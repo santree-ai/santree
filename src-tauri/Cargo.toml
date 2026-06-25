@@ -1,0 +1,50 @@
+[package]
+name = "santree"
+description = "santree desktop app — thin Tauri adapter over santree-core."
+authors = ["Santiago Toscanini"]
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name (a Windows
+# linker quirk: https://github.com/rust-lang/cargo/issues/8519).
+name = "santree_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+santree-core = { path = "../crates/core" }
+
+tauri = { version = "2", features = ["specta"] }
+tauri-plugin-opener = "2"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Typed Rust <-> TS bridge. specta describes the types; tauri-specta wires them
+# into a Builder and emits `src/bindings.ts`.
+specta = { workspace = true }
+specta-typescript = "0.0.12"
+tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
+
+# Async runtime — wired in now so the foundation is async-ready even though the
+# hello-world command is synchronous.
+tokio = { version = "1", features = ["full"] }
+
+anyhow = "1"
+
+# Structured logging.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Linear integration: HTTP (GraphQL/OAuth) + PKCE primitives.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+
+# Local app database (tokens, repo links, settings).
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }

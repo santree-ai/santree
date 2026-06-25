@@ -1,0 +1,16 @@
+[package]
+name = "santree-core"
+description = "Pure domain logic for santree — no Tauri dependency, fully unit-testable."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "santree_core"
+
+[dependencies]
+serde = { workspace = true }
+# `specta::Type` is derived here so domain structs can cross the typed bridge
+# without the command layer having to redefine them.
+specta = { workspace = true }
+thiserror = { workspace = true }

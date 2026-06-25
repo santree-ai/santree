@@ -1,0 +1,21 @@
+[workspace]
+members = ["src-tauri", "crates/core"]
+resolver = "2"
+
+# Shared dependency versions for the whole workspace. Member crates pull these
+# in with `dep = { workspace = true }` so versions stay in lockstep.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+specta = { version = "=2.0.0-rc.25", features = ["derive"] }
+thiserror = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+# Speed up incremental `tauri dev` rebuilds without sacrificing too much runtime
+# perf in the dev profile.
+[profile.dev]
+incremental = true

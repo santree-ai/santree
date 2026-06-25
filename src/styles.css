@@ -1,0 +1,154 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------ *
+ * Design tokens. These codify santree's dark palette as Tailwind
+ * colors (usable as bg-*, text-*, border-*). The accent is a runtime
+ * CSS variable so the Appearance setting can re-theme the whole app.
+ * ------------------------------------------------------------------ */
+@theme {
+  --font-sans: "Geist", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+
+  /* Surfaces (darkest → lightest) */
+  --color-app: #0a0b0e;
+  --color-panel: #0c0d10;
+  --color-surface: #0d0e11;
+  --color-titlebar: #141417;
+  --color-raised: #101114;
+  --color-raised-alt: #101216;
+  --color-input: #141417;
+  --color-input-alt: #161619;
+  --color-popover: #161618;
+
+  /* Borders / hairlines */
+  --color-hairline: #18181c;
+  --color-line: #1d1d22;
+  --color-line-2: #26262c;
+  --color-line-3: #2a2a31;
+  --color-line-strong: #34343c;
+
+  /* Foreground / text */
+  --color-fg: #e6e6ea;
+  --color-fg-bright: #ededf2;
+  --color-fg-2: #cfcfd6;
+  --color-fg-3: #dadae0;
+  --color-muted: #9b9ba3;
+  --color-muted-2: #8b8b94;
+  --color-muted-3: #6b6b73;
+  --color-muted-4: #5b5b63;
+  --color-muted-5: #4a4a52;
+
+  /* Status / semantic */
+  --color-status-green: #3fb950;
+  --color-status-blue: #4493f8;
+  --color-status-indigo: #5b8def;
+  --color-status-amber: #d29922;
+  --color-status-red: #f85149;
+  --color-status-purple: #a78bfa;
+  --color-status-slate: #6e7681;
+  --color-term-cyan: #6fd3e0;
+  --color-cross: #c98a4a;
+
+  /* Accent — overridden at runtime via --accent on :root */
+  --color-accent: var(--accent, #2dd4a7);
+
+  --animate-spin: spin 0.7s linear infinite;
+}
+
+:root {
+  --accent: #2dd4a7;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--color-app);
+  /* Lock the document so a two-finger trackpad swipe can't elastic-scroll the
+     whole webview (which on macOS bounces the content out of the window frame).
+     Inner panes opt back into scrolling with their own overflow + contain. */
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* Scroll panes shouldn't chain their overscroll up to the window. */
+.overflow-auto,
+.overflow-y-auto,
+.overflow-x-auto {
+  overscroll-behavior: contain;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--color-fg);
+  -webkit-font-smoothing: antialiased;
+}
+
+input,
+select,
+button {
+  outline: none;
+  font-family: inherit;
+}
+
+/* Thin dark scrollbars to match the design. */
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2a31;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3a44;
+  background-clip: content-box;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes dashflow {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+.animate-dashflow {
+  animation: dashflow 1s linear infinite;
+}
+.animate-fade-up {
+  animation: fadeUp 0.3s ease both;
+}
+.animate-blink {
+  animation: blink 1s steps(1) infinite;
+}
