@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "Capability for the main window",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:default", "core:window:allow-start-dragging"]
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "opener:allow-open-url",
+    "core:window:allow-start-dragging",
+    "dialog:allow-open"
+  ]
 }

@@ -30,7 +30,11 @@ export function TreeTabs() {
       {worktrees.map((w) => {
         const active = !scopeAll && w.id === activeId;
         const style: CSSProperties = active
-          ? { color: "#e6e6ea", background: "#0a0b0d", boxShadow: "inset 0 -2px 0 var(--accent)" }
+          ? {
+              color: "var(--color-fg)",
+              background: "var(--color-app)",
+              boxShadow: "inset 0 -2px 0 var(--accent)",
+            }
           : { color: "#7c7c85", background: "transparent" };
         return (
           <button

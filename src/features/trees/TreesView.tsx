@@ -14,7 +14,7 @@ import { WorktreeSidebar } from "./WorktreeSidebar";
 function viewTabStyle(active: boolean): CSSProperties {
   return active
     ? { background: "color-mix(in srgb, var(--accent) 9%, transparent)", color: "var(--accent)" }
-    : { background: "transparent", color: "#8b8b94" };
+    : { background: "transparent", color: "var(--color-muted-2)" };
 }
 
 /** Terminal/Diff toggle + status, shown only in single-worktree scope. */
@@ -25,7 +25,7 @@ function WorktreeToolbar() {
   const clean = diff?.clean ?? true;
 
   return (
-    <div className="flex h-10 flex-none items-center justify-between border-b border-line bg-[#0b0c0f] px-3">
+    <div className="flex h-10 flex-none items-center justify-between border-b border-line bg-deep px-3">
       <div className="flex gap-[3px] rounded-lg border border-line-2 bg-input p-[3px]">
         <button
           type="button"
@@ -67,7 +67,7 @@ function TreesContent() {
       {!scopeAll && <WorktreeToolbar />}
       <div className="flex min-h-0 flex-1">
         {!scopeAll && <FileTreePanel />}
-        <div className="flex min-w-0 flex-1 flex-col bg-[#0a0b0d]">
+        <div className="flex min-w-0 flex-1 flex-col bg-app">
           {scopeAll ? <AllAgentsView /> : treeView === "terminal" ? <TerminalView /> : <DiffView />}
         </div>
       </div>
@@ -78,7 +78,7 @@ function TreesContent() {
 export function TreesView() {
   return (
     <TreesProvider>
-      <ViewChrome sidebarWidth={280} sidebar={<WorktreeSidebar />}>
+      <ViewChrome sidebar={<WorktreeSidebar />}>
         <TreesContent />
       </ViewChrome>
     </TreesProvider>

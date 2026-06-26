@@ -6,6 +6,9 @@
 mod commands;
 mod db;
 mod linear;
+mod repo;
+mod settings;
+mod terminal;
 
 use tauri::Manager;
 use tauri_specta::{collect_commands, Builder};
@@ -24,7 +27,9 @@ const BINDINGS_PATH: &str = "../src/bindings.ts";
 fn specta_builder() -> AppBuilder {
     Builder::<tauri::Wry>::new().commands(collect_commands![
         commands::list_repos,
+        commands::add_repo,
         commands::list_agents,
+        commands::agent_auth,
         commands::list_tasks,
         commands::list_worktrees,
         commands::worktree_diff,
@@ -33,14 +38,25 @@ fn specta_builder() -> AppBuilder {
         commands::file_tree,
         commands::stage_meta,
         commands::list_triage_tickets,
+        commands::triage_detail,
+        commands::triage_set_state,
+        commands::triage_schedule,
         commands::triage_thread,
         commands::triage_ask,
         commands::get_settings,
+        commands::list_claude_commands,
+        commands::get_setting,
+        commands::set_setting,
+        commands::resolve_setting,
         commands::linear_auth_status,
         commands::linear_orgs,
         commands::set_repo_linear_org,
         commands::linear_list_issues,
         commands::linear_connect,
+        terminal::terminal_open,
+        terminal::terminal_write,
+        terminal::terminal_resize,
+        terminal::terminal_close,
     ])
 }
 
@@ -77,6 +93,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_decorum::init())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             // Wire specta-registered events into the app (none yet, but this is
@@ -89,11 +107,37 @@ pub fn run() {
                 .expect("initializing database");
             app.manage(db);
 
+            // Owns all live terminal sessions; commands read it from state.
+            app.manage(santree_pty::PtyManager::new());
+
+            // Vertically centre the macOS traffic lights in our 46px top bar so
+            // they line up with the chrome icons (the `trafficLightPosition`
+            // config field is ignored under titleBarStyle: Overlay). decorum
+            // does it natively and re-applies on resize.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_plugin_decorum::WebviewWindowExt;
+                if let Some(main) = app.get_webview_window("main") {
+                    // decorum centers the buttons at `y/2 + 4 + button_height/2`
+                    // from the window top. The chrome icons sit at the 46px bar's
+                    // center (~23px), so y=22 lines the traffic lights up with them.
+                    let _ = main.set_traffic_lights_inset(19.0, 22.0);
+                }
+            }
+
             tracing::info!("santree started");
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Kill every terminal child on exit so nothing is leaked.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(pty) = app.try_state::<santree_pty::PtyManager>() {
+                    pty.close_all();
+                }
+            }
+        });
 }
 
 #[cfg(test)]

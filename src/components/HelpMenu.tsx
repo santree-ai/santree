@@ -7,7 +7,7 @@ const KbdIcon = () => (
     height="15"
     viewBox="0 0 24 24"
     fill="none"
-    stroke="#9b9ba3"
+    stroke="var(--color-muted)"
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -23,7 +23,7 @@ const DocsIcon = () => (
     height="15"
     viewBox="0 0 24 24"
     fill="none"
-    stroke="#9b9ba3"
+    stroke="var(--color-muted)"
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -39,7 +39,7 @@ const FeedbackIcon = () => (
     height="15"
     viewBox="0 0 24 24"
     fill="none"
-    stroke="#9b9ba3"
+    stroke="var(--color-muted)"
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -54,7 +54,7 @@ const DiagIcon = () => (
     height="15"
     viewBox="0 0 24 24"
     fill="none"
-    stroke="#9b9ba3"
+    stroke="var(--color-muted)"
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -85,8 +85,13 @@ const ITEMS: Item[] = [
 ];
 
 export function HelpMenu() {
-  const { helpOpen, setHelpOpen } = useApp();
+  const { helpOpen, setHelpOpen, setShortcutsOpen } = useApp();
   if (!helpOpen) return null;
+
+  // Items that do something beyond closing the menu, keyed by label.
+  const actions: Record<string, () => void> = {
+    "Keyboard shortcuts": () => setShortcutsOpen(true),
+  };
 
   return (
     <>
@@ -102,7 +107,10 @@ export function HelpMenu() {
           <button
             type="button"
             key={item.label}
-            onClick={() => setHelpOpen(false)}
+            onClick={() => {
+              setHelpOpen(false);
+              actions[item.label]?.();
+            }}
             className="flex w-full cursor-pointer items-center gap-[11px] rounded-md px-2.5 py-2 text-left text-[13px] text-fg-3 hover:bg-input"
             style={item.indented ? { paddingLeft: 36, fontSize: 12.5 } : undefined}
           >

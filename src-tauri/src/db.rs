@@ -31,29 +31,9 @@ pub async fn init(db_path: PathBuf) -> Result<Db> {
         .await
         .context("running migrations")?;
 
-    seed_repos(&pool).await?;
     import_legacy_linear_auth(&pool).await?;
 
     Ok(pool)
-}
-
-/// Populate the repos table from the built-in list on first run.
-async fn seed_repos(pool: &Db) -> Result<()> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM repos")
-        .fetch_one(pool)
-        .await?;
-    if count > 0 {
-        return Ok(());
-    }
-    for repo in santree_core::mock::repos() {
-        sqlx::query("INSERT OR IGNORE INTO repos (name, tracker, agents) VALUES (?, ?, ?)")
-            .bind(&repo.name)
-            .bind(&repo.tracker)
-            .bind(repo.agents as i64)
-            .execute(pool)
-            .await?;
-    }
-    Ok(())
 }
 
 /// One-time import of the CLI's `~/.config/santree/auth.json` Linear tokens, so

@@ -7,8 +7,8 @@ import { SessionsPanel } from "./SessionsPanel";
 
 function tabStyle(active: boolean): CSSProperties {
   return active
-    ? { color: "#ededf2", boxShadow: "inset 0 -2px 0 var(--accent)" }
-    : { color: "#6b6b73" };
+    ? { color: "var(--color-fg-bright)", boxShadow: "inset 0 -2px 0 var(--accent)" }
+    : { color: "var(--color-muted-3)" };
 }
 
 export function RightPanel() {

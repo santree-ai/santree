@@ -14,7 +14,11 @@ function iconButtonStyle(active: boolean): CSSProperties {
         borderColor: "color-mix(in srgb, var(--accent) 55%, transparent)",
         color: "var(--accent)",
       }
-    : { background: "transparent", borderColor: "#2a2a31", color: "#8b8b94" };
+    : {
+        background: "transparent",
+        borderColor: "var(--color-line-3)",
+        color: "var(--color-muted-2)",
+      };
 }
 
 export function SidebarFooter() {

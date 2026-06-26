@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as TriageRouteImport } from './routes/triage'
 import { Route as TreesRouteImport } from './routes/trees'
+import { Route as TerminalRouteImport } from './routes/terminal'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ReviewsRouteImport } from './routes/reviews'
 import { Route as IndexRouteImport } from './routes/index'
@@ -23,6 +24,11 @@ const TriageRoute = TriageRouteImport.update({
 const TreesRoute = TreesRouteImport.update({
   id: '/trees',
   path: '/trees',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TerminalRoute = TerminalRouteImport.update({
+  id: '/terminal',
+  path: '/terminal',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SettingsRoute = SettingsRouteImport.update({
@@ -45,6 +51,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/reviews': typeof ReviewsRoute
   '/settings': typeof SettingsRoute
+  '/terminal': typeof TerminalRoute
   '/trees': typeof TreesRoute
   '/triage': typeof TriageRoute
 }
@@ -52,6 +59,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/reviews': typeof ReviewsRoute
   '/settings': typeof SettingsRoute
+  '/terminal': typeof TerminalRoute
   '/trees': typeof TreesRoute
   '/triage': typeof TriageRoute
 }
@@ -60,21 +68,30 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/reviews': typeof ReviewsRoute
   '/settings': typeof SettingsRoute
+  '/terminal': typeof TerminalRoute
   '/trees': typeof TreesRoute
   '/triage': typeof TriageRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/reviews' | '/settings' | '/trees' | '/triage'
+  fullPaths: '/' | '/reviews' | '/settings' | '/terminal' | '/trees' | '/triage'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/reviews' | '/settings' | '/trees' | '/triage'
-  id: '__root__' | '/' | '/reviews' | '/settings' | '/trees' | '/triage'
+  to: '/' | '/reviews' | '/settings' | '/terminal' | '/trees' | '/triage'
+  id:
+    | '__root__'
+    | '/'
+    | '/reviews'
+    | '/settings'
+    | '/terminal'
+    | '/trees'
+    | '/triage'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ReviewsRoute: typeof ReviewsRoute
   SettingsRoute: typeof SettingsRoute
+  TerminalRoute: typeof TerminalRoute
   TreesRoute: typeof TreesRoute
   TriageRoute: typeof TriageRoute
 }
@@ -93,6 +110,13 @@ declare module '@tanstack/react-router' {
       path: '/trees'
       fullPath: '/trees'
       preLoaderRoute: typeof TreesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/terminal': {
+      id: '/terminal'
+      path: '/terminal'
+      fullPath: '/terminal'
+      preLoaderRoute: typeof TerminalRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/settings': {
@@ -123,6 +147,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ReviewsRoute: ReviewsRoute,
   SettingsRoute: SettingsRoute,
+  TerminalRoute: TerminalRoute,
   TreesRoute: TreesRoute,
   TriageRoute: TriageRoute,
 }

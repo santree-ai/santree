@@ -8,7 +8,7 @@ import { RightPanel } from "./RightPanel";
 export function IssuesView() {
   return (
     <IssuesProvider>
-      <ViewChrome sidebarWidth={260} sidebar={<IssueSidebar />}>
+      <ViewChrome sidebar={<IssueSidebar />}>
         <div className="flex min-w-0 flex-1 flex-col bg-app">
           <GraphCanvas />
         </div>

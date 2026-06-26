@@ -1,0 +1,11 @@
+[package]
+name = "santree-pty"
+description = "Local PTY session manager for santree — spawns real processes behind real PTYs."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+portable-pty = "0.9"
+anyhow = "1"
+tracing = "0.1"

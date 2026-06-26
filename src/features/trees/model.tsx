@@ -35,7 +35,7 @@ interface TreesModel {
 
 const TreesContext = createContext<TreesModel | null>(null);
 
-const USER_COLOR = "#dbe6f2";
+const USER_COLOR = "var(--color-user-line)";
 
 export function TreesProvider({ children }: { children: ReactNode }) {
   const { accent } = useApp();

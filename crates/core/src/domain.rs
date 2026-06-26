@@ -10,11 +10,12 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-/// Which coding agent runs a task.
+/// Which coding agent ("harness") runs a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub enum AgentKind {
     Claude,
     Codex,
+    Cursor,
     Opencode,
 }
 
@@ -28,6 +29,32 @@ pub struct AgentDef {
     pub models: Vec<String>,
 }
 
+/// An agent harness's authentication / subscription status, as shown in the
+/// harness settings tab. Mocked today (the CLI owns real auth).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAuth {
+    /// Whether a CLI session is currently authenticated.
+    pub connected: bool,
+    /// How auth is established (only "CLI" today; API keys aren't supported yet).
+    pub method: String,
+    /// Billing provider, e.g. "Anthropic API".
+    pub provider: String,
+    /// Subscription plan, e.g. "Max".
+    pub plan: String,
+    /// Organization the account belongs to.
+    pub org: String,
+    /// Signed-in account label.
+    pub account: String,
+    /// Where the harness keeps its settings file (for the "Open" affordance).
+    pub settings_path: String,
+    /// Shell command that (re)authenticates this harness, e.g. "claude /login".
+    pub login_cmd: String,
+    /// The executable found on the user's PATH, shown as the grayed default when
+    /// no custom path is set. Empty when nothing was found.
+    pub detected_exec: String,
+}
+
 /// A connected repository / task-tracker pairing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +63,9 @@ pub struct Repo {
     pub tracker: String,
     /// Number of agents currently active on this repo.
     pub agents: u32,
+    /// Absolute path on disk, for repos the user added from a local folder.
+    /// `None` for the built-in seed repos.
+    pub path: Option<String>,
 }
 
 /// Lifecycle status of a ticket / worktree.
@@ -211,7 +241,7 @@ pub enum Priority {
     Low,
 }
 
-/// An untriaged ticket awaiting investigation.
+/// An untriaged ticket awaiting investigation (the queue row).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TriageTicket {
@@ -220,6 +250,95 @@ pub struct TriageTicket {
     pub priority: Priority,
     pub age: String,
     pub meta: String,
+    /// The team key (e.g. "MSG"), used to group the queue when the viewer is on
+    /// more than one team.
+    pub team: Option<String>,
+    /// Human SLA hint (e.g. "SLA in 3h", "SLA breached"), if the issue has one.
+    pub sla: Option<String>,
+    /// When set, the issue is snoozed until this human label; the UI greys it out
+    /// and sinks it to the bottom of the queue.
+    pub snoozed_until: Option<String>,
+}
+
+/// A comment on a triage issue (markdown body), with threaded replies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TriageComment {
+    pub author: String,
+    /// Public avatar URL of the author, when they have one.
+    pub avatar_url: Option<String>,
+    pub created: String,
+    /// Markdown — may contain inline images.
+    pub body: String,
+    /// Threaded replies, in chronological order.
+    pub children: Vec<TriageComment>,
+}
+
+/// A workflow state an issue can move to (one of its team's states). Moving an
+/// issue out of the `triage` state — e.g. into `backlog`/`unstarted` — is how the
+/// UI "promotes" a triage item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowState {
+    pub id: String,
+    pub name: String,
+    /// Linear state category: triage | backlog | unstarted | started | completed | canceled.
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// State color (hex), as configured in Linear.
+    pub color: String,
+}
+
+/// The full triage issue as rendered in the discussion pane: the Linear issue's
+/// description, metadata, and comment thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TriageDetail {
+    pub id: String,
+    pub title: String,
+    pub priority: Priority,
+    /// Workflow state name (e.g. "Triage").
+    pub state: String,
+    /// Id of the current workflow state (for the status picker's selection).
+    pub state_id: Option<String>,
+    /// All workflow states the issue can move to, ordered as in Linear.
+    pub states: Vec<WorkflowState>,
+    /// Canonical Linear URL for the issue.
+    pub url: String,
+    pub author: String,
+    /// Public avatar URL of the issue creator, when they have one.
+    pub author_avatar_url: Option<String>,
+    pub created: String,
+    pub labels: Vec<String>,
+    pub project: Option<String>,
+    pub sla: Option<String>,
+    pub snoozed_until: Option<String>,
+    /// Markdown description — may contain inline images.
+    pub description: String,
+    pub comments: Vec<TriageComment>,
+}
+
+/// A single on-call slot in a triage rotation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TriageShift {
+    pub name: String,
+    /// Human time range, e.g. "Mon–Wed".
+    pub range: String,
+    pub is_current: bool,
+    pub is_me: bool,
+}
+
+/// The team triage rotation surfaced from Linear's triage responsibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TriageSchedule {
+    pub team: String,
+    pub schedule_name: String,
+    pub current_name: Option<String>,
+    /// True when the signed-in viewer is the one currently on triage.
+    pub current_is_me: bool,
+    pub shifts: Vec<TriageShift>,
 }
 
 /// Who authored a triage message.
@@ -298,4 +417,26 @@ pub struct Settings {
     pub default_agent: AgentKind,
     pub integrations: Integrations,
     pub agents: Vec<AgentSetting>,
+}
+
+/// A Claude slash-command discovered on disk under a `.claude/commands` folder.
+/// Invoked as `/<name> <arg>` — the triage "Investigate" picker offers these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeCommand {
+    /// Invocation name (the file stem, without `.md`), e.g. `investigate-ticket`.
+    pub name: String,
+    /// The command's `description:` frontmatter, when present.
+    pub description: Option<String>,
+}
+
+/// Claude commands available to the investigate picker, split by where they live
+/// so the repo scope can distinguish its own commands from the global ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeCommands {
+    /// Commands from the user's `~/.claude/commands`.
+    pub global: Vec<ClaudeCommand>,
+    /// Commands from the repo's `.claude/commands` (empty for the app scope).
+    pub repo: Vec<ClaudeCommand>,
 }

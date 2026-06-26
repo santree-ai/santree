@@ -27,8 +27,8 @@ function AgentCard({ worktree }: { worktree: Worktree }) {
   }
 
   return (
-    <div className="flex h-[228px] flex-col overflow-hidden rounded-[10px] border border-line-2 bg-[#0b0c0f]">
-      <div className="flex flex-none items-center gap-[7px] border-b border-line bg-[#0e0f12] px-[11px] py-2">
+    <div className="flex h-[228px] flex-col overflow-hidden rounded-[10px] border border-line-2 bg-deep">
+      <div className="flex flex-none items-center gap-[7px] border-b border-line bg-well px-[11px] py-2">
         <span
           className="h-[7px] w-[7px] flex-none rounded-full"
           style={{ background: statusColor, boxShadow: `0 0 7px ${statusColor}` }}

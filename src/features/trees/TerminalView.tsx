@@ -29,7 +29,7 @@ export function TerminalView() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-none items-center justify-between border-b border-[#15151a] px-3.5 py-2">
+      <div className="flex flex-none items-center justify-between border-b border-hairline px-3.5 py-2">
         <span className="font-mono text-[11px] text-muted-2">
           ~/{repoFolder}/{term.cwd}
         </span>

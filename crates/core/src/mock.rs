@@ -177,9 +177,15 @@ pub fn agents() -> Vec<AgentDef> {
             &["gpt-5-codex", "gpt-5", "o4-mini"],
         ),
         def(
+            AgentKind::Cursor,
+            "Cursor",
+            "Cursor",
+            &["claude-sonnet-4.5", "gpt-5", "auto"],
+        ),
+        def(
             AgentKind::Opencode,
-            "opencode",
-            "opencode",
+            "OpenCode",
+            "OpenCode",
             &[
                 "claude-sonnet-4.5",
                 "gpt-5",
@@ -196,6 +202,7 @@ pub fn repos() -> Vec<Repo> {
         name: name.into(),
         tracker: tracker.into(),
         agents,
+        path: None,
     };
     vec![
         repo("akamai/agent", "Linear · Akamai workspace", 3),
@@ -336,18 +343,13 @@ pub fn settings() -> Settings {
             triage: true,
             github: true,
         },
+        // `exec` is the user's override path (empty ⇒ use the one detected on
+        // PATH, reported by `agent_auth`). Model is the per-agent default.
         agents: vec![
-            agent(
-                AgentKind::Claude,
-                "/usr/local/bin/claude",
-                "claude-sonnet-4.5",
-            ),
-            agent(AgentKind::Codex, "/usr/local/bin/codex", "gpt-5-codex"),
-            agent(
-                AgentKind::Opencode,
-                "/opt/homebrew/bin/opencode",
-                "claude-sonnet-4.5",
-            ),
+            agent(AgentKind::Claude, "", "claude-sonnet-4.5"),
+            agent(AgentKind::Codex, "", "gpt-5-codex"),
+            agent(AgentKind::Cursor, "", "auto"),
+            agent(AgentKind::Opencode, "", "claude-sonnet-4.5"),
         ],
     }
 }
@@ -355,12 +357,21 @@ pub fn settings() -> Settings {
 /// Tickets awaiting triage.
 pub fn triage_tickets() -> Vec<TriageTicket> {
     use Priority::*;
-    let t = |id: &str, title: &str, priority, age: &str, meta: &str| TriageTicket {
+    let t = |id: &str,
+             title: &str,
+             priority,
+             age: &str,
+             meta: &str,
+             sla: Option<&str>,
+             snoozed_until: Option<&str>| TriageTicket {
         id: id.into(),
         title: title.into(),
         priority,
         age: age.into(),
         meta: meta.into(),
+        team: None,
+        sla: sla.map(Into::into),
+        snoozed_until: snoozed_until.map(Into::into),
     };
     vec![
         t(
@@ -369,6 +380,8 @@ pub fn triage_tickets() -> Vec<TriageTicket> {
             Urgent,
             "2h",
             "Booking agent · reported by support · 4 linked tickets",
+            Some("SLA in 3h"),
+            None,
         ),
         t(
             "AK-209",
@@ -376,6 +389,8 @@ pub fn triage_tickets() -> Vec<TriageTicket> {
             High,
             "5h",
             "Agent Knowledge · reported by QA · 2 linked tickets",
+            Some("SLA in 1d"),
+            None,
         ),
         t(
             "AK-207",
@@ -383,8 +398,235 @@ pub fn triage_tickets() -> Vec<TriageTicket> {
             Medium,
             "1d",
             "Agent Knowledge · reported by eng",
+            None,
+            None,
+        ),
+        t(
+            "AK-198",
+            "Dashboard chart legend overflows on narrow viewports",
+            Low,
+            "3d",
+            "Web · reported by design",
+            None,
+            Some("Mon"),
         ),
     ]
+}
+
+/// A 1×1 transparent-ish PNG used as a stand-in for an embedded Linear
+/// screenshot, so the markdown image path renders without a network fetch.
+/// (Real images are downloaded from Linear's CDN; here the data is mocked.)
+const MOCK_SCREENSHOT: &str = "data:image/svg+xml;utf8,\
+<svg xmlns='http://www.w3.org/2000/svg' width='520' height='180'>\
+<rect width='520' height='180' rx='8' fill='%231b2330'/>\
+<rect x='16' y='16' width='200' height='12' rx='3' fill='%233b4a63'/>\
+<rect x='16' y='40' width='488' height='1' fill='%232a3850'/>\
+<rect x='16' y='58' width='150' height='40' rx='4' fill='%23f8514922'/>\
+<rect x='176' y='58' width='150' height='40' rx='4' fill='%233b4a63'/>\
+<rect x='16' y='112' width='420' height='10' rx='3' fill='%232f3e57'/>\
+<rect x='16' y='132' width='360' height='10' rx='3' fill='%232f3e57'/>\
+<text x='16' y='168' fill='%236a8' font-family='monospace' font-size='11'>support-screenshot.png</text>\
+</svg>";
+
+/// The full triage issue (description markdown + comments) for the discussion
+/// pane. Mirrors the shape of a Linear issue fetch.
+/// A representative set of workflow states for the mock issue's status picker.
+fn mock_states() -> Vec<WorkflowState> {
+    let st = |id: &str, name: &str, type_: &str, color: &str| WorkflowState {
+        id: id.into(),
+        name: name.into(),
+        type_: type_.into(),
+        color: color.into(),
+    };
+    vec![
+        st("mock-triage", "Triage", "triage", "#e2a336"),
+        st("mock-backlog", "Backlog", "backlog", "#bec2c8"),
+        st("mock-todo", "Todo", "unstarted", "#e2e2e2"),
+        st("mock-progress", "In Progress", "started", "#f2c94c"),
+        st("mock-done", "Done", "completed", "#5e6ad2"),
+        st("mock-canceled", "Canceled", "canceled", "#95a2b3"),
+    ]
+}
+
+pub fn triage_detail(ticket_id: &str) -> TriageDetail {
+    let detail = |id: &str,
+                  title: &str,
+                  priority,
+                  state: &str,
+                  author: &str,
+                  created: &str,
+                  labels: &[&str],
+                  project: Option<&str>,
+                  sla: Option<&str>,
+                  snoozed_until: Option<&str>,
+                  description: String,
+                  comments: Vec<TriageComment>| TriageDetail {
+        id: id.into(),
+        title: title.into(),
+        priority,
+        state: state.into(),
+        state_id: Some("mock-triage".into()),
+        states: mock_states(),
+        url: format!("https://linear.app/akamai/issue/{id}"),
+        author: author.into(),
+        author_avatar_url: None,
+        created: created.into(),
+        labels: labels.iter().map(|s| (*s).into()).collect(),
+        project: project.map(Into::into),
+        sla: sla.map(Into::into),
+        snoozed_until: snoozed_until.map(Into::into),
+        description,
+        comments,
+    };
+    let comment = |author: &str, created: &str, body: &str| TriageComment {
+        author: author.into(),
+        avatar_url: None,
+        created: created.into(),
+        body: body.into(),
+        children: vec![],
+    };
+    use Priority::*;
+    match ticket_id {
+        "AK-209" => detail(
+            "AK-209",
+            "VOX agent ignores per-action guidelines intermittently",
+            High,
+            "Triage",
+            "Priya Sharma (QA)",
+            "5h ago",
+            &["bug", "vox-agent", "intermittent"],
+            Some("Agent Knowledge: Config (VOX+MSG)"),
+            Some("SLA in 1d"),
+            None,
+            "During regression we saw the VOX agent **skip per-action guidelines** \
+on roughly 1 in 8 sessions. It only happens for sessions that were already \
+open when we pushed a guidelines change.\n\n\
+- Repro rate: ~12% after a config push\n\
+- Always recovers on a fresh session\n\
+- No errors in the agent logs\n\n\
+Looks like a caching issue rather than a prompt regression."
+                .into(),
+            vec![
+                comment(
+                    "Marco Díaz (eng)",
+                    "3h ago",
+                    "Confirmed locally — guidelines are read once at boot and cached \
+in memory. Sessions started before the push keep the stale copy.",
+                ),
+                comment(
+                    "Priya Sharma (QA)",
+                    "2h ago",
+                    "That matches what we saw. Bumping to High — it affects live calls.",
+                ),
+            ],
+        ),
+        "AK-207" => detail(
+            "AK-207",
+            "Spike: auto-detect deprecated webchat usage",
+            Medium,
+            "Triage",
+            "Sam Okafor (eng)",
+            "1d ago",
+            &["spike", "tech-debt"],
+            Some("Agent Knowledge: Config (VOX+MSG)"),
+            None,
+            None,
+            "Can we statically detect remaining `webchat*` column reads so we can \
+plan the VOX+MSG migration?\n\n\
+A static scan plus a codemod could flag the deprecated columns and rewrite the \
+easy call sites automatically.".into(),
+            vec![comment(
+                "Sam Okafor (eng)",
+                "20h ago",
+                "`chat.Config` is referenced at 18 call sites across 6 packages — \
+worth a half-day spike.",
+            )],
+        ),
+        "AK-198" => detail(
+            "AK-198",
+            "Dashboard chart legend overflows on narrow viewports",
+            Low,
+            "Triage",
+            "Lena Park (design)",
+            "3d ago",
+            &["ui", "dashboard", "polish"],
+            None,
+            None,
+            Some("Mon"),
+            "On viewports below ~720px the chart legend wraps and pushes the axis \
+labels off-screen.\n\n\
+Snoozed until Monday — not urgent, but we should fold it into the next \
+dashboard polish pass.".into(),
+            vec![],
+        ),
+        // Default / AK-211 — the flagship urgent ticket, with an embedded image.
+        _ => detail(
+            "AK-211",
+            "Customers report double-charge on booking retry",
+            Urgent,
+            "Triage",
+            "Dana Klein (support)",
+            "2h ago",
+            &["bug", "payments", "booking-agent", "customer-impact"],
+            Some("Booking agent onboarding"),
+            Some("SLA in 3h"),
+            None,
+            format!(
+                "Multiple customers report being **charged twice** when a booking \
+confirmation is retried after a network blip.\n\n\
+### Impact\n\
+- 4 linked support tickets in the last 2h\n\
+- All on the booking-agent confirmation flow\n\n\
+### From a customer's statement\n\
+![support screenshot]({MOCK_SCREENSHOT})\n\n\
+The retry happens automatically, so the customer doesn't trigger it. Looks like \
+the retry path calls `charge()` without an idempotency key.\n\n\
+```ts\n\
+// apps/booking-agent/src/retries.ts\n\
+await charge(amount) // ⚠ no idempotency key on retry\n\
+```\n\n\
+Needs triage urgently — this is real money."
+            ),
+            vec![
+                comment(
+                    "Dana Klein (support)",
+                    "90m ago",
+                    "Refunds issued for the 4 affected customers. Flagging here so \
+the underlying bug gets fixed before it spreads.",
+                ),
+                comment(
+                    "Alex Romano (payments)",
+                    "40m ago",
+                    "The booking flow shares an idempotency helper with subscriptions \
+(`packages/payments/idempotency.ts`). The fix is to thread a key through \
+`retries()`. Happy to co-review.",
+                ),
+            ],
+        ),
+    }
+}
+
+/// The team triage rotation (who is on-call), surfaced from Linear's triage
+/// responsibility schedule. `current_is_me` answers "am I on triage right now".
+pub fn triage_schedule() -> TriageSchedule {
+    let shift = |name: &str, range: &str, is_current: bool, is_me: bool| TriageShift {
+        name: name.into(),
+        range: range.into(),
+        is_current,
+        is_me,
+    };
+    TriageSchedule {
+        team: "Akamai".into(),
+        schedule_name: "Booking on-call".into(),
+        current_name: Some("You".into()),
+        current_is_me: true,
+        shifts: vec![
+            shift("You", "Mon–Wed", true, true),
+            shift("Marco Díaz", "Thu–Fri", false, false),
+            shift("Priya Sharma", "Sat–Sun", false, false),
+            shift("Sam Okafor", "Next Mon–Wed", false, false),
+        ],
+    }
 }
 
 fn agent_msg(text: &str, refs: &[&str]) -> TriageMessage {

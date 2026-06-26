@@ -41,18 +41,18 @@ export function GitHubLogo({ size = 16, className }: IconProps) {
   );
 }
 
-/** Anthropic (Claude) logomark. */
-function AnthropicLogo({ size = 16, className }: IconProps) {
+/** Claude Code logomark — the Claude AI "spark" symbol. */
+function ClaudeCodeLogo({ size = 16, className }: IconProps) {
   return (
     <svg
       width={size}
       height={size}
-      viewBox="0 0 24 24"
+      viewBox="0 0 100 100"
       fill="currentColor"
       className={className}
       aria-hidden
     >
-      <path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.541Zm-.3712 10.2548 2.2932-5.9456 2.2932 5.9456Z" />
+      <path d="m19.6 66.5 19.7-11 .3-1-.3-.5h-1l-3.3-.2-11.2-.3L14 53l-9.5-.5-2.4-.5L0 49l.2-1.5 2-1.3 2.9.2 6.3.5 9.5.6 6.9.4L38 49.1h1.6l.2-.7-.5-.4-.4-.4L29 41l-10.6-7-5.6-4.1-3-2-1.5-2-.6-4.2 2.7-3 3.7.3.9.2 3.7 2.9 8 6.1L37 36l1.5 1.2.6-.4.1-.3-.7-1.1L33 25l-6-10.4-2.7-4.3-.7-2.6c-.3-1-.4-2-.4-3l3-4.2L28 0l4.2.6L33.8 2l2.6 6 4.1 9.3L47 29.9l2 3.8 1 3.4.3 1h.7v-.5l.5-7.2 1-8.7 1-11.2.3-3.2 1.6-3.8 3-2L61 2.6l2 2.9-.3 1.8-1.1 7.7L59 27.1l-1.5 8.2h.9l1-1.1 4.1-5.4 6.9-8.6 3-3.5L77 13l2.3-1.8h4.3l3.1 4.7-1.4 4.9-4.4 5.6-3.7 4.7-5.3 7.1-3.2 5.7.3.4h.7l12-2.6 6.4-1.1 7.6-1.3 3.5 1.6.4 1.6-1.4 3.4-8.2 2-9.6 2-14.3 3.3-.2.1.2.3 6.4.6 2.8.2h6.8l12.6 1 3.3 2 1.9 2.7-.3 2-5.1 2.6-6.8-1.6-16-3.8-5.4-1.3h-.8v.4l4.6 4.5 8.3 7.5L89 80.1l.5 2.4-1.3 2-1.4-.2-9.2-7-3.6-3-8-6.8h-.5v.7l1.8 2.7 9.8 14.7.5 4.5-.7 1.4-2.6 1-2.7-.6-5.8-8-6-9-4.7-8.2-.5.4-2.9 30.2-1.3 1.5-3 1.2-2.5-2-1.4-3 1.4-6.2 1.6-8 1.3-6.4 1.2-7.9.7-2.6v-.2H49L43 72l-9 12.3-7.2 7.6-1.7.7-3-1.5.3-2.8L24 86l10-12.8 6-7.9 4-4.6-.1-.5h-.3L17.2 77.4l-4.7.6-2-2 .2-3 1-1 8-5.5Z" />
     </svg>
   );
 }
@@ -73,36 +73,50 @@ function OpenAiLogo({ size = 16, className }: IconProps) {
   );
 }
 
-/** opencode mark — a terminal glyph stand-in. */
+/** OpenCode logomark — the dark frame plus the gray fill in the lower inner "O". */
 function OpenCodeLogo({ size = 16, className }: IconProps) {
   return (
     <svg
       width={size}
       height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
+      viewBox="0 0 240 300"
+      fill="currentColor"
       className={className}
       aria-hidden
     >
-      <rect x="2" y="3" width="20" height="18" rx="3" />
-      <path d="M7 9l3 3-3 3" />
-      <path d="M13 15h4" />
+      {/* The gray inner fill (lower portion of the window), drawn behind. */}
+      <path d="M180 240H60V120H180V240Z" opacity="0.42" />
+      {/* The frame: outer rectangle with the window punched out. */}
+      <path d="M180 60H60V240H180V60ZM240 300H0V0H240V300Z" />
     </svg>
   );
 }
 
-/** The right logo for a coding agent. */
+/** Cursor logomark. */
+function CursorLogo({ size = 16, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+    >
+      <path d="M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23" />
+    </svg>
+  );
+}
+
+/** The right logo for a coding agent harness. */
 export function AgentIcon({
   kind,
   size = 16,
   className,
-}: IconProps & { kind: "Claude" | "Codex" | "Opencode" }) {
-  if (kind === "Claude") return <AnthropicLogo size={size} className={className} />;
+}: IconProps & { kind: "Claude" | "Codex" | "Cursor" | "Opencode" }) {
+  if (kind === "Claude") return <ClaudeCodeLogo size={size} className={className} />;
   if (kind === "Codex") return <OpenAiLogo size={size} className={className} />;
+  if (kind === "Cursor") return <CursorLogo size={size} className={className} />;
   return <OpenCodeLogo size={size} className={className} />;
 }
 
@@ -118,6 +132,49 @@ export function LinearLogo({ size = 18, className }: IconProps) {
       aria-hidden
     >
       <path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.01c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.21 6.388 17.612 22.79a11.955 11.955 0 0 1-2.965 1.04L.17 9.353a11.955 11.955 0 0 1 1.04-2.965Zm-.97 5.66 12.713 12.712a12.03 12.03 0 0 1-3.7-.71L.95 15.745a12.03 12.03 0 0 1-.71-3.7Zm.687 6.51 4.823 4.823a12.078 12.078 0 0 1-4.823-4.822Z" />
+    </svg>
+  );
+}
+
+export function CalendarIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <rect x="3" y="4" width="18" height="18" rx="2" />
+      <line x1="16" y1="2" x2="16" y2="6" />
+      <line x1="8" y1="2" x2="8" y2="6" />
+      <line x1="3" y1="10" x2="21" y2="10" />
+    </svg>
+  );
+}
+
+export function ExternalLinkIcon({ size = 13, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="10" y1="14" x2="21" y2="3" />
     </svg>
   );
 }
@@ -140,5 +197,124 @@ export function HelpIcon({ size = 15, className }: IconProps) {
       <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
       <line x1="12" y1="17" x2="12.01" y2="17" />
     </svg>
+  );
+}
+
+// ── Settings section + theme icons (stroke, currentColor) ──────────────────
+
+/** Wrapper for a 24-grid stroke icon. */
+function Stroke({
+  size = 16,
+  className,
+  width = 2,
+  children,
+}: IconProps & { width?: number; children: React.ReactNode }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={width}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      {children}
+    </svg>
+  );
+}
+
+/** Integrations — a plug/connection. */
+export function PlugIcon(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <path d="M12 22v-5" />
+      <path d="M9 8V2M15 8V2" />
+      <path d="M18 8v3a6 6 0 0 1-12 0V8z" />
+    </Stroke>
+  );
+}
+
+/** Appearance — half-filled contrast circle. */
+export function ContrastIcon(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none" />
+    </Stroke>
+  );
+}
+
+/** Agents — a small robot/cpu. */
+export function AgentsIcon(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <rect x="4" y="7" width="16" height="12" rx="3" />
+      <path d="M12 7V4M9 13h.01M15 13h.01M2 12h2M20 12h2" />
+    </Stroke>
+  );
+}
+
+/** Triage Investigation — a telescope/explore mark. */
+export function TelescopeIcon(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <path d="m10.5 3.5 7.8 4.5-2 3.5-7.8-4.5z" />
+      <path d="M3.7 9.2 8 11.7l-1.5 2.6L2 11.8z" />
+      <path d="M9 14.5 12 21M12 13.5 15 20M12 21h.01" />
+    </Stroke>
+  );
+}
+
+/** Light theme — sun. */
+export function SunIcon(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </Stroke>
+  );
+}
+
+/** Dark theme — moon. */
+export function MoonIcon(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+    </Stroke>
+  );
+}
+
+/** System theme — a display. */
+export function MonitorIcon(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <rect x="2" y="3" width="20" height="14" rx="2" />
+      <path d="M8 21h8M12 17v4" />
+    </Stroke>
+  );
+}
+
+/** Actions — a lightning bolt. */
+export function BoltIcon(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <path d="M13 2 4 14h7l-1 8 9-12h-7z" />
+    </Stroke>
+  );
+}
+
+/** Refresh — Lucide `refresh-cw`, two circular arrows (pass `animate-spin`). */
+export function RefreshIcon(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+      <path d="M8 16H3v5" />
+    </Stroke>
   );
 }

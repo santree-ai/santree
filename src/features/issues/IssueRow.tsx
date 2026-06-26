@@ -27,7 +27,7 @@ export function IssueRow({ vm }: { vm: IssueRowVM }) {
     <button
       type="button"
       onClick={vm.onClick}
-      className="mb-0.5 flex w-full gap-2 rounded-md px-2 py-[7px] text-left transition-colors hover:bg-[#15161a]"
+      className="mb-0.5 flex w-full gap-2 rounded-md px-2 py-[7px] text-left transition-colors hover:bg-hover"
       style={vm.rowStyle}
     >
       {vm.selectable && (

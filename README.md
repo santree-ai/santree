@@ -133,6 +133,54 @@ pnpm test         # Frontend: Vitest
 
 ---
 
+## Terminals (real PTY emulation)
+
+The **Terminal** tab is a real terminal emulator — architecturally like iTerm or
+VS Code's integrated terminal, **not** a command runner. A kernel PTY hosts a real
+process and we stream raw bytes both ways: `xterm.js` in the webview ↔
+`portable-pty` in Rust, over a local Tauri **Channel** (the high-throughput
+primitive; output never uses `emit`). Full-screen TUIs (`vim`, `htop`, an
+interactive `claude`) run identically to a standalone terminal — alt-screen,
+colors, mouse, `Ctrl-C`, live resize.
+
+**Try it:** open the Terminal tab → a login shell opens in the active repo's
+directory. Click **+** for another shell (sessions are isolated and run
+concurrently). Type a command into "Run a command…" (e.g. `htop` or `vim`) to open
+a new terminal seeded with it. Closing a tab kills its child; quitting the app
+cleans up every session.
+
+**Swappable engine.** xterm.js sits behind two interfaces in
+`src/features/terminal/types.ts` — `TerminalRenderer` (the VT engine) and
+`TerminalBackend` (the Tauri transport). xterm is imported in exactly one file,
+`XtermRenderer.ts`, so swapping the engine later (e.g. a libghostty-backed
+renderer) is mechanical.
+
+**Layers:**
+
+```
+crates/pty/                  # PtyManager: spawn real process behind a real PTY,
+                             #   stream raw bytes to a callback (Tauri-agnostic, unit-tested)
+src-tauri/src/terminal.rs    # thin commands: terminal_open/write/resize/close; output → Channel
+src/features/terminal/
+  types.ts                   # TerminalRenderer + TerminalBackend interfaces (the seams)
+  XtermRenderer.ts           # the ONLY xterm import
+  TauriBackend.ts            # transport over the generated commands + Channel
+  TerminalView.tsx           # wires a renderer to a backend by session id
+  orchestrator.ts            # the app's terminal API: placement + one optional seed
+  TerminalSurface.tsx        # the Terminal tab (tab list + active terminal)
+```
+
+**Testing:** `cargo test -p santree-pty` covers the PTY lifecycle (spawn → write →
+read echo → close, concurrent isolation); `pnpm test` covers `TerminalView` wiring
+with a fake backend/renderer.
+
+> **Compliance:** santree runs the real, unmodified CLI in a real terminal. It does
+> **not** handle credentials, parse output to drive input, or run any unattended
+> control loop. See [COMPLIANCE.md](./COMPLIANCE.md) — these constraints are
+> load-bearing and must survive future changes.
+
+---
+
 ## Project layout
 
 ```

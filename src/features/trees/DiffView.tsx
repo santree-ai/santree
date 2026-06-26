@@ -27,8 +27,8 @@ export function DiffView() {
         key: `f-${fi}`,
         text: `▾ ${f.path}`,
         meta: `${f.tag.toLowerCase()}  +${f.addLines} −${f.delLines}`,
-        color: "#dadae0",
-        bg: "#101216",
+        color: "var(--color-fg-3)",
+        bg: "var(--color-raised-alt)",
         bold: true,
       });
       f.hunks.forEach((h, hi) => {
@@ -36,7 +36,7 @@ export function DiffView() {
           key: `h-${fi}-${hi}`,
           text: h.header,
           meta: "",
-          color: "#6fa8d0",
+          color: "var(--color-diff-hunk)",
           bg: "rgba(111,168,208,.06)",
           bold: false,
         });
@@ -47,7 +47,11 @@ export function DiffView() {
             key: `l-${fi}-${hi}-${li}`,
             text: `${isAdd ? "+ " : isDel ? "- " : "  "}${ln.text}`,
             meta: "",
-            color: isAdd ? "#7ee0b0" : isDel ? "#f0a0a0" : "#8b8b94",
+            color: isAdd
+              ? "var(--color-diff-add)"
+              : isDel
+                ? "var(--color-diff-del)"
+                : "var(--color-muted-2)",
             bg: isAdd ? "rgba(63,185,80,.09)" : isDel ? "rgba(248,81,73,.09)" : "transparent",
             bold: false,
           });
@@ -63,7 +67,7 @@ export function DiffView() {
   if (diff.clean || diff.files.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2.5 text-muted-3">
-        <div className="flex h-10 w-10 items-center justify-center rounded-[11px] border border-[#1e3329] bg-[#101714] text-[18px] text-status-green">
+        <div className="flex h-10 w-10 items-center justify-center rounded-[11px] border border-status-green/30 bg-status-green/10 text-[18px] text-status-green">
           ✓
         </div>
         <span className="text-[13px] text-muted">Working tree clean — nothing to commit</span>
@@ -117,7 +121,7 @@ export function DiffView() {
         <div className="flex gap-2">
           <button
             type="button"
-            className="flex-1 cursor-pointer rounded-lg border border-line-3 bg-[#1a1a1f] py-2.5 text-[12.5px] text-fg-2 hover:border-line-strong"
+            className="flex-1 cursor-pointer rounded-lg border border-line-3 bg-raised-2 py-2.5 text-[12.5px] text-fg-2 hover:border-line-strong"
           >
             Commit {fileCount} {fileCount === 1 ? "file" : "files"}
           </button>

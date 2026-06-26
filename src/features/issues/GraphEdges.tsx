@@ -28,7 +28,7 @@ export function GraphEdges({
     >
       <defs>
         <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3.5" orient="auto">
-          <path d="M0,0 L7,3.5 L0,7 z" fill="#34343c" />
+          <path d="M0,0 L7,3.5 L0,7 z" fill="var(--color-line-strong)" />
         </marker>
         <marker id="arrowA" markerWidth="9" markerHeight="9" refX="6.5" refY="4" orient="auto">
           <path d="M0,0 L8,4 L0,8 z" fill="#2dd4a7" />

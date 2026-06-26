@@ -70,10 +70,12 @@ export function colorForProject(project: string): string {
 /** Semantic terminal/diff tone → concrete color. */
 export function toneColor(tone: Tone): string {
   switch (tone) {
+    // Neutral tones read from theme tokens so transcript text stays legible in
+    // both light and dark mode (the semantic tones below are shared).
     case "Muted":
-      return palette.muted;
+      return "var(--color-muted)";
     case "Default":
-      return palette.text;
+      return "var(--color-fg-2)";
     case "Accent":
       return "var(--accent)";
     case "Green":
@@ -90,7 +92,8 @@ export function toneColor(tone: Tone): string {
 const AGENT_LABELS: Record<AgentKind, string> = {
   Claude: "Claude Code",
   Codex: "Codex",
-  Opencode: "opencode",
+  Cursor: "Cursor",
+  Opencode: "OpenCode",
 };
 
 /** Full display name for an agent (e.g. "Claude Code"). */

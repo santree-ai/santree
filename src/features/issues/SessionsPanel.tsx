@@ -88,10 +88,10 @@ export function SessionsPanel() {
       {items.map((s) => (
         <div
           key={s.id}
-          className="animate-fade-up mb-2.5 overflow-hidden rounded-[10px] bg-[#121316]"
+          className="animate-fade-up mb-2.5 overflow-hidden rounded-[10px] bg-raised"
           style={s.cardStyle}
         >
-          <div className="flex items-center gap-1.5 border-b border-line bg-[#0e0f12] px-2.5 py-[7px]">
+          <div className="flex items-center gap-1.5 border-b border-line bg-well px-2.5 py-[7px]">
             <span className="h-2 w-2 rounded-full bg-[#ff5f57]" />
             <span className="h-2 w-2 rounded-full bg-[#febc2e]" />
             <span className="h-2 w-2 rounded-full bg-[#28c840]" />
@@ -125,7 +125,7 @@ export function SessionsPanel() {
               </span>
               <span className="font-mono text-[10px] text-muted-4">{s.metric}</span>
             </div>
-            <div className="mt-2 overflow-hidden rounded-[5px] bg-panel px-[7px] py-[5px] font-mono text-[10px] text-ellipsis whitespace-nowrap text-[#55555d]">
+            <div className="mt-2 overflow-hidden rounded-[5px] bg-panel px-[7px] py-[5px] font-mono text-[10px] text-ellipsis whitespace-nowrap text-muted-3">
               {s.logLine}
             </div>
             {s.chained && (

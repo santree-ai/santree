@@ -96,7 +96,9 @@ export function InspectorPanel() {
       <div className="mb-3.5 border-t border-line pt-3.5">
         <SectionLabel>⎇ Worktree</SectionLabel>
         {session ? (
-          <div className="font-mono text-[12px] text-[#9ee6c9]">{branchFor(focus.id)}</div>
+          <div className="font-mono text-[12px] text-[color:var(--color-branch)]">
+            {branchFor(focus.id)}
+          </div>
         ) : (
           <div className="font-mono text-[12px] text-muted-4">no worktree for this ticket</div>
         )}
@@ -106,7 +108,9 @@ export function InspectorPanel() {
         <SectionLabel>◉ Pull Request</SectionLabel>
         {done && session ? (
           <div>
-            <div className="font-mono text-[12px] text-[#9ee6c9]">PR #{session.pr} · open</div>
+            <div className="font-mono text-[12px] text-[color:var(--color-branch)]">
+              PR #{session.pr} · open
+            </div>
             <div className="mt-[3px] font-mono text-[11px] text-muted-4">
               {diffLabel(session.add, session.del)} across files
             </div>

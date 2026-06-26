@@ -63,26 +63,26 @@ export function GraphCanvas() {
 
       // Layered styling — later conditions win, matching the design.
       const style: CSSProperties = {
-        background: "#15161a",
-        border: "1px solid #2a2a31",
+        background: "var(--color-hover)",
+        border: "1px solid var(--color-line-3)",
         boxShadow: "0 1px 2px rgba(0,0,0,.4)",
         opacity: dim ? 0.32 : 1,
       };
-      if (focused) style.border = "1px solid #3a3a44";
+      if (focused) style.border = "1px solid var(--color-dot)";
       if (chainable && !isSelected) style.border = `1px solid ${alpha(40)}`;
       if (isSelected) {
         style.border = `1px solid ${accent}`;
-        style.background = "#14181a";
+        style.background = "var(--color-node-sel)";
         style.boxShadow = `0 0 0 1px ${accent}, 0 8px 26px -8px ${alpha(33)}`;
       }
       if (running) {
         style.border = `1px solid ${accent}`;
-        style.background = "#13181a";
+        style.background = "var(--color-node-run)";
         style.boxShadow = `0 0 0 1px ${alpha(40)}, 0 10px 32px -10px ${alpha(47)}`;
       }
       if (done) {
         style.border = "1px solid #2f6f4f";
-        style.background = "#141815";
+        style.background = "var(--color-node-done)";
         style.boxShadow = "0 0 0 1px #2f6f4f55, 0 1px 2px rgba(0,0,0,.4)";
       }
 
@@ -144,7 +144,7 @@ export function GraphCanvas() {
         const chained = worktreeIds.has(depId);
         const crossProject = a.project !== t.project;
 
-        let stroke = active ? accent : chained ? alpha(67) : "#34343c";
+        let stroke = active ? accent : chained ? alpha(67) : "var(--color-line-strong)";
         let width = active ? 2 : chained ? 1.8 : 1.5;
         let dash = active ? "5 7" : "0";
         let marker = active || chained ? "url(#arrowA)" : "url(#arrow)";
@@ -195,7 +195,7 @@ export function GraphCanvas() {
         color,
         border: `${color}${dim ? "18" : "33"}`,
         bg: `${color}${dim ? "04" : "0b"}`,
-        labelColor: dim ? "#5b5b63" : color,
+        labelColor: dim ? "var(--color-muted-4)" : color,
         opacity: dim ? 0.5 : 1,
         count: inProject.length,
         onClick: () => toggleProjectFocus(project),

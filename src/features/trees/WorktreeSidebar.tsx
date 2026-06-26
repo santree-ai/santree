@@ -13,10 +13,10 @@ export function WorktreeSidebar() {
   const { activeId, scopeAll, setActive } = useTrees();
 
   return (
-    <div className="flex w-[280px] flex-none flex-col border-r border-line bg-panel">
-      <div className="flex h-10 flex-none items-center gap-2 border-b border-hairline px-[15px]">
+    <>
+      <div className="flex h-10 flex-none items-center gap-2 border-b border-hairline px-3">
         <span className="text-[12px] font-semibold text-fg-2">Worktrees</span>
-        <span className="rounded-[5px] border border-line-2 bg-[#17171b] px-1.5 py-px font-mono text-[10.5px] text-muted-2">
+        <span className="rounded-[5px] border border-line-2 bg-input-alt px-1.5 py-px font-mono text-[10.5px] text-muted-2">
           {worktrees.length}
         </span>
       </div>
@@ -35,7 +35,7 @@ export function WorktreeSidebar() {
               type="button"
               key={w.id}
               onClick={() => setActive(w.id)}
-              className="mb-[5px] w-full cursor-pointer rounded-[9px] px-[11px] py-2.5 text-left transition-colors hover:bg-[#15161a]"
+              className="mb-[5px] w-full cursor-pointer rounded-[9px] px-[11px] py-2.5 text-left transition-colors hover:bg-hover"
               style={style}
             >
               <div className="mb-[5px] flex items-center gap-2">
@@ -69,6 +69,6 @@ export function WorktreeSidebar() {
       </div>
 
       <SidebarFooter />
-    </div>
+    </>
   );
 }

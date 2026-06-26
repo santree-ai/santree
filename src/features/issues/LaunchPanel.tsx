@@ -20,7 +20,7 @@ export function LaunchPanel() {
 
   if (count === 0) {
     return (
-      <div className="flex-none border-t border-line bg-[#0e0f12] px-[13px] pt-3 pb-3.5">
+      <div className="flex-none border-t border-line bg-well px-[13px] pt-3 pb-3.5">
         <p className="text-[11.5px] leading-[1.55] text-muted-3">
           Select ready tasks to queue agents. Launch in parallel — each opens its own terminal
           session.
@@ -33,7 +33,7 @@ export function LaunchPanel() {
   const models = agents.find((a) => a.key === launchAgent)?.models ?? [];
 
   return (
-    <div className="flex-none border-t border-line bg-[#0e0f12] px-[13px] pt-3 pb-3.5">
+    <div className="flex-none border-t border-line bg-well px-[13px] pt-3 pb-3.5">
       <div className="mb-[9px] flex items-center justify-between">
         <span className="text-[11.5px] text-muted">
           <span className="font-semibold text-fg">{count}</span> selected

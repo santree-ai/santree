@@ -8,20 +8,29 @@ use tauri::State;
 
 use santree_core::{
     domain::{
-        AgentDef, LinearOrg, LinearStatus, Repo, Settings, Stage, Task, Terminal, TriageMessage,
-        TriageTicket, Worktree, WorktreeDiff,
+        AgentDef, AgentKind, ClaudeCommands, LinearOrg, LinearStatus, Repo, Settings, Stage, Task,
+        Terminal, TriageDetail, TriageMessage, TriageSchedule, TriageTicket, Worktree, WorktreeDiff,
     },
     mock,
 };
 
 use crate::db::Db;
 use crate::linear;
+use crate::repo;
+use crate::settings;
 
 /// Connected repositories.
 #[tauri::command]
 #[specta::specta]
-pub fn list_repos() -> Vec<Repo> {
-    mock::repos()
+pub async fn list_repos(db: State<'_, Db>) -> Result<Vec<Repo>, String> {
+    repo::list(&db).await.map_err(|e| e.to_string())
+}
+
+/// Add a repository from a local folder, validating it is a git work tree.
+#[tauri::command]
+#[specta::specta]
+pub async fn add_repo(path: String, db: State<'_, Db>) -> Result<Repo, String> {
+    repo::add(&db, path).await.map_err(|e| e.to_string())
 }
 
 /// Available coding agents and their models.
@@ -80,11 +89,84 @@ pub fn stage_meta() -> Vec<Stage> {
     mock::stage_meta()
 }
 
-/// Tickets awaiting triage.
+/// Whether the repo has a connected Linear org (so triage can go live).
+async fn linear_live(db: &Db, repo: &str) -> bool {
+    linear::auth_status(db, repo)
+        .await
+        .map(|s| s.authenticated)
+        .unwrap_or(false)
+}
+
+/// Tickets awaiting triage — live from Linear when connected, else the sample set.
 #[tauri::command]
 #[specta::specta]
-pub fn list_triage_tickets() -> Vec<TriageTicket> {
-    mock::triage_tickets()
+pub async fn list_triage_tickets(
+    repo: String,
+    db: State<'_, Db>,
+) -> Result<Vec<TriageTicket>, String> {
+    if linear_live(&db, &repo).await {
+        linear::triage_tickets(&db, &repo)
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Ok(mock::triage_tickets())
+    }
+}
+
+/// The full triage issue (description + comments) for the discussion pane.
+#[tauri::command]
+#[specta::specta]
+pub async fn triage_detail(
+    repo: String,
+    ticket_id: String,
+    db: State<'_, Db>,
+) -> Result<TriageDetail, String> {
+    if linear_live(&db, &repo).await {
+        linear::triage_detail(&db, &repo, &ticket_id)
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Ok(mock::triage_detail(&ticket_id))
+    }
+}
+
+/// The team triage rotations (who is on-call now), from Linear's responsibility
+/// schedules — one per team the viewer is on. Empty when none are configured.
+#[tauri::command]
+#[specta::specta]
+pub async fn triage_schedule(
+    repo: String,
+    db: State<'_, Db>,
+) -> Result<Vec<TriageSchedule>, String> {
+    if linear_live(&db, &repo).await {
+        linear::triage_schedule(&db, &repo)
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Ok(vec![mock::triage_schedule()])
+    }
+}
+
+/// Move a triage issue to a different workflow state (the status picker). Moving
+/// it out of `triage` is how the UI promotes an item. Requires a connected,
+/// write-scoped Linear org; a no-op error is returned in mock mode.
+#[tauri::command]
+#[specta::specta]
+pub async fn triage_set_state(
+    repo: String,
+    ticket_id: String,
+    state_id: String,
+    db: State<'_, Db>,
+) -> Result<(), String> {
+    if linear_live(&db, &repo).await {
+        linear::set_issue_state(&db, &repo, &ticket_id, &state_id)
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        // No live backend: accept the change so the optimistic UI stays usable.
+        tracing::info!(ticket = %ticket_id, state = %state_id, "mock: status change");
+        Ok(())
+    }
 }
 
 /// The seed investigation thread for a triage ticket.
@@ -102,11 +184,79 @@ pub fn triage_ask(question: String) -> TriageMessage {
     mock::triage_answer(&question)
 }
 
-/// User settings (the frontend owns live edits after seeding).
+/// User settings (the frontend owns live edits after seeding). Each agent's
+/// `exec` is the user's *override* (empty by default); the executable detected on
+/// PATH is reported separately via [`agent_auth`] and shown as the grayed default.
 #[tauri::command]
 #[specta::specta]
 pub fn get_settings() -> Settings {
     mock::settings()
+}
+
+/// An agent harness's authentication / subscription status. Live for Claude
+/// (read from `~/.claude.json`), placeholders for the work-in-progress harnesses.
+#[tauri::command]
+#[specta::specta]
+pub fn agent_auth(kind: AgentKind) -> santree_core::domain::AgentAuth {
+    settings::agent_auth(kind)
+}
+
+// ── App/per-repo settings + Claude command discovery ───────────────────────
+
+/// The Claude slash-commands offered by the triage "Investigate" picker. Always
+/// includes the global `~/.claude/commands`; when a repo name is given, also its
+/// own `.claude/commands` (so the repo scope can list both).
+#[tauri::command]
+#[specta::specta]
+pub async fn list_claude_commands(
+    repo: Option<String>,
+    db: State<'_, Db>,
+) -> Result<ClaudeCommands, String> {
+    let repo_path = match repo {
+        Some(name) => repo::path(&db, &name).await.map_err(|e| e.to_string())?,
+        None => None,
+    };
+    Ok(settings::commands(repo_path.as_deref()))
+}
+
+/// Read a setting for an exact scope (`"app"` or `"repo:<name>"`).
+#[tauri::command]
+#[specta::specta]
+pub async fn get_setting(
+    scope: String,
+    key: String,
+    db: State<'_, Db>,
+) -> Result<Option<String>, String> {
+    settings::get(&db, &scope, &key)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Write (or clear, when `value` is null) a setting for a scope.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_setting(
+    scope: String,
+    key: String,
+    value: Option<String>,
+    db: State<'_, Db>,
+) -> Result<(), String> {
+    settings::set(&db, &scope, &key, value)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Resolve a repo-scoped setting: the repo's override, else the app value.
+#[tauri::command]
+#[specta::specta]
+pub async fn resolve_setting(
+    repo: String,
+    key: String,
+    db: State<'_, Db>,
+) -> Result<Option<String>, String> {
+    settings::resolve(&db, &repo, &key)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── Linear integration ───────────────────────────────────────────────────

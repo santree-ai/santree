@@ -16,9 +16,31 @@
   --color-titlebar: #141417;
   --color-raised: #101114;
   --color-raised-alt: #101216;
+  --color-raised-2: #1a1a1f;
   --color-input: #141417;
   --color-input-alt: #161619;
   --color-popover: #161618;
+  /* Hover/well surfaces (formerly inline one-off shades). */
+  --color-hover: #15161a;
+  --color-hover-2: #1b1c20;
+  --color-well: #0e0f12;
+  --color-deep: #0b0c0f;
+
+  /* Loading skeleton fill. */
+  --color-skeleton: #23242a;
+  /* Tinted graph-node backgrounds (selected / running / done states). */
+  --color-node-sel: #14181a;
+  --color-node-run: #13181a;
+  --color-node-done: #141815;
+  /* A neutral focus-ring / dot tone (was the inline #3a3a44). */
+  --color-dot: #3a3a44;
+  /* Soft pastel text tones tuned for dark surfaces (diff, branch labels,
+     transcript user lines); retuned darker for light surfaces below. */
+  --color-diff-add: #7ee0b0;
+  --color-diff-del: #f0a0a0;
+  --color-diff-hunk: #6fa8d0;
+  --color-branch: #9ee6c9;
+  --color-user-line: #dbe6f2;
 
   /* Borders / hairlines */
   --color-hairline: #18181c;
@@ -57,6 +79,73 @@
 
 :root {
   --accent: #2dd4a7;
+  /* Live sidebar width. Updated directly during a resize drag (no React
+     re-render) and committed to state on pointer-up — see ViewChrome. */
+  --sidebar-width: 264px;
+  /* Declaring both lets the webview's prefers-color-scheme reflect the OS so
+     the "Auto" theme works; the concrete scheme is pinned per data-theme below
+     (so native scrollbars / form controls match the active theme). */
+  color-scheme: light dark;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+/* ------------------------------------------------------------------ *
+ * Light theme. The app is dark by default; setting data-theme="light"
+ * on <html> (Settings → Appearance, or "Auto" following the system)
+ * remaps the surface / border / text tokens. Semantic status colors and
+ * the accent are intentionally shared across both themes.
+ * ------------------------------------------------------------------ */
+:root[data-theme="light"] {
+  /* Surfaces */
+  --color-app: #f5f6f8;
+  --color-panel: #ffffff;
+  --color-surface: #fbfbfc;
+  --color-titlebar: #eef0f3;
+  --color-raised: #ffffff;
+  --color-raised-alt: #f7f8fa;
+  --color-raised-2: #f2f3f5;
+  --color-input: #f0f1f4;
+  --color-input-alt: #e9ebee;
+  --color-popover: #ffffff;
+  --color-hover: #f0f1f4;
+  --color-hover-2: #e7e9ec;
+  --color-well: #f3f4f6;
+  --color-deep: #eaecef;
+
+  /* Borders / hairlines */
+  --color-hairline: #ececef;
+  --color-line: #e3e4e8;
+  --color-line-2: #d8dade;
+  --color-line-3: #cdd0d6;
+  --color-line-strong: #b9bcc4;
+
+  /* Foreground / text */
+  --color-fg: #1b1c20;
+  --color-fg-bright: #0c0d11;
+  --color-fg-2: #2b2c31;
+  --color-fg-3: #232429;
+  --color-muted: #595a62;
+  --color-muted-2: #696a72;
+  --color-muted-3: #82838b;
+  --color-muted-4: #9a9ba2;
+  --color-muted-5: #b2b3ba;
+
+  /* Loading / graph / dot accents, retuned for light surfaces. */
+  --color-skeleton: #e4e6ea;
+  --color-node-sel: #e9faf4;
+  --color-node-run: #e7f8f1;
+  --color-node-done: #e9f6ed;
+  --color-dot: #c2c5cc;
+  --color-diff-add: #1f8b3b;
+  --color-diff-del: #c4332b;
+  --color-diff-hunk: #2f6aa8;
+  --color-branch: #0f9b73;
+  --color-user-line: #2a4a66;
 }
 
 html,
@@ -103,13 +192,13 @@ button {
   height: 9px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a2a31;
+  background: var(--color-line-3);
   border-radius: 8px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a3a44;
+  background: var(--color-line-strong);
   background-clip: content-box;
 }
 

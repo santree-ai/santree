@@ -2,6 +2,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRouter, RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ErrorScreen } from "./components/ErrorScreen";
+import { TerminalsProvider } from "./features/terminal/TerminalsContext";
 import { routeTree } from "./routeTree.gen";
 import { AppProvider } from "./state/AppContext";
 import "./styles.css";
@@ -11,7 +14,12 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 5 * 60 * 1000, refetchOnWindowFocus: false } },
 });
 
-const router = createRouter({ routeTree });
+// Replace TanStack Router's raw default error UI with our friendly screen for
+// any error thrown while rendering a route.
+const router = createRouter({
+  routeTree,
+  defaultErrorComponent: ({ error, reset }) => <ErrorScreen error={error} onRetry={reset} />,
+});
 
 declare module "@tanstack/react-router" {
   interface Register {
@@ -26,10 +34,14 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <AppProvider>
-        <RouterProvider router={router} />
-      </AppProvider>
-    </QueryClientProvider>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <AppProvider>
+          <TerminalsProvider>
+            <RouterProvider router={router} />
+          </TerminalsProvider>
+        </AppProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   </StrictMode>,
 );

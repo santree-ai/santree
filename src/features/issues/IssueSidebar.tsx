@@ -59,12 +59,12 @@ export function IssueSidebar() {
           const dim = focusProject !== null && t.project !== focusProject;
 
           const rowStyle: CSSProperties = {
-            background: isSelected ? alpha(12) : focused ? "#15161a" : "transparent",
+            background: isSelected ? alpha(12) : focused ? "var(--color-hover)" : "transparent",
             border: `1px solid ${isSelected ? alpha(40) : "transparent"}`,
             opacity: dim ? 0.4 : 1,
           };
           const boxStyle: CSSProperties = {
-            border: `1.5px solid ${selectable ? (isSelected ? accent : "#3a3a44") : "transparent"}`,
+            border: `1.5px solid ${selectable ? (isSelected ? accent : "var(--color-dot)") : "transparent"}`,
             background: isSelected ? accent : "transparent",
           };
 
@@ -105,10 +105,14 @@ export function IssueSidebar() {
 
   const readyFilterStyle: CSSProperties = readyFilter
     ? { background: alpha(12), border: `1px solid ${alpha(40)}`, color: accent }
-    : { background: "#161619", border: "1px solid #2a2a31", color: "#9b9ba3" };
+    : {
+        background: "var(--color-input-alt)",
+        border: "1px solid var(--color-line-3)",
+        color: "var(--color-muted)",
+      };
 
   return (
-    <div className="flex w-[260px] flex-none flex-col border-r border-line bg-panel">
+    <>
       <div className="flex h-10 flex-none items-center gap-2 border-b border-hairline pr-2.5 pl-[15px]">
         <span className="text-[12px] font-semibold tracking-[.01em] text-fg-2">Issues</span>
         <span className="font-mono text-[10.5px] text-muted-4">{tasks.length}</span>
@@ -142,6 +146,6 @@ export function IssueSidebar() {
 
       <LaunchPanel />
       <SidebarFooter />
-    </div>
+    </>
   );
 }

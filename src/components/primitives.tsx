@@ -1,5 +1,12 @@
 /** Small presentational primitives reused across views. */
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
+
+/** A pulsing placeholder bar for loading states. */
+export function Skeleton({ className, style }: { className?: string; style?: CSSProperties }) {
+  return (
+    <span className={`block animate-pulse rounded bg-skeleton ${className ?? ""}`} style={style} />
+  );
+}
 
 /** A spinning ring, themable by color. */
 export function Spinner({ size = 11, color = "var(--accent)" }: { size?: number; color?: string }) {
@@ -48,7 +55,7 @@ export function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
       role="switch"
       aria-checked={on}
       className="relative h-[21px] w-[38px] flex-none cursor-pointer rounded-full border-none transition-colors duration-150"
-      style={{ background: on ? "var(--accent)" : "#2a2a31" }}
+      style={{ background: on ? "var(--accent)" : "var(--color-line-3)" }}
     >
       <span
         className="absolute top-[2px] h-[17px] w-[17px] rounded-full bg-white transition-[left] duration-150"
@@ -85,7 +92,7 @@ export function Segmented<T extends string>({
               border: "1px solid color-mix(in srgb, var(--accent) 40%, transparent)",
               color: "var(--accent)",
             }
-          : { border: "1px solid transparent", color: "#8b8b94" };
+          : { border: "1px solid transparent", color: "var(--color-muted-2)" };
         return (
           <button
             key={opt.value}
@@ -96,6 +103,49 @@ export function Segmented<T extends string>({
           >
             {opt.icon}
             {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * A horizontal tab bar with an accent underline on the active tab. Generic over
+ * the tab value so callers stay type-safe.
+ */
+export function Tabs<T extends string>({
+  tabs,
+  value,
+  onChange,
+  className,
+}: {
+  tabs: { value: T; label: string; icon?: ReactNode; badge?: ReactNode; dimmed?: boolean }[];
+  value: T;
+  onChange: (value: T) => void;
+  className?: string;
+}) {
+  return (
+    <div className={`flex items-center gap-1 border-b border-line ${className ?? ""}`}>
+      {tabs.map((t) => {
+        const active = t.value === value;
+        const style: CSSProperties = active
+          ? { color: "var(--color-fg-bright)", borderColor: "var(--accent)" }
+          : {
+              color: t.dimmed ? "var(--color-muted-4)" : "var(--color-muted-2)",
+              borderColor: "transparent",
+            };
+        return (
+          <button
+            key={t.value}
+            type="button"
+            onClick={() => onChange(t.value)}
+            className="-mb-px flex cursor-pointer items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] font-medium transition-colors hover:text-fg-2"
+            style={style}
+          >
+            {t.icon}
+            {t.label}
+            {t.badge}
           </button>
         );
       })}

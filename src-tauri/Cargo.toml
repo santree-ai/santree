@@ -17,9 +17,14 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 santree-core = { path = "../crates/core" }
+santree-pty = { path = "../crates/pty" }
 
 tauri = { version = "2", features = ["specta"] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+# Repositions the macOS traffic lights (the `trafficLightPosition` config field is
+# ignored with titleBarStyle: Overlay); decorum does it natively + on resize.
+tauri-plugin-decorum = "1.1"
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -35,6 +40,9 @@ tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 tokio = { version = "1", features = ["full"] }
 
 anyhow = "1"
+
+# Parsing Linear's RFC3339 timestamps (SLA / snooze / created / on-call shifts).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 # Structured logging.
 tracing = "0.1"
