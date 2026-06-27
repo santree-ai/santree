@@ -17,8 +17,6 @@ export const commands = {
 	 *  (read from `~/.claude.json`), placeholders for the work-in-progress harnesses.
 	 */
 	agentAuth: (kind: AgentKind) => __TAURI_INVOKE<AgentAuth>("agent_auth", { kind }),
-	/**  All tickets, positioned for the dependency graph. */
-	listTasks: () => __TAURI_INVOKE<Task[]>("list_tasks"),
 	/**  Active agent worktrees. */
 	listWorktrees: () => __TAURI_INVOKE<Worktree[]>("list_worktrees"),
 	/**  The working-tree diff for a worktree. */
@@ -46,16 +44,25 @@ export const commands = {
 	 *  schedules — one per team the viewer is on. Empty when none are configured.
 	 */
 	triageSchedule: (repo: string) => typedError<TriageSchedule[], string>(__TAURI_INVOKE("triage_schedule", { repo })),
-	/**  The seed investigation thread for a triage ticket. */
-	triageThread: (ticketId: string) => __TAURI_INVOKE<TriageMessage[]>("triage_thread", { ticketId }),
-	/**  Investigate a free-text triage question; returns the agent's answer. */
-	triageAsk: (question: string) => __TAURI_INVOKE<TriageMessage>("triage_ask", { question }),
 	/**
-	 *  User settings (the frontend owns live edits after seeding). Each agent's
-	 *  `exec` is the user's *override* (empty by default); the executable detected on
-	 *  PATH is reported separately via [`agent_auth`] and shown as the grayed default.
+	 *  User settings, persisted in the database (seeded from defaults on first run).
+	 *  Each agent's `exec` is the user's *override* (empty by default); the executable
+	 *  detected on PATH is reported separately via [`agent_auth`] and shown as the
+	 *  grayed default.
 	 */
-	getSettings: () => __TAURI_INVOKE<Settings>("get_settings"),
+	getSettings: () => typedError<Settings, string>(__TAURI_INVOKE("get_settings")),
+	/**
+	 *  Persist the full settings blob. The frontend applies edits optimistically and
+	 *  calls this to make them durable across restarts.
+	 */
+	setSettings: (settings: Settings) => typedError<null, string>(__TAURI_INVOKE("set_settings", { settings })),
+	/**
+	 *  The user's local note for a task — extra context stored only on this machine
+	 *  (never synced to Linear). `None` when the task has no note.
+	 */
+	taskNote: (repo: string, taskId: string) => typedError<string | null, string>(__TAURI_INVOKE("task_note", { repo, taskId })),
+	/**  Save (or clear, when blank) the user's local note for a task. */
+	setTaskNote: (repo: string, taskId: string, body: string) => typedError<null, string>(__TAURI_INVOKE("set_task_note", { repo, taskId, body })),
 	/**
 	 *  The Claude slash-commands offered by the triage "Investigate" picker. Always
 	 *  includes the global `~/.claude/commands`; when a repo name is given, also its
@@ -74,7 +81,11 @@ export const commands = {
 	linearOrgs: () => typedError<LinearOrg[], string>(__TAURI_INVOKE("linear_orgs")),
 	/**  Bind (or clear) the Linear org a repo uses. */
 	setRepoLinearOrg: (repo: string, slug: string | null) => typedError<null, string>(__TAURI_INVOKE("set_repo_linear_org", { repo, slug })),
-	/**  Fetch the repo's assigned Linear issues as a positioned dependency graph. */
+	/**
+	 *  The repo's assigned Linear issues as a positioned dependency graph — live when
+	 *  an org is connected, else the built-in sample graph (so the view is never
+	 *  empty and the frontend needs no separate "is connected?" round-trip).
+	 */
 	linearListIssues: (repo: string) => typedError<Task[], string>(__TAURI_INVOKE("linear_list_issues", { repo })),
 	/**  Run the Linear OAuth flow; returns the updated org list. */
 	linearConnect: () => typedError<LinearOrg[], string>(__TAURI_INVOKE("linear_connect")),
@@ -163,11 +174,6 @@ export type ClaudeCommands = {
 	repo: ClaudeCommand[],
 };
 
-/**  A code location referenced by a triage answer. */
-export type CodeRef = {
-	path: string,
-};
-
 /**  A changed file within a worktree's diff. */
 export type DiffFile = {
 	path: string,
@@ -227,9 +233,6 @@ export type LinearStatus = {
 	org: string | null,
 };
 
-/**  Who authored a triage message. */
-export type MessageRole = "User" | "Agent";
-
 /**  Priority of a triage ticket. */
 export type Priority = "Urgent" | "High" | "Medium" | "Low";
 
@@ -252,7 +255,10 @@ export type Repo = {
 	path: string | null,
 };
 
-/**  User settings seeded by the backend (the frontend then owns live edits). */
+/**
+ *  User settings, persisted as a JSON blob in the `settings` table. Seeded from
+ *  defaults on first run; edits are written back through `set_settings`.
+ */
 export type Settings = {
 	defaultAgent: AgentKind,
 	integrations: Integrations,
@@ -273,9 +279,26 @@ export type Task = {
 	id: string,
 	title: string,
 	project: string,
+	/**
+	 *  The project's color (hex) as configured in Linear, when it has one. Falls
+	 *  back to the frontend's per-name color map when absent (e.g. mock data).
+	 */
+	projectColor: string | null,
+	/**
+	 *  The project's icon — an emoji (rendered directly) or a Linear icon name
+	 *  (we don't ship that icon set, so it falls back to the colored dot).
+	 */
+	projectIcon: string | null,
 	status: TaskStatus,
 	ready: boolean,
 	blockedBy: string[],
+	/**
+	 *  Whether this ticket is directly actionable by the viewer: assigned to
+	 *  them and not yet done. Non-actionable tickets (someone else's, or
+	 *  already done) are pulled into the graph only as blocker context and are
+	 *  rendered grayed out.
+	 */
+	actionable: boolean,
 	x: number,
 	y: number,
 	addLines: number,
@@ -283,7 +306,12 @@ export type Task = {
 };
 
 /**  Lifecycle status of a ticket / worktree. */
-export type TaskStatus = "InReview" | "InProgress" | "Todo" | "Backlog";
+export type TaskStatus = "InReview" | "InProgress" | "Todo" | "Backlog" | 
+/**
+ *  Completed or canceled. Only appears on non-actionable blocker context
+ *  nodes — the viewer's own assigned issues never include done work.
+ */
+"Done";
 
 /**  A worktree's terminal session: its seed transcript plus status. */
 export type Terminal = {
@@ -364,18 +392,13 @@ export type TriageDetail = {
 	comments: TriageComment[],
 };
 
-/**  One message in a triage investigation thread. */
-export type TriageMessage = {
-	role: MessageRole,
-	text: string,
-	refs: CodeRef[],
-};
-
 /**  The team triage rotation surfaced from Linear's triage responsibility. */
 export type TriageSchedule = {
 	team: string,
 	scheduleName: string,
 	currentName: string | null,
+	/**  Avatar of whoever is currently on triage, when available. */
+	currentAvatarUrl: string | null,
 	/**  True when the signed-in viewer is the one currently on triage. */
 	currentIsMe: boolean,
 	shifts: TriageShift[],
@@ -384,6 +407,8 @@ export type TriageSchedule = {
 /**  A single on-call slot in a triage rotation. */
 export type TriageShift = {
 	name: string,
+	/**  Avatar of the person on this shift, when Linear exposes one. */
+	avatarUrl: string | null,
 	/**  Human time range, e.g. "Mon–Wed". */
 	range: string,
 	isCurrent: boolean,
@@ -409,6 +434,11 @@ export type TriageTicket = {
 	 *  and sinks it to the bottom of the queue.
 	 */
 	snoozedUntil: string | null,
+	/**
+	 *  Whether the issue is assigned to the viewer. The queue defaults to the
+	 *  viewer's own issues; others' are shown only when "be a good citizen" is on.
+	 */
+	mine: boolean,
 };
 
 /**

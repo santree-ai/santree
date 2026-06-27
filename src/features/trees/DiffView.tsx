@@ -127,7 +127,7 @@ export function DiffView() {
           </button>
           <button
             type="button"
-            className="flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-lg border-none py-2.5 text-[12.5px] font-semibold text-[#06231a] hover:brightness-110"
+            className="flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-lg border-none py-2.5 text-[12.5px] font-semibold text-[color:var(--on-accent)] hover:brightness-110"
             style={{ background: "var(--accent)" }}
           >
             <span className="text-[11px]">✦</span>Commit &amp; open PR

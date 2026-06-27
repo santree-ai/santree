@@ -8,6 +8,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useApp } from "../state/AppContext";
+import { SearchIcon } from "./icons";
 
 interface Shortcut {
   label: string;
@@ -46,6 +47,14 @@ function buildSections(triageEnabled: boolean): Section[] {
       })),
     },
     {
+      title: "Issues",
+      items: [
+        { label: "Toggle right panel", keys: ["⌘", "L"] },
+        { label: "Toggle actionable only", keys: ["⌘", "⇧", "."] },
+        { label: "Add ticket to queue", keys: ["⌘", "Click"] },
+      ],
+    },
+    {
       title: "Triage",
       items: [
         { label: "Next issue", keys: ["J"] },
@@ -55,25 +64,6 @@ function buildSections(triageEnabled: boolean): Section[] {
       ],
     },
   ];
-}
-
-function SearchIcon({ size = 15 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <circle cx="11" cy="11" r="7" />
-      <path d="m21 21-4.3-4.3" />
-    </svg>
-  );
 }
 
 function Kbd({ token }: { token: string }) {

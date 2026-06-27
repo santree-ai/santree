@@ -1,8 +1,12 @@
 /** The launch tray at the bottom of the Issues sidebar. */
-import { AgentIcon } from "../../components/icons";
-import { Segmented } from "../../components/primitives";
+import type { AgentKind } from "../../bindings";
+import { ChevronSelect } from "../../components/primitives";
+import { agentAvailable } from "../../lib/format";
 import { useAgents } from "../../lib/queries";
 import { useIssues } from "./model";
+
+const SELECT_CLASS =
+  "w-full rounded-lg border border-line-2 bg-input py-2 pr-8 pl-2.5 font-mono text-[11px] text-fg-2";
 
 export function LaunchPanel() {
   const {
@@ -10,6 +14,7 @@ export function LaunchPanel() {
     clearSelection,
     launchAgent,
     launchModel,
+    defaultModel,
     setLaunchAgent,
     setLaunchModel,
     launch,
@@ -18,19 +23,13 @@ export function LaunchPanel() {
 
   const count = selectedEligible.length;
 
-  if (count === 0) {
-    return (
-      <div className="flex-none border-t border-line bg-well px-[13px] pt-3 pb-3.5">
-        <p className="text-[11.5px] leading-[1.55] text-muted-3">
-          Select ready tasks to queue agents. Launch in parallel — each opens its own terminal
-          session.
-        </p>
-      </div>
-    );
-  }
+  // Nothing selected → no tray (the hint that used to live here was noise).
+  if (count === 0) return null;
 
-  const chainedCount = selectedEligible.filter((t) => !t.ready).length;
+  // Only offer agents that are actually wired up (just Claude today).
+  const availableAgents = agents.filter((a) => agentAvailable(a.key));
   const models = agents.find((a) => a.key === launchAgent)?.models ?? [];
+  const chainedCount = selectedEligible.filter((t) => !t.ready).length;
 
   return (
     <div className="flex-none border-t border-line bg-well px-[13px] pt-3 pb-3.5">
@@ -56,40 +55,44 @@ export function LaunchPanel() {
       <div className="mb-[5px] font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">
         Agent
       </div>
-      <Segmented
-        className="mb-[9px]"
-        options={agents.map((a) => ({
-          value: a.key,
-          label: a.short,
-          icon: <AgentIcon kind={a.key} size={12} />,
-        }))}
+      <ChevronSelect
         value={launchAgent}
-        onChange={setLaunchAgent}
-      />
+        onChange={(v) => setLaunchAgent(v as AgentKind)}
+        className={SELECT_CLASS}
+        wrapperClassName="mb-[9px]"
+      >
+        {availableAgents.map((a) => (
+          <option key={a.key} value={a.key} className="bg-input">
+            {a.label}
+          </option>
+        ))}
+      </ChevronSelect>
 
       <div className="mb-[5px] font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">
         Model
       </div>
-      <select
+      <ChevronSelect
         value={launchModel}
-        onChange={(e) => setLaunchModel(e.target.value)}
-        className="mb-[11px] w-full cursor-pointer appearance-none rounded-lg border border-line-2 bg-input px-2.5 py-2 font-mono text-[11px] text-fg-2"
+        onChange={setLaunchModel}
+        className={SELECT_CLASS}
+        wrapperClassName="mb-[11px]"
       >
         {models.map((m) => (
           <option key={m} value={m} className="bg-input">
             {m}
+            {m === defaultModel ? "  ·  default" : ""}
           </option>
         ))}
-      </select>
+      </ChevronSelect>
 
       <button
         type="button"
         onClick={launch}
-        className="flex w-full items-center justify-center gap-2 rounded-[9px] border px-3 py-2.5 text-[13px] font-semibold text-[#06231a] transition-[filter,transform] hover:brightness-110 active:translate-y-px"
+        className="flex w-full items-center justify-center gap-2 rounded-[9px] px-3 py-2.5 text-[13px] font-semibold transition-[filter,transform] hover:brightness-105 active:translate-y-px"
         style={{
-          background: "var(--accent)",
-          borderColor: "var(--accent)",
-          boxShadow: "0 8px 22px -10px color-mix(in srgb, var(--accent) 67%, transparent)",
+          background: "var(--color-fg-bright)",
+          color: "var(--color-app)",
+          boxShadow: "0 6px 18px -10px rgba(0,0,0,.55)",
         }}
       >
         <span className="text-[10px]">▶</span>

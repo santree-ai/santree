@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { useAddRepo, useLinearOrgs, useRepos, useSetRepoLinearOrg } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
+import { ChevronDownIcon } from "../icons";
 import { Spinner } from "../primitives";
 import { RepoAvatar } from "./RepoAvatar";
 
@@ -64,7 +65,7 @@ export function RepoSelector() {
             ● {current.agents}
           </span>
         )}
-        <span className="flex-none text-[9px] text-muted-3">▾</span>
+        <ChevronDownIcon size={12} className="flex-none text-muted-3" />
       </button>
 
       {menuOpen && (

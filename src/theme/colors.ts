@@ -6,7 +6,7 @@
  * Small, data-driven bits (graph dots, edge strokes, progress bars) read these
  * hex values via inline styles; structural styling uses Tailwind tokens.
  */
-import type { Activity, AgentKind, CheckState, Priority, TaskStatus, Tone } from "../bindings";
+import type { Activity, AgentKind, Priority, TaskStatus, Tone } from "../bindings";
 
 /** Raw palette — kept in sync with the `@theme` tokens in styles.css. */
 export const palette = {
@@ -26,14 +26,21 @@ export const palette = {
 /** The default accent; the live value is the `--accent` CSS variable. */
 export const DEFAULT_ACCENT = "#2dd4a7";
 
-/** Accent options offered in Appearance settings. */
-export const ACCENT_SWATCHES = ["#2dd4a7", "#5b8def", "#a78bfa", "#e3a008", "#f0709a"] as const;
+/** Semantic "success / ready / done" green — the single source for the green
+ *  used by RDY badges, ready dots, and done markers (was hardcoded as the raw
+ *  hex across several issue components). Mirrors the `--color-status-green` token. */
+export const successColor = palette.green;
+
+/** Linear's brand color (the `--linear-brand` token), for the Linear logo/badge
+ *  in integration surfaces. */
+export const LINEAR_BRAND = "var(--linear-brand)";
 
 export const statusColor: Record<TaskStatus, string> = {
   InReview: palette.green,
   InProgress: palette.amber,
   Todo: palette.blue,
   Backlog: palette.slate,
+  Done: palette.purple,
 };
 
 export const statusLabel: Record<TaskStatus, string> = {
@@ -41,6 +48,7 @@ export const statusLabel: Record<TaskStatus, string> = {
   InProgress: "In Progress",
   Todo: "Todo",
   Backlog: "Backlog",
+  Done: "Done",
 };
 
 export const priorityColor: Record<Priority, string> = {
@@ -106,6 +114,18 @@ export function agentSlug(kind: AgentKind): string {
   return kind === "Codex" ? "codex" : kind === "Opencode" ? "opencode" : "claude";
 }
 
-export function checkPassing(state: CheckState): boolean {
-  return state === "Passing";
+/**
+ * The live accent as a CSS value (reads the runtime `--accent` token). Use this
+ * instead of hardcoding the default accent hex so swatch changes flow through.
+ */
+export const accentVar = "var(--accent)";
+
+/**
+ * Mix any color with transparency via `color-mix`, e.g. for tinted backgrounds
+ * and borders. `pct` is the opacity percentage of `color` (0–100); the rest is
+ * transparent. Defaults to the live accent so `alpha(pct)` reproduces the
+ * per-feature accent tint helper that several graph/sidebar views used locally.
+ */
+export function alpha(pct: number, color: string = accentVar): string {
+  return `color-mix(in srgb, ${color} ${pct}%, transparent)`;
 }

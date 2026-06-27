@@ -1,144 +1,179 @@
 /**
- * The dependency graph: project grouping boxes, blocked-by edges, and ticket
- * nodes. This module owns the geometry/derivation; the pieces it renders
- * (ProjectBox, GraphEdges, GraphNode) are presentational.
+ * The dependency graph, rendered with React Flow. Tickets are laid out by dagre
+ * (blockers left → right, one band per project — see `layout.ts`), drawn as
+ * custom nodes, and connected by blocked-by edges. The canvas owns the
+ * derivation of node/edge view-models; the node components stay presentational.
  */
-
-import type { CSSProperties } from "react";
-import { useMemo } from "react";
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  type Edge,
+  MarkerType,
+  MiniMap,
+  type Node,
+  type NodeMouseHandler,
+  Panel,
+  ReactFlow,
+  ReactFlowProvider,
+  useNodesInitialized,
+  useReactFlow,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { useEffect, useMemo, useRef } from "react";
 
 import type { Task } from "../../bindings";
-import { useWorktrees } from "../../lib/queries";
-import { agentSlug, colorForProject, statusColor, statusLabel } from "../../theme/colors";
-import { type EdgeVM, GraphEdges } from "./GraphEdges";
-import { GraphNode, type NodeVM } from "./GraphNode";
-import { useIssues, useStageHelpers } from "./model";
-import { ProjectBox, type ProjectBoxVM } from "./ProjectBox";
+import { usePrefetchOnHover } from "../../lib/queries";
+import { useApp } from "../../state/AppContext";
+import {
+  accentVar as accent,
+  agentSlug,
+  alpha,
+  colorForProject,
+  palette,
+  statusColor,
+  statusLabel,
+} from "../../theme/colors";
+import { IssueNode, type IssueNodeData } from "./IssueNode";
+import { layoutGraph, NODE_H, NODE_H_RUNNING } from "./layout";
+import { deriveIssueState, MAX_STAGE, sessionState, useIssues, useStageHelpers } from "./model";
+import { ProjectNode, type ProjectNodeData } from "./ProjectNode";
 
-const NODE_W = 212;
-const NODE_H = 64;
-const CANVAS_MIN_W = 760;
-const CANVAS_MIN_H = 690;
+const nodeTypes = { issue: IssueNode, project: ProjectNode };
 
-const accent = "var(--accent)";
-const alpha = (pct: number) => `color-mix(in srgb, var(--accent) ${pct}%, transparent)`;
+type IssueRFNode = Node<IssueNodeData, "issue">;
+type ProjectRFNode = Node<ProjectNodeData, "project">;
 
-export function GraphCanvas() {
+function Flow() {
   const {
     tasks,
+    byId,
+    projectMeta,
     sessionByTask,
+    worktreeIds,
     selected,
-    focusId,
     focusProject,
+    actionableOnly,
+    reveal,
+    projectReveal,
     baseFor,
     toggle,
     setFocus,
+    setHover,
     toggleProjectFocus,
+    toggleActionableOnly,
   } = useIssues();
-  const { data: worktrees = [] } = useWorktrees();
+  const { activeRepo, theme } = useApp();
   const { pctFor, labelFor } = useStageHelpers();
+  const prefetchOnHover = usePrefetchOnHover(activeRepo);
+  const { fitView } = useReactFlow();
 
-  const worktreeIds = useMemo(() => {
-    const set = new Set(worktrees.map((w) => w.id));
-    for (const id of sessionByTask.keys()) set.add(id);
-    return set;
-  }, [worktrees, sessionByTask]);
+  // Grayed context blockers are hidden when "Actionable only" is on.
+  const hiddenCount = useMemo(() => tasks.filter((t) => !t.actionable).length, [tasks]);
+  const visibleTasks = useMemo(
+    () => (actionableOnly ? tasks.filter((t) => t.actionable) : tasks),
+    [tasks, actionableOnly],
+  );
+  const visibleIds = useMemo(() => new Set(visibleTasks.map((t) => t.id)), [visibleTasks]);
 
-  const posById = useMemo(() => {
-    const map = new Map<string, Task>();
-    for (const t of tasks) map.set(t.id, t);
-    return map;
-  }, [tasks]);
+  const { pos, boxes } = useMemo(
+    () =>
+      layoutGraph(visibleTasks, (t) =>
+        sessionState(sessionByTask.get(t.id)) === "running" ? NODE_H_RUNNING : NODE_H,
+      ),
+    [visibleTasks, sessionByTask],
+  );
 
-  const nodes = useMemo<NodeVM[]>(() => {
-    return tasks.map((t) => {
-      const session = sessionByTask.get(t.id);
-      const running = !!session && session.stage < 4;
-      const done = !!session && session.stage >= 4;
-      const isSelected = !!selected[t.id] && !session;
-      const focused = focusId === t.id;
-      const chainBase = t.ready ? null : baseFor(t);
-      const chainable = chainBase !== null && !session;
-      const dim = focusProject !== null && t.project !== focusProject;
-
-      // Layered styling — later conditions win, matching the design.
-      const style: CSSProperties = {
-        background: "var(--color-hover)",
-        border: "1px solid var(--color-line-3)",
-        boxShadow: "0 1px 2px rgba(0,0,0,.4)",
-        opacity: dim ? 0.32 : 1,
-      };
-      if (focused) style.border = "1px solid var(--color-dot)";
-      if (chainable && !isSelected) style.border = `1px solid ${alpha(40)}`;
-      if (isSelected) {
-        style.border = `1px solid ${accent}`;
-        style.background = "var(--color-node-sel)";
-        style.boxShadow = `0 0 0 1px ${accent}, 0 8px 26px -8px ${alpha(33)}`;
-      }
-      if (running) {
-        style.border = `1px solid ${accent}`;
-        style.background = "var(--color-node-run)";
-        style.boxShadow = `0 0 0 1px ${alpha(40)}, 0 10px 32px -10px ${alpha(47)}`;
-      }
-      if (done) {
-        style.border = "1px solid #2f6f4f";
-        style.background = "var(--color-node-done)";
-        style.boxShadow = "0 0 0 1px #2f6f4f55, 0 1px 2px rgba(0,0,0,.4)";
-      }
-
-      const stage = session ? Math.min(session.stage, 4) : 0;
+  const nodes = useMemo<(IssueRFNode | ProjectRFNode)[]>(() => {
+    const projectNodes: ProjectRFNode[] = boxes.map((b) => {
+      const meta = projectMeta.get(b.project);
       return {
-        id: t.id,
-        title: t.title,
-        left: t.x,
-        top: t.y,
-        statusColor: statusColor[t.status],
-        statusLabel: statusLabel[t.status],
-        style,
-        ready: t.ready && !session,
-        chainBase: chainable ? chainBase : null,
-        blocked: !t.ready && !chainable && !session,
-        running,
-        done,
-        pct: session ? pctFor(stage) : 0,
-        runColor: done ? "#3fb950" : accent,
-        stageLabel: session
-          ? session.stage === 2
-            ? `${agentSlug(session.agent)} working`
-            : labelFor(stage)
-          : "",
-        prLabel: done && session ? `PR #${session.pr}` : "",
-        diffLabel: done && session ? `+${session.add} −${session.del}` : "",
-        onClick: () => toggle(t.id),
-        onHover: () => {
-          if (focusId !== t.id) setFocus(t.id);
+        id: `project:${b.project}`,
+        type: "project",
+        position: { x: b.x, y: b.y },
+        draggable: false,
+        selectable: false,
+        focusable: false,
+        zIndex: 0,
+        data: {
+          project: b.project,
+          width: b.width,
+          height: b.height,
+          color: meta?.color ?? colorForProject(b.project),
+          icon: meta?.icon ?? null,
+          count: b.count,
+          dim: focusProject !== null && focusProject !== b.project,
         },
       };
     });
+
+    const issueNodes: IssueRFNode[] = visibleTasks.map((t) => {
+      const grayed = !t.actionable;
+      const session = sessionByTask.get(t.id);
+      const st = deriveIssueState(t, session, { selected: !!selected[t.id], baseFor });
+      const dim = focusProject !== null && t.project !== focusProject;
+
+      // The card's actual border/background/shadow is derived from these stable
+      // PRIMITIVE flags inside IssueNode — passing a fresh `cardStyle` object
+      // here would defeat IssueNode's memo (every session tick rebuilds this
+      // array), so we keep `data` to value-comparable primitives only.
+      const stage = session ? Math.min(session.stage, MAX_STAGE) : 0;
+      const p = pos.get(t.id) ?? { x: 0, y: 0 };
+      return {
+        id: t.id,
+        type: "issue",
+        position: p,
+        draggable: false,
+        zIndex: 1,
+        data: {
+          title: t.title,
+          statusColor: statusColor[t.status],
+          statusLabel: statusLabel[t.status],
+          selected: st.selected,
+          chainable: st.chainable && !st.selected,
+          dim,
+          grayed,
+          ready: st.ready,
+          chainBase: st.chainable ? st.chainBase : null,
+          blocked: st.blocked,
+          running: st.running,
+          done: st.done,
+          pct: session ? pctFor(stage) : 0,
+          runColor: st.runColor,
+          stageLabel: session
+            ? // Stage 2 ("working") shows the agent's name instead of the generic
+              // stage label, per the design.
+              session.stage === 2
+              ? `${agentSlug(session.agent)} working`
+              : labelFor(stage)
+            : "",
+          prLabel: st.done && session ? `PR #${session.pr}` : "",
+          diffLabel: st.done && session ? `+${session.add} −${session.del}` : "",
+        },
+      };
+    });
+
+    return [...projectNodes, ...issueNodes];
   }, [
-    tasks,
+    visibleTasks,
+    boxes,
+    projectMeta,
+    pos,
     sessionByTask,
     selected,
-    focusId,
     focusProject,
     baseFor,
     pctFor,
     labelFor,
-    toggle,
-    setFocus,
   ]);
 
-  const edges = useMemo<EdgeVM[]>(() => {
-    const list: EdgeVM[] = [];
-    for (const t of tasks) {
+  const edges = useMemo<Edge[]>(() => {
+    const list: Edge[] = [];
+    for (const t of visibleTasks) {
       for (const depId of t.blockedBy) {
-        const a = posById.get(depId);
+        if (!visibleIds.has(depId)) continue;
+        const a = byId.get(depId);
         if (!a) continue;
-        const sx = a.x + NODE_W;
-        const sy = a.y + NODE_H / 2;
-        const tx = t.x;
-        const ty = t.y + NODE_H / 2;
-        const dx = Math.max(44, (tx - sx) * 0.5);
         const dep = sessionByTask.get(depId);
         const active = !!dep && dep.stage >= 1;
         const chained = worktreeIds.has(depId);
@@ -146,92 +181,161 @@ export function GraphCanvas() {
 
         let stroke = active ? accent : chained ? alpha(67) : "var(--color-line-strong)";
         let width = active ? 2 : chained ? 1.8 : 1.5;
-        let dash = active ? "5 7" : "0";
-        let marker = active || chained ? "url(#arrowA)" : "url(#arrow)";
+        let dash: string | undefined;
         let opacity = active ? 0.95 : chained ? 0.85 : 0.6;
         if (crossProject && !active) {
-          stroke = "#c98a4a";
+          stroke = palette.cross;
           dash = "4 5";
-          marker = "url(#arrowX)";
           opacity = 0.85;
           width = 1.6;
         }
+
         list.push({
           id: `${depId}->${t.id}`,
-          d: `M ${sx} ${sy} C ${sx + dx} ${sy}, ${tx - dx} ${ty}, ${tx} ${ty}`,
-          stroke,
-          width,
-          dash,
-          marker,
-          opacity,
+          source: depId,
+          target: t.id,
+          type: "smoothstep",
           animated: active,
-        });
+          style: { stroke, strokeWidth: width, opacity, strokeDasharray: dash },
+          markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 16, height: 16 },
+          // Softer corners than the smoothstep default.
+          pathOptions: { borderRadius: 14 },
+        } as Edge);
       }
     }
     return list;
-  }, [tasks, posById, sessionByTask, worktreeIds]);
+  }, [visibleTasks, visibleIds, byId, sessionByTask, worktreeIds]);
 
-  const boxes = useMemo<ProjectBoxVM[]>(() => {
-    const order: string[] = [];
-    for (const t of tasks) if (!order.includes(t.project)) order.push(t.project);
-    const heightOf = (t: Task) => {
-      const s = sessionByTask.get(t.id);
-      return s && s.stage < 4 ? 136 : 100;
-    };
-    return order.map((project) => {
-      const inProject = tasks.filter((t) => t.project === project);
-      const minX = Math.min(...inProject.map((t) => t.x));
-      const minY = Math.min(...inProject.map((t) => t.y));
-      const maxX = Math.max(...inProject.map((t) => t.x + NODE_W));
-      const maxY = Math.max(...inProject.map((t) => t.y + heightOf(t)));
-      const color = colorForProject(project);
-      const dim = focusProject !== null && focusProject !== project;
-      return {
-        project,
-        left: minX - 16,
-        top: minY - 32,
-        width: maxX - minX + 32,
-        height: maxY - minY + 48,
-        color,
-        border: `${color}${dim ? "18" : "33"}`,
-        bg: `${color}${dim ? "04" : "0b"}`,
-        labelColor: dim ? "var(--color-muted-4)" : color,
-        opacity: dim ? 0.5 : 1,
-        count: inProject.length,
-        onClick: () => toggleProjectFocus(project),
-      };
-    });
-  }, [tasks, sessionByTask, focusProject, toggleProjectFocus]);
+  // Fit once the nodes have been measured (and re-fit when the task set changes —
+  // e.g. switching repos). The `tasks` query is reference-stable across session
+  // ticks (only its session overlay changes, not the task array), so keying on
+  // the `tasks` reference itself avoids allocating a big id string every render.
+  const initialized = useNodesInitialized();
+  const fittedTasks = useRef<Task[] | null>(null);
+  useEffect(() => {
+    if (!initialized || tasks.length === 0) return;
+    if (fittedTasks.current === tasks) return;
+    fittedTasks.current = tasks;
+    fitView({ padding: 0.18, duration: 320, maxZoom: 1 });
+  }, [initialized, tasks, fitView]);
 
-  // Size the canvas to the content so large real graphs scroll.
-  const { canvasW, canvasH } = useMemo(() => {
-    let w = CANVAS_MIN_W;
-    let h = CANVAS_MIN_H;
-    for (const t of tasks) {
-      w = Math.max(w, t.x + NODE_W + 40);
-      h = Math.max(h, t.y + 160);
-    }
-    return { canvasW: w, canvasH: h };
-  }, [tasks]);
+  // "Open in graph" from the inspector: pan/zoom to a single node (the nonce
+  // lets the same node be revealed twice in a row).
+  useEffect(() => {
+    if (!reveal || !pos.has(reveal.id)) return;
+    fitView({ nodes: [{ id: reveal.id }], duration: 420, maxZoom: 1.1, padding: 0.6 });
+  }, [reveal, pos, fitView]);
+
+  // Clicking a project header in the sidebar pans the graph onto that band.
+  useEffect(() => {
+    if (!projectReveal) return;
+    const id = `project:${projectReveal.project}`;
+    if (!nodes.some((n) => n.id === id)) return;
+    fitView({ nodes: [{ id }], duration: 420, maxZoom: 1, padding: 0.22 });
+  }, [projectReveal, nodes, fitView]);
+
+  const onNodeClick = useMemo<NodeMouseHandler>(
+    () => (e, node) => {
+      if (node.type === "project") {
+        toggleProjectFocus((node.data as ProjectNodeData).project);
+      } else if (e.metaKey || e.ctrlKey) {
+        // ⌘/Ctrl-click adds the ticket to the launch queue (same as the sidebar
+        // checkbox / the pane's "Add to queue" button).
+        toggle(node.id);
+      } else {
+        // A plain click commits focus (right panel) without queuing.
+        setFocus(node.id);
+      }
+    },
+    [setFocus, toggle, toggleProjectFocus],
+  );
+
+  // Hover only previews: highlight the node, prewarm its detail. It never changes
+  // the selected issue (the right panel) or pans the canvas.
+  const onNodeMouseEnter = useMemo<NodeMouseHandler>(
+    () => (_e, node) => {
+      if (node.type === "project") return;
+      setHover(node.id);
+      prefetchOnHover(node.id);
+    },
+    [setHover, prefetchOnHover],
+  );
+  const onNodeMouseLeave = useMemo<NodeMouseHandler>(() => () => setHover(null), [setHover]);
 
   return (
-    <div className="relative flex-1 overflow-auto">
-      <div className="relative mx-auto my-2" style={{ width: canvasW, height: canvasH }}>
-        <div
-          className="pointer-events-none absolute inset-0"
-          style={{
-            backgroundImage: "radial-gradient(circle, rgba(255,255,255,.05) 1px, transparent 1px)",
-            backgroundSize: "24px 24px",
-          }}
-        />
-        {boxes.map((vm) => (
-          <ProjectBox key={vm.project} vm={vm} />
-        ))}
-        <GraphEdges edges={edges} width={canvasW} height={canvasH} />
-        {nodes.map((vm) => (
-          <GraphNode key={vm.id} vm={vm} />
-        ))}
-      </div>
-    </div>
+    <ReactFlow
+      nodes={nodes}
+      edges={edges}
+      nodeTypes={nodeTypes}
+      onNodeClick={onNodeClick}
+      onNodeMouseEnter={onNodeMouseEnter}
+      onNodeMouseLeave={onNodeMouseLeave}
+      nodesDraggable={false}
+      nodesConnectable={false}
+      elementsSelectable={false}
+      proOptions={{ hideAttribution: true }}
+      colorMode={theme === "auto" ? "system" : theme}
+      minZoom={0.25}
+      maxZoom={1.6}
+      fitView
+      fitViewOptions={{ padding: 0.18, maxZoom: 1 }}
+      className="bg-app"
+    >
+      <Background variant={BackgroundVariant.Dots} gap={24} size={1} className="opacity-60" />
+      <Panel position="top-left">
+        <button
+          type="button"
+          onClick={toggleActionableOnly}
+          title={
+            actionableOnly
+              ? "Showing only tickets you can act on — click to reveal blockers owned by others or already done"
+              : "Showing all related tickets — click to hide non-actionable ones"
+          }
+          className="flex items-center gap-1.5 rounded-lg border border-line-2 bg-panel px-2.5 py-1.5 text-[11.5px] font-medium text-fg-2 shadow-lg transition-colors hover:border-line-strong"
+        >
+          <span
+            className="flex h-3 w-5 flex-none items-center rounded-full p-[2px] transition-colors"
+            style={{ background: actionableOnly ? "var(--accent)" : "var(--color-line-3)" }}
+          >
+            <span
+              className="h-2 w-2 rounded-full bg-white transition-transform"
+              style={{ transform: actionableOnly ? "translateX(8px)" : "translateX(0)" }}
+            />
+          </span>
+          Actionable only
+          {actionableOnly && hiddenCount > 0 && (
+            <span className="font-mono text-[10px] text-muted-3">+{hiddenCount}</span>
+          )}
+        </button>
+      </Panel>
+      <Controls
+        showInteractive={false}
+        className="!rounded-lg !border !border-line-2 !bg-panel !shadow-lg [&>button:hover]:!bg-hover [&>button]:!border-line [&>button]:!bg-panel [&>button]:!text-fg-2 [&_svg]:!fill-current"
+      />
+      <MiniMap
+        pannable
+        zoomable
+        className="!rounded-lg !border !border-line-2 !shadow-lg"
+        style={{ width: 148, height: 104, background: "var(--color-panel)" }}
+        maskColor="color-mix(in srgb, var(--color-app) 58%, transparent)"
+        maskStrokeColor="var(--color-line-strong)"
+        maskStrokeWidth={2}
+        nodeBorderRadius={3}
+        nodeStrokeWidth={0}
+        nodeColor={(n) =>
+          n.type === "project"
+            ? `color-mix(in srgb, ${(n.data as ProjectNodeData).color} 14%, transparent)`
+            : (((n.data as IssueNodeData)?.statusColor as string) ?? "var(--color-line-3)")
+        }
+      />
+    </ReactFlow>
+  );
+}
+
+export function GraphCanvas() {
+  return (
+    <ReactFlowProvider>
+      <Flow />
+    </ReactFlowProvider>
   );
 }

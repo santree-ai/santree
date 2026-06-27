@@ -2,45 +2,43 @@
 import { useRouterState } from "@tanstack/react-router";
 
 import { Badge } from "../../components/primitives";
-import { useLinearStatus, useTasks, useTriageTickets, useWorktrees } from "../../lib/queries";
+import { useLinearStatus, useViewCounts } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 
 export function ViewSummary() {
   const { accent, activeRepo } = useApp();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const { data: tasks = [] } = useTasks(activeRepo);
-  const { data: worktrees = [] } = useWorktrees();
-  const { data: triage = [] } = useTriageTickets(activeRepo);
+  const counts = useViewCounts(activeRepo);
   const { data: linear } = useLinearStatus(activeRepo);
 
   const path = pathname === "" ? "/" : pathname;
-  // Issues and triage are live when a Linear org is connected; only the
-  // unauthenticated fallback is the built-in sample data.
-  const sample = (path === "/" || path.startsWith("/triage")) && !linear?.authenticated;
+  // Issues and triage are live when a Linear org is connected; the
+  // unauthenticated fallback is sample data. Trees and Reviews have no live
+  // backend yet, so they're always sample — flag both honestly.
+  const sample =
+    ((path === "/" || path.startsWith("/triage")) && !linear?.authenticated) ||
+    path.startsWith("/trees") ||
+    path.startsWith("/reviews");
   let lead = "";
   let value = "";
-  let color = "#3fb950";
+  let color = "var(--color-status-green)";
 
   if (path === "/") {
-    lead = `${tasks.length} tasks · `;
-    value = `${tasks.filter((t) => t.ready).length} ready`;
+    lead = `${counts.tasks} tasks · `;
+    value = `${counts.tasksReady} ready`;
   } else if (path.startsWith("/trees")) {
-    lead = `${worktrees.length} worktrees · `;
-    value = `${worktrees.filter((w) => w.activity === "Running").length} running`;
+    lead = `${counts.worktrees} worktrees · `;
+    value = `${counts.worktreesRunning} running`;
     color = accent;
-  } else if (path.startsWith("/triage")) {
-    value = `${triage.length} to triage`;
-    color = "#f85149";
+    // Triage has no header summary — the tab badge already shows the count.
   } else if (path.startsWith("/reviews")) {
-    value = `${worktrees.filter((w) => w.pr).length} awaiting review`;
+    value = `${counts.reviews} awaiting review`;
     color = accent;
   }
 
   return (
     <div className="flex items-center gap-2.5">
-      {sample && (path === "/" || path.startsWith("/triage")) && (
-        <Badge color="var(--color-muted-2)">SAMPLE DATA</Badge>
-      )}
+      {sample && <Badge color="var(--color-muted-2)">SAMPLE DATA</Badge>}
       <div className="font-mono text-[11px] text-muted-4">
         {lead}
         <span style={{ color }}>{value}</span>

@@ -3,11 +3,11 @@ import type { CSSProperties } from "react";
 
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { useWorktreeDiff } from "../../lib/queries";
+import { AgentTranscriptView } from "./AgentTranscriptView";
 import { AllAgentsView } from "./AllAgentsView";
 import { DiffView } from "./DiffView";
 import { FileTreePanel } from "./FileTreePanel";
 import { TreesProvider, useTrees } from "./model";
-import { TerminalView } from "./TerminalView";
 import { TreeTabs } from "./TreeTabs";
 import { WorktreeSidebar } from "./WorktreeSidebar";
 
@@ -68,7 +68,13 @@ function TreesContent() {
       <div className="flex min-h-0 flex-1">
         {!scopeAll && <FileTreePanel />}
         <div className="flex min-w-0 flex-1 flex-col bg-app">
-          {scopeAll ? <AllAgentsView /> : treeView === "terminal" ? <TerminalView /> : <DiffView />}
+          {scopeAll ? (
+            <AllAgentsView />
+          ) : treeView === "terminal" ? (
+            <AgentTranscriptView />
+          ) : (
+            <DiffView />
+          )}
         </div>
       </div>
     </div>

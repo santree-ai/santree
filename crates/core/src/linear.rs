@@ -9,13 +9,14 @@ use crate::domain::{Priority, TaskStatus};
 /// completed | canceled`. We also honour a state *named* "…review…" as
 /// In Review, since many workspaces model review as a custom started state.
 pub fn map_status(state_name: &str, state_type: &str) -> TaskStatus {
-    if state_name.to_lowercase().contains("review") {
-        return TaskStatus::InReview;
-    }
     match state_type {
+        // Only a *started* state named "…review…" is In Review; a completed
+        // state like "Reviewed" stays Done, driven by its type.
+        "started" if state_name.to_lowercase().contains("review") => TaskStatus::InReview,
         "started" => TaskStatus::InProgress,
         "unstarted" => TaskStatus::Todo,
         "backlog" | "triage" => TaskStatus::Backlog,
+        "completed" | "canceled" => TaskStatus::Done,
         _ => TaskStatus::Todo,
     }
 }
@@ -92,6 +93,8 @@ mod tests {
         assert_eq!(map_status("Todo", "unstarted"), TaskStatus::Todo);
         assert_eq!(map_status("Backlog", "backlog"), TaskStatus::Backlog);
         assert_eq!(map_status("Code Review", "started"), TaskStatus::InReview);
+        // A completed state named "Reviewed" is Done, not In Review.
+        assert_eq!(map_status("Reviewed", "completed"), TaskStatus::Done);
     }
 
     #[test]
@@ -112,7 +115,10 @@ mod tests {
     fn sla_formatting() {
         let now = 1_000_000_000_000;
         assert_eq!(format_sla(None, now), None);
-        assert_eq!(format_sla(Some(now - 1), now).as_deref(), Some("SLA breached"));
+        assert_eq!(
+            format_sla(Some(now - 1), now).as_deref(),
+            Some("SLA breached")
+        );
         assert_eq!(
             format_sla(Some(now + 3 * 3_600_000), now).as_deref(),
             Some("SLA in 3h")

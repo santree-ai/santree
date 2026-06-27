@@ -25,6 +25,134 @@ export function GearIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** A plus glyph — "add to queue" and other additive actions. */
+export function PlusIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+/** A check glyph — confirmed / queued state. */
+export function CheckIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
+/** A clean chevron-down — replaces the muddy ▾ unicode glyph in menus/toggles. */
+export function ChevronDownIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+
+/** A git-branch glyph (two nodes on a trunk with a fork). */
+export function BranchIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <circle cx="6" cy="5" r="2.4" />
+      <circle cx="6" cy="19" r="2.4" />
+      <circle cx="17" cy="7" r="2.4" />
+      <path d="M6 7.4v9.2" />
+      <path d="M17 9.4c0 4.2-3.2 5.2-6.2 5.8" />
+    </svg>
+  );
+}
+
+/** A pull-request glyph (a branch merging back into the trunk). */
+/** A crosshair / locate glyph — used for "reveal in graph". */
+export function CrosshairIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="7" />
+      <circle cx="12" cy="12" r="2.2" />
+      <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+    </svg>
+  );
+}
+
+/** A "blocked" glyph (a circle with a slash). */
+export function BlockedIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="M5.6 5.6 18.4 18.4" />
+    </svg>
+  );
+}
+
 /** The GitHub logomark (fills with `currentColor`). */
 export function GitHubLogo({ size = 16, className }: IconProps) {
   return (
@@ -132,49 +260,6 @@ export function LinearLogo({ size = 18, className }: IconProps) {
       aria-hidden
     >
       <path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.01c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.21 6.388 17.612 22.79a11.955 11.955 0 0 1-2.965 1.04L.17 9.353a11.955 11.955 0 0 1 1.04-2.965Zm-.97 5.66 12.713 12.712a12.03 12.03 0 0 1-3.7-.71L.95 15.745a12.03 12.03 0 0 1-.71-3.7Zm.687 6.51 4.823 4.823a12.078 12.078 0 0 1-4.823-4.822Z" />
-    </svg>
-  );
-}
-
-export function CalendarIcon({ size = 14, className }: IconProps) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden
-    >
-      <rect x="3" y="4" width="18" height="18" rx="2" />
-      <line x1="16" y1="2" x2="16" y2="6" />
-      <line x1="8" y1="2" x2="8" y2="6" />
-      <line x1="3" y1="10" x2="21" y2="10" />
-    </svg>
-  );
-}
-
-export function ExternalLinkIcon({ size = 13, className }: IconProps) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden
-    >
-      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-      <polyline points="15 3 21 3 21 9" />
-      <line x1="10" y1="14" x2="21" y2="3" />
     </svg>
   );
 }
@@ -315,6 +400,78 @@ export function RefreshIcon(props: IconProps) {
       <path d="M21 3v5h-5" />
       <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
       <path d="M8 16H3v5" />
+    </Stroke>
+  );
+}
+
+/** A left-pointing arrow — the Settings "back" affordance. */
+export function BackArrowIcon({ size = 17, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={1.8}>
+      <path d="M19 12H5M12 19l-7-7 7-7" />
+    </Stroke>
+  );
+}
+
+/** A terminal/CLI prompt glyph — the agent CLI auth method. */
+export function CliIcon({ size = 20, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <path d="m4 17 6-5-6-5M12 19h8" />
+    </Stroke>
+  );
+}
+
+/** A key glyph — the API-key auth method. */
+export function KeyIcon({ size = 20, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <circle cx="7.5" cy="15.5" r="4.5" />
+      <path d="m10.5 12.5 8-8M16 6l2 2M19 3l2 2" />
+    </Stroke>
+  );
+}
+
+/** A warning triangle — a soft error / "couldn't find" hint. */
+export function WarningIcon({ size = 12, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+      <path d="M12 9v4M12 17h.01" />
+    </Stroke>
+  );
+}
+
+/** A filled play triangle — "run this command". */
+export function PlayIcon({ size = 11, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+    >
+      <path d="M8 5v14l11-7z" />
+    </svg>
+  );
+}
+
+/** An ✕ glyph — close / dismiss. */
+export function CloseIcon({ size = 13, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <path d="M18 6 6 18M6 6l12 12" />
+    </Stroke>
+  );
+}
+
+export function SearchIcon({ size = 15, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <circle cx="11" cy="11" r="7" />
+      <path d="m21 21-4.3-4.3" />
     </Stroke>
   );
 }

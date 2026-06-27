@@ -1,50 +1,61 @@
-/** Right column of the Issues tab: Inspector / Sessions tabbed panel. */
-import type { CSSProperties } from "react";
-
-import { InspectorPanel } from "./InspectorPanel";
+/** Right column of the Issues tab: a single pane showing the focused issue
+ *  (header · add-to-queue · dependencies · description). Resizable (drag the
+ *  left edge) and collapsible (the header chevron or ⌘L). */
+import { ChevronDownIcon } from "../../components/icons";
+import { useEdgeResize } from "../../lib/useEdgeResize";
+import { IssuePanel } from "./IssuePanel";
 import { useIssues } from "./model";
-import { SessionsPanel } from "./SessionsPanel";
 
-function tabStyle(active: boolean): CSSProperties {
-  return active
-    ? { color: "var(--color-fg-bright)", boxShadow: "inset 0 -2px 0 var(--accent)" }
-    : { color: "var(--color-muted-3)" };
-}
+const MIN_W = 264;
+const MAX_W = 560;
+/** Must match the `var(--issues-right, …)` fallback below and the model default. */
+const DEFAULT_W = 304;
 
 export function RightPanel() {
-  const { rightTab, setRightTab, sessions } = useIssues();
-  const inspector = rightTab === "inspector";
+  const { rightCollapsed, rightWidth, setRightWidth, toggleRightPanel } = useIssues();
 
-  return (
-    <div className="flex w-[304px] flex-none flex-col border-l border-line bg-panel">
-      <div className="flex h-10 flex-none border-b border-hairline">
+  // Drag the left edge to resize. The width is committed to state only on
+  // pointer-up; during the drag the hook writes `--issues-right` directly so the
+  // heavy markdown pane doesn't re-render on every move.
+  const resize = useEdgeResize({
+    cssVar: "--issues-right",
+    width: rightWidth,
+    min: MIN_W,
+    max: MAX_W,
+    edge: "left",
+    onCommit: setRightWidth,
+  });
+
+  if (rightCollapsed) {
+    return (
+      <div className="flex w-9 flex-none flex-col items-center border-l border-line bg-panel pt-2.5">
         <button
           type="button"
-          onClick={() => setRightTab("inspector")}
-          className="flex-1 cursor-pointer border-none bg-transparent text-[12.5px] font-medium"
-          style={tabStyle(inspector)}
+          onClick={toggleRightPanel}
+          title="Expand panel (⌘L)"
+          className="flex cursor-pointer items-center justify-center rounded-md p-1.5 text-muted-3 hover:bg-hover hover:text-fg-2"
+          aria-label="Expand panel"
         >
-          Inspector
-        </button>
-        <button
-          type="button"
-          onClick={() => setRightTab("sessions")}
-          className="flex flex-1 cursor-pointer items-center justify-center gap-1.5 border-none bg-transparent text-[12.5px] font-medium"
-          style={tabStyle(!inspector)}
-        >
-          Sessions
-          {sessions.length > 0 && (
-            <span
-              className="rounded-[7px] px-[5px] font-mono text-[10px] text-[#06231a]"
-              style={{ background: "var(--accent)" }}
-            >
-              {sessions.length}
-            </span>
-          )}
+          <span className="inline-block rotate-90">
+            <ChevronDownIcon size={13} />
+          </span>
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto">
-        {inspector ? <InspectorPanel /> : <SessionsPanel />}
+    );
+  }
+
+  return (
+    <div
+      className="relative flex flex-none flex-col border-l border-line bg-panel"
+      style={{ width: `var(--issues-right, ${DEFAULT_W}px)` }}
+    >
+      <div
+        {...resize}
+        className="absolute top-0 left-[-3px] z-20 h-full w-1.5 cursor-col-resize hover:bg-[color-mix(in_srgb,var(--accent)_45%,transparent)]"
+        aria-hidden
+      />
+      <div className="flex min-h-0 flex-1 flex-col">
+        <IssuePanel />
       </div>
     </div>
   );

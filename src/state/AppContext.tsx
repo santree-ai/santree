@@ -7,10 +7,18 @@
  * Per-tab ephemeral state (selection, sessions, terminal logs, …) lives in the
  * relevant feature, not here.
  */
-import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 import type { AgentKind, Settings } from "../bindings";
-import { useRepos, useSettings } from "../lib/queries";
+import { useRepos, useSaveSettings, useSettings } from "../lib/queries";
 import { DEFAULT_ACCENT } from "../theme/colors";
 
 interface AppState {
@@ -21,12 +29,11 @@ interface AppState {
   /** The fixed theme accent (exposed for inline styles). */
   accent: string;
 
-  /** Live settings (null until the backend seed loads). */
+  /** Live settings (null until the backend seed loads). Edits persist via
+   *  `setAgentExec` / `toggleIntegration`, which patch local state and write
+   *  through to the backend. */
   settings: Settings | null;
-  updateSettings: (patch: Partial<Settings>) => void;
-  setDefaultAgent: (agent: AgentKind) => void;
   setAgentExec: (agent: AgentKind, exec: string) => void;
-  setAgentModel: (agent: AgentKind, model: string) => void;
   toggleIntegration: (key: "linear" | "triage" | "github") => void;
 
   /** Triage is available only when Linear is connected and triage is enabled. */
@@ -67,6 +74,7 @@ const AppContext = createContext<AppState | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const { data: seed } = useSettings();
   const { data: repos } = useRepos();
+  const { mutate: saveSettings } = useSaveSettings();
 
   const [activeRepo, setActiveRepo] = useState("");
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -78,7 +86,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     () => (localStorage.getItem(THEME_KEY) as Theme | null) ?? "dark",
   );
 
-  // Adopt the backend seed once, and align the default agent's model.
+  // Adopt the backend seed once it loads; subsequent edits are owned locally.
   useEffect(() => {
     if (seed && !settings) setSettings(seed);
   }, [seed, settings]);
@@ -116,34 +124,44 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => mq.removeEventListener("change", apply);
   }, [theme]);
 
-  const value = useMemo<AppState>(() => {
-    const updateSettings = (patch: Partial<Settings>) =>
-      setSettings((s) => (s ? { ...s, ...patch } : s));
+  // Apply a settings edit: patch local state for an instant UI response, then
+  // persist the whole blob (optimistic write with rollback) so it survives
+  // restarts. A no-op update (e.g. a disallowed toggle) is dropped before either.
+  const applySettings = useCallback(
+    (updater: (s: Settings) => Settings) => {
+      if (!settings) return;
+      const next = updater(settings);
+      if (next === settings) return;
+      setSettings(next);
+      saveSettings(next);
+    },
+    [settings, saveSettings],
+  );
 
+  // NOTE: this single context value bundles volatile UI toggles
+  // (helpOpen/shortcutsOpen/sidebarCollapsed/sidebarWidth) with slow-changing
+  // data (settings/activeRepo), so toggling any of the former re-renders every
+  // `useApp()` consumer. These toggles are low-frequency (the sidebar resizer
+  // writes its CSS var directly during a drag, only committing width on pointer
+  // up), so the churn is bounded; splitting into a separate UI provider would
+  // cut it further but requires migrating every `useApp()` call site, so it's
+  // left for a focused follow-up.
+  const value = useMemo<AppState>(() => {
     return {
       activeRepo,
       setActiveRepo,
       accent: DEFAULT_ACCENT,
       settings,
-      updateSettings,
-      setDefaultAgent: (agent) => updateSettings({ defaultAgent: agent }),
       setAgentExec: (agent, exec) =>
-        setSettings((s) =>
-          s ? { ...s, agents: s.agents.map((a) => (a.key === agent ? { ...a, exec } : a)) } : s,
-        ),
-      setAgentModel: (agent, model) =>
-        setSettings((s) =>
-          s ? { ...s, agents: s.agents.map((a) => (a.key === agent ? { ...a, model } : a)) } : s,
-        ),
+        applySettings((s) => ({
+          ...s,
+          agents: s.agents.map((a) => (a.key === agent ? { ...a, exec } : a)),
+        })),
       toggleIntegration: (key) =>
-        setSettings((s) => {
-          if (!s) return s;
+        applySettings((s) => {
           // Triage depends on Linear: it can only be enabled while Linear is on.
           if (key === "triage" && !s.integrations.linear) return s;
-          return {
-            ...s,
-            integrations: { ...s.integrations, [key]: !s.integrations[key] },
-          };
+          return { ...s, integrations: { ...s.integrations, [key]: !s.integrations[key] } };
         }),
       triageEnabled: !!settings?.integrations.linear && !!settings?.integrations.triage,
       theme,
@@ -162,7 +180,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sidebarWidth,
       setSidebarWidth,
     };
-  }, [activeRepo, settings, helpOpen, shortcutsOpen, sidebarCollapsed, sidebarWidth, theme]);
+  }, [
+    activeRepo,
+    settings,
+    applySettings,
+    helpOpen,
+    shortcutsOpen,
+    sidebarCollapsed,
+    sidebarWidth,
+    theme,
+  ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

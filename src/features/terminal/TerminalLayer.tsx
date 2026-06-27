@@ -102,7 +102,7 @@ export function TerminalLayer() {
           <button
             type="button"
             onClick={() => open({ title: "shell", cwd: repoPath })}
-            className="cursor-pointer rounded-md px-3 py-1.5 text-[12px] font-medium text-[#06231a]"
+            className="cursor-pointer rounded-md px-3 py-1.5 text-[12px] font-medium text-[color:var(--on-accent)]"
             style={{ background: "var(--accent)" }}
           >
             New terminal

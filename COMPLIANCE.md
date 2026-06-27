@@ -7,6 +7,16 @@ real process, and we stream raw bytes to and from it (xterm.js in the webview �
 `portable-pty` in Rust, over local Tauri IPC). It is **not** a "terminal server",
 an agent harness, or an automation driver.
 
+## Why this matters
+
+Each agent CLI (Claude Code, Codex, …) has its own terms of service. Staying a plain
+terminal emulator — we spawn the vendor's binary and render its output, nothing more —
+keeps santree clearly on the right side of those terms and avoids re-implementing or
+spoofing any vendor's control loop. The moment the app handles tokens, parses output to
+decide what to type, or runs unattended, it stops being a terminal and becomes a
+harness — a different product with different (and riskier) obligations. These
+constraints keep that line bright.
+
 These constraints are **load-bearing** for the product and must survive future
 changes. Do not add any of the following, even if they seem helpful:
 

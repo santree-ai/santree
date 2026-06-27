@@ -5,7 +5,7 @@
  * showing, the broadcast (all-agents) scope, and any messages the user has typed
  * into a terminal (appended on top of the backend's seed transcript).
  */
-import { createContext, type ReactNode, useContext, useMemo, useState } from "react";
+import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
 
 import { useWorktrees } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
@@ -18,6 +18,7 @@ export interface LogLine {
 }
 
 interface TreesModel {
+  /** Active worktree id, or "" before any worktree has loaded. */
   activeId: string;
   treeView: "terminal" | "diff";
   scopeAll: boolean;
@@ -41,10 +42,20 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const { accent } = useApp();
   const { data: worktrees = [] } = useWorktrees();
 
-  const [activeId, setActiveId] = useState("AK-165");
+  // Empty until worktrees load; the default is derived from data below.
+  const [activeId, setActiveId] = useState("");
   const [treeView, setTreeView] = useState<"terminal" | "diff">("terminal");
   const [scopeAll, setScopeAllState] = useState(false);
   const [termLog, setTermLog] = useState<Record<string, LogLine[]>>({});
+
+  // Default the active worktree to the first one once data arrives (or if the
+  // current selection vanished from the list).
+  useEffect(() => {
+    if (worktrees.length === 0) return;
+    if (!worktrees.some((w) => w.id === activeId)) {
+      setActiveId(worktrees[0].id);
+    }
+  }, [worktrees, activeId]);
 
   const value = useMemo<TreesModel>(() => {
     const slugFor = (id: string) => {
@@ -55,6 +66,19 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       ...log,
       [id]: [...(log[id] ?? []), ...lines],
     });
+
+    // ── MOCK BOUNDARY ─────────────────────────────────────────────────────
+    // Fake, synchronous agent acknowledgements. Real agent comms are async and
+    // streamed from the backend — when that lands, replace ONLY this seam (and
+    // wire sendTo/broadcast to dispatch instead of pushing canned lines). The
+    // public sendTo/broadcast shape below stays the same so the UI is unaffected.
+    const mockAgentReply = (id: string, broadcast: boolean): LogLine => ({
+      text: broadcast
+        ? `${slugFor(id)}: ack`
+        : `${slugFor(id)}: got it — folding that into the current run…`,
+      color: accent,
+    });
+    // ──────────────────────────────────────────────────────────────────────
 
     return {
       activeId,
@@ -71,10 +95,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         const msg = message.trim();
         if (!msg) return;
         setTermLog((log) =>
-          append(log, id, [
-            { text: `› ${msg}`, color: USER_COLOR },
-            { text: `${slugFor(id)}: got it — folding that into the current run…`, color: accent },
-          ]),
+          append(log, id, [{ text: `› ${msg}`, color: USER_COLOR }, mockAgentReply(id, false)]),
         );
       },
       broadcast: (message) => {
@@ -88,7 +109,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
           for (const w of targets) {
             next = append(next, w.id, [
               { text: `› [broadcast] ${msg}`, color: USER_COLOR },
-              { text: `${slugFor(w.id)}: ack`, color: accent },
+              mockAgentReply(w.id, true),
             ]);
           }
           return next;

@@ -2,21 +2,21 @@
 
 A cross-platform (macOS + Linux) desktop app for **managing AI coding agents** across a repo's tickets, built on **Tauri 2 + React 19 + TanStack** with a **fully-typed Rust ↔ TypeScript bridge**.
 
-This stage implements the **full UI** of the design (five views: Triage, Issues, Trees, Reviews, Settings) against **mocked data served from Rust**. The frontend has no idea the data is mocked — it calls typed commands; only `santree-core::mock` knows. Real integrations (Linear, GitHub, git worktrees, agent processes) slot in later by reimplementing that one module.
+**Triage, Issues, Settings, and the Terminal are real** — backed by Linear (GraphQL + OAuth), a SQLite store, and real kernel PTYs. **Trees and Reviews are still mocked** (they need an agent-orchestration backend that doesn't exist yet, so they show a SAMPLE DATA badge). Every screen uses the same **live-or-mock seam**: a live backend returns `Result<Option<T>>` and the command falls back to `santree-core::mock` when nothing is connected — so the UI is never empty and the frontend never knows which it got.
 
 ```
-React view → TanStack Query hook → typed bindings.ts → #[tauri::command] → santree-core::mock → typed data → UI
+React view → TanStack Query hook → typed bindings.ts → #[tauri::command]
+          → live backend (Linear / SQLite / PTY)  ─┐
+          → santree-core::mock  (fallback)          ├→ typed data → UI
 ```
 
 ### The five views
 
-- **Issues** — a dependency graph of tickets (project boxes, blocked-by edges), a grouped ticket list with a Ready filter, a launch tray (pick agent + model, launch in parallel), and an Inspector / Sessions panel. Launching simulates live agent sessions with a progress timer.
-- **Trees** — agent worktrees with a file browser, a streaming terminal (per-worktree or an all-agents broadcast grid), and a diff view with a commit/open-PR panel.
-- **Triage** — an untriaged queue and an AI investigation thread (ask questions, get answers with code references; the mocked answer is computed in Rust).
-- **Reviews** — open pull requests from agent worktrees.
-- **Settings** — integrations (Linear/GitHub toggles), per-agent executable/model config, and appearance (accent color, graph grid).
-
-> The Claude Design source wraps the screen with editor "tweaks" (accent color, default agent, show grid). Those are **not** app chrome — they map to real in-app settings (Appearance / Agents) and are implemented as such.
+- **Issues** — a dependency graph of tickets (React Flow + dagre, project bands, blocked-by edges), a grouped ticket list with a Ready filter, a launch tray (pick agent + model, launch in parallel), and a single right panel (issue detail + dependencies). Live from the repo's Linear org; launching simulates agent sessions with a progress timer.
+- **Triage** — the team's untriaged Linear inbox (grouped by team, snoozed sunk to the bottom), a status picker that optimistically promotes an issue, and **Investigate** — opens a real terminal in the repo running the configured agent/skill. Live from Linear.
+- **Settings** — integrations (Linear connect / GitHub toggle), per-agent executable + model config, the Triage Investigation action, and appearance (display-name style). App-global defaults with per-repo overrides; **persisted to SQLite**.
+- **Trees** _(mocked)_ — agent worktrees with a file browser, terminal, and diff/commit panel.
+- **Reviews** _(mocked)_ — open pull requests from agent worktrees.
 
 ---
 
@@ -87,13 +87,15 @@ The first `pnpm dev` compiles the Rust side and can take a few minutes; subseque
 
 The frontend never calls `invoke` directly and never hard-codes data. Follow the layers:
 
-1. **A view** (e.g. `src/features/reviews/ReviewsView.tsx`) consumes a typed query hook.
-2. **`src/lib/queries.ts`** — TanStack Query hooks (`useWorktrees`, `useTasks`, …) wrapping the generated client. Caching and loading states live here.
+1. **A view** (e.g. `src/features/issues/IssuesView.tsx`) consumes a typed query hook.
+2. **`src/lib/queries.ts`** — TanStack Query hooks (`useTasks`, `useTriageTickets`, …) wrapping the generated client. Caching, loading states, and **optimistic mutations** live here (`useOptimisticMutation`: patch the cache, roll back on error, invalidate on settle).
 3. **`src/bindings.ts`** — **generated** by `tauri-specta`. The typed `commands.*` and every domain type, mirroring Rust exactly. _Never hand-edit this file._
-4. **`src-tauri/src/commands.rs`** — thin `#[tauri::command]` wrappers that forward to…
-5. **`crates/core/src/mock.rs`** — the mocked data source. The **only** module that knows the data is fake. Domain types live in `crates/core/src/domain.rs` and derive `specta::Type`, which is how their shapes reach `bindings.ts`.
+4. **`src-tauri/src/commands.rs`** — thin `#[tauri::command]` wrappers that forward to a live backend and **fall back to the mock**: `linear::… (db, repo).await?.unwrap_or_else(mock::…)`.
+5. **Live backends** — `src-tauri/src/{linear,db,repo,settings,terminal}.rs` (Linear GraphQL + OAuth + token store, the sqlx pool, repo registry, settings, PTY). **`crates/core/src/mock.rs`** is the fallback and the **only** module that knows data is fake. Domain types live in `crates/core/src/domain.rs` and derive `specta::Type`, which is how their shapes reach `bindings.ts`.
 
 Presentation (colors, labels) is the frontend's job: `src/theme/colors.ts` maps the plain Rust enums (`TaskStatus`, `Tone`, …) to concrete colors. The accent color is a runtime CSS variable so the Appearance setting re-themes everything.
+
+Failed mutations surface as red **toasts** automatically (wired once in `main.tsx`); background successes raise green ones via `toast.success(...)`.
 
 ---
 
@@ -127,7 +129,7 @@ cargo test        # Rust: core logic + bindings export
 pnpm test         # Frontend: Vitest
 ```
 
-- **`crates/core`** — mock-data invariants (every `blockedBy` points at a real task, every worktree maps to a task, triage answers keyword-match, every worktree has a terminal).
+- **`crates/core`** — mock-data invariants (every `blockedBy` points at a real task, every worktree maps to a task, every worktree has a terminal).
 - **`src-tauri`** — `export_bindings_succeeds` guards that the command set always produces valid bindings.
 - **Frontend (Vitest)** — `theme/colors` and `lib/format` presentation helpers, plus `ReviewsView` rendered against mocked commands (asserts only worktrees with a PR appear).
 
@@ -186,19 +188,22 @@ with a fake backend/renderer.
 ```
 .
 ├── crates/core/               # domain + mock data — NO Tauri dep, unit-testable
-│   └── src/{domain,mock}.rs   #   types (specta::Type) + the mocked data source
-├── src-tauri/                 # THIN Tauri adapter (wiring + commands only)
-│   └── src/{lib,commands}.rs  #   builder + registration + #[tauri::command] wrappers
+│   └── src/{domain,mock,linear,layout}.rs  # types · fallback data · Linear→domain mapping
+├── crates/pty/                # PtyManager: real process behind a real PTY (Tauri-agnostic)
+├── src-tauri/                 # THIN Tauri adapter (wiring + commands + live backends)
+│   ├── src/{lib,commands}.rs  #   builder + registration + #[tauri::command] wrappers
+│   ├── src/{linear,db,repo,settings,terminal}.rs  # live backends (GraphQL/OAuth, sqlx, PTY)
+│   └── migrations/            #   SQLite schema, applied on startup
 └── src/                       # React frontend (SPA)
-    ├── main.tsx               #   Query + App providers + Router
+    ├── main.tsx               #   QueryClient (+ global mutation→toast) · providers · Router
     ├── bindings.ts            #   GENERATED typed client (do not edit)
     ├── routeTree.gen.ts       #   GENERATED route tree (do not edit)
     ├── routes/                #   one file per top-level tab → renders a feature view
-    ├── components/            #   shared chrome (TitleBar, TopBar, primitives, …)
-    ├── state/AppContext.tsx   #   global client state (repo, accent, grid, settings)
-    ├── lib/                   #   query hooks + format helpers
+    ├── components/            #   shared chrome + primitives.tsx (Badge, EmptyState, …)
+    ├── state/                 #   AppContext (repo, theme, settings) · toast.tsx
+    ├── lib/                   #   query hooks · format helpers · useEdgeResize · shortcuts
     ├── theme/colors.ts        #   enum → color/label presentation maps
-    └── features/              #   one folder per view (issues, trees, triage, …)
+    └── features/              #   one folder per view (issues, triage, trees, …)
         └── <view>/            #   its own model.tsx + presentational components
 ```
 

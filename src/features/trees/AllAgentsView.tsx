@@ -14,7 +14,7 @@ function AgentCard({ worktree }: { worktree: Worktree }) {
   const { data: term } = useWorktreeTerminal(worktree.id);
 
   const running = worktree.activity === "Running";
-  const statusColor = running ? "var(--accent)" : "#d29922";
+  const statusColor = running ? "var(--accent)" : "var(--color-status-amber)";
 
   const seed = (term?.lines ?? []).map((l) => ({ text: l.text, color: toneColor(l.tone) }));
   const lines = [...seed, ...(termLog[worktree.id] ?? [])].slice(-RECENT_LINES);

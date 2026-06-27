@@ -15,7 +15,7 @@ export function TreeTabs() {
 
   const allStyle: CSSProperties = scopeAll
     ? { background: "color-mix(in srgb, var(--accent) 9%, transparent)", color: "var(--accent)" }
-    : { background: "transparent", color: "#7c7c85" };
+    : { background: "transparent", color: "var(--color-muted-2)" };
 
   return (
     <div className="flex h-[38px] flex-none items-stretch overflow-x-auto border-b border-line bg-panel">
@@ -35,7 +35,7 @@ export function TreeTabs() {
               background: "var(--color-app)",
               boxShadow: "inset 0 -2px 0 var(--accent)",
             }
-          : { color: "#7c7c85", background: "transparent" };
+          : { color: "var(--color-muted-2)", background: "transparent" };
         return (
           <button
             type="button"

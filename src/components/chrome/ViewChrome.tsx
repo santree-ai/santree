@@ -8,9 +8,9 @@
  * collapsed (or the view has no sidebar). Views provide sidebar *content*;
  * ViewChrome owns the column chrome (shared width, border, repo header, resize).
  */
-import type { ReactNode, PointerEvent as ReactPointerEvent } from "react";
-import { useRef } from "react";
+import type { ReactNode } from "react";
 
+import { useEdgeResize } from "../../lib/useEdgeResize";
 import { SIDEBAR, useApp } from "../../state/AppContext";
 import { ChromeControls } from "./ChromeControls";
 import { NavTabs } from "./NavTabs";
@@ -34,58 +34,29 @@ interface ViewChromeProps {
 }
 
 /**
- * Drag handle on the sidebar's right edge. To stay buttery, the drag updates the
- * `--sidebar-width` CSS variable *directly* (no React state, so no re-render of
- * the whole app on every pointer move) and only commits the final width to state
- * on pointer-up. Dragging in past the collapse threshold collapses the sidebar.
+ * Drag handle on the sidebar's right edge. Dragging in past the collapse
+ * threshold collapses the sidebar (resetting the stored width so re-expanding
+ * restores a sensible size). See {@link useEdgeResize} for the resize mechanics.
  */
 function SidebarResizer() {
   const { sidebarWidth, setSidebarWidth, setSidebarCollapsed } = useApp();
-  const startX = useRef(0);
-  const startW = useRef(0);
-  const latest = useRef(sidebarWidth);
-  const dragging = useRef(false);
-
-  const setVar = (w: number) =>
-    document.documentElement.style.setProperty("--sidebar-width", `${w}px`);
-
-  const onDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
-    startX.current = e.clientX;
-    startW.current = sidebarWidth;
-    latest.current = sidebarWidth;
-    dragging.current = true;
-  };
-  const onMove = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (!dragging.current || !(e.buttons & 1)) return;
-    const next = startW.current + (e.clientX - startX.current);
-    if (next < SIDEBAR.collapseAt) {
-      dragging.current = false;
-      e.currentTarget.releasePointerCapture(e.pointerId);
-      latest.current = SIDEBAR.default;
-      setVar(SIDEBAR.default);
-      setSidebarCollapsed(true);
-      setSidebarWidth(SIDEBAR.default);
-      return;
-    }
-    const clamped = Math.min(SIDEBAR.max, Math.max(SIDEBAR.min, next));
-    latest.current = clamped;
-    // Visual-only update — the column + top cell read this variable.
-    setVar(clamped);
-  };
-  const onUp = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (!dragging.current) return;
-    dragging.current = false;
-    e.currentTarget.releasePointerCapture(e.pointerId);
-    // Commit the dragged width to state exactly once.
-    setSidebarWidth(latest.current);
-  };
+  const resize = useEdgeResize({
+    cssVar: "--sidebar-width",
+    width: sidebarWidth,
+    min: SIDEBAR.min,
+    max: SIDEBAR.max,
+    edge: "right",
+    onCommit: setSidebarWidth,
+    collapse: {
+      at: SIDEBAR.collapseAt,
+      resetTo: SIDEBAR.default,
+      onCollapse: () => setSidebarCollapsed(true),
+    },
+  });
 
   return (
     <div
-      onPointerDown={onDown}
-      onPointerMove={onMove}
-      onPointerUp={onUp}
+      {...resize}
       className="absolute top-0 right-[-3px] z-20 h-full w-1.5 cursor-col-resize hover:bg-[color-mix(in_srgb,var(--accent)_45%,transparent)]"
       aria-hidden
     />

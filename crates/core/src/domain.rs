@@ -75,6 +75,41 @@ pub enum TaskStatus {
     InProgress,
     Todo,
     Backlog,
+    /// Completed or canceled. Only appears on non-actionable blocker context
+    /// nodes — the viewer's own assigned issues never include done work.
+    Done,
+}
+
+impl TaskStatus {
+    /// Whether an agent can be *started* on a ticket in this state. Only
+    /// not-yet-started work (Todo/Backlog) is "ready to start"; In Progress /
+    /// In Review tickets are already being worked, so they're never RDY.
+    pub fn is_startable(self) -> bool {
+        matches!(self, TaskStatus::Todo | TaskStatus::Backlog)
+    }
+
+    /// Human workflow-state name for this status, matching what Linear shows and
+    /// what the frontend's `statusLabel` map expects.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            TaskStatus::InReview => "In Review",
+            TaskStatus::InProgress => "In Progress",
+            TaskStatus::Todo => "Todo",
+            TaskStatus::Backlog => "Backlog",
+            TaskStatus::Done => "Done",
+        }
+    }
+
+    /// State color (hex) for this status, matching the frontend's `statusColor`.
+    pub fn color(self) -> &'static str {
+        match self {
+            TaskStatus::InReview => "#3fb950",
+            TaskStatus::InProgress => "#d29922",
+            TaskStatus::Todo => "#4493f8",
+            TaskStatus::Backlog => "#6e7681",
+            TaskStatus::Done => "#8957e5",
+        }
+    }
 }
 
 /// A ticket in the dependency graph. `x`/`y` are its canvas position; `addLines`
@@ -85,9 +120,20 @@ pub struct Task {
     pub id: String,
     pub title: String,
     pub project: String,
+    /// The project's color (hex) as configured in Linear, when it has one. Falls
+    /// back to the frontend's per-name color map when absent (e.g. mock data).
+    pub project_color: Option<String>,
+    /// The project's icon — an emoji (rendered directly) or a Linear icon name
+    /// (we don't ship that icon set, so it falls back to the colored dot).
+    pub project_icon: Option<String>,
     pub status: TaskStatus,
     pub ready: bool,
     pub blocked_by: Vec<String>,
+    /// Whether this ticket is directly actionable by the viewer: assigned to
+    /// them and not yet done. Non-actionable tickets (someone else's, or
+    /// already done) are pulled into the graph only as blocker context and are
+    /// rendered grayed out.
+    pub actionable: bool,
     pub x: i32,
     pub y: i32,
     pub add_lines: u32,
@@ -258,6 +304,9 @@ pub struct TriageTicket {
     /// When set, the issue is snoozed until this human label; the UI greys it out
     /// and sinks it to the bottom of the queue.
     pub snoozed_until: Option<String>,
+    /// Whether the issue is assigned to the viewer. The queue defaults to the
+    /// viewer's own issues; others' are shown only when "be a good citizen" is on.
+    pub mine: bool,
 }
 
 /// A comment on a triage issue (markdown body), with threaded replies.
@@ -323,6 +372,8 @@ pub struct TriageDetail {
 #[serde(rename_all = "camelCase")]
 pub struct TriageShift {
     pub name: String,
+    /// Avatar of the person on this shift, when Linear exposes one.
+    pub avatar_url: Option<String>,
     /// Human time range, e.g. "Mon–Wed".
     pub range: String,
     pub is_current: bool,
@@ -336,32 +387,11 @@ pub struct TriageSchedule {
     pub team: String,
     pub schedule_name: String,
     pub current_name: Option<String>,
+    /// Avatar of whoever is currently on triage, when available.
+    pub current_avatar_url: Option<String>,
     /// True when the signed-in viewer is the one currently on triage.
     pub current_is_me: bool,
     pub shifts: Vec<TriageShift>,
-}
-
-/// Who authored a triage message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
-pub enum MessageRole {
-    User,
-    Agent,
-}
-
-/// A code location referenced by a triage answer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct CodeRef {
-    pub path: String,
-}
-
-/// One message in a triage investigation thread.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct TriageMessage {
-    pub role: MessageRole,
-    pub text: String,
-    pub refs: Vec<CodeRef>,
 }
 
 /// A stage in an agent run, with its progress percentage.
@@ -373,7 +403,7 @@ pub struct Stage {
 }
 
 /// Per-agent configuration: which executable and default model to use.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSetting {
     pub key: AgentKind,
@@ -382,7 +412,7 @@ pub struct AgentSetting {
 }
 
 /// Which trackers/services are connected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Integrations {
     pub linear: bool,
@@ -410,8 +440,9 @@ pub struct LinearStatus {
     pub org: Option<String>,
 }
 
-/// User settings seeded by the backend (the frontend then owns live edits).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+/// User settings, persisted as a JSON blob in the `settings` table. Seeded from
+/// defaults on first run; edits are written back through `set_settings`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub default_agent: AgentKind,

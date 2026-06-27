@@ -8,9 +8,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use santree_core::domain::{AgentAuth, AgentKind, ClaudeCommand, ClaudeCommands};
+use santree_core::domain::{AgentAuth, AgentKind, ClaudeCommand, ClaudeCommands, Settings};
+use santree_core::mock;
 
 use crate::db::Db;
+
+/// The `settings` key under which the full [`Settings`] blob is persisted (scope `"app"`).
+const SETTINGS_KEY: &str = "settings";
 
 /// Read a setting for an exact scope (`"app"` or `"repo:<name>"`).
 pub async fn get(db: &Db, scope: &str, key: &str) -> Result<Option<String>> {
@@ -56,6 +60,21 @@ pub async fn resolve(db: &Db, repo: &str, key: &str) -> Result<Option<String>> {
     get(db, "app", key).await
 }
 
+/// The user's settings: the persisted blob when present, else the seeded
+/// defaults. A corrupt blob falls back to defaults rather than erroring.
+pub async fn get_settings(db: &Db) -> Result<Settings> {
+    match get(db, "app", SETTINGS_KEY).await? {
+        Some(json) => Ok(serde_json::from_str(&json).unwrap_or_else(|_| mock::settings())),
+        None => Ok(mock::settings()),
+    }
+}
+
+/// Persist the full settings blob (integration toggles, agent execs/models, …).
+pub async fn set_settings(db: &Db, settings: &Settings) -> Result<()> {
+    let json = serde_json::to_string(settings)?;
+    set(db, "app", SETTINGS_KEY, Some(json)).await
+}
+
 /// Claude commands available to a scope: always the global set, plus the repo's
 /// own when a `repo_path` is given.
 pub fn commands(repo_path: Option<&str>) -> ClaudeCommands {
@@ -87,9 +106,8 @@ pub fn agent_auth(kind: AgentKind) -> AgentAuth {
         AgentKind::Claude => {
             let account = claude_account();
             let connected = account.is_some();
-            let (account, org, plan) = account.unwrap_or_else(|| {
-                ("Not signed in".to_string(), String::new(), String::new())
-            });
+            let (account, org, plan) = account
+                .unwrap_or_else(|| ("Not signed in".to_string(), String::new(), String::new()));
             AgentAuth {
                 connected,
                 method: "CLI".into(),
@@ -102,7 +120,12 @@ pub fn agent_auth(kind: AgentKind) -> AgentAuth {
                 detected_exec,
             }
         }
-        AgentKind::Codex => wip_auth("OpenAI", "~/.codex/config.toml", "codex login", detected_exec),
+        AgentKind::Codex => wip_auth(
+            "OpenAI",
+            "~/.codex/config.toml",
+            "codex login",
+            detected_exec,
+        ),
         AgentKind::Cursor => wip_auth(
             "Cursor",
             "~/.cursor/cli-config.json",
@@ -164,11 +187,32 @@ fn plan_label(org_type: &str) -> String {
     }
 }
 
+/// Process-wide cache of resolved binary paths. Each lookup spawns a login shell
+/// (tens of ms); the agent settings cards re-resolve on every render, so results
+/// are memoised for the app's lifetime — a binary's location doesn't move while
+/// the app is running.
+static BINARY_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Resolve a CLI binary the way the user's terminal would: through their login
 /// shell, so PATH matches a real terminal (macOS GUI apps inherit a minimal PATH
 /// that usually misses Homebrew, version managers, etc.). Returns the absolute
-/// path, or `None` when the binary isn't found.
+/// path, or `None` when the binary isn't found. Memoised (see [`BINARY_CACHE`]).
 pub fn discover_binary(name: &str) -> Option<String> {
+    if let Some(hit) = BINARY_CACHE.lock().unwrap().get(name).cloned() {
+        return hit;
+    }
+    let resolved = resolve_binary(name);
+    BINARY_CACHE
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), resolved.clone());
+    resolved
+}
+
+/// The uncached login-shell PATH probe behind [`discover_binary`].
+fn resolve_binary(name: &str) -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let output = std::process::Command::new(&shell)
         .args(["-lc", &format!("command -v {name}")])

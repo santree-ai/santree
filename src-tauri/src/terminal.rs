@@ -60,7 +60,9 @@ pub fn terminal_write(
     data: String,
     manager: State<'_, PtyManager>,
 ) -> Result<(), String> {
-    manager.write(id, data.as_bytes()).map_err(|e| e.to_string())
+    manager
+        .write(id, data.as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 /// Resize a session's PTY to the visible grid.

@@ -79,6 +79,19 @@
 
 :root {
   --accent: #2dd4a7;
+  /* A text-safe accent. Equal to the accent on dark surfaces; darkened on light
+     ones (teal on white is otherwise too low-contrast to read). Tracks any
+     runtime --accent override via color-mix. */
+  --accent-text: var(--accent);
+  /* Dark, high-contrast text/icon color for content sitting ON the solid accent
+     fill (filled buttons, the launch checkbox). Distinct from --accent-text,
+     which is the accent used AS text on tinted surfaces. Shared across themes
+     since the accent itself is. */
+  --on-accent: #06231a;
+  /* Linear's brand color (logo tint, connected badge). Single source for the
+     `LINEAR_BRAND` token in theme/colors and the `text-[color:var(--linear-brand)]`
+     icon tints. */
+  --linear-brand: #5e6ad2;
   /* Live sidebar width. Updated directly during a resize drag (no React
      re-render) and committed to state on pointer-up — see ViewChrome. */
   --sidebar-width: 264px;
@@ -101,6 +114,8 @@
  * the accent are intentionally shared across both themes.
  * ------------------------------------------------------------------ */
 :root[data-theme="light"] {
+  --accent-text: color-mix(in srgb, var(--accent) 64%, #000);
+
   /* Surfaces */
   --color-app: #f5f6f8;
   --color-panel: #ffffff;
@@ -212,6 +227,36 @@ button {
     stroke-dashoffset: -22;
   }
 }
+/* The selected issue node in the graph: a steady accent ring plus a sonar ping
+   that radiates outward and fades, so the focused card is obvious among many. */
+@keyframes nodeSelected {
+  0% {
+    box-shadow:
+      0 0 0 1.5px var(--accent),
+      0 0 0 2px color-mix(in srgb, var(--accent) 38%, transparent);
+  }
+  100% {
+    box-shadow:
+      0 0 0 1.5px var(--accent),
+      0 0 0 10px color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+}
+/* A friendly hand wave — used on the "feeling generous?" triage nudge. */
+@keyframes wave {
+  0%,
+  60%,
+  100% {
+    transform: rotate(0deg);
+  }
+  10%,
+  30% {
+    transform: rotate(16deg);
+  }
+  20%,
+  40% {
+    transform: rotate(-9deg);
+  }
+}
 @keyframes fadeUp {
   from {
     opacity: 0;
@@ -229,6 +274,17 @@ button {
   }
   50% {
     opacity: 0;
+  }
+}
+/* Toast cards slide up + fade in from the bottom-right viewport. */
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 

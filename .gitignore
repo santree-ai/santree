@@ -14,9 +14,11 @@ dist-ssr
 # Rust / Cargo (workspace target)
 /target
 
-# Editor directories and files
+# Editor directories and files. Keep the shared workspace recommendations and
+# settings (the Tailwind/Biome fix) tracked; ignore everyone's personal files.
 .vscode/*
 !.vscode/extensions.json
+!.vscode/settings.json
 .idea
 .DS_Store
 *.suo

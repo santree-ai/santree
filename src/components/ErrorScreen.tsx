@@ -35,7 +35,7 @@ export function ErrorScreen({ error, onRetry }: { error?: Error; onRetry?: () =>
 
   return (
     <div className="flex h-full w-full flex-col items-center justify-center bg-surface px-6 text-center">
-      <div className="flex max-w-[440px] flex-col items-center gap-4">
+      <div className="flex max-w-110 flex-col items-center gap-4">
         <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-line-2 bg-panel">
           <svg
             width="26"
@@ -66,7 +66,7 @@ export function ErrorScreen({ error, onRetry }: { error?: Error; onRetry?: () =>
           <button
             type="button"
             onClick={() => (onRetry ? onRetry() : window.location.reload())}
-            className="cursor-pointer rounded-md px-3.5 py-2 text-[12.5px] font-medium text-[#06231a] transition-[filter] hover:brightness-110"
+            className="cursor-pointer rounded-md px-3.5 py-2 text-[12.5px] font-medium text-[color:var(--on-accent)] transition-[filter] hover:brightness-110"
             style={{ background: "var(--accent)" }}
           >
             Try again

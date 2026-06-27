@@ -1,0 +1,31 @@
+{
+  // Tailwind v4 is CSS-first: styles.css uses @import "tailwindcss" and @theme.
+  // VSCode's built-in CSS validator doesn't know those and reports "Unknown at
+  // rule" — silence that here (this is what causes the flood of squiggles in
+  // styles.css). The Tailwind CSS IntelliSense extension provides the real
+  // class autocomplete/diagnostics; point it at our CSS entry for v4.
+  "css.lint.unknownAtRules": "ignore",
+  "tailwindCSS.experimental.configFile": "src/styles.css",
+
+  // Biome is the one formatter + linter for JS/TS/JSON (config in biome.json).
+  // Format and organize imports on save so the IDE matches `pnpm lint`.
+  "editor.defaultFormatter": "biomejs.biome",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.organizeImports.biome": "explicit",
+    "source.fixAll.biome": "explicit"
+  },
+  "[typescript]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[typescriptreact]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[javascript]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[json]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[jsonc]": { "editor.defaultFormatter": "biomejs.biome" },
+
+  // rust-analyzer: build proc-macros and build scripts so macros like
+  // sqlx::migrate! and tauri::command resolve (fixes "proc-macro not yet built").
+  // Shares the normal target/ dir so artifacts compiled by `cargo` are reused by
+  // the editor. Surfacing clippy here matches what CI enforces.
+  "rust-analyzer.procMacro.enable": true,
+  "rust-analyzer.cargo.buildScripts.enable": true,
+  "rust-analyzer.check.command": "clippy"
+}

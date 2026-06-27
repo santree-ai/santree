@@ -6,6 +6,7 @@
 mod commands;
 mod db;
 mod linear;
+mod notes;
 mod repo;
 mod settings;
 mod terminal;
@@ -30,7 +31,6 @@ fn specta_builder() -> AppBuilder {
         commands::add_repo,
         commands::list_agents,
         commands::agent_auth,
-        commands::list_tasks,
         commands::list_worktrees,
         commands::worktree_diff,
         commands::worktree_terminal,
@@ -41,9 +41,10 @@ fn specta_builder() -> AppBuilder {
         commands::triage_detail,
         commands::triage_set_state,
         commands::triage_schedule,
-        commands::triage_thread,
-        commands::triage_ask,
         commands::get_settings,
+        commands::set_settings,
+        commands::task_note,
+        commands::set_task_note,
         commands::list_claude_commands,
         commands::get_setting,
         commands::set_setting,

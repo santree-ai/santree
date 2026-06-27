@@ -17,8 +17,6 @@ fn task(
     status: TaskStatus,
     ready: bool,
     blocked_by: &[&str],
-    x: i32,
-    y: i32,
     add: u32,
     del: u32,
 ) -> Task {
@@ -26,13 +24,52 @@ fn task(
         id: id.into(),
         title: title.into(),
         project: project.into(),
+        // Mock projects have no live color/icon; the frontend's per-name map
+        // colors them (see `colorForProject`).
+        project_color: None,
+        project_icon: None,
         status,
-        ready,
+        // A started (In Progress / In Review) ticket is never "ready to start",
+        // even if the seed marks it ready — enforce the invariant centrally.
+        ready: ready && status.is_startable(),
         blocked_by: blocked_by.iter().map(|s| (*s).into()).collect(),
-        x,
-        y,
+        actionable: true,
+        // Coordinates are owned by `layout::layout_tasks`, applied in `tasks()`.
+        x: 0,
+        y: 0,
         add_lines: add,
         del_lines: del,
+    }
+}
+
+/// A non-actionable blocker node: a ticket that's done or owned by someone else,
+/// pulled into the graph only for context and rendered grayed out.
+fn related(id: &str, title: &str, project: &str, status: TaskStatus) -> Task {
+    Task {
+        id: id.into(),
+        title: title.into(),
+        project: project.into(),
+        project_color: None,
+        project_icon: None,
+        status,
+        ready: false,
+        blocked_by: vec![],
+        actionable: false,
+        x: 0,
+        y: 0,
+        add_lines: 0,
+        del_lines: 0,
+    }
+}
+
+/// A top-level triage comment (no threaded replies).
+fn comment(author: &str, created: &str, body: &str) -> TriageComment {
+    TriageComment {
+        author: author.into(),
+        avatar_url: None,
+        created: created.into(),
+        body: body.into(),
+        children: vec![],
     }
 }
 
@@ -40,10 +77,11 @@ const BOOKING: &str = "Booking agent onboarding";
 const KNOWLEDGE: &str = "Agent Knowledge: Config (VOX+MSG)";
 const NO_PROJECT: &str = "No Project";
 
-/// All tickets across projects, positioned for the dependency graph.
+/// All tickets across projects, with graph coordinates assigned by
+/// `layout::layout_tasks` so the seed never has to hand-maintain `x`/`y`.
 pub fn tasks() -> Vec<Task> {
     use TaskStatus::*;
-    vec![
+    let mut tasks = vec![
         task(
             "AK-159",
             "Booking Agent Onboarding Design",
@@ -51,8 +89,6 @@ pub fn tasks() -> Vec<Task> {
             InReview,
             true,
             &[],
-            34,
-            54,
             312,
             47,
         ),
@@ -62,9 +98,7 @@ pub fn tasks() -> Vec<Task> {
             BOOKING,
             Todo,
             false,
-            &["AK-159"],
-            270,
-            54,
+            &["AK-159", "AK-148"],
             64,
             9,
         ),
@@ -75,8 +109,6 @@ pub fn tasks() -> Vec<Task> {
             Todo,
             true,
             &[],
-            34,
-            210,
             186,
             12,
         ),
@@ -87,8 +119,6 @@ pub fn tasks() -> Vec<Task> {
             Todo,
             false,
             &["AK-159"],
-            270,
-            210,
             120,
             18,
         ),
@@ -99,8 +129,6 @@ pub fn tasks() -> Vec<Task> {
             Backlog,
             false,
             &["AK-170", "AK-201", "AK-64"],
-            506,
-            132,
             210,
             30,
         ),
@@ -111,8 +139,6 @@ pub fn tasks() -> Vec<Task> {
             Todo,
             true,
             &[],
-            34,
-            392,
             94,
             8,
         ),
@@ -123,8 +149,6 @@ pub fn tasks() -> Vec<Task> {
             Todo,
             false,
             &["AK-84"],
-            270,
-            392,
             120,
             40,
         ),
@@ -135,8 +159,6 @@ pub fn tasks() -> Vec<Task> {
             Backlog,
             false,
             &["AK-64", "AK-84"],
-            506,
-            392,
             80,
             5,
         ),
@@ -147,12 +169,19 @@ pub fn tasks() -> Vec<Task> {
             InProgress,
             true,
             &[],
-            34,
-            544,
             540,
             121,
         ),
-    ]
+        // A blocker owned by another team — pulled in as grayed context only.
+        related(
+            "AK-148",
+            "Provision booking-agent service account",
+            BOOKING,
+            Backlog,
+        ),
+    ];
+    crate::layout::layout_tasks(&mut tasks);
+    tasks
 }
 
 /// The agents available in the launch tray and settings.
@@ -363,7 +392,8 @@ pub fn triage_tickets() -> Vec<TriageTicket> {
              age: &str,
              meta: &str,
              sla: Option<&str>,
-             snoozed_until: Option<&str>| TriageTicket {
+             snoozed_until: Option<&str>,
+             mine: bool| TriageTicket {
         id: id.into(),
         title: title.into(),
         priority,
@@ -372,6 +402,7 @@ pub fn triage_tickets() -> Vec<TriageTicket> {
         team: None,
         sla: sla.map(Into::into),
         snoozed_until: snoozed_until.map(Into::into),
+        mine,
     };
     vec![
         t(
@@ -379,36 +410,40 @@ pub fn triage_tickets() -> Vec<TriageTicket> {
             "Customers report double-charge on booking retry",
             Urgent,
             "2h",
-            "Booking agent · reported by support · 4 linked tickets",
+            "Booking agent · assigned to you · 4 linked tickets",
             Some("SLA in 3h"),
             None,
+            true,
         ),
         t(
             "AK-209",
             "VOX agent ignores per-action guidelines intermittently",
             High,
             "5h",
-            "Agent Knowledge · reported by QA · 2 linked tickets",
+            "Agent Knowledge · assigned to you · 2 linked tickets",
             Some("SLA in 1d"),
             None,
+            true,
         ),
         t(
             "AK-207",
             "Spike: auto-detect deprecated webchat usage",
             Medium,
             "1d",
-            "Agent Knowledge · reported by eng",
+            "Agent Knowledge · assigned to Marco Díaz",
             None,
             None,
+            false,
         ),
         t(
             "AK-198",
             "Dashboard chart legend overflows on narrow viewports",
             Low,
             "3d",
-            "Web · reported by design",
+            "Web · assigned to Priya Sharma",
             None,
             Some("Mon"),
+            false,
         ),
     ]
 }
@@ -448,7 +483,91 @@ fn mock_states() -> Vec<WorkflowState> {
     ]
 }
 
+/// Index tasks by id for repeated lookups (blocker/dependency resolution).
+fn index_by_id(tasks: &[Task]) -> std::collections::HashMap<&str, &Task> {
+    tasks.iter().map(|t| (t.id.as_str(), t)).collect()
+}
+
+/// Build a coherent issue detail for a dependency-graph ticket from the task
+/// list, so the Issues Description tab matches the node. Returns `None` for ids
+/// that aren't graph tickets (they're real triage-queue samples).
+fn graph_detail(ticket_id: &str) -> Option<TriageDetail> {
+    let tasks = tasks();
+    let task = tasks.iter().find(|t| t.id == ticket_id)?;
+    let by_id = index_by_id(&tasks);
+
+    let state = task.status.display_name();
+    let priority = match task.status {
+        TaskStatus::InReview => Priority::Medium,
+        TaskStatus::InProgress => Priority::High,
+        TaskStatus::Todo => Priority::Medium,
+        TaskStatus::Backlog => Priority::Low,
+        TaskStatus::Done => Priority::Low,
+    };
+
+    let mut description = format!(
+        "Part of the **{project}** initiative.\n\n\
+Projected change of about **+{add} −{del}** once an agent picks this up.\n",
+        project = task.project,
+        add = task.add_lines,
+        del = task.del_lines,
+    );
+    if task.ready {
+        description.push_str("\nThis ticket is **ready to start** — no open blockers.\n");
+    }
+    if !task.blocked_by.is_empty() {
+        description.push_str("\n### Depends on\n");
+        for b in &task.blocked_by {
+            let title = by_id
+                .get(b.as_str())
+                .map(|t| t.title.as_str())
+                .unwrap_or("");
+            description.push_str(&format!("- `{b}` — {title}\n"));
+        }
+    }
+    let blocks: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| t.blocked_by.iter().any(|b| b == ticket_id))
+        .collect();
+    if !blocks.is_empty() {
+        description.push_str("\n### Unblocks\n");
+        for t in &blocks {
+            description.push_str(&format!("- `{}` — {}\n", t.id, t.title));
+        }
+    }
+
+    Some(TriageDetail {
+        id: task.id.clone(),
+        title: task.title.clone(),
+        priority,
+        state: state.into(),
+        state_id: Some("mock-graph".into()),
+        states: mock_states(),
+        url: format!("https://linear.app/akamai/issue/{}", task.id),
+        author: "Santree (planning)".into(),
+        author_avatar_url: None,
+        created: "2d ago".into(),
+        labels: vec![task.project.clone()],
+        project: Some(task.project.clone()),
+        sla: None,
+        snoozed_until: None,
+        description,
+        comments: vec![comment(
+            "Santree (planning)",
+            "1d ago",
+            "Auto-summarized from the dependency graph. Connect Linear to see the \
+real description, comments, and attachments here.",
+        )],
+    })
+}
+
 pub fn triage_detail(ticket_id: &str) -> TriageDetail {
+    // Graph tickets (AK-159, AK-170, …) get a detail synthesized from the task
+    // list, so the Issues view's Description tab stays consistent with the node
+    // you clicked. Triage-queue ids fall through to the rich samples below.
+    if let Some(d) = graph_detail(ticket_id) {
+        return d;
+    }
     let detail = |id: &str,
                   title: &str,
                   priority,
@@ -477,13 +596,6 @@ pub fn triage_detail(ticket_id: &str) -> TriageDetail {
         snoozed_until: snoozed_until.map(Into::into),
         description,
         comments,
-    };
-    let comment = |author: &str, created: &str, body: &str| TriageComment {
-        author: author.into(),
-        avatar_url: None,
-        created: created.into(),
-        body: body.into(),
-        children: vec![],
     };
     use Priority::*;
     match ticket_id {
@@ -534,7 +646,8 @@ in memory. Sessions started before the push keep the stale copy.",
             "Can we statically detect remaining `webchat*` column reads so we can \
 plan the VOX+MSG migration?\n\n\
 A static scan plus a codemod could flag the deprecated columns and rewrite the \
-easy call sites automatically.".into(),
+easy call sites automatically."
+                .into(),
             vec![comment(
                 "Sam Okafor (eng)",
                 "20h ago",
@@ -556,7 +669,8 @@ worth a half-day spike.",
             "On viewports below ~720px the chart legend wraps and pushes the axis \
 labels off-screen.\n\n\
 Snoozed until Monday — not urgent, but we should fold it into the next \
-dashboard polish pass.".into(),
+dashboard polish pass."
+                .into(),
             vec![],
         ),
         // Default / AK-211 — the flagship urgent ticket, with an embedded image.
@@ -611,6 +725,7 @@ the underlying bug gets fixed before it spreads.",
 pub fn triage_schedule() -> TriageSchedule {
     let shift = |name: &str, range: &str, is_current: bool, is_me: bool| TriageShift {
         name: name.into(),
+        avatar_url: None,
         range: range.into(),
         is_current,
         is_me,
@@ -619,6 +734,7 @@ pub fn triage_schedule() -> TriageSchedule {
         team: "Akamai".into(),
         schedule_name: "Booking on-call".into(),
         current_name: Some("You".into()),
+        current_avatar_url: None,
         current_is_me: true,
         shifts: vec![
             shift("You", "Mon–Wed", true, true),
@@ -626,65 +742,6 @@ pub fn triage_schedule() -> TriageSchedule {
             shift("Priya Sharma", "Sat–Sun", false, false),
             shift("Sam Okafor", "Next Mon–Wed", false, false),
         ],
-    }
-}
-
-fn agent_msg(text: &str, refs: &[&str]) -> TriageMessage {
-    TriageMessage {
-        role: MessageRole::Agent,
-        text: text.into(),
-        refs: refs.iter().map(|p| CodeRef { path: (*p).into() }).collect(),
-    }
-}
-
-/// The seed investigation thread for a triage ticket.
-pub fn triage_thread(ticket_id: &str) -> Vec<TriageMessage> {
-    match ticket_id {
-        "AK-211" => vec![agent_msg(
-            "Reproduced. The retry path in the booking webhook calls charge() without an idempotency key, so a network-level retry charges the card twice. The bug looks isolated to the handler — not the payments SDK.",
-            &["apps/booking-agent/src/webhook.ts:142", "apps/booking-agent/src/retries.ts:31"],
-        )],
-        "AK-209" => vec![agent_msg(
-            "The per-action guidelines are loaded once at boot and cached in memory. Sessions started before a config push keep stale guidelines, so it presents as intermittent. This is a cache-invalidation gap, not a prompt regression.",
-            &["packages/livekit-abilities/guidelines.ts:54"],
-        )],
-        "AK-207" => vec![agent_msg(
-            "Feasible. chat.Config is referenced at 18 call sites across 6 packages. A static scan plus a codemod could flag deprecated columns and rewrite the easy cases automatically.",
-            &["packages/agent-knowledge/chat.Config.ts"],
-        )],
-        _ => vec![],
-    }
-}
-
-/// A mocked triage answer to a free-text question (keyword-matched).
-pub fn triage_answer(question: &str) -> TriageMessage {
-    let q = question.to_lowercase();
-    let has = |k: &str| q.contains(k);
-    if has("related") {
-        agent_msg(
-            "Related code paths: the booking charge flow shares an idempotency helper with subscriptions, so a fix here also de-risks AK-188. The retry wrapper is used in 3 other handlers.",
-            &["apps/booking-agent/src/retries.ts", "packages/payments/idempotency.ts:18"],
-        )
-    } else if has("estimate") || has("complexity") {
-        agent_msg(
-            "Low-to-medium. The fix is a localized change — thread an idempotency key through retries() and add a regression test. ~1 worktree, half a day for an agent. Risk is mostly around the existing payment tests.",
-            &[],
-        )
-    } else if has("fix") || has("plan") {
-        agent_msg(
-            "Plan: (1) generate an idempotency key per booking attempt, (2) pass it into charge() in webhook.ts, (3) make retries() reuse the same key, (4) add a test that simulates a network retry and asserts a single charge. I can open a worktree and start this.",
-            &["apps/booking-agent/src/webhook.ts:142"],
-        )
-    } else if has("own") || has("who") || has("assign") {
-        agent_msg(
-            "Suggested owner: the Payments pod — this touches the shared idempotency helper. Last 3 commits to webhook.ts were by the booking team, so a co-review makes sense.",
-            &[],
-        )
-    } else {
-        agent_msg(
-            "I searched the repo for context on that. The relevant logic lives in the booking webhook handler and its retry wrapper; let me know if you want a fix plan or an estimate.",
-            &["apps/booking-agent/src/webhook.ts"],
-        )
     }
 }
 

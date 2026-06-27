@@ -24,9 +24,10 @@ pub async fn list(db: &Db) -> Result<Vec<Repo>> {
     )
     .fetch_all(db)
     .await?;
-    let orgs = sqlx::query_as::<_, (String, String)>("SELECT slug, name FROM linear_orgs ORDER BY name")
-        .fetch_all(db)
-        .await?;
+    let orgs =
+        sqlx::query_as::<_, (String, String)>("SELECT slug, name FROM linear_orgs ORDER BY name")
+            .fetch_all(db)
+            .await?;
     let first_org = orgs.first();
 
     Ok(rows

@@ -44,16 +44,6 @@ mod tests {
     }
 
     #[test]
-    fn triage_answer_matches_on_keywords() {
-        let plan = mock::triage_answer("can you draft a fix plan?");
-        assert!(plan.text.starts_with("Plan:"));
-        assert!(!plan.refs.is_empty());
-
-        let estimate = mock::triage_answer("what's the complexity estimate?");
-        assert!(estimate.text.starts_with("Low-to-medium"));
-    }
-
-    #[test]
     fn each_worktree_has_a_terminal() {
         for w in mock::worktrees() {
             let term = mock::terminal(&w.id);

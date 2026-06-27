@@ -107,7 +107,7 @@ function normalizeLinearMarkdown(md: string): string {
 // rendered body — only a genuinely new string pays the cost.
 export const Markdown = memo(function Markdown({ children }: { children: string }) {
   return (
-    <div className="text-[12.5px] leading-[1.6] text-fg-2">
+    <div className="text-[12.5px] leading-[1.6] text-fg-2 [overflow-wrap:anywhere]">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
         components={components}

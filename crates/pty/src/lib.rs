@@ -144,7 +144,13 @@ impl PtyManager {
         let session = self.inner.lock().unwrap().sessions.remove(&id);
         if let Some(mut session) = session {
             let _ = session.child.kill();
-            let _ = session.child.wait();
+            // Reap on a detached thread: a process slow to die after the kill must
+            // not block this command thread. Dropping master/writer at the end of
+            // this block closes the pty, so the reader still sees EOF.
+            let mut child = session.child;
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
             tracing::info!(id, "closed pty session");
         }
         Ok(())

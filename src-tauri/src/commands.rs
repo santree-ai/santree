@@ -9,13 +9,14 @@ use tauri::State;
 use santree_core::{
     domain::{
         AgentDef, AgentKind, ClaudeCommands, LinearOrg, LinearStatus, Repo, Settings, Stage, Task,
-        Terminal, TriageDetail, TriageMessage, TriageSchedule, TriageTicket, Worktree, WorktreeDiff,
+        Terminal, TriageDetail, TriageSchedule, TriageTicket, Worktree, WorktreeDiff,
     },
     mock,
 };
 
 use crate::db::Db;
 use crate::linear;
+use crate::notes;
 use crate::repo;
 use crate::settings;
 
@@ -38,13 +39,6 @@ pub async fn add_repo(path: String, db: State<'_, Db>) -> Result<Repo, String> {
 #[specta::specta]
 pub fn list_agents() -> Vec<AgentDef> {
     mock::agents()
-}
-
-/// All tickets, positioned for the dependency graph.
-#[tauri::command]
-#[specta::specta]
-pub fn list_tasks() -> Vec<Task> {
-    mock::tasks()
 }
 
 /// Active agent worktrees.
@@ -89,14 +83,6 @@ pub fn stage_meta() -> Vec<Stage> {
     mock::stage_meta()
 }
 
-/// Whether the repo has a connected Linear org (so triage can go live).
-async fn linear_live(db: &Db, repo: &str) -> bool {
-    linear::auth_status(db, repo)
-        .await
-        .map(|s| s.authenticated)
-        .unwrap_or(false)
-}
-
 /// Tickets awaiting triage — live from Linear when connected, else the sample set.
 #[tauri::command]
 #[specta::specta]
@@ -104,13 +90,10 @@ pub async fn list_triage_tickets(
     repo: String,
     db: State<'_, Db>,
 ) -> Result<Vec<TriageTicket>, String> {
-    if linear_live(&db, &repo).await {
-        linear::triage_tickets(&db, &repo)
-            .await
-            .map_err(|e| e.to_string())
-    } else {
-        Ok(mock::triage_tickets())
-    }
+    linear::triage_tickets(&db, &repo)
+        .await
+        .map_err(|e| e.to_string())
+        .map(|live| live.unwrap_or_else(mock::triage_tickets))
 }
 
 /// The full triage issue (description + comments) for the discussion pane.
@@ -121,13 +104,10 @@ pub async fn triage_detail(
     ticket_id: String,
     db: State<'_, Db>,
 ) -> Result<TriageDetail, String> {
-    if linear_live(&db, &repo).await {
-        linear::triage_detail(&db, &repo, &ticket_id)
-            .await
-            .map_err(|e| e.to_string())
-    } else {
-        Ok(mock::triage_detail(&ticket_id))
-    }
+    linear::triage_detail(&db, &repo, &ticket_id)
+        .await
+        .map_err(|e| e.to_string())
+        .map(|live| live.unwrap_or_else(|| mock::triage_detail(&ticket_id)))
 }
 
 /// The team triage rotations (who is on-call now), from Linear's responsibility
@@ -138,13 +118,10 @@ pub async fn triage_schedule(
     repo: String,
     db: State<'_, Db>,
 ) -> Result<Vec<TriageSchedule>, String> {
-    if linear_live(&db, &repo).await {
-        linear::triage_schedule(&db, &repo)
-            .await
-            .map_err(|e| e.to_string())
-    } else {
-        Ok(vec![mock::triage_schedule()])
-    }
+    linear::triage_schedule(&db, &repo)
+        .await
+        .map_err(|e| e.to_string())
+        .map(|live| live.unwrap_or_else(|| vec![mock::triage_schedule()]))
 }
 
 /// Move a triage issue to a different workflow state (the status picker). Moving
@@ -158,39 +135,37 @@ pub async fn triage_set_state(
     state_id: String,
     db: State<'_, Db>,
 ) -> Result<(), String> {
-    if linear_live(&db, &repo).await {
-        linear::set_issue_state(&db, &repo, &ticket_id, &state_id)
-            .await
-            .map_err(|e| e.to_string())
-    } else {
-        // No live backend: accept the change so the optimistic UI stays usable.
-        tracing::info!(ticket = %ticket_id, state = %state_id, "mock: status change");
-        Ok(())
+    match linear::set_issue_state(&db, &repo, &ticket_id, &state_id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        Some(()) => Ok(()),
+        None => {
+            // No live backend: accept the change so the optimistic UI stays usable.
+            tracing::info!(ticket = %ticket_id, state = %state_id, "mock: status change");
+            Ok(())
+        }
     }
 }
 
-/// The seed investigation thread for a triage ticket.
+/// User settings, persisted in the database (seeded from defaults on first run).
+/// Each agent's `exec` is the user's *override* (empty by default); the executable
+/// detected on PATH is reported separately via [`agent_auth`] and shown as the
+/// grayed default.
 #[tauri::command]
 #[specta::specta]
-pub fn triage_thread(ticket_id: String) -> Vec<TriageMessage> {
-    mock::triage_thread(&ticket_id)
+pub async fn get_settings(db: State<'_, Db>) -> Result<Settings, String> {
+    settings::get_settings(&db).await.map_err(|e| e.to_string())
 }
 
-/// Investigate a free-text triage question; returns the agent's answer.
+/// Persist the full settings blob. The frontend applies edits optimistically and
+/// calls this to make them durable across restarts.
 #[tauri::command]
 #[specta::specta]
-pub fn triage_ask(question: String) -> TriageMessage {
-    tracing::info!(question = %question, "triage question asked");
-    mock::triage_answer(&question)
-}
-
-/// User settings (the frontend owns live edits after seeding). Each agent's
-/// `exec` is the user's *override* (empty by default); the executable detected on
-/// PATH is reported separately via [`agent_auth`] and shown as the grayed default.
-#[tauri::command]
-#[specta::specta]
-pub fn get_settings() -> Settings {
-    mock::settings()
+pub async fn set_settings(settings: Settings, db: State<'_, Db>) -> Result<(), String> {
+    crate::settings::set_settings(&db, &settings)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// An agent harness's authentication / subscription status. Live for Claude
@@ -199,6 +174,34 @@ pub fn get_settings() -> Settings {
 #[specta::specta]
 pub fn agent_auth(kind: AgentKind) -> santree_core::domain::AgentAuth {
     settings::agent_auth(kind)
+}
+
+/// The user's local note for a task — extra context stored only on this machine
+/// (never synced to Linear). `None` when the task has no note.
+#[tauri::command]
+#[specta::specta]
+pub async fn task_note(
+    repo: String,
+    task_id: String,
+    db: State<'_, Db>,
+) -> Result<Option<String>, String> {
+    notes::get(&db, &repo, &task_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Save (or clear, when blank) the user's local note for a task.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_task_note(
+    repo: String,
+    task_id: String,
+    body: String,
+    db: State<'_, Db>,
+) -> Result<(), String> {
+    notes::set(&db, &repo, &task_id, &body)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── App/per-repo settings + Claude command discovery ───────────────────────
@@ -290,18 +293,23 @@ pub async fn set_repo_linear_org(
         .map_err(|e| e.to_string())
 }
 
-/// Fetch the repo's assigned Linear issues as a positioned dependency graph.
+/// The repo's assigned Linear issues as a positioned dependency graph — live when
+/// an org is connected, else the built-in sample graph (so the view is never
+/// empty and the frontend needs no separate "is connected?" round-trip).
 #[tauri::command]
 #[specta::specta]
 pub async fn linear_list_issues(repo: String, db: State<'_, Db>) -> Result<Vec<Task>, String> {
-    let issues = linear::list_issues(&db, &repo)
-        .await
-        .map_err(|e| e.to_string());
-    match &issues {
-        Ok(tasks) => tracing::info!(repo = %repo, count = tasks.len(), "fetched Linear issues"),
-        Err(e) => tracing::warn!(repo = %repo, error = %e, "Linear issue fetch failed"),
+    match linear::list_issues(&db, &repo).await {
+        Ok(Some(tasks)) => {
+            tracing::info!(repo = %repo, count = tasks.len(), "fetched Linear issues");
+            Ok(tasks)
+        }
+        Ok(None) => Ok(mock::tasks()),
+        Err(e) => {
+            tracing::warn!(repo = %repo, error = %e, "Linear issue fetch failed");
+            Err(e.to_string())
+        }
     }
-    issues
 }
 
 /// Run the Linear OAuth flow; returns the updated org list.

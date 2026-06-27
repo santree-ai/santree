@@ -40,8 +40,9 @@ export function ReviewsList() {
                     </span>
                     <span className="font-mono text-[10.5px] text-muted-2">{w.id}</span>
                     <span
-                      className="flex items-center gap-1.5 font-mono text-[10px]"
-                      style={{ color: passing ? "#3fb950" : "#d29922" }}
+                      className={`flex items-center gap-1.5 font-mono text-[10px] ${
+                        passing ? "text-status-green" : "text-status-amber"
+                      }`}
                     >
                       <span>{passing ? "✓" : "◴"}</span>
                       {passing ? "checks passing" : "checks running"}
@@ -68,7 +69,7 @@ export function ReviewsList() {
                   </button>
                   <button
                     type="button"
-                    className="cursor-pointer rounded-md border-none px-3.5 py-[7px] text-[12px] font-medium text-[#06231a] hover:brightness-110"
+                    className="cursor-pointer rounded-md border-none px-3.5 py-[7px] text-[12px] font-medium text-[color:var(--on-accent)] hover:brightness-110"
                     style={{ background: "var(--accent)" }}
                   >
                     Approve & merge

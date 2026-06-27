@@ -1,4 +1,10 @@
-/** A single worktree's terminal: seed transcript + live status + input. */
+/**
+ * MOCK transcript view — a static seed transcript + a local echo input.
+ *
+ * This is NOT the real PTY terminal (see terminal/TerminalView.tsx). It renders
+ * the backend's canned transcript lines plus any locally-appended mock log. When
+ * the real terminal embed lands, swap this component for that stack.
+ */
 import type { KeyboardEvent } from "react";
 
 import { Spinner } from "../../components/primitives";
@@ -7,7 +13,7 @@ import { useApp } from "../../state/AppContext";
 import { toneColor } from "../../theme/colors";
 import { useTrees } from "./model";
 
-export function TerminalView() {
+export function AgentTranscriptView() {
   const { activeId, termLog, sendTo } = useTrees();
   const { activeRepo } = useApp();
   const { data: term } = useWorktreeTerminal(activeId);
@@ -15,6 +21,8 @@ export function TerminalView() {
 
   const worktree = worktrees.find((w) => w.id === activeId);
   const inputEnabled = worktree?.activity === "Running" || worktree?.activity === "Awaiting";
+  // TODO: derive the repo folder from the worktree itself once the Worktree type
+  // carries a path/repo; activeRepo is the only readily-available source today.
   const repoFolder = activeRepo.split("/")[1] ?? "repo";
   const extra = termLog[activeId] ?? [];
 

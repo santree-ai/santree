@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MutationCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRouter, RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -7,11 +7,21 @@ import { ErrorScreen } from "./components/ErrorScreen";
 import { TerminalsProvider } from "./features/terminal/TerminalsContext";
 import { routeTree } from "./routeTree.gen";
 import { AppProvider } from "./state/AppContext";
+import { ToastViewport, toast } from "./state/toast";
 import "./styles.css";
 
 // Mocked data rarely changes within a session; cache it generously.
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 5 * 60 * 1000, refetchOnWindowFocus: false } },
+  // Surface every failed mutation (settings save, Linear connect, status change…)
+  // as a red toast in one place, so individual call sites don't each repeat it.
+  // A mutation can opt out with `meta: { silent: true }` when it owns its own UI.
+  mutationCache: new MutationCache({
+    onError: (error, _vars, _ctx, mutation) => {
+      if (mutation.meta?.silent) return;
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+  }),
 });
 
 // Replace TanStack Router's raw default error UI with our friendly screen for
@@ -41,6 +51,7 @@ createRoot(rootElement).render(
             <RouterProvider router={router} />
           </TerminalsProvider>
         </AppProvider>
+        <ToastViewport />
       </QueryClientProvider>
     </ErrorBoundary>
   </StrictMode>,
