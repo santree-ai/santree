@@ -9,7 +9,7 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect } from "react";
 
-import { useAppOptional } from "../state/AppContext";
+import { useAppOptional, useAppUiOptional } from "../state/AppContext";
 
 /** True when focus is in a field where keystrokes should be left alone. */
 export function inEditable(target: EventTarget | null): boolean {
@@ -24,9 +24,10 @@ export function useKeyboardShortcuts() {
   // Optional: this runs in the route root, which can render for a tick before
   // the app provider during a hot reload — degrade gracefully, never crash.
   const app = useAppOptional();
+  const ui = useAppUiOptional();
   const triageEnabled = app?.triageEnabled ?? false;
-  const toggleSidebar = app?.toggleSidebar;
-  const toggleShortcuts = app?.toggleShortcuts;
+  const toggleSidebar = ui?.toggleSidebar;
+  const toggleShortcuts = ui?.toggleShortcuts;
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   useEffect(() => {

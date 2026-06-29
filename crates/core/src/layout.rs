@@ -114,6 +114,8 @@ mod tests {
             ready: blocked_by.is_empty(),
             blocked_by: blocked_by.iter().map(|s| (*s).into()).collect(),
             actionable: true,
+            assignee: None,
+            assignee_avatar_url: None,
             x: 0,
             y: 0,
             add_lines: 0,

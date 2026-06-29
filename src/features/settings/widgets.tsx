@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 
 import type { ClaudeCommand } from "../../bindings";
-import { Toggle } from "../../components/primitives";
+import { ChevronSelect, Toggle } from "../../components/primitives";
 
 /** A section heading: a bold title over a muted one-line subtitle. */
 export function Heading({ title, subtitle }: { title: string; subtitle: string }) {
@@ -89,9 +89,10 @@ export function KvRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-/** Shared classes for the settings `<select>` dropdowns. */
+/** Shared classes for the settings dropdowns — used as the `<select>` className
+ *  inside {@link ChevronSelect} (which adds the chevron + `appearance-none`). */
 export const SELECT_CLASS =
-  "w-full cursor-pointer appearance-none rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-[12px] text-fg-3";
+  "w-full rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] font-mono text-[12px] text-fg-3";
 
 /** A `<select>` whose empty option inherits the app default, with a Reset. */
 export function OverrideSelect({
@@ -107,14 +108,15 @@ export function OverrideSelect({
 }) {
   return (
     <div className="flex items-center gap-2">
-      <select
+      <ChevronSelect
         value={value}
-        onChange={(e) => onChange(e.target.value || null)}
-        className={`flex-1 ${SELECT_CLASS}`}
+        onChange={(v) => onChange(v || null)}
+        className={SELECT_CLASS}
+        wrapperClassName="flex-1"
       >
         <option value="">{defaultLabel}</option>
         {children}
-      </select>
+      </ChevronSelect>
       <button
         type="button"
         onClick={() => onChange(null)}

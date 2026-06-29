@@ -17,6 +17,8 @@ export interface ProjectNodeData {
   icon: string | null;
   count: number;
   dim: boolean;
+  /** The focused project (others are dimmed) — gets a selection ring. */
+  focused: boolean;
   [key: string]: unknown;
 }
 
@@ -30,8 +32,15 @@ export const ProjectNode = memo(
         style={{
           width: data.width,
           height: data.height,
-          border: `1px solid ${data.color}${data.dim ? "18" : "33"}`,
-          background: `${data.color}${data.dim ? "04" : "0b"}`,
+          // The selected band gets a solid accent border (a clear selection signal
+          // even when no other projects are in view). Deliberately a BORDER, not a
+          // box-shadow ring — a large box-shadow on this (often 800px+) band sits
+          // inside React Flow's GPU-composited viewport and crashes WKWebView's
+          // WebContent process, blanking the graph with no JS error.
+          border: data.focused
+            ? "1.5px solid var(--accent)"
+            : `1px solid ${data.color}${data.dim ? "18" : "33"}`,
+          background: `${data.color}${data.dim ? "04" : data.focused ? "14" : "0b"}`,
           opacity: data.dim ? 0.5 : 1,
         }}
       >
@@ -61,5 +70,6 @@ export const ProjectNode = memo(
     prev.data.color === next.data.color &&
     prev.data.icon === next.data.icon &&
     prev.data.count === next.data.count &&
-    prev.data.dim === next.data.dim,
+    prev.data.dim === next.data.dim &&
+    prev.data.focused === next.data.focused,
 );

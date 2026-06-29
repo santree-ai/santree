@@ -21,6 +21,13 @@ export default defineConfig({
     tailwindcss(),
   ],
 
+  build: {
+    // The Material file-icon set (~1250 small SVGs) would otherwise be inlined as
+    // base64 into the JS bundle. Emit them as standalone asset files instead — in
+    // a Tauri app they load instantly from local disk, and the JS stays lean.
+    assetsInlineLimit: (file: string) => (file.includes("material-icon-theme") ? false : undefined),
+  },
+
   // Vite options tailored for Tauri development, applied during `tauri dev`/`build`.
   //
   // 1. Don't clobber Rust compiler errors in the terminal.

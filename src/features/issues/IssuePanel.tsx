@@ -7,23 +7,26 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useMemo } from "react";
 
-import type { Task } from "../../bindings";
+import type { Task, Worktree, WorktreePr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { DiscussionContent } from "../../components/IssueDiscussion";
 import {
   BlockedIcon,
+  BranchIcon,
   CheckIcon,
   ChevronDownIcon,
   CloseIcon,
   LinearLogo,
   PlusIcon,
 } from "../../components/icons";
-import { Dot, EmptyState, Skeleton, Spinner } from "../../components/primitives";
+import { PrChips } from "../../components/PrChip";
+import { Dot, EmptyState, Skeleton } from "../../components/primitives";
+import { WorktreeStats } from "../../components/WorktreeStats";
 import { useTriageDetail } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
-import { palette, statusColor, statusLabel } from "../../theme/colors";
+import { alpha, palette, statusColor, statusLabel } from "../../theme/colors";
 import { BlockerRow } from "./BlockerRow";
-import { sessionState, useIssues } from "./model";
+import { useIssues } from "./model";
 import { TaskNotes } from "./TaskNotes";
 
 interface RefRow {
@@ -33,6 +36,8 @@ interface RefRow {
   state: string;
   grayed: boolean;
   foreign: string | null;
+  assignee: string | null;
+  assigneeAvatar: string | null;
 }
 
 /** A light skeleton for just the body text — keeps the header + dependencies in
@@ -69,12 +74,14 @@ export function IssuePanel() {
     toggle,
     setFocus,
     clearSelection,
-    sessionByTask,
+    worktreeById,
+    prByTask,
+    goToWorktree,
     revealInGraph,
     toggleRightPanel,
   } = useIssues();
   const { activeRepo } = useApp();
-  const focus = tasks.find((t) => t.id === focusId) ?? tasks[0];
+  const focus = (focusId ? byId.get(focusId) : undefined) ?? tasks[0];
   const { data: detail } = useTriageDetail(activeRepo, focus?.id ?? null);
 
   // "Open in graph" from a dependency row: focus + pan, and scroll the sidebar row in.
@@ -102,6 +109,8 @@ export function IssuePanel() {
           state: t ? statusLabel[t.status] : "Unknown",
           grayed: !t?.actionable,
           foreign: t && t.project !== focus.project ? t.project : null,
+          assignee: t?.assignee ?? null,
+          assigneeAvatar: t?.assigneeAvatarUrl ?? null,
         };
       }),
       blocks: tasks
@@ -113,6 +122,8 @@ export function IssuePanel() {
           state: statusLabel[t.status],
           grayed: !t.actionable,
           foreign: t.project !== focus.project ? t.project : null,
+          assignee: t.assignee,
+          assigneeAvatar: t.assigneeAvatarUrl,
         })),
     };
   }, [focus, tasks, byId]);
@@ -122,11 +133,9 @@ export function IssuePanel() {
   }
 
   const ready = detail?.id === focus.id ? detail : undefined;
-  const session = sessionByTask.get(focus.id);
-  const state = sessionState(session);
-  const running = state === "running";
-  const done = state === "done";
-  const queued = !!selected[focus.id] && !session;
+  const worktree = worktreeById.get(focus.id);
+  const prs = prByTask.get(focus.id) ?? [];
+  const queued = !!selected[focus.id];
   const eligible = isEligible(focus);
   const noBody = !!ready && ready.description.trim() === "" && ready.comments.length === 0;
   const hasDeps = blockedBy.length > 0 || blocks.length > 0;
@@ -195,16 +204,19 @@ export function IssuePanel() {
         )}
 
         <div className="mt-3">
-          <QueueControl
-            running={running}
-            done={done}
-            queued={queued}
-            eligible={eligible}
-            focusStatus={focus.status}
-            actionable={focus.actionable}
-            pr={session?.pr}
-            onToggle={() => toggle(focus.id)}
-          />
+          {/* A real worktree exists → show its live status + a jump to Trees;
+              otherwise show the launch (add-to-queue) control. */}
+          {worktree ? (
+            <WorktreeCard worktree={worktree} prs={prs} onOpen={() => goToWorktree(focus.id)} />
+          ) : (
+            <QueueControl
+              queued={queued}
+              eligible={eligible}
+              focusStatus={focus.status}
+              actionable={focus.actionable}
+              onToggle={() => toggle(focus.id)}
+            />
+          )}
         </div>
       </div>
 
@@ -227,6 +239,8 @@ export function IssuePanel() {
                       state={b.state}
                       grayed={b.grayed}
                       foreignProject={b.foreign}
+                      assignee={b.assignee}
+                      assigneeAvatar={b.assigneeAvatar}
                       onOpenInGraph={openInGraph}
                     />
                   ))}
@@ -246,6 +260,8 @@ export function IssuePanel() {
                       state={b.state}
                       grayed={b.grayed}
                       foreignProject={b.foreign}
+                      assignee={b.assignee}
+                      assigneeAvatar={b.assigneeAvatar}
                       onOpenInGraph={openInGraph}
                     />
                   ))}
@@ -357,47 +373,18 @@ function QueueBar({
 
 /** The "Add to queue" button / status chip for the focused issue. */
 function QueueControl({
-  running,
-  done,
   queued,
   eligible,
   focusStatus,
   actionable,
-  pr,
   onToggle,
 }: {
-  running: boolean;
-  done: boolean;
   queued: boolean;
   eligible: boolean;
   focusStatus: keyof typeof statusColor;
   actionable: boolean;
-  pr?: number;
   onToggle: () => void;
 }) {
-  if (running) {
-    return (
-      <div
-        className="flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-[12px] font-medium"
-        style={{
-          color: "var(--accent-text)",
-          background: "color-mix(in srgb, var(--accent) 10%, transparent)",
-          borderColor: "color-mix(in srgb, var(--accent) 30%, transparent)",
-        }}
-      >
-        <Spinner size={12} />
-        Agent working…
-      </div>
-    );
-  }
-  if (done) {
-    return (
-      <div className="flex items-center justify-center gap-2 rounded-lg border border-status-green/30 bg-status-green/10 px-3 py-2 text-[12px] font-medium text-status-green">
-        <CheckIcon size={13} />
-        PR #{pr} opened
-      </div>
-    );
-  }
   if (eligible) {
     return (
       <button
@@ -407,10 +394,8 @@ function QueueControl({
         className="flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[12.5px] font-semibold transition-[filter,background] hover:brightness-105"
         style={{
           color: "var(--accent-text)",
-          background: queued
-            ? "color-mix(in srgb, var(--accent) 20%, transparent)"
-            : "color-mix(in srgb, var(--accent) 11%, transparent)",
-          borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)",
+          background: alpha(queued ? 20 : 11),
+          borderColor: alpha(40),
         }}
       >
         {queued ? <CheckIcon size={14} /> : <PlusIcon size={14} />}
@@ -428,5 +413,40 @@ function QueueControl({
     <div className="flex cursor-default items-center justify-center gap-1.5 rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] font-medium text-muted-3">
       {reason}
     </div>
+  );
+}
+
+/** Live status of the focused issue's real worktree — branch, PR, and git stats
+ *  — and a jump to that worktree on the Trees tab. */
+function WorktreeCard({
+  worktree,
+  prs,
+  onOpen,
+}: {
+  worktree: Worktree;
+  prs: WorktreePr[];
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      title="Open this worktree on the Trees tab"
+      className="group flex w-full cursor-pointer flex-col gap-1.5 rounded-lg border border-line-2 bg-input px-3 py-2 text-left transition-colors hover:border-line-strong"
+    >
+      <div className="flex items-center gap-2">
+        <BranchIcon size={12} className="flex-none text-muted-3" />
+        <span className="flex-1 overflow-hidden font-mono text-[11px] text-ellipsis whitespace-nowrap text-fg-2">
+          {worktree.branch}
+        </span>
+        <PrChips prs={prs} />
+        <span className="flex-none text-muted-4 transition-transform group-hover:translate-x-0.5">
+          →
+        </span>
+      </div>
+      <div className="flex items-center gap-2.5 font-mono text-[10px] text-muted-4">
+        <WorktreeStats worktree={worktree} showClean />
+      </div>
+    </button>
   );
 }

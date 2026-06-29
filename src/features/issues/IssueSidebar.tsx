@@ -10,8 +10,9 @@ import { usePrefetchOnHover } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import {
   accentVar as accent,
+  accentActiveStyle,
   alpha,
-  colorForProject,
+  PROJECT_FALLBACK,
   statusColor,
   successColor,
 } from "../../theme/colors";
@@ -30,7 +31,7 @@ export function IssueSidebar() {
   const {
     tasks,
     projectMeta,
-    sessionByTask,
+    worktreeIds,
     selected,
     focusId,
     hoverId,
@@ -50,6 +51,9 @@ export function IssueSidebar() {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const toggleCollapsed = (project: string) =>
     setCollapsed((c) => ({ ...c, [project]: !c[project] }));
+  // ⌘/Ctrl+click a chevron collapses or expands *every* project at once.
+  const setAllCollapsed = (value: boolean) =>
+    setCollapsed(Object.fromEntries(groups.map((g) => [g.project, value])));
 
   // Ready (launchable) tickets, and whether they're all already queued — drives
   // the "Select Ready" button's count and its toggled-on styling.
@@ -71,17 +75,38 @@ export function IssueSidebar() {
         const rows = mine.filter((t) => t.project === project);
 
         const mapped = rows.map<IssueRowVM>((t) => {
-          const session = sessionByTask.get(t.id);
-          const st = deriveIssueState(t, session, { selected: !!selected[t.id], baseFor });
+          const hasWorktree = worktreeIds.has(t.id);
+          const st = deriveIssueState(t, {
+            selected: !!selected[t.id],
+            baseFor,
+            hasWorktree,
+          });
           const selectable = isEligible(t);
-          const focused = focusId === t.id || hoverId === t.id;
+          const isFocused = focusId === t.id;
+          const isHover = hoverId === t.id;
           const dim = focusProject !== null && t.project !== focusProject;
 
-          const rowStyle: CSSProperties = {
-            background: st.selected ? alpha(12) : focused ? "var(--color-hover)" : "transparent",
-            border: `1px solid ${st.selected ? alpha(40) : "transparent"}`,
-            opacity: dim ? 0.4 : 1,
-          };
+          // Three visually distinct states (both themes): queued for launch is the
+          // strongest (accent tint + accent border); the open/focused row is a
+          // persistent neutral "selected" surface; a plain hover is the faintest.
+          const opacity = dim ? 0.4 : 1;
+          const rowStyle: CSSProperties = st.selected
+            ? {
+                background: alpha(isFocused || isHover ? 18 : 13),
+                border: `1px solid ${alpha(48)}`,
+                opacity,
+              }
+            : isFocused
+              ? {
+                  background: "var(--color-selected)",
+                  border: "1px solid var(--color-line-strong)",
+                  opacity,
+                }
+              : {
+                  background: isHover ? "var(--color-hover)" : "transparent",
+                  border: "1px solid transparent",
+                  opacity,
+                };
           const boxStyle: CSSProperties = {
             // Non-selectable rows still show a faint (disabled) box so every row
             // keeps the same checkbox column and alignment.
@@ -99,10 +124,7 @@ export function IssueSidebar() {
             showChain: st.chainable,
             chainBase: st.chainBase,
             showBlocked: st.blocked,
-            showRun: st.running,
-            runColor: st.runColor,
-            showDone: st.done,
-            prMini: st.done && session ? `#${session.pr}` : "",
+            showWorking: hasWorktree,
             rowStyle,
             boxStyle,
             onReveal: () => revealInGraph(t.id),
@@ -118,7 +140,7 @@ export function IssueSidebar() {
         const meta = projectMeta.get(project);
         return {
           project,
-          color: meta?.color ?? colorForProject(project),
+          color: meta?.color ?? PROJECT_FALLBACK,
           icon: meta?.icon ?? null,
           rows: mapped,
         };
@@ -127,7 +149,7 @@ export function IssueSidebar() {
   }, [
     tasks,
     projectMeta,
-    sessionByTask,
+    worktreeIds,
     selected,
     focusId,
     hoverId,
@@ -141,7 +163,7 @@ export function IssueSidebar() {
   ]);
 
   const selectReadyStyle: CSSProperties = allReadySelected
-    ? { background: alpha(12), border: `1px solid ${alpha(40)}`, color: accent }
+    ? accentActiveStyle()
     : {
         background: "var(--color-input-alt)",
         border: "1px solid var(--color-line-3)",
@@ -178,9 +200,14 @@ export function IssueSidebar() {
               <div className="flex items-center gap-0.5 pt-2.5 pr-1.5 pb-[5px] pl-0.5">
                 <button
                   type="button"
-                  onClick={() => toggleCollapsed(g.project)}
+                  onClick={(e) =>
+                    e.metaKey || e.ctrlKey
+                      ? setAllCollapsed(!isCollapsed)
+                      : toggleCollapsed(g.project)
+                  }
                   className="flex flex-none cursor-pointer items-center justify-center rounded p-1 text-muted-4 hover:text-fg-2"
                   aria-label={isCollapsed ? "Expand project" : "Collapse project"}
+                  title={`${isCollapsed ? "Expand" : "Collapse"} (⌘-click for all)`}
                 >
                   <ChevronDownIcon
                     size={11}

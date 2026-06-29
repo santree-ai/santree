@@ -2,14 +2,15 @@
  * Issues-tab state model.
  *
  * Everything ephemeral to the Issues tab lives here: which tickets are selected,
- * the agent/model chosen in the launch tray, the focused ticket, the right-panel
- * tab, and the simulated agent sessions (with their progress timer). It's exposed
- * via context so the sidebar, graph, and inspector stay in sync without prop
- * drilling.
+ * the agent/model chosen in the launch tray, the focused ticket, and the
+ * right-panel layout. It's exposed via context so the sidebar, graph, and
+ * inspector stay in sync without prop drilling.
  *
- * The seed data (tasks, worktrees, stages, agents) comes from the backend via
- * queries; this model only layers interaction on top.
+ * The data (tasks, worktrees, PRs, agents) comes from the backend via queries;
+ * this model only layers interaction on top.
  */
+
+import { useNavigate } from "@tanstack/react-router";
 import {
   createContext,
   type ReactNode,
@@ -17,99 +18,59 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 
-import type { AgentKind, Task } from "../../bindings";
-import { branchFor } from "../../lib/format";
+import type { AgentKind, Task, Worktree, WorktreePr } from "../../bindings";
 import {
   useAgents,
+  useCreateWorktree,
   useResolvedSetting,
-  useStageMeta,
   useTasks,
+  useWorktreePrs,
   useWorktrees,
   WORK_AGENT_KEY,
   WORK_MODEL_KEY,
 } from "../../lib/queries";
-import { useApp } from "../../state/AppContext";
-import { accentVar, colorForProject, successColor } from "../../theme/colors";
-
-const TICK_MS = 640;
-/** Stage index at which a session is considered finished (PR opened). */
-export const MAX_STAGE = 4;
-const FIRST_PR = 482;
+import { useApp, useAppUi } from "../../state/AppContext";
+import { PROJECT_FALLBACK } from "../../theme/colors";
+import { NO_PROJECT } from "../trees/model";
 
 /**
- * Collapse a session into its high-level run state. A session is "running" until
- * it reaches the final stage, then "done"; no session at all is `null`. This is
- * the single source of truth for the running/done split everywhere it's needed.
- */
-export function sessionState(session: Session | undefined): "running" | "done" | null {
-  if (!session) return null;
-  return session.stage < MAX_STAGE ? "running" : "done";
-}
-
-/**
- * The shared visual state for a ticket, derived once from its task + session.
- * The sidebar row and the graph node both build their view-models on top of this
- * so the running/done/ready/chainable/blocked/selected rules can't drift apart
- * (they used to be computed independently in each view).
+ * The shared visual state for a ticket, derived once from its task + real
+ * worktree. The sidebar row and the graph node both build their view-models on
+ * top of this so the started/ready/chainable/blocked/selected rules can't drift
+ * apart (they used to be computed independently in each view).
  */
 export interface IssueVisualState {
-  session: Session | undefined;
-  running: boolean;
-  done: boolean;
-  /** Queued for launch — only when there's no live session yet. */
+  /** A real worktree exists — the ticket is being worked on. */
+  started: boolean;
+  /** Queued for launch — only when not already started. */
   selected: boolean;
   /** The ticket this one would stack on (a blocker with a worktree), or null. */
   chainBase: string | null;
   chainable: boolean;
-  /** Ready to start (no open blockers, not already running). */
+  /** Ready to start (no open blockers, not already started). */
   ready: boolean;
   /** Blocked and not chainable — can't be started. */
   blocked: boolean;
-  /** Spinner/progress color: green once done, else the accent. */
-  runColor: string;
 }
 
 export function deriveIssueState(
   task: Task,
-  session: Session | undefined,
-  opts: { selected: boolean; baseFor: (t: Task) => string | null },
+  opts: { selected: boolean; baseFor: (t: Task) => string | null; hasWorktree?: boolean },
 ): IssueVisualState {
-  const state = sessionState(session);
-  const running = state === "running";
-  const done = state === "done";
+  const started = !!opts.hasWorktree;
   const chainBase = task.ready ? null : opts.baseFor(task);
-  const chainable = chainBase !== null && !session;
+  const chainable = chainBase !== null && !started;
   return {
-    session,
-    running,
-    done,
-    selected: opts.selected && !session,
+    started,
+    selected: opts.selected && !started,
     chainBase,
     chainable,
-    ready: task.ready && !session,
-    blocked: !task.ready && !chainable && !session,
-    runColor: done ? successColor : accentVar,
+    ready: task.ready && !started,
+    blocked: !task.ready && !chainable && !started,
   };
-}
-
-export interface Session {
-  taskId: string;
-  agent: AgentKind;
-  model: string;
-  stage: number;
-  ticks: number;
-  speed: number;
-  pr: number;
-  add: number;
-  del: number;
-  /** Branch this session stacks on (`main` if not chained). */
-  base: string;
-  /** Ticket id this session stacks on, or "" if not chained. */
-  baseId: string;
 }
 
 interface IssuesModel {
@@ -119,9 +80,12 @@ interface IssuesModel {
   /** Per-project color + icon (live from Linear, else the per-name fallback),
    *  keyed by project name. The sidebar headers and graph bands read this. */
   projectMeta: Map<string, { color: string; icon: string | null }>;
-  sessionByTask: Map<string, Session>;
-  /** Ids that have a real worktree or a running session (used for chaining). */
+  /** Ids that have a real worktree (used for chaining). */
   worktreeIds: Set<string>;
+  /** Real worktrees keyed by issue id — for the right panel's status + PR. */
+  worktreeById: Map<string, Worktree>;
+  /** Live PR status keyed by issue id — for the graph node's PR badge. */
+  prByTask: Map<string, WorktreePr[]>;
   selected: Record<string, boolean>;
   focusId: string;
   /** Ephemeral highlight (row/graph) while hovering — never pans or changes the
@@ -132,7 +96,6 @@ interface IssuesModel {
   launchModel: string;
   /** The configured default model (from Settings → Actions → Issues) for the launch agent. */
   defaultModel: string;
-  sessions: Session[];
 
   /** The chain base ticket for a blocked task (first dependency with a worktree), or null. */
   baseFor: (task: Task) => string | null;
@@ -169,18 +132,24 @@ interface IssuesModel {
   setLaunchModel: (model: string) => void;
   toggleProjectFocus: (project: string) => void;
   launch: () => void;
+  /** Open the focused ticket's existing worktree on the Trees tab. */
+  goToWorktree: (id: string) => void;
 }
 
 const IssuesContext = createContext<IssuesModel | null>(null);
 
 export function IssuesProvider({ children }: { children: ReactNode }) {
   const { settings, activeRepo } = useApp();
+  const { requestTreeLaunch, requestTreeFocus, addPendingLaunches, removePendingLaunch } =
+    useAppUi();
+  const navigate = useNavigate();
   const { data: tasks = [] } = useTasks(activeRepo);
-  const { data: worktrees = [] } = useWorktrees();
+  const { data: worktrees = [] } = useWorktrees(activeRepo);
+  const { data: worktreePrs = [] } = useWorktreePrs(activeRepo);
   const { data: agents = [] } = useAgents();
+  const { mutateAsync: createWorktree } = useCreateWorktree(activeRepo);
 
   const [selected, setSelected] = useState<Record<string, boolean>>({});
-  const [sessions, setSessions] = useState<Session[]>([]);
   // No hardcoded default — the first task becomes the focus once tasks load (see
   // the effect below), and IssuePanel falls back to tasks[0] until then.
   const [focusId, setFocusId] = useState("");
@@ -193,7 +162,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   );
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [rightWidth, setRightWidth] = useState(304);
-  const [prCounter, setPrCounter] = useState(0);
 
   // Focus a project band (toggle) and, when focusing, pan the graph onto it.
   const revealProject = useCallback(
@@ -264,7 +232,7 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     for (const t of tasks) {
       if (!meta.has(t.project)) {
         meta.set(t.project, {
-          color: t.projectColor ?? colorForProject(t.project),
+          color: t.projectColor ?? PROJECT_FALLBACK,
           icon: t.projectIcon ?? null,
         });
       }
@@ -272,24 +240,39 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     return meta;
   }, [tasks]);
 
-  const sessionByTask = useMemo(() => {
-    const map = new Map<string, Session>();
-    for (const s of sessions) map.set(s.taskId, s);
-    return map;
-  }, [sessions]);
-
   // Once tasks load, default the focused ticket to the first one (so the right
   // panel isn't empty). Only fires while focus is unset — a real click sticks.
   useEffect(() => {
     if (focusId === "" && tasks.length > 0) setFocusId(tasks[0].id);
   }, [focusId, tasks]);
 
-  // A ticket has a "worktree" if it has a real worktree or a running session.
-  const worktreeIds = useMemo(() => {
-    const set = new Set(worktrees.map((w) => w.id));
-    for (const s of sessions) set.add(s.taskId);
-    return set;
-  }, [worktrees, sessions]);
+  const worktreeIds = useMemo(() => new Set(worktrees.map((w) => w.id)), [worktrees]);
+
+  // The real worktree (status/PR/changes) for a ticket, keyed by issue id — read
+  // by the right panel to show live worktree state and the "Open in Trees" link.
+  const worktreeById = useMemo(() => new Map(worktrees.map((w) => [w.id, w])), [worktrees]);
+
+  // Live PR status keyed by issue id — read inside the graph node (from context,
+  // not node data, so a PR refetch never rebuilds the React Flow nodes array).
+  const prByTask = useMemo(() => {
+    const map = new Map<string, WorktreePr[]>();
+    for (const p of worktreePrs) {
+      const list = map.get(p.issueId) ?? [];
+      list.push(p);
+      map.set(p.issueId, list);
+    }
+    return map;
+  }, [worktreePrs]);
+
+  // Jump to the Trees tab and open this ticket's existing worktree (no agent
+  // start — the work is already there).
+  const goToWorktree = useCallback(
+    (id: string) => {
+      requestTreeFocus(id);
+      navigate({ to: "/trees" });
+    },
+    [requestTreeFocus, navigate],
+  );
 
   const baseFor = useCallback(
     (task: Task) => task.blockedBy.find((id) => worktreeIds.has(id)) ?? null,
@@ -299,10 +282,11 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   const isEligible = useCallback(
     (task: Task) => {
       if (!task.actionable) return false;
-      if (sessionByTask.has(task.id)) return false;
+      // Already started — has a real worktree.
+      if (worktreeIds.has(task.id)) return false;
       return task.ready || baseFor(task) !== null;
     },
-    [sessionByTask, baseFor],
+    [worktreeIds, baseFor],
   );
 
   const selectedEligible = useMemo(
@@ -322,49 +306,49 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     [tasks, isEligible, focusTask],
   );
 
+  // Launch: jump to the Trees tab immediately and create a real worktree per
+  // selected ticket *concurrently* in the background — never blocking the view
+  // switch on the git round-trips. Each task is registered as a pending launch so
+  // Trees shows a "Creating workspace…" placeholder at once (dropped there once
+  // the real worktree lands); we also ask Trees to open the first one and start
+  // its agent once it's real. A failed create drops its placeholder (the global
+  // mutation cache still surfaces the error as a toast).
   const launch = useCallback(() => {
     if (selectedEligible.length === 0) return;
-    const base = FIRST_PR + prCounter;
-    const created: Session[] = selectedEligible.map((task, i) => {
-      const chainId = task.ready ? "" : (baseFor(task) ?? "");
-      return {
-        taskId: task.id,
-        agent: launchAgent,
-        model: launchModel,
-        stage: 0,
-        ticks: 0,
-        speed: 2 + Math.floor(Math.random() * 3),
-        pr: base + i,
-        add: task.addLines,
-        del: task.delLines,
-        base: chainId ? branchFor(chainId) : "main",
-        baseId: chainId,
-      };
-    });
-    setSessions((prev) => [...prev, ...created]);
+    const targets = selectedEligible;
     setSelected({});
-    setPrCounter((n) => n + created.length);
-  }, [selectedEligible, prCounter, launchAgent, launchModel, baseFor]);
-
-  // Advance running sessions on a fixed tick until all reach the final stage.
-  const timer = useRef<number | null>(null);
-  const hasRunning = sessions.some((s) => s.stage < MAX_STAGE);
-  useEffect(() => {
-    if (!hasRunning) return;
-    timer.current = window.setInterval(() => {
-      setSessions((prev) =>
-        prev.map((s) => {
-          if (s.stage >= MAX_STAGE) return s;
-          const ticks = s.ticks + 1;
-          const stage = ticks % s.speed === 0 ? Math.min(MAX_STAGE, s.stage + 1) : s.stage;
-          return { ...s, ticks, stage };
-        }),
-      );
-    }, TICK_MS);
-    return () => {
-      if (timer.current) window.clearInterval(timer.current);
-    };
-  }, [hasRunning]);
+    const projectOf = (task: Task) => (task.project === NO_PROJECT ? null : task.project);
+    addPendingLaunches(
+      targets.map((task) => ({
+        id: task.id,
+        title: task.title,
+        project: projectOf(task),
+        agent: launchAgent,
+      })),
+    );
+    requestTreeLaunch(targets[0].id);
+    navigate({ to: "/trees" });
+    void Promise.allSettled(
+      targets.map((task) =>
+        createWorktree({
+          issueId: task.id,
+          title: task.title,
+          project: projectOf(task),
+          base: null,
+          runSetup: false,
+          agent: launchAgent,
+        }).catch(() => removePendingLaunch(task.id)),
+      ),
+    );
+  }, [
+    selectedEligible,
+    launchAgent,
+    createWorktree,
+    requestTreeLaunch,
+    addPendingLaunches,
+    removePendingLaunch,
+    navigate,
+  ]);
 
   // Trivial setter handlers — stable across renders so the context value below
   // doesn't churn (kept symmetric with the useCallback'd handlers above).
@@ -401,8 +385,9 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       tasks,
       byId,
       projectMeta,
-      sessionByTask,
       worktreeIds,
+      worktreeById,
+      prByTask,
       selected,
       focusId,
       hoverId,
@@ -410,7 +395,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       launchAgent,
       launchModel,
       defaultModel,
-      sessions,
       actionableOnly,
       reveal,
       projectReveal,
@@ -420,6 +404,7 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       isEligible,
       selectedEligible,
       toggle,
+      goToWorktree,
       setFocus: focusTask,
       setHover: setHoverId,
       revealInGraph,
@@ -438,8 +423,9 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       tasks,
       byId,
       projectMeta,
-      sessionByTask,
       worktreeIds,
+      worktreeById,
+      prByTask,
       selected,
       focusId,
       hoverId,
@@ -447,7 +433,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       launchAgent,
       launchModel,
       defaultModel,
-      sessions,
       actionableOnly,
       reveal,
       projectReveal,
@@ -457,6 +442,7 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       isEligible,
       selectedEligible,
       toggle,
+      goToWorktree,
       focusTask,
       revealInGraph,
       revealProject,
@@ -478,13 +464,4 @@ export function useIssues(): IssuesModel {
   const ctx = useContext(IssuesContext);
   if (!ctx) throw new Error("useIssues must be used within <IssuesProvider>");
   return ctx;
-}
-
-/** Shared stage helpers, parameterized by the backend stage metadata. */
-export function useStageHelpers() {
-  const { data: stages = [] } = useStageMeta();
-  return {
-    pctFor: (stage: number) => stages[Math.min(stage, stages.length - 1)]?.pct ?? 0,
-    labelFor: (stage: number) => stages[Math.min(stage, stages.length - 1)]?.label ?? "",
-  };
 }

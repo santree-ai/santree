@@ -7,7 +7,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { useApp } from "../state/AppContext";
+import { useApp, useAppUi } from "../state/AppContext";
 import { SearchIcon } from "./icons";
 
 interface Shortcut {
@@ -55,6 +55,10 @@ function buildSections(triageEnabled: boolean): Section[] {
       ],
     },
     {
+      title: "Trees",
+      items: [{ label: "Toggle files panel", keys: ["⌘", "L"] }],
+    },
+    {
       title: "Triage",
       items: [
         { label: "Next issue", keys: ["J"] },
@@ -75,7 +79,8 @@ function Kbd({ token }: { token: string }) {
 }
 
 export function ShortcutsOverlay() {
-  const { shortcutsOpen, setShortcutsOpen, triageEnabled } = useApp();
+  const { triageEnabled } = useApp();
+  const { shortcutsOpen, setShortcutsOpen } = useAppUi();
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 

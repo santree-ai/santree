@@ -36,6 +36,7 @@ import {
   useTriageSetState,
 } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
+import { alpha } from "../../theme/colors";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { DetailTabs } from "./DetailTabs";
 import { useKeptPanes, useTabByTicket, useTriageKeyboard, useTriageSelection } from "./hooks";
@@ -92,7 +93,7 @@ function AllCaughtUp({
       ) : (
         <div
           className="flex h-[64px] w-[64px] items-center justify-center rounded-full"
-          style={{ background: "color-mix(in srgb, var(--accent) 12%, transparent)" }}
+          style={{ background: alpha(12) }}
         >
           <span className="text-[30px] leading-none">🌱</span>
         </div>

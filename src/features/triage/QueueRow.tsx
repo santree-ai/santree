@@ -2,7 +2,8 @@
 import { type CSSProperties, memo } from "react";
 
 import type { TriageTicket } from "../../bindings";
-import { priorityColor } from "../../theme/colors";
+import { alpha } from "../../theme/colors";
+import { PriorityPill } from "./PriorityPill";
 
 /**
  * Memoized so re-renders of the queue (selection change, background refetch)
@@ -23,11 +24,10 @@ export const QueueRow = memo(function QueueRow({
   const snoozed = !!ticket.snoozedUntil;
   const style: CSSProperties = active
     ? {
-        border: "1px solid color-mix(in srgb, var(--accent) 33%, transparent)",
-        background: "color-mix(in srgb, var(--accent) 5%, transparent)",
+        border: `1px solid ${alpha(33)}`,
+        background: alpha(5),
       }
     : { border: "1px solid transparent", background: "transparent" };
-  const pc = snoozed ? "var(--color-muted-4)" : priorityColor[ticket.priority];
 
   return (
     <button
@@ -40,12 +40,7 @@ export const QueueRow = memo(function QueueRow({
     >
       <div className="mb-1.5 flex items-center gap-2">
         <span className="flex-none font-mono text-[10.5px] text-muted-2">{ticket.id}</span>
-        <span
-          className="flex-none rounded px-1.5 py-px font-mono text-[9px] font-semibold tracking-[.04em] uppercase"
-          style={{ color: pc, background: `${pc}15`, border: `1px solid ${pc}40` }}
-        >
-          {ticket.priority}
-        </span>
+        <PriorityPill priority={ticket.priority} muted={snoozed} />
         {snoozed ? (
           <span className="ml-auto flex flex-none items-center gap-1 font-mono text-[10px] text-muted-4">
             💤 {ticket.snoozedUntil}

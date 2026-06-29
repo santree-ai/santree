@@ -11,7 +11,7 @@
 import type { ReactNode } from "react";
 
 import { useEdgeResize } from "../../lib/useEdgeResize";
-import { SIDEBAR, useApp } from "../../state/AppContext";
+import { SIDEBAR, useAppUi } from "../../state/AppContext";
 import { ChromeControls } from "./ChromeControls";
 import { NavTabs } from "./NavTabs";
 import { RepoSelector } from "./RepoSelector";
@@ -39,7 +39,7 @@ interface ViewChromeProps {
  * restores a sensible size). See {@link useEdgeResize} for the resize mechanics.
  */
 function SidebarResizer() {
-  const { sidebarWidth, setSidebarWidth, setSidebarCollapsed } = useApp();
+  const { sidebarWidth, setSidebarWidth, setSidebarCollapsed } = useAppUi();
   const resize = useEdgeResize({
     cssVar: "--sidebar-width",
     width: sidebarWidth,
@@ -70,7 +70,7 @@ export function ViewChrome({
   rightCell,
   showRepoSelector = true,
 }: ViewChromeProps) {
-  const { sidebarCollapsed, toggleSidebar } = useApp();
+  const { sidebarCollapsed, toggleSidebar } = useAppUi();
 
   const hasSidebar = sidebar !== undefined;
   // Views with a custom leftCell (Settings) aren't collapsible — their left cell

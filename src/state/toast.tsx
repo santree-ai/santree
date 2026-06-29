@@ -95,7 +95,17 @@ export function showToast(variant: ToastVariant, message: string, opts: ToastOpt
   }
 
   const id = nextId++;
-  toasts = [...toasts, { id, variant, message, title: opts.title, duration }].slice(-MAX_VISIBLE);
+  const next = [...toasts, { id, variant, message, title: opts.title, duration }];
+  while (next.length > MAX_VISIBLE) {
+    // Drop the oldest *non-error* first so a transient success can't push an
+    // unread error off-screen; only evict an error if nothing else is left.
+    const i = next.findIndex((t) => t.variant !== "error");
+    const [dropped] = next.splice(i === -1 ? 0 : i, 1);
+    const timer = timers.get(dropped.id);
+    if (timer) clearTimeout(timer);
+    timers.delete(dropped.id);
+  }
+  toasts = next;
   emit();
   scheduleDismiss(id, duration);
   return id;

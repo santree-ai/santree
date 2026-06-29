@@ -1,8 +1,9 @@
 /** The Settings tab: app-wide defaults and per-repo overrides.
  *
  * This file is just the shell — scope (app/repo) + section state, the sidebar
- * nav, and a data-driven dispatch to one section pane. Each pane lives in
- * `sections/`; shared widgets in `widgets.tsx`. */
+ * nav (flat items plus grouped sections like "Actions"), and a data-driven
+ * dispatch to one section pane. Each pane lives in `sections/`; shared widgets
+ * in `widgets.tsx`. */
 
 import { useCanGoBack, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
@@ -12,18 +13,21 @@ import { ViewChrome } from "../../components/chrome/ViewChrome";
 import {
   AgentsIcon,
   BackArrowIcon,
-  BoltIcon,
   ContrastIcon,
   LinearLogo,
+  PlayIcon,
   PlugIcon,
+  TelescopeIcon,
 } from "../../components/icons";
 import { Tabs } from "../../components/primitives";
 import { useApp } from "../../state/AppContext";
-import { ActionsSection } from "./sections/Actions";
+import { alpha } from "../../theme/colors";
+import { TriageActionSection } from "./sections/Actions";
 import { AgentsSection } from "./sections/Agents";
 import { AppearanceSection } from "./sections/Appearance";
 import { IntegrationsSection } from "./sections/Integrations";
 import { RepoLinearSection } from "./sections/RepoLinear";
+import { WorkSection } from "./sections/Work";
 
 type Scope = "app" | "repo";
 
@@ -35,8 +39,38 @@ interface SectionDef {
   render: (repo: string) => ReactNode;
 }
 
+/** A labelled group of sections, rendered under a header in the sidebar. */
+interface NavGroup {
+  group: string;
+  sections: SectionDef[];
+}
+
+type NavNode = SectionDef | NavGroup;
+
+const isGroup = (n: NavNode): n is NavGroup => "group" in n;
+/** All sections, flattened out of any groups, for lookup by key. */
+const flatten = (nodes: NavNode[]): SectionDef[] =>
+  nodes.flatMap((n) => (isGroup(n) ? n.sections : [n]));
+
 const ICON_SIZE = 15;
-const APP_SECTIONS: SectionDef[] = [
+
+// The "Actions" group entries, shared between scopes. App scope passes no repo
+// (so each pane shows its app-level defaults); repo scope passes the repo (so
+// the panes render the per-repo override form).
+const triageEntry = (forRepo: boolean): SectionDef => ({
+  key: "triage",
+  label: "Triage",
+  icon: <TelescopeIcon size={ICON_SIZE} />,
+  render: (repo) => <TriageActionSection repo={forRepo ? repo : undefined} />,
+});
+const workEntry = (forRepo: boolean): SectionDef => ({
+  key: "work",
+  label: "Work",
+  icon: <PlayIcon size={ICON_SIZE} />,
+  render: (repo) => <WorkSection repo={repo} forRepo={forRepo} />,
+});
+
+const APP_NAV: NavNode[] = [
   {
     key: "integrations",
     label: "Integrations",
@@ -56,26 +90,32 @@ const APP_SECTIONS: SectionDef[] = [
     render: () => <AgentsSection />,
   },
   {
-    key: "actions",
-    label: "Actions",
-    icon: <BoltIcon size={ICON_SIZE} />,
-    render: () => <ActionsSection />,
+    group: "Actions",
+    sections: [triageEntry(false), workEntry(false)],
   },
 ];
-const REPO_SECTIONS: SectionDef[] = [
+
+const REPO_NAV: NavNode[] = [
   {
     key: "linear",
     label: "Linear",
     icon: <LinearLogo size={ICON_SIZE} />,
     render: (repo) => <RepoLinearSection repo={repo} />,
   },
-  {
-    key: "actions",
-    label: "Actions",
-    icon: <BoltIcon size={ICON_SIZE} />,
-    render: (repo) => <ActionsSection repo={repo} />,
-  },
+  { group: "Actions", sections: [triageEntry(true), workEntry(true)] },
 ];
+
+/** The default section key for a scope (the first one in its nav). */
+const defaultSection = (nodes: NavNode[]): string => flatten(nodes)[0].key;
+
+/** Resolve a (possibly stale/deep-linked) section key for a scope's nav. The
+ *  legacy `?section=actions` deep-link now lands on the Triage action. */
+function resolveSection(nodes: NavNode[], key: string | undefined): SectionDef {
+  const sections = flatten(nodes);
+  // Legacy deep-links: `actions` → Triage; the former `issues`/`trees` → Work.
+  const wanted = key === "actions" ? "triage" : key === "issues" || key === "trees" ? "work" : key;
+  return sections.find((s) => s.key === wanted) ?? sections[0];
+}
 
 export function SettingsView() {
   const { activeRepo } = useApp();
@@ -86,18 +126,16 @@ export function SettingsView() {
   // Land on a deep-linked section (e.g. `/settings?section=actions`) when given.
   const { section: initialSection } = useSearch({ strict: false }) as { section?: string };
   const [scope, setScope] = useState<Scope>("app");
-  const [section, setSection] = useState<string>(initialSection ?? "integrations");
+  const [section, setSection] = useState<string>(() => resolveSection(APP_NAV, initialSection).key);
 
   const goBack = () => (canGoBack ? router.history.back() : navigate({ to: "/" }));
   const switchScope = (next: Scope) => {
     setScope(next);
-    setSection(next === "app" ? "integrations" : "linear");
+    setSection(defaultSection(next === "app" ? APP_NAV : REPO_NAV));
   };
 
-  const sections = scope === "app" ? APP_SECTIONS : REPO_SECTIONS;
-  // `section` comes from an unvalidated URL param, so fall back to the first
-  // section for unknown deep-links instead of rendering a blank pane.
-  const active = sections.find((s) => s.key === section) ?? sections[0];
+  const nav = scope === "app" ? APP_NAV : REPO_NAV;
+  const active = resolveSection(nav, section);
 
   const backCell = (
     <div className="flex items-center pl-1">
@@ -130,6 +168,29 @@ export function SettingsView() {
     />
   );
 
+  const navButton = (s: SectionDef) => {
+    const isActive = active.key === s.key;
+    const style: CSSProperties = isActive
+      ? {
+          background: alpha(15),
+          color: "var(--color-fg-bright)",
+          boxShadow: "inset 2px 0 0 var(--accent)",
+        }
+      : { background: "transparent", color: "var(--color-muted)" };
+    return (
+      <button
+        type="button"
+        key={s.key}
+        onClick={() => setSection(s.key)}
+        className="mb-0.5 flex w-full cursor-pointer items-center gap-2.5 rounded-md px-3 py-[9px] text-left text-[12.5px] hover:bg-hover"
+        style={style}
+      >
+        <span className="flex-none opacity-90">{s.icon}</span>
+        {s.label}
+      </button>
+    );
+  };
+
   return (
     <ViewChrome
       leftCell={backCell}
@@ -137,28 +198,18 @@ export function SettingsView() {
       showRepoSelector={false}
       sidebar={
         <div className="p-2">
-          {sections.map((s) => {
-            const isActive = active.key === s.key;
-            const style: CSSProperties = isActive
-              ? {
-                  background: "color-mix(in srgb, var(--accent) 15%, transparent)",
-                  color: "var(--color-fg-bright)",
-                  boxShadow: "inset 2px 0 0 var(--accent)",
-                }
-              : { background: "transparent", color: "var(--color-muted)" };
-            return (
-              <button
-                type="button"
-                key={s.key}
-                onClick={() => setSection(s.key)}
-                className="mb-0.5 flex w-full cursor-pointer items-center gap-2.5 rounded-md px-3 py-[9px] text-left text-[12.5px] hover:bg-hover"
-                style={style}
-              >
-                <span className="flex-none opacity-90">{s.icon}</span>
-                {s.label}
-              </button>
-            );
-          })}
+          {nav.map((node) =>
+            isGroup(node) ? (
+              <div key={node.group} className="mt-3 first:mt-0">
+                <div className="mb-1 px-3 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
+                  {node.group}
+                </div>
+                {node.sections.map(navButton)}
+              </div>
+            ) : (
+              navButton(node)
+            ),
+          )}
         </div>
       }
     >

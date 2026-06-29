@@ -25,18 +25,10 @@ import { useEffect, useMemo, useRef } from "react";
 import type { Task } from "../../bindings";
 import { usePrefetchOnHover } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
-import {
-  accentVar as accent,
-  agentSlug,
-  alpha,
-  colorForProject,
-  palette,
-  statusColor,
-  statusLabel,
-} from "../../theme/colors";
+import { alpha, PROJECT_FALLBACK, palette, statusColor, statusLabel } from "../../theme/colors";
 import { IssueNode, type IssueNodeData } from "./IssueNode";
-import { layoutGraph, NODE_H, NODE_H_RUNNING } from "./layout";
-import { deriveIssueState, MAX_STAGE, sessionState, useIssues, useStageHelpers } from "./model";
+import { layoutGraph } from "./layout";
+import { deriveIssueState, useIssues } from "./model";
 import { ProjectNode, type ProjectNodeData } from "./ProjectNode";
 
 const nodeTypes = { issue: IssueNode, project: ProjectNode };
@@ -49,7 +41,6 @@ function Flow() {
     tasks,
     byId,
     projectMeta,
-    sessionByTask,
     worktreeIds,
     selected,
     focusProject,
@@ -64,7 +55,6 @@ function Flow() {
     toggleActionableOnly,
   } = useIssues();
   const { activeRepo, theme } = useApp();
-  const { pctFor, labelFor } = useStageHelpers();
   const prefetchOnHover = usePrefetchOnHover(activeRepo);
   const { fitView } = useReactFlow();
 
@@ -76,13 +66,7 @@ function Flow() {
   );
   const visibleIds = useMemo(() => new Set(visibleTasks.map((t) => t.id)), [visibleTasks]);
 
-  const { pos, boxes } = useMemo(
-    () =>
-      layoutGraph(visibleTasks, (t) =>
-        sessionState(sessionByTask.get(t.id)) === "running" ? NODE_H_RUNNING : NODE_H,
-      ),
-    [visibleTasks, sessionByTask],
-  );
+  const { pos, boxes } = useMemo(() => layoutGraph(visibleTasks), [visibleTasks]);
 
   const nodes = useMemo<(IssueRFNode | ProjectRFNode)[]>(() => {
     const projectNodes: ProjectRFNode[] = boxes.map((b) => {
@@ -99,25 +83,28 @@ function Flow() {
           project: b.project,
           width: b.width,
           height: b.height,
-          color: meta?.color ?? colorForProject(b.project),
+          color: meta?.color ?? PROJECT_FALLBACK,
           icon: meta?.icon ?? null,
           count: b.count,
           dim: focusProject !== null && focusProject !== b.project,
+          focused: focusProject === b.project,
         },
       };
     });
 
     const issueNodes: IssueRFNode[] = visibleTasks.map((t) => {
       const grayed = !t.actionable;
-      const session = sessionByTask.get(t.id);
-      const st = deriveIssueState(t, session, { selected: !!selected[t.id], baseFor });
+      // NB: `hasWorktree` is intentionally NOT passed here — the graph reads
+      // worktree state from context inside IssueNode so a worktrees refetch never
+      // rebuilds this nodes array (which blanks the canvas mid-fitView). The
+      // sidebar still passes it (no React Flow, no such constraint).
+      const st = deriveIssueState(t, { selected: !!selected[t.id], baseFor });
       const dim = focusProject !== null && t.project !== focusProject;
 
       // The card's actual border/background/shadow is derived from these stable
       // PRIMITIVE flags inside IssueNode — passing a fresh `cardStyle` object
-      // here would defeat IssueNode's memo (every session tick rebuilds this
-      // array), so we keep `data` to value-comparable primitives only.
-      const stage = session ? Math.min(session.stage, MAX_STAGE) : 0;
+      // here would defeat IssueNode's memo, so `data` stays value-comparable
+      // primitives only.
       const p = pos.get(t.id) ?? { x: 0, y: 0 };
       return {
         id: t.id,
@@ -136,36 +123,12 @@ function Flow() {
           ready: st.ready,
           chainBase: st.chainable ? st.chainBase : null,
           blocked: st.blocked,
-          running: st.running,
-          done: st.done,
-          pct: session ? pctFor(stage) : 0,
-          runColor: st.runColor,
-          stageLabel: session
-            ? // Stage 2 ("working") shows the agent's name instead of the generic
-              // stage label, per the design.
-              session.stage === 2
-              ? `${agentSlug(session.agent)} working`
-              : labelFor(stage)
-            : "",
-          prLabel: st.done && session ? `PR #${session.pr}` : "",
-          diffLabel: st.done && session ? `+${session.add} −${session.del}` : "",
         },
       };
     });
 
     return [...projectNodes, ...issueNodes];
-  }, [
-    visibleTasks,
-    boxes,
-    projectMeta,
-    pos,
-    sessionByTask,
-    selected,
-    focusProject,
-    baseFor,
-    pctFor,
-    labelFor,
-  ]);
+  }, [visibleTasks, boxes, projectMeta, pos, selected, focusProject, baseFor]);
 
   const edges = useMemo<Edge[]>(() => {
     const list: Edge[] = [];
@@ -174,16 +137,16 @@ function Flow() {
         if (!visibleIds.has(depId)) continue;
         const a = byId.get(depId);
         if (!a) continue;
-        const dep = sessionByTask.get(depId);
-        const active = !!dep && dep.stage >= 1;
+        // A blocker with a worktree is being worked on — draw its edge as the
+        // active/"chained" dependency (accent-tinted, heavier).
         const chained = worktreeIds.has(depId);
         const crossProject = a.project !== t.project;
 
-        let stroke = active ? accent : chained ? alpha(67) : "var(--color-line-strong)";
-        let width = active ? 2 : chained ? 1.8 : 1.5;
+        let stroke = chained ? alpha(67) : "var(--color-line-strong)";
+        let width = chained ? 1.8 : 1.5;
         let dash: string | undefined;
-        let opacity = active ? 0.95 : chained ? 0.85 : 0.6;
-        if (crossProject && !active) {
+        let opacity = chained ? 0.85 : 0.6;
+        if (crossProject) {
           stroke = palette.cross;
           dash = "4 5";
           opacity = 0.85;
@@ -195,7 +158,6 @@ function Flow() {
           source: depId,
           target: t.id,
           type: "smoothstep",
-          animated: active,
           style: { stroke, strokeWidth: width, opacity, strokeDasharray: dash },
           markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 16, height: 16 },
           // Softer corners than the smoothstep default.
@@ -204,12 +166,11 @@ function Flow() {
       }
     }
     return list;
-  }, [visibleTasks, visibleIds, byId, sessionByTask, worktreeIds]);
+  }, [visibleTasks, visibleIds, byId, worktreeIds]);
 
   // Fit once the nodes have been measured (and re-fit when the task set changes —
-  // e.g. switching repos). The `tasks` query is reference-stable across session
-  // ticks (only its session overlay changes, not the task array), so keying on
-  // the `tasks` reference itself avoids allocating a big id string every render.
+  // e.g. switching repos). Keying on the `tasks` reference itself (stable until a
+  // refetch returns a new array) avoids allocating a big id string every render.
   const initialized = useNodesInitialized();
   const fittedTasks = useRef<Task[] | null>(null);
   useEffect(() => {
@@ -226,13 +187,19 @@ function Flow() {
     fitView({ nodes: [{ id: reveal.id }], duration: 420, maxZoom: 1.1, padding: 0.6 });
   }, [reveal, pos, fitView]);
 
-  // Clicking a project header in the sidebar pans the graph onto that band.
+  // Clicking a project header in the sidebar pans the graph onto that band. Keyed
+  // on the reveal request (nonce) only — NOT `nodes`, which rebuilds constantly;
+  // depending on it re-fired fitView on every rebuild (a storm that blanks the
+  // canvas). The band node always exists by the time a user can click its header.
   useEffect(() => {
     if (!projectReveal) return;
-    const id = `project:${projectReveal.project}`;
-    if (!nodes.some((n) => n.id === id)) return;
-    fitView({ nodes: [{ id }], duration: 420, maxZoom: 1, padding: 0.22 });
-  }, [projectReveal, nodes, fitView]);
+    fitView({
+      nodes: [{ id: `project:${projectReveal.project}` }],
+      duration: 420,
+      maxZoom: 1,
+      padding: 0.22,
+    });
+  }, [projectReveal, fitView]);
 
   const onNodeClick = useMemo<NodeMouseHandler>(
     () => (e, node) => {

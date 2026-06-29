@@ -59,3 +59,15 @@ rand = "0.8"
 
 # Local app database (tokens, repo links, settings).
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+# Filesystem watcher for the Trees "Changes" view: notify wraps the native
+# backend (FSEvents/inotify); the debouncer collapses event bursts. See git_watch.rs.
+notify = "8.2.0"
+notify-debouncer-full = "0.7.0"
+
+# Jinja/Nunjucks-style templating for the AI prompts (commit / PR / work), kept as
+# readable files under prompts/ and rendered in prompts.rs.
+minijinja = "2"
+
+# Run the setup script under a PTY so its children (nix/make/…) see a TTY and emit
+# output live instead of block-buffering into a pipe. Same crate crates/pty uses.
+portable-pty = "0.9"

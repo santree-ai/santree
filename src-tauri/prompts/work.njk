@@ -1,0 +1,27 @@
+{% if ticket_content %}
+{{ ticket_content }}
+{% else %}
+Work on {{ ticket_id }}{% if title %}: {{ title }}{% endif %}.
+
+Note: the {{ ticket_id }} ticket could not be fetched directly. If a Linear MCP server is available, use it to fetch the ticket description, comments, and any relevant details for {{ ticket_id }}. Otherwise, proceed based on the branch/title context above.
+{% endif %}
+{% if custom_context %}
+## Additional context from the user
+
+{{ custom_context }}
+{% endif %}
+Review the codebase to understand the relevant areas and existing patterns.
+{% if mode == "plan" %}
+Create a detailed implementation plan with:
+- Step-by-step approach
+- Files to modify
+- Potential risks or edge cases
+
+Do NOT implement yet — just plan. Wait for approval before making changes.
+{% else %}
+Create an implementation plan, then implement the changes.
+
+After implementing:
+- Run tests if applicable
+- Ensure the code follows existing patterns
+{% endif %}

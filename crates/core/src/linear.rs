@@ -6,8 +6,8 @@ use crate::domain::{Priority, TaskStatus};
 /// Map a Linear workflow state to our coarse status.
 ///
 /// Linear state *types* are `triage | backlog | unstarted | started |
-/// completed | canceled`. We also honour a state *named* "…review…" as
-/// In Review, since many workspaces model review as a custom started state.
+/// completed | canceled | duplicate`. We also honour a state *named* "…review…"
+/// as In Review, since many workspaces model review as a custom started state.
 pub fn map_status(state_name: &str, state_type: &str) -> TaskStatus {
     match state_type {
         // Only a *started* state named "…review…" is In Review; a completed
@@ -16,7 +16,9 @@ pub fn map_status(state_name: &str, state_type: &str) -> TaskStatus {
         "started" => TaskStatus::InProgress,
         "unstarted" => TaskStatus::Todo,
         "backlog" | "triage" => TaskStatus::Backlog,
-        "completed" | "canceled" => TaskStatus::Done,
+        // `duplicate` is its own terminal type in Linear (distinct from
+        // `canceled`); all three are closed/non-actionable → Done.
+        "completed" | "canceled" | "duplicate" => TaskStatus::Done,
         _ => TaskStatus::Todo,
     }
 }
@@ -32,7 +34,10 @@ pub fn map_priority(n: i64) -> Priority {
         1 => Priority::Urgent,
         2 => Priority::High,
         3 => Priority::Medium,
-        _ => Priority::Low,
+        4 => Priority::Low,
+        // 0 is Linear's explicit "no priority"; anything unexpected also lands
+        // here rather than silently rendering as Low.
+        _ => Priority::None,
     }
 }
 
@@ -95,6 +100,9 @@ mod tests {
         assert_eq!(map_status("Code Review", "started"), TaskStatus::InReview);
         // A completed state named "Reviewed" is Done, not In Review.
         assert_eq!(map_status("Reviewed", "completed"), TaskStatus::Done);
+        // Linear's `duplicate` type is terminal — Done, never an actionable Todo.
+        assert_eq!(map_status("Duplicate", "duplicate"), TaskStatus::Done);
+        assert_eq!(map_status("Canceled", "canceled"), TaskStatus::Done);
     }
 
     #[test]
@@ -108,7 +116,8 @@ mod tests {
     fn priorities_map() {
         assert_eq!(map_priority(1), Priority::Urgent);
         assert_eq!(map_priority(4), Priority::Low);
-        assert_eq!(map_priority(0), Priority::Low);
+        // "No priority" (0) is its own variant, never Low.
+        assert_eq!(map_priority(0), Priority::None);
     }
 
     #[test]

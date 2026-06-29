@@ -1,0 +1,112 @@
+/** The commit box at the bottom of the Changes list: a message field with an
+ *  AI-draft button, honouring the "stage all before committing" preference. The
+ *  message is persisted per worktree (DB-backed), so it survives switching tabs,
+ *  closing the worktree, or an app crash — until you commit (which clears it) or
+ *  regenerate it with AI. Mount with `key={worktreeId}` for a per-worktree draft. */
+import { useEffect, useRef, useState } from "react";
+
+import { Spinner } from "../../components/primitives";
+import {
+  TREES_AUTO_PR_KEY,
+  TREES_STAGE_ALL_KEY,
+  useBoolSetting,
+  useCommitDraft,
+  useCommitMessage,
+  useCommitWorktree,
+  useSetCommitDraft,
+} from "../../lib/queries";
+import { BASE_ID, useTrees } from "./model";
+
+const SAVE_DEBOUNCE_MS = 500;
+
+export function CommitBox({
+  stagedCount,
+  totalCount,
+}: {
+  stagedCount: number;
+  totalCount: number;
+}) {
+  const { repo, activeId, openPrDialog, prsByWorktree } = useTrees();
+  const stageAll = useBoolSetting("app", TREES_STAGE_ALL_KEY).value;
+  const autoPr = useBoolSetting("app", TREES_AUTO_PR_KEY).value;
+
+  const { data: saved } = useCommitDraft(repo, activeId);
+  const { mutate: saveDraft } = useSetCommitDraft(repo);
+  const { mutate: draft, isPending: drafting } = useCommitMessage(repo);
+  const { mutate: commit, isPending: committing } = useCommitWorktree(repo);
+
+  const [message, setMessage] = useState("");
+  // The saved draft loads asynchronously; adopt it into the field exactly once so
+  // later cache updates (our own optimistic save) never clobber active typing.
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (!seeded.current && saved !== undefined) {
+      setMessage(saved ?? "");
+      seeded.current = true;
+    }
+  }, [saved]);
+
+  // Autosave the draft a beat after typing stops (no-op once it matches what's
+  // stored — our optimistic write makes `saved` equal `message` after a save).
+  useEffect(() => {
+    if (!seeded.current || message === (saved ?? "")) return;
+    const timer = setTimeout(() => saveDraft({ id: activeId, message }), SAVE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [message, saved, activeId, saveDraft]);
+
+  // With "stage all" on we commit everything; otherwise only what's staged.
+  const committable = stageAll ? totalCount : stagedCount;
+  const canCommit = committable > 0 && message.trim().length > 0 && !committing;
+
+  const onDraft = () => draft(activeId, { onSuccess: (msg) => setMessage(msg) });
+  const onCommit = () =>
+    commit(
+      { id: activeId, message: message.trim(), stageAll },
+      {
+        onSuccess: () => {
+          // The backend clears the persisted draft on commit; clear the field to
+          // match (autosave then settles the cache to empty).
+          setMessage("");
+          // "Open a PR on the first commit": prompt once there's a commit to PR
+          // and no PR exists yet. The dialog validates commits-ahead itself. Never
+          // for the base branch — you don't open a PR against main itself.
+          const hasPr = (prsByWorktree.get(activeId) ?? []).length > 0;
+          if (autoPr && !hasPr && activeId !== BASE_ID) openPrDialog(activeId);
+        },
+      },
+    );
+
+  return (
+    <div className="flex-none border-t border-line bg-panel p-2.5">
+      <div className="relative">
+        <textarea
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          placeholder={stageAll ? "Commit message (stages all)" : "Commit message"}
+          rows={3}
+          className="w-full resize-none rounded-lg border border-line-3 bg-input px-2.5 py-2 pr-8 font-mono text-[11.5px] text-fg-3 outline-none placeholder:text-muted-4 focus:border-line-strong"
+        />
+        <button
+          type="button"
+          onClick={onDraft}
+          disabled={drafting || committable === 0}
+          title="Draft a message with AI"
+          className="absolute top-2 right-2 flex h-6 w-6 cursor-pointer items-center justify-center rounded-md text-muted-2 hover:bg-hover hover:text-accent disabled:opacity-40"
+        >
+          {drafting ? <Spinner size={12} /> : <span className="text-[13px] leading-none">✨</span>}
+        </button>
+      </div>
+      <button
+        type="button"
+        onClick={onCommit}
+        disabled={!canCommit}
+        style={{ color: "var(--on-accent)" }}
+        className="mt-2 w-full cursor-pointer rounded-md border-none bg-accent py-1.5 text-[11.5px] font-semibold hover:opacity-90 disabled:cursor-default disabled:opacity-40"
+      >
+        {committing
+          ? "Committing…"
+          : `Commit${committable ? ` ${committable} file${committable === 1 ? "" : "s"}` : ""}`}
+      </button>
+    </div>
+  );
+}

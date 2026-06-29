@@ -1,56 +1,101 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
-import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { Worktree } from "../../bindings";
+import type { ReviewInbox, ReviewPr } from "../../bindings";
+import { ticketIdFor } from "./ReviewDetail";
+import { ReviewsSidebarView } from "./ReviewsSidebar";
 
-// Mock the generated bridge so the view renders against fixed data, never IPC.
-const worktrees: Worktree[] = [
-  {
-    id: "AK-201",
-    title: "Booking confirmation webhook + retries",
-    status: "InReview",
-    addLines: 186,
-    delLines: 12,
-    dirty: false,
-    ahead: 2,
-    agent: "Codex",
-    activity: "Running",
-    pr: { number: 483, checks: "Running" },
-  },
-  {
-    id: "AK-165",
-    title: "Spike: Auto learn from PCA",
-    status: "InProgress",
-    addLines: 540,
-    delLines: 121,
-    dirty: true,
-    ahead: 7,
-    agent: "Claude",
-    activity: "Running",
-    pr: null, // no PR → excluded from Reviews
-  },
-];
-
-vi.mock("../../bindings", () => ({
-  commands: { listWorktrees: () => Promise.resolve(worktrees) },
-}));
-
-import { ReviewsList } from "./ReviewsView";
-
-function renderWithQuery(ui: ReactNode) {
-  const queryClient = new QueryClient();
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+function pr(id: string, number: number, title: string, repo: string): ReviewPr {
+  return {
+    id,
+    number,
+    title,
+    url: `https://github.com/${repo}/pull/${number}`,
+    repo,
+    headRef: `you/pr-${number}`,
+    author: "you",
+    authorAvatarUrl: "",
+    state: "Open",
+    isDraft: false,
+    reviewDecision: "ReviewRequired",
+    checks: "Success",
+    additions: 10,
+    deletions: 2,
+    commentCount: 0,
+    reviewers: [],
+    updatedAt: "2026-06-29T12:00:00Z",
+  };
 }
 
-describe("ReviewsView", () => {
-  it("lists only worktrees that have an open PR", async () => {
-    renderWithQuery(<ReviewsList />);
+const inbox: ReviewInbox = {
+  mine: [pr("m1", 483, "Booking webhook retries", "acme/booking-agent")],
+  requested: [pr("r1", 512, "Tighten rate limiter", "acme/booking-agent")],
+  teams: [
+    {
+      slug: "eng",
+      name: "Engineering",
+      prs: [pr("t1", 498, "Migrate billing jobs", "acme/platform")],
+    },
+  ],
+};
 
-    expect(await screen.findByText("PR #483")).toBeInTheDocument();
-    expect(screen.getByText("Booking confirmation webhook + retries")).toBeInTheDocument();
-    // The worktree without a PR must not appear.
-    expect(screen.queryByText("Spike: Auto learn from PCA")).not.toBeInTheDocument();
+describe("ReviewsSidebarView", () => {
+  it("renders the three categories with their PRs", () => {
+    render(
+      <ReviewsSidebarView
+        inbox={inbox}
+        loading={false}
+        total={3}
+        activeId="m1"
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("My PRs")).toBeInTheDocument();
+    expect(screen.getByText("Review requests")).toBeInTheDocument();
+    expect(screen.getByText("Team · Engineering")).toBeInTheDocument();
+    expect(screen.getByText("Booking webhook retries")).toBeInTheDocument();
+    expect(screen.getByText("Tighten rate limiter")).toBeInTheDocument();
+    expect(screen.getByText("Migrate billing jobs")).toBeInTheDocument();
+  });
+
+  it("shows an empty state when there are no PRs", () => {
+    render(
+      <ReviewsSidebarView
+        inbox={{ mine: [], requested: [], teams: [] }}
+        loading={false}
+        total={0}
+        activeId={null}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("No open pull requests")).toBeInTheDocument();
+  });
+});
+
+describe("ticketIdFor", () => {
+  it("prefers the [AK-123] tag in the PR title", () => {
+    expect(ticketIdFor({ title: "[AK-201] Booking webhook", headRef: "you/whatever-9" })).toBe(
+      "AK-201",
+    );
+  });
+
+  it("falls back to the head branch, upper-cased", () => {
+    expect(
+      ticketIdFor({
+        title: "Hide unactioned service-ticket sources in AI explanation",
+        headRef: "jonathansandoval/msg-5033-ai-explanation-servi",
+      }),
+    ).toBe("MSG-5033");
+  });
+
+  it("does not false-match prose like 'service-ticket' in the title", () => {
+    expect(
+      ticketIdFor({ title: "Fix the service-ticket bug", headRef: "feature/no-id" }),
+    ).toBeNull();
+  });
+
+  it("returns null when neither title nor branch carries an id", () => {
+    expect(ticketIdFor({ title: "Plain title", headRef: "you/pr88" })).toBeNull();
   });
 });

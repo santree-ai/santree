@@ -10,6 +10,7 @@ import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import { useRepos } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
+import { alpha } from "../../theme/colors";
 import type { TerminalSource } from "./orchestrator";
 import { useTerminals } from "./TerminalsContext";
 
@@ -97,11 +98,7 @@ export function TerminalSurface() {
                       <div
                         key={t.key}
                         className="group mb-[3px] flex items-center rounded-md transition-colors hover:bg-hover"
-                        style={
-                          active
-                            ? { background: "color-mix(in srgb, var(--accent) 10%, transparent)" }
-                            : undefined
-                        }
+                        style={active ? { background: alpha(10) } : undefined}
                       >
                         <button
                           type="button"

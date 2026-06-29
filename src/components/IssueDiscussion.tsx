@@ -57,7 +57,12 @@ export const DiscussionContent = memo(function DiscussionContent({
   const total = countComments(detail.comments);
   return (
     <>
-      <Markdown>{detail.description}</Markdown>
+      {detail.description.trim() ? (
+        <Markdown>{detail.description}</Markdown>
+      ) : (
+        // Be explicit about an empty body — a blank space reads as "failed to load".
+        <p className="text-[12.5px] text-muted-4 italic">No description.</p>
+      )}
 
       {total > 0 && (
         <div className="mt-6">

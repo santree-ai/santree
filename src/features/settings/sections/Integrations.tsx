@@ -38,7 +38,7 @@ export function IntegrationsSection() {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="text-[13.5px] font-semibold text-fg-bright">Linear</span>
-              {connected && <Badge color="#3fb950">connected</Badge>}
+              {connected && <Badge color="var(--color-status-green)">connected</Badge>}
             </div>
             <div className="mt-[3px] text-[11.5px] text-muted-3">
               {connected
@@ -77,7 +77,7 @@ export function IntegrationsSection() {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="text-[13.5px] font-semibold text-fg-bright">GitHub</span>
-            <Badge color="#3fb950">connected</Badge>
+            <Badge color="var(--color-status-green)">connected</Badge>
           </div>
           <div className="mt-[3px] text-[11.5px] text-muted-3">
             akamai/agent · used for worktree pull requests

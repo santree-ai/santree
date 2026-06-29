@@ -6,7 +6,18 @@
  * Small, data-driven bits (graph dots, edge strokes, progress bars) read these
  * hex values via inline styles; structural styling uses Tailwind tokens.
  */
-import type { Activity, AgentKind, Priority, TaskStatus, Tone } from "../bindings";
+import type { CSSProperties } from "react";
+
+import type {
+  Activity,
+  AgentKind,
+  CheckRollup,
+  CheckStatus,
+  Priority,
+  PrState,
+  ReviewDecision,
+  TaskStatus,
+} from "../bindings";
 
 /** Raw palette — kept in sync with the `@theme` tokens in styles.css. */
 export const palette = {
@@ -43,6 +54,46 @@ export const statusColor: Record<TaskStatus, string> = {
   Done: palette.purple,
 };
 
+/**
+ * Color + label for a pull request's state on its chip. Uses GitHub Primer's
+ * standard state colors (dark-mode values) so the chip reads like GitHub:
+ *   open → neutral gray · merged → "done" purple · closed → danger red.
+ * Reserved for when CI/merge-queue status is wired: enqueued → attention yellow
+ * (`#d29922`), CI failing → danger red (`#f85149`).
+ */
+export const prStateMeta: Record<PrState, { color: string; label: string }> = {
+  Open: { color: "#848d97", label: "open" },
+  Merged: { color: "#a371f7", label: "merged" },
+  Closed: { color: "#f85149", label: "closed" },
+};
+
+/** Color + label for a PR's aggregate review decision (Reviews dashboard). */
+export const reviewDecisionMeta: Record<ReviewDecision, { color: string; label: string }> = {
+  Approved: { color: palette.green, label: "approved" },
+  ChangesRequested: { color: palette.red, label: "changes requested" },
+  ReviewRequired: { color: palette.amber, label: "review required" },
+  None: { color: palette.slate, label: "no review" },
+};
+
+/** Color + glyph + label for a PR's rolled-up CI checks (Reviews dashboard). */
+export const checkRollupMeta: Record<CheckRollup, { color: string; glyph: string; label: string }> =
+  {
+    Success: { color: palette.green, glyph: "✓", label: "checks passing" },
+    Failure: { color: palette.red, glyph: "✕", label: "checks failing" },
+    Pending: { color: palette.amber, glyph: "◴", label: "checks running" },
+    None: { color: palette.slate, glyph: "–", label: "no checks" },
+  };
+
+/** Color + glyph + label for a single CI check's status (Reviews Checks tab). */
+export const checkStatusMeta: Record<CheckStatus, { color: string; glyph: string; label: string }> =
+  {
+    Success: { color: palette.green, glyph: "✓", label: "passed" },
+    Failure: { color: palette.red, glyph: "✕", label: "failed" },
+    Pending: { color: palette.amber, glyph: "◴", label: "running" },
+    Skipped: { color: palette.slate, glyph: "↷", label: "skipped" },
+    Neutral: { color: palette.slate, glyph: "–", label: "neutral" },
+  };
+
 export const statusLabel: Record<TaskStatus, string> = {
   InReview: "In Review",
   InProgress: "In Progress",
@@ -56,6 +107,7 @@ export const priorityColor: Record<Priority, string> = {
   High: palette.amber,
   Medium: palette.blue,
   Low: palette.slate,
+  None: palette.muted,
 };
 
 export const activityColor: Record<Activity, string> = {
@@ -64,38 +116,9 @@ export const activityColor: Record<Activity, string> = {
   Idle: "#6b6b73",
 };
 
-export const projectColor: Record<string, string> = {
-  "Booking agent onboarding": palette.indigo,
-  "Agent Knowledge: Config (VOX+MSG)": palette.purple,
-  "No Project": palette.slate,
-};
-
-/** Color for a graph project box, defaulting to slate for unknown projects. */
-export function colorForProject(project: string): string {
-  return projectColor[project] ?? palette.slate;
-}
-
-/** Semantic terminal/diff tone → concrete color. */
-export function toneColor(tone: Tone): string {
-  switch (tone) {
-    // Neutral tones read from theme tokens so transcript text stays legible in
-    // both light and dark mode (the semantic tones below are shared).
-    case "Muted":
-      return "var(--color-muted)";
-    case "Default":
-      return "var(--color-fg-2)";
-    case "Accent":
-      return "var(--accent)";
-    case "Green":
-      return palette.green;
-    case "Cyan":
-      return palette.cyan;
-    case "Amber":
-      return palette.amber;
-    case "Red":
-      return palette.red;
-  }
-}
+/** Fallback color for a project box when the backend sends no `project_color`
+ *  (real projects ship one on the `Task` domain type). */
+export const PROJECT_FALLBACK = palette.slate;
 
 const AGENT_LABELS: Record<AgentKind, string> = {
   Claude: "Claude Code",
@@ -128,4 +151,19 @@ export const accentVar = "var(--accent)";
  */
 export function alpha(pct: number, color: string = accentVar): string {
   return `color-mix(in srgb, ${color} ${pct}%, transparent)`;
+}
+
+/**
+ * The shared "active / selected" accent treatment: a faint accent fill, a
+ * stronger accent border, and accent-colored text. Centralized so the fill/
+ * border percentages can't drift across the many toggle/segment/selected
+ * surfaces that hand-rolled the same `color-mix` trio with slightly different
+ * numbers. Spread it into an element's `style`.
+ */
+export function accentActiveStyle(): CSSProperties {
+  return {
+    background: alpha(13),
+    border: `1px solid ${alpha(40)}`,
+    color: accentVar,
+  };
 }

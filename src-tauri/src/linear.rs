@@ -22,6 +22,7 @@ use santree_core::domain::{
 use santree_core::{layout, linear as core_linear};
 
 use crate::db::Db;
+use crate::gql::Connection;
 use crate::settings;
 
 const CLIENT_ID: &str = "4be2738749371d7d3401061aabe2d11b";
@@ -32,9 +33,14 @@ const OAUTH_PORT: u16 = 8420;
 const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
 
 /// One process-wide HTTP client so the connection pool (and TLS sessions) are
-/// reused across every Linear request instead of rebuilt per call.
-static CLIENT: std::sync::LazyLock<reqwest::Client> =
-    std::sync::LazyLock::new(reqwest::Client::new);
+/// reused across every Linear request instead of rebuilt per call. A 30s timeout
+/// so a stalled request fails instead of hanging forever.
+static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("building Linear HTTP client")
+});
 
 // ── Org token store (SQLite) ──────────────────────────────────────────────
 
@@ -105,16 +111,19 @@ async fn resolve_org_slug(db: &Db, repo: &str) -> Result<Option<String>> {
     )
 }
 
-/// Bind (or clear, with `None`) the Linear org a repo uses.
+/// Bind (or clear, with `None`) the Linear org a repo uses. Updates the existing
+/// repo row only — binding an org for an unregistered repo used to INSERT a
+/// half-populated row (NULL path/tracker) that showed up as a phantom repo.
 pub async fn set_repo_org(db: &Db, repo: &str, slug: Option<String>) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO repos (name, linear_org_slug) VALUES (?, ?)
-         ON CONFLICT(name) DO UPDATE SET linear_org_slug = excluded.linear_org_slug",
-    )
-    .bind(repo)
-    .bind(slug)
-    .execute(db)
-    .await?;
+    let affected = sqlx::query("UPDATE repos SET linear_org_slug = ? WHERE name = ?")
+        .bind(slug)
+        .bind(repo)
+        .execute(db)
+        .await?
+        .rows_affected();
+    if affected == 0 {
+        bail!("repo '{repo}' is not registered");
+    }
     Ok(())
 }
 
@@ -134,6 +143,23 @@ struct TokenResponse {
     expires_in: i64,
 }
 
+/// Per-org locks serializing token refresh. Linear rotates the refresh token on
+/// each use, so two commands refreshing the same org concurrently (Issues +
+/// Triage both load on startup) would race: the second sends an already-consumed
+/// token and fails — or both persist, last-writer-wins. We single-flight per slug.
+static REFRESH_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn refresh_lock(slug: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    REFRESH_LOCKS
+        .lock()
+        .unwrap()
+        .entry(slug.to_string())
+        .or_default()
+        .clone()
+}
+
 /// A valid access token for `slug`, refreshing + persisting if near expiry.
 async fn valid_token(db: &Db, slug: &str) -> Result<String> {
     let row = org_row(db, slug)
@@ -142,6 +168,18 @@ async fn valid_token(db: &Db, slug: &str) -> Result<String> {
     if now_ms() < row.expires_at - REFRESH_SKEW_MS {
         return Ok(row.access_token);
     }
+
+    // Near expiry: serialize the refresh per org, then re-read — another caller
+    // may have refreshed while we waited, so we'd reuse its fresh token.
+    let lock = refresh_lock(slug);
+    let _guard = lock.lock().await;
+    let row = org_row(db, slug)
+        .await?
+        .ok_or_else(|| anyhow!("org {slug} not connected"))?;
+    if now_ms() < row.expires_at - REFRESH_SKEW_MS {
+        return Ok(row.access_token);
+    }
+
     let res = CLIENT
         .post(TOKEN_URL)
         .form(&[
@@ -169,11 +207,16 @@ async fn valid_token(db: &Db, slug: &str) -> Result<String> {
 
 // ── GraphQL fetch ────────────────────────────────────────────────────────
 
+// NOTE: Linear caps query complexity at 10000. This query sits near that ceiling
+// — `assignedIssues(first: 100)` × `inverseRelations(first: N)` × the per-issue
+// fields (incl. `assignee`) is the dominant cost. `first: 12` on the relations
+// keeps it under the limit *with* assignee on both levels; raising either count,
+// or adding fields, can push it over (the API then 400s and the graph goes empty).
 const ASSIGNED_ISSUES_QUERY: &str = r#"
 query AssignedIssues {
   viewer {
     assignedIssues(
-      filter: { state: { type: { nin: ["completed", "canceled"] } } }
+      filter: { state: { type: { nin: ["completed", "canceled", "duplicate"] } } }
       orderBy: updatedAt
       first: 100
     ) {
@@ -182,10 +225,11 @@ query AssignedIssues {
         title
         state { name type }
         project { name color icon }
-        inverseRelations(first: 20) {
+        assignee { name displayName avatarUrl }
+        inverseRelations(first: 12) {
           nodes {
             type
-            issue { identifier title state { name type } project { name color icon } }
+            issue { identifier title state { name type } project { name color icon } assignee { name displayName avatarUrl } }
           }
         }
       }
@@ -212,6 +256,8 @@ struct RelatedIssue {
     state: Option<StateNode>,
     #[serde(default)]
     project: Option<ProjectNode>,
+    #[serde(default)]
+    assignee: Option<UserNode>,
 }
 
 #[derive(Deserialize)]
@@ -221,21 +267,6 @@ struct RelationNode {
     /// The issue on the *other* side of an inverse relation (this issue's blocker).
     #[serde(default)]
     issue: Option<RelatedIssue>,
-}
-
-/// A GraphQL `{ nodes: [...] }` connection. One generic wrapper instead of a
-/// near-identical `*Conn` struct per query. `Default` is hand-written because the
-/// derive would needlessly require `T: Default` — an absent connection is simply
-/// no nodes.
-#[derive(Deserialize)]
-struct Connection<T> {
-    #[serde(default = "Vec::new")]
-    nodes: Vec<T>,
-}
-impl<T> Default for Connection<T> {
-    fn default() -> Self {
-        Self { nodes: Vec::new() }
-    }
 }
 
 #[derive(Deserialize)]
@@ -256,6 +287,8 @@ struct IssueNode {
     state: Option<StateNode>,
     project: Option<ProjectNode>,
     #[serde(default)]
+    assignee: Option<UserNode>,
+    #[serde(default)]
     inverse_relations: Connection<RelationNode>,
 }
 
@@ -269,7 +302,22 @@ struct QueryData {
     viewer: Viewer,
 }
 
-const TERMINAL_STATES: [&str; 2] = ["completed", "canceled"];
+const TERMINAL_STATES: [&str; 3] = ["completed", "canceled", "duplicate"];
+
+/// An assignee's `(name, avatar_url)` for a Task — the full name (falling back to
+/// the @handle), and the avatar URL. `(None, None)` when unassigned.
+fn assignee_fields(u: Option<UserNode>) -> (Option<String>, Option<String>) {
+    match u {
+        Some(u) => {
+            let name = u
+                .name
+                .filter(|s| !s.is_empty())
+                .or(u.display_name.filter(|s| !s.is_empty()));
+            (name, u.avatar_url)
+        }
+        None => (None, None),
+    }
+}
 
 /// A project's `(name, color, icon)` for a Task, defaulting the name when unset.
 fn project_fields(p: Option<ProjectNode>) -> (String, Option<String>, Option<String>) {
@@ -315,6 +363,7 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
     }
 
     let (project, project_color, project_icon) = project_fields(node.project);
+    let (assignee, assignee_avatar_url) = assignee_fields(node.assignee);
     let task = Task {
         id: node.identifier,
         title: node.title,
@@ -327,6 +376,8 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
         ready: core_linear::is_ready(&done_flags) && status.is_startable(),
         blocked_by,
         actionable: true,
+        assignee,
+        assignee_avatar_url,
         x: 0,
         y: 0,
         add_lines: 0,
@@ -344,6 +395,7 @@ fn map_related(issue: RelatedIssue) -> Task {
         type_: "unstarted".into(),
     });
     let (project, project_color, project_icon) = project_fields(issue.project);
+    let (assignee, assignee_avatar_url) = assignee_fields(issue.assignee);
     Task {
         id: issue.identifier,
         title: issue.title,
@@ -354,6 +406,8 @@ fn map_related(issue: RelatedIssue) -> Task {
         ready: false,
         blocked_by: vec![],
         actionable: false,
+        assignee,
+        assignee_avatar_url,
         x: 0,
         y: 0,
         add_lines: 0,
@@ -362,9 +416,8 @@ fn map_related(issue: RelatedIssue) -> Task {
 }
 
 /// Fetch the assigned issues for `repo`'s org and lay them out as a graph, or
-/// `None` when no org is connected (so the command can fall back to sample data,
-/// mirroring the triage seam). Returning `None` instead of erroring lets a
-/// not-yet-connected repo show the built-in graph rather than an error state.
+/// `None` when no org is connected. Returning `None` instead of erroring lets a
+/// not-yet-connected repo show an empty graph rather than an error state.
 pub async fn list_issues(db: &Db, repo: &str) -> Result<Option<Vec<Task>>> {
     let Some(token) = repo_token(db, repo).await? else {
         return Ok(None);
@@ -423,27 +476,12 @@ pub async fn auth_status(db: &Db, repo: &str) -> Result<LinearStatus> {
 
 /// A valid access token for the org this repo uses, or `None` when no org is
 /// connected. Returning `None` (rather than erroring) lets each live command
-/// resolve the org exactly once and fall back to mock data when not connected.
+/// resolve the org exactly once and return an empty result when not connected.
 async fn repo_token(db: &Db, repo: &str) -> Result<Option<String>> {
     let Some(slug) = resolve_org_slug(db, repo).await? else {
         return Ok(None);
     };
     valid_token(db, &slug).await.map(Some)
-}
-
-/// A single GraphQL error from Linear's `errors` array.
-#[derive(Deserialize)]
-struct GqlError {
-    message: String,
-}
-
-#[derive(Deserialize)]
-struct Envelope<T> {
-    data: Option<T>,
-    /// Linear returns HTTP 200 with `data: null` + populated `errors` on
-    /// permission/validation failures — surfaced instead of "empty response".
-    #[serde(default)]
-    errors: Vec<GqlError>,
 }
 
 /// POST a GraphQL query and return the typed `data` payload.
@@ -452,27 +490,11 @@ async fn graphql<T: DeserializeOwned>(
     query: &str,
     variables: serde_json::Value,
 ) -> Result<T> {
-    let res = CLIENT
+    let req = CLIENT
         .post(GRAPHQL_URL)
         .bearer_auth(token)
-        .json(&serde_json::json!({ "query": query, "variables": variables }))
-        .send()
-        .await
-        .context("Linear GraphQL request")?;
-    if !res.status().is_success() {
-        bail!("Linear API returned {}", res.status());
-    }
-    let env: Envelope<T> = res.json().await.context("decoding Linear response")?;
-    if !env.errors.is_empty() {
-        let joined = env
-            .errors
-            .iter()
-            .map(|e| e.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ");
-        bail!("Linear: {joined}");
-    }
-    env.data.ok_or_else(|| anyhow!("empty Linear response"))
+        .json(&serde_json::json!({ "query": query, "variables": variables }));
+    crate::gql::post(req, "Linear").await
 }
 
 #[derive(Deserialize)]
@@ -549,18 +571,42 @@ fn actor(
     ("Unknown".into(), None)
 }
 
-// The triage queue is the team triage inbox for the teams the viewer belongs to
-// — issues in a `triage` workflow state, regardless of assignee (most triage
-// items are unassigned until someone picks them up). We scope to the viewer's
-// teams so a large workspace's other inboxes don't flood the list; if the
-// viewer is on no teams we fall back to the workspace-wide triage inbox.
+// The triage queue is the on-call inbox for the teams the viewer belongs to that
+// run a triage rotation — issues in a `triage` workflow state, regardless of
+// assignee (most triage items are unassigned until someone picks them up). We
+// scope to *rotation* teams only: a team without a triage rotation has no on-call
+// owner, so its triage state isn't anyone's responsibility and would just be
+// noise here. This mirrors the schedule strips (build via `triage_schedule`), so
+// the teams shown there are exactly the teams whose issues land in this queue.
 
-const VIEWER_TEAMS_QUERY: &str =
-    "query { viewer { teamMemberships(first: 100) { nodes { team { key } } } } }";
+const VIEWER_IDENTITY_QUERY: &str = r#"
+query {
+  viewer {
+    id
+    teamMemberships(first: 100) {
+      nodes { team { key triageResponsibility { timeSchedule { entries { startsAt } } } } }
+    }
+  }
+}
+"#;
 
 #[derive(Deserialize)]
+struct VtSchedule {
+    #[serde(default)]
+    entries: Vec<serde_json::Value>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VtResp {
+    #[serde(default)]
+    time_schedule: Option<VtSchedule>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct VtTeam {
     key: String,
+    #[serde(default)]
+    triage_responsibility: Option<VtResp>,
 }
 #[derive(Deserialize)]
 struct VtMembership {
@@ -571,6 +617,8 @@ struct VtMembership {
 #[serde(rename_all = "camelCase")]
 struct VtViewer {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     team_memberships: Option<Connection<VtMembership>>,
 }
 #[derive(Deserialize)]
@@ -578,31 +626,30 @@ struct VtData {
     viewer: Option<VtViewer>,
 }
 
-/// The signed-in user's id, for deciding which triage issues are "mine".
-async fn viewer_id(token: &str) -> Result<Option<String>> {
-    #[derive(Deserialize)]
-    struct V {
-        viewer: IdNode,
-    }
-    #[derive(Deserialize)]
-    struct IdNode {
-        #[serde(default)]
-        id: Option<String>,
-    }
-    let data: V = graphql(token, "query { viewer { id } }", serde_json::json!({})).await?;
-    Ok(data.viewer.id)
-}
-
-async fn viewer_team_keys(token: &str) -> Result<Vec<String>> {
-    let data: VtData = graphql(token, VIEWER_TEAMS_QUERY, serde_json::json!({})).await?;
-    Ok(data
-        .viewer
-        .and_then(|v| v.team_memberships)
+/// The signed-in user's id (for "mine") and the keys of their *rotation* teams
+/// (teams whose triage responsibility is backed by a non-empty time schedule) in
+/// one round-trip — both hang off the same `viewer` root. Non-rotation teams are
+/// dropped so the queue stays scoped to actual on-call inboxes.
+async fn viewer_triage_scope(token: &str) -> Result<(Option<String>, Vec<String>)> {
+    let data: VtData = graphql(token, VIEWER_IDENTITY_QUERY, serde_json::json!({})).await?;
+    let Some(viewer) = data.viewer else {
+        return Ok((None, Vec::new()));
+    };
+    let keys = viewer
+        .team_memberships
         .map(|c| c.nodes)
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|m| m.team.map(|t| t.key))
-        .collect())
+        .filter_map(|m| m.team)
+        .filter(|t| {
+            t.triage_responsibility
+                .as_ref()
+                .and_then(|r| r.time_schedule.as_ref())
+                .is_some_and(|s| !s.entries.is_empty())
+        })
+        .map(|t| t.key)
+        .collect();
+    Ok((viewer.id, keys))
 }
 
 const TRIAGE_INBOX_QUERY: &str = r#"
@@ -654,23 +701,22 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
     let Some(token) = repo_token(db, repo).await? else {
         return Ok(None);
     };
-    // The viewer (for "mine") and their teams (to scope the inbox) are
-    // independent round-trips, so fetch them concurrently. A failure in either
-    // silently changes ownership/scoping semantics, so it's logged and degraded
-    // rather than swallowed: no viewer → nothing is "mine"; no teams → the
-    // workspace-wide triage inbox.
-    let (me, keys) = tokio::join!(viewer_id(&token), viewer_team_keys(&token));
-    let me = me
-        .map_err(|e| tracing::warn!(error = %e, "triage: viewer id lookup failed"))
-        .ok()
-        .flatten();
-    let keys = keys
-        .map_err(|e| tracing::warn!(error = %e, "triage: team membership lookup failed"))
-        .unwrap_or_default();
-    let mut filter = serde_json::json!({ "state": { "type": { "eq": "triage" } } });
-    if !keys.is_empty() {
-        filter["team"] = serde_json::json!({ "key": { "in": keys } });
+    // The viewer (for "mine") and their *rotation* teams (to scope the inbox) come
+    // from one query. A failure degrades rather than being swallowed: no scope →
+    // nothing is "mine" and the queue is empty.
+    let (me, keys) = viewer_triage_scope(&token)
+        .await
+        .map_err(|e| tracing::warn!(error = %e, "triage: viewer scope lookup failed"))
+        .unwrap_or((None, Vec::new()));
+    // No rotation team → no on-call inbox. Show an empty queue rather than
+    // flooding the list with the whole workspace's (un-owned) triage issues.
+    if keys.is_empty() {
+        return Ok(Some(Vec::new()));
     }
+    let filter = serde_json::json!({
+        "state": { "type": { "eq": "triage" } },
+        "team": { "key": { "in": keys } },
+    });
     let data: TriageInboxData = graphql(
         &token,
         TRIAGE_INBOX_QUERY,
@@ -1005,8 +1051,85 @@ pub async fn set_issue_state(
     if data.issue_update.map(|u| u.success).unwrap_or(false) {
         Ok(Some(()))
     } else {
-        bail!("Linear rejected the status change (the connected token may be read-only — reconnect Linear to grant write access)")
+        // `graphql()` already surfaces any `errors` array (permission/scope
+        // problems land there), so reaching here means a bare `success: false`
+        // with no error — don't guess a specific cause.
+        bail!("Linear rejected the status change")
     }
+}
+
+const STARTED_STATE_QUERY: &str = r#"
+query StartedState($id: String!) {
+  issue(id: $id) {
+    state { type }
+    team {
+      states(filter: { type: { eq: "started" } }) {
+        nodes { id position }
+      }
+    }
+  }
+}
+"#;
+
+/// Move an issue into its team's "started" (In Progress) workflow state — used
+/// when a worktree begins so Linear reflects active work. Best-effort: no token →
+/// `Ok(None)`; already started/done/canceled → left as-is. Picks the lowest-
+/// position "started" state. Requires a write-scoped token.
+pub async fn move_issue_to_started(db: &Db, repo: &str, issue_id: &str) -> Result<Option<()>> {
+    #[derive(Deserialize)]
+    struct StateType {
+        #[serde(rename = "type")]
+        kind: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct StartedState {
+        id: String,
+        #[serde(default)]
+        position: f64,
+    }
+    #[derive(Deserialize)]
+    struct TeamStates {
+        states: Connection<StartedState>,
+    }
+    #[derive(Deserialize)]
+    struct IssueNode {
+        #[serde(default)]
+        state: Option<StateType>,
+        #[serde(default)]
+        team: Option<TeamStates>,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        issue: Option<IssueNode>,
+    }
+
+    let Some(token) = repo_token(db, repo).await? else {
+        return Ok(None);
+    };
+    let data: Data = graphql(
+        &token,
+        STARTED_STATE_QUERY,
+        serde_json::json!({ "id": issue_id }),
+    )
+    .await?;
+    let Some(issue) = data.issue else {
+        return Ok(None);
+    };
+    // Never drag an issue backwards — only promote one that hasn't started yet.
+    let kind = issue.state.and_then(|s| s.kind).unwrap_or_default();
+    if matches!(kind.as_str(), "started" | "completed" | "canceled" | "duplicate") {
+        return Ok(Some(()));
+    }
+    let mut states = issue.team.map(|t| t.states.nodes).unwrap_or_default();
+    states.sort_by(|a, b| {
+        a.position
+            .partial_cmp(&b.position)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let Some(target) = states.first() else {
+        return Ok(None); // team has no started state — nothing to do
+    };
+    set_issue_state(db, repo, issue_id, &target.id).await
 }
 
 const TRIAGE_SCHEDULES_QUERY: &str = r#"
@@ -1374,10 +1497,57 @@ async fn inline_images(client: &reqwest::Client, md: &str, token: &str) -> Strin
     out
 }
 
+/// Cap on a single inlined image so one huge attachment can't balloon the IPC
+/// payload / memory (the data URI is ~1.33× the raw bytes on top of that).
+const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Session cache of fetched image data URIs (keyed by URL), so reopening a ticket
+/// doesn't re-download its images. Bounded by *total bytes* with FIFO eviction —
+/// a count cap could still pin hundreds of MB since each entry is up to
+/// `MAX_IMAGE_BYTES`. The token is stable for the session, so URL is a safe key.
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct ImageCache {
+    map: std::collections::HashMap<String, String>,
+    order: std::collections::VecDeque<String>,
+    bytes: usize,
+}
+impl ImageCache {
+    fn get(&self, url: &str) -> Option<String> {
+        self.map.get(url).cloned()
+    }
+    fn insert(&mut self, url: String, uri: String) {
+        if self.map.contains_key(&url) {
+            return;
+        }
+        self.bytes += uri.len();
+        self.order.push_back(url.clone());
+        self.map.insert(url, uri);
+        while self.bytes > MAX_CACHE_BYTES {
+            let Some(evicted) = self.order.pop_front() else { break };
+            if let Some(v) = self.map.remove(&evicted) {
+                self.bytes -= v.len();
+            }
+        }
+    }
+}
+
+static IMAGE_CACHE: std::sync::LazyLock<tokio::sync::Mutex<ImageCache>> =
+    std::sync::LazyLock::new(Default::default);
+
 async fn fetch_data_uri(client: &reqwest::Client, url: &str, token: &str) -> Result<String> {
+    if let Some(hit) = IMAGE_CACHE.lock().await.get(url) {
+        return Ok(hit);
+    }
     let res = client.get(url).bearer_auth(token).send().await?;
     if !res.status().is_success() {
         bail!("image fetch returned {}", res.status());
+    }
+    if let Some(len) = res.content_length() {
+        if len > MAX_IMAGE_BYTES {
+            bail!("image too large to inline ({len} bytes)");
+        }
     }
     let mime = res
         .headers()
@@ -1386,11 +1556,17 @@ async fn fetch_data_uri(client: &reqwest::Client, url: &str, token: &str) -> Res
         .unwrap_or("image/png")
         .to_string();
     let data = res.bytes().await?;
-    Ok(format!(
+    // Guard again in case the server didn't send a Content-Length.
+    if data.len() as u64 > MAX_IMAGE_BYTES {
+        bail!("image too large to inline ({} bytes)", data.len());
+    }
+    let uri = format!(
         "data:{};base64,{}",
         mime,
         base64::engine::general_purpose::STANDARD.encode(&data)
-    ))
+    );
+    IMAGE_CACHE.lock().await.insert(url.to_string(), uri.clone());
+    Ok(uri)
 }
 
 // ── OAuth PKCE connect flow ──────────────────────────────────────────────

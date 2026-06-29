@@ -2,21 +2,29 @@
  * Typed data layer. Every backend read is a TanStack Query hook wrapping a
  * generated command from `bindings.ts`. Components never call `commands.*`
  * directly — they consume these hooks, so caching and loading states are
- * uniform and the data source (mocked today, real later) stays swappable.
+ * uniform and the live/empty data source stays swappable.
  */
 import {
   type QueryClient,
   type QueryKey,
+  type UseQueryOptions,
   useIsFetching,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
-import type { AgentKind, Settings, TriageDetail, TriageTicket } from "../bindings";
-import { commands } from "../bindings";
-import { toast } from "../state/toast";
+import type {
+  AgentKind,
+  ChangedFile,
+  ScriptInfo,
+  Settings,
+  TriageDetail,
+  TriageTicket,
+} from "../bindings";
+import { commands, events } from "../bindings";
+import { type ToastOptions, toast } from "../state/toast";
 
 /** The shape of a generated `Result`-typed command's promise. */
 type CommandResult<T> = Promise<{ status: "ok"; data: T } | { status: "error"; error: string }>;
@@ -38,7 +46,15 @@ async function unwrap<T>(promise: CommandResult<T>): Promise<T> {
 function useUnwrappedQuery<T>(
   queryKey: QueryKey,
   command: () => CommandResult<T>,
-  options: { enabled?: boolean; staleTime?: number; gcTime?: number } = {},
+  options: {
+    enabled?: boolean;
+    staleTime?: number;
+    gcTime?: number;
+    // For "live status" reads only: poll on an interval (or a predicate of the
+    // cached data) while a condition holds. Off everywhere else — we lean on
+    // staleTime + the cache, and only hit the network when data is actually old.
+    refetchInterval?: UseQueryOptions<T>["refetchInterval"];
+  } = {},
 ) {
   return useQuery({ queryKey, queryFn: () => unwrap(command()), ...options });
 }
@@ -59,23 +75,51 @@ function useOptimisticMutation<TVars, TData>(opts: {
   mutationFn: (v: TVars) => Promise<TData>;
   /** Patch the cache optimistically; return a rollback closure (or nothing). */
   optimistic?: (qc: QueryClient, v: TVars) => (() => void) | undefined;
-  /** Keys to refetch on settle (and to cancel before patching). */
-  invalidate?: (qc: QueryClient, v: TVars) => QueryKey[];
+  /** Keys to refetch on settle (and to cancel before patching). Takes the vars
+   *  first, matching `useActionMutation` so the two factories read the same. */
+  invalidate?: (v: TVars) => QueryKey[];
 }) {
   const qc = useQueryClient();
   return useMutation<TData, Error, TVars, { rollback?: () => void }>({
     mutationFn: opts.mutationFn,
     onMutate: async (vars) => {
-      const keys = opts.invalidate?.(qc, vars) ?? [];
+      const keys = opts.invalidate?.(vars) ?? [];
       await Promise.all(keys.map((queryKey) => qc.cancelQueries({ queryKey })));
       const rollback = opts.optimistic?.(qc, vars) ?? undefined;
       return { rollback };
     },
     onError: (_err, _vars, ctx) => ctx?.rollback?.(),
     onSettled: (_data, _err, vars) => {
-      for (const queryKey of opts.invalidate?.(qc, vars) ?? []) {
+      for (const queryKey of opts.invalidate?.(vars) ?? []) {
         qc.invalidateQueries({ queryKey });
       }
+    },
+  });
+}
+
+/**
+ * A non-optimistic "fire → invalidate + confirm" mutation: run the command, then
+ * refetch the affected keys and (optionally) raise a success toast. Centralizes
+ * the boilerplate the worktree/repo/settings action hooks each repeated. Use
+ * `useOptimisticMutation` instead when the UI should patch before the round-trip.
+ */
+function useActionMutation<TVars = void, TData = unknown>(opts: {
+  mutationFn: (v: TVars) => Promise<TData>;
+  invalidate?: (v: TVars, data: TData) => QueryKey[];
+  success?: (data: TData, v: TVars) => string | ({ message: string } & ToastOptions) | null;
+  /** Opt out of the global error→toast handler when the caller owns its own
+   *  failure UI (e.g. a `ConfirmDialog` that shows the error inline). */
+  silent?: boolean;
+}) {
+  const qc = useQueryClient();
+  return useMutation<TData, Error, TVars>({
+    mutationFn: opts.mutationFn,
+    meta: opts.silent ? { silent: true } : undefined,
+    onSuccess: (data, vars) => {
+      for (const queryKey of opts.invalidate?.(vars, data) ?? [])
+        qc.invalidateQueries({ queryKey });
+      const s = opts.success?.(data, vars);
+      if (s) typeof s === "string" ? toast.success(s) : toast.success(s.message, s);
     },
   });
 }
@@ -88,12 +132,22 @@ export const queryKeys = {
   repos: ["repos"] as const,
   agents: ["agents"] as const,
   tasks: ["tasks"] as const,
-  worktrees: ["worktrees"] as const,
-  worktreeDiff: (id: string) => ["worktree-diff", id] as const,
-  worktreeTerminal: (id: string) => ["worktree-terminal", id] as const,
-  commitSuggestion: (id: string) => ["commit-suggestion", id] as const,
-  fileTree: ["file-tree"] as const,
-  stageMeta: ["stage-meta"] as const,
+  worktrees: (repo: string) => ["worktrees", repo] as const,
+  baseWorktree: (repo: string) => ["base-worktree", repo] as const,
+  worktreeStatus: (repo: string, id: string) => ["worktree-status", repo, id] as const,
+  worktreeFiles: (repo: string, id: string) => ["worktree-files", repo, id] as const,
+  worktreeFileDiff: (repo: string, id: string, path: string) =>
+    ["worktree-file-diff", repo, id, path] as const,
+  worktreeFileSource: (repo: string, id: string, path: string) =>
+    ["worktree-file-source", repo, id, path] as const,
+  workPrompt: (repo: string, id: string) => ["work-prompt", repo, id] as const,
+  commitDraft: (repo: string, id: string) => ["commit-draft", repo, id] as const,
+  worktreePrs: (repo: string) => ["worktree-prs", repo] as const,
+  reviews: (repo: string) => ["reviews", repo] as const,
+  prDetail: (owner: string, name: string, number: number) =>
+    ["pr-detail", owner, name, number] as const,
+  openers: ["openers"] as const,
+  initScript: (repo: string) => ["init-script", repo] as const,
   taskNote: (repo: string, id: string) => ["task-note", repo, id] as const,
   triageTickets: (repo: string) => ["triage-tickets", repo] as const,
   triageDetail: (repo: string, id: string) => ["triage-detail", repo, id] as const,
@@ -115,6 +169,9 @@ export const INVESTIGATE_MODEL_KEY = "investigate_model";
  *  tray. Unlike triage, this action is always on — there's no enable switch. */
 export const WORK_AGENT_KEY = "work_agent";
 export const WORK_MODEL_KEY = "work_model";
+/** When on, starting a worktree moves the Linear issue to its "started" (In
+ *  Progress) state so Linear reflects what's actually being worked on. */
+export const WORK_MOVE_IN_PROGRESS_KEY = "work_move_in_progress";
 
 /**
  * Triage queue preference keys (app-scoped, string "true"/"false").
@@ -130,6 +187,26 @@ export const TRIAGE_SNOOZED_KEY = "triage_show_snoozed";
  * Mirrors Linear's own "Display names" preference. App-scoped, defaults to full.
  */
 export const DISPLAY_NAMES_KEY = "display_names";
+
+/**
+ * Trees (worktree) preference keys (string-valued settings):
+ * - run_setup: run `.santree/init.sh` automatically when creating a worktree.
+ * - stage_all: stage everything before committing (skip the confirmation).
+ * - auto_pr: open a PR automatically on the first commit (wired in Phase 2).
+ * - batch_setup: how to handle setup when starting several tasks at once —
+ *   "always" run · "never" run · "ask" once.
+ */
+export const TREES_RUN_SETUP_KEY = "trees_run_setup";
+export const TREES_STAGE_ALL_KEY = "trees_stage_all";
+export const TREES_AUTO_PR_KEY = "trees_auto_pr";
+export const TREES_BATCH_SETUP_KEY = "trees_batch_setup";
+/** Diff layout for the Trees diff panel: "split" | "unified" (default split). */
+export const TREES_DIFF_MODE_KEY = "trees_diff_mode";
+/** Default "open in" target (an opener key, e.g. "cursor") for the split button. */
+export const TREES_DEFAULT_EDITOR_KEY = "trees_default_editor";
+
+/** How the start-multiple flow treats the setup script. */
+export type BatchSetup = "always" | "never" | "ask";
 
 /** Read an app-scoped boolean setting (defaults to false until loaded). */
 export const useBoolSetting = (scope: string, key: string) => {
@@ -155,16 +232,12 @@ export const useRepos = () =>
   });
 
 /** Register a repository from a local folder (validated as a git repo in Rust). */
-export const useAddRepo = () => {
-  const qc = useQueryClient();
-  return useMutation({
+export const useAddRepo = () =>
+  useActionMutation({
     mutationFn: (path: string) => unwrap(commands.addRepo(path)),
-    onSuccess: (repo) => {
-      qc.invalidateQueries({ queryKey: queryKeys.repos });
-      toast.success(`Added ${repo.name}.`);
-    },
+    invalidate: () => [queryKeys.repos],
+    success: (repo) => `Added ${repo.name}.`,
   });
-};
 
 export const useAgents = () =>
   useQuery({ queryKey: queryKeys.agents, queryFn: commands.listAgents });
@@ -175,9 +248,9 @@ export const useAgentAuth = (kind: AgentKind) =>
 
 /**
  * Graph tickets for a repo. The backend returns the live Linear graph when an
- * org is connected and the built-in sample otherwise, so this is a single fetch
- * with no "is connected?" round-trip gating it (the old waterfall blocked the
- * graph behind a serial status read).
+ * org is connected and an empty list otherwise, so this is a single fetch with
+ * no "is connected?" round-trip gating it (the old waterfall blocked the graph
+ * behind a serial status read).
  */
 export const useTasks = (repo: string) =>
   useUnwrappedQuery([...queryKeys.tasks, repo], () => commands.linearListIssues(repo));
@@ -218,6 +291,10 @@ export const useLinearConnect = () => {
       qc.invalidateQueries({ queryKey: queryKeys.linearStatus });
       qc.invalidateQueries({ queryKey: queryKeys.linearOrgs });
       qc.invalidateQueries({ queryKey: queryKeys.tasks });
+      // Triage is Linear-derived too; refresh it (all repos) so a freshly
+      // connected workspace's queue/schedule appears without the 3-min wait.
+      qc.invalidateQueries({ queryKey: ["triage-tickets"] });
+      qc.invalidateQueries({ queryKey: ["triage-schedule"] });
       // `connect` returns the full (name-sorted) org list, so we can't single out
       // the one just added — a generic confirmation avoids naming the wrong org.
       toast.success("Linear connected.", {
@@ -241,54 +318,404 @@ export const useSetRepoLinearOrg = () =>
       qc.setQueryData(key, { ...prev, orgSlug: args.slug });
       return () => qc.setQueryData(key, prev);
     },
-    invalidate: () => [queryKeys.linearStatus, queryKeys.tasks],
+    invalidate: (args) => [
+      queryKeys.linearStatus,
+      queryKeys.tasks,
+      queryKeys.triageTickets(args.repo),
+      queryKeys.triageSchedule(args.repo),
+    ],
   });
 
-// Worktree data changes only on agent activity, so cache it briefly: switching
-// away from a worktree's diff/terminal and back serves instantly instead of
-// refetching on every remount. (stageMeta is static config, so it never goes stale.)
+// Worktree data changes only on agent/git activity, so cache it briefly:
+// switching away from a worktree and back serves instantly instead of refetching
+// on every remount.
 const WORKTREE_STALE_TIME = 60_000;
 
-export const useWorktrees = () =>
-  useQuery({
-    queryKey: queryKeys.worktrees,
-    queryFn: commands.listWorktrees,
+/** The repo's live agent worktrees (real git when the repo has a local path,
+ *  else empty). */
+export const useWorktrees = (repo: string) =>
+  useUnwrappedQuery(queryKeys.worktrees(repo), () => commands.worktrees(repo), {
+    enabled: !!repo,
     staleTime: WORKTREE_STALE_TIME,
   });
 
-export const useWorktreeDiff = (id: string) =>
-  useQuery({
-    queryKey: queryKeys.worktreeDiff(id),
-    queryFn: () => commands.worktreeDiff(id),
+/** The repo's base branch as a worktree-like entry (repo root on main/master) —
+ *  the Trees "main" entry. `null` when the repo has no local path. */
+export const useBaseWorktree = (repo: string) =>
+  useUnwrappedQuery(queryKeys.baseWorktree(repo), () => commands.baseWorktree(repo), {
+    enabled: !!repo,
     staleTime: WORKTREE_STALE_TIME,
   });
 
-export const useWorktreeTerminal = (id: string) =>
-  useQuery({
-    queryKey: queryKeys.worktreeTerminal(id),
-    queryFn: () => commands.worktreeTerminal(id),
+/** A worktree's changed files (the commit-box model). `staleTime: 0` so every
+ *  mount (e.g. returning to the Trees tab) refetches `git status` — the watcher
+ *  keeps it live while visible, this covers the gap on re-entry. */
+export const useWorktreeStatus = (repo: string, id: string) =>
+  useUnwrappedQuery(queryKeys.worktreeStatus(repo, id), () => commands.worktreeStatus(repo, id), {
+    enabled: !!repo && !!id,
+    staleTime: 0,
+  });
+
+/** Every browsable file in the worktree (tracked + untracked, gitignore-aware). */
+export const useWorktreeFiles = (repo: string, id: string) =>
+  useUnwrappedQuery(queryKeys.worktreeFiles(repo, id), () => commands.worktreeFiles(repo, id), {
+    enabled: !!repo && !!id,
     staleTime: WORKTREE_STALE_TIME,
   });
 
-export const useCommitSuggestion = (id: string) =>
-  useQuery({
-    queryKey: queryKeys.commitSuggestion(id),
-    queryFn: () => commands.commitSuggestion(id),
-    staleTime: WORKTREE_STALE_TIME,
+/** The unified diff for one changed file (staged + unstaged vs HEAD). */
+export const useWorktreeFileDiff = (repo: string, id: string, path: string, untracked: boolean) =>
+  useUnwrappedQuery(
+    queryKeys.worktreeFileDiff(repo, id, path),
+    () => commands.worktreeFileDiff(repo, id, path, untracked),
+    { enabled: !!repo && !!id && !!path },
+  );
+
+/** The old/new full file contents, for the diff viewer's context expansion. */
+export const useWorktreeFileSource = (repo: string, id: string, path: string) =>
+  useUnwrappedQuery(
+    queryKeys.worktreeFileSource(repo, id, path),
+    () => commands.worktreeFileSource(repo, id, path),
+    { enabled: !!repo && !!id && !!path },
+  );
+
+/**
+ * Keep the worktree views in sync with on-disk changes. Points the Rust
+ * filesystem watcher at `repo`'s worktrees and, on each debounced
+ * `worktreeChanged` event, invalidates that worktree's status/files/diffs *and*
+ * the worktrees list (its `+/-` line stats) — so an agent editing files in the
+ * terminal updates the Changes/All-files panes and the sidebar card with no
+ * polling or refresh button.
+ *
+ * Mounted once at the app root (not in the Trees view) so invalidation happens
+ * even while another tab is showing: returning to Trees then sees fresh data
+ * instead of a stale cache.
+ */
+export const useWorktreeWatcher = (repo: string) => {
+  const qc = useQueryClient();
+  useEffect(() => {
+    if (!repo) return;
+    // Idempotent on the Rust side; re-points if the repo changed.
+    void commands.watchWorktrees(repo);
+
+    const unlisten = events.worktreeChanged.listen(({ payload: { issueId } }) => {
+      qc.invalidateQueries({ queryKey: queryKeys.worktreeStatus(repo, issueId) });
+      qc.invalidateQueries({ queryKey: queryKeys.worktreeFiles(repo, issueId) });
+      // Prefix key — every cached per-file diff for this worktree.
+      qc.invalidateQueries({ queryKey: ["worktree-file-diff", repo, issueId] });
+      // The list carries each worktree's add/del line counts, shown on the
+      // sidebar card and the Issues-panel worktree card.
+      qc.invalidateQueries({ queryKey: queryKeys.worktrees(repo) });
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [repo, qc]);
+};
+
+/** The agent's opening prompt for a freshly-started worktree (the `work`
+ *  template — ticket id + title + implement instructions). Deterministic for a
+ *  given worktree, so cache it; `enabled` gates the fetch to the launch flow. The
+ *  terminal seed waits on this so the agent starts with the full prompt. */
+export const useWorkPrompt = (repo: string, id: string, enabled: boolean) =>
+  useUnwrappedQuery(queryKeys.workPrompt(repo, id), () => commands.workPrompt(repo, id), {
+    enabled: enabled && !!repo && !!id,
+    staleTime: 5 * 60 * 1000,
   });
 
-export const useFileTree = () =>
-  useQuery({
-    queryKey: queryKeys.fileTree,
-    queryFn: commands.fileTree,
-    staleTime: WORKTREE_STALE_TIME,
+/** Live PR status (number/url/state) for the repo's worktrees, from GitHub. Empty
+ *  when `gh` isn't authenticated. Cached a minute — merge state changes server-side
+ *  and the user can refetch by revisiting. */
+export const useWorktreePrs = (repo: string) =>
+  useUnwrappedQuery(queryKeys.worktreePrs(repo), () => commands.worktreePrs(repo), {
+    enabled: !!repo,
+    staleTime: 60_000,
   });
 
-export const useStageMeta = () =>
+/** The Reviews dashboard inbox (my PRs / review requests / per-team), scoped to
+ *  the org of the active repo. Sample data when `gh` isn't authenticated. Cached a
+ *  minute — PR state changes server-side and the user can refetch by revisiting. */
+export const useReviews = (repo: string) =>
+  useUnwrappedQuery(queryKeys.reviews(repo), () => commands.reviews(repo), {
+    enabled: !!repo,
+    staleTime: 60_000,
+  });
+
+/** Full detail (body + conversation + diff + checks) for one PR. Gated on a
+ *  selection. While any CI check is still running we poll every 30s so the Checks
+ *  tab goes live; once everything is terminal we stop and rely on the cache (no
+ *  background churn). Nothing else here polls — reads refresh only when stale. */
+export const usePrDetail = (owner: string, name: string, number: number, enabled = true) =>
+  useUnwrappedQuery(
+    queryKeys.prDetail(owner, name, number),
+    () => commands.prDetail(owner, name, number),
+    {
+      enabled: enabled && !!owner && !!name && number > 0,
+      refetchInterval: (query) =>
+        (query.state.data?.checks ?? []).some((c) => c.status === "Pending") ? 30_000 : false,
+    },
+  );
+
+/** The "open in app" targets (Finder, editors, terminals) for a worktree. */
+export const useOpeners = () =>
   useQuery({
-    queryKey: queryKeys.stageMeta,
-    queryFn: commands.stageMeta,
+    queryKey: queryKeys.openers,
+    queryFn: commands.listOpeners,
     staleTime: SETTING_STALE_TIME,
+  });
+
+/** Open a path in an external app (by opener key). */
+export const useOpenInApp = () =>
+  useMutation({
+    mutationFn: (a: { path: string; opener: string }) =>
+      unwrap(commands.openInApp(a.path, a.opener)),
+  });
+
+/**
+ * Start a task: create a worktree for an issue, then refresh the list. The
+ * immediate "Creating workspace…" feedback is owned by `pendingLaunches` in
+ * AppContext (merged into the Trees list at display time) rather than a cache
+ * patch — a patch here gets clobbered by the refetch the Trees mount triggers.
+ */
+export const useCreateWorktree = (repo: string) =>
+  useActionMutation({
+    mutationFn: (a: {
+      issueId: string;
+      title: string;
+      project: string | null;
+      base: string | null;
+      runSetup: boolean;
+      agent: AgentKind;
+    }) =>
+      unwrap(
+        commands.createWorktree(repo, a.issueId, a.title, a.project, a.base, a.runSetup, a.agent),
+      ),
+    // Only the worktree list — NOT tasks. The graph relies on the `tasks` query
+    // reference staying stable (re-firing fitView mid-rebuild blanks the canvas),
+    // and a full graph refetch on every launch is heavy. The WIP badge already
+    // signals "being worked on"; a moved Linear status refreshes on the next
+    // natural tasks refetch.
+    invalidate: () => [queryKeys.worktrees(repo)],
+    success: (wt) => `Created worktree for ${wt.id}.`,
+  });
+
+/**
+ * Remove a worktree (and its branch) — background + non-blocking. The Trees model
+ * hides it instantly via `pendingDeletes` (NOT a cache patch, which a mid-delete
+ * refetch from the filesystem watcher would clobber — re-adding the worktree with
+ * garbage stats read off the half-deleted dir). On settle we reconcile with a
+ * refetch; on failure the model drops it from `pendingDeletes` so it reappears,
+ * and the error surfaces as a red toast.
+ */
+export const useRemoveWorktree = (repo: string) =>
+  useOptimisticMutation({
+    mutationFn: (issueId: string) => unwrap(commands.removeWorktree(repo, issueId)),
+    invalidate: () => [queryKeys.worktrees(repo), queryKeys.worktreePrs(repo)],
+  });
+
+/** Remove several worktrees at once (e.g. all merged ones) — background, in
+ *  parallel. Hiding/reappear is driven by the model's `pendingDeletes`. Throws
+ *  (→ red toast) naming any that failed; the settling refetch reconciles. */
+export const useRemoveWorktrees = (repo: string) =>
+  useOptimisticMutation({
+    mutationFn: async (ids: string[]) => {
+      const results = await Promise.allSettled(
+        ids.map((id) => unwrap(commands.removeWorktree(repo, id))),
+      );
+      const failed = ids.filter((_, i) => results[i].status === "rejected");
+      if (failed.length) throw new Error(`Couldn't delete ${failed.join(", ")}.`);
+    },
+    invalidate: () => [queryKeys.worktrees(repo), queryKeys.worktreePrs(repo)],
+  });
+
+/** Merge the base branch (main/master) into the worktree. Errors on conflicts. */
+export const usePullWorktree = (repo: string) =>
+  useActionMutation({
+    mutationFn: (issueId: string) => unwrap(commands.pullWorktree(repo, issueId)),
+    invalidate: (issueId) => [queryKeys.worktrees(repo), queryKeys.worktreeStatus(repo, issueId)],
+    success: (base) => `Pulled ${base}.`,
+  });
+
+/** Fast-forward the repo's local base branch (main/master) to origin. */
+export const useUpdateBaseBranch = (repo: string) =>
+  useActionMutation({
+    mutationFn: (issueId: string) => unwrap(commands.updateBaseBranch(repo, issueId)),
+    invalidate: () => [queryKeys.worktrees(repo)],
+    success: (base) => `Updated ${base} from origin.`,
+  });
+
+/** Draft a commit message from the staged diff (headless `claude -p`). */
+export const useCommitMessage = (repo: string) =>
+  useMutation({
+    mutationFn: (id: string) => unwrap(commands.commitMessage(repo, id)),
+  });
+
+/** Commit a worktree (optionally staging everything first). */
+export const useCommitWorktree = (repo: string) =>
+  useActionMutation({
+    mutationFn: (a: { id: string; message: string; stageAll: boolean }) =>
+      unwrap(commands.commitWorktree(repo, a.id, a.message, a.stageAll)),
+    invalidate: (a) => [queryKeys.worktreeStatus(repo, a.id), queryKeys.worktrees(repo)],
+    success: () => "Committed.",
+  });
+
+/** Draft a PR title + body for the create-PR dialog. `fill` runs the AI draft;
+ *  otherwise it returns the raw PR template + first-commit-subject title. */
+export const usePrDraft = (repo: string) =>
+  useMutation({
+    mutationFn: (a: { id: string; fill: boolean }) => unwrap(commands.prDraft(repo, a.id, a.fill)),
+    // The dialog shows draft errors inline; don't double-surface as a toast.
+    meta: { silent: true },
+  });
+
+/** Push the branch and open a PR via the GitHub API. The dialog handles success
+ *  (opens the URL) and shows errors inline, so it's silent here. */
+export const useCreatePr = (repo: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (a: { id: string; title: string; body: string }) =>
+      unwrap(commands.createPullRequest(repo, a.id, a.title, a.body)),
+    meta: { silent: true },
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.worktrees(repo) }),
+  });
+};
+
+/** Refresh a worktree's stored title (self-healing). Silent — it's a background
+ *  reconcile triggered when the Issue tab sees a newer Linear title; invalidating
+ *  the worktrees list updates the sidebar card. */
+export const useSetWorktreeTitle = (repo: string) =>
+  useActionMutation({
+    mutationFn: (a: { id: string; title: string }) =>
+      unwrap(commands.setWorktreeTitle(repo, a.id, a.title)),
+    invalidate: () => [queryKeys.worktrees(repo)],
+    silent: true,
+  });
+
+/** A worktree's persisted commit-message draft (survives tab switches / restarts
+ *  until committed). `null` when none is saved. */
+export const useCommitDraft = (repo: string, id: string) =>
+  useUnwrappedQuery(queryKeys.commitDraft(repo, id), () => commands.commitDraft(repo, id), {
+    enabled: !!repo && !!id,
+    staleTime: SETTING_STALE_TIME,
+  });
+
+/** Save (or clear, when blank) a worktree's commit-message draft, optimistically. */
+export const useSetCommitDraft = (repo: string) =>
+  useOptimisticMutation({
+    mutationFn: (a: { id: string; message: string }) =>
+      unwrap(commands.setCommitDraft(repo, a.id, a.message)),
+    optimistic: (qc, a) => {
+      const key = queryKeys.commitDraft(repo, a.id);
+      const prev = qc.getQueryData<string | null>(key);
+      qc.setQueryData(key, a.message.trim() === "" ? null : a.message);
+      return () => qc.setQueryData(key, prev);
+    },
+  });
+
+/** A staging action on one file (or all). One mutation, discriminated by `action`,
+ *  so the commit box doesn't juggle five separate hooks. Refreshes the status +
+ *  the affected file's diff afterward. */
+export type StageAction = "stage" | "unstage" | "discard" | "stageAll" | "unstageAll";
+interface StageVars {
+  action: StageAction;
+  path?: string;
+  untracked?: boolean;
+}
+
+/** Apply a staging action to the cached file list so the checkbox/row updates
+ *  before the git round-trip lands: flip `staged`, or drop a discarded file. */
+function applyStage(files: ChangedFile[], a: StageVars): ChangedFile[] {
+  switch (a.action) {
+    case "stage":
+      return files.map((f) => (f.path === a.path ? { ...f, staged: true } : f));
+    case "unstage":
+      return files.map((f) => (f.path === a.path ? { ...f, staged: false } : f));
+    case "discard":
+      return files.filter((f) => f.path !== a.path);
+    case "stageAll":
+      return files.map((f) => ({ ...f, staged: true }));
+    case "unstageAll":
+      return files.map((f) => ({ ...f, staged: false }));
+  }
+}
+
+export const useStageAction = (repo: string, id: string) =>
+  useOptimisticMutation({
+    mutationFn: (a: StageVars) => {
+      switch (a.action) {
+        case "stage":
+          return unwrap(commands.stagePath(repo, id, a.path ?? ""));
+        case "unstage":
+          return unwrap(commands.unstagePath(repo, id, a.path ?? ""));
+        case "discard":
+          return unwrap(commands.discardPath(repo, id, a.path ?? "", a.untracked ?? false));
+        case "stageAll":
+          return unwrap(commands.stageAllPaths(repo, id));
+        case "unstageAll":
+          return unwrap(commands.unstageAllPaths(repo, id));
+      }
+    },
+    optimistic: (qc, a) => {
+      const key = queryKeys.worktreeStatus(repo, id);
+      const prev = qc.getQueryData<ChangedFile[]>(key);
+      if (prev === undefined) return;
+      qc.setQueryData<ChangedFile[]>(key, applyStage(prev, a));
+      return () => qc.setQueryData(key, prev);
+    },
+    invalidate: (a) => {
+      const keys: QueryKey[] = [queryKeys.worktreeStatus(repo, id)];
+      // Prefix key — matches every cached per-file diff for this worktree.
+      const diffPrefix = ["worktree-file-diff", repo, id] as const;
+      switch (a.action) {
+        case "stage":
+        case "unstage":
+          if (a.path) keys.push(queryKeys.worktreeFileDiff(repo, id, a.path));
+          break;
+        case "discard":
+          // Discard reverts/removes the file on disk, so its diff, its full
+          // source, and the file list can all change.
+          keys.push(diffPrefix, queryKeys.worktreeFiles(repo, id));
+          if (a.path) keys.push(queryKeys.worktreeFileSource(repo, id, a.path));
+          break;
+        case "stageAll":
+        case "unstageAll":
+          keys.push(diffPrefix);
+          break;
+      }
+      return keys;
+    },
+  });
+
+/**
+ * The repo's `.santree/init.sh` setup script (content + executable bit), for the
+ * Settings → Trees editor. Changes only on explicit writes, so it never needs a
+ * background refetch.
+ */
+export const useInitScript = (repo: string) =>
+  useUnwrappedQuery(queryKeys.initScript(repo), () => commands.worktreeInitScript(repo), {
+    enabled: !!repo,
+    staleTime: SETTING_STALE_TIME,
+  });
+
+/** Save the repo's setup script, optimistically patching the cached content. */
+export const useSetInitScript = (repo: string) =>
+  useOptimisticMutation({
+    mutationFn: (content: string) => unwrap(commands.setWorktreeInitScript(repo, content)),
+    optimistic: (qc, content) => {
+      const key = queryKeys.initScript(repo);
+      const prev = qc.getQueryData<ScriptInfo>(key);
+      if (prev) qc.setQueryData<ScriptInfo>(key, { ...prev, content, exists: true });
+      return () => qc.setQueryData(key, prev);
+    },
+    invalidate: () => [queryKeys.initScript(repo)],
+  });
+
+/** Mark the repo's setup script executable; refreshes the script read. */
+export const useMakeInitExecutable = (repo: string) =>
+  useActionMutation({
+    mutationFn: () => unwrap(commands.makeInitScriptExecutable(repo)),
+    invalidate: () => [queryKeys.initScript(repo)],
+    success: () => "Marked init.sh executable.",
   });
 
 export interface ViewCounts {
@@ -308,16 +735,21 @@ export interface ViewCounts {
  */
 export const useViewCounts = (repo: string): ViewCounts => {
   const { data: tasks = [] } = useTasks(repo);
-  const { data: worktrees = [] } = useWorktrees();
+  const { data: worktrees = [] } = useWorktrees(repo);
+  const { data: reviews } = useReviews(repo);
   return useMemo(
     () => ({
       tasks: tasks.length,
       tasksReady: tasks.filter((t) => t.ready).length,
       worktrees: worktrees.length,
       worktreesRunning: worktrees.filter((w) => w.activity === "Running").length,
-      reviews: worktrees.filter((w) => w.pr).length,
+      // The Reviews badge counts PRs awaiting *my* review (individual + team),
+      // not my own authored PRs.
+      reviews:
+        (reviews?.requested.length ?? 0) +
+        (reviews?.teams.reduce((n, t) => n + t.prs.length, 0) ?? 0),
     }),
-    [tasks, worktrees],
+    [tasks, worktrees, reviews],
   );
 };
 
@@ -330,7 +762,7 @@ export const useViewCounts = (repo: string): ViewCounts => {
 const TRIAGE_STALE_TIME = 3 * 60_000;
 const TRIAGE_GC_TIME = 30 * 60_000;
 
-/** The triage queue for a repo — live from Linear when connected, else sample. */
+/** The triage queue for a repo — live from Linear when connected, else empty. */
 export const useTriageTickets = (repo: string) =>
   useUnwrappedQuery(queryKeys.triageTickets(repo), () => commands.listTriageTickets(repo), {
     staleTime: TRIAGE_STALE_TIME,
@@ -422,7 +854,7 @@ export const useTriageSetState = (repo: string) =>
         if (prevQueue !== undefined) qc.setQueryData(queueKey, prevQueue);
       };
     },
-    invalidate: (_qc, args) => [
+    invalidate: (args) => [
       queryKeys.triageTickets(repo),
       queryKeys.triageDetail(repo, args.ticketId),
     ],
@@ -430,9 +862,7 @@ export const useTriageSetState = (repo: string) =>
 
 /** The team triage rotations — one per team the viewer is on. */
 export const useTriageSchedule = (repo: string) =>
-  useQuery({
-    queryKey: queryKeys.triageSchedule(repo),
-    queryFn: () => unwrap(commands.triageSchedule(repo)),
+  useUnwrappedQuery(queryKeys.triageSchedule(repo), () => commands.triageSchedule(repo), {
     staleTime: TRIAGE_STALE_TIME,
     gcTime: TRIAGE_GC_TIME,
   });
@@ -574,7 +1004,11 @@ export const useSetSetting = () =>
   useOptimisticMutation({
     mutationFn: (a: SetSettingVars) => unwrap(commands.setSetting(a.scope, a.key, a.value)),
     optimistic: (qc, a) => patchSettingCache(qc, a),
-    invalidate: () => [["setting"], ["resolved-setting"]],
+    // Reconcile only this key's exact read; resolved reads (few, and a per-repo
+    // override changes its resolved value) refetch via the prefix. Invalidating
+    // the whole `["setting"]` prefix would refetch every cached setting on any
+    // single write.
+    invalidate: (a) => [queryKeys.setting(a.scope, a.key), ["resolved-setting"]],
   });
 
 export type DisplayNames = "full" | "username";
@@ -600,7 +1034,9 @@ export const useDisplayNames = () => {
       ["triage-tickets"],
       ["triage-detail"],
       ["triage-schedule"],
-      ["issue-ref"],
+      // The Issues task graph (and its blocker hover cards) resolve names
+      // server-side too; `["tasks"]` is the prefix for every repo's graph.
+      queryKeys.tasks,
     ],
   });
   return { value, setValue: mutate };

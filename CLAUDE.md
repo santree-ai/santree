@@ -9,9 +9,10 @@ agents** across a repo's tickets. Tauri 2 + React 19, with a **fully-typed
 Rust ↔ TypeScript bridge** (tauri-specta). Pre-release, **zero users** — so there's
 no backwards-compatibility burden: prefer deleting dead/old code over keeping shims.
 
-**Views:** Triage, Issues, Settings, and Terminal are real; **Trees and Reviews are
-still mocked** (they need an agent-orchestration backend that doesn't exist yet, so
-they show SAMPLE DATA).
+**Views:** all of them — Triage, Issues, Trees, Reviews, Settings, Terminal — are
+backed by real data. **There is no mock/sample data anywhere**; when a backend isn't
+connected (no Linear org, no `gh` auth, no repo path) commands return real-but-empty
+results and the view shows its empty state.
 
 ## Goal & priorities (in order)
 
@@ -33,21 +34,22 @@ they show SAMPLE DATA).
 - **Frontend:** React 19, Vite 8, TanStack Router + Query v5, Tailwind v4 (CSS-first,
   no `tailwind.config`), xterm.js, react-markdown. Biome for lint+format. Vitest.
 - **Cargo workspace:** `src-tauri` (thin Tauri adapter) + `crates/core` (pure domain
-  + mock, no Tauri dep) + `crates/pty` (PTY manager, Tauri-agnostic).
+  + static config, no Tauri dep) + `crates/pty` (PTY manager, Tauri-agnostic).
 
 ## Architecture & data flow
 
 ```
 React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
           → #[tauri::command] (src-tauri/src/commands.rs)
-          → live backend (linear.rs / db.rs / repo.rs / settings.rs / terminal.rs)
-            └─ or, when not connected, santree-core::mock  (the fallback seam)
+          → live backend (linear.rs / db.rs / repo.rs / settings.rs / terminal.rs /
+                           github.rs / reviews.rs)
+            └─ when not connected: return real-but-empty (no sample data)
 ```
 
-- **Live-or-mock seam:** live backends return `Result<Option<T>>`; the command does
-  `live.unwrap_or_else(mock::…)`. So an unauthenticated repo still shows sample data
-  and the UI is never empty. `crates/core/src/mock.rs` is the *only* place that knows
-  data is fake.
+- **No mock data.** When a backend isn't connected the command returns an empty
+  result (e.g. `live.unwrap_or_default()`, `Ok(vec![])`) and the view renders its
+  empty state. `crates/core/src/config.rs` holds the only *static* data — real
+  canonical config, not samples: the agent catalog, stage metadata, default settings.
 - **Domain types** live in `crates/core/src/domain.rs` and derive `specta::Type` —
   that's how their shapes reach `bindings.ts`. **Never hand-edit `bindings.ts`** (it's
   generated; run `pnpm gen:bindings` after changing a command or `Type`).
@@ -57,8 +59,8 @@ React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
 ## Repo structure
 
 ```
-crates/core/src/   domain.rs (types) · mock.rs (fallback data) · linear.rs (mapping)
-                   · layout.rs (dagre-free graph helpers) · lib.rs (tests)
+crates/core/src/   domain.rs (types) · config.rs (static config/defaults) · linear.rs
+                   (mapping) · layout.rs (dagre-free graph helpers) · lib.rs
 crates/pty/src/    lib.rs — PtyManager: spawn real process behind a PTY, stream bytes
 src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin wrappers)
                    · linear.rs (GraphQL + OAuth + token store) · db.rs (sqlx pool +

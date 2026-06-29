@@ -1,12 +1,9 @@
-/** The Actions section: a tab bar of agent-action configs (Triage Investigation
- * and Issues Work today; Plan / Review later). Per-scope — app defaults or repo
- * override. */
-
-import { useState } from "react";
+/** Agent-action configs, one per left-nav entry under the "Actions" group:
+ * Triage Investigation and Issues Work today (Plan / Review later). Per-scope —
+ * app defaults or repo override. */
 
 import type { AgentKind } from "../../../bindings";
-import { BranchIcon, TelescopeIcon } from "../../../components/icons";
-import { Tabs, Toggle } from "../../../components/primitives";
+import { ChevronSelect, Toggle } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
 import {
   INVESTIGATE_AGENT_KEY,
@@ -49,38 +46,28 @@ const INVESTIGATE: ActionDescriptor = {
 };
 const WORK: ActionDescriptor = { agentKey: WORK_AGENT_KEY, modelKey: WORK_MODEL_KEY };
 
-export function ActionsSection({ repo }: { repo?: string }) {
-  const [tab, setTab] = useState<"triage" | "issues">("triage");
+/** The Triage Investigation action. Triage is global: the enable switch + queue
+ * prefs live at the app level; a repo only overrides which agent/skill/model the
+ * investigation runs. */
+export function TriageActionSection({ repo }: { repo?: string }) {
   return (
     <>
       <Heading
-        title="Actions"
-        subtitle="Configure how each agent action runs — pick the agent, skill, and model. More actions (Plan, Review) are coming."
+        title="Triage"
+        subtitle="How the Triage investigation runs — pick the agent, skill, and model."
       />
-      <Tabs
-        tabs={[
-          { value: "triage", label: "Triage", icon: <TelescopeIcon size={14} /> },
-          { value: "issues", label: "Issues", icon: <BranchIcon size={14} /> },
-        ]}
-        value={tab}
-        onChange={setTab}
-        className="mb-5"
-      />
-      {tab === "triage" ? (
-        // Triage is global: the enable switch + queue prefs live at the app level;
-        // a repo only overrides which agent/skill/model the investigation runs.
-        repo ? (
-          <ActionConfig descriptor={INVESTIGATE} repo={repo} />
-        ) : (
-          <AppTriagePanel />
-        )
-      ) : repo ? (
-        <ActionConfig descriptor={WORK} repo={repo} />
-      ) : (
-        <AppWorkPanel />
-      )}
+      {repo ? <ActionConfig descriptor={INVESTIGATE} repo={repo} /> : <AppTriagePanel />}
     </>
   );
+}
+
+/** The Work action body — the default agent + model the launch tray uses (app
+ *  defaults or a per-repo override). Heading-less; rendered inside the merged
+ *  "Work" settings section. */
+export function WorkActionConfig({ repo }: { repo?: string }) {
+  // Just the agent + model card. The old standalone "Work" intro card was
+  // redundant with the section heading, so it's been dropped.
+  return <ActionConfig descriptor={WORK} repo={repo} />;
 }
 
 /**
@@ -145,23 +132,6 @@ function AppTriagePanel() {
           <ActionConfig descriptor={INVESTIGATE} />
         </div>
       </div>
-    </div>
-  );
-}
-
-/** The app-level Work action: which agent + model the Issues launch tray uses by
- *  default. Unlike triage there's no enable switch — it's always available. */
-function AppWorkPanel() {
-  return (
-    <div className="space-y-3.5">
-      <div className="rounded-xl border border-line-2 bg-raised p-4">
-        <div className="text-[13px] font-semibold text-fg-bright">Work</div>
-        <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
-          The default agent and model used when you launch tickets from the Issues tab. You can
-          still switch the model per launch.
-        </div>
-      </div>
-      <ActionConfig descriptor={WORK} />
     </div>
   );
 }
@@ -247,14 +217,14 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
               No commands found in <span className="font-mono">~/.claude/commands</span>.
             </div>
           ) : (
-            <select
+            <ChevronSelect
               value={scopeCmd ?? ""}
-              onChange={(e) => set(cmdKey, e.target.value || null)}
+              onChange={(v) => set(cmdKey, v || null)}
               className={SELECT_CLASS}
             >
               <option value="">None</option>
               <CommandOptions globalCmds={globalCmds} repoCmds={[]} />
-            </select>
+            </ChevronSelect>
           )}
           {!inherits && selectedCmd?.description && (
             <div className="mt-2 text-[11.5px] text-muted-3">{selectedCmd.description}</div>
@@ -314,9 +284,9 @@ function AgentSelect({
     );
   }
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value)} className={SELECT_CLASS}>
+    <ChevronSelect value={value} onChange={onChange} className={SELECT_CLASS}>
       {options}
-    </select>
+    </ChevronSelect>
   );
 }
 
@@ -348,13 +318,9 @@ function ModelSelect({
     );
   }
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value || null)}
-      className={SELECT_CLASS}
-    >
+    <ChevronSelect value={value} onChange={(v) => onChange(v || null)} className={SELECT_CLASS}>
       <option value="">Agent default</option>
       {options}
-    </select>
+    </ChevronSelect>
   );
 }

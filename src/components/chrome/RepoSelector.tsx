@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { useAddRepo, useLinearOrgs, useRepos, useSetRepoLinearOrg } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
+import { alpha } from "../../theme/colors";
 import { ChevronDownIcon } from "../icons";
 import { Spinner } from "../primitives";
 import { RepoAvatar } from "./RepoAvatar";
@@ -127,11 +128,7 @@ export function RepoSelector() {
                         closeMenu();
                       }}
                       className="flex w-full cursor-pointer items-center gap-[9px] rounded-md px-[9px] py-2 text-left hover:bg-hover-2"
-                      style={
-                        active
-                          ? { background: `color-mix(in srgb, ${accent} 12%, transparent)` }
-                          : undefined
-                      }
+                      style={active ? { background: alpha(12, accent) } : undefined}
                     >
                       <RepoAvatar repo={r.name} size={18} />
                       <div className="min-w-0 flex-1">

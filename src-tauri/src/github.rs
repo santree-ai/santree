@@ -1,0 +1,759 @@
+//! Minimal GitHub integration for opening pull requests.
+//!
+//! The app has no GitHub OAuth of its own yet, so it borrows the token the user
+//! already authorized for the `gh` CLI (`gh auth token`) and talks to the REST
+//! API directly with `reqwest` — no browser round-trip. The owner/repo comes from
+//! the worktree's `origin` remote; the PR template is read from the checkout.
+
+use std::path::Path;
+use std::process::Command;
+
+use anyhow::{anyhow, bail, Result};
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+
+use santree_core::domain::{
+    CheckRollup, CheckStatus, CommentKind, PrCheck, PrComment, PrDetail, PrFile, PrState,
+    ReviewDecision, ReviewInbox, ReviewPr, Reviewer, ReviewerKind, TeamReviews,
+};
+
+use crate::git;
+use crate::gql::Connection;
+use crate::repo;
+
+/// Shared HTTP client (connection pool) for GitHub API calls. A 30s timeout so a
+/// stalled request fails instead of hanging forever.
+static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("building GitHub HTTP client")
+});
+
+/// The GitHub token the user authorized for the `gh` CLI. `None` when `gh` isn't
+/// installed or the user hasn't run `gh auth login`. Shells out, so it runs on the
+/// blocking pool rather than the async executor.
+pub async fn token() -> Option<String> {
+    tokio::task::spawn_blocking(|| {
+        let out = Command::new("gh").args(["auth", "token"]).output().ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// `(owner, repo)` parsed from the worktree's `origin` remote, or an error when
+/// it isn't a recognizable GitHub remote.
+pub fn owner_repo(cwd: &Path) -> Result<(String, String)> {
+    let url = git::git(cwd, &["remote", "get-url", "origin"])
+        .map_err(|_| anyhow!("no `origin` remote found"))?;
+    let slug = repo::github_slug(&url).ok_or_else(|| anyhow!("origin is not a GitHub remote"))?;
+    let (owner, name) = slug
+        .split_once('/')
+        .ok_or_else(|| anyhow!("malformed GitHub slug: {slug}"))?;
+    Ok((owner.to_string(), name.to_string()))
+}
+
+/// The repo's PR template, read from the checkout (the worktree shares the
+/// branch's files). Checks the standard locations; `None` when there's none.
+pub fn pr_template(cwd: &Path) -> Option<String> {
+    const PATHS: &[&str] = &[
+        ".github/pull_request_template.md",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        "docs/pull_request_template.md",
+        "docs/PULL_REQUEST_TEMPLATE.md",
+        "pull_request_template.md",
+        "PULL_REQUEST_TEMPLATE.md",
+    ];
+    PATHS
+        .iter()
+        .find_map(|p| std::fs::read_to_string(cwd.join(p)).ok())
+        .filter(|s| !s.trim().is_empty())
+}
+
+#[derive(Deserialize)]
+struct CreatedPr {
+    number: u32,
+    html_url: String,
+}
+
+#[derive(Deserialize)]
+struct SearchResp {
+    items: Vec<SearchItem>,
+}
+
+#[derive(Deserialize)]
+struct SearchItem {
+    number: u32,
+    html_url: String,
+    state: String,
+    pull_request: Option<PrRef>,
+}
+
+#[derive(Deserialize)]
+struct PrRef {
+    merged_at: Option<String>,
+}
+
+/// Every PR associated with an issue, newest first — each as (number, URL, merge
+/// state). Associated by the issue id in the PR **title** (the `[AK-123] …` tag
+/// our commit/PR flow writes, mirroring the branch name) — NOT by the branch
+/// itself, which GitHub deletes on merge (so merged PRs would vanish), and NOT by
+/// the body, which references *other* tickets as dependencies. A single issue can
+/// span several PRs. Empty when there are none. Network errors bubble up.
+pub async fn prs_for_issue(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    issue_id: &str,
+) -> Result<Vec<(u32, String, PrState)>> {
+    // Quoted issue id → exact phrase, so "AK-55" can't match "AK-550" etc.
+    let q = format!("repo:{owner}/{repo} type:pr in:title \"{issue_id}\"");
+    let res = CLIENT
+        .get("https://api.github.com/search/issues")
+        .query(&[
+            ("q", q.as_str()),
+            ("per_page", "100"),
+            ("sort", "created"),
+            ("order", "desc"),
+        ])
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "santree")
+        .send()
+        .await?;
+    if !res.status().is_success() {
+        bail!("GitHub returned {}", res.status());
+    }
+    let body: SearchResp = res.json().await?;
+    Ok(body
+        .items
+        .into_iter()
+        .map(|p| {
+            let merged = p.pull_request.and_then(|r| r.merged_at).is_some();
+            let state = if merged {
+                PrState::Merged
+            } else if p.state == "closed" {
+                PrState::Closed
+            } else {
+                PrState::Open
+            };
+            (p.number, p.html_url, state)
+        })
+        .collect())
+}
+
+/// Open a pull request via the GitHub REST API. Returns `(number, url)`.
+pub async fn create_pr(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    title: &str,
+    head: &str,
+    base: &str,
+    body: &str,
+) -> Result<(u32, String)> {
+    let res = CLIENT
+        .post(format!("https://api.github.com/repos/{owner}/{repo}/pulls"))
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "santree")
+        .json(&serde_json::json!({
+            "title": title,
+            "head": head,
+            "base": base,
+            "body": body,
+        }))
+        .send()
+        .await?;
+
+    let status = res.status();
+    if status.is_success() {
+        let pr: CreatedPr = res.json().await.map_err(|e| anyhow!("decoding PR: {e}"))?;
+        return Ok((pr.number, pr.html_url));
+    }
+
+    // Surface GitHub's own message (e.g. "A pull request already exists for …",
+    // or a validation error) rather than a bare status code.
+    let detail = res
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| {
+            v.get("errors")
+                .and_then(|e| e.get(0))
+                .and_then(|e| e.get("message"))
+                .or_else(|| v.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| status.to_string());
+    bail!("GitHub: {detail}");
+}
+
+// ── GraphQL (Reviews dashboard) ─────────────────────────────────────────────
+
+const GRAPHQL_URL: &str = "https://api.github.com/graphql";
+
+/// POST a GraphQL query to GitHub and return the typed `data` payload.
+async fn graphql<T: DeserializeOwned>(
+    token: &str,
+    query: &str,
+    variables: serde_json::Value,
+) -> Result<T> {
+    let req = CLIENT
+        .post(GRAPHQL_URL)
+        .bearer_auth(token)
+        .header("User-Agent", "santree")
+        .json(&serde_json::json!({ "query": query, "variables": variables }));
+    crate::gql::post(req, "GitHub").await
+}
+
+// The PR fields the Reviews list needs — shared by all three category searches.
+const PR_FIELDS: &str = r"
+    id number title url isDraft updatedAt headRefName
+    repository { nameWithOwner }
+    author { login avatarUrl }
+    reviewDecision
+    comments { totalCount }
+    additions deletions
+    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+    reviewRequests(first: 20) {
+      nodes {
+        requestedReviewer {
+          __typename
+          ... on User { login avatarUrl }
+          ... on Team { name }
+        }
+      }
+    }
+";
+
+#[derive(Deserialize)]
+struct Actor {
+    login: String,
+    #[serde(rename = "avatarUrl")]
+    avatar_url: String,
+}
+
+#[derive(Deserialize)]
+struct TotalCount {
+    #[serde(rename = "totalCount")]
+    total_count: u32,
+}
+
+#[derive(Deserialize)]
+struct RepoRef {
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: String,
+}
+
+#[derive(Deserialize)]
+struct Rollup {
+    state: String,
+}
+#[derive(Deserialize)]
+struct CommitWrap {
+    #[serde(rename = "statusCheckRollup")]
+    status_check_rollup: Option<Rollup>,
+}
+#[derive(Deserialize)]
+struct CommitNode {
+    commit: CommitWrap,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "__typename")]
+enum RequestedReviewer {
+    User {
+        login: String,
+        #[serde(rename = "avatarUrl")]
+        avatar_url: String,
+    },
+    Team {
+        name: String,
+    },
+    // Mannequins, bots, etc. — ignored.
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+struct ReviewRequestNode {
+    #[serde(rename = "requestedReviewer")]
+    requested_reviewer: Option<RequestedReviewer>,
+}
+
+#[derive(Deserialize)]
+struct PrNode {
+    id: String,
+    number: u32,
+    title: String,
+    url: String,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    repository: RepoRef,
+    author: Option<Actor>,
+    #[serde(rename = "reviewDecision")]
+    review_decision: Option<String>,
+    comments: TotalCount,
+    additions: u32,
+    deletions: u32,
+    commits: Connection<CommitNode>,
+    #[serde(rename = "reviewRequests")]
+    review_requests: Connection<ReviewRequestNode>,
+}
+
+impl From<PrNode> for ReviewPr {
+    fn from(n: PrNode) -> Self {
+        let (author, author_avatar_url) = n
+            .author
+            .map(|a| (a.login, a.avatar_url))
+            .unwrap_or_default();
+        let review_decision = match n.review_decision.as_deref() {
+            Some("APPROVED") => ReviewDecision::Approved,
+            Some("CHANGES_REQUESTED") => ReviewDecision::ChangesRequested,
+            Some("REVIEW_REQUIRED") => ReviewDecision::ReviewRequired,
+            _ => ReviewDecision::None,
+        };
+        let checks = n
+            .commits
+            .nodes
+            .first()
+            .and_then(|c| c.commit.status_check_rollup.as_ref())
+            .map(|r| match r.state.as_str() {
+                "SUCCESS" => CheckRollup::Success,
+                "FAILURE" | "ERROR" => CheckRollup::Failure,
+                "PENDING" | "EXPECTED" => CheckRollup::Pending,
+                _ => CheckRollup::None,
+            })
+            .unwrap_or(CheckRollup::None);
+        let reviewers = n
+            .review_requests
+            .nodes
+            .into_iter()
+            .filter_map(|r| match r.requested_reviewer {
+                Some(RequestedReviewer::User { login, avatar_url }) => Some(Reviewer {
+                    kind: ReviewerKind::User,
+                    name: login,
+                    avatar_url,
+                }),
+                Some(RequestedReviewer::Team { name }) => Some(Reviewer {
+                    kind: ReviewerKind::Team,
+                    name,
+                    avatar_url: String::new(),
+                }),
+                _ => None,
+            })
+            .collect();
+        ReviewPr {
+            id: n.id,
+            number: n.number,
+            title: n.title,
+            url: n.url,
+            repo: n.repository.name_with_owner,
+            head_ref: n.head_ref_name,
+            author,
+            author_avatar_url,
+            // The dashboard only ever queries `is:open`, so these are open PRs.
+            state: PrState::Open,
+            is_draft: n.is_draft,
+            review_decision,
+            checks,
+            additions: n.additions,
+            deletions: n.deletions,
+            comment_count: n.comments.total_count,
+            reviewers,
+            updated_at: n.updated_at,
+        }
+    }
+}
+
+/// Run one `search(type: ISSUE)` query and map the PR nodes to `ReviewPr`.
+async fn search_prs(token: &str, q: &str) -> Result<Vec<ReviewPr>> {
+    #[derive(Deserialize)]
+    struct Data {
+        search: Connection<PrNode>,
+    }
+    let query = format!(
+        "query($q: String!) {{ search(query: $q, type: ISSUE, first: 50) {{ nodes {{ ... on PullRequest {{ {PR_FIELDS} }} }} }} }}"
+    );
+    let data: Data = graphql(token, &query, serde_json::json!({ "q": q })).await?;
+    Ok(data.search.nodes.into_iter().map(ReviewPr::from).collect())
+}
+
+/// The teams (slug, name) the viewer belongs to within `org`. Empty when the
+/// viewer isn't in that org or it has no teams visible to them.
+pub async fn viewer_teams(token: &str, org: &str) -> Result<Vec<(String, String)>> {
+    #[derive(Deserialize)]
+    struct Data {
+        viewer: Viewer,
+    }
+    #[derive(Deserialize)]
+    struct Viewer {
+        organizations: Connection<OrgNode>,
+    }
+    #[derive(Deserialize)]
+    struct OrgNode {
+        login: String,
+        teams: Connection<TeamNode>,
+    }
+    #[derive(Deserialize)]
+    struct TeamNode {
+        slug: String,
+        name: String,
+    }
+    let query = "query { viewer { organizations(first: 50) { nodes { login teams(first: 50, role: MEMBER) { nodes { slug name } } } } } }";
+    let data: Data = graphql(token, query, serde_json::json!({})).await?;
+    Ok(data
+        .viewer
+        .organizations
+        .nodes
+        .into_iter()
+        .find(|o| o.login == org)
+        .map(|o| {
+            o.teams
+                .nodes
+                .into_iter()
+                .map(|t| (t.slug, t.name))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// The categorized PR inbox for `org`: PRs the viewer authored, PRs where they're
+/// individually requested, and one section per team that has open requests. All
+/// searches run concurrently; empty team sections are dropped.
+pub async fn review_inbox(
+    token: &str,
+    org: &str,
+    teams: &[(String, String)],
+) -> Result<ReviewInbox> {
+    let common = "is:open is:pr archived:false sort:updated-desc";
+    let mine_q = format!("{common} author:@me org:{org}");
+    let requested_q = format!("{common} review-requested:@me org:{org}");
+
+    let team_searches = futures::future::join_all(teams.iter().map(|(slug, name)| {
+        let q = format!("{common} team-review-requested:{org}/{slug}");
+        async move {
+            let prs = search_prs(token, &q).await.unwrap_or_default();
+            (slug.clone(), name.clone(), prs)
+        }
+    }));
+
+    let (mine, requested, team_results) = tokio::join!(
+        search_prs(token, &mine_q),
+        search_prs(token, &requested_q),
+        team_searches,
+    );
+
+    let teams = team_results
+        .into_iter()
+        .filter(|(_, _, prs)| !prs.is_empty())
+        .map(|(slug, name, prs)| TeamReviews { slug, name, prs })
+        .collect();
+
+    Ok(ReviewInbox {
+        mine: mine?,
+        requested: requested?,
+        teams,
+    })
+}
+
+/// Full detail for one PR: body + merged conversation + changed files (with diffs).
+pub async fn pr_detail(token: &str, owner: &str, name: &str, number: u32) -> Result<PrDetail> {
+    let (conversation, files) = tokio::join!(
+        pr_conversation(token, owner, name, number),
+        pr_files(token, owner, name, number),
+    );
+    let (body, comments, checks) = conversation?;
+    Ok(PrDetail {
+        body,
+        comments,
+        files: files?,
+        checks,
+    })
+}
+
+/// Body + comments (issue comments, reviews, and inline review-thread comments)
+/// merged chronologically, plus the head commit's individual CI checks.
+async fn pr_conversation(
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u32,
+) -> Result<(String, Vec<PrComment>, Vec<PrCheck>)> {
+    #[derive(Deserialize)]
+    struct Data {
+        repository: Option<Repo>,
+    }
+    #[derive(Deserialize)]
+    struct Repo {
+        #[serde(rename = "pullRequest")]
+        pull_request: Option<Pr>,
+    }
+    #[derive(Deserialize)]
+    struct Pr {
+        body: String,
+        comments: Connection<Comment>,
+        reviews: Connection<Review>,
+        #[serde(rename = "reviewThreads")]
+        review_threads: Connection<Thread>,
+        // Renamed (vs the module-level `CommitNode`) because this one reads the
+        // rollup's individual check `contexts`, not the aggregate `state`.
+        commits: Connection<DetailCommitNode>,
+    }
+    #[derive(Deserialize)]
+    struct DetailCommitNode {
+        commit: CommitInner,
+    }
+    #[derive(Deserialize)]
+    struct CommitInner {
+        #[serde(rename = "statusCheckRollup")]
+        status_check_rollup: Option<RollupCtx>,
+    }
+    #[derive(Deserialize)]
+    struct RollupCtx {
+        contexts: Connection<Ctx>,
+    }
+    #[derive(Deserialize)]
+    #[serde(tag = "__typename")]
+    enum Ctx {
+        CheckRun {
+            name: String,
+            conclusion: Option<String>,
+            status: String,
+            #[serde(rename = "detailsUrl")]
+            details_url: Option<String>,
+            #[serde(rename = "checkSuite")]
+            check_suite: Option<CheckSuite>,
+        },
+        StatusContext {
+            context: String,
+            state: String,
+            #[serde(rename = "targetUrl")]
+            target_url: Option<String>,
+            description: Option<String>,
+        },
+        #[serde(other)]
+        Other,
+    }
+    #[derive(Deserialize)]
+    struct CheckSuite {
+        app: Option<App>,
+    }
+    #[derive(Deserialize)]
+    struct App {
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct Comment {
+        author: Option<Actor>,
+        body: String,
+        #[serde(rename = "createdAt")]
+        created_at: String,
+    }
+    #[derive(Deserialize)]
+    struct Review {
+        author: Option<Actor>,
+        body: String,
+        #[serde(rename = "createdAt")]
+        created_at: String,
+    }
+    #[derive(Deserialize)]
+    struct Thread {
+        comments: Connection<ThreadComment>,
+    }
+    #[derive(Deserialize)]
+    struct ThreadComment {
+        author: Option<Actor>,
+        body: String,
+        path: Option<String>,
+        #[serde(rename = "createdAt")]
+        created_at: String,
+    }
+
+    let query = r"
+        query($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              body
+              comments(first: 100) { nodes { author { login avatarUrl } body createdAt } }
+              reviews(first: 50) { nodes { author { login avatarUrl } body createdAt } }
+              reviewThreads(first: 50) { nodes { comments(first: 50) { nodes { author { login avatarUrl } body path createdAt } } } }
+              commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+                __typename
+                ... on CheckRun { name status conclusion detailsUrl checkSuite { app { name } } }
+                ... on StatusContext { context state targetUrl description }
+              } } } } } }
+            }
+          }
+        }
+    ";
+    let data: Data = graphql(
+        token,
+        query,
+        serde_json::json!({ "owner": owner, "name": name, "number": number }),
+    )
+    .await?;
+    let pr = data
+        .repository
+        .and_then(|r| r.pull_request)
+        .ok_or_else(|| anyhow!("PR {owner}/{name}#{number} not found"))?;
+
+    let actor = |a: Option<Actor>| a.map(|a| (a.login, a.avatar_url)).unwrap_or_default();
+    let mut comments: Vec<PrComment> = Vec::new();
+    for c in pr.comments.nodes {
+        let (author, author_avatar_url) = actor(c.author);
+        comments.push(PrComment {
+            author,
+            author_avatar_url,
+            body: c.body,
+            created_at: c.created_at,
+            kind: CommentKind::Issue,
+            path: None,
+        });
+    }
+    for r in pr.reviews.nodes {
+        // Skip empty-body reviews (bare approvals add no conversation).
+        if r.body.trim().is_empty() {
+            continue;
+        }
+        let (author, author_avatar_url) = actor(r.author);
+        comments.push(PrComment {
+            author,
+            author_avatar_url,
+            body: r.body,
+            created_at: r.created_at,
+            kind: CommentKind::Review,
+            path: None,
+        });
+    }
+    for t in pr.review_threads.nodes {
+        for c in t.comments.nodes {
+            let (author, author_avatar_url) = actor(c.author);
+            comments.push(PrComment {
+                author,
+                author_avatar_url,
+                body: c.body,
+                created_at: c.created_at,
+                kind: CommentKind::ReviewThread,
+                path: c.path,
+            });
+        }
+    }
+    comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    let mut checks: Vec<PrCheck> = Vec::new();
+    if let Some(rollup) = pr
+        .commits
+        .nodes
+        .into_iter()
+        .next()
+        .and_then(|c| c.commit.status_check_rollup)
+    {
+        for ctx in rollup.contexts.nodes {
+            match ctx {
+                Ctx::CheckRun {
+                    name,
+                    conclusion,
+                    status,
+                    details_url,
+                    check_suite,
+                } => {
+                    // A check run is only conclusive once COMPLETED; before that
+                    // (QUEUED / IN_PROGRESS) it's still pending regardless of conclusion.
+                    let st = if status != "COMPLETED" {
+                        CheckStatus::Pending
+                    } else {
+                        match conclusion.as_deref() {
+                            Some("SUCCESS") => CheckStatus::Success,
+                            // ACTION_REQUIRED blocks the PR and needs the user to
+                            // act, so surface it as a failure rather than hiding it
+                            // in the collapsed "skipped/neutral" group.
+                            Some(
+                                "FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED",
+                            ) => CheckStatus::Failure,
+                            Some("SKIPPED") => CheckStatus::Skipped,
+                            // NEUTRAL / CANCELLED / STALE (and any unknown future
+                            // value) — finished without a pass/fail verdict.
+                            _ => CheckStatus::Neutral,
+                        }
+                    };
+                    checks.push(PrCheck {
+                        name,
+                        status: st,
+                        description: check_suite.and_then(|s| s.app).map(|a| a.name),
+                        url: details_url,
+                    });
+                }
+                Ctx::StatusContext {
+                    context,
+                    state,
+                    target_url,
+                    description,
+                } => {
+                    let st = match state.as_str() {
+                        "SUCCESS" => CheckStatus::Success,
+                        "FAILURE" | "ERROR" => CheckStatus::Failure,
+                        "PENDING" | "EXPECTED" => CheckStatus::Pending,
+                        _ => CheckStatus::Neutral,
+                    };
+                    checks.push(PrCheck {
+                        name: context,
+                        status: st,
+                        description,
+                        url: target_url,
+                    });
+                }
+                Ctx::Other => {}
+            }
+        }
+    }
+
+    Ok((pr.body, comments, checks))
+}
+
+/// Changed files for a PR, with their unified-diff patches (REST files API).
+async fn pr_files(token: &str, owner: &str, name: &str, number: u32) -> Result<Vec<PrFile>> {
+    #[derive(Deserialize)]
+    struct RestFile {
+        filename: String,
+        status: String,
+        additions: u32,
+        deletions: u32,
+        patch: Option<String>,
+    }
+    let res = CLIENT
+        .get(format!(
+            "https://api.github.com/repos/{owner}/{name}/pulls/{number}/files"
+        ))
+        .query(&[("per_page", "100")])
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "santree")
+        .send()
+        .await?;
+    if !res.status().is_success() {
+        bail!("GitHub returned {}", res.status());
+    }
+    let files: Vec<RestFile> = res.json().await?;
+    Ok(files
+        .into_iter()
+        .map(|f| PrFile {
+            path: f.filename,
+            status: f.status,
+            additions: f.additions,
+            deletions: f.deletions,
+            patch: f.patch,
+        })
+        .collect())
+}

@@ -6,6 +6,7 @@ import { Avatar } from "../../components/Avatar";
 import { ChevronDownIcon } from "../../components/icons";
 import { Badge } from "../../components/primitives";
 import { useApp } from "../../state/AppContext";
+import { alpha } from "../../theme/colors";
 
 /** All of the viewer's triage on-call rotations (one per team). */
 export function ScheduleSection({ schedules }: { schedules: TriageSchedule[] }) {
@@ -56,11 +57,7 @@ function ScheduleStrip({ schedule }: { schedule: TriageSchedule }) {
             <div
               key={`${s.name}-${s.range}`}
               className="flex items-center gap-2 rounded-md px-2 py-1.5"
-              style={
-                s.isCurrent
-                  ? { background: "color-mix(in srgb, var(--accent) 8%, transparent)" }
-                  : undefined
-              }
+              style={s.isCurrent ? { background: alpha(8) } : undefined}
             >
               <Avatar name={s.name} src={s.avatarUrl} size={20} />
               <span

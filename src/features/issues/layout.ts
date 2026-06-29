@@ -14,9 +14,7 @@ import Dagre from "@dagrejs/dagre";
 import type { Task } from "../../bindings";
 
 export const NODE_W = 212;
-/** Resting card height; running cards are taller (progress bar + log row). */
 export const NODE_H = 96;
-export const NODE_H_RUNNING = 142;
 
 // Inner padding of a project band, and extra headroom for its label.
 const BAND_PAD = 18;
@@ -39,11 +37,8 @@ export interface LaidGraph {
   boxes: LaidBox[];
 }
 
-/**
- * Lay out `tasks` into per-project bands. `heightOf` lets running nodes claim
- * more vertical space so their taller cards don't overlap their neighbours.
- */
-export function layoutGraph(tasks: Task[], heightOf: (t: Task) => number): LaidGraph {
+/** Lay out `tasks` into per-project bands (dagre, left → right per band). */
+export function layoutGraph(tasks: Task[]): LaidGraph {
   const pos = new Map<string, { x: number; y: number }>();
   const boxes: LaidBox[] = [];
   if (tasks.length === 0) return { pos, boxes };
@@ -62,7 +57,7 @@ export function layoutGraph(tasks: Task[], heightOf: (t: Task) => number): LaidG
     g.setGraph({ rankdir: "LR", nodesep: 22, ranksep: 70, marginx: 0, marginy: 0 });
     g.setDefaultEdgeLabel(() => ({}));
 
-    for (const t of members) g.setNode(t.id, { width: NODE_W, height: heightOf(t) });
+    for (const t of members) g.setNode(t.id, { width: NODE_W, height: NODE_H });
     // Only intra-project blockers shape this band's layout; cross-project links
     // are drawn as edges but must not pull a foreign node into the band.
     for (const t of members) {

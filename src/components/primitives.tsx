@@ -1,6 +1,14 @@
 /** Small presentational primitives reused across views. */
-import type { CSSProperties, ReactNode, SelectHTMLAttributes } from "react";
+import {
+  type CSSProperties,
+  type ReactNode,
+  type SelectHTMLAttributes,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
+import { accentActiveStyle, alpha } from "../theme/colors";
 import { ChevronDownIcon } from "./icons";
 
 /**
@@ -59,7 +67,9 @@ export function Spinner({ size = 11, color = "var(--accent)" }: { size?: number;
       style={{
         width: size,
         height: size,
-        border: `1.6px solid ${color}33`,
+        // `alpha()` (color-mix) instead of a `${color}33` hex-suffix so the faint
+        // ring renders for CSS-var colors like `var(--accent)` too.
+        border: `1.6px solid ${alpha(20, color)}`,
         borderTopColor: color,
       }}
     />
@@ -182,11 +192,7 @@ export function Segmented<T extends string>({
       {options.map((opt) => {
         const active = opt.value === value;
         const style: CSSProperties = active
-          ? {
-              background: "color-mix(in srgb, var(--accent) 13%, transparent)",
-              border: "1px solid color-mix(in srgb, var(--accent) 40%, transparent)",
-              color: "var(--accent)",
-            }
+          ? accentActiveStyle()
           : { border: "1px solid transparent", color: "var(--color-muted-2)" };
         return (
           <button
@@ -298,28 +304,226 @@ export function Tabs<T extends string>({
   );
 }
 
-/** A subtle pill badge (e.g. RDY, connected). */
+/**
+ * A tinted chip: text in `color` over a faint `color` wash with a `color` border.
+ * The single source for the soft color-coded pills (priority, status, badges)
+ * that several views hand-rolled with the `${hex}15`/`${hex}40` suffix trick —
+ * which silently broke for CSS-var colors. Uses `alpha()` so `var(--accent)`
+ * works too. `className` controls size/padding/typography.
+ */
+export function Pill({
+  color,
+  children,
+  className,
+  title,
+}: {
+  color: string;
+  children: ReactNode;
+  className?: string;
+  title?: string;
+}) {
+  return (
+    <span
+      title={title}
+      className={`inline-flex flex-none items-center rounded ${className ?? ""}`}
+      style={{ color, background: alpha(12, color), border: `1px solid ${alpha(34, color)}` }}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** A subtle pill badge (e.g. RDY, connected). A {@link Pill} at a fixed small size. */
 export function Badge({
   children,
   color,
   className,
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
   color?: string;
   className?: string;
 }) {
-  const c = color ?? "var(--accent)";
   return (
-    <span
-      className={`rounded font-mono text-[9px] font-semibold tracking-wide ${className ?? ""}`}
-      style={{
-        color: c,
-        background: `color-mix(in srgb, ${c} 12%, transparent)`,
-        border: `1px solid color-mix(in srgb, ${c} 30%, transparent)`,
-        padding: "1px 5px",
-      }}
+    <Pill
+      color={color ?? "var(--accent)"}
+      className={`px-[5px] py-px font-mono text-[9px] font-semibold tracking-wide ${className ?? ""}`}
     >
       {children}
-    </span>
+    </Pill>
+  );
+}
+
+/**
+ * A click-away dropdown: `trigger` renders the opener (it's handed a `toggle`),
+ * `children` renders the menu (handed a `close`). The single source for the menus
+ * the bottom bar and the start-task button each hand-rolled.
+ *
+ * Closes on outside click via a capture-phase `pointerdown` listener (not a
+ * z-index backdrop) so it works even when the dropdown opens over the terminal
+ * overlay — which shares the backdrop's stacking level and used to swallow the
+ * close click. Escape closes it too.
+ */
+export function Dropdown({
+  trigger,
+  children,
+  placement = "down",
+  align = "left",
+  menuClassName = "w-44 overflow-hidden",
+}: {
+  trigger: (toggle: () => void) => ReactNode;
+  children: (close: () => void) => ReactNode;
+  /** Open above (`up`) or below (`down`, default) the trigger. */
+  placement?: "up" | "down";
+  /** Anchor the menu to the trigger's left (default) or right edge. */
+  align?: "left" | "right";
+  /** Menu width / overflow classes (default `w-44 overflow-hidden`). */
+  menuClassName?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    // Capture phase so we still see the click even if an overlay (xterm) stops
+    // propagation on its own pointerdown handler.
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative">
+      {trigger(() => setOpen((o) => !o))}
+      {open && (
+        <div
+          className={`absolute z-40 rounded-lg border border-line-3 bg-raised py-1 shadow-lg ${
+            placement === "up" ? "bottom-full mb-1" : "mt-1"
+          } ${align === "right" ? "right-0" : "left-0"} ${menuClassName}`}
+        >
+          {children(() => setOpen(false))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Active/inactive style for an "inset underline" tab (a `bg-app` fill with an
+ *  `inset 0 -2px 0` accent rule) — shared by the main-area and file-picker tab
+ *  bars so the look can't drift. */
+export function underlineTabStyle(active: boolean): CSSProperties {
+  return {
+    color: active ? "var(--color-fg-2)" : "var(--color-muted-2)",
+    background: active ? "var(--color-app)" : "transparent",
+    boxShadow: active ? "inset 0 -2px 0 var(--accent)" : "none",
+  };
+}
+
+/**
+ * A modal confirmation for a destructive action. Unlike `window.confirm`, it
+ * runs the action inline and shows its *status*: a spinner while the work runs,
+ * the error message if it fails (the dialog stays open to retry), and it only
+ * closes once the action resolves. `onConfirm` should return a promise.
+ */
+export function ConfirmDialog({
+  open,
+  title,
+  message,
+  confirmLabel = "Confirm",
+  busyLabel = "Working…",
+  danger = false,
+  onConfirm,
+  onClose,
+}: {
+  open: boolean;
+  title: string;
+  message: ReactNode;
+  confirmLabel?: string;
+  busyLabel?: string;
+  danger?: boolean;
+  /** Runs the action; its resolved value is ignored — the dialog only cares
+   *  whether it resolves (close) or rejects (show the error, stay open). */
+  onConfirm: () => Promise<unknown>;
+  onClose: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!open) return null;
+
+  const accent = danger ? "var(--color-status-red)" : "var(--accent)";
+  const onAccent = danger ? "var(--on-danger)" : "var(--on-accent)";
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[300] flex items-center justify-center p-6">
+      <button
+        type="button"
+        aria-hidden
+        tabIndex={-1}
+        onClick={() => !busy && onClose()}
+        className="absolute inset-0 cursor-default bg-black/50"
+      />
+      <div
+        role="dialog"
+        aria-modal
+        aria-label={title}
+        className="relative w-[380px] max-w-full rounded-xl border border-line-3 bg-panel p-4 shadow-2xl"
+        style={{ animation: "toastIn .16s ease-out" }}
+      >
+        <div className="text-[13px] font-semibold text-fg-bright">{title}</div>
+        <div className="mt-1.5 text-[12px] leading-[1.5] text-fg-2">{message}</div>
+        {error && (
+          <div
+            className="mt-2.5 rounded-md px-2.5 py-1.5 text-[11px] leading-[1.45]"
+            style={{
+              color: "var(--color-status-red)",
+              background: alpha(10, "var(--color-status-red)"),
+              border: `1px solid ${alpha(30, "var(--color-status-red)")}`,
+            }}
+          >
+            {error}
+          </div>
+        )}
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="cursor-pointer rounded-md border border-line-2 bg-input px-3 py-1.5 text-[12px] text-muted-2 hover:text-fg-2 disabled:cursor-default disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={run}
+            disabled={busy}
+            className="flex cursor-pointer items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium disabled:cursor-default"
+            style={{ color: onAccent, background: accent, opacity: busy ? 0.85 : 1 }}
+          >
+            {busy && <Spinner size={11} color={onAccent} />}
+            {busy ? busyLabel : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

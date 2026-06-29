@@ -1,0 +1,68 @@
+You are writing a Git commit message. Output ONLY the message string itself — no preamble, no quotes, no markdown, no explanation.
+
+# Format rules
+
+The message is **a single line** — no newlines, no body paragraphs.
+
+If the diff covers multiple changes, list each one as a brief phrase joined by a `+`. Each phrase is one short imperative clause — never a sentence.
+
+```
+{% if ticket_id %}[{{ ticket_id }}] {% endif %}add login throttling + fix token refresh race + rename UserService
+```
+
+If the diff is one change, write one phrase, no separator.
+
+```
+{% if ticket_id %}[{{ ticket_id }}] {% endif %}add login throttling
+```
+
+# Per-phrase rules (apply to every clause in the message)
+
+- Imperative mood: "add", "fix", "update", "rename", "remove" — NEVER "added", "fixing", "updates".
+- Lowercase first letter (after any [TICKET] prefix).
+- Concise — describe the change in 3–8 words. No "and that does X also" hedging.
+- No trailing period. No wrapping quotes.
+{% if ticket_id %}- The whole message is prefixed once: `[{{ ticket_id }}] ` (square brackets, single space). The prefix is not repeated per clause.{% endif %}
+
+# What to include vs drop
+
+Include user-facing changes — new commands, new keybindings, new UI surfaces, user-visible bugfixes, behaviour changes a user would notice.
+
+Drop or merge into a parent phrase:
+- Pure type/interface refactors that exist only to support an included feature
+- Internal helper extractions unless they ARE the entire commit
+- Dependency bumps triggered by an included feature
+
+If the diff is genuinely 100% internal (refactor commit, no user-facing change), write one phrase about the structural change.
+
+# Bad examples (do NOT do this)
+
+- `Added the help overlay.`                                ← past tense + period
+- `add help overlay and also fix the tail`                 ← prose-y "and"/"also"; use `+`
+- `add help overlay\nfix tail rendering`                   ← multi-line; must be a single line
+- `"add help overlay"`                                     ← wrapped in quotes
+
+# Context
+
+Branch: {{ branch_name }}
+{% if ticket_id %}Ticket: {{ ticket_id }}{% endif %}
+{% if ticket_content %}
+{{ ticket_content }}
+{% endif %}
+
+# Staged diff
+
+```
+{{ diff_content }}
+```
+
+# Final self-check
+
+1. Is the message a single line (no newlines)?
+2. Does each clause start with an imperative verb (add/fix/update/…)?
+3. Are clauses separated by ` + ` (with spaces around the plus)?
+4. Have I dropped clauses that just support another included clause?
+
+# Output
+
+Output ONLY the final commit message string. Nothing before, nothing after.

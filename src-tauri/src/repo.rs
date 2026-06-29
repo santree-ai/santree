@@ -6,13 +6,13 @@
 //! remote when present, falling back to the folder name.
 
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{anyhow, bail, Result};
 
 use santree_core::domain::Repo;
 
 use crate::db::Db;
+use crate::git;
 
 /// Every registered repository, in insertion order. The displayed tracker
 /// reflects the Linear org the repo actually resolves to (its explicit link, or
@@ -68,13 +68,25 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
     if !dir.is_dir() {
         bail!("That path isn't a folder.");
     }
-    let toplevel = git(dir, &["rev-parse", "--show-toplevel"])
+    let toplevel = git::git(dir, &["rev-parse", "--show-toplevel"])
+        .ok()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("That folder isn't a git repository."))?;
     let top = Path::new(&toplevel);
 
-    let remote = git(top, &["remote", "get-url", "origin"]).filter(|s| !s.is_empty());
+    let remote = git::git(top, &["remote", "get-url", "origin"])
+        .ok()
+        .filter(|s| !s.is_empty());
     let (name, tracker) = identity(remote.as_deref(), top);
+
+    // Repos are keyed by derived name; warn if that collides with a *different*
+    // path so a silent clobber (two checkouts whose names derive the same) is
+    // at least traceable.
+    if let Some(existing) = self::path(db, &name).await? {
+        if existing != toplevel {
+            tracing::warn!(name = %name, existing = %existing, new = %toplevel, "repo name collision; overwriting path");
+        }
+    }
 
     sqlx::query(
         "INSERT INTO repos (name, tracker, agents, path) VALUES (?, ?, 0, ?)
@@ -95,20 +107,6 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
     })
 }
 
-/// Run `git -C <dir> <args>`, returning trimmed stdout on success.
-fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
 /// Derive `(name, tracker)` for a repo: prefer the GitHub `owner/repo` from the
 /// origin remote, otherwise the folder name as a local checkout.
 fn identity(remote: Option<&str>, top: &Path) -> (String, String) {
@@ -124,7 +122,7 @@ fn identity(remote: Option<&str>, top: &Path) -> (String, String) {
 }
 
 /// Parse `owner/repo` out of a GitHub remote URL (ssh or https forms).
-fn github_slug(url: &str) -> Option<String> {
+pub(crate) fn github_slug(url: &str) -> Option<String> {
     let url = url.trim();
     let rest = [
         "git@github.com:",

@@ -6,8 +6,31 @@
  */
 import { memo } from "react";
 import ReactMarkdown, { type Components, defaultUrlTransform } from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+
+// GitHub-flavored content embeds raw HTML — most visibly Linear's linkback, which
+// wraps the issue body in a collapsible `<details><summary>…</summary>`. Without
+// raw-HTML rendering those tags (and the `<!-- linear-linkback -->` comment) leak
+// out as literal text and nothing collapses. We render the HTML (rehype-raw) but
+// sanitize it first (rehype-sanitize, GitHub's default schema) so issue/PR bodies
+// from arbitrary authors can't inject scripts. The schema is widened only to:
+//  - allow `<details>`/`<summary>` + the `open` attribute (the disclosure), and
+//  - permit `data:` image sources (Linear inlines images as data URIs).
+const sanitizeSchema = {
+  ...defaultSchema,
+  tagNames: [...(defaultSchema.tagNames ?? []), "details", "summary"],
+  attributes: {
+    ...defaultSchema.attributes,
+    details: [...(defaultSchema.attributes?.details ?? []), "open"],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    src: [...(defaultSchema.protocols?.src ?? []), "data"],
+  },
+};
 
 // Linear-CDN images are inlined by the backend as `data:` URIs; react-markdown's
 // default URL sanitizer drops `data:` URLs, so allow image data URIs through
@@ -24,9 +47,7 @@ const components: Components = {
     <h2 className="mt-3 mb-1.5 text-[13px] font-semibold text-fg-bright">{children}</h2>
   ),
   h3: ({ children }) => (
-    <h3 className="mt-2.5 mb-1 text-[12px] font-semibold tracking-[.02em] text-fg-2 uppercase">
-      {children}
-    </h3>
+    <h3 className="mt-2.5 mb-1 text-[12px] font-semibold text-fg-2">{children}</h3>
   ),
   ul: ({ children }) => <ul className="mb-2.5 ml-1 space-y-1">{children}</ul>,
   ol: ({ children }) => (
@@ -80,6 +101,36 @@ const components: Components = {
       {children}
     </blockquote>
   ),
+  // Native disclosure (GitHub-style): collapsed unless the source set `open`. The
+  // `summary` is the always-visible, clickable header; the rest reveals on toggle.
+  details: ({ children }) => (
+    <details className="my-2 rounded-lg border border-line-2 bg-input px-3 py-2 [&[open]>summary]:mb-2">
+      {children}
+    </details>
+  ),
+  summary: ({ children }) => (
+    <summary className="cursor-pointer font-medium text-fg-2 marker:text-muted-4">
+      {children}
+    </summary>
+  ),
+  // GFM tables (remark-gfm). Without these overrides the table parses but renders
+  // as bare, borderless cells (just runs of text); style them to match Linear.
+  table: ({ children }) => (
+    <div className="mb-2.5 overflow-x-auto rounded-lg border border-line-2">
+      <table className="w-full border-collapse text-[11.5px]">{children}</table>
+    </div>
+  ),
+  thead: ({ children }) => <thead className="bg-input">{children}</thead>,
+  th: ({ children }) => (
+    <th className="border-b border-line-2 px-2.5 py-1.5 text-left font-semibold text-fg-2 [&:not(:last-child)]:border-r">
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td className="border-t border-line-2 px-2.5 py-1.5 align-top text-fg-3 [&:not(:last-child)]:border-r">
+      {children}
+    </td>
+  ),
 };
 
 /**
@@ -107,9 +158,10 @@ function normalizeLinearMarkdown(md: string): string {
 // rendered body — only a genuinely new string pays the cost.
 export const Markdown = memo(function Markdown({ children }: { children: string }) {
   return (
-    <div className="text-[12.5px] leading-[1.6] text-fg-2 [overflow-wrap:anywhere]">
+    <div className="selectable text-[12.5px] leading-[1.6] text-fg-2 [overflow-wrap:anywhere]">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
         components={components}
         urlTransform={urlTransform}
       >

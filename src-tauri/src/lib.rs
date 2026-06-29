@@ -3,16 +3,27 @@
 //! Keep this file about *registration* only. Command bodies live in
 //! [`commands`], and the real logic lives in the `santree-core` crate.
 
+mod agent;
 mod commands;
+mod commit_draft;
 mod db;
+mod git;
+mod git_watch;
+mod github;
+mod gql;
 mod linear;
 mod notes;
+mod openers;
+mod pr;
+mod prompts;
 mod repo;
+mod reviews;
 mod settings;
 mod terminal;
+mod worktree;
 
 use tauri::Manager;
-use tauri_specta::{collect_commands, Builder};
+use tauri_specta::{collect_commands, collect_events, Builder};
 
 /// The app's concrete `tauri-specta` builder type (Tauri's default `Wry` runtime).
 type AppBuilder = Builder<tauri::Wry>;
@@ -26,17 +37,46 @@ const BINDINGS_PATH: &str = "../src/bindings.ts";
 /// Centralised so the binary (`run`), the debug export, and the `gen:bindings`
 /// test all use the exact same command set — there's no way for them to drift.
 fn specta_builder() -> AppBuilder {
-    Builder::<tauri::Wry>::new().commands(collect_commands![
+    Builder::<tauri::Wry>::new()
+        .events(collect_events![git_watch::WorktreeChanged])
+        .commands(collect_commands![
         commands::list_repos,
         commands::add_repo,
         commands::list_agents,
         commands::agent_auth,
-        commands::list_worktrees,
-        commands::worktree_diff,
-        commands::worktree_terminal,
-        commands::commit_suggestion,
-        commands::file_tree,
-        commands::stage_meta,
+        commands::worktrees,
+        commands::base_worktree,
+        commands::create_worktree,
+        commands::remove_worktree,
+        commands::run_worktree_setup_streamed,
+        commands::pull_worktree,
+        commands::update_base_branch,
+        commands::worktree_status,
+        commands::worktree_file_diff,
+        commands::worktree_file_source,
+        commands::worktree_files,
+        commands::watch_worktrees,
+        commands::stage_path,
+        commands::unstage_path,
+        commands::discard_path,
+        commands::stage_all_paths,
+        commands::unstage_all_paths,
+        commands::commit_worktree,
+        commands::commit_message,
+        commands::commit_draft,
+        commands::set_commit_draft,
+        commands::set_worktree_title,
+        commands::work_prompt,
+        commands::pr_draft,
+        commands::create_pull_request,
+        commands::worktree_prs,
+        commands::reviews,
+        commands::pr_detail,
+        commands::worktree_init_script,
+        commands::set_worktree_init_script,
+        commands::make_init_script_executable,
+        commands::list_openers,
+        commands::open_in_app,
         commands::list_triage_tickets,
         commands::triage_detail,
         commands::triage_set_state,
@@ -110,6 +150,10 @@ pub fn run() {
 
             // Owns all live terminal sessions; commands read it from state.
             app.manage(santree_pty::PtyManager::new());
+
+            // Owns the worktree filesystem watcher; `watch_worktrees` points it at
+            // the active repo so the Trees views refresh live on disk changes.
+            app.manage(git_watch::WorktreeWatcher::default());
 
             // Vertically centre the macOS traffic lights in our 46px top bar so
             // they line up with the chrome icons (the `trafficLightPosition`

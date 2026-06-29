@@ -47,10 +47,8 @@ export function useEmbeddedTerminal(opts: {
   spec: EmbeddedTerminalSpec;
   /** Fired once when the hosted process exits (its tab is removed). */
   onExited?: () => void;
-  /** When false, no session is embedded (host stays empty). Defaults to true. */
-  enabled?: boolean;
 }): UseEmbeddedTerminalResult {
-  const { spec, onExited, enabled = true } = opts;
+  const { spec, onExited } = opts;
   const { tabs, ensure, close: closeTab, setEmbed } = useTerminals();
 
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -71,7 +69,7 @@ export function useEmbeddedTerminal(opts: {
   // biome-ignore lint/correctness/useExhaustiveDependencies: argsKey/envKey stand in for args/env.
   useLayoutEffect(() => {
     const host = hostRef.current;
-    if (!host || !enabled) return;
+    if (!host) return;
     const key = ensure({ title, cwd, command, args, env, seed, source, refId });
     keyRef.current = key;
     seenRef.current = false;
@@ -80,7 +78,7 @@ export function useEmbeddedTerminal(opts: {
     const r = host.getBoundingClientRect();
     setEmbed({ host, key, rect: { top: r.top, left: r.left, width: r.width, height: r.height } });
     return () => setEmbed(null);
-  }, [enabled, title, cwd, command, seed, source, refId, argsKey, envKey, ensure, setEmbed]);
+  }, [title, cwd, command, seed, source, refId, argsKey, envKey, ensure, setEmbed]);
 
   // Seen-latch exit detection (see the file header).
   useEffect(() => {

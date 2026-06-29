@@ -13,10 +13,10 @@
  */
 
 import { useRouterState } from "@tanstack/react-router";
-import { useLayoutEffect, useState } from "react";
+import { type CSSProperties, useLayoutEffect, useRef, useState } from "react";
 
 import { useRepos } from "../../lib/queries";
-import { useApp } from "../../state/AppContext";
+import { useApp, useAppUi } from "../../state/AppContext";
 import { useTerminals } from "./TerminalsContext";
 import { TerminalView } from "./TerminalView";
 
@@ -60,7 +60,8 @@ function useElementRect(el: HTMLElement | null): Rect | null {
 
 export function TerminalLayer() {
   const { tabs, activeKey, open, close, embed, setEmbed } = useTerminals();
-  const { activeRepo, sidebarCollapsed } = useApp();
+  const { activeRepo } = useApp();
+  const { sidebarCollapsed } = useAppUi();
   const { data: repos = [] } = useRepos();
   const repoPath = repos.find((r) => r.name === activeRepo)?.path ?? undefined;
   const onTerminal = useRouterState({ select: (s) => s.location.pathname === "/terminal" });
@@ -75,21 +76,40 @@ export function TerminalLayer() {
   // The session to display: the embedded one when embedding, else the active tab.
   const shownKey = embedded ? embed.key : activeKey;
 
-  const style = embedded
-    ? {
-        top: embedRect.top,
-        left: embedRect.left,
-        width: embedRect.width,
-        height: embedRect.height,
-        zIndex: 30,
-      }
-    : {
-        top: TOP_BAR,
-        bottom: 0,
-        left: sidebarCollapsed ? 0 : "var(--sidebar-width)",
-        right: 0,
-        zIndex: onTerminal ? 5 : -1,
-      };
+  // Remember the last embed rect so that when the embed goes away (e.g. the
+  // Trees pane navigates to the all-agents overview, or a file diff is opened
+  // over the terminal), the hidden overlay keeps the *same* geometry instead of
+  // snapping to the full content area. That snap would resize the xterm grid and
+  // make zsh reprint its prompt — a spurious blank prompt line every time you
+  // came back. Frozen-at-last-size means no resize, so no reprint.
+  const lastEmbedRect = useRef<Rect | null>(null);
+  if (embedded && embedRect) lastEmbedRect.current = embedRect;
+
+  const fullArea = {
+    top: TOP_BAR,
+    bottom: 0,
+    left: sidebarCollapsed ? 0 : "var(--sidebar-width)",
+    right: 0,
+  };
+
+  let style: CSSProperties;
+  if (embedded) {
+    style = {
+      top: embedRect.top,
+      left: embedRect.left,
+      width: embedRect.width,
+      height: embedRect.height,
+      zIndex: 30,
+    };
+  } else if (onTerminal) {
+    style = { ...fullArea, zIndex: 5 };
+  } else if (lastEmbedRect.current) {
+    // Hidden, but frozen at the last embed size (see above).
+    const r = lastEmbedRect.current;
+    style = { top: r.top, left: r.left, width: r.width, height: r.height, zIndex: -1 };
+  } else {
+    style = { ...fullArea, zIndex: -1 };
+  }
 
   return (
     <div

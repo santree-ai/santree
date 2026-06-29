@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use santree_core::config;
 use santree_core::domain::{AgentAuth, AgentKind, ClaudeCommand, ClaudeCommands, Settings};
-use santree_core::mock;
 
 use crate::db::Db;
 
@@ -64,8 +64,11 @@ pub async fn resolve(db: &Db, repo: &str, key: &str) -> Result<Option<String>> {
 /// defaults. A corrupt blob falls back to defaults rather than erroring.
 pub async fn get_settings(db: &Db) -> Result<Settings> {
     match get(db, "app", SETTINGS_KEY).await? {
-        Some(json) => Ok(serde_json::from_str(&json).unwrap_or_else(|_| mock::settings())),
-        None => Ok(mock::settings()),
+        Some(json) => Ok(serde_json::from_str(&json).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "settings blob failed to parse; using defaults");
+            config::default_settings()
+        })),
+        None => Ok(config::default_settings()),
     }
 }
 
@@ -188,26 +191,34 @@ fn plan_label(org_type: &str) -> String {
 }
 
 /// Process-wide cache of resolved binary paths. Each lookup spawns a login shell
-/// (tens of ms); the agent settings cards re-resolve on every render, so results
-/// are memoised for the app's lifetime — a binary's location doesn't move while
-/// the app is running.
+/// (tens of ms); the agent settings cards re-resolve on every render, so hits are
+/// memoised for the app's lifetime — a binary's location doesn't move while the
+/// app is running. Only *hits* are cached: a binary installed mid-session would
+/// otherwise stay "not detected" until restart, so misses are re-probed.
 static BINARY_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Resolve a CLI binary the way the user's terminal would: through their login
 /// shell, so PATH matches a real terminal (macOS GUI apps inherit a minimal PATH
 /// that usually misses Homebrew, version managers, etc.). Returns the absolute
-/// path, or `None` when the binary isn't found. Memoised (see [`BINARY_CACHE`]).
+/// path, or `None` when the binary isn't found. Hits are memoised (see [`BINARY_CACHE`]).
 pub fn discover_binary(name: &str) -> Option<String> {
-    if let Some(hit) = BINARY_CACHE.lock().unwrap().get(name).cloned() {
-        return hit;
+    if let Some(hit) = BINARY_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(name)
+        .cloned()
+    {
+        return Some(hit);
     }
     let resolved = resolve_binary(name);
-    BINARY_CACHE
-        .lock()
-        .unwrap()
-        .insert(name.to_string(), resolved.clone());
+    if let Some(path) = &resolved {
+        BINARY_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), path.clone());
+    }
     resolved
 }
 

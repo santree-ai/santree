@@ -19,6 +19,7 @@ import { Badge, Tabs } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
 import { useAgentAuth, useAgents } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
+import { alpha } from "../../../theme/colors";
 import { useEmbeddedTerminal } from "../../terminal/useEmbeddedTerminal";
 import { Block, Heading, KvRow } from "../widgets";
 
@@ -38,7 +39,9 @@ export function AgentsSection() {
           label: a.label,
           icon: <AgentIcon kind={a.key} size={14} />,
           dimmed: !agentAvailable(a.key),
-          badge: agentAvailable(a.key) ? undefined : <Badge color="#8a8a93">WIP</Badge>,
+          badge: agentAvailable(a.key) ? undefined : (
+            <Badge color="var(--color-muted-2)">WIP</Badge>
+          ),
         }))}
         value={tab}
         onChange={setTab}
@@ -71,7 +74,7 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
         <div className="max-w-[380px] text-[12px] text-muted-3">
           This harness is a work in progress. For now, Claude Code is the only configurable agent.
         </div>
-        <Badge color="#8a8a93">WIP</Badge>
+        <Badge color="var(--color-muted-2)">WIP</Badge>
       </div>
     );
   }
@@ -82,10 +85,7 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
         <div className="grid grid-cols-2 gap-3">
           <div
             className="relative flex flex-col items-center justify-center gap-1.5 rounded-xl border bg-input py-5"
-            style={{
-              borderColor: "color-mix(in srgb, var(--accent) 45%, transparent)",
-              background: "color-mix(in srgb, var(--accent) 7%, transparent)",
-            }}
+            style={{ borderColor: alpha(45), background: alpha(7) }}
           >
             <CliIcon size={20} className="text-fg-2" />
             <span className="text-[12px] font-medium text-fg-2">CLI</span>
@@ -97,7 +97,7 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
             <KeyIcon size={20} className="text-muted-2" />
             <span className="text-[12px] font-medium text-muted-2">API key</span>
             <span className="mt-0.5">
-              <Badge color="#8a8a93">WIP</Badge>
+              <Badge color="var(--color-muted-2)">WIP</Badge>
             </span>
           </div>
         </div>
@@ -105,7 +105,9 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
         {auth && (
           <>
             <div className="mt-3.5 mb-2 flex items-center justify-between">
-              <Badge color={auth.connected ? "#3fb950" : "var(--color-status-amber)"}>
+              <Badge
+                color={auth.connected ? "var(--color-status-green)" : "var(--color-status-amber)"}
+              >
                 {auth.connected ? "Connected" : "Not connected"}
               </Badge>
               <button

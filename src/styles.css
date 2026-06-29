@@ -23,6 +23,10 @@
   /* Hover/well surfaces (formerly inline one-off shades). */
   --color-hover: #15161a;
   --color-hover-2: #1b1c20;
+  /* The persistent "selected" row surface (the issue open in the right panel) —
+     deliberately stronger than the transient --color-hover so a selected row is
+     distinguishable from one you're merely hovering. */
+  --color-selected: #22232c;
   --color-well: #0e0f12;
   --color-deep: #0b0c0f;
 
@@ -88,6 +92,10 @@
      which is the accent used AS text on tinted surfaces. Shared across themes
      since the accent itself is. */
   --on-accent: #06231a;
+  /* Text/icon color for content sitting ON the solid danger (red) fill — white
+     in both themes since the danger red is shared. The dark --on-accent only
+     reads on the teal accent, so destructive buttons need their own token. */
+  --on-danger: #ffffff;
   /* Linear's brand color (logo tint, connected badge). Single source for the
      `LINEAR_BRAND` token in theme/colors and the `text-[color:var(--linear-brand)]`
      icon tints. */
@@ -129,6 +137,7 @@
   --color-popover: #ffffff;
   --color-hover: #f0f1f4;
   --color-hover-2: #e7e9ec;
+  --color-selected: #dde0e7;
   --color-well: #f3f4f6;
   --color-deep: #eaecef;
 
@@ -186,6 +195,31 @@ body,
 
 * {
   box-sizing: border-box;
+}
+
+/* Native-app feel: don't let chrome (labels, buttons, headings) be selected or
+   show a text caret like a webpage. Real text — form fields and prose content
+   (marked `.selectable`) — opts back in below. */
+:root {
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+.selectable,
+.selectable * {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: auto;
+}
+
+/* Images and links shouldn't be draggable as ghost previews (a browser tell). */
+img,
+a {
+  -webkit-user-drag: none;
 }
 
 body {
@@ -296,4 +330,105 @@ button {
 }
 .animate-blink {
   animation: blink 1s steps(1) infinite;
+}
+
+/* Bash syntax tokens for the Trees → Setup-script editor (refractor/Prism token
+   classes). Dark defaults with light-mode overrides for the washed-out hues. */
+.shell-editor .token.comment {
+  color: var(--color-muted-3);
+  font-style: italic;
+}
+.shell-editor .token.keyword,
+.shell-editor .token.builtin,
+.shell-editor .token.class-name {
+  color: #c678dd;
+}
+.shell-editor .token.string,
+.shell-editor .token.char {
+  color: #98c379;
+}
+.shell-editor .token.function {
+  color: #61afef;
+}
+.shell-editor .token.variable,
+.shell-editor .token.number {
+  color: #e5a44b;
+}
+.shell-editor .token.operator,
+.shell-editor .token.punctuation {
+  color: var(--color-muted);
+}
+:root[data-theme="light"] .shell-editor .token.string,
+:root[data-theme="light"] .shell-editor .token.char {
+  color: #3f8a3f;
+}
+:root[data-theme="light"] .shell-editor .token.variable,
+:root[data-theme="light"] .shell-editor .token.number {
+  color: #b3711a;
+}
+:root[data-theme="light"] .shell-editor .token.function {
+  color: #2f6aa8;
+}
+
+/* Syntax tokens for the read-only Trees file viewer (CodeView). Same palette as
+   the setup-script editor, applied to any language refractor can tokenize. */
+.code-hl .token.comment,
+.code-hl .token.prolog,
+.code-hl .token.doctype,
+.code-hl .token.cdata {
+  color: var(--color-muted-3);
+  font-style: italic;
+}
+.code-hl .token.keyword,
+.code-hl .token.builtin,
+.code-hl .token.class-name,
+.code-hl .token.tag,
+.code-hl .token.selector,
+.code-hl .token.atrule {
+  color: #c678dd;
+}
+.code-hl .token.string,
+.code-hl .token.char,
+.code-hl .token.attr-value,
+.code-hl .token.regex {
+  color: #98c379;
+}
+.code-hl .token.function,
+.code-hl .token.attr-name,
+.code-hl .token.property {
+  color: #61afef;
+}
+.code-hl .token.variable,
+.code-hl .token.number,
+.code-hl .token.boolean,
+.code-hl .token.constant,
+.code-hl .token.symbol {
+  color: #e5a44b;
+}
+.code-hl .token.operator,
+.code-hl .token.punctuation {
+  color: var(--color-muted);
+}
+.code-hl .token.inserted {
+  color: #98c379;
+}
+.code-hl .token.deleted {
+  color: #e06c75;
+}
+:root[data-theme="light"] .code-hl .token.string,
+:root[data-theme="light"] .code-hl .token.char,
+:root[data-theme="light"] .code-hl .token.attr-value,
+:root[data-theme="light"] .code-hl .token.regex {
+  color: #3f8a3f;
+}
+:root[data-theme="light"] .code-hl .token.variable,
+:root[data-theme="light"] .code-hl .token.number,
+:root[data-theme="light"] .code-hl .token.boolean,
+:root[data-theme="light"] .code-hl .token.constant {
+  color: #b3711a;
+}
+:root[data-theme="light"] .code-hl .token.function,
+:root[data-theme="light"] .code-hl .token.attr-name,
+:root[data-theme="light"] .code-hl .token.property {
+  color: #2f6aa8;
 }

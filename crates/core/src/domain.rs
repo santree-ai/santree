@@ -19,6 +19,32 @@ pub enum AgentKind {
     Opencode,
 }
 
+impl AgentKind {
+    /// Stable string form for persistence (matches the serde discriminant name).
+    /// Exhaustive, so adding a variant forces this to be updated.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "Claude",
+            AgentKind::Codex => "Codex",
+            AgentKind::Cursor => "Cursor",
+            AgentKind::Opencode => "Opencode",
+        }
+    }
+}
+
+impl std::str::FromStr for AgentKind {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "Claude" => AgentKind::Claude,
+            "Codex" => AgentKind::Codex,
+            "Cursor" => AgentKind::Cursor,
+            "Opencode" => AgentKind::Opencode,
+            _ => return Err(()),
+        })
+    }
+}
+
 /// A selectable agent and the models it offers in the launch tray.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -30,7 +56,8 @@ pub struct AgentDef {
 }
 
 /// An agent harness's authentication / subscription status, as shown in the
-/// harness settings tab. Mocked today (the CLI owns real auth).
+/// harness settings tab. Read from the agent CLI's own credentials (e.g.
+/// `~/.claude.json`); the CLI owns auth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentAuth {
@@ -99,17 +126,6 @@ impl TaskStatus {
             TaskStatus::Done => "Done",
         }
     }
-
-    /// State color (hex) for this status, matching the frontend's `statusColor`.
-    pub fn color(self) -> &'static str {
-        match self {
-            TaskStatus::InReview => "#3fb950",
-            TaskStatus::InProgress => "#d29922",
-            TaskStatus::Todo => "#4493f8",
-            TaskStatus::Backlog => "#6e7681",
-            TaskStatus::Done => "#8957e5",
-        }
-    }
 }
 
 /// A ticket in the dependency graph. `x`/`y` are its canvas position; `addLines`
@@ -121,7 +137,7 @@ pub struct Task {
     pub title: String,
     pub project: String,
     /// The project's color (hex) as configured in Linear, when it has one. Falls
-    /// back to the frontend's per-name color map when absent (e.g. mock data).
+    /// back to the frontend's per-name color map when absent.
     pub project_color: Option<String>,
     /// The project's icon — an emoji (rendered directly) or a Linear icon name
     /// (we don't ship that icon set, so it falls back to the colored dot).
@@ -134,25 +150,217 @@ pub struct Task {
     /// already done) are pulled into the graph only as blocker context and are
     /// rendered grayed out.
     pub actionable: bool,
+    /// The assignee's display name, when the issue is assigned (shown in the
+    /// inspector's dependency cards).
+    pub assignee: Option<String>,
+    /// The assignee's avatar URL, when present.
+    pub assignee_avatar_url: Option<String>,
     pub x: i32,
     pub y: i32,
     pub add_lines: u32,
     pub del_lines: u32,
 }
 
-/// CI state of a pull request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
-pub enum CheckState {
-    Running,
-    Passing,
+/// A proposed PR (title + body) for the create-PR dialog, before it's opened.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PrDraft {
+    pub title: String,
+    pub body: String,
+    /// The branch the PR would merge into (shown for confirmation).
+    pub base_branch: String,
 }
 
-/// A pull request opened from a worktree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+/// The result of creating a PR: its number and web URL (to open in the browser).
+#[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct PullRequest {
+pub struct NewPr {
     pub number: u32,
-    pub checks: CheckState,
+    pub url: String,
+}
+
+/// The merge state of a worktree's pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
+}
+
+/// Live status of the PR opened from a worktree's branch (fetched from GitHub,
+/// separately from the worktree list so the list stays fast/offline-capable).
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreePr {
+    /// The worktree this PR belongs to (its issue id).
+    pub issue_id: String,
+    pub number: u32,
+    pub url: String,
+    pub state: PrState,
+}
+
+// ── Reviews dashboard (org-scoped GitHub PR inbox) ──────────────────────────
+
+/// GitHub's aggregate review decision for a PR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum ReviewDecision {
+    Approved,
+    ChangesRequested,
+    /// A review is required but none satisfying it has been given yet.
+    ReviewRequired,
+    /// No review has been requested/required (or GitHub returned null).
+    None,
+}
+
+/// Rolled-up CI/status-check state for a PR's latest commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum CheckRollup {
+    Success,
+    Failure,
+    Pending,
+    /// No checks configured (GitHub returned null).
+    None,
+}
+
+/// Whether a requested reviewer is an individual or a team.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum ReviewerKind {
+    User,
+    Team,
+}
+
+/// A reviewer requested on a PR — a person (with avatar) or a team (no avatar).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct Reviewer {
+    pub kind: ReviewerKind,
+    /// Login for a user, team name for a team.
+    pub name: String,
+    /// Avatar URL for users; empty for teams.
+    pub avatar_url: String,
+}
+
+/// A pull request shown in the Reviews dashboard. Spans repos within one org, so
+/// it carries its own `repo` (owner/name) rather than relying on a single active
+/// checkout the way [`WorktreePr`] does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewPr {
+    /// GraphQL node id — stable selection key across refetches.
+    pub id: String,
+    pub number: u32,
+    pub title: String,
+    pub url: String,
+    /// "owner/name" the PR lives in (the grouping axis for "My PRs").
+    pub repo: String,
+    /// The PR's head branch name (shown in the header, click-to-copy).
+    pub head_ref: String,
+    pub author: String,
+    pub author_avatar_url: String,
+    pub state: PrState,
+    pub is_draft: bool,
+    pub review_decision: ReviewDecision,
+    pub checks: CheckRollup,
+    pub additions: u32,
+    pub deletions: u32,
+    pub comment_count: u32,
+    /// Reviewers requested on the PR (people and teams).
+    pub reviewers: Vec<Reviewer>,
+    /// ISO-8601 timestamp of the last update.
+    pub updated_at: String,
+}
+
+/// Review requests waiting on a specific team the viewer belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamReviews {
+    pub slug: String,
+    pub name: String,
+    pub prs: Vec<ReviewPr>,
+}
+
+/// The categorized PR inbox for the Reviews tab, scoped to one org.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewInbox {
+    /// PRs the viewer authored (grouped by repo on the frontend).
+    pub mine: Vec<ReviewPr>,
+    /// PRs where the viewer is individually requested as a reviewer.
+    pub requested: Vec<ReviewPr>,
+    /// PRs requested via a team the viewer is on — one section per team.
+    pub teams: Vec<TeamReviews>,
+}
+
+/// Where a PR comment originated, so the UI can label/anchor it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum CommentKind {
+    /// A top-level conversation comment.
+    Issue,
+    /// A review summary (approve / request-changes / comment).
+    Review,
+    /// An inline comment anchored to a file in a review thread.
+    ReviewThread,
+}
+
+/// One comment in a PR's conversation (issue comment, review, or inline thread).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PrComment {
+    pub author: String,
+    pub author_avatar_url: String,
+    pub body: String,
+    pub created_at: String,
+    pub kind: CommentKind,
+    /// File path for inline (`ReviewThread`) comments; `None` otherwise.
+    pub path: Option<String>,
+}
+
+/// One changed file in a PR, with its unified diff hunk (from the REST files API).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PrFile {
+    pub path: String,
+    /// GitHub's status string: "added" | "modified" | "removed" | "renamed".
+    pub status: String,
+    pub additions: u32,
+    pub deletions: u32,
+    /// Unified diff for the file; `None` for binary files (no textual patch).
+    pub patch: Option<String>,
+}
+
+/// Normalized status of a single CI check (a check run or a status context).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum CheckStatus {
+    Success,
+    Failure,
+    /// Queued / in-progress / expected.
+    Pending,
+    Skipped,
+    /// Neutral / cancelled / action-required — finished without pass/fail.
+    Neutral,
+}
+
+/// One CI check on a PR's head commit (a GitHub check run or a status context).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PrCheck {
+    pub name: String,
+    pub status: CheckStatus,
+    /// The app/workflow that produced it (e.g. "GitHub Actions"), or the status
+    /// context's description — shown as a subtitle.
+    pub description: Option<String>,
+    /// Link to the check's details (the run/build page).
+    pub url: Option<String>,
+}
+
+/// The detail panel payload for a selected PR: body, conversation, diff, checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PrDetail {
+    pub body: String,
+    pub comments: Vec<PrComment>,
+    pub files: Vec<PrFile>,
+    pub checks: Vec<PrCheck>,
 }
 
 /// What an agent worktree is currently doing.
@@ -167,124 +375,104 @@ pub enum Activity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Worktree {
+    /// The issue identifier this worktree was created for (e.g. "AK-165").
     pub id: String,
     pub title: String,
     pub status: TaskStatus,
     pub add_lines: u32,
     pub del_lines: u32,
     pub dirty: bool,
+    /// Commits this branch is ahead of its base.
     pub ahead: u32,
+    /// Commits this branch is behind its base (origin/<base>).
+    pub behind: u32,
     pub agent: AgentKind,
     pub activity: Activity,
-    pub pr: Option<PullRequest>,
-}
-
-/// Semantic color tone for a terminal/diff line. The frontend maps each tone to
-/// a concrete theme color.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
-pub enum Tone {
-    Muted,
-    Default,
-    Accent,
-    Green,
-    Cyan,
-    Amber,
-    Red,
-}
-
-/// One line of streamed terminal output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalLine {
-    pub text: String,
-    pub tone: Tone,
-    pub indent: u32,
-}
-
-/// A worktree's terminal session: its seed transcript plus status.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct Terminal {
-    pub worktree_id: String,
-    pub lines: Vec<TerminalLine>,
-    pub running: bool,
-    pub awaiting: bool,
-    pub status: String,
-    pub status_tone: Tone,
-    /// Working directory shown in the header, e.g. `.worktrees/ak-165`.
-    pub cwd: String,
-}
-
-/// Whether a diffed file is newly added or modified in place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
-pub enum DiffTag {
-    New,
-    Modified,
-}
-
-/// The role of a single diff line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
-pub enum DiffLineKind {
-    Add,
-    Del,
-    Context,
-}
-
-/// One line inside a diff hunk.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct DiffLine {
-    pub kind: DiffLineKind,
-    pub text: String,
-}
-
-/// A contiguous block of changes within a file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct DiffHunk {
-    pub header: String,
-    pub lines: Vec<DiffLine>,
-}
-
-/// A changed file within a worktree's diff.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct DiffFile {
+    /// Git branch checked out in the worktree (e.g. "feature/ak-165-…").
+    pub branch: String,
+    /// Absolute filesystem path of the worktree directory.
     pub path: String,
+    /// Linear project the issue belongs to, used to group the Trees tabs.
+    pub project: Option<String>,
+    /// Branch this worktree was created from.
+    pub base_branch: String,
+    /// Whether `.santree/init.sh` has been run for this worktree.
+    pub setup_ran: bool,
+    /// True only for the optimistic frontend placeholder shown while a worktree
+    /// is still being created (it has no branch/path yet). Always false from the
+    /// backend; `#[serde(default)]` so older payloads deserialize cleanly.
+    #[serde(default)]
+    pub pending: bool,
+}
+
+/// Whether a changed file was added, modified, deleted, renamed, or is untracked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum FileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Untracked,
+}
+
+/// One entry in a worktree's working-tree status — a file with uncommitted
+/// changes, as shown in the commit box. `staged` reflects whether the index
+/// holds changes for the file (the commit box stages whole files).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedFile {
+    pub path: String,
+    /// Original path for renames.
+    pub old_path: Option<String>,
+    pub status: FileStatus,
+    pub staged: bool,
     pub add_lines: u32,
     pub del_lines: u32,
-    pub tag: DiffTag,
-    pub hunks: Vec<DiffHunk>,
+    /// Binary / non-text content — the diff viewer skips rendering these.
+    pub binary: bool,
 }
 
-/// The full diff for a worktree. When `clean`, there is nothing to commit and
-/// `pr_note` describes the open PR instead.
+/// The old (HEAD) and new (working-tree) full contents of a file, used by the
+/// diff viewer to expand unchanged context above/below a hunk (GitHub-style).
+/// Either side is empty when it doesn't exist (added vs. deleted).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct WorktreeDiff {
-    pub clean: bool,
-    pub files: Vec<DiffFile>,
-    pub pr_note: Option<String>,
+pub struct FileSource {
+    pub old_text: String,
+    pub new_text: String,
 }
 
-/// An entry in the worktree file browser.
+/// The repo's `.santree/init.sh` setup script, surfaced to the Settings editor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct FileEntry {
-    pub name: String,
-    pub icon: String,
-    pub depth: u32,
-    pub dir: bool,
-    pub modified: bool,
+pub struct ScriptInfo {
+    pub path: String,
+    pub exists: bool,
+    /// Whether the file has its executable bit set (required to run on create).
+    pub executable: bool,
+    pub content: String,
 }
 
-/// Priority of a triage ticket.
+/// An external app/location a worktree can be opened in (Conductor-style menu).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct Opener {
+    /// Stable key passed back to `open_in_app` (e.g. "finder", "cursor").
+    pub key: String,
+    pub label: String,
+    /// Whether the app was found installed on this machine.
+    pub available: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 pub enum Priority {
     Urgent,
     High,
     Medium,
     Low,
+    /// Linear's "no priority" (numeric 0). Distinct from `Low` so unprioritized
+    /// issues don't masquerade as low-priority; the UI shows no priority pill.
+    None,
 }
 
 /// An untriaged ticket awaiting investigation (the queue row).
@@ -392,14 +580,6 @@ pub struct TriageSchedule {
     /// True when the signed-in viewer is the one currently on triage.
     pub current_is_me: bool,
     pub shifts: Vec<TriageShift>,
-}
-
-/// A stage in an agent run, with its progress percentage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct Stage {
-    pub label: String,
-    pub pct: u32,
 }
 
 /// Per-agent configuration: which executable and default model to use.

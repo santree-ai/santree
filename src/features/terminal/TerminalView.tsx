@@ -5,7 +5,7 @@
  * unmount. Backend and renderer are injectable so the wiring is unit-testable
  * with fakes. No xterm import here — only the `TerminalRenderer` interface.
  */
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import { tauriBackend } from "./TauriBackend";
 import type { SessionId, TerminalBackend, TerminalRenderer, Unsubscribe } from "./types";
@@ -51,9 +51,25 @@ export function TerminalView({
   const host = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<TerminalRenderer | null>(null);
   const idRef = useRef<SessionId | null>(null);
+  // Last grid size sent to the PTY. Resizing the PTY makes the shell redraw its
+  // prompt (p10k/zsh reprint on SIGWINCH), so we only send a resize when cols/rows
+  // *actually* change — a ResizeObserver fires on every pixel nudge (e.g. toggling
+  // the side panel re-lays-out the host), and most of those keep the same grid.
+  const lastSizeRef = useRef({ cols: 0, rows: 0 });
   // Read the latest onExit without re-running the mount-once effect.
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
+
+  // Send a resize to the PTY only if the grid size changed since the last send.
+  const commitResize = useCallback(
+    (cols: number, rows: number) => {
+      if (idRef.current === null || cols <= 0 || rows <= 0) return;
+      if (cols === lastSizeRef.current.cols && rows === lastSizeRef.current.rows) return;
+      lastSizeRef.current = { cols, rows };
+      backend.resize(idRef.current, cols, rows);
+    },
+    [backend],
+  );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: open exactly one session for this pane's lifetime; props are stable per tab.
   useEffect(() => {
@@ -84,6 +100,7 @@ export function TerminalView({
           return;
         }
         idRef.current = id;
+        lastSizeRef.current = { cols, rows };
         unsub = backend.onOutput(id, (bytes) => renderer.write(bytes));
         unsubExit = backend.onExit(id, () => onExitRef.current?.());
         renderer.onInput((data) => backend.write(id, data));
@@ -95,12 +112,20 @@ export function TerminalView({
     })();
 
     let ro: ResizeObserver | undefined;
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     if (typeof ResizeObserver !== "undefined") {
       ro = new ResizeObserver(() => {
-        const size = safeFit(renderer);
-        if (idRef.current !== null && size.cols > 0) {
-          backend.resize(idRef.current, size.cols, size.rows);
-        }
+        // DEBOUNCE the resize — don't fit/resize on every observer tick. A window or
+        // panel resize fires a burst of ticks, each a slightly different size; sending
+        // a SIGWINCH per intermediate size makes the shell redraw its prompt over and
+        // over (xterm's reflow shifts the cursor between rapid resizes, so each redraw
+        // stacks a new prompt line). Waiting for the size to SETTLE and resizing once
+        // gives a single clean in-place redraw — the same approach VS Code uses.
+        if (resizeTimer) clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          const { cols, rows } = safeFit(renderer);
+          commitResize(cols, rows);
+        }, 100);
       });
       ro.observe(el);
     }
@@ -108,6 +133,7 @@ export function TerminalView({
     return () => {
       disposed = true;
       ro?.disconnect();
+      if (resizeTimer) clearTimeout(resizeTimer);
       unsub();
       unsubExit();
       if (idRef.current !== null) backend.close(idRef.current);
@@ -125,11 +151,11 @@ export function TerminalView({
     if (!renderer) return;
     const raf = requestAnimationFrame(() => {
       const { cols, rows } = safeFit(renderer);
-      if (idRef.current !== null && cols > 0) backend.resize(idRef.current, cols, rows);
+      commitResize(cols, rows);
       renderer.focus();
     });
     return () => cancelAnimationFrame(raf);
-  }, [active, backend]);
+  }, [active, commitResize]);
 
   return <div ref={host} className="h-full w-full" />;
 }

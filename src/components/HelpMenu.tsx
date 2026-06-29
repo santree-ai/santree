@@ -1,5 +1,6 @@
 /** The help popover anchored at the bottom-left of the window. */
-import { useApp } from "../state/AppContext";
+import { useAppUi } from "../state/AppContext";
+import { APP_VERSION } from "./SidebarFooter";
 
 const KbdIcon = () => (
   <svg
@@ -85,7 +86,7 @@ const ITEMS: Item[] = [
 ];
 
 export function HelpMenu() {
-  const { helpOpen, setHelpOpen, setShortcutsOpen } = useApp();
+  const { helpOpen, setHelpOpen, setShortcutsOpen } = useAppUi();
   if (!helpOpen) return null;
 
   // Items that do something beyond closing the menu, keyed by label.
@@ -123,7 +124,7 @@ export function HelpMenu() {
           </button>
         ))}
         <div className="mt-1 border-t border-line-2 px-2.5 pt-2.5 pb-1 font-mono text-[10.5px] text-muted-4">
-          santree v0.8.0 · Claude Code 2.1.156 · Codex 0.138.0
+          santree {APP_VERSION}
         </div>
       </div>
     </>

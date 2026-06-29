@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { agentLabel, agentSlug, statusColor, statusLabel, toneColor } from "./colors";
+import { agentLabel, agentSlug, statusColor, statusLabel } from "./colors";
 
 describe("theme color/label maps", () => {
   it("maps every task status to a label and color", () => {
@@ -12,11 +12,6 @@ describe("theme color/label maps", () => {
 
   it("renders In Review with a space", () => {
     expect(statusLabel.InReview).toBe("In Review");
-  });
-
-  it("resolves the accent tone to the CSS variable", () => {
-    expect(toneColor("Accent")).toBe("var(--accent)");
-    expect(toneColor("Green")).toMatch(/^#/);
   });
 
   it("gives agents full labels and lower-case slugs", () => {

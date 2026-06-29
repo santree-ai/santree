@@ -2,18 +2,15 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import type { CSSProperties } from "react";
 
-import { useApp } from "../state/AppContext";
+import { useAppUi } from "../state/AppContext";
+import { accentActiveStyle } from "../theme/colors";
 import { GearIcon, HelpIcon } from "./icons";
 
-const APP_VERSION = "v0.8.0";
+export const APP_VERSION = "v0.8.0";
 
 function iconButtonStyle(active: boolean): CSSProperties {
   return active
-    ? {
-        background: "color-mix(in srgb, var(--accent) 18%, transparent)",
-        borderColor: "color-mix(in srgb, var(--accent) 55%, transparent)",
-        color: "var(--accent)",
-      }
+    ? accentActiveStyle()
     : {
         background: "transparent",
         borderColor: "var(--color-line-3)",
@@ -22,7 +19,7 @@ function iconButtonStyle(active: boolean): CSSProperties {
 }
 
 export function SidebarFooter() {
-  const { helpOpen, setHelpOpen } = useApp();
+  const { helpOpen, setHelpOpen } = useAppUi();
   const navigate = useNavigate();
   const onSettings = useRouterState({
     select: (s) => s.location.pathname.startsWith("/settings"),

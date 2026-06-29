@@ -10,7 +10,7 @@ import { AppProvider } from "./state/AppContext";
 import { ToastViewport, toast } from "./state/toast";
 import "./styles.css";
 
-// Mocked data rarely changes within a session; cache it generously.
+// Backend data rarely changes within a session; cache it generously.
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 5 * 60 * 1000, refetchOnWindowFocus: false } },
   // Surface every failed mutation (settings save, Linear connect, status change…)

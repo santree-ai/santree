@@ -9,7 +9,8 @@ import type { TriageDetail, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { LinearLogo, RefreshIcon } from "../../components/icons";
 import { Skeleton } from "../../components/primitives";
-import { priorityColor } from "../../theme/colors";
+import { alpha } from "../../theme/colors";
+import { PriorityPill } from "./PriorityPill";
 import { StatusPicker } from "./StatusPicker";
 
 /** The AI "spark" glyph for the Investigate button — a big 4-point star + a small one. */
@@ -39,17 +40,11 @@ export function IssueHeader({
   onRefresh: () => void;
   refreshing: boolean;
 }) {
-  const pc = priorityColor[ticket.priority];
   return (
     <div className="flex-none border-b border-hairline px-5 pt-4 pb-3.5">
       <div className="mb-2 flex items-center gap-2.5">
         <span className="font-mono text-[11.5px] text-muted-2">{ticket.id}</span>
-        <span
-          className="rounded px-[7px] py-[1.5px] font-mono text-[9px] font-semibold tracking-[.04em] uppercase"
-          style={{ color: pc, background: `${pc}15`, border: `1px solid ${pc}40` }}
-        >
-          {ticket.priority}
-        </span>
+        <PriorityPill priority={ticket.priority} />
         <StatusPicker detail={detail} onSetState={onSetState} />
         {ticket.sla && (
           <span className="font-mono text-[10.5px] text-status-red/90">{ticket.sla}</span>
@@ -81,12 +76,8 @@ export function IssueHeader({
             className="flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-medium transition-colors"
             style={{
               color: "var(--accent)",
-              borderColor: investigating
-                ? "color-mix(in srgb, var(--accent) 55%, transparent)"
-                : "color-mix(in srgb, var(--accent) 30%, transparent)",
-              background: investigating
-                ? "color-mix(in srgb, var(--accent) 20%, transparent)"
-                : "color-mix(in srgb, var(--accent) 11%, transparent)",
+              borderColor: investigating ? alpha(55) : alpha(30),
+              background: investigating ? alpha(20) : alpha(11),
             }}
           >
             <InvestigateIcon size={13} />

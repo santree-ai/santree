@@ -34,7 +34,10 @@ pub struct OpenOpts {
 
 struct Session {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// Per-session writer lock so a blocking `write_all`/`flush` on one stuck
+    /// child only serializes that session — not every session behind the manager's
+    /// single `Inner` lock.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
 }
 
@@ -73,7 +76,7 @@ impl PtyManager {
             .context("allocating pty")?;
 
         let cmd = build_command(&opts);
-        let child = pair.slave.spawn_command(cmd).context("spawning process")?;
+        let mut child = pair.slave.spawn_command(cmd).context("spawning process")?;
         // Drop the slave handle in the parent so the master reader sees EOF once
         // the child exits.
         drop(pair.slave);
@@ -82,26 +85,37 @@ impl PtyManager {
         let writer = pair.master.take_writer().context("taking writer")?;
 
         let id = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let id = inner.next_id;
             inner.next_id += 1;
-            inner.sessions.insert(
-                id,
-                Session {
-                    master: pair.master,
-                    writer,
-                    child,
-                },
-            );
             id
         };
 
-        // Blocking read loop on its own thread — the PTY master read is blocking,
-        // so this is a std thread rather than an async task.
-        std::thread::Builder::new()
+        // Spawn the reader *before* registering the session: if the spawn fails we
+        // kill+reap the child here instead of leaving an unreaped, reader-less
+        // session in the map. Blocking read loop on its own std thread (the PTY
+        // master read is blocking), not an async task.
+        if let Err(e) = std::thread::Builder::new()
             .name(format!("pty-reader-{id}"))
             .spawn(move || pump(reader, on_output))
-            .context("spawning reader thread")?;
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow::Error::new(e).context("spawning reader thread"));
+        }
+
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sessions
+            .insert(
+                id,
+                Session {
+                    master: pair.master,
+                    writer: Arc::new(Mutex::new(writer)),
+                    child,
+                },
+            );
 
         tracing::info!(id, command = %opts.command, "opened pty session");
         Ok(id)
@@ -109,19 +123,25 @@ impl PtyManager {
 
     /// Write raw bytes (keystrokes, or a seed) to the session's PTY master.
     pub fn write(&self, id: SessionId, data: &[u8]) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
-        let session = inner
-            .sessions
-            .get_mut(&id)
-            .ok_or_else(|| anyhow!("no terminal session {id}"))?;
-        session.writer.write_all(data).context("writing to pty")?;
-        session.writer.flush().context("flushing pty")?;
+        // Clone out the per-session writer handle, then drop the manager lock so
+        // the (potentially blocking) write never serializes other sessions.
+        let writer = {
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let session = inner
+                .sessions
+                .get(&id)
+                .ok_or_else(|| anyhow!("no terminal session {id}"))?;
+            session.writer.clone()
+        };
+        let mut writer = writer.lock().unwrap_or_else(|e| e.into_inner());
+        writer.write_all(data).context("writing to pty")?;
+        writer.flush().context("flushing pty")?;
         Ok(())
     }
 
     /// Resize the PTY so the hosted process reflows to the visible grid.
     pub fn resize(&self, id: SessionId, cols: u16, rows: u16) -> Result<()> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let session = inner
             .sessions
             .get(&id)
@@ -141,7 +161,12 @@ impl PtyManager {
     /// Kill the child and free the session. The reader thread then sees EOF and
     /// exits on its own.
     pub fn close(&self, id: SessionId) -> Result<()> {
-        let session = self.inner.lock().unwrap().sessions.remove(&id);
+        let session = self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sessions
+            .remove(&id);
         if let Some(mut session) = session {
             let _ = session.child.kill();
             // Reap on a detached thread: a process slow to die after the kill must
@@ -158,12 +183,17 @@ impl PtyManager {
 
     /// Kill every session — used on app exit so no child or thread is leaked.
     pub fn close_all(&self) {
-        let drained: Vec<Session> = {
-            let mut inner = self.inner.lock().unwrap();
+        let mut drained: Vec<Session> = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.sessions.drain().map(|(_, s)| s).collect()
         };
-        for mut session in drained {
+        // Kill everything first so the children die in parallel, then reap — a
+        // single slow-dying child mustn't serialize behind the others and stall
+        // app exit.
+        for session in &mut drained {
             let _ = session.child.kill();
+        }
+        for mut session in drained {
             let _ = session.child.wait();
         }
     }
