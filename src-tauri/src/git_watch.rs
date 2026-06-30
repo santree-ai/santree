@@ -63,10 +63,20 @@ impl WorktreeWatcher {
     /// Point the watcher at `<repo_root>/.santree/worktrees`, replacing any
     /// previous watch. Idempotent: re-watching the same root is a no-op (so the
     /// frontend can call this freely on every Trees mount / repo change).
-    pub fn watch(&self, app: &AppHandle, repo_root: &Path) -> Result<()> {
+    ///
+    /// Async because registering a recursive watch is heavy: on Linux (inotify) it
+    /// enumerates and adds one descriptor per subdirectory, which is slow for
+    /// worktrees carrying `node_modules`/`target`. We run that on the blocking pool
+    /// rather than stalling the async executor.
+    pub async fn watch(&self, app: &AppHandle, repo_root: &Path) -> Result<()> {
         let root = repo_root.join(".santree").join("worktrees");
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.as_ref().is_some_and(|a| a.root == root) {
+        if self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|a| a.root == root)
+        {
             return Ok(());
         }
         // Don't create anything just because Trees was opened — merely browsing a
@@ -90,26 +100,36 @@ impl WorktreeWatcher {
         // The watch may attach to `.santree`, but issue ids are mapped relative to
         // the worktrees dir, so paths outside it simply don't map.
         let watch_root = root.clone();
-        let mut debouncer = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
-            let Ok(events) = res else { return };
-            // One signal per worktree per batch — the path storm of a single save
-            // collapses to a single invalidation.
-            let mut fired = HashSet::new();
-            for ev in events {
-                for path in &ev.paths {
-                    if let Some(id) = issue_id_for(&watch_root, path) {
-                        if fired.insert(id.clone()) {
-                            let _ = WorktreeChanged { issue_id: id }.emit(&app);
+        // We keep a *recursive* watch rather than hand-rolling per-directory
+        // registration that skips `SKIP_DIRS`: a manual walker would miss
+        // subdirectories created after setup (newly-cloned deps, fresh build dirs)
+        // unless it also tracked create events and re-registered them — a whole
+        // subsystem to maintain. The debounce window plus `issue_id_for`'s skip
+        // filter already collapse build churn to at most one signal per worktree.
+        let debouncer = tokio::task::spawn_blocking(move || -> Result<FullDebouncer> {
+            let mut debouncer = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
+                let Ok(events) = res else { return };
+                // One signal per worktree per batch — the path storm of a single
+                // save collapses to a single invalidation.
+                let mut fired = HashSet::new();
+                for ev in events {
+                    for path in &ev.paths {
+                        if let Some(id) = issue_id_for(&watch_root, path) {
+                            if fired.insert(id.clone()) {
+                                let _ = WorktreeChanged { issue_id: id }.emit(&app);
+                            }
                         }
                     }
                 }
-            }
-        })?;
-        debouncer.watch(&watch_target, RecursiveMode::Recursive)?;
+            })?;
+            debouncer.watch(&watch_target, RecursiveMode::Recursive)?;
+            Ok(debouncer)
+        })
+        .await??;
 
         // Replace (and thereby drop/stop) any previous watcher only after the new
         // one is live, so there's no gap.
-        *guard = Some(Active {
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = Some(Active {
             root,
             _debouncer: debouncer,
         });

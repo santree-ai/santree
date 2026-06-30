@@ -85,6 +85,46 @@ export function ChevronDownIcon({ size = 12, className }: IconProps) {
   );
 }
 
+/** A clean chevron-left — back/previous affordance. */
+export function ChevronLeftIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <polyline points="15 18 9 12 15 6" />
+    </svg>
+  );
+}
+
+/** A clean chevron-right — forward/next affordance. */
+export function ChevronRightIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <polyline points="9 18 15 12 9 6" />
+    </svg>
+  );
+}
+
 /** A git-branch glyph (two nodes on a trunk with a fork). */
 export function BranchIcon({ size = 14, className }: IconProps) {
   return (
@@ -151,24 +191,26 @@ export function TrashIcon({ size = 14, className }: IconProps) {
 }
 
 /** A pull-request glyph (a branch merging back into the trunk). */
-/** A crosshair / locate glyph — used for "reveal in graph". */
-export function CrosshairIcon({ size = 14, className }: IconProps) {
+export function PrIcon({ size = 13, className }: IconProps) {
   return (
     <svg
       width={size}
       height={size}
-      viewBox="0 0 24 24"
+      viewBox="0 0 16 16"
       fill="none"
       stroke="currentColor"
-      strokeWidth={2}
+      strokeWidth={1.4}
       strokeLinecap="round"
       strokeLinejoin="round"
       className={className}
       aria-hidden
     >
-      <circle cx="12" cy="12" r="7" />
-      <circle cx="12" cy="12" r="2.2" />
-      <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+      <circle cx="4.5" cy="4" r="1.6" />
+      <circle cx="4.5" cy="12" r="1.6" />
+      <circle cx="11.5" cy="12" r="1.6" />
+      <path d="M4.5 5.6v4.8" />
+      <path d="M11.5 10.4V7.4A2.4 2.4 0 0 0 9.1 5H7" />
+      <path d="M8.6 3.4 7 5l1.6 1.6" />
     </svg>
   );
 }
@@ -514,5 +556,270 @@ export function SearchIcon({ size = 15, className }: IconProps) {
       <circle cx="11" cy="11" r="7" />
       <path d="m21 21-4.3-4.3" />
     </Stroke>
+  );
+}
+
+/** A panel/sidebar glyph — toggles the worktree files panel. */
+export function PanelIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      className={className}
+      aria-hidden
+    >
+      <rect x="2" y="3" width="12" height="10" rx="1.5" />
+      <line x1="10" y1="3" x2="10" y2="13" />
+    </svg>
+  );
+}
+
+/** A terminal/CLI window glyph — the Terminal tab. */
+export function TerminalIcon({ size = 13, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <rect x="2" y="3" width="12" height="10" rx="1.5" />
+      <path d="M4.5 6.5 6.5 8l-2 1.5M8 9.5h3.5" />
+    </svg>
+  );
+}
+
+/** A globe glyph — the Web tab. */
+export function GlobeIcon({ size = 13, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.3}
+      className={className}
+      aria-hidden
+    >
+      <circle cx="8" cy="8" r="6" />
+      <path d="M2 8h12M8 2c1.8 1.6 2.8 3.8 2.8 6S9.8 12.4 8 14C6.2 12.4 5.2 10.2 5.2 8S6.2 3.6 8 2Z" />
+    </svg>
+  );
+}
+
+/** A down-arrow-into-tray glyph — pull the base branch into the worktree. */
+export function PullIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M8 2.5v7M5 6.5 8 9.5l3-3M3.5 13h9" />
+    </svg>
+  );
+}
+
+/** A download glyph (down arrow over a baseline) — update base from origin. */
+export function DownloadIcon({ size = 13, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.3}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M8 2v8M4.8 7 8 10.2 11.2 7M3 13h10" />
+    </svg>
+  );
+}
+
+/** A sidebar-collapse glyph — a framed panel with a left rail. */
+export function CollapseIcon({ size = 16, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <line x1="9" y1="4" x2="9" y2="20" />
+    </svg>
+  );
+}
+
+/** A keyboard glyph — the keyboard-shortcuts menu item. */
+export function KbdIcon({ size = 15, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <rect x="2" y="6" width="20" height="12" rx="2" />
+      <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10" />
+    </svg>
+  );
+}
+
+/** An open-book glyph — the Docs menu item. */
+export function DocsIcon({ size = 15, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+      <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+    </svg>
+  );
+}
+
+/** A speech-bubble glyph — the Send feedback menu item. */
+export function FeedbackIcon({ size = 15, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+/** An activity/pulse glyph — the Diagnostics menu item. */
+export function DiagIcon({ size = 15, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    </svg>
+  );
+}
+
+/** The AI "spark" glyph for the Investigate action — a big 4-point star + a small one. */
+export function InvestigateIcon({ size = 13, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+    >
+      <path d="M12 2.2c.3 2.6 1 4.5 2.2 5.6 1.1 1.2 3 1.9 5.6 2.2-2.6.3-4.5 1-5.6 2.2-1.2 1.1-1.9 3-2.2 5.6-.3-2.6-1-4.5-2.2-5.6-1.1-1.2-3-1.9-5.6-2.2 2.6-.3 4.5-1 5.6-2.2 1.2-1.1 1.9-3 2.2-5.6Z" />
+      <path d="M18.5 14.5c.15 1.3.5 2.25 1.1 2.8.55.6 1.5.95 2.8 1.1-1.3.15-2.25.5-2.8 1.1-.6.55-.95 1.5-1.1 2.8-.15-1.3-.5-2.25-1.1-2.8-.55-.6-1.5-.95-2.8-1.1 1.3-.15 2.25-.5 2.8-1.1.6-.55.95-1.5 1.1-2.8Z" />
+    </svg>
+  );
+}
+
+/** Flat list — three full-width rows. Pairs with TreeIcon for the changes view toggle. */
+export function ListIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      className={className}
+      aria-hidden
+    >
+      <line x1="3" y1="4" x2="13" y2="4" />
+      <line x1="3" y1="8" x2="13" y2="8" />
+      <line x1="3" y1="12" x2="13" y2="12" />
+    </svg>
+  );
+}
+
+/** Indented tree — a parent row with two indented children. Pairs with ListIcon. */
+export function TreeIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <line x1="3" y1="3.5" x2="13" y2="3.5" />
+      <path d="M5 5v6" />
+      <path d="M5 8h3.5" />
+      <path d="M5 11.5h3.5" />
+      <line x1="10.5" y1="8" x2="13" y2="8" />
+      <line x1="10.5" y1="11.5" x2="13" y2="11.5" />
+    </svg>
   );
 }

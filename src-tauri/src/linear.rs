@@ -5,11 +5,12 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use futures::future::join_all;
+use futures::StreamExt;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -21,8 +22,8 @@ use santree_core::domain::{
 };
 use santree_core::{layout, linear as core_linear};
 
-use crate::db::Db;
-use crate::gql::Connection;
+use crate::db::{now_ms, Db};
+use crate::gql::{self, Connection};
 use crate::settings;
 
 const CLIENT_ID: &str = "4be2738749371d7d3401061aabe2d11b";
@@ -31,16 +32,6 @@ const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
 const GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 const OAUTH_PORT: u16 = 8420;
 const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
-
-/// One process-wide HTTP client so the connection pool (and TLS sessions) are
-/// reused across every Linear request instead of rebuilt per call. A 30s timeout
-/// so a stalled request fails instead of hanging forever.
-static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("building Linear HTTP client")
-});
 
 // ── Org token store (SQLite) ──────────────────────────────────────────────
 
@@ -127,13 +118,6 @@ pub async fn set_repo_org(db: &Db, repo: &str, slug: Option<String>) -> Result<(
     Ok(())
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 // ── Token refresh ──────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -152,9 +136,11 @@ static REFRESH_LOCKS: std::sync::LazyLock<
 > = std::sync::LazyLock::new(Default::default);
 
 fn refresh_lock(slug: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    // Poison-tolerant (matching the pty/openers/settings locks): the map holds
+    // only Arcs, so a thread that panicked mid-access left it structurally sound.
     REFRESH_LOCKS
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .entry(slug.to_string())
         .or_default()
         .clone()
@@ -180,7 +166,7 @@ async fn valid_token(db: &Db, slug: &str) -> Result<String> {
         return Ok(row.access_token);
     }
 
-    let res = CLIENT
+    let res = gql::client()
         .post(TOKEN_URL)
         .form(&[
             ("grant_type", "refresh_token"),
@@ -246,6 +232,16 @@ struct StateNode {
     name: String,
     #[serde(default, rename = "type")]
     type_: String,
+}
+impl Default for StateNode {
+    /// An issue that arrived without a state is treated as an unstarted "Unknown".
+    fn default() -> Self {
+        Self {
+            id: None,
+            name: "Unknown".into(),
+            type_: "unstarted".into(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -335,11 +331,7 @@ fn project_fields(p: Option<ProjectNode>) -> (String, Option<String>, Option<Str
 /// the caller can pull any that aren't themselves assigned into the graph as
 /// grayed context nodes.
 fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
-    let state = node.state.unwrap_or(StateNode {
-        id: None,
-        name: "Unknown".into(),
-        type_: "unstarted".into(),
-    });
+    let state = node.state.unwrap_or_default();
     let status: TaskStatus = core_linear::map_status(&state.name, &state.type_);
 
     // `inverseRelations` of type "blocks" point *at* this issue → its blockers.
@@ -380,8 +372,6 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
         assignee_avatar_url,
         x: 0,
         y: 0,
-        add_lines: 0,
-        del_lines: 0,
     };
     (task, blockers)
 }
@@ -389,11 +379,7 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
 /// A blocker that isn't one of the viewer's assigned issues, mapped to a grayed,
 /// non-actionable context node (no children — we don't recurse).
 fn map_related(issue: RelatedIssue) -> Task {
-    let state = issue.state.unwrap_or(StateNode {
-        id: None,
-        name: "Unknown".into(),
-        type_: "unstarted".into(),
-    });
+    let state = issue.state.unwrap_or_default();
     let (project, project_color, project_icon) = project_fields(issue.project);
     let (assignee, assignee_avatar_url) = assignee_fields(issue.assignee);
     Task {
@@ -410,8 +396,6 @@ fn map_related(issue: RelatedIssue) -> Task {
         assignee_avatar_url,
         x: 0,
         y: 0,
-        add_lines: 0,
-        del_lines: 0,
     }
 }
 
@@ -490,7 +474,7 @@ async fn graphql<T: DeserializeOwned>(
     query: &str,
     variables: serde_json::Value,
 ) -> Result<T> {
-    let req = CLIENT
+    let req = gql::client()
         .post(GRAPHQL_URL)
         .bearer_auth(token)
         .json(&serde_json::json!({ "query": query, "variables": variables }));
@@ -579,59 +563,15 @@ fn actor(
 // noise here. This mirrors the schedule strips (build via `triage_schedule`), so
 // the teams shown there are exactly the teams whose issues land in this queue.
 
-const VIEWER_IDENTITY_QUERY: &str = r#"
-query {
-  viewer {
-    id
-    teamMemberships(first: 100) {
-      nodes { team { key triageResponsibility { timeSchedule { entries { startsAt } } } } }
-    }
-  }
-}
-"#;
-
-#[derive(Deserialize)]
-struct VtSchedule {
-    #[serde(default)]
-    entries: Vec<serde_json::Value>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct VtResp {
-    #[serde(default)]
-    time_schedule: Option<VtSchedule>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct VtTeam {
-    key: String,
-    #[serde(default)]
-    triage_responsibility: Option<VtResp>,
-}
-#[derive(Deserialize)]
-struct VtMembership {
-    #[serde(default)]
-    team: Option<VtTeam>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct VtViewer {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    team_memberships: Option<Connection<VtMembership>>,
-}
-#[derive(Deserialize)]
-struct VtData {
-    viewer: Option<VtViewer>,
-}
-
 /// The signed-in user's id (for "mine") and the keys of their *rotation* teams
 /// (teams whose triage responsibility is backed by a non-empty time schedule) in
 /// one round-trip — both hang off the same `viewer` root. Non-rotation teams are
-/// dropped so the queue stays scoped to actual on-call inboxes.
+/// dropped so the queue stays scoped to actual on-call inboxes. Reuses
+/// [`TRIAGE_SCHEDULES_QUERY`] / [`SchedQueryData`] (a superset of what's needed
+/// here) so there's a single source of truth for the `teamMemberships` shape.
 async fn viewer_triage_scope(token: &str) -> Result<(Option<String>, Vec<String>)> {
-    let data: VtData = graphql(token, VIEWER_IDENTITY_QUERY, serde_json::json!({})).await?;
+    let data: SchedQueryData =
+        graphql(token, TRIAGE_SCHEDULES_QUERY, serde_json::json!({})).await?;
     let Some(viewer) = data.viewer else {
         return Ok((None, Vec::new()));
     };
@@ -641,12 +581,7 @@ async fn viewer_triage_scope(token: &str) -> Result<(Option<String>, Vec<String>
         .unwrap_or_default()
         .into_iter()
         .filter_map(|m| m.team)
-        .filter(|t| {
-            t.triage_responsibility
-                .as_ref()
-                .and_then(|r| r.time_schedule.as_ref())
-                .is_some_and(|s| !s.entries.is_empty())
-        })
+        .filter(is_rotation_team)
         .map(|t| t.key)
         .collect();
     Ok((viewer.id, keys))
@@ -706,7 +641,7 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
     // nothing is "mine" and the queue is empty.
     let (me, keys) = viewer_triage_scope(&token)
         .await
-        .map_err(|e| tracing::warn!(error = %e, "triage: viewer scope lookup failed"))
+        .map_err(|e| log::warn!("triage: viewer scope lookup failed: {e}"))
         .unwrap_or((None, Vec::new()));
     // No rotation team → no on-call inbox. Show an empty queue rather than
     // flooding the list with the whole workspace's (un-owned) triage issues.
@@ -808,11 +743,11 @@ query GetIssue($id: String!) {
 }
 "#;
 
+/// A comment's parent reference. Its presence is all we use (to drop replies from
+/// the top-level list), so the body is intentionally empty — the queried `id` is
+/// ignored on deserialization.
 #[derive(Deserialize)]
-struct ParentRef {
-    #[allow(dead_code)]
-    id: Option<String>,
-}
+struct ParentRef {}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CommentNode {
@@ -943,7 +878,7 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
         .ok_or_else(|| anyhow!("issue {ticket_id} not found"))?;
     let now = now_ms();
     let style = name_style(db).await;
-    let client = &*CLIENT;
+    let client = gql::client();
 
     let description = inline_images(client, &issue.description.unwrap_or_default(), &token).await;
 
@@ -970,11 +905,7 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
 
     // The team's workflow states, ordered as in Linear, for the status picker.
     let mut state_nodes = issue.team.map(|t| t.states.nodes).unwrap_or_default();
-    state_nodes.sort_by(|a, b| {
-        a.position
-            .partial_cmp(&b.position)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    state_nodes.sort_by(|a, b| a.position.total_cmp(&b.position));
     let states: Vec<WorkflowState> = state_nodes
         .into_iter()
         .map(|s| WorkflowState {
@@ -1121,11 +1052,7 @@ pub async fn move_issue_to_started(db: &Db, repo: &str, issue_id: &str) -> Resul
         return Ok(Some(()));
     }
     let mut states = issue.team.map(|t| t.states.nodes).unwrap_or_default();
-    states.sort_by(|a, b| {
-        a.position
-            .partial_cmp(&b.position)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    states.sort_by(|a, b| a.position.total_cmp(&b.position));
     let Some(target) = states.first() else {
         return Ok(None); // team has no started state — nothing to do
     };
@@ -1186,9 +1113,20 @@ struct TriageResp {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TeamNode {
+    key: String,
     name: String,
     #[serde(default)]
     triage_responsibility: Option<TriageResp>,
+}
+
+/// A team runs a triage rotation when its responsibility is backed by a non-empty
+/// time schedule; a team without one has no on-call owner, so its triage issues
+/// aren't anyone's responsibility. The queue and the schedule strips share this.
+fn is_rotation_team(t: &TeamNode) -> bool {
+    t.triage_responsibility
+        .as_ref()
+        .and_then(|r| r.time_schedule.as_ref())
+        .is_some_and(|s| !s.entries.is_empty())
 }
 #[derive(Deserialize)]
 struct Membership {
@@ -1215,20 +1153,8 @@ struct UserInfo {
     avatar_url: Option<String>,
 }
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UserIdName {
-    id: String,
-    /// Full name ("Felipe Perdomo") — preferred over the `displayName` handle.
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    display_name: Option<String>,
-    #[serde(default)]
-    avatar_url: Option<String>,
-}
-#[derive(Deserialize)]
 struct UsersData {
-    users: Connection<UserIdName>,
+    users: Connection<UserNode>,
 }
 
 /// The viewer's triage on-call rotations — one per team that has a
@@ -1252,12 +1178,7 @@ pub async fn triage_schedule(db: &Db, repo: &str) -> Result<Option<Vec<TriageSch
         .unwrap_or_default()
         .into_iter()
         .filter_map(|m| m.team)
-        .filter(|t| {
-            t.triage_responsibility
-                .as_ref()
-                .and_then(|r| r.time_schedule.as_ref())
-                .is_some_and(|s| !s.entries.is_empty())
-        })
+        .filter(is_rotation_team)
         .collect();
     if teams.is_empty() {
         return Ok(Some(Vec::new()));
@@ -1386,15 +1307,16 @@ query ResolveUsers($ids: [ID!]!) {
         .users
         .nodes
         .into_iter()
-        .map(|u| {
-            let name = pick_name(u.name, u.display_name, style).unwrap_or_else(|| u.id.clone());
-            (
-                u.id,
+        .filter_map(|u| {
+            let id = u.id?;
+            let name = pick_name(u.name, u.display_name, style).unwrap_or_else(|| id.clone());
+            Some((
+                id,
                 UserInfo {
                     name,
                     avatar_url: u.avatar_url,
                 },
-            )
+            ))
         })
         .collect())
 }
@@ -1555,10 +1477,17 @@ async fn fetch_data_uri(client: &reqwest::Client, url: &str, token: &str) -> Res
         .and_then(|v| v.to_str().ok())
         .unwrap_or("image/png")
         .to_string();
-    let data = res.bytes().await?;
-    // Guard again in case the server didn't send a Content-Length.
-    if data.len() as u64 > MAX_IMAGE_BYTES {
-        bail!("image too large to inline ({} bytes)", data.len());
+    // Stream the body with a running cap rather than buffering it whole and
+    // checking after: a missing or lying Content-Length defeats the pre-check
+    // above, so without this a huge response would spike memory before we noticed.
+    let mut data: Vec<u8> = Vec::new();
+    let mut stream = res.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if data.len() as u64 + chunk.len() as u64 > MAX_IMAGE_BYTES {
+            bail!("image too large to inline (exceeds {MAX_IMAGE_BYTES} bytes)");
+        }
+        data.extend_from_slice(&chunk);
     }
     let uri = format!(
         "data:{};base64,{}",
@@ -1686,18 +1615,17 @@ fn wait_for_code(expected_state: &str) -> Result<String> {
     }
 }
 
-/// Extract `code` and `state` from a callback path like `/?code=…&state=…`.
+/// Extract `code` and `state` from a callback path like `/?code=…&state=…`,
+/// percent-decoding each value (a `%`-escaped code would otherwise mismatch).
 fn parse_callback(path: &str) -> (Option<String>, Option<String>) {
     let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
     let mut code = None;
     let mut state = None;
-    for pair in query.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            match k {
-                "code" => code = Some(v.to_string()),
-                "state" => state = Some(v.to_string()),
-                _ => {}
-            }
+    for (k, v) in form_urlencoded::parse(query.as_bytes()) {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state = Some(v.into_owned()),
+            _ => {}
         }
     }
     (code, state)
@@ -1709,7 +1637,7 @@ async fn exchange_code(
     redirect_uri: &str,
     verifier: &str,
 ) -> Result<(String, String, i64)> {
-    let res = CLIENT
+    let res = gql::client()
         .post(TOKEN_URL)
         .form(&[
             ("grant_type", "authorization_code"),

@@ -155,13 +155,27 @@ pub fn create_worktree(repo: &Path, worktree_path: &Path, branch: &str, base: &s
     Ok(())
 }
 
-/// Remove a worktree and delete its branch. Cleans up leftover untracked files
-/// that `git worktree remove` leaves behind. Branch deletion failure is
-/// non-fatal (it may be checked out elsewhere or already gone).
+/// Remove a worktree and delete its branch. Idempotent: the goal is simply that
+/// the worktree no longer exist, so a half-removed worktree (e.g. a prior delete
+/// interrupted by a hot-reload) cleans up cleanly instead of wedging forever.
+///
+/// `git worktree remove` is the clean path, but it fails outright when the
+/// worktree is already partly gone — `fatal: '…' is not a working tree` once the
+/// admin metadata or the dir's `.git` file is missing. We treat that as
+/// non-fatal: drop the directory ourselves and `prune` git's stale bookkeeping so
+/// the path is fully forgotten (and the id can be reused later). Branch deletion
+/// is best-effort (it may be checked out elsewhere or already gone).
 pub fn remove_worktree(repo: &Path, worktree_path: &Path, branch: &str) -> Result<()> {
     let path = worktree_path.to_string_lossy().into_owned();
-    git(repo, &["worktree", "remove", "--force", &path])?;
-    if worktree_path.exists() {
+    if git(repo, &["worktree", "remove", "--force", &path]).is_err() {
+        // Half-removed (or never a real worktree): finish the job manually.
+        if worktree_path.exists() {
+            let _ = std::fs::remove_dir_all(worktree_path);
+        }
+        // Forget any orphaned admin entry so `<id>` is free to recreate.
+        let _ = git(repo, &["worktree", "prune"]);
+    } else if worktree_path.exists() {
+        // Clean removal can still leave untracked files behind.
         let _ = std::fs::remove_dir_all(worktree_path);
     }
     let _ = git(repo, &["branch", "-D", branch]);

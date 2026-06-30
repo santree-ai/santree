@@ -2,6 +2,7 @@
  *  (header · add-to-queue · dependencies · description). Resizable (drag the
  *  left edge) and collapsible (the header chevron or ⌘L). */
 import { ChevronDownIcon } from "../../components/icons";
+import { EdgeResizeHandle } from "../../components/primitives";
 import { useEdgeResize } from "../../lib/useEdgeResize";
 import { IssuePanel } from "./IssuePanel";
 import { useIssues } from "./model";
@@ -49,11 +50,7 @@ export function RightPanel() {
       className="relative flex flex-none flex-col border-l border-line bg-panel"
       style={{ width: `var(--issues-right, ${DEFAULT_W}px)` }}
     >
-      <div
-        {...resize}
-        className="absolute top-0 left-[-3px] z-20 h-full w-1.5 cursor-col-resize hover:bg-[color-mix(in_srgb,var(--accent)_45%,transparent)]"
-        aria-hidden
-      />
+      <EdgeResizeHandle edge="left" {...resize} />
       <div className="flex min-h-0 flex-1 flex-col">
         <IssuePanel />
       </div>

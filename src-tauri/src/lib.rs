@@ -7,6 +7,7 @@ mod agent;
 mod commands;
 mod commit_draft;
 mod db;
+mod error;
 mod git;
 mod git_watch;
 mod github;
@@ -18,8 +19,10 @@ mod pr;
 mod prompts;
 mod repo;
 mod reviews;
+mod session;
 mod settings;
 mod terminal;
+mod text_store;
 mod worktree;
 
 use tauri::Manager;
@@ -29,7 +32,10 @@ use tauri_specta::{collect_commands, collect_events, Builder};
 type AppBuilder = Builder<tauri::Wry>;
 
 /// Where the generated TypeScript client is written, relative to `src-tauri`
-/// (the cwd for both `tauri dev` and `cargo test`).
+/// (the cwd for both `tauri dev` and `cargo test`). Only used by the
+/// debug-only `export_bindings`, so it's gated to avoid a dead-code warning in
+/// release builds.
+#[cfg(debug_assertions)]
 const BINDINGS_PATH: &str = "../src/bindings.ts";
 
 /// Build the `tauri-specta` command bridge.
@@ -44,6 +50,7 @@ fn specta_builder() -> AppBuilder {
         commands::add_repo,
         commands::list_agents,
         commands::agent_auth,
+        commands::github_status,
         commands::worktrees,
         commands::base_worktree,
         commands::create_worktree,
@@ -67,6 +74,7 @@ fn specta_builder() -> AppBuilder {
         commands::set_commit_draft,
         commands::set_worktree_title,
         commands::work_prompt,
+        commands::agent_session,
         commands::pr_draft,
         commands::create_pull_request,
         commands::worktree_prs,
@@ -116,13 +124,109 @@ fn export_bindings(builder: &AppBuilder) -> anyhow::Result<()> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// File + stdout logger. Rust (`log` facade) and forwarded JS-`console` logs land
+/// in ONE attachable file at the OS log dir — on macOS
+/// `~/Library/Logs/com.santree.desktop/santree.log` — each line carrying a local
+/// timestamp, level, and source target (`[santree::linear]` for Rust,
+/// `[webview]` for JS) so it's clear when, where, and what. Bounded to ~20 MB
+/// (one 10 MB file + one rotated backup) so it can't grow without limit, and
+/// stays small enough to attach to a bug report. `sqlx` is pinned to warn so
+/// query chatter doesn't drown the file.
+fn log_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    use tauri_plugin_log::{Builder, RotationStrategy, Target, TargetKind, TimezoneStrategy};
+    Builder::new()
+        .targets([
+            Target::new(TargetKind::Stdout),
+            Target::new(TargetKind::LogDir {
+                file_name: Some("santree".into()),
+            }),
+        ])
+        .level(log::LevelFilter::Info)
+        .level_for("sqlx", log::LevelFilter::Warn)
+        .timezone_strategy(TimezoneStrategy::UseLocal)
+        .max_file_size(10_000_000)
+        .rotation_strategy(RotationStrategy::KeepOne)
+        .build()
+}
+
+/// One-time migration after the bundle id rename (`com.santree.app` →
+/// `com.santree.desktop`): the app data dir is keyed by the identifier, so move
+/// the existing SQLite DB (and its WAL sidecars) from the old dir into the new one
+/// so local state — repos, settings, Linear tokens, worktree links, terminal
+/// sessions — survives the rename. No-op once the new DB exists, or if there's no
+/// legacy DB to carry over. Logs are intentionally left behind (disposable).
+fn migrate_legacy_data_dir(new_dir: &std::path::Path) {
+    const LEGACY_ID: &str = "com.santree.app";
+    if new_dir.join("santree.db").exists() {
+        return; // already migrated (or a fresh install on the new id)
+    }
+    let Some(legacy_dir) = new_dir.parent().map(|p| p.join(LEGACY_ID)) else {
+        return;
+    };
+    if !legacy_dir.join("santree.db").exists() {
+        return; // nothing to migrate
+    }
+    if let Err(e) = std::fs::create_dir_all(new_dir) {
+        log::warn!("data migration: couldn't create {}: {e}", new_dir.display());
+        return;
+    }
+    // Move the DB and its WAL/SHM sidecars together (the app isn't using them yet).
+    for name in ["santree.db", "santree.db-wal", "santree.db-shm"] {
+        let from = legacy_dir.join(name);
+        if from.exists() {
+            if let Err(e) = std::fs::rename(&from, new_dir.join(name)) {
+                log::warn!("data migration: couldn't move {name}: {e}");
+            }
+        }
+    }
+    log::info!(
+        "migrated app data from {} to {}",
+        legacy_dir.display(),
+        new_dir.display()
+    );
+}
+
+/// Merge a login-shell PATH into the current one: login entries first (the source
+/// of truth for where the user's tools live), then any current-only entries we
+/// shouldn't drop. Order-preserving and de-duplicated. Pure, for testability.
+fn merge_paths(login: &str, current: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    login
+        .split(':')
+        .chain(current.split(':'))
+        .filter(|p| !p.is_empty() && seen.insert(*p))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Recover the user's real PATH at startup. A Finder-launched macOS bundle gets a
+/// minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) that misses Homebrew, `direnv`,
+/// version managers, etc. Every subprocess we spawn inherits this PATH — `git`
+/// (and the repo's commit hooks, which routinely shell out to `direnv` and friends),
+/// `.santree` setup scripts, the agent CLIs, openers — so without this they fail to
+/// find tools that work fine in a terminal (e.g. the `direnv: command not found` a
+/// pre-commit hook hits, which then breaks the hook's lint step). We merge the login
+/// shell's PATH into the process PATH exactly once, before anything spawns, so all
+/// children inherit it. No-op when launched from a terminal (login PATH already
+/// covers the current one). Unix only; the probe spawns one login shell (~tens of ms).
+#[cfg(unix)]
+fn hydrate_path() {
+    let Some(login) = settings::login_shell_path() else {
+        return;
+    };
+    let current = std::env::var("PATH").unwrap_or_default();
+    let merged = merge_paths(&login, &current);
+    if !merged.is_empty() && merged != current {
+        // Safe: called as the first thing in `run()`, before we spawn any threads
+        // or the Tauri/async runtime, so there's no concurrent env access.
+        std::env::set_var("PATH", &merged);
+    }
+}
+
 pub fn run() {
-    // Logging. Honour `RUST_LOG` if set, otherwise default to `info`.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // Must run before any subprocess is spawned (git, hooks, setup scripts, agents).
+    #[cfg(unix)]
+    hydrate_path();
 
     let builder = specta_builder();
 
@@ -133,6 +237,7 @@ pub fn run() {
     export_bindings(&builder).expect("failed to export typescript bindings");
 
     tauri::Builder::default()
+        .plugin(log_plugin())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_decorum::init())
@@ -142,8 +247,11 @@ pub fn run() {
             // where they'd attach as the app grows).
             builder.mount_events(app);
 
-            // Open the app database and make the pool available to commands.
+            // Open the app database and make the pool available to commands. The
+            // bundle id was renamed (com.santree.app → com.santree.desktop); the
+            // data dir is keyed by it, so carry the existing DB over first.
             let data_dir = app.path().app_data_dir().expect("resolving app data dir");
+            migrate_legacy_data_dir(&data_dir);
             let db = tauri::async_runtime::block_on(db::init(data_dir.join("santree.db")))
                 .expect("initializing database");
             app.manage(db);
@@ -170,7 +278,7 @@ pub fn run() {
                 }
             }
 
-            tracing::info!("santree started");
+            log::info!("santree started");
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -194,5 +302,27 @@ mod tests {
     #[test]
     fn export_bindings_succeeds() {
         export_bindings(&specta_builder()).expect("bindings export should succeed");
+    }
+
+    #[test]
+    fn merge_paths_prepends_login_and_dedups() {
+        // Login PATH wins ordering; current-only entries are appended; dupes dropped.
+        let login = "/opt/homebrew/bin:/usr/bin:/bin";
+        let current = "/usr/bin:/bin:/sbin";
+        assert_eq!(
+            merge_paths(login, current),
+            "/opt/homebrew/bin:/usr/bin:/bin:/sbin"
+        );
+    }
+
+    #[test]
+    fn merge_paths_is_noop_when_login_covers_current() {
+        let path = "/opt/homebrew/bin:/usr/bin:/bin";
+        assert_eq!(merge_paths(path, path), path);
+    }
+
+    #[test]
+    fn merge_paths_skips_empty_segments() {
+        assert_eq!(merge_paths("/usr/bin::", ":/bin:"), "/usr/bin:/bin");
     }
 }

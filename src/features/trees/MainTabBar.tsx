@@ -7,8 +7,9 @@
  *  close × or a status dot) in a fixed slot. */
 import type { ReactNode } from "react";
 
-import { PlusIcon } from "../../components/icons";
-import { Dropdown, underlineTabStyle } from "../../components/primitives";
+import { CloseIcon, GlobeIcon, PlusIcon, TerminalIcon } from "../../components/icons";
+import { Dropdown, MENU_ITEM, underlineTabStyle } from "../../components/primitives";
+import { CHROME } from "../../state/AppContext";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { BASE_ID, type MainTab, termTab, useTrees } from "./model";
 
@@ -39,7 +40,7 @@ export function MainTabBar() {
   };
 
   return (
-    <div className="flex h-8 flex-none items-stretch border-b border-line bg-deep">
+    <div className={`flex ${CHROME.subBar} flex-none items-stretch border-b border-line bg-deep`}>
       {!isBase && <Tab tab="issue" label="Issue" active={activeTab} onSelect={setActiveTab} />}
       <Tab tab="terminal" label="Terminal" active={activeTab} onSelect={setActiveTab} />
       {extraTerminals.map((n) => (
@@ -105,11 +106,11 @@ function NewTabButton({ onAddTerminal }: { onAddTerminal: () => void }) {
             }}
             className={MENU_ITEM}
           >
-            <TerminalGlyph />
+            <TerminalIcon />
             Terminal
           </button>
           <button type="button" disabled title="Coming soon" className={MENU_ITEM}>
-            <GlobeGlyph />
+            <GlobeIcon />
             Web
             <span className="ml-auto text-[10px] text-muted-4">WIP</span>
           </button>
@@ -118,9 +119,6 @@ function NewTabButton({ onAddTerminal }: { onAddTerminal: () => void }) {
     </Dropdown>
   );
 }
-
-const MENU_ITEM =
-  "flex w-full cursor-pointer items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-fg-3 hover:bg-hover disabled:cursor-default disabled:text-muted-4 disabled:hover:bg-transparent";
 
 function Tab({
   tab,
@@ -157,48 +155,12 @@ function Tab({
             title="Close"
             className="flex h-4 w-4 cursor-pointer items-center justify-center rounded text-[13px] leading-none text-muted-3 hover:bg-hover hover:text-fg-2"
           >
-            ×
+            <CloseIcon size={10} />
           </button>
         ) : (
           trailing
         )}
       </span>
     </div>
-  );
-}
-
-function TerminalGlyph() {
-  return (
-    <svg
-      width={13}
-      height={13}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.4}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <rect x="2" y="3" width="12" height="10" rx="1.5" />
-      <path d="M4.5 6.5 6.5 8l-2 1.5M8 9.5h3.5" />
-    </svg>
-  );
-}
-
-function GlobeGlyph() {
-  return (
-    <svg
-      width={13}
-      height={13}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.3}
-      aria-hidden
-    >
-      <circle cx="8" cy="8" r="6" />
-      <path d="M2 8h12M8 2c1.8 1.6 2.8 3.8 2.8 6S9.8 12.4 8 14C6.2 12.4 5.2 10.2 5.2 8S6.2 3.6 8 2Z" />
-    </svg>
   );
 }

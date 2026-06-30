@@ -118,8 +118,6 @@ mod tests {
             assignee_avatar_url: None,
             x: 0,
             y: 0,
-            add_lines: 0,
-            del_lines: 0,
         }
     }
 

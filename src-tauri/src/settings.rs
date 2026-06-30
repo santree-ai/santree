@@ -65,7 +65,7 @@ pub async fn resolve(db: &Db, repo: &str, key: &str) -> Result<Option<String>> {
 pub async fn get_settings(db: &Db) -> Result<Settings> {
     match get(db, "app", SETTINGS_KEY).await? {
         Some(json) => Ok(serde_json::from_str(&json).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "settings blob failed to parse; using defaults");
+            log::warn!("settings blob failed to parse; using defaults: {e}");
             config::default_settings()
         })),
         None => Ok(config::default_settings()),
@@ -239,6 +239,31 @@ fn resolve_binary(name: &str) -> Option<String> {
         .rfind(|l| !l.is_empty())?
         .to_string();
     Some(path)
+}
+
+/// The user's PATH as a real login shell sees it — recovered by running
+/// `$SHELL -lc 'printf …$PATH'`. A Finder-launched macOS bundle inherits a minimal
+/// PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) that misses Homebrew, version managers,
+/// `direnv`, etc.; this returns the PATH a terminal would have. `None` if the
+/// probe fails or yields nothing.
+///
+/// A sentinel marks the PATH line so noisy rc files (which print to stdout on
+/// login-shell startup) can't corrupt the result.
+pub fn login_shell_path() -> Option<String> {
+    const MARK: &str = "__santree_path__=";
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let output = std::process::Command::new(&shell)
+        .args(["-lc", &format!("printf '%s%s\\n' '{MARK}' \"$PATH\"")])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix(MARK))
+        .map(str::to_string)
+        .filter(|p| !p.is_empty())
 }
 
 /// The user's global Claude commands directory (`~/.claude/commands`).

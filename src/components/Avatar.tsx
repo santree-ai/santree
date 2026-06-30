@@ -5,7 +5,7 @@
  */
 import { useState } from "react";
 
-const COLORS = ["#5b8def", "#a78bfa", "#2dd4a7", "#d29922", "#f0709a", "#6fd3e0"];
+import { AVATAR_PALETTE } from "../theme/colors";
 
 function initials(name: string): string {
   const parts = name
@@ -20,7 +20,7 @@ function initials(name: string): string {
 function colorFor(name: string): string {
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  return COLORS[h % COLORS.length];
+  return AVATAR_PALETTE[h % AVATAR_PALETTE.length];
 }
 
 export function Avatar({

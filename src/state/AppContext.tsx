@@ -41,7 +41,7 @@ interface AppData {
    *  settings cache. */
   settings: Settings | null;
   setAgentExec: (agent: AgentKind, exec: string) => void;
-  toggleIntegration: (key: "linear" | "triage" | "github") => void;
+  toggleIntegration: (key: "linear" | "triage") => void;
 
   /** Triage is available only when Linear is connected and triage is enabled. */
   triageEnabled: boolean;
@@ -121,6 +121,15 @@ const THEME_KEY = "santree-theme";
 
 /** Bounds for the resizable sidebar; dragging below MIN triggers collapse. */
 export const SIDEBAR = { default: 264, min: 200, max: 460, collapseAt: 170 } as const;
+
+/**
+ * Shared chrome bar heights (Tailwind height classes) so the sidebar column's
+ * horizontal dividers line up with the content column's across the app:
+ *  - `subBar`: the row under the top bar — repo selector (sidebar) ↔ tab bar (content).
+ *  - `statusBar`: the bottom bar — sidebar footer ↔ work-panel bottom bar.
+ * Both columns share the viewport's top/bottom edges, so equal heights ⇒ aligned dividers.
+ */
+export const CHROME = { subBar: "h-9", statusBar: "h-9" } as const;
 
 const AppDataContext = createContext<AppData | null>(null);
 const AppUiContext = createContext<AppUi | null>(null);
@@ -226,45 +235,65 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [activeRepo, settings, applySettings, theme],
   );
 
+  // Handlers are stabilized with `useCallback` (all use functional setState, so
+  // none capture render values). This matters because the Issues and Trees models
+  // capture these functions into their own context-value `useMemo` deps — if the
+  // refs changed whenever volatile UI state did (help menu, sidebar drag), those
+  // models would rebuild and re-render every consumer on every unrelated toggle.
+  const toggleShortcuts = useCallback(() => setShortcutsOpen((o) => !o), []);
+  const consumeTreeLaunch = useCallback(() => setTreeLaunch(null), []);
+  const consumeTreeFocus = useCallback(() => setTreeFocus(null), []);
+  const consumeReviewFocus = useCallback(() => setReviewFocus(null), []);
+  const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), []);
+  const addPendingLaunches = useCallback((items: PendingLaunch[]) => {
+    setPendingLaunches((prev) => [
+      ...prev,
+      ...items.filter((i) => !prev.some((p) => p.id === i.id)),
+    ]);
+  }, []);
+  const removePendingLaunch = useCallback((id: string) => {
+    setPendingLaunches((prev) => prev.filter((p) => p.id !== id));
+  }, []);
+  const addPendingDeletes = useCallback((ids: string[]) => {
+    setPendingDeletes((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.add(id);
+      return next;
+    });
+  }, []);
+  const removePendingDelete = useCallback((id: string) => {
+    setPendingDeletes((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
   const uiValue = useMemo<AppUi>(
     () => ({
       helpOpen,
       setHelpOpen,
       shortcutsOpen,
       setShortcutsOpen,
-      toggleShortcuts: () => setShortcutsOpen((o) => !o),
+      toggleShortcuts,
       treeLaunch,
       requestTreeLaunch: setTreeLaunch,
-      consumeTreeLaunch: () => setTreeLaunch(null),
+      consumeTreeLaunch,
       treeFocus,
       requestTreeFocus: setTreeFocus,
-      consumeTreeFocus: () => setTreeFocus(null),
+      consumeTreeFocus,
       reviewFocus,
       requestReviewFocus: setReviewFocus,
-      consumeReviewFocus: () => setReviewFocus(null),
+      consumeReviewFocus,
       pendingLaunches,
-      addPendingLaunches: (items) =>
-        setPendingLaunches((prev) => [
-          ...prev,
-          ...items.filter((i) => !prev.some((p) => p.id === i.id)),
-        ]),
-      removePendingLaunch: (id) => setPendingLaunches((prev) => prev.filter((p) => p.id !== id)),
+      addPendingLaunches,
+      removePendingLaunch,
       pendingDeletes,
-      addPendingDeletes: (ids) =>
-        setPendingDeletes((prev) => {
-          const next = new Set(prev);
-          for (const id of ids) next.add(id);
-          return next;
-        }),
-      removePendingDelete: (id) =>
-        setPendingDeletes((prev) => {
-          if (!prev.has(id)) return prev;
-          const next = new Set(prev);
-          next.delete(id);
-          return next;
-        }),
+      addPendingDeletes,
+      removePendingDelete,
       sidebarCollapsed,
-      toggleSidebar: () => setSidebarCollapsed((c) => !c),
+      toggleSidebar,
       setSidebarCollapsed,
       sidebarWidth,
       setSidebarWidth,
@@ -279,6 +308,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
       pendingDeletes,
       sidebarCollapsed,
       sidebarWidth,
+      toggleShortcuts,
+      consumeTreeLaunch,
+      consumeTreeFocus,
+      consumeReviewFocus,
+      toggleSidebar,
+      addPendingLaunches,
+      removePendingLaunch,
+      addPendingDeletes,
+      removePendingDelete,
     ],
   );
 

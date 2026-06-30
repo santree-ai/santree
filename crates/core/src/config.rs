@@ -58,7 +58,6 @@ pub fn default_settings() -> Settings {
         integrations: Integrations {
             linear: true,
             triage: true,
-            github: true,
         },
         // `exec` is the user's override path (empty ⇒ use the one detected on
         // PATH, reported by `agent_auth`). Model is the per-agent default.

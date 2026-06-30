@@ -59,7 +59,7 @@ export function OpenerIcon({ openerKey, size = 16 }: { openerKey: string; size?:
   }
   return (
     <svg width={size} height={size} viewBox={VB} aria-hidden>
-      <rect width="16" height="16" rx="3.6" fill="#3a3a3f" />
+      <rect width="16" height="16" rx="3.6" fill="var(--color-line-3)" />
     </svg>
   );
 }

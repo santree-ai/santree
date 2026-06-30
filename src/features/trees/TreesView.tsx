@@ -1,11 +1,15 @@
 /** The Trees tab: worktrees grouped by project (sidebar) · a main area that holds
  *  the always-on terminal (or a picked file's diff/contents) with a bottom status
  *  bar · a collapsible file-picker right panel · the all-agents overview. */
-import type { Settings, Worktree } from "../../bindings";
+import { useRef } from "react";
+
+import type { Worktree } from "../../bindings";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { EmptyState, Spinner } from "../../components/primitives";
-import { useWorkPrompt } from "../../lib/queries";
+import { useAgentSession, useWorkPrompt } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
+import { agentSessionSeed } from "../terminal/agentSeed";
+import { useTerminals } from "../terminal/TerminalsContext";
 import { AllAgentsView } from "./AllAgentsView";
 import { BottomBar } from "./BottomBar";
 import { CreatePrDialog } from "./CreatePrDialog";
@@ -46,7 +50,9 @@ function TreesContent() {
         active.pending ? (
           <CreatingPane worktree={active} />
         ) : (
-          <WorktreePane worktree={active} />
+          // Keyed by id so per-worktree terminal state (e.g. the live-session
+          // latch) resets when switching worktrees.
+          <WorktreePane key={active.id} worktree={active} />
         )
       ) : (
         <AllAgentsView />
@@ -70,22 +76,6 @@ function CreatingPane({ worktree }: { worktree: Worktree }) {
       </div>
     </div>
   );
-}
-
-/** Single-quote a string for a POSIX shell command line. */
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
-/** The command a freshly-started worktree's terminal runs: `exec claude '<prompt>'`.
- *  Setup (if any) ran earlier on the setup-logs page, so this is just the agent.
- *  `exec` replaces the shell so quitting the agent ends the session. `promptText`
- *  is the backend-rendered `work` prompt; falls back to a one-liner if it's not
- *  available (e.g. the render failed). */
-function agentSeed(w: Worktree, settings: Settings | null, promptText?: string): string {
-  const exec = settings?.agents.find((a) => a.key === w.agent)?.exec?.trim() || "claude";
-  const prompt = promptText ?? `Work on ${w.id}: ${w.title}`;
-  return `exec ${shellQuote(exec)} ${shellQuote(prompt)}`;
 }
 
 function WorktreePane({ worktree }: { worktree: Worktree }) {
@@ -113,11 +103,35 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
   const initialSetup = settingUp && setupThenLaunch;
 
   // The agent's opening prompt is rendered by the backend (`work` template). Fetch
-  // it once we're launching (and past any initial setup); the terminal waits for
-  // it so the agent starts with the full prompt, not the fallback one-liner.
+  // it only for a fresh launch (and past any initial setup); a resume/shell don't
+  // need it.
   const workPrompt = useWorkPrompt(repo, worktree.id, launching && !initialSetup);
-  const awaitingPrompt = launching && !initialSetup && !workPrompt.isFetched;
-  const seed = launching ? agentSeed(worktree, settings, workPrompt.data) : undefined;
+  const promptReady = !launching || workPrompt.isFetched;
+
+  // Whether a live PTY already exists for this worktree. We only resolve a
+  // (re)launch when there's none to attach to — and we latch `everLive` so that
+  // quitting the agent (the session dies under us) doesn't immediately re-resume
+  // it into a restart loop. A real reopen remounts this pane (it's keyed by id),
+  // resetting the latch so the next open resumes. See WorktreeTerminal.
+  const refId = `tree:${worktree.id}`;
+  const { tabs } = useTerminals();
+  const liveSession = tabs.some((t) => t.source === "issue" && t.refId === refId);
+  const everLive = useRef(false);
+  if (liveSession) everLive.current = true;
+
+  // Resolve how to (re)launch the agent: resume a still-on-disk session, start
+  // fresh with a reserved id, or a plain shell. A passive reopen (not launching)
+  // only resumes; an explicit launch may mint a fresh session. Skip the base
+  // entry (no ticket/agent). The terminal waits on this so it never opens with no
+  // seed and loses a resumable session.
+  const needsSeed = !isBase && !initialSetup && promptReady && !liveSession && !everLive.current;
+  const session = useAgentSession(repo, refId, worktree.path, launching, needsSeed);
+  const exec = settings?.agents.find((a) => a.key === worktree.agent)?.exec?.trim() || "claude";
+  const seed = agentSessionSeed(session.data, exec, {
+    prompt: workPrompt.data ?? `Work on ${worktree.id}: ${worktree.title}`,
+  });
+  // Hold the terminal until the seed decision is fresh (so the new PTY carries it).
+  const preparing = needsSeed && (session.isFetching || (launching && !workPrompt.isFetched));
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -140,11 +154,11 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
                 title="Setting up the workspace…"
                 subtitle="The terminal opens once setup finishes."
               />
-            ) : awaitingPrompt ? (
+            ) : preparing ? (
               <EmptyState
                 className="h-full"
-                title="Preparing the agent…"
-                subtitle="The terminal opens once the prompt is ready."
+                title={launching ? "Preparing the agent…" : "Opening terminal…"}
+                subtitle="The terminal opens in a moment."
               />
             ) : (
               <WorktreeTerminal

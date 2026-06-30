@@ -7,21 +7,11 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 
 import type { TriageDetail, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
-import { LinearLogo, RefreshIcon } from "../../components/icons";
+import { InvestigateIcon, LinearLogo, RefreshIcon } from "../../components/icons";
 import { Skeleton } from "../../components/primitives";
 import { alpha } from "../../theme/colors";
 import { PriorityPill } from "./PriorityPill";
 import { StatusPicker } from "./StatusPicker";
-
-/** The AI "spark" glyph for the Investigate button — a big 4-point star + a small one. */
-function InvestigateIcon({ size = 13 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M12 2.2c.3 2.6 1 4.5 2.2 5.6 1.1 1.2 3 1.9 5.6 2.2-2.6.3-4.5 1-5.6 2.2-1.2 1.1-1.9 3-2.2 5.6-.3-2.6-1-4.5-2.2-5.6-1.1-1.2-3-1.9-5.6-2.2 2.6-.3 4.5-1 5.6-2.2 1.2-1.1 1.9-3 2.2-5.6Z" />
-      <path d="M18.5 14.5c.15 1.3.5 2.25 1.1 2.8.55.6 1.5.95 2.8 1.1-1.3.15-2.25.5-2.8 1.1-.6.55-.95 1.5-1.1 2.8-.15-1.3-.5-2.25-1.1-2.8-.55-.6-1.5-.95-2.8-1.1 1.3-.15 2.25-.5 2.8-1.1.6-.55.95-1.5 1.1-2.8Z" />
-    </svg>
-  );
-}
 
 export function IssueHeader({
   ticket,

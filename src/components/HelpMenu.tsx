@@ -1,69 +1,8 @@
 /** The help popover anchored at the bottom-left of the window. */
-import { useAppUi } from "../state/AppContext";
-import { APP_VERSION } from "./SidebarFooter";
 
-const KbdIcon = () => (
-  <svg
-    width="15"
-    height="15"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="var(--color-muted)"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden
-  >
-    <rect x="2" y="6" width="20" height="12" rx="2" />
-    <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10" />
-  </svg>
-);
-const DocsIcon = () => (
-  <svg
-    width="15"
-    height="15"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="var(--color-muted)"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden
-  >
-    <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
-    <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
-  </svg>
-);
-const FeedbackIcon = () => (
-  <svg
-    width="15"
-    height="15"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="var(--color-muted)"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden
-  >
-    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-  </svg>
-);
-const DiagIcon = () => (
-  <svg
-    width="15"
-    height="15"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="var(--color-muted)"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden
-  >
-    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-  </svg>
-);
+import { useAppUi } from "../state/AppContext";
+import { DiagIcon, DocsIcon, FeedbackIcon, KbdIcon } from "./icons";
+import { APP_VERSION } from "./SidebarFooter";
 
 interface Item {
   icon?: React.ReactNode;
@@ -74,14 +13,14 @@ interface Item {
 }
 
 const ITEMS: Item[] = [
-  { icon: <KbdIcon />, label: "Keyboard shortcuts", shortcut: "⌘/" },
-  { icon: <DocsIcon />, label: "Docs", external: true },
+  { icon: <KbdIcon className="text-muted" />, label: "Keyboard shortcuts", shortcut: "⌘/" },
+  { icon: <DocsIcon className="text-muted" />, label: "Docs", external: true },
   { label: "Best practices", external: true, indented: true },
   { label: "Changelog", external: true, indented: true },
-  { icon: <FeedbackIcon />, label: "Send feedback", shortcut: "⌘⌥F" },
+  { icon: <FeedbackIcon className="text-muted" />, label: "Send feedback", shortcut: "⌘⌥F" },
   { label: "Discord", external: true, indented: true },
   { label: "Submit a prompt", indented: true },
-  { icon: <DiagIcon />, label: "Diagnostics" },
+  { icon: <DiagIcon className="text-muted" />, label: "Diagnostics" },
   { label: "Open debug tools", indented: true },
 ];
 

@@ -1,5 +1,6 @@
 /** Small presentational primitives reused across views. */
 import {
+  type ComponentProps,
   type CSSProperties,
   type ReactNode,
   type SelectHTMLAttributes,
@@ -416,6 +417,10 @@ export function Dropdown({
   );
 }
 
+/** Shared row class for items inside a `Dropdown` menu. */
+export const MENU_ITEM =
+  "flex w-full cursor-pointer items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-fg-3 hover:bg-hover disabled:cursor-default disabled:text-muted-4 disabled:hover:bg-transparent";
+
 /** Active/inactive style for an "inset underline" tab (a `bg-app` fill with an
  *  `inset 0 -2px 0` accent rule) — shared by the main-area and file-picker tab
  *  bars so the look can't drift. */
@@ -525,5 +530,29 @@ export function ConfirmDialog({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * The thin (1.5px) drag strip on a resizable panel's edge. Spreads the pointer
+ * handlers from {@link useEdgeResize}; `edge` places it just outside the matching
+ * border (`left` for a right-hand panel, `right` for the left sidebar). Extracted
+ * so the three panel resizers share one definition (and the lone `color-mix`
+ * arbitrary-value, which can't be expressed via `alpha()` from a className).
+ */
+export function EdgeResizeHandle({
+  edge,
+  ...handlers
+}: Pick<ComponentProps<"div">, "onPointerDown" | "onPointerMove" | "onPointerUp"> & {
+  edge: "left" | "right";
+}) {
+  return (
+    <div
+      {...handlers}
+      aria-hidden
+      className={`absolute top-0 z-20 h-full w-1.5 cursor-col-resize hover:bg-[color-mix(in_srgb,var(--accent)_45%,transparent)] ${
+        edge === "left" ? "left-[-3px]" : "right-[-3px]"
+      }`}
+    />
   );
 }

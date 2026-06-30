@@ -58,7 +58,7 @@ pub struct AgentDef {
 /// An agent harness's authentication / subscription status, as shown in the
 /// harness settings tab. Read from the agent CLI's own credentials (e.g.
 /// `~/.claude.json`); the CLI owns auth.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentAuth {
     /// Whether a CLI session is currently authenticated.
@@ -80,6 +80,31 @@ pub struct AgentAuth {
     /// The executable found on the user's PATH, shown as the grayed default when
     /// no custom path is set. Empty when nothing was found.
     pub detected_exec: String,
+}
+
+/// The `gh` CLI integration status, shown in Settings → Integrations. GitHub
+/// powers PR creation and the Reviews dashboard and can't be turned off, so the
+/// UI surfaces whether the CLI is installed and authenticated (and as whom)
+/// rather than a toggle. Auth is borrowed from `gh`'s own session — the CLI owns
+/// it — by reading `gh auth token` and the REST `/user` endpoint.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubStatus {
+    /// Whether the `gh` CLI was found on the user's PATH (login-shell resolved).
+    pub installed: bool,
+    /// Absolute path to the resolved `gh` executable. Empty when not found.
+    pub detected_exec: String,
+    /// The `gh` version line, e.g. "gh version 2.62.0 (2024-11-14)". Empty when
+    /// not found.
+    pub version: String,
+    /// Whether `gh` has a valid authenticated session.
+    pub authenticated: bool,
+    /// Signed-in account login, e.g. "octocat". Empty when not authenticated.
+    pub account: String,
+    /// The account's display name when set on the GitHub profile. Empty otherwise.
+    pub name: String,
+    /// The host the session authenticates against, e.g. "github.com".
+    pub host: String,
 }
 
 /// A connected repository / task-tracker pairing.
@@ -128,8 +153,7 @@ impl TaskStatus {
     }
 }
 
-/// A ticket in the dependency graph. `x`/`y` are its canvas position; `addLines`
-/// / `delLines` are the projected diff size once worked.
+/// A ticket in the dependency graph. `x`/`y` are its canvas position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -157,8 +181,21 @@ pub struct Task {
     pub assignee_avatar_url: Option<String>,
     pub x: i32,
     pub y: i32,
-    pub add_lines: u32,
-    pub del_lines: u32,
+}
+
+/// How a terminal that auto-launches `claude` should (re)launch it, resolved
+/// against the persisted session registry + the on-disk transcript. The frontend
+/// turns this into the shell seed: `--resume <id>` to continue, `--session-id
+/// <id> '<prompt>'` to start fresh, or a plain shell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "type")]
+pub enum AgentSession {
+    /// A still-on-disk session to continue: `claude --resume <sessionId>`.
+    Resume { session_id: String },
+    /// A reserved id to start fresh with: `claude --session-id <sessionId> '<prompt>'`.
+    Fresh { session_id: String },
+    /// No agent session — just a login shell.
+    Shell,
 }
 
 /// A proposed PR (title + body) for the create-PR dialog, before it's opened.
@@ -597,7 +634,6 @@ pub struct AgentSetting {
 pub struct Integrations {
     pub linear: bool,
     pub triage: bool,
-    pub github: bool,
 }
 
 /// A connected Linear organization.

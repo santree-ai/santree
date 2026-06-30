@@ -26,6 +26,12 @@ export default defineConfig({
     // base64 into the JS bundle. Emit them as standalone asset files instead — in
     // a Tauri app they load instantly from local disk, and the JS stays lean.
     assetsInlineLimit: (file: string) => (file.includes("material-icon-theme") ? false : undefined),
+    // Vite's 500 kB warning is about network download time; this app's bundle
+    // loads from local disk (no download), so large chunks like the diff viewer
+    // (@git-diff-view) are fine. The app is already route-/feature-split, so raise
+    // the threshold to silence the irrelevant noise while still catching a chunk
+    // that unexpectedly balloons.
+    chunkSizeWarningLimit: 1500,
   },
 
   // Vite options tailored for Tauri development, applied during `tauri dev`/`build`.

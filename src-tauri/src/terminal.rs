@@ -12,6 +12,7 @@ use specta::Type;
 use tauri::ipc::Channel;
 use tauri::State;
 
+use crate::error::CmdResult;
 use santree_pty::{OpenOpts, PtyManager, SessionId};
 
 /// How the frontend asks for a new terminal. An empty `command` means the user's
@@ -27,14 +28,19 @@ pub struct TerminalOpenOpts {
     pub rows: u16,
 }
 
+// These are `async` so Tauri runs them on the async runtime rather than the main
+// (UI) thread: opening a PTY does a fork+exec with a full env copy, and a write
+// can block if a stuck child's PTY buffer is full — neither should ever stall the
+// UI. The PtyManager's per-session locking keeps sessions isolated from each other.
+
 /// Spawn a process behind a PTY and stream its raw output over `on_output`.
 #[tauri::command]
 #[specta::specta]
-pub fn terminal_open(
+pub async fn terminal_open(
     opts: TerminalOpenOpts,
     on_output: Channel<Vec<u8>>,
     manager: State<'_, PtyManager>,
-) -> Result<SessionId, String> {
+) -> CmdResult<SessionId> {
     let opts = OpenOpts {
         cwd: opts.cwd,
         command: opts.command,
@@ -43,43 +49,39 @@ pub fn terminal_open(
         cols: opts.cols,
         rows: opts.rows,
     };
-    manager
-        .open(opts, move |bytes| {
-            // A failed send means the channel was dropped (view unmounted); the
-            // session will be closed separately, so just stop forwarding.
-            let _ = on_output.send(bytes);
-        })
-        .map_err(|e| e.to_string())
+    Ok(manager.open(opts, move |bytes| {
+        // A failed send means the channel was dropped (view unmounted); the
+        // session will be closed separately, so just stop forwarding.
+        let _ = on_output.send(bytes);
+    })?)
 }
 
 /// Write raw bytes (keystrokes or a seed) to a session.
 #[tauri::command]
 #[specta::specta]
-pub fn terminal_write(
+pub async fn terminal_write(
     id: SessionId,
     data: String,
     manager: State<'_, PtyManager>,
-) -> Result<(), String> {
-    manager
-        .write(id, data.as_bytes())
-        .map_err(|e| e.to_string())
+) -> CmdResult<()> {
+    Ok(manager.write(id, data.as_bytes())?)
 }
 
 /// Resize a session's PTY to the visible grid.
 #[tauri::command]
 #[specta::specta]
-pub fn terminal_resize(
+pub async fn terminal_resize(
     id: SessionId,
     cols: u16,
     rows: u16,
     manager: State<'_, PtyManager>,
-) -> Result<(), String> {
-    manager.resize(id, cols, rows).map_err(|e| e.to_string())
+) -> CmdResult<()> {
+    Ok(manager.resize(id, cols, rows)?)
 }
 
 /// Kill a session's child and free it.
 #[tauri::command]
 #[specta::specta]
-pub fn terminal_close(id: SessionId, manager: State<'_, PtyManager>) -> Result<(), String> {
-    manager.close(id).map_err(|e| e.to_string())
+pub async fn terminal_close(id: SessionId, manager: State<'_, PtyManager>) -> CmdResult<()> {
+    Ok(manager.close(id)?)
 }

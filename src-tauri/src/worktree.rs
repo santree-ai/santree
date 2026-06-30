@@ -19,12 +19,16 @@ use santree_core::domain::{
     Activity, AgentKind, ChangedFile, FileSource, ScriptInfo, TaskStatus, Worktree,
 };
 
-/// A streamed setup-script event for the Trees "Setup" tab: one `Line` per output
-/// line as the script runs, then a final `Done`.
-#[derive(Clone, Serialize, Type)]
+/// A streamed setup-script event for the Trees "Setup" tab. `Line` is a committed
+/// output line (appended). `Progress` is a transient redraw of the current line —
+/// emitted when the script's output ends a line with a lone `\r` (progress bars,
+/// spinners) — which the view shows in place so a redrawing bar reads as movement
+/// instead of a frozen log. A final `Done` closes the tab.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum SetupEvent {
     Line { text: String },
+    Progress { text: String },
     Done { ok: bool },
 }
 
@@ -89,6 +93,7 @@ async fn link(db: &Db, repo_root: &str, issue_id: &str) -> Result<Option<Link>> 
 
 /// A worktree's git coordinates, for operations that need more than the path
 /// (commit-message drafting, PR creation): branch, its base, and the directory.
+#[derive(Clone)]
 pub(crate) struct Coords {
     pub branch: String,
     pub base_branch: String,
@@ -292,7 +297,7 @@ pub async fn create(
             let branch = if wt_path.exists() {
                 // Adopt a pre-existing worktree: reuse its real branch (from git) when
                 // it is a registered worktree, else fall back to the computed name.
-                tracing::info!(issue = %issue_id, path = %wt_path.display(), "adopting existing worktree");
+                log::info!("adopting existing worktree {issue_id} at {}", wt_path.display());
                 git::worktree_branch(root_path, &wt_path).unwrap_or(computed_branch)
             } else {
                 git::create_worktree(root_path, &wt_path, &computed_branch, &base_branch)?;
@@ -301,10 +306,10 @@ pub async fn create(
                     // it and leave `setup_ran` false so the UI offers a re-run.
                     match run_init_script(root_path, &wt_path) {
                         Ok(_) => setup_ran = true,
-                        Err(e) => tracing::warn!(issue = %issue_id, error = %e, "init.sh failed"),
+                        Err(e) => log::warn!("init.sh failed for {issue_id}: {e}"),
                     }
                 }
-                tracing::info!(issue = %issue_id, branch = %computed_branch, "created worktree");
+                log::info!("created worktree {issue_id} on branch {computed_branch}");
                 computed_branch
             };
             Ok((base_branch, branch, setup_ran, wt_path.to_string_lossy().into_owned()))
@@ -339,7 +344,7 @@ pub async fn create(
         == Some("true");
     if move_in_progress {
         if let Err(e) = crate::linear::move_issue_to_started(db, repo, issue_id).await {
-            tracing::warn!(issue = issue_id, error = %e, "couldn't move issue to In Progress");
+            log::warn!("couldn't move issue {issue_id} to In Progress: {e}");
         }
     }
 
@@ -392,7 +397,7 @@ pub async fn remove(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
     .execute(db)
     .await?
     .rows_affected();
-    tracing::info!(issue = issue_id, restacked, "removed worktree");
+    log::info!("removed worktree {issue_id} ({restacked} children restacked)");
     Ok(())
 }
 
@@ -437,6 +442,45 @@ pub async fn run_setup_streamed(
     }
     let _ = on_event.send(SetupEvent::Done { ok });
     Ok(())
+}
+
+/// Drain complete line boundaries from `acc`, classifying each segment: `\n` (or
+/// `\r\n`) ends a committed `Line`; a lone `\r` is a transient `Progress` redraw
+/// (progress bars / spinners). A `\r` at the very end of `acc` is held — it may be
+/// the first half of a `\r\n` split across reads — unless `flush` is set (EOF),
+/// when the remainder is emitted as a final `Line`. ANSI escapes are stripped.
+fn drain_setup_events(acc: &mut String, flush: bool) -> Vec<SetupEvent> {
+    let mut out = Vec::new();
+    while let Some(idx) = acc.find(['\n', '\r']) {
+        if acc.as_bytes()[idx] == b'\r' {
+            if idx + 1 == acc.len() {
+                break; // trailing `\r` — wait for the next byte to disambiguate.
+            }
+            if acc.as_bytes()[idx + 1] == b'\n' {
+                let line: String = acc.drain(..=idx + 1).collect();
+                out.push(SetupEvent::Line {
+                    text: strip_ansi(line.trim_end_matches(['\r', '\n'])),
+                });
+            } else {
+                let line: String = acc.drain(..=idx).collect();
+                out.push(SetupEvent::Progress {
+                    text: strip_ansi(line.trim_end_matches('\r')),
+                });
+            }
+        } else {
+            let line: String = acc.drain(..=idx).collect();
+            out.push(SetupEvent::Line {
+                text: strip_ansi(line.trim_end_matches(['\r', '\n'])),
+            });
+        }
+    }
+    if flush && !acc.trim().is_empty() {
+        let line = std::mem::take(acc);
+        out.push(SetupEvent::Line {
+            text: strip_ansi(line.trim_end_matches(['\r', '\n'])),
+        });
+    }
+    out
 }
 
 /// Spawn the setup script (stderr folded into stdout) and forward each output line
@@ -497,7 +541,8 @@ fn stream_init_script(script: &Path, wt: &Path, root: &str, ev: &Channel<SetupEv
         }
     };
 
-    // Read bytes and emit complete lines as they arrive (PTYs use \r\n).
+    // Read bytes and drain complete boundaries as they arrive (see
+    // `drain_setup_events`), then flush any trailing partial line at EOF.
     let mut buf = [0u8; 4096];
     let mut acc = String::new();
     loop {
@@ -505,19 +550,14 @@ fn stream_init_script(script: &Path, wt: &Path, root: &str, ev: &Channel<SetupEv
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 acc.push_str(&String::from_utf8_lossy(&buf[..n]));
-                while let Some(idx) = acc.find('\n') {
-                    let line: String = acc.drain(..=idx).collect();
-                    let _ = ev.send(SetupEvent::Line {
-                        text: strip_ansi(line.trim_end_matches(['\r', '\n'])),
-                    });
+                for e in drain_setup_events(&mut acc, false) {
+                    let _ = ev.send(e);
                 }
             }
         }
     }
-    if !acc.trim().is_empty() {
-        let _ = ev.send(SetupEvent::Line {
-            text: strip_ansi(acc.trim_end_matches(['\r', '\n'])),
-        });
+    for e in drain_setup_events(&mut acc, true) {
+        let _ = ev.send(e);
     }
 
     let ok = child.wait().map(|s| s.success()).unwrap_or(false);
@@ -562,18 +602,9 @@ fn shell_quote(s: &str) -> String {
 /// Merge the base branch (origin/main, etc.) into the worktree — the "pull from
 /// main/master" button. Errors on a conflicting merge (leaving the tree clean).
 pub async fn pull(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
-    let root = repo_root(db, repo).await?;
-    let row = sqlx::query_as::<_, (String, String)>(
-        "SELECT worktree_path, base_branch
-         FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
-    )
-    .bind(&root)
-    .bind(issue_id)
-    .fetch_optional(db)
-    .await?
-    .ok_or_else(|| anyhow!("no worktree for issue '{issue_id}'"))?;
+    let c = coords(db, repo, issue_id).await?;
     // `pull_base` fetches + merges (network + blocking) — keep it off the runtime.
-    tokio::task::spawn_blocking(move || git::pull_base(Path::new(&row.0), &row.1)).await?
+    tokio::task::spawn_blocking(move || git::pull_base(&c.path, &c.base_branch)).await?
 }
 
 /// Fast-forward the repo's local base branch (main/master) to origin — the
@@ -700,18 +731,24 @@ pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<Strin
     let root = repo_root(db, repo).await?;
     // The base sentinel commits the repo root on its own branch; per-issue
     // worktrees resolve their path + branch from the link row.
-    let (path, branch) = if issue_id == BASE_ID {
-        let root_path = PathBuf::from(&root);
-        let branch = git::default_branch(&root_path);
-        (root_path, branch)
+    let (path, known_branch) = if issue_id == BASE_ID {
+        (PathBuf::from(&root), None)
     } else {
         let l = link(db, &root, issue_id)
             .await?
             .ok_or_else(|| anyhow!("no worktree for issue '{issue_id}'"))?;
-        (PathBuf::from(&l.worktree_path), l.branch)
+        (PathBuf::from(&l.worktree_path), Some(l.branch))
     };
 
-    let diff = git::staged_diff(&path);
+    // `default_branch` and `staged_diff` both shell out to git; run them off the
+    // async runtime's worker threads.
+    let p = path.clone();
+    let (branch, diff) = tokio::task::spawn_blocking(move || {
+        let branch = known_branch.unwrap_or_else(|| git::default_branch(&p));
+        (branch, git::staged_diff(&p))
+    })
+    .await?;
+
     let fallback = if issue_id == BASE_ID {
         "update".to_string()
     } else {
@@ -757,11 +794,31 @@ pub async fn work_prompt(db: &Db, repo: &str, issue_id: &str) -> Result<String> 
     .fetch_optional(db)
     .await?;
 
+    // Fetch the full ticket (description + comment thread) and render it the way
+    // the CLI does, so the agent starts with real context instead of being told
+    // to re-fetch via MCP. `triage_detail` fetches any issue by id, not just
+    // triage ones. On any failure we leave `ticket_content` empty and the
+    // template falls back to the MCP-fetch hint.
+    let ticket_content = match crate::linear::triage_detail(db, repo, issue_id).await {
+        Ok(Some(detail)) => crate::prompts::render_ticket(&detail).ok(),
+        _ => None,
+    };
+
+    // The user's per-task notes become the work prompt's `custom_context` — the
+    // app's analog of the CLI's ad-hoc launch context.
+    let custom_context = crate::notes::get(db, repo, issue_id)
+        .await
+        .ok()
+        .flatten()
+        .filter(|n| !n.trim().is_empty());
+
     crate::prompts::render(
         "work",
         minijinja::context! {
             ticket_id => issue_id,
             title => title.unwrap_or_default(),
+            ticket_content,
+            custom_context,
             mode => "implement",
         },
     )
@@ -778,35 +835,41 @@ fn init_script_path(repo_root: &str) -> PathBuf {
 pub async fn init_script(db: &Db, repo: &str) -> Result<ScriptInfo> {
     let root = repo_root(db, repo).await?;
     let path = init_script_path(&root);
-    let exists = path.exists();
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    Ok(ScriptInfo {
-        path: path.to_string_lossy().into_owned(),
-        exists,
+    Ok(tokio::task::spawn_blocking(move || ScriptInfo {
+        exists: path.exists(),
         executable: is_executable(&path),
-        content,
+        content: std::fs::read_to_string(&path).unwrap_or_default(),
+        path: path.to_string_lossy().into_owned(),
     })
+    .await?)
 }
 
 /// Write the repo's `.santree/init.sh`, creating `.santree/` if needed.
 pub async fn set_init_script(db: &Db, repo: &str, content: &str) -> Result<()> {
     let root = repo_root(db, repo).await?;
     let path = init_script_path(&root);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&path, content)?;
-    Ok(())
+    let content = content.to_string();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, content)?;
+        Ok(())
+    })
+    .await?
 }
 
 /// Mark `.santree/init.sh` executable (so it runs on worktree creation).
 pub async fn make_init_executable(db: &Db, repo: &str) -> Result<()> {
     let root = repo_root(db, repo).await?;
     let path = init_script_path(&root);
-    if !path.exists() {
-        bail!("no init.sh to make executable");
-    }
-    set_executable(&path)
+    tokio::task::spawn_blocking(move || {
+        if !path.exists() {
+            bail!("no init.sh to make executable");
+        }
+        set_executable(&path)
+    })
+    .await?
 }
 
 /// Run `.santree/init.sh` in the worktree, with the same env the CLI passes,
@@ -930,6 +993,57 @@ mod tests {
         assert_eq!(strip_ansi("plain"), "plain");
     }
 
+    fn line(text: &str) -> SetupEvent {
+        SetupEvent::Line { text: text.into() }
+    }
+    fn progress(text: &str) -> SetupEvent {
+        SetupEvent::Progress { text: text.into() }
+    }
+
+    #[test]
+    fn drain_splits_newlines_and_holds_partials() {
+        let mut acc = String::from("one\ntwo\nthr");
+        assert_eq!(drain_setup_events(&mut acc, false), vec![line("one"), line("two")]);
+        assert_eq!(acc, "thr", "partial line is held for the next read");
+        acc.push_str("ee\n");
+        assert_eq!(drain_setup_events(&mut acc, false), vec![line("three")]);
+    }
+
+    #[test]
+    fn drain_treats_crlf_as_one_boundary() {
+        let mut acc = String::from("a\r\nb\r\n");
+        assert_eq!(drain_setup_events(&mut acc, false), vec![line("a"), line("b")]);
+        assert!(acc.is_empty());
+    }
+
+    #[test]
+    fn drain_emits_lone_cr_as_progress() {
+        // A redrawing bar: each `\r`-terminated frame is a transient Progress; the
+        // final, not-yet-terminated frame is held until more bytes arrive.
+        let mut acc = String::from("10%\r20%\r30%");
+        assert_eq!(drain_setup_events(&mut acc, false), vec![progress("10%"), progress("20%")]);
+        assert_eq!(acc, "30%");
+    }
+
+    #[test]
+    fn drain_holds_trailing_cr_until_disambiguated() {
+        // `\r` arriving as the last byte must not be emitted yet — the next read may
+        // reveal it was a `\r\n`, which is a single committed line, not Progress.
+        let mut acc = String::from("done\r");
+        assert_eq!(drain_setup_events(&mut acc, false), vec![]);
+        assert_eq!(acc, "done\r", "trailing \\r is held");
+        acc.push('\n');
+        assert_eq!(drain_setup_events(&mut acc, false), vec![line("done")]);
+        assert!(acc.is_empty());
+    }
+
+    #[test]
+    fn drain_flush_emits_trailing_partial() {
+        let mut acc = String::from("tail-no-newline");
+        assert_eq!(drain_setup_events(&mut acc, false), vec![]);
+        assert_eq!(drain_setup_events(&mut acc, true), vec![line("tail-no-newline")]);
+    }
+
     fn run_git(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")
             .current_dir(dir)
@@ -938,6 +1052,46 @@ mod tests {
             .unwrap()
             .success();
         assert!(ok, "git {args:?} failed");
+    }
+
+    /// A half-removed worktree (e.g. a delete interrupted by a hot-reload) must
+    /// still clean up — `git worktree remove` fails fatally once the gitlink is
+    /// gone, and the old code propagated that, wedging the worktree forever.
+    #[test]
+    fn remove_worktree_tolerates_half_removed_state() {
+        let base = std::env::temp_dir().join(format!("santree-rm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo_dir = base.join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        run_git(&repo_dir, &["init", "-b", "main"]);
+        run_git(&repo_dir, &["config", "user.email", "t@t.test"]);
+        run_git(&repo_dir, &["config", "user.name", "Test"]);
+        std::fs::write(repo_dir.join("README.md"), "hello\n").unwrap();
+        run_git(&repo_dir, &["add", "-A"]);
+        run_git(&repo_dir, &["commit", "-m", "init"]);
+
+        let wt = repo_dir.join(".santree/worktrees/AK-9");
+        std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+        let wt_str = wt.to_string_lossy().into_owned();
+        run_git(&repo_dir, &["worktree", "add", "-b", "santree/ak-9", &wt_str, "main"]);
+        assert!(wt.exists());
+
+        // Simulate the interrupted delete: drop the worktree's gitlink so git no
+        // longer recognises it — `git worktree remove` now fails fatally.
+        std::fs::remove_file(wt.join(".git")).unwrap();
+        assert!(
+            crate::git::git(&repo_dir, &["worktree", "remove", "--force", &wt_str]).is_err(),
+            "precondition: git refuses to remove the half-broken worktree"
+        );
+
+        // Our removal tolerates it: dir gone, branch gone, Ok — and idempotent.
+        crate::git::remove_worktree(&repo_dir, &wt, "santree/ak-9").unwrap();
+        assert!(!wt.exists(), "worktree directory cleaned up");
+        let branches = crate::git::git(&repo_dir, &["branch", "--list", "santree/ak-9"]).unwrap();
+        assert!(branches.trim().is_empty(), "branch deleted");
+        crate::git::remove_worktree(&repo_dir, &wt, "santree/ak-9").unwrap();
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// End-to-end: a real git repo + real SQLite, exercising the full start-task

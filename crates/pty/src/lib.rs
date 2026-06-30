@@ -117,7 +117,7 @@ impl PtyManager {
                 },
             );
 
-        tracing::info!(id, command = %opts.command, "opened pty session");
+        log::info!("opened pty session {id} (command: {})", opts.command);
         Ok(id)
     }
 
@@ -176,7 +176,7 @@ impl PtyManager {
             std::thread::spawn(move || {
                 let _ = child.wait();
             });
-            tracing::info!(id, "closed pty session");
+            log::info!("closed pty session {id}");
         }
         Ok(())
     }

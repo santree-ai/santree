@@ -33,6 +33,7 @@ import {
   WORK_MODEL_KEY,
 } from "../../lib/queries";
 import { useApp, useAppUi } from "../../state/AppContext";
+import { toast } from "../../state/toast";
 import { PROJECT_FALLBACK } from "../../theme/colors";
 import { NO_PROJECT } from "../trees/model";
 
@@ -88,9 +89,6 @@ interface IssuesModel {
   prByTask: Map<string, WorktreePr[]>;
   selected: Record<string, boolean>;
   focusId: string;
-  /** Ephemeral highlight (row/graph) while hovering — never pans or changes the
-   *  right panel; only a click commits `focusId`. */
-  hoverId: string | null;
   focusProject: string | null;
   launchAgent: AgentKind;
   launchModel: string;
@@ -116,7 +114,6 @@ interface IssuesModel {
 
   toggle: (id: string) => void;
   setFocus: (id: string) => void;
-  setHover: (id: string | null) => void;
   /** Focus a ticket and pan/zoom the graph to it (from the inspector's "Open in graph"). */
   revealInGraph: (id: string) => void;
   /** Focus a project and pan the graph to its band (from the sidebar project header). */
@@ -137,6 +134,19 @@ interface IssuesModel {
 }
 
 const IssuesContext = createContext<IssuesModel | null>(null);
+
+/** Hover highlight, split into its own context so moving the pointer between rows
+ *  / graph nodes only re-renders hover-sensitive views (the nodes and sidebar
+ *  rows) — not every `useIssues` consumer (the inspector's Markdown, the launch
+ *  tray, the project bands), which is what made hover janky. */
+interface IssuesHover {
+  /** Ephemeral highlight (row/graph) while hovering — never pans or changes the
+   *  right panel; only a click commits `focusId`. */
+  hoverId: string | null;
+  setHover: (id: string | null) => void;
+}
+
+const IssuesHoverContext = createContext<IssuesHover | null>(null);
 
 export function IssuesProvider({ children }: { children: ReactNode }) {
   const { settings, activeRepo } = useApp();
@@ -328,6 +338,9 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     );
     requestTreeLaunch(targets[0].id);
     navigate({ to: "/trees" });
+    // A bulk launch suppresses the per-worktree toast and raises one summary once
+    // every create settles; a single launch keeps its specific "Created … for X".
+    const bulk = targets.length > 1;
     void Promise.allSettled(
       targets.map((task) =>
         createWorktree({
@@ -337,9 +350,14 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
           base: null,
           runSetup: false,
           agent: launchAgent,
+          quiet: bulk,
         }).catch(() => removePendingLaunch(task.id)),
       ),
-    );
+    ).then((results) => {
+      if (!bulk) return;
+      const created = results.filter((r) => r.status === "fulfilled").length;
+      if (created > 0) toast.success(`Created ${created} worktrees.`);
+    });
   }, [
     selectedEligible,
     launchAgent,
@@ -390,7 +408,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       prByTask,
       selected,
       focusId,
-      hoverId,
       focusProject,
       launchAgent,
       launchModel,
@@ -406,7 +423,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       toggle,
       goToWorktree,
       setFocus: focusTask,
-      setHover: setHoverId,
       revealInGraph,
       revealProject,
       toggleActionableOnly,
@@ -428,7 +444,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       prByTask,
       selected,
       focusId,
-      hoverId,
       focusProject,
       launchAgent,
       launchModel,
@@ -457,11 +472,25 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  return <IssuesContext.Provider value={value}>{children}</IssuesContext.Provider>;
+  // Its own value object so a hover change re-renders only hover subscribers; the
+  // `value` above keeps its identity across hovers (hoverId isn't one of its deps).
+  const hover = useMemo<IssuesHover>(() => ({ hoverId, setHover: setHoverId }), [hoverId]);
+
+  return (
+    <IssuesContext.Provider value={value}>
+      <IssuesHoverContext.Provider value={hover}>{children}</IssuesHoverContext.Provider>
+    </IssuesContext.Provider>
+  );
 }
 
 export function useIssues(): IssuesModel {
   const ctx = useContext(IssuesContext);
   if (!ctx) throw new Error("useIssues must be used within <IssuesProvider>");
+  return ctx;
+}
+
+export function useIssueHover(): IssuesHover {
+  const ctx = useContext(IssuesHoverContext);
+  if (!ctx) throw new Error("useIssueHover must be used within <IssuesProvider>");
   return ctx;
 }

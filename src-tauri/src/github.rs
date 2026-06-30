@@ -18,24 +18,44 @@ use santree_core::domain::{
 };
 
 use crate::git;
-use crate::gql::Connection;
+use crate::gql::{self, Connection};
 use crate::repo;
 
-/// Shared HTTP client (connection pool) for GitHub API calls. A 30s timeout so a
-/// stalled request fails instead of hanging forever.
-static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("building GitHub HTTP client")
-});
+/// Stamp the headers every GitHub call needs: bearer auth, the v3 JSON Accept
+/// type, and a User-Agent (GitHub rejects requests that omit one).
+fn rest(builder: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+    builder
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "santree")
+}
+
+/// GET a GitHub REST endpoint and decode its JSON body, erroring on a non-success
+/// status. The shared shape behind the simple REST reads.
+async fn get_json<T: DeserializeOwned>(
+    url: String,
+    query: &[(&str, &str)],
+    token: &str,
+) -> Result<T> {
+    let res = rest(gql::client().get(url).query(query), token).send().await?;
+    if !res.status().is_success() {
+        bail!("GitHub returned {}", res.status());
+    }
+    Ok(res.json().await?)
+}
 
 /// The GitHub token the user authorized for the `gh` CLI. `None` when `gh` isn't
 /// installed or the user hasn't run `gh auth login`. Shells out, so it runs on the
 /// blocking pool rather than the async executor.
+///
+/// `gh` is resolved through the user's login shell (not bare `Command::new("gh")`):
+/// a Finder-launched bundle inherits a minimal PATH that misses Homebrew, so a bare
+/// spawn would find `gh` in `tauri dev` (terminal PATH) but silently fail in a
+/// release build — leaving the Reviews tab and graph PRs empty.
 pub async fn token() -> Option<String> {
     tokio::task::spawn_blocking(|| {
-        let out = Command::new("gh").args(["auth", "token"]).output().ok()?;
+        let gh = crate::settings::discover_binary("gh")?;
+        let out = Command::new(gh).args(["auth", "token"]).output().ok()?;
         out.status
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -44,6 +64,67 @@ pub async fn token() -> Option<String> {
     .await
     .ok()
     .flatten()
+}
+
+/// The `gh` CLI integration status for Settings → Integrations: whether `gh` is
+/// installed (resolved through the login shell, so it matches a real terminal —
+/// see [`token`]), its version, and the signed-in account (borrowed from `gh`'s
+/// own session via the REST `/user` endpoint). Infallible — a missing or
+/// signed-out `gh` is reported as a status with the relevant flags false.
+pub async fn status() -> santree_core::domain::GithubStatus {
+    use santree_core::domain::GithubStatus;
+
+    // `gh` lives in Homebrew on most Macs, which a Finder-launched bundle's
+    // minimal PATH misses — resolve it the same way `token()` does.
+    let Some(exec) = crate::settings::discover_binary("gh") else {
+        return GithubStatus::default(); // installed: false; everything else empty
+    };
+
+    let version = {
+        let exec = exec.clone();
+        tokio::task::spawn_blocking(move || {
+            let out = Command::new(exec).arg("--version").output().ok()?;
+            out.status.success().then(|| {
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    };
+
+    let mut status = GithubStatus {
+        installed: true,
+        detected_exec: exec,
+        version,
+        host: "github.com".into(),
+        ..Default::default()
+    };
+
+    // Borrow gh's session and ask the API who we are. A signed-out or
+    // network-less `gh` simply leaves `authenticated` false.
+    if let Some(token) = token().await {
+        #[derive(Deserialize)]
+        struct GhUser {
+            login: String,
+            name: Option<String>,
+        }
+        if let Ok(user) =
+            get_json::<GhUser>("https://api.github.com/user".to_string(), &[], &token).await
+        {
+            status.authenticated = true;
+            status.account = user.login;
+            status.name = user.name.unwrap_or_default();
+        }
+    }
+
+    status
 }
 
 /// `(owner, repo)` parsed from the worktree's `origin` remote, or an error when
@@ -113,23 +194,17 @@ pub async fn prs_for_issue(
 ) -> Result<Vec<(u32, String, PrState)>> {
     // Quoted issue id → exact phrase, so "AK-55" can't match "AK-550" etc.
     let q = format!("repo:{owner}/{repo} type:pr in:title \"{issue_id}\"");
-    let res = CLIENT
-        .get("https://api.github.com/search/issues")
-        .query(&[
+    let body: SearchResp = get_json(
+        "https://api.github.com/search/issues".to_string(),
+        &[
             ("q", q.as_str()),
             ("per_page", "100"),
             ("sort", "created"),
             ("order", "desc"),
-        ])
-        .bearer_auth(token)
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "santree")
-        .send()
-        .await?;
-    if !res.status().is_success() {
-        bail!("GitHub returned {}", res.status());
-    }
-    let body: SearchResp = res.json().await?;
+        ],
+        token,
+    )
+    .await?;
     Ok(body
         .items
         .into_iter()
@@ -157,19 +232,18 @@ pub async fn create_pr(
     base: &str,
     body: &str,
 ) -> Result<(u32, String)> {
-    let res = CLIENT
-        .post(format!("https://api.github.com/repos/{owner}/{repo}/pulls"))
-        .bearer_auth(token)
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "santree")
-        .json(&serde_json::json!({
-            "title": title,
-            "head": head,
-            "base": base,
-            "body": body,
-        }))
-        .send()
-        .await?;
+    let res = rest(
+        gql::client().post(format!("https://api.github.com/repos/{owner}/{repo}/pulls")),
+        token,
+    )
+    .json(&serde_json::json!({
+        "title": title,
+        "head": head,
+        "base": base,
+        "body": body,
+    }))
+    .send()
+    .await?;
 
     let status = res.status();
     if status.is_success() {
@@ -205,12 +279,12 @@ async fn graphql<T: DeserializeOwned>(
     query: &str,
     variables: serde_json::Value,
 ) -> Result<T> {
-    let req = CLIENT
+    let req = gql::client()
         .post(GRAPHQL_URL)
         .bearer_auth(token)
         .header("User-Agent", "santree")
         .json(&serde_json::json!({ "query": query, "variables": variables }));
-    crate::gql::post(req, "GitHub").await
+    gql::post(req, "GitHub").await
 }
 
 // The PR fields the Reviews list needs — shared by all three category searches.
@@ -732,20 +806,12 @@ async fn pr_files(token: &str, owner: &str, name: &str, number: u32) -> Result<V
         deletions: u32,
         patch: Option<String>,
     }
-    let res = CLIENT
-        .get(format!(
-            "https://api.github.com/repos/{owner}/{name}/pulls/{number}/files"
-        ))
-        .query(&[("per_page", "100")])
-        .bearer_auth(token)
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "santree")
-        .send()
-        .await?;
-    if !res.status().is_success() {
-        bail!("GitHub returned {}", res.status());
-    }
-    let files: Vec<RestFile> = res.json().await?;
+    let files: Vec<RestFile> = get_json(
+        format!("https://api.github.com/repos/{owner}/{name}/pulls/{number}/files"),
+        &[("per_page", "100")],
+        token,
+    )
+    .await?;
     Ok(files
         .into_iter()
         .map(|f| PrFile {

@@ -5,10 +5,14 @@ import { createRoot } from "react-dom/client";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ErrorScreen } from "./components/ErrorScreen";
 import { TerminalsProvider } from "./features/terminal/TerminalsContext";
+import { forwardConsoleToLog } from "./lib/logging";
 import { routeTree } from "./routeTree.gen";
 import { AppProvider } from "./state/AppContext";
 import { ToastViewport, toast } from "./state/toast";
 import "./styles.css";
+
+// Mirror console.* into the shared on-disk log file (no-op outside Tauri).
+forwardConsoleToLog();
 
 // Backend data rarely changes within a session; cache it generously.
 const queryClient = new QueryClient({

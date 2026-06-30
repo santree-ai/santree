@@ -64,27 +64,33 @@ pub async fn path(db: &Db, name: &str) -> Result<Option<String>> {
 /// path is the repo's top level (so adding a subdirectory still works). Adding
 /// the same repo twice just refreshes it — the call is idempotent.
 pub async fn add(db: &Db, path: String) -> Result<Repo> {
-    let dir = Path::new(&path);
-    if !dir.is_dir() {
-        bail!("That path isn't a folder.");
-    }
-    let toplevel = git::git(dir, &["rev-parse", "--show-toplevel"])
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("That folder isn't a git repository."))?;
-    let top = Path::new(&toplevel);
-
-    let remote = git::git(top, &["remote", "get-url", "origin"])
-        .ok()
-        .filter(|s| !s.is_empty());
-    let (name, tracker) = identity(remote.as_deref(), top);
+    // The folder check and both git calls block; run validation+identity off the
+    // async runtime's worker threads before touching the db.
+    let (toplevel, name, tracker) =
+        tokio::task::spawn_blocking(move || -> Result<(String, String, String)> {
+            let dir = Path::new(&path);
+            if !dir.is_dir() {
+                bail!("That path isn't a folder.");
+            }
+            let toplevel = git::git(dir, &["rev-parse", "--show-toplevel"])
+                .ok()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow!("That folder isn't a git repository."))?;
+            let top = Path::new(&toplevel);
+            let remote = git::git(top, &["remote", "get-url", "origin"])
+                .ok()
+                .filter(|s| !s.is_empty());
+            let (name, tracker) = identity(remote.as_deref(), top);
+            Ok((toplevel, name, tracker))
+        })
+        .await??;
 
     // Repos are keyed by derived name; warn if that collides with a *different*
     // path so a silent clobber (two checkouts whose names derive the same) is
     // at least traceable.
     if let Some(existing) = self::path(db, &name).await? {
         if existing != toplevel {
-            tracing::warn!(name = %name, existing = %existing, new = %toplevel, "repo name collision; overwriting path");
+            log::warn!("repo name collision for {name}; overwriting path {existing} -> {toplevel}");
         }
     }
 
@@ -98,7 +104,7 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
     .execute(db)
     .await?;
 
-    tracing::info!(name = %name, path = %toplevel, "registered repository");
+    log::info!("registered repository {name} at {toplevel}");
     Ok(Repo {
         name,
         tracker,

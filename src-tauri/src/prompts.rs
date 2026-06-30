@@ -8,7 +8,8 @@
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
-use minijinja::Environment;
+use minijinja::{context, Environment};
+use santree_core::domain::{Priority, TriageDetail};
 use serde::Serialize;
 
 /// The shared template environment, built once. Add new prompts here and to the
@@ -21,6 +22,8 @@ static ENV: LazyLock<Environment<'static>> = LazyLock::new(|| {
         .expect("fill-pr template");
     env.add_template("work", include_str!("../prompts/work.njk"))
         .expect("work template");
+    env.add_template("ticket", include_str!("../prompts/ticket.njk"))
+        .expect("ticket template");
     env
 });
 
@@ -32,6 +35,33 @@ pub fn render<S: Serialize>(name: &str, ctx: S) -> Result<String> {
         .with_context(|| format!("unknown prompt template: {name}"))?;
     tmpl.render(ctx)
         .with_context(|| format!("rendering prompt template: {name}"))
+}
+
+/// Render a fetched Linear issue into the markdown the work prompt embeds as
+/// `ticket_content` — mirrors the CLI's `renderTicket`, so the agent starts
+/// with the description and comment thread instead of being told to re-fetch.
+pub fn render_ticket(detail: &TriageDetail) -> Result<String> {
+    let priority_label = match detail.priority {
+        Priority::Urgent => Some("Urgent"),
+        Priority::High => Some("High"),
+        Priority::Medium => Some("Medium"),
+        Priority::Low => Some("Low"),
+        Priority::None => None,
+    };
+    render(
+        "ticket",
+        context! {
+            tracker_name => "Linear",
+            identifier => &detail.id,
+            title => &detail.title,
+            url => &detail.url,
+            state => &detail.state,
+            priority_label,
+            labels => &detail.labels,
+            description => &detail.description,
+            comments => &detail.comments,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -71,5 +101,39 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains("Do NOT implement yet"), "plan mode is read-only");
+    }
+
+    #[test]
+    fn work_embeds_ticket_content_over_mcp_fallback() {
+        let ticket = render(
+            "ticket",
+            context! {
+                tracker_name => "Linear",
+                identifier => "AK-3",
+                title => "Fix the thing",
+                url => "https://linear.app/x/AK-3",
+                state => "In Progress",
+                priority_label => "High",
+                labels => vec!["bug", "backend"],
+                description => "Steps to reproduce…",
+                comments => Vec::<minijinja::Value>::new(),
+            },
+        )
+        .unwrap();
+        assert!(ticket.contains("Linear Issue: AK-3"));
+        assert!(ticket.contains("Priority: High"));
+        assert!(ticket.contains("Labels: bug, backend"));
+        assert!(ticket.contains("Steps to reproduce"));
+
+        let out = render(
+            "work",
+            context! { ticket_id => "AK-3", ticket_content => ticket, mode => "implement" },
+        )
+        .unwrap();
+        assert!(out.contains("Steps to reproduce"), "ticket body is embedded");
+        assert!(
+            !out.contains("could not be fetched"),
+            "fallback hint is skipped when ticket_content is present"
+        );
     }
 }

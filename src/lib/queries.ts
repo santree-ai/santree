@@ -128,6 +128,11 @@ function useActionMutation<TVars = void, TData = unknown>(opts: {
  *  they never need a background refetch — newly-mounted consumers reuse cache. */
 const SETTING_STALE_TIME = Number.POSITIVE_INFINITY;
 
+/** The Linear issue graph is heavy and changes infrequently; mutations invalidate
+ *  `["tasks"]` explicitly, so a stale window keeps re-entering the Issues tab from
+ *  re-fetching the whole graph on every mount. */
+const TASKS_STALE_TIME = 3 * 60_000;
+
 export const queryKeys = {
   repos: ["repos"] as const,
   agents: ["agents"] as const,
@@ -141,6 +146,8 @@ export const queryKeys = {
   worktreeFileSource: (repo: string, id: string, path: string) =>
     ["worktree-file-source", repo, id, path] as const,
   workPrompt: (repo: string, id: string) => ["work-prompt", repo, id] as const,
+  agentSession: (repo: string, termKey: string, allowFresh: boolean) =>
+    ["agent-session", repo, termKey, allowFresh] as const,
   commitDraft: (repo: string, id: string) => ["commit-draft", repo, id] as const,
   worktreePrs: (repo: string) => ["worktree-prs", repo] as const,
   reviews: (repo: string) => ["reviews", repo] as const,
@@ -202,6 +209,8 @@ export const TREES_AUTO_PR_KEY = "trees_auto_pr";
 export const TREES_BATCH_SETUP_KEY = "trees_batch_setup";
 /** Diff layout for the Trees diff panel: "split" | "unified" (default split). */
 export const TREES_DIFF_MODE_KEY = "trees_diff_mode";
+/** Changes browser layout: "list" | "tree" (default list). */
+export const TREES_CHANGES_VIEW_KEY = "trees_changes_view";
 /** Default "open in" target (an opener key, e.g. "cursor") for the split button. */
 export const TREES_DEFAULT_EDITOR_KEY = "trees_default_editor";
 
@@ -246,6 +255,10 @@ export const useAgents = () =>
 export const useAgentAuth = (kind: AgentKind) =>
   useQuery({ queryKey: ["agent-auth", kind], queryFn: () => commands.agentAuth(kind) });
 
+/** The `gh` CLI integration status (installed? authenticated? which account?). */
+export const useGithubStatus = () =>
+  useQuery({ queryKey: ["github-status"], queryFn: () => commands.githubStatus() });
+
 /**
  * Graph tickets for a repo. The backend returns the live Linear graph when an
  * org is connected and an empty list otherwise, so this is a single fetch with
@@ -253,7 +266,10 @@ export const useAgentAuth = (kind: AgentKind) =>
  * behind a serial status read).
  */
 export const useTasks = (repo: string) =>
-  useUnwrappedQuery([...queryKeys.tasks, repo], () => commands.linearListIssues(repo));
+  useUnwrappedQuery([...queryKeys.tasks, repo], () => commands.linearListIssues(repo), {
+    enabled: !!repo,
+    staleTime: TASKS_STALE_TIME,
+  });
 
 /**
  * The user's local note for a task (extra context, stored only on this machine).
@@ -280,6 +296,9 @@ export const useSetTaskNote = (repo: string) =>
       qc.setQueryData(key, a.body.trim() === "" ? null : a.body);
       return () => qc.setQueryData(key, prev);
     },
+    // Reconcile with what the backend actually stored (e.g. trimmed body) instead
+    // of leaving the optimistic value to diverge until the next cold mount.
+    invalidate: (a) => [queryKeys.taskNote(repo, a.taskId)],
   });
 
 /** Run the Linear OAuth connect flow, refreshing status + orgs + tickets. */
@@ -363,20 +382,23 @@ export const useWorktreeFiles = (repo: string, id: string) =>
     staleTime: WORKTREE_STALE_TIME,
   });
 
-/** The unified diff for one changed file (staged + unstaged vs HEAD). */
+/** The unified diff for one changed file (staged + unstaged vs HEAD). Cached: the
+ *  filesystem watcher invalidates it on real change, so re-clicking a file it
+ *  already loaded shouldn't re-run `git diff`. */
 export const useWorktreeFileDiff = (repo: string, id: string, path: string, untracked: boolean) =>
   useUnwrappedQuery(
     queryKeys.worktreeFileDiff(repo, id, path),
     () => commands.worktreeFileDiff(repo, id, path, untracked),
-    { enabled: !!repo && !!id && !!path },
+    { enabled: !!repo && !!id && !!path, staleTime: WORKTREE_STALE_TIME },
   );
 
-/** The old/new full file contents, for the diff viewer's context expansion. */
+/** The old/new full file contents, for the diff viewer's context expansion.
+ *  Cached like the diff (watcher-invalidated) so revisiting a file is instant. */
 export const useWorktreeFileSource = (repo: string, id: string, path: string) =>
   useUnwrappedQuery(
     queryKeys.worktreeFileSource(repo, id, path),
     () => commands.worktreeFileSource(repo, id, path),
-    { enabled: !!repo && !!id && !!path },
+    { enabled: !!repo && !!id && !!path, staleTime: WORKTREE_STALE_TIME },
   );
 
 /**
@@ -422,6 +444,34 @@ export const useWorkPrompt = (repo: string, id: string, enabled: boolean) =>
     enabled: enabled && !!repo && !!id,
     staleTime: 5 * 60 * 1000,
   });
+
+/**
+ * Resolve how a terminal that auto-launches `claude` should (re)launch it —
+ * resume an on-disk session, start fresh with a reserved id, or a plain shell
+ * (see {@link agentSessionSeed}). `allowFresh` mints a new session when none is
+ * resumable (set on an explicit launch; `false` on a passive reopen, which then
+ * only resumes or stays a shell).
+ *
+ * Callers should only `enable` this when there's no live PTY to attach to (a new
+ * shell is about to be created), so the resume decision is always against current
+ * on-disk state. A fresh launch caches forever (mint exactly once); a resume
+ * re-checks each time it runs (the transcript may have appeared since).
+ */
+export const useAgentSession = (
+  repo: string,
+  termKey: string,
+  cwd: string,
+  allowFresh: boolean,
+  enabled: boolean,
+) =>
+  useUnwrappedQuery(
+    queryKeys.agentSession(repo, termKey, allowFresh),
+    () => commands.agentSession(repo, termKey, cwd, allowFresh),
+    {
+      enabled: enabled && !!repo && !!termKey && !!cwd,
+      staleTime: allowFresh ? Number.POSITIVE_INFINITY : 0,
+    },
+  );
 
 /** Live PR status (number/url/state) for the repo's worktrees, from GitHub. Empty
  *  when `gh` isn't authenticated. Cached a minute — merge state changes server-side
@@ -486,6 +536,9 @@ export const useCreateWorktree = (repo: string) =>
       base: string | null;
       runSetup: boolean;
       agent: AgentKind;
+      // Suppress the per-worktree toast — a bulk launch raises one summary toast
+      // for the whole batch instead of N near-identical ones.
+      quiet?: boolean;
     }) =>
       unwrap(
         commands.createWorktree(repo, a.issueId, a.title, a.project, a.base, a.runSetup, a.agent),
@@ -496,7 +549,7 @@ export const useCreateWorktree = (repo: string) =>
     // signals "being worked on"; a moved Linear status refreshes on the next
     // natural tasks refetch.
     invalidate: () => [queryKeys.worktrees(repo)],
-    success: (wt) => `Created worktree for ${wt.id}.`,
+    success: (wt, a) => (a.quiet ? null : `Created worktree for ${wt.id}.`),
   });
 
 /**
@@ -576,7 +629,12 @@ export const useCreatePr = (repo: string) => {
     mutationFn: (a: { id: string; title: string; body: string }) =>
       unwrap(commands.createPullRequest(repo, a.id, a.title, a.body)),
     meta: { silent: true },
-    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.worktrees(repo) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.worktrees(repo) });
+      // The graph/sidebar PR badges read worktreePrs — refresh it so a freshly
+      // opened PR shows immediately instead of after its staleTime lapses.
+      qc.invalidateQueries({ queryKey: queryKeys.worktreePrs(repo) });
+    },
   });
 };
 
@@ -610,6 +668,7 @@ export const useSetCommitDraft = (repo: string) =>
       qc.setQueryData(key, a.message.trim() === "" ? null : a.message);
       return () => qc.setQueryData(key, prev);
     },
+    invalidate: (a) => [queryKeys.commitDraft(repo, a.id)],
   });
 
 /** A staging action on one file (or all). One mutation, discriminated by `action`,
@@ -765,6 +824,7 @@ const TRIAGE_GC_TIME = 30 * 60_000;
 /** The triage queue for a repo — live from Linear when connected, else empty. */
 export const useTriageTickets = (repo: string) =>
   useUnwrappedQuery(queryKeys.triageTickets(repo), () => commands.listTriageTickets(repo), {
+    enabled: !!repo,
     staleTime: TRIAGE_STALE_TIME,
     gcTime: TRIAGE_GC_TIME,
   });
@@ -790,6 +850,9 @@ export const useTriageDetailPrefetch = () => {
         queryKey: queryKeys.triageDetail(repo, id),
         queryFn: () => unwrap(commands.triageDetail(repo, id)),
         staleTime: TRIAGE_STALE_TIME,
+        // Match the live read's retention so a hovered-but-unclicked prefetch
+        // isn't GC'd at the 5-min default before the click.
+        gcTime: TRIAGE_GC_TIME,
       }),
     [qc],
   );
@@ -863,6 +926,7 @@ export const useTriageSetState = (repo: string) =>
 /** The team triage rotations — one per team the viewer is on. */
 export const useTriageSchedule = (repo: string) =>
   useUnwrappedQuery(queryKeys.triageSchedule(repo), () => commands.triageSchedule(repo), {
+    enabled: !!repo,
     staleTime: TRIAGE_STALE_TIME,
     gcTime: TRIAGE_GC_TIME,
   });

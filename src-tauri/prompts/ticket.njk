@@ -1,0 +1,24 @@
+## {{ tracker_name }} Issue: {{ identifier }}
+**{{ title }}**
+{% if url %}[View in {{ tracker_name }}]({{ url }}){% endif %}
+{% if state %}Status: {{ state }}{% endif %}{% if priority_label %} | Priority: {{ priority_label }}{% endif %}{% if labels %} | Labels: {{ labels | join(", ") }}{% endif %}
+
+{% if description %}
+### Description
+{{ description }}
+{% endif %}
+{% if comments %}
+### Comments
+{% for comment in comments %}
+**{{ comment.author }}** — {{ comment.created }}
+{{ comment.body }}
+{% for reply in comment.children %}
+
+> **{{ reply.author }}** — {{ reply.created }}
+> {{ reply.body | replace("\n", "\n> ") }}
+{% endfor %}
+{% if not loop.last %}
+---
+{% endif %}
+{% endfor %}
+{% endif %}

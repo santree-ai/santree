@@ -18,7 +18,7 @@ import {
 } from "../../theme/colors";
 import { IssueRow, type IssueRowVM } from "./IssueRow";
 import { LaunchPanel } from "./LaunchPanel";
-import { deriveIssueState, useIssues } from "./model";
+import { deriveIssueState, useIssueHover, useIssues } from "./model";
 
 interface Group {
   project: string;
@@ -34,16 +34,15 @@ export function IssueSidebar() {
     worktreeIds,
     selected,
     focusId,
-    hoverId,
     focusProject,
     baseFor,
     isEligible,
     toggle,
     revealInGraph,
     revealProject,
-    setHover,
     selectReady,
   } = useIssues();
+  const { hoverId, setHover } = useIssueHover();
   const { activeRepo } = useApp();
   const prefetchOnHover = usePrefetchOnHover(activeRepo);
 

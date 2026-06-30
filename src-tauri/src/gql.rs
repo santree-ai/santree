@@ -7,6 +7,19 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
+/// One process-wide HTTP client (connection pool + TLS session reuse) shared by
+/// every Linear/GitHub call instead of a per-module duplicate. The 30s timeout
+/// means a stalled request fails instead of hanging forever.
+pub fn client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("building HTTP client")
+    });
+    &CLIENT
+}
+
 /// A GraphQL `{ nodes: [...] }` connection. One generic wrapper instead of a
 /// near-identical `*Conn` struct per query. `Default` is hand-written because the
 /// derive would needlessly require `T: Default` — an absent connection is simply

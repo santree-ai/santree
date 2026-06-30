@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ViewChrome } from "../../components/chrome/ViewChrome";
+import { CliIcon } from "../../components/icons";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import { useRepos } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
@@ -20,26 +21,6 @@ const GROUPS: [TerminalSource, string][] = [
   ["triage", "Triage"],
   ["issue", "Issues"],
 ];
-
-function TerminalIcon({ size = 14, className }: { size?: number; className?: string }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden
-    >
-      <polyline points="4 17 10 11 4 5" />
-      <line x1="12" y1="19" x2="20" y2="19" />
-    </svg>
-  );
-}
 
 export function TerminalSurface() {
   const { activeRepo } = useApp();
@@ -105,7 +86,7 @@ export function TerminalSurface() {
                           onClick={() => setActiveKey(t.key)}
                           className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-2 pl-2.5 text-left"
                         >
-                          <TerminalIcon
+                          <CliIcon
                             size={13}
                             className={active ? "text-[color:var(--accent)]" : "text-muted-3"}
                           />

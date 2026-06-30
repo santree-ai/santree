@@ -29,6 +29,10 @@ export function SetupLogsView({
   const [lines, setLines] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const startedRef = useRef(false);
+  // Whether the last appended line is a transient progress redraw — the next
+  // `progress` event overwrites it in place; the next committed `line` commits
+  // over it (so a finished progress bar collapses to its final frame).
+  const lastWasProgress = useRef(false);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
@@ -37,8 +41,26 @@ export function SetupLogsView({
     startedRef.current = true;
     const channel = new Channel<SetupEvent>();
     channel.onmessage = (e) => {
-      if (e.type === "line") {
-        setLines((prev) => [...prev, e.text]);
+      if (e.type === "progress") {
+        setLines((prev) => {
+          if (lastWasProgress.current && prev.length) {
+            const next = prev.slice();
+            next[next.length - 1] = e.text;
+            return next;
+          }
+          return [...prev, e.text];
+        });
+        lastWasProgress.current = true;
+      } else if (e.type === "line") {
+        setLines((prev) => {
+          if (lastWasProgress.current && prev.length) {
+            const next = prev.slice();
+            next[next.length - 1] = e.text;
+            return next;
+          }
+          return [...prev, e.text];
+        });
+        lastWasProgress.current = false;
       } else {
         onCompleteRef.current();
       }
@@ -62,9 +84,9 @@ export function SetupLogsView({
     <div ref={scrollRef} className="h-full overflow-auto bg-app px-3 py-2">
       <pre className="selectable font-mono text-[12px] leading-[1.55] whitespace-pre-wrap text-fg-3">
         {lines.map((line, i) => (
-          // Append-only log: lines are never reordered, so the index is a stable
-          // key. Rendering one node per line avoids re-joining the whole buffer
-          // (O(n²)) into a single text node on every streamed line.
+          // Lines only ever append or get replaced in place (progress redraws the
+          // last one) — never reordered — so the index is a stable key. One node
+          // per line avoids re-joining the whole buffer (O(n²)) on every event.
           <div key={i}>{line || " "}</div>
         ))}
       </pre>

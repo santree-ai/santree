@@ -8,4 +8,5 @@ license.workspace = true
 [dependencies]
 portable-pty = "0.9"
 anyhow = "1"
-tracing = "0.1"
+# Logging via the `log` facade; the host app installs the global logger.
+log = "0.4"

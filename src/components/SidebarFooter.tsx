@@ -2,7 +2,7 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import type { CSSProperties } from "react";
 
-import { useAppUi } from "../state/AppContext";
+import { CHROME, useAppUi } from "../state/AppContext";
 import { accentActiveStyle } from "../theme/colors";
 import { GearIcon, HelpIcon } from "./icons";
 
@@ -26,7 +26,9 @@ export function SidebarFooter() {
   });
 
   return (
-    <div className="flex flex-none items-center gap-1.5 border-t border-line px-2.5 py-2">
+    <div
+      className={`flex ${CHROME.statusBar} flex-none items-center gap-1.5 border-t border-line px-2.5`}
+    >
       <button
         type="button"
         onClick={() => setHelpOpen(!helpOpen)}

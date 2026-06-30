@@ -30,7 +30,8 @@ results and the view shows its empty state.
 
 - **Rust:** Tauri 2.11, tauri-specta `=2.0.0-rc.25` (pinned with `specta`/
   `specta-typescript` — bump all three together), sqlx + SQLite, portable-pty, tokio,
-  reqwest, serde, anyhow, tracing.
+  reqwest, serde, anyhow, `log` + tauri-plugin-log (file logging — Rust + JS console
+  to `~/Library/Logs/com.santree.desktop/santree.log`).
 - **Frontend:** React 19, Vite 8, TanStack Router + Query v5, Tailwind v4 (CSS-first,
   no `tailwind.config`), xterm.js, react-markdown. Biome for lint+format. Vitest.
 - **Cargo workspace:** `src-tauri` (thin Tauri adapter) + `crates/core` (pure domain

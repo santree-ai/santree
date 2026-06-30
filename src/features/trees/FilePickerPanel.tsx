@@ -7,10 +7,18 @@
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 
 import type { ChangedFile, FileStatus } from "../../bindings";
-import { ConfirmDialog, underlineTabStyle } from "../../components/primitives";
-import { useStageAction, useWorktreeFiles, useWorktreeStatus } from "../../lib/queries";
+import { ListIcon, TreeIcon } from "../../components/icons";
+import { ConfirmDialog, EdgeResizeHandle, underlineTabStyle } from "../../components/primitives";
+import {
+  TREES_CHANGES_VIEW_KEY,
+  useSetSetting,
+  useSetting,
+  useStageAction,
+  useWorktreeFiles,
+  useWorktreeStatus,
+} from "../../lib/queries";
 import { useEdgeResize } from "../../lib/useEdgeResize";
-import { alpha } from "../../theme/colors";
+import { accentActiveStyle, alpha } from "../../theme/colors";
 import { CommitBox } from "./CommitBox";
 import { fileIconUrl, folderIconUrl } from "./fileIcons";
 import { type FileTab, useTrees } from "./model";
@@ -59,11 +67,7 @@ export function FilePickerPanel() {
       className="relative flex flex-none flex-col border-l border-line bg-deep"
       style={{ width: `var(--tree-right, ${DEFAULT_W}px)` }}
     >
-      <div
-        {...resize}
-        className="absolute top-0 left-[-3px] z-20 h-full w-1.5 cursor-col-resize hover:bg-[color-mix(in_srgb,var(--accent)_45%,transparent)]"
-        aria-hidden
-      />
+      <EdgeResizeHandle edge="left" {...resize} />
       <div className="flex h-9 flex-none items-stretch border-b border-line">
         <FileTabButton tab="all" label="All files" active={fileTab} onClick={setFileTab} />
         <FileTabButton
@@ -105,6 +109,66 @@ function FileTabButton({
 
 // ── Changes list ─────────────────────────────────────────────────────────
 
+/** A node in the changed-files tree: a file leaf, or a directory whose
+ *  single-child chains are collapsed into one `a/b/c` row (`count` = files under it). */
+export type ChangeTreeNode =
+  | { kind: "file"; name: string; path: string; file: ChangedFile }
+  | { kind: "dir"; name: string; path: string; count: number; children: ChangeTreeNode[] };
+
+/** Build the changed-files tree, collapsing runs of single-child directories into
+ *  one `a/b/c` row (the common case when a change sits deep in an otherwise
+ *  untouched subtree). Dirs sort before files, both alphabetically. */
+export function buildChangeTree(files: ChangedFile[]): ChangeTreeNode[] {
+  interface Raw {
+    dirs: Map<string, Raw>;
+    files: ChangedFile[];
+  }
+  const root: Raw = { dirs: new Map(), files: [] };
+  for (const f of files) {
+    const parts = f.path.split("/");
+    parts.pop(); // the file name; leaves only its directory chain
+    let d = root;
+    for (const part of parts) {
+      let next = d.dirs.get(part);
+      if (!next) {
+        next = { dirs: new Map(), files: [] };
+        d.dirs.set(part, next);
+      }
+      d = next;
+    }
+    d.files.push(f);
+  }
+
+  const build = (raw: Raw, prefix: string): ChangeTreeNode[] => {
+    const dirs: ChangeTreeNode[] = [];
+    for (const [name, sub] of raw.dirs) {
+      let display = name;
+      let path = prefix ? `${prefix}/${name}` : name;
+      let cur = sub;
+      // Absorb a chain of lone sub-directories: `a` → `a/b` → `a/b/c`.
+      while (cur.files.length === 0 && cur.dirs.size === 1) {
+        const [childName, childRaw] = [...cur.dirs][0];
+        display = `${display}/${childName}`;
+        path = `${path}/${childName}`;
+        cur = childRaw;
+      }
+      const children = build(cur, path);
+      const count = children.reduce((n, c) => n + (c.kind === "file" ? 1 : c.count), 0);
+      dirs.push({ kind: "dir", name: display, path, count, children });
+    }
+    const fileNodes: ChangeTreeNode[] = raw.files.map((f) => ({
+      kind: "file",
+      name: f.path.slice(f.path.lastIndexOf("/") + 1),
+      path: f.path,
+      file: f,
+    }));
+    dirs.sort((a, b) => a.name.localeCompare(b.name));
+    fileNodes.sort((a, b) => a.name.localeCompare(b.name));
+    return [...dirs, ...fileNodes];
+  };
+  return build(root, "");
+}
+
 function ChangesList({ files }: { files: ChangedFile[] }) {
   const { repo, activeId, selectedFile, selectFile } = useTrees();
   const { mutate: act, mutateAsync: actAsync } = useStageAction(repo, activeId);
@@ -114,33 +178,56 @@ function ChangesList({ files }: { files: ChangedFile[] }) {
   // work is unrecoverable — so it asks first, like the worktree delete).
   const [discarding, setDiscarding] = useState<ChangedFile | null>(null);
 
+  // List vs collapsed-folder tree, persisted app-wide (default list).
+  const viewSetting = useSetting("app", TREES_CHANGES_VIEW_KEY);
+  const { mutate: setSetting } = useSetSetting();
+  const tree = viewSetting.data === "tree";
+  const setTree = (on: boolean) =>
+    setSetting({ scope: "app", key: TREES_CHANGES_VIEW_KEY, value: on ? "tree" : null });
+
+  const onToggle = useCallback(
+    (f: ChangedFile) => act({ action: f.staged ? "unstage" : "stage", path: f.path }),
+    [act],
+  );
+
   return (
     <>
       {files.length > 0 && (
-        <div className="flex flex-none items-center justify-between border-b border-line px-2.5 py-1.5">
+        <div className="flex flex-none items-center justify-between gap-2 border-b border-line px-2.5 py-1.5">
           <span className="font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
             {stagedCount}/{files.length} staged
           </span>
-          <button
-            type="button"
-            onClick={() => act({ action: allStaged ? "unstageAll" : "stageAll" })}
-            className="cursor-pointer rounded-[5px] border border-line-3 bg-input px-2 py-0.5 text-[10.5px] text-muted-2 hover:border-line-strong hover:text-fg-2"
-          >
-            {allStaged ? "Unstage all" : "Stage all"}
-          </button>
+          <div className="flex items-center gap-1.5">
+            <ViewToggle tree={tree} onChange={setTree} />
+            <button
+              type="button"
+              onClick={() => act({ action: allStaged ? "unstageAll" : "stageAll" })}
+              className="cursor-pointer rounded-[5px] border border-line-3 bg-input px-2 py-0.5 text-[10.5px] text-muted-2 hover:border-line-strong hover:text-fg-2"
+            >
+              {allStaged ? "Unstage all" : "Stage all"}
+            </button>
+          </div>
         </div>
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
         {files.length === 0 ? (
           <div className="px-3 py-6 text-center text-[11.5px] text-muted-3">No changes.</div>
+        ) : tree ? (
+          <ChangesTree
+            files={files}
+            selectedFile={selectedFile}
+            onToggle={onToggle}
+            onOpen={selectFile}
+            onDiscard={setDiscarding}
+          />
         ) : (
           files.map((f) => (
             <ChangeRow
               key={f.path}
               file={f}
               selected={f.path === selectedFile}
-              onToggle={() => act({ action: f.staged ? "unstage" : "stage", path: f.path })}
+              onToggle={() => onToggle(f)}
               onOpen={() => selectFile(f.path)}
               onDiscard={() => setDiscarding(f)}
             />
@@ -177,17 +264,157 @@ function ChangesList({ files }: { files: ChangedFile[] }) {
   );
 }
 
-/** One row in the Changes list. Memoized so staging/selecting one file doesn't
- *  re-render every other row (the list re-renders on each optimistic patch). */
+/** Segmented list/tree toggle for the changes browser. */
+function ViewToggle({ tree, onChange }: { tree: boolean; onChange: (tree: boolean) => void }) {
+  return (
+    <div className="flex items-center gap-0.5">
+      {(
+        [
+          [false, "List", ListIcon],
+          [true, "Tree", TreeIcon],
+        ] as const
+      ).map(([on, label, Icon]) => (
+        <button
+          key={label}
+          type="button"
+          onClick={() => onChange(on)}
+          title={`${label} view`}
+          aria-pressed={tree === on}
+          className="flex cursor-pointer items-center rounded-[5px] border px-1.5 py-1"
+          style={
+            tree === on
+              ? accentActiveStyle()
+              : { borderColor: "transparent", color: "var(--color-muted-3)" }
+          }
+        >
+          <Icon size={12} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** The changes tree: collapsed-folder dirs (toggle to expand) + file rows that keep
+ *  the full stage/discard/diff affordances of the flat list. Expanded by default
+ *  (changes are few); `collapsed` tracks the dirs the user has folded. */
+function ChangesTree({
+  files,
+  selectedFile,
+  onToggle,
+  onOpen,
+  onDiscard,
+}: {
+  files: ChangedFile[];
+  selectedFile: string | null;
+  onToggle: (f: ChangedFile) => void;
+  onOpen: (path: string) => void;
+  onDiscard: (f: ChangedFile) => void;
+}) {
+  const tree = useMemo(() => buildChangeTree(files), [files]);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const toggleDir = useCallback(
+    (path: string) =>
+      setCollapsed((prev) => {
+        const next = new Set(prev);
+        if (next.has(path)) next.delete(path);
+        else next.add(path);
+        return next;
+      }),
+    [],
+  );
+
+  const rows = useMemo(() => {
+    const out: { node: ChangeTreeNode; depth: number }[] = [];
+    const walk = (nodes: ChangeTreeNode[], depth: number) => {
+      for (const node of nodes) {
+        out.push({ node, depth });
+        if (node.kind === "dir" && !collapsed.has(node.path)) walk(node.children, depth + 1);
+      }
+    };
+    walk(tree, 0);
+    return out;
+  }, [tree, collapsed]);
+
+  return (
+    <>
+      {rows.map(({ node, depth }) =>
+        node.kind === "dir" ? (
+          <ChangeFolderRow
+            key={node.path}
+            name={node.name}
+            count={node.count}
+            depth={depth}
+            open={!collapsed.has(node.path)}
+            onToggle={() => toggleDir(node.path)}
+          />
+        ) : (
+          <ChangeRow
+            key={node.path}
+            file={node.file}
+            depth={depth}
+            showDir={false}
+            selected={node.path === selectedFile}
+            onToggle={() => onToggle(node.file)}
+            onOpen={() => onOpen(node.path)}
+            onDiscard={() => onDiscard(node.file)}
+          />
+        ),
+      )}
+    </>
+  );
+}
+
+/** A collapsed-folder row in the changes tree (its `a/b/c` chain + a file count). */
+const ChangeFolderRow = memo(function ChangeFolderRow({
+  name,
+  count,
+  depth,
+  open,
+  onToggle,
+}: {
+  name: string;
+  count: number;
+  depth: number;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const leaf = name.slice(name.lastIndexOf("/") + 1);
+  const icon = folderIconUrl(leaf, open);
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="flex w-full cursor-pointer items-center gap-1.5 py-[3px] pr-2.5 text-left hover:bg-hover"
+      style={{ paddingLeft: 10 + depth * 13 }}
+    >
+      <span className="flex-none text-[8px] text-muted-4" style={{ width: 7 }}>
+        {open ? "▾" : "▸"}
+      </span>
+      {icon ? <img src={icon} alt="" className="h-4 w-4 flex-none" draggable={false} /> : null}
+      <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-2">{name}</span>
+      <span className="flex-none font-mono text-[9.5px] text-muted-4">{count}</span>
+    </button>
+  );
+});
+
+/** One file row in the Changes browser (flat list or tree). Memoized so staging/
+ *  selecting one file doesn't re-render every other row (the list re-renders on each
+ *  optimistic patch). In tree mode it's indented and drops the dir suffix. */
 const ChangeRow = memo(function ChangeRow({
   file: f,
   selected,
+  depth = 0,
+  showDir = true,
   onToggle,
   onOpen,
   onDiscard,
 }: {
   file: ChangedFile;
   selected: boolean;
+  /** Indent level when rendered inside the tree (0 in the flat list). */
+  depth?: number;
+  /** Show the trailing directory path (flat list only — the tree implies it). */
+  showDir?: boolean;
   onToggle: () => void;
   onOpen: () => void;
   onDiscard: () => void;
@@ -198,8 +425,8 @@ const ChangeRow = memo(function ChangeRow({
   const icon = fileIconUrl(name);
   return (
     <div
-      className="group flex items-center gap-2 px-2.5 py-[3px] hover:bg-hover"
-      style={selected ? { background: alpha(8) } : undefined}
+      className="group flex items-center gap-2 py-[3px] pr-2.5 hover:bg-hover"
+      style={{ paddingLeft: 10 + depth * 13, background: selected ? alpha(8) : undefined }}
     >
       <input
         type="checkbox"
@@ -215,7 +442,7 @@ const ChangeRow = memo(function ChangeRow({
         {icon ? <img src={icon} alt="" className="h-4 w-4 flex-none" draggable={false} /> : null}
         <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-3">
           {name}
-          {dir && <span className="text-muted-4"> {dir}</span>}
+          {showDir && dir && <span className="text-muted-4"> {dir}</span>}
         </span>
         <span className="flex-none font-mono text-[9.5px] text-muted-4">
           +{f.addLines} −{f.delLines}

@@ -11,7 +11,7 @@ import { memo } from "react";
 import { PrChips } from "../../components/PrChip";
 import { Badge, Dot } from "../../components/primitives";
 import { accentVar as accent, alpha, successColor } from "../../theme/colors";
-import { useIssues } from "./model";
+import { useIssueHover, useIssues } from "./model";
 
 export interface IssueNodeData {
   title: string;
@@ -104,7 +104,8 @@ export const IssueNode = memo(
     // hover/selection nor a worktrees refetch rebuilds the React Flow nodes array
     // — that churn resets node measurement and blanks the canvas when a fitView
     // lands mid-rebuild.
-    const { focusId, hoverId, worktreeIds, prByTask } = useIssues();
+    const { focusId, worktreeIds, prByTask } = useIssues();
+    const { hoverId } = useIssueHover();
     const focused = focusId === id;
     const hovered = hoverId === id && !focused;
     const working = worktreeIds.has(id);

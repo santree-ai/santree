@@ -5,8 +5,17 @@
 import { Fragment, useEffect, useState } from "react";
 
 import type { Worktree } from "../../bindings";
-import { BranchIcon, ChevronDownIcon, GearIcon, TrashIcon } from "../../components/icons";
-import { ConfirmDialog, Dropdown, Spinner } from "../../components/primitives";
+import {
+  BranchIcon,
+  ChevronDownIcon,
+  DownloadIcon,
+  GearIcon,
+  PanelIcon,
+  PrIcon,
+  PullIcon,
+  TrashIcon,
+} from "../../components/icons";
+import { ConfirmDialog, Dropdown, MENU_ITEM, Spinner } from "../../components/primitives";
 import {
   TREES_DEFAULT_EDITOR_KEY,
   useOpeners,
@@ -15,6 +24,7 @@ import {
   useSetting,
   useUpdateBaseBranch,
 } from "../../lib/queries";
+import { CHROME } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import { BASE_ID, useTrees } from "./model";
 import { OpenerIcon } from "./openerIcons";
@@ -26,7 +36,9 @@ export function BottomBar({ worktree }: { worktree: Worktree }) {
   const isBase = worktree.id === BASE_ID;
 
   return (
-    <div className="flex h-7 flex-none items-center gap-1 border-t border-line bg-deep pr-1 pl-2 text-[11px] text-muted-2">
+    <div
+      className={`flex ${CHROME.statusBar} flex-none items-center gap-1 border-t border-line bg-deep pr-1 pl-2 text-[11px] text-muted-2`}
+    >
       <GitState worktree={worktree} />
       {!isBase && (
         <>
@@ -81,29 +93,6 @@ function PrButton({ worktree }: { worktree: Worktree }) {
       <PrIcon />
       Create PR
     </button>
-  );
-}
-
-function PrIcon() {
-  return (
-    <svg
-      width={13}
-      height={13}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.4}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <circle cx="4.5" cy="4" r="1.6" />
-      <circle cx="4.5" cy="12" r="1.6" />
-      <circle cx="11.5" cy="12" r="1.6" />
-      <path d="M4.5 5.6v4.8" />
-      <path d="M11.5 10.4V7.4A2.4 2.4 0 0 0 9.1 5H7" />
-      <path d="M8.6 3.4 7 5l1.6 1.6" />
-    </svg>
   );
 }
 
@@ -349,63 +338,5 @@ function OpenInMenuItems({ items, close }: { items: MenuItem[]; close: () => voi
         </Fragment>
       ))}
     </>
-  );
-}
-
-const MENU_ITEM =
-  "flex w-full cursor-pointer items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-fg-3 hover:bg-hover disabled:cursor-default disabled:text-muted-4";
-
-// ── Icons ────────────────────────────────────────────────────────────────────
-
-function PanelIcon() {
-  return (
-    <svg
-      width={12}
-      height={12}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.4}
-      aria-hidden
-    >
-      <rect x="2" y="3" width="12" height="10" rx="1.5" />
-      <line x1="10" y1="3" x2="10" y2="13" />
-    </svg>
-  );
-}
-
-function PullIcon() {
-  return (
-    <svg
-      width={12}
-      height={12}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.4}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M8 2.5v7M5 6.5 8 9.5l3-3M3.5 13h9" />
-    </svg>
-  );
-}
-
-function DownloadIcon() {
-  return (
-    <svg
-      width={13}
-      height={13}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.3}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M8 2v8M4.8 7 8 10.2 11.2 7M3 13h10" />
-    </svg>
   );
 }

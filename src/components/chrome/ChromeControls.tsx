@@ -6,6 +6,8 @@
  */
 import { useCanGoBack, useRouter } from "@tanstack/react-router";
 
+import { ChevronLeftIcon, ChevronRightIcon, CollapseIcon } from "../icons";
+
 function IconButton({
   onClick,
   disabled,
@@ -31,25 +33,6 @@ function IconButton({
   );
 }
 
-function CollapseIcon() {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <line x1="9" y1="4" x2="9" y2="20" />
-    </svg>
-  );
-}
-
 export function ChromeControls({
   canCollapse,
   collapsed,
@@ -68,34 +51,10 @@ export function ChromeControls({
   const arrows = (
     <div className="flex items-center gap-0.5">
       <IconButton onClick={() => router.history.back()} disabled={!canGoBack} label="Back">
-        <svg
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden
-        >
-          <path d="M15 18l-6-6 6-6" />
-        </svg>
+        <ChevronLeftIcon size={16} />
       </IconButton>
       <IconButton onClick={() => router.history.forward()} label="Forward">
-        <svg
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden
-        >
-          <path d="M9 18l6-6-6-6" />
-        </svg>
+        <ChevronRightIcon size={16} />
       </IconButton>
     </div>
   );

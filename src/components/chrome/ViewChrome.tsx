@@ -11,7 +11,8 @@
 import type { ReactNode } from "react";
 
 import { useEdgeResize } from "../../lib/useEdgeResize";
-import { SIDEBAR, useAppUi } from "../../state/AppContext";
+import { CHROME, SIDEBAR, useAppUi } from "../../state/AppContext";
+import { EdgeResizeHandle } from "../primitives";
 import { ChromeControls } from "./ChromeControls";
 import { NavTabs } from "./NavTabs";
 import { RepoSelector } from "./RepoSelector";
@@ -54,13 +55,7 @@ function SidebarResizer() {
     },
   });
 
-  return (
-    <div
-      {...resize}
-      className="absolute top-0 right-[-3px] z-20 h-full w-1.5 cursor-col-resize hover:bg-[color-mix(in_srgb,var(--accent)_45%,transparent)]"
-      aria-hidden
-    />
-  );
+  return <EdgeResizeHandle edge="right" {...resize} />;
 }
 
 export function ViewChrome({
@@ -126,7 +121,9 @@ export function ViewChrome({
             style={{ width: "var(--sidebar-width)" }}
           >
             {showRepoSelector && (
-              <div className="flex h-11 flex-none items-center border-b border-hairline px-3">
+              <div
+                className={`flex ${CHROME.subBar} flex-none items-center border-b border-hairline px-3`}
+              >
                 <RepoSelector />
               </div>
             )}

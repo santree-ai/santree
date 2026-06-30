@@ -271,6 +271,7 @@ export function TriageView() {
             {selectedTab === "investigate" && (
               <InvestigatePane
                 key={activeTicket.id}
+                repo={activeRepo}
                 ticketId={activeTicket.id}
                 cwd={repoPath}
                 command={investigateCommand ?? null}

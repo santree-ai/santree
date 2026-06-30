@@ -8,9 +8,9 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 /** Commands */
 export const commands = {
 	/**  Connected repositories. */
-	listRepos: () => typedError<Repo[], string>(__TAURI_INVOKE("list_repos")),
+	listRepos: () => typedError<Repo[], CmdError>(__TAURI_INVOKE("list_repos")),
 	/**  Add a repository from a local folder, validating it is a git work tree. */
-	addRepo: (path: string) => typedError<Repo, string>(__TAURI_INVOKE("add_repo", { path })),
+	addRepo: (path: string) => typedError<Repo, CmdError>(__TAURI_INVOKE("add_repo", { path })),
 	/**  Available coding agents and their models. */
 	listAgents: () => __TAURI_INVOKE<AgentDef[]>("list_agents"),
 	/**
@@ -19,10 +19,17 @@ export const commands = {
 	 */
 	agentAuth: (kind: AgentKind) => __TAURI_INVOKE<AgentAuth>("agent_auth", { kind }),
 	/**
+	 *  The `gh` CLI integration status for Settings → Integrations: installed?
+	 *  authenticated? as which account? Infallible — a missing or signed-out `gh`
+	 *  is reported via the status flags rather than as an error, since GitHub can't
+	 *  be turned off and the view always renders.
+	 */
+	githubStatus: () => __TAURI_INVOKE<GithubStatus>("github_status"),
+	/**
 	 *  The repo's live agent worktrees (DB-tracked, with live git stats). Empty when
 	 *  the repo has no local path.
 	 */
-	worktrees: (repo: string) => typedError<Worktree[], string>(__TAURI_INVOKE("worktrees", { repo })),
+	worktrees: (repo: string) => typedError<Worktree[], CmdError>(__TAURI_INVOKE("worktrees", { repo })),
 	/**
 	 *  The repo's base branch as a worktree-like entry (repo root on main/master),
 	 *  for the Trees "main" entry. `None` when the repo has no local path.
@@ -57,183 +64,194 @@ export const commands = {
 	 *  backend; `#[serde(default)]` so older payloads deserialize cleanly.
 	 */
 	pending?: boolean,
-} | null, string>(__TAURI_INVOKE("base_worktree", { repo })),
+} | null, CmdError>(__TAURI_INVOKE("base_worktree", { repo })),
 	/**
 	 *  Start a task: create a worktree for an issue (branching off `base`), optionally
 	 *  running `.santree/init.sh`, and record the issue ↔ worktree link.
 	 */
-	createWorktree: (repo: string, issueId: string, title: string, project: string | null, base: string | null, runSetup: boolean, agent: AgentKind) => typedError<Worktree, string>(__TAURI_INVOKE("create_worktree", { repo, issueId, title, project, base, runSetup, agent })),
+	createWorktree: (repo: string, issueId: string, title: string, project: string | null, base: string | null, runSetup: boolean, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree", { repo, issueId, title, project, base, runSetup, agent })),
 	/**  Remove a worktree (and its branch) and drop the issue link. */
-	removeWorktree: (repo: string, issueId: string) => typedError<null, string>(__TAURI_INVOKE("remove_worktree", { repo, issueId })),
+	removeWorktree: (repo: string, issueId: string) => typedError<null, CmdError>(__TAURI_INVOKE("remove_worktree", { repo, issueId })),
 	/**
 	 *  Run a worktree's setup script, streaming each output line over `on_event` for
 	 *  the Trees "Setup" tab; records it as run on success.
 	 */
-	runWorktreeSetupStreamed: (repo: string, issueId: string, onEvent: Channel<SetupEvent>) => typedError<null, string>(__TAURI_INVOKE("run_worktree_setup_streamed", { repo, issueId, onEvent })),
+	runWorktreeSetupStreamed: (repo: string, issueId: string, onEvent: Channel<SetupEvent>) => typedError<null, CmdError>(__TAURI_INVOKE("run_worktree_setup_streamed", { repo, issueId, onEvent })),
 	/**
 	 *  Merge the base branch into the worktree (the "pull from main/master" button).
 	 *  Errors on a conflicting merge; returns the base ref that was merged on success.
 	 */
-	pullWorktree: (repo: string, issueId: string) => typedError<string, string>(__TAURI_INVOKE("pull_worktree", { repo, issueId })),
+	pullWorktree: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("pull_worktree", { repo, issueId })),
 	/**
 	 *  Fast-forward the repo's local base branch (main/master) to origin — the
 	 *  "update master" action. Returns the base branch that was updated.
 	 */
-	updateBaseBranch: (repo: string, issueId: string) => typedError<string, string>(__TAURI_INVOKE("update_base_branch", { repo, issueId })),
+	updateBaseBranch: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("update_base_branch", { repo, issueId })),
 	/**  The worktree's working-tree status (changed files) for the commit box. */
-	worktreeStatus: (repo: string, issueId: string) => typedError<ChangedFile[], string>(__TAURI_INVOKE("worktree_status", { repo, issueId })),
+	worktreeStatus: (repo: string, issueId: string) => typedError<ChangedFile[], CmdError>(__TAURI_INVOKE("worktree_status", { repo, issueId })),
 	/**  A unified diff for one changed file (staged + unstaged vs HEAD). */
-	worktreeFileDiff: (repo: string, issueId: string, path: string, untracked: boolean) => typedError<string, string>(__TAURI_INVOKE("worktree_file_diff", { repo, issueId, path, untracked })),
+	worktreeFileDiff: (repo: string, issueId: string, path: string, untracked: boolean) => typedError<string, CmdError>(__TAURI_INVOKE("worktree_file_diff", { repo, issueId, path, untracked })),
 	/**  The old/new full file contents, for the diff viewer's context expansion. */
-	worktreeFileSource: (repo: string, issueId: string, path: string) => typedError<FileSource, string>(__TAURI_INVOKE("worktree_file_source", { repo, issueId, path })),
+	worktreeFileSource: (repo: string, issueId: string, path: string) => typedError<FileSource, CmdError>(__TAURI_INVOKE("worktree_file_source", { repo, issueId, path })),
 	/**  Every browsable file in the worktree (tracked + untracked, gitignore-aware). */
-	worktreeFiles: (repo: string, issueId: string) => typedError<string[], string>(__TAURI_INVOKE("worktree_files", { repo, issueId })),
+	worktreeFiles: (repo: string, issueId: string) => typedError<string[], CmdError>(__TAURI_INVOKE("worktree_files", { repo, issueId })),
 	/**
 	 *  Start (or re-point) the filesystem watcher at the given repo's worktrees, so
 	 *  the Trees views refresh live when files change on disk (e.g. an agent editing
 	 *  in the terminal). A no-op for repos without a local path; idempotent, so the
 	 *  frontend can call it on every Trees mount / repo change.
 	 */
-	watchWorktrees: (repo: string) => typedError<null, string>(__TAURI_INVOKE("watch_worktrees", { repo })),
+	watchWorktrees: (repo: string) => typedError<null, CmdError>(__TAURI_INVOKE("watch_worktrees", { repo })),
 	/**  Stage a single file. */
-	stagePath: (repo: string, issueId: string, path: string) => typedError<null, string>(__TAURI_INVOKE("stage_path", { repo, issueId, path })),
+	stagePath: (repo: string, issueId: string, path: string) => typedError<null, CmdError>(__TAURI_INVOKE("stage_path", { repo, issueId, path })),
 	/**  Unstage a single file. */
-	unstagePath: (repo: string, issueId: string, path: string) => typedError<null, string>(__TAURI_INVOKE("unstage_path", { repo, issueId, path })),
+	unstagePath: (repo: string, issueId: string, path: string) => typedError<null, CmdError>(__TAURI_INVOKE("unstage_path", { repo, issueId, path })),
 	/**  Discard a file's uncommitted changes (delete if untracked, else restore HEAD). */
-	discardPath: (repo: string, issueId: string, path: string, untracked: boolean) => typedError<null, string>(__TAURI_INVOKE("discard_path", { repo, issueId, path, untracked })),
+	discardPath: (repo: string, issueId: string, path: string, untracked: boolean) => typedError<null, CmdError>(__TAURI_INVOKE("discard_path", { repo, issueId, path, untracked })),
 	/**  Stage every change in the worktree. */
-	stageAllPaths: (repo: string, issueId: string) => typedError<null, string>(__TAURI_INVOKE("stage_all_paths", { repo, issueId })),
+	stageAllPaths: (repo: string, issueId: string) => typedError<null, CmdError>(__TAURI_INVOKE("stage_all_paths", { repo, issueId })),
 	/**  Unstage everything in the worktree. */
-	unstageAllPaths: (repo: string, issueId: string) => typedError<null, string>(__TAURI_INVOKE("unstage_all_paths", { repo, issueId })),
+	unstageAllPaths: (repo: string, issueId: string) => typedError<null, CmdError>(__TAURI_INVOKE("unstage_all_paths", { repo, issueId })),
 	/**  Commit the worktree (optionally staging everything first). */
-	commitWorktree: (repo: string, issueId: string, message: string, stageAll: boolean) => typedError<null, string>(__TAURI_INVOKE("commit_worktree", { repo, issueId, message, stageAll })),
+	commitWorktree: (repo: string, issueId: string, message: string, stageAll: boolean) => typedError<null, CmdError>(__TAURI_INVOKE("commit_worktree", { repo, issueId, message, stageAll })),
 	/**  Draft a commit message from the staged diff via a headless `claude -p` call. */
-	commitMessage: (repo: string, issueId: string) => typedError<string, string>(__TAURI_INVOKE("commit_message", { repo, issueId })),
+	commitMessage: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("commit_message", { repo, issueId })),
 	/**
 	 *  The saved commit-message draft for a worktree, or `None`. Survives tab
 	 *  switches / restarts until the worktree commits (which clears it).
 	 */
-	commitDraft: (repo: string, issueId: string) => typedError<string | null, string>(__TAURI_INVOKE("commit_draft", { repo, issueId })),
+	commitDraft: (repo: string, issueId: string) => typedError<string | null, CmdError>(__TAURI_INVOKE("commit_draft", { repo, issueId })),
 	/**  Save (or clear, when blank) a worktree's commit-message draft. */
-	setCommitDraft: (repo: string, issueId: string, message: string) => typedError<null, string>(__TAURI_INVOKE("set_commit_draft", { repo, issueId, message })),
+	setCommitDraft: (repo: string, issueId: string, message: string) => typedError<null, CmdError>(__TAURI_INVOKE("set_commit_draft", { repo, issueId, message })),
 	/**
 	 *  Refresh a worktree's stored Linear title (the Issue tab calls this when the
 	 *  live title differs, keeping the sidebar accurate without the list hitting Linear).
 	 */
-	setWorktreeTitle: (repo: string, issueId: string, title: string) => typedError<null, string>(__TAURI_INVOKE("set_worktree_title", { repo, issueId, title })),
+	setWorktreeTitle: (repo: string, issueId: string, title: string) => typedError<null, CmdError>(__TAURI_INVOKE("set_worktree_title", { repo, issueId, title })),
 	/**
 	 *  The agent's opening prompt for a freshly-started worktree (the `work`
 	 *  template). The terminal seeds `exec <agent> '<prompt>'` with this.
 	 */
-	workPrompt: (repo: string, issueId: string) => typedError<string, string>(__TAURI_INVOKE("work_prompt", { repo, issueId })),
+	workPrompt: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("work_prompt", { repo, issueId })),
+	/**
+	 *  Decide how a terminal that auto-launches `claude` should (re)launch it: resume
+	 *  a still-on-disk session, start fresh with a reserved id, or a plain shell.
+	 *  `term_key` is the logical terminal id (e.g. `tree:AK-1`, `triage:AK-1`); `cwd`
+	 *  is where claude runs. `allow_fresh` mints a new session when none is resumable
+	 *  (set on an explicit launch; false on a passive reopen).
+	 */
+	agentSession: (repo: string, termKey: string, cwd: string, allowFresh: boolean) => typedError<AgentSession, CmdError>(__TAURI_INVOKE("agent_session", { repo, termKey, cwd, allowFresh })),
 	/**
 	 *  Draft a PR title + body for the create-PR dialog. With `fill`, the body is
 	 *  AI-generated from the repo's PR template + the branch diff; otherwise it's the
 	 *  raw template. Title defaults to the first commit's subject.
 	 */
-	prDraft: (repo: string, issueId: string, fill: boolean) => typedError<PrDraft, string>(__TAURI_INVOKE("pr_draft", { repo, issueId, fill })),
+	prDraft: (repo: string, issueId: string, fill: boolean) => typedError<PrDraft, CmdError>(__TAURI_INVOKE("pr_draft", { repo, issueId, fill })),
 	/**
 	 *  Push the worktree branch and open a pull request via the GitHub API. Returns
 	 *  the new PR's number and URL (the frontend opens it in the browser).
 	 */
-	createPullRequest: (repo: string, issueId: string, title: string, body: string) => typedError<NewPr, string>(__TAURI_INVOKE("create_pull_request", { repo, issueId, title, body })),
+	createPullRequest: (repo: string, issueId: string, title: string, body: string) => typedError<NewPr, CmdError>(__TAURI_INVOKE("create_pull_request", { repo, issueId, title, body })),
 	/**
 	 *  Live PR status (number, URL, merge state) for each tracked worktree, from
 	 *  GitHub. Empty when `gh` isn't authenticated; worktrees without a PR are omitted.
 	 */
-	worktreePrs: (repo: string) => typedError<WorktreePr[], string>(__TAURI_INVOKE("worktree_prs", { repo })),
+	worktreePrs: (repo: string) => typedError<WorktreePr[], CmdError>(__TAURI_INVOKE("worktree_prs", { repo })),
 	/**
 	 *  The Reviews dashboard inbox for the org the active `repo` belongs to: the
 	 *  viewer's open PRs, PRs individually requesting their review, and one section
 	 *  per team that has open requests. Empty when `gh` isn't authenticated.
 	 */
-	reviews: (repo: string) => typedError<ReviewInbox, string>(__TAURI_INVOKE("reviews", { repo })),
+	reviews: (repo: string) => typedError<ReviewInbox, CmdError>(__TAURI_INVOKE("reviews", { repo })),
 	/**
 	 *  Full detail for one PR — body, conversation (comments + reviews + inline
 	 *  threads), and changed files with diffs. Empty when `gh` isn't authenticated.
 	 */
-	prDetail: (owner: string, name: string, number: number) => typedError<PrDetail, string>(__TAURI_INVOKE("pr_detail", { owner, name, number })),
+	prDetail: (owner: string, name: string, number: number) => typedError<PrDetail, CmdError>(__TAURI_INVOKE("pr_detail", { owner, name, number })),
 	/**  The repo's `.santree/init.sh` setup script (for the Settings editor). */
-	worktreeInitScript: (repo: string) => typedError<ScriptInfo, string>(__TAURI_INVOKE("worktree_init_script", { repo })),
+	worktreeInitScript: (repo: string) => typedError<ScriptInfo, CmdError>(__TAURI_INVOKE("worktree_init_script", { repo })),
 	/**  Write the repo's `.santree/init.sh` setup script. */
-	setWorktreeInitScript: (repo: string, content: string) => typedError<null, string>(__TAURI_INVOKE("set_worktree_init_script", { repo, content })),
+	setWorktreeInitScript: (repo: string, content: string) => typedError<null, CmdError>(__TAURI_INVOKE("set_worktree_init_script", { repo, content })),
 	/**  Mark `.santree/init.sh` executable so it runs on worktree creation. */
-	makeInitScriptExecutable: (repo: string) => typedError<null, string>(__TAURI_INVOKE("make_init_script_executable", { repo })),
+	makeInitScriptExecutable: (repo: string) => typedError<null, CmdError>(__TAURI_INVOKE("make_init_script_executable", { repo })),
 	/**
 	 *  The "open in app" targets (Finder, editors, terminals) for a worktree.
 	 *  Detection shells out (`open -Ra` per candidate), so it runs on the blocking
 	 *  pool rather than freezing the UI thread; the result is memoised.
 	 */
 	listOpeners: () => __TAURI_INVOKE<Opener[]>("list_openers"),
-	/**  Open a path in the chosen app (by opener key). */
-	openInApp: (path: string, opener: string) => typedError<null, string>(__TAURI_INVOKE("open_in_app", { path, opener })),
+	/**
+	 *  Open a path in the chosen app (by opener key). Launching shells out and waits
+	 *  on the child, so it runs on the blocking pool rather than the UI thread.
+	 */
+	openInApp: (path: string, opener: string) => typedError<null, CmdError>(__TAURI_INVOKE("open_in_app", { path, opener })),
 	/**  Tickets awaiting triage — live from Linear when connected, else empty. */
-	listTriageTickets: (repo: string) => typedError<TriageTicket[], string>(__TAURI_INVOKE("list_triage_tickets", { repo })),
+	listTriageTickets: (repo: string) => typedError<TriageTicket[], CmdError>(__TAURI_INVOKE("list_triage_tickets", { repo })),
 	/**  The full triage issue (description + comments) for the discussion pane. */
-	triageDetail: (repo: string, ticketId: string) => typedError<TriageDetail, string>(__TAURI_INVOKE("triage_detail", { repo, ticketId })),
+	triageDetail: (repo: string, ticketId: string) => typedError<TriageDetail, CmdError>(__TAURI_INVOKE("triage_detail", { repo, ticketId })),
 	/**
 	 *  Move a triage issue to a different workflow state (the status picker). Moving
 	 *  it out of `triage` is how the UI promotes an item. Requires a connected,
 	 *  write-scoped Linear org; errors when no org is connected.
 	 */
-	triageSetState: (repo: string, ticketId: string, stateId: string) => typedError<null, string>(__TAURI_INVOKE("triage_set_state", { repo, ticketId, stateId })),
+	triageSetState: (repo: string, ticketId: string, stateId: string) => typedError<null, CmdError>(__TAURI_INVOKE("triage_set_state", { repo, ticketId, stateId })),
 	/**
 	 *  The team triage rotations (who is on-call now), from Linear's responsibility
 	 *  schedules — one per team the viewer is on. Empty when none are configured.
 	 */
-	triageSchedule: (repo: string) => typedError<TriageSchedule[], string>(__TAURI_INVOKE("triage_schedule", { repo })),
+	triageSchedule: (repo: string) => typedError<TriageSchedule[], CmdError>(__TAURI_INVOKE("triage_schedule", { repo })),
 	/**
 	 *  User settings, persisted in the database (seeded from defaults on first run).
 	 *  Each agent's `exec` is the user's *override* (empty by default); the executable
 	 *  detected on PATH is reported separately via [`agent_auth`] and shown as the
 	 *  grayed default.
 	 */
-	getSettings: () => typedError<Settings, string>(__TAURI_INVOKE("get_settings")),
+	getSettings: () => typedError<Settings, CmdError>(__TAURI_INVOKE("get_settings")),
 	/**
 	 *  Persist the full settings blob. The frontend applies edits optimistically and
 	 *  calls this to make them durable across restarts.
 	 */
-	setSettings: (settings: Settings) => typedError<null, string>(__TAURI_INVOKE("set_settings", { settings })),
+	setSettings: (settings: Settings) => typedError<null, CmdError>(__TAURI_INVOKE("set_settings", { settings })),
 	/**
 	 *  The user's local note for a task — extra context stored only on this machine
 	 *  (never synced to Linear). `None` when the task has no note.
 	 */
-	taskNote: (repo: string, taskId: string) => typedError<string | null, string>(__TAURI_INVOKE("task_note", { repo, taskId })),
+	taskNote: (repo: string, taskId: string) => typedError<string | null, CmdError>(__TAURI_INVOKE("task_note", { repo, taskId })),
 	/**  Save (or clear, when blank) the user's local note for a task. */
-	setTaskNote: (repo: string, taskId: string, body: string) => typedError<null, string>(__TAURI_INVOKE("set_task_note", { repo, taskId, body })),
+	setTaskNote: (repo: string, taskId: string, body: string) => typedError<null, CmdError>(__TAURI_INVOKE("set_task_note", { repo, taskId, body })),
 	/**
 	 *  The Claude slash-commands offered by the triage "Investigate" picker. Always
 	 *  includes the global `~/.claude/commands`; when a repo name is given, also its
 	 *  own `.claude/commands` (so the repo scope can list both).
 	 */
-	listClaudeCommands: (repo: string | null) => typedError<ClaudeCommands, string>(__TAURI_INVOKE("list_claude_commands", { repo })),
+	listClaudeCommands: (repo: string | null) => typedError<ClaudeCommands, CmdError>(__TAURI_INVOKE("list_claude_commands", { repo })),
 	/**  Read a setting for an exact scope (`"app"` or `"repo:<name>"`). */
-	getSetting: (scope: string, key: string) => typedError<string | null, string>(__TAURI_INVOKE("get_setting", { scope, key })),
+	getSetting: (scope: string, key: string) => typedError<string | null, CmdError>(__TAURI_INVOKE("get_setting", { scope, key })),
 	/**  Write (or clear, when `value` is null) a setting for a scope. */
-	setSetting: (scope: string, key: string, value: string | null) => typedError<null, string>(__TAURI_INVOKE("set_setting", { scope, key, value })),
+	setSetting: (scope: string, key: string, value: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_setting", { scope, key, value })),
 	/**  Resolve a repo-scoped setting: the repo's override, else the app value. */
-	resolveSetting: (repo: string, key: string) => typedError<string | null, string>(__TAURI_INVOKE("resolve_setting", { repo, key })),
+	resolveSetting: (repo: string, key: string) => typedError<string | null, CmdError>(__TAURI_INVOKE("resolve_setting", { repo, key })),
 	/**  Connection status for a repo: whether any org is connected, and which one it uses. */
-	linearAuthStatus: (repo: string) => typedError<LinearStatus, string>(__TAURI_INVOKE("linear_auth_status", { repo })),
+	linearAuthStatus: (repo: string) => typedError<LinearStatus, CmdError>(__TAURI_INVOKE("linear_auth_status", { repo })),
 	/**  Every connected Linear organization. */
-	linearOrgs: () => typedError<LinearOrg[], string>(__TAURI_INVOKE("linear_orgs")),
+	linearOrgs: () => typedError<LinearOrg[], CmdError>(__TAURI_INVOKE("linear_orgs")),
 	/**  Bind (or clear) the Linear org a repo uses. */
-	setRepoLinearOrg: (repo: string, slug: string | null) => typedError<null, string>(__TAURI_INVOKE("set_repo_linear_org", { repo, slug })),
+	setRepoLinearOrg: (repo: string, slug: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_repo_linear_org", { repo, slug })),
 	/**
 	 *  The repo's assigned Linear issues as a positioned dependency graph — live when
 	 *  an org is connected, else empty.
 	 */
-	linearListIssues: (repo: string) => typedError<Task[], string>(__TAURI_INVOKE("linear_list_issues", { repo })),
+	linearListIssues: (repo: string) => typedError<Task[], CmdError>(__TAURI_INVOKE("linear_list_issues", { repo })),
 	/**  Run the Linear OAuth flow; returns the updated org list. */
-	linearConnect: () => typedError<LinearOrg[], string>(__TAURI_INVOKE("linear_connect")),
+	linearConnect: () => typedError<LinearOrg[], CmdError>(__TAURI_INVOKE("linear_connect")),
 	/**  Spawn a process behind a PTY and stream its raw output over `on_output`. */
-	terminalOpen: (opts: TerminalOpenOpts, onOutput: Channel<number[]>) => typedError<number, string>(__TAURI_INVOKE("terminal_open", { opts, onOutput })),
+	terminalOpen: (opts: TerminalOpenOpts, onOutput: Channel<number[]>) => typedError<number, CmdError>(__TAURI_INVOKE("terminal_open", { opts, onOutput })),
 	/**  Write raw bytes (keystrokes or a seed) to a session. */
-	terminalWrite: (id: number, data: string) => typedError<null, string>(__TAURI_INVOKE("terminal_write", { id, data })),
+	terminalWrite: (id: number, data: string) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_write", { id, data })),
 	/**  Resize a session's PTY to the visible grid. */
-	terminalResize: (id: number, cols: number, rows: number) => typedError<null, string>(__TAURI_INVOKE("terminal_resize", { id, cols, rows })),
+	terminalResize: (id: number, cols: number, rows: number) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_resize", { id, cols, rows })),
 	/**  Kill a session's child and free it. */
-	terminalClose: (id: number) => typedError<null, string>(__TAURI_INVOKE("terminal_close", { id })),
+	terminalClose: (id: number) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_close", { id })),
 };
 
 /** Events */
@@ -284,6 +302,20 @@ export type AgentDef = {
 
 /**  Which coding agent ("harness") runs a task. */
 export type AgentKind = "Claude" | "Codex" | "Cursor" | "Opencode";
+
+/**
+ *  How a terminal that auto-launches `claude` should (re)launch it, resolved
+ *  against the persisted session registry + the on-disk transcript. The frontend
+ *  turns this into the shell seed: `--resume <id>` to continue, `--session-id
+ *  <id> '<prompt>'` to start fresh, or a plain shell.
+ */
+export type AgentSession = 
+/**  A still-on-disk session to continue: `claude --resume <sessionId>`. */
+{ type: "resume"; sessionId: string } | 
+/**  A reserved id to start fresh with: `claude --session-id <sessionId> '<prompt>'`. */
+{ type: "fresh"; sessionId: string } | 
+/**  No agent session — just a login shell. */
+{ type: "shell" };
 
 /**  Per-agent configuration: which executable and default model to use. */
 export type AgentSetting = {
@@ -343,6 +375,8 @@ export type ClaudeCommands = {
 	repo: ClaudeCommand[],
 };
 
+export type CmdError = string;
+
 /**  Where a PR comment originated, so the UI can label/anchor it. */
 export type CommentKind = 
 /**  A top-level conversation comment. */
@@ -365,11 +399,37 @@ export type FileSource = {
 /**  Whether a changed file was added, modified, deleted, renamed, or is untracked. */
 export type FileStatus = "Added" | "Modified" | "Deleted" | "Renamed" | "Untracked";
 
+/**
+ *  The `gh` CLI integration status, shown in Settings → Integrations. GitHub
+ *  powers PR creation and the Reviews dashboard and can't be turned off, so the
+ *  UI surfaces whether the CLI is installed and authenticated (and as whom)
+ *  rather than a toggle. Auth is borrowed from `gh`'s own session — the CLI owns
+ *  it — by reading `gh auth token` and the REST `/user` endpoint.
+ */
+export type GithubStatus = {
+	/**  Whether the `gh` CLI was found on the user's PATH (login-shell resolved). */
+	installed: boolean,
+	/**  Absolute path to the resolved `gh` executable. Empty when not found. */
+	detectedExec: string,
+	/**
+	 *  The `gh` version line, e.g. "gh version 2.62.0 (2024-11-14)". Empty when
+	 *  not found.
+	 */
+	version: string,
+	/**  Whether `gh` has a valid authenticated session. */
+	authenticated: boolean,
+	/**  Signed-in account login, e.g. "octocat". Empty when not authenticated. */
+	account: string,
+	/**  The account's display name when set on the GitHub profile. Empty otherwise. */
+	name: string,
+	/**  The host the session authenticates against, e.g. "github.com". */
+	host: string,
+};
+
 /**  Which trackers/services are connected. */
 export type Integrations = {
 	linear: boolean,
 	triage: boolean,
-	github: boolean,
 };
 
 /**  A connected Linear organization. */
@@ -556,15 +616,15 @@ export type Settings = {
 };
 
 /**
- *  A streamed setup-script event for the Trees "Setup" tab: one `Line` per output
- *  line as the script runs, then a final `Done`.
+ *  A streamed setup-script event for the Trees "Setup" tab. `Line` is a committed
+ *  output line (appended). `Progress` is a transient redraw of the current line —
+ *  emitted when the script's output ends a line with a lone `\r` (progress bars,
+ *  spinners) — which the view shows in place so a redrawing bar reads as movement
+ *  instead of a frozen log. A final `Done` closes the tab.
  */
-export type SetupEvent = { type: "line"; text: string } | { type: "done"; ok: boolean };
+export type SetupEvent = { type: "line"; text: string } | { type: "progress"; text: string } | { type: "done"; ok: boolean };
 
-/**
- *  A ticket in the dependency graph. `x`/`y` are its canvas position; `addLines`
- *  / `delLines` are the projected diff size once worked.
- */
+/**  A ticket in the dependency graph. `x`/`y` are its canvas position. */
 export type Task = {
 	id: string,
 	title: string,
@@ -598,8 +658,6 @@ export type Task = {
 	assigneeAvatarUrl: string | null,
 	x: number,
 	y: number,
-	addLines: number,
-	delLines: number,
 };
 
 /**  Lifecycle status of a ticket / worktree. */

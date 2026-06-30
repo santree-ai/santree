@@ -334,10 +334,7 @@ function QueueBar({
               className="flex items-center gap-1 rounded-md border py-0.5 pr-1 pl-1.5"
               style={
                 active
-                  ? {
-                      borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)",
-                      background: "color-mix(in srgb, var(--accent) 12%, transparent)",
-                    }
+                  ? { borderColor: alpha(40), background: alpha(12) }
                   : { borderColor: "var(--color-line-2)", background: "var(--color-input)" }
               }
             >

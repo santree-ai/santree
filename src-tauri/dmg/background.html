@@ -1,0 +1,59 @@
+<!doctype html>
+<!--
+  Source for the DMG installer background (src-tauri/dmg/background.png), referenced
+  by tauri.conf.json → bundle.macOS.dmg.background. The arrow sits in the gap between
+  the app icon (appPosition 180,170 → ~x360 in pixels) and the Applications symlink
+  (applicationFolderPosition 480,170 → ~x960); keep them in sync if you move the icons.
+
+  CONTRAST: Finder draws the icon *labels* ("santree" / "Applications") itself, in a
+  fixed DARK color we can't change. So the background is intentionally LIGHT — dark
+  labels read cleanly on it. (A dark background leaves the labels illegible.)
+
+  POINT SIZE: Finder sizes the background by its POINT size, not by scaling to the
+  window. The window is 660x400 points, so the PNG must report 660x400 points — we
+  render at 1320x800 px (Retina) and stamp it to 144 DPI: 1320/(144/72) = 660 x 400.
+  Skipping the DPI step makes the image 1320x800 POINTS (2x the window) → it overflows
+  and the install window scrolls sideways.
+
+  Regenerate after editing:
+
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+      --window-size=1320,800 --screenshot=src-tauri/dmg/background.png \
+      "file://$PWD/src-tauri/dmg/background.html"
+    sips -s dpiWidth 144 -s dpiHeight 144 src-tauri/dmg/background.png
+-->
+<html lang="en"><head><meta charset="utf-8"><style>
+  html,body{margin:0;padding:0;background:#eef2f0}
+  svg{display:block}
+  text{font-family:-apple-system,"Helvetica Neue",Helvetica,Arial,sans-serif}
+</style></head><body>
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="800" viewBox="0 0 1320 800">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f5f8f6"/>
+      <stop offset="1" stop-color="#e6ece9"/>
+    </linearGradient>
+    <linearGradient id="em" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2bb892"/>
+      <stop offset="1" stop-color="#138a6c"/>
+    </linearGradient>
+  </defs>
+  <rect width="1320" height="800" fill="url(#bg)"/>
+
+  <!-- brand glyph (twin triangles) + wordmark, top center -->
+  <g transform="translate(610,52)" fill="url(#em)">
+    <path d="M50 6 L22 42 L78 42 Z"/>
+    <path d="M50 48 L14 92 L86 92 Z"/>
+  </g>
+  <text x="660" y="198" text-anchor="middle" font-size="36" font-weight="600" fill="#15302a" letter-spacing="2">santree</text>
+
+  <!-- arrow: app slot -> Applications slot -->
+  <g stroke="#149073" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="548" y1="340" x2="757" y2="340"/>
+    <polyline points="722,311 762,340 722,369"/>
+  </g>
+
+  <text x="660" y="708" text-anchor="middle" font-size="23" fill="#5d716a">Drag santree into Applications to install</text>
+</svg>
+</body></html>

@@ -4,7 +4,7 @@
 //! On-disk `.santree/` files (worktree scripts, etc.) are left as files.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -12,6 +12,15 @@ use sqlx::SqlitePool;
 
 /// The app-wide database handle (cheap to clone; backed by a pool).
 pub type Db = SqlitePool;
+
+/// Milliseconds since the Unix epoch — the `updated_at` / token-expiry stamp used
+/// across the db-backed modules (0 if the clock is somehow before the epoch).
+pub fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// Open (creating if needed) the database and run migrations.
 pub async fn init(db_path: PathBuf) -> Result<Db> {

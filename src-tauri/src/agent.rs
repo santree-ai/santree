@@ -2,14 +2,21 @@
 //! (commit message, PR body). Mirrors the santree CLI's `runAgent` — same flags,
 //! same large-prompt temp-file fallback — so behaviour matches the CLI.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::settings;
 
 /// Conservative arg-size limit (bytes): macOS `ARG_MAX` is 256 KB, leave room for env.
 const ARG_MAX_SAFE: usize = 200 * 1024;
+
+/// Hard ceiling on a single headless agent call. Claude normally answers in
+/// 5–30s; this only fires when it hangs, so the UI spinner can't wait forever and
+/// a blocking-pool thread can't leak.
+const AGENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Distinguishes concurrent large-prompt temp files (pid alone collides when two
 /// `run_print` calls overlap).
@@ -25,7 +32,9 @@ fn prompt_arg(prompt: &str) -> (String, Option<PathBuf>) {
     }
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("santree-prompt-{}-{seq}.md", std::process::id()));
-    if std::fs::write(&path, prompt).is_ok() {
+    // The prompt can carry the repo diff (and thus possibly secrets), so the temp
+    // file is owner-only (0600) — never world-readable on a shared host.
+    if write_private(&path, prompt).is_ok() {
         (
             format!("Read {} and follow the instructions inside.", path.display()),
             Some(path),
@@ -36,6 +45,25 @@ fn prompt_arg(prompt: &str) -> (String, Option<PathBuf>) {
         // which counts characters and could exceed the byte limit).
         (truncate_bytes(prompt, ARG_MAX_SAFE), None)
     }
+}
+
+/// Write `contents` to `path` with owner-only (0600) permissions.
+#[cfg(unix)]
+fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(contents.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    std::fs::write(path, contents)
 }
 
 /// Truncate `s` to at most `max` bytes, backing up to the nearest char boundary so
@@ -69,14 +97,48 @@ pub fn run_print(cwd: &Path, prompt: &str, allowed_tools: &[&str]) -> Option<Str
     }
     cmd.args(["-p", "--output-format", "text", "--", &arg]);
 
-    let out = cmd.output();
+    let out = run_with_timeout(cmd, AGENT_TIMEOUT);
     // Clean up the large-prompt temp file regardless of how the call went.
     if let Some(path) = temp {
         let _ = std::fs::remove_file(path);
     }
-    let out = out.ok()?;
-    out.status
+    let (status, stdout) = out?;
+    status
         .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .then(|| String::from_utf8_lossy(&stdout).trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Run `cmd`, capturing stdout, but kill it if it hasn't exited within `timeout`.
+/// Returns `None` if it can't be spawned or is killed for exceeding the deadline.
+/// A dedicated thread drains stdout so a full pipe buffer can't deadlock the wait
+/// (and can't be mistaken for a hang).
+fn run_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+) -> Option<(std::process::ExitStatus, Vec<u8>)> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => break None,
+        }
+    };
+    // The reader returns once the pipe closes (on exit or kill), so this never hangs.
+    let stdout = reader.join().unwrap_or_default();
+    Some((status?, stdout))
 }

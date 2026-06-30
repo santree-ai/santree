@@ -37,6 +37,18 @@ export const palette = {
 /** The default accent; the live value is the `--accent` CSS variable. */
 export const DEFAULT_ACCENT = "#2dd4a7";
 
+/** Fixed, deterministic palette for {@link Avatar} initials — a name hashes to
+ *  one of these. Literal hex (not theme colors): the same name must map to the
+ *  same swatch regardless of light/dark. */
+export const AVATAR_PALETTE = [
+  "#5b8def",
+  "#a78bfa",
+  "#2dd4a7",
+  "#d29922",
+  "#f0709a",
+  "#6fd3e0",
+] as const;
+
 /** Semantic "success / ready / done" green — the single source for the green
  *  used by RDY badges, ready dots, and done markers (was hardcoded as the raw
  *  hex across several issue components). Mirrors the `--color-status-green` token. */

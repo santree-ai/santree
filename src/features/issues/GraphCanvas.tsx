@@ -28,7 +28,7 @@ import { useApp } from "../../state/AppContext";
 import { alpha, PROJECT_FALLBACK, palette, statusColor, statusLabel } from "../../theme/colors";
 import { IssueNode, type IssueNodeData } from "./IssueNode";
 import { layoutGraph } from "./layout";
-import { deriveIssueState, useIssues } from "./model";
+import { deriveIssueState, useIssueHover, useIssues } from "./model";
 import { ProjectNode, type ProjectNodeData } from "./ProjectNode";
 
 const nodeTypes = { issue: IssueNode, project: ProjectNode };
@@ -50,10 +50,10 @@ function Flow() {
     baseFor,
     toggle,
     setFocus,
-    setHover,
     toggleProjectFocus,
     toggleActionableOnly,
   } = useIssues();
+  const { setHover } = useIssueHover();
   const { activeRepo, theme } = useApp();
   const prefetchOnHover = usePrefetchOnHover(activeRepo);
   const { fitView } = useReactFlow();
@@ -284,14 +284,14 @@ function Flow() {
         zoomable
         className="!rounded-lg !border !border-line-2 !shadow-lg"
         style={{ width: 148, height: 104, background: "var(--color-panel)" }}
-        maskColor="color-mix(in srgb, var(--color-app) 58%, transparent)"
+        maskColor={alpha(58, "var(--color-app)")}
         maskStrokeColor="var(--color-line-strong)"
         maskStrokeWidth={2}
         nodeBorderRadius={3}
         nodeStrokeWidth={0}
         nodeColor={(n) =>
           n.type === "project"
-            ? `color-mix(in srgb, ${(n.data as ProjectNodeData).color} 14%, transparent)`
+            ? alpha(14, (n.data as ProjectNodeData).color)
             : (((n.data as IssueNodeData)?.statusColor as string) ?? "var(--color-line-3)")
         }
       />

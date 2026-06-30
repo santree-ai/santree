@@ -75,13 +75,24 @@ pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
 /// + the branch diff; otherwise it's the raw template (or empty).
 pub async fn draft(db: &Db, repo: &str, issue_id: &str, fill: bool) -> Result<PrDraft> {
     let c = worktree::coords(db, repo, issue_id).await?;
-    let title = git::first_commit_subject(&c.path, &c.base_branch).ok_or_else(|| {
+    // `first_commit_subject` and `pr_template` shell out / read files; keep them
+    // off the async runtime's worker threads.
+    let (title, template) = {
+        let c = c.clone();
+        tokio::task::spawn_blocking(move || {
+            (
+                git::first_commit_subject(&c.path, &c.base_branch),
+                github::pr_template(&c.path),
+            )
+        })
+        .await?
+    };
+    let title = title.ok_or_else(|| {
         anyhow!(
             "No commits to open a PR for (branch isn't ahead of {}).",
             c.base_branch
         )
     })?;
-    let template = github::pr_template(&c.path);
 
     let body = if fill {
         // Fall back to the raw template if Claude isn't available / fails.
@@ -101,30 +112,34 @@ pub async fn draft(db: &Db, repo: &str, issue_id: &str, fill: bool) -> Result<Pr
 
 /// Draft the PR body with a headless Claude call against the `fill-pr` template.
 async fn draft_body(c: &Coords, issue_id: &str, template: Option<String>) -> Option<String> {
-    // Cap the diff so the prompt stays within sane arg/token limits.
-    let diff: String = git::diff_range(&c.path, &c.base_branch)
-        .chars()
-        .take(12_000)
-        .collect();
-    let prompt = prompts::render(
-        "fill-pr",
-        minijinja::context! {
-            pr_template => template.unwrap_or_default(),
-            branch_name => c.branch.clone(),
-            ticket_id => issue_id,
-            base_branch => c.base_branch.clone(),
-            commit_log => git::commit_log(&c.path, &c.base_branch),
-            diff_stat => git::diff_stat(&c.path, &c.base_branch),
-            diff => diff,
-        },
-    )
-    .ok()?;
-
-    let cwd = c.path.clone();
-    tokio::task::spawn_blocking(move || agent::run_print(&cwd, &prompt, &["Read"]))
-        .await
-        .ok()
-        .flatten()
+    // The diff reads, prompt render, and Claude call all block — run the whole
+    // chain on one blocking thread instead of shelling out git on the runtime.
+    let c = c.clone();
+    let issue_id = issue_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        // Cap the diff so the prompt stays within sane arg/token limits.
+        let diff: String = git::diff_range(&c.path, &c.base_branch)
+            .chars()
+            .take(12_000)
+            .collect();
+        let prompt = prompts::render(
+            "fill-pr",
+            minijinja::context! {
+                pr_template => template.unwrap_or_default(),
+                branch_name => c.branch.clone(),
+                ticket_id => issue_id,
+                base_branch => c.base_branch.clone(),
+                commit_log => git::commit_log(&c.path, &c.base_branch),
+                diff_stat => git::diff_stat(&c.path, &c.base_branch),
+                diff => diff,
+            },
+        )
+        .ok()?;
+        agent::run_print(&c.path, &prompt, &["Read"])
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Create the PR: push the branch, then open it via the GitHub API. The token is
