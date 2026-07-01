@@ -25,7 +25,7 @@ mod terminal;
 mod text_store;
 mod worktree;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_specta::{collect_commands, collect_events, Builder};
 
 /// The app's concrete `tauri-specta` builder type (Tauri's default `Wry` runtime).
@@ -93,6 +93,7 @@ fn specta_builder() -> AppBuilder {
             commands::triage_schedule,
             commands::get_settings,
             commands::set_settings,
+            commands::quit_app,
             commands::task_note,
             commands::set_task_note,
             commands::list_claude_commands,
@@ -243,6 +244,21 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_decorum::init())
+        .menu(build_menu)
+        .on_menu_event(|app, event| {
+            // Our custom Quit item (replacing the predefined one, which calls the
+            // native terminate and can't be intercepted). Route ⌘Q through the same
+            // confirmation as the window close button.
+            if event.id() == QUIT_MENU_ID {
+                if confirm_on_quit(app) {
+                    if let Some(main) = app.get_webview_window("main") {
+                        let _ = main.emit("quit-requested", ());
+                    }
+                } else {
+                    app.exit(0);
+                }
+            }
+        })
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             // Wire specta-registered events into the app (none yet, but this is
@@ -286,13 +302,120 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // Kill every terminal child on exit so nothing is leaked.
+            // By the time an exit is actually requested it's already been confirmed:
+            // ⌘Q goes through the custom menu item → QuitGuard, the close button /
+            // ⌘W goes through the window's `onCloseRequested` → QuitGuard, and both
+            // finish via `quit_app`/`destroy()`. So just reap terminal children here.
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 if let Some(pty) = app.try_state::<santree_pty::PtyManager>() {
                     pty.close_all();
                 }
             }
         });
+}
+
+/// The menu id of our custom Quit item. It replaces `PredefinedMenuItem::quit`,
+/// whose native terminate can't be intercepted, so ⌘Q can be routed through the
+/// quit-confirmation dialog.
+const QUIT_MENU_ID: &str = "santree-quit";
+
+/// Build the application menu. This mirrors Tauri's default menu (so the standard
+/// Edit/Window/etc. shortcuts keep working) but swaps the predefined Quit for a
+/// custom `MenuItem` we can catch in `on_menu_event`.
+fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    let pkg = app.package_info();
+    let config = app.config();
+    let about = AboutMetadata {
+        name: Some(pkg.name.clone()),
+        version: Some(pkg.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+
+    let quit = MenuItem::with_id(app, QUIT_MENU_ID, "Quit santree", true, Some("CmdOrCtrl+Q"))?;
+
+    let edit = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+
+    let window = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            #[cfg(target_os = "macos")]
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let app_menu = Submenu::with_items(
+            app,
+            pkg.name.clone(),
+            true,
+            &[
+                &PredefinedMenuItem::about(app, None, Some(about))?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::services(app, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::hide(app, None)?,
+                &PredefinedMenuItem::hide_others(app, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &quit,
+            ],
+        )?;
+        let view = Submenu::with_items(app, "View", true, &[&PredefinedMenuItem::fullscreen(app, None)?])?;
+        Menu::with_items(app, &[&app_menu, &edit, &view, &window])
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let file = Submenu::with_items(
+            app,
+            "File",
+            true,
+            &[&PredefinedMenuItem::close_window(app, None)?, &quit],
+        )?;
+        let help = Submenu::with_items(
+            app,
+            "Help",
+            true,
+            &[&PredefinedMenuItem::about(app, None, Some(about))?],
+        )?;
+        Menu::with_items(app, &[&file, &edit, &window, &help])
+    }
+}
+
+/// Whether the "confirm before quitting" setting is on. Defaults ON: a missing
+/// value still confirms, and only an explicit `"false"` opts out (mirrors the
+/// frontend in `QuitGuard.tsx`). Reads the DB synchronously — acceptable since it
+/// only runs on a quit attempt.
+fn confirm_on_quit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Some(db) = app.try_state::<db::Db>() else {
+        return false; // DB not ready → don't block shutdown
+    };
+    let value = tauri::async_runtime::block_on(settings::get(&db, "app", "confirm_on_quit"))
+        .ok()
+        .flatten();
+    value.as_deref() != Some("false")
 }
 
 #[cfg(test)]

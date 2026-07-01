@@ -1,16 +1,18 @@
 /**
- * Confirms before the app window closes. Listens for the window's close request
- * (the red traffic-light / ⌘W), and — when the "confirm before quitting" setting
- * is on — cancels it and shows a confirmation dialog instead. The dialog carries a
- * "Don't ask again" checkbox that flips the setting off (the same setting lives in
- * Settings → General), so the choice is reachable from both places.
- *
- * Confirming calls `destroy()`, which closes the window without re-emitting the
- * close request, so it bypasses this guard cleanly.
+ * Confirms before the app quits. Covers both quit paths:
+ *   - the red traffic-light / ⌘W → the window's `onCloseRequested`, cancelled here
+ *     and finished with `destroy()` (closes the window without re-emitting).
+ *   - ⌘Q / the app menu → a *custom* Quit menu item in Rust (the predefined one
+ *     calls the native terminate, which can't be intercepted) emits `quit-requested`
+ *     instead of quitting; confirming runs the `quit_app` command to exit the process.
+ * When the "confirm before quitting" setting is off, both paths pass straight
+ * through. The dialog carries a "Don't ask again" checkbox that flips the setting
+ * off (the same setting lives in Settings → General).
  */
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
 
+import { commands } from "../bindings";
 import { CONFIRM_ON_QUIT_KEY, useSetSetting, useSetting } from "../lib/queries";
 import { ConfirmDialog } from "./primitives";
 
@@ -22,28 +24,39 @@ export function QuitGuard() {
 
   const [asking, setAsking] = useState(false);
   const [dontAsk, setDontAsk] = useState(false);
+  // Which path opened the dialog: ⌘W/close → destroy the window; ⌘Q → exit the app.
+  const viaQuit = useRef(false);
 
-  // The close listener is registered once; read the latest setting through a ref so
-  // toggling the preference doesn't re-register it (and the handler never closes
-  // over a stale value).
+  // The listeners are registered once; read the latest setting through a ref so
+  // toggling the preference doesn't re-register them (and the handlers never close
+  // over a stale value). ⌘Q is already gated in Rust — the event only fires when
+  // the setting is on — but the window close path is gated here.
   const confirmRef = useRef(confirmOnQuit);
   confirmRef.current = confirmOnQuit;
 
   useEffect(() => {
-    const unlisten = getCurrentWindow().onCloseRequested((e) => {
+    const win = getCurrentWindow();
+    const unlistenClose = win.onCloseRequested((e) => {
       if (!confirmRef.current) return; // setting off → let it close
       e.preventDefault();
+      viaQuit.current = false;
+      setDontAsk(false);
+      setAsking(true);
+    });
+    const unlistenQuit = win.listen("quit-requested", () => {
+      viaQuit.current = true;
       setDontAsk(false);
       setAsking(true);
     });
     return () => {
-      void unlisten.then((off) => off());
+      void unlistenClose.then((off) => off());
+      void unlistenQuit.then((off) => off());
     };
   }, []);
 
   const onConfirm = async () => {
-    // Persist "don't ask again" before tearing the window down (best-effort — a
-    // failed write must not block quitting).
+    // Persist "don't ask again" before tearing things down (best-effort — a failed
+    // write must not block quitting).
     if (dontAsk) {
       try {
         await setSettingAsync({ scope: "app", key: CONFIRM_ON_QUIT_KEY, value: "false" });
@@ -51,7 +64,12 @@ export function QuitGuard() {
         // ignore — quit anyway
       }
     }
-    await getCurrentWindow().destroy();
+    if (viaQuit.current) {
+      // ⌘Q was prevented in Rust; fully exit the process now.
+      await commands.quitApp();
+    } else {
+      await getCurrentWindow().destroy();
+    }
   };
 
   return (

@@ -4,6 +4,7 @@ import {
   type CSSProperties,
   type ReactNode,
   type SelectHTMLAttributes,
+  useCallback,
   useEffect,
   useId,
   useRef,
@@ -425,6 +426,8 @@ export function Dropdown({
   placement = "down",
   align = "left",
   menuClassName = "w-44 overflow-hidden",
+  open: openProp,
+  onOpenChange,
 }: {
   trigger: (toggle: () => void) => ReactNode;
   children: (close: () => void) => ReactNode;
@@ -434,17 +437,32 @@ export function Dropdown({
   align?: "left" | "right";
   /** Menu width / overflow classes (default `w-44 overflow-hidden`). */
   menuClassName?: string;
+  /** Controlled open state. When set (with `onOpenChange`) the parent owns
+   *  open/close — e.g. to trigger the menu from a keyboard shortcut. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [openState, setOpenState] = useState(false);
+  const open = openProp ?? openState;
+  const setOpen = (value: boolean) => {
+    if (onOpenChange) onOpenChange(value);
+    else setOpenState(value);
+  };
+  // Stable closer for the outside-click / Escape listeners so the effect below
+  // doesn't re-register on every render.
+  const close = useCallback(() => {
+    if (onOpenChange) onOpenChange(false);
+    else setOpenState(false);
+  }, [onOpenChange]);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (ref.current && !ref.current.contains(e.target as Node)) close();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") close();
     };
     // Capture phase so we still see the click even if an overlay (xterm) stops
     // propagation on its own pointerdown handler.
@@ -454,11 +472,11 @@ export function Dropdown({
       document.removeEventListener("pointerdown", onDown, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [open, close]);
 
   return (
     <div ref={ref} className="relative">
-      {trigger(() => setOpen((o) => !o))}
+      {trigger(() => setOpen(!open))}
       {open && (
         <div
           className={`absolute z-40 rounded-lg border border-line-3 bg-raised py-1 shadow-lg ${

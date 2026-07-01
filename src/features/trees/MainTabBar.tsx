@@ -5,10 +5,11 @@
  *  demand, and extra terminals opened via the trailing "+" tab are closable. All
  *  tabs share the same shape — a label with an optional trailing affordance (a
  *  close × or a status dot) in a fixed slot. */
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { CloseIcon, GlobeIcon, PlusIcon, TerminalIcon } from "../../components/icons";
 import { Dropdown, MENU_ITEM, underlineTabStyle } from "../../components/primitives";
+import { inEditable } from "../../lib/useKeyboardShortcuts";
 import { CHROME } from "../../state/AppContext";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { BASE_ID, type MainTab, termTab, useTrees } from "./model";
@@ -93,12 +94,31 @@ export function MainTabBar() {
   );
 }
 
-/** The trailing "+" tab: opens a new terminal (or a browser, once that's built). */
+/** The trailing "+" tab: opens a new terminal (or a browser, once that's built).
+ *  ⌘T opens the menu while a worktree is active (this bar is on screen); then
+ *  1 selects Terminal and 2 would select Web (WIP — no-op for now). */
 function NewTabButton({ onAddTerminal }: { onAddTerminal: () => void }) {
+  const [open, setOpen] = useState(false);
+
+  // ⌘T opens the menu. Scoped to this component's lifetime, which matches "a
+  // worktree is active in Trees" (the bar only renders then).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.key !== "t") return;
+      if (inEditable(e.target)) return;
+      e.preventDefault();
+      setOpen((o) => !o);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   return (
     <Dropdown
       align="left"
       menuClassName="w-40 overflow-hidden"
+      open={open}
+      onOpenChange={setOpen}
       trigger={(toggle) => (
         // h-full so the button fills the bar's height (the Dropdown wrapper is a
         // block, so without it the button is content-height and rides up to the top
@@ -106,34 +126,55 @@ function NewTabButton({ onAddTerminal }: { onAddTerminal: () => void }) {
         <button
           type="button"
           onClick={toggle}
-          title="New tab"
+          title="New tab (⌘T)"
           className="flex h-full w-8 cursor-pointer items-center justify-center text-muted-3 hover:bg-hover hover:text-fg-2"
         >
           <PlusIcon size={13} />
         </button>
       )}
     >
-      {(close) => (
-        <>
-          <button
-            type="button"
-            onClick={() => {
-              onAddTerminal();
-              close();
-            }}
-            className={MENU_ITEM}
-          >
-            <TerminalIcon />
-            Terminal
-          </button>
-          <button type="button" disabled title="Coming soon" className={MENU_ITEM}>
-            <GlobeIcon />
-            Web
-            <span className="ml-auto text-[10px] text-muted-4">WIP</span>
-          </button>
-        </>
-      )}
+      {(close) => <NewTabMenu onAddTerminal={onAddTerminal} close={close} />}
     </Dropdown>
+  );
+}
+
+/** New-tab menu rows. Mounted only while the menu is open, so its digit-key
+ *  listener (1 → Terminal, 2 → Web) is live exactly when the menu is visible. */
+function NewTabMenu({ onAddTerminal, close }: { onAddTerminal: () => void; close: () => void }) {
+  const addTerminal = () => {
+    onAddTerminal();
+    close();
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || inEditable(e.target)) return;
+      if (e.key === "1") {
+        e.preventDefault();
+        onAddTerminal();
+        close();
+      } else if (e.key === "2") {
+        // Web is WIP — swallow the key so it doesn't leak, but do nothing yet.
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onAddTerminal, close]);
+
+  return (
+    <>
+      <button type="button" onClick={addTerminal} className={MENU_ITEM}>
+        <TerminalIcon />
+        Terminal
+        <span className="ml-auto text-[10px] text-muted-4">1</span>
+      </button>
+      <button type="button" disabled title="Coming soon" className={MENU_ITEM}>
+        <GlobeIcon />
+        Web
+        <span className="ml-auto text-[10px] text-muted-4">WIP</span>
+      </button>
+    </>
   );
 }
 

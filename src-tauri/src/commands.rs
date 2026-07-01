@@ -515,6 +515,15 @@ pub async fn triage_set_state(
     Ok(())
 }
 
+/// Exit the app. Called from the quit-confirmation dialog once the user confirms a
+/// ⌘Q / menu quit — `app.exit(0)` re-emits `ExitRequested` with a `Some` code, which
+/// the run-loop treats as a confirmed exit and lets through (see `run`).
+#[tauri::command]
+#[specta::specta]
+pub fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 /// User settings, persisted in the database (seeded from defaults on first run).
 /// Each agent's `exec` is the user's *override* (empty by default); the executable
 /// detected on PATH is reported separately via [`agent_auth`] and shown as the

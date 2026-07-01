@@ -229,6 +229,12 @@ export const commands = {
 	 */
 	setSettings: (settings: Settings) => typedError<null, CmdError>(__TAURI_INVOKE("set_settings", { settings })),
 	/**
+	 *  Exit the app. Called from the quit-confirmation dialog once the user confirms a
+	 *  ⌘Q / menu quit — `app.exit(0)` re-emits `ExitRequested` with a `Some` code, which
+	 *  the run-loop treats as a confirmed exit and lets through (see `run`).
+	 */
+	quitApp: () => __TAURI_INVOKE<void>("quit_app"),
+	/**
 	 *  The user's local note for a task — extra context stored only on this machine
 	 *  (never synced to Linear). `None` when the task has no note.
 	 */
