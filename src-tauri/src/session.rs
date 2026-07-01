@@ -75,13 +75,15 @@ pub async fn resolve(
     }
 
     let session_id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)")
-        .bind(repo)
-        .bind(term_key)
-        .bind(cwd)
-        .bind(&session_id)
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)",
+    )
+    .bind(repo)
+    .bind(term_key)
+    .bind(cwd)
+    .bind(&session_id)
+    .execute(db)
+    .await?;
     Ok(AgentSession::Fresh { session_id })
 }
 
@@ -123,7 +125,9 @@ mod tests {
         std::fs::write(&path, "{}").unwrap();
         assert_eq!(
             resolve(&db, "repo", key, cwd, false).await.unwrap(),
-            AgentSession::Resume { session_id: session_id.clone() }
+            AgentSession::Resume {
+                session_id: session_id.clone()
+            }
         );
 
         // A re-launch prefers resuming the live session over minting a new id.

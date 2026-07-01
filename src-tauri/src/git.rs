@@ -26,10 +26,12 @@ fn safe_path(cwd: &Path, rel: &str) -> Result<PathBuf> {
     if candidate.is_absolute() {
         bail!("path '{rel}' must be relative to the worktree");
     }
-    if candidate
-        .components()
-        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_) | Component::RootDir))
-    {
+    if candidate.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        )
+    }) {
         bail!("path '{rel}' must not escape the worktree");
     }
     Ok(cwd.join(candidate))
@@ -41,15 +43,16 @@ fn safe_path(cwd: &Path, rel: &str) -> Result<PathBuf> {
 /// (`subdir/link → /etc`), and these worktrees hold agent-written, untrusted code.
 fn safe_real_path(cwd: &Path, rel: &str) -> Result<PathBuf> {
     let joined = safe_path(cwd, rel)?;
-    let root = std::fs::canonicalize(cwd).map_err(|e| anyhow!("can't resolve worktree root: {e}"))?;
+    let root =
+        std::fs::canonicalize(cwd).map_err(|e| anyhow!("can't resolve worktree root: {e}"))?;
     // Canonicalize the target when it exists; otherwise resolve its parent so a
     // symlinked directory component is still caught for not-yet-created paths.
     let real = match std::fs::canonicalize(&joined) {
         Ok(p) => p,
         Err(_) => {
             let parent = joined.parent().unwrap_or(&joined);
-            let real_parent =
-                std::fs::canonicalize(parent).map_err(|e| anyhow!("can't resolve path '{rel}': {e}"))?;
+            let real_parent = std::fs::canonicalize(parent)
+                .map_err(|e| anyhow!("can't resolve path '{rel}': {e}"))?;
             match joined.file_name() {
                 Some(name) => real_parent.join(name),
                 None => real_parent,
@@ -187,7 +190,8 @@ pub fn remove_worktree(repo: &Path, worktree_path: &Path, branch: &str) -> Resul
 /// Used to adopt worktrees the app didn't create (the CLI, a prior run).
 pub fn worktree_branch(repo: &Path, worktree_path: &Path) -> Option<String> {
     let out = git_output(repo, &["worktree", "list", "--porcelain"]).ok()?;
-    let target = std::fs::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
+    let target =
+        std::fs::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
     let mut at_target = false;
     for line in out.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
@@ -220,6 +224,24 @@ pub fn behind(cwd: &Path, base: &str) -> u32 {
     .ok()
     .and_then(|s| s.parse().ok())
     .unwrap_or(0)
+}
+
+/// Count commits on `branch` that aren't on its remote tracking branch yet —
+/// i.e. what a `git push` would upload. When the branch has been pushed before,
+/// that's `origin/<branch>..HEAD`; when it never has (no remote ref), every commit
+/// the branch added over `base` is unpushed, so fall back to `ahead`. 0 on failure.
+pub fn unpushed(cwd: &Path, branch: &str, base: &str) -> u32 {
+    let origin_ref = format!("origin/{branch}");
+    if git(cwd, &["rev-parse", "--verify", &origin_ref]).is_ok() {
+        return git(
+            cwd,
+            &["rev-list", "--count", &format!("{origin_ref}..HEAD")],
+        )
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    }
+    ahead(cwd, base)
 }
 
 /// Merge the freshest base branch (`origin/<base>`, else local `<base>`) into the
@@ -421,8 +443,16 @@ pub fn file_diff(cwd: &Path, path: &str, untracked: bool) -> Result<String> {
         // containment before handing it the absolute path.
         let abs = safe_real_path(cwd, path)?;
         // `--no-index` exits 1 when the files differ — expected, so capture.
-        let (_, stdout, _) =
-            git_capture(cwd, &["diff", "--no-index", "--", "/dev/null", &abs.to_string_lossy()])?;
+        let (_, stdout, _) = git_capture(
+            cwd,
+            &[
+                "diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                &abs.to_string_lossy(),
+            ],
+        )?;
         return Ok(stdout);
     }
     safe_path(cwd, path)?;
@@ -520,7 +550,13 @@ pub fn diff_range(cwd: &Path, base: &str) -> String {
 pub fn list_files(cwd: &Path) -> Result<Vec<String>> {
     let raw = git_output(
         cwd,
-        &["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
     )?;
     let mut files: Vec<String> = raw
         .split('\0')

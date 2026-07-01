@@ -15,6 +15,7 @@ import { ChevronSelect, Segmented } from "../../../components/primitives";
 import {
   type BatchSetup,
   TREES_AUTO_PR_KEY,
+  TREES_AUTO_PUSH_KEY,
   TREES_BATCH_SETUP_KEY,
   TREES_DEFAULT_EDITOR_KEY,
   TREES_DIFF_MODE_KEY,
@@ -123,6 +124,11 @@ export function WorktreeSettings({ repo }: { repo: string }) {
           settingKey={TREES_STAGE_ALL_KEY}
           label="Stage all files before committing"
           hint="Stage every change automatically instead of asking for confirmation."
+        />
+        <BoolToggle
+          settingKey={TREES_AUTO_PUSH_KEY}
+          label="Push to origin after every commit"
+          hint="Automatically push the branch to its remote right after committing (sets upstream on the first push)."
         />
         <BoolToggle
           settingKey={TREES_AUTO_PR_KEY}

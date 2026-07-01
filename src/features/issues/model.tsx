@@ -334,6 +334,8 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
         title: task.title,
         project: projectOf(task),
         agent: launchAgent,
+        // Carry the tray's per-launch model to the Trees fresh-launch seed.
+        model: launchModel,
       })),
     );
     requestTreeLaunch(targets[0].id);
@@ -361,6 +363,7 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   }, [
     selectedEligible,
     launchAgent,
+    launchModel,
     createWorktree,
     requestTreeLaunch,
     addPendingLaunches,

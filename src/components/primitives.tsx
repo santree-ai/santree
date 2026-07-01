@@ -5,6 +5,7 @@ import {
   type ReactNode,
   type SelectHTMLAttributes,
   useEffect,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -49,6 +50,60 @@ export function ChevronSelect({
         size={12}
         className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-muted-3"
       />
+    </div>
+  );
+}
+
+/**
+ * A free-text field with a suggestion list (native `<input list>` + `<datalist>`).
+ * Use where the canonical options are known but not exhaustive — e.g. model names:
+ * the suggestions cover the common aliases, but the CLI is the source of truth, so
+ * you can type any alias/id it accepts (`opus`, `claude-fable-5`, …) and never be
+ * stuck behind a stale hardcoded list. Empty is a valid value (callers treat it as
+ * "default"). `chevron` overlays the same arrow as {@link ChevronSelect} for visual
+ * parity in dropdown rows.
+ */
+export function ComboBox({
+  value,
+  onChange,
+  options,
+  placeholder,
+  className,
+  wrapperClassName,
+  chevron = true,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  options: string[];
+  placeholder?: string;
+  className?: string;
+  wrapperClassName?: string;
+  chevron?: boolean;
+}) {
+  const listId = useId();
+  return (
+    <div className={`relative ${wrapperClassName ?? ""}`}>
+      <input
+        type="text"
+        list={listId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        spellCheck={false}
+        autoComplete="off"
+        className={className ?? ""}
+      />
+      <datalist id={listId}>
+        {options.map((o) => (
+          <option key={o} value={o} />
+        ))}
+      </datalist>
+      {chevron && (
+        <ChevronDownIcon
+          size={12}
+          className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-muted-3"
+        />
+      )}
     </div>
   );
 }
@@ -445,6 +500,7 @@ export function ConfirmDialog({
   confirmLabel = "Confirm",
   busyLabel = "Working…",
   danger = false,
+  extra,
   onConfirm,
   onClose,
 }: {
@@ -454,6 +510,9 @@ export function ConfirmDialog({
   confirmLabel?: string;
   busyLabel?: string;
   danger?: boolean;
+  /** Optional content between the message and the buttons (e.g. a "don't ask
+   *  again" checkbox). */
+  extra?: ReactNode;
   /** Runs the action; its resolved value is ignored — the dialog only cares
    *  whether it resolves (close) or rejects (show the error, stay open). */
   onConfirm: () => Promise<unknown>;
@@ -508,6 +567,7 @@ export function ConfirmDialog({
             {error}
           </div>
         )}
+        {extra && <div className="mt-3">{extra}</div>}
         <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"

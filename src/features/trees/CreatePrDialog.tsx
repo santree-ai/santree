@@ -2,27 +2,37 @@
  *  title (first commit subject) + body (repo PR template), with an AI-fill button
  *  that drafts both from the diff. On success it opens the new PR in the browser. */
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import type { Reviewer } from "../../bindings";
+import { Avatar } from "../../components/Avatar";
+import { CloseIcon } from "../../components/icons";
 import { Spinner } from "../../components/primitives";
-import { useCreatePr, usePrDraft } from "../../lib/queries";
+import { useCreatePr, usePrDraft, usePrReviewers } from "../../lib/queries";
 import { toast } from "../../state/toast";
 import { alpha } from "../../theme/colors";
 import { useTrees } from "./model";
 
 export function CreatePrDialog() {
-  const { repo, prDialogFor, closePrDialog } = useTrees();
+  const { repo, prDialogFor, closePrDialog, prsByWorktree } = useTrees();
   // Rendered only when a worktree is targeted, so this is always set on mount.
   const id = prDialogFor ?? "";
+
+  // An already-open PR for this branch blocks a new one (GitHub rejects duplicates).
+  // Merged/closed PRs don't — the branch can have new commits to open a fresh PR for.
+  const openPr = (prsByWorktree.get(id) ?? []).find((p) => p.state === "Open");
 
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [base, setBase] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [draftPr, setDraftPr] = useState(false);
+  const [reviewers, setReviewers] = useState<string[]>([]);
 
   const { mutate: draft, isPending: drafting } = usePrDraft(repo);
   const { mutate: create, isPending: creating } = useCreatePr(repo);
+  const { data: candidates = [] } = usePrReviewers(repo, id);
 
   // Prefill from a non-AI draft (template + first-commit title) on open.
   useEffect(() => {
@@ -58,11 +68,11 @@ export function CreatePrDialog() {
   const onCreate = () => {
     setError(null);
     create(
-      { id, title: title.trim(), body },
+      { id, title: title.trim(), body, draft: draftPr, reviewers },
       {
         onSuccess: (pr) => {
           void openUrl(pr.url);
-          toast.success(`Opened PR #${pr.number}.`);
+          toast.success(`Opened ${draftPr ? "draft " : ""}PR #${pr.number}.`);
           closePrDialog();
         },
         onError: (e) => setError(e instanceof Error ? e.message : String(e)),
@@ -70,7 +80,7 @@ export function CreatePrDialog() {
     );
   };
 
-  const canCreate = title.trim().length > 0 && !creating && loaded;
+  const canCreate = title.trim().length > 0 && !creating && loaded && !openPr;
 
   return (
     <div className="fixed inset-0 z-[300] flex items-center justify-center p-6">
@@ -134,10 +144,34 @@ export function CreatePrDialog() {
               value={body}
               onChange={(e) => setBody(e.target.value)}
               placeholder="Pull request description (Markdown)"
-              rows={12}
+              rows={10}
               className="w-full resize-none rounded-lg border border-line-3 bg-input px-2.5 py-2 font-mono text-[11.5px] leading-[1.5] text-fg-3 outline-none placeholder:text-muted-4 focus:border-line-strong"
             />
+
+            {candidates.length > 0 && (
+              <div className="mt-3">
+                <span className="text-[11px] font-medium text-muted-2">Reviewers</span>
+                <ReviewerPicker
+                  candidates={candidates}
+                  selected={reviewers}
+                  onChange={setReviewers}
+                />
+              </div>
+            )}
           </>
+        )}
+
+        {openPr && (
+          <div className="mt-2.5 flex items-center gap-2 rounded-md border border-line-2 bg-raised px-2.5 py-1.5 text-[11.5px] text-muted-2">
+            <span>A pull request is already open for this branch (#{openPr.number}).</span>
+            <button
+              type="button"
+              onClick={() => void openUrl(openPr.url)}
+              className="ml-auto cursor-pointer font-medium text-accent hover:underline"
+            >
+              View PR
+            </button>
+          </div>
         )}
 
         {error && (
@@ -153,7 +187,18 @@ export function CreatePrDialog() {
           </div>
         )}
 
-        <div className="mt-4 flex justify-end gap-2">
+        <div className="mt-4 flex items-center gap-2">
+          <label className="flex cursor-pointer select-none items-center gap-2 text-[12px] text-muted-2 hover:text-fg-2">
+            <input
+              type="checkbox"
+              checked={draftPr}
+              onChange={(e) => setDraftPr(e.target.checked)}
+              disabled={!loaded || creating}
+              className="h-3.5 w-3.5 cursor-pointer accent-[var(--accent)]"
+            />
+            Create as draft
+          </label>
+          <div className="flex-1" />
           <button
             type="button"
             onClick={closePrDialog}
@@ -173,12 +218,102 @@ export function CreatePrDialog() {
               <>
                 <Spinner size={12} /> Creating…
               </>
+            ) : draftPr ? (
+              "Create draft"
             ) : (
               "Create PR"
             )}
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** A compact multi-select for requesting PR reviewers: selected reviewers show as
+ *  removable chips, and a search field reveals a filtered list of the repo's
+ *  collaborators to add. Selection is by login (what the GitHub API expects). */
+function ReviewerPicker({
+  candidates,
+  selected,
+  onChange,
+}: {
+  candidates: Reviewer[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+
+  // Close the suggestion list when focus leaves the whole control.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const add = (login: string) => {
+    if (!selected.includes(login)) onChange([...selected, login]);
+    setQuery("");
+  };
+  const remove = (login: string) => onChange(selected.filter((l) => l !== login));
+
+  const q = query.trim().toLowerCase();
+  const matches = candidates.filter(
+    (c) => !selected.includes(c.name) && c.name.toLowerCase().includes(q),
+  );
+
+  return (
+    <div ref={boxRef} className="relative mt-1">
+      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-line-3 bg-input px-2 py-1.5 focus-within:border-line-strong">
+        {selected.map((login) => {
+          const c = candidates.find((x) => x.name === login);
+          return (
+            <span
+              key={login}
+              className="flex items-center gap-1.5 rounded-full border border-line-2 bg-raised py-0.5 pr-1 pl-1 text-[11.5px] text-fg-2"
+            >
+              <Avatar name={login} src={c?.avatarUrl} size={16} />
+              {login}
+              <button
+                type="button"
+                onClick={() => remove(login)}
+                title="Remove reviewer"
+                className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-full text-muted-3 hover:bg-hover hover:text-fg-2"
+              >
+                <CloseIcon size={9} />
+              </button>
+            </span>
+          );
+        })}
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onFocus={() => setOpen(true)}
+          placeholder={selected.length ? "" : "Add reviewers…"}
+          className="min-w-[100px] flex-1 bg-transparent py-0.5 text-[12px] text-fg-2 outline-none placeholder:text-muted-4"
+        />
+      </div>
+
+      {open && matches.length > 0 && (
+        <div className="absolute z-10 mt-1 max-h-44 w-full overflow-auto rounded-lg border border-line-3 bg-panel py-1 shadow-xl">
+          {matches.slice(0, 30).map((c) => (
+            <button
+              key={c.name}
+              type="button"
+              onClick={() => add(c.name)}
+              className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-fg-2 hover:bg-hover"
+            >
+              <Avatar name={c.name} src={c.avatarUrl} size={18} />
+              {c.name}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -89,7 +89,10 @@ mod tests {
         )
         .unwrap();
         // The rendered examples carry no `[TICKET] ` prefix when there's no id.
-        assert!(out.contains("\nadd login throttling"), "example has no prefix");
+        assert!(
+            out.contains("\nadd login throttling"),
+            "example has no prefix"
+        );
         assert!(!out.contains("] add login throttling"), "no ticket prefix");
     }
 
@@ -100,7 +103,10 @@ mod tests {
             context! { ticket_id => "AK-2", title => "Do thing", mode => "plan" },
         )
         .unwrap();
-        assert!(out.contains("Do NOT implement yet"), "plan mode is read-only");
+        assert!(
+            out.contains("Do NOT implement yet"),
+            "plan mode is read-only"
+        );
     }
 
     #[test]
@@ -130,7 +136,10 @@ mod tests {
             context! { ticket_id => "AK-3", ticket_content => ticket, mode => "implement" },
         )
         .unwrap();
-        assert!(out.contains("Steps to reproduce"), "ticket body is embedded");
+        assert!(
+            out.contains("Steps to reproduce"),
+            "ticket body is embedded"
+        );
         assert!(
             !out.contains("could not be fetched"),
             "fallback hint is skipped when ticket_content is present"

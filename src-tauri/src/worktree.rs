@@ -169,6 +169,7 @@ pub async fn base_worktree(db: &Db, repo: &str) -> Result<Option<Worktree>> {
             dirty: git::is_dirty(&p),
             ahead: 0,
             behind: git::behind(&p, &base),
+            unpushed: git::unpushed(&p, &base, &base),
             agent: AgentKind::Claude,
             activity: Activity::Idle,
             branch: base.clone(),
@@ -224,6 +225,7 @@ fn build_worktree(row: LinkRow) -> Worktree {
         dirty: git::is_dirty(&path),
         ahead: git::ahead(&path, &row.base_branch),
         behind: git::behind(&path, &row.base_branch),
+        unpushed: git::unpushed(&path, &row.branch, &row.base_branch),
         agent: parse_agent(row.agent.as_deref()),
         // Live agent activity needs the session-signal system (not yet wired);
         // default to Idle until then.
@@ -248,7 +250,9 @@ pub async fn get(db: &Db, repo: &str, issue_id: &str) -> Result<Option<Worktree>
     .fetch_optional(db)
     .await?;
     let Some(row) = row else { return Ok(None) };
-    Ok(Some(tokio::task::spawn_blocking(move || build_worktree(row)).await?))
+    Ok(Some(
+        tokio::task::spawn_blocking(move || build_worktree(row)).await?,
+    ))
 }
 
 /// Create (or adopt) a worktree for an issue and record the link.
@@ -297,7 +301,10 @@ pub async fn create(
             let branch = if wt_path.exists() {
                 // Adopt a pre-existing worktree: reuse its real branch (from git) when
                 // it is a registered worktree, else fall back to the computed name.
-                log::info!("adopting existing worktree {issue_id} at {}", wt_path.display());
+                log::info!(
+                    "adopting existing worktree {issue_id} at {}",
+                    wt_path.display()
+                );
                 git::worktree_branch(root_path, &wt_path).unwrap_or(computed_branch)
             } else {
                 git::create_worktree(root_path, &wt_path, &computed_branch, &base_branch)?;
@@ -312,7 +319,12 @@ pub async fn create(
                 log::info!("created worktree {issue_id} on branch {computed_branch}");
                 computed_branch
             };
-            Ok((base_branch, branch, setup_ran, wt_path.to_string_lossy().into_owned()))
+            Ok((
+                base_branch,
+                branch,
+                setup_ran,
+                wt_path.to_string_lossy().into_owned(),
+            ))
         })
         .await??
     };
@@ -434,11 +446,13 @@ pub async fn run_setup_streamed(
     .unwrap_or(false);
 
     if ok {
-        let _ = sqlx::query("UPDATE worktree_links SET setup_ran = 1 WHERE repo_path = ? AND issue_id = ?")
-            .bind(&root)
-            .bind(issue_id)
-            .execute(db)
-            .await;
+        let _ = sqlx::query(
+            "UPDATE worktree_links SET setup_ran = 1 WHERE repo_path = ? AND issue_id = ?",
+        )
+        .bind(&root)
+        .bind(issue_id)
+        .execute(db)
+        .await;
     }
     let _ = on_event.send(SetupEvent::Done { ok });
     Ok(())
@@ -512,7 +526,10 @@ fn stream_init_script(script: &Path, wt: &Path, root: &str, ev: &Channel<SetupEv
     };
 
     let mut cmd = CommandBuilder::new("/bin/bash");
-    cmd.args(["-c", &format!("exec {}", shell_quote(&script.to_string_lossy()))]);
+    cmd.args([
+        "-c",
+        &format!("exec {}", shell_quote(&script.to_string_lossy())),
+    ]);
     cmd.cwd(wt);
     cmd.env("SANTREE_WORKTREE_PATH", wt);
     cmd.env("SANTREE_REPO_ROOT", root);
@@ -607,6 +624,13 @@ pub async fn pull(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
     tokio::task::spawn_blocking(move || git::pull_base(&c.path, &c.base_branch)).await?
 }
 
+/// Push the worktree's branch to origin (setting upstream) — the Trees "Push"
+/// button and the post-commit auto-push. Network + blocking, so off the runtime.
+pub async fn push(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
+    let c = coords(db, repo, issue_id).await?;
+    tokio::task::spawn_blocking(move || git::push(&c.path, &c.branch)).await?
+}
+
 /// Fast-forward the repo's local base branch (main/master) to origin — the
 /// "update master" action. Operates on the main repo dir, not the worktree.
 pub async fn update_base(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
@@ -656,7 +680,10 @@ pub async fn file_diff(
     untracked: bool,
 ) -> Result<String> {
     let path = path.to_string();
-    with_worktree(db, repo, issue_id, move |p| git::file_diff(p, &path, untracked)).await
+    with_worktree(db, repo, issue_id, move |p| {
+        git::file_diff(p, &path, untracked)
+    })
+    .await
 }
 
 pub async fn file_source(db: &Db, repo: &str, issue_id: &str, path: &str) -> Result<FileSource> {
@@ -686,7 +713,10 @@ pub async fn discard(
     untracked: bool,
 ) -> Result<()> {
     let path = path.to_string();
-    with_worktree(db, repo, issue_id, move |p| git::discard(p, &path, untracked)).await
+    with_worktree(db, repo, issue_id, move |p| {
+        git::discard(p, &path, untracked)
+    })
+    .await
 }
 
 pub async fn stage_all(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
@@ -771,10 +801,12 @@ pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<Strin
 
     // Claude can take 5–30s; run it off the async runtime's worker threads.
     let cwd = path.clone();
-    let drafted = tokio::task::spawn_blocking(move || crate::agent::run_print(&cwd, &prompt, &[]))
-        .await
-        .ok()
-        .flatten();
+    let drafted = tokio::task::spawn_blocking(move || {
+        crate::agent::run_print(&cwd, &prompt, &[], Some(crate::agent::HELPER_MODEL))
+    })
+    .await
+    .ok()
+    .flatten();
 
     Ok(drafted
         .map(|s| s.trim_matches(['"', '\'', '`']).trim().to_string())
@@ -786,13 +818,12 @@ pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<Strin
 /// seeds `exec <agent> '<prompt>'` with this. Cheap — pure template render, no AI.
 pub async fn work_prompt(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
     let root = repo_root(db, repo).await?;
-    let title: Option<String> = sqlx::query_scalar(
-        "SELECT title FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
-    )
-    .bind(&root)
-    .bind(issue_id)
-    .fetch_optional(db)
-    .await?;
+    let title: Option<String> =
+        sqlx::query_scalar("SELECT title FROM worktree_links WHERE repo_path = ? AND issue_id = ?")
+            .bind(&root)
+            .bind(issue_id)
+            .fetch_optional(db)
+            .await?;
 
     // Fetch the full ticket (description + comment thread) and render it the way
     // the CLI does, so the agent starts with real context instead of being told
@@ -989,7 +1020,10 @@ mod tests {
     #[test]
     fn strip_ansi_removes_colour_codes() {
         assert_eq!(strip_ansi("\x1b[1;33m=== hi ===\x1b[0m"), "=== hi ===");
-        assert_eq!(strip_ansi("\x1b[0;36m[Frontend]\x1b[0m go"), "[Frontend] go");
+        assert_eq!(
+            strip_ansi("\x1b[0;36m[Frontend]\x1b[0m go"),
+            "[Frontend] go"
+        );
         assert_eq!(strip_ansi("plain"), "plain");
     }
 
@@ -1003,7 +1037,10 @@ mod tests {
     #[test]
     fn drain_splits_newlines_and_holds_partials() {
         let mut acc = String::from("one\ntwo\nthr");
-        assert_eq!(drain_setup_events(&mut acc, false), vec![line("one"), line("two")]);
+        assert_eq!(
+            drain_setup_events(&mut acc, false),
+            vec![line("one"), line("two")]
+        );
         assert_eq!(acc, "thr", "partial line is held for the next read");
         acc.push_str("ee\n");
         assert_eq!(drain_setup_events(&mut acc, false), vec![line("three")]);
@@ -1012,7 +1049,10 @@ mod tests {
     #[test]
     fn drain_treats_crlf_as_one_boundary() {
         let mut acc = String::from("a\r\nb\r\n");
-        assert_eq!(drain_setup_events(&mut acc, false), vec![line("a"), line("b")]);
+        assert_eq!(
+            drain_setup_events(&mut acc, false),
+            vec![line("a"), line("b")]
+        );
         assert!(acc.is_empty());
     }
 
@@ -1021,7 +1061,10 @@ mod tests {
         // A redrawing bar: each `\r`-terminated frame is a transient Progress; the
         // final, not-yet-terminated frame is held until more bytes arrive.
         let mut acc = String::from("10%\r20%\r30%");
-        assert_eq!(drain_setup_events(&mut acc, false), vec![progress("10%"), progress("20%")]);
+        assert_eq!(
+            drain_setup_events(&mut acc, false),
+            vec![progress("10%"), progress("20%")]
+        );
         assert_eq!(acc, "30%");
     }
 
@@ -1041,7 +1084,10 @@ mod tests {
     fn drain_flush_emits_trailing_partial() {
         let mut acc = String::from("tail-no-newline");
         assert_eq!(drain_setup_events(&mut acc, false), vec![]);
-        assert_eq!(drain_setup_events(&mut acc, true), vec![line("tail-no-newline")]);
+        assert_eq!(
+            drain_setup_events(&mut acc, true),
+            vec![line("tail-no-newline")]
+        );
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
@@ -1073,7 +1119,10 @@ mod tests {
         let wt = repo_dir.join(".santree/worktrees/AK-9");
         std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
         let wt_str = wt.to_string_lossy().into_owned();
-        run_git(&repo_dir, &["worktree", "add", "-b", "santree/ak-9", &wt_str, "main"]);
+        run_git(
+            &repo_dir,
+            &["worktree", "add", "-b", "santree/ak-9", &wt_str, "main"],
+        );
         assert!(wt.exists());
 
         // Simulate the interrupted delete: drop the worktree's gitlink so git no
@@ -1122,21 +1171,35 @@ mod tests {
 
         // Real SQLite (migrations applied) with a repo row pointing at our git dir.
         let db = crate::db::init(base.join("test.db")).await.unwrap();
-        sqlx::query("INSERT INTO repos (name, tracker, agents, path) VALUES ('test','Local git',0,?)")
-            .bind(repo_dir.to_string_lossy().as_ref())
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO repos (name, tracker, agents, path) VALUES ('test','Local git',0,?)",
+        )
+        .bind(repo_dir.to_string_lossy().as_ref())
+        .execute(&db)
+        .await
+        .unwrap();
 
         // 1. Create the worktree + run setup + record the link.
-        let wt = create(&db, "test", "AK-1", "Do a thing", Some("Booking"), None, true, AgentKind::Claude)
-            .await
-            .unwrap();
+        let wt = create(
+            &db,
+            "test",
+            "AK-1",
+            "Do a thing",
+            Some("Booking"),
+            None,
+            true,
+            AgentKind::Claude,
+        )
+        .await
+        .unwrap();
         assert_eq!(wt.id, "AK-1");
         assert!(wt.setup_ran, "setup should have run");
         let wt_dir = repo_dir.join(".santree/worktrees/AK-1");
         assert!(wt_dir.exists(), "worktree directory should exist");
-        assert!(wt_dir.join("setup-ran").exists(), "init.sh should have run in the worktree");
+        assert!(
+            wt_dir.join("setup-ran").exists(),
+            "init.sh should have run in the worktree"
+        );
 
         // The link is queryable.
         let listed = list(&db, "test").await.unwrap();
@@ -1144,11 +1207,24 @@ mod tests {
         assert_eq!(listed[0].project.as_deref(), Some("Booking"));
 
         // Idempotent: creating again just returns the existing worktree (no error).
-        let again = create(&db, "test", "AK-1", "Do a thing", None, None, false, AgentKind::Claude)
-            .await
-            .unwrap();
+        let again = create(
+            &db,
+            "test",
+            "AK-1",
+            "Do a thing",
+            None,
+            None,
+            false,
+            AgentKind::Claude,
+        )
+        .await
+        .unwrap();
         assert_eq!(again.id, "AK-1");
-        assert_eq!(list(&db, "test").await.unwrap().len(), 1, "no duplicate link");
+        assert_eq!(
+            list(&db, "test").await.unwrap().len(),
+            1,
+            "no duplicate link"
+        );
 
         // Adopt: drop the link but keep the on-disk worktree (mimics one made by
         // the CLI / a prior run), then create — it re-links and opens, not errors.
@@ -1157,31 +1233,54 @@ mod tests {
             .await
             .unwrap();
         assert!(get(&db, "test", "AK-1").await.unwrap().is_none());
-        let adopted = create(&db, "test", "AK-1", "Do a thing", None, None, false, AgentKind::Claude)
-            .await
-            .unwrap();
+        let adopted = create(
+            &db,
+            "test",
+            "AK-1",
+            "Do a thing",
+            None,
+            None,
+            false,
+            AgentKind::Claude,
+        )
+        .await
+        .unwrap();
         assert!(
             adopted.branch.contains("ak-1"),
             "adopted the real branch from git: {}",
             adopted.branch
         );
-        assert!(get(&db, "test", "AK-1").await.unwrap().is_some(), "link re-created on adopt");
+        assert!(
+            get(&db, "test", "AK-1").await.unwrap().is_some(),
+            "link re-created on adopt"
+        );
 
         // 2. Make a change, see it in status, stage + commit, confirm clean.
         // (`setup-ran` from init.sh is also an untracked change, so we look up
         // our file by path rather than asserting an exact count.)
         std::fs::write(wt_dir.join("new.txt"), "x\n").unwrap();
         let st = status(&db, "test", "AK-1").await.unwrap();
-        let new_file = st.iter().find(|f| f.path == "new.txt").expect("new.txt in status");
+        let new_file = st
+            .iter()
+            .find(|f| f.path == "new.txt")
+            .expect("new.txt in status");
         assert_eq!(new_file.status, FileStatus::Untracked);
 
-        commit(&db, "test", "AK-1", "[AK-1] add file", true).await.unwrap();
-        assert!(status(&db, "test", "AK-1").await.unwrap().is_empty(), "clean after commit");
+        commit(&db, "test", "AK-1", "[AK-1] add file", true)
+            .await
+            .unwrap();
+        assert!(
+            status(&db, "test", "AK-1").await.unwrap().is_empty(),
+            "clean after commit"
+        );
 
         // 3. Remove the worktree + link.
         remove(&db, "test", "AK-1").await.unwrap();
         assert!(!wt_dir.exists(), "worktree directory should be gone");
-        assert!(list(&db, "test").await.unwrap().is_empty(), "link should be gone");
+        assert!(
+            list(&db, "test").await.unwrap().is_empty(),
+            "link should be gone"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

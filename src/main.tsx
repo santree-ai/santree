@@ -4,6 +4,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ErrorScreen } from "./components/ErrorScreen";
+import { QuitGuard } from "./components/QuitGuard";
 import { TerminalsProvider } from "./features/terminal/TerminalsContext";
 import { forwardConsoleToLog } from "./lib/logging";
 import { routeTree } from "./routeTree.gen";
@@ -55,6 +56,7 @@ createRoot(rootElement).render(
             <RouterProvider router={router} />
           </TerminalsProvider>
         </AppProvider>
+        <QuitGuard />
         <ToastViewport />
       </QueryClientProvider>
     </ErrorBoundary>

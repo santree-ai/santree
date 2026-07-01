@@ -8,11 +8,13 @@ import { useEffect, useRef, useState } from "react";
 import { Spinner } from "../../components/primitives";
 import {
   TREES_AUTO_PR_KEY,
+  TREES_AUTO_PUSH_KEY,
   TREES_STAGE_ALL_KEY,
   useBoolSetting,
   useCommitDraft,
   useCommitMessage,
   useCommitWorktree,
+  usePushWorktree,
   useSetCommitDraft,
 } from "../../lib/queries";
 import { BASE_ID, useTrees } from "./model";
@@ -26,14 +28,16 @@ export function CommitBox({
   stagedCount: number;
   totalCount: number;
 }) {
-  const { repo, activeId, openPrDialog, prsByWorktree } = useTrees();
+  const { repo, activeId, openPrDialog, prsByWorktree, suggestPr } = useTrees();
   const stageAll = useBoolSetting("app", TREES_STAGE_ALL_KEY).value;
   const autoPr = useBoolSetting("app", TREES_AUTO_PR_KEY).value;
+  const autoPush = useBoolSetting("app", TREES_AUTO_PUSH_KEY).value;
 
   const { data: saved } = useCommitDraft(repo, activeId);
   const { mutate: saveDraft } = useSetCommitDraft(repo);
   const { mutate: draft, isPending: drafting } = useCommitMessage(repo);
   const { mutate: commit, isPending: committing } = useCommitWorktree(repo);
+  const { mutate: push } = usePushWorktree(repo);
 
   const [message, setMessage] = useState("");
   // The saved draft loads asynchronously; adopt it into the field exactly once so
@@ -67,6 +71,14 @@ export function CommitBox({
           // The backend clears the persisted draft on commit; clear the field to
           // match (autosave then settles the cache to empty).
           setMessage("");
+          // "Push after every commit": upload the new commit to origin straight
+          // away (sets upstream on first push). Once it lands, surface the PR
+          // suggestion bar (skipped for the base branch). Independent of autoPr.
+          if (autoPush && activeId !== BASE_ID) {
+            push(activeId, { onSuccess: () => suggestPr(activeId) });
+          } else if (autoPush) {
+            push(activeId);
+          }
           // "Open a PR on the first commit": prompt once there's a commit to PR
           // and no PR exists yet. The dialog validates commits-ahead itself. Never
           // for the base branch — you don't open a PR against main itself.

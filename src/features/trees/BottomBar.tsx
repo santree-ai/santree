@@ -13,6 +13,7 @@ import {
   PanelIcon,
   PrIcon,
   PullIcon,
+  PushIcon,
   TrashIcon,
 } from "../../components/icons";
 import { ConfirmDialog, Dropdown, MENU_ITEM, Spinner } from "../../components/primitives";
@@ -21,6 +22,7 @@ import {
   useOpeners,
   useOpenInApp,
   usePullWorktree,
+  usePushWorktree,
   useSetting,
   useUpdateBaseBranch,
 } from "../../lib/queries";
@@ -51,6 +53,7 @@ export function BottomBar({ worktree }: { worktree: Worktree }) {
 
       <OpenInMenu path={worktree.path} />
       <Divider />
+      <PushButton worktree={worktree} />
       {!isBase && (
         <>
           <PrButton worktree={worktree} />
@@ -75,6 +78,30 @@ export function BottomBar({ worktree }: { worktree: Worktree }) {
 
 function Divider() {
   return <span className="mx-0.5 h-3.5 w-px flex-none bg-line-3" />;
+}
+
+/** "Push" — shown only when the branch has commits not yet on its remote. Pushes
+ *  to origin (setting upstream); the count resets once the worktree list refetches. */
+function PushButton({ worktree }: { worktree: Worktree }) {
+  const { repo, suggestPr } = useTrees();
+  const { mutate: push, isPending } = usePushWorktree(repo);
+  const isBase = worktree.id === BASE_ID;
+  const n = worktree.unpushed;
+  if (n === 0) return null;
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        push(worktree.id, isBase ? undefined : { onSuccess: () => suggestPr(worktree.id) })
+      }
+      disabled={isPending}
+      title={`Push ${n} commit${n === 1 ? "" : "s"} to origin`}
+      className={ITEM}
+    >
+      {isPending ? <Spinner size={11} /> : <PushIcon size={12} />}
+      Push {n}
+    </button>
+  );
 }
 
 /** "Create PR" — shown only when the branch is ahead of base and has no PR yet.

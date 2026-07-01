@@ -24,6 +24,7 @@ export function InvestigatePane({
   command,
   agentExec,
   model,
+  effort,
   onExited,
 }: {
   /** Active repo name — scopes the persisted Claude session. */
@@ -36,6 +37,8 @@ export function InvestigatePane({
   agentExec: string;
   /** Model override for the run, or null to use the agent's default. */
   model: string | null;
+  /** Effort level (Claude's --effort), or null for the CLI default. */
+  effort: string | null;
   onExited: () => void;
 }) {
   // When a skill is configured, launch the configured agent under a login shell so
@@ -59,8 +62,14 @@ export function InvestigatePane({
   const session = useAgentSession(repo, `triage:${ticketId}`, cwd ?? "", canLaunch, needsSeed);
   const exec = agentExec.trim() || "claude";
   const modelFlag = model ? `--model ${shellQuote(model)}` : undefined;
+  const effortFlag = effort ? `--effort ${shellQuote(effort)}` : undefined;
   const seed = command
-    ? agentSessionSeed(session.data, exec, { prompt: `/${command} ${ticketId}`, modelFlag })
+    ? agentSessionSeed(session.data, exec, {
+        prompt: `/${command} ${ticketId}`,
+        modelFlag,
+        effortFlag,
+        remoteControl: ticketId,
+      })
     : undefined;
   // Hold the embed until the seed decision is fresh, so the new PTY carries it.
   const ready = !needsSeed || !session.isFetching;

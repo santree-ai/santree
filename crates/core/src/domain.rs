@@ -188,7 +188,11 @@ pub struct Task {
 /// turns this into the shell seed: `--resume <id>` to continue, `--session-id
 /// <id> '<prompt>'` to start fresh, or a plain shell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "type")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
 pub enum AgentSession {
     /// A still-on-disk session to continue: `claude --resume <sessionId>`.
     Resume { session_id: String },
@@ -423,6 +427,9 @@ pub struct Worktree {
     pub ahead: u32,
     /// Commits this branch is behind its base (origin/<base>).
     pub behind: u32,
+    /// Commits on this branch not yet pushed to its remote (what `git push` would
+    /// upload); 0 when the remote is up to date.
+    pub unpushed: u32,
     pub agent: AgentKind,
     pub activity: Activity,
     /// Git branch checked out in the worktree (e.g. "feature/ak-165-…").

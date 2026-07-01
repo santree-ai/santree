@@ -3,11 +3,13 @@
  * app defaults or repo override. */
 
 import type { AgentKind } from "../../../bindings";
-import { ChevronSelect, Toggle } from "../../../components/primitives";
+import { ChevronSelect, ComboBox, Toggle } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
 import {
+  EFFORT_LEVELS,
   INVESTIGATE_AGENT_KEY,
   INVESTIGATE_COMMAND_KEY,
+  INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
   TRIAGE_GOOD_CITIZEN_KEY,
   TRIAGE_SNOOZED_KEY,
@@ -17,6 +19,7 @@ import {
   useSetSetting,
   useSetting,
   WORK_AGENT_KEY,
+  WORK_EFFORT_KEY,
   WORK_MODEL_KEY,
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
@@ -35,6 +38,8 @@ import {
 interface ActionDescriptor {
   agentKey: string;
   modelKey: string;
+  /** Claude's `--effort` for the run (low…max). */
+  effortKey: string;
   /** Present only for actions that also run a Claude slash command (Investigate). */
   commandKey?: string;
 }
@@ -42,9 +47,14 @@ interface ActionDescriptor {
 const INVESTIGATE: ActionDescriptor = {
   agentKey: INVESTIGATE_AGENT_KEY,
   modelKey: INVESTIGATE_MODEL_KEY,
+  effortKey: INVESTIGATE_EFFORT_KEY,
   commandKey: INVESTIGATE_COMMAND_KEY,
 };
-const WORK: ActionDescriptor = { agentKey: WORK_AGENT_KEY, modelKey: WORK_MODEL_KEY };
+const WORK: ActionDescriptor = {
+  agentKey: WORK_AGENT_KEY,
+  modelKey: WORK_MODEL_KEY,
+  effortKey: WORK_EFFORT_KEY,
+};
 
 /** The Triage Investigation action. Triage is global: the enable switch + queue
  * prefs live at the app level; a repo only overrides which agent/skill/model the
@@ -159,11 +169,13 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
   const appAgent = (useSetting("app", descriptor.agentKey).data as AgentKind | null) ?? "Claude";
   const appCmd = useSetting("app", cmdKey).data;
   const appModel = useSetting("app", descriptor.modelKey).data;
+  const appEffort = useSetting("app", descriptor.effortKey).data;
 
   // This scope's stored values (null/undefined for both app + an unset repo).
   const scopeAgent = useSetting(scope, descriptor.agentKey).data as AgentKind | null;
   const scopeCmd = useSetting(scope, cmdKey).data;
   const scopeModel = useSetting(scope, descriptor.modelKey).data;
+  const scopeEffort = useSetting(scope, descriptor.effortKey).data;
 
   const effectiveAgent = scopeAgent ?? appAgent;
   const agentDef = agents.find((a) => a.key === effectiveAgent);
@@ -250,7 +262,57 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
           defaultLabel={`Use app default${appModel ? ` (${appModel})` : ""}`}
         />
       </Field>
+
+      {effectiveAgent === "Claude" && (
+        <Field
+          label="Effort"
+          hint={
+            inherits
+              ? undefined
+              : "How hard the agent thinks (Claude's --effort). Higher is more thorough but slower and pricier."
+          }
+        >
+          <EffortSelect
+            value={scopeEffort ?? ""}
+            onChange={(v) => set(descriptor.effortKey, v)}
+            inherits={inherits}
+            defaultLabel={`Use app default${appEffort ? ` (${appEffort})` : ""}`}
+          />
+        </Field>
+      )}
     </div>
+  );
+}
+
+/** The effort picker — a fixed low→max scale. "CLI default" leaves the flag off. */
+function EffortSelect({
+  value,
+  onChange,
+  inherits,
+  defaultLabel,
+}: {
+  value: string;
+  onChange: (v: string | null) => void;
+  inherits: boolean;
+  defaultLabel: string;
+}) {
+  const options = EFFORT_LEVELS.map((e) => (
+    <option key={e} value={e} className="bg-input">
+      {e}
+    </option>
+  ));
+  if (inherits) {
+    return (
+      <OverrideSelect value={value} onChange={onChange} defaultLabel={defaultLabel}>
+        {options}
+      </OverrideSelect>
+    );
+  }
+  return (
+    <ChevronSelect value={value} onChange={(v) => onChange(v || null)} className={SELECT_CLASS}>
+      <option value="">CLI default</option>
+      {options}
+    </ChevronSelect>
   );
 }
 
@@ -290,8 +352,10 @@ function AgentSelect({
   );
 }
 
-/** The model picker — the effective agent's models. When `inherits`, an
- * {@link OverrideSelect}; otherwise a plain select with an "Agent default". */
+/** The model picker — an editable combobox. The effective agent's models are just
+ *  suggestions; the CLI is the source of truth, so you can type any alias/id it
+ *  accepts (`opus`, `claude-fable-5`, …) and never be stuck behind a stale list.
+ *  Empty clears the setting (repo: inherit the app value · app: agent default). */
 function ModelSelect({
   models,
   value,
@@ -305,22 +369,13 @@ function ModelSelect({
   inherits: boolean;
   defaultLabel: string;
 }) {
-  const options = models.map((m) => (
-    <option key={m} value={m} className="bg-input">
-      {m}
-    </option>
-  ));
-  if (inherits) {
-    return (
-      <OverrideSelect value={value} onChange={onChange} defaultLabel={defaultLabel}>
-        {options}
-      </OverrideSelect>
-    );
-  }
   return (
-    <ChevronSelect value={value} onChange={(v) => onChange(v || null)} className={SELECT_CLASS}>
-      <option value="">Agent default</option>
-      {options}
-    </ChevronSelect>
+    <ComboBox
+      value={value}
+      onChange={(v) => onChange(v.trim() || null)}
+      options={models}
+      placeholder={inherits ? defaultLabel : "Agent default"}
+      className={SELECT_CLASS}
+    />
   );
 }

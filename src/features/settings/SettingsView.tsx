@@ -14,6 +14,7 @@ import {
   AgentsIcon,
   BackArrowIcon,
   ContrastIcon,
+  GearIcon,
   LinearLogo,
   PlayIcon,
   PlugIcon,
@@ -25,6 +26,7 @@ import { alpha } from "../../theme/colors";
 import { TriageActionSection } from "./sections/Actions";
 import { AgentsSection } from "./sections/Agents";
 import { AppearanceSection } from "./sections/Appearance";
+import { GeneralSection } from "./sections/General";
 import { IntegrationsSection } from "./sections/Integrations";
 import { RepoLinearSection } from "./sections/RepoLinear";
 import { WorkSection } from "./sections/Work";
@@ -71,6 +73,12 @@ const workEntry = (forRepo: boolean): SectionDef => ({
 });
 
 const APP_NAV: NavNode[] = [
+  {
+    key: "general",
+    label: "General",
+    icon: <GearIcon size={ICON_SIZE} />,
+    render: () => <GeneralSection />,
+  },
   {
     key: "integrations",
     label: "Integrations",

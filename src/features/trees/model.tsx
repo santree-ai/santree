@@ -51,6 +51,7 @@ function pendingWorktree(p: PendingLaunch): Worktree {
     dirty: false,
     ahead: 0,
     behind: 0,
+    unpushed: 0,
     agent: p.agent,
     activity: "Idle",
     branch: "",
@@ -137,6 +138,9 @@ interface TreesModel {
   /** Worktree ids whose terminal should launch the agent on first open — set
    *  when a task is started, cleared once its terminal has consumed it. */
   launchAgents: Set<string>;
+  /** Per-launch model overrides from the Issues tray, keyed by worktree id (empty
+   *  ⇒ fall back to the configured Work model). Read once by the fresh-launch seed. */
+  launchModels: Record<string, string>;
   requestAgentLaunch: (id: string) => void;
   clearAgentLaunch: (id: string) => void;
 
@@ -144,6 +148,13 @@ interface TreesModel {
   prDialogFor: string | null;
   openPrDialog: (id: string) => void;
   closePrDialog: () => void;
+
+  /** The worktree to surface the "create a PR?" suggestion bar for (set after a
+   *  commit+push), or null. Cleared on dismiss, when the PR dialog opens, or once a
+   *  PR exists / the banner's own checks no longer hold. */
+  prSuggestFor: string | null;
+  suggestPr: (id: string) => void;
+  dismissPrSuggestion: () => void;
 
   /** Worktrees ticked for bulk actions (e.g. delete all merged). */
   selectedWorktrees: Set<string>;
@@ -224,16 +235,33 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [rightWidth, setRightWidth] = useState(320);
   const [fileTab, setFileTab] = useState<FileTab>("changes");
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [launchAgents, setLaunchAgents] = useState<Set<string>>(new Set());
+  // Per-launch model chosen in the Issues tray, keyed by worktree id. A transient
+  // hand-off: captured from the pending launch when a launch is consumed, read once
+  // by the fresh-launch seed, then cleared with the agent-launch flag. Empty ⇒ the
+  // Trees fallback (the configured Work model). Never persisted — the created
+  // session carries `--model` itself, so a resume needs nothing stored.
+  const [launchModels, setLaunchModels] = useState<Record<string, string>>({});
   // The worktree whose setup script is running in the Setup tab, and whether to
   // launch the agent once it finishes (true when setup is part of starting a task).
   const [setupFor, setSetupFor] = useState<string | null>(null);
   const [setupThenLaunch, setSetupThenLaunch] = useState(false);
-  // Opening a worktree lands on its Issue tab (the context), like Triage; the
-  // launch flow switches to setup/terminal as it starts the agent.
-  const [activeTab, setActiveTab] = useState<MainTab>("issue");
+  // Per-worktree main tab + open file, so switching worktrees restores whichever
+  // tab/file each one was last on instead of snapping every one back to its Issue
+  // tab. A worktree with no entry defaults to Issue (Terminal for the base entry,
+  // which has no ticket); the launch flow switches to setup/terminal as it starts.
+  const [activeTabByWt, setActiveTabByWt] = useState<Record<string, MainTab>>({});
+  const [selectedFileByWt, setSelectedFileByWt] = useState<Record<string, string | null>>({});
+  const setTabFor = useCallback(
+    (id: string, tab: MainTab) => setActiveTabByWt((m) => ({ ...m, [id]: tab })),
+    [],
+  );
+  const setFileFor = useCallback(
+    (id: string, file: string | null) => setSelectedFileByWt((m) => ({ ...m, [id]: file })),
+    [],
+  );
   const [prDialogFor, setPrDialogFor] = useState<string | null>(null);
+  const [prSuggestFor, setPrSuggestFor] = useState<string | null>(null);
   const [selectedWorktrees, setSelectedWorktrees] = useState<Set<string>>(new Set());
   // Extra terminals per worktree id (the "+" tab). Keyed by worktree so each one
   // keeps its own terminals across switches; the next number is max+1 (the primary
@@ -245,17 +273,17 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const startAgent = useCallback(
     (id: string) => {
       setActiveId(id);
-      setSelectedFile(null);
+      setFileFor(id, null);
       if (runSetupPref) {
         setSetupFor(id);
         setSetupThenLaunch(true);
-        setActiveTab("setup");
+        setTabFor(id, "setup");
       } else {
         setLaunchAgents((s) => new Set(s).add(id));
-        setActiveTab("terminal");
+        setTabFor(id, "terminal");
       }
     },
-    [runSetupPref],
+    [runSetupPref, setFileFor, setTabFor],
   );
 
   // Clear the selection if the active worktree vanished (e.g. it was deleted).
@@ -274,21 +302,34 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     const wt = worktrees.find((w) => w.id === treeLaunch);
     if (!wt) return;
     setActiveId(treeLaunch);
+    // Capture the tray's model now, while the pending launch is still around (it's
+    // dropped once the real worktree lands, before the seed is built). Idempotent.
+    const model = pendingLaunches.find((p) => p.id === treeLaunch)?.model;
+    if (model)
+      setLaunchModels((m) => (m[treeLaunch] === model ? m : { ...m, [treeLaunch]: model }));
     if (wt.pending) {
       // Pre-arm the main tab *before* the real worktree's pane can mount, so the
       // terminal never spawns a bare shell ahead of setup: with setup, switch to
       // the Setup tab now (terminal stays unmounted until setup finishes); without
       // setup, mark the launch so the terminal mounts already carrying the seed.
-      if (runSetupPref) setActiveTab("setup");
+      if (runSetupPref) setTabFor(treeLaunch, "setup");
       else {
         setLaunchAgents((s) => (s.has(treeLaunch) ? s : new Set(s).add(treeLaunch)));
-        setActiveTab("terminal");
+        setTabFor(treeLaunch, "terminal");
       }
       return;
     }
     startAgent(treeLaunch);
     consumeTreeLaunch();
-  }, [treeLaunch, worktrees, runSetupPref, consumeTreeLaunch, startAgent]);
+  }, [
+    treeLaunch,
+    worktrees,
+    pendingLaunches,
+    runSetupPref,
+    consumeTreeLaunch,
+    startAgent,
+    setTabFor,
+  ]);
 
   // Consume a cross-view "open" request (from the Issues graph/"Open in Trees"):
   // select the existing worktree and land on its Issue tab — no agent start, the
@@ -298,11 +339,11 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     if (!treeFocus) return;
     if (!worktrees.some((w) => w.id === treeFocus)) return;
     setActiveId(treeFocus);
-    setSelectedFile(null);
+    setFileFor(treeFocus, null);
     setSetupFor(null);
-    setActiveTab("issue");
+    setTabFor(treeFocus, "issue");
     consumeTreeFocus();
-  }, [treeFocus, worktrees, consumeTreeFocus]);
+  }, [treeFocus, worktrees, consumeTreeFocus, setFileFor, setTabFor]);
 
   // ⌘L toggles the file-picker panel (mirrors the Issues tab). Owned here rather
   // than in a separate consumer component so there's no shallow useTrees() caller.
@@ -323,6 +364,27 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     const active =
       activeId === BASE_ID ? baseWorktree : (worktrees.find((w) => w.id === activeId) ?? null);
     const extraTerminals = extraTermsByWt[activeId] ?? [];
+    const selectedFile = selectedFileByWt[activeId] ?? null;
+    // Resolve the active worktree's remembered tab. Unlike Triage (two always-present
+    // tabs), Trees' File/Setup/extra-terminal tabs are conditional: the File tab needs
+    // an open file, the Setup tab needs setup still running for THIS worktree (setupFor
+    // is a single slot — another worktree's setup can supersede it), and a `term:<n>`
+    // tab needs that terminal to still exist. If the remembered tab is no longer
+    // available, fall back to a safe default instead of rendering a blank pane.
+    const isBaseActive = activeId === BASE_ID;
+    const fallbackTab: MainTab = isBaseActive ? "terminal" : "issue";
+    const remembered = activeTabByWt[activeId];
+    const termN =
+      typeof remembered === "string" && remembered.startsWith("term:")
+        ? Number(remembered.slice(5))
+        : null;
+    const tabAvailable =
+      remembered === "terminal" ||
+      (remembered === "issue" && !isBaseActive) ||
+      (remembered === "file" && selectedFile !== null) ||
+      (remembered === "setup" && setupFor === activeId) ||
+      (termN !== null && extraTerminals.includes(termN));
+    const activeTab: MainTab = remembered && tabAvailable ? remembered : fallbackTab;
     return {
       repo: activeRepo,
       worktrees,
@@ -339,42 +401,34 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       setupThenLaunch,
       activeTab,
       extraTerminals,
-      // Switching worktrees (or to the overview) resets the main tabs — File/Setup
-      // tabs belong to whichever worktree is open. The base entry has no issue, so
-      // it lands on its terminal; a per-issue worktree shows its issue first.
-      setActive: (id) => {
-        setActiveId(id);
-        setSelectedFile(null);
-        setSetupFor(null);
-        setActiveTab(id === BASE_ID ? "terminal" : "issue");
-      },
-      showAllAgents: () => {
-        setActiveId("");
-        setSelectedFile(null);
-        setSetupFor(null);
-        setActiveTab("issue");
-      },
+      // Switching worktrees just changes which one is active — each remembers its
+      // own tab/file (see activeTabByWt/selectedFileByWt), so returning to a worktree
+      // restores whatever it was last showing instead of snapping back to the Issue
+      // tab. A never-visited worktree falls back to its default (Issue, or Terminal
+      // for the base entry which has no ticket).
+      setActive: (id) => setActiveId(id),
+      showAllAgents: () => setActiveId(""),
       toggleRightPanel: () => setRightCollapsed((c) => !c),
       setRightWidth,
       setFileTab,
       // Picking a file opens (or reuses) the shared File tab and focuses it;
       // expand the picker if it was collapsed so it stays usable alongside.
       selectFile: (path) => {
-        setSelectedFile(path);
-        setActiveTab(path ? "file" : "terminal");
+        setFileFor(activeId, path);
+        setTabFor(activeId, path ? "file" : "terminal");
         if (path) setRightCollapsed(false);
       },
-      setActiveTab,
+      setActiveTab: (tab) => setTabFor(activeId, tab),
       closeFileTab: () => {
-        setSelectedFile(null);
-        setActiveTab((t) => (t === "file" ? "terminal" : t));
+        setFileFor(activeId, null);
+        if (activeTab === "file") setTabFor(activeId, "terminal");
       },
       addTerminal: () => {
         if (!activeId) return;
         const list = extraTermsByWt[activeId] ?? [];
         const next = (list.length ? Math.max(...list) : 1) + 1;
         setExtraTermsByWt((m) => ({ ...m, [activeId]: [...(m[activeId] ?? []), next] }));
-        setActiveTab(termTab(next));
+        setTabFor(activeId, termTab(next));
       },
       closeTerminal: (n) => {
         setExtraTermsByWt((m) => ({
@@ -382,7 +436,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
           [activeId]: (m[activeId] ?? []).filter((x) => x !== n),
         }));
         // If the closed terminal was showing, fall back to the primary terminal.
-        setActiveTab((t) => (t === termTab(n) ? "terminal" : t));
+        if (activeTab === termTab(n)) setTabFor(activeId, "terminal");
       },
       startAgent,
       // A manual re-run opens the Setup tab alongside whatever's already open
@@ -390,7 +444,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       runSetup: (id) => {
         setSetupFor(id);
         setSetupThenLaunch(false);
-        setActiveTab("setup");
+        setTabFor(id, "setup");
       },
       // The Setup tab is temporary: it closes when the script finishes. The launch
       // flow then continues to the agent.
@@ -399,22 +453,37 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         if (setupThenLaunch && setupFor) {
           setLaunchAgents((s) => new Set(s).add(setupFor));
         }
+        if (setupFor) setTabFor(setupFor, "terminal");
         setSetupFor(null);
         setSetupThenLaunch(false);
-        setActiveTab("terminal");
       },
       launchAgents,
+      launchModels,
       requestAgentLaunch: (id) => setLaunchAgents((s) => new Set(s).add(id)),
-      clearAgentLaunch: (id) =>
+      clearAgentLaunch: (id) => {
         setLaunchAgents((s) => {
           if (!s.has(id)) return s;
           const next = new Set(s);
           next.delete(id);
           return next;
-        }),
+        });
+        // The seed has been consumed — drop the one-shot model override too.
+        setLaunchModels((m) => {
+          if (!(id in m)) return m;
+          const { [id]: _, ...rest } = m;
+          return rest;
+        });
+      },
       prDialogFor,
-      openPrDialog: (id) => setPrDialogFor(id),
+      // Opening the dialog supersedes the suggestion bar for that worktree.
+      openPrDialog: (id) => {
+        setPrSuggestFor((cur) => (cur === id ? null : cur));
+        setPrDialogFor(id);
+      },
       closePrDialog: () => setPrDialogFor(null),
+      prSuggestFor,
+      suggestPr: (id) => setPrSuggestFor(id),
+      dismissPrSuggestion: () => setPrSuggestFor(null),
       selectedWorktrees,
       toggleWorktreeSelected: (id) =>
         setSelectedWorktrees((s) => {
@@ -450,15 +519,19 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     rightCollapsed,
     rightWidth,
     fileTab,
-    selectedFile,
+    selectedFileByWt,
     setupFor,
     setupThenLaunch,
-    activeTab,
+    activeTabByWt,
+    setTabFor,
+    setFileFor,
     startAgent,
     launchAgents,
+    launchModels,
     activeRepo,
     qc,
     prDialogFor,
+    prSuggestFor,
     selectedWorktrees,
     removeOne,
     removeMany,

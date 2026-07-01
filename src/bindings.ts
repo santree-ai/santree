@@ -46,6 +46,11 @@ export const commands = {
 	ahead: number,
 	/**  Commits this branch is behind its base (origin/<base>). */
 	behind: number,
+	/**
+	 *  Commits on this branch not yet pushed to its remote (what `git push` would
+	 *  upload); 0 when the remote is up to date.
+	 */
+	unpushed: number,
 	agent: AgentKind,
 	activity: Activity,
 	/**  Git branch checked out in the worktree (e.g. "feature/ak-165-…"). */
@@ -82,6 +87,11 @@ export const commands = {
 	 *  Errors on a conflicting merge; returns the base ref that was merged on success.
 	 */
 	pullWorktree: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("pull_worktree", { repo, issueId })),
+	/**
+	 *  Push the worktree's branch to origin (the Trees "Push" button / post-commit
+	 *  auto-push). Network op — may fail (no auth, rejected non-fast-forward, …).
+	 */
+	pushWorktree: (repo: string, issueId: string) => typedError<null, CmdError>(__TAURI_INVOKE("push_worktree", { repo, issueId })),
 	/**
 	 *  Fast-forward the repo's local base branch (main/master) to origin — the
 	 *  "update master" action. Returns the base branch that was updated.
@@ -148,10 +158,16 @@ export const commands = {
 	 */
 	prDraft: (repo: string, issueId: string, fill: boolean) => typedError<PrDraft, CmdError>(__TAURI_INVOKE("pr_draft", { repo, issueId, fill })),
 	/**
-	 *  Push the worktree branch and open a pull request via the GitHub API. Returns
-	 *  the new PR's number and URL (the frontend opens it in the browser).
+	 *  Push the worktree branch and open a pull request via the GitHub API (optionally
+	 *  as a draft, requesting `reviewers` by login). Returns the new PR's number and
+	 *  URL (the frontend opens it in the browser).
 	 */
-	createPullRequest: (repo: string, issueId: string, title: string, body: string) => typedError<NewPr, CmdError>(__TAURI_INVOKE("create_pull_request", { repo, issueId, title, body })),
+	createPullRequest: (repo: string, issueId: string, title: string, body: string, draft: boolean, reviewers: string[]) => typedError<NewPr, CmdError>(__TAURI_INVOKE("create_pull_request", { repo, issueId, title, body, draft, reviewers })),
+	/**
+	 *  Candidate reviewers (repo collaborators) for the create-PR dialog's picker.
+	 *  Empty when GitHub isn't connected.
+	 */
+	prReviewers: (repo: string, issueId: string) => typedError<Reviewer[], CmdError>(__TAURI_INVOKE("pr_reviewers", { repo, issueId })),
 	/**
 	 *  Live PR status (number, URL, merge state) for each tracked worktree, from
 	 *  GitHub. Empty when `gh` isn't authenticated; worktrees without a PR are omitted.
@@ -805,6 +821,11 @@ export type Worktree = {
 	ahead: number,
 	/**  Commits this branch is behind its base (origin/<base>). */
 	behind: number,
+	/**
+	 *  Commits on this branch not yet pushed to its remote (what `git push` would
+	 *  upload); 0 when the remote is up to date.
+	 */
+	unpushed: number,
 	agent: AgentKind,
 	activity: Activity,
 	/**  Git branch checked out in the worktree (e.g. "feature/ak-165-…"). */

@@ -25,6 +25,7 @@ import { SidebarFooter } from "../../components/SidebarFooter";
 import {
   INVESTIGATE_AGENT_KEY,
   INVESTIGATE_COMMAND_KEY,
+  INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
   usePrefetchOnHover,
   useRefreshTriage,
@@ -137,6 +138,7 @@ export function TriageView() {
   const { data: investigateAgent } = useResolvedSetting(activeRepo, INVESTIGATE_AGENT_KEY);
   const { data: investigateCommand } = useResolvedSetting(activeRepo, INVESTIGATE_COMMAND_KEY);
   const { data: investigateModel } = useResolvedSetting(activeRepo, INVESTIGATE_MODEL_KEY);
+  const { data: investigateEffort } = useResolvedSetting(activeRepo, INVESTIGATE_EFFORT_KEY);
   // Resolve the chosen agent to its executable from Settings → Agents.
   const agentKind = (investigateAgent as AgentKind | null) ?? "Claude";
   const agentExec = settings?.agents.find((a) => a.key === agentKind)?.exec ?? "";
@@ -277,6 +279,7 @@ export function TriageView() {
                 command={investigateCommand ?? null}
                 agentExec={agentExec}
                 model={investigateModel ?? null}
+                effort={investigateEffort ?? null}
                 onExited={backToDiscussion}
               />
             )}

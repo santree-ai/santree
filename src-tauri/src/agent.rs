@@ -2,6 +2,12 @@
 //! (commit message, PR body). Mirrors the santree CLI's `runAgent` — same flags,
 //! same large-prompt temp-file fallback — so behaviour matches the CLI.
 
+/// The model these background helpers run on. They're short, cheap, high-volume
+/// text tasks (commit messages, PR bodies), so we pin them to the cheapest tier
+/// rather than the (pricier) model the interactive agent uses. An alias, so the
+/// CLI resolves it to the latest Haiku without us pinning a dated id here.
+pub const HELPER_MODEL: &str = "haiku";
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -36,7 +42,10 @@ fn prompt_arg(prompt: &str) -> (String, Option<PathBuf>) {
     // file is owner-only (0600) — never world-readable on a shared host.
     if write_private(&path, prompt).is_ok() {
         (
-            format!("Read {} and follow the instructions inside.", path.display()),
+            format!(
+                "Read {} and follow the instructions inside.",
+                path.display()
+            ),
             Some(path),
         )
     } else {
@@ -81,17 +90,26 @@ fn truncate_bytes(s: &str, max: usize) -> String {
 
 /// Run the configured `claude` binary in non-interactive print mode and capture
 /// its text output, run with `cwd` as the working directory. `allowed_tools`
-/// maps to `--allowedTools` (empty = none). Returns `None` when the binary isn't
-/// found, the call fails, or the output is empty.
+/// maps to `--allowedTools` (empty = none); `model` maps to `--model` (`None` =
+/// the CLI default). Returns `None` when the binary isn't found, the call fails,
+/// or the output is empty.
 ///
 /// Blocking — call from `spawn_blocking` (Claude can take 5–30s).
-pub fn run_print(cwd: &Path, prompt: &str, allowed_tools: &[&str]) -> Option<String> {
+pub fn run_print(
+    cwd: &Path,
+    prompt: &str,
+    allowed_tools: &[&str],
+    model: Option<&str>,
+) -> Option<String> {
     let bin = settings::discover_binary("claude")?;
 
     let (arg, temp) = prompt_arg(prompt);
 
     let mut cmd = Command::new(bin);
     cmd.current_dir(cwd).args(["--permission-mode", "auto"]);
+    if let Some(model) = model {
+        cmd.args(["--model", model]);
+    }
     if !allowed_tools.is_empty() {
         cmd.arg("--allowedTools").args(allowed_tools);
     }
@@ -117,7 +135,11 @@ fn run_with_timeout(
     mut cmd: Command,
     timeout: Duration,
 ) -> Option<(std::process::ExitStatus, Vec<u8>)> {
-    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
     let mut stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();

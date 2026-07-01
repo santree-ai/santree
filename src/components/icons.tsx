@@ -658,6 +658,26 @@ export function DownloadIcon({ size = 13, className }: IconProps) {
   );
 }
 
+/** An upload glyph (up arrow over a baseline) — push the branch to origin. */
+export function PushIcon({ size = 13, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.3}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M8 11V3M4.8 6.2 8 3l3.2 3.2M3 13h10" />
+    </svg>
+  );
+}
+
 /** A sidebar-collapse glyph — a framed panel with a left rail. */
 export function CollapseIcon({ size = 16, className }: IconProps) {
   return (

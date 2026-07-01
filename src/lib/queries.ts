@@ -150,6 +150,7 @@ export const queryKeys = {
     ["agent-session", repo, termKey, allowFresh] as const,
   commitDraft: (repo: string, id: string) => ["commit-draft", repo, id] as const,
   worktreePrs: (repo: string) => ["worktree-prs", repo] as const,
+  prReviewers: (repo: string, id: string) => ["pr-reviewers", repo, id] as const,
   reviews: (repo: string) => ["reviews", repo] as const,
   prDetail: (owner: string, name: string, number: number) =>
     ["pr-detail", owner, name, number] as const,
@@ -167,15 +168,22 @@ export const queryKeys = {
   linearOrgs: ["linear-orgs"] as const,
 };
 
-/** Setting keys for the Triage Investigation action (agent · skill · model). */
+/** Setting keys for the Triage Investigation action (agent · skill · model ·
+ *  effort). `effort` maps to the agent's `--effort` flag (Claude only). */
 export const INVESTIGATE_AGENT_KEY = "investigate_agent";
 export const INVESTIGATE_COMMAND_KEY = "investigate_command";
 export const INVESTIGATE_MODEL_KEY = "investigate_model";
+export const INVESTIGATE_EFFORT_KEY = "investigate_effort";
 
-/** Setting keys for the Issues "Work" action (agent · model) used by the launch
- *  tray. Unlike triage, this action is always on — there's no enable switch. */
+/** Setting keys for the Issues "Work" action (agent · model · effort) used by the
+ *  launch tray. Unlike triage, this action is always on — there's no enable switch. */
 export const WORK_AGENT_KEY = "work_agent";
 export const WORK_MODEL_KEY = "work_model";
+export const WORK_EFFORT_KEY = "work_effort";
+
+/** The agent effort levels (Claude's `--effort`), in ascending order. Empty means
+ *  "leave on the CLI default" — don't pass the flag. */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 /** When on, starting a worktree moves the Linear issue to its "started" (In
  *  Progress) state so Linear reflects what's actually being worked on. */
 export const WORK_MOVE_IN_PROGRESS_KEY = "work_move_in_progress";
@@ -195,6 +203,10 @@ export const TRIAGE_SNOOZED_KEY = "triage_show_snoozed";
  */
 export const DISPLAY_NAMES_KEY = "display_names";
 
+/** Whether to confirm before quitting the app. App-scoped; defaults to ON (a
+ *  missing value means confirm), so read it as `data !== "false"`. */
+export const CONFIRM_ON_QUIT_KEY = "confirm_on_quit";
+
 /**
  * Trees (worktree) preference keys (string-valued settings):
  * - run_setup: run `.santree/init.sh` automatically when creating a worktree.
@@ -206,6 +218,8 @@ export const DISPLAY_NAMES_KEY = "display_names";
 export const TREES_RUN_SETUP_KEY = "trees_run_setup";
 export const TREES_STAGE_ALL_KEY = "trees_stage_all";
 export const TREES_AUTO_PR_KEY = "trees_auto_pr";
+/** Push the branch to origin automatically after each commit (default off). */
+export const TREES_AUTO_PUSH_KEY = "trees_auto_push";
 export const TREES_BATCH_SETUP_KEY = "trees_batch_setup";
 /** Diff layout for the Trees diff panel: "split" | "unified" (default split). */
 export const TREES_DIFF_MODE_KEY = "trees_diff_mode";
@@ -589,6 +603,16 @@ export const usePullWorktree = (repo: string) =>
     success: (base) => `Pulled ${base}.`,
   });
 
+/** Push the worktree's branch to origin (sets upstream). The Trees "Push" button
+ *  and the post-commit auto-push both use this. Refreshes the worktree list (its
+ *  unpushed count) and PR badges. */
+export const usePushWorktree = (repo: string) =>
+  useActionMutation({
+    mutationFn: (issueId: string) => unwrap(commands.pushWorktree(repo, issueId)),
+    invalidate: () => [queryKeys.worktrees(repo), queryKeys.worktreePrs(repo)],
+    success: () => "Pushed to origin.",
+  });
+
 /** Fast-forward the repo's local base branch (main/master) to origin. */
 export const useUpdateBaseBranch = (repo: string) =>
   useActionMutation({
@@ -621,13 +645,27 @@ export const usePrDraft = (repo: string) =>
     meta: { silent: true },
   });
 
+/** Candidate reviewers (repo collaborators) for the create-PR dialog's picker.
+ *  Empty when GitHub isn't connected. Cached a few minutes — collaborators rarely
+ *  change within a session. */
+export const usePrReviewers = (repo: string, id: string) =>
+  useUnwrappedQuery(queryKeys.prReviewers(repo, id), () => commands.prReviewers(repo, id), {
+    enabled: !!repo && !!id,
+    staleTime: 5 * 60_000,
+  });
+
 /** Push the branch and open a PR via the GitHub API. The dialog handles success
  *  (opens the URL) and shows errors inline, so it's silent here. */
 export const useCreatePr = (repo: string) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (a: { id: string; title: string; body: string }) =>
-      unwrap(commands.createPullRequest(repo, a.id, a.title, a.body)),
+    mutationFn: (a: {
+      id: string;
+      title: string;
+      body: string;
+      draft: boolean;
+      reviewers: string[];
+    }) => unwrap(commands.createPullRequest(repo, a.id, a.title, a.body, a.draft, a.reviewers)),
     meta: { silent: true },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.worktrees(repo) });

@@ -1048,7 +1048,10 @@ pub async fn move_issue_to_started(db: &Db, repo: &str, issue_id: &str) -> Resul
     };
     // Never drag an issue backwards — only promote one that hasn't started yet.
     let kind = issue.state.and_then(|s| s.kind).unwrap_or_default();
-    if matches!(kind.as_str(), "started" | "completed" | "canceled" | "duplicate") {
+    if matches!(
+        kind.as_str(),
+        "started" | "completed" | "canceled" | "duplicate"
+    ) {
         return Ok(Some(()));
     }
     let mut states = issue.team.map(|t| t.states.nodes).unwrap_or_default();
@@ -1447,7 +1450,9 @@ impl ImageCache {
         self.order.push_back(url.clone());
         self.map.insert(url, uri);
         while self.bytes > MAX_CACHE_BYTES {
-            let Some(evicted) = self.order.pop_front() else { break };
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
             if let Some(v) = self.map.remove(&evicted) {
                 self.bytes -= v.len();
             }
@@ -1494,7 +1499,10 @@ async fn fetch_data_uri(client: &reqwest::Client, url: &str, token: &str) -> Res
         mime,
         base64::engine::general_purpose::STANDARD.encode(&data)
     );
-    IMAGE_CACHE.lock().await.insert(url.to_string(), uri.clone());
+    IMAGE_CACHE
+        .lock()
+        .await
+        .insert(url.to_string(), uri.clone());
     Ok(uri)
 }
 

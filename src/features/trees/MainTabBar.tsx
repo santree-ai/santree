@@ -5,7 +5,7 @@
  *  demand, and extra terminals opened via the trailing "+" tab are closable. All
  *  tabs share the same shape — a label with an optional trailing affordance (a
  *  close × or a status dot) in a fixed slot. */
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 
 import { CloseIcon, GlobeIcon, PlusIcon, TerminalIcon } from "../../components/icons";
 import { Dropdown, MENU_ITEM, underlineTabStyle } from "../../components/primitives";
@@ -38,6 +38,23 @@ export function MainTabBar() {
     if (tab) close(tab.key);
     closeTerminal(n);
   };
+
+  // Auto-close an extra terminal tab once its process exits (its session vanishes
+  // from `tabs`), so it disappears instead of lingering as a dead/gray tab you have
+  // to ✕ by hand. We only prune a terminal we've *seen* live, so the brief gap
+  // before a freshly-opened session registers doesn't drop it. This pane is keyed
+  // by worktree id, so `seen` is naturally scoped to the active worktree.
+  const seen = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    for (const n of extraTerminals) {
+      const alive = tabs.some((t) => t.refId === `tree:${activeId}:t${n}`);
+      if (alive) seen.current.add(n);
+      else if (seen.current.has(n)) {
+        seen.current.delete(n);
+        closeTerminal(n);
+      }
+    }
+  }, [tabs, extraTerminals, activeId, closeTerminal]);
 
   return (
     <div className={`flex ${CHROME.subBar} flex-none items-stretch border-b border-line bg-deep`}>

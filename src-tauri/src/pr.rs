@@ -28,14 +28,14 @@ pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
         .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
 
     let root_path = PathBuf::from(&root);
-    let (owner, name) = tokio::task::spawn_blocking(move || github::owner_repo(&root_path)).await??;
+    let (owner, name) =
+        tokio::task::spawn_blocking(move || github::owner_repo(&root_path)).await??;
 
-    let issue_ids = sqlx::query_scalar::<_, String>(
-        "SELECT issue_id FROM worktree_links WHERE repo_path = ?",
-    )
-    .bind(&root)
-    .fetch_all(db)
-    .await?;
+    let issue_ids =
+        sqlx::query_scalar::<_, String>("SELECT issue_id FROM worktree_links WHERE repo_path = ?")
+            .bind(&root)
+            .fetch_all(db)
+            .await?;
 
     // One title search per issue, concurrently. Each issue may have several PRs
     // (one `WorktreePr` row each, grouped by issue id on the frontend). Title search
@@ -135,7 +135,7 @@ async fn draft_body(c: &Coords, issue_id: &str, template: Option<String>) -> Opt
             },
         )
         .ok()?;
-        agent::run_print(&c.path, &prompt, &["Read"])
+        agent::run_print(&c.path, &prompt, &["Read"], Some(agent::HELPER_MODEL))
     })
     .await
     .ok()
@@ -150,6 +150,8 @@ pub async fn create(
     issue_id: &str,
     title: &str,
     body: &str,
+    draft: bool,
+    reviewers: &[String],
 ) -> Result<NewPr> {
     let c = worktree::coords(db, repo, issue_id).await?;
     let token = github::token()
@@ -164,7 +166,47 @@ pub async fn create(
     let branch = c.branch.clone();
     tokio::task::spawn_blocking(move || git::push(&path, &branch)).await??;
 
-    let (number, url) =
-        github::create_pr(&token, &owner, &name, title, &c.branch, &c.base_branch, body).await?;
+    let (number, url) = github::create_pr(
+        &token,
+        &owner,
+        &name,
+        title,
+        &c.branch,
+        &c.base_branch,
+        body,
+        draft,
+    )
+    .await?;
+
+    // Reviewers are requested after the PR exists. Best-effort: the PR is the
+    // primary artifact, so a reviewer-side failure must not fail the whole call
+    // (that would leave a created PR behind an error + a "PR already exists" retry).
+    // Log it and return the PR — the user can add reviewers on GitHub.
+    if let Err(e) = github::request_reviewers(&token, &owner, &name, number, reviewers, &[]).await {
+        log::warn!("PR #{number} created but requesting reviewers failed: {e}");
+    }
+
     Ok(NewPr { number, url })
+}
+
+/// Candidate reviewers (repo collaborators with push access) for the create-PR
+/// dialog's reviewer picker. Empty when `gh` isn't authenticated or the repo has
+/// no resolvable GitHub remote, so the dialog just omits the picker.
+pub async fn reviewers(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+) -> Result<Vec<santree_core::domain::Reviewer>> {
+    let Some(token) = github::token().await else {
+        return Ok(vec![]);
+    };
+    let c = worktree::coords(db, repo, issue_id).await?;
+    let path = c.path.clone();
+    let Ok((owner, name)) = tokio::task::spawn_blocking(move || github::owner_repo(&path)).await?
+    else {
+        return Ok(vec![]);
+    };
+    Ok(github::list_reviewers(&token, &owner, &name)
+        .await
+        .unwrap_or_default())
 }

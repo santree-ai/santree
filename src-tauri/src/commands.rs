@@ -14,12 +14,12 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 
 use santree_core::{
+    config,
     domain::{
         AgentDef, AgentKind, AgentSession, ChangedFile, ClaudeCommands, FileSource, LinearOrg,
-        LinearStatus, NewPr, Opener, PrDetail, PrDraft, Repo, ReviewInbox, ScriptInfo, Settings,
-        Task, TriageDetail, TriageSchedule, TriageTicket, Worktree, WorktreePr,
+        LinearStatus, NewPr, Opener, PrDetail, PrDraft, Repo, ReviewInbox, Reviewer, ScriptInfo,
+        Settings, Task, TriageDetail, TriageSchedule, TriageTicket, Worktree, WorktreePr,
     },
-    config,
 };
 
 use crate::commit_draft;
@@ -116,6 +116,14 @@ pub async fn remove_worktree(repo: String, issue_id: String, db: State<'_, Db>) 
 #[specta::specta]
 pub async fn pull_worktree(repo: String, issue_id: String, db: State<'_, Db>) -> CmdResult<String> {
     Ok(worktree::pull(&db, &repo, &issue_id).await?)
+}
+
+/// Push the worktree's branch to origin (the Trees "Push" button / post-commit
+/// auto-push). Network op — may fail (no auth, rejected non-fast-forward, …).
+#[tauri::command]
+#[specta::specta]
+pub async fn push_worktree(repo: String, issue_id: String, db: State<'_, Db>) -> CmdResult<()> {
+    Ok(worktree::push(&db, &repo, &issue_id).await?)
 }
 
 /// Run a worktree's setup script, streaming each output line over `on_event` for
@@ -275,7 +283,11 @@ pub async fn commit_worktree(
 /// Draft a commit message from the staged diff via a headless `claude -p` call.
 #[tauri::command]
 #[specta::specta]
-pub async fn commit_message(repo: String, issue_id: String, db: State<'_, Db>) -> CmdResult<String> {
+pub async fn commit_message(
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<String> {
     Ok(worktree::commit_message(&db, &repo, &issue_id).await?)
 }
 
@@ -380,8 +392,9 @@ pub async fn pr_detail(owner: String, name: String, number: u32) -> CmdResult<Pr
     Ok(reviews::detail(&owner, &name, number).await?)
 }
 
-/// Push the worktree branch and open a pull request via the GitHub API. Returns
-/// the new PR's number and URL (the frontend opens it in the browser).
+/// Push the worktree branch and open a pull request via the GitHub API (optionally
+/// as a draft, requesting `reviewers` by login). Returns the new PR's number and
+/// URL (the frontend opens it in the browser).
 #[tauri::command]
 #[specta::specta]
 pub async fn create_pull_request(
@@ -389,9 +402,23 @@ pub async fn create_pull_request(
     issue_id: String,
     title: String,
     body: String,
+    draft: bool,
+    reviewers: Vec<String>,
     db: State<'_, Db>,
 ) -> CmdResult<NewPr> {
-    Ok(pr::create(&db, &repo, &issue_id, &title, &body).await?)
+    Ok(pr::create(&db, &repo, &issue_id, &title, &body, draft, &reviewers).await?)
+}
+
+/// Candidate reviewers (repo collaborators) for the create-PR dialog's picker.
+/// Empty when GitHub isn't connected.
+#[tauri::command]
+#[specta::specta]
+pub async fn pr_reviewers(
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<Vec<Reviewer>> {
+    Ok(pr::reviewers(&db, &repo, &issue_id).await?)
 }
 
 /// The repo's `.santree/init.sh` setup script (for the Settings editor).
@@ -443,7 +470,9 @@ pub async fn open_in_app(path: String, opener: String) -> CmdResult<()> {
 #[tauri::command]
 #[specta::specta]
 pub async fn list_triage_tickets(repo: String, db: State<'_, Db>) -> CmdResult<Vec<TriageTicket>> {
-    Ok(linear::triage_tickets(&db, &repo).await?.unwrap_or_default())
+    Ok(linear::triage_tickets(&db, &repo)
+        .await?
+        .unwrap_or_default())
 }
 
 /// The full triage issue (description + comments) for the discussion pane.
@@ -464,7 +493,9 @@ pub async fn triage_detail(
 #[tauri::command]
 #[specta::specta]
 pub async fn triage_schedule(repo: String, db: State<'_, Db>) -> CmdResult<Vec<TriageSchedule>> {
-    Ok(linear::triage_schedule(&db, &repo).await?.unwrap_or_default())
+    Ok(linear::triage_schedule(&db, &repo)
+        .await?
+        .unwrap_or_default())
 }
 
 /// Move a triage issue to a different workflow state (the status picker). Moving

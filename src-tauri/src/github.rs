@@ -37,7 +37,9 @@ async fn get_json<T: DeserializeOwned>(
     query: &[(&str, &str)],
     token: &str,
 ) -> Result<T> {
-    let res = rest(gql::client().get(url).query(query), token).send().await?;
+    let res = rest(gql::client().get(url).query(query), token)
+        .send()
+        .await?;
     if !res.status().is_success() {
         bail!("GitHub returned {}", res.status());
     }
@@ -223,6 +225,9 @@ pub async fn prs_for_issue(
 }
 
 /// Open a pull request via the GitHub REST API. Returns `(number, url)`.
+// One flat call mapping straight to the GitHub "create a pull request" body —
+// grouping the fields into a struct would only add indirection here.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_pr(
     token: &str,
     owner: &str,
@@ -231,6 +236,7 @@ pub async fn create_pr(
     head: &str,
     base: &str,
     body: &str,
+    draft: bool,
 ) -> Result<(u32, String)> {
     let res = rest(
         gql::client().post(format!("https://api.github.com/repos/{owner}/{repo}/pulls")),
@@ -241,6 +247,7 @@ pub async fn create_pr(
         "head": head,
         "base": base,
         "body": body,
+        "draft": draft,
     }))
     .send()
     .await?;
@@ -267,6 +274,92 @@ pub async fn create_pr(
         })
         .unwrap_or_else(|| status.to_string());
     bail!("GitHub: {detail}");
+}
+
+/// Request reviewers (by login) and team reviewers (by slug) on an open PR. Best-
+/// effort relative to PR creation: the caller opens the PR first, then asks for
+/// reviewers, so a reviewer-side failure (e.g. someone lacking repo access) doesn't
+/// undo the PR. Errors carry GitHub's message for the toast.
+pub async fn request_reviewers(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    number: u32,
+    users: &[String],
+    teams: &[String],
+) -> Result<()> {
+    if users.is_empty() && teams.is_empty() {
+        return Ok(());
+    }
+    let res = rest(
+        gql::client().post(format!(
+            "https://api.github.com/repos/{owner}/{repo}/pulls/{number}/requested_reviewers"
+        )),
+        token,
+    )
+    .json(&serde_json::json!({ "reviewers": users, "team_reviewers": teams }))
+    .send()
+    .await?;
+    if res.status().is_success() {
+        return Ok(());
+    }
+    let status = res.status();
+    let detail = res
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| status.to_string());
+    bail!("GitHub: {detail}");
+}
+
+/// Candidate reviewers for a repo: its collaborators with push access (anyone who
+/// can be requested for review), as `User` reviewers with avatars. Excludes the
+/// signed-in user — you can't review your own PR. Empty (not an error) when the
+/// listing fails so the dialog degrades to a plain create.
+pub async fn list_reviewers(token: &str, owner: &str, repo: &str) -> Result<Vec<Reviewer>> {
+    #[derive(Deserialize)]
+    struct Collaborator {
+        login: String,
+        #[serde(default)]
+        avatar_url: String,
+        #[serde(rename = "type", default)]
+        kind: String,
+    }
+    let me = current_login(token).await;
+    let list: Vec<Collaborator> = get_json(
+        format!("https://api.github.com/repos/{owner}/{repo}/collaborators"),
+        &[("permission", "push"), ("per_page", "100")],
+        token,
+    )
+    .await?;
+    Ok(list
+        .into_iter()
+        // Drop bots and the signed-in user (GitHub rejects self-review requests).
+        .filter(|c| c.kind != "Bot" && me.as_deref() != Some(c.login.as_str()))
+        .map(|c| Reviewer {
+            kind: ReviewerKind::User,
+            name: c.login,
+            avatar_url: c.avatar_url,
+        })
+        .collect())
+}
+
+/// The signed-in GitHub login (the PR author), for excluding self from reviewer
+/// lists. `None` when the `/user` call fails.
+async fn current_login(token: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct GhUser {
+        login: String,
+    }
+    get_json::<GhUser>("https://api.github.com/user".to_string(), &[], token)
+        .await
+        .ok()
+        .map(|u| u.login)
 }
 
 // ── GraphQL (Reviews dashboard) ─────────────────────────────────────────────

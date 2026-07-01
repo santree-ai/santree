@@ -1,6 +1,6 @@
 /** The launch tray at the bottom of the Issues sidebar. */
 import type { AgentKind } from "../../bindings";
-import { ChevronSelect } from "../../components/primitives";
+import { ChevronSelect, ComboBox } from "../../components/primitives";
 import { agentAvailable } from "../../lib/format";
 import { useAgents } from "../../lib/queries";
 import { useIssues } from "./model";
@@ -71,19 +71,17 @@ export function LaunchPanel() {
       <div className="mb-[5px] font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">
         Model
       </div>
-      <ChevronSelect
+      {/* Editable: the suggestions are the known models, but you can type any alias
+          or id the CLI accepts (`opus`, `claude-fable-5`, …) — so it's never stuck
+          behind a stale list. Empty falls back to the configured default. */}
+      <ComboBox
         value={launchModel}
         onChange={setLaunchModel}
+        options={models}
+        placeholder={defaultModel}
         className={SELECT_CLASS}
         wrapperClassName="mb-[11px]"
-      >
-        {models.map((m) => (
-          <option key={m} value={m} className="bg-input">
-            {m}
-            {m === defaultModel ? "  ·  default" : ""}
-          </option>
-        ))}
-      </ChevronSelect>
+      />
 
       <button
         type="button"

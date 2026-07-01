@@ -37,7 +37,11 @@ impl Store {
     /// Upsert the value, or delete the row when it's blank.
     pub async fn set(&self, db: &Db, repo: &str, key: &str, value: &str) -> Result<()> {
         if value.trim().is_empty() {
-            let sql = format!("DELETE FROM {t} WHERE repo = ? AND {k} = ?", t = self.table, k = self.key);
+            let sql = format!(
+                "DELETE FROM {t} WHERE repo = ? AND {k} = ?",
+                t = self.table,
+                k = self.key
+            );
             sqlx::query(&sql).bind(repo).bind(key).execute(db).await?;
             return Ok(());
         }

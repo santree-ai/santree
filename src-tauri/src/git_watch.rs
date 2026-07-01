@@ -147,7 +147,10 @@ fn issue_id_for(root: &Path, path: &Path) -> Option<String> {
     // Only inspect components *inside* the worktree, so a repo dir that happens to
     // be named like a skip entry can't suppress real changes.
     for c in comps {
-        if c.as_os_str().to_str().is_some_and(|s| SKIP_DIRS.contains(&s)) {
+        if c.as_os_str()
+            .to_str()
+            .is_some_and(|s| SKIP_DIRS.contains(&s))
+        {
             return None;
         }
     }
