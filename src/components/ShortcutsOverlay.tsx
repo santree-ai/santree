@@ -9,6 +9,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useApp, useAppUi } from "../state/AppContext";
 import { SearchIcon } from "./icons";
+import { useModalA11y } from "./primitives";
 
 interface Shortcut {
   label: string;
@@ -83,28 +84,22 @@ export function ShortcutsOverlay() {
   const { shortcutsOpen, setShortcutsOpen } = useAppUi();
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Reset the filter and focus the search box each time it opens.
+  // Reset the filter each time it opens.
   useEffect(() => {
     if (!shortcutsOpen) return;
     setQuery("");
-    inputRef.current?.focus();
   }, [shortcutsOpen]);
 
-  // Esc closes — handled here (capture) so it doesn't also bubble to other Esc
-  // handlers (e.g. the Settings escape) while the overlay is up.
-  useEffect(() => {
-    if (!shortcutsOpen) return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        setShortcutsOpen(false);
-      }
-    }
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [shortcutsOpen, setShortcutsOpen]);
+  // Initial focus, Escape-to-close, Tab trap, and focus-restore on close —
+  // shared with ConfirmDialog/CreatePrDialog so modal a11y can't drift apart.
+  useModalA11y({
+    open: shortcutsOpen,
+    onClose: () => setShortcutsOpen(false),
+    dialogRef,
+    initialFocusRef: inputRef,
+  });
 
   const sections = useMemo(() => {
     const all = buildSections(triageEnabled);
@@ -126,7 +121,13 @@ export function ShortcutsOverlay() {
         onClick={() => setShortcutsOpen(false)}
         className="fixed inset-0 cursor-default bg-black/40 backdrop-blur-sm"
       />
-      <div className="relative flex max-h-[76vh] w-[760px] max-w-full flex-col overflow-hidden rounded-2xl border border-line-3 bg-popover shadow-[0_30px_80px_-20px_rgba(0,0,0,.85)]">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal
+        aria-label="Keyboard shortcuts"
+        className="relative flex max-h-[76vh] w-[760px] max-w-full flex-col overflow-hidden rounded-2xl border border-line-3 bg-popover shadow-[0_30px_80px_-20px_rgba(0,0,0,.85)]"
+      >
         <div className="flex items-center gap-2.5 px-6 pt-5 pb-3">
           <span className="font-mono text-[15px] text-muted-2">⌘</span>
           <h2 className="text-[15px] font-semibold text-fg-bright">Keyboard shortcuts</h2>

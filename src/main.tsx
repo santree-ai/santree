@@ -17,7 +17,14 @@ forwardConsoleToLog();
 
 // Backend data rarely changes within a session; cache it generously.
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { staleTime: 5 * 60 * 1000, refetchOnWindowFocus: false } },
+  defaultOptions: {
+    // Most queries wrap a Result-typed backend command (git/sqlite/gh) whose
+    // failures are deterministic, not transient — TanStack's default `retry: 3`
+    // (with backoff) just re-runs the same failing command 3x (~7s) before the
+    // error/empty state renders, stalling the UI against our snappy-UX bar.
+    // One retry still absorbs a genuine one-off network blip (Linear/GitHub).
+    queries: { staleTime: 5 * 60 * 1000, refetchOnWindowFocus: false, retry: 1 },
+  },
   // Surface every failed mutation (settings save, Linear connect, status change…)
   // as a red toast in one place, so individual call sites don't each repeat it.
   // A mutation can opt out with `meta: { silent: true }` when it owns its own UI.
@@ -49,16 +56,20 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <ErrorBoundary>
-      <QueryClientProvider client={queryClient}>
+    {/* QueryClientProvider wraps ErrorBoundary (not the reverse) so QuitGuard — which
+        only needs query context, not the app tree — survives a render error instead
+        of unmounting with everything else and losing its `quit-requested` listener,
+        the one working ⌘Q the ErrorScreen depends on. */}
+    <QueryClientProvider client={queryClient}>
+      <ErrorBoundary>
         <AppProvider>
           <TerminalsProvider>
             <RouterProvider router={router} />
           </TerminalsProvider>
         </AppProvider>
-        <QuitGuard />
         <ToastViewport />
-      </QueryClientProvider>
-    </ErrorBoundary>
+      </ErrorBoundary>
+      <QuitGuard />
+    </QueryClientProvider>
   </StrictMode>,
 );

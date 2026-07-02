@@ -2,6 +2,8 @@
 import { type CSSProperties, memo } from "react";
 
 import type { TriageTicket } from "../../bindings";
+import { RelativeTime, SlaCountdown } from "../../components/RelativeTime";
+import { formatSnoozeLabel } from "../../lib/relativeTime";
 import { alpha } from "../../theme/colors";
 import { PriorityPill } from "./PriorityPill";
 
@@ -21,7 +23,9 @@ export const QueueRow = memo(function QueueRow({
   onSelect: (id: string) => void;
   onHover: (id: string) => void;
 }) {
-  const snoozed = !!ticket.snoozedUntil;
+  const snoozeLabel =
+    ticket.snoozedUntilMs != null ? formatSnoozeLabel(ticket.snoozedUntilMs) : null;
+  const snoozed = snoozeLabel != null;
   const style: CSSProperties = active
     ? {
         border: `1px solid ${alpha(33)}`,
@@ -43,10 +47,13 @@ export const QueueRow = memo(function QueueRow({
         <PriorityPill priority={ticket.priority} muted={snoozed} />
         {snoozed ? (
           <span className="ml-auto flex flex-none items-center gap-1 font-mono text-[10px] text-muted-4">
-            💤 {ticket.snoozedUntil}
+            💤 {snoozeLabel}
           </span>
         ) : (
-          <span className="ml-auto flex-none font-mono text-[10px] text-muted-4">{ticket.age}</span>
+          <RelativeTime
+            ms={ticket.createdAtMs}
+            className="ml-auto flex-none font-mono text-[10px] text-muted-4"
+          />
         )}
       </div>
       <div
@@ -57,8 +64,11 @@ export const QueueRow = memo(function QueueRow({
       </div>
       <div className="mt-1.5 flex items-center gap-2 text-[10.5px] text-muted-4">
         <span className="min-w-0 truncate">{ticket.meta}</span>
-        {ticket.sla && !snoozed && (
-          <span className="ml-auto flex-none font-mono text-status-red/80">{ticket.sla}</span>
+        {!snoozed && (
+          <SlaCountdown
+            breachMs={ticket.slaBreachMs}
+            className="ml-auto flex-none font-mono text-status-red/80"
+          />
         )}
       </div>
     </button>

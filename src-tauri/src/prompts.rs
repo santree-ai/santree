@@ -97,6 +97,36 @@ mod tests {
     }
 
     #[test]
+    fn fill_commit_omits_prefix_for_base_worktree() {
+        // worktree::commit_message maps the BASE_ID sentinel to `None` (not the
+        // literal "__base__" string) before rendering, exactly like this — a
+        // truthy sentinel string would otherwise slip past `{% if ticket_id %}`
+        // and prefix every AI-drafted base-branch commit with `[__base__] `.
+        let out = render(
+            "fill-commit",
+            context! {
+                branch_name => "main",
+                ticket_id => Option::<&str>::None,
+                diff_content => "diff",
+            },
+        )
+        .unwrap();
+        // Same assertions as the no-ticket case above: the rendered examples and
+        // the `Ticket:` context line are both skipped by `{% if ticket_id %}`.
+        assert!(
+            out.contains("\nadd login throttling"),
+            "example has no prefix"
+        );
+        assert!(!out.contains("] add login throttling"), "no ticket prefix");
+        assert!(!out.contains("Ticket:"), "no ticket context line");
+        assert!(
+            !out.contains("__base__"),
+            "sentinel id must never leak into the prompt"
+        );
+        assert!(out.contains("diff"), "should still embed the diff");
+    }
+
+    #[test]
     fn work_plan_mode_withholds_implementation() {
         let out = render(
             "work",

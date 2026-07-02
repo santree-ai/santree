@@ -7,7 +7,16 @@
  * doesn't re-render on every pointer move — and the final width is committed to
  * state exactly once on pointer-up.
  */
-import { type PointerEvent as ReactPointerEvent, useRef } from "react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  useRef,
+} from "react";
+
+/** Amount ArrowLeft/ArrowRight nudge the width by — a keyboard-reachable
+ *  equivalent of a small drag, for users who can't grab the handle with a
+ *  pointer. */
+const KEY_STEP = 16;
 
 export interface EdgeResizeOptions {
   /** CSS custom property updated live during the drag (e.g. `--sidebar-width`). */
@@ -68,13 +77,41 @@ export function useEdgeResize(opts: EdgeResizeOptions) {
     setVar(clamped);
   };
 
-  const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+  // Shared by pointerup and pointercancel: commit the dragged width to state
+  // exactly once. Without a pointercancel handler, a system gesture stealing
+  // the pointer (or capture loss) leaves `dragging` stuck true and the CSS
+  // var showing a mid-drag width that React's committed state never catches
+  // up to, until the next collapse/expand snaps it back.
+  const commit = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (!dragging.current) return;
     dragging.current = false;
     e.currentTarget.releasePointerCapture(e.pointerId);
-    // Commit the dragged width to state exactly once.
     opts.onCommit(latest.current);
   };
 
-  return { onPointerDown, onPointerMove, onPointerUp };
+  // ArrowLeft/ArrowRight resize by KEY_STEP, clamped to [min, max] — same
+  // direction convention as the pointer drag (see `edge` above). Committed
+  // immediately (no separate "up" event for the keyboard).
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    let delta = 0;
+    if (e.key === "ArrowLeft") delta = -KEY_STEP;
+    else if (e.key === "ArrowRight") delta = KEY_STEP;
+    else return;
+    e.preventDefault();
+    const signed = opts.edge === "right" ? delta : -delta;
+    const next = Math.min(opts.max, Math.max(opts.min, opts.width + signed));
+    setVar(next);
+    opts.onCommit(next);
+  };
+
+  return {
+    onPointerDown,
+    onPointerMove,
+    onPointerUp: commit,
+    onPointerCancel: commit,
+    onKeyDown,
+    "aria-valuenow": Math.round(opts.width),
+    "aria-valuemin": opts.min,
+    "aria-valuemax": opts.max,
+  };
 }

@@ -6,7 +6,6 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "opener:allow-open-url",
     "core:window:allow-start-dragging",
     "core:window:allow-destroy",
     "dialog:allow-open",

@@ -51,6 +51,9 @@ React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
   result (e.g. `live.unwrap_or_default()`, `Ok(vec![])`) and the view renders its
   empty state. `crates/core/src/config.rs` holds the only *static* data — real
   canonical config, not samples: the agent catalog, stage metadata, default settings.
+  This also bans **hardcoded placeholder field values**: if a struct field isn't
+  wired to a real source, derive it or don't render it — never ship a constant
+  (e.g. a fixed `InProgress`/`Idle`) that the UI shows as live data.
 - **Domain types** live in `crates/core/src/domain.rs` and derive `specta::Type` —
   that's how their shapes reach `bindings.ts`. **Never hand-edit `bindings.ts`** (it's
   generated; run `pnpm gen:bindings` after changing a command or `Type`).
@@ -93,6 +96,22 @@ src/
   `LINEAR_BRAND`, `alpha()`, `statusColor`) or a CSS token. Tinted-text/on-accent have
   dedicated tokens (`--accent-text`, `--on-accent`) so they flip in light mode.
 
+## Security & validation invariants (load-bearing)
+
+- **Every IPC value that becomes a path, id, or git arg is untrusted.** Validate
+  before it touches the filesystem or a `git` argv: paths/ids through `git.rs`
+  `safe_path`/`safe_real_path` (single normal component; reject `..`, absolute,
+  symlink-escape); branch/ref names must not start with `-` (flag injection).
+  `issue_id`, `base`, session ids all cross this line — never `Path::join` or
+  shell them raw.
+- **Match hosts/URLs by parse at the sink, never by string prefix** —
+  `url.host_str() == Some("uploads.linear.app")`, not
+  `starts_with("https://uploads.linear.app")` (a prefix also matches
+  `…app.evil.com`). Same for any allowlist.
+- **App-owned secrets** (Linear tokens) belong in the OS keychain, not plaintext
+  SQLite. Don't add new plaintext-secret columns. (Distinct from `COMPLIANCE.md`,
+  which bars *agent-CLI* creds — this is our own OAuth.)
+
 ## Commands
 
 | | |
@@ -106,6 +125,8 @@ src/
 
 **Before finishing a change:** `cargo check`/`clippy`, `pnpm gen:bindings` (if commands
 changed), `npx tsc --noEmit`, `pnpm lint`, and the test suites — keep them all green.
+And for any new command taking a path/id/branch, confirm it's validated
+(`safe_path` / no-leading-dash) before it reaches fs or git.
 
 ## Gotchas
 
@@ -116,3 +137,10 @@ changed), `npx tsc --noEmit`, `pnpm lint`, and the test suites — keep them all
 - **Terminal compliance:** the PTY runs the real, unmodified CLI — no credential
   handling, no output-parsing-drives-input, no unattended loops. See `COMPLIANCE.md`;
   these constraints are load-bearing.
+- **External CLI contracts:** verify vendor flags against `--help`, don't guess.
+  Claude `--model` takes dash-form ids or aliases (`sonnet`/`opus`/`haiku`) —
+  dotted (`claude-sonnet-4.5`) is invalid and fails launch.
+- **Non-idempotent effects** (setup scripts, PTY spawn, worktree create) must stay
+  mounted with `display:none`, never `cond && <C/>` — remount re-fires them.
+- **A11y baseline:** new interactive elements need keyboard focus + an accessible
+  name; never `outline:none` without a `:focus-visible` ring.

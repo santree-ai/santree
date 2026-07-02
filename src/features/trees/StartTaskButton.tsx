@@ -6,12 +6,13 @@ import { useMemo } from "react";
 import { PlusIcon } from "../../components/icons";
 import { Dropdown, Spinner } from "../../components/primitives";
 import { useCreateWorktree, useTasks } from "../../lib/queries";
-import { useApp } from "../../state/AppContext";
+import { useApp, useAppUi } from "../../state/AppContext";
 import { NO_PROJECT, useTrees } from "./model";
 
 export function StartTaskButton() {
   const { repo, worktrees, startAgent } = useTrees();
   const { settings } = useApp();
+  const { addPendingLaunches, removePendingLaunch } = useAppUi();
   const { data: tasks = [] } = useTasks(repo);
   const { mutate: create, isPending } = useCreateWorktree(repo);
 
@@ -21,23 +22,32 @@ export function StartTaskButton() {
     return tasks.filter((t) => t.ready && !taken.has(t.id));
   }, [tasks, worktrees]);
 
-  const start = (t: { id: string; title: string; project: string }) =>
+  // Mirrors the Issues tab's `launch()` (see features/issues/model.tsx): register
+  // a pending launch *before* creating, so the Trees sidebar shows a "Creating
+  // workspace…" placeholder at once (TreesProvider already merges `pendingLaunches`
+  // into `worktrees`) rather than leaving the multi-second git worktree creation
+  // with no feedback beyond the trigger button's tiny spinner. A failed create
+  // drops the placeholder (the global mutation cache still surfaces the toast).
+  const start = (t: { id: string; title: string; project: string }) => {
+    const agent = settings?.defaultAgent ?? "Claude";
+    const project = t.project === NO_PROJECT ? null : t.project;
+    addPendingLaunches([{ id: t.id, title: t.title, project, agent }]);
     create(
       {
         issueId: t.id,
         title: t.title,
-        project: t.project === NO_PROJECT ? null : t.project,
+        project,
         base: null,
-        // Setup runs in the worktree terminal (so its logs stream), not here.
-        runSetup: false,
-        agent: settings?.defaultAgent ?? "Claude",
+        agent,
       },
       {
         // Open the new worktree and begin the task: run setup on the logs page
         // (per the preference), then launch the agent.
         onSuccess: (wt) => startAgent(wt.id),
+        onError: () => removePendingLaunch(t.id),
       },
     );
+  };
 
   return (
     <Dropdown

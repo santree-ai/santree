@@ -16,7 +16,9 @@ export function NavTabs() {
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const counts = useViewCounts(activeRepo);
-  const { visible: triageVisible } = useTriageQueue(activeRepo);
+  // Only fetch the triage queue (2 Linear GraphQL calls) when the tab is actually
+  // shown — useTriageTickets/useTriageSchedule already no-op on an empty repo.
+  const { visible: triageVisible } = useTriageQueue(triageEnabled ? activeRepo : "");
   const { tabs: terminals } = useTerminals();
 
   const activePath = pathname === "" ? "/" : pathname;

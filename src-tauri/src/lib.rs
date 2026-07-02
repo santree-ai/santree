@@ -26,6 +26,7 @@ mod text_store;
 mod worktree;
 
 use tauri::{Emitter, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_specta::{collect_commands, collect_events, Builder};
 
 /// The app's concrete `tauri-specta` builder type (Tauri's default `Wry` runtime).
@@ -126,7 +127,6 @@ fn export_bindings(builder: &AppBuilder) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// File + stdout logger. Rust (`log` facade) and forwarded JS-`console` logs land
 /// in ONE attachable file at the OS log dir — on macOS
 /// `~/Library/Logs/com.santree.desktop/santree.log` — each line carrying a local
@@ -211,22 +211,104 @@ fn merge_paths(login: &str, current: &str) -> String {
 /// pre-commit hook hits, which then breaks the hook's lint step). We merge the login
 /// shell's PATH into the process PATH exactly once, before anything spawns, so all
 /// children inherit it. No-op when launched from a terminal (login PATH already
-/// covers the current one). Unix only; the probe spawns one login shell (~tens of ms).
+/// covers the current one). Unix only.
+///
+/// The probe spawns a real login shell, which the doc used to describe as
+/// "~tens of ms" — true for a bare shell, but users with nvm/rbenv/direnv-laden rc
+/// files routinely see 500ms-2s, all blocking first-window paint. So this is
+/// cached across launches in [`path_cache_file`]: a hit applies the last-known PATH
+/// immediately (no shell spawn) and kicks off a background re-probe to keep the
+/// cache fresh for *next* launch; only a genuine first run (or a cleared temp dir)
+/// pays the full synchronous cost. Deliberately not the app's SQLite settings store
+/// — reading that needs a `Db`, which needs an `AppHandle` and sqlx's tokio runtime,
+/// neither of which exist yet this early, and starting the runtime here would spawn
+/// worker threads before we're done mutating `PATH` (see the safety note below).
 #[cfg(unix)]
 fn hydrate_path() {
-    let Some(login) = settings::login_shell_path() else {
+    let cache = path_cache_file();
+    if let Some(cached) = std::fs::read_to_string(&cache)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        apply_login_path(&cached);
+        // Refresh for next launch — the user's shell rc / installed tools can
+        // change between runs. Doesn't touch `PATH` itself, so it's safe to run
+        // concurrently with whatever threads Tauri spawns next. Its own `log::info!`
+        // reliably lands: this thread almost always outlives the log plugin's setup.
+        std::thread::spawn(move || refresh_path_cache(&cache));
         return;
-    };
+    }
+    // No cache yet: probe synchronously so PATH is correct for this run's own
+    // children, and seed the cache so the next launch skips the shell spawn.
+    if let Some(login) = settings::login_shell_path() {
+        apply_login_path(&login);
+        let _ = std::fs::write(&cache, &login);
+    }
+}
+
+/// Merge a resolved login-shell PATH into the process's current PATH and apply it.
+#[cfg(unix)]
+fn apply_login_path(login: &str) {
     let current = std::env::var("PATH").unwrap_or_default();
-    let merged = merge_paths(&login, &current);
+    let merged = merge_paths(login, &current);
     if !merged.is_empty() && merged != current {
-        // Safe: called as the first thing in `run()`, before we spawn any threads
-        // or the Tauri/async runtime, so there's no concurrent env access.
+        // Safe: `hydrate_path` calls this synchronously before spawning the
+        // background refresh thread or starting the Tauri/async runtime, so
+        // nothing else can be concurrently reading/writing the environment yet.
         std::env::set_var("PATH", &merged);
     }
 }
 
+/// Where the last resolved login-shell PATH is cached between launches. A flat
+/// file in the OS temp dir rather than app data: it needs no app identifier (so it
+/// can't drift out of sync with `migrate_legacy_data_dir`'s bundle-id handling) and
+/// no async runtime to read. Being in temp means the OS may clear it, which just
+/// costs one slow launch to reseed — acceptable for a cache.
+#[cfg(unix)]
+fn path_cache_file() -> std::path::PathBuf {
+    std::env::temp_dir().join("santree-login-path.cache")
+}
+
+/// Re-probe the login shell's PATH and rewrite the cache for the next launch.
+/// Runs on a background thread so it never delays startup.
+#[cfg(unix)]
+fn refresh_path_cache(cache: &std::path::Path) {
+    let started = std::time::Instant::now();
+    if let Some(login) = settings::login_shell_path() {
+        let _ = std::fs::write(cache, &login);
+        log::info!(
+            "refreshed cached login PATH in {}ms (applies on next launch)",
+            started.elapsed().as_millis()
+        );
+    }
+}
+
+/// Show a blocking native error dialog and exit — for setup failures (corrupt DB,
+/// unreadable data dir) that would otherwise panic with only a stderr message and
+/// no explanation for a packaged app's user. Never returns.
+fn fatal_startup_error(app: &tauri::App, message: &str) -> ! {
+    log::error!("fatal startup error: {message}");
+    app.dialog()
+        .message(message)
+        .title("santree can't start")
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
+    std::process::exit(1)
+}
+
 pub fn run() {
+    // Chain onto (not replace) the default hook, so stderr output is unchanged;
+    // this just also routes panics into the log file, where they're otherwise
+    // invisible in a packaged app. Installed first so it catches panics from
+    // anything below, including `hydrate_path`'s shell-out. Before the log
+    // plugin is attached (in `.setup()` below), `log::error!` is a silent
+    // no-op — the default hook's stderr line is the only output, same as today.
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!("panic: {info}");
+        default_panic_hook(info);
+    }));
+
     // Must run before any subprocess is spawned (git, hooks, setup scripts, agents).
     #[cfg(unix)]
     hydrate_path();
@@ -240,6 +322,17 @@ pub fn run() {
     export_bindings(&builder).expect("failed to export typescript bindings");
 
     tauri::Builder::default()
+        // Two independent instances (nothing stops this on Linux, unlike macOS's
+        // Dock/LaunchServices) would run separate PTY managers and fs watchers
+        // against the same santree.db, with `set_settings` last-writer-wins
+        // clobbering whichever instance saved second. Must be registered first —
+        // the plugin only "runs before other plugins can interfere" in that slot.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.unminimize();
+                let _ = main.set_focus();
+            }
+        }))
         .plugin(log_plugin())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -261,17 +354,27 @@ pub fn run() {
         })
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
-            // Wire specta-registered events into the app (none yet, but this is
-            // where they'd attach as the app grows).
+            // Wire specta-registered events (WorktreeChanged) into the app.
             builder.mount_events(app);
 
             // Open the app database and make the pool available to commands. The
             // bundle id was renamed (com.santree.app → com.santree.desktop); the
             // data dir is keyed by it, so carry the existing DB over first.
-            let data_dir = app.path().app_data_dir().expect("resolving app data dir");
+            let data_dir = match app.path().app_data_dir() {
+                Ok(d) => d,
+                Err(e) => fatal_startup_error(app, &format!("Couldn't resolve the app data directory: {e:#}")),
+            };
             migrate_legacy_data_dir(&data_dir);
-            let db = tauri::async_runtime::block_on(db::init(data_dir.join("santree.db")))
-                .expect("initializing database");
+            let db = match tauri::async_runtime::block_on(db::init(data_dir.join("santree.db"))) {
+                Ok(db) => db,
+                Err(e) => fatal_startup_error(
+                    app,
+                    &format!(
+                        "Couldn't open the database: {e:#}\n\nIf santree.db is corrupted, quit and move or delete it from:\n{}",
+                        data_dir.display()
+                    ),
+                ),
+            };
             app.manage(db);
 
             // Owns all live terminal sessions; commands read it from state.
@@ -382,7 +485,12 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tau
                 &quit,
             ],
         )?;
-        let view = Submenu::with_items(app, "View", true, &[&PredefinedMenuItem::fullscreen(app, None)?])?;
+        let view = Submenu::with_items(
+            app,
+            "View",
+            true,
+            &[&PredefinedMenuItem::fullscreen(app, None)?],
+        )?;
         Menu::with_items(app, &[&app_menu, &edit, &view, &window])
     }
 

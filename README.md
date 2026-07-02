@@ -2,28 +2,28 @@
 
 A cross-platform (macOS + Linux) desktop app for **managing AI coding agents** across a repo's tickets, built on **Tauri 2 + React 19 + TanStack** with a **fully-typed Rust ↔ TypeScript bridge**.
 
-**Triage, Issues, Settings, and the Terminal are real** — backed by Linear (GraphQL + OAuth), a SQLite store, and real kernel PTYs. **Trees and Reviews are still mocked** (they need an agent-orchestration backend that doesn't exist yet, so they show a SAMPLE DATA badge). Every screen uses the same **live-or-mock seam**: a live backend returns `Result<Option<T>>` and the command falls back to `santree-core::mock` when nothing is connected — so the UI is never empty and the frontend never knows which it got.
+**Every view is real** — Triage, Issues, Trees, Reviews, Settings, and the Terminal are all backed by live data: Linear (GraphQL + OAuth), a SQLite store, real `git`/GitHub, and real kernel PTYs. **There is no mock/sample data anywhere.** When a backend isn't connected (no Linear org, no `gh` auth, no repo path) commands return real-but-empty results and the view shows its empty state — the frontend never fabricates data.
 
 ```
-React view → TanStack Query hook → typed bindings.ts → #[tauri::command]
-          → live backend (Linear / SQLite / PTY)  ─┐
-          → santree-core::mock  (fallback)          ├→ typed data → UI
+React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
+          → #[tauri::command] → live backend (Linear / SQLite / git / GitHub / PTY)
+            └─ when not connected: real-but-empty result → view renders its empty state
 ```
 
 ### The five views
 
-- **Issues** — a dependency graph of tickets (React Flow + dagre, project bands, blocked-by edges), a grouped ticket list with a Ready filter, a launch tray (pick agent + model, launch in parallel), and a single right panel (issue detail + dependencies). Live from the repo's Linear org; launching simulates agent sessions with a progress timer.
+- **Issues** — a dependency graph of tickets (React Flow + dagre, project bands, blocked-by edges), a grouped ticket list with a Ready filter, a launch tray (pick agent + model, launch in parallel), and a single right panel (issue detail + dependencies). Live from the repo's Linear org.
 - **Triage** — the team's untriaged Linear inbox (grouped by team, snoozed sunk to the bottom), a status picker that optimistically promotes an issue, and **Investigate** — opens a real terminal in the repo running the configured agent/skill. Live from Linear.
 - **Settings** — integrations (Linear connect / GitHub toggle), per-agent executable + model config, the Triage Investigation action, and appearance (display-name style). App-global defaults with per-repo overrides; **persisted to SQLite**.
-- **Trees** _(mocked)_ — agent worktrees with a file browser, terminal, and diff/commit panel.
-- **Reviews** _(mocked)_ — open pull requests from agent worktrees.
+- **Trees** — real agent worktrees (created via `git worktree`) with a file browser, embedded terminal, and diff/commit panel.
+- **Reviews** — real open pull requests for the repo, fetched via the GitHub API/`gh` auth.
 
 ---
 
 ## Prerequisites
 
-- **Rust** (stable) — install via [rustup](https://rustup.rs). The toolchain is pinned in [`rust-toolchain.toml`](./rust-toolchain.toml) (stable + `rustfmt` + `clippy`), so rustup will fetch the right one automatically.
-- **Node 20+** and **pnpm** (`npm i -g pnpm`).
+- **Rust** — install via [rustup](https://rustup.rs). The exact toolchain version is pinned in [`rust-toolchain.toml`](./rust-toolchain.toml) (with `rustfmt` + `clippy`), so rustup will fetch and use the right one automatically, both locally and in CI.
+- **Node 22+** and **pnpm** (`npm i -g pnpm`).
 
 ### Linux system dependencies (the #1 DX papercut)
 
@@ -90,8 +90,8 @@ The frontend never calls `invoke` directly and never hard-codes data. Follow the
 1. **A view** (e.g. `src/features/issues/IssuesView.tsx`) consumes a typed query hook.
 2. **`src/lib/queries.ts`** — TanStack Query hooks (`useTasks`, `useTriageTickets`, …) wrapping the generated client. Caching, loading states, and **optimistic mutations** live here (`useOptimisticMutation`: patch the cache, roll back on error, invalidate on settle).
 3. **`src/bindings.ts`** — **generated** by `tauri-specta`. The typed `commands.*` and every domain type, mirroring Rust exactly. _Never hand-edit this file._
-4. **`src-tauri/src/commands.rs`** — thin `#[tauri::command]` wrappers that forward to a live backend and **fall back to the mock**: `linear::… (db, repo).await?.unwrap_or_else(mock::…)`.
-5. **Live backends** — `src-tauri/src/{linear,db,repo,settings,terminal}.rs` (Linear GraphQL + OAuth + token store, the sqlx pool, repo registry, settings, PTY). **`crates/core/src/mock.rs`** is the fallback and the **only** module that knows data is fake. Domain types live in `crates/core/src/domain.rs` and derive `specta::Type`, which is how their shapes reach `bindings.ts`.
+4. **`src-tauri/src/commands.rs`** — thin `#[tauri::command]` wrappers that forward to a live backend, e.g. `linear::…(db, repo).await?.unwrap_or_default()`. When a backend isn't connected the command returns a real-but-empty result (`Ok(vec![])`, `None`, …) — never sample data.
+5. **Live backends** — `src-tauri/src/{linear,db,repo,settings,terminal,github,worktree,git,reviews}.rs` (Linear GraphQL + OAuth + token store, the sqlx pool, repo registry, settings, PTY, GitHub API, git worktree management, PR reviews). Domain types live in `crates/core/src/domain.rs` and derive `specta::Type`, which is how their shapes reach `bindings.ts`. `crates/core/src/config.rs` holds the only static data in the app — real canonical config (agent catalog, stage metadata, default settings), not samples.
 
 Presentation (colors, labels) is the frontend's job: `src/theme/colors.ts` maps the plain Rust enums (`TaskStatus`, `Tone`, …) to concrete colors. The accent color is a runtime CSS variable so the Appearance setting re-themes everything.
 
@@ -105,8 +105,6 @@ Failed mutations surface as red **toasts** automatically (wired once in `main.ts
 | ----------------------------- | --------------------------------------------------------------------- |
 | `.tsx` / `.css` in `src/`     | **Vite HMR** — updates instantly, no restart, state preserved.        |
 | `src-tauri/**` or `crates/**` | **`tauri dev` rebuilds** the Rust binary and relaunches (~tens of secs).|
-
-To see the Rust path live: change a value in `crates/core/src/mock.rs` (e.g. a ticket title or worktree diff), save, wait for the rebuild — the new data appears.
 
 ---
 
@@ -129,9 +127,9 @@ cargo test        # Rust: core logic + bindings export
 pnpm test         # Frontend: Vitest
 ```
 
-- **`crates/core`** — mock-data invariants (every `blockedBy` points at a real task, every worktree maps to a task, every worktree has a terminal).
+- **`crates/core`** — unit tests for Linear→domain mapping (`linear.rs`) and the dagre-free graph layout helpers (`layout.rs`).
 - **`src-tauri`** — `export_bindings_succeeds` guards that the command set always produces valid bindings.
-- **Frontend (Vitest)** — `theme/colors` and `lib/format` presentation helpers, plus `ReviewsView` rendered against mocked commands (asserts only worktrees with a PR appear).
+- **Frontend (Vitest)** — presentation helpers (`theme/colors`, `lib/format`), component behavior (`Markdown`, `ErrorBoundary`, `TerminalView`, `TaskNotes`, `ReviewsSidebarView`), and pure logic (`buildChangeTree`, Trees `model`, terminal agent seeding).
 
 ---
 
@@ -187,12 +185,12 @@ with a fake backend/renderer.
 
 ```
 .
-├── crates/core/               # domain + mock data — NO Tauri dep, unit-testable
-│   └── src/{domain,mock,linear,layout}.rs  # types · fallback data · Linear→domain mapping
+├── crates/core/               # pure domain + static config — NO Tauri dep, unit-testable
+│   └── src/{domain,config,linear,layout}.rs  # types · canonical config/defaults · Linear→domain mapping · dagre-free graph helpers
 ├── crates/pty/                # PtyManager: real process behind a real PTY (Tauri-agnostic)
 ├── src-tauri/                 # THIN Tauri adapter (wiring + commands + live backends)
 │   ├── src/{lib,commands}.rs  #   builder + registration + #[tauri::command] wrappers
-│   ├── src/{linear,db,repo,settings,terminal}.rs  # live backends (GraphQL/OAuth, sqlx, PTY)
+│   ├── src/{linear,db,repo,settings,terminal,github,worktree,git,reviews}.rs  # live backends (GraphQL/OAuth, sqlx, PTY, GitHub API, worktrees, PR reviews)
 │   └── migrations/            #   SQLite schema, applied on startup
 └── src/                       # React frontend (SPA)
     ├── main.tsx               #   QueryClient (+ global mutation→toast) · providers · Router

@@ -16,7 +16,19 @@ import type { AgentSession } from "../../bindings";
 
 /** Single-quote a string for a POSIX shell command line. */
 export function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
+  // The result is typed into a live interactive shell, not just parsed by it —
+  // quoting alone stops the shell parser but not the terminal's line editor, which
+  // interprets raw C0 bytes (e.g. \x15 kill-line, \r accept-line) as they arrive.
+  // Strip them so untrusted content (ticket titles/bodies) can't break out of the
+  // quoted string mid-paste; a literal newline is folded to a space for the same
+  // reason (one PTY write is meant to stay one typed line).
+  const sanitized = Array.from(s.replace(/\n/g, " "))
+    .filter((c) => {
+      const code = c.codePointAt(0) ?? 0;
+      return !(code <= 0x1f || code === 0x7f);
+    })
+    .join("");
+  return `'${sanitized.replace(/'/g, `'\\''`)}'`;
 }
 
 export function agentSessionSeed(

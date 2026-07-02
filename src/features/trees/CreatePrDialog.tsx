@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Reviewer } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { CloseIcon } from "../../components/icons";
-import { Spinner } from "../../components/primitives";
+import { Spinner, useModalA11y } from "../../components/primitives";
 import { useCreatePr, usePrDraft, usePrReviewers } from "../../lib/queries";
 import { toast } from "../../state/toast";
 import { alpha } from "../../theme/colors";
@@ -33,6 +33,18 @@ export function CreatePrDialog() {
   const { mutate: draft, isPending: drafting } = usePrDraft(repo);
   const { mutate: create, isPending: creating } = useCreatePr(repo);
   const { data: candidates = [] } = usePrReviewers(repo, id);
+
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  // Same focus-trap/Escape/restore-focus pattern as ConfirmDialog — shared via
+  // useModalA11y so the two dialogs' modal a11y can't drift apart.
+  useModalA11y({
+    open: true,
+    busy: creating,
+    onClose: closePrDialog,
+    dialogRef,
+    initialFocusRef: cancelRef,
+  });
 
   // Prefill from a non-AI draft (template + first-commit title) on open.
   useEffect(() => {
@@ -92,6 +104,7 @@ export function CreatePrDialog() {
         className="absolute inset-0 cursor-default bg-black/50"
       />
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal
         aria-label="Create pull request"
@@ -176,7 +189,7 @@ export function CreatePrDialog() {
 
         {error && (
           <div
-            className="mt-2.5 rounded-md px-2.5 py-1.5 text-[11px] leading-[1.45]"
+            className="selectable mt-2.5 rounded-md px-2.5 py-1.5 text-[11px] leading-[1.45]"
             style={{
               color: "var(--color-status-red)",
               background: alpha(10, "var(--color-status-red)"),
@@ -200,6 +213,7 @@ export function CreatePrDialog() {
           </label>
           <div className="flex-1" />
           <button
+            ref={cancelRef}
             type="button"
             onClick={closePrDialog}
             disabled={creating}

@@ -11,11 +11,13 @@ import {
   INVESTIGATE_COMMAND_KEY,
   INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
+  INVESTIGATE_REMOTE_CONTROL_KEY,
   TRIAGE_GOOD_CITIZEN_KEY,
   TRIAGE_SNOOZED_KEY,
   useAgents,
   useBoolSetting,
   useClaudeCommands,
+  useResolvedSetting,
   useSetSetting,
   useSetting,
   WORK_AGENT_KEY,
@@ -66,8 +68,39 @@ export function TriageActionSection({ repo }: { repo?: string }) {
         title="Triage"
         subtitle="How the Triage investigation runs — pick the agent, skill, and model."
       />
-      {repo ? <ActionConfig descriptor={INVESTIGATE} repo={repo} /> : <AppTriagePanel />}
+      {repo ? (
+        <div className="space-y-3.5">
+          <ActionConfig descriptor={INVESTIGATE} repo={repo} />
+          <RemoteControlCard forRepo={repo} />
+        </div>
+      ) : (
+        <AppTriagePanel />
+      )}
     </>
+  );
+}
+
+/** Whether Investigate passes Claude's `--remote-control` flag (see
+ *  {@link INVESTIGATE_REMOTE_CONTROL_KEY}). App defaults or a per-repo override,
+ *  same scope convention as {@link WorkActionConfig}'s sibling cards. */
+function RemoteControlCard({ forRepo }: { forRepo?: string }) {
+  const scope = forRepo ? `repo:${forRepo}` : "app";
+  const appOn = useSetting("app", INVESTIGATE_REMOTE_CONTROL_KEY).data !== "false";
+  const resolvedOn =
+    useResolvedSetting(forRepo ?? "", INVESTIGATE_REMOTE_CONTROL_KEY).data !== "false";
+  const on = forRepo ? resolvedOn : appOn;
+  const { mutate: setSetting } = useSetSetting();
+  return (
+    <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
+      <ToggleRow
+        label="Enable Remote Control"
+        hint="Names the Investigate session for Claude's Remote Control web (--remote-control). Turn off if your claude build predates the flag and Investigate exits right away."
+        on={on}
+        onChange={(next) =>
+          setSetting({ scope, key: INVESTIGATE_REMOTE_CONTROL_KEY, value: next ? null : "false" })
+        }
+      />
+    </div>
   );
 }
 
@@ -87,8 +120,8 @@ export function WorkActionConfig({ repo }: { repo?: string }) {
  */
 function AppTriagePanel() {
   const { settings, toggleIntegration } = useApp();
-  const linear = !!settings?.integrations.linear;
-  const enabled = !!settings?.integrations.triage;
+  const linear = !!settings?.integrations?.linear;
+  const enabled = !!settings?.integrations?.triage;
 
   const goodCitizen = useBoolSetting("app", TRIAGE_GOOD_CITIZEN_KEY).value;
   const showSnoozed = useBoolSetting("app", TRIAGE_SNOOZED_KEY).value;
@@ -139,7 +172,10 @@ function AppTriagePanel() {
           <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
             Investigation
           </div>
-          <ActionConfig descriptor={INVESTIGATE} />
+          <div className="space-y-3.5">
+            <ActionConfig descriptor={INVESTIGATE} />
+            <RemoteControlCard />
+          </div>
         </div>
       </div>
     </div>
@@ -290,11 +326,13 @@ function EffortSelect({
   onChange,
   inherits,
   defaultLabel,
+  "aria-labelledby": ariaLabelledBy,
 }: {
   value: string;
   onChange: (v: string | null) => void;
   inherits: boolean;
   defaultLabel: string;
+  "aria-labelledby"?: string;
 }) {
   const options = EFFORT_LEVELS.map((e) => (
     <option key={e} value={e} className="bg-input">
@@ -303,13 +341,23 @@ function EffortSelect({
   ));
   if (inherits) {
     return (
-      <OverrideSelect value={value} onChange={onChange} defaultLabel={defaultLabel}>
+      <OverrideSelect
+        value={value}
+        onChange={onChange}
+        defaultLabel={defaultLabel}
+        aria-labelledby={ariaLabelledBy}
+      >
         {options}
       </OverrideSelect>
     );
   }
   return (
-    <ChevronSelect value={value} onChange={(v) => onChange(v || null)} className={SELECT_CLASS}>
+    <ChevronSelect
+      value={value}
+      onChange={(v) => onChange(v || null)}
+      className={SELECT_CLASS}
+      aria-labelledby={ariaLabelledBy}
+    >
       <option value="">CLI default</option>
       {options}
     </ChevronSelect>
@@ -325,28 +373,40 @@ function AgentSelect({
   onChange,
   inherits,
   defaultLabel,
+  "aria-labelledby": ariaLabelledBy,
 }: {
-  agents: { key: AgentKind; label: string }[];
+  agents: { key: AgentKind; label: string; available: boolean }[];
   value: string;
   onChange: (v: string | null) => void;
   inherits: boolean;
   defaultLabel: string;
+  "aria-labelledby"?: string;
 }) {
   const options = agents.map((a) => (
-    <option key={a.key} value={a.key} disabled={!agentAvailable(a.key)} className="bg-input">
+    <option key={a.key} value={a.key} disabled={!agentAvailable(a)} className="bg-input">
       {a.label}
-      {agentAvailable(a.key) ? "" : " — WIP"}
+      {agentAvailable(a) ? "" : " — WIP"}
     </option>
   ));
   if (inherits) {
     return (
-      <OverrideSelect value={value} onChange={onChange} defaultLabel={defaultLabel}>
+      <OverrideSelect
+        value={value}
+        onChange={onChange}
+        defaultLabel={defaultLabel}
+        aria-labelledby={ariaLabelledBy}
+      >
         {options}
       </OverrideSelect>
     );
   }
   return (
-    <ChevronSelect value={value} onChange={onChange} className={SELECT_CLASS}>
+    <ChevronSelect
+      value={value}
+      onChange={onChange}
+      className={SELECT_CLASS}
+      aria-labelledby={ariaLabelledBy}
+    >
       {options}
     </ChevronSelect>
   );
@@ -362,12 +422,14 @@ function ModelSelect({
   onChange,
   inherits,
   defaultLabel,
+  "aria-labelledby": ariaLabelledBy,
 }: {
   models: string[];
   value: string;
   onChange: (v: string | null) => void;
   inherits: boolean;
   defaultLabel: string;
+  "aria-labelledby"?: string;
 }) {
   return (
     <ComboBox
@@ -376,6 +438,7 @@ function ModelSelect({
       options={models}
       placeholder={inherits ? defaultLabel : "Agent default"}
       className={SELECT_CLASS}
+      aria-labelledby={ariaLabelledBy}
     />
   );
 }

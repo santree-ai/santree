@@ -19,7 +19,10 @@ pub struct CmdError(pub String);
 
 impl<E: std::fmt::Display> From<E> for CmdError {
     fn from(e: E) -> Self {
-        Self(e.to_string())
+        // `{:#}` (alternate Display) renders an anyhow chain as "outer: inner:
+        // root" instead of just the outermost `.context(...)` — plain `to_string()`
+        // silently drops the actual cause (DNS/timeout/TLS, etc.) from every toast.
+        Self(format!("{e:#}"))
     }
 }
 

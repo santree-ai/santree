@@ -7,6 +7,8 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 
+import { WarningIcon } from "./icons";
+
 const REPORT_URL = "https://github.com/santree-ai/santree/issues/new";
 
 export function ErrorScreen({ error, onRetry }: { error?: Error; onRetry?: () => void }) {
@@ -37,21 +39,7 @@ export function ErrorScreen({ error, onRetry }: { error?: Error; onRetry?: () =>
     <div className="flex h-full w-full flex-col items-center justify-center bg-surface px-6 text-center">
       <div className="flex max-w-110 flex-col items-center gap-4">
         <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-line-2 bg-panel">
-          <svg
-            width="26"
-            height="26"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="var(--color-status-amber)"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden
-          >
-            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-            <line x1="12" y1="9" x2="12" y2="13" />
-            <line x1="12" y1="17" x2="12.01" y2="17" />
-          </svg>
+          <WarningIcon size={26} className="text-status-amber" />
         </div>
 
         <div>

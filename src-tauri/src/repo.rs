@@ -17,10 +17,14 @@ use crate::git;
 /// Every registered repository, in insertion order. The displayed tracker
 /// reflects the Linear org the repo actually resolves to (its explicit link, or
 /// the only connected org) — so a GitHub-hosted repo whose issues live in Linear
-/// reads "Linear · <workspace>", not "GitHub Issues".
+/// reads "Linear · <workspace>", not "GitHub Issues". `agents` is a live count of
+/// worktree links (one per issue with an active agent worktree) rather than a
+/// stored column, so it always reflects reality.
 pub async fn list(db: &Db) -> Result<Vec<Repo>> {
-    let rows = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>)>(
-        "SELECT name, tracker, agents, path, linear_org_slug FROM repos ORDER BY rowid",
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, i64)>(
+        "SELECT r.name, r.tracker, r.path, r.linear_org_slug,
+                (SELECT COUNT(*) FROM worktree_links wl WHERE wl.repo_path = r.path)
+         FROM repos r ORDER BY r.rowid",
     )
     .fetch_all(db)
     .await?;
@@ -32,7 +36,7 @@ pub async fn list(db: &Db) -> Result<Vec<Repo>> {
 
     Ok(rows
         .into_iter()
-        .map(|(name, tracker, agents, path, linked_slug)| {
+        .map(|(name, tracker, path, linked_slug, agents)| {
             // The org the repo resolves to: explicit link, else the only/first org.
             let org_name = linked_slug
                 .and_then(|slug| orgs.iter().find(|(s, _)| *s == slug))
@@ -95,7 +99,7 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
     }
 
     sqlx::query(
-        "INSERT INTO repos (name, tracker, agents, path) VALUES (?, ?, 0, ?)
+        "INSERT INTO repos (name, tracker, path) VALUES (?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET tracker = excluded.tracker, path = excluded.path",
     )
     .bind(&name)
@@ -104,11 +108,19 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
     .execute(db)
     .await?;
 
+    // Usually 0 for a fresh repo, but re-adding an already-registered one
+    // (the call is idempotent) can have existing worktree links.
+    let (agents,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM worktree_links WHERE repo_path = ?")
+            .bind(&toplevel)
+            .fetch_one(db)
+            .await?;
+
     log::info!("registered repository {name} at {toplevel}");
     Ok(Repo {
         name,
         tracker,
-        agents: 0,
+        agents: agents as u32,
         path: Some(toplevel),
     })
 }

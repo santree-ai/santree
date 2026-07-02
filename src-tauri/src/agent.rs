@@ -88,11 +88,40 @@ fn truncate_bytes(s: &str, max: usize) -> String {
     s[..end].to_string()
 }
 
+/// Build the argument list for a headless `claude -p` invocation. Pure and
+/// separated out from `run_print` so the permission/tool flags are testable
+/// without spawning a process.
+fn build_args(allowed_tools: &[&str], model: Option<&str>, arg: &str) -> Vec<String> {
+    let mut args = vec!["--permission-mode".to_string(), "default".to_string()];
+    // `default` (not `auto`) — in `-p`/print mode `default` denies any tool use
+    // that isn't explicitly allowlisted below, instead of auto-approving it. These
+    // prompts embed diff/PR content that may be attacker-influenceable (a malicious
+    // diff hunk, PR text), so nothing here should be able to trigger tool use the
+    // caller didn't explicitly ask for. `--disallowedTools` is belt-and-braces on
+    // top of that: even if a future call site's `--allowedTools` is loosened, these
+    // three stay denied for headless helpers.
+    args.push("--disallowedTools".to_string());
+    args.extend(["Bash", "Write", "Edit"].map(str::to_string));
+    if let Some(model) = model {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    if !allowed_tools.is_empty() {
+        args.push("--allowedTools".to_string());
+        args.extend(allowed_tools.iter().map(|s| s.to_string()));
+    }
+    args.push("-p".to_string());
+    args.extend(["--output-format", "text", "--", arg].map(str::to_string));
+    args
+}
+
 /// Run the configured `claude` binary in non-interactive print mode and capture
 /// its text output, run with `cwd` as the working directory. `allowed_tools`
 /// maps to `--allowedTools` (empty = none); `model` maps to `--model` (`None` =
 /// the CLI default). Returns `None` when the binary isn't found, the call fails,
-/// or the output is empty.
+/// or the output is empty — every such failure is also `log::warn!`'d (with
+/// stderr, when captured) so a signed-out CLI or a rejected flag/model shows up
+/// in the app's log file instead of silently falling back to defaults.
 ///
 /// Blocking — call from `spawn_blocking` (Claude can take 5–30s).
 pub fn run_print(
@@ -106,44 +135,58 @@ pub fn run_print(
     let (arg, temp) = prompt_arg(prompt);
 
     let mut cmd = Command::new(bin);
-    cmd.current_dir(cwd).args(["--permission-mode", "auto"]);
-    if let Some(model) = model {
-        cmd.args(["--model", model]);
-    }
-    if !allowed_tools.is_empty() {
-        cmd.arg("--allowedTools").args(allowed_tools);
-    }
-    cmd.args(["-p", "--output-format", "text", "--", &arg]);
+    cmd.current_dir(cwd)
+        .args(build_args(allowed_tools, model, &arg));
 
     let out = run_with_timeout(cmd, AGENT_TIMEOUT);
     // Clean up the large-prompt temp file regardless of how the call went.
     if let Some(path) = temp {
         let _ = std::fs::remove_file(path);
     }
-    let (status, stdout) = out?;
-    status
-        .success()
-        .then(|| String::from_utf8_lossy(&stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
+    let (status, stdout, stderr) = out?;
+    if !status.success() {
+        log::warn!(
+            "claude -p failed ({status}): {}",
+            String::from_utf8_lossy(&stderr).trim()
+        );
+        return None;
+    }
+    let text = String::from_utf8_lossy(&stdout).trim().to_string();
+    if text.is_empty() {
+        log::warn!(
+            "claude -p exited successfully but produced no output; stderr: {}",
+            String::from_utf8_lossy(&stderr).trim()
+        );
+        return None;
+    }
+    Some(text)
 }
 
-/// Run `cmd`, capturing stdout, but kill it if it hasn't exited within `timeout`.
-/// Returns `None` if it can't be spawned or is killed for exceeding the deadline.
-/// A dedicated thread drains stdout so a full pipe buffer can't deadlock the wait
-/// (and can't be mistaken for a hang).
+/// Run `cmd`, capturing stdout and stderr, but kill it if it hasn't exited within
+/// `timeout`. Returns `None` (after logging why) if it can't be spawned or is
+/// killed for exceeding the deadline. Dedicated threads drain stdout/stderr so a
+/// full pipe buffer can't deadlock the wait (and can't be mistaken for a hang).
 fn run_with_timeout(
     mut cmd: Command,
     timeout: Duration,
-) -> Option<(std::process::ExitStatus, Vec<u8>)> {
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+) -> Option<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
+    let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            log::warn!("claude -p failed to spawn: {e}");
+            return None;
+        }
+    };
     let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let mut stderr = child.stderr.take()?;
+    let stdout_reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
         buf
     });
 
@@ -157,10 +200,79 @@ fn run_with_timeout(
                 break None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(_) => break None,
+            Err(e) => {
+                log::warn!("claude -p: error waiting on child process: {e}");
+                break None;
+            }
         }
     };
-    // The reader returns once the pipe closes (on exit or kill), so this never hangs.
-    let stdout = reader.join().unwrap_or_default();
-    Some((status?, stdout))
+    // The readers return once their pipe closes (on exit or kill), so this never hangs.
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    match status {
+        Some(status) => Some((status, stdout, stderr)),
+        None => {
+            log::warn!(
+                "claude -p timed out after {timeout:?}; stderr so far: {}",
+                String::from_utf8_lossy(&stderr).trim()
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every headless call must run in `default` permission mode (never `auto`)
+    /// and must always deny Bash/Write/Edit, regardless of the caller's
+    /// `--allowedTools` — the fix for the prompt-injection finding.
+    #[test]
+    fn build_args_always_denies_tool_use_by_default() {
+        // Commit-message call site: no allowlisted tools at all.
+        let args = build_args(&[], Some(HELPER_MODEL), "prompt");
+        assert_eq!(
+            &args[..2],
+            &["--permission-mode".to_string(), "default".to_string()]
+        );
+        assert!(!args.contains(&"auto".to_string()));
+        let disallowed_idx = args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("--disallowedTools must always be present");
+        assert_eq!(
+            &args[disallowed_idx + 1..disallowed_idx + 4],
+            &["Bash".to_string(), "Write".to_string(), "Edit".to_string()]
+        );
+    }
+
+    /// PR-description call site allowlists `Read` on top of the same
+    /// permission-mode/disallowed-tools baseline.
+    #[test]
+    fn build_args_keeps_disallowed_tools_alongside_an_allowlist() {
+        let args = build_args(&["Read"], Some(HELPER_MODEL), "prompt");
+        assert!(args.windows(2).any(|w| w == ["--disallowedTools", "Bash"]));
+        assert!(args.windows(2).any(|w| w == ["--allowedTools", "Read"]));
+    }
+
+    #[test]
+    fn build_args_omits_model_flag_when_none() {
+        let args = build_args(&[], None, "prompt");
+        assert!(!args.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn build_args_ends_with_prompt_after_double_dash() {
+        let args = build_args(&[], None, "the prompt text");
+        assert_eq!(
+            &args[args.len() - 4..],
+            &[
+                "--output-format".to_string(),
+                "text".to_string(),
+                "--".to_string(),
+                "the prompt text".to_string()
+            ]
+        );
+    }
 }

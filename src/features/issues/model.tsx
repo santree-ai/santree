@@ -74,6 +74,15 @@ export function deriveIssueState(
   };
 }
 
+/** Counts genuinely-successful creates out of a bulk launch's settled results.
+ *  A failed `createWorktree` is caught in `launch()` and turned into a
+ *  *fulfilled* `null` (so one bad create doesn't reject the whole batch) — so
+ *  `status === "fulfilled"` alone can't tell success from failure. Must also
+ *  check the value itself is non-null. */
+export function countLaunchSuccesses<T>(results: PromiseSettledResult<T | null>[]): number {
+  return results.filter((r) => r.status === "fulfilled" && r.value !== null).length;
+}
+
 interface IssuesModel {
   tasks: Task[];
   /** Tasks indexed by id — shared so consumers don't each rebuild the map. */
@@ -148,6 +157,20 @@ interface IssuesHover {
 
 const IssuesHoverContext = createContext<IssuesHover | null>(null);
 
+/** The subset of `IssuesModel` that `IssueNode` actually paints from — split
+ *  into its own context (same reasoning as `IssuesHoverContext` above) so
+ *  unrelated `IssuesModel` churn (selection toggles, every keystroke in the
+ *  launch tray's model combobox, …) doesn't re-render every graph node. Each
+ *  field is independently memoized in the provider, so this value only gets a
+ *  new reference when one of these three actually changes. */
+interface IssueNodeContextValue {
+  focusId: string;
+  worktreeIds: Set<string>;
+  prByTask: Map<string, WorktreePr[]>;
+}
+
+const IssueNodeDataContext = createContext<IssueNodeContextValue | null>(null);
+
 export function IssuesProvider({ children }: { children: ReactNode }) {
   const { settings, activeRepo } = useApp();
   const { requestTreeLaunch, requestTreeFocus, addPendingLaunches, removePendingLaunch } =
@@ -217,7 +240,7 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
 
   const modelFor = useCallback(
     (agent: AgentKind) =>
-      settings?.agents.find((a) => a.key === agent)?.model ??
+      settings?.agents?.find((a) => a.key === agent)?.model ??
       agents.find((a) => a.key === agent)?.models[0] ??
       "",
     [settings, agents],
@@ -350,14 +373,16 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
           title: task.title,
           project: projectOf(task),
           base: null,
-          runSetup: false,
           agent: launchAgent,
           quiet: bulk,
-        }).catch(() => removePendingLaunch(task.id)),
+        }).catch(() => {
+          removePendingLaunch(task.id);
+          return null;
+        }),
       ),
     ).then((results) => {
       if (!bulk) return;
-      const created = results.filter((r) => r.status === "fulfilled").length;
+      const created = countLaunchSuccesses(results);
       if (created > 0) toast.success(`Created ${created} worktrees.`);
     });
   }, [
@@ -479,9 +504,19 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   // `value` above keeps its identity across hovers (hoverId isn't one of its deps).
   const hover = useMemo<IssuesHover>(() => ({ hoverId, setHover: setHoverId }), [hoverId]);
 
+  // Same split for the graph node's paint-relevant fields — its identity only
+  // changes when focus/worktrees/PRs actually change, not on every selection
+  // toggle or launch-tray edit that rebuilds `value` above.
+  const nodeData = useMemo<IssueNodeContextValue>(
+    () => ({ focusId, worktreeIds, prByTask }),
+    [focusId, worktreeIds, prByTask],
+  );
+
   return (
     <IssuesContext.Provider value={value}>
-      <IssuesHoverContext.Provider value={hover}>{children}</IssuesHoverContext.Provider>
+      <IssuesHoverContext.Provider value={hover}>
+        <IssueNodeDataContext.Provider value={nodeData}>{children}</IssueNodeDataContext.Provider>
+      </IssuesHoverContext.Provider>
     </IssuesContext.Provider>
   );
 }
@@ -495,5 +530,11 @@ export function useIssues(): IssuesModel {
 export function useIssueHover(): IssuesHover {
   const ctx = useContext(IssuesHoverContext);
   if (!ctx) throw new Error("useIssueHover must be used within <IssuesProvider>");
+  return ctx;
+}
+
+export function useIssueNodeData(): IssueNodeContextValue {
+  const ctx = useContext(IssueNodeDataContext);
+  if (!ctx) throw new Error("useIssueNodeData must be used within <IssuesProvider>");
   return ctx;
 }

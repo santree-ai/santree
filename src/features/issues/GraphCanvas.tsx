@@ -181,9 +181,15 @@ function Flow() {
   }, [initialized, tasks, fitView]);
 
   // "Open in graph" from the inspector: pan/zoom to a single node (the nonce
-  // lets the same node be revealed twice in a row).
+  // lets the same node be revealed twice in a row). `pos` stays a dep so a
+  // reveal that arrives before layout catches up (the target not in `pos` yet)
+  // still fires once `pos` updates — but `handledNonce` stops it from re-firing
+  // on every LATER `pos` identity change (actionable-only toggle, refetch),
+  // which used to yank the camera back to a stale reveal target.
+  const handledNonce = useRef(0);
   useEffect(() => {
-    if (!reveal || !pos.has(reveal.id)) return;
+    if (!reveal || handledNonce.current === reveal.nonce || !pos.has(reveal.id)) return;
+    handledNonce.current = reveal.nonce;
     fitView({ nodes: [{ id: reveal.id }], duration: 420, maxZoom: 1.1, padding: 0.6 });
   }, [reveal, pos, fitView]);
 
@@ -253,6 +259,7 @@ function Flow() {
         <button
           type="button"
           onClick={toggleActionableOnly}
+          aria-pressed={actionableOnly}
           title={
             actionableOnly
               ? "Showing only tickets you can act on — click to reveal blockers owned by others or already done"

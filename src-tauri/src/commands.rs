@@ -16,9 +16,10 @@ use tauri::{AppHandle, State};
 use santree_core::{
     config,
     domain::{
-        AgentDef, AgentKind, AgentSession, ChangedFile, ClaudeCommands, FileSource, LinearOrg,
-        LinearStatus, NewPr, Opener, PrDetail, PrDraft, Repo, ReviewInbox, Reviewer, ScriptInfo,
-        Settings, Task, TriageDetail, TriageSchedule, TriageTicket, Worktree, WorktreePr,
+        AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, ClaudeCommands, FileSource,
+        GithubStatus, LinearOrg, LinearStatus, NewPr, Opener, PrDetail, PrDraft, Repo,
+        ReviewInbox, Reviewer, ScriptInfo, Settings, Task, TriageDetail, TriageSchedule,
+        TriageTicket, Worktree, WorktreePr,
     },
 };
 
@@ -75,18 +76,17 @@ pub async fn base_worktree(repo: String, db: State<'_, Db>) -> CmdResult<Option<
     Ok(worktree::base_worktree(&db, &repo).await?)
 }
 
-/// Start a task: create a worktree for an issue (branching off `base`), optionally
-/// running `.santree/init.sh`, and record the issue ↔ worktree link.
+/// Start a task: create a worktree for an issue (branching off `base`) and record
+/// the issue ↔ worktree link. Running `.santree/init.sh` is a separate step —
+/// see `run_worktree_setup_streamed` — so it isn't gated on this call.
 #[tauri::command]
 #[specta::specta]
-#[allow(clippy::too_many_arguments)]
 pub async fn create_worktree(
     repo: String,
     issue_id: String,
     title: String,
     project: Option<String>,
     base: Option<String>,
-    run_setup: bool,
     agent: AgentKind,
     db: State<'_, Db>,
 ) -> CmdResult<Worktree> {
@@ -97,7 +97,6 @@ pub async fn create_worktree(
         &title,
         project.as_deref(),
         base.as_deref(),
-        run_setup,
         agent,
     )
     .await?)
@@ -350,7 +349,8 @@ pub async fn agent_session(
     allow_fresh: bool,
     db: State<'_, Db>,
 ) -> CmdResult<AgentSession> {
-    Ok(session::resolve(&db, &repo, &term_key, &cwd, allow_fresh).await?)
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    Ok(session::resolve(&db, &repo, &term_key, &cwd, home.as_deref(), allow_fresh).await?)
 }
 
 /// Draft a PR title + body for the create-PR dialog. With `fill`, the body is
@@ -539,14 +539,14 @@ pub async fn get_settings(db: State<'_, Db>) -> CmdResult<Settings> {
 #[tauri::command]
 #[specta::specta]
 pub async fn set_settings(settings: Settings, db: State<'_, Db>) -> CmdResult<()> {
-    Ok(crate::settings::set_settings(&db, &settings).await?)
+    Ok(settings::set_settings(&db, &settings).await?)
 }
 
 /// An agent harness's authentication / subscription status. Live for Claude
 /// (read from `~/.claude.json`), placeholders for the work-in-progress harnesses.
 #[tauri::command]
 #[specta::specta]
-pub async fn agent_auth(kind: AgentKind) -> santree_core::domain::AgentAuth {
+pub async fn agent_auth(kind: AgentKind) -> AgentAuth {
     // Reads `~/.claude.json` and spawns a login shell (binary discovery), so keep
     // it off the UI thread.
     // A panicked detection task degrades to "not connected" rather than crashing
@@ -562,7 +562,7 @@ pub async fn agent_auth(kind: AgentKind) -> santree_core::domain::AgentAuth {
 /// be turned off and the view always renders.
 #[tauri::command]
 #[specta::specta]
-pub async fn github_status() -> santree_core::domain::GithubStatus {
+pub async fn github_status() -> GithubStatus {
     crate::github::status().await
 }
 
@@ -605,7 +605,9 @@ pub async fn list_claude_commands(
         Some(name) => repo::path(&db, &name).await?,
         None => None,
     };
-    Ok(settings::commands(repo_path.as_deref()))
+    // `settings::commands` does sync `read_dir` + `read_to_string` per command
+    // file — keep it off the async runtime (mirrors `agent_auth` below).
+    Ok(tokio::task::spawn_blocking(move || settings::commands(repo_path.as_deref())).await?)
 }
 
 /// Read a setting for an exact scope (`"app"` or `"repo:<name>"`).

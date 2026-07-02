@@ -19,6 +19,15 @@ pub enum AgentKind {
     Opencode,
 }
 
+impl Default for AgentKind {
+    /// Used only as a `#[serde(default)]` fallback inside `AgentSetting` (e.g. a
+    /// future new field added to that struct) — never as a semantic "the" default
+    /// agent, which is `Settings::default_agent`.
+    fn default() -> Self {
+        AgentKind::Claude
+    }
+}
+
 impl AgentKind {
     /// Stable string form for persistence (matches the serde discriminant name).
     /// Exhaustive, so adding a variant forces this to be updated.
@@ -53,6 +62,10 @@ pub struct AgentDef {
     pub label: String,
     pub short: String,
     pub models: Vec<String>,
+    /// Whether this harness is actually wired up to launch today. WIP agents
+    /// (Codex/Cursor/OpenCode) are shown but disabled everywhere they're
+    /// offered — this is the single source of truth for that gate.
+    pub available: bool,
 }
 
 /// An agent harness's authentication / subscription status, as shown in the
@@ -115,8 +128,11 @@ pub struct Repo {
     pub tracker: String,
     /// Number of agents currently active on this repo.
     pub agents: u32,
-    /// Absolute path on disk, for repos the user added from a local folder.
-    /// `None` for the built-in seed repos.
+    /// Absolute path on disk of the repo's git checkout. Always set in
+    /// practice — every repo is registered via `repo::add`, which validates a
+    /// real local folder before inserting — but stays `Option` because the
+    /// underlying `repos.path` column is nullable (a leftover from before
+    /// migration `0002_repo_path` and the removed built-in seed repos).
     pub path: Option<String>,
 }
 
@@ -443,9 +459,10 @@ pub struct Worktree {
     /// Whether `.santree/init.sh` has been run for this worktree.
     pub setup_ran: bool,
     /// True only for the optimistic frontend placeholder shown while a worktree
-    /// is still being created (it has no branch/path yet). Always false from the
-    /// backend; `#[serde(default)]` so older payloads deserialize cleanly.
-    #[serde(default)]
+    /// is still being created (it has no branch/path yet). The backend always
+    /// sets this to `false` — the `true` case exists only in the frontend's own
+    /// placeholder object (`AppContext.pendingLaunches`), built in JS and never
+    /// deserialized from this type (`Worktree` only derives `Serialize`).
     pub pending: bool,
 }
 
@@ -520,35 +537,46 @@ pub enum Priority {
 }
 
 /// An untriaged ticket awaiting investigation (the queue row).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+///
+/// Only `PartialEq` (not `Eq`) because of the `f64` timestamp fields below —
+/// nothing here needs `TriageTicket` as a map/set key.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TriageTicket {
     pub id: String,
     pub title: String,
     pub priority: Priority,
-    pub age: String,
+    /// Epoch ms the issue was created. Raw, not a pre-formatted "5m ago" label —
+    /// with triage's multi-minute query staleTime, a label baked in at fetch
+    /// time would freeze between refetches. The frontend formats (and ticks)
+    /// it live; see `src/lib/relativeTime.ts`. `f64` (not `i64`) because Specta
+    /// forbids exporting 64-bit ints to TypeScript; epoch-ms values are exact
+    /// in an `f64` for millennia to come.
+    pub created_at_ms: f64,
     pub meta: String,
     /// The team key (e.g. "MSG"), used to group the queue when the viewer is on
     /// more than one team.
     pub team: Option<String>,
-    /// Human SLA hint (e.g. "SLA in 3h", "SLA breached"), if the issue has one.
-    pub sla: Option<String>,
-    /// When set, the issue is snoozed until this human label; the UI greys it out
-    /// and sinks it to the bottom of the queue.
-    pub snoozed_until: Option<String>,
+    /// Absolute epoch ms the issue's SLA breaches, if it has one. `None` when
+    /// the issue has no SLA. The frontend renders (and ticks) the countdown.
+    pub sla_breach_ms: Option<f64>,
+    /// Epoch ms the issue is snoozed until, if snoozed; the UI greys it out and
+    /// sinks it to the bottom of the queue.
+    pub snoozed_until_ms: Option<f64>,
     /// Whether the issue is assigned to the viewer. The queue defaults to the
     /// viewer's own issues; others' are shown only when "be a good citizen" is on.
     pub mine: bool,
 }
 
 /// A comment on a triage issue (markdown body), with threaded replies.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TriageComment {
     pub author: String,
     /// Public avatar URL of the author, when they have one.
     pub avatar_url: Option<String>,
-    pub created: String,
+    /// Epoch ms the comment was posted — raw, formatted live by the frontend.
+    pub created_at_ms: f64,
     /// Markdown — may contain inline images.
     pub body: String,
     /// Threaded replies, in chronological order.
@@ -563,7 +591,8 @@ pub struct TriageComment {
 pub struct WorkflowState {
     pub id: String,
     pub name: String,
-    /// Linear state category: triage | backlog | unstarted | started | completed | canceled.
+    /// Linear state category: triage | backlog | unstarted | started | completed
+    /// | canceled | duplicate.
     #[serde(rename = "type")]
     pub type_: String,
     /// State color (hex), as configured in Linear.
@@ -572,7 +601,9 @@ pub struct WorkflowState {
 
 /// The full triage issue as rendered in the discussion pane: the Linear issue's
 /// description, metadata, and comment thread.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+///
+/// Only `PartialEq` (not `Eq`) because of the `f64` timestamp fields below.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TriageDetail {
     pub id: String,
@@ -589,11 +620,14 @@ pub struct TriageDetail {
     pub author: String,
     /// Public avatar URL of the issue creator, when they have one.
     pub author_avatar_url: Option<String>,
-    pub created: String,
+    /// Epoch ms the issue was created — raw, formatted live by the frontend.
+    pub created_at_ms: f64,
     pub labels: Vec<String>,
     pub project: Option<String>,
-    pub sla: Option<String>,
-    pub snoozed_until: Option<String>,
+    /// Absolute epoch ms the issue's SLA breaches, if it has one.
+    pub sla_breach_ms: Option<f64>,
+    /// Epoch ms the issue is snoozed until, if snoozed.
+    pub snoozed_until_ms: Option<f64>,
     /// Markdown description — may contain inline images.
     pub description: String,
     pub comments: Vec<TriageComment>,
@@ -627,8 +661,12 @@ pub struct TriageSchedule {
 }
 
 /// Per-agent configuration: which executable and default model to use.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
+///
+/// `#[serde(default)]`: a future new field must not fail deserialization of
+/// every settings blob written before that field existed — see `Settings`'s
+/// doc comment for the failure mode this guards against.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", default)]
 pub struct AgentSetting {
     pub key: AgentKind,
     pub exec: String,
@@ -637,10 +675,21 @@ pub struct AgentSetting {
 
 /// Which trackers/services are connected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Integrations {
     pub linear: bool,
     pub triage: bool,
+}
+
+impl Default for Integrations {
+    /// Both default on, matching `config::default_settings()` — a missing field
+    /// in an old stored blob should read as "still connected", not a silent opt-out.
+    fn default() -> Self {
+        Integrations {
+            linear: true,
+            triage: true,
+        }
+    }
 }
 
 /// A connected Linear organization.
@@ -665,12 +714,28 @@ pub struct LinearStatus {
 
 /// User settings, persisted as a JSON blob in the `settings` table. Seeded from
 /// defaults on first run; edits are written back through `set_settings`.
+///
+/// `#[serde(default)]` at every level here (this struct + `Integrations` +
+/// `AgentSetting`) matters more than it looks: without it, adding a single new
+/// field in a future release makes every EXISTING stored blob fail to parse.
+/// `get_settings` already falls back to `config::default_settings()` on a parse
+/// error — silently wiping the user's real agent execs/models/integration
+/// toggles — and the next `set_settings` call then *persists* that wipe. With
+/// `#[serde(default)]`, a missing field falls back per-field (via `Default`,
+/// seeded from `config::default_settings()`) instead of the whole blob being
+/// discarded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub default_agent: AgentKind,
     pub integrations: Integrations,
     pub agents: Vec<AgentSetting>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        crate::config::default_settings()
+    }
 }
 
 /// A Claude slash-command discovered on disk under a `.claude/commands` folder.

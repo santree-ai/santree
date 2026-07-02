@@ -23,16 +23,33 @@ pub fn client() -> &'static reqwest::Client {
 /// A GraphQL `{ nodes: [...] }` connection. One generic wrapper instead of a
 /// near-identical `*Conn` struct per query. `Default` is hand-written because the
 /// derive would needlessly require `T: Default` — an absent connection is simply
-/// no nodes.
+/// no nodes. `page_info` is only populated for queries that request it; callers
+/// that don't care about pagination just ignore it.
 #[derive(Deserialize)]
 pub struct Connection<T> {
     #[serde(default = "Vec::new")]
     pub nodes: Vec<T>,
+    #[serde(default, rename = "pageInfo")]
+    pub page_info: PageInfo,
 }
 impl<T> Default for Connection<T> {
     fn default() -> Self {
-        Self { nodes: Vec::new() }
+        Self {
+            nodes: Vec::new(),
+            page_info: PageInfo::default(),
+        }
     }
+}
+
+/// A GraphQL connection's pagination cursor. Defaults to "no more pages" so a
+/// query that doesn't request `pageInfo` behaves as if everything fit in one page.
+#[derive(Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PageInfo {
+    #[serde(default)]
+    pub has_next_page: bool,
+    #[serde(default)]
+    pub end_cursor: Option<String>,
 }
 
 /// A single GraphQL error from the `errors` array.
@@ -61,7 +78,12 @@ pub async fn post<T: DeserializeOwned>(req: reqwest::RequestBuilder, service: &s
         .await
         .with_context(|| format!("{service} GraphQL request"))?;
     if !res.status().is_success() {
-        bail!("{service} GraphQL returned {}", res.status());
+        let status = res.status();
+        // Linear returns HTTP 400 with a JSON body explaining a GraphQL
+        // complexity overflow; surface that instead of a bare status code.
+        let body = res.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(300).collect();
+        bail!("{service} GraphQL returned {status}: {snippet}");
     }
     let env: Envelope<T> = res
         .json()

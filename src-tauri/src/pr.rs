@@ -2,6 +2,7 @@
 //! create the PR (push the branch + open it via the GitHub API). Composes
 //! `git` + `github` + `prompts` + `agent`; the thin commands call in here.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -16,8 +17,10 @@ use crate::prompts;
 use crate::repo;
 use crate::worktree::{self, Coords};
 
-/// Live PR status for every tracked worktree in `repo`, fetched from GitHub in
-/// parallel. Returns an empty list (not an error) when `gh` isn't authenticated
+/// Live PR status for every tracked worktree in `repo`, fetched from GitHub with a
+/// single repo-wide search (see [`github::prs_for_repo`]) rather than one call per
+/// worktree. Returns an empty list (not an error) when `gh` isn't authenticated, the
+/// repo has no linked worktrees, or the search itself fails (logged, not surfaced)
 /// so the UI degrades gracefully; worktrees without a PR are simply omitted.
 pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
     let Some(token) = github::token().await else {
@@ -27,46 +30,64 @@ pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
         .await?
         .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
 
+    // A missing/non-GitHub origin (e.g. a "Local git" repo) is not an error here —
+    // same not-connected-⇒-empty contract as the unauthenticated case above and as
+    // `reviewers` below.
     let root_path = PathBuf::from(&root);
-    let (owner, name) =
-        tokio::task::spawn_blocking(move || github::owner_repo(&root_path)).await??;
+    let Ok((owner, name)) =
+        tokio::task::spawn_blocking(move || github::owner_repo(&root_path)).await?
+    else {
+        return Ok(vec![]);
+    };
 
-    let issue_ids =
+    let issue_ids: HashSet<String> =
         sqlx::query_scalar::<_, String>("SELECT issue_id FROM worktree_links WHERE repo_path = ?")
             .bind(&root)
             .fetch_all(db)
-            .await?;
+            .await?
+            .into_iter()
+            .collect();
+    if issue_ids.is_empty() {
+        return Ok(vec![]);
+    }
 
-    // One title search per issue, concurrently. Each issue may have several PRs
-    // (one `WorktreePr` row each, grouped by issue id on the frontend). Title search
-    // (not branch listing) so merged PRs — whose branches GitHub deleted — still show.
-    let handles: Vec<_> = issue_ids
+    // Search once per repo (see `prs_for_repo`'s doc comment on the rate-limit
+    // problem this replaces), then match every linked issue id client-side by the
+    // `[ISSUE-ID] …` title tag. A failed search degrades to empty like the
+    // unauthenticated case above, but is logged — a 403/rate-limit shouldn't just
+    // make PR chips vanish with nothing in the log to explain why.
+    let prs = match github::prs_for_repo(&token, &owner, &name).await {
+        Ok(prs) => prs,
+        Err(e) => {
+            log::warn!("worktreePrs: PR search failed for {owner}/{name}: {e}");
+            return Ok(vec![]);
+        }
+    };
+
+    Ok(prs
         .into_iter()
-        .map(|issue_id| {
-            let (token, owner, name) = (token.clone(), owner.clone(), name.clone());
-            tokio::spawn(async move {
-                github::prs_for_issue(&token, &owner, &name, &issue_id)
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(number, url, state)| WorktreePr {
-                        issue_id: issue_id.clone(),
-                        number,
-                        url,
-                        state,
-                    })
-                    .collect::<Vec<_>>()
+        .filter_map(|p| {
+            let tag = issue_tag(&p.title)?;
+            issue_ids.contains(tag).then(|| WorktreePr {
+                issue_id: tag.to_string(),
+                number: p.number,
+                url: p.url,
+                state: p.state,
             })
         })
-        .collect();
+        .collect())
+}
 
-    let mut out = Vec::new();
-    for h in handles {
-        if let Ok(prs) = h.await {
-            out.extend(prs);
-        }
-    }
-    Ok(out)
+/// The `[ISSUE-ID]` tag this app's PR/commit flow writes at the front of a PR title
+/// (mirroring the branch name), e.g. `"[AK-123] Add foo"` → `Some("AK-123")`. Used
+/// to match a repo-wide PR search against several linked issue ids by exact bracket
+/// contents — never a substring, so `"[AK-1]"` can't false-match `"AK-10"` or vice
+/// versa the way a plain `contains` check would.
+fn issue_tag(title: &str) -> Option<&str> {
+    let rest = title.strip_prefix('[')?;
+    let (tag, _) = rest.split_once(']')?;
+    let tag = tag.trim();
+    (!tag.is_empty()).then_some(tag)
 }
 
 /// Build a proposed PR (title + body) for the dialog. The title defaults to the
@@ -209,4 +230,38 @@ pub async fn reviewers(
     Ok(github::list_reviewers(&token, &owner, &name)
         .await
         .unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issue_tag_extracts_bracketed_prefix() {
+        assert_eq!(issue_tag("[AK-1] Fix the thing"), Some("AK-1"));
+    }
+
+    #[test]
+    fn issue_tag_does_not_conflate_prefixed_ids() {
+        // A repo-wide search returns every PR in one shot, so the client-side match
+        // must be exact — "AK-1" must not swallow "AK-10" or vice versa.
+        assert_eq!(issue_tag("[AK-10] Fix another thing"), Some("AK-10"));
+        assert_ne!(issue_tag("[AK-10] Fix another thing"), Some("AK-1"));
+        assert_ne!(issue_tag("[AK-1] Fix the thing"), Some("AK-10"));
+    }
+
+    #[test]
+    fn issue_tag_none_without_leading_bracket() {
+        assert_eq!(issue_tag("Fix AK-1"), None);
+    }
+
+    #[test]
+    fn issue_tag_none_for_empty_brackets() {
+        assert_eq!(issue_tag("[] Fix the thing"), None);
+    }
+
+    #[test]
+    fn issue_tag_trims_whitespace_inside_brackets() {
+        assert_eq!(issue_tag("[ AK-1 ] Fix the thing"), Some("AK-1"));
+    }
 }

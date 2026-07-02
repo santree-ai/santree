@@ -1,0 +1,11 @@
+{
+  // Type-checking project for `*.test.ts(x)` + the vitest setup file. Kept
+  // separate from tsconfig.json so vitest/jest-dom's ambient globals don't leak
+  // into production source's type-checking (see the comment in tsconfig.json).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["vitest/globals", "@testing-library/jest-dom"]
+  },
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test", "src/vite-env.d.ts"],
+  "exclude": []
+}

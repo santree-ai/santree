@@ -61,16 +61,15 @@ export function useEmbeddedTerminal(opts: {
 
   // Pull the spec into primitive fields so the embed effect re-runs on real
   // changes (a new ticket/command) rather than on every render's fresh object
-  // identity. args/env are folded into stable string keys.
-  const { title, cwd, command, args, env, seed, source, refId } = spec;
+  // identity. args is folded into a stable string key.
+  const { title, cwd, command, args, seed, source, refId } = spec;
   const argsKey = args?.join(" ");
-  const envKey = env && JSON.stringify(env);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: argsKey/envKey stand in for args/env.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: argsKey stands in for args.
   useLayoutEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const key = ensure({ title, cwd, command, args, env, seed, source, refId });
+    const key = ensure({ title, cwd, command, args, seed, source, refId });
     keyRef.current = key;
     seenRef.current = false;
     // Capture the host's current rect synchronously so the layer is sized right
@@ -78,7 +77,7 @@ export function useEmbeddedTerminal(opts: {
     const r = host.getBoundingClientRect();
     setEmbed({ host, key, rect: { top: r.top, left: r.left, width: r.width, height: r.height } });
     return () => setEmbed(null);
-  }, [title, cwd, command, seed, source, refId, argsKey, envKey, ensure, setEmbed]);
+  }, [title, cwd, command, seed, source, refId, argsKey, ensure, setEmbed]);
 
   // Seen-latch exit detection (see the file header).
   useEffect(() => {

@@ -1,4 +1,8 @@
 @import "tailwindcss";
+/* Bundled locally (not fetched from fonts.googleapis.com) so the app renders
+ * correctly offline/behind a firewall and never phones Google on launch. */
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
 
 /* ------------------------------------------------------------------ *
  * Design tokens. These codify santree's dark palette as Tailwind
@@ -6,8 +10,8 @@
  * CSS variable so the Appearance setting can re-theme the whole app.
  * ------------------------------------------------------------------ */
 @theme {
-  --font-sans: "Geist", system-ui, -apple-system, sans-serif;
-  --font-mono: "Geist Mono", ui-monospace, monospace;
+  --font-sans: "Geist Variable", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
 
   /* Surfaces (darkest → lightest) */
   --color-app: #0a0b0e;
@@ -60,8 +64,11 @@
   --color-fg-3: #dadae0;
   --color-muted: #9b9ba3;
   --color-muted-2: #8b8b94;
-  --color-muted-3: #6b6b73;
-  --color-muted-4: #5b5b63;
+  /* muted-3/4 are used for real text (settings hints, empty-state subtitles,
+     timestamps, count badges) at small sizes, so they're tuned to clear WCAG
+     AA (4.5:1) against --color-app rather than sit purely decorative. */
+  --color-muted-3: #85858d;
+  --color-muted-4: #7b7b83;
   --color-muted-5: #4a4a52;
 
   /* Status / semantic */
@@ -155,8 +162,9 @@
   --color-fg-3: #232429;
   --color-muted: #595a62;
   --color-muted-2: #696a72;
-  --color-muted-3: #82838b;
-  --color-muted-4: #9a9ba2;
+  /* See dark-theme comment above: muted-3/4 are real text, tuned for AA. */
+  --color-muted-3: #6b6b73;
+  --color-muted-4: #6e6e76;
   --color-muted-5: #b2b3ba;
 
   /* Loading / graph / dot accents, retuned for light surfaces. */
@@ -231,8 +239,23 @@ body {
 input,
 select,
 button {
-  outline: none;
   font-family: inherit;
+}
+
+/* Suppress the focus ring for mouse/pointer interaction only — keyboard focus
+   (:focus-visible) always keeps a visible ring. A blanket outline:none makes the
+   whole app invisible to keyboard navigation (WCAG 2.4.7). */
+input:focus:not(:focus-visible),
+select:focus:not(:focus-visible),
+button:focus:not(:focus-visible) {
+  outline: none;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* Thin dark scrollbars to match the design. */

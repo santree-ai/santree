@@ -4,6 +4,7 @@
  * and theme each element to match the dark UI. Images get a framed, max-width
  * treatment; code is monospaced in a subtle well.
  */
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { memo } from "react";
 import ReactMarkdown, { type Components, defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
@@ -58,11 +59,19 @@ const components: Components = {
       {children}
     </li>
   ),
+  // Tauri's WKWebView doesn't route `target="_blank"` to the system browser (it
+  // either no-ops or navigates the app's own webview), so intercept the click and
+  // hand the URL to the opener plugin. Still render a real `href` for
+  // accessibility and right-click-to-copy.
   a: ({ children, href }) => (
     <a
       href={href}
       target="_blank"
       rel="noreferrer"
+      onClick={(e) => {
+        e.preventDefault();
+        if (href) void openUrl(href);
+      }}
       className="underline decoration-dotted underline-offset-2"
       style={{ color: "var(--accent)" }}
     >

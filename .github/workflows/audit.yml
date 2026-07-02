@@ -1,0 +1,51 @@
+name: Dependency Audit
+
+# Scheduled rather than PR-gated: new advisories can appear against a pinned
+# version with no code change on our side, so gating every PR on this would
+# fail builds for reasons unrelated to the PR's content. Running weekly (plus
+# on-demand) surfaces newly-disclosed RustSec/npm advisories without blocking
+# day-to-day CI.
+on:
+  schedule:
+    - cron: "0 8 * * 1" # every Monday, 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  checks: write
+
+jobs:
+  cargo-audit:
+    name: cargo audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Downloads a prebuilt binary and checks Cargo.lock — no compiling the
+      # workspace, so it's fast even though it runs against 650+ crates.
+      # On schedule/dispatch runs it files a GitHub issue per new advisory
+      # instead of failing the run outright.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  pnpm-audit:
+    name: pnpm audit (npm advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Version is read from package.json's `packageManager` field.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # --prod: dev-only tooling (Biome, Vite, Vitest, …) never ships in the
+      # built app, so advisories there aren't worth paging anyone over.
+      - run: pnpm audit --prod

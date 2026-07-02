@@ -13,7 +13,8 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -27,7 +28,6 @@ pub struct OpenOpts {
     pub cwd: Option<String>,
     pub command: String,
     pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -81,8 +81,22 @@ impl PtyManager {
         // the child exits.
         drop(pair.slave);
 
-        let reader = pair.master.try_clone_reader().context("cloning reader")?;
-        let writer = pair.master.take_writer().context("taking writer")?;
+        let reader = match pair.master.try_clone_reader().context("cloning reader") {
+            Ok(reader) => reader,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
+        let writer = match pair.master.take_writer().context("taking writer") {
+            Ok(writer) => writer,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
 
         let id = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -182,20 +196,64 @@ impl PtyManager {
     }
 
     /// Kill every session — used on app exit so no child or thread is leaked.
+    ///
+    /// This runs synchronously on the Tauri run loop during `ExitRequested`, so
+    /// it must never hang: `portable_pty::Child::kill()` sends `SIGHUP` on unix
+    /// and internally escalates to `SIGKILL` after ~250ms if the child hasn't
+    /// exited, but a child wedged in uninterruptible I/O (or otherwise slow to
+    /// be reaped) could still stall a synchronous `wait()`. So, mirroring
+    /// `close()`'s detached-thread reap (one stuck child must not block the
+    /// others or this thread), each session is torn down on its own thread —
+    /// pty master/writer dropped first so the child sees EOF/HUP even if it
+    /// traps the kill signal, then `kill()` + `wait()` — and this function
+    /// blocks on all of them finishing only up to a bounded overall deadline,
+    /// after which it gives up so app exit can't hang no matter what a child
+    /// does.
     pub fn close_all(&self) {
-        let mut drained: Vec<Session> = {
+        let drained: Vec<Session> = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.sessions.drain().map(|(_, s)| s).collect()
         };
-        // Kill everything first so the children die in parallel, then reap — a
-        // single slow-dying child mustn't serialize behind the others and stall
-        // app exit.
-        for session in &mut drained {
-            let _ = session.child.kill();
+        let total = drained.len();
+        if total == 0 {
+            return;
         }
-        for mut session in drained {
-            let _ = session.child.wait();
+
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        for session in drained {
+            let done_tx = done_tx.clone();
+            std::thread::spawn(move || {
+                let Session {
+                    master,
+                    writer,
+                    mut child,
+                } = session;
+                // Drop the pty master/writer before signalling: closing our end
+                // of the pty delivers EOF/HUP to the child immediately, even if
+                // it ignores or traps the kill signal below.
+                drop(writer);
+                drop(master);
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = done_tx.send(());
+            });
         }
+        drop(done_tx);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut reaped = 0;
+        while reaped < total {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || done_rx.recv_timeout(remaining).is_err() {
+                log::warn!(
+                    "close_all: {} of {total} pty session(s) did not reap before the exit deadline",
+                    total - reaped
+                );
+                return;
+            }
+            reaped += 1;
+        }
+        log::info!("closed all {total} pty session(s)");
     }
 }
 
@@ -209,15 +267,20 @@ fn pump(mut reader: Box<dyn Read + Send>, on_output: impl Fn(Vec<u8>)) {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => on_output(buf[..n].to_vec()),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
     }
     on_output(Vec::new());
 }
 
-/// Build the `CommandBuilder`: inherit the parent environment (so PATH/HOME are
-/// present and login CLIs resolve), then apply caller overrides, a sane TERM, and
-/// a working directory that exists.
+/// Build the `CommandBuilder`. `CommandBuilder::new` already inherits the full
+/// parent environment (so PATH/HOME are present and login CLIs resolve) via
+/// `vars_os()`, which is `OsString`-based and so tolerates non-UTF-8 values —
+/// unlike `std::env::vars()`, which panics on one. Only a sane TERM is added on
+/// top of that — the PTY only ever inherits the ambient process environment
+/// (see COMPLIANCE.md); there is deliberately no override channel a caller
+/// could misuse to forward secrets into a hosted CLI.
 fn build_command(opts: &OpenOpts) -> CommandBuilder {
     let (program, default_args) = if opts.command.trim().is_empty() {
         (default_shell(), vec!["-l".to_string()])
@@ -233,15 +296,7 @@ fn build_command(opts: &OpenOpts) -> CommandBuilder {
     };
     cmd.args(args);
 
-    for (key, value) in std::env::vars() {
-        cmd.env(key, value);
-    }
-    for (key, value) in &opts.env {
-        cmd.env(key, value);
-    }
-    if !opts.env.iter().any(|(k, _)| k == "TERM") {
-        cmd.env("TERM", "xterm-256color");
-    }
+    cmd.env("TERM", "xterm-256color");
 
     if let Some(cwd) = effective_cwd(opts.cwd.as_deref()) {
         cmd.cwd(cwd);
@@ -276,8 +331,40 @@ fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
-    use std::time::{Duration, Instant};
+
+    /// Open a silent `sh` session, returning its id and the receiver end of its
+    /// output channel. Shared by the sentinel tests below.
+    fn open_silent_shell(mgr: &PtyManager) -> (SessionId, mpsc::Receiver<Vec<u8>>) {
+        let (tx, rx) = mpsc::channel();
+        let id = mgr
+            .open(
+                OpenOpts {
+                    command: "sh".into(),
+                    cols: 80,
+                    rows: 24,
+                    ..Default::default()
+                },
+                move |bytes| {
+                    let _ = tx.send(bytes);
+                },
+            )
+            .expect("open session");
+        (id, rx)
+    }
+
+    /// Poll `rx` until either the exit sentinel (an empty chunk — see `pump`'s
+    /// doc comment) arrives or `deadline` passes. Returns whether it arrived.
+    fn recv_sentinel(rx: &mpsc::Receiver<Vec<u8>>, deadline: Instant) -> bool {
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(bytes) if bytes.is_empty() => return true,
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => break,
+            }
+        }
+        false
+    }
 
     /// Full lifecycle: spawn a shell, write a command, read its echoed output,
     /// then close — proving real PTY round-tripping.
@@ -353,5 +440,60 @@ mod tests {
     fn write_to_missing_session_errors() {
         let mgr = PtyManager::new();
         assert!(mgr.write(999, b"x").is_err());
+    }
+
+    /// `pump()`'s exit sentinel (a final empty chunk — see its doc comment) is
+    /// the frontend's only signal to tear down a terminal pane. Prove it's
+    /// actually delivered when the hosted process exits on its own, not just
+    /// when we kill it.
+    #[test]
+    fn process_exit_sends_sentinel() {
+        let mgr = PtyManager::new();
+        let (id, rx) = open_silent_shell(&mgr);
+
+        mgr.write(id, b"exit\n").expect("write");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert!(
+            recv_sentinel(&rx, deadline),
+            "expected exit sentinel after the shell process exited on its own"
+        );
+    }
+
+    /// `close()` kills the session out from under a still-running process; the
+    /// sentinel must still arrive so the frontend tears the pane down.
+    #[test]
+    fn close_sends_sentinel() {
+        let mgr = PtyManager::new();
+        let (id, rx) = open_silent_shell(&mgr);
+
+        mgr.close(id).expect("close");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert!(
+            recv_sentinel(&rx, deadline),
+            "expected exit sentinel after close()"
+        );
+    }
+
+    /// `close_all()` (used on app quit) must reap every open session and
+    /// deliver each one's sentinel, not just the first — the whole point of
+    /// its per-session detached-thread fix is that one session can't block
+    /// another.
+    #[test]
+    fn close_all_sends_sentinel_to_every_session() {
+        let mgr = PtyManager::new();
+        let sessions: Vec<(SessionId, mpsc::Receiver<Vec<u8>>)> =
+            (0..3).map(|_| open_silent_shell(&mgr)).collect();
+
+        mgr.close_all();
+
+        for (id, rx) in sessions {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            assert!(
+                recv_sentinel(&rx, deadline),
+                "expected exit sentinel for session {id} after close_all()"
+            );
+        }
     }
 }

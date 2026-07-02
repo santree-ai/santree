@@ -65,16 +65,19 @@ export const commands = {
 	setupRan: boolean,
 	/**
 	 *  True only for the optimistic frontend placeholder shown while a worktree
-	 *  is still being created (it has no branch/path yet). Always false from the
-	 *  backend; `#[serde(default)]` so older payloads deserialize cleanly.
+	 *  is still being created (it has no branch/path yet). The backend always
+	 *  sets this to `false` — the `true` case exists only in the frontend's own
+	 *  placeholder object (`AppContext.pendingLaunches`), built in JS and never
+	 *  deserialized from this type (`Worktree` only derives `Serialize`).
 	 */
-	pending?: boolean,
+	pending: boolean,
 } | null, CmdError>(__TAURI_INVOKE("base_worktree", { repo })),
 	/**
-	 *  Start a task: create a worktree for an issue (branching off `base`), optionally
-	 *  running `.santree/init.sh`, and record the issue ↔ worktree link.
+	 *  Start a task: create a worktree for an issue (branching off `base`) and record
+	 *  the issue ↔ worktree link. Running `.santree/init.sh` is a separate step —
+	 *  see `run_worktree_setup_streamed` — so it isn't gated on this call.
 	 */
-	createWorktree: (repo: string, issueId: string, title: string, project: string | null, base: string | null, runSetup: boolean, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree", { repo, issueId, title, project, base, runSetup, agent })),
+	createWorktree: (repo: string, issueId: string, title: string, project: string | null, base: string | null, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree", { repo, issueId, title, project, base, agent })),
 	/**  Remove a worktree (and its branch) and drop the issue link. */
 	removeWorktree: (repo: string, issueId: string) => typedError<null, CmdError>(__TAURI_INVOKE("remove_worktree", { repo, issueId })),
 	/**
@@ -267,8 +270,14 @@ export const commands = {
 	/**  Run the Linear OAuth flow; returns the updated org list. */
 	linearConnect: () => typedError<LinearOrg[], CmdError>(__TAURI_INVOKE("linear_connect")),
 	/**  Spawn a process behind a PTY and stream its raw output over `on_output`. */
-	terminalOpen: (opts: TerminalOpenOpts, onOutput: Channel<number[]>) => typedError<number, CmdError>(__TAURI_INVOKE("terminal_open", { opts, onOutput })),
-	/**  Write raw bytes (keystrokes or a seed) to a session. */
+	terminalOpen: (opts: TerminalOpenOpts, onOutput: Channel<ArrayBuffer>) => typedError<number, CmdError>(__TAURI_INVOKE("terminal_open", { opts, onOutput })),
+	/**
+	 *  Write raw bytes (keystrokes or a seed) to a session.
+	 * 
+	 *  Unlike resize/close, this can genuinely block (see the comment above): the
+	 *  write is offloaded to a blocking-pool thread so a stuck child's full PTY
+	 *  buffer can never pin a tokio worker and starve every other async command.
+	 */
 	terminalWrite: (id: number, data: string) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_write", { id, data })),
 	/**  Resize a session's PTY to the visible grid. */
 	terminalResize: (id: number, cols: number, rows: number) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_resize", { id, cols, rows })),
@@ -320,6 +329,12 @@ export type AgentDef = {
 	label: string,
 	short: string,
 	models: string[],
+	/**
+	 *  Whether this harness is actually wired up to launch today. WIP agents
+	 *  (Codex/Cursor/OpenCode) are shown but disabled everywhere they're
+	 *  offered — this is the single source of truth for that gate.
+	 */
+	available: boolean,
 };
 
 /**  Which coding agent ("harness") runs a task. */
@@ -339,11 +354,17 @@ export type AgentSession =
 /**  No agent session — just a login shell. */
 { type: "shell" };
 
-/**  Per-agent configuration: which executable and default model to use. */
+/**
+ *  Per-agent configuration: which executable and default model to use.
+ * 
+ *  `#[serde(default)]`: a future new field must not fail deserialization of
+ *  every settings blob written before that field existed — see `Settings`'s
+ *  doc comment for the failure mode this guards against.
+ */
 export type AgentSetting = {
-	key: AgentKind,
-	exec: string,
-	model: string,
+	key?: AgentKind,
+	exec?: string,
+	model?: string,
 };
 
 /**
@@ -450,8 +471,8 @@ export type GithubStatus = {
 
 /**  Which trackers/services are connected. */
 export type Integrations = {
-	linear: boolean,
-	triage: boolean,
+	linear?: boolean,
+	triage?: boolean,
 };
 
 /**  A connected Linear organization. */
@@ -553,8 +574,11 @@ export type Repo = {
 	/**  Number of agents currently active on this repo. */
 	agents: number,
 	/**
-	 *  Absolute path on disk, for repos the user added from a local folder.
-	 *  `None` for the built-in seed repos.
+	 *  Absolute path on disk of the repo's git checkout. Always set in
+	 *  practice — every repo is registered via `repo::add`, which validates a
+	 *  real local folder before inserting — but stays `Option` because the
+	 *  underlying `repos.path` column is nullable (a leftover from before
+	 *  migration `0002_repo_path` and the removed built-in seed repos).
 	 */
 	path: string | null,
 };
@@ -630,11 +654,21 @@ export type ScriptInfo = {
 /**
  *  User settings, persisted as a JSON blob in the `settings` table. Seeded from
  *  defaults on first run; edits are written back through `set_settings`.
+ * 
+ *  `#[serde(default)]` at every level here (this struct + `Integrations` +
+ *  `AgentSetting`) matters more than it looks: without it, adding a single new
+ *  field in a future release makes every EXISTING stored blob fail to parse.
+ *  `get_settings` already falls back to `config::default_settings()` on a parse
+ *  error — silently wiping the user's real agent execs/models/integration
+ *  toggles — and the next `set_settings` call then *persists* that wipe. With
+ *  `#[serde(default)]`, a missing field falls back per-field (via `Default`,
+ *  seeded from `config::default_settings()`) instead of the whole blob being
+ *  discarded.
  */
 export type Settings = {
-	defaultAgent: AgentKind,
-	integrations: Integrations,
-	agents: AgentSetting[],
+	defaultAgent?: AgentKind,
+	integrations?: Integrations,
+	agents?: AgentSetting[],
 };
 
 /**
@@ -705,7 +739,6 @@ export type TerminalOpenOpts = {
 	cwd: string | null,
 	command: string,
 	args: string[],
-	env: { [key in string]: string },
 	cols: number,
 	rows: number,
 };
@@ -715,7 +748,8 @@ export type TriageComment = {
 	author: string,
 	/**  Public avatar URL of the author, when they have one. */
 	avatarUrl: string | null,
-	created: string,
+	/**  Epoch ms the comment was posted — raw, formatted live by the frontend. */
+	createdAtMs: number | null,
 	/**  Markdown — may contain inline images. */
 	body: string,
 	/**  Threaded replies, in chronological order. */
@@ -725,6 +759,8 @@ export type TriageComment = {
 /**
  *  The full triage issue as rendered in the discussion pane: the Linear issue's
  *  description, metadata, and comment thread.
+ * 
+ *  Only `PartialEq` (not `Eq`) because of the `f64` timestamp fields below.
  */
 export type TriageDetail = {
 	id: string,
@@ -741,11 +777,14 @@ export type TriageDetail = {
 	author: string,
 	/**  Public avatar URL of the issue creator, when they have one. */
 	authorAvatarUrl: string | null,
-	created: string,
+	/**  Epoch ms the issue was created — raw, formatted live by the frontend. */
+	createdAtMs: number | null,
 	labels: string[],
 	project: string | null,
-	sla: string | null,
-	snoozedUntil: string | null,
+	/**  Absolute epoch ms the issue's SLA breaches, if it has one. */
+	slaBreachMs: number | null,
+	/**  Epoch ms the issue is snoozed until, if snoozed. */
+	snoozedUntilMs: number | null,
 	/**  Markdown description — may contain inline images. */
 	description: string,
 	comments: TriageComment[],
@@ -774,25 +813,41 @@ export type TriageShift = {
 	isMe: boolean,
 };
 
-/**  An untriaged ticket awaiting investigation (the queue row). */
+/**
+ *  An untriaged ticket awaiting investigation (the queue row).
+ * 
+ *  Only `PartialEq` (not `Eq`) because of the `f64` timestamp fields below —
+ *  nothing here needs `TriageTicket` as a map/set key.
+ */
 export type TriageTicket = {
 	id: string,
 	title: string,
 	priority: Priority,
-	age: string,
+	/**
+	 *  Epoch ms the issue was created. Raw, not a pre-formatted "5m ago" label —
+	 *  with triage's multi-minute query staleTime, a label baked in at fetch
+	 *  time would freeze between refetches. The frontend formats (and ticks)
+	 *  it live; see `src/lib/relativeTime.ts`. `f64` (not `i64`) because Specta
+	 *  forbids exporting 64-bit ints to TypeScript; epoch-ms values are exact
+	 *  in an `f64` for millennia to come.
+	 */
+	createdAtMs: number | null,
 	meta: string,
 	/**
 	 *  The team key (e.g. "MSG"), used to group the queue when the viewer is on
 	 *  more than one team.
 	 */
 	team: string | null,
-	/**  Human SLA hint (e.g. "SLA in 3h", "SLA breached"), if the issue has one. */
-	sla: string | null,
 	/**
-	 *  When set, the issue is snoozed until this human label; the UI greys it out
-	 *  and sinks it to the bottom of the queue.
+	 *  Absolute epoch ms the issue's SLA breaches, if it has one. `None` when
+	 *  the issue has no SLA. The frontend renders (and ticks) the countdown.
 	 */
-	snoozedUntil: string | null,
+	slaBreachMs: number | null,
+	/**
+	 *  Epoch ms the issue is snoozed until, if snoozed; the UI greys it out and
+	 *  sinks it to the bottom of the queue.
+	 */
+	snoozedUntilMs: number | null,
 	/**
 	 *  Whether the issue is assigned to the viewer. The queue defaults to the
 	 *  viewer's own issues; others' are shown only when "be a good citizen" is on.
@@ -808,7 +863,10 @@ export type TriageTicket = {
 export type WorkflowState = {
 	id: string,
 	name: string,
-	/**  Linear state category: triage | backlog | unstarted | started | completed | canceled. */
+	/**
+	 *  Linear state category: triage | backlog | unstarted | started | completed
+	 *  | canceled | duplicate.
+	 */
 	type: string,
 	/**  State color (hex), as configured in Linear. */
 	color: string,
@@ -846,15 +904,18 @@ export type Worktree = {
 	setupRan: boolean,
 	/**
 	 *  True only for the optimistic frontend placeholder shown while a worktree
-	 *  is still being created (it has no branch/path yet). Always false from the
-	 *  backend; `#[serde(default)]` so older payloads deserialize cleanly.
+	 *  is still being created (it has no branch/path yet). The backend always
+	 *  sets this to `false` — the `true` case exists only in the frontend's own
+	 *  placeholder object (`AppContext.pendingLaunches`), built in JS and never
+	 *  deserialized from this type (`Worktree` only derives `Serialize`).
 	 */
-	pending?: boolean,
+	pending: boolean,
 };
 
 /**
  *  Debounced "a worktree's files changed on disk" signal. The frontend reacts by
  *  invalidating that worktree's status/files/diff queries for the active repo.
+ *  `issue_id` is [`BASE_ID`] for a change to the base worktree (the repo root).
  */
 export type WorktreeChanged = {
 	issueId: string,

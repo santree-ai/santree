@@ -18,11 +18,12 @@
         "minWidth": 1040,
         "minHeight": 700,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "backgroundColor": "#0a0b0e"
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' https: data:; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {

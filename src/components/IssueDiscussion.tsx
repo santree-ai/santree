@@ -11,6 +11,7 @@ import type { TriageComment, TriageDetail } from "../bindings";
 import { Avatar } from "./Avatar";
 import { Markdown } from "./Markdown";
 import { Skeleton } from "./primitives";
+import { RelativeTime } from "./RelativeTime";
 
 export function countComments(comments: TriageComment[]): number {
   return comments.reduce((n, c) => n + 1 + countComments(c.children), 0);
@@ -21,7 +22,7 @@ function CommentHead({ comment, size }: { comment: TriageComment; size: number }
     <div className="mb-2 flex items-center gap-2">
       <Avatar name={comment.author} src={comment.avatarUrl} size={size} />
       <span className="text-[11.5px] font-medium text-fg-2">{comment.author}</span>
-      <span className="font-mono text-[10px] text-muted-4">{comment.created}</span>
+      <RelativeTime ms={comment.createdAtMs} className="font-mono text-[10px] text-muted-4" />
     </div>
   );
 }

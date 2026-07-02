@@ -53,10 +53,6 @@ interface AppData {
 
 /** Volatile UI state — toggling these re-renders only their own consumers. */
 interface AppUi {
-  /** The help menu popup is anchored in the shell but toggled from sidebars. */
-  helpOpen: boolean;
-  setHelpOpen: (open: boolean) => void;
-
   /** The searchable keyboard-shortcuts overlay (⌘/ or the help menu). */
   shortcutsOpen: boolean;
   setShortcutsOpen: (open: boolean) => void;
@@ -123,6 +119,9 @@ export interface PendingLaunch {
 export type Theme = "dark" | "light" | "auto";
 
 const THEME_KEY = "santree-theme";
+const REPO_KEY = "santree-active-repo";
+const SIDEBAR_COLLAPSED_KEY = "santree-sidebar-collapsed";
+const SIDEBAR_WIDTH_KEY = "santree-sidebar-width";
 
 /** Bounds for the resizable sidebar; dragging below MIN triggers collapse. */
 export const SIDEBAR = { default: 264, min: 200, max: 460, collapseAt: 170 } as const;
@@ -147,11 +146,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const { data: repos } = useRepos();
   const { mutate: saveSettings } = useSaveSettings();
 
-  const [activeRepo, setActiveRepo] = useState("");
-  const [helpOpen, setHelpOpen] = useState(false);
+  const [activeRepo, setActiveRepo] = useState(() => localStorage.getItem(REPO_KEY) ?? "");
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR.default);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true",
+  );
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    return stored >= SIDEBAR.min && stored <= SIDEBAR.max ? stored : SIDEBAR.default;
+  });
   const [treeLaunch, setTreeLaunch] = useState<string | null>(null);
   const [treeFocus, setTreeFocus] = useState<string | null>(null);
   const [reviewFocus, setReviewFocus] = useState<string | null>(null);
@@ -168,6 +171,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [repos, activeRepo]);
 
+  // Persist the active repo (and sidebar layout) across launches, same as theme.
+  // Keyed on the state itself rather than wrapping the exposed setters, since
+  // `activeRepo` and `sidebarCollapsed` are also written from other call sites
+  // above (the repo-validation fallback) and below (`toggleSidebar`).
+  useEffect(() => {
+    if (activeRepo) localStorage.setItem(REPO_KEY, activeRepo);
+  }, [activeRepo]);
+
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
   // Watch the active repo's worktrees app-wide (not just on the Trees tab) so
   // on-disk changes invalidate the cache even while another view is showing —
   // returning to Trees then renders fresh data, not a stale snapshot.
@@ -180,9 +195,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // Mirror the committed width into the `--sidebar-width` CSS variable. During a
   // drag the resizer writes this variable directly (no React render); this keeps
-  // it in sync on the initial value and the pointer-up commit.
+  // it in sync on the initial value and the pointer-up commit. Also persist it,
+  // same as theme, so a resize survives a relaunch.
   useEffect(() => {
     document.documentElement.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
   }, [sidebarWidth]);
 
   // Resolve the theme to a concrete `data-theme` on <html>. "auto" tracks the OS
@@ -222,15 +239,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setAgentExec: (agent, exec) =>
         applySettings((s) => ({
           ...s,
-          agents: s.agents.map((a) => (a.key === agent ? { ...a, exec } : a)),
+          agents: (s.agents ?? []).map((a) => (a.key === agent ? { ...a, exec } : a)),
         })),
       toggleIntegration: (key) =>
         applySettings((s) => {
+          // `s.integrations` is only optional in the generated type because
+          // `Settings` round-trips through `#[serde(default)]` for backward
+          // compat on old stored blobs — the live value here is always fully
+          // populated (from `get_settings`), so a fallback is just for TS.
+          const integrations = s.integrations ?? { linear: false, triage: false };
           // Triage depends on Linear: it can only be enabled while Linear is on.
-          if (key === "triage" && !s.integrations.linear) return s;
-          return { ...s, integrations: { ...s.integrations, [key]: !s.integrations[key] } };
+          if (key === "triage" && !integrations.linear) return s;
+          return { ...s, integrations: { ...integrations, [key]: !integrations[key] } };
         }),
-      triageEnabled: !!settings?.integrations.linear && !!settings?.integrations.triage,
+      triageEnabled: !!settings?.integrations?.linear && !!settings?.integrations?.triage,
       theme,
       setTheme: (next: Theme) => {
         localStorage.setItem(THEME_KEY, next);
@@ -277,8 +299,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const uiValue = useMemo<AppUi>(
     () => ({
-      helpOpen,
-      setHelpOpen,
       shortcutsOpen,
       setShortcutsOpen,
       toggleShortcuts,
@@ -304,7 +324,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setSidebarWidth,
     }),
     [
-      helpOpen,
       shortcutsOpen,
       treeLaunch,
       treeFocus,

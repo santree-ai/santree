@@ -151,7 +151,12 @@ fn open_file_browser(path: &str) -> Result<()> {
 
 #[cfg(not(target_os = "macos"))]
 fn open_app(c: &Candidate, path: &str) -> Result<()> {
-    run(Command::new(c.bin).arg(path))
+    // Unlike macOS `open` (a launcher that hands off to LaunchServices and
+    // returns immediately), this execs the target application binary
+    // directly — for apps that don't fork-and-exit, `.status()` would block
+    // for the app's entire lifetime. Detach instead: only report spawn
+    // errors, never wait for exit.
+    run_detached(Command::new(c.bin).arg(path))
 }
 
 /// Spawn `cmd`, erroring if it can't start or exits non-zero.
@@ -160,5 +165,14 @@ fn run(cmd: &mut Command) -> Result<()> {
     if !status.success() {
         bail!("opener exited with status {status}");
     }
+    Ok(())
+}
+
+/// Spawn `cmd` and detach without waiting for it to exit — for launchers that
+/// exec the target app directly rather than handing off to a fast-returning
+/// session launcher (see `open_app` above). Only spawn errors are reported.
+#[cfg(not(target_os = "macos"))]
+fn run_detached(cmd: &mut Command) -> Result<()> {
+    cmd.spawn().map_err(|e| anyhow!("failed to launch: {e}"))?;
     Ok(())
 }

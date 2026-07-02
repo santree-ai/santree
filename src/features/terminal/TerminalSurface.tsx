@@ -98,7 +98,7 @@ export function TerminalSurface() {
                           type="button"
                           onClick={() => close(t.key)}
                           aria-label="Close terminal"
-                          className="flex-none cursor-pointer px-2 py-2 text-[13px] text-muted-5 opacity-0 hover:text-fg-2 group-hover:opacity-100"
+                          className="flex-none cursor-pointer px-2 py-2 text-[13px] text-muted-5 opacity-0 hover:text-fg-2 group-hover:opacity-100 focus-visible:opacity-100"
                         >
                           ×
                         </button>

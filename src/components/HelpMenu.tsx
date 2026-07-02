@@ -1,8 +1,11 @@
-/** The help popover anchored at the bottom-left of the window. */
+/** The help button + popover in each view's sidebar footer. */
+import { useState } from "react";
 
+import { useAppVersion } from "../lib/queries";
 import { useAppUi } from "../state/AppContext";
-import { DiagIcon, DocsIcon, FeedbackIcon, KbdIcon } from "./icons";
-import { APP_VERSION } from "./SidebarFooter";
+import { iconButtonStyle } from "../theme/colors";
+import { HelpIcon, KbdIcon } from "./icons";
+import { Dropdown } from "./primitives";
 
 interface Item {
   icon?: React.ReactNode;
@@ -14,19 +17,12 @@ interface Item {
 
 const ITEMS: Item[] = [
   { icon: <KbdIcon className="text-muted" />, label: "Keyboard shortcuts", shortcut: "⌘/" },
-  { icon: <DocsIcon className="text-muted" />, label: "Docs", external: true },
-  { label: "Best practices", external: true, indented: true },
-  { label: "Changelog", external: true, indented: true },
-  { icon: <FeedbackIcon className="text-muted" />, label: "Send feedback", shortcut: "⌘⌥F" },
-  { label: "Discord", external: true, indented: true },
-  { label: "Submit a prompt", indented: true },
-  { icon: <DiagIcon className="text-muted" />, label: "Diagnostics" },
-  { label: "Open debug tools", indented: true },
 ];
 
 export function HelpMenu() {
-  const { helpOpen, setHelpOpen, setShortcutsOpen } = useAppUi();
-  if (!helpOpen) return null;
+  const { setShortcutsOpen } = useAppUi();
+  const { data: version } = useAppVersion();
+  const [open, setOpen] = useState(false);
 
   // Items that do something beyond closing the menu, keyed by label.
   const actions: Record<string, () => void> = {
@@ -34,38 +30,50 @@ export function HelpMenu() {
   };
 
   return (
-    <>
-      {/* Click-away catcher */}
-      <button
-        type="button"
-        aria-label="Close help"
-        className="fixed inset-0 z-[70] cursor-default"
-        onClick={() => setHelpOpen(false)}
-      />
-      <div className="absolute bottom-[54px] left-3 z-[80] w-[302px] rounded-xl border border-line-3 bg-popover p-1.5 shadow-[0_22px_58px_-18px_rgba(0,0,0,.9)]">
-        {ITEMS.map((item) => (
-          <button
-            type="button"
-            key={item.label}
-            onClick={() => {
-              setHelpOpen(false);
-              actions[item.label]?.();
-            }}
-            className="flex w-full cursor-pointer items-center gap-[11px] rounded-md px-2.5 py-2 text-left text-[13px] text-fg-3 hover:bg-input"
-            style={item.indented ? { paddingLeft: 36, fontSize: 12.5 } : undefined}
-          >
-            {item.icon}
-            <span className="flex-1">{item.label}</span>
-            {item.shortcut && (
-              <span className="font-mono text-[11px] text-muted-3">{item.shortcut}</span>
-            )}
-            {item.external && <span className="text-[11px] text-muted-4">↗</span>}
-          </button>
-        ))}
-        <div className="mt-1 border-t border-line-2 px-2.5 pt-2.5 pb-1 font-mono text-[10.5px] text-muted-4">
-          santree {APP_VERSION}
-        </div>
-      </div>
-    </>
+    <Dropdown
+      placement="up"
+      align="left"
+      menuClassName="w-[302px] overflow-hidden p-1.5"
+      open={open}
+      onOpenChange={setOpen}
+      trigger={(toggle) => (
+        <button
+          type="button"
+          onClick={toggle}
+          className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border transition-colors hover:!border-line-strong hover:!text-fg-2"
+          style={iconButtonStyle(open)}
+          aria-label="Help"
+        >
+          <HelpIcon />
+        </button>
+      )}
+    >
+      {(close) => (
+        <>
+          {ITEMS.map((item) => (
+            <button
+              type="button"
+              key={item.label}
+              onClick={() => {
+                close();
+                actions[item.label]?.();
+              }}
+              className="flex w-full cursor-pointer items-center gap-[11px] rounded-md px-2.5 py-2 text-left text-[13px] text-fg-3 hover:bg-input"
+              style={item.indented ? { paddingLeft: 36, fontSize: 12.5 } : undefined}
+            >
+              {item.icon}
+              <span className="flex-1">{item.label}</span>
+              {item.shortcut && (
+                <span className="font-mono text-[11px] text-muted-3">{item.shortcut}</span>
+              )}
+              {item.external && <span className="text-[11px] text-muted-4">↗</span>}
+            </button>
+          ))}
+          <div className="mt-1 border-t border-line-2 px-2.5 pt-2.5 pb-1 font-mono text-[10.5px] text-muted-4">
+            santree {version ? `v${version}` : ""}
+          </div>
+        </>
+      )}
+    </Dropdown>
   );
 }

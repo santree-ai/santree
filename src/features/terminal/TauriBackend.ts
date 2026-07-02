@@ -1,8 +1,9 @@
 /**
  * `TerminalBackend` over Tauri IPC. Output streams from Rust on a Tauri
- * `Channel` (raw byte chunks), not `emit` — the right primitive for
- * high-frequency terminal output. This is local in-process plumbing carrying the
- * PTY byte stream, exactly like VS Code's renderer↔pty-host split.
+ * `Channel` (raw byte chunks, delivered as `ArrayBuffer` — see `terminal::RawBytes`
+ * in `terminal.rs`), not `emit` — the right primitive for high-frequency terminal
+ * output. This is local in-process plumbing carrying the PTY byte stream, exactly
+ * like VS Code's renderer↔pty-host split.
  */
 import { Channel } from "@tauri-apps/api/core";
 
@@ -23,11 +24,15 @@ export class TauriBackend implements TerminalBackend {
 
   async open(opts: OpenOpts): Promise<SessionId> {
     const sink: Sink = { buffer: [], exited: false };
-    const channel = new Channel<number[]>();
+    // The backend sends raw bytes (`InvokeResponseBody::Raw`, not JSON), so Tauri
+    // delivers each chunk here as an `ArrayBuffer` rather than a JSON array of
+    // decimal integers — avoids JSON-parsing megabytes of terminal output on
+    // high-throughput streams (verbose builds, `cat` of a large file).
+    const channel = new Channel<ArrayBuffer>();
     channel.onmessage = (chunk) => {
       // An empty chunk is the PTY exit sentinel (the process ended). Real output
       // chunks are never empty.
-      if (chunk.length === 0) {
+      if (chunk.byteLength === 0) {
         sink.exited = true;
         sink.exitCb?.();
         return;
@@ -42,7 +47,6 @@ export class TauriBackend implements TerminalBackend {
         cwd: opts.cwd ?? null,
         command: opts.command,
         args: opts.args,
-        env: opts.env,
         cols: opts.cols,
         rows: opts.rows,
       },

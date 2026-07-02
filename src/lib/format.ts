@@ -1,16 +1,11 @@
 /** Small presentation helpers shared across views. */
-import type { AgentKind } from "../bindings";
+import type { AgentDef } from "../bindings";
 
-/** Whether an agent harness is wired up today. Only Claude runs for now; the
- *  others (Codex/Cursor/OpenCode) are shown as work-in-progress everywhere. */
-export const agentAvailable = (kind: AgentKind): boolean => kind === "Claude";
+/** Whether an agent harness is wired up today — the catalog's own
+ *  `available` flag (see `crates/core/src/config.rs`), not a frontend guess. */
+export const agentAvailable = (agent: Pick<AgentDef, "available">): boolean => agent.available;
 
 /** A diff size as `+540 −121` (note the real minus sign, matching the design). */
 export function diffLabel(add: number, del: number): string {
   return `+${add} −${del}`;
-}
-
-/** The git branch a ticket's worktree uses, e.g. `santree/ak-165`. */
-export function branchFor(id: string): string {
-  return `santree/${id.toLowerCase()}`;
 }

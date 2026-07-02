@@ -141,13 +141,16 @@ export function TriageView() {
   const { data: investigateEffort } = useResolvedSetting(activeRepo, INVESTIGATE_EFFORT_KEY);
   // Resolve the chosen agent to its executable from Settings → Agents.
   const agentKind = (investigateAgent as AgentKind | null) ?? "Claude";
-  const agentExec = settings?.agents.find((a) => a.key === agentKind)?.exec ?? "";
+  const agentExec = settings?.agents?.find((a) => a.key === agentKind)?.exec ?? "";
 
   const { tabs: terminalTabs } = useTerminals();
 
   // Active issues first, snoozed sunk to the bottom (matching the CLI).
   const ordered = useMemo(
-    () => [...visible].sort((a, b) => Number(!!a.snoozedUntil) - Number(!!b.snoozedUntil)),
+    () =>
+      [...visible].sort(
+        (a, b) => Number(a.snoozedUntilMs != null) - Number(b.snoozedUntilMs != null),
+      ),
     [visible],
   );
   // Group by team, preserving order. Only used when the queue spans >1 team.
@@ -173,8 +176,9 @@ export function TriageView() {
 
   // Recently-viewed discussion panes stay mounted (hidden) so revisiting a
   // ticket is instant; new panes mount under a transition so the first heavy
-  // render never blocks the click.
-  const { keptPanes, detailFor } = useKeptPanes(detail, MAX_KEPT_PANES);
+  // render never blocks the click. Keyed on `activeRepo` so switching repos
+  // drops the whole cache instead of carrying old-repo details along.
+  const { keptPanes, detailFor } = useKeptPanes(detail, MAX_KEPT_PANES, activeRepo);
 
   // Per-ticket detail-tab memory (Discussion vs Investigation), so an open
   // investigation survives navigating away and back.

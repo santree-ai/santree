@@ -267,19 +267,25 @@ pub fn pull_base(cwd: &Path, base: &str) -> Result<String> {
 /// Fast-forward the *local* base branch (main/master) to `origin/<base>` — the
 /// "update master" action. Since the base is never worked on directly, this is
 /// expected to always be a clean fast-forward. Runs against the main repo dir:
-/// if the base is the branch checked out there, it's ff-merged; otherwise just
-/// the ref is moved (which `fetch refspec` does, ff-only).
+/// if the base is the branch checked out there, a plain fetch + `merge
+/// --ff-only` is required (git refuses to move the ref HEAD points at via a
+/// fetch refspec); otherwise a single combined-refspec fetch ff-updates the
+/// local ref directly, in one round-trip instead of two.
 pub fn update_base(repo: &Path, base: &str) -> Result<()> {
-    let (ok, _o, err) = git_capture(repo, &["fetch", "origin", base])?;
-    if !ok {
-        bail!("Couldn't fetch origin/{base}: {}", err.trim());
-    }
     let checked_out = git(repo, &["symbolic-ref", "--short", "HEAD"]).ok();
     if checked_out.as_deref() == Some(base) {
+        let (ok, _o, err) = git_capture(repo, &["fetch", "origin", base])?;
+        if !ok {
+            bail!("Couldn't fetch origin/{base}: {}", err.trim());
+        }
         git(repo, &["merge", "--ff-only", &format!("origin/{base}")])?;
     } else {
         // Move the local ref to origin/<base>, ff-only (errors if it would rewind).
-        git(repo, &["fetch", "origin", &format!("{base}:{base}")])?;
+        let (ok, _o, err) =
+            git_capture(repo, &["fetch", "origin", &format!("{base}:{base}")])?;
+        if !ok {
+            bail!("Couldn't fetch origin/{base}: {}", err.trim());
+        }
     }
     Ok(())
 }
@@ -291,13 +297,29 @@ pub fn is_dirty(cwd: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Git's canonical empty-tree object hash (stable across every repo — it's the
+/// hash of a tree with zero entries, not repo-specific data). Stands in for
+/// `HEAD` when the repo has no commits yet: a freshly `git init`-ed repo is a
+/// valid, connected repo per this app's validation (`rev-parse
+/// --show-toplevel` succeeds with zero commits), and `git diff HEAD` errors
+/// outright on that unborn HEAD.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /// The working-tree status as a list of changed files (the commit box model).
 /// Combines porcelain status (for state + staged flag) with `--numstat` line
 /// counts; untracked files are counted by reading them.
 pub fn status(cwd: &Path) -> Result<Vec<ChangedFile>> {
     let raw = git_output(cwd, &["status", "--porcelain=v1", "-z"])?;
     let parts: Vec<&str> = raw.split('\0').collect();
-    let numstat = numstat(cwd)?;
+    // HEAD is unborn on a brand-new repo (no commits yet) — diff against the
+    // empty tree instead so untracked/staged files still get counted rather
+    // than the whole status call erroring out.
+    let diff_base = if git(cwd, &["rev-parse", "--verify", "HEAD"]).is_ok() {
+        "HEAD"
+    } else {
+        EMPTY_TREE
+    };
+    let numstat = numstat(cwd, diff_base)?;
 
     let mut files = Vec::new();
     let mut i = 0;
@@ -367,14 +389,16 @@ pub fn parse_numstat_line(line: &str) -> Option<(String, u32, u32, bool)> {
 }
 
 /// `path → (additions, deletions, binary)` for every tracked file that differs
-/// from HEAD (staged + unstaged combined). Binary files report `-`/`-`.
+/// from `diff_base` (staged + unstaged combined; `diff_base` is `HEAD`, or the
+/// empty-tree hash when HEAD is unborn — see [`status`]). Binary files report
+/// `-`/`-`.
 ///
 /// Uses `--numstat -z` so renames key by their real (porcelain) path: without
 /// `-z`, git emits a `{old => new}` arrow form for renames that never matches the
 /// status path, so they'd show (0, 0). A map (not a Vec + linear scan) keeps the
 /// per-file lookup in [`status`] O(1) instead of O(files²).
-fn numstat(cwd: &Path) -> Result<HashMap<String, (u32, u32, bool)>> {
-    let raw = git_output(cwd, &["diff", "HEAD", "--numstat", "-z"])?;
+fn numstat(cwd: &Path, diff_base: &str) -> Result<HashMap<String, (u32, u32, bool)>> {
+    let raw = git_output(cwd, &["diff", diff_base, "--numstat", "-z"])?;
     let mut map = HashMap::new();
     // With `-z`, each record is `add\tdel\tpath\0`; for a rename the path field is
     // empty and the old then new paths follow as two extra NUL-separated fields.
@@ -404,10 +428,22 @@ fn numstat(cwd: &Path) -> Result<HashMap<String, (u32, u32, bool)>> {
     Ok(map)
 }
 
+/// Line-count cap for [`count_new_file`] — beyond this the exact count no
+/// longer matters for a `+N` badge, so scanning stops and reports the cap.
+const MAX_COUNTED_LINES: u32 = 10_000;
+
+/// Byte cap for [`count_new_file`], guarding the pathological case of a huge
+/// file with very few newlines (e.g. a multi-MB single-line minified bundle)
+/// where the line cap alone would never kick in.
+const MAX_SCANNED_BYTES: usize = 4 * 1024 * 1024;
+
 /// Additions / binary-ness of an untracked file. The binary check only needs the
 /// first chunk, so a huge binary (image, build artifact) is detected without a
-/// full read; a text file is then streamed for its line count without ever being
-/// held wholly in memory.
+/// full read; a text file is then streamed for its line count, capped at
+/// [`MAX_COUNTED_LINES`]/[`MAX_SCANNED_BYTES`] so a large generated file (log,
+/// dataset, lockfile) isn't read end-to-end on every `worktree_status` poll —
+/// the file watcher's 400ms debounce would otherwise re-read it repeatedly just
+/// to show a line-count badge.
 fn count_new_file(cwd: &Path, path: &str) -> (u32, u32, bool) {
     use std::io::Read;
     let Ok(real) = safe_real_path(cwd, path) else {
@@ -425,14 +461,18 @@ fn count_new_file(cwd: &Path, path: &str) -> (u32, u32, bool) {
         return (0, 0, true);
     }
     let mut lines = head[..n].iter().filter(|&&b| b == b'\n').count() as u32;
+    let mut scanned = n;
     let mut buf = [0u8; 8192];
-    loop {
+    while lines < MAX_COUNTED_LINES && scanned < MAX_SCANNED_BYTES {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
-            Ok(m) => lines += buf[..m].iter().filter(|&&b| b == b'\n').count() as u32,
+            Ok(m) => {
+                lines += buf[..m].iter().filter(|&&b| b == b'\n').count() as u32;
+                scanned += m;
+            }
         }
     }
-    (lines.max(1), 0, false)
+    (lines.clamp(1, MAX_COUNTED_LINES), 0, false)
 }
 
 /// A unified diff for a single file vs HEAD (staged + unstaged combined).
@@ -566,4 +606,380 @@ pub fn list_files(cwd: &Path) -> Result<Vec<String>> {
     files.sort();
     files.dedup();
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A unique scratch dir under the OS temp dir, cleaned before use. Mirrors
+    /// the ad-hoc temp-repo harness in `worktree.rs`'s test module (this
+    /// workspace doesn't depend on the `tempfile` crate).
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("santree-git-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    // ---- safe_path (lexical traversal guard) ----
+
+    #[test]
+    fn safe_path_rejects_absolute() {
+        let cwd = Path::new("/repo/worktree");
+        assert!(safe_path(cwd, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn safe_path_rejects_parent_dir_traversal() {
+        let cwd = Path::new("/repo/worktree");
+        assert!(safe_path(cwd, "../x").is_err());
+        assert!(safe_path(cwd, "a/../../x").is_err());
+    }
+
+    #[test]
+    fn safe_path_accepts_normal_relative_path() {
+        let cwd = Path::new("/repo/worktree");
+        assert_eq!(
+            safe_path(cwd, "sub/file.txt").unwrap(),
+            cwd.join("sub/file.txt")
+        );
+    }
+
+    // ---- safe_real_path (symlink-resolving containment check) ----
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_real_path_rejects_symlink_escape() {
+        let base = scratch_dir("symlink-escape");
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        assert!(
+            safe_real_path(&root, "link/file").is_err(),
+            "a path through a symlink pointing outside root must be rejected"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn safe_real_path_accepts_nonexistent_nested_path() {
+        let base = scratch_dir("nonexistent-nested");
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+
+        // `sub/new.txt` doesn't exist yet, but its parent does and resolves
+        // inside root — this is the "not-yet-created file" branch.
+        let real = safe_real_path(&root, "sub/new.txt").unwrap();
+        assert!(!real.exists());
+        assert!(real.starts_with(std::fs::canonicalize(&root).unwrap()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_real_path_rejects_symlinked_parent_dir_for_new_file() {
+        let base = scratch_dir("symlink-parent");
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("evil-link-dir")).unwrap();
+
+        assert!(
+            safe_real_path(&root, "evil-link-dir/new.txt").is_err(),
+            "a not-yet-created file whose parent dir is itself a symlink \
+             escaping root must be rejected"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn safe_real_path_accepts_normal_nested_paths() {
+        let base = scratch_dir("normal-nested");
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/file.txt"), "hi\n").unwrap();
+
+        let real = safe_real_path(&root, "sub/file.txt").unwrap();
+        assert_eq!(
+            real,
+            std::fs::canonicalize(root.join("sub/file.txt")).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- status()'s porcelain `-z` parsing (rename record consumption) ----
+
+    /// A regression guard for the `i += 1` rename-record dance in `status()`:
+    /// a staged rename is followed by an unrelated unstaged change, so an
+    /// off-by-one in consuming the rename's extra NUL-delimited old-path field
+    /// would desync the stream and corrupt (or swallow) the next record.
+    #[test]
+    fn status_handles_rename_without_desyncing_subsequent_records() {
+        let base = scratch_dir("status-rename");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "hello\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        // Stage a rename (content unchanged, so it's detected at 100% similarity)...
+        run_git(&repo, &["mv", "a.txt", "a-renamed.txt"]);
+        // ...plus an unrelated unstaged modification right after it.
+        std::fs::write(repo.join("b.txt"), "hello\nworld\n").unwrap();
+
+        let files = status(&repo).unwrap();
+
+        let renamed = files
+            .iter()
+            .find(|f| f.status == FileStatus::Renamed)
+            .expect("rename record present");
+        assert_eq!(renamed.path, "a-renamed.txt");
+        assert_eq!(renamed.old_path.as_deref(), Some("a.txt"));
+        assert!(renamed.staged, "git mv stages the rename");
+
+        let modified = files
+            .iter()
+            .find(|f| f.path == "b.txt")
+            .expect("b.txt record wasn't swallowed by the rename's extra field");
+        assert_eq!(modified.status, FileStatus::Modified);
+        assert!(!modified.staged);
+        assert_eq!(modified.old_path, None);
+        assert_eq!(modified.add_lines, 1);
+        assert_eq!(modified.del_lines, 0);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- status() on an unborn HEAD (freshly `git init`-ed repo) ----
+
+    /// A brand-new repo (zero commits) is a valid, connected repo per this
+    /// app's validation (`rev-parse --show-toplevel` succeeds with no commits).
+    /// `status()` used to propagate `git diff HEAD`'s failure on the unborn
+    /// HEAD, erroring out the whole commit box instead of listing the
+    /// untracked files a user adding their first commit needs to see.
+    #[test]
+    fn status_on_unborn_head_lists_untracked_files() {
+        let base = scratch_dir("status-unborn-head-untracked");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+
+        std::fs::write(repo.join("new.txt"), "hello\nworld\n").unwrap();
+
+        let files = status(&repo).expect("status() must not error on unborn HEAD");
+        let f = files
+            .iter()
+            .find(|f| f.path == "new.txt")
+            .expect("untracked file must be listed on unborn HEAD");
+        assert_eq!(f.status, FileStatus::Untracked);
+        assert!(!f.staged);
+        assert_eq!(f.add_lines, 2);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A staged file on an unborn HEAD diffs against the empty tree, so its
+    /// line count is still reported correctly (not silently `0`).
+    #[test]
+    fn status_on_unborn_head_counts_staged_file_via_empty_tree_diff() {
+        let base = scratch_dir("status-unborn-head-staged");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+
+        std::fs::write(repo.join("staged.txt"), "a\nb\nc\n").unwrap();
+        run_git(&repo, &["add", "staged.txt"]);
+
+        let files = status(&repo).expect("status() must not error on unborn HEAD");
+        let f = files
+            .iter()
+            .find(|f| f.path == "staged.txt")
+            .expect("staged file must be listed on unborn HEAD");
+        assert_eq!(f.status, FileStatus::Added);
+        assert!(f.staged);
+        assert_eq!(f.add_lines, 3);
+        assert_eq!(f.del_lines, 0);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- count_new_file's NUL-byte binary heuristic ----
+
+    #[test]
+    fn count_new_file_detects_embedded_nul_as_binary() {
+        let base = scratch_dir("count-new-file-binary");
+        std::fs::write(base.join("bin.dat"), [b'h', b'i', 0u8, b'x']).unwrap();
+
+        let (add, del, binary) = count_new_file(&base, "bin.dat");
+        assert!(
+            binary,
+            "a NUL byte in the content must be detected as binary"
+        );
+        assert_eq!((add, del), (0, 0));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn count_new_file_counts_lines_for_text() {
+        let base = scratch_dir("count-new-file-text");
+        std::fs::write(base.join("text.txt"), "one\ntwo\nthree\n").unwrap();
+
+        let (add, del, binary) = count_new_file(&base, "text.txt");
+        assert!(!binary);
+        assert_eq!(add, 3);
+        assert_eq!(del, 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A large untracked file (log, dataset, lockfile) must not be read end to
+    /// end just to count its lines — the count saturates at
+    /// [`MAX_COUNTED_LINES`] instead of scanning the whole file.
+    #[test]
+    fn count_new_file_caps_line_count_for_huge_files() {
+        let base = scratch_dir("count-new-file-cap");
+        let content = "x\n".repeat(MAX_COUNTED_LINES as usize + 500);
+        std::fs::write(base.join("huge.txt"), content).unwrap();
+
+        let (add, del, binary) = count_new_file(&base, "huge.txt");
+        assert!(!binary);
+        assert_eq!(add, MAX_COUNTED_LINES, "line count must saturate at the cap");
+        assert_eq!(del, 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- parse_numstat_line ----
+
+    #[test]
+    fn parse_numstat_line_flags_binary_dash_counts() {
+        let (path, add, del, binary) = parse_numstat_line("-\t-\tfoo.png").unwrap();
+        assert_eq!(path, "foo.png");
+        assert_eq!((add, del), (0, 0));
+        assert!(binary);
+    }
+
+    #[test]
+    fn parse_numstat_line_parses_normal_counts() {
+        let (path, add, del, binary) = parse_numstat_line("12\t3\tfoo.rs").unwrap();
+        assert_eq!(path, "foo.rs");
+        assert_eq!(add, 12);
+        assert_eq!(del, 3);
+        assert!(!binary);
+    }
+
+    // ---- update_base ----
+
+    /// Sets up a bare "origin" repo plus a `seed` clone (kept around so the
+    /// test can push further commits to simulate someone else advancing the
+    /// base) and a `repo` clone — the one `update_base` is exercised against.
+    /// Returns `(origin, seed, repo)`.
+    fn init_origin_seed_and_clone(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = scratch_dir(name);
+        let origin = base.join("origin.git");
+        let seed = base.join("seed");
+        let repo = base.join("repo");
+
+        run_git(&base, &["init", "--bare", "-b", "main", "origin.git"]);
+
+        std::fs::create_dir_all(&seed).unwrap();
+        run_git(&seed, &["init", "-b", "main"]);
+        run_git(&seed, &["config", "user.email", "t@t.test"]);
+        run_git(&seed, &["config", "user.name", "Test"]);
+        std::fs::write(seed.join("f.txt"), "v1\n").unwrap();
+        run_git(&seed, &["add", "-A"]);
+        run_git(&seed, &["commit", "-m", "init"]);
+        run_git(&seed, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        run_git(&seed, &["push", "origin", "main"]);
+
+        run_git(
+            &base,
+            &["clone", origin.to_str().unwrap(), repo.to_str().unwrap()],
+        );
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+
+        (origin, seed, repo)
+    }
+
+    /// Pushes a new commit to origin's `main` via the `seed` clone, simulating
+    /// the base advancing upstream after `repo` was cloned.
+    fn advance_origin_main(seed: &Path, content: &str) {
+        std::fs::write(seed.join("f.txt"), content).unwrap();
+        run_git(seed, &["add", "-A"]);
+        run_git(seed, &["commit", "-m", "advance"]);
+        run_git(seed, &["push", "origin", "main"]);
+    }
+
+    /// When `base` isn't the branch checked out in `repo`, `update_base` must
+    /// fast-forward the local `refs/heads/<base>` ref directly (the combined
+    /// `fetch origin base:base` refspec) rather than needing a separate merge.
+    #[test]
+    fn update_base_fast_forwards_local_ref_when_not_checked_out() {
+        let (origin, seed, repo) = init_origin_seed_and_clone("update-base-not-checked-out");
+        // Switch off `main` so it's not the checked-out branch — mirrors an
+        // agent's worktree sitting on its own feature branch.
+        run_git(&repo, &["checkout", "-b", "feature"]);
+
+        advance_origin_main(&seed, "v2\n");
+
+        update_base(&repo, "main").expect("update_base should succeed");
+
+        let local_main = git(&repo, &["rev-parse", "refs/heads/main"]).unwrap();
+        let origin_tip = git(&origin, &["rev-parse", "main"]).unwrap();
+        assert_eq!(
+            local_main, origin_tip,
+            "local main ref must be fast-forwarded to origin's tip"
+        );
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    /// When `base` IS the checked-out branch, a direct-ref fetch can't move it
+    /// (git refuses to update the ref HEAD points at) — `update_base` must
+    /// fall back to a plain fetch + `merge --ff-only`, updating the working
+    /// tree too.
+    #[test]
+    fn update_base_ff_merges_when_base_is_checked_out() {
+        let (origin, seed, repo) = init_origin_seed_and_clone("update-base-checked-out");
+        // `clone` checks out `main` by default, so this is already the
+        // "base is checked out" case.
+
+        advance_origin_main(&seed, "v2\n");
+
+        update_base(&repo, "main").expect("update_base should succeed");
+
+        let content = std::fs::read_to_string(repo.join("f.txt")).unwrap();
+        assert_eq!(
+            content, "v2\n",
+            "checked-out main's working tree must be ff-merged"
+        );
+        let local_head = git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let origin_tip = git(&origin, &["rev-parse", "main"]).unwrap();
+        assert_eq!(local_head, origin_tip);
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
 }

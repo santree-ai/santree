@@ -25,6 +25,10 @@ tauri-plugin-dialog = "2"
 # Repositions the macOS traffic lights (the `trafficLightPosition` config field is
 # ignored with titleBarStyle: Overlay); decorum does it natively + on resize.
 tauri-plugin-decorum = "1.1"
+# Guards against two instances fighting over the same santree.db (last-writer-wins
+# on settings) — a real risk on Linux, which has no OS-level single-instance
+# enforcement the way macOS's Dock/LaunchServices give app bundles for free.
+tauri-plugin-single-instance = "2"
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -35,9 +39,13 @@ specta = { workspace = true }
 specta-typescript = "0.0.12"
 tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 
-# Async runtime — wired in now so the foundation is async-ready even though the
-# hello-world command is synchronous.
-tokio = { version = "1", features = ["full"] }
+# Async runtime — used pervasively (every #[tauri::command] is async, plus sqlx,
+# reqwest, and PTY streaming). We only need `spawn`/`spawn_blocking` (rt),
+# `join!`/#[tokio::test] (macros), and tokio::sync::Mutex (sync) — no signal/net/
+# io-std/etc, which "full" pulled in unused. Tauri and sqlx pull in whatever
+# additional tokio features they themselves need via Cargo's feature unification;
+# this list only has to cover what our own code names directly.
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
 
 anyhow = "1"
 

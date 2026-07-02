@@ -179,3 +179,19 @@ export function accentActiveStyle(): CSSProperties {
     color: accentVar,
   };
 }
+
+/**
+ * Style for a small icon button that toggles into the accent-active treatment
+ * when `active` (open/selected) — shared by the sidebar footer's Help and
+ * Settings buttons so a menu-open button and a route-active button look the
+ * same way "on".
+ */
+export function iconButtonStyle(active: boolean): CSSProperties {
+  return active
+    ? accentActiveStyle()
+    : {
+        background: "transparent",
+        borderColor: "var(--color-line-3)",
+        color: "var(--color-muted-2)",
+      };
+}

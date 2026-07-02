@@ -1,5 +1,6 @@
 /** The per-repo Linear section: which connected org supplies this repo's issues. */
 
+import { ChevronSelect } from "../../../components/primitives";
 import {
   useLinearConnect,
   useLinearOrgs,
@@ -7,7 +8,7 @@ import {
   useSetRepoLinearOrg,
 } from "../../../lib/queries";
 import { LINEAR_BRAND } from "../../../theme/colors";
-import { Heading } from "../widgets";
+import { Heading, SELECT_CLASS } from "../widgets";
 import { linearBadge } from "./Integrations";
 
 export function RepoLinearSection({ repo }: { repo: string }) {
@@ -50,17 +51,18 @@ export function RepoLinearSection({ repo }: { repo: string }) {
             this org.
           </div>
           <div className="flex items-center gap-2">
-            <select
+            <ChevronSelect
               value={status?.orgSlug ?? ""}
-              onChange={(e) => setOrg.mutate({ repo, slug: e.target.value })}
-              className="flex-1 cursor-pointer appearance-none rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-[12px] text-fg-3"
+              onChange={(v) => setOrg.mutate({ repo, slug: v })}
+              className={SELECT_CLASS}
+              wrapperClassName="flex-1"
             >
               {orgs.map((org) => (
                 <option key={org.slug} value={org.slug} className="bg-input">
                   {org.name} ({org.slug})
                 </option>
               ))}
-            </select>
+            </ChevronSelect>
             <button
               type="button"
               onClick={() => setOrg.mutate({ repo, slug: null })}

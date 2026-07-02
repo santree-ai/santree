@@ -27,7 +27,7 @@ export function LaunchPanel() {
   if (count === 0) return null;
 
   // Only offer agents that are actually wired up (just Claude today).
-  const availableAgents = agents.filter((a) => agentAvailable(a.key));
+  const availableAgents = agents.filter((a) => agentAvailable(a));
   const models = agents.find((a) => a.key === launchAgent)?.models ?? [];
   const chainedCount = selectedEligible.filter((t) => !t.ready).length;
 
@@ -60,6 +60,7 @@ export function LaunchPanel() {
         onChange={(v) => setLaunchAgent(v as AgentKind)}
         className={SELECT_CLASS}
         wrapperClassName="mb-[9px]"
+        aria-label="Agent"
       >
         {availableAgents.map((a) => (
           <option key={a.key} value={a.key} className="bg-input">
@@ -81,6 +82,7 @@ export function LaunchPanel() {
         placeholder={defaultModel}
         className={SELECT_CLASS}
         wrapperClassName="mb-[11px]"
+        aria-label="Model"
       />
 
       <button

@@ -17,13 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Version is read from package.json's `packageManager` field, so it
+      # can't drift from what contributors get via corepack locally.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -37,14 +37,20 @@ jobs:
       - run: pnpm test
 
   backend:
-    name: Backend (fmt · clippy · test · bindings drift)
-    runs-on: ubuntu-latest
+    name: Backend (fmt · clippy · test · bindings drift) — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
       # Tauri builds against the OS webview — WebKitGTK — so its dev libs are
       # required before the Rust side will compile (mirrors README's Linux deps).
+      # macOS ships WebKit as part of the OS, so this step is Linux-only.
       - name: Install system dependencies
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -55,10 +61,13 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
-      # The toolchain (stable + rustfmt + clippy) is pinned in rust-toolchain.toml.
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # The exact toolchain version + components (rustfmt, clippy) are pinned in
+      # rust-toolchain.toml — the single source of truth. `rustup show` reads that
+      # file and auto-installs the pinned toolchain if it isn't already present
+      # (GitHub-hosted runners ship rustup + a floating "stable" by default, which
+      # this overrides for every cargo invocation below).
+      - name: Install pinned Rust toolchain
+        run: rustup show
 
       - uses: Swatinem/rust-cache@v2
 
@@ -74,5 +83,8 @@ jobs:
       # `cargo test` re-runs the bindings export (export_bindings_succeeds), which
       # rewrites src/bindings.ts. If the committed file is stale, this fails —
       # forcing `pnpm gen:bindings` to be run + committed when a command changes.
+      # Only checked on one OS in the matrix — the export is platform-independent,
+      # so running it on both would just duplicate the check.
       - name: Bindings are up to date
+        if: matrix.os == 'ubuntu-latest'
         run: git diff --exit-code src/bindings.ts

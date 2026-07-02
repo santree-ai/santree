@@ -16,7 +16,6 @@ export interface TerminalSpec {
   /** Empty ⇒ the user's login shell. */
   command?: string;
   args?: string[];
-  env?: Record<string, string>;
   /** One-time initial input, sent as if the user typed it. */
   seed?: string;
   /** Category, for grouping (defaults to "shell"). */

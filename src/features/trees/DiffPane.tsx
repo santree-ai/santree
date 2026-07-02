@@ -15,15 +15,20 @@ export function DiffPane() {
   const { repo, activeId, selectedFile } = useTrees();
   const { data: diffModeSetting } = useSetting("app", TREES_DIFF_MODE_KEY);
   const diffMode = diffModeSetting === "unified" ? "unified" : "split";
-  const { data: status = [] } = useWorktreeStatus(repo, activeId);
+  const { data: status = [], isFetched: statusFetched } = useWorktreeStatus(repo, activeId);
   const file = status.find((f) => f.path === selectedFile);
   const untracked = file?.status === "Untracked";
 
+  // Withhold the diff fetch until status has resolved at least once — otherwise
+  // `untracked` defaults to false before `file` is known, the diff query runs
+  // against the wrong (tracked) code path, and an untracked file flashes "No
+  // changes in this file" until the second, correct fetch lands.
   const { data: diff, isLoading } = useWorktreeFileDiff(
     repo,
     activeId,
     selectedFile ?? "",
     untracked,
+    statusFetched,
   );
   const { data: source } = useWorktreeFileSource(repo, activeId, selectedFile ?? "");
 

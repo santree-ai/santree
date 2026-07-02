@@ -240,7 +240,7 @@ function WorktreeEntry({
           }}
           aria-label={selected ? "Deselect worktree" : "Select worktree"}
           className={`mt-px flex h-3.5 w-3.5 flex-none items-center justify-center rounded-[4px] border transition-opacity ${
-            selected ? "" : "opacity-0 group-hover:opacity-100"
+            selected ? "" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
           }`}
           style={
             selected

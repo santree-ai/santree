@@ -41,7 +41,12 @@ async fn get_json<T: DeserializeOwned>(
         .send()
         .await?;
     if !res.status().is_success() {
-        bail!("GitHub returned {}", res.status());
+        let status = res.status();
+        // A 403 carries rate-limit details in the body; surface them instead
+        // of a bare status code.
+        let body = res.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(300).collect();
+        bail!("GitHub returned {status}: {snippet}");
     }
     Ok(res.json().await?)
 }
@@ -77,8 +82,14 @@ pub async fn status() -> santree_core::domain::GithubStatus {
     use santree_core::domain::GithubStatus;
 
     // `gh` lives in Homebrew on most Macs, which a Finder-launched bundle's
-    // minimal PATH misses — resolve it the same way `token()` does.
-    let Some(exec) = crate::settings::discover_binary("gh") else {
+    // minimal PATH misses — resolve it the same way `token()` does. Discovery
+    // spawns a login shell (tens-hundreds of ms on a cache miss), so keep it
+    // off the async runtime like `token()` and `agent_auth` do.
+    let Some(exec) = tokio::task::spawn_blocking(|| crate::settings::discover_binary("gh"))
+        .await
+        .ok()
+        .flatten()
+    else {
         return GithubStatus::default(); // installed: false; everything else empty
     };
 
@@ -172,6 +183,7 @@ struct SearchResp {
 #[derive(Deserialize)]
 struct SearchItem {
     number: u32,
+    title: String,
     html_url: String,
     state: String,
     pull_request: Option<PrRef>,
@@ -182,20 +194,33 @@ struct PrRef {
     merged_at: Option<String>,
 }
 
-/// Every PR associated with an issue, newest first — each as (number, URL, merge
-/// state). Associated by the issue id in the PR **title** (the `[AK-123] …` tag
-/// our commit/PR flow writes, mirroring the branch name) — NOT by the branch
-/// itself, which GitHub deletes on merge (so merged PRs would vanish), and NOT by
-/// the body, which references *other* tickets as dependencies. A single issue can
-/// span several PRs. Empty when there are none. Network errors bubble up.
-pub async fn prs_for_issue(
-    token: &str,
-    owner: &str,
-    repo: &str,
-    issue_id: &str,
-) -> Result<Vec<(u32, String, PrState)>> {
-    // Quoted issue id → exact phrase, so "AK-55" can't match "AK-550" etc.
-    let q = format!("repo:{owner}/{repo} type:pr in:title \"{issue_id}\"");
+/// One PR from a repo-wide search — title included so [`crate::pr::statuses`] can
+/// match it against several linked issue ids without a search call per issue.
+pub struct RepoPr {
+    pub number: u32,
+    pub title: String,
+    pub url: String,
+    pub state: PrState,
+}
+
+/// Every PR in `owner/repo`, newest-created first — one GitHub API call
+/// regardless of how many worktrees/issues the caller wants to match against.
+///
+/// Replaces the old "one search per issue id" approach: GitHub's search API
+/// has a secondary rate limit of ~30 requests/minute, and `worktreePrs` is
+/// refetched on a 60s staleTime *and* after every worktree mutation — a repo
+/// with a modest number of active worktrees could blow through that budget in
+/// one refetch, silently dropping PR chips. Callers match titles against the
+/// `[ISSUE-ID] …` tag our commit/PR flow writes (see `pr::issue_tag`) rather
+/// than the branch, which GitHub deletes on merge (so merged PRs would vanish
+/// from a branch-based lookup).
+///
+/// Capped at one page (100, GitHub's search max per page), so a repo with more
+/// than 100 PRs newer than a given worktree's PR won't surface it here — an
+/// accepted tradeoff since worktrees are actively-worked branches and their
+/// PRs are typically among the most recent. Network errors bubble up.
+pub async fn prs_for_repo(token: &str, owner: &str, repo: &str) -> Result<Vec<RepoPr>> {
+    let q = format!("repo:{owner}/{repo} type:pr");
     let body: SearchResp = get_json(
         "https://api.github.com/search/issues".to_string(),
         &[
@@ -219,7 +244,12 @@ pub async fn prs_for_issue(
             } else {
                 PrState::Open
             };
-            (p.number, p.html_url, state)
+            RepoPr {
+                number: p.number,
+                title: p.title,
+                url: p.html_url,
+                state,
+            }
         })
         .collect())
 }

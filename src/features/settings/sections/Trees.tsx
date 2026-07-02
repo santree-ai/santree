@@ -25,6 +25,8 @@ import {
   useInitScript,
   useMakeInitExecutable,
   useOpeners,
+  useResolvedBoolSetting,
+  useResolvedSetting,
   useSetInitScript,
   useSetSetting,
   useSetting,
@@ -43,26 +45,30 @@ function Card({ children }: { children: ReactNode }) {
   return <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">{children}</div>;
 }
 
-/** An app-scoped boolean preference rendered as a toggle row. */
+/** A boolean preference rendered as a toggle row — app defaults, or (when
+ *  `forRepo` is set) a per-repo override that falls back to the app value. */
 export function BoolToggle({
   settingKey,
   label,
   hint,
+  forRepo,
 }: {
   settingKey: string;
   label: string;
   hint?: ReactNode;
+  forRepo?: string;
 }) {
-  const { value } = useBoolSetting("app", settingKey);
+  const scope = forRepo ? `repo:${forRepo}` : "app";
+  const appValue = useBoolSetting("app", settingKey).value;
+  const resolvedValue = useResolvedBoolSetting(forRepo ?? "", settingKey).value;
+  const value = forRepo ? resolvedValue : appValue;
   const { mutate: setSetting } = useSetSetting();
   return (
     <ToggleRow
       label={label}
       hint={hint}
       on={value}
-      onChange={(next) =>
-        setSetting({ scope: "app", key: settingKey, value: next ? "true" : "false" })
-      }
+      onChange={(next) => setSetting({ scope, key: settingKey, value: next ? "true" : "false" })}
     />
   );
 }
@@ -80,11 +86,23 @@ const DIFF_OPTIONS: { value: DiffMode; label: string }[] = [
 ];
 
 /** The worktree setup + commit preferences and the per-repo setup-script editor.
- *  Heading-less — rendered under the merged "Work" settings section. */
-export function WorktreeSettings({ repo }: { repo: string }) {
-  const { data: batch } = useSetting("app", TREES_BATCH_SETUP_KEY);
-  const { data: diffMode } = useSetting("app", TREES_DIFF_MODE_KEY);
-  const { data: defaultEditor } = useSetting("app", TREES_DEFAULT_EDITOR_KEY);
+ *  Heading-less — rendered under the merged "Work" settings section. App
+ *  defaults, or (when `forRepo` is set) per-repo overrides — same scope
+ *  convention as {@link WorkActionConfig}. */
+export function WorktreeSettings({ repo, forRepo }: { repo: string; forRepo?: string }) {
+  const scope = forRepo ? `repo:${forRepo}` : "app";
+  const { data: appBatch } = useSetting("app", TREES_BATCH_SETUP_KEY);
+  const { data: resolvedBatch } = useResolvedSetting(forRepo ?? "", TREES_BATCH_SETUP_KEY);
+  const batch = forRepo ? resolvedBatch : appBatch;
+  const { data: appDiffMode } = useSetting("app", TREES_DIFF_MODE_KEY);
+  const { data: resolvedDiffMode } = useResolvedSetting(forRepo ?? "", TREES_DIFF_MODE_KEY);
+  const diffMode = forRepo ? resolvedDiffMode : appDiffMode;
+  const { data: appDefaultEditor } = useSetting("app", TREES_DEFAULT_EDITOR_KEY);
+  const { data: resolvedDefaultEditor } = useResolvedSetting(
+    forRepo ?? "",
+    TREES_DEFAULT_EDITOR_KEY,
+  );
+  const defaultEditor = forRepo ? resolvedDefaultEditor : appDefaultEditor;
   const { data: openers = [] } = useOpeners();
   const { mutate: setSetting } = useSetSetting();
 
@@ -105,6 +123,7 @@ export function WorktreeSettings({ repo }: { repo: string }) {
           settingKey={TREES_RUN_SETUP_KEY}
           label="Run setup on new worktrees"
           hint="Run .santree/init.sh automatically right after creating a worktree."
+          forRepo={forRepo}
         />
         <Field
           label="When starting several tasks at once"
@@ -113,7 +132,7 @@ export function WorktreeSettings({ repo }: { repo: string }) {
           <Segmented<BatchSetup>
             options={BATCH_OPTIONS}
             value={(batch as BatchSetup) ?? "ask"}
-            onChange={(value) => setSetting({ scope: "app", key: TREES_BATCH_SETUP_KEY, value })}
+            onChange={(value) => setSetting({ scope, key: TREES_BATCH_SETUP_KEY, value })}
           />
         </Field>
         <SetupScriptField repo={repo} />
@@ -124,16 +143,19 @@ export function WorktreeSettings({ repo }: { repo: string }) {
           settingKey={TREES_STAGE_ALL_KEY}
           label="Stage all files before committing"
           hint="Stage every change automatically instead of asking for confirmation."
+          forRepo={forRepo}
         />
         <BoolToggle
           settingKey={TREES_AUTO_PUSH_KEY}
           label="Push to origin after every commit"
           hint="Automatically push the branch to its remote right after committing (sets upstream on the first push)."
+          forRepo={forRepo}
         />
         <BoolToggle
           settingKey={TREES_AUTO_PR_KEY}
           label="Open the PR dialog after a commit"
           hint="When a worktree has a commit and no PR yet, automatically open the create-PR dialog after committing. Requires the GitHub CLI (gh) to be authenticated."
+          forRepo={forRepo}
         />
       </Card>
 
@@ -145,7 +167,7 @@ export function WorktreeSettings({ repo }: { repo: string }) {
           <ChevronSelect
             className={SELECT_CLASS}
             value={effectiveEditor}
-            onChange={(v) => setSetting({ scope: "app", key: TREES_DEFAULT_EDITOR_KEY, value: v })}
+            onChange={(v) => setSetting({ scope, key: TREES_DEFAULT_EDITOR_KEY, value: v })}
           >
             {openers.map((o) => (
               <option key={o.key} value={o.key} disabled={!o.available} className="bg-input">
@@ -159,7 +181,7 @@ export function WorktreeSettings({ repo }: { repo: string }) {
           <Segmented<DiffMode>
             options={DIFF_OPTIONS}
             value={(diffMode as DiffMode) ?? "split"}
-            onChange={(value) => setSetting({ scope: "app", key: TREES_DIFF_MODE_KEY, value })}
+            onChange={(value) => setSetting({ scope, key: TREES_DIFF_MODE_KEY, value })}
           />
         </Field>
       </Card>
@@ -183,7 +205,9 @@ function SetupScriptField({ repo }: { repo: string }) {
 
   const base = script?.exists ? script.content : STARTER_SCRIPT;
   const value = draft ?? base;
-  const dirty = draft !== null && draft !== base;
+  // No script yet: the starter template itself is a valid save, so "Create
+  // script" must be clickable even with zero edits.
+  const dirty = !script?.exists || (draft !== null && draft !== base);
   const needsChmod = !!script?.exists && !script.executable;
 
   const onSave = () => {

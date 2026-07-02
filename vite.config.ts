@@ -22,6 +22,10 @@ export default defineConfig({
   ],
 
   build: {
+    // Local files only — no download cost in a Tauri app — so ship them to get
+    // readable stack traces (file/line, unminified names) from production crashes
+    // instead of a wall of minified gibberish.
+    sourcemap: true,
     // The Material file-icon set (~1250 small SVGs) would otherwise be inlined as
     // base64 into the JS bundle. Emit them as standalone asset files instead — in
     // a Tauri app they load instantly from local disk, and the JS stays lean.

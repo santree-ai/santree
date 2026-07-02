@@ -38,6 +38,26 @@ inspects them to decide what to type next.
 Do not wrap, re-implement, or spoof any agent's control loop or SDK. We spawn the
 real binary and render its real output — nothing more.
 
+## Headless helpers — a scoped exception
+Two call sites intentionally sit outside the terminal pane and are the only
+sanctioned exceptions to the constraints above:
+- `src-tauri/src/agent.rs` (`run_print` / headless helpers) — one-shot `claude -p`
+  calls that draft a commit message or a PR title/description.
+- `src-tauri/src/github.rs` (`token()`) — reads a token via `gh auth token`, GitHub's
+  own documented token-lending interface for scripts/tools. This is distinct from
+  santree reading, storing, or proxying an *agent CLI's* (Claude/Codex/…) auth —
+  that remains strictly forbidden per "No credential handling" above.
+
+Both stay inside the spirit of this doc only because they are: the vendor's own
+documented print/non-interactive mode, invoked on the real unmodified binary;
+single-shot, with no loop and no retry; human-initiated by a button click, never
+automatic or background; bounded by a timeout (~120s); scoped with explicit
+`--allowedTools`/`--disallowedTools`; and their output lands in a commit message or
+PR body — it never feeds back into another agent invocation. This is a narrow,
+named exception, not a license for headless/background Claude usage generally. Any
+new headless call site must be justified against these same conditions before
+merging.
+
 ## Where this is enforced in code
 - `crates/pty` — spawns a real process behind a real PTY and streams **raw
   bytes**. No command interpretation, no output parsing.

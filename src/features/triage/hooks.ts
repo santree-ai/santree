@@ -67,11 +67,28 @@ export function useTabByTicket() {
  * ticket's detail so inactive (hidden) panes keep rendering their own content
  * even after the active detail has moved on.
  *
+ * `detailsRef` is pruned to match `keptPanes` on every eviction — otherwise
+ * every detail ever viewed (images included) would outlive the query cache's
+ * own gcTime, pinned in memory for the life of the view. `resetKey` (e.g. the
+ * active repo) additionally drops the whole cache outright on change, so
+ * switching repos doesn't ride old-repo details along until they age out.
+ *
  * Generic over the detail shape; callers feed the currently-active detail.
  */
-export function useKeptPanes<D extends { id: string }>(activeDetail: D | undefined, max: number) {
+export function useKeptPanes<D extends { id: string }>(
+  activeDetail: D | undefined,
+  max: number,
+  resetKey?: unknown,
+) {
   const detailsRef = useRef(new Map<string, D>());
   const [keptPanes, setKeptPanes] = useState<string[]>([]);
+
+  // Reset the whole cache when `resetKey` changes (e.g. the active repo).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run on resetKey change.
+  useEffect(() => {
+    detailsRef.current.clear();
+    setKeptPanes([]);
+  }, [resetKey]);
 
   useEffect(() => {
     if (!activeDetail) return;
@@ -82,6 +99,14 @@ export function useKeptPanes<D extends { id: string }>(activeDetail: D | undefin
       );
     });
   }, [activeDetail, max]);
+
+  // Prune alongside eviction: once a pane ages out of `keptPanes` its detail
+  // (and any inlined images) has no reason to stay in `detailsRef`.
+  useEffect(() => {
+    for (const id of detailsRef.current.keys()) {
+      if (!keptPanes.includes(id)) detailsRef.current.delete(id);
+    }
+  }, [keptPanes]);
 
   const detailFor = useCallback((id: string) => detailsRef.current.get(id), []);
 

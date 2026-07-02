@@ -11,7 +11,7 @@ import { memo } from "react";
 import { PrChips } from "../../components/PrChip";
 import { Badge, Dot } from "../../components/primitives";
 import { accentVar as accent, alpha, successColor } from "../../theme/colors";
-import { useIssueHover, useIssues } from "./model";
+import { useIssueHover, useIssueNodeData } from "./model";
 
 export interface IssueNodeData {
   title: string;
@@ -41,7 +41,6 @@ function cardStyleFor(data: IssueNodeData, working: boolean): CSSProperties {
   const style: CSSProperties = {
     background: "var(--color-hover)",
     border: "1px solid var(--color-line-3)",
-    boxShadow: "0 1px 2px rgba(0,0,0,.4)",
   };
   if (data.grayed) {
     // Non-actionable context node: no fill/shadow, so the border alone has to
@@ -103,8 +102,10 @@ export const IssueNode = memo(
     // Highlight + worktree state come from context (NOT node data) so neither a
     // hover/selection nor a worktrees refetch rebuilds the React Flow nodes array
     // — that churn resets node measurement and blanks the canvas when a fitView
-    // lands mid-rebuild.
-    const { focusId, worktreeIds, prByTask } = useIssues();
+    // lands mid-rebuild. `useIssueNodeData` is a narrow context carrying only
+    // these three fields (see model.tsx) so unrelated IssuesModel churn
+    // (selection, launch tray) doesn't re-render every node.
+    const { focusId, worktreeIds, prByTask } = useIssueNodeData();
     const { hoverId } = useIssueHover();
     const focused = focusId === id;
     const hovered = hoverId === id && !focused;
@@ -119,7 +120,7 @@ export const IssueNode = memo(
         // then rasterizes at 1× and magnifies — WebKit keeps the layer around, so
         // the whole graph stays blurry after a focus toggle. Dim is applied
         // instantly instead.
-        className="relative w-[212px] cursor-pointer rounded-[11px] px-3 py-2.5 text-left transition-[border-color,box-shadow] duration-200"
+        className="relative w-[212px] cursor-pointer rounded-[11px] px-3 py-2.5 text-left shadow-sm transition-[border-color,box-shadow] duration-200"
         style={{
           opacity: data.dim ? 0.32 : data.grayed ? 0.75 : 1,
           ...cardStyleFor(data, working),
@@ -153,7 +154,7 @@ export const IssueNode = memo(
           <div className="ml-auto flex items-center gap-1">
             {working && <Badge color="var(--color-status-amber)">WIP</Badge>}
             {data.ready && !working && <Badge color={successColor}>RDY</Badge>}
-            {data.chainBase && <Badge>⛓ {data.chainBase}</Badge>}
+            {data.chainBase && !working && <Badge>⛓ {data.chainBase}</Badge>}
             {/* "Blocked" is contradictory once a node is being worked on or has a
                 PR — suppress it so the cluster stays clean. */}
             {data.blocked && !working && !hasPr && (

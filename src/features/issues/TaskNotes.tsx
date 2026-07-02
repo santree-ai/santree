@@ -43,6 +43,31 @@ export function TaskNotes({ repo, taskId }: { repo: string; taskId: string }) {
     return () => clearTimeout(timer);
   }, [draft, saved, taskId, saveNote]);
 
+  // Mirror the latest values into refs so the unmount effect below can read them
+  // without depending on (and re-firing for) every keystroke.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const savedRef = useRef(saved);
+  savedRef.current = saved;
+  const saveNoteRef = useRef(saveNote);
+  saveNoteRef.current = saveNote;
+  const taskIdRef = useRef(taskId);
+  taskIdRef.current = taskId;
+
+  // Global keyboard shortcuts (view switches, ⌘,) can unmount this component
+  // mid-edit without ever firing a blur or letting the debounce timer above
+  // elapse. Flush any unsaved draft synchronously on teardown so typing is
+  // never silently discarded. Mounted with key={taskId}, so this only runs on
+  // true mount/unmount, never on a taskId/repo change underneath the same
+  // instance.
+  useEffect(() => {
+    return () => {
+      if (draftRef.current !== savedRef.current) {
+        saveNoteRef.current({ taskId: taskIdRef.current, body: draftRef.current });
+      }
+    };
+  }, []);
+
   const hasContent = saved.trim().length > 0;
 
   return (

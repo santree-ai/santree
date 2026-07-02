@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ChangedFile } from "../../bindings";
-import { buildChangeTree, type ChangeTreeNode } from "./FilePickerPanel";
+import { buildChangeTree, type ChangeTreeNode } from "./changeTree";
 
 /** Minimal ChangedFile for path-shape assertions (status/stats don't matter here). */
 function file(path: string): ChangedFile {

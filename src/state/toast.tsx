@@ -130,8 +130,6 @@ function ToastCard({ toast: t }: { toast: Toast }) {
   const v = VARIANT[t.variant];
   return (
     <div
-      role="status"
-      aria-live={t.variant === "error" ? "assertive" : "polite"}
       className="pointer-events-auto flex items-start gap-2.5 rounded-lg border border-line-2 bg-panel py-2.5 pr-2 pl-3 shadow-xl"
       style={{ borderLeft: `2.5px solid ${v.color}`, animation: "toastIn .2s ease-out" }}
     >
@@ -140,7 +138,9 @@ function ToastCard({ toast: t }: { toast: Toast }) {
       </span>
       <div className="min-w-0 flex-1 pt-px">
         <div className="text-[12px] font-semibold text-fg-bright">{t.title ?? v.label}</div>
-        <div className="mt-0.5 text-[11.5px] leading-[1.45] break-words text-fg-2">{t.message}</div>
+        <div className="selectable mt-0.5 text-[11.5px] leading-[1.45] break-words text-fg-2">
+          {t.message}
+        </div>
       </div>
       <button
         type="button"
@@ -158,14 +158,36 @@ function ToastCard({ toast: t }: { toast: Toast }) {
  * Renders the stacked toasts, bottom-right (clear of the macOS titlebar/chrome).
  * Mount once near the app root; reads the module store directly, so it needs no
  * provider.
+ *
+ * The `aria-live` region lives here — on the always-mounted wrapper — rather
+ * than on each `ToastCard`. Screen readers only reliably announce *changes*
+ * inside a live region that already existed in the DOM; a region that appears
+ * fully-formed (as each card would, mounting with its text already in place)
+ * is often not announced at all. A second, visually-hidden `assertive` region
+ * mirrors error toasts specifically, so they interrupt (per their severity)
+ * instead of queuing politely behind whatever else is being read.
  */
 export function ToastViewport() {
   const items = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const errors = items.filter((t) => t.variant === "error");
   return (
-    <div className="pointer-events-none fixed right-4 bottom-4 z-[200] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
-      {items.map((t) => (
-        <ToastCard key={t.id} toast={t} />
-      ))}
-    </div>
+    <>
+      <div
+        role="log"
+        aria-live="polite"
+        className="pointer-events-none fixed right-4 bottom-4 z-[200] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2"
+      >
+        {items.map((t) => (
+          <ToastCard key={t.id} toast={t} />
+        ))}
+      </div>
+      <div role="alert" aria-live="assertive" className="sr-only">
+        {errors.map((t) => (
+          <div key={t.id}>
+            {t.title ?? VARIANT.error.label}: {t.message}
+          </div>
+        ))}
+      </div>
+    </>
   );
 }

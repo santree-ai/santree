@@ -1,4 +1,9 @@
 [toolchain]
-channel = "stable"
+# Pinned to an exact version (not the floating "stable" channel) so a new Rust
+# release's new clippy lints can't turn CI red on unrelated PRs — bump this
+# deliberately. CI installs this exact toolchain via `rustup show` (rustup
+# auto-installs whatever this file specifies), so this is the single source
+# of truth for both local dev and CI.
+channel = "1.96.0"
 components = ["rustfmt", "clippy"]
 profile = "default"

@@ -1,6 +1,13 @@
 /** Generic presentational widgets shared across the Settings sections. */
 
-import type { ReactNode } from "react";
+import {
+  Children,
+  cloneElement,
+  isValidElement,
+  type ReactElement,
+  type ReactNode,
+  useId,
+} from "react";
 
 import type { ClaudeCommand } from "../../bindings";
 import { ChevronSelect, Toggle } from "../../components/primitives";
@@ -15,7 +22,11 @@ export function Heading({ title, subtitle }: { title: string; subtitle: string }
   );
 }
 
-/** A labelled field inside a settings card, divided from the previous one. */
+/** A labelled field inside a settings card, divided from the previous one.
+ *  The caption is wired to the control(s) below via `aria-labelledby` (cloned
+ *  onto every element child) so the visible text doubles as the control's
+ *  programmatic name — {@link ChevronSelect}, {@link ComboBox}, and
+ *  {@link OverrideSelect} all forward it down to their native element. */
 export function Field({
   label,
   hint,
@@ -25,11 +36,20 @@ export function Field({
   hint?: ReactNode;
   children: ReactNode;
 }) {
+  const labelId = useId();
   return (
     <div className="border-t border-line py-3.5 first:border-t-0">
-      <div className="mb-[3px] text-[12.5px] font-medium text-fg-3">{label}</div>
+      <div id={labelId} className="mb-[3px] text-[12.5px] font-medium text-fg-3">
+        {label}
+      </div>
       {hint && <div className="mb-2.5 text-[11.5px] text-muted-3">{hint}</div>}
-      {children}
+      {Children.map(children, (child) =>
+        isValidElement(child)
+          ? cloneElement(child as ReactElement<{ "aria-labelledby"?: string }>, {
+              "aria-labelledby": labelId,
+            })
+          : child,
+      )}
     </div>
   );
 }
@@ -48,13 +68,16 @@ export function ToggleRow({
   onChange: (next: boolean) => void;
   disabled?: boolean;
 }) {
+  const labelId = useId();
   return (
     <div className="flex items-center gap-[13px] border-t border-line py-3.5 first:border-t-0">
       <div className="min-w-0 flex-1">
-        <div className="text-[12.5px] font-medium text-fg-3">{label}</div>
+        <div id={labelId} className="text-[12.5px] font-medium text-fg-3">
+          {label}
+        </div>
         {hint && <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">{hint}</div>}
       </div>
-      <Toggle on={on} onClick={() => !disabled && onChange(!on)} />
+      <Toggle on={on} onClick={() => onChange(!on)} disabled={disabled} ariaLabelledBy={labelId} />
     </div>
   );
 }
@@ -100,11 +123,13 @@ export function OverrideSelect({
   onChange,
   defaultLabel,
   children,
+  "aria-labelledby": ariaLabelledBy,
 }: {
   value: string;
   onChange: (v: string | null) => void;
   defaultLabel: string;
   children: ReactNode;
+  "aria-labelledby"?: string;
 }) {
   return (
     <div className="flex items-center gap-2">
@@ -113,6 +138,7 @@ export function OverrideSelect({
         onChange={(v) => onChange(v || null)}
         className={SELECT_CLASS}
         wrapperClassName="flex-1"
+        aria-labelledby={ariaLabelledBy}
       >
         <option value="">{defaultLabel}</option>
         {children}

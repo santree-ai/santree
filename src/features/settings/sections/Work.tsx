@@ -2,15 +2,24 @@
  *  agent/model, Linear tracking, and how agent worktrees are set up and committed.
  *  Merges what used to be the separate "Issues" and "Trees" sections. */
 
-import { useBoolSetting, useSetSetting, WORK_MOVE_IN_PROGRESS_KEY } from "../../../lib/queries";
+import {
+  useBoolSetting,
+  useResolvedBoolSetting,
+  useSetSetting,
+  WORK_MOVE_IN_PROGRESS_KEY,
+} from "../../../lib/queries";
 import { Heading, ToggleRow } from "../widgets";
 import { WorkActionConfig } from "./Actions";
 import { WorktreeSettings } from "./Trees";
 
-/** Toggle (app-scoped) that moves the Linear issue to its started state when a
- *  worktree is created, so Linear reflects what's actually being worked on. */
-function TrackingCard() {
-  const { value } = useBoolSetting("app", WORK_MOVE_IN_PROGRESS_KEY);
+/** Toggle that moves the Linear issue to its started state when a worktree is
+ *  created, so Linear reflects what's actually being worked on. App defaults or
+ *  a per-repo override, same scope convention as {@link WorkActionConfig}. */
+function TrackingCard({ forRepo }: { forRepo?: string }) {
+  const scope = forRepo ? `repo:${forRepo}` : "app";
+  const appValue = useBoolSetting("app", WORK_MOVE_IN_PROGRESS_KEY).value;
+  const resolvedValue = useResolvedBoolSetting(forRepo ?? "", WORK_MOVE_IN_PROGRESS_KEY).value;
+  const value = forRepo ? resolvedValue : appValue;
   const { mutate: setSetting } = useSetSetting();
   return (
     <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
@@ -20,7 +29,7 @@ function TrackingCard() {
         on={value}
         onChange={(next) =>
           setSetting({
-            scope: "app",
+            scope,
             key: WORK_MOVE_IN_PROGRESS_KEY,
             value: next ? "true" : "false",
           })
@@ -31,6 +40,7 @@ function TrackingCard() {
 }
 
 export function WorkSection({ repo, forRepo }: { repo: string; forRepo: boolean }) {
+  const scopeRepo = forRepo ? repo : undefined;
   return (
     <>
       <Heading
@@ -41,9 +51,9 @@ export function WorkSection({ repo, forRepo }: { repo: string; forRepo: boolean 
           a fragment of cards, which flatten in here as siblings — so the gap is
           uniform across all of them (App scope shows the defaults; repo the override). */}
       <div className="space-y-5">
-        <WorkActionConfig repo={forRepo ? repo : undefined} />
-        <TrackingCard />
-        <WorktreeSettings repo={repo} />
+        <WorkActionConfig repo={scopeRepo} />
+        <TrackingCard forRepo={scopeRepo} />
+        <WorktreeSettings repo={repo} forRepo={scopeRepo} />
       </div>
     </>
   );

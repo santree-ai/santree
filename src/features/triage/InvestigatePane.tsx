@@ -9,10 +9,15 @@
  * lives in `useEmbeddedTerminal`; when the hosted process exits, `onExited`
  * drops us back to the discussion.
  */
-import { useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useCallback, useRef } from "react";
 
 import { Spinner } from "../../components/primitives";
-import { useAgentSession } from "../../lib/queries";
+import {
+  INVESTIGATE_REMOTE_CONTROL_KEY,
+  useAgentSession,
+  useResolvedSetting,
+} from "../../lib/queries";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
@@ -57,26 +62,43 @@ export function InvestigatePane({
   const everLive = useRef(false);
   if (liveSession) everLive.current = true;
 
+  const termKey = `triage:${ticketId}`;
   const canLaunch = command != null && !!cwd;
   const needsSeed = canLaunch && !liveSession && !everLive.current;
-  const session = useAgentSession(repo, `triage:${ticketId}`, cwd ?? "", canLaunch, needsSeed);
+  const session = useAgentSession(repo, termKey, cwd ?? "", canLaunch, needsSeed);
   const exec = agentExec.trim() || "claude";
   const modelFlag = model ? `--model ${shellQuote(model)}` : undefined;
   const effortFlag = effort ? `--effort ${shellQuote(effort)}` : undefined;
+  // `--remote-control` is opt-out (Settings → Investigation): some environments
+  // run a `claude` build old enough to predate the flag, which would otherwise
+  // fail every launch with no visible cause (see CLAUDE.md's "verify vendor
+  // flags" gotcha) and no way to turn it off.
+  const remoteControlSetting = useResolvedSetting(repo, INVESTIGATE_REMOTE_CONTROL_KEY);
+  const remoteControlEnabled = remoteControlSetting.data !== "false";
   const seed = command
     ? agentSessionSeed(session.data, exec, {
         prompt: `/${command} ${ticketId}`,
         modelFlag,
         effortFlag,
-        remoteControl: ticketId,
+        remoteControl: remoteControlEnabled ? ticketId : undefined,
       })
     : undefined;
-  // Hold the embed until the seed decision is fresh, so the new PTY carries it.
-  const ready = !needsSeed || !session.isFetching;
+  // Hold the embed until both the seed decision and the remote-control setting
+  // are fresh, so the new PTY carries the right flags from the first frame.
+  const ready = !needsSeed || (!session.isFetching && !remoteControlSetting.isLoading);
+
+  const qc = useQueryClient();
+  const handleExited = useCallback(() => {
+    // Drop the cached session resolution so re-investigating re-asks the backend
+    // instead of replaying a stale "fresh" decision whose transcript now exists
+    // on disk (which `session::resolve` would correctly resolve to Resume).
+    qc.removeQueries({ queryKey: ["agent-session", repo, termKey] });
+    onExited();
+  }, [qc, repo, termKey, onExited]);
 
   const { hostRef } = useEmbeddedTerminal({
     spec: { title: ticketId, cwd, source: "triage", refId: ticketId, seed },
-    onExited,
+    onExited: handleExited,
   });
 
   return (

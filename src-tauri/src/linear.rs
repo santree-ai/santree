@@ -219,6 +219,7 @@ query AssignedIssues {
           }
         }
       }
+      pageInfo { hasNextPage }
     }
   }
 }
@@ -407,6 +408,16 @@ pub async fn list_issues(db: &Db, repo: &str) -> Result<Option<Vec<Task>>> {
         return Ok(None);
     };
     let data: QueryData = graphql(&token, ASSIGNED_ISSUES_QUERY, serde_json::json!({})).await?;
+    // Looping past the first page would multiply this query's cost, and it's
+    // already near Linear's ~10000 complexity ceiling (see the NOTE above) — so a
+    // >100-issue backlog is truncated rather than risking a 400. Warn instead of
+    // silently dropping the rest.
+    if data.viewer.assigned_issues.page_info.has_next_page {
+        log::warn!(
+            "assignedIssues truncated at 100 for repo {repo}: more assigned issues exist but \
+             weren't fetched (looping risks exceeding Linear's query complexity cap)"
+        );
+    }
     let nodes = data.viewer.assigned_issues.nodes;
 
     let assigned: std::collections::HashSet<String> =
@@ -564,14 +575,15 @@ fn actor(
 // the teams shown there are exactly the teams whose issues land in this queue.
 
 /// The signed-in user's id (for "mine") and the keys of their *rotation* teams
-/// (teams whose triage responsibility is backed by a non-empty time schedule) in
-/// one round-trip — both hang off the same `viewer` root. Non-rotation teams are
-/// dropped so the queue stays scoped to actual on-call inboxes. Reuses
-/// [`TRIAGE_SCHEDULES_QUERY`] / [`SchedQueryData`] (a superset of what's needed
+/// (teams whose triage responsibility is backed by a non-empty time schedule) —
+/// both hang off the same `viewer` root, in one round-trip for the common case
+/// (`fetch_all_team_memberships` only loops past that if a user is in >100
+/// teams). Non-rotation teams are dropped so the queue stays scoped to actual
+/// on-call inboxes. Reuses [`TRIAGE_SCHEDULES_QUERY`] / [`SchedQueryData`] (a
+/// superset of what's needed
 /// here) so there's a single source of truth for the `teamMemberships` shape.
 async fn viewer_triage_scope(token: &str) -> Result<(Option<String>, Vec<String>)> {
-    let data: SchedQueryData =
-        graphql(token, TRIAGE_SCHEDULES_QUERY, serde_json::json!({})).await?;
+    let data = fetch_all_team_memberships(token).await?;
     let Some(viewer) = data.viewer else {
         return Ok((None, Vec::new()));
     };
@@ -588,8 +600,8 @@ async fn viewer_triage_scope(token: &str) -> Result<(Option<String>, Vec<String>
 }
 
 const TRIAGE_INBOX_QUERY: &str = r#"
-query TriageInbox($filter: IssueFilter) {
-  issues(filter: $filter, first: 100) {
+query TriageInbox($filter: IssueFilter, $after: String) {
+  issues(filter: $filter, first: 100, after: $after) {
     nodes {
       identifier title priority createdAt slaBreachesAt snoozedUntilAt
       state { name type }
@@ -597,6 +609,7 @@ query TriageInbox($filter: IssueFilter) {
       assignee { id name displayName }
       labels { nodes { name } }
     }
+    pageInfo { hasNextPage endCursor }
   }
 }
 "#;
@@ -637,12 +650,12 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
         return Ok(None);
     };
     // The viewer (for "mine") and their *rotation* teams (to scope the inbox) come
-    // from one query. A failure degrades rather than being swallowed: no scope →
-    // nothing is "mine" and the queue is empty.
-    let (me, keys) = viewer_triage_scope(&token)
-        .await
-        .map_err(|e| log::warn!("triage: viewer scope lookup failed: {e}"))
-        .unwrap_or((None, Vec::new()));
+    // from one query. Propagate a failure here rather than swallowing it into an
+    // empty scope — that used to render a transient network/auth error as the
+    // positive "All caught up" empty state. A genuinely empty scope (no rotation
+    // team configured) still comes back as `Ok((_, vec![]))` below and is the only
+    // legitimate empty-inbox path.
+    let (me, keys) = viewer_triage_scope(&token).await?;
     // No rotation team → no on-call inbox. Show an empty queue rather than
     // flooding the list with the whole workspace's (un-owned) triage issues.
     if keys.is_empty() {
@@ -652,18 +665,32 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
         "state": { "type": { "eq": "triage" } },
         "team": { "key": { "in": keys } },
     });
-    let data: TriageInboxData = graphql(
-        &token,
-        TRIAGE_INBOX_QUERY,
-        serde_json::json!({ "filter": filter }),
-    )
-    .await?;
+    // A busy org's triage inbox can exceed one page; this filtered query is cheap
+    // relative to the complexity budget (unlike assignedIssues), so loop the
+    // cursor rather than silently truncating at 100.
+    let mut nodes: Vec<TriageRow> = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let data: TriageInboxData = graphql(
+            &token,
+            TRIAGE_INBOX_QUERY,
+            serde_json::json!({ "filter": filter, "after": after }),
+        )
+        .await?;
+        let page_info = data.issues.page_info;
+        nodes.extend(data.issues.nodes);
+        if !page_info.has_next_page {
+            break;
+        }
+        let Some(cursor) = page_info.end_cursor else {
+            break;
+        };
+        after = Some(cursor);
+    }
     let now = now_ms();
     let style = name_style(db).await;
 
-    let mut rows: Vec<(TriageTicket, bool, i64)> = data
-        .issues
-        .nodes
+    let mut rows: Vec<(TriageTicket, bool, i64)> = nodes
         .into_iter()
         .map(|r| {
             let snooze_ms = r.snoozed_until_at.as_deref().and_then(parse_ms);
@@ -680,21 +707,24 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
                 _ => false,
             };
             let assignee = assignee_user.and_then(|u| pick_name(u.name, u.display_name, style));
-            let age = r
+            // Specta forbids exporting i64 (BigInt precision-loss risk), so the raw
+            // millisecond timestamps cross the bridge as f64 — exact for epoch-ms
+            // values for millennia to come.
+            let created_at_ms = r
                 .created_at
                 .as_deref()
                 .and_then(parse_ms)
-                .map(|c| core_linear::relative_time(c, now))
+                .map(|v| v as f64)
                 .unwrap_or_default();
             let ticket = TriageTicket {
                 id: r.identifier,
                 title: r.title,
                 priority: core_linear::map_priority(r.priority),
-                age,
+                created_at_ms,
                 meta: triage_meta(assignee.as_deref(), &labels),
                 team,
-                sla: core_linear::format_sla(sla_ms, now),
-                snoozed_until: snoozed.then(|| snooze_ms.map(snooze_label)).flatten(),
+                sla_breach_ms: sla_ms.map(|v| v as f64),
+                snoozed_until_ms: snoozed.then_some(snooze_ms).flatten().map(|v| v as f64),
                 mine,
             };
             (ticket, snoozed, sla_ms.unwrap_or(i64::MAX))
@@ -738,6 +768,32 @@ query GetIssue($id: String!) {
           }
         }
       }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"#;
+
+/// Follow-up page of a single issue's top-level comments, keyed by cursor. Kept
+/// separate from [`ISSUE_DETAIL_QUERY`] so paginating a chatty thread doesn't
+/// re-fetch the description/labels/team states on every page.
+const ISSUE_COMMENTS_PAGE_QUERY: &str = r#"
+query GetIssueComments($id: String!, $after: String) {
+  issue(id: $id) {
+    comments(first: 100, after: $after) {
+      nodes {
+        body createdAt parent { id }
+        user { name displayName avatarUrl }
+        botActor { name avatarUrl }
+        children {
+          nodes {
+            body createdAt
+            user { name displayName avatarUrl }
+            botActor { name avatarUrl }
+          }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
     }
   }
 }
@@ -816,34 +872,40 @@ struct IssueDetailData {
     issue: Option<IssueDetailNode>,
 }
 
+#[derive(Deserialize)]
+struct IssueCommentsPage {
+    comments: Connection<CommentNode>,
+}
+#[derive(Deserialize)]
+struct IssueCommentsPageData {
+    issue: Option<IssueCommentsPage>,
+}
+
 /// Map one comment (and its one level of threaded replies) into the domain
 /// type, downloading inline images in each body.
 async fn map_comment(
     client: &reqwest::Client,
     node: CommentNode,
     token: &str,
-    now: i64,
     style: NameStyle,
 ) -> TriageComment {
-    let rel = |ts: &Option<String>| {
-        ts.as_deref()
-            .and_then(parse_ms)
-            .map(|m| core_linear::relative_time(m, now))
-            .unwrap_or_default()
-    };
-
     let mut child_nodes = node.children.map(|c| c.nodes).unwrap_or_default();
     child_nodes.sort_by_key(|c| c.created_at.as_deref().and_then(parse_ms).unwrap_or(0));
-    // Inline each reply's images concurrently; join_all preserves order. Compute
-    // the relative time up front so the per-reply futures don't borrow `rel`.
+    // Inline each reply's images concurrently; join_all preserves order. Resolve
+    // the timestamp up front so the per-reply futures don't borrow `ch`.
     let children = join_all(child_nodes.into_iter().map(|ch| {
-        let created = rel(&ch.created_at);
+        let created_at_ms = ch
+            .created_at
+            .as_deref()
+            .and_then(parse_ms)
+            .map(|v| v as f64)
+            .unwrap_or_default();
         async move {
             let (author, avatar_url) = actor(ch.user, ch.bot_actor, style);
             TriageComment {
                 author,
                 avatar_url,
-                created,
+                created_at_ms,
                 body: inline_images(client, &ch.body, token).await,
                 children: vec![],
             }
@@ -855,7 +917,12 @@ async fn map_comment(
     TriageComment {
         author,
         avatar_url,
-        created: rel(&node.created_at),
+        created_at_ms: node
+            .created_at
+            .as_deref()
+            .and_then(parse_ms)
+            .map(|v| v as f64)
+            .unwrap_or_default(),
         body: inline_images(client, &node.body, token).await,
         children,
     }
@@ -873,9 +940,28 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
         serde_json::json!({ "id": ticket_id }),
     )
     .await?;
-    let issue = data
+    let mut issue = data
         .issue
         .ok_or_else(|| anyhow!("issue {ticket_id} not found"))?;
+
+    // A long-running thread can exceed one page of comments — pull the rest via
+    // cursor. Comments are cheap relative to the complexity budget (unlike
+    // assignedIssues), so looping here is safe.
+    let mut cursor = issue.comments.page_info.end_cursor.clone();
+    while issue.comments.page_info.has_next_page {
+        let Some(after) = cursor.take() else { break };
+        let page: IssueCommentsPageData = graphql(
+            &token,
+            ISSUE_COMMENTS_PAGE_QUERY,
+            serde_json::json!({ "id": ticket_id, "after": after }),
+        )
+        .await?;
+        let Some(page_issue) = page.issue else { break };
+        issue.comments.nodes.extend(page_issue.comments.nodes);
+        issue.comments.page_info = page_issue.comments.page_info;
+        cursor = issue.comments.page_info.end_cursor.clone();
+    }
+
     let now = now_ms();
     let style = name_style(db).await;
     let client = gql::client();
@@ -894,7 +980,7 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
     // join_all preserves the oldest-first order.
     let comments = join_all(
         top.into_iter()
-            .map(|node| map_comment(client, node, &token, now, style)),
+            .map(|node| map_comment(client, node, &token, style)),
     )
     .await;
 
@@ -926,18 +1012,23 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
         url: issue.url,
         author,
         author_avatar_url,
-        created: issue
+        created_at_ms: issue
             .created_at
             .as_deref()
             .and_then(parse_ms)
-            .map(|m| core_linear::relative_time(m, now))
+            .map(|v| v as f64)
             .unwrap_or_default(),
         labels: issue.labels.nodes.into_iter().map(|l| l.name).collect(),
         project: issue.project.and_then(|p| p.name),
-        sla: core_linear::format_sla(issue.sla_breaches_at.as_deref().and_then(parse_ms), now),
-        snoozed_until: core_linear::is_snoozed(snooze_ms, now)
-            .then(|| snooze_ms.map(snooze_label))
-            .flatten(),
+        sla_breach_ms: issue
+            .sla_breaches_at
+            .as_deref()
+            .and_then(parse_ms)
+            .map(|v| v as f64),
+        snoozed_until_ms: core_linear::is_snoozed(snooze_ms, now)
+            .then_some(snooze_ms)
+            .flatten()
+            .map(|v| v as f64),
         description,
         comments,
     }))
@@ -1063,10 +1154,10 @@ pub async fn move_issue_to_started(db: &Db, repo: &str, issue_id: &str) -> Resul
 }
 
 const TRIAGE_SCHEDULES_QUERY: &str = r#"
-query TriageSchedules {
+query TriageSchedules($after: String) {
   viewer {
     id
-    teamMemberships(first: 100) {
+    teamMemberships(first: 100, after: $after) {
       nodes {
         team {
           key name
@@ -1076,6 +1167,7 @@ query TriageSchedules {
           }
         }
       }
+      pageInfo { hasNextPage endCursor }
     }
   }
 }
@@ -1149,6 +1241,38 @@ struct SchedQueryData {
     viewer: Option<SchedViewer>,
 }
 
+/// Fetch every page of the viewer's team memberships. A user rarely belongs to
+/// more than a handful of teams, so unlike `assignedIssues` this is cheap to loop
+/// in full rather than truncate — a team past the first 100 would otherwise drop
+/// silently out of both the triage queue's scope and the schedule strips.
+async fn fetch_all_team_memberships(token: &str) -> Result<SchedQueryData> {
+    let mut data: SchedQueryData =
+        graphql(token, TRIAGE_SCHEDULES_QUERY, serde_json::json!({})).await?;
+    let Some(viewer) = data.viewer.as_mut() else {
+        return Ok(data);
+    };
+    let Some(conn) = viewer.team_memberships.as_mut() else {
+        return Ok(data);
+    };
+    let mut cursor = conn.page_info.end_cursor.clone();
+    while conn.page_info.has_next_page {
+        let Some(after) = cursor.take() else { break };
+        let page: SchedQueryData = graphql(
+            token,
+            TRIAGE_SCHEDULES_QUERY,
+            serde_json::json!({ "after": after }),
+        )
+        .await?;
+        let Some(mut page_conn) = page.viewer.and_then(|v| v.team_memberships) else {
+            break;
+        };
+        conn.nodes.append(&mut page_conn.nodes);
+        conn.page_info = page_conn.page_info;
+        cursor = conn.page_info.end_cursor.clone();
+    }
+    Ok(data)
+}
+
 /// A user's display name + avatar, keyed by id in the resolved name map.
 #[derive(Clone)]
 struct UserInfo {
@@ -1167,8 +1291,7 @@ pub async fn triage_schedule(db: &Db, repo: &str) -> Result<Option<Vec<TriageSch
     let Some(token) = repo_token(db, repo).await? else {
         return Ok(None);
     };
-    let data: SchedQueryData =
-        graphql(&token, TRIAGE_SCHEDULES_QUERY, serde_json::json!({})).await?;
+    let data = fetch_all_team_memberships(&token).await?;
     let Some(viewer) = data.viewer else {
         return Ok(Some(Vec::new()));
     };
@@ -1333,13 +1456,6 @@ fn parse_ms(s: &str) -> Option<i64> {
         .map(|dt| dt.timestamp_millis())
 }
 
-/// Short wake label for a snoozed issue, e.g. "Jun 30".
-fn snooze_label(ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms)
-        .map(|dt| dt.format("%b %-d").to_string())
-        .unwrap_or_else(|| "soon".into())
-}
-
 /// A short on-call range like "Jun 19 – Jun 26" from start/end epoch millis. The
 /// schedule's end is exclusive (midnight of the following day), so we show the
 /// last covered day instead — "Jun 19 – Jun 25" reads as the actual shift.
@@ -1357,24 +1473,29 @@ fn shift_range(start: Option<i64>, end: Option<i64>) -> String {
     }
 }
 
-/// Replace `https://uploads.linear.app/...` image URLs in markdown with
-/// base64 data URIs, downloading each with the access token. URLs that fail to
-/// fetch are left untouched.
-async fn inline_images(client: &reqwest::Client, md: &str, token: &str) -> String {
-    const HOST: &str = "https://uploads.linear.app";
-    if !md.contains(HOST) {
-        return md.to_string();
-    }
+/// The CDN host image URLs are inlined from.
+const IMAGE_HOST: &str = "https://uploads.linear.app";
+
+/// Byte-offset spans (in order) of every `https://uploads.linear.app/...` image
+/// URL in `md`. Pure and synchronous so the scan (the part that shipped a
+/// substring-corruption bug) is unit-testable without mocking a fetch.
+fn image_spans(md: &str) -> Vec<(usize, usize)> {
     let bytes = md.as_bytes();
-    // Record every image-URL span (in order) and the distinct URLs to fetch. We
-    // splice by span rather than `str::replace` so one URL being a substring of
-    // another can't corrupt the output, and the whole body is rewritten once.
     let mut spans: Vec<(usize, usize)> = Vec::new();
-    let mut distinct: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut search = 0;
-    while let Some(rel) = md[search..].find(HOST) {
+    while let Some(rel) = md[search..].find(IMAGE_HOST) {
         let start = search + rel;
+        // Require a path boundary ('/' or end-of-match) right after the host so a
+        // prefix match like `https://uploads.linear.app.evil.com` (which contains
+        // our string as a prefix, not the real host) is skipped, not treated as a
+        // trusted Linear URL. fetch_data_uri re-validates the host as a second layer.
+        if !matches!(
+            md.as_bytes().get(start + IMAGE_HOST.len()),
+            Some(b'/') | None
+        ) {
+            search = start + IMAGE_HOST.len();
+            continue;
+        }
         let mut end = start;
         while end < md.len()
             && !matches!(
@@ -1385,13 +1506,57 @@ async fn inline_images(client: &reqwest::Client, md: &str, token: &str) -> Strin
             end += 1;
         }
         spans.push((start, end));
-        if seen.insert(&md[start..end]) {
-            distinct.push(md[start..end].to_string());
-        }
         search = end;
+    }
+    spans
+}
+
+/// Rebuild `md` with each `spans` entry replaced by its match in
+/// `replacements` (keyed by the exact URL substring). A span with no entry
+/// (e.g. its fetch failed) is left untouched. Splices by span rather than
+/// `str::replace` so one URL being a substring of another can't corrupt the
+/// output, and the whole body is rewritten in a single pass.
+fn splice_images(
+    md: &str,
+    spans: &[(usize, usize)],
+    replacements: &std::collections::HashMap<&str, &str>,
+) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut cursor = 0;
+    for &(start, end) in spans {
+        out.push_str(&md[cursor..start]);
+        out.push_str(
+            replacements
+                .get(&md[start..end])
+                .copied()
+                .unwrap_or(&md[start..end]),
+        );
+        cursor = end;
+    }
+    out.push_str(&md[cursor..]);
+    out
+}
+
+/// Replace `https://uploads.linear.app/...` image URLs in markdown with
+/// base64 data URIs, downloading each with the access token. URLs that fail to
+/// fetch are left untouched.
+async fn inline_images(client: &reqwest::Client, md: &str, token: &str) -> String {
+    if !md.contains(IMAGE_HOST) {
+        return md.to_string();
+    }
+    let spans = image_spans(md);
+    if spans.is_empty() {
+        return md.to_string();
     }
 
     // Fetch each distinct URL once, concurrently.
+    let mut distinct: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for &(start, end) in &spans {
+        if seen.insert(&md[start..end]) {
+            distinct.push(md[start..end].to_string());
+        }
+    }
     let fetched = join_all(
         distinct
             .iter()
@@ -1404,22 +1569,7 @@ async fn inline_images(client: &reqwest::Client, md: &str, token: &str) -> Strin
         .filter_map(|(url, uri)| uri.as_deref().map(|u| (url.as_str(), u)))
         .collect();
 
-    // Rebuild the body in a single pass, replacing each span (left untouched
-    // when its fetch failed).
-    let mut out = String::with_capacity(md.len());
-    let mut cursor = 0;
-    for (start, end) in spans {
-        out.push_str(&md[cursor..start]);
-        out.push_str(
-            replacements
-                .get(&md[start..end])
-                .copied()
-                .unwrap_or(&md[start..end]),
-        );
-        cursor = end;
-    }
-    out.push_str(&md[cursor..]);
-    out
+    splice_images(md, &spans, &replacements)
 }
 
 /// Cap on a single inlined image so one huge attachment can't balloon the IPC
@@ -1443,13 +1593,19 @@ impl ImageCache {
         self.map.get(url).cloned()
     }
     fn insert(&mut self, url: String, uri: String) {
+        self.insert_bounded(url, uri, MAX_CACHE_BYTES);
+    }
+
+    /// `insert` with the byte cap as a parameter, so the FIFO eviction logic is
+    /// unit-testable without allocating real megabytes of string data.
+    fn insert_bounded(&mut self, url: String, uri: String, max_bytes: usize) {
         if self.map.contains_key(&url) {
             return;
         }
         self.bytes += uri.len();
         self.order.push_back(url.clone());
         self.map.insert(url, uri);
-        while self.bytes > MAX_CACHE_BYTES {
+        while self.bytes > max_bytes {
             let Some(evicted) = self.order.pop_front() else {
                 break;
             };
@@ -1464,6 +1620,13 @@ static IMAGE_CACHE: std::sync::LazyLock<tokio::sync::Mutex<ImageCache>> =
     std::sync::LazyLock::new(Default::default);
 
 async fn fetch_data_uri(client: &reqwest::Client, url: &str, token: &str) -> Result<String> {
+    // Re-validate the host by parsing (not string-prefix) right before the token
+    // goes out over the wire — the last line of defense against sending the org's
+    // Linear OAuth token to a lookalike host (e.g. uploads.linear.app.evil.com).
+    let parsed = reqwest::Url::parse(url)?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("uploads.linear.app") {
+        bail!("refusing to fetch image from untrusted host: {url}");
+    }
     if let Some(hit) = IMAGE_CACHE.lock().await.get(url) {
         return Ok(hit);
     }
@@ -1595,8 +1758,9 @@ fn wait_for_code(expected_state: &str) -> Result<String> {
                     .split_whitespace()
                     .nth(1)
                     .unwrap_or("");
-                let (code, returned_state) = parse_callback(path);
-                let ok = code.is_some() && returned_state.as_deref() == Some(expected_state);
+                let (code, returned_state, error) = parse_callback(path);
+                let state_matches = returned_state.as_deref() == Some(expected_state);
+                let ok = code.is_some() && state_matches;
 
                 let html = if ok {
                     "<html><body><h2>Authentication successful!</h2><p>You can close this tab.</p></body></html>"
@@ -1614,6 +1778,15 @@ fn wait_for_code(expected_state: &str) -> Result<String> {
                 if ok {
                     return Ok(code.unwrap());
                 }
+                // Linear's deny redirect carries `error=access_denied` (no code) rather
+                // than a failure status — without this, a user who declines sits on the
+                // full 120s timeout before seeing an error. Only trust the error when the
+                // state matches, so a stray request to the callback port can't abort the flow.
+                if state_matches {
+                    if let Some(error) = error {
+                        bail!("Linear authorization failed: {error}");
+                    }
+                }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(100));
@@ -1623,20 +1796,24 @@ fn wait_for_code(expected_state: &str) -> Result<String> {
     }
 }
 
-/// Extract `code` and `state` from a callback path like `/?code=…&state=…`,
-/// percent-decoding each value (a `%`-escaped code would otherwise mismatch).
-fn parse_callback(path: &str) -> (Option<String>, Option<String>) {
+/// Extract `code`, `state`, and `error` from a callback path like
+/// `/?code=…&state=…` (success) or `/?error=access_denied&state=…` (the user
+/// declined), percent-decoding each value (a `%`-escaped code would otherwise
+/// mismatch).
+fn parse_callback(path: &str) -> (Option<String>, Option<String>, Option<String>) {
     let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
     let mut code = None;
     let mut state = None;
+    let mut error = None;
     for (k, v) in form_urlencoded::parse(query.as_bytes()) {
         match k.as_ref() {
             "code" => code = Some(v.into_owned()),
             "state" => state = Some(v.into_owned()),
+            "error" => error = Some(v.into_owned()),
             _ => {}
         }
     }
-    (code, state)
+    (code, state, error)
 }
 
 /// Exchange an auth code for `(access_token, refresh_token, expires_at_ms)`.
@@ -1719,4 +1896,371 @@ fn urlencode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        image_spans, map_issue, parse_callback, parse_ms, refresh_lock, shift_range,
+        splice_images, triage_meta, ImageCache, IssueNode, ProjectNode, RelatedIssue,
+        RelationNode, StateNode, UserNode, IMAGE_HOST,
+    };
+    use crate::gql::{Connection, PageInfo};
+    use std::collections::HashMap;
+
+    /// The exact bug class that previously shipped: naive `str::replace` on a
+    /// URL that is a strict prefix of another URL in the same doc corrupted the
+    /// longer one (replacing its prefix and stranding the suffix). Span-based
+    /// splicing must keep both intact.
+    #[test]
+    fn prefix_url_does_not_corrupt_longer_url() {
+        let md = format!("![a]({IMAGE_HOST}/abc) ![b]({IMAGE_HOST}/abc/nested)");
+        let spans = image_spans(&md);
+        assert_eq!(spans.len(), 2);
+
+        let short = format!("{IMAGE_HOST}/abc");
+        let long = format!("{IMAGE_HOST}/abc/nested");
+        let replacements: HashMap<&str, &str> =
+            HashMap::from([(short.as_str(), "DATA_A"), (long.as_str(), "DATA_B")]);
+
+        let out = splice_images(&md, &spans, &replacements);
+        assert_eq!(out, "![a](DATA_A) ![b](DATA_B)");
+    }
+
+    #[test]
+    fn url_at_end_of_string_is_captured() {
+        let md = format!("see {IMAGE_HOST}/end");
+        let spans = image_spans(&md);
+        assert_eq!(spans, vec![(4, md.len())]);
+
+        let key = format!("{IMAGE_HOST}/end");
+        let replacements: HashMap<&str, &str> = HashMap::from([(key.as_str(), "DATA")]);
+        assert_eq!(splice_images(&md, &spans, &replacements), "see DATA");
+    }
+
+    #[test]
+    fn repeated_url_is_replaced_at_every_occurrence() {
+        let md = format!("{IMAGE_HOST}/x and again {IMAGE_HOST}/x");
+        let spans = image_spans(&md);
+        assert_eq!(spans.len(), 2);
+
+        let key = format!("{IMAGE_HOST}/x");
+        let replacements: HashMap<&str, &str> = HashMap::from([(key.as_str(), "DATA")]);
+        assert_eq!(
+            splice_images(&md, &spans, &replacements),
+            "DATA and again DATA"
+        );
+    }
+
+    /// A failed fetch means no entry lands in the replacements map — the span
+    /// must be left exactly as-is, not corrupted or dropped.
+    #[test]
+    fn missing_replacement_leaves_span_untouched() {
+        let md = format!("![a]({IMAGE_HOST}/missing)");
+        let spans = image_spans(&md);
+        let replacements: HashMap<&str, &str> = HashMap::new();
+        assert_eq!(splice_images(&md, &spans, &replacements), md);
+    }
+
+    #[test]
+    fn every_boundary_terminator_ends_the_span() {
+        for term in [')', ' ', '\n', '\t', '"', ']', '>', '<'] {
+            let md = format!("{IMAGE_HOST}/x{term}rest");
+            let spans = image_spans(&md);
+            assert_eq!(
+                spans,
+                vec![(0, IMAGE_HOST.len() + 2)],
+                "terminator {term:?} did not close the span"
+            );
+        }
+    }
+
+    #[test]
+    fn url_with_no_terminator_runs_to_end_of_string() {
+        let md = format!("{IMAGE_HOST}/x");
+        assert_eq!(image_spans(&md), vec![(0, md.len())]);
+    }
+
+    /// The critical fix this refactor must not regress: a lookalike host that
+    /// merely has our host as a string *prefix* (not the real host) is skipped,
+    /// so its token-bearing URL is never queued for fetch.
+    #[test]
+    fn lookalike_host_is_not_a_match() {
+        let md = format!("{IMAGE_HOST}.evil.com/x");
+        assert!(image_spans(&md).is_empty());
+    }
+
+    // ── refresh_lock ──────────────────────────────────────────────────────
+
+    #[test]
+    fn refresh_lock_same_slug_returns_the_same_arc() {
+        let a = refresh_lock("refresh-lock-test-same");
+        let b = refresh_lock("refresh-lock-test-same");
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn refresh_lock_different_slugs_return_different_arcs() {
+        let a = refresh_lock("refresh-lock-test-a");
+        let b = refresh_lock("refresh-lock-test-b");
+        assert!(!std::sync::Arc::ptr_eq(&a, &b));
+    }
+
+    // ── ImageCache ────────────────────────────────────────────────────────
+
+    #[test]
+    fn image_cache_evicts_oldest_entry_once_over_the_byte_cap() {
+        let mut cache = ImageCache::default();
+        cache.insert_bounded("a".into(), "x".repeat(10), 15);
+        // Total is now 20 bytes > the 15-byte cap: the oldest entry ("a") must
+        // be evicted to bring the running total back under the cap.
+        cache.insert_bounded("b".into(), "x".repeat(10), 15);
+        assert!(cache.get("a").is_none());
+        assert_eq!(cache.get("b"), Some("x".repeat(10)));
+    }
+
+    #[test]
+    fn image_cache_insert_is_a_no_op_for_an_existing_key() {
+        let mut cache = ImageCache::default();
+        cache.insert_bounded("a".into(), "one".into(), 1000);
+        cache.insert_bounded("a".into(), "two".into(), 1000);
+        // The first value wins; a re-insert of the same URL doesn't overwrite it
+        // (or double-count its bytes against the cap).
+        assert_eq!(cache.get("a"), Some("one".into()));
+    }
+
+    #[test]
+    fn image_cache_keeps_entries_under_the_cap() {
+        let mut cache = ImageCache::default();
+        cache.insert_bounded("a".into(), "12345".into(), 100);
+        cache.insert_bounded("b".into(), "67890".into(), 100);
+        assert_eq!(cache.get("a"), Some("12345".into()));
+        assert_eq!(cache.get("b"), Some("67890".into()));
+    }
+
+    // ── parse_callback ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_callback_reads_code_and_state() {
+        let (code, state, error) = parse_callback("/?code=abc123&state=xyz789");
+        assert_eq!(code.as_deref(), Some("abc123"));
+        assert_eq!(state.as_deref(), Some("xyz789"));
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn parse_callback_percent_decodes_values() {
+        // A `%`-escaped code (e.g. one containing `+` or `/`) must come back
+        // decoded, or it would mismatch the raw code sent in the token exchange.
+        let (code, state, _) = parse_callback("/?code=a%2Bb%2Fc&state=has%20space");
+        assert_eq!(code.as_deref(), Some("a+b/c"));
+        assert_eq!(state.as_deref(), Some("has space"));
+    }
+
+    #[test]
+    fn parse_callback_reads_error_on_deny() {
+        // Linear's deny redirect: no code, an `error`, and the original `state`.
+        let (code, state, error) = parse_callback("/?error=access_denied&state=xyz789");
+        assert_eq!(code, None);
+        assert_eq!(state.as_deref(), Some("xyz789"));
+        assert_eq!(error.as_deref(), Some("access_denied"));
+    }
+
+    #[test]
+    fn parse_callback_handles_missing_query_string() {
+        let (code, state, error) = parse_callback("/");
+        assert_eq!(code, None);
+        assert_eq!(state, None);
+        assert_eq!(error, None);
+    }
+
+    // ── shift_range ───────────────────────────────────────────────────────
+
+    fn ms(rfc3339: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn shift_range_shows_the_last_covered_day_not_the_exclusive_end() {
+        // A schedule end is exclusive (midnight of the day after the shift), so a
+        // Jan 1 - Jan 8 (exclusive) window is a shift that runs through Jan 7.
+        let start = ms("2024-01-01T00:00:00Z");
+        let end = ms("2024-01-08T00:00:00Z");
+        assert_eq!(shift_range(Some(start), Some(end)), "Jan 1 – Jan 7");
+    }
+
+    #[test]
+    fn shift_range_open_start_shows_only_the_end_day() {
+        let end = ms("2024-03-05T00:00:00Z");
+        assert_eq!(shift_range(None, Some(end)), "Mar 5");
+    }
+
+    #[test]
+    fn shift_range_open_end_shows_only_the_start_day() {
+        let start = ms("2024-03-05T00:00:00Z");
+        assert_eq!(shift_range(Some(start), None), "Mar 5");
+    }
+
+    #[test]
+    fn shift_range_neither_bound_is_empty() {
+        assert_eq!(shift_range(None, None), "");
+    }
+
+    // ── parse_ms ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_ms_parses_a_real_linear_timestamp() {
+        let got = parse_ms("2024-06-15T12:34:56.789Z").unwrap();
+        let want = chrono::DateTime::parse_from_rfc3339("2024-06-15T12:34:56.789Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn parse_ms_rejects_a_non_rfc3339_string() {
+        assert_eq!(parse_ms("not-a-timestamp"), None);
+    }
+
+    // ── triage_meta ───────────────────────────────────────────────────────
+
+    #[test]
+    fn triage_meta_joins_assignee_and_first_label() {
+        let labels = vec!["bug".to_string(), "p1".to_string()];
+        assert_eq!(triage_meta(Some("Alice"), &labels), "Alice · bug");
+    }
+
+    #[test]
+    fn triage_meta_defaults_to_unassigned_with_no_labels() {
+        assert_eq!(triage_meta(None, &[]), "unassigned");
+    }
+
+    // ── map_issue / map_related ───────────────────────────────────────────
+
+    fn state(name: &str, type_: &str) -> StateNode {
+        StateNode {
+            id: None,
+            name: name.into(),
+            type_: type_.into(),
+        }
+    }
+
+    fn related(identifier: &str, state_type: &str) -> RelatedIssue {
+        RelatedIssue {
+            identifier: identifier.into(),
+            title: format!("{identifier} title"),
+            state: Some(state("Some State", state_type)),
+            project: None,
+            assignee: None,
+        }
+    }
+
+    #[test]
+    fn map_issue_maps_status_project_assignee_and_open_blockers() {
+        let node = IssueNode {
+            identifier: "ENG-10".into(),
+            title: "Do the thing".into(),
+            state: Some(state("Todo", "unstarted")),
+            project: Some(ProjectNode {
+                name: Some("Roadmap".into()),
+                color: Some("#fff".into()),
+                icon: None,
+            }),
+            assignee: Some(UserNode {
+                id: Some("u1".into()),
+                name: Some("Ada Lovelace".into()),
+                display_name: Some("ada".into()),
+                avatar_url: Some("https://example.com/a.png".into()),
+            }),
+            inverse_relations: Connection {
+                nodes: vec![
+                    RelationNode {
+                        type_: "blocks".into(),
+                        issue: Some(related("ENG-1", "completed")),
+                    },
+                    RelationNode {
+                        type_: "blocks".into(),
+                        issue: Some(related("ENG-2", "unstarted")),
+                    },
+                    // A non-"blocks" relation (e.g. duplicate) must be ignored.
+                    RelationNode {
+                        type_: "duplicate".into(),
+                        issue: Some(related("ENG-3", "completed")),
+                    },
+                ],
+                page_info: PageInfo::default(),
+            },
+        };
+
+        let (task, blockers) = map_issue(node);
+
+        assert_eq!(task.id, "ENG-10");
+        assert_eq!(task.project, "Roadmap");
+        assert_eq!(task.assignee.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(
+            task.assignee_avatar_url.as_deref(),
+            Some("https://example.com/a.png")
+        );
+        assert_eq!(task.blocked_by, vec!["ENG-1".to_string(), "ENG-2".to_string()]);
+        // One of the two "blocks" blockers is still open -> not ready.
+        assert!(!task.ready);
+        assert!(task.actionable);
+        assert_eq!(blockers.len(), 2);
+    }
+
+    #[test]
+    fn map_issue_is_ready_when_every_blocker_is_done() {
+        let node = IssueNode {
+            identifier: "ENG-11".into(),
+            title: "Unblocked".into(),
+            state: Some(state("Todo", "unstarted")),
+            project: None,
+            assignee: None,
+            inverse_relations: Connection {
+                nodes: vec![RelationNode {
+                    type_: "blocks".into(),
+                    issue: Some(related("ENG-1", "completed")),
+                }],
+                page_info: PageInfo::default(),
+            },
+        };
+        let (task, _) = map_issue(node);
+        assert!(task.ready);
+        assert_eq!(task.project, "No Project");
+        assert_eq!(task.assignee, None);
+    }
+
+    #[test]
+    fn map_issue_in_progress_is_never_ready_even_with_no_blockers() {
+        // Ready means "not yet started AND unblocked" — an already-started
+        // ticket is never re-offered as ready to start.
+        let node = IssueNode {
+            identifier: "ENG-12".into(),
+            title: "Already going".into(),
+            state: Some(state("In Progress", "started")),
+            project: None,
+            assignee: None,
+            inverse_relations: Connection::default(),
+        };
+        let (task, _) = map_issue(node);
+        assert!(!task.ready);
+    }
+
+    #[test]
+    fn map_issue_defaults_missing_state_to_unstarted_unknown() {
+        let node = IssueNode {
+            identifier: "ENG-13".into(),
+            title: "No state on the wire".into(),
+            state: None,
+            project: None,
+            assignee: None,
+            inverse_relations: Connection::default(),
+        };
+        let (task, _) = map_issue(node);
+        // TaskStatus::Todo is map_status("Unknown", "unstarted"); ready because
+        // there are no blockers and the status is startable.
+        assert!(task.ready);
+    }
 }

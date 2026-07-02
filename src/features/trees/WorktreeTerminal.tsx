@@ -19,6 +19,7 @@ export function WorktreeTerminal({
   cwd,
   seed,
   onLaunched,
+  onExited,
 }: {
   id: string;
   branch: string;
@@ -27,9 +28,12 @@ export function WorktreeTerminal({
   seed?: string;
   /** Fired once after mount when a seed was provided, to clear the launch flag. */
   onLaunched?: () => void;
+  /** Fired once when the hosted process exits (its tab is removed). */
+  onExited?: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
     spec: { title: branch, cwd, source: "issue", refId: `tree:${id}`, seed },
+    onExited,
   });
 
   const consumed = useRef(false);

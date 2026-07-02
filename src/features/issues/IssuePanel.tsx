@@ -21,6 +21,7 @@ import {
 } from "../../components/icons";
 import { PrChips } from "../../components/PrChip";
 import { Dot, EmptyState, Skeleton } from "../../components/primitives";
+import { RelativeTime } from "../../components/RelativeTime";
 import { WorktreeStats } from "../../components/WorktreeStats";
 import { useTriageDetail } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
@@ -191,7 +192,7 @@ export function IssuePanel() {
               {ready.author}
             </span>
             <span className="text-muted-5">·</span>
-            <span>{ready.created}</span>
+            <RelativeTime ms={ready.createdAtMs} />
             {ready.labels.map((l) => (
               <span
                 key={l}

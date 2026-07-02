@@ -49,4 +49,14 @@ export function forwardConsoleToLog(): void {
       forward(args.map(stringifyArg).join(" ")).catch(() => {});
     };
   }
+
+  // `console.*` patching only covers errors code explicitly logs. Fire-and-forget
+  // promises (this codebase's `void somePromise()` idiom) that reject, and errors
+  // thrown outside React's render tree, otherwise never reach the on-disk log.
+  window.addEventListener("unhandledrejection", (event) => {
+    error(`unhandledrejection: ${stringifyArg(event.reason)}`).catch(() => {});
+  });
+  window.addEventListener("error", (event) => {
+    error(`uncaught error: ${stringifyArg(event.error ?? event.message)}`).catch(() => {});
+  });
 }

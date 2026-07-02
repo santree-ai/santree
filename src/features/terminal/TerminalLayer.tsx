@@ -40,7 +40,15 @@ function useElementRect(el: HTMLElement | null): Rect | null {
     }
     const measure = () => {
       const r = el.getBoundingClientRect();
-      setRect({ top: r.top, left: r.left, width: r.width, height: r.height });
+      setRect((prev) =>
+        prev &&
+        prev.top === r.top &&
+        prev.left === r.left &&
+        prev.width === r.width &&
+        prev.height === r.height
+          ? prev
+          : { top: r.top, left: r.left, width: r.width, height: r.height },
+      );
     };
     measure();
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : undefined;
@@ -142,7 +150,6 @@ export function TerminalLayer() {
               cwd={t.cwd}
               command={t.command}
               args={t.args}
-              env={t.env}
               seed={t.seed}
               active={visible && t.key === shownKey}
               onExit={() => {

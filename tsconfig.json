@@ -21,11 +21,15 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true,
-
-    /* Vitest globals (describe/it/expect) without importing them everywhere. */
-    "types": ["vitest/globals", "@testing-library/jest-dom"]
+    "noUncheckedSideEffectImports": true
   },
   "include": ["src"],
+  // Test files get their own tsconfig (tsconfig.test.json, not wired in via
+  // "references" — project references require the referenced config to emit,
+  // which conflicts with its noEmit) so vitest/jest-dom's ambient globals
+  // (describe/it/expect, matcher augmentation) don't leak into production
+  // code's type-checking — an accidental test-global reference in app code
+  // would otherwise pass `tsc` and only blow up at runtime.
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

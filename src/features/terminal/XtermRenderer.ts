@@ -5,20 +5,20 @@
  * `TerminalRenderer` interface, so swapping the VT engine later (e.g. a
  * libghostty-backed renderer) means replacing just this file.
  */
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
+import { DEFAULT_ACCENT } from "../../theme/colors";
 import type { TerminalRenderer } from "./types";
 
 const DARK_THEME = {
   background: "#0c0d10",
   foreground: "#d2d2da",
-  cursor: "#2dd4a7",
   cursorAccent: "#0c0d10",
-  selectionBackground: "#2dd4a733",
   black: "#15161a",
   brightBlack: "#5b5b63",
 };
@@ -28,9 +28,7 @@ const DARK_THEME = {
 const LIGHT_THEME = {
   background: "#ffffff",
   foreground: "#1f2024",
-  cursor: "#10b488",
   cursorAccent: "#ffffff",
-  selectionBackground: "#2dd4a733",
   black: "#2b2c31",
   brightBlack: "#9a9ba2",
   red: "#c4332b",
@@ -42,7 +40,29 @@ const LIGHT_THEME = {
   white: "#2b2c31",
 };
 
-const themeFor = (mode: string | null) => (mode === "light" ? LIGHT_THEME : DARK_THEME);
+// xterm renders to canvas/WebGL, not CSS, so it can't take `var(--accent)`
+// directly — resolve the live value each time a theme is built instead of
+// baking in the app's default accent hex.
+const liveAccent = () =>
+  getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || DEFAULT_ACCENT;
+
+const themeFor = (mode: string | null) => {
+  const accent = liveAccent();
+  return {
+    ...(mode === "light" ? LIGHT_THEME : DARK_THEME),
+    cursor: accent,
+    selectionBackground: `${accent}33`,
+  };
+};
+
+/** Pulls the `--accent` declaration out of a raw `style` attribute string, so
+ *  the mutation observer below can tell whether an accent change is what
+ *  triggered a `style` mutation without forcing a style recalc via
+ *  `getComputedStyle` on every call (that attribute also carries
+ *  `--sidebar-width`, which is written on every pointermove of a sidebar
+ *  drag). */
+const accentDeclaration = (styleText: string | null) =>
+  styleText?.match(/--accent:\s*([^;]+)/)?.[1]?.trim();
 
 export class XtermRenderer implements TerminalRenderer {
   private term: Terminal;
@@ -63,16 +83,30 @@ export class XtermRenderer implements TerminalRenderer {
     });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
-    this.term.loadAddon(new WebLinksAddon());
+    // Default handler is `window.open`, which WKWebView doesn't route to the
+    // system browser — send matched links through the opener plugin instead.
+    this.term.loadAddon(new WebLinksAddon((_e, uri) => void openUrl(uri)));
 
-    // Re-theme live when the app theme (data-theme on <html>) changes.
+    // Re-theme live when the app theme (data-theme on <html>) flips, or when
+    // the accent CSS var changes. Both land as attribute mutations on the
+    // same <html> element (data-theme / inline style respectively).
     if (typeof MutationObserver !== "undefined") {
-      this.themeObserver = new MutationObserver(() => {
-        this.term.options.theme = themeFor(document.documentElement.getAttribute("data-theme"));
+      const html = document.documentElement;
+      this.themeObserver = new MutationObserver((mutations) => {
+        const accentChanged = mutations.some(
+          (m) =>
+            m.attributeName === "style" &&
+            accentDeclaration(m.oldValue) !== accentDeclaration(html.getAttribute("style")),
+        );
+        const themeChanged = mutations.some((m) => m.attributeName === "data-theme");
+        if (accentChanged || themeChanged) {
+          this.term.options.theme = themeFor(html.getAttribute("data-theme"));
+        }
       });
-      this.themeObserver.observe(document.documentElement, {
+      this.themeObserver.observe(html, {
         attributes: true,
-        attributeFilter: ["data-theme"],
+        attributeFilter: ["data-theme", "style"],
+        attributeOldValue: true,
       });
     }
   }

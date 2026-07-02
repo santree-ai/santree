@@ -11,6 +11,7 @@ import { Avatar } from "../../components/Avatar";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
 import { LinearLogo } from "../../components/icons";
 import { Dot } from "../../components/primitives";
+import { RelativeTime } from "../../components/RelativeTime";
 import { useSetWorktreeTitle, useTriageDetail } from "../../lib/queries";
 import { statusColor, statusLabel } from "../../theme/colors";
 
@@ -63,7 +64,7 @@ export function WorktreeIssuePane({ repo, worktree }: { repo: string; worktree: 
               {ready.author}
             </span>
             <span className="text-muted-5">·</span>
-            <span>{ready.created}</span>
+            <RelativeTime ms={ready.createdAtMs} />
             {ready.labels.map((l) => (
               <span
                 key={l}

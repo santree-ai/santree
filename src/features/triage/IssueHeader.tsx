@@ -9,6 +9,8 @@ import type { TriageDetail, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { InvestigateIcon, LinearLogo, RefreshIcon } from "../../components/icons";
 import { Skeleton } from "../../components/primitives";
+import { RelativeTime, SlaCountdown } from "../../components/RelativeTime";
+import { formatSnoozeLabel } from "../../lib/relativeTime";
 import { alpha } from "../../theme/colors";
 import { PriorityPill } from "./PriorityPill";
 import { StatusPicker } from "./StatusPicker";
@@ -36,9 +38,10 @@ export function IssueHeader({
         <span className="font-mono text-[11.5px] text-muted-2">{ticket.id}</span>
         <PriorityPill priority={ticket.priority} />
         <StatusPicker detail={detail} onSetState={onSetState} />
-        {ticket.sla && (
-          <span className="font-mono text-[10.5px] text-status-red/90">{ticket.sla}</span>
-        )}
+        <SlaCountdown
+          breachMs={ticket.slaBreachMs}
+          className="font-mono text-[10.5px] text-status-red/90"
+        />
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
@@ -86,7 +89,7 @@ export function IssueHeader({
               {detail.author}
             </span>
             <span className="text-muted-5">·</span>
-            <span>{detail.created}</span>
+            <RelativeTime ms={detail.createdAtMs} />
             {detail.project && (
               <>
                 <span className="text-muted-5">·</span>
@@ -112,9 +115,10 @@ export function IssueHeader({
           </>
         )}
       </div>
-      {ticket.snoozedUntil && (
+      {ticket.snoozedUntilMs != null && (
         <div className="mt-2.5 flex items-center gap-2 rounded-md border border-line-2 bg-input px-2.5 py-1.5 text-[11px] text-muted-2">
-          💤 Snoozed until {ticket.snoozedUntil} — sits at the bottom of the queue until then.
+          💤 Snoozed until {formatSnoozeLabel(ticket.snoozedUntilMs)} — sits at the bottom of the
+          queue until then.
         </div>
       )}
     </div>

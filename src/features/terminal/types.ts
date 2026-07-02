@@ -15,7 +15,6 @@ export interface OpenOpts {
   cwd?: string;
   command: string;
   args: string[];
-  env: Record<string, string>;
   cols: number;
   rows: number;
 }

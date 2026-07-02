@@ -7,6 +7,7 @@ import type { NodeProps } from "@xyflow/react";
 import { memo } from "react";
 
 import { ProjectGlyph } from "../../components/primitives";
+import { alpha } from "../../theme/colors";
 
 export interface ProjectNodeData {
   project: string;
@@ -39,8 +40,8 @@ export const ProjectNode = memo(
           // WebContent process, blanking the graph with no JS error.
           border: data.focused
             ? "1.5px solid var(--accent)"
-            : `1px solid ${data.color}${data.dim ? "18" : "33"}`,
-          background: `${data.color}${data.dim ? "04" : data.focused ? "14" : "0b"}`,
+            : `1px solid ${alpha(data.dim ? 9 : 20, data.color)}`,
+          background: alpha(data.dim ? 2 : data.focused ? 8 : 4, data.color),
           opacity: data.dim ? 0.5 : 1,
         }}
       >

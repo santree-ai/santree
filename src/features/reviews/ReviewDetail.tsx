@@ -26,6 +26,7 @@ import {
 } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
 import { Dot, EmptyState, Pill, Skeleton, Tabs } from "../../components/primitives";
+import { RelativeTime } from "../../components/RelativeTime";
 import { usePrDetail, useTriageDetail } from "../../lib/queries";
 import { toast } from "../../state/toast";
 import {
@@ -417,7 +418,7 @@ function ReviewIssuePane({ repo, ticketId }: { repo: string; ticketId: string | 
               {ready.author}
             </span>
             <span className="text-muted-5">·</span>
-            <span>{ready.created}</span>
+            <RelativeTime ms={ready.createdAtMs} />
             {ready.labels.map((l) => (
               <span
                 key={l}

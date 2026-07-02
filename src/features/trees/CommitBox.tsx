@@ -41,14 +41,15 @@ export function CommitBox({
 
   const [message, setMessage] = useState("");
   // The saved draft loads asynchronously; adopt it into the field exactly once so
-  // later cache updates (our own optimistic save) never clobber active typing.
+  // later cache updates (our own optimistic save) never clobber active typing. If
+  // the user already started typing before the draft resolved (cold cache), their
+  // in-progress input wins — never stomp it with the loaded value.
   const seeded = useRef(false);
   useEffect(() => {
-    if (!seeded.current && saved !== undefined) {
-      setMessage(saved ?? "");
-      seeded.current = true;
-    }
-  }, [saved]);
+    if (seeded.current || saved === undefined) return;
+    seeded.current = true;
+    if (message === "") setMessage(saved ?? "");
+  }, [saved, message]);
 
   // Autosave the draft a beat after typing stops (no-op once it matches what's
   // stored — our optimistic write makes `saved` equal `message` after a save).
@@ -57,6 +58,31 @@ export function CommitBox({
     const timer = setTimeout(() => saveDraft({ id: activeId, message }), SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [message, saved, activeId, saveDraft]);
+
+  // Mirror the latest values into refs so the unmount effect below can read them
+  // without depending on (and re-firing for) every keystroke.
+  const messageRef = useRef(message);
+  messageRef.current = message;
+  const savedRef = useRef(saved);
+  savedRef.current = saved;
+  const saveDraftRef = useRef(saveDraft);
+  saveDraftRef.current = saveDraft;
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+
+  // Switching worktrees mid-typing (this component is mounted with
+  // key={worktreeId}) unmounts before the debounce timer above ever fires,
+  // silently dropping the last edits. Flush any unsaved draft synchronously on
+  // teardown so typing is never lost. Mounted with key={activeId}, so this only
+  // runs on true mount/unmount, never on an activeId change underneath the same
+  // instance.
+  useEffect(() => {
+    return () => {
+      if (messageRef.current !== (savedRef.current ?? "")) {
+        saveDraftRef.current({ id: activeIdRef.current, message: messageRef.current });
+      }
+    };
+  }, []);
 
   // With "stage all" on we commit everything; otherwise only what's staged.
   const committable = stageAll ? totalCount : stagedCount;

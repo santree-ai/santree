@@ -11,36 +11,31 @@
  *  Trees sidebar cards and the Issues graph nodes. */
 import type { PrState } from "../bindings";
 import { useOpenPr } from "../lib/openPr";
-import { alpha, prStateMeta } from "../theme/colors";
+import { prStateMeta } from "../theme/colors";
 import { GitHubLogo } from "./icons";
+import { Pill } from "./primitives";
 
 type Pr = { number: number; url: string; state: PrState };
 
-/** Tinted-pill styling shared by the single chip and the multi-PR summary. */
-function pillStyle(color: string) {
-  return {
-    color,
-    background: alpha(12, color),
-    border: `1px solid ${alpha(34, color)}`,
-  };
-}
+/** Shared size/type styling for the single chip and the multi-PR summary — only
+ *  the color (via {@link Pill}) and gap differ between them. */
+const PILL_CLASS = "gap-1 px-[5px] py-px font-mono text-[9px] font-semibold tracking-wide";
 
 export function PrChip({ number, url, state }: Pr) {
   const meta = prStateMeta[state];
   const openPr = useOpenPr();
   return (
-    <button
-      type="button"
+    <Pill
+      color={meta.color}
+      className={PILL_CLASS}
+      title={`PR #${number} (${meta.label}) — open in Reviews or on GitHub`}
       onClick={(e) => {
         e.stopPropagation();
         openPr(url);
       }}
-      title={`PR #${number} (${meta.label}) — open in Reviews or on GitHub`}
-      className="inline-flex flex-none cursor-pointer items-center gap-1 rounded px-[5px] py-px font-mono text-[9px] font-semibold tracking-wide"
-      style={pillStyle(meta.color)}
     >
       <GitHubLogo size={9} />#{number}
-    </button>
+    </Pill>
   );
 }
 
@@ -60,17 +55,17 @@ export function PrChips({ prs }: { prs: Pr[] }) {
   return (
     // Named group so it doesn't collide with the card's own `group` (checkbox).
     <span className="group/prs relative inline-flex">
-      <span
-        className="inline-flex flex-none cursor-default items-center gap-1 rounded px-[5px] py-px font-mono text-[9px] font-semibold tracking-wide"
-        style={pillStyle(color)}
+      <Pill
+        color={color}
+        className={`${PILL_CLASS} cursor-default`}
         title={`${prs.length} pull requests`}
       >
         <GitHubLogo size={9} />
         {prs.length} PRs
-      </span>
+      </Pill>
       {/* Touching the summary (top-full, no gap) so the hover stays alive while
           moving onto the list. High z so it floats over neighbouring cards/nodes. */}
-      <span className="invisible absolute top-full right-0 z-50 flex flex-col items-end gap-1 rounded-lg border border-line-3 bg-raised p-1.5 shadow-lg group-hover/prs:visible">
+      <span className="invisible absolute top-full right-0 z-50 flex flex-col items-end gap-1 rounded-lg border border-line-3 bg-raised p-1.5 shadow-lg group-hover/prs:visible group-focus-within/prs:visible">
         {prs.map((p) => (
           <PrChip key={p.number} {...p} />
         ))}

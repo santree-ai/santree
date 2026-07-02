@@ -318,3 +318,123 @@ fn read_description(path: &Path) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use santree_core::domain::{AgentKind, AgentSetting, Integrations};
+    use uuid::Uuid;
+
+    use super::*;
+
+    /// A real (temp-file-backed) SQLite pool, isolated per test — same pattern
+    /// as `session::tests`. Each test gets its own fresh directory: `db::init`
+    /// chmods the db's parent, which fails on the shared system temp root.
+    async fn test_db() -> Db {
+        let dir = std::env::temp_dir().join(format!("santree-settings-{}", Uuid::new_v4()));
+        crate::db::init(dir.join("test.db")).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn resolve_prefers_repo_override_then_falls_back_to_app_default() {
+        let db = test_db().await;
+
+        // No value anywhere yet.
+        assert_eq!(resolve(&db, "canary", "theme").await.unwrap(), None);
+
+        // App-scope default is used when there's no repo override.
+        set(&db, "app", "theme", Some("dark".into())).await.unwrap();
+        assert_eq!(
+            resolve(&db, "canary", "theme").await.unwrap(),
+            Some("dark".into())
+        );
+
+        // A repo override wins over the app default.
+        set(&db, "repo:canary", "theme", Some("light".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve(&db, "canary", "theme").await.unwrap(),
+            Some("light".into())
+        );
+        // Other repos are unaffected.
+        assert_eq!(
+            resolve(&db, "other", "theme").await.unwrap(),
+            Some("dark".into())
+        );
+
+        // Clearing the override (set to None) falls back to the app value again.
+        set(&db, "repo:canary", "theme", None).await.unwrap();
+        assert_eq!(
+            resolve(&db, "canary", "theme").await.unwrap(),
+            Some("dark".into())
+        );
+        assert_eq!(get(&db, "repo:canary", "theme").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn get_settings_defaults_to_config_when_unset() {
+        let db = test_db().await;
+        assert_eq!(get_settings(&db).await.unwrap(), config::default_settings());
+    }
+
+    #[tokio::test]
+    async fn set_settings_round_trips_the_full_blob() {
+        let db = test_db().await;
+
+        let settings = Settings {
+            default_agent: AgentKind::Codex,
+            integrations: Integrations {
+                linear: false,
+                triage: true,
+            },
+            agents: vec![AgentSetting {
+                key: AgentKind::Codex,
+                exec: "/usr/local/bin/codex".into(),
+                model: "gpt-5-codex".into(),
+            }],
+        };
+
+        set_settings(&db, &settings).await.unwrap();
+        assert_eq!(get_settings(&db).await.unwrap(), settings);
+
+        // Overwriting persists the new value, not a merge of old + new.
+        let updated = Settings {
+            default_agent: AgentKind::Claude,
+            ..settings
+        };
+        set_settings(&db, &updated).await.unwrap();
+        assert_eq!(get_settings(&db).await.unwrap(), updated);
+    }
+
+    /// Simulates a settings blob stored before a field existed: `integrations`
+    /// is missing `triage` entirely, and the top-level `agents` array is
+    /// missing altogether. `#[serde(default)]` on `Settings`/`Integrations`
+    /// must backfill just the missing pieces (from their `Default` impls,
+    /// seeded from `config::default_settings()`) rather than the whole blob
+    /// falling back to `config::default_settings()` wholesale and discarding
+    /// the fields that ARE present.
+    #[test]
+    fn settings_deserialize_backfills_missing_fields_per_field_not_wholesale() {
+        let json = r#"{
+            "defaultAgent": "Codex",
+            "integrations": { "linear": false }
+        }"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            settings.default_agent,
+            AgentKind::Codex,
+            "present top-level field is preserved"
+        );
+        assert!(!settings.integrations.linear, "present nested field is preserved");
+        assert!(
+            settings.integrations.triage,
+            "missing nested field falls back to its own default, not to a bare `false`"
+        );
+        assert_eq!(
+            settings.agents,
+            config::default_settings().agents,
+            "missing top-level field falls back to the canonical agent catalog"
+        );
+    }
+}

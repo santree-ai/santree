@@ -1,10 +1,11 @@
 //! Worktree orchestration: the issue ↔ worktree lifecycle the Trees view drives.
 //!
 //! This is the live counterpart to the santree CLI's dashboard "start a task"
-//! flow (create worktree → run `.santree/init.sh` → launch an agent), plus the
-//! commit-box operations. The issue ↔ worktree relationship is stored in the
-//! `worktree_links` table (keyed by repo + issue id) rather than inferred from
-//! the branch name. Git itself is driven through [`crate::git`].
+//! flow (create worktree → run `.santree/init.sh` via `run_setup_streamed` →
+//! launch an agent), plus the commit-box operations. The issue ↔ worktree
+//! relationship is stored in the `worktree_links` table (keyed by repo + issue
+//! id) rather than inferred from the branch name. Git itself is driven through
+//! [`crate::git`].
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -41,6 +42,28 @@ use crate::repo;
 /// helpers map it to the repo root + default branch — so the Trees view can offer
 /// a terminal / file browser / commit box for the base branch itself.
 pub const BASE_ID: &str = "__base__";
+
+/// Reject an `issue_id` that isn't safe to `Path::join` onto the worktrees dir —
+/// mirrors `git.rs`'s `safe_path` guard. IPC-supplied, so a value like `".."` or
+/// `"/etc"` must not be allowed to escape `.santree/worktrees` and later get
+/// `remove_dir_all`'d as an "adopted" worktree.
+fn validate_issue_id(issue_id: &str) -> Result<()> {
+    let mut components = Path::new(issue_id).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(_)), None) => Ok(()),
+        _ => bail!("invalid issue id '{issue_id}'"),
+    }
+}
+
+/// Reject a branch name that could be parsed as a flag by `git` instead of a
+/// positional ref — an IPC-supplied `base` reaching `git fetch origin <base>`
+/// unquoted (`git.rs`) must not be able to smuggle e.g. `--upload-pack=<cmd>`.
+fn validate_branch_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.starts_with('-') {
+        bail!("invalid branch name '{name}'");
+    }
+    Ok(())
+}
 
 /// A stored issue ↔ worktree link's git coordinates, hydrated from
 /// `worktree_links`. The `list` query reads the full row separately; this is
@@ -104,6 +127,19 @@ pub(crate) struct Coords {
 /// issue isn't tracked.
 pub(crate) async fn coords(db: &Db, repo: &str, issue_id: &str) -> Result<Coords> {
     let root = repo_root(db, repo).await?;
+    if issue_id == BASE_ID {
+        let root_path = PathBuf::from(&root);
+        let base = tokio::task::spawn_blocking({
+            let root_path = root_path.clone();
+            move || git::default_branch(&root_path)
+        })
+        .await?;
+        return Ok(Coords {
+            branch: base.clone(),
+            base_branch: base,
+            path: root_path,
+        });
+    }
     let row = sqlx::query_as::<_, (String, String, String)>(
         "SELECT branch, base_branch, worktree_path
          FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
@@ -151,7 +187,9 @@ async fn worktree_path(db: &Db, repo: &str, issue_id: &str) -> Result<PathBuf> {
 /// The repo's base branch as a worktree-like entry: the repo root checked out on
 /// the default branch (main/master). Surfaced in the Trees sidebar above the
 /// per-issue worktrees so the base branch gets the same terminal / file browser /
-/// commit box. `None` when the repo has no local path (a seed/demo repo).
+/// commit box. `None` when the repo has no local path recorded (in practice
+/// this never happens for a repo added via `repo::add`, which always stores
+/// one — see the note on `Repo::path`).
 pub async fn base_worktree(db: &Db, repo: &str) -> Result<Option<Worktree>> {
     let Some(root) = repo::path(db, repo).await? else {
         return Ok(None);
@@ -260,9 +298,9 @@ pub async fn get(db: &Db, repo: &str, issue_id: &str) -> Result<Option<Worktree>
 /// Idempotent: if the issue is already tracked it's just returned; if a worktree
 /// directory already exists on disk but isn't tracked (e.g. it was created by the
 /// santree CLI or a prior run) it's *adopted* — linked and opened — rather than
-/// failing. Only a genuinely new worktree is branched off the base and gets its
-/// setup script run.
-#[allow(clippy::too_many_arguments)]
+/// failing. Only a genuinely new worktree is branched off the base; running its
+/// setup script is a separate step (`run_setup_streamed`) so its output streams
+/// live to the Trees "Setup" tab instead of blocking this call for minutes.
 pub async fn create(
     db: &Db,
     repo: &str,
@@ -270,9 +308,12 @@ pub async fn create(
     title: &str,
     project: Option<&str>,
     base: Option<&str>,
-    run_setup: bool,
     agent: AgentKind,
 ) -> Result<Worktree> {
+    validate_issue_id(issue_id)?;
+    if let Some(b) = base {
+        validate_branch_name(b)?;
+    }
     let root = repo_root(db, repo).await?;
 
     // Already tracked → just open it.
@@ -280,9 +321,9 @@ pub async fn create(
         return Ok(existing);
     }
 
-    // The git work (branch resolution, `worktree add`, fetch) and `.santree/init.sh`
-    // (which can run for minutes) are all blocking — run them off the async runtime.
-    let (base_branch, branch, setup_ran, wt_path_str) = {
+    // The git work (branch resolution, `worktree add`, fetch) is blocking — run it
+    // off the async runtime.
+    let (base_branch, branch, wt_path_str) = {
         let root = root.clone();
         let issue_id = issue_id.to_string();
         let title = title.to_string();
@@ -297,7 +338,6 @@ pub async fn create(
             let computed_branch =
                 format!("santree/{}-{}", issue_id.to_lowercase(), slugify(&title));
 
-            let mut setup_ran = false;
             let branch = if wt_path.exists() {
                 // Adopt a pre-existing worktree: reuse its real branch (from git) when
                 // it is a registered worktree, else fall back to the computed name.
@@ -308,31 +348,21 @@ pub async fn create(
                 git::worktree_branch(root_path, &wt_path).unwrap_or(computed_branch)
             } else {
                 git::create_worktree(root_path, &wt_path, &computed_branch, &base_branch)?;
-                if run_setup {
-                    // Setup failure is non-fatal — the worktree still exists; surface
-                    // it and leave `setup_ran` false so the UI offers a re-run.
-                    match run_init_script(root_path, &wt_path) {
-                        Ok(_) => setup_ran = true,
-                        Err(e) => log::warn!("init.sh failed for {issue_id}: {e}"),
-                    }
-                }
                 log::info!("created worktree {issue_id} on branch {computed_branch}");
                 computed_branch
             };
-            Ok((
-                base_branch,
-                branch,
-                setup_ran,
-                wt_path.to_string_lossy().into_owned(),
-            ))
+            Ok((base_branch, branch, wt_path.to_string_lossy().into_owned()))
         })
         .await??
     };
 
+    // `setup_ran` always starts false: setup now only ever runs via the separate
+    // `run_setup_streamed` command (driven from the Trees "Setup" tab), never as
+    // part of create.
     sqlx::query(
         "INSERT INTO worktree_links
             (repo_path, issue_id, title, project, branch, worktree_path, base_branch, agent, setup_ran)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
     )
     .bind(&root)
     .bind(issue_id)
@@ -342,12 +372,13 @@ pub async fn create(
     .bind(&wt_path_str)
     .bind(&base_branch)
     .bind(agent.as_str())
-    .bind(setup_ran as i64)
     .execute(db)
     .await?;
 
     // If opted in, reflect the new work in Linear by moving the issue to its
-    // "started" state. Best-effort — never fail the worktree create over it.
+    // "started" state. Best-effort and genuinely fire-and-forget — nobody awaits
+    // this, so it must not gate the create response (and the frontend's
+    // pendingLaunch→real-worktree swap) on Linear's GraphQL round-trip latency.
     let move_in_progress = crate::settings::get(db, "app", "work_move_in_progress")
         .await
         .ok()
@@ -355,9 +386,14 @@ pub async fn create(
         .as_deref()
         == Some("true");
     if move_in_progress {
-        if let Err(e) = crate::linear::move_issue_to_started(db, repo, issue_id).await {
-            log::warn!("couldn't move issue {issue_id} to In Progress: {e}");
-        }
+        let db = db.clone();
+        let repo = repo.to_string();
+        let issue_id = issue_id.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = crate::linear::move_issue_to_started(&db, &repo, &issue_id).await {
+                log::warn!("couldn't move issue {issue_id} to In Progress: {e}");
+            }
+        });
     }
 
     get(db, repo, issue_id)
@@ -399,6 +435,9 @@ pub async fn remove(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
         .bind(issue_id)
         .execute(db)
         .await?;
+    // Forget the terminal session tied to this worktree so recreating it later
+    // starts a fresh conversation instead of `--resume`ing one about deleted code.
+    crate::session::forget(db, repo, &format!("tree:{issue_id}")).await?;
     // Re-point this branch's children onto its base (the grandparent).
     let restacked = sqlx::query(
         "UPDATE worktree_links SET base_branch = ? WHERE repo_path = ? AND base_branch = ?",
@@ -584,8 +623,8 @@ fn stream_init_script(script: &Path, wt: &Path, root: &str, ev: &Channel<SetupEv
     ok
 }
 
-/// Strip ANSI escape sequences (colour/SGR + other CSI) from a line so the
-/// plain-text setup log shows clean text instead of raw `\x1b[…m` codes.
+/// Strip ANSI escape sequences (colour/SGR + other CSI, plus OSC) from a line so
+/// the plain-text setup log shows clean text instead of raw escape codes.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -594,18 +633,38 @@ fn strip_ansi(s: &str) -> String {
             out.push(c);
             continue;
         }
-        // ESC `[` … <final byte 0x40–0x7e> (CSI, e.g. colours); other escapes
-        // (e.g. ESC `]` OSC) — drop the escape and the following intro byte.
-        if chars.peek() == Some(&'[') {
-            chars.next();
-            while let Some(&nc) = chars.peek() {
+        match chars.peek() {
+            // CSI: ESC `[` … <final byte 0x40–0x7e> (colours, cursor moves, etc).
+            Some('[') => {
                 chars.next();
-                if ('@'..='~').contains(&nc) {
-                    break;
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if ('@'..='~').contains(&nc) {
+                        break;
+                    }
                 }
             }
-        } else {
-            chars.next();
+            // OSC: ESC `]` … terminated by BEL or ST (`ESC \`) — e.g. a terminal
+            // title/hyperlink sequence (npm, cargo wrappers, nix all emit these).
+            // Without this, the payload *and* a raw BEL byte would leak straight
+            // into the plain-text setup log.
+            Some(']') => {
+                chars.next();
+                loop {
+                    match chars.next() {
+                        None | Some('\x07') => break,
+                        Some('\x1b') if chars.peek() == Some(&'\\') => {
+                            chars.next();
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Other escapes: drop the escape and its single intro byte.
+            _ => {
+                chars.next();
+            }
         }
     }
     out
@@ -790,11 +849,14 @@ pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<Strin
 
     // Cap the diff so the prompt stays within sane arg/token limits.
     let diff: String = diff.chars().take(12_000).collect();
+    // The base worktree's `issue_id` is the `BASE_ID` sentinel, not a real ticket —
+    // pass `None` so `{% if ticket_id %}` in the template omits the `[__base__] `
+    // prefix, matching the non-AI fallback above.
     let prompt = crate::prompts::render(
         "fill-commit",
         minijinja::context! {
             branch_name => branch,
-            ticket_id => issue_id,
+            ticket_id => (issue_id != BASE_ID).then_some(issue_id),
             diff_content => diff,
         },
     )?;
@@ -890,7 +952,7 @@ pub async fn set_init_script(db: &Db, repo: &str, content: &str) -> Result<()> {
     .await?
 }
 
-/// Mark `.santree/init.sh` executable (so it runs on worktree creation).
+/// Mark `.santree/init.sh` executable (required for `run_setup_streamed` to run it).
 pub async fn make_init_executable(db: &Db, repo: &str) -> Result<()> {
     let root = repo_root(db, repo).await?;
     let path = init_script_path(&root);
@@ -901,31 +963,6 @@ pub async fn make_init_executable(db: &Db, repo: &str) -> Result<()> {
         set_executable(&path)
     })
     .await?
-}
-
-/// Run `.santree/init.sh` in the worktree, with the same env the CLI passes,
-/// returning its combined stdout+stderr. Errors when the script is missing or
-/// not executable.
-fn run_init_script(repo_root: &Path, worktree_path: &Path) -> Result<String> {
-    let script = repo_root.join(".santree").join("init.sh");
-    if !script.exists() {
-        bail!("no .santree/init.sh in this repo");
-    }
-    if !is_executable(&script) {
-        bail!("init.sh is not executable");
-    }
-    let out = std::process::Command::new(&script)
-        .current_dir(worktree_path)
-        .env("SANTREE_WORKTREE_PATH", worktree_path)
-        .env("SANTREE_REPO_ROOT", repo_root)
-        .output()
-        .map_err(|e| anyhow!("failed to run init.sh: {e}"))?;
-    let mut log = String::from_utf8_lossy(&out.stdout).into_owned();
-    log.push_str(&String::from_utf8_lossy(&out.stderr));
-    if !out.status.success() {
-        bail!("init.sh exited with {}:\n{log}", out.status);
-    }
-    Ok(log)
 }
 
 // ── Small helpers ─────────────────────────────────────────────────────────
@@ -1025,6 +1062,25 @@ mod tests {
             "[Frontend] go"
         );
         assert_eq!(strip_ansi("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ansi_removes_osc_title_sequences() {
+        // BEL-terminated OSC (the common case: window/tab title-setters).
+        assert_eq!(
+            strip_ansi("\x1b]0;building…\x07building project"),
+            "building project"
+        );
+        // ST-terminated OSC (`ESC \`) — e.g. a terminal hyperlink sequence.
+        assert_eq!(
+            strip_ansi("\x1b]8;;https://example.com\x1b\\link text\x1b]8;;\x1b\\"),
+            "link text"
+        );
+        // Mixed with CSI colour codes on the same line.
+        assert_eq!(
+            strip_ansi("\x1b]0;title\x07\x1b[32mgreen\x1b[0m"),
+            "green"
+        );
     }
 
     fn line(text: &str) -> SetupEvent {
@@ -1144,8 +1200,10 @@ mod tests {
     }
 
     /// End-to-end: a real git repo + real SQLite, exercising the full start-task
-    /// lifecycle — create worktree, run the setup script, record the link, then
-    /// stage/commit and remove. This is the exact path the `create_worktree` /
+    /// lifecycle — create worktree, record the link, then stage/commit and remove.
+    /// (Running `.santree/init.sh` is a separate, streamed step — see
+    /// `run_setup_streamed` — so it's no longer part of `create` and isn't
+    /// exercised here.) This is the exact path the `create_worktree` /
     /// `commit_worktree` / `remove_worktree` commands drive, minus Tauri/Linear.
     #[tokio::test]
     async fn worktree_lifecycle_e2e() {
@@ -1162,24 +1220,17 @@ mod tests {
         run_git(&repo_dir, &["add", "-A"]);
         run_git(&repo_dir, &["commit", "-m", "init"]);
 
-        // A setup script that drops a marker so we can prove it ran.
-        let santree = repo_dir.join(".santree");
-        std::fs::create_dir_all(&santree).unwrap();
-        let script = santree.join("init.sh");
-        std::fs::write(&script, "#!/usr/bin/env bash\ntouch setup-ran\n").unwrap();
-        set_executable(&script).unwrap();
-
         // Real SQLite (migrations applied) with a repo row pointing at our git dir.
         let db = crate::db::init(base.join("test.db")).await.unwrap();
         sqlx::query(
-            "INSERT INTO repos (name, tracker, agents, path) VALUES ('test','Local git',0,?)",
+            "INSERT INTO repos (name, tracker, path) VALUES ('test','Local git',?)",
         )
         .bind(repo_dir.to_string_lossy().as_ref())
         .execute(&db)
         .await
         .unwrap();
 
-        // 1. Create the worktree + run setup + record the link.
+        // 1. Create the worktree and record the link.
         let wt = create(
             &db,
             "test",
@@ -1187,19 +1238,17 @@ mod tests {
             "Do a thing",
             Some("Booking"),
             None,
-            true,
             AgentKind::Claude,
         )
         .await
         .unwrap();
         assert_eq!(wt.id, "AK-1");
-        assert!(wt.setup_ran, "setup should have run");
+        assert!(
+            !wt.setup_ran,
+            "setup is a separate streamed step, not run by create"
+        );
         let wt_dir = repo_dir.join(".santree/worktrees/AK-1");
         assert!(wt_dir.exists(), "worktree directory should exist");
-        assert!(
-            wt_dir.join("setup-ran").exists(),
-            "init.sh should have run in the worktree"
-        );
 
         // The link is queryable.
         let listed = list(&db, "test").await.unwrap();
@@ -1207,18 +1256,9 @@ mod tests {
         assert_eq!(listed[0].project.as_deref(), Some("Booking"));
 
         // Idempotent: creating again just returns the existing worktree (no error).
-        let again = create(
-            &db,
-            "test",
-            "AK-1",
-            "Do a thing",
-            None,
-            None,
-            false,
-            AgentKind::Claude,
-        )
-        .await
-        .unwrap();
+        let again = create(&db, "test", "AK-1", "Do a thing", None, None, AgentKind::Claude)
+            .await
+            .unwrap();
         assert_eq!(again.id, "AK-1");
         assert_eq!(
             list(&db, "test").await.unwrap().len(),
@@ -1233,18 +1273,9 @@ mod tests {
             .await
             .unwrap();
         assert!(get(&db, "test", "AK-1").await.unwrap().is_none());
-        let adopted = create(
-            &db,
-            "test",
-            "AK-1",
-            "Do a thing",
-            None,
-            None,
-            false,
-            AgentKind::Claude,
-        )
-        .await
-        .unwrap();
+        let adopted = create(&db, "test", "AK-1", "Do a thing", None, None, AgentKind::Claude)
+            .await
+            .unwrap();
         assert!(
             adopted.branch.contains("ak-1"),
             "adopted the real branch from git: {}",
@@ -1256,8 +1287,6 @@ mod tests {
         );
 
         // 2. Make a change, see it in status, stage + commit, confirm clean.
-        // (`setup-ran` from init.sh is also an untracked change, so we look up
-        // our file by path rather than asserting an exact count.)
         std::fs::write(wt_dir.join("new.txt"), "x\n").unwrap();
         let st = status(&db, "test", "AK-1").await.unwrap();
         let new_file = st
@@ -1283,5 +1312,85 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `remove`'s documented restacking behavior: in a stack `main → AK-1 → AK-2`,
+    /// removing `AK-1` must re-point `AK-2`'s stored `base_branch` to `AK-1`'s OLD
+    /// base (`main`), not leave it dangling on the now-deleted branch.
+    #[tokio::test]
+    async fn remove_restacks_children_onto_grandparent_base() {
+        let base = std::env::temp_dir().join(format!("santree-restack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo_dir = base.join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        run_git(&repo_dir, &["init", "-b", "main"]);
+        run_git(&repo_dir, &["config", "user.email", "t@t.test"]);
+        run_git(&repo_dir, &["config", "user.name", "Test"]);
+        std::fs::write(repo_dir.join("README.md"), "hello\n").unwrap();
+        run_git(&repo_dir, &["add", "-A"]);
+        run_git(&repo_dir, &["commit", "-m", "init"]);
+
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        sqlx::query(
+            "INSERT INTO repos (name, tracker, path) VALUES ('test','Local git',?)",
+        )
+        .bind(repo_dir.to_string_lossy().as_ref())
+        .execute(&db)
+        .await
+        .unwrap();
+
+        // AK-1 branches off main.
+        let ak1 = create(&db, "test", "AK-1", "First", None, None, AgentKind::Claude)
+            .await
+            .unwrap();
+        assert_eq!(ak1.base_branch, "main");
+
+        // AK-2 is stacked on AK-1's branch.
+        let ak2 = create(
+            &db,
+            "test",
+            "AK-2",
+            "Second",
+            None,
+            Some(&ak1.branch),
+            AgentKind::Claude,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ak2.base_branch, ak1.branch);
+
+        // Removing AK-1 restacks AK-2 onto AK-1's own (old) base: main.
+        remove(&db, "test", "AK-1").await.unwrap();
+        let ak2_after = get(&db, "test", "AK-2").await.unwrap().unwrap();
+        assert_eq!(
+            ak2_after.base_branch, "main",
+            "AK-2 should be re-pointed to AK-1's old base, not left on the deleted branch"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn slugify_cases() {
+        // (title, expected slug)
+        let cases: &[(&str, &str)] = &[
+            ("Fix the login bug", "fix-the-login-bug"),
+            // Emoji-only title has no ASCII alphanumerics — falls back to "task"
+            // rather than slugging to an empty (trailing-dash) string.
+            ("🎉🚀✨", "task"),
+            // CJK-only title — same fallback, since `is_ascii_alphanumeric` never
+            // matches non-ASCII scripts.
+            ("修复登录错误", "task"),
+        ];
+        for (title, expected) in cases {
+            assert_eq!(slugify(title), *expected, "title: {title:?}");
+        }
+
+        // A 60+ char title is capped at 40 chars.
+        let long_title = "a".repeat(60);
+        let slug = slugify(&long_title);
+        assert_eq!(slug.len(), 40, "slug capped at 40 chars");
+        assert_eq!(slug, "a".repeat(40));
     }
 }

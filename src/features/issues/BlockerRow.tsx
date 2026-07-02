@@ -72,6 +72,8 @@ export const BlockerRow = memo(function BlockerRow({
         ref={btnRef}
         type="button"
         onClick={() => onOpenInGraph(id)}
+        onFocus={openCard}
+        onBlur={scheduleClose}
         className="flex w-full items-center gap-2 rounded-lg border border-line-2 bg-input px-2.5 py-2 text-left transition-colors hover:border-line-strong hover:bg-hover"
         style={grayed ? { borderStyle: "dashed" } : undefined}
       >

@@ -1,6 +1,7 @@
 /** The Trees tab: worktrees grouped by project (sidebar) · a main area that holds
  *  the always-on terminal (or a picked file's diff/contents) with a bottom status
  *  bar · a collapsible file-picker right panel · the all-agents overview. */
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import type { Worktree } from "../../bindings";
@@ -173,8 +174,8 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
     selectedFile,
     setupFor,
     setupThenLaunch,
+    setupLines,
     activeTab,
-    completeSetup,
     extraTerminals,
   } = useTrees();
   const { settings } = useApp();
@@ -202,6 +203,7 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
   // (the main work tab can't be closed), and the explicit Resume button resets the
   // latch to re-seed. A real reopen also remounts this pane (it's keyed by id).
   const refId = `tree:${worktree.id}`;
+  const qc = useQueryClient();
   const { tabs } = useTerminals();
   const liveSession = tabs.some((t) => t.source === "issue" && t.refId === refId);
   const [liveSeen, setLiveSeen] = useState(false);
@@ -220,7 +222,7 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
   // seed and loses a resumable session.
   const needsSeed = !isBase && !initialSetup && promptReady && !liveSession && !liveSeen;
   const session = useAgentSession(repo, refId, worktree.path, launching, needsSeed);
-  const exec = settings?.agents.find((a) => a.key === worktree.agent)?.exec?.trim() || "claude";
+  const exec = settings?.agents?.find((a) => a.key === worktree.agent)?.exec?.trim() || "claude";
   // The Work action's configured model + effort (repo override → app default),
   // applied to the launch. Claude-only flags — gate on the agent so a future
   // Codex/Cursor launch isn't handed `--model`/`--effort`/`--remote-control`.
@@ -275,6 +277,11 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
                 cwd={worktree.path}
                 seed={seed}
                 onLaunched={() => clearAgentLaunch(worktree.id)}
+                // Drop the cached session resolution so the next launch re-asks the
+                // backend instead of replaying a stale "fresh" decision whose
+                // transcript now exists on disk (which `session::resolve` would
+                // correctly resolve to Resume).
+                onExited={() => qc.removeQueries({ queryKey: ["agent-session", repo, refId] })}
               />
             ))}
           {/* Extra terminals (opened via the "+" tab): each its own PTY, mounted
@@ -302,7 +309,7 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
           )}
           {settingUp && (
             <div className={`absolute inset-0 z-40 ${activeTab === "setup" ? "" : "hidden"}`}>
-              <SetupLogsView repo={repo} worktreeId={worktree.id} onComplete={completeSetup} />
+              <SetupLogsView lines={setupLines} />
             </div>
           )}
         </div>

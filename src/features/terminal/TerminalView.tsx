@@ -16,7 +16,6 @@ export interface TerminalViewProps {
   /** Empty ⇒ the user's login shell. */
   command?: string;
   args?: string[];
-  env?: Record<string, string>;
   /** Optional initial input, sent as if typed (followed by Enter). */
   seed?: string;
   /** When this pane is the visible one — refit + focus on activation. */
@@ -41,7 +40,6 @@ export function TerminalView({
   cwd,
   command = "",
   args,
-  env,
   seed,
   active = true,
   onExit,
@@ -91,7 +89,6 @@ export function TerminalView({
           cwd,
           command,
           args: args ?? [],
-          env: env ?? {},
           cols,
           rows,
         });

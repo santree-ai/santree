@@ -11,6 +11,12 @@ importers:
       '@dagrejs/dagre':
         specifier: ^3.0.0
         version: 3.0.0
+      '@fontsource-variable/geist':
+        specifier: ^5.2.9
+        version: 5.2.9
+      '@fontsource-variable/geist-mono':
+        specifier: ^5.2.8
+        version: 5.2.8
       '@git-diff-view/react':
         specifier: ^0.1.6
         version: 0.1.6(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -335,6 +341,12 @@ packages:
     peerDependenciesMeta:
       '@noble/hashes':
         optional: true
+
+  '@fontsource-variable/geist-mono@5.2.8':
+    resolution: {integrity: sha512-KI5bj+hkkRiHttYHmccotUZ80ZuZyai+RwI1d7UId0clkx/jXxlo8qYK8j54WzmpBjtMoEMPyllV7faDcj+6RA==}
+
+  '@fontsource-variable/geist@5.2.9':
+    resolution: {integrity: sha512-TP+QSBG3wxKGPE33CbMy/L0Nu3qvJ6Fy81Yc4LnQ95xH+i+cfEp8fyU8/kfV14YwszxIFPhnoMTbjL71waVpyQ==}
 
   '@git-diff-view/core@0.1.6':
     resolution: {integrity: sha512-q2Ch8jURF6pL7VeNpOgHBRVY9gsGLXCOYpKXHG3BqpXe0kv6GNSUux8SmAYsDrakBzfgDClODxDtsM2rfiWpnA==}
@@ -2117,6 +2129,10 @@ snapshots:
     optional: true
 
   '@exodus/bytes@1.15.1': {}
+
+  '@fontsource-variable/geist-mono@5.2.8': {}
+
+  '@fontsource-variable/geist@5.2.9': {}
 
   '@git-diff-view/core@0.1.6':
     dependencies:

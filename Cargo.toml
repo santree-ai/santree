@@ -14,7 +14,12 @@ edition = "2021"
 version = "0.1.0"
 license = "MIT"
 
-# Speed up incremental `tauri dev` rebuilds without sacrificing too much runtime
-# perf in the dev profile.
-[profile.dev]
-incremental = true
+# The shipped desktop binary (what actually goes in the DMG/AppImage): trade
+# build time for a smaller, faster release artifact. Only paid in CI/release
+# builds — `tauri dev` still uses Cargo's normal (fast-compiling) dev profile.
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+panic = "abort"
+opt-level = "s"

@@ -11,6 +11,12 @@ dist
 dist-ssr
 *.local
 
+# TanStack Router plugin cache
+.tanstack
+
+# Claude Code local session/worktree state (nothing here is meant to be shared)
+.claude
+
 # Rust / Cargo (workspace target)
 /target
 

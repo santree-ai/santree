@@ -7,30 +7,37 @@ use crate::domain::*;
 /// The supported coding agents and their selectable models (the catalog the
 /// Settings cards and the launch panel render).
 pub fn agents() -> Vec<AgentDef> {
-    let def = |key, label: &str, short: &str, models: &[&str]| AgentDef {
+    let def = |key, label: &str, short: &str, models: &[&str], available: bool| AgentDef {
         key,
         label: label.into(),
         short: short.into(),
         models: models.iter().map(|s| (*s).into()).collect(),
+        available,
     };
     vec![
         def(
             AgentKind::Claude,
             "Claude Code",
             "Claude",
-            &["claude-opus-4.1", "claude-sonnet-4.5", "claude-haiku-4.5"],
+            // CLI aliases (`claude --help`), not dotted model ids — the CLI
+            // rejects e.g. "claude-sonnet-4.5" outright and aliases always
+            // resolve to the vendor's current model for that tier.
+            &["opus", "sonnet", "haiku"],
+            true,
         ),
         def(
             AgentKind::Codex,
             "Codex",
             "Codex",
             &["gpt-5-codex", "gpt-5", "o4-mini"],
+            false,
         ),
         def(
             AgentKind::Cursor,
             "Cursor",
             "Cursor",
             &["claude-sonnet-4.5", "gpt-5", "auto"],
+            false,
         ),
         def(
             AgentKind::Opencode,
@@ -42,6 +49,7 @@ pub fn agents() -> Vec<AgentDef> {
                 "qwen2.5-coder:32b",
                 "llama3.3:70b",
             ],
+            false,
         ),
     ]
 }
@@ -62,7 +70,7 @@ pub fn default_settings() -> Settings {
         // `exec` is the user's override path (empty ⇒ use the one detected on
         // PATH, reported by `agent_auth`). Model is the per-agent default.
         agents: vec![
-            agent(AgentKind::Claude, "", "claude-sonnet-4.5"),
+            agent(AgentKind::Claude, "", "sonnet"),
             agent(AgentKind::Codex, "", "gpt-5-codex"),
             agent(AgentKind::Cursor, "", "auto"),
             agent(AgentKind::Opencode, "", "claude-sonnet-4.5"),

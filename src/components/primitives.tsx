@@ -2,7 +2,13 @@
 import {
   type ComponentProps,
   type CSSProperties,
+  cloneElement,
+  type InputHTMLAttributes,
+  isValidElement,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  type RefObject,
   type SelectHTMLAttributes,
   useCallback,
   useEffect,
@@ -72,6 +78,7 @@ export function ComboBox({
   className,
   wrapperClassName,
   chevron = true,
+  ...rest
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -80,7 +87,17 @@ export function ComboBox({
   className?: string;
   wrapperClassName?: string;
   chevron?: boolean;
-}) {
+} & Omit<
+  InputHTMLAttributes<HTMLInputElement>,
+  | "type"
+  | "list"
+  | "value"
+  | "onChange"
+  | "placeholder"
+  | "spellCheck"
+  | "autoComplete"
+  | "className"
+>) {
   const listId = useId();
   return (
     <div className={`relative ${wrapperClassName ?? ""}`}>
@@ -93,6 +110,7 @@ export function ComboBox({
         spellCheck={false}
         autoComplete="off"
         className={className ?? ""}
+        {...rest}
       />
       <datalist id={listId}>
         {options.map((o) => (
@@ -208,15 +226,37 @@ export function EmptyState({
   );
 }
 
-/** An iOS-style switch. */
-export function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
+/**
+ * An iOS-style switch. `ariaLabel`/`ariaLabelledBy` give the switch an
+ * accessible name — most callers pass `ariaLabelledBy` pointing at a sibling
+ * label element they already render (e.g. {@link ToggleRow}); a standalone
+ * toggle with no visible label should pass `ariaLabel` instead. `disabled`
+ * sets the real `disabled` attribute (so it's unreachable/announced as
+ * disabled by assistive tech, not just click-swallowed) and dims the control.
+ */
+export function Toggle({
+  on,
+  onClick,
+  disabled,
+  ariaLabel,
+  ariaLabelledBy,
+}: {
+  on: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  ariaLabel?: string;
+  ariaLabelledBy?: string;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       role="switch"
       aria-checked={on}
-      className="relative h-[21px] w-[38px] flex-none cursor-pointer rounded-full border-none transition-colors duration-150"
+      aria-label={ariaLabel}
+      aria-labelledby={ariaLabelledBy}
+      className="relative h-[21px] w-[38px] flex-none cursor-pointer rounded-full border-none transition-colors duration-150 disabled:cursor-default disabled:opacity-45"
       style={{ background: on ? "var(--accent)" : "var(--color-line-3)" }}
     >
       <span
@@ -244,6 +284,7 @@ export function Segmented<T extends string>({
 }) {
   return (
     <div
+      role="radiogroup"
       className={`flex gap-1 rounded-lg border border-line-2 bg-input p-[3px] ${className ?? ""}`}
     >
       {options.map((opt) => {
@@ -252,9 +293,12 @@ export function Segmented<T extends string>({
           ? accentActiveStyle()
           : { border: "1px solid transparent", color: "var(--color-muted-2)" };
         return (
+          // biome-ignore lint/a11y/useSemanticElements: custom-styled segmented control, not a native radio input.
           <button
             key={opt.value}
             type="button"
+            role="radio"
+            aria-checked={active}
             onClick={() => onChange(opt.value)}
             className="flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md px-0.5 py-[7px] font-mono text-[11px] transition-all"
             style={style}
@@ -324,6 +368,7 @@ export function Tabs<T extends string>({
   const inset = variant === "inset";
   return (
     <div
+      role="tablist"
       className={`flex items-center gap-1 ${inset ? "" : "border-b border-line"} ${className ?? ""}`}
     >
       {tabs.map((t) => {
@@ -347,6 +392,8 @@ export function Tabs<T extends string>({
           <button
             key={t.value}
             type="button"
+            role="tab"
+            aria-selected={active}
             onClick={() => onChange(t.value)}
             className={`${base} ${tabClassName ?? ""}`}
             style={style}
@@ -373,18 +420,37 @@ export function Pill({
   children,
   className,
   title,
+  onClick,
 }: {
   color: string;
   children: ReactNode;
   className?: string;
   title?: string;
+  /** Renders as a clickable `<button>` instead of a plain `<span>` when set —
+   *  e.g. {@link PrChip}'s pressable PR pill. Visual output is otherwise identical. */
+  onClick?: (e: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
+  const style: CSSProperties = {
+    color,
+    background: alpha(12, color),
+    border: `1px solid ${alpha(34, color)}`,
+  };
+  const classes = `inline-flex flex-none items-center rounded ${className ?? ""}`;
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        title={title}
+        onClick={onClick}
+        className={`cursor-pointer ${classes}`}
+        style={style}
+      >
+        {children}
+      </button>
+    );
+  }
   return (
-    <span
-      title={title}
-      className={`inline-flex flex-none items-center rounded ${className ?? ""}`}
-      style={{ color, background: alpha(12, color), border: `1px solid ${alpha(34, color)}` }}
-    >
+    <span title={title} className={classes} style={style}>
       {children}
     </span>
   );
@@ -410,6 +476,12 @@ export function Badge({
   );
 }
 
+/** Selector for a menu's interactive rows — used to move focus into the menu on
+ *  open and to rove between items with the arrow keys. Matches `role="menuitem"`
+ *  where a caller sets it, and falls back to any enabled `<button>` since most
+ *  existing menus (built from the shared {@link MENU_ITEM} class) don't. */
+const MENU_ITEM_SELECTOR = '[role="menuitem"]:not([disabled]), button:not([disabled])';
+
 /**
  * A click-away dropdown: `trigger` renders the opener (it's handed a `toggle`),
  * `children` renders the menu (handed a `close`). The single source for the menus
@@ -419,6 +491,13 @@ export function Badge({
  * z-index backdrop) so it works even when the dropdown opens over the terminal
  * overlay — which shares the backdrop's stacking level and used to swallow the
  * close click. Escape closes it too.
+ *
+ * Menu-button semantics are wired centrally so callers don't each have to do it:
+ * `trigger`'s returned element is cloned with `aria-haspopup`/`aria-expanded`
+ * (it's always a single interactive element in practice — a plain clone is a
+ * no-op if it isn't), focus moves to the first menu item on open, and
+ * Up/Down/Home/End rove focus between items (the ad-hoc digit shortcuts a
+ * couple of menus already have keep working independently of this).
  */
 export function Dropdown({
   trigger,
@@ -455,6 +534,7 @@ export function Dropdown({
     else setOpenState(false);
   }, [onOpenChange]);
   const ref = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -474,11 +554,47 @@ export function Dropdown({
     };
   }, [open, close]);
 
+  // Move focus into the menu when it opens — covers both click-opened and
+  // controlled/shortcut-opened dropdowns (both flow through `open`).
+  useEffect(() => {
+    if (!open) return;
+    menuRef.current?.querySelector<HTMLElement>(MENU_ITEM_SELECTOR)?.focus();
+  }, [open]);
+
+  const onMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+    const items = Array.from(
+      menuRef.current?.querySelectorAll<HTMLElement>(MENU_ITEM_SELECTOR) ?? [],
+    );
+    if (items.length === 0) return;
+    e.preventDefault();
+    const current = items.indexOf(document.activeElement as HTMLElement);
+    let next: number;
+    if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = items.length - 1;
+    else if (current === -1) next = e.key === "ArrowDown" ? 0 : items.length - 1;
+    else if (e.key === "ArrowDown") next = (current + 1) % items.length;
+    else next = (current - 1 + items.length) % items.length;
+    items[next]?.focus();
+  };
+
+  // `trigger` is caller-controlled and in every current usage returns a single
+  // <button> — clone it to add the menu-button aria pair without every call
+  // site wiring it by hand. Falls back to rendering as-is for anything that
+  // isn't a single element (e.g. a Fragment).
+  const renderedTrigger = trigger(() => setOpen(!open));
+  const triggerNode = isValidElement<Record<string, unknown>>(renderedTrigger)
+    ? cloneElement(renderedTrigger, { "aria-haspopup": "menu", "aria-expanded": open })
+    : renderedTrigger;
+
   return (
     <div ref={ref} className="relative">
-      {trigger(() => setOpen(!open))}
+      {triggerNode}
       {open && (
         <div
+          ref={menuRef}
+          role="menu"
+          onKeyDown={onMenuKeyDown}
           className={`absolute z-40 rounded-lg border border-line-3 bg-raised py-1 shadow-lg ${
             placement === "up" ? "bottom-full mb-1" : "mt-1"
           } ${align === "right" ? "right-0" : "left-0"} ${menuClassName}`}
@@ -503,6 +619,79 @@ export function underlineTabStyle(active: boolean): CSSProperties {
     background: active ? "var(--color-app)" : "transparent",
     boxShadow: active ? "inset 0 -2px 0 var(--accent)" : "none",
   };
+}
+
+/** Focusable-element selector used by {@link useModalA11y}'s Tab trap — mirrors
+ *  the elements a keyboard user could actually land on. */
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Focus management for a modal `role="dialog"`, shared by {@link ConfirmDialog}
+ * and `CreatePrDialog` so the two don't drift:
+ *  - on open, remembers whatever had focus and moves focus to `initialFocusRef`
+ *    (typically the dialog's Cancel button);
+ *  - Escape closes the dialog, unless `busy` (an in-flight action shouldn't be
+ *    dismissable mid-flight);
+ *  - Tab/Shift-Tab is trapped within `dialogRef`, wrapping at both ends, so
+ *    focus can't leak to the page behind the modal;
+ *  - on close, focus returns to whatever triggered the dialog.
+ */
+export function useModalA11y({
+  open,
+  busy = false,
+  onClose,
+  dialogRef,
+  initialFocusRef,
+}: {
+  open: boolean;
+  busy?: boolean;
+  onClose: () => void;
+  dialogRef: RefObject<HTMLElement | null>;
+  initialFocusRef: RefObject<HTMLElement | null>;
+}) {
+  const restoreRef = useRef<HTMLElement | null>(null);
+
+  // Move focus in on open, restore it on close. initialFocusRef is a ref
+  // object (stable by contract) so it's deliberately left off the deps list.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: initialFocusRef is a ref, stable by contract.
+  useEffect(() => {
+    if (!open) return;
+    restoreRef.current = document.activeElement as HTMLElement | null;
+    initialFocusRef.current?.focus();
+    return () => restoreRef.current?.focus?.();
+  }, [open]);
+
+  // Escape-to-close + Tab trap.
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (!busy) onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const root = dialogRef.current;
+      if (!root) return;
+      const focusables = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      const outside = !active || !root.contains(active);
+      if (e.shiftKey) {
+        if (outside || active === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (outside || active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, busy, onClose, dialogRef]);
 }
 
 /**
@@ -538,6 +727,18 @@ export function ConfirmDialog({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useModalA11y({ open, busy, onClose, dialogRef, initialFocusRef: cancelRef });
+  // Reset stale busy/error state left over from a previous open — the component
+  // stays mounted across `open` flips (see the early-return below), so without
+  // this a failed confirm from days ago would flash its old error on reopen.
+  useEffect(() => {
+    if (open) {
+      setBusy(false);
+      setError(null);
+    }
+  }, [open]);
   if (!open) return null;
 
   const accent = danger ? "var(--color-status-red)" : "var(--accent)";
@@ -565,6 +766,7 @@ export function ConfirmDialog({
         className="absolute inset-0 cursor-default bg-black/50"
       />
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal
         aria-label={title}
@@ -575,7 +777,7 @@ export function ConfirmDialog({
         <div className="mt-1.5 text-[12px] leading-[1.5] text-fg-2">{message}</div>
         {error && (
           <div
-            className="mt-2.5 rounded-md px-2.5 py-1.5 text-[11px] leading-[1.45]"
+            className="selectable mt-2.5 rounded-md px-2.5 py-1.5 text-[11px] leading-[1.45]"
             style={{
               color: "var(--color-status-red)",
               background: alpha(10, "var(--color-status-red)"),
@@ -588,6 +790,7 @@ export function ConfirmDialog({
         {extra && <div className="mt-3">{extra}</div>}
         <div className="mt-4 flex justify-end gap-2">
           <button
+            ref={cancelRef}
             type="button"
             onClick={onClose}
             disabled={busy}
@@ -613,21 +816,49 @@ export function ConfirmDialog({
 
 /**
  * The thin (1.5px) drag strip on a resizable panel's edge. Spreads the pointer
- * handlers from {@link useEdgeResize}; `edge` places it just outside the matching
- * border (`left` for a right-hand panel, `right` for the left sidebar). Extracted
- * so the three panel resizers share one definition (and the lone `color-mix`
- * arbitrary-value, which can't be expressed via `alpha()` from a className).
+ * handlers (and now keyboard handler + aria-value* trio) from {@link useEdgeResize};
+ * `edge` places it just outside the matching border (`left` for a right-hand
+ * panel, `right` for the left sidebar). Extracted so the three panel resizers
+ * share one definition (and the lone `color-mix` arbitrary-value, which can't
+ * be expressed via `alpha()` from a className).
+ *
+ * A focusable, keyboard-operable `role="separator"` rather than `aria-hidden`
+ * — ⌘B/⌘L collapse the panel outright, but this is the only way to *resize*
+ * it without a pointer; see {@link useEdgeResize}'s `onKeyDown` for the
+ * ArrowLeft/ArrowRight handling. This is the WAI-ARIA "focusable separator"
+ * pattern (used for resizable splitters), which is why it stays a `<div>`
+ * with a role rather than a semantic element like `<hr>`.
  */
 export function EdgeResizeHandle({
   edge,
-  ...handlers
-}: Pick<ComponentProps<"div">, "onPointerDown" | "onPointerMove" | "onPointerUp"> & {
+  "aria-valuenow": valueNow,
+  "aria-valuemin": valueMin,
+  "aria-valuemax": valueMax,
+  ...pointerHandlers
+}: Pick<
+  ComponentProps<"div">,
+  | "onPointerDown"
+  | "onPointerMove"
+  | "onPointerUp"
+  | "onPointerCancel"
+  | "onKeyDown"
+  | "aria-valuenow"
+  | "aria-valuemin"
+  | "aria-valuemax"
+> & {
   edge: "left" | "right";
 }) {
   return (
+    // biome-ignore lint/a11y/useSemanticElements: focusable/keyboard-resizable separator (WAI-ARIA splitter pattern), not a decorative <hr>.
     <div
-      {...handlers}
-      aria-hidden
+      {...pointerHandlers}
+      role="separator"
+      aria-orientation="vertical"
+      aria-valuenow={valueNow}
+      aria-valuemin={valueMin}
+      aria-valuemax={valueMax}
+      aria-label="Resize panel"
+      tabIndex={0}
       className={`absolute top-0 z-20 h-full w-1.5 cursor-col-resize hover:bg-[color-mix(in_srgb,var(--accent)_45%,transparent)] ${
         edge === "left" ? "left-[-3px]" : "right-[-3px]"
       }`}
