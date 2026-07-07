@@ -4,13 +4,13 @@ import type { CSSProperties } from "react";
 import { useMemo, useState } from "react";
 
 import { ChevronDownIcon } from "../../components/icons";
-import { Dot, ProjectGlyph } from "../../components/primitives";
+import { Button, Dot, ProjectGlyph } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import { usePrefetchOnHover } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import {
-  accentVar as accent,
   accentActiveStyle,
+  accentFillVar,
   alpha,
   PROJECT_FALLBACK,
   statusColor,
@@ -109,8 +109,8 @@ export function IssueSidebar() {
           const boxStyle: CSSProperties = {
             // Non-selectable rows still show a faint (disabled) box so every row
             // keeps the same checkbox column and alignment.
-            border: `1.5px solid ${selectable ? (st.selected ? accent : "var(--color-dot)") : "var(--color-line-2)"}`,
-            background: st.selected ? accent : "transparent",
+            border: `1.5px solid ${selectable ? (st.selected ? accentFillVar : "var(--color-dot)") : "var(--color-line-2)"}`,
+            background: st.selected ? accentFillVar : "transparent",
           };
 
           return {
@@ -161,14 +161,6 @@ export function IssueSidebar() {
     prefetchOnHover,
   ]);
 
-  const selectReadyStyle: CSSProperties = allReadySelected
-    ? accentActiveStyle()
-    : {
-        background: "var(--color-input-alt)",
-        border: "1px solid var(--color-line-3)",
-        color: "var(--color-muted)",
-      };
-
   return (
     <>
       <div className="flex h-10 flex-none items-center gap-2 border-b border-hairline pr-2.5 pl-[15px]">
@@ -176,17 +168,17 @@ export function IssueSidebar() {
         <span className="font-mono text-[10.5px] text-muted-4">
           {tasks.filter((t) => t.actionable).length}
         </span>
-        <button
-          type="button"
+        <Button
+          size="sm"
           onClick={selectReady}
           disabled={readyIds.length === 0}
           title="Add all ready tickets to the launch selection"
-          className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] transition-all hover:border-line-strong disabled:cursor-default disabled:opacity-50"
-          style={selectReadyStyle}
+          className="ml-auto"
+          style={allReadySelected ? accentActiveStyle() : undefined}
         >
           <Dot color={successColor} size={6} />
           Select Ready {readyIds.length}
-        </button>
+        </Button>
       </div>
 
       {/* biome-ignore lint/a11y/noStaticElementInteractions: clears the decorative hover highlight */}

@@ -8,7 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type { TriageDetail, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { InvestigateIcon, LinearLogo, RefreshIcon } from "../../components/icons";
-import { Skeleton } from "../../components/primitives";
+import { Button, Skeleton } from "../../components/primitives";
 import { RelativeTime, SlaCountdown } from "../../components/RelativeTime";
 import { formatSnoozeLabel } from "../../lib/relativeTime";
 import { alpha } from "../../theme/colors";
@@ -53,29 +53,20 @@ export function IssueHeader({
           >
             <RefreshIcon size={13} className={refreshing ? "animate-spin" : ""} />
           </button>
-          <button
-            type="button"
-            onClick={() => detail && openUrl(detail.url)}
-            disabled={!detail}
-            className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2.5 py-1.5 text-[11px] text-muted-2 hover:text-fg-2 disabled:cursor-default disabled:opacity-40"
-          >
+          <Button size="sm" onClick={() => detail && openUrl(detail.url)} disabled={!detail}>
             <LinearLogo size={12} className="text-[color:var(--linear-brand)]" />
             Open Issue
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="tinted"
+            size="sm"
             onClick={onInvestigate}
             title="Open a terminal to investigate this issue"
-            className="flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-medium transition-colors"
-            style={{
-              color: "var(--accent)",
-              borderColor: investigating ? alpha(55) : alpha(30),
-              background: investigating ? alpha(20) : alpha(11),
-            }}
+            style={investigating ? { borderColor: alpha(55), background: alpha(20) } : undefined}
           >
             <InvestigateIcon size={13} />
             Investigate
-          </button>
+          </Button>
         </div>
       </div>
       <div className="mb-2 text-[17px] leading-[1.3] font-semibold text-fg-bright">

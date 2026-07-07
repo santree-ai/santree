@@ -9,12 +9,24 @@
  *  - `useKeptPanes`        — the mounted-pane cache (keep recently-viewed panes
  *    mounted, toggle visibility) so revisiting a ticket is instant.
  *  - `useTriageKeyboard`   — the vim-style queue keybindings (j/k, ⌘I, ⌘O).
+ *  - `useInvestigateSelection` / `useBatchInvestigate` — multi-select in the
+ *    queue + starting an investigation session per selected ticket at once.
  */
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 
-import type { TriageDetail, TriageTicket } from "../../bindings";
+import { commands, type TriageDetail, type TriageTicket } from "../../bindings";
+import {
+  CLAUDE_START_WITH_CHROME_KEY,
+  queryKeys,
+  useBoolSetting,
+  useClaudeHookSettings,
+} from "../../lib/queries";
 import { inEditable } from "../../lib/useKeyboardShortcuts";
+import { toast } from "../../state/toast";
+import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
+import { useTerminals } from "../terminal/TerminalsContext";
 
 /** Which detail tab a ticket is showing. */
 export type DetailTab = "discussion" | "investigate";
@@ -111,6 +123,101 @@ export function useKeptPanes<D extends { id: string }>(
   const detailFor = useCallback((id: string) => detailsRef.current.get(id), []);
 
   return { keptPanes, detailFor };
+}
+
+/**
+ * Multi-select for batch investigation (mirrors the Issues launch selection).
+ * `selectAll` toggles the whole eligible set — if every eligible ticket is
+ * already selected it clears them instead, like Issues' "Select Ready".
+ */
+export function useInvestigateSelection(eligibleIds: string[]) {
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+
+  const toggle = useCallback((id: string) => setSelected((s) => ({ ...s, [id]: !s[id] })), []);
+  const clear = useCallback(() => setSelected({}), []);
+  const selectAll = useCallback(() => {
+    if (eligibleIds.length === 0) return;
+    setSelected((s) => {
+      const allSelected = eligibleIds.every((id) => s[id]);
+      const next = { ...s };
+      for (const id of eligibleIds) next[id] = !allSelected;
+      return next;
+    });
+  }, [eligibleIds]);
+
+  return { selected, toggle, clear, selectAll };
+}
+
+/**
+ * Start (or resume) investigations for several tickets at once, without
+ * visiting each one. Per ticket this does exactly what InvestigatePane's launch
+ * does — resolve its persisted session (a fresh `--session-id`, or `--resume`
+ * when a transcript is still on disk) and open the seeded PTY — but in the
+ * background: the sessions live in the persistent TerminalLayer, so each
+ * ticket's Investigation tab (and the Terminal view) attaches to them whenever
+ * they're opened. `ensure` is idempotent per (source, refId), so a ticket whose
+ * investigation is already live is a no-op. Raises one summary toast when done.
+ */
+export function useBatchInvestigate(opts: {
+  repo: string;
+  /** The repo's local path (where the agent runs); no path ⇒ can't launch. */
+  cwd: string | undefined;
+  /** Configured investigate skill (a Claude slash-command); null ⇒ can't launch. */
+  command: string | null;
+  agentExec: string;
+  model: string | null;
+  effort: string | null;
+  remoteControl: boolean;
+}) {
+  const { ensure } = useTerminals();
+  const qc = useQueryClient();
+  const hookSettings = useClaudeHookSettings().data;
+  const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
+  const { repo, cwd, command, agentExec, model, effort, remoteControl } = opts;
+
+  return useCallback(
+    async (ids: string[]) => {
+      if (!command || !cwd || ids.length === 0) return;
+      const exec = agentExec.trim() || "claude";
+      const results = await Promise.allSettled(
+        ids.map(async (id) => {
+          const r = await commands.agentSession(repo, `triage:${id}`, cwd, true);
+          if (r.status === "error") throw new Error(r.error);
+          const seed = agentSessionSeed(r.data, exec, {
+            prompt: `/${command} ${id}`,
+            modelFlag: model ? `--model ${shellQuote(model)}` : undefined,
+            effortFlag: effort ? `--effort ${shellQuote(effort)}` : undefined,
+            remoteControl: remoteControl ? id : undefined,
+            settingsFlag: hookSettings ? `--settings ${shellQuote(hookSettings)}` : undefined,
+            chrome: startWithChrome,
+          });
+          ensure({ title: id, cwd, source: "triage", refId: id, seed });
+        }),
+      );
+      // Each launch recorded a session — refresh the "started" set so the
+      // resumable indicator/tab surface for these tickets once they exit.
+      qc.invalidateQueries({ queryKey: queryKeys.startedInvestigations(repo) });
+      const failed = results.filter((r) => r.status === "rejected").length;
+      const started = ids.length - failed;
+      if (started > 0)
+        toast.success(`Started ${started} investigation${started === 1 ? "" : "s"}.`);
+      if (failed > 0)
+        toast.error(`Couldn't start ${failed} investigation${failed === 1 ? "" : "s"}.`);
+    },
+    [
+      repo,
+      cwd,
+      command,
+      agentExec,
+      model,
+      effort,
+      remoteControl,
+      hookSettings,
+      startWithChrome,
+      ensure,
+      qc,
+    ],
+  );
 }
 
 /**

@@ -10,7 +10,7 @@ import type { Worktree } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
 import { LinearLogo } from "../../components/icons";
-import { Dot } from "../../components/primitives";
+import { Button, Dot } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
 import { useSetWorktreeTitle, useTriageDetail } from "../../lib/queries";
 import { statusColor, statusLabel } from "../../theme/colors";
@@ -43,15 +43,15 @@ export function WorktreeIssuePane({ repo, worktree }: { repo: string; worktree: 
             {statusLabel[worktree.status]}
           </span>
           {ready && (
-            <button
-              type="button"
+            <Button
+              size="sm"
               onClick={() => openUrl(ready.url)}
               title="Open in Linear"
-              className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 py-1 text-[10.5px] text-muted-2 hover:text-fg-2"
+              className="ml-auto"
             >
               <LinearLogo size={11} className="text-[color:var(--linear-brand)]" />
               Open
-            </button>
+            </Button>
           )}
         </div>
         <div className="text-[15px] leading-[1.3] font-semibold text-fg-bright">
@@ -76,7 +76,7 @@ export function WorktreeIssuePane({ repo, worktree }: { repo: string; worktree: 
           </div>
         )}
       </div>
-      {ready ? <DiscussionPane detail={ready} /> : <DiscussionSkeleton />}
+      {ready ? <DiscussionPane detail={ready} repo={repo} /> : <DiscussionSkeleton />}
     </div>
   );
 }

@@ -1,12 +1,14 @@
 /** The Discussion / Investigation tab bar, shown once an investigation starts. */
-import { Tabs } from "../../components/primitives";
+import { ClaudeSparkIcon } from "../../components/icons";
+import { type TabItem, Tabs } from "../../components/primitives";
 import { useApp } from "../../state/AppContext";
 import type { DetailTab } from "./hooks";
 
-const DETAIL_TABS: { value: DetailTab; label: string }[] = [
+const DETAIL_TABS: TabItem<DetailTab>[] = [
   // Discussion first; the Investigation tab only renders once a session is live.
   { value: "discussion", label: "Discussion" },
-  { value: "investigate", label: "Investigation" },
+  // The spark marks it as the Claude session it hosts (like the Trees agent tabs).
+  { value: "investigate", label: "Investigation", icon: <ClaudeSparkIcon size={12} /> },
 ];
 
 export function DetailTabs({ tab, onTab }: { tab: DetailTab; onTab: (t: DetailTab) => void }) {

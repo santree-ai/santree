@@ -1,21 +1,29 @@
 /**
- * The Investigate tab. For now it hosts a real terminal scoped to the repo (a
- * Claude investigation will replace it later — see COMPLIANCE.md). The terminal
- * is a *global* session (so it also appears in the Terminal tab, grouped under
- * "Triage"); we render it here by registering this pane as the embed host — the
- * persistent TerminalLayer positions the live session over it.
+ * The Investigate tab: a real Claude session scoped to the repo, run over a
+ * persisted `--session-id` (see COMPLIANCE.md — placement + seeding only). The
+ * terminal is a *global* session (so it also appears in the Terminal tab,
+ * grouped under "Triage"); the inner {@link InvestigateTerminal} registers the
+ * pane as the embed host and the persistent TerminalLayer positions the live
+ * session over it.
  *
- * The embed lifecycle (synchronous-rect placement + seen-latch exit detection)
- * lives in `useEmbeddedTerminal`; when the hosted process exits, `onExited`
- * drops us back to the discussion.
+ * When the agent exits we don't drop straight back to the discussion — like the
+ * Trees work terminal, we show a "resume when ready" pane (its conversation is
+ * still on disk, so Resume continues it). Only a plain shell (no investigate
+ * skill configured) falls back to the discussion on exit, since there's nothing
+ * to resume.
  */
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Spinner } from "../../components/primitives";
+import { SessionEndedPane } from "../../components/SessionEndedPane";
 import {
+  CLAUDE_START_WITH_CHROME_KEY,
   INVESTIGATE_REMOTE_CONTROL_KEY,
+  queryKeys,
   useAgentSession,
+  useBoolSetting,
+  useClaudeHookSettings,
   useResolvedSetting,
 } from "../../lib/queries";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
@@ -30,6 +38,7 @@ export function InvestigatePane({
   agentExec,
   model,
   effort,
+  hasStartedSession,
   onExited,
 }: {
   /** Active repo name — scopes the persisted Claude session. */
@@ -44,27 +53,45 @@ export function InvestigatePane({
   model: string | null;
   /** Effort level (Claude's --effort), or null for the CLI default. */
   effort: string | null;
+  /** This ticket has a stored session from a past investigation (across app
+   *  restarts) — so land on the resume pane rather than auto-launching. */
+  hasStartedSession: boolean;
+  /** Called only for a plain shell (no skill) when it exits — a launchable
+   *  investigation keeps the tab and shows the resume pane instead. */
   onExited: () => void;
 }) {
-  // When a skill is configured, launch the configured agent under a login shell so
-  // it + node resolve on PATH (like a normal terminal); `exec` replaces the shell
-  // so quitting the agent closes the tab. Mirrors the CLI's
-  // `claude [--model M] '/<cmd> <ticket>'`. With nothing configured, a plain shell.
-  //
-  // The session is persisted: a first investigate mints a `--session-id`; a later
-  // one (after the agent was quit or the app restarted) resumes the same
-  // conversation instead of re-running the investigation from scratch.
   // Only resolve a (re)launch when there's no live PTY to attach to; latch
-  // `everLive` so quitting the agent doesn't re-resume it into a restart loop
-  // (this pane is keyed by ticket, so reopening for the ticket resets it).
+  // `liveSeen` (as state, so the exit re-renders) so quitting the agent doesn't
+  // immediately re-resume it into a restart loop — instead we show the resume
+  // pane, and its Resume button clears the latch to re-seed. This pane is keyed
+  // by ticket, so reopening the ticket resets the latch.
   const { tabs } = useTerminals();
   const liveSession = tabs.some((t) => t.source === "triage" && t.refId === ticketId);
-  const everLive = useRef(false);
-  if (liveSession) everLive.current = true;
+  const [liveSeen, setLiveSeen] = useState(false);
+  // A brand-new investigation (no stored session) auto-launches when opened; one
+  // that already has a stored session waits behind the resume pane until the user
+  // clicks Resume (mirrors the Trees work terminal — a fresh start goes straight
+  // to the agent, a past session shows "resume when ready"). `resumeRequested`
+  // is that explicit click; reset once the session is live again so a later
+  // in-place exit shows the pane once more.
+  const [resumeRequested, setResumeRequested] = useState(false);
+  useEffect(() => {
+    if (liveSession) {
+      setLiveSeen(true);
+      setResumeRequested(false);
+    }
+  }, [liveSession]);
 
   const termKey = `triage:${ticketId}`;
   const canLaunch = command != null && !!cwd;
-  const needsSeed = canLaunch && !liveSession && !everLive.current;
+  // Something to resume: it ran and exited in-place (liveSeen), or a past
+  // investigation left a stored session. Show the resume pane instead of a dead
+  // terminal — unless the user just asked to resume (then we launch).
+  const resumable = liveSeen || hasStartedSession;
+  const ended = canLaunch && !liveSession && resumable && !resumeRequested;
+  // Auto-launch only a genuinely fresh investigation (nothing to resume), or the
+  // one the user just clicked Resume on.
+  const needsSeed = canLaunch && !liveSession && !liveSeen && (resumeRequested || !resumable);
   const session = useAgentSession(repo, termKey, cwd ?? "", canLaunch, needsSeed);
   const exec = agentExec.trim() || "claude";
   const modelFlag = model ? `--model ${shellQuote(model)}` : undefined;
@@ -75,12 +102,17 @@ export function InvestigatePane({
   // flags" gotcha) and no way to turn it off.
   const remoteControlSetting = useResolvedSetting(repo, INVESTIGATE_REMOTE_CONTROL_KEY);
   const remoteControlEnabled = remoteControlSetting.data !== "false";
+  // Investigate is Claude-only by design, so inject session-state hooks unconditionally.
+  const hookSettings = useClaudeHookSettings().data;
+  const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
   const seed = command
     ? agentSessionSeed(session.data, exec, {
         prompt: `/${command} ${ticketId}`,
         modelFlag,
         effortFlag,
         remoteControl: remoteControlEnabled ? ticketId : undefined,
+        settingsFlag: hookSettings ? `--settings ${shellQuote(hookSettings)}` : undefined,
+        chrome: startWithChrome,
       })
     : undefined;
   // Hold the embed until both the seed decision and the remote-control setting
@@ -88,24 +120,53 @@ export function InvestigatePane({
   const ready = !needsSeed || (!session.isFetching && !remoteControlSetting.isLoading);
 
   const qc = useQueryClient();
-  const handleExited = useCallback(() => {
-    // Drop the cached session resolution so re-investigating re-asks the backend
+  const dropCachedSession = useCallback(
+    // Drop the cached session resolution so the next launch re-asks the backend
     // instead of replaying a stale "fresh" decision whose transcript now exists
     // on disk (which `session::resolve` would correctly resolve to Resume).
-    qc.removeQueries({ queryKey: ["agent-session", repo, termKey] });
-    onExited();
-  }, [qc, repo, termKey, onExited]);
+    () => qc.removeQueries({ queryKey: ["agent-session", repo, termKey] }),
+    [qc, repo, termKey],
+  );
+  const handleExited = useCallback(() => {
+    dropCachedSession();
+    // The stored session persists past exit — refresh the "started" set so the
+    // queue's resumable indicator (and this ticket's tab) reflect it once the
+    // live session is gone.
+    qc.invalidateQueries({ queryKey: queryKeys.startedInvestigations(repo) });
+    // A launchable investigation stays put and shows the resume pane (driven by
+    // the resumable check above); a plain shell has nothing to resume, so fall
+    // back to the discussion.
+    if (!canLaunch) onExited();
+  }, [dropCachedSession, qc, repo, canLaunch, onExited]);
 
-  const { hostRef } = useEmbeddedTerminal({
-    spec: { title: ticketId, cwd, source: "triage", refId: ticketId, seed },
-    onExited: handleExited,
-  });
+  if (ended) {
+    return (
+      <SessionEndedPane
+        title="Investigation ended"
+        subtitle={
+          <>
+            The investigation for <span className="font-mono text-fg-3">{ticketId}</span> is saved —
+            resume the same conversation whenever you're ready.
+          </>
+        }
+        onResume={() => {
+          // Drop the cached resolution first — the process can die while this
+          // pane is unmounted (onExited never fires then), leaving a stale
+          // cached decision. `resumeRequested` + clearing the `liveSeen` latch
+          // re-seed; the resolve allows a fresh session when the transcript is
+          // gone (the stored id is reused either way).
+          dropCachedSession();
+          setResumeRequested(true);
+          setLiveSeen(false);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="min-h-0 flex-1">
-      {/* The TerminalLayer overlays this host with the ticket's live session. */}
       {ready ? (
-        <div ref={hostRef} className="h-full w-full" />
+        <InvestigateTerminal ticketId={ticketId} cwd={cwd} seed={seed} onExited={handleExited} />
       ) : (
         <div className="flex h-full items-center justify-center">
           <Spinner size={16} />
@@ -113,4 +174,26 @@ export function InvestigatePane({
       )}
     </div>
   );
+}
+
+/** The embedded terminal host, split out so it fully unmounts when the pane
+ *  swaps to the resume state — that tears the embed down cleanly (setEmbed(null))
+ *  instead of leaving it pointed at a detached node. */
+function InvestigateTerminal({
+  ticketId,
+  cwd,
+  seed,
+  onExited,
+}: {
+  ticketId: string;
+  cwd?: string;
+  seed?: string;
+  onExited: () => void;
+}) {
+  const { hostRef } = useEmbeddedTerminal({
+    spec: { title: ticketId, cwd, source: "triage", refId: ticketId, seed },
+    onExited,
+  });
+  // The TerminalLayer overlays this host with the ticket's live session.
+  return <div ref={hostRef} className="h-full w-full" />;
 }

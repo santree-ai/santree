@@ -88,6 +88,27 @@ pub async fn resolve(
     Ok(AgentSession::Fresh { session_id })
 }
 
+/// The ticket ids of every triage investigation that has a *stored session* for
+/// `repo` — i.e. one was started for it at some point, so it can be resumed.
+///
+/// Mirrors how a worktree row makes the Trees work terminal resumable: presence
+/// of the record — not the on-disk transcript — is what surfaces the tab +
+/// resume affordance. We intentionally don't stat the transcript here: even if
+/// Claude has pruned it, `resolve` (with `allow_fresh`) reuses the stored id to
+/// start fresh, so a stored session is always a valid resume target.
+pub async fn started_investigations(db: &Db, repo: &str) -> Result<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT term_key FROM terminal_sessions WHERE repo = ? AND term_key LIKE 'triage:%'",
+    )
+    .bind(repo)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(key,)| key.strip_prefix("triage:").map(str::to_string))
+        .collect())
+}
+
 /// Drop a terminal's stored session, so its next `resolve` mints a fresh one
 /// instead of resuming a conversation whose worktree no longer exists. Callers
 /// remove a worktree's own directory then call this with `term_key`
@@ -208,6 +229,44 @@ mod tests {
                 .unwrap(),
             AgentSession::Resume { session_id }
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn started_investigations_lists_triage_tickets_with_a_stored_session() {
+        let base =
+            std::env::temp_dir().join(format!("santree-session-started-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+
+        // An explicit launch records a session for two triage tickets and a
+        // worktree; a passive reopen for AK-9 records nothing.
+        let cwd = "/tmp/santree/work";
+        resolve(&db, "repo", "triage:AK-1", cwd, Some(&home), true)
+            .await
+            .unwrap();
+        resolve(&db, "repo", "triage:AK-2", cwd, Some(&home), true)
+            .await
+            .unwrap();
+        resolve(&db, "repo", "tree:AK-3", cwd, Some(&home), true)
+            .await
+            .unwrap();
+        resolve(&db, "repo", "triage:AK-9", cwd, Some(&home), false)
+            .await
+            .unwrap();
+        // A different repo's investigation must not leak in.
+        resolve(&db, "other", "triage:AK-8", cwd, Some(&home), true)
+            .await
+            .unwrap();
+
+        let mut got = started_investigations(&db, "repo").await.unwrap();
+        got.sort();
+        // Only the two triage tickets with a stored row — not the worktree, the
+        // never-launched AK-9, or the other repo's ticket. Transcript existence
+        // is irrelevant (none were written on disk here).
+        assert_eq!(got, vec!["AK-1".to_string(), "AK-2".to_string()]);
 
         let _ = std::fs::remove_dir_all(&base);
     }

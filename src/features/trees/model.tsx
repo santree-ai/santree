@@ -22,17 +22,29 @@ import {
   useState,
 } from "react";
 
-import { commands, type SetupEvent, type Worktree, type WorktreePr } from "../../bindings";
+import {
+  commands,
+  type SessionState,
+  type SetupEvent,
+  type TabKind,
+  type Worktree,
+  type WorktreePr,
+  type WorktreeTab,
+} from "../../bindings";
 import {
   queryKeys,
   TREES_RUN_SETUP_KEY,
+  useAddWorktreeTab,
   useBaseWorktree,
   useBoolSetting,
   useRemoveWorktree,
   useRemoveWorktrees,
+  useRemoveWorktreeTab,
+  useRenameWorktreeTab,
   useTasks,
   useWorktreePrs,
   useWorktrees,
+  useWorktreeTabs,
 } from "../../lib/queries";
 import { inEditable } from "../../lib/useKeyboardShortcuts";
 import { type PendingLaunch, useApp, useAppUi } from "../../state/AppContext";
@@ -59,6 +71,8 @@ export function pendingWorktree(p: PendingLaunch): Worktree {
     ahead: 0,
     behind: 0,
     unpushed: 0,
+    remoteBehind: 0,
+    pullConflict: false,
     agent: p.agent,
     activity: "Idle",
     branch: "",
@@ -86,6 +100,19 @@ export function withLiveWorktreeStatus(
     status: statusByTaskId.get(w.id) ?? w.status,
     activity: liveTermRefIds.has(`tree:${w.id}`) ? "Running" : "Idle",
   };
+}
+
+/** The effective, display-ready Claude session state, reconciling the
+ *  hook-recorded state with process liveness. Liveness is authoritative for
+ *  running-vs-exited: a stored `active`/`waiting`/`idle` goes stale the instant
+ *  the session dies without a `SessionEnd` (app restart, crash, kill), so a
+ *  worktree with no live PTY reads as `exited` regardless of the last hook. A
+ *  live session shows its hook state; `null` means nothing to show — the worktree
+ *  never ran an agent, or a terminal is live but hasn't reported a state yet.
+ *  Assumes `w` carries the live `activity` from {@link withLiveWorktreeStatus}. */
+export function effectiveSessionState(w: Worktree, hook: SessionState | undefined): string | null {
+  if (w.activity !== "Running") return hook ? "exited" : null;
+  return hook?.state ?? null;
 }
 
 /** Terminal tabs belonging to a worktree: its main session (`tree:<id>`) and any
@@ -146,12 +173,24 @@ export function shouldCompleteSetup(finishedId: string, currentSetupFor: string 
 /** The file-picker sub-tabs (right panel). */
 export type FileTab = "all" | "changes";
 /** The main-area tabs. "issue" and "terminal" are always present (and can't be
- *  closed); "file"/"setup" appear on demand; `term:<n>` are extra terminals opened
- *  via the "+" tab (closable). */
-export type MainTab = "issue" | "terminal" | "file" | "setup" | `term:${number}`;
+ *  closed); "file"/"setup" appear on demand; `tab:<id>` are the persisted extra
+ *  tabs (Claude sessions / terminals) opened via the "+" tab (closable). */
+export type MainTab = "issue" | "terminal" | "file" | "setup" | `tab:${string}`;
 
-/** The tab id for the nth extra terminal. */
-export const termTab = (n: number): MainTab => `term:${n}`;
+/** The main-tab id for a persisted extra tab. */
+export const extraTab = (id: string): MainTab => `tab:${id}`;
+
+/** Default title for a new extra tab, unique among the worktree's existing tab
+ *  titles: "Claude", "Claude 2", … / "Terminal 2", "Terminal 3", … (the primary
+ *  Terminal tab is #1 implicitly). Exported for testing — see model.test.ts. */
+export function defaultTabTitle(kind: TabKind, existing: WorktreeTab[]): string {
+  const base = kind === "claude" ? "Claude" : "Terminal";
+  const titles = new Set(existing.map((t) => t.title));
+  let n = kind === "claude" ? 1 : 2;
+  const candidate = () => (n === 1 ? base : `${base} ${n}`);
+  while (titles.has(candidate())) n++;
+  return candidate();
+}
 
 /** The project a worktree belongs to (its Linear project, or the catch-all). */
 export const projectOf = (w: Worktree): string => w.project ?? NO_PROJECT;
@@ -160,10 +199,10 @@ export const projectOf = (w: Worktree): string => w.project ?? NO_PROJECT;
  *  default when the remembered tab is no longer available: the File tab needs
  *  an open file, the Setup tab needs setup still running for THIS worktree
  *  (`setupFor` is a single slot — another worktree's setup can supersede it),
- *  a `term:<n>` tab needs that terminal to still exist, and the Issue tab
- *  doesn't apply to the base entry (no ticket). A never-remembered tab (or one
- *  that's no longer available) falls back to Issue (Terminal for the base
- *  entry). Exported for testing — see model.test.ts. */
+ *  a `tab:<id>` tab needs that persisted extra tab to still exist, and the
+ *  Issue tab doesn't apply to the base entry (no ticket). A never-remembered
+ *  tab (or one that's no longer available) falls back to Issue (Terminal for
+ *  the base entry). Exported for testing — see model.test.ts. */
 export function resolveActiveTab(
   remembered: MainTab | undefined,
   opts: {
@@ -171,22 +210,39 @@ export function resolveActiveTab(
     selectedFile: string | null;
     setupFor: string | null;
     activeId: string;
-    extraTerminals: number[];
+    extraTabIds: string[];
   },
 ): MainTab {
-  const { isBaseActive, selectedFile, setupFor, activeId, extraTerminals } = opts;
+  const { isBaseActive, selectedFile, setupFor, activeId, extraTabIds } = opts;
   const fallbackTab: MainTab = isBaseActive ? "terminal" : "issue";
-  const termN =
-    typeof remembered === "string" && remembered.startsWith("term:")
-      ? Number(remembered.slice(5))
-      : null;
+  const tabId =
+    typeof remembered === "string" && remembered.startsWith("tab:") ? remembered.slice(4) : null;
   const tabAvailable =
     remembered === "terminal" ||
     (remembered === "issue" && !isBaseActive) ||
     (remembered === "file" && selectedFile !== null) ||
     (remembered === "setup" && setupFor === activeId) ||
-    (termN !== null && extraTerminals.includes(termN));
+    (tabId !== null && extraTabIds.includes(tabId));
   return remembered && tabAvailable ? remembered : fallbackTab;
+}
+
+/** Whether the main terminal must be withheld (not mounted) because its seed
+ *  inputs are still being fetched. The PTY applies the seed only at session
+ *  creation, so mounting early spawns a bare shell and the agent launch is
+ *  silently lost — no session row is ever minted, which later strands the
+ *  Resume button in a shell↔"session ended" loop. Two inputs can be in flight:
+ *  the work prompt (during a launch, past any initial setup — during setup the
+ *  terminal is withheld by the setup gate itself) and the session resolution.
+ *  Exported for testing — see model.test.ts. */
+export function shouldHoldTerminal(opts: {
+  launching: boolean;
+  initialSetup: boolean;
+  promptFetched: boolean;
+  needsSeed: boolean;
+  sessionFetching: boolean;
+}): boolean {
+  const { launching, initialSetup, promptFetched, needsSeed, sessionFetching } = opts;
+  return (launching && !initialSetup && !promptFetched) || (needsSeed && sessionFetching);
 }
 
 /** Decide how "begin a task" opens the worktree: run setup first (Setup tab,
@@ -236,9 +292,9 @@ interface TreesModel {
   setupLines: string[];
   /** Which main-area tab is showing. */
   activeTab: MainTab;
-  /** Extra-terminal numbers for the active worktree (each → a `term:<n>` tab),
+  /** Persisted extra tabs (Claude sessions / terminals) for the active worktree,
    *  in open order. The primary "terminal" tab is always present and not listed. */
-  extraTerminals: number[];
+  extraTabs: WorktreeTab[];
 
   setActive: (id: string) => void;
   showAllAgents: () => void;
@@ -251,10 +307,14 @@ interface TreesModel {
   setActiveTab: (tab: MainTab) => void;
   /** Close the File tab (back to the terminal). */
   closeFileTab: () => void;
-  /** Open a new extra terminal for the active worktree and focus it. */
-  addTerminal: () => void;
-  /** Close an extra terminal tab (the caller tears down its PTY session). */
-  closeTerminal: (n: number) => void;
+  /** Open (and persist) a new Claude or terminal tab for the active worktree
+   *  and focus it. */
+  addTab: (kind: TabKind) => void;
+  /** Close a persisted extra tab (the caller tears down its PTY session). A
+   *  Claude tab's stored session is forgotten with it. */
+  closeTab: (id: string) => void;
+  /** Rename a persisted extra tab (blank titles are ignored). */
+  renameTab: (id: string, title: string) => void;
 
   /** Begin a task: open the worktree and either run setup first (in the Setup tab,
    *  then launch the agent) or launch the agent straight away — per the "run setup
@@ -305,6 +365,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     consumeTreeLaunch,
     treeFocus,
     consumeTreeFocus,
+    bgLaunches,
     pendingLaunches,
     removePendingLaunch,
     pendingDeletes,
@@ -415,16 +476,31 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const [prDialogFor, setPrDialogFor] = useState<string | null>(null);
   const [prSuggestFor, setPrSuggestFor] = useState<string | null>(null);
   const [selectedWorktrees, setSelectedWorktrees] = useState<Set<string>>(new Set());
-  // Extra terminals per worktree id (the "+" tab). Keyed by worktree so each one
-  // keeps its own terminals across switches; the next number is max+1 (the primary
-  // "Terminal" tab is #1 implicitly, so extras start at 2).
-  const [extraTermsByWt, setExtraTermsByWt] = useState<Record<string, number[]>>({});
+  // Persisted extra tabs (the "+" tab: Claude sessions / terminals), DB-backed so
+  // they survive app restarts. Grouped by worktree id; mutations are optimistic
+  // (the tab appears/renames/closes instantly, the row lands in the background).
+  const { data: allExtraTabs = [] } = useWorktreeTabs(activeRepo);
+  const tabsByWt = useMemo(() => {
+    const map = new Map<string, WorktreeTab[]>();
+    for (const t of allExtraTabs) {
+      const list = map.get(t.worktreeId) ?? [];
+      list.push(t);
+      map.set(t.worktreeId, list);
+    }
+    return map;
+  }, [allExtraTabs]);
+  const { mutate: addTabRow } = useAddWorktreeTab(activeRepo);
+  const { mutate: renameTabRow } = useRenameWorktreeTab(activeRepo);
+  const { mutate: removeTabRow } = useRemoveWorktreeTab(activeRepo);
 
   // Begin a task: open it, then either run setup first (in the Setup tab, then
   // launch the agent on finish) or launch the agent straight away, per the pref.
+  // `focus` (default true) makes the worktree active; a background launch passes
+  // false so the agent starts (setup/launch flags are all keyed by id) without
+  // switching the active worktree or the current view.
   const startAgent = useCallback(
-    (id: string) => {
-      setActiveId(id);
+    (id: string, opts?: { focus?: boolean }) => {
+      if (opts?.focus ?? true) setActiveId(id);
       setFileFor(id, null);
       const plan = planStartAgent(runSetupPref);
       if (plan.setupThenLaunch) {
@@ -587,6 +663,27 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     setTabFor,
   ]);
 
+  // Consume background launch requests (Issues "Run in background"): start each
+  // agent *without focusing* as soon as its real worktree lands. `startAgent`
+  // sets the launch flags the off-screen `BackgroundLaunch` host reads; that host
+  // clears the id from `bgLaunches` once the agent has actually launched. Track
+  // started ids so a worktrees refetch doesn't restart an already-running agent,
+  // and forget ids no longer requested so a later background launch of the same
+  // ticket (after its worktree was deleted) starts fresh.
+  const bgStartedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const id of bgLaunches) {
+      if (bgStartedRef.current.has(id)) continue;
+      const wt = worktrees.find((w) => w.id === id);
+      if (!wt || wt.pending) continue;
+      bgStartedRef.current.add(id);
+      startAgent(id, { focus: false });
+    }
+    for (const id of bgStartedRef.current) {
+      if (!bgLaunches.includes(id)) bgStartedRef.current.delete(id);
+    }
+  }, [bgLaunches, worktrees, startAgent]);
+
   // Consume a cross-view "open" request (from the Issues graph/"Open in Trees"):
   // select the existing worktree and land on its Issue tab — no agent start, the
   // work is already there. Resetting the tab/file/setup state (like `setActive`)
@@ -619,7 +716,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const value = useMemo<TreesModel>(() => {
     const active =
       activeId === BASE_ID ? baseWorktree : (worktrees.find((w) => w.id === activeId) ?? null);
-    const extraTerminals = extraTermsByWt[activeId] ?? [];
+    const extraTabs = tabsByWt.get(activeId) ?? [];
     const selectedFile = selectedFileByWt[activeId] ?? null;
     // Resolve the active worktree's remembered tab (falls back to a safe
     // default — Issue, or Terminal for the base entry — when it's no longer
@@ -630,7 +727,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       selectedFile,
       setupFor,
       activeId,
-      extraTerminals,
+      extraTabIds: extraTabs.map((t) => t.id),
     });
     return {
       repo: activeRepo,
@@ -648,7 +745,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       setupThenLaunch,
       setupLines,
       activeTab,
-      extraTerminals,
+      extraTabs,
       // Switching worktrees just changes which one is active — each remembers its
       // own tab/file (see activeTabByWt/selectedFileByWt), so returning to a worktree
       // restores whatever it was last showing instead of snapping back to the Issue
@@ -671,20 +768,22 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         setFileFor(activeId, null);
         if (activeTab === "file") setTabFor(activeId, "terminal");
       },
-      addTerminal: () => {
+      // The id is minted here (not by the backend) so the optimistic cache patch
+      // is the exact row the DB will hold and the tab can be focused immediately.
+      addTab: (kind) => {
         if (!activeId) return;
-        const list = extraTermsByWt[activeId] ?? [];
-        const next = (list.length ? Math.max(...list) : 1) + 1;
-        setExtraTermsByWt((m) => ({ ...m, [activeId]: [...(m[activeId] ?? []), next] }));
-        setTabFor(activeId, termTab(next));
+        const id = crypto.randomUUID();
+        addTabRow({ id, worktreeId: activeId, kind, title: defaultTabTitle(kind, extraTabs) });
+        setTabFor(activeId, extraTab(id));
       },
-      closeTerminal: (n) => {
-        setExtraTermsByWt((m) => ({
-          ...m,
-          [activeId]: (m[activeId] ?? []).filter((x) => x !== n),
-        }));
-        // If the closed terminal was showing, fall back to the primary terminal.
-        if (activeTab === termTab(n)) setTabFor(activeId, "terminal");
+      closeTab: (id) => {
+        removeTabRow(id);
+        // If the closed tab was showing, fall back to the primary terminal.
+        if (activeTab === extraTab(id)) setTabFor(activeId, "terminal");
+      },
+      renameTab: (id, title) => {
+        const trimmed = title.trim();
+        if (trimmed) renameTabRow({ id, title: trimmed });
       },
       startAgent,
       // A manual re-run opens the Setup tab alongside whatever's already open
@@ -759,7 +858,10 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     worktreesLoading,
     baseWorktree,
     activeId,
-    extraTermsByWt,
+    tabsByWt,
+    addTabRow,
+    renameTabRow,
+    removeTabRow,
     rightCollapsed,
     rightWidth,
     fileTab,

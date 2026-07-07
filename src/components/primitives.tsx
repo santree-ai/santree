@@ -13,12 +13,87 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 
 import { accentActiveStyle, alpha } from "../theme/colors";
 import { ChevronDownIcon } from "./icons";
+
+/** The visual tiers a labeled action button can have. One filled style per
+ *  intent — never hand-roll a new one:
+ *  - `primary` — THE filled call-to-action (accent fill + on-accent text).
+ *  - `danger`  — the filled destructive action (red + on-danger).
+ *  - `tinted`  — accent-tinted secondary emphasis (e.g. header Investigate).
+ *  - `outline` — the neutral chip (header/bar actions, dialog Cancel).
+ *  - `ghost`   — borderless de-emphasized action (Clear, Dismiss).
+ */
+export type ButtonVariant = "primary" | "danger" | "tinted" | "outline" | "ghost";
+
+export type ButtonSize = "sm" | "md" | "lg";
+
+/** One radius, one type scale — chips are `sm`, standalone actions `md`,
+ *  full-width panel CTAs `lg`. */
+const BUTTON_SIZE: Record<ButtonSize, string> = {
+  sm: "gap-1.5 rounded-md px-2.5 py-1 text-[11px]",
+  md: "gap-1.5 rounded-md px-3 py-1.5 text-[12px]",
+  lg: "gap-2 rounded-md px-3.5 py-2 text-[12.5px]",
+};
+
+/** Class + style per variant. Every variant carries a border (transparent when
+ *  invisible) so all variants of a size are the exact same height, and border
+ *  colors never rely on utility-order tiebreaks. */
+const BUTTON_VARIANT: Record<ButtonVariant, { cls: string; style?: CSSProperties }> = {
+  primary: {
+    cls: "border-transparent bg-accent-fill font-semibold hover:opacity-90",
+    style: { color: "var(--on-accent)" },
+  },
+  danger: {
+    cls: "border-transparent font-semibold hover:opacity-90",
+    style: { background: "var(--color-status-red)", color: "var(--on-danger)" },
+  },
+  tinted: {
+    cls: "font-medium",
+    style: { background: alpha(11), borderColor: alpha(30), color: "var(--accent-text)" },
+  },
+  outline: {
+    cls: "border-line-2 bg-input font-medium text-muted-2 hover:border-line-strong hover:text-fg-2",
+  },
+  ghost: {
+    cls: "border-transparent font-medium text-muted-2 hover:bg-hover hover:text-fg-2",
+  },
+};
+
+/**
+ * The app's ONE labeled action button. Anything a user clicks that reads as a
+ * button (CTAs, header chips, dialog actions) renders through this — list rows,
+ * cards, menu items, tabs, and icon-only ghosts are their own families.
+ * `className` appends layout (widths/margins); `style` merges last so callers
+ * can layer state styling (e.g. `accentActiveStyle()` on a toggled chip).
+ */
+export function Button({
+  variant = "outline",
+  size = "md",
+  className,
+  style,
+  type = "button",
+  ...rest
+}: {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+} & ComponentProps<"button">) {
+  const v = BUTTON_VARIANT[variant];
+  return (
+    <button
+      type={type}
+      className={`flex cursor-pointer items-center justify-center border transition-colors disabled:cursor-default disabled:opacity-50 ${BUTTON_SIZE[size]} ${v.cls} ${className ?? ""}`}
+      style={{ ...v.style, ...style }}
+      {...rest}
+    />
+  );
+}
 
 /**
  * A native `<select>` with the browser arrow removed and our own chevron
@@ -487,10 +562,15 @@ const MENU_ITEM_SELECTOR = '[role="menuitem"]:not([disabled]), button:not([disab
  * `children` renders the menu (handed a `close`). The single source for the menus
  * the bottom bar and the start-task button each hand-rolled.
  *
+ * The menu is rendered through a portal to `document.body` at a z-index above
+ * the terminal overlay (a `fixed` z-30 layer that forms its own stacking
+ * context). An in-flow `absolute` menu would paint *behind* that overlay
+ * whenever it opened over the terminal (bottom bar, tab bar); the portal
+ * escapes the local stacking context so the menu always sits on top.
+ *
  * Closes on outside click via a capture-phase `pointerdown` listener (not a
  * z-index backdrop) so it works even when the dropdown opens over the terminal
- * overlay — which shares the backdrop's stacking level and used to swallow the
- * close click. Escape closes it too.
+ * overlay — which used to swallow the close click. Escape closes it too.
  *
  * Menu-button semantics are wired centrally so callers don't each have to do it:
  * `trigger`'s returned element is cloned with `aria-haspopup`/`aria-expanded`
@@ -535,11 +615,48 @@ export function Dropdown({
   }, [onOpenChange]);
   const ref = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  // Fixed-position coordinates for the portaled menu, anchored to the trigger.
+  const [coords, setCoords] = useState<CSSProperties | null>(null);
+
+  // Measure the trigger and derive the menu's fixed position. Re-runs while open
+  // on scroll/resize so the menu tracks the trigger (it lives in document.body,
+  // not next to the trigger, so it can't rely on normal layout to follow it).
+  useLayoutEffect(() => {
+    if (!open) {
+      setCoords(null);
+      return;
+    }
+    const place = () => {
+      const el = ref.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const next: CSSProperties = {
+        position: "fixed",
+        ...(placement === "up"
+          ? { bottom: window.innerHeight - r.top + 4 }
+          : { top: r.bottom + 4 }),
+        ...(align === "right" ? { right: window.innerWidth - r.right } : { left: r.left }),
+      };
+      setCoords(next);
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, placement, align]);
 
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) close();
+      const target = e.target as Node;
+      // The menu is portaled out of `ref`, so check it separately — otherwise a
+      // click inside the menu reads as "outside" and closes it before the item
+      // handler runs.
+      if (ref.current?.contains(target) || menuRef.current?.contains(target)) return;
+      close();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
@@ -590,18 +707,20 @@ export function Dropdown({
   return (
     <div ref={ref} className="relative">
       {triggerNode}
-      {open && (
-        <div
-          ref={menuRef}
-          role="menu"
-          onKeyDown={onMenuKeyDown}
-          className={`absolute z-40 rounded-lg border border-line-3 bg-raised py-1 shadow-lg ${
-            placement === "up" ? "bottom-full mb-1" : "mt-1"
-          } ${align === "right" ? "right-0" : "left-0"} ${menuClassName}`}
-        >
-          {children(() => setOpen(false))}
-        </div>
-      )}
+      {open &&
+        coords &&
+        createPortal(
+          <div
+            ref={menuRef}
+            role="menu"
+            onKeyDown={onMenuKeyDown}
+            style={coords}
+            className={`z-[200] rounded-lg border border-line-3 bg-raised py-1 shadow-lg ${menuClassName}`}
+          >
+            {children(() => setOpen(false))}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -741,7 +860,6 @@ export function ConfirmDialog({
   }, [open]);
   if (!open) return null;
 
-  const accent = danger ? "var(--color-status-red)" : "var(--accent)";
   const onAccent = danger ? "var(--on-danger)" : "var(--on-accent)";
   const run = async () => {
     setBusy(true);
@@ -789,25 +907,18 @@ export function ConfirmDialog({
         )}
         {extra && <div className="mt-3">{extra}</div>}
         <div className="mt-4 flex justify-end gap-2">
-          <button
-            ref={cancelRef}
-            type="button"
-            onClick={onClose}
-            disabled={busy}
-            className="cursor-pointer rounded-md border border-line-2 bg-input px-3 py-1.5 text-[12px] text-muted-2 hover:text-fg-2 disabled:cursor-default disabled:opacity-50"
-          >
+          <Button ref={cancelRef} onClick={onClose} disabled={busy}>
             Cancel
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant={danger ? "danger" : "primary"}
             onClick={run}
             disabled={busy}
-            className="flex cursor-pointer items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium disabled:cursor-default"
-            style={{ color: onAccent, background: accent, opacity: busy ? 0.85 : 1 }}
+            style={{ opacity: busy ? 0.85 : 1 }}
           >
             {busy && <Spinner size={11} color={onAccent} />}
             {busy ? busyLabel : confirmLabel}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

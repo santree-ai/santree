@@ -1,0 +1,18 @@
+[package]
+name = "santree-hook"
+description = "Tiny CLI that Claude Code hooks invoke to record santree session-state events."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "santree-hook"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+# Same SQLite driver + version as the app so both processes link one
+# libsqlite3-sys (rusqlite would pull a second, and `links = "sqlite3"` allows
+# only one in the graph). A one-shot insert on a current-thread runtime.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1", features = ["rt", "macros"] }

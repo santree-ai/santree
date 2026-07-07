@@ -10,7 +10,7 @@ import {
 } from "react";
 
 import type { ClaudeCommand } from "../../bindings";
-import { ChevronSelect, Toggle } from "../../components/primitives";
+import { Button, ChevronSelect, Toggle } from "../../components/primitives";
 
 /** A section heading: a bold title over a muted one-line subtitle. */
 export function Heading({ title, subtitle }: { title: string; subtitle: string }) {
@@ -143,14 +143,9 @@ export function OverrideSelect({
         <option value="">{defaultLabel}</option>
         {children}
       </ChevronSelect>
-      <button
-        type="button"
-        onClick={() => onChange(null)}
-        disabled={!value}
-        className="cursor-pointer rounded-md border border-line-3 bg-input px-3 py-2 text-[11.5px] text-muted hover:border-line-strong hover:text-fg-2 disabled:cursor-default disabled:opacity-50"
-      >
+      <Button onClick={() => onChange(null)} disabled={!value}>
         Reset
-      </button>
+      </Button>
     </div>
   );
 }

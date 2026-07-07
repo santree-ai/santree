@@ -1,6 +1,6 @@
 /** The per-repo Linear section: which connected org supplies this repo's issues. */
 
-import { ChevronSelect } from "../../../components/primitives";
+import { Button, ChevronSelect } from "../../../components/primitives";
 import {
   useLinearConnect,
   useLinearOrgs,
@@ -33,15 +33,16 @@ export function RepoLinearSection({ repo }: { repo: string }) {
               Connect one to pull this repo's assigned issues.
             </div>
           </div>
-          <button
-            type="button"
+          {/* Brand-colored primary — the Linear purple with white text is the one
+              deliberate exception to the accent fill (a "connect to Linear" cue). */}
+          <Button
+            variant="primary"
             onClick={() => connect.mutate()}
             disabled={connect.isPending}
-            className="cursor-pointer rounded-md border-none px-3 py-1.5 text-[12px] font-medium text-white transition-[filter] hover:brightness-110 disabled:opacity-60"
-            style={{ background: LINEAR_BRAND }}
+            style={{ background: LINEAR_BRAND, color: "#ffffff" }}
           >
             {connect.isPending ? "Connecting…" : "Connect"}
-          </button>
+          </Button>
         </div>
       ) : (
         <div className="rounded-xl border border-line-2 bg-raised p-4">
@@ -63,13 +64,7 @@ export function RepoLinearSection({ repo }: { repo: string }) {
                 </option>
               ))}
             </ChevronSelect>
-            <button
-              type="button"
-              onClick={() => setOrg.mutate({ repo, slug: null })}
-              className="cursor-pointer rounded-md border border-line-3 bg-input px-3 py-2 text-[11.5px] text-muted hover:border-line-strong hover:text-fg-2"
-            >
-              Reset to default
-            </button>
+            <Button onClick={() => setOrg.mutate({ repo, slug: null })}>Reset to default</Button>
           </div>
         </div>
       )}

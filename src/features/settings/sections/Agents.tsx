@@ -15,13 +15,20 @@ import {
   RefreshIcon,
   WarningIcon,
 } from "../../../components/icons";
-import { Badge, Tabs } from "../../../components/primitives";
+import { Badge, Button, Tabs } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
-import { useAgentAuth, useAgents } from "../../../lib/queries";
+import {
+  CLAUDE_START_WITH_CHROME_KEY,
+  CLAUDE_STATUS_LINE_KEY,
+  useAgentAuth,
+  useAgents,
+  useBoolSetting,
+  useSetSetting,
+} from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
 import { alpha } from "../../../theme/colors";
 import { useEmbeddedTerminal } from "../../terminal/useEmbeddedTerminal";
-import { Block, Heading, KvRow } from "../widgets";
+import { Block, Heading, KvRow, ToggleRow } from "../widgets";
 
 export function AgentsSection() {
   const { data: agents = [] } = useAgents();
@@ -142,14 +149,10 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
               <KvRow label="Account" value={auth.account} />
             </div>
             {!loginOpen && (
-              <button
-                type="button"
-                onClick={() => setLoginOpen(true)}
-                className="mt-3 flex cursor-pointer items-center gap-2 rounded-md border border-line-3 bg-input px-3 py-1.5 text-[12px] font-medium text-fg-3 hover:border-line-strong"
-              >
+              <Button onClick={() => setLoginOpen(true)} className="mt-3">
                 <PlayIcon size={11} />
                 Run <span className="font-mono">{auth.loginCmd}</span>
-              </button>
+              </Button>
             )}
             {loginOpen && (
               <LoginTerminal
@@ -179,16 +182,15 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
             className="w-full flex-1 rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-[11.5px] text-fg-3 placeholder:text-muted-4"
           />
           {execValue.trim() && (
-            <button
-              type="button"
+            <Button
               onClick={() => {
                 setExecDraft(null);
                 setAgentExec(kind, "");
               }}
-              className="cursor-pointer whitespace-nowrap rounded-md border border-line-3 bg-input px-3 py-2 text-[11.5px] text-muted hover:border-line-strong hover:text-fg-2"
+              className="whitespace-nowrap"
             >
               Use detected
-            </button>
+            </Button>
           )}
         </div>
         {!execValue.trim() && !auth?.detectedExec && (
@@ -206,7 +208,55 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
           </div>
         </Block>
       )}
+
+      {kind === "Claude" && <ClaudeTerminalBlock />}
     </div>
+  );
+}
+
+/** Claude-only launch/terminal behavior toggles: launch with `--chrome` (browser
+ *  control), and show santree's inline context-usage bar. santree always injects
+ *  its own status line into the sessions it launches (leaving the user's own
+ *  `~/.claude/settings.json` untouched), so usage is always captured; the toggle
+ *  only gates the in-app bar. */
+function ClaudeTerminalBlock() {
+  const { value: startWithChrome } = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
+  const { value: santreeStatusLine } = useBoolSetting("app", CLAUDE_STATUS_LINE_KEY);
+  const { mutate: setSetting } = useSetSetting();
+  const set = (key: string, next: boolean) =>
+    setSetting({ scope: "app", key, value: next ? "true" : "false" });
+
+  return (
+    <Block title="Behavior">
+      <div className="rounded-xl border border-line-3 bg-surface px-3.5 py-0.5">
+        <ToggleRow
+          label="Start with Chrome"
+          hint={
+            <>
+              Launch Claude with the <span className="font-mono">--chrome</span> flag so it can
+              control your browser. Requires the{" "}
+              <a
+                href="https://code.claude.com/docs/en/chrome"
+                target="_blank"
+                rel="noreferrer"
+                className="underline decoration-line-strong underline-offset-2 hover:text-fg-2"
+              >
+                Claude Code Chrome extension
+              </a>
+              .
+            </>
+          }
+          on={startWithChrome}
+          onChange={(next) => set(CLAUDE_START_WITH_CHROME_KEY, next)}
+        />
+        <ToggleRow
+          label="Show inline context usage"
+          hint="Display each Claude session's live context-fill bar inside santree, in sync with the terminal's status line. Usage is always captured from santree's own status line; this only toggles the in-app bar, so it reflects instantly on sessions that are already running."
+          on={santreeStatusLine}
+          onChange={(next) => set(CLAUDE_STATUS_LINE_KEY, next)}
+        />
+      </div>
+    </Block>
   );
 }
 

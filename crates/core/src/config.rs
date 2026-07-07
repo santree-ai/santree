@@ -54,6 +54,60 @@ pub fn agents() -> Vec<AgentDef> {
     ]
 }
 
+/// Per-model token prices in **USD per million tokens**, used to derive the
+/// approximate cost shown alongside the exact token counts in the Usage panel.
+///
+/// A static snapshot of Anthropic's published API pricing — **update these when
+/// vendor pricing changes**; the token counts are exact regardless of this table.
+/// `cache_write_per_mtok` is the 5-minute-TTL cache-creation rate (1.25× input);
+/// 1-hour cache creation is billed at 2× input and computed at the call site (see
+/// `usage.rs`), not stored here.
+///
+/// Matched by the longest `key` that is a substring of the (lowercased) model id,
+/// so specific versions win over the family fallback — e.g. `claude-opus-4-8`
+/// matches `opus-4-8` ($5/$25), while `claude-opus-4-1` falls back to `opus`
+/// ($15/$75). Opus dropped to $5/$25 starting at 4.5; earlier Opus stays $15/$75.
+pub struct ModelPrice {
+    /// Substring matched against the transcript's (lowercased) model id; the
+    /// longest matching key wins.
+    pub key: &'static str,
+    pub input_per_mtok: f64,
+    pub output_per_mtok: f64,
+    pub cache_write_per_mtok: f64,
+    pub cache_read_per_mtok: f64,
+    /// The model's context-window limit in tokens — the real denominator for the
+    /// session "before compaction" meter (Sonnet 5 / Opus 4.5+ / Fable 5 = 1M,
+    /// Haiku 4.5 and earlier = 200K). Overridden at runtime by the fetched
+    /// LiteLLM `max_input_tokens` when available.
+    pub context_tokens: f64,
+}
+
+/// The price table. A model id matching no key contributes 0 cost (its tokens are
+/// still counted). Opus 4.5+ are listed explicitly because they cost a third of
+/// earlier Opus; everything else keys off the family fallback.
+pub fn model_pricing() -> &'static [ModelPrice] {
+    // Opus 4.5-4.8: $5/$25 (a third of earlier Opus).
+    const OPUS_45_PLUS: [&str; 4] = ["opus-4-5", "opus-4-6", "opus-4-7", "opus-4-8"];
+    const _: () = assert!(OPUS_45_PLUS.len() == 4); // keep the slice below in sync
+    &[
+        ModelPrice { key: "opus-4-5", input_per_mtok: 5.0, output_per_mtok: 25.0, cache_write_per_mtok: 6.25, cache_read_per_mtok: 0.50, context_tokens: 1_000_000.0 },
+        ModelPrice { key: "opus-4-6", input_per_mtok: 5.0, output_per_mtok: 25.0, cache_write_per_mtok: 6.25, cache_read_per_mtok: 0.50, context_tokens: 1_000_000.0 },
+        ModelPrice { key: "opus-4-7", input_per_mtok: 5.0, output_per_mtok: 25.0, cache_write_per_mtok: 6.25, cache_read_per_mtok: 0.50, context_tokens: 1_000_000.0 },
+        ModelPrice { key: "opus-4-8", input_per_mtok: 5.0, output_per_mtok: 25.0, cache_write_per_mtok: 6.25, cache_read_per_mtok: 0.50, context_tokens: 1_000_000.0 },
+        // Earlier Opus (4, 4.1, 3-opus): $15/$75, 200K context.
+        ModelPrice { key: "opus", input_per_mtok: 15.0, output_per_mtok: 75.0, cache_write_per_mtok: 18.75, cache_read_per_mtok: 1.50, context_tokens: 200_000.0 },
+        // Claude 5 family. Sonnet 5 ($2/$10) is cheaper than Sonnet 4.6, so it needs
+        // its own key to beat the "sonnet" fallback; Fable 5 ($10/$50) is premium.
+        ModelPrice { key: "sonnet-5", input_per_mtok: 2.0, output_per_mtok: 10.0, cache_write_per_mtok: 2.50, cache_read_per_mtok: 0.20, context_tokens: 1_000_000.0 },
+        ModelPrice { key: "fable", input_per_mtok: 10.0, output_per_mtok: 50.0, cache_write_per_mtok: 12.50, cache_read_per_mtok: 1.00, context_tokens: 1_000_000.0 },
+        // Sonnet (3.5 / 4 / 4.5 / 4.6) all share $3/$15. Current Sonnet runs 1M;
+        // (the old sonnet-4 >200k-context premium tier is omitted — a shrinking case).
+        ModelPrice { key: "sonnet", input_per_mtok: 3.0, output_per_mtok: 15.0, cache_write_per_mtok: 3.75, cache_read_per_mtok: 0.30, context_tokens: 1_000_000.0 },
+        // Haiku 4.5 ($1/$5), 200K context.
+        ModelPrice { key: "haiku", input_per_mtok: 1.0, output_per_mtok: 5.0, cache_write_per_mtok: 1.25, cache_read_per_mtok: 0.10, context_tokens: 200_000.0 },
+    ]
+}
+
 /// The seeded default settings for a fresh install (before the user edits any).
 pub fn default_settings() -> Settings {
     let agent = |key, exec: &str, model: &str| AgentSetting {

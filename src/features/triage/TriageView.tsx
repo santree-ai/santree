@@ -20,27 +20,36 @@ import type { AgentKind, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
-import { EmptyState } from "../../components/primitives";
+import { Button, EmptyState } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import {
   INVESTIGATE_AGENT_KEY,
   INVESTIGATE_COMMAND_KEY,
   INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
+  INVESTIGATE_REMOTE_CONTROL_KEY,
   usePrefetchOnHover,
   useRefreshTriage,
   useRepos,
   useResolvedSetting,
+  useStartedInvestigations,
   useTriageDetail,
   useTriageQueue,
   useTriageSchedule,
   useTriageSetState,
 } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
-import { alpha } from "../../theme/colors";
+import { accentActiveStyle, alpha } from "../../theme/colors";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { DetailTabs } from "./DetailTabs";
-import { useKeptPanes, useTabByTicket, useTriageKeyboard, useTriageSelection } from "./hooks";
+import {
+  useBatchInvestigate,
+  useInvestigateSelection,
+  useKeptPanes,
+  useTabByTicket,
+  useTriageKeyboard,
+  useTriageSelection,
+} from "./hooks";
 import { InvestigatePane } from "./InvestigatePane";
 import { IssueHeader } from "./IssueHeader";
 import { QueueRow } from "./QueueRow";
@@ -180,6 +189,54 @@ export function TriageView() {
   // drops the whole cache instead of carrying old-repo details along.
   const { keptPanes, detailFor } = useKeptPanes(detail, MAX_KEPT_PANES, activeRepo);
 
+  // Batch investigation: tickets are eligible while not snoozed and not already
+  // running one; the checkbox selection mirrors the Issues launch queue.
+  const liveInvestigations = useMemo(
+    () =>
+      new Set(
+        terminalTabs
+          .filter((t) => t.source === "triage" && t.refId !== undefined)
+          .map((t) => t.refId as string),
+      ),
+    [terminalTabs],
+  );
+  // Tickets with a stored session from a past investigation (persists across app
+  // restarts) — they get the tab + resume affordance even when not live.
+  const { data: startedIds = [] } = useStartedInvestigations(activeRepo);
+  const startedInvestigations = useMemo(() => new Set(startedIds), [startedIds]);
+  const canInvestigate = !!investigateCommand && !!repoPath;
+  const eligibleIds = useMemo(
+    () =>
+      ordered
+        .filter((t) => t.snoozedUntilMs == null && !liveInvestigations.has(t.id))
+        .map((t) => t.id),
+    [ordered, liveInvestigations],
+  );
+  const { selected, toggle, clear, selectAll } = useInvestigateSelection(eligibleIds);
+  const selectedIds = useMemo(
+    () => eligibleIds.filter((id) => selected[id]),
+    [eligibleIds, selected],
+  );
+  const allEligibleSelected = eligibleIds.length > 0 && eligibleIds.every((id) => selected[id]);
+  const { data: remoteControlSetting } = useResolvedSetting(
+    activeRepo,
+    INVESTIGATE_REMOTE_CONTROL_KEY,
+  );
+  const batchInvestigate = useBatchInvestigate({
+    repo: activeRepo,
+    cwd: repoPath,
+    command: investigateCommand ?? null,
+    agentExec,
+    model: investigateModel ?? null,
+    effort: investigateEffort ?? null,
+    remoteControl: remoteControlSetting !== "false",
+  });
+  const investigateSelected = () => {
+    const ids = selectedIds;
+    clear();
+    void batchInvestigate(ids);
+  };
+
   // Per-ticket detail-tab memory (Discussion vs Investigation), so an open
   // investigation survives navigating away and back.
   const { tabFor, setTab } = useTabByTicket();
@@ -187,7 +244,11 @@ export function TriageView() {
   const hasInvestigation =
     !!activeTicket &&
     terminalTabs.some((t) => t.source === "triage" && t.refId === activeTicket.id);
-  const showInvestigation = hasInvestigation || selectedTab === "investigate";
+  // The active ticket has a stored (resumable) session from a past investigation.
+  const activeHasStarted = !!activeTicket && startedInvestigations.has(activeTicket.id);
+  // Show the Investigation tab when it's live, has a resumable stored session, or
+  // the user is actively on it — so past investigations surface a tab + resume.
+  const showInvestigation = hasInvestigation || activeHasStarted || selectedTab === "investigate";
   const investigate = useCallback(() => setTab(activeId, "investigate"), [setTab, activeId]);
   // When the investigate terminal exits, fall back to this ticket's discussion.
   const backToDiscussion = useCallback(() => setTab(activeId, "discussion"), [setTab, activeId]);
@@ -205,7 +266,12 @@ export function TriageView() {
       key={t.id}
       ticket={t}
       active={t.id === activeId}
+      selectable={canInvestigate && eligibleIds.includes(t.id)}
+      selected={!!selected[t.id]}
+      investigating={liveInvestigations.has(t.id)}
+      started={startedInvestigations.has(t.id)}
       onSelect={select}
+      onToggleSelect={toggle}
       onHover={onHoverRow}
     />
   );
@@ -214,6 +280,32 @@ export function TriageView() {
     <ViewChrome
       sidebar={
         <>
+          {/* Header (count + Select all) only when there's a queue to act on — an
+              empty queue (e.g. good citizen off and nothing assigned) renders its
+              own empty state below, and a disabled Select all is just noise. */}
+          {ordered.length > 0 && (
+            <div className="flex h-10 flex-none items-center gap-2 border-b border-hairline pr-2.5 pl-[15px]">
+              <span className="text-[12px] font-semibold tracking-[.01em] text-fg-2">Triage</span>
+              <span className="font-mono text-[10.5px] text-muted-4">{ordered.length}</span>
+              <Button
+                size="sm"
+                onClick={selectAll}
+                disabled={!canInvestigate || eligibleIds.length === 0}
+                title={
+                  canInvestigate
+                    ? "Select every ticket for investigation"
+                    : "Configure the Investigation action in Settings first"
+                }
+                className="ml-auto"
+                style={allEligibleSelected ? accentActiveStyle() : undefined}
+              >
+                Select all
+                {eligibleIds.length > 0 && (
+                  <span className="font-mono text-[9.5px] opacity-70">{eligibleIds.length}</span>
+                )}
+              </Button>
+            </div>
+          )}
           <ScheduleSection schedules={schedules} />
           <div className="flex-1 overflow-y-auto p-2">
             {ordered.length === 0 ? (
@@ -232,6 +324,16 @@ export function TriageView() {
               ordered.map(renderRow)
             )}
           </div>
+          {selectedIds.length > 0 && (
+            <div className="flex flex-none items-center gap-1.5 border-t border-hairline p-2">
+              <Button variant="primary" onClick={investigateSelected} className="min-w-0 flex-1">
+                Investigate {selectedIds.length} {selectedIds.length === 1 ? "ticket" : "tickets"}
+              </Button>
+              <Button variant="ghost" onClick={clear} title="Clear selection" className="flex-none">
+                Clear
+              </Button>
+            </div>
+          )}
           <SidebarFooter />
         </>
       }
@@ -264,7 +366,7 @@ export function TriageView() {
               const shown = id === activeId && selectedTab === "discussion";
               return (
                 <div key={id} className={shown ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-                  <DiscussionPane detail={d} />
+                  <DiscussionPane detail={d} repo={activeRepo} />
                 </div>
               );
             })}
@@ -284,6 +386,7 @@ export function TriageView() {
                 agentExec={agentExec}
                 model={investigateModel ?? null}
                 effort={investigateEffort ?? null}
+                hasStartedSession={activeHasStarted}
                 onExited={backToDiscussion}
               />
             )}

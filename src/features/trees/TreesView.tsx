@@ -4,18 +4,23 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
-import type { Worktree } from "../../bindings";
+import type { Worktree, WorktreeTab } from "../../bindings";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
-import { CloseIcon, PlayIcon, PrIcon, TerminalIcon } from "../../components/icons";
-import { EmptyState, Spinner } from "../../components/primitives";
+import { CloseIcon, PrIcon } from "../../components/icons";
+import { Button, EmptyState, Spinner } from "../../components/primitives";
+import { SessionEndedPane } from "../../components/SessionEndedPane";
 import {
+  CLAUDE_START_WITH_CHROME_KEY,
+  CLAUDE_STATUS_LINE_KEY,
   useAgentSession,
+  useBoolSetting,
+  useClaudeHookSettings,
   useResolvedSetting,
-  useWorkPrompt,
   WORK_EFFORT_KEY,
   WORK_MODEL_KEY,
+  WORK_PERMISSION_MODE_KEY,
 } from "../../lib/queries";
-import { useApp } from "../../state/AppContext";
+import { useApp, useAppUi } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
@@ -25,8 +30,10 @@ import { CreatePrDialog } from "./CreatePrDialog";
 import { FilePickerPanel } from "./FilePickerPanel";
 import { FileViewer } from "./FileViewer";
 import { MainTabBar } from "./MainTabBar";
-import { BASE_ID, TreesProvider, termTab, useTrees } from "./model";
+import { BASE_ID, extraTab, TreesProvider, useTrees } from "./model";
+import { SessionStatusLine } from "./SessionStatusLine";
 import { SetupLogsView } from "./SetupLogsView";
+import { useWorktreeAgent } from "./useWorktreeAgent";
 import { WorktreeIssuePane } from "./WorktreeIssuePane";
 import { WorktreeSidebar } from "./WorktreeSidebar";
 import { WorktreeTerminal } from "./WorktreeTerminal";
@@ -87,35 +94,6 @@ function CreatingPane({ worktree }: { worktree: Worktree }) {
   );
 }
 
-/** Shown in the (non-closable) main Terminal tab once its agent session has
- *  exited: a clear "this session ended, resume when ready" state instead of a
- *  blank/dead terminal. Resume re-seeds the terminal, which the backend resolves
- *  to a `claude --resume <id>` against the on-disk transcript. */
-function ResumePane({ worktree, onResume }: { worktree: Worktree; onResume: () => void }) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-      <TerminalIcon size={20} className="text-muted-3" />
-      <div>
-        <div className="text-[13px] font-medium text-fg-2">Work session ended</div>
-        <div className="mx-auto mt-1 max-w-[360px] text-[11.5px] leading-[1.6] text-muted-3">
-          This is the main work terminal for{" "}
-          <span className="font-mono text-fg-3">{worktree.id}</span>. The agent exited — resume it
-          whenever you're ready.
-        </div>
-      </div>
-      <button
-        type="button"
-        onClick={onResume}
-        style={{ color: "var(--on-accent)" }}
-        className="mt-1 flex cursor-pointer items-center gap-1.5 rounded-md bg-accent px-3.5 py-1.5 text-[12px] font-semibold hover:opacity-90"
-      >
-        <PlayIcon size={11} />
-        Resume
-      </button>
-    </div>
-  );
-}
-
 /** The "create a PR?" suggestion strip, shown above the bottom bar after a
  *  commit+push when the branch has commits and no PR yet. A gentle nudge — Create
  *  PR opens the dialog, Dismiss hides it — instead of relying on the bottom-bar
@@ -136,31 +114,33 @@ function PrSuggestionBar({ worktree }: { worktree: Worktree }) {
       className="flex flex-none items-center gap-2 border-t border-line px-3 py-2 text-[11.5px]"
       style={{ background: alpha(10) }}
     >
-      <span className="text-accent">
+      <span className="flex-none text-accent">
         <PrIcon size={13} />
       </span>
-      <span className="text-fg-2">
+      {/* Take the row's free width but stay one line — a long branch name
+          truncates with an ellipsis instead of wrapping the strip taller. */}
+      <span className="min-w-0 flex-1 truncate text-fg-2">
         Pushed to origin — open a pull request for{" "}
         <span className="font-mono text-fg-3">{worktree.branch}</span>?
       </span>
-      <div className="flex-1" />
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="sm"
+        className="flex-none whitespace-nowrap"
         onClick={dismissPrSuggestion}
-        className="flex cursor-pointer items-center gap-1 rounded px-2 py-1 text-muted-2 hover:bg-hover hover:text-fg-2"
       >
         <CloseIcon size={10} />
         Dismiss
-      </button>
-      <button
-        type="button"
+      </Button>
+      <Button
+        variant="primary"
+        size="sm"
+        className="flex-none whitespace-nowrap"
         onClick={() => openPrDialog(worktree.id)}
-        style={{ color: "var(--on-accent)" }}
-        className="flex cursor-pointer items-center gap-1.5 rounded-md bg-accent px-2.5 py-1 font-semibold hover:opacity-90"
       >
         <PrIcon size={12} />
         Create PR
-      </button>
+      </Button>
     </div>
   );
 }
@@ -168,78 +148,37 @@ function PrSuggestionBar({ worktree }: { worktree: Worktree }) {
 function WorktreePane({ worktree }: { worktree: Worktree }) {
   const {
     repo,
-    launchAgents,
-    launchModels,
     clearAgentLaunch,
+    requestAgentLaunch,
     selectedFile,
-    setupFor,
-    setupThenLaunch,
     setupLines,
     activeTab,
-    extraTerminals,
+    extraTabs,
   } = useTrees();
-  const { settings } = useApp();
-  // The base-branch entry has no ticket — no Issue tab, no agent launch/setup.
-  const isBase = worktree.id === BASE_ID;
-
-  // Only freshly-started tasks launch the agent (see the launch-flag in the model).
-  const launching = launchAgents.has(worktree.id);
-  const settingUp = setupFor === worktree.id;
-  // Withhold the terminal ONLY during the very first setup (part of starting the
-  // task) — the PTY doesn't exist yet, so it must wait for the env. A manual
-  // "Re-run setup" later must NOT yank/restart the already-running terminal.
-  const initialSetup = settingUp && setupThenLaunch;
-
-  // The agent's opening prompt is rendered by the backend (`work` template). Fetch
-  // it only for a fresh launch (and past any initial setup); a resume/shell don't
-  // need it.
-  const workPrompt = useWorkPrompt(repo, worktree.id, launching && !initialSetup);
-  const promptReady = !launching || workPrompt.isFetched;
-
-  // Whether a live PTY already exists for this worktree. We only resolve a
-  // (re)launch when there's none to attach to — and we latch `liveSeen` so that
-  // quitting the agent (the session dies under us) doesn't immediately re-resume
-  // it into a restart loop. Instead the Terminal tab shows a "resume" placeholder
-  // (the main work tab can't be closed), and the explicit Resume button resets the
-  // latch to re-seed. A real reopen also remounts this pane (it's keyed by id).
-  const refId = `tree:${worktree.id}`;
+  // Display-only gate for the inline usage bar; usage is captured regardless, so
+  // this reflects instantly on already-running tabs (no relaunch needed).
+  const showUsageBar = useBoolSetting("app", CLAUDE_STATUS_LINE_KEY).value;
   const qc = useQueryClient();
-  const { tabs } = useTerminals();
-  const liveSession = tabs.some((t) => t.source === "issue" && t.refId === refId);
-  const [liveSeen, setLiveSeen] = useState(false);
-  useEffect(() => {
-    if (liveSession) setLiveSeen(true);
-  }, [liveSession]);
-  // The main work session ran and has since exited (vs. never launched yet) — show
-  // the resume placeholder instead of a blank/dead terminal. Never for the base
-  // entry (a plain shell, no agent session to resume).
-  const ended = !isBase && liveSeen && !liveSession;
 
-  // Resolve how to (re)launch the agent: resume a still-on-disk session, start
-  // fresh with a reserved id, or a plain shell. A passive reopen (not launching)
-  // only resumes; an explicit launch may mint a fresh session. Skip the base
-  // entry (no ticket/agent). The terminal waits on this so it never opens with no
-  // seed and loses a resumable session.
-  const needsSeed = !isBase && !initialSetup && promptReady && !liveSession && !liveSeen;
-  const session = useAgentSession(repo, refId, worktree.path, launching, needsSeed);
-  const exec = settings?.agents?.find((a) => a.key === worktree.agent)?.exec?.trim() || "claude";
-  // The Work action's configured model + effort (repo override → app default),
-  // applied to the launch. Claude-only flags — gate on the agent so a future
-  // Codex/Cursor launch isn't handed `--model`/`--effort`/`--remote-control`.
-  const isClaude = worktree.agent === "Claude";
-  const workEffort = useResolvedSetting(repo, WORK_EFFORT_KEY).data;
-  const settingsModel = useResolvedSetting(repo, WORK_MODEL_KEY).data;
-  // The per-launch tray choice wins over the configured default; either applies
-  // only on a fresh launch (a resume carries the session's own model).
-  const model = launchModels[worktree.id] || settingsModel;
-  const seed = agentSessionSeed(session.data, exec, {
-    prompt: workPrompt.data ?? `Work on ${worktree.id}: ${worktree.title}`,
-    remoteControl: isClaude ? worktree.id : undefined,
-    modelFlag: isClaude && model ? `--model ${shellQuote(model)}` : undefined,
-    effortFlag: isClaude && workEffort ? `--effort ${shellQuote(workEffort)}` : undefined,
-  });
-  // Hold the terminal until the seed decision is fresh (so the new PTY carries it).
-  const preparing = needsSeed && (session.isFetching || (launching && !workPrompt.isFetched));
+  // The whole main-session seed pipeline — resume/fresh/shell resolution, the
+  // one-shot seed, and the terminal-hold gates — lives in a shared hook so the
+  // off-screen background launcher (`BackgroundLaunch`) runs the exact same logic.
+  // `liveSeen` latches so quitting the agent (the session dies under us) doesn't
+  // immediately re-resume it into a restart loop: the Terminal tab shows a resume
+  // placeholder (the main work tab can't be closed) and the Resume button resets
+  // the latch. A real reopen also remounts this pane (it's keyed by id).
+  const {
+    isBase,
+    launching,
+    settingUp,
+    initialSetup,
+    refId,
+    setLiveSeen,
+    ended,
+    session,
+    seed,
+    preparing,
+  } = useWorktreeAgent(worktree);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -269,7 +208,28 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
                 subtitle="The terminal opens in a moment."
               />
             ) : ended ? (
-              <ResumePane worktree={worktree} onResume={() => setLiveSeen(false)} />
+              <SessionEndedPane
+                title="Work session ended"
+                subtitle={
+                  <>
+                    This is the main work terminal for{" "}
+                    <span className="font-mono text-fg-3">{worktree.id}</span>. The agent exited —
+                    resume it whenever you're ready.
+                  </>
+                }
+                onResume={() => {
+                  // Resuming is an explicit launch: drop the cached session
+                  // resolution (it may predate this exit — e.g. the process died
+                  // while the terminal host was unmounted and onExited never
+                  // fired) and set the launch flag so the resolve is allowed to
+                  // start fresh. Without the flag, a pruned/never-written
+                  // transcript resolves to a plain shell and Resume dead-ends in
+                  // a shell ↔ "session ended" loop with no way to get the agent.
+                  qc.removeQueries({ queryKey: ["agent-session", repo, refId] });
+                  requestAgentLaunch(worktree.id);
+                  setLiveSeen(false);
+                }}
+              />
             ) : (
               <WorktreeTerminal
                 id={worktree.id}
@@ -284,17 +244,22 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
                 onExited={() => qc.removeQueries({ queryKey: ["agent-session", repo, refId] })}
               />
             ))}
-          {/* Extra terminals (opened via the "+" tab): each its own PTY, mounted
-              only while showing — the session persists in the global TerminalLayer.
-              Plain login shells (no agent seed). */}
-          {extraTerminals.map((n) =>
-            activeTab === termTab(n) ? (
-              <WorktreeTerminal
-                key={n}
-                id={`${worktree.id}:t${n}`}
-                branch={worktree.branch}
-                cwd={worktree.path}
-              />
+          {/* Extra tabs (opened via the "+" tab): each its own PTY, mounted only
+              while showing — the session persists in the global TerminalLayer.
+              Terminal tabs are plain login shells; Claude tabs carry their own
+              resumable agent session. */}
+          {extraTabs.map((t) =>
+            activeTab === extraTab(t.id) ? (
+              t.kind === "claude" ? (
+                <ClaudeTabPane key={t.id} repo={repo} worktree={worktree} tab={t} />
+              ) : (
+                <WorktreeTerminal
+                  key={t.id}
+                  id={`${worktree.id}:tab:${t.id}`}
+                  branch={t.title}
+                  cwd={worktree.path}
+                />
+              )
             ) : null,
           )}
           {!isBase && (
@@ -313,11 +278,117 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
             </div>
           )}
         </div>
+        {/* santree-native statusline for this worktree's main session, from the
+            live usage the injected statusLine captures — the exact numbers the
+            in-terminal bar shows. Gated on the display setting only (capture is
+            always on), so toggling it updates running tabs instantly. */}
+        {!isBase && showUsageBar && (
+          <SessionStatusLine
+            sessionId={
+              session.data && session.data.type !== "shell" ? session.data.sessionId : null
+            }
+          />
+        )}
         <PrSuggestionBar worktree={worktree} />
         <BottomBar worktree={worktree} />
       </div>
       <FilePickerPanel />
     </div>
+  );
+}
+
+/** An extra Claude tab: a persisted agent session rooted in the worktree.
+ *
+ *  Its conversation is keyed by `tree:<worktree>:tab:<tab id>` in the session
+ *  registry, so opening the tab — first ever, after quitting claude, or after an
+ *  app restart — resolves to a fresh `--session-id` launch or a `--resume` of
+ *  the same conversation. Unlike the main work tab there's no opening prompt
+ *  (the user starts the conversation), and unlike extra terminal tabs, quitting
+ *  claude doesn't close the tab — it shows the resume state instead (`liveSeen`
+ *  latches so the dead session isn't instantly re-resumed into a restart loop). */
+function ClaudeTabPane({
+  repo,
+  worktree,
+  tab,
+}: {
+  repo: string;
+  worktree: Worktree;
+  tab: WorktreeTab;
+}) {
+  const { settings } = useApp();
+  const refId = `tree:${worktree.id}:tab:${tab.id}`;
+  const qc = useQueryClient();
+  const { tabs } = useTerminals();
+  const liveSession = tabs.some((t) => t.source === "issue" && t.refId === refId);
+  const [liveSeen, setLiveSeen] = useState(false);
+  useEffect(() => {
+    if (liveSession) setLiveSeen(true);
+  }, [liveSession]);
+  const ended = liveSeen && !liveSession;
+
+  // A Claude tab exists to run claude, so any (re)open is an explicit launch
+  // (`allowFresh`) — resolve only when there's no live PTY to attach to.
+  const needsSeed = !liveSession && !liveSeen;
+  const session = useAgentSession(repo, refId, worktree.path, true, needsSeed);
+  const exec = settings?.agents?.find((a) => a.key === "Claude")?.exec?.trim() || "claude";
+  // The configured Work model/effort apply to a fresh start only — a resume
+  // keeps the session's own model.
+  const model = useResolvedSetting(repo, WORK_MODEL_KEY).data;
+  const effort = useResolvedSetting(repo, WORK_EFFORT_KEY).data;
+  const hookSettings = useClaudeHookSettings().data;
+  const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
+  const permissionMode = useResolvedSetting(repo, WORK_PERMISSION_MODE_KEY).data;
+  const seed = agentSessionSeed(session.data, exec, {
+    modelFlag: model ? `--model ${shellQuote(model)}` : undefined,
+    effortFlag: effort ? `--effort ${shellQuote(effort)}` : undefined,
+    // This pane is Claude-only by construction (exec pinned to "Claude").
+    settingsFlag: hookSettings ? `--settings ${shellQuote(hookSettings)}` : undefined,
+    chrome: startWithChrome,
+    permissionMode: permissionMode ?? undefined,
+  });
+
+  if (ended) {
+    return (
+      <SessionEndedPane
+        title="Claude session ended"
+        subtitle={
+          <>
+            <span className="font-mono text-fg-3">{tab.title}</span> keeps its conversation — resume
+            it whenever you're ready, or close the tab to discard it.
+          </>
+        }
+        onResume={() => {
+          // Drop the cached resolution first — it may predate this exit (the
+          // process can die while this pane is unmounted, so onExited never
+          // fired) and would replay a stale `--session-id` for a session whose
+          // transcript now exists.
+          qc.removeQueries({ queryKey: ["agent-session", repo, refId] });
+          setLiveSeen(false);
+        }}
+      />
+    );
+  }
+  if (needsSeed && session.isFetching) {
+    return (
+      <EmptyState
+        className="h-full"
+        title="Starting Claude…"
+        subtitle="The terminal opens in a moment."
+      />
+    );
+  }
+  return (
+    <WorktreeTerminal
+      id={`${worktree.id}:tab:${tab.id}`}
+      branch={tab.title}
+      cwd={worktree.path}
+      seed={seed}
+      // Drop the cached session resolution so the next open re-asks the backend
+      // instead of replaying a stale "fresh" decision whose transcript now
+      // exists on disk (which `session::resolve` would correctly resolve to
+      // Resume).
+      onExited={() => qc.removeQueries({ queryKey: ["agent-session", repo, refId] })}
+    />
   );
 }
 
@@ -328,7 +399,67 @@ export function TreesView() {
         <TreesContent />
       </ViewChrome>
       <PrDialogHost />
+      <BackgroundLaunches />
     </TreesProvider>
+  );
+}
+
+/** Hosts the off-screen agent terminals for "Run in background" launches. Each
+ *  runs the same seed pipeline as the visible pane but is rendered off-screen (at
+ *  a real size — a display:none host gives xterm a 0-row grid) so its PTY spawns
+ *  and the agent seeds without stealing focus. The active worktree is excluded —
+ *  its own visible `WorktreePane` owns that session. Once an agent has launched it
+ *  drops out of `bgLaunches`, unmounting here; the live session persists in the
+ *  TerminalLayer and re-attaches when the worktree is next opened. */
+function BackgroundLaunches() {
+  const { bgLaunches } = useAppUi();
+  const { worktrees, activeId } = useTrees();
+  return (
+    <>
+      {bgLaunches
+        .filter((id) => id !== activeId)
+        .map((id) => {
+          const wt = worktrees.find((w) => w.id === id);
+          // Wait for the real worktree — a pending placeholder has no path/branch
+          // to root a terminal in yet.
+          return wt && !wt.pending ? <BackgroundLaunch key={id} worktree={wt} /> : null;
+        })}
+    </>
+  );
+}
+
+/** One off-screen agent terminal for a background launch (see {@link BackgroundLaunches}). */
+function BackgroundLaunch({ worktree }: { worktree: Worktree }) {
+  const { repo, clearAgentLaunch } = useTrees();
+  const { clearBackgroundLaunch } = useAppUi();
+  const qc = useQueryClient();
+  const { launching, initialSetup, preparing, seed, refId } = useWorktreeAgent(worktree);
+
+  // Same gate as the visible pane: don't spawn the PTY until we're actually
+  // launching and the seed inputs are fresh (past initial setup + prompt fetch) —
+  // mounting early would spawn a bare shell and silently drop the agent launch.
+  if (!launching || initialSetup || preparing) return null;
+
+  return (
+    <div
+      aria-hidden
+      className="pointer-events-none fixed top-0 left-0 -z-50 h-[600px] w-[900px] overflow-hidden opacity-0"
+      style={{ transform: "translateX(-100000px)" }}
+    >
+      <WorktreeTerminal
+        id={worktree.id}
+        branch={worktree.branch}
+        cwd={worktree.path}
+        seed={seed}
+        onLaunched={() => {
+          clearAgentLaunch(worktree.id);
+          // Agent seeded + running in the persistent TerminalLayer — stop hosting
+          // it off-screen; a later open re-attaches to the same session.
+          clearBackgroundLaunch(worktree.id);
+        }}
+        onExited={() => qc.removeQueries({ queryKey: ["agent-session", repo, refId] })}
+      />
+    </div>
   );
 }
 

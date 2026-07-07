@@ -2,6 +2,7 @@
 import { type CSSProperties, memo } from "react";
 
 import type { TriageTicket } from "../../bindings";
+import { ClaudeSparkIcon } from "../../components/icons";
 import { RelativeTime, SlaCountdown } from "../../components/RelativeTime";
 import { formatSnoozeLabel } from "../../lib/relativeTime";
 import { alpha } from "../../theme/colors";
@@ -9,18 +10,36 @@ import { PriorityPill } from "./PriorityPill";
 
 /**
  * Memoized so re-renders of the queue (selection change, background refetch)
- * only re-render the row whose `active` flips, not every row. `onHover` warms
- * the detail cache so the click feels instant.
+ * only re-render the row whose `active`/`selected`/`investigating` flips, not
+ * every row. `onHover` warms the detail cache so the click feels instant.
+ *
+ * Like IssueRow, the row is a container with two click targets: the checkbox
+ * queues the ticket for batch investigation, the card selects it. The checkbox
+ * column is always present so rows align; a row whose investigation is already
+ * live shows the Claude spark there instead, and a snoozed row a disabled box.
  */
 export const QueueRow = memo(function QueueRow({
   ticket,
   active,
+  selectable,
+  selected,
+  investigating,
+  started,
   onSelect,
+  onToggleSelect,
   onHover,
 }: {
   ticket: TriageTicket;
   active: boolean;
+  /** Whether the row can join the batch-investigate selection. */
+  selectable: boolean;
+  selected: boolean;
+  /** A live investigation session exists for this ticket. */
+  investigating: boolean;
+  /** A past investigation left a stored (resumable) session — not live now. */
+  started: boolean;
   onSelect: (id: string) => void;
+  onToggleSelect: (id: string) => void;
   onHover: (id: string) => void;
 }) {
   const snoozeLabel =
@@ -32,45 +51,93 @@ export const QueueRow = memo(function QueueRow({
         background: alpha(5),
       }
     : { border: "1px solid transparent", background: "transparent" };
+  const boxStyle: CSSProperties = selected
+    ? { background: "var(--accent-fill)", border: "1px solid var(--accent-fill)" }
+    : { border: "1px solid var(--color-line-strong)" };
 
   return (
-    <button
-      type="button"
+    // biome-ignore lint/a11y/noStaticElementInteractions: hover only warms a cache; both real actions are buttons inside.
+    <div
       data-ticket-id={ticket.id}
-      onClick={() => onSelect(ticket.id)}
       onMouseEnter={() => onHover(ticket.id)}
-      className="mb-[5px] w-full min-w-0 cursor-pointer overflow-hidden rounded-[9px] px-[11px] py-[11px] text-left transition-colors hover:bg-hover"
+      className="mb-[5px] flex w-full min-w-0 items-stretch overflow-hidden rounded-[9px] transition-colors hover:bg-hover"
       style={{ ...style, opacity: snoozed ? 0.55 : 1 }}
     >
-      <div className="mb-1.5 flex items-center gap-2">
-        <span className="flex-none font-mono text-[10.5px] text-muted-2">{ticket.id}</span>
-        <PriorityPill priority={ticket.priority} muted={snoozed} />
-        {snoozed ? (
-          <span className="ml-auto flex flex-none items-center gap-1 font-mono text-[10px] text-muted-4">
-            💤 {snoozeLabel}
-          </span>
-        ) : (
-          <RelativeTime
-            ms={ticket.createdAtMs}
-            className="ml-auto flex-none font-mono text-[10px] text-muted-4"
-          />
-        )}
-      </div>
-      <div
-        className="line-clamp-2 text-[12.5px] leading-[1.35] text-fg-3"
-        style={{ overflowWrap: "anywhere" }}
+      <button
+        type="button"
+        onClick={selectable ? () => onToggleSelect(ticket.id) : undefined}
+        disabled={!selectable}
+        aria-label={
+          investigating
+            ? "Investigation running"
+            : selected
+              ? "Remove from investigation selection"
+              : "Add to investigation selection"
+        }
+        aria-pressed={selectable ? selected : undefined}
+        className={`flex flex-none items-start rounded-l-[9px] py-[13px] pr-0.5 pl-2 ${
+          selectable ? "cursor-pointer" : "cursor-default"
+        }`}
       >
-        {ticket.title}
-      </div>
-      <div className="mt-1.5 flex items-center gap-2 text-[10.5px] text-muted-4">
-        <span className="min-w-0 truncate">{ticket.meta}</span>
-        {!snoozed && (
-          <SlaCountdown
-            breachMs={ticket.slaBreachMs}
-            className="ml-auto flex-none font-mono text-status-red/80"
-          />
+        {investigating ? (
+          <ClaudeSparkIcon size={12} />
+        ) : (
+          <span
+            className={`flex h-3.5 w-3.5 items-center justify-center rounded text-[9px] font-bold text-[color:var(--on-accent)] transition-colors ${
+              selectable ? "" : "opacity-45"
+            }`}
+            style={boxStyle}
+          >
+            {selected ? "✓" : ""}
+          </span>
         )}
-      </div>
-    </button>
+      </button>
+      <button
+        type="button"
+        onClick={() => onSelect(ticket.id)}
+        className="min-w-0 flex-1 cursor-pointer overflow-hidden rounded-r-[9px] py-[11px] pr-[11px] pl-1 text-left"
+      >
+        <div className="mb-1.5 flex items-center gap-2">
+          <span className="flex-none font-mono text-[10.5px] text-muted-2">{ticket.id}</span>
+          {/* A past (not-live) investigation is resumable — mark it with a faint
+              spark; the checkbox stays so it can still be batch-resumed. A live
+              one already shows the bright spark in the checkbox column. */}
+          {started && !investigating && (
+            <span
+              title="Investigation started — resumable"
+              className="flex flex-none items-center opacity-60"
+            >
+              <ClaudeSparkIcon size={11} />
+            </span>
+          )}
+          <PriorityPill priority={ticket.priority} muted={snoozed} />
+          {snoozed ? (
+            <span className="ml-auto flex flex-none items-center gap-1 font-mono text-[10px] text-muted-4">
+              💤 {snoozeLabel}
+            </span>
+          ) : (
+            <RelativeTime
+              ms={ticket.createdAtMs}
+              className="ml-auto flex-none font-mono text-[10px] text-muted-4"
+            />
+          )}
+        </div>
+        <div
+          className="line-clamp-2 text-[12.5px] leading-[1.35] text-fg-3"
+          style={{ overflowWrap: "anywhere" }}
+        >
+          {ticket.title}
+        </div>
+        <div className="mt-1.5 flex items-center gap-2 text-[10.5px] text-muted-4">
+          <span className="min-w-0 truncate">{ticket.meta}</span>
+          {!snoozed && (
+            <SlaCountdown
+              breachMs={ticket.slaBreachMs}
+              className="ml-auto flex-none font-mono text-status-red/80"
+            />
+          )}
+        </div>
+      </button>
+    </div>
   );
 });

@@ -13,6 +13,7 @@ import type {
   AgentKind,
   CheckRollup,
   CheckStatus,
+  MergeQueueState,
   Priority,
   PrState,
   ReviewDecision,
@@ -63,6 +64,7 @@ export const statusColor: Record<TaskStatus, string> = {
   InProgress: palette.amber,
   Todo: palette.blue,
   Backlog: palette.slate,
+  Blocked: palette.red,
   Done: palette.purple,
 };
 
@@ -73,6 +75,29 @@ export const statusColor: Record<TaskStatus, string> = {
  * Reserved for when CI/merge-queue status is wired: enqueued → attention yellow
  * (`#d29922`), CI failing → danger red (`#f85149`).
  */
+/** Family key + label + color for a raw Claude model id (`claude-opus-4-8` →
+ *  opus / "Opus" / purple), for the Usage panel's per-model bars and session
+ *  badges. `key` groups every version of a family together; matched by substring
+ *  so it survives version bumps. An unknown id shows verbatim in slate. */
+export function modelMeta(model: string): { key: string; label: string; color: string } {
+  const m = model.toLowerCase();
+  if (m.includes("opus")) return { key: "opus", label: "Opus", color: palette.purple };
+  if (m.includes("sonnet")) return { key: "sonnet", label: "Sonnet", color: palette.blue };
+  if (m.includes("haiku")) return { key: "haiku", label: "Haiku", color: palette.green };
+  if (m.includes("fable")) return { key: "fable", label: "Fable", color: palette.amber };
+  return { key: model, label: model, color: palette.slate };
+}
+
+/** A specific version label for a raw model id, for hover detail — `Opus 4.8`,
+ *  `Sonnet 4.6`, `Fable 5`, `Haiku 4.5`. Falls back to the family label (or the
+ *  raw id for an unknown family) when no version is encoded. */
+export function modelVersion(model: string): string {
+  const { key, label } = modelMeta(model);
+  if (key === model) return model; // unknown family → raw id
+  const m = model.toLowerCase().match(/(?:opus|sonnet|haiku|fable)-(\d+(?:-\d+)?)/);
+  return m ? `${label} ${m[1].replace("-", ".")}` : label;
+}
+
 export const prStateMeta: Record<PrState, { color: string; label: string }> = {
   Open: { color: "#848d97", label: "open" },
   Merged: { color: "#a371f7", label: "merged" },
@@ -96,6 +121,24 @@ export const checkRollupMeta: Record<CheckRollup, { color: string; glyph: string
     None: { color: palette.slate, glyph: "–", label: "no checks" },
   };
 
+/** Badge for a PR sitting in the repo's merge queue (GitHub's "Queued" state).
+ *  Attention-yellow, matching the reserved merge-queue color noted above. */
+export const mergeQueueMeta = {
+  color: palette.amber,
+  glyph: "⧗",
+  label: "queued to merge",
+} as const;
+
+/** Color + label for a merge-queue entry's state (Reviews merge-queue panel). */
+export const mergeQueueStateMeta: Record<MergeQueueState, { color: string; label: string }> = {
+  Queued: { color: palette.slate, label: "queued" },
+  AwaitingChecks: { color: palette.amber, label: "checks running" },
+  Mergeable: { color: palette.green, label: "ready to merge" },
+  Unmergeable: { color: palette.red, label: "cannot merge" },
+  Locked: { color: palette.blue, label: "locked" },
+  Unknown: { color: palette.slate, label: "" },
+};
+
 /** Color + glyph + label for a single CI check's status (Reviews Checks tab). */
 export const checkStatusMeta: Record<CheckStatus, { color: string; glyph: string; label: string }> =
   {
@@ -111,6 +154,7 @@ export const statusLabel: Record<TaskStatus, string> = {
   InProgress: "In Progress",
   Todo: "Todo",
   Backlog: "Backlog",
+  Blocked: "Blocked",
   Done: "Done",
 };
 
@@ -126,6 +170,32 @@ export const activityColor: Record<Activity, string> = {
   Running: "var(--accent)",
   Awaiting: palette.amber,
   Idle: "#6b6b73",
+};
+
+/** Color + label for a live Claude session state (from the session-signal hooks
+ *  the app injects into its `claude` launches). `waiting` = the agent needs your
+ *  input (red, glows for attention); `active` = a turn is running (green);
+ *  `idle` = the turn finished (amber). `exited` is intentionally absent — a
+ *  finished session shows no indicator. Keyed by the raw `state` string. */
+// `short` is the compact inline word (e.g. on a card); `label` is the fuller
+// tooltip text. `active` reads as "running" — a turn is in progress, i.e. the
+// agent is working (thinking / running tools), which "active" didn't convey.
+export const sessionStateMeta: Record<
+  string,
+  { color: string; short: string; label: string; glow?: boolean }
+> = {
+  active: { color: palette.green, short: "running", label: "Running", glow: true },
+  // The main loop has handed off and is blocked on a Task subagent — working, but
+  // not the agent itself, and NOT "needs you". Blue reads as busy/info, distinct
+  // from green (running) and amber (idle).
+  delegating: { color: palette.blue, short: "delegating", label: "Running a subagent" },
+  // A tool is blocked on your approval — the sharpest "act now". Same urgent red
+  // as `waiting`, distinguished by label (color = urgency, label = reason).
+  permission: { color: palette.red, short: "permission", label: "Needs permission", glow: true },
+  waiting: { color: palette.red, short: "waiting", label: "Waiting for input", glow: true },
+  idle: { color: palette.amber, short: "idle", label: "Idle" },
+  // The session ended (or isn't running). Muted, no glow — it recedes.
+  exited: { color: palette.muted, short: "exited", label: "Exited" },
 };
 
 /** Fallback color for a project box when the backend sends no `project_color`
@@ -154,6 +224,11 @@ export function agentSlug(kind: AgentKind): string {
  * instead of hardcoding the default accent hex so swatch changes flow through.
  */
 export const accentVar = "var(--accent)";
+
+/** The solid accent fill (`--accent-fill`) for primary buttons / launch
+ *  checkboxes: the accent itself on dark, darkened on light so the white
+ *  `--on-accent` content reads. Pair the two — never raw accent + on-accent. */
+export const accentFillVar = "var(--accent-fill)";
 
 /**
  * Mix any color with transparency via `color-mix`, e.g. for tinted backgrounds

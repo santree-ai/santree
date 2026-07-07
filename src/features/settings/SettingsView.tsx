@@ -7,28 +7,35 @@
 
 import { useCanGoBack, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import type { Repo } from "../../bindings";
 import { RepoAvatar } from "../../components/chrome/RepoAvatar";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import {
   AgentsIcon,
   BackArrowIcon,
+  BoltIcon,
+  ChevronDownIcon,
   ContrastIcon,
   GearIcon,
+  KeyIcon,
   LinearLogo,
   PlayIcon,
   PlugIcon,
   TelescopeIcon,
 } from "../../components/icons";
-import { Tabs } from "../../components/primitives";
+import { Dropdown, Tabs } from "../../components/primitives";
+import { useRepos } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
 import { TriageActionSection } from "./sections/Actions";
 import { AgentsSection } from "./sections/Agents";
 import { AppearanceSection } from "./sections/Appearance";
+import { EnvironmentSection } from "./sections/Environment";
 import { GeneralSection } from "./sections/General";
 import { IntegrationsSection } from "./sections/Integrations";
 import { RepoLinearSection } from "./sections/RepoLinear";
+import { UsageSection } from "./sections/Usage";
 import { WorkSection } from "./sections/Work";
 
 type Scope = "app" | "repo";
@@ -98,6 +105,18 @@ const APP_NAV: NavNode[] = [
     render: () => <AgentsSection />,
   },
   {
+    key: "environment",
+    label: "Environment",
+    icon: <KeyIcon size={ICON_SIZE} />,
+    render: () => <EnvironmentSection />,
+  },
+  {
+    key: "usage",
+    label: "Usage",
+    icon: <BoltIcon size={ICON_SIZE} />,
+    render: () => <UsageSection />,
+  },
+  {
     group: "Actions",
     sections: [triageEntry(false), workEntry(false)],
   },
@@ -109,6 +128,12 @@ const REPO_NAV: NavNode[] = [
     label: "Linear",
     icon: <LinearLogo size={ICON_SIZE} />,
     render: (repo) => <RepoLinearSection repo={repo} />,
+  },
+  {
+    key: "environment",
+    label: "Environment",
+    icon: <KeyIcon size={ICON_SIZE} />,
+    render: (repo) => <EnvironmentSection repo={repo} />,
   },
   { group: "Actions", sections: [triageEntry(true), workEntry(true)] },
 ];
@@ -127,6 +152,7 @@ function resolveSection(nodes: NavNode[], key: string | undefined): SectionDef {
 
 export function SettingsView() {
   const { activeRepo } = useApp();
+  const { data: repos = [] } = useRepos();
   const router = useRouter();
   const canGoBack = useCanGoBack();
   const navigate = useNavigate();
@@ -135,6 +161,15 @@ export function SettingsView() {
   const { section: initialSection } = useSearch({ strict: false }) as { section?: string };
   const [scope, setScope] = useState<Scope>("app");
   const [section, setSection] = useState<string>(() => resolveSection(APP_NAV, initialSection).key);
+
+  // Which repo we're *editing* under the Repo scope — independent of the app's
+  // active repo, so you can tweak another project's settings from here without
+  // switching what the rest of the app is pointed at. Defaults to (and falls
+  // back to) the active repo whenever the current pick isn't a known repo.
+  const [settingsRepo, setSettingsRepo] = useState(activeRepo);
+  useEffect(() => {
+    if (!settingsRepo || !repos.some((r) => r.name === settingsRepo)) setSettingsRepo(activeRepo);
+  }, [activeRepo, repos, settingsRepo]);
 
   const goBack = () => (canGoBack ? router.history.back() : navigate({ to: "/" }));
   const switchScope = (next: Scope) => {
@@ -159,21 +194,24 @@ export function SettingsView() {
   );
 
   const scopeTabs = (
-    <Tabs<Scope>
-      variant="inset"
-      className="h-full gap-0.5"
-      tabClassName="h-full"
-      tabs={[
-        { value: "app", label: "App defaults" },
-        {
-          value: "repo",
-          label: activeRepo,
-          icon: <RepoAvatar repo={activeRepo} size={15} />,
-        },
-      ]}
-      value={scope}
-      onChange={switchScope}
-    />
+    <div className="flex h-full items-center gap-2.5">
+      <Tabs<Scope>
+        variant="inset"
+        className="h-full gap-0.5"
+        tabClassName="h-full"
+        tabs={[
+          { value: "app", label: "User" },
+          { value: "repo", label: "Repo" },
+        ]}
+        value={scope}
+        onChange={switchScope}
+      />
+      {/* Under the Repo scope, pick *which* repo's settings to edit — separate
+          from the app's active repo (changing it here doesn't re-point the app). */}
+      {scope === "repo" && (
+        <RepoScopePicker repos={repos} value={settingsRepo} onChange={setSettingsRepo} />
+      )}
+    </div>
   );
 
   const navButton = (s: SectionDef) => {
@@ -222,8 +260,79 @@ export function SettingsView() {
       }
     >
       <div className="flex-1 overflow-y-auto bg-app">
-        <div className="max-w-[660px] px-[30px] pt-[26px] pb-11">{active.render(activeRepo)}</div>
+        <div className="mx-auto max-w-[660px] px-[30px] pt-[26px] pb-11">
+          {active.render(settingsRepo)}
+        </div>
       </div>
     </ViewChrome>
+  );
+}
+
+/** The repo picker in the Repo-scope header — selects which repo's settings are
+ *  being edited, without touching the app-wide active repo. */
+function RepoScopePicker({
+  repos,
+  value,
+  onChange,
+}: {
+  repos: Repo[];
+  value: string;
+  onChange: (repo: string) => void;
+}) {
+  const { accent } = useApp();
+  const [open, setOpen] = useState(false);
+  return (
+    <Dropdown
+      open={open}
+      onOpenChange={setOpen}
+      menuClassName="w-[260px] overflow-hidden p-1.5"
+      trigger={(toggle) => (
+        <button
+          type="button"
+          onClick={toggle}
+          className="flex h-full min-w-[180px] cursor-pointer items-center gap-[7px] rounded-md border bg-input-alt px-[9px] transition-colors hover:border-line-strong"
+          style={{ borderColor: open ? accent : "var(--color-line-3)" }}
+        >
+          <RepoAvatar repo={value} size={16} />
+          <span className="min-w-0 flex-1 truncate text-left font-mono text-[12px] font-medium text-fg">
+            {value}
+          </span>
+          <ChevronDownIcon size={12} className="flex-none text-muted-3" />
+        </button>
+      )}
+    >
+      {(close) => (
+        <>
+          <div className="px-[9px] pt-1.5 pb-[5px] font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">
+            Repositories
+          </div>
+          {repos.map((r) => {
+            const isActive = r.name === value;
+            return (
+              <button
+                type="button"
+                key={r.name}
+                onClick={() => {
+                  onChange(r.name);
+                  close();
+                }}
+                className="flex w-full cursor-pointer items-center gap-[9px] rounded-md px-[9px] py-2 text-left hover:bg-hover-2"
+                style={isActive ? { background: alpha(12, accent) } : undefined}
+              >
+                <RepoAvatar repo={r.name} size={18} />
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg">
+                  {r.name}
+                </span>
+                {isActive && (
+                  <span className="flex-none text-[12px]" style={{ color: accent }}>
+                    ✓
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </>
+      )}
+    </Dropdown>
   );
 }

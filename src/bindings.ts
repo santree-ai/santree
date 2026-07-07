@@ -14,6 +14,14 @@ export const commands = {
 	/**  Available coding agents and their models. */
 	listAgents: () => __TAURI_INVOKE<AgentDef[]>("list_agents"),
 	/**
+	 *  Aggregated Claude Code token usage across all local session transcripts
+	 *  (`~/.claude/projects/**\/*.jsonl`) — period/model/session totals + context fill.
+	 *  Empty when there are no transcripts. Resolves the price table first (a daily
+	 *  background refresh from LiteLLM, cached in SQLite, over the static fallback),
+	 *  then runs the cold parse on the blocking pool (cached per-file afterwards).
+	 */
+	claudeUsage: () => typedError<UsageReport, CmdError>(__TAURI_INVOKE("claude_usage")),
+	/**
 	 *  An agent harness's authentication / subscription status. Live for Claude
 	 *  (read from `~/.claude.json`), placeholders for the work-in-progress harnesses.
 	 */
@@ -51,6 +59,19 @@ export const commands = {
 	 *  upload); 0 when the remote is up to date.
 	 */
 	unpushed: number,
+	/**
+	 *  Commits on this branch's remote tracking ref not yet local (what `git pull`
+	 *  would download — PR-UI suggestions, "Update branch", a teammate's push);
+	 *  0 when local is up to date or the branch has no remote.
+	 */
+	remoteBehind: number,
+	/**
+	 *  When `remote_behind > 0`, whether pulling origin/<branch> would conflict
+	 *  with local commits (from a virtual merge). Disables the Pull button — a
+	 *  conflicting pull can't be applied automatically and must be resolved in the
+	 *  worktree. Always false when nothing is pending (`remote_behind == 0`).
+	 */
+	pullConflict: boolean,
 	agent: AgentKind,
 	activity: Activity,
 	/**  Git branch checked out in the worktree (e.g. "feature/ak-165-…"). */
@@ -78,7 +99,10 @@ export const commands = {
 	 *  see `run_worktree_setup_streamed` — so it isn't gated on this call.
 	 */
 	createWorktree: (repo: string, issueId: string, title: string, project: string | null, base: string | null, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree", { repo, issueId, title, project, base, agent })),
-	/**  Remove a worktree (and its branch) and drop the issue link. */
+	/**
+	 *  Remove a worktree (and its branch), drop the issue link, and delete its
+	 *  on-disk work prompt.
+	 */
 	removeWorktree: (repo: string, issueId: string) => typedError<null, CmdError>(__TAURI_INVOKE("remove_worktree", { repo, issueId })),
 	/**
 	 *  Run a worktree's setup script, streaming each output line over `on_event` for
@@ -95,6 +119,13 @@ export const commands = {
 	 *  auto-push). Network op — may fail (no auth, rejected non-fast-forward, …).
 	 */
 	pushWorktree: (repo: string, issueId: string) => typedError<null, CmdError>(__TAURI_INVOKE("push_worktree", { repo, issueId })),
+	/**
+	 *  Integrate origin/<branch> into the worktree's own branch — the Trees "Pull"
+	 *  button, for commits added to the branch remotely (PR-UI suggestions, "Update
+	 *  branch", a teammate's push). Fast-forwards when possible, else merges; refuses
+	 *  up front (nothing touched) when the merge would conflict.
+	 */
+	pullRemoteWorktree: (repo: string, issueId: string) => typedError<null, CmdError>(__TAURI_INVOKE("pull_remote_worktree", { repo, issueId })),
 	/**
 	 *  Fast-forward the repo's local base branch (main/master) to origin — the
 	 *  "update master" action. Returns the base branch that was updated.
@@ -142,8 +173,13 @@ export const commands = {
 	 */
 	setWorktreeTitle: (repo: string, issueId: string, title: string) => typedError<null, CmdError>(__TAURI_INVOKE("set_worktree_title", { repo, issueId, title })),
 	/**
-	 *  The agent's opening prompt for a freshly-started worktree (the `work`
-	 *  template). The terminal seeds `exec <agent> '<prompt>'` with this.
+	 *  Render the agent's opening prompt for a freshly-started worktree (the `work`
+	 *  template, from live ticket data), write it to a stable on-disk file, and
+	 *  return that file's **path** — not the text. The terminal seeds
+	 *  `exec <agent> 'Read <path> and follow the instructions inside.'`, so a long
+	 *  prompt can't overflow the interactive-shell line or be mangled by the PTY line
+	 *  editor. Regenerated on every launch (re-fetches the live ticket), so it always
+	 *  reflects the latest Linear state; deleted with the worktree.
 	 */
 	workPrompt: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("work_prompt", { repo, issueId })),
 	/**
@@ -154,6 +190,26 @@ export const commands = {
 	 *  (set on an explicit launch; false on a passive reopen).
 	 */
 	agentSession: (repo: string, termKey: string, cwd: string, allowFresh: boolean) => typedError<AgentSession, CmdError>(__TAURI_INVOKE("agent_session", { repo, termKey, cwd, allowFresh })),
+	/**
+	 *  Ticket ids of triage investigations that have a stored (resumable) session —
+	 *  i.e. an investigation was started for them at some point. Drives the Triage
+	 *  view's tab + resume affordance for past investigations (across app restarts).
+	 */
+	startedInvestigations: (repo: string) => typedError<string[], CmdError>(__TAURI_INVOKE("started_investigations", { repo })),
+	/**
+	 *  All persisted extra tabs (Claude / terminal) for the repo's worktrees, in
+	 *  open order — loaded on Trees mount so tabs survive app restarts.
+	 */
+	listWorktreeTabs: (repo: string) => typedError<WorktreeTab[], CmdError>(__TAURI_INVOKE("list_worktree_tabs", { repo })),
+	/**
+	 *  Persist a new extra tab. The frontend mints `id` (a UUID) so it can patch
+	 *  its cache and focus the tab without waiting on the round-trip.
+	 */
+	addWorktreeTab: (repo: string, worktreeId: string, id: string, kind: TabKind, title: string) => typedError<null, CmdError>(__TAURI_INVOKE("add_worktree_tab", { repo, worktreeId, id, kind, title })),
+	/**  Rename an extra tab (blank titles are rejected). */
+	renameWorktreeTab: (repo: string, id: string, title: string) => typedError<null, CmdError>(__TAURI_INVOKE("rename_worktree_tab", { repo, id, title })),
+	/**  Remove an extra tab; a Claude tab's stored session is forgotten with it. */
+	removeWorktreeTab: (repo: string, id: string) => typedError<null, CmdError>(__TAURI_INVOKE("remove_worktree_tab", { repo, id })),
 	/**
 	 *  Draft a PR title + body for the create-PR dialog. With `fill`, the body is
 	 *  AI-generated from the repo's PR template + the branch diff; otherwise it's the
@@ -182,6 +238,18 @@ export const commands = {
 	 *  per team that has open requests. Empty when `gh` isn't authenticated.
 	 */
 	reviews: (repo: string) => typedError<ReviewInbox, CmdError>(__TAURI_INVOKE("reviews", { repo })),
+	/**
+	 *  The merge queue for the active `repo`'s default branch — the ordered list of
+	 *  PRs waiting to merge, so the user can see where their own PRs sit. `None` when
+	 *  `gh` isn't authenticated or the repo has no merge queue enabled.
+	 */
+	mergeQueue: (repo: string) => typedError<{
+	/**  "owner/name" of the repo whose queue this is. */
+	repo: string,
+	/**  The branch the queue merges into (its default branch). */
+	branch: string,
+	entries: MergeQueueEntry[],
+} | null, CmdError>(__TAURI_INVOKE("merge_queue", { repo })),
 	/**
 	 *  Full detail for one PR — body, conversation (comments + reviews + inline
 	 *  threads), and changed files with diffs. Empty when `gh` isn't authenticated.
@@ -214,6 +282,33 @@ export const commands = {
 	 *  write-scoped Linear org; errors when no org is connected.
 	 */
 	triageSetState: (repo: string, ticketId: string, stateId: string) => typedError<null, CmdError>(__TAURI_INVOKE("triage_set_state", { repo, ticketId, stateId })),
+	/**
+	 *  Post a comment on an issue — a top-level comment, or a reply when `parent_id`
+	 *  is the id of the comment being replied to. `ticket_id`/`parent_id` are used
+	 *  only as GraphQL variables (never as a path or git arg). Requires a
+	 *  write-scoped Linear org.
+	 */
+	triageAddComment: (repo: string, ticketId: string, parentId: string | null, body: string) => typedError<null, CmdError>(__TAURI_INVOKE("triage_add_comment", { repo, ticketId, parentId, body })),
+	/**
+	 *  Path to the settings file santree passes as `claude --settings <path>`,
+	 *  carrying the session-state hooks and santree's own `statusLine` (which prints
+	 *  the context-fill bar and captures live usage into the db). Both are always
+	 *  present — capture is unconditional; whether the app *displays* the inline
+	 *  usage bar is a runtime frontend decision. `None` when the hook binary/db can't
+	 *  be resolved — the frontend then launches without the flag. The content is
+	 *  setting-independent, so the frontend caches the path forever.
+	 */
+	claudeHookSettings: () => __TAURI_INVOKE<string | null>("claude_hook_settings"),
+	/**
+	 *  The current state of every Claude session santree has launched, as recorded
+	 *  live by the injected hooks. Most-recently-updated first.
+	 */
+	sessionStates: () => typedError<SessionState[], CmdError>(__TAURI_INVOKE("session_states")),
+	/**
+	 *  Every santree-launched session's live token/context usage, captured from the
+	 *  status-line stdin. Newest first.
+	 */
+	sessionUsageLive: () => typedError<SessionUsageLive[], CmdError>(__TAURI_INVOKE("session_usage_live")),
 	/**
 	 *  The team triage rotations (who is on-call now), from Linear's responsibility
 	 *  schedules — one per team the viewer is on. Empty when none are configured.
@@ -250,12 +345,27 @@ export const commands = {
 	 *  own `.claude/commands` (so the repo scope can list both).
 	 */
 	listClaudeCommands: (repo: string | null) => typedError<ClaudeCommands, CmdError>(__TAURI_INVOKE("list_claude_commands", { repo })),
+	/**
+	 *  The current Claude models to suggest in the model pickers — derived live from
+	 *  the fetched LiteLLM catalog (cached in SQLite, daily refresh, static fallback),
+	 *  so it tracks Anthropic's releases instead of a hardcoded/stale list and includes
+	 *  the latest of each family (Opus/Sonnet/Haiku/Fable). See
+	 *  [`pricing::claude_models`].
+	 */
+	claudeModels: () => typedError<string[], CmdError>(__TAURI_INVOKE("claude_models")),
 	/**  Read a setting for an exact scope (`"app"` or `"repo:<name>"`). */
 	getSetting: (scope: string, key: string) => typedError<string | null, CmdError>(__TAURI_INVOKE("get_setting", { scope, key })),
 	/**  Write (or clear, when `value` is null) a setting for a scope. */
 	setSetting: (scope: string, key: string, value: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_setting", { scope, key, value })),
 	/**  Resolve a repo-scoped setting: the repo's override, else the app value. */
 	resolveSetting: (repo: string, key: string) => typedError<string | null, CmdError>(__TAURI_INVOKE("resolve_setting", { repo, key })),
+	/**
+	 *  The variable names a user-referenced `.env` file defines, for the Environment
+	 *  settings' "N variables loaded" readout. Reads exactly the absolute path the
+	 *  user picked (a native file dialog) — no id is joined onto a base dir, so
+	 *  there's no traversal surface — and returns an empty list if it's unreadable.
+	 */
+	envFileVars: (path: string) => __TAURI_INVOKE<string[]>("env_file_vars", { path }),
 	/**  Connection status for a repo: whether any org is connected, and which one it uses. */
 	linearAuthStatus: (repo: string) => typedError<LinearStatus, CmdError>(__TAURI_INVOKE("linear_auth_status", { repo })),
 	/**  Every connected Linear organization. */
@@ -287,6 +397,10 @@ export const commands = {
 
 /** Events */
 export const events = {
+	sessionStateChanged: makeEvent<SessionStateChanged>("session-state-changed"),
+	sessionUsageChanged: makeEvent<SessionUsageChanged>("session-usage-changed"),
+	usageChanged: makeEvent<UsageChanged>("usage-changed"),
+	usageProgress: makeEvent<UsageProgress>("usage-progress"),
 	worktreeChanged: makeEvent<WorktreeChanged>("worktree-changed"),
 };
 
@@ -491,6 +605,66 @@ export type LinearStatus = {
 	org: string | null,
 };
 
+/**
+ *  The merge queue for a repo's target branch — the ordered list of PRs waiting
+ *  to merge, for the Reviews tab's merge-queue panel.
+ */
+export type MergeQueue = {
+	/**  "owner/name" of the repo whose queue this is. */
+	repo: string,
+	/**  The branch the queue merges into (its default branch). */
+	branch: string,
+	entries: MergeQueueEntry[],
+};
+
+/**  One pull request sitting in a repo's merge queue, in queue order. */
+export type MergeQueueEntry = {
+	/**
+	 *  1-indexed rank in the queue (front of the line = 1), derived from queue
+	 *  order rather than GitHub's raw `position` so it's display-ready.
+	 */
+	position: number,
+	state: MergeQueueState,
+	prNumber: number,
+	prTitle: string,
+	prUrl: string,
+	author: string,
+	authorAvatarUrl: string,
+	/**
+	 *  True when the viewer authored this PR — highlighted in the panel so they
+	 *  can spot their own place in line.
+	 */
+	isMine: boolean,
+};
+
+/**
+ *  A merge-queue entry's state (GitHub's `MergeQueueEntryState`). Drives the
+ *  per-row status dot in the merge-queue panel.
+ */
+export type MergeQueueState = 
+/**  Waiting its turn (or for the entries ahead to merge). */
+"Queued" | 
+/**  Required checks are still running against the merge-queue branch. */
+"AwaitingChecks" | 
+/**  Checks passed; ready to merge when it reaches the front. */
+"Mergeable" | 
+/**  Cannot merge (failing checks / conflicts) — will be dropped from the queue. */
+"Unmergeable" | 
+/**  Locked by the queue (a solo/jump entry is being processed). */
+"Locked" | 
+/**  Any state GitHub adds later that we don't map yet. */
+"Unknown";
+
+/**  Token usage attributed to one model, summed across every session. */
+export type ModelUsage = {
+	/**
+	 *  Raw model id from the transcript, e.g. `claude-opus-4-8` — the frontend
+	 *  maps it to a family label + color.
+	 */
+	model: string,
+	totals: UsageTotals,
+};
+
 /**  The result of creating a PR: its number and web URL (to open in the browser). */
 export type NewPr = {
 	number: number,
@@ -621,6 +795,12 @@ export type ReviewPr = {
 	isDraft: boolean,
 	reviewDecision: ReviewDecision,
 	checks: CheckRollup,
+	/**
+	 *  True when the PR is sitting in the repo's merge queue (GitHub's "Queued"
+	 *  badge). The exact queue position isn't carried — it's shown in the
+	 *  merge-queue bot comment rendered in the PR conversation.
+	 */
+	isInMergeQueue: boolean,
 	additions: number,
 	deletions: number,
 	commentCount: number,
@@ -652,6 +832,113 @@ export type ScriptInfo = {
 };
 
 /**
+ *  The current state of one Claude session, captured live via the hooks santree
+ *  injects into its `claude` launches. One per session id (a current-state row,
+ *  not an event log). The frontend correlates a session back to a worktree later
+ *  via `cwd` / the `terminal_sessions` mapping.
+ *  Only `PartialEq` (not `Eq`) because of the `f64` timestamp below.
+ */
+export type SessionState = {
+	/**  Claude session id (the one santree minted via `--session-id`). */
+	sessionId: string,
+	/**  Derived agent state: "active" | "waiting" | "idle" | "exited". */
+	state: string,
+	/**  Raw Claude hook event that last set `state` (e.g. "Stop"). */
+	event: string,
+	/**  Working directory the session ran in (the worktree path). */
+	cwd: string,
+	/**  Notification message, when the last event carried one. */
+	message: string | null,
+	/**  Transcript path on disk, when the payload carried one. */
+	transcriptPath: string | null,
+	/**  Epoch ms the state was last updated — raw, formatted live by the frontend. */
+	updatedAtMs: number | null,
+};
+
+/**
+ *  "A session's state changed" — the frontend invalidates its session-states
+ *  query and refetches. Empty payload: the table is tiny, so a bare signal is
+ *  enough (mirrors how `WorktreeChanged` drives a targeted invalidation).
+ */
+export type SessionStateChanged = Record<string, never>;
+
+/**
+ *  Token usage for one Claude session (one main transcript), plus its current
+ *  context-window fill — the "how much before compaction" signal.
+ */
+export type SessionUsage = {
+	/**  The session id (the transcript file's stem, a UUID). */
+	sessionId: string,
+	/**
+	 *  The owning repository (folder) the session ran in — the grouping key in the
+	 *  Usage panel. Resolved from the transcript's `cwd` against santree's
+	 *  registered repos, falling back to the path.
+	 */
+	repo: string,
+	/**
+	 *  The worktree label (the issue id under `.santree/worktrees/`) when the
+	 *  session ran in a santree worktree; `None` for the repo's main checkout.
+	 */
+	worktree: string | null,
+	/**  The session's primary (most-used by tokens) model id — the badge model. */
+	model: string,
+	/**
+	 *  Every model used in the session with its own token split, most-used first.
+	 *  Surfaces mid-session model switches (a session isn't tied to one model).
+	 */
+	models: ModelUsage[],
+	totals: UsageTotals,
+	/**
+	 *  Tokens in the last turn's context (input + cache read + cache write) ≈ the
+	 *  current context size — what "fills up" before Claude compacts.
+	 */
+	contextTokens: number | null,
+	/**
+	 *  The model's context-window limit the fill is measured against (200k, or 1M
+	 *  when the observed context already exceeds 200k).
+	 */
+	contextLimit: number | null,
+	/**  Epoch ms of the session's most recent activity — formatted live by the frontend. */
+	lastActivityMs: number | null,
+};
+
+/**
+ *  "A session's live token/context usage changed" — the frontend invalidates its
+ *  session-usage-live query. Fired far more often than [`SessionStateChanged`]
+ *  (once per status-line render), so it's a *separate* event to avoid refetching
+ *  the state table on every status-line tick. The hook tags its socket byte to
+ *  pick which one this is.
+ */
+export type SessionUsageChanged = Record<string, never>;
+
+/**
+ *  Live token/context usage for one Claude session, captured from Claude's own
+ *  status-line stdin (see crates/hook's `statusline` mode). This is Claude's
+ *  authoritative `used_percentage` + token counts — the faithful source for the
+ *  inline session status line, unlike the transcript-derived reconstruction in
+ *  `usage.rs`. One current-value row per session id.
+ */
+export type SessionUsageLive = {
+	/**  Claude session id (matches [`SessionState::session_id`]). */
+	sessionId: string,
+	/**
+	 *  Claude's pre-calculated context-window fill, 0..100 (raw — the 1.2x
+	 *  display nudge is applied at render time, matching the terminal bar).
+	 */
+	usedPct: number | null,
+	/**  Tokens currently in the context window (input + cache reads + writes). */
+	inputTokens: number | null,
+	/**  The model's context window size in tokens (200k, or 1M for extended). */
+	contextSize: number | null,
+	/**  Model id, e.g. `claude-opus-4-8` — mapped to a family label by the frontend. */
+	model: string,
+	/**  Session cost so far in USD (Claude's own `cost.total_cost_usd`). */
+	costUsd: number | null,
+	/**  Epoch ms this row was last written — raw, formatted live by the frontend. */
+	updatedAtMs: number | null,
+};
+
+/**
  *  User settings, persisted as a JSON blob in the `settings` table. Seeded from
  *  defaults on first run; edits are written back through `set_settings`.
  * 
@@ -679,6 +966,12 @@ export type Settings = {
  *  instead of a frozen log. A final `Done` closes the tab.
  */
 export type SetupEvent = { type: "line"; text: string } | { type: "progress"; text: string } | { type: "done"; ok: boolean };
+
+/**
+ *  What an extra Trees main-area tab hosts: a Claude agent session (resumable
+ *  across app restarts via its stored session id) or a plain login shell.
+ */
+export type TabKind = "claude" | "terminal";
 
 /**  A ticket in the dependency graph. `x`/`y` are its canvas position. */
 export type Task = {
@@ -719,6 +1012,13 @@ export type Task = {
 /**  Lifecycle status of a ticket / worktree. */
 export type TaskStatus = "InReview" | "InProgress" | "Todo" | "Backlog" | 
 /**
+ *  A custom "Blocked" workflow state (Linear has no native `blocked` type, so
+ *  teams model it as an `unstarted`/`started` state named "Blocked"). Never
+ *  startable — being in this state is itself a not-actionable signal,
+ *  independent of any ticket-to-ticket blocker relations.
+ */
+"Blocked" | 
+/**
  *  Completed or canceled. Only appears on non-actionable blocker context
  *  nodes — the viewer's own assigned issues never include done work.
  */
@@ -745,6 +1045,8 @@ export type TerminalOpenOpts = {
 
 /**  A comment on a triage issue (markdown body), with threaded replies. */
 export type TriageComment = {
+	/**  Linear comment id — used as the `parentId` when posting a reply. */
+	id: string,
 	author: string,
 	/**  Public avatar URL of the author, when they have one. */
 	avatarUrl: string | null,
@@ -856,6 +1158,51 @@ export type TriageTicket = {
 };
 
 /**
+ *  Debounced "a Claude transcript changed on disk" signal. The frontend reacts by
+ *  invalidating the usage query so the panel refetches without polling.
+ */
+export type UsageChanged = Record<string, never>;
+
+/**
+ *  Progress of the (cold) transcript parse in file counts, so the panel can show a
+ *  determinate progress bar on the first load. Only fires while the per-file cache
+ *  is cold — a warm reload returns instantly and emits nothing meaningful.
+ */
+export type UsageProgress = {
+	done: number,
+	total: number,
+};
+
+/**
+ *  The full Claude usage report: grand + period totals, the per-model split, and
+ *  the most recent sessions (newest first).
+ */
+export type UsageReport = {
+	total: UsageTotals,
+	today: UsageTotals,
+	week: UsageTotals,
+	month: UsageTotals,
+	byModel: ModelUsage[],
+	sessions: SessionUsage[],
+};
+
+/**
+ *  Aggregated Claude token counts for a bucket (a period, a model, or a session).
+ *  Every count is a raw number the frontend formats; the four token classes are
+ *  kept apart because they're priced differently. `cost_usd` is *derived* from a
+ *  static price table and is approximate — the token counts themselves are exact.
+ *  Counts are `f64` (not `u64`) to match the domain's "numbers cross the bridge as
+ *  JS numbers" convention; token totals stay well within f64's exact-integer range.
+ */
+export type UsageTotals = {
+	inputTokens: number | null,
+	outputTokens: number | null,
+	cacheReadTokens: number | null,
+	cacheWriteTokens: number | null,
+	costUsd: number | null,
+};
+
+/**
  *  A workflow state an issue can move to (one of its team's states). Moving an
  *  issue out of the `triage` state — e.g. into `backlog`/`unstarted` — is how the
  *  UI "promotes" a triage item.
@@ -890,6 +1237,19 @@ export type Worktree = {
 	 *  upload); 0 when the remote is up to date.
 	 */
 	unpushed: number,
+	/**
+	 *  Commits on this branch's remote tracking ref not yet local (what `git pull`
+	 *  would download — PR-UI suggestions, "Update branch", a teammate's push);
+	 *  0 when local is up to date or the branch has no remote.
+	 */
+	remoteBehind: number,
+	/**
+	 *  When `remote_behind > 0`, whether pulling origin/<branch> would conflict
+	 *  with local commits (from a virtual merge). Disables the Pull button — a
+	 *  conflicting pull can't be applied automatically and must be resolved in the
+	 *  worktree. Always false when nothing is pending (`remote_behind == 0`).
+	 */
+	pullConflict: boolean,
 	agent: AgentKind,
 	activity: Activity,
 	/**  Git branch checked out in the worktree (e.g. "feature/ak-165-…"). */
@@ -931,6 +1291,19 @@ export type WorktreePr = {
 	number: number,
 	url: string,
 	state: PrState,
+};
+
+/**
+ *  An extra main-area tab in Trees (opened via the "+" menu), persisted so it
+ *  survives an app restart. Claude tabs re-resolve their stored session on open
+ *  (`terminal_sessions`, term_key `tree:<worktree_id>:tab:<id>`); terminal tabs
+ *  just reopen a fresh shell.
+ */
+export type WorktreeTab = {
+	id: string,
+	worktreeId: string,
+	kind: TabKind,
+	title: string,
 };
 
 /* Tauri Specta runtime */

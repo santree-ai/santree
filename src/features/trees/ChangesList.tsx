@@ -18,6 +18,7 @@ import { accentActiveStyle, alpha } from "../../theme/colors";
 import { CommitBox } from "./CommitBox";
 import { buildChangeTree, type ChangeTreeNode, STATUS_META } from "./changeTree";
 import { fileIconUrl, folderIconUrl } from "./fileIcons";
+import { IndentGuides } from "./IndentGuides";
 import { useTrees } from "./model";
 
 export function ChangesList({ files }: { files: ChangedFile[] }) {
@@ -238,15 +239,22 @@ const ChangeFolderRow = memo(function ChangeFolderRow({
     <button
       type="button"
       onClick={() => onToggle(path)}
-      className="flex w-full cursor-pointer items-center gap-1.5 py-[3px] pr-2.5 text-left hover:bg-hover"
-      style={{ paddingLeft: 10 + depth * 13 }}
+      className="flex w-full cursor-pointer items-center py-[3px] pr-2.5 pl-1.5 text-left hover:bg-hover"
     >
-      <span className="flex-none text-[8px] text-muted-4" style={{ width: 7 }}>
+      <IndentGuides depth={depth} />
+      <span
+        className="flex flex-none items-center justify-center text-[11px] text-muted-2"
+        style={{ width: 14 }}
+      >
         {open ? "▾" : "▸"}
       </span>
-      {icon ? <img src={icon} alt="" className="h-4 w-4 flex-none" draggable={false} /> : null}
-      <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-2">{name}</span>
-      <span className="flex-none font-mono text-[9.5px] text-muted-4">{count}</span>
+      {icon ? (
+        <img src={icon} alt="" className="ml-0.5 h-4 w-4 flex-none" draggable={false} />
+      ) : null}
+      <span className="ml-1.5 min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-2">
+        {name}
+      </span>
+      <span className="ml-1.5 flex-none font-mono text-[9.5px] text-muted-4">{count}</span>
     </button>
   );
 });
@@ -279,9 +287,10 @@ const ChangeRow = memo(function ChangeRow({
   const icon = fileIconUrl(name);
   return (
     <div
-      className="group flex items-center gap-2 py-[3px] pr-2.5 hover:bg-hover"
-      style={{ paddingLeft: 10 + depth * 13, background: selected ? alpha(8) : undefined }}
+      className="group flex items-center gap-2 py-[3px] pr-2.5 pl-1.5 hover:bg-hover"
+      style={{ background: selected ? alpha(8) : undefined }}
     >
+      <IndentGuides depth={depth} />
       <input
         type="checkbox"
         checked={f.staged}

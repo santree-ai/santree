@@ -24,6 +24,7 @@ import {
 import type { AgentKind, Task, Worktree, WorktreePr } from "../../bindings";
 import {
   useAgents,
+  useBoolSetting,
   useCreateWorktree,
   useResolvedSetting,
   useTasks,
@@ -31,6 +32,7 @@ import {
   useWorktrees,
   WORK_AGENT_KEY,
   WORK_MODEL_KEY,
+  WORK_QUEUE_KEY,
 } from "../../lib/queries";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
@@ -138,6 +140,13 @@ interface IssuesModel {
   setLaunchModel: (model: string) => void;
   toggleProjectFocus: (project: string) => void;
   launch: () => void;
+  /** Whether the multi-select launch queue is enabled (Settings → Actions → Work).
+   *  Off (default) → the panel offers "Run" instead of "Add to queue". */
+  queueEnabled: boolean;
+  /** Run the focused ticket now: create its worktree and open it on Trees. */
+  run: (id: string) => void;
+  /** Run the focused ticket in the background — no view switch (⌘-click "Run"). */
+  runBackground: (id: string) => void;
   /** Open the focused ticket's existing worktree on the Trees tab. */
   goToWorktree: (id: string) => void;
 }
@@ -173,14 +182,23 @@ const IssueNodeDataContext = createContext<IssueNodeContextValue | null>(null);
 
 export function IssuesProvider({ children }: { children: ReactNode }) {
   const { settings, activeRepo } = useApp();
-  const { requestTreeLaunch, requestTreeFocus, addPendingLaunches, removePendingLaunch } =
-    useAppUi();
+  const {
+    requestTreeLaunch,
+    requestTreeFocus,
+    requestBackgroundLaunch,
+    clearBackgroundLaunch,
+    addPendingLaunches,
+    removePendingLaunch,
+  } = useAppUi();
   const navigate = useNavigate();
   const { data: tasks = [] } = useTasks(activeRepo);
   const { data: worktrees = [] } = useWorktrees(activeRepo);
   const { data: worktreePrs = [] } = useWorktreePrs(activeRepo);
   const { data: agents = [] } = useAgents();
   const { mutateAsync: createWorktree } = useCreateWorktree(activeRepo);
+  // When off (default), the launch queue is bypassed: the panel shows a "Run"
+  // button that starts the single focused ticket immediately (⌘-click → background).
+  const queueEnabled = useBoolSetting("app", WORK_QUEUE_KEY).value;
 
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   // No hardcoded default — the first task becomes the focus once tasks load (see
@@ -396,6 +414,76 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     navigate,
   ]);
 
+  // The single-ticket create-worktree core shared by `run` and `runBackground`:
+  // register the placeholder + kick off the git create, dropping both on failure.
+  // `onCreated` wires up how the launch is consumed on the Trees side (focus +
+  // navigate, or background) before the async create resolves.
+  const startOne = useCallback(
+    (id: string, onCreated: (task: Task) => void, quiet: boolean) => {
+      const task = byId.get(id);
+      if (!task || !isEligible(task)) return;
+      const project = task.project === NO_PROJECT ? null : task.project;
+      addPendingLaunches([
+        { id: task.id, title: task.title, project, agent: launchAgent, model: launchModel },
+      ]);
+      onCreated(task);
+      void createWorktree({
+        issueId: task.id,
+        title: task.title,
+        project,
+        base: null,
+        agent: launchAgent,
+        quiet,
+      }).catch(() => {
+        removePendingLaunch(task.id);
+        clearBackgroundLaunch(task.id);
+      });
+    },
+    [
+      byId,
+      isEligible,
+      launchAgent,
+      launchModel,
+      addPendingLaunches,
+      removePendingLaunch,
+      clearBackgroundLaunch,
+      createWorktree,
+    ],
+  );
+
+  // Run a single ticket now: create its worktree and jump to Trees, starting the
+  // agent there — the queue-off equivalent of selecting one ticket and launching.
+  const run = useCallback(
+    (id: string) => {
+      startOne(
+        id,
+        (task) => {
+          requestTreeLaunch(task.id);
+          navigate({ to: "/trees" });
+        },
+        false,
+      );
+    },
+    [startOne, requestTreeLaunch, navigate],
+  );
+
+  // Run a single ticket in the background: create its worktree and start the agent
+  // without leaving the current view or switching the active worktree (Trees mounts
+  // it off-screen — see BackgroundLaunch). The ⌘-click path of the "Run" button.
+  const runBackground = useCallback(
+    (id: string) => {
+      startOne(
+        id,
+        (task) => {
+          requestBackgroundLaunch(task.id);
+          toast.success(`Running ${task.id} in the background…`);
+        },
+        true,
+      );
+    },
+    [startOne, requestBackgroundLaunch],
+  );
+
   // Trivial setter handlers — stable across renders so the context value below
   // doesn't churn (kept symmetric with the useCallback'd handlers above).
   const toggleActionableOnly = useCallback(() => setActionableOnly((v) => !v), []);
@@ -462,6 +550,9 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       setLaunchModel,
       toggleProjectFocus,
       launch,
+      queueEnabled,
+      run,
+      runBackground,
     }),
     [
       tasks,
@@ -497,6 +588,9 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       setLaunchModel,
       toggleProjectFocus,
       launch,
+      queueEnabled,
+      run,
+      runBackground,
     ],
   );
 

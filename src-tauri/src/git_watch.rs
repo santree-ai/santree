@@ -110,7 +110,8 @@ impl WorktreeWatcher {
         // canonical form, or a repo opened via a symlinked path silently never
         // matches (falls back to the lexical path if it doesn't exist yet;
         // mirrors `git.rs`'s `worktree_branch`).
-        let repo_root = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+        let repo_root =
+            std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
         let worktrees_root = repo_root.join(".santree").join("worktrees");
 
         let already_active = self
@@ -172,8 +173,8 @@ impl WorktreeWatcher {
                                     for path in &ev.paths {
                                         if let Some(id) = issue_id_for(&watch_root, path) {
                                             if fired.insert(id.clone()) {
-                                                let _ = WorktreeChanged { issue_id: id }
-                                                    .emit(&app_wt);
+                                                let _ =
+                                                    WorktreeChanged { issue_id: id }.emit(&app_wt);
                                             }
                                         }
                                     }
@@ -289,8 +290,10 @@ mod tests {
     /// `git.rs`'s test harness (this workspace doesn't depend on the
     /// `tempfile` crate).
     fn scratch_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("santree-git-watch-test-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "santree-git-watch-test-{}-{name}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

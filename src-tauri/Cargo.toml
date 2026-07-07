@@ -49,6 +49,10 @@ tokio = { version = "1", features = ["rt", "macros", "sync"] }
 
 anyhow = "1"
 
+# Parse user-configured `.env` files into KEY=VALUE pairs (without mutating our
+# own process env) for the Environment settings — see `env.rs`.
+dotenvy = "0.15"
+
 # Stable session UUIDs for resumable agent terminals (Claude `--session-id`).
 uuid = { version = "1", features = ["v4"] }
 
@@ -56,7 +60,10 @@ uuid = { version = "1", features = ["v4"] }
 futures = "0.3"
 
 # Parsing Linear's RFC3339 timestamps (SLA / snooze / created / on-call shifts).
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+# `clock` adds the local-timezone offset, needed to bucket usage by the user's
+# own "today"/this-week rather than UTC (see usage.rs). Small feature flag on an
+# already-present dep — not a new dependency.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 # Logging via the `log` facade, persisted to a file (+ stdout) by tauri-plugin-log
 # so Rust and JS-console logs land in one attachable file. See `lib.rs`.

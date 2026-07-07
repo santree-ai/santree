@@ -7,12 +7,18 @@ use crate::domain::{Priority, TaskStatus};
 ///
 /// Linear state *types* are `triage | backlog | unstarted | started |
 /// completed | canceled | duplicate`. We also honour a state *named* "…review…"
-/// as In Review, since many workspaces model review as a custom started state.
+/// as In Review, and one named "…block…" as Blocked, since Linear has no native
+/// type for either — workspaces model them as custom `unstarted`/`started` states.
 pub fn map_status(state_name: &str, state_type: &str) -> TaskStatus {
+    let name = state_name.to_lowercase();
     match state_type {
+        // A custom "Blocked" state can be typed `unstarted` or `started`; either
+        // way it's not actionable, so name takes precedence over type here. Guard
+        // on the open types so a terminal state can never be mis-read as Blocked.
+        "unstarted" | "started" if name.contains("block") => TaskStatus::Blocked,
         // Only a *started* state named "…review…" is In Review; a completed
         // state like "Reviewed" stays Done, driven by its type.
-        "started" if state_name.to_lowercase().contains("review") => TaskStatus::InReview,
+        "started" if name.contains("review") => TaskStatus::InReview,
         "started" => TaskStatus::InProgress,
         "unstarted" => TaskStatus::Todo,
         "backlog" | "triage" => TaskStatus::Backlog,
@@ -61,6 +67,11 @@ mod tests {
         // Linear's `duplicate` type is terminal — Done, never an actionable Todo.
         assert_eq!(map_status("Duplicate", "duplicate"), TaskStatus::Done);
         assert_eq!(map_status("Canceled", "canceled"), TaskStatus::Done);
+        // A custom "Blocked" state is not actionable, whether Linear types it
+        // `unstarted` or `started` — it must not collapse into Todo/In Progress.
+        assert_eq!(map_status("Blocked", "unstarted"), TaskStatus::Blocked);
+        assert_eq!(map_status("Blocked", "started"), TaskStatus::Blocked);
+        assert!(!map_status("Blocked", "unstarted").is_startable());
     }
 
     #[test]

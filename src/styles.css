@@ -84,6 +84,9 @@
 
   /* Accent — overridden at runtime via --accent on :root */
   --color-accent: var(--accent, #2dd4a7);
+  /* The solid accent fill (primary buttons, launch checkboxes) — see
+     --accent-fill below. Aliased here so the `bg-accent-fill` utility exists. */
+  --color-accent-fill: var(--accent-fill, var(--accent, #2dd4a7));
 
   --animate-spin: spin 0.7s linear infinite;
 }
@@ -94,10 +97,15 @@
      ones (teal on white is otherwise too low-contrast to read). Tracks any
      runtime --accent override via color-mix. */
   --accent-text: var(--accent);
-  /* Dark, high-contrast text/icon color for content sitting ON the solid accent
-     fill (filled buttons, the launch checkbox). Distinct from --accent-text,
-     which is the accent used AS text on tinted surfaces. Shared across themes
-     since the accent itself is. */
+  /* The SOLID accent fill (primary buttons, launch checkboxes). Equal to the
+     accent on dark; darkened on light — a bright mint slab with dark text looks
+     harsh on white, so light mode inverts the pair (deep accent fill + white
+     --on-accent). Tracks any runtime --accent override via color-mix. */
+  --accent-fill: var(--accent);
+  /* Text/icon color for content sitting ON --accent-fill. Near-black on the
+     dark theme's bright fill; flipped to white on the light theme's deep fill.
+     Distinct from --accent-text, which is the accent used AS text on tinted
+     surfaces. */
   --on-accent: #06231a;
   /* Text/icon color for content sitting ON the solid danger (red) fill — white
      in both themes since the danger red is shared. The dark --on-accent only
@@ -107,6 +115,9 @@
      `LINEAR_BRAND` token in theme/colors and the `text-[color:var(--linear-brand)]`
      icon tints. */
   --linear-brand: #5e6ad2;
+  /* Claude's brand terracotta — the `ClaudeSparkIcon` logomark tint on tabs
+     that host a Claude session. Reads on both themes. */
+  --claude-brand: #d97757;
   /* Live sidebar width. Updated directly during a resize drag (no React
      re-render) and committed to state on pointer-up — see ViewChrome. */
   --sidebar-width: 264px;
@@ -129,7 +140,12 @@
  * the accent are intentionally shared across both themes.
  * ------------------------------------------------------------------ */
 :root[data-theme="light"] {
-  --accent-text: color-mix(in srgb, var(--accent) 64%, #000);
+  --accent-text: color-mix(in srgb, var(--accent) 60%, #000);
+  /* Deep accent fill + white text (see :root) — 60% mix keeps white ≥ 4.5:1
+     (WCAG AA) for the default accent, and matches --accent-text so filled and
+     text accents read as one color. */
+  --accent-fill: color-mix(in srgb, var(--accent) 60%, #000);
+  --on-accent: #ffffff;
 
   /* Surfaces */
   --color-app: #f5f6f8;

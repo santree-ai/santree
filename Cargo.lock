@@ -3991,6 +3991,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "dotenvy",
  "form_urlencoded",
  "futures",
  "log",
@@ -4026,6 +4027,15 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "specta",
+]
+
+[[package]]
+name = "santree-hook"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]

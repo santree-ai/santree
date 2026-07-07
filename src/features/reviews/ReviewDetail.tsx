@@ -25,17 +25,19 @@ import {
   LinearLogo,
 } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
-import { Dot, EmptyState, Pill, Skeleton, Tabs } from "../../components/primitives";
+import { Button, Dot, EmptyState, Pill, Skeleton, Tabs } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
 import { usePrDetail, useTriageDetail } from "../../lib/queries";
 import { toast } from "../../state/toast";
 import {
   checkRollupMeta,
   checkStatusMeta,
+  mergeQueueMeta,
   priorityColor,
   reviewDecisionMeta,
 } from "../../theme/colors";
 import { DiffViewer } from "../trees/DiffViewer";
+import { MergeQueuePane } from "./MergeQueuePane";
 import { useReviewsModel } from "./model";
 
 type DetailTab = "pr" | "checks" | "issue";
@@ -62,7 +64,9 @@ export function ticketIdFor(pr: { title: string; headRef: string }): string | nu
 }
 
 export function ReviewDetail() {
-  const { active } = useReviewsModel();
+  const { active, showMergeQueue } = useReviewsModel();
+
+  if (showMergeQueue) return <MergeQueuePane />;
 
   if (!active) {
     return (
@@ -109,15 +113,15 @@ function PrPane({ pr }: { pr: ReviewPr }) {
               <span className="truncate">{pr.headRef}</span>
               <CopyIcon size={11} className="flex-none text-muted-3 group-hover:text-fg-2" />
             </button>
-            <button
-              type="button"
+            <Button
+              size="sm"
               onClick={() => openUrl(pr.url)}
               title="Open on GitHub"
-              className="flex flex-none cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 py-1 text-[10.5px] text-muted-2 hover:text-fg-2"
+              className="flex-none"
             >
               <GitHubLogo size={11} />
               Open
-            </button>
+            </Button>
           </div>
         </div>
         <h1 className="mb-2 text-[16px] leading-[1.3] font-semibold text-fg-bright">{pr.title}</h1>
@@ -129,6 +133,11 @@ function PrPane({ pr }: { pr: ReviewPr }) {
           <Pill color={decision.color} className="px-1.5 py-px text-[10px] font-medium">
             {decision.label}
           </Pill>
+          {pr.isInMergeQueue && (
+            <Pill color={mergeQueueMeta.color} className="px-1.5 py-px text-[10px] font-medium">
+              {mergeQueueMeta.glyph} {mergeQueueMeta.label}
+            </Pill>
+          )}
           <span className="flex items-center gap-1 font-mono" style={{ color: checks.color }}>
             {checks.glyph} {checks.label}
           </span>
@@ -397,15 +406,15 @@ function ReviewIssuePane({ repo, ticketId }: { repo: string; ticketId: string | 
             </span>
           )}
           {ready && (
-            <button
-              type="button"
+            <Button
+              size="sm"
               onClick={() => openUrl(ready.url)}
               title="Open in Linear"
-              className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 py-1 text-[10.5px] text-muted-2 hover:text-fg-2"
+              className="ml-auto"
             >
               <LinearLogo size={11} className="text-[color:var(--linear-brand)]" />
               Open
-            </button>
+            </Button>
           )}
         </div>
         <div className="text-[15px] leading-[1.3] font-semibold text-fg-bright">
@@ -430,7 +439,7 @@ function ReviewIssuePane({ repo, ticketId }: { repo: string; ticketId: string | 
           </div>
         )}
       </div>
-      {ready ? <DiscussionPane detail={ready} /> : <DiscussionSkeleton />}
+      {ready ? <DiscussionPane detail={ready} repo={repo} /> : <DiscussionSkeleton />}
     </div>
   );
 }

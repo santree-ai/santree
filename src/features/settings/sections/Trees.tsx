@@ -11,7 +11,7 @@ const Editor = ((EditorImport as unknown as { default?: typeof EditorImport }).d
   EditorImport) as typeof EditorImport;
 
 import { ChevronDownIcon } from "../../../components/icons";
-import { ChevronSelect, Segmented } from "../../../components/primitives";
+import { Button, ChevronSelect, Segmented } from "../../../components/primitives";
 import {
   type BatchSetup,
   TREES_AUTO_PR_KEY,
@@ -286,14 +286,9 @@ function SetupScriptBody({
           <div className="min-w-0 flex-1 text-[11.5px] text-fg-3">
             This script isn't executable, so it won't run when a worktree is created.
           </div>
-          <button
-            type="button"
-            onClick={() => makeExecutable()}
-            disabled={chmodding}
-            className="flex-none cursor-pointer rounded-md border border-line-3 bg-input px-3 py-1.5 text-[11.5px] font-medium text-fg-2 hover:border-line-strong disabled:opacity-50"
-          >
+          <Button onClick={() => makeExecutable()} disabled={chmodding} className="flex-none">
             Make executable
-          </button>
+          </Button>
         </div>
       )}
 
@@ -315,15 +310,9 @@ function SetupScriptBody({
       </div>
 
       <div className="mt-3 flex items-center justify-end gap-2">
-        <button
-          type="button"
-          onClick={onSave}
-          disabled={!dirty || saving}
-          style={{ color: "var(--on-accent)" }}
-          className="cursor-pointer rounded-md border-none bg-accent px-3.5 py-1.5 text-[11.5px] font-semibold hover:opacity-90 disabled:cursor-default disabled:opacity-50"
-        >
+        <Button variant="primary" onClick={onSave} disabled={!dirty || saving}>
           {exists ? "Save" : "Create script"}
-        </button>
+        </Button>
       </div>
     </div>
   );

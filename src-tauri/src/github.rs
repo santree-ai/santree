@@ -13,8 +13,9 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use santree_core::domain::{
-    CheckRollup, CheckStatus, CommentKind, PrCheck, PrComment, PrDetail, PrFile, PrState,
-    ReviewDecision, ReviewInbox, ReviewPr, Reviewer, ReviewerKind, TeamReviews,
+    CheckRollup, CheckStatus, CommentKind, MergeQueue, MergeQueueEntry, MergeQueueState, PrCheck,
+    PrComment, PrDetail, PrFile, PrState, ReviewDecision, ReviewInbox, ReviewPr, Reviewer,
+    ReviewerKind, TeamReviews,
 };
 
 use crate::git;
@@ -412,7 +413,7 @@ async fn graphql<T: DeserializeOwned>(
 
 // The PR fields the Reviews list needs — shared by all three category searches.
 const PR_FIELDS: &str = r"
-    id number title url isDraft updatedAt headRefName
+    id number title url isDraft updatedAt headRefName isInMergeQueue
     repository { nameWithOwner }
     author { login avatarUrl }
     reviewDecision
@@ -497,6 +498,8 @@ struct PrNode {
     updated_at: String,
     #[serde(rename = "headRefName")]
     head_ref_name: String,
+    #[serde(rename = "isInMergeQueue")]
+    is_in_merge_queue: bool,
     repository: RepoRef,
     author: Option<Actor>,
     #[serde(rename = "reviewDecision")]
@@ -565,6 +568,7 @@ impl From<PrNode> for ReviewPr {
             is_draft: n.is_draft,
             review_decision,
             checks,
+            is_in_merge_queue: n.is_in_merge_queue,
             additions: n.additions,
             deletions: n.deletions,
             comment_count: n.comments.total_count,
@@ -665,6 +669,129 @@ pub async fn review_inbox(
     })
 }
 
+/// The repo's merge queue (its default branch's queue): the ordered list of PRs
+/// waiting to merge, each tagged with whether the viewer authored it. `None` when
+/// the repo has no merge queue enabled. One GraphQL round-trip — the viewer login
+/// is fetched alongside the queue so entries can be marked "mine".
+pub async fn merge_queue(token: &str, owner: &str, name: &str) -> Result<Option<MergeQueue>> {
+    #[derive(Deserialize)]
+    struct Data {
+        viewer: Login,
+        repository: Option<RepoNode>,
+    }
+    #[derive(Deserialize)]
+    struct Login {
+        login: String,
+    }
+    #[derive(Deserialize)]
+    struct RepoNode {
+        // The queue is the default branch's queue; `MergeQueue` itself carries no
+        // branch field, so the name comes from the repo's default branch ref.
+        #[serde(rename = "defaultBranchRef")]
+        default_branch_ref: Option<BranchRef>,
+        #[serde(rename = "mergeQueue")]
+        merge_queue: Option<QueueNode>,
+    }
+    #[derive(Deserialize)]
+    struct BranchRef {
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct QueueNode {
+        entries: Connection<EntryNode>,
+    }
+    #[derive(Deserialize)]
+    struct EntryNode {
+        /// GitHub's raw position; we re-rank by queue order for display, so this
+        /// is only used to sort (its exact indexing base doesn't matter).
+        #[serde(default)]
+        position: Option<u32>,
+        state: Option<String>,
+        #[serde(rename = "pullRequest")]
+        pull_request: Option<QueuePr>,
+    }
+    #[derive(Deserialize)]
+    struct QueuePr {
+        number: u32,
+        title: String,
+        url: String,
+        author: Option<Actor>,
+    }
+
+    let query = r"
+        query($owner: String!, $name: String!) {
+          viewer { login }
+          repository(owner: $owner, name: $name) {
+            defaultBranchRef { name }
+            mergeQueue {
+              entries(first: 100) {
+                nodes {
+                  position
+                  state
+                  pullRequest { number title url author { login avatarUrl } }
+                }
+              }
+            }
+          }
+        }
+    ";
+    let data: Data = graphql(
+        token,
+        query,
+        serde_json::json!({ "owner": owner, "name": name }),
+    )
+    .await?;
+
+    let viewer = data.viewer.login;
+    let Some(repo_node) = data.repository else {
+        return Ok(None);
+    };
+    let branch = repo_node
+        .default_branch_ref
+        .map(|b| b.name)
+        .unwrap_or_default();
+    let Some(queue) = repo_node.merge_queue else {
+        return Ok(None);
+    };
+
+    // Order by GitHub's position (front of the line first), then re-number 1..N
+    // so the displayed rank is unambiguous regardless of GitHub's indexing base.
+    let mut nodes = queue.entries.nodes;
+    nodes.sort_by_key(|e| e.position.unwrap_or(u32::MAX));
+    let entries = nodes
+        .into_iter()
+        .filter_map(|e| e.pull_request.map(|pr| (e.state, pr)))
+        .enumerate()
+        .map(|(i, (state, pr))| {
+            let (author, author_avatar_url) =
+                pr.author.map(|a| (a.login, a.avatar_url)).unwrap_or_default();
+            MergeQueueEntry {
+                position: i as u32 + 1,
+                state: match state.as_deref() {
+                    Some("QUEUED") => MergeQueueState::Queued,
+                    Some("AWAITING_CHECKS") => MergeQueueState::AwaitingChecks,
+                    Some("MERGEABLE") => MergeQueueState::Mergeable,
+                    Some("UNMERGEABLE") => MergeQueueState::Unmergeable,
+                    Some("LOCKED") => MergeQueueState::Locked,
+                    _ => MergeQueueState::Unknown,
+                },
+                is_mine: author == viewer,
+                pr_number: pr.number,
+                pr_title: pr.title,
+                pr_url: pr.url,
+                author,
+                author_avatar_url,
+            }
+        })
+        .collect();
+
+    Ok(Some(MergeQueue {
+        repo: format!("{owner}/{name}"),
+        branch,
+        entries,
+    }))
+}
+
 /// Full detail for one PR: body + merged conversation + changed files (with diffs).
 pub async fn pr_detail(token: &str, owner: &str, name: &str, number: u32) -> Result<PrDetail> {
     let (conversation, files) = tokio::join!(
@@ -720,6 +847,21 @@ async fn pr_conversation(
     #[derive(Deserialize)]
     struct RollupCtx {
         contexts: Connection<Ctx>,
+    }
+    // Minimal shape for the contexts-only pagination follow-up: it re-navigates
+    // to the same head commit's rollup but fetches none of the PR's other fields.
+    #[derive(Deserialize)]
+    struct CtxData {
+        repository: Option<CtxRepo>,
+    }
+    #[derive(Deserialize)]
+    struct CtxRepo {
+        #[serde(rename = "pullRequest")]
+        pull_request: Option<CtxPr>,
+    }
+    #[derive(Deserialize)]
+    struct CtxPr {
+        commits: Connection<DetailCommitNode>,
     }
     #[derive(Deserialize)]
     #[serde(tag = "__typename")]
@@ -786,11 +928,32 @@ async fn pr_conversation(
               comments(first: 100) { nodes { author { login avatarUrl } body createdAt } }
               reviews(first: 50) { nodes { author { login avatarUrl } body createdAt } }
               reviewThreads(first: 50) { nodes { comments(first: 50) { nodes { author { login avatarUrl } body path createdAt } } } }
-              commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
-                __typename
-                ... on CheckRun { name status conclusion detailsUrl checkSuite { app { name } } }
-                ... on StatusContext { context state targetUrl description }
-              } } } } } }
+              commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name status conclusion detailsUrl checkSuite { app { name } } }
+                  ... on StatusContext { context state targetUrl description }
+                }
+                pageInfo { hasNextPage endCursor }
+              } } } } }
+            }
+          }
+        }
+    ";
+    // Follow-up query for additional check-context pages (see the paging loop
+    // below). Only the head commit's `contexts` connection, keyed by cursor.
+    let contexts_query = r"
+        query($owner: String!, $name: String!, $number: Int!, $after: String!) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100, after: $after) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name status conclusion detailsUrl checkSuite { app { name } } }
+                  ... on StatusContext { context state targetUrl description }
+                }
+                pageInfo { hasNextPage endCursor }
+              } } } } }
             }
           }
         }
@@ -849,70 +1012,100 @@ async fn pr_conversation(
     }
     comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
 
-    let mut checks: Vec<PrCheck> = Vec::new();
-    if let Some(rollup) = pr
+    // Collect the head commit's check contexts, paging through all of them.
+    // GitHub caps a GraphQL connection at 100 nodes/page, but the aggregate
+    // rollup `state` that drives the PR's header badge counts every context —
+    // so on a PR with >100 checks a still-running check beyond the first page
+    // makes the header say "checks running" while the (truncated) list shows
+    // only the passed/skipped ones. Page until exhausted so the list matches
+    // the badge.
+    let mut ctx_nodes: Vec<Ctx> = Vec::new();
+    let mut ctx_page = pr
         .commits
         .nodes
         .into_iter()
         .next()
         .and_then(|c| c.commit.status_check_rollup)
-    {
-        for ctx in rollup.contexts.nodes {
-            match ctx {
-                Ctx::CheckRun {
-                    name,
-                    conclusion,
-                    status,
-                    details_url,
-                    check_suite,
-                } => {
-                    // A check run is only conclusive once COMPLETED; before that
-                    // (QUEUED / IN_PROGRESS) it's still pending regardless of conclusion.
-                    let st = if status != "COMPLETED" {
-                        CheckStatus::Pending
-                    } else {
-                        match conclusion.as_deref() {
-                            Some("SUCCESS") => CheckStatus::Success,
-                            // ACTION_REQUIRED blocks the PR and needs the user to
-                            // act, so surface it as a failure rather than hiding it
-                            // in the collapsed "skipped/neutral" group.
-                            Some(
-                                "FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED",
-                            ) => CheckStatus::Failure,
-                            Some("SKIPPED") => CheckStatus::Skipped,
-                            // NEUTRAL / CANCELLED / STALE (and any unknown future
-                            // value) — finished without a pass/fail verdict.
-                            _ => CheckStatus::Neutral,
+        .map(|r| r.contexts);
+    while let Some(page) = ctx_page.take() {
+        ctx_nodes.extend(page.nodes);
+        let Some(cursor) = page
+            .page_info
+            .end_cursor
+            .filter(|_| page.page_info.has_next_page)
+        else {
+            break;
+        };
+        let more: CtxData = graphql(
+            token,
+            contexts_query,
+            serde_json::json!({ "owner": owner, "name": name, "number": number, "after": cursor }),
+        )
+        .await?;
+        ctx_page = more
+            .repository
+            .and_then(|r| r.pull_request)
+            .and_then(|p| p.commits.nodes.into_iter().next())
+            .and_then(|c| c.commit.status_check_rollup)
+            .map(|r| r.contexts);
+    }
+
+    let mut checks: Vec<PrCheck> = Vec::new();
+    for ctx in ctx_nodes {
+        match ctx {
+            Ctx::CheckRun {
+                name,
+                conclusion,
+                status,
+                details_url,
+                check_suite,
+            } => {
+                // A check run is only conclusive once COMPLETED; before that
+                // (QUEUED / IN_PROGRESS) it's still pending regardless of conclusion.
+                let st = if status != "COMPLETED" {
+                    CheckStatus::Pending
+                } else {
+                    match conclusion.as_deref() {
+                        Some("SUCCESS") => CheckStatus::Success,
+                        // ACTION_REQUIRED blocks the PR and needs the user to
+                        // act, so surface it as a failure rather than hiding it
+                        // in the collapsed "skipped/neutral" group.
+                        Some("FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED") => {
+                            CheckStatus::Failure
                         }
-                    };
-                    checks.push(PrCheck {
-                        name,
-                        status: st,
-                        description: check_suite.and_then(|s| s.app).map(|a| a.name),
-                        url: details_url,
-                    });
-                }
-                Ctx::StatusContext {
-                    context,
-                    state,
-                    target_url,
-                    description,
-                } => {
-                    let st = match state.as_str() {
-                        "SUCCESS" => CheckStatus::Success,
-                        "FAILURE" | "ERROR" => CheckStatus::Failure,
-                        "PENDING" | "EXPECTED" => CheckStatus::Pending,
+                        Some("SKIPPED") => CheckStatus::Skipped,
+                        // NEUTRAL / CANCELLED / STALE (and any unknown future
+                        // value) — finished without a pass/fail verdict.
                         _ => CheckStatus::Neutral,
-                    };
-                    checks.push(PrCheck {
-                        name: context,
-                        status: st,
-                        description,
-                        url: target_url,
-                    });
-                }
-                Ctx::Other => {}
+                    }
+                };
+                checks.push(PrCheck {
+                    name,
+                    status: st,
+                    description: check_suite.and_then(|s| s.app).map(|a| a.name),
+                    url: details_url,
+                });
             }
+            Ctx::StatusContext {
+                context,
+                state,
+                target_url,
+                description,
+            } => {
+                let st = match state.as_str() {
+                    "SUCCESS" => CheckStatus::Success,
+                    "FAILURE" | "ERROR" => CheckStatus::Failure,
+                    "PENDING" | "EXPECTED" => CheckStatus::Pending,
+                    _ => CheckStatus::Neutral,
+                };
+                checks.push(PrCheck {
+                    name: context,
+                    status: st,
+                    description,
+                    url: target_url,
+                });
+            }
+            Ctx::Other => {}
         }
     }
 

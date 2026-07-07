@@ -3,7 +3,7 @@
  * app defaults or repo override. */
 
 import type { AgentKind } from "../../../bindings";
-import { ChevronSelect, ComboBox, Toggle } from "../../../components/primitives";
+import { ChevronSelect, Toggle } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
 import {
   EFFORT_LEVELS,
@@ -12,17 +12,21 @@ import {
   INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
   INVESTIGATE_REMOTE_CONTROL_KEY,
+  PERMISSION_MODES,
   TRIAGE_GOOD_CITIZEN_KEY,
   TRIAGE_SNOOZED_KEY,
   useAgents,
   useBoolSetting,
   useClaudeCommands,
+  useClaudeModels,
   useResolvedSetting,
   useSetSetting,
   useSetting,
   WORK_AGENT_KEY,
   WORK_EFFORT_KEY,
   WORK_MODEL_KEY,
+  WORK_PERMISSION_MODE_KEY,
+  WORK_QUEUE_KEY,
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
 import {
@@ -44,6 +48,8 @@ interface ActionDescriptor {
   effortKey: string;
   /** Present only for actions that also run a Claude slash command (Investigate). */
   commandKey?: string;
+  /** Present only for actions that pick a start mode (Claude's `--permission-mode`). */
+  permissionModeKey?: string;
 }
 
 const INVESTIGATE: ActionDescriptor = {
@@ -56,6 +62,7 @@ const WORK: ActionDescriptor = {
   agentKey: WORK_AGENT_KEY,
   modelKey: WORK_MODEL_KEY,
   effortKey: WORK_EFFORT_KEY,
+  permissionModeKey: WORK_PERMISSION_MODE_KEY,
 };
 
 /** The Triage Investigation action. Triage is global: the enable switch + queue
@@ -108,9 +115,27 @@ function RemoteControlCard({ forRepo }: { forRepo?: string }) {
  *  defaults or a per-repo override). Heading-less; rendered inside the merged
  *  "Work" settings section. */
 export function WorkActionConfig({ repo }: { repo?: string }) {
-  // Just the agent + model card. The old standalone "Work" intro card was
-  // redundant with the section heading, so it's been dropped.
-  return <ActionConfig descriptor={WORK} repo={repo} />;
+  const queue = useBoolSetting("app", WORK_QUEUE_KEY).value;
+  const setSetting = useSetSetting();
+  return (
+    <div className="space-y-3.5">
+      <ActionConfig descriptor={WORK} repo={repo} />
+      {/* The queue is a global workflow choice (not a per-repo agent/model
+          override), so it only appears on the app-defaults scope. */}
+      {!repo && (
+        <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
+          <ToggleRow
+            label="Queue work before launching"
+            hint="On: add several tickets to a queue and launch them together (the launch tray). Off: each issue's panel shows a single “Run” button that starts it right away — ⌘-click runs it in the background without leaving your current view."
+            on={queue}
+            onChange={(v) =>
+              setSetting.mutate({ scope: "app", key: WORK_QUEUE_KEY, value: v ? "true" : null })
+            }
+          />
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -186,12 +211,13 @@ function AppTriagePanel() {
  * The single body shared by all four action panels. Resolves the scope (`app`
  * or `repo:<repo>`), reads the effective agent (a repo override falls back to
  * the app value), and renders the agent / optional skill / model selects. The
- * `inherits` flag flips each select between a plain picker (app: hardcoded
- * "Agent default") and an {@link OverrideSelect} that inherits the app value.
+ * `inherits` flag flips each select between a plain concrete picker (app scope)
+ * and one with a leading "inherit the app value" option (repo scope).
  */
 function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo?: string }) {
   const inherits = repo !== undefined;
   const scope = inherits ? `repo:${repo}` : "app";
+  const { settings } = useApp();
   const { data: agents = [] } = useAgents();
   const { data: cmds } = useClaudeCommands(repo ?? null);
   const setSetting = useSetSetting();
@@ -202,20 +228,40 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
   // action has no command) so hook order stays stable across renders.
   const cmdKey = descriptor.commandKey ?? "__none__";
   const hasCmd = descriptor.commandKey !== undefined;
+  // Read the permission-mode key unconditionally too (harmless sentinel when the
+  // action has none) so hook order stays stable across renders.
+  const permKey = descriptor.permissionModeKey ?? "__none_perm__";
+  const hasPerm = descriptor.permissionModeKey !== undefined;
   const appAgent = (useSetting("app", descriptor.agentKey).data as AgentKind | null) ?? "Claude";
   const appCmd = useSetting("app", cmdKey).data;
   const appModel = useSetting("app", descriptor.modelKey).data;
   const appEffort = useSetting("app", descriptor.effortKey).data;
+  const appPerm = useSetting("app", permKey).data;
 
   // This scope's stored values (null/undefined for both app + an unset repo).
   const scopeAgent = useSetting(scope, descriptor.agentKey).data as AgentKind | null;
   const scopeCmd = useSetting(scope, cmdKey).data;
   const scopeModel = useSetting(scope, descriptor.modelKey).data;
   const scopeEffort = useSetting(scope, descriptor.effortKey).data;
+  const scopePerm = useSetting(scope, permKey).data;
 
   const effectiveAgent = scopeAgent ?? appAgent;
   const agentDef = agents.find((a) => a.key === effectiveAgent);
+  // Claude's list is live (from Claude Code's own picker cache), so it isn't stuck
+  // on the agent catalog's static tiers; other (WIP) agents keep their catalog list.
+  const claudeModels = useClaudeModels().data;
+  const models =
+    effectiveAgent === "Claude"
+      ? (claudeModels ?? agentDef?.models ?? [])
+      : (agentDef?.models ?? []);
   const appAgentShort = agents.find((a) => a.key === appAgent)?.short ?? appAgent;
+  // The concrete model an unset app-scope picker falls back to: the effective
+  // agent's own default (Settings → Agents), else the first current model. We no
+  // longer expose an "Agent default" (defer) option — the app model is always a
+  // concrete pick — so the picker must have a real value to show when nothing's
+  // been chosen yet.
+  const agentDefaultModel =
+    settings?.agents?.find((a) => a.key === effectiveAgent)?.model || models[0] || "";
   const globalCmds = cmds?.global ?? [];
   const repoCmds = cmds?.repo ?? [];
   const selectedCmd = globalCmds.find((c) => c.name === scopeCmd);
@@ -283,16 +329,12 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
       <Field
         label="Model"
         hint={
-          inherits
-            ? undefined
-            : hasCmd
-              ? "Leave on the agent default to use the model set in Agents."
-              : "The default in the launch tray; switch it per launch any time."
+          inherits ? undefined : "The model this action runs with; it's the launch tray's default."
         }
       >
         <ModelSelect
-          models={agentDef?.models ?? []}
-          value={scopeModel ?? ""}
+          models={models}
+          value={inherits ? (scopeModel ?? "") : (scopeModel ?? agentDefaultModel)}
           onChange={(v) => set(descriptor.modelKey, v)}
           inherits={inherits}
           defaultLabel={`Use app default${appModel ? ` (${appModel})` : ""}`}
@@ -316,7 +358,76 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
           />
         </Field>
       )}
+
+      {hasPerm && effectiveAgent === "Claude" && (
+        <Field
+          label="Start mode"
+          hint={
+            inherits
+              ? undefined
+              : "Which permission mode a worktree's agent starts (and restarts) in — Claude's --permission-mode. Default keeps Claude's normal mode."
+          }
+        >
+          <PermissionModeSelect
+            value={scopePerm ?? ""}
+            onChange={(v) => set(permKey, v)}
+            inherits={inherits}
+            defaultLabel={`Use app default (${permModeLabel(appPerm) ?? "Default"})`}
+          />
+        </Field>
+      )}
     </div>
+  );
+}
+
+/** Friendly label for a stored `--permission-mode` value (e.g. `acceptEdits` →
+ *  "Accept edits"); `null`/unset returns `undefined` (the "Default" case). */
+function permModeLabel(value: string | null | undefined): string | undefined {
+  return PERMISSION_MODES.find((m) => m.value === value)?.label;
+}
+
+/** The start-mode picker — Claude's `--permission-mode`. The empty option
+ *  ("Default") leaves the flag off, i.e. Claude's own normal mode. */
+function PermissionModeSelect({
+  value,
+  onChange,
+  inherits,
+  defaultLabel,
+  "aria-labelledby": ariaLabelledBy,
+}: {
+  value: string;
+  onChange: (v: string | null) => void;
+  inherits: boolean;
+  defaultLabel: string;
+  "aria-labelledby"?: string;
+}) {
+  const options = PERMISSION_MODES.map((m) => (
+    <option key={m.value} value={m.value} className="bg-input">
+      {m.label}
+    </option>
+  ));
+  if (inherits) {
+    return (
+      <OverrideSelect
+        value={value}
+        onChange={onChange}
+        defaultLabel={defaultLabel}
+        aria-labelledby={ariaLabelledBy}
+      >
+        {options}
+      </OverrideSelect>
+    );
+  }
+  return (
+    <ChevronSelect
+      value={value}
+      onChange={(v) => onChange(v || null)}
+      className={SELECT_CLASS}
+      aria-labelledby={ariaLabelledBy}
+    >
+      <option value="">Default</option>
+      {options}
+    </ChevronSelect>
   );
 }
 
@@ -412,10 +523,11 @@ function AgentSelect({
   );
 }
 
-/** The model picker — an editable combobox. The effective agent's models are just
- *  suggestions; the CLI is the source of truth, so you can type any alias/id it
- *  accepts (`opus`, `claude-fable-5`, …) and never be stuck behind a stale list.
- *  Empty clears the setting (repo: inherit the app value · app: agent default). */
+/** The model picker — a plain dropdown over the current models (`useClaudeModels`);
+ *  no free-text entry. The app scope is always a concrete model (no "Agent default"
+ *  defer option); only the repo scope keeps a first "inherit the app value" option.
+ *  A saved value that's no longer in the live list (an older pin) is kept as an
+ *  option so it isn't dropped. */
 function ModelSelect({
   models,
   value,
@@ -431,14 +543,20 @@ function ModelSelect({
   defaultLabel: string;
   "aria-labelledby"?: string;
 }) {
+  const options = value && !models.includes(value) ? [value, ...models] : models;
   return (
-    <ComboBox
+    <ChevronSelect
       value={value}
-      onChange={(v) => onChange(v.trim() || null)}
-      options={models}
-      placeholder={inherits ? defaultLabel : "Agent default"}
+      onChange={(v) => onChange(v || null)}
       className={SELECT_CLASS}
       aria-labelledby={ariaLabelledBy}
-    />
+    >
+      {inherits && <option value="">{defaultLabel}</option>}
+      {options.map((m) => (
+        <option key={m} value={m} className="bg-input">
+          {m}
+        </option>
+      ))}
+    </ChevronSelect>
   );
 }

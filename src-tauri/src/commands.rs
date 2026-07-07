@@ -12,14 +12,15 @@
 
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
+use tauri_specta::Event;
 
 use santree_core::{
     config,
     domain::{
         AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, ClaudeCommands, FileSource,
-        GithubStatus, LinearOrg, LinearStatus, NewPr, Opener, PrDetail, PrDraft, Repo,
-        ReviewInbox, Reviewer, ScriptInfo, Settings, Task, TriageDetail, TriageSchedule,
-        TriageTicket, Worktree, WorktreePr,
+        GithubStatus, LinearOrg, LinearStatus, MergeQueue, NewPr, Opener, PrDetail, PrDraft, Repo,
+        ReviewInbox, Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings, TabKind, Task,
+        TriageDetail, TriageSchedule, TriageTicket, UsageReport, Worktree, WorktreePr, WorktreeTab,
     },
 };
 
@@ -31,10 +32,13 @@ use crate::linear;
 use crate::notes;
 use crate::openers;
 use crate::pr;
+use crate::pricing;
 use crate::repo;
 use crate::reviews;
 use crate::session;
 use crate::settings;
+use crate::tabs;
+use crate::usage;
 use crate::worktree;
 
 /// Connected repositories.
@@ -56,6 +60,34 @@ pub async fn add_repo(path: String, db: State<'_, Db>) -> CmdResult<Repo> {
 #[specta::specta]
 pub fn list_agents() -> Vec<AgentDef> {
     config::agents()
+}
+
+/// Aggregated Claude Code token usage across all local session transcripts
+/// (`~/.claude/projects/**/*.jsonl`) — period/model/session totals + context fill.
+/// Empty when there are no transcripts. Resolves the price table first (a daily
+/// background refresh from LiteLLM, cached in SQLite, over the static fallback),
+/// then runs the cold parse on the blocking pool (cached per-file afterwards).
+#[tauri::command]
+#[specta::specta]
+pub async fn claude_usage(app: AppHandle, db: State<'_, Db>) -> CmdResult<UsageReport> {
+    let table = pricing::ensure_fresh(&db).await;
+    // Registered repos let a session's cwd resolve to its repo (and worktree),
+    // so the panel can group sessions by repo folder.
+    let repos: Vec<usage::Repo> = repo::list(&db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| r.path.map(|p| (r.name, p)))
+        .collect();
+    // Emit parse progress so the panel can show a bar on the (slow) cold load.
+    let on_progress = move |done: usize, total: usize| {
+        let _ = usage::UsageProgress {
+            done: done as u32,
+            total: total as u32,
+        }
+        .emit(&app);
+    };
+    Ok(tokio::task::spawn_blocking(move || usage::report(&table, &repos, on_progress)).await??)
 }
 
 // ── Real worktrees (Trees view) ────────────────────────────────────────────
@@ -102,11 +134,18 @@ pub async fn create_worktree(
     .await?)
 }
 
-/// Remove a worktree (and its branch) and drop the issue link.
+/// Remove a worktree (and its branch), drop the issue link, and delete its
+/// on-disk work prompt.
 #[tauri::command]
 #[specta::specta]
-pub async fn remove_worktree(repo: String, issue_id: String, db: State<'_, Db>) -> CmdResult<()> {
-    Ok(worktree::remove(&db, &repo, &issue_id).await?)
+pub async fn remove_worktree(
+    app: AppHandle,
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    let prompts = worktree::prompts_root(&app);
+    Ok(worktree::remove(&db, &repo, &issue_id, prompts.as_deref()).await?)
 }
 
 /// Merge the base branch into the worktree (the "pull from main/master" button).
@@ -123,6 +162,20 @@ pub async fn pull_worktree(repo: String, issue_id: String, db: State<'_, Db>) ->
 #[specta::specta]
 pub async fn push_worktree(repo: String, issue_id: String, db: State<'_, Db>) -> CmdResult<()> {
     Ok(worktree::push(&db, &repo, &issue_id).await?)
+}
+
+/// Integrate origin/<branch> into the worktree's own branch — the Trees "Pull"
+/// button, for commits added to the branch remotely (PR-UI suggestions, "Update
+/// branch", a teammate's push). Fast-forwards when possible, else merges; refuses
+/// up front (nothing touched) when the merge would conflict.
+#[tauri::command]
+#[specta::specta]
+pub async fn pull_remote_worktree(
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(worktree::pull_remote(&db, &repo, &issue_id).await?)
 }
 
 /// Run a worktree's setup script, streaming each output line over `on_event` for
@@ -327,12 +380,23 @@ pub async fn set_commit_draft(
     Ok(commit_draft::set(&db, &repo, &issue_id, &message).await?)
 }
 
-/// The agent's opening prompt for a freshly-started worktree (the `work`
-/// template). The terminal seeds `exec <agent> '<prompt>'` with this.
+/// Render the agent's opening prompt for a freshly-started worktree (the `work`
+/// template, from live ticket data), write it to a stable on-disk file, and
+/// return that file's **path** — not the text. The terminal seeds
+/// `exec <agent> 'Read <path> and follow the instructions inside.'`, so a long
+/// prompt can't overflow the interactive-shell line or be mangled by the PTY line
+/// editor. Regenerated on every launch (re-fetches the live ticket), so it always
+/// reflects the latest Linear state; deleted with the worktree.
 #[tauri::command]
 #[specta::specta]
-pub async fn work_prompt(repo: String, issue_id: String, db: State<'_, Db>) -> CmdResult<String> {
-    Ok(worktree::work_prompt(&db, &repo, &issue_id).await?)
+pub async fn work_prompt(
+    app: AppHandle,
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<String> {
+    let prompts = worktree::prompts_root(&app).ok_or("no writable data dir for prompt file")?;
+    Ok(worktree::work_prompt(&db, &repo, &issue_id, &prompts).await?)
 }
 
 /// Decide how a terminal that auto-launches `claude` should (re)launch it: resume
@@ -351,6 +415,57 @@ pub async fn agent_session(
 ) -> CmdResult<AgentSession> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     Ok(session::resolve(&db, &repo, &term_key, &cwd, home.as_deref(), allow_fresh).await?)
+}
+
+/// Ticket ids of triage investigations that have a stored (resumable) session —
+/// i.e. an investigation was started for them at some point. Drives the Triage
+/// view's tab + resume affordance for past investigations (across app restarts).
+#[tauri::command]
+#[specta::specta]
+pub async fn started_investigations(repo: String, db: State<'_, Db>) -> CmdResult<Vec<String>> {
+    Ok(session::started_investigations(&db, &repo).await?)
+}
+
+/// All persisted extra tabs (Claude / terminal) for the repo's worktrees, in
+/// open order — loaded on Trees mount so tabs survive app restarts.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_worktree_tabs(repo: String, db: State<'_, Db>) -> CmdResult<Vec<WorktreeTab>> {
+    Ok(tabs::list(&db, &repo).await?)
+}
+
+/// Persist a new extra tab. The frontend mints `id` (a UUID) so it can patch
+/// its cache and focus the tab without waiting on the round-trip.
+#[tauri::command]
+#[specta::specta]
+pub async fn add_worktree_tab(
+    repo: String,
+    worktree_id: String,
+    id: String,
+    kind: TabKind,
+    title: String,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(tabs::add(&db, &repo, &worktree_id, &id, kind, &title).await?)
+}
+
+/// Rename an extra tab (blank titles are rejected).
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_worktree_tab(
+    repo: String,
+    id: String,
+    title: String,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(tabs::rename(&db, &repo, &id, &title).await?)
+}
+
+/// Remove an extra tab; a Claude tab's stored session is forgotten with it.
+#[tauri::command]
+#[specta::specta]
+pub async fn remove_worktree_tab(repo: String, id: String, db: State<'_, Db>) -> CmdResult<()> {
+    Ok(tabs::remove(&db, &repo, &id).await?)
 }
 
 /// Draft a PR title + body for the create-PR dialog. With `fill`, the body is
@@ -382,6 +497,15 @@ pub async fn worktree_prs(repo: String, db: State<'_, Db>) -> CmdResult<Vec<Work
 #[specta::specta]
 pub async fn reviews(repo: String, db: State<'_, Db>) -> CmdResult<ReviewInbox> {
     Ok(reviews::inbox(&db, &repo).await?)
+}
+
+/// The merge queue for the active `repo`'s default branch — the ordered list of
+/// PRs waiting to merge, so the user can see where their own PRs sit. `None` when
+/// `gh` isn't authenticated or the repo has no merge queue enabled.
+#[tauri::command]
+#[specta::specta]
+pub async fn merge_queue(repo: String, db: State<'_, Db>) -> CmdResult<Option<MergeQueue>> {
+    Ok(reviews::merge_queue(&db, &repo).await?)
 }
 
 /// Full detail for one PR — body, conversation (comments + reviews + inline
@@ -515,6 +639,29 @@ pub async fn triage_set_state(
     Ok(())
 }
 
+/// Post a comment on an issue — a top-level comment, or a reply when `parent_id`
+/// is the id of the comment being replied to. `ticket_id`/`parent_id` are used
+/// only as GraphQL variables (never as a path or git arg). Requires a
+/// write-scoped Linear org.
+#[tauri::command]
+#[specta::specta]
+pub async fn triage_add_comment(
+    repo: String,
+    ticket_id: String,
+    parent_id: Option<String>,
+    body: String,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("comment body is empty".into());
+    }
+    linear::create_comment(&db, &repo, &ticket_id, parent_id.as_deref(), body)
+        .await?
+        .ok_or("no Linear org connected")?;
+    Ok(())
+}
+
 /// Exit the app. Called from the quit-confirmation dialog once the user confirms a
 /// ⌘Q / menu quit — `app.exit(0)` re-emits `ExitRequested` with a `Some` code, which
 /// the run-loop treats as a confirmed exit and lets through (see `run`).
@@ -566,6 +713,35 @@ pub async fn github_status() -> GithubStatus {
     crate::github::status().await
 }
 
+/// Path to the settings file santree passes as `claude --settings <path>`,
+/// carrying the session-state hooks and santree's own `statusLine` (which prints
+/// the context-fill bar and captures live usage into the db). Both are always
+/// present — capture is unconditional; whether the app *displays* the inline
+/// usage bar is a runtime frontend decision. `None` when the hook binary/db can't
+/// be resolved — the frontend then launches without the flag. The content is
+/// setting-independent, so the frontend caches the path forever.
+#[tauri::command]
+#[specta::specta]
+pub fn claude_hook_settings(app: AppHandle) -> Option<String> {
+    crate::hooks::claude_settings(&app)
+}
+
+/// Every santree-launched session's live token/context usage, captured from the
+/// status-line stdin. Newest first.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_usage_live(db: State<'_, Db>) -> CmdResult<Vec<SessionUsageLive>> {
+    Ok(crate::hooks::session_usage_live(&db).await?)
+}
+
+/// The current state of every Claude session santree has launched, as recorded
+/// live by the injected hooks. Most-recently-updated first.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_states(db: State<'_, Db>) -> CmdResult<Vec<SessionState>> {
+    Ok(crate::hooks::session_states(&db).await?)
+}
+
 /// The user's local note for a task — extra context stored only on this machine
 /// (never synced to Linear). `None` when the task has no note.
 #[tauri::command]
@@ -592,6 +768,17 @@ pub async fn set_task_note(
 
 // ── App/per-repo settings + Claude command discovery ───────────────────────
 
+/// The current Claude models to suggest in the model pickers — derived live from
+/// the fetched LiteLLM catalog (cached in SQLite, daily refresh, static fallback),
+/// so it tracks Anthropic's releases instead of a hardcoded/stale list and includes
+/// the latest of each family (Opus/Sonnet/Haiku/Fable). See
+/// [`pricing::claude_models`].
+#[tauri::command]
+#[specta::specta]
+pub async fn claude_models(db: State<'_, Db>) -> CmdResult<Vec<String>> {
+    Ok(pricing::claude_models(&db).await)
+}
+
 /// The Claude slash-commands offered by the triage "Investigate" picker. Always
 /// includes the global `~/.claude/commands`; when a repo name is given, also its
 /// own `.claude/commands` (so the repo scope can list both).
@@ -608,6 +795,16 @@ pub async fn list_claude_commands(
     // `settings::commands` does sync `read_dir` + `read_to_string` per command
     // file — keep it off the async runtime (mirrors `agent_auth` below).
     Ok(tokio::task::spawn_blocking(move || settings::commands(repo_path.as_deref())).await?)
+}
+
+/// The variable names a user-referenced `.env` file defines, for the Environment
+/// settings' "N variables loaded" readout. Reads exactly the absolute path the
+/// user picked (a native file dialog) — no id is joined onto a base dir, so
+/// there's no traversal surface — and returns an empty list if it's unreadable.
+#[tauri::command]
+#[specta::specta]
+pub fn env_file_vars(path: String) -> Vec<String> {
+    crate::env::env_file_var_names(&path)
 }
 
 /// Read a setting for an exact scope (`"app"` or `"repo:<name>"`).

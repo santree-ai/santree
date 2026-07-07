@@ -426,7 +426,10 @@ mod tests {
             AgentKind::Codex,
             "present top-level field is preserved"
         );
-        assert!(!settings.integrations.linear, "present nested field is preserved");
+        assert!(
+            !settings.integrations.linear,
+            "present nested field is preserved"
+        );
         assert!(
             settings.integrations.triage,
             "missing nested field falls back to its own default, not to a bare `false`"

@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import type { Worktree } from "../../bindings";
+import type { SessionState, TabKind, Worktree, WorktreeTab } from "../../bindings";
 import type { PendingLaunch } from "../../state/AppContext";
 import type { TerminalTab } from "../terminal/orchestrator";
 import {
+  defaultTabTitle,
+  effectiveSessionState,
   isTreeLaunchDead,
   mergeWorktrees,
   pendingWorktree,
   planStartAgent,
   resolveActiveTab,
   shouldCompleteSetup,
+  shouldHoldTerminal,
   tabsToCloseForWorktree,
   withLiveWorktreeStatus,
 } from "./model";
@@ -26,6 +29,8 @@ function worktree(id: string): Worktree {
     ahead: 0,
     behind: 0,
     unpushed: 0,
+    remoteBehind: 0,
+    pullConflict: false,
     agent: "Claude",
     activity: "Idle",
     branch: `santree/${id.toLowerCase()}`,
@@ -64,6 +69,37 @@ describe("withLiveWorktreeStatus", () => {
   });
 });
 
+describe("effectiveSessionState", () => {
+  const running = (): Worktree => ({ ...worktree("AK-1"), activity: "Running" });
+  const idle = (): Worktree => ({ ...worktree("AK-1"), activity: "Idle" });
+  const hook = (state: string): SessionState => ({
+    sessionId: "s1",
+    state,
+    event: "x",
+    cwd: "/tmp/x",
+    message: null,
+    transcriptPath: null,
+    updatedAtMs: 0,
+  });
+
+  it("shows the hook state for a live session", () => {
+    expect(effectiveSessionState(running(), hook("waiting"))).toBe("waiting");
+    expect(effectiveSessionState(running(), hook("active"))).toBe("active");
+  });
+
+  it("reads a stopped worktree as exited even if the last hook said active", () => {
+    // Liveness is authoritative — a session that died without SessionEnd is stale.
+    expect(effectiveSessionState(idle(), hook("active"))).toBe("exited");
+    expect(effectiveSessionState(idle(), hook("waiting"))).toBe("exited");
+  });
+
+  it("shows nothing for a worktree that never ran an agent", () => {
+    expect(effectiveSessionState(idle(), undefined)).toBeNull();
+    // Live terminal but no agent state reported yet (e.g. a plain shell tab).
+    expect(effectiveSessionState(running(), undefined)).toBeNull();
+  });
+});
+
 /** Minimal TerminalTab fixture. */
 function tab(key: string, refId?: string): TerminalTab {
   return { key, title: key, source: "issue", refId };
@@ -75,8 +111,8 @@ describe("tabsToCloseForWorktree", () => {
     expect(tabsToCloseForWorktree(tabs, "AK-1")).toEqual(tabs);
   });
 
-  it("includes extra terminal tabs opened via the + tab", () => {
-    const extra = tab("t2", "tree:AK-1:t2");
+  it("includes extra tabs opened via the + tab", () => {
+    const extra = tab("t2", "tree:AK-1:tab:6f9a");
     const tabs = [tab("t1", "tree:AK-1"), extra];
     expect(tabsToCloseForWorktree(tabs, "AK-1")).toEqual(tabs);
   });
@@ -195,13 +231,45 @@ describe("planStartAgent", () => {
   });
 });
 
+describe("shouldHoldTerminal", () => {
+  const idle = {
+    launching: false,
+    initialSetup: false,
+    promptFetched: false,
+    needsSeed: false,
+    sessionFetching: false,
+  };
+
+  // Regression guard for the bare-shell launch race: while the work prompt is
+  // fetching, `needsSeed` is still false (it waits on the prompt) — the terminal
+  // must be withheld anyway, or it mounts seedless and the launch is lost (the
+  // seed only applies at PTY creation).
+  it("holds during a launch while the work prompt is still fetching, even with needsSeed false", () => {
+    expect(shouldHoldTerminal({ ...idle, launching: true })).toBe(true);
+  });
+
+  it("does not hold during the initial setup (the setup gate withholds the terminal itself)", () => {
+    expect(shouldHoldTerminal({ ...idle, launching: true, initialSetup: true })).toBe(false);
+  });
+
+  it("holds while the session resolution is in flight", () => {
+    expect(shouldHoldTerminal({ ...idle, needsSeed: true, sessionFetching: true })).toBe(true);
+    expect(shouldHoldTerminal({ ...idle, needsSeed: true })).toBe(false);
+  });
+
+  it("releases once the prompt and session are both fresh", () => {
+    expect(shouldHoldTerminal({ ...idle, launching: true, promptFetched: true })).toBe(false);
+    expect(shouldHoldTerminal(idle)).toBe(false);
+  });
+});
+
 describe("resolveActiveTab", () => {
   const base = {
     isBaseActive: false,
     selectedFile: null as string | null,
     setupFor: null as string | null,
     activeId: "AK-1",
-    extraTerminals: [] as number[],
+    extraTabIds: [] as string[],
   };
 
   it("defaults a never-visited worktree to the Issue tab", () => {
@@ -231,8 +299,39 @@ describe("resolveActiveTab", () => {
     expect(resolveActiveTab("setup", { ...base, setupFor: "AK-2" })).toBe("issue");
   });
 
-  it("keeps a remembered extra-terminal tab only while that terminal still exists", () => {
-    expect(resolveActiveTab("term:2", { ...base, extraTerminals: [2, 3] })).toBe("term:2");
-    expect(resolveActiveTab("term:2", { ...base, extraTerminals: [3] })).toBe("issue");
+  it("keeps a remembered extra tab only while that tab still exists", () => {
+    expect(resolveActiveTab("tab:a1", { ...base, extraTabIds: ["a1", "b2"] })).toBe("tab:a1");
+    expect(resolveActiveTab("tab:a1", { ...base, extraTabIds: ["b2"] })).toBe("issue");
+  });
+});
+
+/** Minimal WorktreeTab fixture. */
+function extraTabRow(id: string, kind: TabKind, title: string): WorktreeTab {
+  return { id, worktreeId: "AK-1", kind, title };
+}
+
+describe("defaultTabTitle", () => {
+  it("names the first Claude tab plain 'Claude', then numbers from 2", () => {
+    expect(defaultTabTitle("claude", [])).toBe("Claude");
+    expect(defaultTabTitle("claude", [extraTabRow("a", "claude", "Claude")])).toBe("Claude 2");
+  });
+
+  it("numbers terminals from 2 — the primary Terminal tab is #1 implicitly", () => {
+    expect(defaultTabTitle("terminal", [])).toBe("Terminal 2");
+    expect(defaultTabTitle("terminal", [extraTabRow("a", "terminal", "Terminal 2")])).toBe(
+      "Terminal 3",
+    );
+  });
+
+  it("skips past renamed/deleted gaps to stay unique among existing titles", () => {
+    // "Claude" was renamed away → the base name is free again.
+    expect(defaultTabTitle("claude", [extraTabRow("a", "claude", "Debugging")])).toBe("Claude");
+    // A middle title was taken back by a rename — pick the first free number.
+    const taken = [extraTabRow("a", "claude", "Claude"), extraTabRow("b", "claude", "Claude 3")];
+    expect(defaultTabTitle("claude", taken)).toBe("Claude 2");
+  });
+
+  it("ignores the other kind's titles", () => {
+    expect(defaultTabTitle("claude", [extraTabRow("a", "terminal", "Terminal 2")])).toBe("Claude");
   });
 });

@@ -5,7 +5,7 @@
  *  regenerate it with AI. Mount with `key={worktreeId}` for a per-worktree draft. */
 import { useEffect, useRef, useState } from "react";
 
-import { Spinner } from "../../components/primitives";
+import { Button, Spinner } from "../../components/primitives";
 import {
   TREES_AUTO_PR_KEY,
   TREES_AUTO_PUSH_KEY,
@@ -134,17 +134,11 @@ export function CommitBox({
           {drafting ? <Spinner size={12} /> : <span className="text-[13px] leading-none">✨</span>}
         </button>
       </div>
-      <button
-        type="button"
-        onClick={onCommit}
-        disabled={!canCommit}
-        style={{ color: "var(--on-accent)" }}
-        className="mt-2 w-full cursor-pointer rounded-md border-none bg-accent py-1.5 text-[11.5px] font-semibold hover:opacity-90 disabled:cursor-default disabled:opacity-40"
-      >
+      <Button variant="primary" onClick={onCommit} disabled={!canCommit} className="mt-2 w-full">
         {committing
           ? "Committing…"
           : `Commit${committable ? ` ${committable} file${committable === 1 ? "" : "s"}` : ""}`}
-      </button>
+      </Button>
     </div>
   );
 }

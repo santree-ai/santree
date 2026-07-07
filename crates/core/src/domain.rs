@@ -120,6 +120,55 @@ pub struct GithubStatus {
     pub host: String,
 }
 
+/// The current state of one Claude session, captured live via the hooks santree
+/// injects into its `claude` launches. One per session id (a current-state row,
+/// not an event log). The frontend correlates a session back to a worktree later
+/// via `cwd` / the `terminal_sessions` mapping.
+/// Only `PartialEq` (not `Eq`) because of the `f64` timestamp below.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionState {
+    /// Claude session id (the one santree minted via `--session-id`).
+    pub session_id: String,
+    /// Derived agent state: "active" | "waiting" | "idle" | "exited".
+    pub state: String,
+    /// Raw Claude hook event that last set `state` (e.g. "Stop").
+    pub event: String,
+    /// Working directory the session ran in (the worktree path).
+    pub cwd: String,
+    /// Notification message, when the last event carried one.
+    pub message: Option<String>,
+    /// Transcript path on disk, when the payload carried one.
+    pub transcript_path: Option<String>,
+    /// Epoch ms the state was last updated — raw, formatted live by the frontend.
+    pub updated_at_ms: f64,
+}
+
+/// Live token/context usage for one Claude session, captured from Claude's own
+/// status-line stdin (see crates/hook's `statusline` mode). This is Claude's
+/// authoritative `used_percentage` + token counts — the faithful source for the
+/// inline session status line, unlike the transcript-derived reconstruction in
+/// `usage.rs`. One current-value row per session id.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsageLive {
+    /// Claude session id (matches [`SessionState::session_id`]).
+    pub session_id: String,
+    /// Claude's pre-calculated context-window fill, 0..100 (raw — the 1.2x
+    /// display nudge is applied at render time, matching the terminal bar).
+    pub used_pct: f64,
+    /// Tokens currently in the context window (input + cache reads + writes).
+    pub input_tokens: f64,
+    /// The model's context window size in tokens (200k, or 1M for extended).
+    pub context_size: f64,
+    /// Model id, e.g. `claude-opus-4-8` — mapped to a family label by the frontend.
+    pub model: String,
+    /// Session cost so far in USD (Claude's own `cost.total_cost_usd`).
+    pub cost_usd: f64,
+    /// Epoch ms this row was last written — raw, formatted live by the frontend.
+    pub updated_at_ms: f64,
+}
+
 /// A connected repository / task-tracker pairing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -143,6 +192,11 @@ pub enum TaskStatus {
     InProgress,
     Todo,
     Backlog,
+    /// A custom "Blocked" workflow state (Linear has no native `blocked` type, so
+    /// teams model it as an `unstarted`/`started` state named "Blocked"). Never
+    /// startable — being in this state is itself a not-actionable signal,
+    /// independent of any ticket-to-ticket blocker relations.
+    Blocked,
     /// Completed or canceled. Only appears on non-actionable blocker context
     /// nodes — the viewer's own assigned issues never include done work.
     Done,
@@ -164,6 +218,7 @@ impl TaskStatus {
             TaskStatus::InProgress => "In Progress",
             TaskStatus::Todo => "Todo",
             TaskStatus::Backlog => "Backlog",
+            TaskStatus::Blocked => "Blocked",
             TaskStatus::Done => "Done",
         }
     }
@@ -216,6 +271,38 @@ pub enum AgentSession {
     Fresh { session_id: String },
     /// No agent session — just a login shell.
     Shell,
+}
+
+/// What an extra Trees main-area tab hosts: a Claude agent session (resumable
+/// across app restarts via its stored session id) or a plain login shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum TabKind {
+    Claude,
+    Terminal,
+}
+
+impl TabKind {
+    /// The value stored in the `worktree_tabs.kind` column.
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            TabKind::Claude => "claude",
+            TabKind::Terminal => "terminal",
+        }
+    }
+}
+
+/// An extra main-area tab in Trees (opened via the "+" menu), persisted so it
+/// survives an app restart. Claude tabs re-resolve their stored session on open
+/// (`terminal_sessions`, term_key `tree:<worktree_id>:tab:<id>`); terminal tabs
+/// just reopen a fresh shell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeTab {
+    pub id: String,
+    pub worktree_id: String,
+    pub kind: TabKind,
+    pub title: String,
 }
 
 /// A proposed PR (title + body) for the create-PR dialog, before it's opened.
@@ -318,6 +405,10 @@ pub struct ReviewPr {
     pub is_draft: bool,
     pub review_decision: ReviewDecision,
     pub checks: CheckRollup,
+    /// True when the PR is sitting in the repo's merge queue (GitHub's "Queued"
+    /// badge). The exact queue position isn't carried — it's shown in the
+    /// merge-queue bot comment rendered in the PR conversation.
+    pub is_in_merge_queue: bool,
     pub additions: u32,
     pub deletions: u32,
     pub comment_count: u32,
@@ -346,6 +437,54 @@ pub struct ReviewInbox {
     pub requested: Vec<ReviewPr>,
     /// PRs requested via a team the viewer is on — one section per team.
     pub teams: Vec<TeamReviews>,
+}
+
+/// A merge-queue entry's state (GitHub's `MergeQueueEntryState`). Drives the
+/// per-row status dot in the merge-queue panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum MergeQueueState {
+    /// Waiting its turn (or for the entries ahead to merge).
+    Queued,
+    /// Required checks are still running against the merge-queue branch.
+    AwaitingChecks,
+    /// Checks passed; ready to merge when it reaches the front.
+    Mergeable,
+    /// Cannot merge (failing checks / conflicts) — will be dropped from the queue.
+    Unmergeable,
+    /// Locked by the queue (a solo/jump entry is being processed).
+    Locked,
+    /// Any state GitHub adds later that we don't map yet.
+    Unknown,
+}
+
+/// One pull request sitting in a repo's merge queue, in queue order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeQueueEntry {
+    /// 1-indexed rank in the queue (front of the line = 1), derived from queue
+    /// order rather than GitHub's raw `position` so it's display-ready.
+    pub position: u32,
+    pub state: MergeQueueState,
+    pub pr_number: u32,
+    pub pr_title: String,
+    pub pr_url: String,
+    pub author: String,
+    pub author_avatar_url: String,
+    /// True when the viewer authored this PR — highlighted in the panel so they
+    /// can spot their own place in line.
+    pub is_mine: bool,
+}
+
+/// The merge queue for a repo's target branch — the ordered list of PRs waiting
+/// to merge, for the Reviews tab's merge-queue panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeQueue {
+    /// "owner/name" of the repo whose queue this is.
+    pub repo: String,
+    /// The branch the queue merges into (its default branch).
+    pub branch: String,
+    pub entries: Vec<MergeQueueEntry>,
 }
 
 /// Where a PR comment originated, so the UI can label/anchor it.
@@ -446,6 +585,15 @@ pub struct Worktree {
     /// Commits on this branch not yet pushed to its remote (what `git push` would
     /// upload); 0 when the remote is up to date.
     pub unpushed: u32,
+    /// Commits on this branch's remote tracking ref not yet local (what `git pull`
+    /// would download — PR-UI suggestions, "Update branch", a teammate's push);
+    /// 0 when local is up to date or the branch has no remote.
+    pub remote_behind: u32,
+    /// When `remote_behind > 0`, whether pulling origin/<branch> would conflict
+    /// with local commits (from a virtual merge). Disables the Pull button — a
+    /// conflicting pull can't be applied automatically and must be resolved in the
+    /// worktree. Always false when nothing is pending (`remote_behind == 0`).
+    pub pull_conflict: bool,
     pub agent: AgentKind,
     pub activity: Activity,
     /// Git branch checked out in the worktree (e.g. "feature/ak-165-…").
@@ -572,6 +720,8 @@ pub struct TriageTicket {
 #[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TriageComment {
+    /// Linear comment id — used as the `parentId` when posting a reply.
+    pub id: String,
     pub author: String,
     /// Public avatar URL of the author, when they have one.
     pub avatar_url: Option<String>,
@@ -758,4 +908,73 @@ pub struct ClaudeCommands {
     pub global: Vec<ClaudeCommand>,
     /// Commands from the repo's `.claude/commands` (empty for the app scope).
     pub repo: Vec<ClaudeCommand>,
+}
+
+/// Aggregated Claude token counts for a bucket (a period, a model, or a session).
+/// Every count is a raw number the frontend formats; the four token classes are
+/// kept apart because they're priced differently. `cost_usd` is *derived* from a
+/// static price table and is approximate — the token counts themselves are exact.
+/// Counts are `f64` (not `u64`) to match the domain's "numbers cross the bridge as
+/// JS numbers" convention; token totals stay well within f64's exact-integer range.
+#[derive(Debug, Clone, Default, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTotals {
+    pub input_tokens: f64,
+    pub output_tokens: f64,
+    pub cache_read_tokens: f64,
+    pub cache_write_tokens: f64,
+    pub cost_usd: f64,
+}
+
+/// Token usage attributed to one model, summed across every session.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUsage {
+    /// Raw model id from the transcript, e.g. `claude-opus-4-8` — the frontend
+    /// maps it to a family label + color.
+    pub model: String,
+    pub totals: UsageTotals,
+}
+
+/// Token usage for one Claude session (one main transcript), plus its current
+/// context-window fill — the "how much before compaction" signal.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsage {
+    /// The session id (the transcript file's stem, a UUID).
+    pub session_id: String,
+    /// The owning repository (folder) the session ran in — the grouping key in the
+    /// Usage panel. Resolved from the transcript's `cwd` against santree's
+    /// registered repos, falling back to the path.
+    pub repo: String,
+    /// The worktree label (the issue id under `.santree/worktrees/`) when the
+    /// session ran in a santree worktree; `None` for the repo's main checkout.
+    pub worktree: Option<String>,
+    /// The session's primary (most-used by tokens) model id — the badge model.
+    pub model: String,
+    /// Every model used in the session with its own token split, most-used first.
+    /// Surfaces mid-session model switches (a session isn't tied to one model).
+    pub models: Vec<ModelUsage>,
+    pub totals: UsageTotals,
+    /// Tokens in the last turn's context (input + cache read + cache write) ≈ the
+    /// current context size — what "fills up" before Claude compacts.
+    pub context_tokens: f64,
+    /// The model's context-window limit the fill is measured against (200k, or 1M
+    /// when the observed context already exceeds 200k).
+    pub context_limit: f64,
+    /// Epoch ms of the session's most recent activity — formatted live by the frontend.
+    pub last_activity_ms: f64,
+}
+
+/// The full Claude usage report: grand + period totals, the per-model split, and
+/// the most recent sessions (newest first).
+#[derive(Debug, Clone, Default, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReport {
+    pub total: UsageTotals,
+    pub today: UsageTotals,
+    pub week: UsageTotals,
+    pub month: UsageTotals,
+    pub by_model: Vec<ModelUsage>,
+    pub sessions: Vec<SessionUsage>,
 }

@@ -2,73 +2,104 @@
  *  "Issue" (the ticket, like Triage) is present for per-issue worktrees but not
  *  the base-branch entry (it has no ticket). A shared "File" tab (whatever file
  *  you click) and a temporary "Setup" tab (while the setup script runs) appear on
- *  demand, and extra terminals opened via the trailing "+" tab are closable. All
- *  tabs share the same shape — a label with an optional trailing affordance (a
- *  close × or a status dot) in a fixed slot. */
+ *  demand, and the persisted extra tabs opened via the trailing "+" tab (Claude
+ *  sessions / terminals) are closable and renameable (double-click the label).
+ *  All tabs share the same shape — an optional leading icon + label with an
+ *  optional trailing affordance (a close × or a status dot) in a fixed slot. */
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
-import { CloseIcon, GlobeIcon, PlusIcon, TerminalIcon } from "../../components/icons";
+import type { AgentKind, TabKind, WorktreeTab } from "../../bindings";
+import {
+  AgentIcon,
+  ClaudeSparkIcon,
+  CloseIcon,
+  GlobeIcon,
+  PlusIcon,
+  TerminalIcon,
+} from "../../components/icons";
 import { Dropdown, MENU_ITEM, underlineTabStyle } from "../../components/primitives";
 import { inEditable } from "../../lib/useKeyboardShortcuts";
 import { CHROME } from "../../state/AppContext";
 import { useTerminals } from "../terminal/TerminalsContext";
-import { BASE_ID, type MainTab, termTab, useTrees } from "./model";
+import { BASE_ID, extraTab, type MainTab, useTrees } from "./model";
 
 export function MainTabBar() {
   const {
+    active,
     selectedFile,
     setupFor,
     activeId,
     activeTab,
     setActiveTab,
     closeFileTab,
-    extraTerminals,
-    addTerminal,
-    closeTerminal,
+    extraTabs,
+    addTab,
+    closeTab,
+    renameTab,
   } = useTrees();
   const { tabs, close } = useTerminals();
   const isBase = activeId === BASE_ID;
   const hasFile = selectedFile !== null;
   const hasSetup = setupFor !== null && setupFor === activeId;
 
-  // Closing an extra terminal tears down its PTY session (found by refId) too, so
-  // it doesn't linger in the global Terminal tab.
-  const closeExtra = (n: number) => {
-    const refId = `tree:${activeId}:t${n}`;
-    const tab = tabs.find((t) => t.refId === refId);
-    if (tab) close(tab.key);
-    closeTerminal(n);
+  // Closing an extra tab tears down its PTY session (found by refId) too, so it
+  // doesn't linger in the global Terminal tab (and a Claude tab's stored session
+  // is forgotten by the backend).
+  const closeExtra = (t: WorktreeTab) => {
+    const refId = `tree:${activeId}:tab:${t.id}`;
+    const live = tabs.find((x) => x.refId === refId);
+    if (live) close(live.key);
+    closeTab(t.id);
   };
 
-  // Auto-close an extra terminal tab once its process exits (its session vanishes
-  // from `tabs`), so it disappears instead of lingering as a dead/gray tab you have
-  // to ✕ by hand. We only prune a terminal we've *seen* live, so the brief gap
-  // before a freshly-opened session registers doesn't drop it. This pane is keyed
-  // by worktree id, so `seen` is naturally scoped to the active worktree.
-  const seen = useRef<Set<number>>(new Set());
+  // Auto-close an extra *terminal* tab once its shell exits (its session vanishes
+  // from `tabs`), so it disappears instead of lingering as a dead/gray tab you
+  // have to ✕ by hand. We only prune a tab we've *seen* live, so the brief gap
+  // before a freshly-opened session registers doesn't drop it. Claude tabs are
+  // exempt: their session is meant to outlive the process (quitting claude shows
+  // the resume pane; the tab comes back after an app restart too). This pane is
+  // keyed by worktree id, so `seen` is naturally scoped to the active worktree.
+  const seen = useRef<Set<string>>(new Set());
   useEffect(() => {
-    for (const n of extraTerminals) {
-      const alive = tabs.some((t) => t.refId === `tree:${activeId}:t${n}`);
-      if (alive) seen.current.add(n);
-      else if (seen.current.has(n)) {
-        seen.current.delete(n);
-        closeTerminal(n);
+    for (const t of extraTabs) {
+      if (t.kind !== "terminal") continue;
+      const alive = tabs.some((x) => x.refId === `tree:${activeId}:tab:${t.id}`);
+      if (alive) seen.current.add(t.id);
+      else if (seen.current.has(t.id)) {
+        seen.current.delete(t.id);
+        closeTab(t.id);
       }
     }
-  }, [tabs, extraTerminals, activeId, closeTerminal]);
+  }, [tabs, extraTabs, activeId, closeTab]);
 
   return (
     <div className={`flex ${CHROME.subBar} flex-none items-stretch border-b border-line bg-deep`}>
       {!isBase && <Tab tab="issue" label="Issue" active={activeTab} onSelect={setActiveTab} />}
-      <Tab tab="terminal" label="Terminal" active={activeTab} onSelect={setActiveTab} />
-      {extraTerminals.map((n) => (
+      {/* The main work terminal hosts the worktree's agent session — mark it with
+          the agent's logo (the base entry is a plain shell, so no icon). */}
+      <Tab
+        tab="terminal"
+        label="Terminal"
+        icon={!isBase && active ? <AgentTabIcon kind={active.agent} /> : undefined}
+        active={activeTab}
+        onSelect={setActiveTab}
+      />
+      {extraTabs.map((t) => (
         <Tab
-          key={n}
-          tab={termTab(n)}
-          label={`Terminal ${n}`}
+          key={t.id}
+          tab={extraTab(t.id)}
+          label={t.title}
+          icon={
+            t.kind === "claude" ? (
+              <ClaudeSparkIcon />
+            ) : (
+              <TerminalIcon size={11} className="text-muted-3" />
+            )
+          }
           active={activeTab}
           onSelect={setActiveTab}
-          onClose={() => closeExtra(n)}
+          onClose={() => closeExtra(t)}
+          onRename={(title) => renameTab(t.id, title)}
         />
       ))}
       {hasFile && (
@@ -89,15 +120,22 @@ export function MainTabBar() {
           trailing={<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-amber" />}
         />
       )}
-      <NewTabButton onAddTerminal={addTerminal} />
+      <NewTabButton onAdd={addTab} />
     </div>
   );
 }
 
-/** The trailing "+" tab: opens a new terminal (or a browser, once that's built).
- *  ⌘T opens the menu while a worktree is active (this bar is on screen); then
- *  1 selects Terminal and 2 would select Web (WIP — no-op for now). */
-function NewTabButton({ onAddTerminal }: { onAddTerminal: () => void }) {
+/** The agent's logomark for the main work tab — Claude gets its brand color so
+ *  the spark reads as "Claude" at a glance; other agents use the text color. */
+function AgentTabIcon({ kind }: { kind: AgentKind }) {
+  if (kind === "Claude") return <ClaudeSparkIcon />;
+  return <AgentIcon kind={kind} size={11} className="text-muted-3" />;
+}
+
+/** The trailing "+" tab: opens a new Claude session or terminal (or a browser,
+ *  once that's built). ⌘T opens the menu while a worktree is active (this bar is
+ *  on screen); then 1 selects Claude, 2 Terminal, and 3 would select Web (WIP). */
+function NewTabButton({ onAdd }: { onAdd: (kind: TabKind) => void }) {
   const [open, setOpen] = useState(false);
 
   // ⌘T opens the menu. Scoped to this component's lifetime, which matches "a
@@ -133,16 +171,17 @@ function NewTabButton({ onAddTerminal }: { onAddTerminal: () => void }) {
         </button>
       )}
     >
-      {(close) => <NewTabMenu onAddTerminal={onAddTerminal} close={close} />}
+      {(close) => <NewTabMenu onAdd={onAdd} close={close} />}
     </Dropdown>
   );
 }
 
 /** New-tab menu rows. Mounted only while the menu is open, so its digit-key
- *  listener (1 → Terminal, 2 → Web) is live exactly when the menu is visible. */
-function NewTabMenu({ onAddTerminal, close }: { onAddTerminal: () => void; close: () => void }) {
-  const addTerminal = () => {
-    onAddTerminal();
+ *  listener (1 → Claude, 2 → Terminal, 3 → Web) is live exactly when the menu is
+ *  visible. */
+function NewTabMenu({ onAdd, close }: { onAdd: (kind: TabKind) => void; close: () => void }) {
+  const add = (kind: TabKind) => {
+    onAdd(kind);
     close();
   };
 
@@ -151,23 +190,32 @@ function NewTabMenu({ onAddTerminal, close }: { onAddTerminal: () => void; close
       if (e.metaKey || e.ctrlKey || e.altKey || inEditable(e.target)) return;
       if (e.key === "1") {
         e.preventDefault();
-        onAddTerminal();
+        onAdd("claude");
         close();
       } else if (e.key === "2") {
+        e.preventDefault();
+        onAdd("terminal");
+        close();
+      } else if (e.key === "3") {
         // Web is WIP — swallow the key so it doesn't leak, but do nothing yet.
         e.preventDefault();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onAddTerminal, close]);
+  }, [onAdd, close]);
 
   return (
     <>
-      <button type="button" onClick={addTerminal} className={MENU_ITEM}>
+      <button type="button" onClick={() => add("claude")} className={MENU_ITEM}>
+        <ClaudeSparkIcon size={13} />
+        Claude
+        <span className="ml-auto text-[10px] text-muted-4">1</span>
+      </button>
+      <button type="button" onClick={() => add("terminal")} className={MENU_ITEM}>
         <TerminalIcon />
         Terminal
-        <span className="ml-auto text-[10px] text-muted-4">1</span>
+        <span className="ml-auto text-[10px] text-muted-4">2</span>
       </button>
       <button type="button" disabled title="Coming soon" className={MENU_ITEM}>
         <GlobeIcon />
@@ -181,29 +229,53 @@ function NewTabMenu({ onAddTerminal, close }: { onAddTerminal: () => void; close
 function Tab({
   tab,
   label,
+  icon,
   active,
   onSelect,
   onClose,
+  onRename,
   trailing,
 }: {
   tab: MainTab;
   label: string;
+  /** Leading logomark (e.g. the Claude spark on agent tabs). */
+  icon?: ReactNode;
   active: MainTab;
   onSelect: (tab: MainTab) => void;
   /** When set, the trailing slot is a close button. */
   onClose?: () => void;
+  /** When set, double-clicking the label edits it inline. */
+  onRename?: (title: string) => void;
   /** A non-interactive trailing affordance (e.g. a status dot). */
   trailing?: ReactNode;
 }) {
   const on = active === tab;
+  const [editing, setEditing] = useState(false);
   return (
     <div
       className="flex items-stretch border-r border-line text-[11.5px] font-medium"
       style={underlineTabStyle(on)}
     >
-      <button type="button" onClick={() => onSelect(tab)} className="cursor-pointer pr-1.5 pl-3">
-        {label}
-      </button>
+      {editing && onRename ? (
+        <RenameInput
+          initial={label}
+          onDone={(title) => {
+            setEditing(false);
+            if (title) onRename(title);
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={() => onSelect(tab)}
+          onDoubleClick={onRename ? () => setEditing(true) : undefined}
+          title={onRename ? "Double-click to rename" : undefined}
+          className="flex cursor-pointer items-center gap-1.5 pr-1.5 pl-3"
+        >
+          {icon}
+          {label}
+        </button>
+      )}
       {/* Fixed trailing slot so all tabs are the same shape. */}
       <span className="flex w-5 items-center justify-center pr-1.5">
         {onClose ? (
@@ -220,5 +292,41 @@ function Tab({
         )}
       </span>
     </div>
+  );
+}
+
+/** The inline rename field a tab swaps to on double-click. Enter/blur commit,
+ *  Escape cancels; committing is latched so Enter's commit isn't followed by the
+ *  unmount blur re-firing `onDone`. */
+function RenameInput({
+  initial,
+  onDone,
+}: {
+  initial: string;
+  onDone: (title: string | null) => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const done = useRef(false);
+  const finish = (title: string | null) => {
+    if (done.current) return;
+    done.current = true;
+    onDone(title);
+  };
+  return (
+    <input
+      // biome-ignore lint/a11y/noAutofocus: the field replaces the label the user just double-clicked — focus must follow.
+      autoFocus
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onFocus={(e) => e.currentTarget.select()}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") finish(value.trim() || null);
+        else if (e.key === "Escape") finish(null);
+      }}
+      onBlur={() => finish(value.trim() || null)}
+      aria-label="Tab name"
+      className="my-1 ml-2 rounded border border-line bg-app px-1.5 text-[11.5px] text-fg-2 outline-none focus-visible:border-accent"
+      style={{ width: `${Math.min(Math.max(value.length + 3, 10), 32)}ch` }}
+    />
   );
 }

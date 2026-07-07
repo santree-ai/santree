@@ -319,6 +319,19 @@ function CursorLogo({ size = 16, className }: IconProps) {
   );
 }
 
+/** The Claude "spark" logomark in brand terracotta — marks tabs that host a
+ *  Claude session (Trees work/Claude tabs, the Triage Investigation tab). */
+export function ClaudeSparkIcon({ size = 11, className }: IconProps) {
+  return (
+    <span
+      style={{ color: "var(--claude-brand)" }}
+      className={`flex items-center ${className ?? ""}`}
+    >
+      <ClaudeCodeLogo size={size} />
+    </span>
+  );
+}
+
 /** The right logo for a coding agent harness. */
 export function AgentIcon({
   kind,
@@ -511,6 +524,46 @@ export function KeyIcon({ size = 20, className }: IconProps) {
     <Stroke size={size} className={className}>
       <circle cx="7.5" cy="15.5" r="4.5" />
       <path d="m10.5 12.5 8-8M16 6l2 2M19 3l2 2" />
+    </Stroke>
+  );
+}
+
+/** An eye — reveal a masked value. */
+export function EyeIcon({ size = 14, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </Stroke>
+  );
+}
+
+/** An eye with a slash — hide a revealed value. */
+export function EyeOffIcon({ size = 14, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c6.5 0 10 7 10 7a13.2 13.2 0 0 1-2.16 2.94M6.6 6.6A13.2 13.2 0 0 0 2 12s3.5 7 10 7a9.1 9.1 0 0 0 3.4-.66" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2M2 2l20 20" />
+    </Stroke>
+  );
+}
+
+/** A pencil — edit in place. */
+export function PencilIcon({ size = 14, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </Stroke>
+  );
+}
+
+/** A padlock — a stored (masked) secret. */
+export function LockIcon({ size = 14, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <rect x="4.5" y="11" width="15" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
     </Stroke>
   );
 }

@@ -208,6 +208,10 @@ pub async fn base_worktree(db: &Db, repo: &str) -> Result<Option<Worktree>> {
             ahead: 0,
             behind: git::behind(&p, &base),
             unpushed: git::unpushed(&p, &base, &base),
+            // The base's remote-sync is the "Update base from origin" action, so
+            // don't surface a redundant Pull button for it.
+            remote_behind: 0,
+            pull_conflict: false,
             agent: AgentKind::Claude,
             activity: Activity::Idle,
             branch: base.clone(),
@@ -254,6 +258,7 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<Worktree>> {
 fn build_worktree(row: LinkRow) -> Worktree {
     let path = PathBuf::from(&row.worktree_path);
     let (add_lines, del_lines) = branch_stats(&path, &row.base_branch);
+    let remote = git::pull_state(&path, &row.branch);
     Worktree {
         id: row.issue_id,
         title: row.title,
@@ -264,6 +269,12 @@ fn build_worktree(row: LinkRow) -> Worktree {
         ahead: git::ahead(&path, &row.base_branch),
         behind: git::behind(&path, &row.base_branch),
         unpushed: git::unpushed(&path, &row.branch, &row.base_branch),
+        // Freshen the branch's remote ref (throttled) so remote_behind reflects
+        // commits added to the branch upstream — nothing else fetches it.
+        remote_behind: remote.behind,
+        // Only when there's something to pull do we run the (cheap) virtual merge
+        // to see if it'd conflict, so the Pull button can disable itself up front.
+        pull_conflict: remote.conflict,
         agent: parse_agent(row.agent.as_deref()),
         // Live agent activity needs the session-signal system (not yet wired);
         // default to Idle until then.
@@ -409,7 +420,12 @@ pub async fn create(
 /// master. This keeps each stacked worktree's `base_branch` (and therefore its PR
 /// base / diff) correct as intermediate branches land, walking one hop per removal
 /// up the chain.
-pub async fn remove(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
+pub async fn remove(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    prompts_root: Option<&Path>,
+) -> Result<()> {
     let root = repo_root(db, repo).await?;
     let (branch, base_branch, worktree_path) = sqlx::query_as::<_, (String, String, String)>(
         "SELECT branch, base_branch, worktree_path
@@ -425,8 +441,9 @@ pub async fn remove(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
         // Blocking git (`worktree remove`, `branch -D`) off the async runtime.
         let root = root.clone();
         let branch = branch.clone();
+        let wt = worktree_path.clone();
         tokio::task::spawn_blocking(move || {
-            git::remove_worktree(Path::new(&root), Path::new(&worktree_path), &branch)
+            git::remove_worktree(Path::new(&root), Path::new(&wt), &branch)
         })
         .await??;
     }
@@ -435,9 +452,23 @@ pub async fn remove(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
         .bind(issue_id)
         .execute(db)
         .await?;
+    // Drop any recorded live session state for this worktree. Keyed by the cwd
+    // the hooks stored, which is the worktree path Claude ran in. (A row that
+    // doesn't match — e.g. a symlink-resolved cwd — just lingers harmlessly;
+    // the table is bounded regardless.)
+    sqlx::query("DELETE FROM session_state WHERE cwd = ?")
+        .bind(&worktree_path)
+        .execute(db)
+        .await?;
+    // Delete the on-disk work prompt (best-effort; absent is fine).
+    if let Some(prompts_root) = prompts_root {
+        delete_prompt_file(prompts_root, &root, issue_id);
+    }
     // Forget the terminal session tied to this worktree so recreating it later
     // starts a fresh conversation instead of `--resume`ing one about deleted code.
     crate::session::forget(db, repo, &format!("tree:{issue_id}")).await?;
+    // Same for its persisted extra tabs (and each Claude tab's stored session).
+    crate::tabs::remove_for_worktree(db, repo, issue_id).await?;
     // Re-point this branch's children onto its base (the grandparent).
     let restacked = sqlx::query(
         "UPDATE worktree_links SET base_branch = ? WHERE repo_path = ? AND base_branch = ?",
@@ -690,6 +721,16 @@ pub async fn push(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
     tokio::task::spawn_blocking(move || git::push(&c.path, &c.branch)).await?
 }
 
+/// Integrate origin/<branch> into the worktree's own branch — the Trees "Pull"
+/// button, for commits added to the branch remotely (PR-UI suggestions, "Update
+/// branch", a teammate's push). Fast-forwards when possible, else merges — but
+/// refuses up front (nothing touched) if that merge would conflict. Network +
+/// blocking, so off the runtime.
+pub async fn pull_remote(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
+    let c = coords(db, repo, issue_id).await?;
+    tokio::task::spawn_blocking(move || git::pull_remote(&c.path, &c.branch)).await?
+}
+
 /// Fast-forward the repo's local base branch (main/master) to origin — the
 /// "update master" action. Operates on the main repo dir, not the worktree.
 pub async fn update_base(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
@@ -875,10 +916,64 @@ pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<Strin
         .unwrap_or(fallback))
 }
 
+// ── Agent work-prompt file ───────────────────────────────────────────────────
+//
+// The rendered `work` prompt can be very long (full ticket body + comment
+// thread). Typing it into the interactive-shell seed (`exec claude '<prompt>'`)
+// overflows the line and forces the shell into a `quote>` continuation, and the
+// PTY line editor mangles control bytes — the same problem the `--settings` file
+// works around (see `hooks.rs`). So we write the prompt to a stable file and seed
+// the short `Read <path> …` instruction instead. The file is regenerated on every
+// launch (so it reflects the latest ticket) and deleted with the worktree.
+
+/// Stable, filesystem-safe key for a repo's local path (FNV-1a, hex). Namespaces
+/// per-repo prompt files so two repos sharing an issue id (both have "AK-1") don't
+/// collide. FNV is spelled out (not std's `DefaultHasher`, whose output isn't
+/// guaranteed stable across releases) so the key a later app version computes to
+/// *delete* the file matches the one an earlier version wrote.
+fn repo_key(repo_root: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in repo_root.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Absolute path of the on-disk work prompt for a worktree:
+/// `<prompts_root>/<repo-key>/<issue_id>.md`. `issue_id` is `validate_issue_id`-safe
+/// (a single normal component), so it can't escape the directory.
+fn prompt_file_path(prompts_root: &Path, repo_root: &str, issue_id: &str) -> PathBuf {
+    prompts_root
+        .join(repo_key(repo_root))
+        .join(format!("{issue_id}.md"))
+}
+
+/// The directory santree writes agent work-prompt files into, under the app's data
+/// dir — never inside a repo checkout, so it can't surface in any worktree's
+/// `git status`. Mirrors where `claude-hooks.json` lives. `None` when no writable
+/// data dir resolves; the caller then launches without a prompt file.
+pub fn prompts_root(app: &tauri::AppHandle) -> Option<PathBuf> {
+    use tauri::Manager;
+    app.path().app_data_dir().ok().map(|d| d.join("prompts"))
+}
+
+/// Best-effort delete of a worktree's on-disk work prompt (missing is fine).
+fn delete_prompt_file(prompts_root: &Path, repo_root: &str, issue_id: &str) {
+    let _ = std::fs::remove_file(prompt_file_path(prompts_root, repo_root, issue_id));
+}
+
 /// Render the agent's opening prompt for a freshly-started worktree, from the
-/// `work` template (ticket id + title + implement instructions). The terminal
-/// seeds `exec <agent> '<prompt>'` with this. Cheap — pure template render, no AI.
-pub async fn work_prompt(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
+/// `work` template (ticket id + title + implement instructions), write it to a
+/// stable per-worktree file (see the module note above), and return that file's
+/// **path**. The terminal seeds `exec <agent> 'Read <path> …'` with it. Cheap —
+/// pure template render + one file write, no AI.
+pub async fn work_prompt(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    prompts_root: &Path,
+) -> Result<String> {
     let root = repo_root(db, repo).await?;
     let title: Option<String> =
         sqlx::query_scalar("SELECT title FROM worktree_links WHERE repo_path = ? AND issue_id = ?")
@@ -905,7 +1000,7 @@ pub async fn work_prompt(db: &Db, repo: &str, issue_id: &str) -> Result<String> 
         .flatten()
         .filter(|n| !n.trim().is_empty());
 
-    crate::prompts::render(
+    let rendered = crate::prompts::render(
         "work",
         minijinja::context! {
             ticket_id => issue_id,
@@ -914,8 +1009,20 @@ pub async fn work_prompt(db: &Db, repo: &str, issue_id: &str) -> Result<String> 
             custom_context,
             mode => "implement",
         },
-    )
-    .map(|s| s.trim().to_string())
+    )?
+    .trim()
+    .to_string();
+
+    // Persist to a stable file and hand back its path (not the text) — the seed is
+    // then the short `Read <path> …` line. Writing here (inside the launch fetch,
+    // which pulled the live ticket above) is what keeps the file current: every
+    // fresh launch re-renders from the latest Linear state and overwrites.
+    let path = prompt_file_path(prompts_root, &root, issue_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, &rendered)?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 // ── Setup script (.santree/init.sh) ──────────────────────────────────────────
@@ -976,7 +1083,10 @@ pub async fn make_init_executable(db: &Db, repo: &str) -> Result<()> {
 /// unresolvable base means the pointer is wrong and should be fixed (and `remove`
 /// keeps it correct by re-pointing a removed branch's children to its own base).
 fn branch_stats(cwd: &Path, base: &str) -> (u32, u32) {
-    let Ok(merge_base) = git::git(cwd, &["merge-base", base, "HEAD"]) else {
+    // Diff from the ref the worktree actually forked from (origin/<base>), not a
+    // possibly-stale local <base> — see git::compare_base.
+    let base = git::compare_base(cwd, base);
+    let Ok(merge_base) = git::git(cwd, &["merge-base", &base, "HEAD"]) else {
         return (0, 0);
     };
     let Ok(raw) = git::git_output(cwd, &["diff", "--numstat", &merge_base]) else {
@@ -1077,10 +1187,7 @@ mod tests {
             "link text"
         );
         // Mixed with CSI colour codes on the same line.
-        assert_eq!(
-            strip_ansi("\x1b]0;title\x07\x1b[32mgreen\x1b[0m"),
-            "green"
-        );
+        assert_eq!(strip_ansi("\x1b]0;title\x07\x1b[32mgreen\x1b[0m"), "green");
     }
 
     fn line(text: &str) -> SetupEvent {
@@ -1222,13 +1329,11 @@ mod tests {
 
         // Real SQLite (migrations applied) with a repo row pointing at our git dir.
         let db = crate::db::init(base.join("test.db")).await.unwrap();
-        sqlx::query(
-            "INSERT INTO repos (name, tracker, path) VALUES ('test','Local git',?)",
-        )
-        .bind(repo_dir.to_string_lossy().as_ref())
-        .execute(&db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO repos (name, tracker, path) VALUES ('test','Local git',?)")
+            .bind(repo_dir.to_string_lossy().as_ref())
+            .execute(&db)
+            .await
+            .unwrap();
 
         // 1. Create the worktree and record the link.
         let wt = create(
@@ -1256,9 +1361,17 @@ mod tests {
         assert_eq!(listed[0].project.as_deref(), Some("Booking"));
 
         // Idempotent: creating again just returns the existing worktree (no error).
-        let again = create(&db, "test", "AK-1", "Do a thing", None, None, AgentKind::Claude)
-            .await
-            .unwrap();
+        let again = create(
+            &db,
+            "test",
+            "AK-1",
+            "Do a thing",
+            None,
+            None,
+            AgentKind::Claude,
+        )
+        .await
+        .unwrap();
         assert_eq!(again.id, "AK-1");
         assert_eq!(
             list(&db, "test").await.unwrap().len(),
@@ -1273,9 +1386,17 @@ mod tests {
             .await
             .unwrap();
         assert!(get(&db, "test", "AK-1").await.unwrap().is_none());
-        let adopted = create(&db, "test", "AK-1", "Do a thing", None, None, AgentKind::Claude)
-            .await
-            .unwrap();
+        let adopted = create(
+            &db,
+            "test",
+            "AK-1",
+            "Do a thing",
+            None,
+            None,
+            AgentKind::Claude,
+        )
+        .await
+        .unwrap();
         assert!(
             adopted.branch.contains("ak-1"),
             "adopted the real branch from git: {}",
@@ -1303,9 +1424,17 @@ mod tests {
             "clean after commit"
         );
 
+        // A work-prompt file (normally written by `work_prompt` at launch) is
+        // cleaned up on removal. Write one at the real path the removal recomputes.
+        let prompts = base.join("prompts");
+        let pfile = prompt_file_path(&prompts, repo_dir.to_string_lossy().as_ref(), "AK-1");
+        std::fs::create_dir_all(pfile.parent().unwrap()).unwrap();
+        std::fs::write(&pfile, "prompt body").unwrap();
+
         // 3. Remove the worktree + link.
-        remove(&db, "test", "AK-1").await.unwrap();
+        remove(&db, "test", "AK-1", Some(&prompts)).await.unwrap();
         assert!(!wt_dir.exists(), "worktree directory should be gone");
+        assert!(!pfile.exists(), "work-prompt file should be deleted with the worktree");
         assert!(
             list(&db, "test").await.unwrap().is_empty(),
             "link should be gone"
@@ -1332,13 +1461,11 @@ mod tests {
         run_git(&repo_dir, &["commit", "-m", "init"]);
 
         let db = crate::db::init(base.join("test.db")).await.unwrap();
-        sqlx::query(
-            "INSERT INTO repos (name, tracker, path) VALUES ('test','Local git',?)",
-        )
-        .bind(repo_dir.to_string_lossy().as_ref())
-        .execute(&db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO repos (name, tracker, path) VALUES ('test','Local git',?)")
+            .bind(repo_dir.to_string_lossy().as_ref())
+            .execute(&db)
+            .await
+            .unwrap();
 
         // AK-1 branches off main.
         let ak1 = create(&db, "test", "AK-1", "First", None, None, AgentKind::Claude)
@@ -1361,7 +1488,7 @@ mod tests {
         assert_eq!(ak2.base_branch, ak1.branch);
 
         // Removing AK-1 restacks AK-2 onto AK-1's own (old) base: main.
-        remove(&db, "test", "AK-1").await.unwrap();
+        remove(&db, "test", "AK-1", None).await.unwrap();
         let ak2_after = get(&db, "test", "AK-2").await.unwrap().unwrap();
         assert_eq!(
             ak2_after.base_branch, "main",

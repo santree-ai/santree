@@ -5,16 +5,92 @@
  * identically. Memoized on `detail` so toggling visibility never re-parses the
  * markdown — only genuinely new detail data does.
  */
-import { memo } from "react";
+import { memo, useState } from "react";
 
 import type { TriageComment, TriageDetail } from "../bindings";
+import { useAddComment } from "../lib/queries";
 import { Avatar } from "./Avatar";
 import { Markdown } from "./Markdown";
-import { Skeleton } from "./primitives";
+import { Button, Skeleton } from "./primitives";
 import { RelativeTime } from "./RelativeTime";
 
 export function countComments(comments: TriageComment[]): number {
   return comments.reduce((n, c) => n + 1 + countComments(c.children), 0);
+}
+
+/** Optimistically-added comments carry a temp id until the refetch replaces
+ *  them; dim those so a slow post reads as in-flight, not committed. */
+const isPending = (c: TriageComment) => c.id.startsWith("pending-");
+
+/**
+ * Inline comment editor. Posts a top-level comment when `parentId` is null, or a
+ * reply to that comment otherwise. ⌘/Ctrl+Enter sends; Esc cancels a reply.
+ */
+function CommentComposer({
+  repo,
+  ticketId,
+  parentId = null,
+  autoFocus = false,
+  onClose,
+  placeholder = "Leave a comment…",
+}: {
+  repo: string;
+  ticketId: string;
+  parentId?: string | null;
+  autoFocus?: boolean;
+  onClose?: () => void;
+  placeholder?: string;
+}) {
+  const [body, setBody] = useState("");
+  const add = useAddComment(repo);
+  const trimmed = body.trim();
+
+  const submit = () => {
+    if (!trimmed || add.isPending) return;
+    add.mutate(
+      { ticketId, parentId, body: trimmed },
+      {
+        onSuccess: () => {
+          setBody("");
+          onClose?.();
+        },
+      },
+    );
+  };
+
+  return (
+    <div>
+      <textarea
+        // biome-ignore lint/a11y/noAutofocus: a reply composer opens on explicit click; focusing it is the intent
+        autoFocus={autoFocus}
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        onKeyDown={(e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+            e.preventDefault();
+            submit();
+          } else if (e.key === "Escape" && onClose) {
+            e.preventDefault();
+            onClose();
+          }
+        }}
+        placeholder={placeholder}
+        rows={parentId ? 2 : 3}
+        className="w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] leading-[1.55] text-fg-2 placeholder:text-muted-4 focus:border-line-strong focus:outline-none"
+      />
+      <div className="mt-1.5 flex items-center justify-end gap-2">
+        <span className="mr-auto font-mono text-[9px] text-muted-4">⌘⏎ to send</span>
+        {onClose && (
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            Cancel
+          </Button>
+        )}
+        <Button variant="primary" size="sm" onClick={submit} disabled={!trimmed || add.isPending}>
+          {add.isPending ? "Posting…" : parentId ? "Reply" : "Comment"}
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 function CommentHead({ comment, size }: { comment: TriageComment; size: number }) {
@@ -27,9 +103,21 @@ function CommentHead({ comment, size }: { comment: TriageComment; size: number }
   );
 }
 
-function CommentItem({ comment }: { comment: TriageComment }) {
+function CommentItem({
+  comment,
+  repo,
+  ticketId,
+}: {
+  comment: TriageComment;
+  repo: string;
+  ticketId: string;
+}) {
+  const [replying, setReplying] = useState(false);
   return (
-    <div className="rounded-[10px] border border-hairline bg-panel px-3.5 py-3">
+    <div
+      className="rounded-[10px] border border-hairline bg-panel px-3.5 py-3"
+      style={isPending(comment) ? { opacity: 0.55 } : undefined}
+    >
       <CommentHead comment={comment} size={22} />
       <Markdown>{comment.body}</Markdown>
 
@@ -37,13 +125,37 @@ function CommentItem({ comment }: { comment: TriageComment }) {
         // Threaded replies — indented under a connector rail, no separate card.
         <div className="mt-3.5 space-y-3.5 border-l-2 border-line-2 pl-3.5">
           {comment.children.map((child, i) => (
-            <div key={`${child.author}-${i}`}>
+            <div key={`${child.id}-${i}`} style={isPending(child) ? { opacity: 0.55 } : undefined}>
               <CommentHead comment={child} size={18} />
               <Markdown>{child.body}</Markdown>
             </div>
           ))}
         </div>
       )}
+
+      {/* Reply targets this thread's root (Linear threads are one level deep).
+          Hidden for optimistic comments — there's no real id to reply to yet. */}
+      {!isPending(comment) &&
+        (replying ? (
+          <div className="mt-3 border-l-2 border-line-2 pl-3.5">
+            <CommentComposer
+              repo={repo}
+              ticketId={ticketId}
+              parentId={comment.id}
+              autoFocus
+              placeholder="Write a reply…"
+              onClose={() => setReplying(false)}
+            />
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setReplying(true)}
+            className="mt-2.5 cursor-pointer text-[11px] font-medium text-muted-3 hover:text-fg-2"
+          >
+            Reply
+          </button>
+        ))}
     </div>
   );
 }
@@ -52,8 +164,10 @@ function CommentItem({ comment }: { comment: TriageComment }) {
  *  that scrolls other sections (e.g. dependencies) alongside it. */
 export const DiscussionContent = memo(function DiscussionContent({
   detail,
+  repo,
 }: {
   detail: TriageDetail;
+  repo: string;
 }) {
   const total = countComments(detail.comments);
   return (
@@ -65,27 +179,36 @@ export const DiscussionContent = memo(function DiscussionContent({
         <p className="text-[12.5px] text-muted-4 italic">No description.</p>
       )}
 
-      {total > 0 && (
-        <div className="mt-6">
-          <div className="mb-3 font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">
-            {total} {total === 1 ? "comment" : "comments"}
-          </div>
-          <div className="space-y-3.5">
-            {detail.comments.map((c, i) => (
-              <CommentItem key={`${c.author}-${i}`} comment={c} />
-            ))}
-          </div>
-        </div>
-      )}
+      <div className="mt-6">
+        {total > 0 && (
+          <>
+            <div className="mb-3 font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">
+              {total} {total === 1 ? "comment" : "comments"}
+            </div>
+            <div className="mb-4 space-y-3.5">
+              {detail.comments.map((c, i) => (
+                <CommentItem key={`${c.id}-${i}`} comment={c} repo={repo} ticketId={detail.id} />
+              ))}
+            </div>
+          </>
+        )}
+        <CommentComposer repo={repo} ticketId={detail.id} />
+      </div>
     </>
   );
 });
 
 /** The issue body + comment thread. Scrolls within its own pane. */
-export const DiscussionPane = memo(function DiscussionPane({ detail }: { detail: TriageDetail }) {
+export const DiscussionPane = memo(function DiscussionPane({
+  detail,
+  repo,
+}: {
+  detail: TriageDetail;
+  repo: string;
+}) {
   return (
     <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-5 py-[18px]">
-      <DiscussionContent detail={detail} />
+      <DiscussionContent detail={detail} repo={repo} />
     </div>
   );
 });

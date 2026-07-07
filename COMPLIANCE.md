@@ -21,11 +21,24 @@ These constraints are **load-bearing** for the product and must survive future
 changes. Do not add any of the following, even if they seem helpful:
 
 ## No credential handling
-The app never reads, stores, proxies, injects, or intercepts a CLI's auth/OAuth
-tokens. The user runs `claude login` (or any vendor's equivalent) **themselves,
-inside the terminal**; auth lives wherever the CLI puts it. santree is agnostic to
-and untouched by it. The PTY layer only inherits the ambient process environment
-so PATH/HOME resolve — it does not synthesize, capture, or forward secrets.
+The app never reads, stores, proxies, injects, or intercepts **an agent CLI's own
+auth/OAuth tokens**. The user runs `claude login` (or any vendor's equivalent)
+**themselves, inside the terminal**; auth lives wherever the CLI puts it. santree
+is agnostic to and untouched by it. santree never reads or captures a CLI's token
+from disk/keychain/env to forward it anywhere.
+
+### User-configured project environment — a scoped exception
+The PTY inherits the ambient process environment (so PATH/HOME resolve) **plus the
+variables the user configures under Settings → Environment** (`env.rs`,
+`OpenOpts.env`). This is the user's *own* project environment — a `DATABASE_URL`,
+a service key their code-under-test needs — exactly what an IDE's integrated
+terminal provides, and identical to the user `export`-ing it in their shell rc.
+It is entered by the user in santree's own UI and stored in santree's own settings;
+santree does not synthesize it, read it from a CLI's config, or capture it from
+anywhere. This is **not** a hole in "No credential handling" above: santree still
+never touches an agent CLI's *own* auth token. The distinction is load-bearing —
+forwarding the user's project env is fine; reading/storing/proxying Claude's (or
+any vendor's) login credential remains strictly forbidden.
 
 ## No automated control loop
 No auto-responders, no output-parsing that feeds new prompts back in, no
@@ -60,7 +73,10 @@ merging.
 
 ## Where this is enforced in code
 - `crates/pty` — spawns a real process behind a real PTY and streams **raw
-  bytes**. No command interpretation, no output parsing.
+  bytes**. No command interpretation, no output parsing. The only env it sets on
+  top of the inherited ambient env is `TERM` plus the user's own configured
+  variables (`OpenOpts.env`, resolved by `src-tauri/src/env.rs` from Settings →
+  Environment) — never an agent CLI's auth token.
 - `src-tauri/src/terminal.rs` — thin Tauri adapter (open/write/resize/close). The
   output channel forwards bytes verbatim.
 - `src/features/terminal/orchestrator.ts` — the app's only terminal API. It does

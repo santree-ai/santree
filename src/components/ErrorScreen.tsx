@@ -8,6 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 
 import { WarningIcon } from "./icons";
+import { Button } from "./primitives";
 
 const REPORT_URL = "https://github.com/santree-ai/santree/issues/new";
 
@@ -51,28 +52,19 @@ export function ErrorScreen({ error, onRetry }: { error?: Error; onRetry?: () =>
         </div>
 
         <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
-          <button
-            type="button"
+          <Button
+            variant="primary"
+            size="lg"
             onClick={() => (onRetry ? onRetry() : window.location.reload())}
-            className="cursor-pointer rounded-md px-3.5 py-2 text-[12.5px] font-medium text-[color:var(--on-accent)] transition-[filter] hover:brightness-110"
-            style={{ background: "var(--accent)" }}
           >
             Try again
-          </button>
-          <button
-            type="button"
-            onClick={report}
-            className="cursor-pointer rounded-md border border-line-2 bg-input px-3.5 py-2 text-[12.5px] text-fg-2 transition-colors hover:border-line-strong"
-          >
+          </Button>
+          <Button size="lg" onClick={report}>
             Report issue
-          </button>
-          <button
-            type="button"
-            onClick={copy}
-            className="cursor-pointer rounded-md px-3 py-2 text-[12.5px] text-muted-2 transition-colors hover:text-fg-2"
-          >
+          </Button>
+          <Button variant="ghost" size="lg" onClick={copy}>
             {copied ? "Copied ✓" : "Copy details"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

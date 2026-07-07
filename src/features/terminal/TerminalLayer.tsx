@@ -15,8 +15,10 @@
 import { useRouterState } from "@tanstack/react-router";
 import { type CSSProperties, useLayoutEffect, useRef, useState } from "react";
 
+import { Button } from "../../components/primitives";
 import { useRepos } from "../../lib/queries";
 import { useApp, useAppUi } from "../../state/AppContext";
+import { TERMINAL_STRIP_PX } from "./orchestrator";
 import { useTerminals } from "./TerminalsContext";
 import { TerminalView } from "./TerminalView";
 
@@ -93,8 +95,11 @@ export function TerminalLayer() {
   const lastEmbedRect = useRef<Rect | null>(null);
   if (embedded && embedRect) lastEmbedRect.current = embedRect;
 
+  // On /terminal the overlay starts below the session tab strip TerminalSurface
+  // renders at the top of the content area (same height, kept in sync via the
+  // shared constant).
   const fullArea = {
-    top: TOP_BAR,
+    top: TOP_BAR + TERMINAL_STRIP_PX,
     bottom: 0,
     left: sidebarCollapsed ? 0 : "var(--sidebar-width)",
     right: 0,
@@ -127,14 +132,9 @@ export function TerminalLayer() {
       {tabs.length === 0 && onTerminal && !embedded ? (
         <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
           <div className="text-[14px] font-medium text-fg-2">No terminals open</div>
-          <button
-            type="button"
-            onClick={() => open({ title: "shell", cwd: repoPath })}
-            className="cursor-pointer rounded-md px-3 py-1.5 text-[12px] font-medium text-[color:var(--on-accent)]"
-            style={{ background: "var(--accent)" }}
-          >
+          <Button variant="primary" onClick={() => open({ title: "shell", cwd: repoPath })}>
             New terminal
-          </button>
+          </Button>
         </div>
       ) : (
         tabs.map((t) => (

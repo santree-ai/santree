@@ -9,6 +9,12 @@ import { useCallback, useMemo, useRef, useState } from "react";
 /** Where a terminal was opened from — drives the grouping in the Terminal tab. */
 export type TerminalSource = "shell" | "triage" | "issue";
 
+/** Height (px) of the Terminal tab's session tab strip. The strip is rendered
+ *  by `TerminalSurface` with `CHROME.subBar` (h-9 = 36px); `TerminalLayer`
+ *  offsets its full-area overlay by the same amount so the strip stays visible
+ *  above the terminals. Keep the two in sync. */
+export const TERMINAL_STRIP_PX = 36;
+
 /** A terminal to open: a cwd + command (empty ⇒ login shell), optional seed. */
 export interface TerminalSpec {
   title: string;

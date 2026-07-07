@@ -14,15 +14,17 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { getVersion } from "@tauri-apps/api/app";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type {
   AgentKind,
   ChangedFile,
   ScriptInfo,
   Settings,
+  TriageComment,
   TriageDetail,
   TriageTicket,
+  WorktreeTab,
 } from "../bindings";
 import { commands, events } from "../bindings";
 // `useViewCounts` needs live PTY presence for its "N running" badge — the one
@@ -157,8 +159,12 @@ const TASKS_STALE_TIME = 3 * 60_000;
 export const queryKeys = {
   repos: ["repos"] as const,
   agents: ["agents"] as const,
+  claudeModels: ["claude-models"] as const,
   agentAuth: (kind: AgentKind) => ["agent-auth", kind] as const,
   githubStatus: ["github-status"] as const,
+  claudeHookSettings: ["claude-hook-settings"] as const,
+  sessionStates: ["session-states"] as const,
+  sessionUsageLive: ["session-usage-live"] as const,
   /** Prefix for every repo's task graph — invalidate this (not `tasks(repo)`)
    *  when a change (e.g. a fresh Linear connection) should refetch all repos'
    *  graphs at once. */
@@ -175,10 +181,13 @@ export const queryKeys = {
   workPrompt: (repo: string, id: string) => ["work-prompt", repo, id] as const,
   agentSession: (repo: string, termKey: string, allowFresh: boolean) =>
     ["agent-session", repo, termKey, allowFresh] as const,
+  startedInvestigations: (repo: string) => ["started-investigations", repo] as const,
+  worktreeTabs: (repo: string) => ["worktree-tabs", repo] as const,
   commitDraft: (repo: string, id: string) => ["commit-draft", repo, id] as const,
   worktreePrs: (repo: string) => ["worktree-prs", repo] as const,
   prReviewers: (repo: string, id: string) => ["pr-reviewers", repo, id] as const,
   reviews: (repo: string) => ["reviews", repo] as const,
+  mergeQueue: (repo: string) => ["merge-queue", repo] as const,
   prDetail: (owner: string, name: string, number: number) =>
     ["pr-detail", owner, name, number] as const,
   openers: ["openers"] as const,
@@ -197,6 +206,7 @@ export const queryKeys = {
   linearStatusPrefix: ["linear-status"] as const,
   linearStatus: (repo: string) => ["linear-status", repo] as const,
   linearOrgs: ["linear-orgs"] as const,
+  claudeUsage: ["claude-usage"] as const,
 };
 
 /** Setting keys for the Triage Investigation action (agent · skill · model ·
@@ -217,13 +227,36 @@ export const INVESTIGATE_REMOTE_CONTROL_KEY = "investigate_remote_control";
 export const WORK_AGENT_KEY = "work_agent";
 export const WORK_MODEL_KEY = "work_model";
 export const WORK_EFFORT_KEY = "work_effort";
+/** Start mode for a worktree's Claude launch — the value passed to Claude's
+ *  `--permission-mode` (see {@link PERMISSION_MODES}). Empty leaves the flag off
+ *  ("Default" — Claude's own normal mode). Applied on both start and restart. */
+export const WORK_PERMISSION_MODE_KEY = "work_permission_mode";
 
 /** The agent effort levels (Claude's `--effort`), in ascending order. Empty means
  *  "leave on the CLI default" — don't pass the flag. */
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+/** Selectable Claude start modes (`--permission-mode <value>`) — the full set the
+ *  CLI accepts. The empty "Default" option (no flag) is rendered separately by the
+ *  picker; these are the explicit overrides. Values are Claude's exact flag values
+ *  — do not translate (`manual` is Claude's own alias for `default`). */
+export const PERMISSION_MODES = [
+  { value: "plan", label: "Plan" },
+  { value: "acceptEdits", label: "Accept edits" },
+  { value: "auto", label: "Auto" },
+  { value: "dontAsk", label: "Don't ask" },
+  { value: "bypassPermissions", label: "Bypass permissions" },
+  { value: "manual", label: "Manual" },
+] as const;
 /** When on, starting a worktree moves the Linear issue to its "started" (In
  *  Progress) state so Linear reflects what's actually being worked on. */
 export const WORK_MOVE_IN_PROGRESS_KEY = "work_move_in_progress";
+
+/** When on, launching work goes through the multi-select queue (the "Add to
+ *  queue" button + launch tray). Off (default) drops the queue: the button reads
+ *  "Run" and starts the single focused ticket immediately — ⌘-click runs it in
+ *  the background without leaving the current view. App-scoped, defaults off. */
+export const WORK_QUEUE_KEY = "work_queue";
 
 /**
  * Triage queue preference keys (app-scoped, string "true"/"false").
@@ -243,6 +276,18 @@ export const DISPLAY_NAMES_KEY = "display_names";
 /** Whether to confirm before quitting the app. App-scoped; defaults to ON (a
  *  missing value means confirm), so read it as `data !== "false"`. */
 export const CONFIRM_ON_QUIT_KEY = "confirm_on_quit";
+
+/** Show santree's inline context-usage bar in the app (Trees, above the bottom
+ *  bar). App-scoped, defaults to OFF (`data === "true"` = on). Display-only: the
+ *  usage itself is *always* captured (the `--settings` statusLine is injected
+ *  unconditionally — see {@link useClaudeHookSettings}), so flipping this lights
+ *  up already-running tabs at runtime without relaunching. */
+export const CLAUDE_STATUS_LINE_KEY = "claude_status_line";
+
+/** Launch Claude with the `--chrome` flag (browser control). App-scoped, defaults
+ *  to OFF (`data === "true"` means on). Threaded into the agent seed as
+ *  `opts.chrome` at every Claude launch site. */
+export const CLAUDE_START_WITH_CHROME_KEY = "claude_start_with_chrome";
 
 /**
  * Trees (worktree) preference keys (string-valued settings):
@@ -267,6 +312,50 @@ export const TREES_DEFAULT_EDITOR_KEY = "trees_default_editor";
 
 /** How the start-multiple flow treats the setup script. */
 export type BatchSetup = "always" | "never" | "ask";
+
+/**
+ * Environment settings — variables (and `.env` file references) santree injects
+ * into every terminal it spawns. Stored as JSON in the generic settings table,
+ * scope `"app"` or `"repo:<name>"` (both merge at spawn, repo wins). The backend
+ * (`env.rs`) resolves + applies them; these hooks drive the settings editor.
+ */
+export const ENV_VARS_KEY = "env_vars";
+export const ENV_FILES_KEY = "env_files";
+
+export interface EnvVar {
+  name: string;
+  value: string;
+}
+
+const parseJsonSetting = <T>(raw: string | null | undefined, fallback: T): T => {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+};
+
+/** The explicit env variables stored for a scope (app or `repo:<name>`). */
+export const useEnvVars = (scope: string) => {
+  const q = useSetting(scope, ENV_VARS_KEY);
+  return { vars: parseJsonSetting<EnvVar[]>(q.data, []), loading: q.isLoading };
+};
+
+/** The `.env` file paths referenced by a scope. */
+export const useEnvFiles = (scope: string) => {
+  const q = useSetting(scope, ENV_FILES_KEY);
+  return { files: parseJsonSetting<string[]>(q.data, []), loading: q.isLoading };
+};
+
+/** The variable names a referenced `.env` file defines (for the "N loaded" count). */
+export const useEnvFileVars = (path: string) =>
+  useQuery({
+    queryKey: ["env-file-vars", path],
+    queryFn: () => commands.envFileVars(path),
+    enabled: !!path,
+    staleTime: SETTING_STALE_TIME,
+  });
 
 /** The running app's real version (single-sourced from `tauri.conf.json`), for
  * the sidebar footer and help menu. Fixed for the process lifetime. */
@@ -307,6 +396,16 @@ export const useAddRepo = () =>
 export const useAgents = () =>
   useQuery({ queryKey: queryKeys.agents, queryFn: commands.listAgents });
 
+/** The Claude model-picker options — the CLI's tier aliases (`opus`/`sonnet`/
+ *  `haiku`, which auto-resolve to the current model) plus any extra models Claude
+ *  Code has cached (e.g. Fable), read live from `~/.claude.json` so the list tracks
+ *  the vendor's lineup instead of a hardcoded one. Cached briefly; it changes only
+ *  when Claude Code's own picker cache does. */
+export const useClaudeModels = () =>
+  useUnwrappedQuery(queryKeys.claudeModels, () => commands.claudeModels(), {
+    staleTime: 5 * 60 * 1000,
+  });
+
 /** An agent harness's authentication / subscription status. */
 export const useAgentAuth = (kind: AgentKind) =>
   useQuery({ queryKey: queryKeys.agentAuth(kind), queryFn: () => commands.agentAuth(kind) });
@@ -314,6 +413,133 @@ export const useAgentAuth = (kind: AgentKind) =>
 /** The `gh` CLI integration status (installed? authenticated? which account?). */
 export const useGithubStatus = () =>
   useQuery({ queryKey: queryKeys.githubStatus, queryFn: () => commands.githubStatus() });
+
+/**
+ * Path to the settings file to pass as `claude --settings <path>` — carries the
+ * session-state hooks and santree's own `statusLine` (`null` when the hook binary
+ * can't be resolved). A file path — not inline JSON — because the config is too
+ * large to inline into the PTY seed command without breaking its shell quoting.
+ *
+ * The content is setting-independent (the statusLine is *always* injected so
+ * usage is always captured), so this is cached forever. Whether the app renders
+ * the inline usage bar is gated separately at the render site via
+ * {@link CLAUDE_STATUS_LINE_KEY} — a runtime decision, so it works for
+ * already-running tabs.
+ */
+export const useClaudeHookSettings = () =>
+  useQuery({
+    queryKey: queryKeys.claudeHookSettings,
+    queryFn: () => commands.claudeHookSettings(),
+    staleTime: Infinity,
+  });
+
+/** Current state of every santree-launched Claude session (active/waiting/idle/
+ *  exited), recorded live by the injected hooks. Kept fresh in realtime by
+ *  `useSessionStateWatcher`.
+ *
+ *  The realtime signal covers every state change a hook *observes*, but the hooks
+ *  can't reliably *clear* a state: a manually-answered prompt (accept/reject, or a
+ *  typed reply) fires nothing, and a turn can end with no `Stop`. The backend
+ *  reconciles the live state against the session transcript (the ground truth) on
+ *  every read; this short poll guarantees a read actually happens so those
+ *  transitions surface within ~10s even when no hook fires. We poll while any
+ *  session is unsettled — a pending prompt (to catch resolution) or `running` (to
+ *  catch it going idle without a `Stop`). Zero polling once everything is idle/
+ *  exited. */
+/** States that can still change without a hook firing, so a read (and thus the
+ *  backend's transcript reconciliation) must keep happening: a pending prompt (to
+ *  catch resolution) and any working state (to catch it going idle without a
+ *  `Stop`). Settled states — idle / exited — don't need polling. */
+const UNSETTLED_STATES = new Set(["permission", "waiting", "active", "delegating"]);
+
+export const useSessionStates = () =>
+  useUnwrappedQuery(queryKeys.sessionStates, () => commands.sessionStates(), {
+    refetchInterval: (query) =>
+      query.state.data?.some((s) => UNSETTLED_STATES.has(s.state)) ? 10_000 : false,
+  });
+
+/**
+ * Keep `useSessionStates` fresh in realtime. The `santree-hook` binary bumps a
+ * tick file after each write; the Rust watcher (started at app setup) emits
+ * `sessionStateChanged`, and we invalidate the query so it refetches — no
+ * polling. Mount once at the app root so it stays live across tab switches; the
+ * query's on-mount fetch covers the "poll latest on restart" case.
+ */
+export const useSessionStateWatcher = () => {
+  const qc = useQueryClient();
+  useEffect(() => {
+    const unlisten = events.sessionStateChanged.listen(() => {
+      qc.invalidateQueries({ queryKey: queryKeys.sessionStates });
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [qc]);
+};
+
+/** Live per-session token/context usage, captured by santree's status line (the
+ *  authoritative source, matching the terminal bar). Keyed by session id. */
+export const useSessionUsageLive = () =>
+  useUnwrappedQuery(queryKeys.sessionUsageLive, () => commands.sessionUsageLive());
+
+/** Realtime refresh for {@link useSessionUsageLive}: the status-line capture pings
+ *  the signal socket (tagged `u`), the Rust listener emits `sessionUsageChanged`,
+ *  and we invalidate. Mount once at the app root (mirrors the state watcher). */
+export const useSessionUsageWatcher = () => {
+  const qc = useQueryClient();
+  useEffect(() => {
+    const unlisten = events.sessionUsageChanged.listen(() => {
+      qc.invalidateQueries({ queryKey: queryKeys.sessionUsageLive });
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [qc]);
+};
+
+/**
+ * Aggregated Claude token usage across all local session transcripts (Settings →
+ * Usage). A short staleTime avoids re-parsing on every panel revisit; the watcher
+ * below pushes live updates while a session is active, so it's rarely stale.
+ */
+export const useClaudeUsage = () =>
+  useUnwrappedQuery(queryKeys.claudeUsage, () => commands.claudeUsage(), {
+    staleTime: 60_000,
+  });
+
+/**
+ * Keep `useClaudeUsage` live: the Rust watcher (started at app setup) emits
+ * `usageChanged` whenever a transcript grows, and we invalidate the query so the
+ * Usage panel refetches without polling. Mounted once at the app root; the
+ * invalidation is a no-op when the panel (and thus the query) isn't observed.
+ */
+export const useUsageWatcher = () => {
+  const qc = useQueryClient();
+  useEffect(() => {
+    const unlisten = events.usageChanged.listen(() => {
+      qc.invalidateQueries({ queryKey: queryKeys.claudeUsage });
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [qc]);
+};
+
+/**
+ * File-count progress of the cold transcript parse, for a determinate loading bar
+ * on first open. `null` until the first event arrives; a warm reload returns
+ * instantly (nothing to show). Mounted by the Usage panel while it's loading.
+ */
+export const useUsageProgress = () => {
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  useEffect(() => {
+    const unlisten = events.usageProgress.listen(({ payload }) => setProgress(payload));
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
+  return progress;
+};
 
 /**
  * Graph tickets for a repo. The backend returns the live Linear graph when an
@@ -513,14 +739,17 @@ export const useWorktreeWatcher = (repo: string) => {
   }, [repo, qc]);
 };
 
-/** The agent's opening prompt for a freshly-started worktree (the `work`
- *  template — ticket id + title + implement instructions). Deterministic for a
- *  given worktree, so cache it; `enabled` gates the fetch to the launch flow. The
- *  terminal seed waits on this so the agent starts with the full prompt. */
+/** The PATH of the on-disk work prompt for a freshly-started worktree. The backend
+ *  renders the `work` template from the *live* ticket, writes it to a file, and
+ *  returns that file's path; the terminal seeds `claude 'Read <path> …'` (see
+ *  {@link agentSessionSeed} callers). `enabled` gates the fetch to the launch flow;
+ *  the terminal seed waits on this so the file exists before the agent starts.
+ *  `staleTime: 0` so every fresh launch re-renders from current Linear state
+ *  (new comments, edits) and overwrites the file. */
 export const useWorkPrompt = (repo: string, id: string, enabled: boolean) =>
   useUnwrappedQuery(queryKeys.workPrompt(repo, id), () => commands.workPrompt(repo, id), {
     enabled: enabled && !!repo && !!id,
-    staleTime: 5 * 60 * 1000,
+    staleTime: 0,
   });
 
 /**
@@ -551,6 +780,70 @@ export const useAgentSession = (
     },
   );
 
+/** Ticket ids of triage investigations that have a stored (resumable) session —
+ *  i.e. one was started for them at some point. Drives the Triage view's tab +
+ *  resume affordance for past investigations (across restarts), mirroring how a
+ *  worktree row makes the Trees work terminal resumable. Cached briefly; a new
+ *  investigation invalidates it, and it refetches on Triage revisit / focus. */
+export const useStartedInvestigations = (repo: string) =>
+  useUnwrappedQuery(
+    queryKeys.startedInvestigations(repo),
+    () => commands.startedInvestigations(repo),
+    { enabled: !!repo, staleTime: 30_000 },
+  );
+
+/** Persisted extra main-area tabs (Claude / terminal) for the repo's worktrees,
+ *  loaded once so they survive app restarts. Tabs only change through the
+ *  mutations below (which invalidate), so the cache never goes stale on its own. */
+export const useWorktreeTabs = (repo: string) =>
+  useUnwrappedQuery(queryKeys.worktreeTabs(repo), () => commands.listWorktreeTabs(repo), {
+    enabled: !!repo,
+    staleTime: SETTING_STALE_TIME,
+  });
+
+/** Persist a new extra tab. The caller mints the id/title (see the Trees model),
+ *  so the cache patch is the exact row the backend will store. */
+export const useAddWorktreeTab = (repo: string) =>
+  useOptimisticMutation<WorktreeTab, null>({
+    mutationFn: (tab) =>
+      unwrap(commands.addWorktreeTab(repo, tab.worktreeId, tab.id, tab.kind, tab.title)),
+    optimistic: (qc, tab) => {
+      const key = queryKeys.worktreeTabs(repo);
+      const prev = qc.getQueryData<WorktreeTab[]>(key);
+      qc.setQueryData<WorktreeTab[]>(key, (cur = []) => [...cur, tab]);
+      return () => qc.setQueryData(key, prev);
+    },
+    invalidate: () => [queryKeys.worktreeTabs(repo)],
+  });
+
+/** Rename an extra tab (optimistic — the tab bar re-labels instantly). */
+export const useRenameWorktreeTab = (repo: string) =>
+  useOptimisticMutation<{ id: string; title: string }, null>({
+    mutationFn: ({ id, title }) => unwrap(commands.renameWorktreeTab(repo, id, title)),
+    optimistic: (qc, { id, title }) => {
+      const key = queryKeys.worktreeTabs(repo);
+      const prev = qc.getQueryData<WorktreeTab[]>(key);
+      qc.setQueryData<WorktreeTab[]>(key, (cur = []) =>
+        cur.map((t) => (t.id === id ? { ...t, title } : t)),
+      );
+      return () => qc.setQueryData(key, prev);
+    },
+    invalidate: () => [queryKeys.worktreeTabs(repo)],
+  });
+
+/** Remove an extra tab (optimistic); a Claude tab's stored session goes with it. */
+export const useRemoveWorktreeTab = (repo: string) =>
+  useOptimisticMutation<string, null>({
+    mutationFn: (id) => unwrap(commands.removeWorktreeTab(repo, id)),
+    optimistic: (qc, id) => {
+      const key = queryKeys.worktreeTabs(repo);
+      const prev = qc.getQueryData<WorktreeTab[]>(key);
+      qc.setQueryData<WorktreeTab[]>(key, (cur = []) => cur.filter((t) => t.id !== id));
+      return () => qc.setQueryData(key, prev);
+    },
+    invalidate: () => [queryKeys.worktreeTabs(repo)],
+  });
+
 /** Live PR status (number/url/state) for the repo's worktrees, from GitHub. Empty
  *  when `gh` isn't authenticated. Cached a minute — merge state changes server-side
  *  and the user can refetch by revisiting. */
@@ -567,6 +860,16 @@ export const useReviews = (repo: string) =>
   useUnwrappedQuery(queryKeys.reviews(repo), () => commands.reviews(repo), {
     enabled: !!repo,
     staleTime: 60_000,
+  });
+
+/** The active repo's merge queue (its default branch's queue) — the ordered PRs
+ *  waiting to merge, for the Reviews tab's merge-queue panel. `null` when GitHub
+ *  isn't connected or the repo has no merge queue. Positions shift as PRs merge,
+ *  so it's cached only briefly and refetches on revisit. */
+export const useMergeQueue = (repo: string) =>
+  useUnwrappedQuery(queryKeys.mergeQueue(repo), () => commands.mergeQueue(repo), {
+    enabled: !!repo,
+    staleTime: 20_000,
   });
 
 /** Full detail (body + conversation + diff + checks) for one PR. Gated on a
@@ -638,7 +941,12 @@ export const useRemoveWorktree = (repo: string) =>
   useOptimisticMutation({
     mutationKey: ["remove-worktree", repo],
     mutationFn: (issueId: string) => unwrap(commands.removeWorktree(repo, issueId)),
-    invalidate: () => [queryKeys.worktrees(repo), queryKeys.worktreePrs(repo)],
+    // Tabs too: the backend drops the worktree's persisted extra tabs with it.
+    invalidate: () => [
+      queryKeys.worktrees(repo),
+      queryKeys.worktreePrs(repo),
+      queryKeys.worktreeTabs(repo),
+    ],
   });
 
 /** Remove several worktrees at once (e.g. all merged ones) — background, in
@@ -654,7 +962,11 @@ export const useRemoveWorktrees = (repo: string) =>
       const failed = ids.filter((_, i) => results[i].status === "rejected");
       if (failed.length) throw new Error(`Couldn't delete ${failed.join(", ")}.`);
     },
-    invalidate: () => [queryKeys.worktrees(repo), queryKeys.worktreePrs(repo)],
+    invalidate: () => [
+      queryKeys.worktrees(repo),
+      queryKeys.worktreePrs(repo),
+      queryKeys.worktreeTabs(repo),
+    ],
   });
 
 /** Merge the base branch (main/master) into the worktree. Errors on conflicts. */
@@ -673,6 +985,17 @@ export const usePushWorktree = (repo: string) =>
     mutationFn: (issueId: string) => unwrap(commands.pushWorktree(repo, issueId)),
     invalidate: () => [queryKeys.worktrees(repo), queryKeys.worktreePrs(repo)],
     success: () => "Pushed to origin.",
+  });
+
+/** Integrate origin/<branch> into the worktree's own branch — pulls commits added
+ *  to the branch remotely (PR-UI suggestions, "Update branch", a teammate's push).
+ *  Fast-forwards when possible, else merges; refuses up front (nothing touched)
+ *  when the merge would conflict. */
+export const usePullRemoteWorktree = (repo: string) =>
+  useActionMutation({
+    mutationFn: (issueId: string) => unwrap(commands.pullRemoteWorktree(repo, issueId)),
+    invalidate: (issueId) => [queryKeys.worktrees(repo), queryKeys.worktreeStatus(repo, issueId)],
+    success: () => "Pulled from origin.",
   });
 
 /** Fast-forward the repo's local base branch (main/master) to origin. */
@@ -1034,6 +1357,45 @@ export const useTriageSetState = (repo: string) =>
       queryKeys.triageTickets(repo),
       queryKeys.triageDetail(repo, args.ticketId),
     ],
+  });
+
+/**
+ * Post a comment (or a reply, when `parentId` is set) on an issue. Optimistically
+ * appends a pending comment to the cached detail so the thread updates instantly,
+ * then reconciles with the real thread on settle. Backs every issue-discussion
+ * surface (Triage, Issues, Trees, Reviews) since they all read `triageDetail`.
+ */
+export const useAddComment = (repo: string) =>
+  useOptimisticMutation({
+    mutationKey: ["triage-add-comment", repo],
+    mutationFn: (args: { ticketId: string; parentId: string | null; body: string }) =>
+      unwrap(commands.triageAddComment(repo, args.ticketId, args.parentId, args.body)),
+    optimistic: (qc, args) => {
+      const detailKey = queryKeys.triageDetail(repo, args.ticketId);
+      const prev = qc.getQueryData<TriageDetail>(detailKey);
+      if (!prev) return;
+
+      // Author is unknown client-side (no viewer-identity query); "You" is a
+      // placeholder that the settle-time refetch replaces with the real author.
+      const pending: TriageComment = {
+        id: `pending-${crypto.randomUUID()}`,
+        author: "You",
+        avatarUrl: null,
+        createdAtMs: Date.now(),
+        body: args.body,
+        children: [],
+      };
+
+      const comments = args.parentId
+        ? prev.comments.map((c) =>
+            c.id === args.parentId ? { ...c, children: [...c.children, pending] } : c,
+          )
+        : [...prev.comments, pending];
+
+      qc.setQueryData<TriageDetail>(detailKey, { ...prev, comments });
+      return () => qc.setQueryData(detailKey, prev);
+    },
+    invalidate: (args) => [queryKeys.triageDetail(repo, args.ticketId)],
   });
 
 /** The team triage rotations — one per team the viewer is on. */

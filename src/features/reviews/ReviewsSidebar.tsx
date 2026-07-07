@@ -10,8 +10,16 @@
  * (split out so it can be tested without AppContext/router).
  */
 import type { ReviewInbox, ReviewPr } from "../../bindings";
+import { ListIcon } from "../../components/icons";
 import { Dot, EmptyState, Skeleton } from "../../components/primitives";
-import { accentActiveStyle, checkRollupMeta, reviewDecisionMeta } from "../../theme/colors";
+import { useMergeQueue } from "../../lib/queries";
+import {
+  accentActiveStyle,
+  alpha,
+  checkRollupMeta,
+  mergeQueueMeta,
+  reviewDecisionMeta,
+} from "../../theme/colors";
 import { useReviewsModel } from "./model";
 
 /** Short "name" from an "owner/name" slug. */
@@ -20,14 +28,20 @@ function repoName(slug: string): string {
 }
 
 export function ReviewsSidebar() {
-  const { inbox, loading, allPrs, activeId, setActive } = useReviewsModel();
+  const { repo, inbox, loading, allPrs, activeId, setActive, showMergeQueue, openMergeQueue } =
+    useReviewsModel();
+  const { data: queue } = useMergeQueue(repo);
   return (
     <ReviewsSidebarView
       inbox={inbox}
       loading={loading}
       total={allPrs.length}
-      activeId={activeId}
+      activeId={showMergeQueue ? null : activeId}
       onSelect={setActive}
+      onOpenMergeQueue={openMergeQueue}
+      mergeQueueActive={showMergeQueue}
+      mergeQueueCount={queue?.entries.length ?? 0}
+      mergeQueueHasMine={queue?.entries.some((e) => e.isMine) ?? false}
     />
   );
 }
@@ -38,12 +52,22 @@ export function ReviewsSidebarView({
   total,
   activeId,
   onSelect,
+  onOpenMergeQueue,
+  mergeQueueActive = false,
+  mergeQueueCount = 0,
+  mergeQueueHasMine = false,
 }: {
   inbox: ReviewInbox | undefined;
   loading: boolean;
   total: number;
   activeId: string | null;
   onSelect: (id: string) => void;
+  /** Opens the merge-queue panel; when omitted the button is hidden (tests). */
+  onOpenMergeQueue?: () => void;
+  mergeQueueActive?: boolean;
+  mergeQueueCount?: number;
+  /** True when the viewer has a PR in the queue — nudges the button to accent. */
+  mergeQueueHasMine?: boolean;
 }) {
   // Group "My PRs" by repository, preserving first-seen order.
   const mineByRepo = new Map<string, ReviewPr[]>();
@@ -61,6 +85,39 @@ export function ReviewsSidebarView({
           {total}
         </span>
       </div>
+
+      {onOpenMergeQueue && (
+        <div className="flex-none border-b border-hairline p-2">
+          <button
+            type="button"
+            onClick={onOpenMergeQueue}
+            title="Show the repo's merge queue"
+            className="flex w-full cursor-pointer items-center gap-2 rounded-[8px] px-2.5 py-1.5 text-left transition-colors hover:bg-hover"
+            style={
+              mergeQueueActive
+                ? accentActiveStyle()
+                : { border: "1px solid transparent", background: "transparent" }
+            }
+          >
+            <ListIcon
+              size={13}
+              className={mergeQueueActive ? "text-[color:var(--accent)]" : "text-muted-2"}
+            />
+            <span
+              className="text-[12px] font-medium"
+              style={{ color: mergeQueueActive ? "var(--accent)" : "var(--color-fg-2)" }}
+            >
+              Merge queue
+            </span>
+            {mergeQueueHasMine && !mergeQueueActive && <Dot color="var(--accent)" size={6} />}
+            {mergeQueueCount > 0 && (
+              <span className="ml-auto rounded-[5px] border border-line-2 bg-input-alt px-1.5 py-px font-mono text-[10px] text-muted-2">
+                {mergeQueueCount}
+              </span>
+            )}
+          </button>
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto p-2">
         {loading && total === 0 && <SidebarSkeleton />}
@@ -149,6 +206,18 @@ function PrRow({
         {pr.isDraft && (
           <span className="rounded-[4px] border border-line-3 px-1 font-mono text-[8.5px] text-muted-3 uppercase">
             draft
+          </span>
+        )}
+        {pr.isInMergeQueue && (
+          <span
+            className="rounded-[4px] px-1 font-mono text-[8.5px] uppercase"
+            style={{
+              color: mergeQueueMeta.color,
+              border: `1px solid ${alpha(40, mergeQueueMeta.color)}`,
+            }}
+            title={mergeQueueMeta.label}
+          >
+            queued
           </span>
         )}
         <span

@@ -20,7 +20,7 @@ import {
   PlusIcon,
 } from "../../components/icons";
 import { PrChips } from "../../components/PrChip";
-import { Dot, EmptyState, Skeleton } from "../../components/primitives";
+import { Button, Dot, EmptyState, Skeleton } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
 import { WorktreeStats } from "../../components/WorktreeStats";
 import { useTriageDetail } from "../../lib/queries";
@@ -80,6 +80,9 @@ export function IssuePanel() {
     goToWorktree,
     revealInGraph,
     toggleRightPanel,
+    queueEnabled,
+    run,
+    runBackground,
   } = useIssues();
   const { activeRepo } = useApp();
   const focus = (focusId ? byId.get(focusId) : undefined) ?? tasks[0];
@@ -211,11 +214,14 @@ export function IssuePanel() {
             <WorktreeCard worktree={worktree} prs={prs} onOpen={() => goToWorktree(focus.id)} />
           ) : (
             <QueueControl
+              queueEnabled={queueEnabled}
               queued={queued}
               eligible={eligible}
               focusStatus={focus.status}
               actionable={focus.actionable}
               onToggle={() => toggle(focus.id)}
+              onRun={() => run(focus.id)}
+              onRunBackground={() => runBackground(focus.id)}
             />
           )}
         </div>
@@ -283,7 +289,7 @@ export function IssuePanel() {
             />
           )
         ) : (
-          <DiscussionContent detail={ready} />
+          <DiscussionContent detail={ready} repo={activeRepo} />
         )}
       </div>
 
@@ -369,36 +375,56 @@ function QueueBar({
   );
 }
 
-/** The "Add to queue" button / status chip for the focused issue. */
+/** The launch control for the focused issue. With the queue enabled it's the
+ *  "Add to queue" toggle / "Queued" chip; with the queue off (default) it's a
+ *  single "Run" button that starts the ticket now — ⌘/Ctrl-click runs it in the
+ *  background without leaving the current view. */
 function QueueControl({
+  queueEnabled,
   queued,
   eligible,
   focusStatus,
   actionable,
   onToggle,
+  onRun,
+  onRunBackground,
 }: {
+  queueEnabled: boolean;
   queued: boolean;
   eligible: boolean;
   focusStatus: keyof typeof statusColor;
   actionable: boolean;
   onToggle: () => void;
+  onRun: () => void;
+  onRunBackground: () => void;
 }) {
   if (eligible) {
+    if (!queueEnabled) {
+      return (
+        <Button
+          variant="tinted"
+          size="lg"
+          onClick={(e) => (e.metaKey || e.ctrlKey ? onRunBackground() : onRun())}
+          title="Run now — ⌘-click to run in the background"
+          className="w-full"
+        >
+          <span className="text-[10px]">▶</span>
+          Run
+        </Button>
+      );
+    }
     return (
-      <button
-        type="button"
+      <Button
+        variant="tinted"
+        size="lg"
         onClick={onToggle}
         title={queued ? "Remove from queue" : "Add to the work queue"}
-        className="flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[12.5px] font-semibold transition-[filter,background] hover:brightness-105"
-        style={{
-          color: "var(--accent-text)",
-          background: alpha(queued ? 20 : 11),
-          borderColor: alpha(40),
-        }}
+        className="w-full"
+        style={queued ? { background: alpha(20), borderColor: alpha(40) } : undefined}
       >
         {queued ? <CheckIcon size={14} /> : <PlusIcon size={14} />}
         {queued ? "Queued" : "Add to queue"}
-      </button>
+      </Button>
     );
   }
   // Not launchable — say why, disabled.
@@ -442,7 +468,7 @@ function WorktreeCard({
           →
         </span>
       </div>
-      <div className="flex items-center gap-2.5 font-mono text-[10px] text-muted-4">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10px] text-muted-4">
         <WorktreeStats worktree={worktree} showClean />
       </div>
     </button>

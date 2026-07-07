@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
-use santree_core::domain::{PrDetail, ReviewInbox};
+use santree_core::domain::{MergeQueue, PrDetail, ReviewInbox};
 
 use crate::db::Db;
 use crate::github;
@@ -37,6 +37,23 @@ pub async fn inbox(db: &Db, repo: &str) -> Result<ReviewInbox> {
 
     let teams = github::viewer_teams(&token, &org).await.unwrap_or_default();
     github::review_inbox(&token, &org, &teams).await
+}
+
+/// The merge queue for the active repo's default branch — the ordered list of
+/// PRs waiting to merge, so the user can see where their own PRs sit in line.
+/// `None` when `gh` isn't authenticated or the repo has no merge queue enabled.
+pub async fn merge_queue(db: &Db, repo: &str) -> Result<Option<MergeQueue>> {
+    let Some(token) = github::token().await else {
+        return Ok(None);
+    };
+    let root = repo::path(db, repo)
+        .await?
+        .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
+    // owner/name from the `origin` remote — shells out to git, so off the async pool.
+    let root_path = PathBuf::from(&root);
+    let (owner, name) =
+        tokio::task::spawn_blocking(move || github::owner_repo(&root_path)).await??;
+    github::merge_queue(&token, &owner, &name).await
 }
 
 /// Full detail (body, conversation, changed files) for one PR. Empty when `gh`

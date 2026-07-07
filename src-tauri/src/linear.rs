@@ -757,12 +757,12 @@ query GetIssue($id: String!) {
     creator { name displayName avatarUrl }
     comments(first: 100) {
       nodes {
-        body createdAt parent { id }
+        id body createdAt parent { id }
         user { name displayName avatarUrl }
         botActor { name avatarUrl }
         children {
           nodes {
-            body createdAt
+            id body createdAt
             user { name displayName avatarUrl }
             botActor { name avatarUrl }
           }
@@ -782,12 +782,12 @@ query GetIssueComments($id: String!, $after: String) {
   issue(id: $id) {
     comments(first: 100, after: $after) {
       nodes {
-        body createdAt parent { id }
+        id body createdAt parent { id }
         user { name displayName avatarUrl }
         botActor { name avatarUrl }
         children {
           nodes {
-            body createdAt
+            id body createdAt
             user { name displayName avatarUrl }
             botActor { name avatarUrl }
           }
@@ -807,6 +807,8 @@ struct ParentRef {}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CommentNode {
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     body: String,
     #[serde(default)]
@@ -903,6 +905,7 @@ async fn map_comment(
         async move {
             let (author, avatar_url) = actor(ch.user, ch.bot_actor, style);
             TriageComment {
+                id: ch.id,
                 author,
                 avatar_url,
                 created_at_ms,
@@ -915,6 +918,7 @@ async fn map_comment(
 
     let (author, avatar_url) = actor(node.user, node.bot_actor, style);
     TriageComment {
+        id: node.id,
         author,
         avatar_url,
         created_at_ms: node
@@ -1077,6 +1081,78 @@ pub async fn set_issue_state(
         // problems land there), so reaching here means a bare `success: false`
         // with no error — don't guess a specific cause.
         bail!("Linear rejected the status change")
+    }
+}
+
+// `commentCreate.issueId` requires the issue's UUID, but the UI only holds the
+// human identifier (e.g. "MSG-5147"), so resolve the UUID first.
+const ISSUE_UUID_QUERY: &str = r#"
+query IssueUuid($id: String!) { issue(id: $id) { id } }
+"#;
+
+const CREATE_COMMENT_MUTATION: &str = r#"
+mutation CreateComment($issueId: String!, $parentId: String, $body: String!) {
+  commentCreate(input: { issueId: $issueId, parentId: $parentId, body: $body }) {
+    success
+  }
+}
+"#;
+
+/// Post a comment on an issue — a top-level comment, or a reply when `parent_id`
+/// is the id of the comment being replied to. Requires a write-scoped token;
+/// returns `Ok(None)` when no Linear org is connected for the repo.
+pub async fn create_comment(
+    db: &Db,
+    repo: &str,
+    ticket_id: &str,
+    parent_id: Option<&str>,
+    body: &str,
+) -> Result<Option<()>> {
+    let Some(token) = repo_token(db, repo).await? else {
+        return Ok(None);
+    };
+
+    #[derive(Deserialize)]
+    struct IssueId {
+        id: String,
+    }
+    #[derive(Deserialize)]
+    struct IssueIdData {
+        issue: Option<IssueId>,
+    }
+    let id_data: IssueIdData = graphql(
+        &token,
+        ISSUE_UUID_QUERY,
+        serde_json::json!({ "id": ticket_id }),
+    )
+    .await?;
+    let issue_uuid = id_data
+        .issue
+        .ok_or_else(|| anyhow!("issue {ticket_id} not found"))?
+        .id;
+
+    #[derive(Deserialize)]
+    struct CreateResult {
+        #[serde(default)]
+        success: bool,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CreateCommentData {
+        comment_create: Option<CreateResult>,
+    }
+    let data: CreateCommentData = graphql(
+        &token,
+        CREATE_COMMENT_MUTATION,
+        serde_json::json!({ "issueId": issue_uuid, "parentId": parent_id, "body": body }),
+    )
+    .await?;
+    if data.comment_create.map(|c| c.success).unwrap_or(false) {
+        Ok(Some(()))
+    } else {
+        // `graphql()` surfaces any `errors` array, so a bare `success: false`
+        // here has no specific cause to report.
+        bail!("Linear rejected the comment")
     }
 }
 
@@ -1901,9 +1977,9 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        image_spans, map_issue, parse_callback, parse_ms, refresh_lock, shift_range,
-        splice_images, triage_meta, ImageCache, IssueNode, ProjectNode, RelatedIssue,
-        RelationNode, StateNode, UserNode, IMAGE_HOST,
+        image_spans, map_issue, parse_callback, parse_ms, refresh_lock, shift_range, splice_images,
+        triage_meta, ImageCache, IssueNode, ProjectNode, RelatedIssue, RelationNode, StateNode,
+        UserNode, IMAGE_HOST,
     };
     use crate::gql::{Connection, PageInfo};
     use std::collections::HashMap;
@@ -2203,7 +2279,10 @@ mod tests {
             task.assignee_avatar_url.as_deref(),
             Some("https://example.com/a.png")
         );
-        assert_eq!(task.blocked_by, vec!["ENG-1".to_string(), "ENG-2".to_string()]);
+        assert_eq!(
+            task.blocked_by,
+            vec!["ENG-1".to_string(), "ENG-2".to_string()]
+        );
         // One of the two "blocks" blockers is still open -> not ready.
         assert!(!task.ready);
         assert!(task.actionable);

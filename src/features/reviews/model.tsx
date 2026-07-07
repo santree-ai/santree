@@ -7,7 +7,15 @@
  * by setting `reviewFocus` (the PR url) on AppContext, which we resolve to a
  * selection once the inbox is loaded.
  */
-import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 import type { ReviewInbox, ReviewPr } from "../../bindings";
 import { useReviews } from "../../lib/queries";
@@ -23,6 +31,9 @@ interface ReviewsModel {
   setActive: (id: string | null) => void;
   /** The currently selected PR, or null. */
   active: ReviewPr | null;
+  /** When true, the detail pane shows the repo's merge queue instead of a PR. */
+  showMergeQueue: boolean;
+  openMergeQueue: () => void;
 }
 
 const ReviewsContext = createContext<ReviewsModel | null>(null);
@@ -32,6 +43,15 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
   const { reviewFocus, consumeReviewFocus } = useAppUi();
   const { data: inbox, isLoading } = useReviews(repo);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [showMergeQueue, setShowMergeQueue] = useState(false);
+
+  // Selecting a PR always returns to the PR detail view; opening the merge queue
+  // swaps the pane without disturbing which PR is selected underneath.
+  const setActive = useCallback((id: string | null) => {
+    setActiveId(id);
+    setShowMergeQueue(false);
+  }, []);
+  const openMergeQueue = useCallback(() => setShowMergeQueue(true), []);
 
   const allPrs = useMemo(
     () => (inbox ? [...inbox.mine, ...inbox.requested, ...inbox.teams.flatMap((t) => t.prs)] : []),
@@ -53,10 +73,10 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
     if (!reviewFocus) return;
     const match = allPrs.find((p) => p.url === reviewFocus);
     if (match) {
-      setActiveId(match.id);
+      setActive(match.id);
       consumeReviewFocus();
     }
-  }, [reviewFocus, allPrs, consumeReviewFocus]);
+  }, [reviewFocus, allPrs, consumeReviewFocus, setActive]);
 
   const value = useMemo<ReviewsModel>(
     () => ({
@@ -65,10 +85,12 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
       loading: isLoading,
       allPrs,
       activeId,
-      setActive: setActiveId,
+      setActive,
       active: allPrs.find((p) => p.id === activeId) ?? null,
+      showMergeQueue,
+      openMergeQueue,
     }),
-    [repo, inbox, isLoading, allPrs, activeId],
+    [repo, inbox, isLoading, allPrs, activeId, setActive, showMergeQueue, openMergeQueue],
   );
 
   return <ReviewsContext.Provider value={value}>{children}</ReviewsContext.Provider>;

@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 
@@ -206,8 +208,25 @@ pub fn worktree_branch(repo: &Path, worktree_path: &Path) -> Option<String> {
     None
 }
 
+/// The ref to log/diff a worktree branch against for PR-style "what this branch
+/// adds" semantics. Prefers `origin/<base>` — the ref the worktree was actually
+/// forked from (see [`create_worktree`]) — so a stale *local* `<base>` (a `master`
+/// the app never checks out or pulls, sitting behind `origin/master`) doesn't fold
+/// every unrelated upstream commit between the stale local ref and the fork point
+/// into the branch's diff, stats, and PR title. Falls back to the local `<base>`
+/// for stacked branches whose base is a sibling worktree branch with no remote.
+pub(crate) fn compare_base(cwd: &Path, base: &str) -> String {
+    let origin_ref = format!("origin/{base}");
+    if git(cwd, &["rev-parse", "--verify", &origin_ref]).is_ok() {
+        origin_ref
+    } else {
+        base.to_string()
+    }
+}
+
 /// Count commits `branch` is ahead of `base` (`<base>..HEAD`). 0 on failure.
 pub fn ahead(cwd: &Path, base: &str) -> u32 {
+    let base = compare_base(cwd, base);
     git(cwd, &["rev-list", "--count", &format!("{base}..HEAD")])
         .ok()
         .and_then(|s| s.parse().ok())
@@ -244,6 +263,75 @@ pub fn unpushed(cwd: &Path, branch: &str, base: &str) -> u32 {
     ahead(cwd, base)
 }
 
+/// Best-effort, throttled `git fetch origin <branch>` so the branch's remote
+/// tracking ref (and thus [`remote_behind`]) reflects commits added upstream —
+/// PR-UI suggestions, "Update branch", a teammate's push. Nothing else in the app
+/// fetches the worktree's own branch, so without this the ref stays stale and the
+/// Pull button never lights up.
+///
+/// Throttled per worktree path because the worktree-status query refetches on
+/// every filesystem change (the FS watcher invalidates it): an agent actively
+/// writing files would otherwise trigger a fetch storm. Failures are swallowed
+/// (offline, no remote) — a stale ref just means the Pull count lags, never an error.
+pub fn refresh_remote_ref(cwd: &Path, branch: &str) {
+    static LAST_FETCH: LazyLock<Mutex<HashMap<PathBuf, Instant>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    const THROTTLE: Duration = Duration::from_secs(20);
+
+    {
+        let mut last = LAST_FETCH.lock().unwrap();
+        let now = Instant::now();
+        if let Some(&t) = last.get(cwd) {
+            if now.duration_since(t) < THROTTLE {
+                return;
+            }
+        }
+        // Record before fetching so concurrent status builds for the same worktree
+        // (spawned in parallel by `list`) don't all fire a redundant fetch.
+        last.insert(cwd.to_path_buf(), now);
+    }
+    let _ = git_capture(cwd, &["fetch", "origin", branch]);
+}
+
+/// Pending-pull state for a worktree branch: how many commits origin/<branch> has
+/// that aren't local, and — only when there are — whether pulling them would
+/// conflict with local commits. Freshens the remote ref first (throttled). Bundled
+/// so the fetch happens once and the (cheap) virtual-merge conflict check runs only
+/// when there's actually something to pull.
+pub struct PullState {
+    pub behind: u32,
+    pub conflict: bool,
+}
+
+pub fn pull_state(cwd: &Path, branch: &str) -> PullState {
+    refresh_remote_ref(cwd, branch);
+    let behind = remote_behind(cwd, branch);
+    let conflict = behind > 0
+        && merge_conflicts(cwd, &format!("origin/{branch}"))
+            .map(|c| !c.is_empty())
+            .unwrap_or(false);
+    PullState { behind, conflict }
+}
+
+/// Count commits on the branch's remote tracking ref that aren't local yet —
+/// `HEAD..origin/<branch>`, i.e. what a `git pull` would download. This is commits
+/// added to the branch *remotely* (PR-UI suggestions, GitHub's "Update branch",
+/// a teammate's push), distinct from `behind` which is measured against the base.
+/// 0 when the branch has no remote ref or on failure.
+pub fn remote_behind(cwd: &Path, branch: &str) -> u32 {
+    let origin_ref = format!("origin/{branch}");
+    if git(cwd, &["rev-parse", "--verify", &origin_ref]).is_err() {
+        return 0;
+    }
+    git(
+        cwd,
+        &["rev-list", "--count", &format!("HEAD..{origin_ref}")],
+    )
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(0)
+}
+
 /// Merge the freshest base branch (`origin/<base>`, else local `<base>`) into the
 /// worktree's branch — the Trees "pull from main/master" button. Best-effort
 /// fetches first. On a conflicting (non-clean) merge it aborts and errors, so the
@@ -255,13 +343,64 @@ pub fn pull_base(cwd: &Path, base: &str) -> Result<String> {
     } else {
         base.to_string()
     };
-    let (ok, _out, err) = git_capture(cwd, &["merge", "--no-edit", &target])?;
+    merge_checked(cwd, &target)?;
+    Ok(target)
+}
+
+/// Conflicted paths that merging `target` into HEAD *would* produce, computed
+/// WITHOUT touching the working tree via `git merge-tree --write-tree` — a virtual
+/// in-memory merge (git ≥2.38). `Some(vec![])` = clean, `Some(paths)` = would
+/// conflict, `None` = detection couldn't run (old git / error), so the caller
+/// falls back to attempting a real merge.
+///
+/// On conflict, stdout is `<tree-oid>\n<conflicted paths…>\n\n<messages…>`, so the
+/// files are the lines between the oid (line 1) and the first blank line.
+pub fn merge_conflicts(cwd: &Path, target: &str) -> Option<Vec<String>> {
+    let (ok, out, _err) = git_capture(
+        cwd,
+        &["merge-tree", "--write-tree", "--name-only", "HEAD", target],
+    )
+    .ok()?;
+    if ok {
+        return Some(Vec::new());
+    }
+    let files: Vec<String> = out
+        .lines()
+        .skip(1)
+        .take_while(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    // Non-zero exit with no file list means a real error (bad args, unsupported
+    // git), not a conflict — signal fallback rather than report a phantom result.
+    if files.is_empty() {
+        None
+    } else {
+        Some(files)
+    }
+}
+
+/// Merge `target` into the current branch, but only if it applies cleanly.
+/// Conflicts are detected UP FRONT with [`merge_conflicts`] (a virtual merge that
+/// never touches the tree), so a conflicting pull is refused with a legible error
+/// instead of dropping the branch into a half-merged, conflicted state the user
+/// then has to `git merge --abort` out of. Shared by the pull actions.
+fn merge_checked(cwd: &Path, target: &str) -> Result<()> {
+    if let Some(conflicts) = merge_conflicts(cwd, target) {
+        if !conflicts.is_empty() {
+            bail!(
+                "Merging {target} would conflict in {} — nothing was changed. Resolve it in the worktree (git merge {target}), then commit.",
+                conflicts.join(", ")
+            );
+        }
+    }
+    // Clean per the virtual merge (or detection unavailable). The abort is a
+    // safety net — normally unreachable after a clean pre-check.
+    let (ok, _out, err) = git_capture(cwd, &["merge", "--no-edit", target])?;
     if !ok {
-        // Roll back a started-but-conflicting merge so the tree stays clean.
         let _ = git_capture(cwd, &["merge", "--abort"]);
         bail!("Can't cleanly merge {target}: {}", err.trim());
     }
-    Ok(target)
+    Ok(())
 }
 
 /// Fast-forward the *local* base branch (main/master) to `origin/<base>` — the
@@ -281,13 +420,35 @@ pub fn update_base(repo: &Path, base: &str) -> Result<()> {
         git(repo, &["merge", "--ff-only", &format!("origin/{base}")])?;
     } else {
         // Move the local ref to origin/<base>, ff-only (errors if it would rewind).
-        let (ok, _o, err) =
-            git_capture(repo, &["fetch", "origin", &format!("{base}:{base}")])?;
+        let (ok, _o, err) = git_capture(repo, &["fetch", "origin", &format!("{base}:{base}")])?;
         if !ok {
             bail!("Couldn't fetch origin/{base}: {}", err.trim());
         }
     }
     Ok(())
+}
+
+/// Integrate `origin/<branch>` into the worktree's own branch — the Trees "Pull"
+/// button, for commits added to the branch remotely (PR-UI suggestions, GitHub's
+/// "Update branch", a teammate's push). Fast-forwards when the local branch is
+/// strictly behind (no merge commit — keeps history clean); when it has *diverged*
+/// (local commits origin lacks, e.g. unpushed work plus a remote master-merge),
+/// ff isn't possible, so it falls back to [`merge_checked`] — which refuses up
+/// front (no working-tree touch) if the merge would conflict, exactly like
+/// [`pull_base`].
+pub fn pull_remote(cwd: &Path, branch: &str) -> Result<()> {
+    let (ok, _o, err) = git_capture(cwd, &["fetch", "origin", branch])?;
+    if !ok {
+        bail!("Couldn't fetch origin/{branch}: {}", err.trim());
+    }
+    let origin_ref = format!("origin/{branch}");
+    // Prefer a clean fast-forward; `--ff-only` fails without side effects (no
+    // MERGE_HEAD, tree untouched) when the branch has diverged, so we can fall
+    // through to a merge.
+    if git(cwd, &["merge", "--ff-only", &origin_ref]).is_ok() {
+        return Ok(());
+    }
+    merge_checked(cwd, &origin_ref)
 }
 
 /// Whether the working tree has any uncommitted change (staged or not).
@@ -558,6 +719,7 @@ pub fn push(cwd: &Path, branch: &str) -> Result<()> {
 /// Subject of the first commit on this branch since `base` — the natural PR
 /// title. `None` when there are no commits ahead of `base`.
 pub fn first_commit_subject(cwd: &Path, base: &str) -> Option<String> {
+    let base = compare_base(cwd, base);
     let range = format!("{base}..HEAD");
     let out = git_output(cwd, &["log", &range, "--reverse", "--format=%s"]).ok()?;
     out.lines()
@@ -569,19 +731,25 @@ pub fn first_commit_subject(cwd: &Path, base: &str) -> Option<String> {
 
 /// `git log base..HEAD` as a bullet list of subjects, for PR-body context.
 pub fn commit_log(cwd: &Path, base: &str) -> String {
+    let base = compare_base(cwd, base);
     let range = format!("{base}..HEAD");
     git_output(cwd, &["log", &range, "--format=- %s"]).unwrap_or_default()
 }
 
-/// `git diff base..HEAD --stat`, for PR-body context.
+/// `git diff base...HEAD --stat`, for PR-body context. Three-dot (merge-base) diff
+/// so it shows only the branch's own changes, never a net-diff against an upstream
+/// `base` that advanced past the fork point.
 pub fn diff_stat(cwd: &Path, base: &str) -> String {
-    let range = format!("{base}..HEAD");
+    let base = compare_base(cwd, base);
+    let range = format!("{base}...HEAD");
     git_output(cwd, &["diff", &range, "--stat"]).unwrap_or_default()
 }
 
-/// Full `git diff base..HEAD`, for PR-body context (capped by the caller).
+/// Full `git diff base...HEAD`, for PR-body context (capped by the caller).
+/// Three-dot (merge-base) diff — see [`diff_stat`].
 pub fn diff_range(cwd: &Path, base: &str) -> String {
-    let range = format!("{base}..HEAD");
+    let base = compare_base(cwd, base);
+    let range = format!("{base}...HEAD");
     git_output(cwd, &["diff", &range]).unwrap_or_default()
 }
 
@@ -866,7 +1034,10 @@ mod tests {
 
         let (add, del, binary) = count_new_file(&base, "huge.txt");
         assert!(!binary);
-        assert_eq!(add, MAX_COUNTED_LINES, "line count must saturate at the cap");
+        assert_eq!(
+            add, MAX_COUNTED_LINES,
+            "line count must saturate at the cap"
+        );
         assert_eq!(del, 0);
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -911,7 +1082,10 @@ mod tests {
         std::fs::write(seed.join("f.txt"), "v1\n").unwrap();
         run_git(&seed, &["add", "-A"]);
         run_git(&seed, &["commit", "-m", "init"]);
-        run_git(&seed, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        run_git(
+            &seed,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
         run_git(&seed, &["push", "origin", "main"]);
 
         run_git(
@@ -979,6 +1153,217 @@ mod tests {
         let local_head = git(&repo, &["rev-parse", "HEAD"]).unwrap();
         let origin_tip = git(&origin, &["rev-parse", "main"]).unwrap();
         assert_eq!(local_head, origin_tip);
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    // ---- pull_remote / remote_behind ----
+
+    /// Puts `repo` on a feature branch pushed to origin, then advances that same
+    /// branch on origin via `seed` (simulating a PR-UI commit / teammate push).
+    /// Returns `(origin, seed, repo)` with `repo`'s tracking ref intentionally
+    /// stale — the caller decides when to fetch.
+    fn init_diverged_feature(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let (origin, seed, repo) = init_origin_seed_and_clone(name);
+        // repo starts a feature branch and publishes it.
+        run_git(&repo, &["checkout", "-b", "feature"]);
+        std::fs::write(repo.join("f.txt"), "local\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "feature c1"]);
+        run_git(&repo, &["push", "-u", "origin", "feature"]);
+        // seed picks up the branch and advances it on origin.
+        run_git(&seed, &["fetch", "origin", "feature"]);
+        run_git(&seed, &["checkout", "-b", "feature", "origin/feature"]);
+        std::fs::write(seed.join("f.txt"), "remote-edit\n").unwrap();
+        run_git(&seed, &["add", "-A"]);
+        run_git(&seed, &["commit", "-m", "PR-UI suggestion"]);
+        run_git(&seed, &["push", "origin", "feature"]);
+        (origin, seed, repo)
+    }
+
+    /// `pull_remote` fast-forwards the worktree's own branch to origin/<branch>,
+    /// pulling in a commit added to the branch remotely.
+    #[test]
+    fn pull_remote_fast_forwards_branch_from_origin() {
+        let (origin, seed, repo) = init_diverged_feature("pull-remote-ff");
+
+        pull_remote(&repo, "feature").expect("pull_remote should ff cleanly");
+
+        let content = std::fs::read_to_string(repo.join("f.txt")).unwrap();
+        assert_eq!(
+            content, "remote-edit\n",
+            "working tree must reflect the remote commit"
+        );
+        let local_head = git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let origin_tip = git(&origin, &["rev-parse", "feature"]).unwrap();
+        assert_eq!(
+            local_head, origin_tip,
+            "local branch must match origin's feature tip"
+        );
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    /// `remote_behind` counts commits on origin/<branch> the local branch lacks,
+    /// but only after a fetch has updated the tracking ref (it reads the local
+    /// `origin/<branch>` ref, matching how the worktree-list builder observes it).
+    #[test]
+    fn remote_behind_counts_after_fetch() {
+        let (_origin, seed, repo) = init_diverged_feature("remote-behind-count");
+
+        // Tracking ref is stale until a fetch, so nothing looks pending yet.
+        assert_eq!(remote_behind(&repo, "feature"), 0);
+
+        run_git(&repo, &["fetch", "origin", "feature"]);
+        assert_eq!(
+            remote_behind(&repo, "feature"),
+            1,
+            "one remote commit is now pending"
+        );
+
+        pull_remote(&repo, "feature").expect("pull_remote should succeed");
+        assert_eq!(
+            remote_behind(&repo, "feature"),
+            0,
+            "up to date after pulling"
+        );
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    /// When the local branch has diverged (its own commit origin doesn't have)
+    /// but the changes don't conflict, `pull_remote` falls back to a real merge:
+    /// both the local commit and the remote edit survive.
+    #[test]
+    fn pull_remote_merges_on_nonconflicting_divergence() {
+        let (_origin, seed, repo) = init_diverged_feature("pull-remote-merge");
+        // A local-only commit touching a *different* file — diverges history but
+        // won't conflict with origin's edit to f.txt.
+        std::fs::write(repo.join("g.txt"), "local only\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "local divergence"]);
+
+        pull_remote(&repo, "feature").expect("non-conflicting divergence should merge");
+
+        // Remote edit pulled in…
+        assert_eq!(
+            std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+            "remote-edit\n"
+        );
+        // …and the local-only commit preserved.
+        assert!(
+            repo.join("g.txt").exists(),
+            "local commit must survive the merge"
+        );
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    /// When the divergence *conflicts*, `pull_remote` detects it up front (virtual
+    /// merge) and refuses — the working tree is never touched, so it's never left
+    /// in a half-merged/conflicted state, and the error names the file.
+    #[test]
+    fn pull_remote_refuses_conflicting_merge() {
+        let (_origin, seed, repo) = init_diverged_feature("pull-remote-conflict");
+        // Local edits the *same* file origin edited — an unmergeable divergence.
+        std::fs::write(repo.join("f.txt"), "local-conflict\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "conflicting local edit"]);
+        let head_before = git(&repo, &["rev-parse", "HEAD"]).unwrap();
+
+        let err = pull_remote(&repo, "feature").expect_err("conflicting pull must error");
+
+        // The message must name the conflicted file, not leak git's raw stderr.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("f.txt"),
+            "error should name the conflicted file: {msg}"
+        );
+        assert!(
+            msg.contains("would conflict"),
+            "error should be the up-front form: {msg}"
+        );
+        // Nothing touched: clean tree, unchanged HEAD, no MERGE_HEAD started.
+        assert!(
+            !is_dirty(&repo),
+            "tree must be untouched when a conflict is detected"
+        );
+        assert_eq!(
+            git(&repo, &["rev-parse", "HEAD"]).unwrap(),
+            head_before,
+            "HEAD must not move"
+        );
+        assert!(
+            git(&repo, &["rev-parse", "--verify", "MERGE_HEAD"]).is_err(),
+            "no merge in progress"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+            "local-conflict\n"
+        );
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    /// `merge_conflicts` reports the would-conflict paths from a *virtual* merge
+    /// without touching the working tree — the primitive behind the up-front check.
+    #[test]
+    fn merge_conflicts_detects_without_touching_tree() {
+        let (_origin, seed, repo) = init_diverged_feature("merge-conflicts-detect");
+        std::fs::write(repo.join("f.txt"), "local-conflict\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "conflicting local edit"]);
+        run_git(&repo, &["fetch", "origin", "feature"]);
+
+        let conflicts = merge_conflicts(&repo, "origin/feature").expect("detection should run");
+        assert_eq!(conflicts, vec!["f.txt".to_string()]);
+        assert!(
+            !is_dirty(&repo),
+            "virtual merge must not touch the working tree"
+        );
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    /// `pull_state` reports the pending-pull count and flags a conflicting pull —
+    /// the field that lets the Pull button disable itself up front.
+    #[test]
+    fn pull_state_flags_conflicting_pull() {
+        let (_origin, seed, repo) = init_diverged_feature("pull-state-conflict");
+        std::fs::write(repo.join("f.txt"), "local-conflict\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "conflicting local edit"]);
+
+        // `pull_state` fetches internally, so the count is live without a manual fetch.
+        let state = pull_state(&repo, "feature");
+        assert_eq!(state.behind, 1, "one remote commit is pending");
+        assert!(
+            state.conflict,
+            "the pending pull conflicts with the local edit"
+        );
+        assert!(
+            !is_dirty(&repo),
+            "computing pull_state must not touch the tree"
+        );
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    /// A non-conflicting divergence pulls cleanly, so `pull_state.conflict` is false.
+    #[test]
+    fn pull_state_clean_when_no_conflict() {
+        let (_origin, seed, repo) = init_diverged_feature("pull-state-clean");
+        // Local commit on a *different* file — pending pull, but no conflict.
+        std::fs::write(repo.join("g.txt"), "local only\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "non-conflicting local edit"]);
+
+        let state = pull_state(&repo, "feature");
+        assert_eq!(state.behind, 1);
+        assert!(
+            !state.conflict,
+            "a non-conflicting pull must not be flagged"
+        );
 
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
     }

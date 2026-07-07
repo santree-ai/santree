@@ -7,22 +7,28 @@ mod agent;
 mod commands;
 mod commit_draft;
 mod db;
+mod env;
 mod error;
 mod git;
 mod git_watch;
 mod github;
 mod gql;
+mod hooks;
 mod linear;
 mod notes;
 mod openers;
 mod pr;
+mod pricing;
 mod prompts;
 mod repo;
 mod reviews;
 mod session;
+mod session_signal;
 mod settings;
+mod tabs;
 mod terminal;
 mod text_store;
+mod usage;
 mod worktree;
 
 use tauri::{Emitter, Manager};
@@ -45,11 +51,18 @@ const BINDINGS_PATH: &str = "../src/bindings.ts";
 /// test all use the exact same command set — there's no way for them to drift.
 fn specta_builder() -> AppBuilder {
     Builder::<tauri::Wry>::new()
-        .events(collect_events![git_watch::WorktreeChanged])
+        .events(collect_events![
+            git_watch::WorktreeChanged,
+            session_signal::SessionStateChanged,
+            session_signal::SessionUsageChanged,
+            usage::UsageChanged,
+            usage::UsageProgress
+        ])
         .commands(collect_commands![
             commands::list_repos,
             commands::add_repo,
             commands::list_agents,
+            commands::claude_usage,
             commands::agent_auth,
             commands::github_status,
             commands::worktrees,
@@ -59,6 +72,7 @@ fn specta_builder() -> AppBuilder {
             commands::run_worktree_setup_streamed,
             commands::pull_worktree,
             commands::push_worktree,
+            commands::pull_remote_worktree,
             commands::update_base_branch,
             commands::worktree_status,
             commands::worktree_file_diff,
@@ -77,11 +91,17 @@ fn specta_builder() -> AppBuilder {
             commands::set_worktree_title,
             commands::work_prompt,
             commands::agent_session,
+            commands::started_investigations,
+            commands::list_worktree_tabs,
+            commands::add_worktree_tab,
+            commands::rename_worktree_tab,
+            commands::remove_worktree_tab,
             commands::pr_draft,
             commands::create_pull_request,
             commands::pr_reviewers,
             commands::worktree_prs,
             commands::reviews,
+            commands::merge_queue,
             commands::pr_detail,
             commands::worktree_init_script,
             commands::set_worktree_init_script,
@@ -91,6 +111,10 @@ fn specta_builder() -> AppBuilder {
             commands::list_triage_tickets,
             commands::triage_detail,
             commands::triage_set_state,
+            commands::triage_add_comment,
+            commands::claude_hook_settings,
+            commands::session_states,
+            commands::session_usage_live,
             commands::triage_schedule,
             commands::get_settings,
             commands::set_settings,
@@ -98,9 +122,11 @@ fn specta_builder() -> AppBuilder {
             commands::task_note,
             commands::set_task_note,
             commands::list_claude_commands,
+            commands::claude_models,
             commands::get_setting,
             commands::set_setting,
             commands::resolve_setting,
+            commands::env_file_vars,
             commands::linear_auth_status,
             commands::linear_orgs,
             commands::set_repo_linear_org,
@@ -354,7 +380,8 @@ pub fn run() {
         })
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
-            // Wire specta-registered events (WorktreeChanged) into the app.
+            // Wire specta-registered events (WorktreeChanged, SessionStateChanged)
+            // into the app.
             builder.mount_events(app);
 
             // Open the app database and make the pool available to commands. The
@@ -383,6 +410,23 @@ pub fn run() {
             // Owns the worktree filesystem watcher; `watch_worktrees` points it at
             // the active repo so the Trees views refresh live on disk changes.
             app.manage(git_watch::WorktreeWatcher::default());
+
+            // Watch ~/.claude/projects so the Settings → Usage panel refreshes live
+            // as Claude sessions grow, without polling. Best-effort; started once at
+            // a fixed path (unlike the per-repo worktree watcher). Kept in managed
+            // state so its watcher thread lives for the whole app.
+            let usage_watcher = usage::UsageWatcher::default();
+            usage_watcher.start(app.handle());
+            app.manage(usage_watcher);
+
+            // Listen on a Unix socket that the `santree-hook` binary nudges after
+            // each session-state write, so the frontend refreshes in realtime.
+            // Best-effort — a bind failure just means the UI falls back to its
+            // on-mount / on-focus fetch.
+            if let Err(e) = session_signal::start(app.handle(), &data_dir.join("santree-signal.sock"))
+            {
+                log::warn!("session-state signal socket failed to bind: {e:#}; live state updates disabled");
+            }
 
             // Vertically centre the macOS traffic lights in our 46px top bar so
             // they line up with the chrome icons (the `trafficLightPosition`

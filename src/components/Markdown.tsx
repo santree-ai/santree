@@ -142,6 +142,88 @@ const components: Components = {
   ),
 };
 
+// Real HTML element names. CommonMark parses ANY `<tagname …>` as raw HTML, so
+// issue-template placeholders (`<Add any relevant attachments>`) and generics
+// (`Vec<String>`) become HTML nodes whose unknown tag is then stripped by
+// rehype-sanitize — the text silently vanishes. This set is the allowlist of
+// tags we let through to rehype-raw as real HTML (the Linear linkback's
+// `<details>/<summary>`, images, breaks…); everything else is downgraded to
+// literal text by `literalizeUnknownHtml` below.
+const HTML_TAGS = new Set([
+  "a",
+  "abbr",
+  "b",
+  "blockquote",
+  "br",
+  "code",
+  "dd",
+  "del",
+  "details",
+  "div",
+  "dl",
+  "dt",
+  "em",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "hr",
+  "i",
+  "img",
+  "ins",
+  "kbd",
+  "li",
+  "mark",
+  "ol",
+  "p",
+  "picture",
+  "pre",
+  "q",
+  "s",
+  "samp",
+  "source",
+  "span",
+  "strike",
+  "strong",
+  "sub",
+  "summary",
+  "sup",
+  "table",
+  "tbody",
+  "td",
+  "tfoot",
+  "th",
+  "thead",
+  "tr",
+  "u",
+  "ul",
+  "video",
+]);
+
+// remark plugin: walk the mdast and turn any `html` node that isn't a recognized
+// HTML tag (or an HTML comment) into a plain `text` node, so it renders as the
+// literal characters the author typed instead of being parsed-then-stripped.
+// Code fences / inline code are `code`/`inlineCode` nodes, never `html`, so
+// they're untouched.
+function literalizeUnknownHtml() {
+  const visit = (node: { type: string; value?: string; children?: unknown[] }) => {
+    if (node.type === "html" && typeof node.value === "string") {
+      const isComment = node.value.startsWith("<!--");
+      const tag = /^<\/?\s*([a-zA-Z][a-zA-Z0-9-]*)/.exec(node.value)?.[1];
+      if (!isComment && (!tag || !HTML_TAGS.has(tag.toLowerCase()))) {
+        node.type = "text";
+      }
+      return;
+    }
+    if (Array.isArray(node.children)) {
+      for (const child of node.children) visit(child as typeof node);
+    }
+  };
+  return visit;
+}
+
 /**
  * Linear's editor serializes to slightly off-spec markdown — e.g. a non-breaking
  * space before a closing `**` (so `**Description: **` won't bold under
@@ -169,7 +251,7 @@ export const Markdown = memo(function Markdown({ children }: { children: string 
   return (
     <div className="selectable text-[12.5px] leading-[1.6] text-fg-2 [overflow-wrap:anywhere]">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkBreaks]}
+        remarkPlugins={[remarkGfm, remarkBreaks, literalizeUnknownHtml]}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
         components={components}
         urlTransform={urlTransform}

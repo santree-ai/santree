@@ -24,7 +24,17 @@ import {
 } from "react";
 
 import type { AgentKind, Settings } from "../bindings";
-import { useRepos, useSaveSettings, useSettings, useWorktreeWatcher } from "../lib/queries";
+import { preloadRepoAvatars } from "../components/chrome/RepoAvatar";
+import {
+  useRepos,
+  useSaveSettings,
+  useSessionStates,
+  useSessionStateWatcher,
+  useSessionUsageWatcher,
+  useSettings,
+  useUsageWatcher,
+  useWorktreeWatcher,
+} from "../lib/queries";
 import { DEFAULT_ACCENT } from "../theme/colors";
 
 /** Slow-changing shared data — the part most `useApp()` consumers read. */
@@ -86,6 +96,15 @@ interface AppUi {
   treeFocus: string | null;
   requestTreeFocus: (id: string) => void;
   consumeTreeFocus: () => void;
+
+  /** Worktrees the Trees tab should launch an agent in *in the background* —
+   *  set by the Issues "Run in background" (⌘-click) action. Trees mounts each
+   *  off-screen to spawn its PTY and seed the agent without stealing focus or
+   *  switching the active worktree, then drops it here once launched (the live
+   *  session persists in the TerminalLayer and re-attaches on a later open). */
+  bgLaunches: string[];
+  requestBackgroundLaunch: (id: string) => void;
+  clearBackgroundLaunch: (id: string) => void;
 
   /** A PR the Reviews tab should select — set (as the PR's url) by a PR pill
    *  elsewhere in the app before navigating to Reviews, consumed once there. */
@@ -157,6 +176,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   });
   const [treeLaunch, setTreeLaunch] = useState<string | null>(null);
   const [treeFocus, setTreeFocus] = useState<string | null>(null);
+  const [bgLaunches, setBgLaunches] = useState<string[]>([]);
   const [reviewFocus, setReviewFocus] = useState<string | null>(null);
   const [pendingLaunches, setPendingLaunches] = useState<PendingLaunch[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(new Set());
@@ -170,6 +190,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setActiveRepo(repos[0].name);
     }
   }, [repos, activeRepo]);
+
+  // Warm the GitHub avatar cache for every repo up front, so pickers/dropdowns
+  // render their icons instantly instead of flashing a loading state on open.
+  useEffect(() => {
+    if (repos?.length) preloadRepoAvatars(repos);
+  }, [repos]);
 
   // Persist the active repo (and sidebar layout) across launches, same as theme.
   // Keyed on the state itself rather than wrapping the exposed setters, since
@@ -187,6 +213,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // on-disk changes invalidate the cache even while another view is showing —
   // returning to Trees then renders fresh data, not a stale snapshot.
   useWorktreeWatcher(activeRepo);
+
+  // Keep live Claude session state flowing into the cache app-wide + in realtime
+  // (the query lands the data; the watcher pushes updates). No UI renders it yet.
+  useSessionStates();
+  useSessionStateWatcher();
+  useSessionUsageWatcher();
+
+  // Keep the Settings → Usage panel live: the watcher invalidates the usage query
+  // when a transcript grows. Mounted app-wide so the listener is always attached;
+  // the invalidation is a no-op until the panel actually observes the query.
+  useUsageWatcher();
 
   // The accent is a fixed theme color, set once on the root.
   useEffect(() => {
@@ -281,6 +318,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const removePendingLaunch = useCallback((id: string) => {
     setPendingLaunches((prev) => prev.filter((p) => p.id !== id));
   }, []);
+  const requestBackgroundLaunch = useCallback((id: string) => {
+    setBgLaunches((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  }, []);
+  const clearBackgroundLaunch = useCallback((id: string) => {
+    setBgLaunches((prev) => prev.filter((x) => x !== id));
+  }, []);
   const addPendingDeletes = useCallback((ids: string[]) => {
     setPendingDeletes((prev) => {
       const next = new Set(prev);
@@ -308,6 +351,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       treeFocus,
       requestTreeFocus: setTreeFocus,
       consumeTreeFocus,
+      bgLaunches,
+      requestBackgroundLaunch,
+      clearBackgroundLaunch,
       reviewFocus,
       requestReviewFocus: setReviewFocus,
       consumeReviewFocus,
@@ -327,6 +373,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       shortcutsOpen,
       treeLaunch,
       treeFocus,
+      bgLaunches,
+      requestBackgroundLaunch,
+      clearBackgroundLaunch,
       reviewFocus,
       pendingLaunches,
       pendingDeletes,

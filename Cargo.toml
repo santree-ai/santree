@@ -1,5 +1,5 @@
 [workspace]
-members = ["src-tauri", "crates/core", "crates/pty"]
+members = ["src-tauri", "crates/core", "crates/pty", "crates/hook"]
 resolver = "2"
 
 # Shared dependency versions for the whole workspace. Member crates pull these

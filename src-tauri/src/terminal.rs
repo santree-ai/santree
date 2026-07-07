@@ -10,6 +10,7 @@ use specta::{datatype::DataType, Type, Types};
 use tauri::ipc::{Channel, InvokeResponseBody, IpcResponse};
 use tauri::State;
 
+use crate::db::Db;
 use crate::error::CmdResult;
 use santree_pty::{OpenOpts, PtyManager, SessionId};
 
@@ -73,13 +74,18 @@ pub async fn terminal_open(
     opts: TerminalOpenOpts,
     on_output: Channel<RawBytes>,
     manager: State<'_, PtyManager>,
+    db: State<'_, Db>,
 ) -> CmdResult<SessionId> {
+    // The user's configured project env for the repo this cwd belongs to (app +
+    // per-repo). Applies to every santree-spawned terminal — the one chokepoint.
+    let env = crate::env::resolve_env(&db, opts.cwd.as_deref()).await;
     let opts = OpenOpts {
         cwd: opts.cwd,
         command: opts.command,
         args: opts.args,
         cols: opts.cols,
         rows: opts.rows,
+        env,
     };
     Ok(manager.open(opts, move |bytes| {
         // A failed send means the channel was dropped (view unmounted); the

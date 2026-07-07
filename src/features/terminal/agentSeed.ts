@@ -34,17 +34,40 @@ export function shellQuote(s: string): string {
 export function agentSessionSeed(
   session: AgentSession | undefined,
   exec: string,
-  opts: { prompt: string; modelFlag?: string; effortFlag?: string; remoteControl?: string },
+  opts: {
+    prompt?: string;
+    modelFlag?: string;
+    effortFlag?: string;
+    remoteControl?: string;
+    /** Pre-quoted `--settings '<path>'` (a settings *file*, not inline JSON —
+     *  the hook config is too large to inline without breaking the shell line)
+     *  to wire up santree's session-state hooks. Applied on both fresh and
+     *  resume launches so state is captured either way. */
+    settingsFlag?: string;
+    /** Launch with Claude's `--chrome` flag (browser control). A launch-time
+     *  capability, so — like `--settings` — it's applied on both fresh and
+     *  resume launches. */
+    chrome?: boolean;
+    /** Start in a specific permission mode via Claude's `--permission-mode`
+     *  (`plan` / `acceptEdits` / `auto` / …). A startup mode, so it's applied on
+     *  both fresh and resume launches; empty/undefined leaves the flag off. */
+    permissionMode?: string;
+  },
 ): string | undefined {
   if (!session || session.type === "shell") return undefined;
   const bin = shellQuote(exec);
   // Enable + name Remote Control (Claude's `--remote-control [name]`) with the
   // ticket id, so the session is identifiable on the Remote Control web.
   const rc = opts.remoteControl ? `--remote-control ${shellQuote(opts.remoteControl)} ` : "";
+  const settings = opts.settingsFlag ? `${opts.settingsFlag} ` : "";
+  const chrome = opts.chrome ? "--chrome " : "";
+  const perm = opts.permissionMode ? `--permission-mode ${shellQuote(opts.permissionMode)} ` : "";
   if (session.type === "resume") {
-    return `exec ${bin} ${rc}--resume ${shellQuote(session.sessionId)}`;
+    return `exec ${bin} ${rc}${settings}${chrome}${perm}--resume ${shellQuote(session.sessionId)}`;
   }
   const model = opts.modelFlag ? `${opts.modelFlag} ` : "";
   const effort = opts.effortFlag ? `${opts.effortFlag} ` : "";
-  return `exec ${bin} ${rc}${model}${effort}--session-id ${shellQuote(session.sessionId)} ${shellQuote(opts.prompt)}`;
+  // No prompt (a manual Claude tab) ⇒ launch interactive and let the user type.
+  const prompt = opts.prompt !== undefined ? ` ${shellQuote(opts.prompt)}` : "";
+  return `exec ${bin} ${rc}${settings}${chrome}${perm}${model}${effort}--session-id ${shellQuote(session.sessionId)}${prompt}`;
 }

@@ -30,6 +30,13 @@ pub struct OpenOpts {
     pub args: Vec<String>,
     pub cols: u16,
     pub rows: u16,
+    /// Extra environment variables (name → value) to set on top of the inherited
+    /// ambient env — the user's own configured project env (see COMPLIANCE.md's
+    /// "user-configured project environment" carve-out). Resolved by the caller
+    /// (`src-tauri`); this crate just applies them. Empty for an unconfigured
+    /// environment. This is NOT a channel for an agent CLI's own auth tokens —
+    /// those are never read, stored, or forwarded here.
+    pub env: Vec<(String, String)>,
 }
 
 struct Session {
@@ -277,10 +284,14 @@ fn pump(mut reader: Box<dyn Read + Send>, on_output: impl Fn(Vec<u8>)) {
 /// Build the `CommandBuilder`. `CommandBuilder::new` already inherits the full
 /// parent environment (so PATH/HOME are present and login CLIs resolve) via
 /// `vars_os()`, which is `OsString`-based and so tolerates non-UTF-8 values —
-/// unlike `std::env::vars()`, which panics on one. Only a sane TERM is added on
-/// top of that — the PTY only ever inherits the ambient process environment
-/// (see COMPLIANCE.md); there is deliberately no override channel a caller
-/// could misuse to forward secrets into a hosted CLI.
+/// unlike `std::env::vars()`, which panics on one.
+///
+/// On top of the inherited env we set: the user's own configured project env
+/// (`opts.env`, resolved by `src-tauri` from the Environment settings — see
+/// COMPLIANCE.md's "user-configured project environment" carve-out), then a sane
+/// `TERM` last so it can't be clobbered. This is the *only* env override channel,
+/// and it carries the user's own variables — it is never used to read, store, or
+/// forward an agent CLI's auth tokens.
 fn build_command(opts: &OpenOpts) -> CommandBuilder {
     let (program, default_args) = if opts.command.trim().is_empty() {
         (default_shell(), vec!["-l".to_string()])
@@ -296,6 +307,10 @@ fn build_command(opts: &OpenOpts) -> CommandBuilder {
     };
     cmd.args(args);
 
+    for (name, value) in &opts.env {
+        cmd.env(name, value);
+    }
+    // TERM last so a stray user-set TERM can't break xterm rendering.
     cmd.env("TERM", "xterm-256color");
 
     if let Some(cwd) = effective_cwd(opts.cwd.as_deref()) {

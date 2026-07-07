@@ -2,7 +2,7 @@
  *  (divergence + pull-into-worktree + update-base-from-origin), and the per-worktree
  *  actions (open in editor, run setup, delete) plus the file-picker toggle. Lives at
  *  the bottom of the main content so it stays put regardless of the side panels. */
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 
 import type { Worktree } from "../../bindings";
 import {
@@ -21,6 +21,7 @@ import {
   TREES_DEFAULT_EDITOR_KEY,
   useOpeners,
   useOpenInApp,
+  usePullRemoteWorktree,
   usePullWorktree,
   usePushWorktree,
   useSetting,
@@ -36,48 +37,125 @@ export function BottomBar({ worktree }: { worktree: Worktree }) {
   // The base-branch entry isn't a per-issue worktree: no PR / setup / delete, and
   // it can't pull-into-itself, so it shows just git state + open-in + files.
   const isBase = worktree.id === BASE_ID;
+  const showMore = useOverflowFade();
 
+  // The row is a single fixed-height (`h-9`) line: items never wrap or shrink
+  // (`whitespace-nowrap` + `flex-none` in ITEM), and anything past the edge is
+  // reachable by scrolling horizontally rather than wrapping or spilling out. The
+  // right-edge "…" fade appears only when there's more off-screen (`showMore`).
   return (
-    <div
-      className={`flex ${CHROME.statusBar} flex-none items-center gap-1 border-t border-line bg-deep pr-1 pl-2 text-[11px] text-muted-2`}
-    >
-      <GitState worktree={worktree} />
-      {!isBase && (
-        <>
-          <Divider />
-          <BaseMenu repo={repo} worktree={worktree} />
-        </>
-      )}
-
-      <div className="flex-1" />
-
-      <OpenInMenu path={worktree.path} />
-      <Divider />
-      <PushButton worktree={worktree} />
-      {!isBase && (
-        <>
-          <PrButton worktree={worktree} />
-          <SetupButton worktree={worktree} />
-          <DeleteButton worktree={worktree} />
-          <Divider />
-        </>
-      )}
-      <button
-        type="button"
-        onClick={toggleRightPanel}
-        title={rightCollapsed ? "Show files (⌘L)" : "Hide files (⌘L)"}
-        className="flex h-[22px] cursor-pointer items-center gap-1.5 rounded px-2 hover:bg-hover"
-        style={{ color: rightCollapsed ? "var(--color-muted-2)" : "var(--accent)" }}
+    <div className={`relative ${CHROME.statusBar} flex-none border-t border-line bg-deep`}>
+      <div
+        ref={showMore.ref}
+        className="flex h-full items-center gap-1 overflow-x-auto overflow-y-hidden pr-1 pl-2 text-[11px] text-muted-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
-        <PanelIcon />
-        Files
-      </button>
+        <GitState worktree={worktree} />
+        {!isBase && (
+          <>
+            <Divider />
+            <BaseMenu repo={repo} worktree={worktree} />
+          </>
+        )}
+
+        <div className="min-w-2 flex-1" />
+
+        <OpenInMenu path={worktree.path} />
+        <Divider />
+        <PullRemoteButton worktree={worktree} />
+        <PushButton worktree={worktree} />
+        {!isBase && (
+          <>
+            <PrButton worktree={worktree} />
+            <SetupButton worktree={worktree} />
+            <DeleteButton worktree={worktree} />
+            <Divider />
+          </>
+        )}
+        <button
+          type="button"
+          onClick={toggleRightPanel}
+          title={rightCollapsed ? "Show files (⌘L)" : "Hide files (⌘L)"}
+          className="flex h-[22px] flex-none cursor-pointer items-center gap-1.5 rounded px-2 whitespace-nowrap hover:bg-hover"
+          style={{ color: rightCollapsed ? "var(--color-muted-2)" : "var(--accent)" }}
+        >
+          <PanelIcon />
+          Files
+        </button>
+      </div>
+      {showMore.value && (
+        <div
+          className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-1.5 pl-8 text-muted-3"
+          style={{ background: "linear-gradient(to left, var(--color-deep) 45%, transparent)" }}
+        >
+          …
+        </div>
+      )}
     </div>
   );
 }
 
+/** Tracks whether a horizontally-scrollable row has content off its right edge —
+ *  drives the "…" fade. Recomputes on resize (ResizeObserver) and on scroll. */
+function useOverflowFade() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [value, setValue] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () =>
+      setValue(
+        el.scrollWidth > el.clientWidth + 1 && el.scrollLeft + el.clientWidth < el.scrollWidth - 1,
+      );
+    update();
+    // ResizeObserver catches width changes; MutationObserver catches actions
+    // appearing/disappearing (Push/Pull/PR toggle on git state) — which change the
+    // scroll width without resizing the box.
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    const mo = new MutationObserver(update);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    el.addEventListener("scroll", update, { passive: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      el.removeEventListener("scroll", update);
+    };
+  }, []);
+  return { ref, value };
+}
+
 function Divider() {
   return <span className="mx-0.5 h-3.5 w-px flex-none bg-line-3" />;
+}
+
+/** "Pull" — shown only when the branch's own remote has commits not yet local
+ *  (PR-UI suggestions, "Update branch", a teammate's push). Fast-forwards from
+ *  origin/<branch> when possible, else merges. Disabled (not hidden) when the pull
+ *  would conflict, so the count is still visible but can't be applied automatically
+ *  — the tooltip points to resolving it in the worktree. */
+function PullRemoteButton({ worktree }: { worktree: Worktree }) {
+  const { repo } = useTrees();
+  const { mutate: pullRemote, isPending } = usePullRemoteWorktree(repo);
+  const n = worktree.remoteBehind;
+  if (n === 0) return null;
+  const commits = `${n} commit${n === 1 ? "" : "s"}`;
+  const conflict = worktree.pullConflict;
+  return (
+    <button
+      type="button"
+      onClick={() => pullRemote(worktree.id)}
+      disabled={isPending || conflict}
+      title={
+        conflict
+          ? `Pulling ${commits} would conflict with your local changes — resolve it in the worktree (open Terminal → git merge origin/${worktree.branch})`
+          : `Pull ${commits} from origin/${worktree.branch}`
+      }
+      className={`${ITEM} disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent`}
+    >
+      {isPending ? <Spinner size={11} /> : <DownloadIcon size={12} />}
+      Pull {n}
+    </button>
+  );
 }
 
 /** "Push" — shown only when the branch has commits not yet on its remote. Pushes
@@ -124,11 +202,11 @@ function PrButton({ worktree }: { worktree: Worktree }) {
 }
 
 const ITEM =
-  "flex h-[22px] cursor-pointer items-center gap-1.5 rounded px-2 hover:bg-hover hover:text-fg-2";
+  "flex h-[22px] flex-none cursor-pointer items-center gap-1.5 rounded px-2 whitespace-nowrap hover:bg-hover hover:text-fg-2";
 
 function GitState({ worktree }: { worktree: Worktree }) {
   return (
-    <span className="flex items-center gap-1.5 px-1 font-mono">
+    <span className="flex flex-none items-center gap-1.5 px-1 font-mono whitespace-nowrap">
       {worktree.dirty ? (
         <span className="text-status-amber">● uncommitted</span>
       ) : (
@@ -291,12 +369,12 @@ function OpenInMenu({ path }: { path: string }) {
       placement="up"
       align="right"
       trigger={(toggle) => (
-        <div className="flex items-stretch">
+        <div className="flex flex-none items-stretch">
           <button
             type="button"
             onClick={() => openIn({ path, opener: defaultKey })}
             title={`Open in ${defaultLabel}`}
-            className="flex h-[22px] cursor-pointer items-center gap-1.5 rounded-l px-2 hover:bg-hover"
+            className="flex h-[22px] cursor-pointer items-center gap-1.5 rounded-l px-2 whitespace-nowrap hover:bg-hover"
           >
             <OpenerIcon openerKey={defaultKey} size={14} />
             Open in
@@ -305,7 +383,7 @@ function OpenInMenu({ path }: { path: string }) {
             type="button"
             onClick={toggle}
             title="Open in…"
-            className="flex h-[22px] w-5 cursor-pointer items-center justify-center rounded-r hover:bg-hover"
+            className="flex h-[22px] w-5 flex-none cursor-pointer items-center justify-center rounded-r hover:bg-hover"
           >
             <ChevronDownIcon size={10} />
           </button>

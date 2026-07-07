@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Reviewer } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { CloseIcon } from "../../components/icons";
-import { Spinner, useModalA11y } from "../../components/primitives";
+import { Button, Spinner, useModalA11y } from "../../components/primitives";
 import { useCreatePr, usePrDraft, usePrReviewers } from "../../lib/queries";
 import { toast } from "../../state/toast";
 import { alpha } from "../../theme/colors";
@@ -212,22 +212,10 @@ export function CreatePrDialog() {
             Create as draft
           </label>
           <div className="flex-1" />
-          <button
-            ref={cancelRef}
-            type="button"
-            onClick={closePrDialog}
-            disabled={creating}
-            className="cursor-pointer rounded-md border border-line-2 bg-input px-3 py-1.5 text-[12px] text-muted-2 hover:text-fg-2 disabled:cursor-default disabled:opacity-50"
-          >
+          <Button ref={cancelRef} onClick={closePrDialog} disabled={creating}>
             Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onCreate}
-            disabled={!canCreate}
-            style={{ color: "var(--on-accent)" }}
-            className="flex cursor-pointer items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium hover:opacity-90 disabled:cursor-default disabled:opacity-50"
-          >
+          </Button>
+          <Button variant="primary" onClick={onCreate} disabled={!canCreate}>
             {creating ? (
               <>
                 <Spinner size={12} /> Creating…
@@ -237,7 +225,7 @@ export function CreatePrDialog() {
             ) : (
               "Create PR"
             )}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

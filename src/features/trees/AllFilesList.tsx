@@ -7,6 +7,7 @@ import { useWorktreeFiles, useWorktreeStatus } from "../../lib/queries";
 import { alpha } from "../../theme/colors";
 import { STATUS_META } from "./changeTree";
 import { fileIconUrl, folderIconUrl } from "./fileIcons";
+import { IndentGuides } from "./IndentGuides";
 import { useTrees } from "./model";
 
 interface TreeNode {
@@ -125,14 +126,17 @@ const TreeRow = memo(function TreeRow({
     <button
       type="button"
       onClick={() => onActivate(node.path, node.dir)}
-      className="flex w-full cursor-pointer items-center gap-1.5 py-[3px] pr-2 text-[12px] hover:bg-hover"
+      className="flex w-full cursor-pointer items-center gap-1.5 py-[3px] pr-2 pl-1.5 text-[12px] hover:bg-hover"
       style={{
-        paddingLeft: 8 + depth * 13,
         color: tint ?? (node.dir ? "var(--color-fg-2)" : "var(--color-muted)"),
         background: selected ? alpha(8) : undefined,
       }}
     >
-      <span className="flex-none text-[8px] text-muted-4" style={{ width: 7 }}>
+      <IndentGuides depth={depth} />
+      <span
+        className="flex flex-none items-center justify-center text-[11px] text-muted-2"
+        style={{ width: 14 }}
+      >
         {node.dir ? (isOpen ? "▾" : "▸") : ""}
       </span>
       {icon ? (
