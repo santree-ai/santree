@@ -255,6 +255,21 @@ export const commands = {
 	 *  threads), and changed files with diffs. Empty when `gh` isn't authenticated.
 	 */
 	prDetail: (owner: string, name: string, number: number) => typedError<PrDetail, CmdError>(__TAURI_INVOKE("pr_detail", { owner, name, number })),
+	/**
+	 *  The old (base) + new (head) full contents of one PR file, fetched on demand so
+	 *  the diff can expand unchanged context beyond the patch hunks (GitHub-style).
+	 *  `base`/`head` are the commit OIDs from [`PrDetail`]. Empty when GitHub isn't
+	 *  connected or the file doesn't exist on that side (added/deleted).
+	 */
+	prFileSource: (owner: string, name: string, base: string, head: string, path: string) => typedError<FileSource, CmdError>(__TAURI_INVOKE("pr_file_source", { owner, name, base, head, path })),
+	/**
+	 *  The files a user has marked "Viewed" for a PR, each with the blob SHA it was
+	 *  marked at. The frontend keeps a mark only while the file's current head SHA
+	 *  still matches (a new commit changing the file drops the mark automatically).
+	 */
+	reviewedFiles: (prRepo: string, prNumber: number) => typedError<ReviewedFile[], CmdError>(__TAURI_INVOKE("reviewed_files", { prRepo, prNumber })),
+	/**  Mark a PR file reviewed (persisting its current blob `sha`) or clear the mark. */
+	setFileReviewed: (prRepo: string, prNumber: number, path: string, sha: string, reviewed: boolean) => typedError<null, CmdError>(__TAURI_INVOKE("set_file_reviewed", { prRepo, prNumber, path, sha, reviewed })),
 	/**  The repo's `.santree/init.sh` setup script (for the Settings editor). */
 	worktreeInitScript: (repo: string) => typedError<ScriptInfo, CmdError>(__TAURI_INVOKE("worktree_init_script", { repo })),
 	/**  Write the repo's `.santree/init.sh` setup script. */
@@ -498,6 +513,24 @@ export type ChangedFile = {
 	binary: boolean,
 };
 
+/**
+ *  A single annotation a check run emitted (compiler/lint/test error) — the
+ *  actionable "what failed" content GitHub shows inline on the Checks tab. Only
+ *  populated for failed check runs.
+ */
+export type CheckAnnotation = {
+	/**  `error` | `warning` | `notice` (GitHub's `annotationLevel`, lowercased). */
+	level: string,
+	message: string,
+	/**  File the annotation is anchored to, when any. */
+	path: string | null,
+	/**  Start line in `path`, when any. */
+	startLine: number | null,
+	title: string | null,
+	/**  Raw log excerpt GitHub attaches (often the full error block), when any. */
+	rawDetails: string | null,
+};
+
 /**  Rolled-up CI/status-check state for a PR's latest commit. */
 export type CheckRollup = "Success" | "Failure" | "Pending" | 
 /**  No checks configured (GitHub returned null). */
@@ -509,6 +542,16 @@ export type CheckStatus = "Success" | "Failure" |
 "Pending" | "Skipped" | 
 /**  Neutral / cancelled / action-required — finished without pass/fail. */
 "Neutral";
+
+/**
+ *  One step of a GitHub Actions check run (e.g. "Run tests"). Only populated for
+ *  failed check runs — the expandable detail shows which step broke.
+ */
+export type CheckStep = {
+	number: number,
+	name: string,
+	status: CheckStatus,
+};
 
 /**
  *  A Claude slash-command discovered on disk under a `.claude/commands` folder.
@@ -691,6 +734,10 @@ export type PrCheck = {
 	description: string | null,
 	/**  Link to the check's details (the run/build page). */
 	url: string | null,
+	/**  The run's steps — populated only for failed check runs (empty otherwise). */
+	steps: CheckStep[],
+	/**  Error/warning annotations — populated only for failed check runs. */
+	annotations: CheckAnnotation[],
 };
 
 /**  One comment in a PR's conversation (issue comment, review, or inline thread). */
@@ -707,9 +754,23 @@ export type PrComment = {
 /**  The detail panel payload for a selected PR: body, conversation, diff, checks. */
 export type PrDetail = {
 	body: string,
+	/**
+	 *  Top-level conversation: issue comments and review summaries, chronological.
+	 *  Inline review-thread comments live in `threads`, not here.
+	 */
 	comments: PrComment[],
+	/**  Inline review-comment threads, anchored to files/lines (shown in the diff). */
+	threads: PrThread[],
 	files: PrFile[],
 	checks: PrCheck[],
+	/**
+	 *  Commit OID of the PR's base (old side) — used to fetch full file content
+	 *  on demand so the diff can expand unchanged context (GitHub-style). Empty
+	 *  when `gh` isn't authenticated.
+	 */
+	baseSha: string,
+	/**  Commit OID of the PR's head (new side) — the other end of the expand fetch. */
+	headSha: string,
 };
 
 /**  A proposed PR (title + body) for the create-PR dialog, before it's opened. */
@@ -729,10 +790,44 @@ export type PrFile = {
 	deletions: number,
 	/**  Unified diff for the file; `None` for binary files (no textual patch). */
 	patch: string | null,
+	/**
+	 *  Blob SHA of the file at the PR's head. It changes only when the file's
+	 *  *content* changes, so the "Viewed" feature keys its persisted mark on it:
+	 *  a mark stored against this SHA survives commits that don't touch the file,
+	 *  and auto-clears the moment a new commit changes the file (SHA differs).
+	 */
+	sha: string,
 };
 
 /**  The merge state of a worktree's pull request. */
 export type PrState = "Open" | "Merged" | "Closed";
+
+/**
+ *  One inline review-comment thread on a PR, anchored to a file (and usually a
+ *  line). Its comments are rendered together, and resolved threads collapse in the
+ *  UI (GitHub-style). Distinct from the top-level `PrComment`s in [`PrDetail`],
+ *  which are the issue-level conversation.
+ */
+export type PrThread = {
+	path: string,
+	/**
+	 *  Line the thread is anchored to (in the file named by `path`). `None` when
+	 *  GitHub can't place it anymore (outdated threads on since-changed lines).
+	 */
+	line: number | null,
+	/**
+	 *  Which side of the diff the anchor line lives on: `true` = the new/right
+	 *  side (an added/context line), `false` = the old/left side (a removed line).
+	 */
+	onRight: boolean,
+	isResolved: boolean,
+	/**
+	 *  The thread's anchor line no longer matches the current diff (the code moved
+	 *  or changed under it). Such threads can't be shown inline in the diff.
+	 */
+	isOutdated: boolean,
+	comments: PrComment[],
+};
 
 export type Priority = "Urgent" | "High" | "Medium" | "Low" | 
 /**
@@ -808,6 +903,17 @@ export type ReviewPr = {
 	reviewers: Reviewer[],
 	/**  ISO-8601 timestamp of the last update. */
 	updatedAt: string,
+};
+
+/**
+ *  A file's persisted "Viewed" mark in the Reviews tab: the file path plus the
+ *  blob SHA it was marked at. The UI treats a file as reviewed only while its
+ *  current [`PrFile::sha`] still equals this `sha` — so a new commit that changes
+ *  the file (new SHA) automatically drops it back to unreviewed.
+ */
+export type ReviewedFile = {
+	path: string,
+	sha: string,
 };
 
 /**  A reviewer requested on a PR — a person (with avatar) or a team (no avatar). */

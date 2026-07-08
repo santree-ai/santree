@@ -13,7 +13,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 
-import type { CheckStatus, PrCheck, PrComment, Reviewer, ReviewPr } from "../../bindings";
+import type { CheckStatus, PrCheck, Reviewer, ReviewPr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
 import {
@@ -23,22 +23,24 @@ import {
   CopyIcon,
   GitHubLogo,
   LinearLogo,
+  PanelIcon,
 } from "../../components/icons";
-import { Markdown } from "../../components/Markdown";
 import { Button, Dot, EmptyState, Pill, Skeleton, Tabs } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
 import { usePrDetail, useTriageDetail } from "../../lib/queries";
 import { toast } from "../../state/toast";
 import {
+  accentActiveStyle,
   checkRollupMeta,
   checkStatusMeta,
   mergeQueueMeta,
   priorityColor,
   reviewDecisionMeta,
 } from "../../theme/colors";
-import { DiffViewer } from "../trees/DiffViewer";
 import { MergeQueuePane } from "./MergeQueuePane";
 import { useReviewsModel } from "./model";
+import { PrInfoPanel } from "./PrInfoPanel";
+import { PrReviewPane } from "./PrReviewPane";
 
 type DetailTab = "pr" | "checks" | "issue";
 
@@ -79,11 +81,18 @@ export function ReviewDetail() {
     );
   }
   // Keyed remount so per-PR query state, the active tab, and scroll reset on switch.
-  return <PrPane key={active.id} pr={active} />;
+  // The info rail spans the whole detail area (header, tabs, body) alongside the
+  // PR pane, so the description stays visible across every tab.
+  return (
+    <div key={active.id} className="flex min-w-0 flex-1">
+      <PrPane pr={active} />
+      <PrInfoPanel pr={active} />
+    </div>
+  );
 }
 
 function PrPane({ pr }: { pr: ReviewPr }) {
-  const { repo: santreeRepo } = useReviewsModel();
+  const { repo: santreeRepo, infoCollapsed, toggleInfo } = useReviewsModel();
   const [tab, setTab] = useState<DetailTab>("pr");
   const ticketId = ticketIdFor(pr);
   const decision = reviewDecisionMeta[pr.reviewDecision];
@@ -122,6 +131,16 @@ function PrPane({ pr }: { pr: ReviewPr }) {
               <GitHubLogo size={11} />
               Open
             </Button>
+            <button
+              type="button"
+              onClick={toggleInfo}
+              aria-pressed={!infoCollapsed}
+              title={`${infoCollapsed ? "Show" : "Hide"} details (⌘L)`}
+              className="flex-none cursor-pointer rounded-md border border-line-2 bg-input p-1.5 hover:border-line-strong"
+              style={infoCollapsed ? { color: "var(--color-muted-3)" } : accentActiveStyle()}
+            >
+              <PanelIcon size={13} />
+            </button>
           </div>
         </div>
         <h1 className="mb-2 text-[16px] leading-[1.3] font-semibold text-fg-bright">{pr.title}</h1>
@@ -168,7 +187,7 @@ function PrPane({ pr }: { pr: ReviewPr }) {
         ]}
       />
 
-      {tab === "pr" && <PrBody pr={pr} />}
+      {tab === "pr" && <PrReviewPane pr={pr} />}
       {tab === "checks" && <ChecksPane pr={pr} />}
       {tab === "issue" && <ReviewIssuePane repo={santreeRepo} ticketId={ticketId} />}
     </div>
@@ -202,54 +221,83 @@ function Reviewers({ reviewers }: { reviewers: Reviewer[] }) {
   );
 }
 
-function PrBody({ pr }: { pr: ReviewPr }) {
-  const [owner, name] = splitRepo(pr.repo);
-  const { data: detail, isLoading } = usePrDetail(owner, name, pr.number);
+// GitHub annotation levels → tint. `notice` is informational; error/warning
+// map to the shared status palette so they read the same as check glyphs.
+const annotationLevelColor: Record<string, string> = {
+  // GitHub's CheckAnnotationLevel enum: FAILURE | WARNING | NOTICE (lowercased).
+  failure: "var(--color-status-red)",
+  error: "var(--color-status-red)",
+  warning: "var(--color-status-amber)",
+  notice: "var(--color-muted-3)",
+};
 
+/** Failed steps + error annotations for a failed check, shown when expanded. */
+function CheckDetail({ check }: { check: PrCheck }) {
+  // Steps are ordered; the failing one(s) are what matter, but showing the run's
+  // step list gives context on where it broke. Highlight non-passing steps.
+  const failedSteps = check.steps.filter((s) => s.status === "Failure");
+  const steps = failedSteps.length > 0 ? failedSteps : check.steps;
   return (
-    <div className="flex min-h-0 flex-1">
-      <div className="selectable min-w-0 flex-1 overflow-y-auto px-5 py-4">
-        {isLoading ? (
-          <BodySkeleton />
-        ) : (
-          <>
-            <Markdown>{detail?.body?.trim() || "_No description._"}</Markdown>
-            <Conversation comments={detail?.comments ?? []} />
-          </>
-        )}
-      </div>
-
-      <div className="min-w-0 flex-1 overflow-y-auto border-l border-hairline px-4 py-4">
-        <div className="mb-2.5 font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
-          Changed files
-        </div>
-        {isLoading ? (
-          <BodySkeleton />
-        ) : detail && detail.files.length > 0 ? (
-          detail.files.map((f) => (
-            <div key={f.path} className="mb-3 overflow-hidden rounded-lg border border-line-2">
-              <div className="flex items-center gap-2 border-b border-line-2 bg-raised px-3 py-1.5 font-mono text-[11px]">
-                <span className="min-w-0 flex-1 truncate text-fg-2">{f.path}</span>
-                <span className="flex-none text-muted-4">
-                  <span className="text-status-green">+{f.additions}</span>{" "}
-                  <span className="text-status-red">−{f.deletions}</span>
+    <div className="mt-1.5 flex flex-col gap-2 border-t border-line-2 pt-2">
+      {steps.length > 0 && (
+        <div className="flex flex-col gap-1">
+          {steps.map((s) => {
+            const sm = checkStatusMeta[s.status];
+            return (
+              <div key={s.number} className="flex items-center gap-2 text-[11.5px]">
+                <span className="flex-none font-mono text-[11px]" style={{ color: sm.color }}>
+                  {sm.glyph}
                 </span>
+                <span className="min-w-0 flex-1 truncate text-muted-2">{s.name}</span>
               </div>
-              <DiffViewer path={f.path} diff={f.patch ?? ""} oldText="" newText="" mode="unified" />
+            );
+          })}
+        </div>
+      )}
+      {check.annotations.map((a, i) => {
+        const color = annotationLevelColor[a.level] ?? "var(--color-status-red)";
+        return (
+          <div
+            key={`${a.path ?? ""}-${a.startLine ?? i}-${i}`}
+            className="rounded-md border border-line-2 bg-app px-2.5 py-2"
+            style={{ borderLeft: `2px solid ${color}` }}
+          >
+            <div className="mb-1 flex items-center gap-2 font-mono text-[10px]">
+              <span className="uppercase" style={{ color }}>
+                {a.level || "error"}
+              </span>
+              {a.path && (
+                <span className="min-w-0 truncate text-muted-3">
+                  {a.path}
+                  {a.startLine != null && `:${a.startLine}`}
+                </span>
+              )}
             </div>
-          ))
-        ) : (
-          <EmptyState title="No file changes" />
-        )}
-      </div>
+            {a.title && <div className="mb-0.5 text-[11.5px] font-medium text-fg-2">{a.title}</div>}
+            <div className="text-[11.5px] leading-snug whitespace-pre-wrap text-muted-2">
+              {a.message}
+            </div>
+            {a.rawDetails && (
+              <pre className="mt-1.5 overflow-x-auto rounded bg-input px-2 py-1.5 font-mono text-[10.5px] leading-snug text-muted-3">
+                {a.rawDetails}
+              </pre>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-/** One CI check row — links to the run's details page when one is available. */
+/** One CI check row. Failed checks with step/annotation detail expand inline to
+ *  show what broke; every row links to the run's details page when available. */
 function CheckRow({ check }: { check: PrCheck }) {
   const m = checkStatusMeta[check.status];
-  const inner = (
+  const hasDetail = check.steps.length > 0 || check.annotations.length > 0;
+  // Failed runs start expanded — the detail is the reason you opened this tab.
+  const [open, setOpen] = useState(hasDetail);
+
+  const header = (
     <>
       <span className="flex-none font-mono text-[12px]" style={{ color: m.color }}>
         {m.glyph}
@@ -260,19 +308,51 @@ function CheckRow({ check }: { check: PrCheck }) {
       )}
     </>
   );
-  const cls =
-    "flex items-center gap-2.5 rounded-md border border-line-2 bg-input px-3 py-2 text-left";
-  return check.url ? (
-    <button
-      type="button"
-      onClick={() => openUrl(check.url as string)}
-      title="Open check details"
-      className={`${cls} w-full cursor-pointer hover:border-line-strong`}
-    >
-      {inner}
-    </button>
-  ) : (
-    <div className={cls}>{inner}</div>
+  const rowCls = "flex items-center gap-2.5 rounded-md border border-line-2 bg-input px-3 py-2";
+
+  if (!hasDetail) {
+    return check.url ? (
+      <button
+        type="button"
+        onClick={() => openUrl(check.url as string)}
+        title="Open check details"
+        className={`${rowCls} w-full cursor-pointer text-left hover:border-line-strong`}
+      >
+        {header}
+      </button>
+    ) : (
+      <div className={rowCls}>{header}</div>
+    );
+  }
+
+  return (
+    <div className="rounded-md border border-line-2 bg-input px-3 py-2">
+      <div className="flex items-center gap-2.5">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 text-left"
+          title={open ? "Collapse" : "Expand"}
+        >
+          <ChevronDownIcon
+            size={11}
+            className={`flex-none text-muted-4 transition-transform ${open ? "" : "-rotate-90"}`}
+          />
+          {header}
+        </button>
+        {check.url && (
+          <button
+            type="button"
+            onClick={() => openUrl(check.url as string)}
+            title="Open check details"
+            className="flex-none cursor-pointer text-muted-4 hover:text-fg-2"
+          >
+            <GitHubLogo size={13} />
+          </button>
+        )}
+      </div>
+      {open && <CheckDetail check={check} />}
+    </div>
   );
 }
 
@@ -440,34 +520,6 @@ function ReviewIssuePane({ repo, ticketId }: { repo: string; ticketId: string | 
         )}
       </div>
       {ready ? <DiscussionPane detail={ready} repo={repo} /> : <DiscussionSkeleton />}
-    </div>
-  );
-}
-
-function Conversation({ comments }: { comments: PrComment[] }) {
-  if (comments.length === 0) return null;
-  return (
-    <div className="mt-6 border-t border-hairline pt-4">
-      <div className="mb-3 font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
-        Conversation
-      </div>
-      <div className="flex flex-col gap-3.5">
-        {comments.map((c, i) => (
-          <div key={`${c.author}-${c.createdAt}-${i}`} className="flex gap-2.5">
-            <Avatar name={c.author} src={c.authorAvatarUrl} size={22} />
-            <div className="min-w-0 flex-1 rounded-lg border border-line-2 bg-raised px-3 py-2">
-              <div className="mb-1 flex items-center gap-2 text-[11px]">
-                <span className="font-medium text-fg-2">{c.author}</span>
-                {c.kind === "Review" && <span className="text-muted-4">reviewed</span>}
-                {c.kind === "ReviewThread" && c.path && (
-                  <span className="truncate font-mono text-[10px] text-muted-4">{c.path}</span>
-                )}
-              </div>
-              <Markdown>{c.body}</Markdown>
-            </div>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

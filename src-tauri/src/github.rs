@@ -13,9 +13,9 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use santree_core::domain::{
-    CheckRollup, CheckStatus, CommentKind, MergeQueue, MergeQueueEntry, MergeQueueState, PrCheck,
-    PrComment, PrDetail, PrFile, PrState, ReviewDecision, ReviewInbox, ReviewPr, Reviewer,
-    ReviewerKind, TeamReviews,
+    CheckAnnotation, CheckRollup, CheckStatus, CheckStep, CommentKind, FileSource, MergeQueue,
+    MergeQueueEntry, MergeQueueState, PrCheck, PrComment, PrDetail, PrFile, PrState, PrThread,
+    ReviewDecision, ReviewInbox, ReviewPr, Reviewer, ReviewerKind, TeamReviews,
 };
 
 use crate::git;
@@ -798,23 +798,48 @@ pub async fn pr_detail(token: &str, owner: &str, name: &str, number: u32) -> Res
         pr_conversation(token, owner, name, number),
         pr_files(token, owner, name, number),
     );
-    let (body, comments, checks) = conversation?;
+    let (body, comments, threads, checks, base_sha, head_sha) = conversation?;
     Ok(PrDetail {
         body,
         comments,
+        threads,
         files: files?,
         checks,
+        base_sha,
+        head_sha,
     })
 }
 
-/// Body + comments (issue comments, reviews, and inline review-thread comments)
-/// merged chronologically, plus the head commit's individual CI checks.
+/// Normalize a check run's / check step's (`status`, `conclusion`) pair into the
+/// UI's flat [`CheckStatus`]. A run is only conclusive once `COMPLETED`; before
+/// that (`QUEUED` / `IN_PROGRESS`) it's still pending regardless of conclusion.
+fn check_run_status(status: &str, conclusion: Option<&str>) -> CheckStatus {
+    if status != "COMPLETED" {
+        return CheckStatus::Pending;
+    }
+    match conclusion {
+        Some("SUCCESS") => CheckStatus::Success,
+        // ACTION_REQUIRED blocks the PR and needs the user to act, so surface it
+        // as a failure rather than hiding it in the collapsed "neutral" group.
+        Some("FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED") => {
+            CheckStatus::Failure
+        }
+        Some("SKIPPED") => CheckStatus::Skipped,
+        // NEUTRAL / CANCELLED / STALE (and any unknown future value) — finished
+        // without a pass/fail verdict.
+        _ => CheckStatus::Neutral,
+    }
+}
+
+/// Body + top-level comments (issue comments and review summaries) merged
+/// chronologically, the inline review-comment threads (grouped, with resolution
+/// and anchor line/side), and the head commit's individual CI checks.
 async fn pr_conversation(
     token: &str,
     owner: &str,
     name: &str,
     number: u32,
-) -> Result<(String, Vec<PrComment>, Vec<PrCheck>)> {
+) -> Result<(String, Vec<PrComment>, Vec<PrThread>, Vec<PrCheck>, String, String)> {
     #[derive(Deserialize)]
     struct Data {
         repository: Option<Repo>,
@@ -827,6 +852,10 @@ async fn pr_conversation(
     #[derive(Deserialize)]
     struct Pr {
         body: String,
+        #[serde(rename = "baseRefOid")]
+        base_ref_oid: String,
+        #[serde(rename = "headRefOid")]
+        head_ref_oid: String,
         comments: Connection<Comment>,
         reviews: Connection<Review>,
         #[serde(rename = "reviewThreads")]
@@ -874,6 +903,8 @@ async fn pr_conversation(
             details_url: Option<String>,
             #[serde(rename = "checkSuite")]
             check_suite: Option<CheckSuite>,
+            steps: Option<Connection<StepNode>>,
+            annotations: Option<Connection<AnnotationNode>>,
         },
         StatusContext {
             context: String,
@@ -894,6 +925,32 @@ async fn pr_conversation(
         name: String,
     }
     #[derive(Deserialize)]
+    struct StepNode {
+        number: u32,
+        name: String,
+        status: String,
+        conclusion: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct AnnotationNode {
+        #[serde(rename = "annotationLevel")]
+        annotation_level: Option<String>,
+        message: String,
+        path: Option<String>,
+        title: Option<String>,
+        #[serde(rename = "rawDetails")]
+        raw_details: Option<String>,
+        location: Option<AnnotationLocation>,
+    }
+    #[derive(Deserialize)]
+    struct AnnotationLocation {
+        start: Option<AnnotationLine>,
+    }
+    #[derive(Deserialize)]
+    struct AnnotationLine {
+        line: Option<u32>,
+    }
+    #[derive(Deserialize)]
     struct Comment {
         author: Option<Actor>,
         body: String,
@@ -909,13 +966,20 @@ async fn pr_conversation(
     }
     #[derive(Deserialize)]
     struct Thread {
+        path: String,
+        line: Option<u32>,
+        #[serde(rename = "diffSide")]
+        diff_side: Option<String>,
+        #[serde(rename = "isResolved")]
+        is_resolved: bool,
+        #[serde(rename = "isOutdated")]
+        is_outdated: bool,
         comments: Connection<ThreadComment>,
     }
     #[derive(Deserialize)]
     struct ThreadComment {
         author: Option<Actor>,
         body: String,
-        path: Option<String>,
         #[serde(rename = "createdAt")]
         created_at: String,
     }
@@ -925,13 +989,19 @@ async fn pr_conversation(
           repository(owner: $owner, name: $name) {
             pullRequest(number: $number) {
               body
+              baseRefOid
+              headRefOid
               comments(first: 100) { nodes { author { login avatarUrl } body createdAt } }
               reviews(first: 50) { nodes { author { login avatarUrl } body createdAt } }
-              reviewThreads(first: 50) { nodes { comments(first: 50) { nodes { author { login avatarUrl } body path createdAt } } } }
+              reviewThreads(first: 50) { nodes { path line diffSide isResolved isOutdated comments(first: 50) { nodes { author { login avatarUrl } body createdAt } } } }
               commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
                 nodes {
                   __typename
-                  ... on CheckRun { name status conclusion detailsUrl checkSuite { app { name } } }
+                  ... on CheckRun {
+                    name status conclusion detailsUrl checkSuite { app { name } }
+                    steps(first: 50) { nodes { number name status conclusion } }
+                    annotations(first: 50) { nodes { annotationLevel message path title rawDetails location { start { line } } } }
+                  }
                   ... on StatusContext { context state targetUrl description }
                 }
                 pageInfo { hasNextPage endCursor }
@@ -949,7 +1019,11 @@ async fn pr_conversation(
               commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100, after: $after) {
                 nodes {
                   __typename
-                  ... on CheckRun { name status conclusion detailsUrl checkSuite { app { name } } }
+                  ... on CheckRun {
+                    name status conclusion detailsUrl checkSuite { app { name } }
+                    steps(first: 50) { nodes { number name status conclusion } }
+                    annotations(first: 50) { nodes { annotationLevel message path title rawDetails location { start { line } } } }
+                  }
                   ... on StatusContext { context state targetUrl description }
                 }
                 pageInfo { hasNextPage endCursor }
@@ -997,20 +1071,38 @@ async fn pr_conversation(
             path: None,
         });
     }
+    comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    // Inline review threads stay grouped (each renders as one collapsible thread
+    // anchored in the diff), rather than being flattened into `comments`.
+    let mut threads: Vec<PrThread> = Vec::new();
     for t in pr.review_threads.nodes {
+        let mut thread_comments: Vec<PrComment> = Vec::new();
         for c in t.comments.nodes {
             let (author, author_avatar_url) = actor(c.author);
-            comments.push(PrComment {
+            thread_comments.push(PrComment {
                 author,
                 author_avatar_url,
                 body: c.body,
                 created_at: c.created_at,
                 kind: CommentKind::ReviewThread,
-                path: c.path,
+                path: Some(t.path.clone()),
             });
         }
+        if thread_comments.is_empty() {
+            continue;
+        }
+        threads.push(PrThread {
+            path: t.path,
+            line: t.line,
+            // GitHub's `diffSide` is RIGHT for the new side, LEFT for the old;
+            // default to the new side when absent (the common single-line case).
+            on_right: t.diff_side.as_deref() != Some("LEFT"),
+            is_resolved: t.is_resolved,
+            is_outdated: t.is_outdated,
+            comments: thread_comments,
+        });
     }
-    comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
 
     // Collect the head commit's check contexts, paging through all of them.
     // GitHub caps a GraphQL connection at 100 nodes/page, but the aggregate
@@ -1059,31 +1151,47 @@ async fn pr_conversation(
                 status,
                 details_url,
                 check_suite,
+                steps,
+                annotations,
             } => {
-                // A check run is only conclusive once COMPLETED; before that
-                // (QUEUED / IN_PROGRESS) it's still pending regardless of conclusion.
-                let st = if status != "COMPLETED" {
-                    CheckStatus::Pending
+                let st = check_run_status(&status, conclusion.as_deref());
+                // Only failed checks carry their step/annotation detail — that's
+                // the only place the UI expands it, and it keeps the payload lean.
+                let (steps, annotations) = if st == CheckStatus::Failure {
+                    let steps = steps
+                        .map(|c| c.nodes)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|s| CheckStep {
+                            number: s.number,
+                            name: s.name,
+                            status: check_run_status(&s.status, s.conclusion.as_deref()),
+                        })
+                        .collect();
+                    let annotations = annotations
+                        .map(|c| c.nodes)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|a| CheckAnnotation {
+                            level: a.annotation_level.unwrap_or_default().to_lowercase(),
+                            message: a.message,
+                            path: a.path,
+                            start_line: a.location.and_then(|l| l.start).and_then(|s| s.line),
+                            title: a.title,
+                            raw_details: a.raw_details,
+                        })
+                        .collect();
+                    (steps, annotations)
                 } else {
-                    match conclusion.as_deref() {
-                        Some("SUCCESS") => CheckStatus::Success,
-                        // ACTION_REQUIRED blocks the PR and needs the user to
-                        // act, so surface it as a failure rather than hiding it
-                        // in the collapsed "skipped/neutral" group.
-                        Some("FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED") => {
-                            CheckStatus::Failure
-                        }
-                        Some("SKIPPED") => CheckStatus::Skipped,
-                        // NEUTRAL / CANCELLED / STALE (and any unknown future
-                        // value) — finished without a pass/fail verdict.
-                        _ => CheckStatus::Neutral,
-                    }
+                    (Vec::new(), Vec::new())
                 };
                 checks.push(PrCheck {
                     name,
                     status: st,
                     description: check_suite.and_then(|s| s.app).map(|a| a.name),
                     url: details_url,
+                    steps,
+                    annotations,
                 });
             }
             Ctx::StatusContext {
@@ -1103,13 +1211,24 @@ async fn pr_conversation(
                     status: st,
                     description,
                     url: target_url,
+                    // Status contexts (legacy commit statuses) have no steps or
+                    // annotations — only GitHub Actions check runs do.
+                    steps: Vec::new(),
+                    annotations: Vec::new(),
                 });
             }
             Ctx::Other => {}
         }
     }
 
-    Ok((pr.body, comments, checks))
+    Ok((
+        pr.body,
+        comments,
+        threads,
+        checks,
+        pr.base_ref_oid,
+        pr.head_ref_oid,
+    ))
 }
 
 /// Changed files for a PR, with their unified-diff patches (REST files API).
@@ -1121,6 +1240,8 @@ async fn pr_files(token: &str, owner: &str, name: &str, number: u32) -> Result<V
         additions: u32,
         deletions: u32,
         patch: Option<String>,
+        /// Blob SHA of the file at the PR's head — drives the "Viewed" mark.
+        sha: String,
     }
     let files: Vec<RestFile> = get_json(
         format!("https://api.github.com/repos/{owner}/{name}/pulls/{number}/files"),
@@ -1136,6 +1257,46 @@ async fn pr_files(token: &str, owner: &str, name: &str, number: u32) -> Result<V
             additions: f.additions,
             deletions: f.deletions,
             patch: f.patch,
+            sha: f.sha,
         })
         .collect())
+}
+
+/// The full text of a file at a given commit, via the REST contents API with the
+/// `raw` media type (returns the bytes directly rather than base64 JSON). A 404 —
+/// the file doesn't exist at that commit (added on the new side, or deleted on the
+/// old side) — maps to empty, which the diff viewer treats as "no content".
+async fn file_content(token: &str, owner: &str, name: &str, r#ref: &str, path: &str) -> String {
+    let res = gql::client()
+        .get(format!(
+            "https://api.github.com/repos/{owner}/{name}/contents/{path}"
+        ))
+        .query(&[("ref", r#ref)])
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github.raw")
+        .header("User-Agent", "santree")
+        .send()
+        .await;
+    match res {
+        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// The old (base) and new (head) full contents of a PR file, so the diff viewer
+/// can expand unchanged context beyond the patch hunks (GitHub-style). Fetched on
+/// demand per file. Either side is empty for an added/deleted file.
+pub async fn pr_file_source(
+    token: &str,
+    owner: &str,
+    name: &str,
+    base: &str,
+    head: &str,
+    path: &str,
+) -> Result<FileSource> {
+    let (old_text, new_text) = tokio::join!(
+        file_content(token, owner, name, base, path),
+        file_content(token, owner, name, head, path),
+    );
+    Ok(FileSource { old_text, new_text })
 }

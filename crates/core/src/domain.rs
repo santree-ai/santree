@@ -522,6 +522,32 @@ pub struct PrFile {
     pub deletions: u32,
     /// Unified diff for the file; `None` for binary files (no textual patch).
     pub patch: Option<String>,
+    /// Blob SHA of the file at the PR's head. It changes only when the file's
+    /// *content* changes, so the "Viewed" feature keys its persisted mark on it:
+    /// a mark stored against this SHA survives commits that don't touch the file,
+    /// and auto-clears the moment a new commit changes the file (SHA differs).
+    pub sha: String,
+}
+
+/// One inline review-comment thread on a PR, anchored to a file (and usually a
+/// line). Its comments are rendered together, and resolved threads collapse in the
+/// UI (GitHub-style). Distinct from the top-level `PrComment`s in [`PrDetail`],
+/// which are the issue-level conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PrThread {
+    pub path: String,
+    /// Line the thread is anchored to (in the file named by `path`). `None` when
+    /// GitHub can't place it anymore (outdated threads on since-changed lines).
+    pub line: Option<u32>,
+    /// Which side of the diff the anchor line lives on: `true` = the new/right
+    /// side (an added/context line), `false` = the old/left side (a removed line).
+    pub on_right: bool,
+    pub is_resolved: bool,
+    /// The thread's anchor line no longer matches the current diff (the code moved
+    /// or changed under it). Such threads can't be shown inline in the diff.
+    pub is_outdated: bool,
+    pub comments: Vec<PrComment>,
 }
 
 /// Normalized status of a single CI check (a check run or a status context).
@@ -536,6 +562,34 @@ pub enum CheckStatus {
     Neutral,
 }
 
+/// One step of a GitHub Actions check run (e.g. "Run tests"). Only populated for
+/// failed check runs — the expandable detail shows which step broke.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckStep {
+    pub number: u32,
+    pub name: String,
+    pub status: CheckStatus,
+}
+
+/// A single annotation a check run emitted (compiler/lint/test error) — the
+/// actionable "what failed" content GitHub shows inline on the Checks tab. Only
+/// populated for failed check runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckAnnotation {
+    /// `error` | `warning` | `notice` (GitHub's `annotationLevel`, lowercased).
+    pub level: String,
+    pub message: String,
+    /// File the annotation is anchored to, when any.
+    pub path: Option<String>,
+    /// Start line in `path`, when any.
+    pub start_line: Option<u32>,
+    pub title: Option<String>,
+    /// Raw log excerpt GitHub attaches (often the full error block), when any.
+    pub raw_details: Option<String>,
+}
+
 /// One CI check on a PR's head commit (a GitHub check run or a status context).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -547,6 +601,10 @@ pub struct PrCheck {
     pub description: Option<String>,
     /// Link to the check's details (the run/build page).
     pub url: Option<String>,
+    /// The run's steps — populated only for failed check runs (empty otherwise).
+    pub steps: Vec<CheckStep>,
+    /// Error/warning annotations — populated only for failed check runs.
+    pub annotations: Vec<CheckAnnotation>,
 }
 
 /// The detail panel payload for a selected PR: body, conversation, diff, checks.
@@ -554,9 +612,30 @@ pub struct PrCheck {
 #[serde(rename_all = "camelCase")]
 pub struct PrDetail {
     pub body: String,
+    /// Top-level conversation: issue comments and review summaries, chronological.
+    /// Inline review-thread comments live in `threads`, not here.
     pub comments: Vec<PrComment>,
+    /// Inline review-comment threads, anchored to files/lines (shown in the diff).
+    pub threads: Vec<PrThread>,
     pub files: Vec<PrFile>,
     pub checks: Vec<PrCheck>,
+    /// Commit OID of the PR's base (old side) — used to fetch full file content
+    /// on demand so the diff can expand unchanged context (GitHub-style). Empty
+    /// when `gh` isn't authenticated.
+    pub base_sha: String,
+    /// Commit OID of the PR's head (new side) — the other end of the expand fetch.
+    pub head_sha: String,
+}
+
+/// A file's persisted "Viewed" mark in the Reviews tab: the file path plus the
+/// blob SHA it was marked at. The UI treats a file as reviewed only while its
+/// current [`PrFile::sha`] still equals this `sha` — so a new commit that changes
+/// the file (new SHA) automatically drops it back to unreviewed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewedFile {
+    pub path: String,
+    pub sha: String,
 }
 
 /// What an agent worktree is currently doing.

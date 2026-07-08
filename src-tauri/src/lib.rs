@@ -21,6 +21,7 @@ mod pr;
 mod pricing;
 mod prompts;
 mod repo;
+mod reviewed;
 mod reviews;
 mod session;
 mod session_signal;
@@ -103,6 +104,9 @@ fn specta_builder() -> AppBuilder {
             commands::reviews,
             commands::merge_queue,
             commands::pr_detail,
+            commands::pr_file_source,
+            commands::reviewed_files,
+            commands::set_file_reviewed,
             commands::worktree_init_script,
             commands::set_worktree_init_script,
             commands::make_init_script_executable,

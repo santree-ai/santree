@@ -5,7 +5,7 @@
  * lives here. The detail is fetched lazily (and prewarmed on graph hover).
  */
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { Task, Worktree, WorktreePr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
@@ -375,6 +375,48 @@ function QueueBar({
   );
 }
 
+/** True while ⌘ (macOS) / Ctrl is held down anywhere in the window, so a control
+ *  can preview what a modifier-click will do. Resets on window blur so a missed
+ *  keyup (e.g. after ⌘-Tab) can't leave it stuck on. */
+function useModifierHeld() {
+  const [held, setHeld] = useState(false);
+  useEffect(() => {
+    const sync = (e: KeyboardEvent) => setHeld(e.metaKey || e.ctrlKey);
+    const clear = () => setHeld(false);
+    window.addEventListener("keydown", sync);
+    window.addEventListener("keyup", sync);
+    window.addEventListener("blur", clear);
+    return () => {
+      window.removeEventListener("keydown", sync);
+      window.removeEventListener("keyup", sync);
+      window.removeEventListener("blur", clear);
+    };
+  }, []);
+  return held;
+}
+
+/** The queue-off "Run" button. Its label previews the action: holding ⌘/Ctrl
+ *  flips "Run" → "Run in background" (the same modifier the click reads), so the
+ *  background launch is discoverable rather than a hidden shortcut. */
+function RunButton({ onRun, onRunBackground }: { onRun: () => void; onRunBackground: () => void }) {
+  const modifierHeld = useModifierHeld();
+  return (
+    <Button
+      variant="tinted"
+      size="lg"
+      onClick={(e) => (e.metaKey || e.ctrlKey ? onRunBackground() : onRun())}
+      title="Run now — ⌘-click to run in the background"
+      className="w-full transition-colors"
+      // Armed look while ⌘/Ctrl is held: a stronger fill + accent border makes
+      // the background-launch mode unmistakable, matching the swapped label.
+      style={modifierHeld ? { background: alpha(22), borderColor: "var(--accent)" } : undefined}
+    >
+      <span className="text-[10px]">▶</span>
+      {modifierHeld ? "Run in background" : "Run"}
+    </Button>
+  );
+}
+
 /** The launch control for the focused issue. With the queue enabled it's the
  *  "Add to queue" toggle / "Queued" chip; with the queue off (default) it's a
  *  single "Run" button that starts the ticket now — ⌘/Ctrl-click runs it in the
@@ -400,18 +442,7 @@ function QueueControl({
 }) {
   if (eligible) {
     if (!queueEnabled) {
-      return (
-        <Button
-          variant="tinted"
-          size="lg"
-          onClick={(e) => (e.metaKey || e.ctrlKey ? onRunBackground() : onRun())}
-          title="Run now — ⌘-click to run in the background"
-          className="w-full"
-        >
-          <span className="text-[10px]">▶</span>
-          Run
-        </Button>
-      );
+      return <RunButton onRun={onRun} onRunBackground={onRunBackground} />;
     }
     return (
       <Button

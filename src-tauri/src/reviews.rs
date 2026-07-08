@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
-use santree_core::domain::{MergeQueue, PrDetail, ReviewInbox};
+use santree_core::domain::{FileSource, MergeQueue, PrDetail, ReviewInbox};
 
 use crate::db::Db;
 use crate::github;
@@ -63,9 +63,30 @@ pub async fn detail(owner: &str, name: &str, number: u32) -> Result<PrDetail> {
         return Ok(PrDetail {
             body: String::new(),
             comments: vec![],
+            threads: vec![],
             files: vec![],
             checks: vec![],
+            base_sha: String::new(),
+            head_sha: String::new(),
         });
     };
     github::pr_detail(&token, owner, name, number).await
+}
+
+/// The old (base) + new (head) full contents of one PR file, for expanding
+/// unchanged context in the diff. Empty when `gh` isn't authenticated.
+pub async fn file_source(
+    owner: &str,
+    name: &str,
+    base: &str,
+    head: &str,
+    path: &str,
+) -> Result<FileSource> {
+    let Some(token) = github::token().await else {
+        return Ok(FileSource {
+            old_text: String::new(),
+            new_text: String::new(),
+        });
+    };
+    github::pr_file_source(&token, owner, name, base, head, path).await
 }

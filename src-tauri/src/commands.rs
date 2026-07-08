@@ -19,7 +19,8 @@ use santree_core::{
     domain::{
         AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, ClaudeCommands, FileSource,
         GithubStatus, LinearOrg, LinearStatus, MergeQueue, NewPr, Opener, PrDetail, PrDraft, Repo,
-        ReviewInbox, Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings, TabKind, Task,
+        ReviewInbox, ReviewedFile, Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings,
+        TabKind, Task,
         TriageDetail, TriageSchedule, TriageTicket, UsageReport, Worktree, WorktreePr, WorktreeTab,
     },
 };
@@ -34,6 +35,7 @@ use crate::openers;
 use crate::pr;
 use crate::pricing;
 use crate::repo;
+use crate::reviewed;
 use crate::reviews;
 use crate::session;
 use crate::settings;
@@ -514,6 +516,49 @@ pub async fn merge_queue(repo: String, db: State<'_, Db>) -> CmdResult<Option<Me
 #[specta::specta]
 pub async fn pr_detail(owner: String, name: String, number: u32) -> CmdResult<PrDetail> {
     Ok(reviews::detail(&owner, &name, number).await?)
+}
+
+/// The old (base) + new (head) full contents of one PR file, fetched on demand so
+/// the diff can expand unchanged context beyond the patch hunks (GitHub-style).
+/// `base`/`head` are the commit OIDs from [`PrDetail`]. Empty when GitHub isn't
+/// connected or the file doesn't exist on that side (added/deleted).
+#[tauri::command]
+#[specta::specta]
+pub async fn pr_file_source(
+    owner: String,
+    name: String,
+    base: String,
+    head: String,
+    path: String,
+) -> CmdResult<FileSource> {
+    Ok(reviews::file_source(&owner, &name, &base, &head, &path).await?)
+}
+
+/// The files a user has marked "Viewed" for a PR, each with the blob SHA it was
+/// marked at. The frontend keeps a mark only while the file's current head SHA
+/// still matches (a new commit changing the file drops the mark automatically).
+#[tauri::command]
+#[specta::specta]
+pub async fn reviewed_files(
+    pr_repo: String,
+    pr_number: u32,
+    db: State<'_, Db>,
+) -> CmdResult<Vec<ReviewedFile>> {
+    Ok(reviewed::list(&db, &pr_repo, pr_number).await?)
+}
+
+/// Mark a PR file reviewed (persisting its current blob `sha`) or clear the mark.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_file_reviewed(
+    pr_repo: String,
+    pr_number: u32,
+    path: String,
+    sha: String,
+    reviewed: bool,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(reviewed::set(&db, &pr_repo, pr_number, &path, &sha, reviewed).await?)
 }
 
 /// Push the worktree branch and open a pull request via the GitHub API (optionally

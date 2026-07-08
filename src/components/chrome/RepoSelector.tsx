@@ -55,10 +55,10 @@ export function RepoSelector() {
   }
 
   return (
-    // min-w-0: this sits in a flex row (ViewChrome's sidebar header); without
-    // it the flex item won't shrink below the trigger's content width, and
-    // the long repo name overflows past the sidebar edge instead of eliding.
-    <div className="min-w-0">
+    // flex-1 + min-w-0: this sits in a flex row (ViewChrome's sidebar header).
+    // flex-1 makes the trigger span the full bar width (not just its content);
+    // min-w-0 lets it shrink so a long repo name elides instead of overflowing.
+    <div className="min-w-0 flex-1">
       <Dropdown
         open={menuOpen}
         onOpenChange={handleOpenChange}
@@ -67,7 +67,7 @@ export function RepoSelector() {
           <button
             type="button"
             onClick={toggle}
-            className="flex min-w-0 max-w-full cursor-pointer items-center gap-[7px] rounded-md border bg-input-alt px-[9px] py-[5px] transition-colors hover:border-line-strong"
+            className="flex w-full min-w-0 cursor-pointer items-center gap-[7px] rounded-md border bg-input-alt px-[9px] py-[5px] transition-colors hover:border-line-strong"
             style={{ borderColor: menuOpen ? accent : "var(--color-line-3)" }}
           >
             <RepoAvatar repo={activeRepo} />

@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AgentKind,
   ChangedFile,
+  ReviewedFile,
   ScriptInfo,
   Settings,
   TriageComment,
@@ -190,6 +191,9 @@ export const queryKeys = {
   mergeQueue: (repo: string) => ["merge-queue", repo] as const,
   prDetail: (owner: string, name: string, number: number) =>
     ["pr-detail", owner, name, number] as const,
+  reviewedFiles: (prRepo: string, number: number) => ["reviewed-files", prRepo, number] as const,
+  prFileSource: (owner: string, name: string, base: string, head: string, path: string) =>
+    ["pr-file-source", owner, name, base, head, path] as const,
   openers: ["openers"] as const,
   initScript: (repo: string) => ["init-script", repo] as const,
   taskNote: (repo: string, id: string) => ["task-note", repo, id] as const,
@@ -886,6 +890,57 @@ export const usePrDetail = (owner: string, name: string, number: number, enabled
         (query.state.data?.checks ?? []).some((c) => c.status === "Pending") ? 30_000 : false,
     },
   );
+
+/** One PR file's old (base) + new (head) full contents, fetched on demand so the
+ *  diff can expand unchanged context (GitHub-style). Gated by `enabled` so it only
+ *  fires for an expanded, non-binary file. Content at a commit is immutable, so
+ *  it's cached forever. */
+export const usePrFileSource = (
+  owner: string,
+  name: string,
+  base: string,
+  head: string,
+  path: string,
+  enabled: boolean,
+) =>
+  useUnwrappedQuery(
+    queryKeys.prFileSource(owner, name, base, head, path),
+    () => commands.prFileSource(owner, name, base, head, path),
+    {
+      enabled: enabled && !!owner && !!name && !!head && !!path,
+      staleTime: Number.POSITIVE_INFINITY,
+    },
+  );
+
+/** The files the user has marked "Viewed" for a PR, each with the blob SHA it was
+ *  marked at. A file counts as reviewed only while its current [`PrFile.sha`]
+ *  still equals the stored SHA (the caller compares) — so a commit that changes
+ *  the file auto-drops the mark. Marks are local + durable, so never stale. */
+export const useReviewedFiles = (prRepo: string, number: number, enabled = true) =>
+  useUnwrappedQuery(
+    queryKeys.reviewedFiles(prRepo, number),
+    () => commands.reviewedFiles(prRepo, number),
+    { enabled: enabled && !!prRepo && number > 0, staleTime: Number.POSITIVE_INFINITY },
+  );
+
+/** Toggle a PR file's "Viewed" mark, persisting (or clearing) its blob SHA.
+ *  Optimistic — patches the reviewed-files cache so the checkbox + diff collapse
+ *  react instantly; the mutationKey lets rapid toggles reconcile last-write-wins. */
+export const useSetFileReviewed = (prRepo: string, number: number) =>
+  useOptimisticMutation<{ path: string; sha: string; reviewed: boolean }, null>({
+    mutationKey: ["set-file-reviewed", prRepo, number],
+    mutationFn: (v) => unwrap(commands.setFileReviewed(prRepo, number, v.path, v.sha, v.reviewed)),
+    optimistic: (qc, v) => {
+      const key = queryKeys.reviewedFiles(prRepo, number);
+      const prev = qc.getQueryData<ReviewedFile[]>(key);
+      qc.setQueryData<ReviewedFile[]>(key, (cur = []) => {
+        const rest = cur.filter((f) => f.path !== v.path);
+        return v.reviewed ? [...rest, { path: v.path, sha: v.sha }] : rest;
+      });
+      return () => qc.setQueryData(key, prev);
+    },
+    invalidate: () => [queryKeys.reviewedFiles(prRepo, number)],
+  });
 
 /** The "open in app" targets (Finder, editors, terminals) for a worktree. */
 export const useOpeners = () =>
