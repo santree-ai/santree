@@ -15,6 +15,7 @@ import {
   useAgentSession,
   useBoolSetting,
   useClaudeHookSettings,
+  useClaudeHookSettingsNoGit,
   useResolvedSetting,
   WORK_EFFORT_KEY,
   WORK_MODEL_KEY,
@@ -252,6 +253,8 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
             activeTab === extraTab(t.id) ? (
               t.kind === "claude" ? (
                 <ClaudeTabPane key={t.id} repo={repo} worktree={worktree} tab={t} />
+              ) : t.kind === "fixCi" ? (
+                <FixCiTabPane key={t.id} repo={repo} worktree={worktree} tab={t} />
               ) : (
                 <WorktreeTerminal
                   key={t.id}
@@ -387,6 +390,95 @@ function ClaudeTabPane({
       // instead of replaying a stale "fresh" decision whose transcript now
       // exists on disk (which `session::resolve` would correctly resolve to
       // Resume).
+      onExited={() => qc.removeQueries({ queryKey: ["agent-session", repo, refId] })}
+    />
+  );
+}
+
+/** A "Fix CI with AI" tab: like {@link ClaudeTabPane}, but launched with the
+ *  commit/push-denying settings file and seeded to read the CI-fix prompt (the
+ *  failed log + guardrails) written when the Reviews button kicked this off. The
+ *  prompt is seeded only on the first (fresh) launch; a resume after restart just
+ *  continues the conversation, and the no-git settings still apply. */
+function FixCiTabPane({
+  repo,
+  worktree,
+  tab,
+}: {
+  repo: string;
+  worktree: Worktree;
+  tab: WorktreeTab;
+}) {
+  const { settings } = useApp();
+  const { fixCiPromptFor } = useTrees();
+  const refId = `tree:${worktree.id}:tab:${tab.id}`;
+  const qc = useQueryClient();
+  const { tabs } = useTerminals();
+  const liveSession = tabs.some((t) => t.source === "issue" && t.refId === refId);
+  const [liveSeen, setLiveSeen] = useState(false);
+  useEffect(() => {
+    if (liveSession) setLiveSeen(true);
+  }, [liveSession]);
+  const ended = liveSeen && !liveSession;
+
+  const needsSeed = !liveSession && !liveSeen;
+  const session = useAgentSession(repo, refId, worktree.path, true, needsSeed);
+  const exec = settings?.agents?.find((a) => a.key === "Claude")?.exec?.trim() || "claude";
+  const model = useResolvedSetting(repo, WORK_MODEL_KEY).data;
+  const effort = useResolvedSetting(repo, WORK_EFFORT_KEY).data;
+  // The no-git variant: forbids `git commit`/`git push` for this session, so the
+  // AI fixes + validates but leaves committing/pushing to the user (via Trees).
+  const hookSettings = useClaudeHookSettingsNoGit().data;
+  const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
+  const permissionMode = useResolvedSetting(repo, WORK_PERMISSION_MODE_KEY).data;
+  const promptPath = fixCiPromptFor(tab.id);
+  const seed = agentSessionSeed(session.data, exec, {
+    // Seed the short "read the file" line — the CI log is far too large to type
+    // into the PTY (same reason the work prompt seeds a path, see useWorktreeAgent).
+    prompt: promptPath
+      ? `Read ${promptPath} and follow the instructions inside.`
+      : "Fix the failing CI for this branch. Do not commit or push.",
+    // No `--remote-control` here: it would collide with the worktree's main work
+    // session (same worktree id), which already claims that Remote Control name.
+    modelFlag: model ? `--model ${shellQuote(model)}` : undefined,
+    effortFlag: effort ? `--effort ${shellQuote(effort)}` : undefined,
+    settingsFlag: hookSettings ? `--settings ${shellQuote(hookSettings)}` : undefined,
+    chrome: startWithChrome,
+    permissionMode: permissionMode ?? undefined,
+  });
+
+  if (ended) {
+    return (
+      <SessionEndedPane
+        title="Fix-CI session ended"
+        subtitle={
+          <>
+            <span className="font-mono text-fg-3">{tab.title}</span> keeps its conversation — resume
+            it to keep working, or close the tab. Commit &amp; push your fix from the bottom bar.
+          </>
+        }
+        onResume={() => {
+          qc.removeQueries({ queryKey: ["agent-session", repo, refId] });
+          setLiveSeen(false);
+        }}
+      />
+    );
+  }
+  if (needsSeed && session.isFetching) {
+    return (
+      <EmptyState
+        className="h-full"
+        title="Starting Claude…"
+        subtitle="Reading the CI failure — the terminal opens in a moment."
+      />
+    );
+  }
+  return (
+    <WorktreeTerminal
+      id={`${worktree.id}:tab:${tab.id}`}
+      branch={tab.title}
+      cwd={worktree.path}
+      seed={seed}
       onExited={() => qc.removeQueries({ queryKey: ["agent-session", repo, refId] })}
     />
   );

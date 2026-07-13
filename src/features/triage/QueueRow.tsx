@@ -61,7 +61,14 @@ export const QueueRow = memo(function QueueRow({
       data-ticket-id={ticket.id}
       onMouseEnter={() => onHover(ticket.id)}
       className="mb-[5px] flex w-full min-w-0 items-stretch overflow-hidden rounded-[9px] transition-colors hover:bg-hover"
-      style={{ ...style, opacity: snoozed ? 0.55 : 1 }}
+      style={{
+        ...style,
+        opacity: snoozed ? 0.62 : 1,
+        // Snoozed rows are dimmed and sunk to the bottom, but dimming alone is
+        // easy to miss — an amber left stripe marks the "parked until later"
+        // rows at a glance. Sits under the active/selected border, not fighting it.
+        boxShadow: snoozed ? "inset 3px 0 0 var(--color-status-amber)" : undefined,
+      }}
     >
       <button
         type="button"

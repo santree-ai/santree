@@ -20,7 +20,7 @@ import type { AgentKind, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
-import { Button, EmptyState } from "../../components/primitives";
+import { Button, EmptyState, Segmented } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import {
   INVESTIGATE_AGENT_KEY,
@@ -28,10 +28,12 @@ import {
   INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
   INVESTIGATE_REMOTE_CONTROL_KEY,
+  TRIAGE_GOOD_CITIZEN_KEY,
   usePrefetchOnHover,
   useRefreshTriage,
   useRepos,
   useResolvedSetting,
+  useSetSetting,
   useStartedInvestigations,
   useTriageDetail,
   useTriageQueue,
@@ -130,6 +132,11 @@ export function TriageView() {
   const navigate = useNavigate();
   const { data: schedules = [] } = useTriageSchedule(activeRepo);
   const { visible, teamWaiting, goodCitizen } = useTriageQueue(activeRepo);
+  const setSetting = useSetSetting();
+  // The Mine/All header toggle *is* the "be a good citizen" setting — All widens
+  // to the whole team inbox (issues not assigned to you included).
+  const setGoodCitizen = (next: boolean) =>
+    setSetting.mutate({ scope: "app", key: TRIAGE_GOOD_CITIZEN_KEY, value: next ? "true" : null });
   // Who's currently on triage (someone other than me) — drives the empty-state
   // nudge to lend them a hand.
   const onTriageShift = schedules.find((s) => s.currentName && !s.currentIsMe);
@@ -280,13 +287,20 @@ export function TriageView() {
     <ViewChrome
       sidebar={
         <>
-          {/* Header (count + Select all) only when there's a queue to act on — an
-              empty queue (e.g. good citizen off and nothing assigned) renders its
-              own empty state below, and a disabled Select all is just noise. */}
-          {ordered.length > 0 && (
-            <div className="flex h-10 flex-none items-center gap-2 border-b border-hairline pr-2.5 pl-[15px]">
-              <span className="text-[12px] font-semibold tracking-[.01em] text-fg-2">Triage</span>
-              <span className="font-mono text-[10.5px] text-muted-4">{ordered.length}</span>
+          {/* Header (scope toggle + count + Select all). Shown whenever there's a
+              queue OR team issues to widen to, so the Mine/All toggle is reachable
+              even when your own queue is empty. */}
+          {(ordered.length > 0 || teamWaiting > 0) && (
+            <div className="flex h-10 flex-none items-center gap-2 border-b border-hairline pr-2.5 pl-2.5">
+              <Segmented
+                options={[
+                  { value: "mine", label: "Mine" },
+                  { value: "all", label: "All" },
+                ]}
+                value={goodCitizen ? "all" : "mine"}
+                onChange={(v) => setGoodCitizen(v === "all")}
+                className="max-w-[190px] flex-1"
+              />
               <Button
                 size="sm"
                 onClick={selectAll}
@@ -296,7 +310,7 @@ export function TriageView() {
                     ? "Select every ticket for investigation"
                     : "Configure the Investigation action in Settings first"
                 }
-                className="ml-auto"
+                className="flex-none"
                 style={allEligibleSelected ? accentActiveStyle() : undefined}
               >
                 Select all

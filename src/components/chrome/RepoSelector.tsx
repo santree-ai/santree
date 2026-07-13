@@ -71,7 +71,7 @@ export function RepoSelector() {
             style={{ borderColor: menuOpen ? accent : "var(--color-line-3)" }}
           >
             <RepoAvatar repo={activeRepo} />
-            <span className="min-w-0 truncate font-mono text-[12px] font-medium text-fg">
+            <span className="min-w-0 flex-1 truncate text-left font-mono text-[12px] font-medium text-fg">
               {activeRepo}
             </span>
             {!!current?.agents && (

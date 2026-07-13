@@ -5,6 +5,7 @@
  * uniform and the live/empty data source stays swappable.
  */
 import {
+  keepPreviousData,
   type QueryClient,
   type QueryKey,
   type UseQueryOptions,
@@ -19,6 +20,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AgentKind,
   ChangedFile,
+  ClaudeCommandFile,
+  CommandSource,
+  PrDetail,
+  PrLabel,
+  PromptInfo,
   ReviewedFile,
   ScriptInfo,
   Settings,
@@ -37,8 +43,10 @@ import { type ToastOptions, toast } from "../state/toast";
 /** The shape of a generated `Result`-typed command's promise. */
 type CommandResult<T> = Promise<{ status: "ok"; data: T } | { status: "error"; error: string }>;
 
-/** Unwrap a generated `Result` command into a value-or-throw promise. */
-async function unwrap<T>(promise: CommandResult<T>): Promise<T> {
+/** Unwrap a generated `Result` command into a value-or-throw promise. Exported for
+ *  the rare multi-step imperative orchestration (e.g. Reviews "Fix CI with AI")
+ *  that chains several commands rather than fitting one read/mutation hook. */
+export async function unwrap<T>(promise: CommandResult<T>): Promise<T> {
   const result = await promise;
   if (result.status === "error") throw new Error(result.error);
   return result.data;
@@ -62,6 +70,9 @@ function useUnwrappedQuery<T>(
     // cached data) while a condition holds. Off everywhere else — we lean on
     // staleTime + the cache, and only hit the network when data is actually old.
     refetchInterval?: UseQueryOptions<T>["refetchInterval"];
+    // Keep the last successful data visible while the next fetch is in flight —
+    // e.g. `keepPreviousData` so a re-keyed read doesn't flash empty.
+    placeholderData?: UseQueryOptions<T>["placeholderData"];
   } = {},
 ) {
   return useQuery({ queryKey, queryFn: () => unwrap(command()), ...options });
@@ -164,6 +175,7 @@ export const queryKeys = {
   agentAuth: (kind: AgentKind) => ["agent-auth", kind] as const,
   githubStatus: ["github-status"] as const,
   claudeHookSettings: ["claude-hook-settings"] as const,
+  claudeHookSettingsNoGit: ["claude-hook-settings-no-git"] as const,
   sessionStates: ["session-states"] as const,
   sessionUsageLive: ["session-usage-live"] as const,
   /** Prefix for every repo's task graph — invalidate this (not `tasks(repo)`)
@@ -191,9 +203,12 @@ export const queryKeys = {
   mergeQueue: (repo: string) => ["merge-queue", repo] as const,
   prDetail: (owner: string, name: string, number: number) =>
     ["pr-detail", owner, name, number] as const,
+  prRepoLabels: (owner: string, name: string) => ["pr-repo-labels", owner, name] as const,
   reviewedFiles: (prRepo: string, number: number) => ["reviewed-files", prRepo, number] as const,
   prFileSource: (owner: string, name: string, base: string, head: string, path: string) =>
     ["pr-file-source", owner, name, base, head, path] as const,
+  prCheckLog: (owner: string, name: string, jobId: number) =>
+    ["pr-check-log", owner, name, jobId] as const,
   openers: ["openers"] as const,
   initScript: (repo: string) => ["init-script", repo] as const,
   taskNote: (repo: string, id: string) => ["task-note", repo, id] as const,
@@ -202,8 +217,13 @@ export const queryKeys = {
   triageSchedule: (repo: string) => ["triage-schedule", repo] as const,
   settings: ["settings"] as const,
   claudeCommands: (repo: string | null) => ["claude-commands", repo] as const,
+  claudeCommandFile: (repo: string | null, name: string) =>
+    ["claude-command-file", repo, name] as const,
   setting: (scope: string, key: string) => ["setting", scope, key] as const,
   resolvedSetting: (repo: string, key: string) => ["resolved-setting", repo, key] as const,
+  /** Editable AI prompts (with per-scope overrides) for the Prompts editor. */
+  prompts: (scope: string) => ["prompts", scope] as const,
+  promptPreview: (name: string, content: string) => ["prompt-preview", name, content] as const,
   /** Prefix for every repo's Linear connection status — invalidate this (not
    *  `linearStatus(repo)`) when a change (e.g. connect/disconnect) should
    *  refetch all repos' status at once. */
@@ -264,7 +284,9 @@ export const WORK_QUEUE_KEY = "work_queue";
 
 /**
  * Triage queue preference keys (app-scoped, string "true"/"false").
- * - good_citizen: when off-duty or your queue is empty, show the team's issues.
+ * - good_citizen: show the whole team inbox (issues not assigned to you) too, so
+ *   you can pitch in on anyone's tickets — on triage duty or not. Off = just
+ *   yours. Surfaced as the Mine/All toggle in the Triage header.
  * - show_snoozed: include snoozed issues instead of hiding them.
  */
 export const TRIAGE_GOOD_CITIZEN_KEY = "triage_good_citizen";
@@ -434,6 +456,16 @@ export const useClaudeHookSettings = () =>
   useQuery({
     queryKey: queryKeys.claudeHookSettings,
     queryFn: () => commands.claudeHookSettings(),
+    staleTime: Infinity,
+  });
+
+/** Like {@link useClaudeHookSettings} but the commit/push-denying variant — the
+ *  `--settings` path a "Fix CI" session launches with, so the AI fixes + validates
+ *  but never commits/pushes. Content is setting-independent, so cache forever. */
+export const useClaudeHookSettingsNoGit = () =>
+  useQuery({
+    queryKey: queryKeys.claudeHookSettingsNoGit,
+    queryFn: () => commands.claudeHookSettingsNoGit(),
     staleTime: Infinity,
   });
 
@@ -891,6 +923,50 @@ export const usePrDetail = (owner: string, name: string, number: number, enabled
     },
   );
 
+/** The repo's full label palette — the options for the PR label picker. Gated by
+ *  `enabled` so it only fetches when the picker is opened (labels rarely change, so
+ *  a long staleTime avoids refetching per open). */
+export const useRepoLabels = (owner: string, name: string, enabled: boolean) =>
+  useUnwrappedQuery(queryKeys.prRepoLabels(owner, name), () => commands.prRepoLabels(owner, name), {
+    enabled: enabled && !!owner && !!name,
+    staleTime: 5 * 60_000,
+  });
+
+/** Replace a PR's labels (GitHub PUT semantics — the whole set is overwritten).
+ *  Optimistically patches the cached PR detail's `labels` so the header updates
+ *  instantly, then reconciles with the authoritative set the API returns (no full
+ *  detail refetch). Rolls back and red-toasts on failure. */
+export const useSetPrLabels = (owner: string, name: string, number: number) => {
+  const qc = useQueryClient();
+  const key = queryKeys.prDetail(owner, name, number);
+  return useMutation({
+    // `next` carries full label objects for the optimistic patch (colors and all);
+    // only the names go to the API.
+    mutationFn: (next: PrLabel[]) =>
+      unwrap(
+        commands.setPrLabels(
+          owner,
+          name,
+          number,
+          next.map((l) => l.name),
+        ),
+      ),
+    onMutate: async (next) => {
+      await qc.cancelQueries({ queryKey: key });
+      const prev = qc.getQueryData<PrDetail>(key);
+      if (prev) qc.setQueryData<PrDetail>(key, { ...prev, labels: next });
+      return { prev };
+    },
+    onError: (_err, _next, ctx) => {
+      if (ctx?.prev) qc.setQueryData<PrDetail>(key, ctx.prev);
+    },
+    onSuccess: (labels) => {
+      // The API returns the resulting set — adopt it verbatim (order/casing).
+      qc.setQueryData<PrDetail>(key, (d) => (d ? { ...d, labels } : d));
+    },
+  });
+};
+
 /** One PR file's old (base) + new (head) full contents, fetched on demand so the
  *  diff can expand unchanged context (GitHub-style). Gated by `enabled` so it only
  *  fires for an expanded, non-binary file. Content at a commit is immutable, so
@@ -908,6 +984,24 @@ export const usePrFileSource = (
     () => commands.prFileSource(owner, name, base, head, path),
     {
       enabled: enabled && !!owner && !!name && !!head && !!path,
+      staleTime: Number.POSITIVE_INFINITY,
+    },
+  );
+
+/** A failed GitHub Actions check's job log, sliced to the failing step, fetched on
+ *  demand when the user expands the check (gated by `enabled`). A completed run's
+ *  log is immutable, so it's cached forever. */
+export const usePrCheckLog = (
+  owner: string,
+  name: string,
+  jobId: number | null,
+  enabled: boolean,
+) =>
+  useUnwrappedQuery(
+    queryKeys.prCheckLog(owner, name, jobId ?? 0),
+    () => commands.prCheckLog(owner, name, jobId),
+    {
+      enabled: enabled && !!owner && !!name && jobId != null,
       staleTime: Number.POSITIVE_INFINITY,
     },
   );
@@ -1484,23 +1578,22 @@ export interface TriageQueue {
   teamWaiting: number;
   goodCitizen: boolean;
   showSnoozed: boolean;
-  onDuty: boolean;
 }
 
 /**
- * Pure mine/good-citizen/on-duty/snoozed filter matrix for the triage queue.
- * Extracted out of `useTriageQueue` so it's testable without mounting the
- * hook (no QueryClient / settings reads needed) — see queries.test.ts.
+ * Pure mine/good-citizen/snoozed filter matrix for the triage queue. Extracted
+ * out of `useTriageQueue` so it's testable without mounting the hook (no
+ * QueryClient / settings reads needed) — see queries.test.ts.
  */
 export function filterTriageQueue(
   tickets: TriageTicket[],
-  opts: { goodCitizen: boolean; showSnoozed: boolean; onDuty: boolean },
+  opts: { goodCitizen: boolean; showSnoozed: boolean },
 ): Pick<TriageQueue, "visible" | "teamWaiting"> {
-  const { goodCitizen, showSnoozed, onDuty } = opts;
+  const { goodCitizen, showSnoozed } = opts;
   const mine = tickets.filter((t) => t.mine);
-  const mineActive = mine.filter((t) => t.snoozedUntilMs == null);
-  const showTeam = goodCitizen && (!onDuty || mineActive.length === 0);
-  const base = showTeam ? tickets : mine;
+  // "Be a good citizen" widens to the whole team inbox (issues not assigned to
+  // you included) so you can pitch in — unconditionally, on triage duty or not.
+  const base = goodCitizen ? tickets : mine;
   return {
     visible: showSnoozed ? base : base.filter((t) => t.snoozedUntilMs == null),
     teamWaiting: tickets.filter((t) => !t.mine && t.snoozedUntilMs == null).length,
@@ -1510,23 +1603,17 @@ export function filterTriageQueue(
 /**
  * The resolved triage queue for a repo — the single source of truth for what's
  * shown and the tab count. Defaults to the viewer's own issues; "be a good
- * citizen" widens to the team inbox when off-duty or your queue is empty.
+ * citizen" widens to the whole team inbox so you can help on anyone's tickets.
  */
 export const useTriageQueue = (repo: string): TriageQueue => {
   const { data: tickets = [] } = useTriageTickets(repo);
-  const { data: schedules = [] } = useTriageSchedule(repo);
   const goodCitizen = useBoolSetting("app", TRIAGE_GOOD_CITIZEN_KEY).value;
   const showSnoozed = useBoolSetting("app", TRIAGE_SNOOZED_KEY).value;
-  const onDuty = schedules.some((s) => s.currentIsMe);
 
   return useMemo(() => {
-    const { visible, teamWaiting } = filterTriageQueue(tickets, {
-      goodCitizen,
-      showSnoozed,
-      onDuty,
-    });
-    return { visible, teamWaiting, goodCitizen, showSnoozed, onDuty };
-  }, [tickets, goodCitizen, showSnoozed, onDuty]);
+    const { visible, teamWaiting } = filterTriageQueue(tickets, { goodCitizen, showSnoozed });
+    return { visible, teamWaiting, goodCitizen, showSnoozed };
+  }, [tickets, goodCitizen, showSnoozed]);
 };
 
 /** The persisted user settings (seeded from defaults on first run). */
@@ -1558,6 +1645,39 @@ export const useSaveSettings = () =>
  */
 export const useClaudeCommands = (repo: string | null) =>
   useUnwrappedQuery(queryKeys.claudeCommands(repo), () => commands.listClaudeCommands(repo));
+
+/**
+ * The effective backing file for a selected slash-command (`skill`), so Settings
+ * can edit the real thing in place. Resolves repo-over-global on the backend, and
+ * reports which file (`source`, `path`) an edit will land on. `repo` is a repo
+ * *name* (or null for the app scope); disabled until a command is picked.
+ */
+export const useClaudeCommandFile = (repo: string | null, name: string) =>
+  useUnwrappedQuery(
+    queryKeys.claudeCommandFile(repo, name),
+    () => commands.readClaudeCommand(repo, name),
+    { enabled: name.trim().length > 0, staleTime: SETTING_STALE_TIME },
+  );
+
+/**
+ * Save an edited slash-command back to its file. `source` comes from the matching
+ * {@link useClaudeCommandFile} read so the write hits the exact file that was
+ * loaded (global vs the repo's own copy). Success is silent (autosave); a failed
+ * write red-toasts via the global handler. Keeps the cached file in sync with what
+ * we wrote — our write is authoritative, so no refetch.
+ */
+export const useWriteClaudeCommand = (repo: string | null, name: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { source: CommandSource; content: string }) =>
+      unwrap(commands.writeClaudeCommand(repo, name, v.source, v.content)),
+    onSuccess: (_data, v) => {
+      qc.setQueryData<ClaudeCommandFile>(queryKeys.claudeCommandFile(repo, name), (prev) =>
+        prev ? { ...prev, content: v.content } : prev,
+      );
+    },
+  });
+};
 
 /** A single setting value for an exact scope (`"app"` or `"repo:<name>"`). */
 export const useSetting = (scope: string, key: string) =>
@@ -1631,6 +1751,82 @@ export const useSetSetting = () =>
     // the whole `["setting"]` prefix would refetch every cached setting on any
     // single write.
     invalidate: (a) => [queryKeys.setting(a.scope, a.key), ["resolved-setting"]],
+  });
+
+// ── Editable AI prompts ──────────────────────────────────────────────────────
+
+/** The editable AI prompts with the override stored at `scope` (`"app"` or
+ *  `"repo:<name>"`), each with its default + variable/include catalog. */
+export const usePrompts = (scope: string) =>
+  useUnwrappedQuery(queryKeys.prompts(scope), () => commands.listPrompts(scope), {
+    staleTime: SETTING_STALE_TIME,
+  });
+
+interface SetPromptVars {
+  name: string;
+  /** The override text, or `null` to clear it (reset to the inherited value). */
+  content: string | null;
+}
+
+/** Save (or clear, with `null`) a prompt's override for `scope`. Optimistically
+ *  patches the cached prompt list's `overrideSource` so the "Modified" badge and
+ *  editor reflect the write before it lands, with rollback on error. */
+export const useSetPrompt = (scope: string) =>
+  useOptimisticMutation({
+    mutationKey: ["set-prompt", scope],
+    mutationFn: ({ name, content }: SetPromptVars) =>
+      unwrap(commands.setPrompt(scope, name, content)),
+    optimistic: (qc, { name, content }) => {
+      const key = queryKeys.prompts(scope);
+      const prev = qc.getQueryData<PromptInfo[]>(key);
+      if (prev) {
+        qc.setQueryData<PromptInfo[]>(
+          key,
+          prev.map((p) => (p.name === name ? { ...p, overrideSource: content } : p)),
+        );
+      }
+      return () => qc.setQueryData(key, prev);
+    },
+    invalidate: () => [queryKeys.prompts(scope)],
+  });
+
+/** Render a draft prompt for the live preview. Rendering is pure on the backend —
+ *  the real issue (`detail`, already in the editor's cache) is passed in, not
+ *  fetched — so this re-renders instantly on each keystroke. Keyed on content +
+ *  issue id; `keepPreviousData` holds the last render visible so the pane never
+ *  flashes empty mid-type. Disabled while the draft is empty, or while a chosen
+ *  issue's `detail` is still loading (so we never render it as the sample). */
+export const usePreviewPrompt = (
+  name: string,
+  content: string,
+  repo: string | undefined,
+  issueId: string | undefined,
+  detail: TriageDetail | undefined,
+) =>
+  useUnwrappedQuery(
+    [...queryKeys.promptPreview(name, content), repo ?? "", issueId ?? ""],
+    () => commands.previewPrompt(name, content, repo ?? null, detail ?? null),
+    {
+      enabled: content.trim().length > 0 && (!issueId || detail !== undefined),
+      staleTime: SETTING_STALE_TIME,
+      placeholderData: keepPreviousData,
+    },
+  );
+
+/** Create a user-defined shared block; refreshes every scope's prompt list. */
+export const useCreatePromptBlock = () =>
+  useActionMutation({
+    mutationFn: (v: { name: string; label: string }) =>
+      unwrap(commands.createPromptBlock(v.name, v.label)),
+    invalidate: () => [["prompts"]],
+    success: (_d, v) => `Created block “${v.label || v.name}”.`,
+  });
+
+/** Delete a user-defined shared block; refreshes every scope's prompt list. */
+export const useDeletePromptBlock = () =>
+  useActionMutation({
+    mutationFn: (name: string) => unwrap(commands.deletePromptBlock(name)),
+    invalidate: () => [["prompts"]],
   });
 
 export type DisplayNames = "full" | "username";

@@ -90,10 +90,12 @@ export function MainTabBar() {
           tab={extraTab(t.id)}
           label={t.title}
           icon={
-            t.kind === "claude" ? (
-              <ClaudeSparkIcon />
-            ) : (
+            // Claude + Fix-CI tabs both host a Claude session — mark them with the
+            // spark; only plain terminal tabs get the shell glyph.
+            t.kind === "terminal" ? (
               <TerminalIcon size={11} className="text-muted-3" />
+            ) : (
+              <ClaudeSparkIcon />
             )
           }
           active={activeTab}

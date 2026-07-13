@@ -16,6 +16,7 @@ import {
   BackArrowIcon,
   BoltIcon,
   ChevronDownIcon,
+  ClaudeSparkIcon,
   ContrastIcon,
   GearIcon,
   KeyIcon,
@@ -34,6 +35,7 @@ import { AppearanceSection } from "./sections/Appearance";
 import { EnvironmentSection } from "./sections/Environment";
 import { GeneralSection } from "./sections/General";
 import { IntegrationsSection } from "./sections/Integrations";
+import { PromptsSection } from "./sections/Prompts";
 import { RepoLinearSection } from "./sections/RepoLinear";
 import { UsageSection } from "./sections/Usage";
 import { WorkSection } from "./sections/Work";
@@ -46,6 +48,9 @@ interface SectionDef {
   label: string;
   icon: ReactNode;
   render: (repo: string) => ReactNode;
+  /** Render edge-to-edge, filling the content area (no centered max-width
+   *  column) — for panes that own their own multi-column layout, like Prompts. */
+  fullBleed?: boolean;
 }
 
 /** A labelled group of sections, rendered under a header in the sidebar. */
@@ -77,6 +82,13 @@ const workEntry = (forRepo: boolean): SectionDef => ({
   label: "Work",
   icon: <PlayIcon size={ICON_SIZE} />,
   render: (repo) => <WorkSection repo={repo} forRepo={forRepo} />,
+});
+const promptsEntry = (forRepo: boolean): SectionDef => ({
+  key: "prompts",
+  label: "Prompts",
+  icon: <ClaudeSparkIcon size={ICON_SIZE} />,
+  fullBleed: true,
+  render: (repo) => <PromptsSection repo={repo} forRepo={forRepo} />,
 });
 
 const APP_NAV: NavNode[] = [
@@ -118,7 +130,7 @@ const APP_NAV: NavNode[] = [
   },
   {
     group: "Actions",
-    sections: [triageEntry(false), workEntry(false)],
+    sections: [triageEntry(false), workEntry(false), promptsEntry(false)],
   },
 ];
 
@@ -135,7 +147,7 @@ const REPO_NAV: NavNode[] = [
     icon: <KeyIcon size={ICON_SIZE} />,
     render: (repo) => <EnvironmentSection repo={repo} />,
   },
-  { group: "Actions", sections: [triageEntry(true), workEntry(true)] },
+  { group: "Actions", sections: [triageEntry(true), workEntry(true), promptsEntry(true)] },
 ];
 
 /** The default section key for a scope (the first one in its nav). */
@@ -259,11 +271,15 @@ export function SettingsView() {
         </div>
       }
     >
-      <div className="flex-1 overflow-y-auto bg-app">
-        <div className="mx-auto max-w-[660px] px-[30px] pt-[26px] pb-11">
-          {active.render(settingsRepo)}
+      {active.fullBleed ? (
+        <div className="flex min-h-0 flex-1 bg-app">{active.render(settingsRepo)}</div>
+      ) : (
+        <div className="flex-1 overflow-y-auto bg-app">
+          <div className="mx-auto max-w-[660px] px-[30px] pt-[26px] pb-11">
+            {active.render(settingsRepo)}
+          </div>
         </div>
-      </div>
+      )}
     </ViewChrome>
   );
 }

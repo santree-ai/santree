@@ -117,7 +117,7 @@ pub async fn draft(db: &Db, repo: &str, issue_id: &str, fill: bool) -> Result<Pr
 
     let body = if fill {
         // Fall back to the raw template if Claude isn't available / fails.
-        draft_body(&c, issue_id, template.clone())
+        draft_body(db, repo, &c, issue_id, template.clone())
             .await
             .unwrap_or_else(|| template.unwrap_or_default())
     } else {
@@ -132,7 +132,22 @@ pub async fn draft(db: &Db, repo: &str, issue_id: &str, fill: bool) -> Result<Pr
 }
 
 /// Draft the PR body with a headless Claude call against the `fill-pr` template.
-async fn draft_body(c: &Coords, issue_id: &str, template: Option<String>) -> Option<String> {
+async fn draft_body(
+    db: &Db,
+    repo: &str,
+    c: &Coords,
+    issue_id: &str,
+    template: Option<String>,
+) -> Option<String> {
+    // Resolve the effective prompt sources + fetch the issue (both async) before
+    // dropping onto the blocking pool. The issue is best-effort — a missing/failed
+    // fetch just leaves `ticket_content` empty, same as the work flow.
+    let sources = prompts::resolve_sources(db, Some(repo)).await.ok()?;
+    let detail = crate::linear::triage_detail(db, repo, issue_id)
+        .await
+        .ok()
+        .flatten();
+
     // The diff reads, prompt render, and Claude call all block — run the whole
     // chain on one blocking thread instead of shelling out git on the runtime.
     let c = c.clone();
@@ -143,16 +158,29 @@ async fn draft_body(c: &Coords, issue_id: &str, template: Option<String>) -> Opt
             .chars()
             .take(12_000)
             .collect();
-        let prompt = prompts::render(
+        // Render the (editable) issue into `ticket_content`, and flatten its fields
+        // so a customized `fill-pr` prompt can `{% include "issue" %}` too.
+        let ticket_content = detail
+            .as_ref()
+            .and_then(|d| prompts::render_ticket_from(&sources, d).ok())
+            .unwrap_or_default();
+        let issue_ctx = detail
+            .as_ref()
+            .map(prompts::issue_context)
+            .unwrap_or_else(|| minijinja::context! {});
+        let prompt = prompts::render_from(
+            &sources,
             "fill-pr",
             minijinja::context! {
                 pr_template => template.unwrap_or_default(),
                 branch_name => c.branch.clone(),
                 ticket_id => issue_id,
+                ticket_content => ticket_content,
                 base_branch => c.base_branch.clone(),
                 commit_log => git::commit_log(&c.path, &c.base_branch),
                 diff_stat => git::diff_stat(&c.path, &c.base_branch),
                 diff => diff,
+                ..issue_ctx,
             },
         )
         .ok()?;

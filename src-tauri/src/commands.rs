@@ -17,8 +17,11 @@ use tauri_specta::Event;
 use santree_core::{
     config,
     domain::{
-        AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, ClaudeCommands, FileSource,
-        GithubStatus, LinearOrg, LinearStatus, MergeQueue, NewPr, Opener, PrDetail, PrDraft, Repo,
+        AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, CheckLog, ClaudeCommandFile,
+        ClaudeCommands, CommandSource,
+        FileSource,
+        GithubStatus, LinearOrg, LinearStatus, MergeQueue, NewPr, Opener, PrDetail, PrDraft,
+        PrLabel, PromptInfo, PromptPreview, Repo,
         ReviewInbox, ReviewedFile, Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings,
         TabKind, Task,
         TriageDetail, TriageSchedule, TriageTicket, UsageReport, Worktree, WorktreePr, WorktreeTab,
@@ -132,8 +135,54 @@ pub async fn create_worktree(
         project.as_deref(),
         base.as_deref(),
         agent,
+        None,
     )
     .await?)
+}
+
+/// Find-or-create a worktree for a pull request: reuse the one already tracked
+/// under `issue_id` if present, else create one that **checks out the PR's head
+/// branch** (`branch`) so commits made in it land on the PR. Used by the Reviews
+/// "Fix CI with AI" flow. `base` is the PR's base branch (for the worktree's diff).
+#[tauri::command]
+#[specta::specta]
+pub async fn create_worktree_for_pr(
+    repo: String,
+    issue_id: String,
+    title: String,
+    branch: String,
+    base: Option<String>,
+    agent: AgentKind,
+    db: State<'_, Db>,
+) -> CmdResult<Worktree> {
+    Ok(worktree::create(
+        &db,
+        &repo,
+        &issue_id,
+        &title,
+        None,
+        base.as_deref(),
+        agent,
+        Some(&branch),
+    )
+    .await?)
+}
+
+/// Render the CI-fix opening prompt (the failing check `log` + guardrails) to a
+/// per-worktree file and return its **path** — the "Fix CI" terminal seeds
+/// `exec <agent> 'Read <path> …'` with it (the log is too large to type into the
+/// PTY). Rewritten each launch so it reflects the latest failing run.
+#[tauri::command]
+#[specta::specta]
+pub async fn fix_ci_prompt(
+    app: AppHandle,
+    repo: String,
+    issue_id: String,
+    log: String,
+    db: State<'_, Db>,
+) -> CmdResult<String> {
+    let prompts = worktree::prompts_root(&app).ok_or("no writable data dir for prompt file")?;
+    Ok(worktree::fix_ci_prompt(&db, &repo, &issue_id, &prompts, &log).await?)
 }
 
 /// Remove a worktree (and its branch), drop the issue link, and delete its
@@ -518,6 +567,37 @@ pub async fn pr_detail(owner: String, name: String, number: u32) -> CmdResult<Pr
     Ok(reviews::detail(&owner, &name, number).await?)
 }
 
+/// The repo's full label palette — the options offered by the PR label picker.
+/// Empty when `gh` isn't authenticated.
+#[tauri::command]
+#[specta::specta]
+pub async fn pr_repo_labels(owner: String, name: String) -> CmdResult<Vec<PrLabel>> {
+    Ok(reviews::repo_labels(&owner, &name).await?)
+}
+
+/// Replace a PR's labels with exactly `labels` (GitHub PUT semantics — the set is
+/// overwritten, so an empty list clears them), returning the resulting labels.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_pr_labels(
+    owner: String,
+    name: String,
+    number: u32,
+    labels: Vec<String>,
+) -> CmdResult<Vec<PrLabel>> {
+    Ok(reviews::set_pr_labels(&owner, &name, number, labels).await?)
+}
+
+/// The raw job log for a failed GitHub Actions check, fetched on demand when the
+/// user expands the check — sliced to the failing step and classified so the UI
+/// can tint errors/warnings and collapse the quiet runs between them. `job_id`
+/// comes from [`PrCheck::job_id`]; empty when `gh` isn't authenticated.
+#[tauri::command]
+#[specta::specta]
+pub async fn pr_check_log(owner: String, name: String, job_id: f64) -> CmdResult<CheckLog> {
+    Ok(reviews::check_log(&owner, &name, job_id as u64).await?)
+}
+
 /// The old (base) + new (head) full contents of one PR file, fetched on demand so
 /// the diff can expand unchanged context beyond the patch hunks (GitHub-style).
 /// `base`/`head` are the commit OIDs from [`PrDetail`]. Empty when GitHub isn't
@@ -771,6 +851,16 @@ pub fn claude_hook_settings(app: AppHandle) -> Option<String> {
     crate::hooks::claude_settings(&app)
 }
 
+/// Like [`claude_hook_settings`] but with a `permissions.deny` block forbidding
+/// git commit/push — the `--settings` file the "Fix CI" session launches with, so
+/// the AI fixes + validates but never commits or pushes (the user does that from
+/// Trees). `None` when the hook binary/db can't be resolved.
+#[tauri::command]
+#[specta::specta]
+pub fn claude_hook_settings_no_git(app: AppHandle) -> Option<String> {
+    crate::hooks::claude_settings_no_git(&app)
+}
+
 /// Every santree-launched session's live token/context usage, captured from the
 /// status-line stdin. Newest first.
 #[tauri::command]
@@ -842,6 +932,46 @@ pub async fn list_claude_commands(
     Ok(tokio::task::spawn_blocking(move || settings::commands(repo_path.as_deref())).await?)
 }
 
+/// Read the effective backing file for a selected slash-command so the Triage
+/// settings editor can edit the real skill in place. Resolves repo-over-global
+/// (the repo's own copy wins), returning which file was loaded.
+#[tauri::command]
+#[specta::specta]
+pub async fn read_claude_command(
+    repo: Option<String>,
+    name: String,
+    db: State<'_, Db>,
+) -> CmdResult<ClaudeCommandFile> {
+    let repo_path = match repo {
+        Some(name) => repo::path(&db, &name).await?,
+        None => None,
+    };
+    Ok(tokio::task::spawn_blocking(move || settings::read_command(repo_path.as_deref(), &name))
+        .await??)
+}
+
+/// Overwrite a slash-command's backing file. `source` comes from the matching
+/// [`read_claude_command`] so the edit lands on the exact file that was loaded
+/// (global vs the repo's own copy).
+#[tauri::command]
+#[specta::specta]
+pub async fn write_claude_command(
+    repo: Option<String>,
+    name: String,
+    source: CommandSource,
+    content: String,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    let repo_path = match repo {
+        Some(name) => repo::path(&db, &name).await?,
+        None => None,
+    };
+    Ok(tokio::task::spawn_blocking(move || {
+        settings::write_command(repo_path.as_deref(), &name, source, &content)
+    })
+    .await??)
+}
+
 /// The variable names a user-referenced `.env` file defines, for the Environment
 /// settings' "N variables loaded" readout. Reads exactly the absolute path the
 /// user picked (a native file dialog) — no id is joined onto a base dir, so
@@ -884,6 +1014,67 @@ pub async fn resolve_setting(
     db: State<'_, Db>,
 ) -> CmdResult<Option<String>> {
     Ok(settings::resolve(&db, &repo, &key).await?)
+}
+
+// ── Editable AI prompts ──────────────────────────────────────────────────────
+
+/// Every editable AI prompt with its default, the override stored at `scope`
+/// (`"app"` / `"repo:<name>"`), and its variable/include catalog — for the
+/// Settings → Prompts editor.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_prompts(scope: String, db: State<'_, Db>) -> CmdResult<Vec<PromptInfo>> {
+    Ok(crate::prompts::list(&db, &scope).await?)
+}
+
+/// Store (or clear, when `content` is null) a prompt's override for `scope`.
+/// Rejects a non-empty override that doesn't compile, so a broken template can
+/// never be persisted or reach a real flow.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_prompt(
+    scope: String,
+    name: String,
+    content: Option<String>,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(crate::prompts::set_prompt(&db, &scope, &name, content).await?)
+}
+
+/// Render a *draft* prompt for the live editor preview. With a `detail` (the issue
+/// the editor already holds in cache) it renders against that real ticket;
+/// otherwise a built-in sample. Rendering is pure — no fetch — so the editor can
+/// re-render on every keystroke. Compile/render errors come back in
+/// `PromptPreview.error`, not as a failure, so the editor can show them inline.
+#[tauri::command]
+#[specta::specta]
+pub async fn preview_prompt(
+    name: String,
+    content: String,
+    repo: Option<String>,
+    detail: Option<TriageDetail>,
+    db: State<'_, Db>,
+) -> CmdResult<PromptPreview> {
+    Ok(crate::prompts::preview(&db, &name, &content, repo.as_deref(), detail).await?)
+}
+
+/// Create a user-defined shared block (a reusable partial any prompt can
+/// `{% include %}`). Validates the name and seeds a starter body.
+#[tauri::command]
+#[specta::specta]
+pub async fn create_prompt_block(
+    name: String,
+    label: String,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(crate::prompts::create_block(&db, &name, &label).await?)
+}
+
+/// Delete a user-defined shared block, clearing its content across every scope.
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_prompt_block(name: String, db: State<'_, Db>) -> CmdResult<()> {
+    Ok(crate::prompts::delete_block(&db, &name).await?)
 }
 
 // ── Linear integration ───────────────────────────────────────────────────

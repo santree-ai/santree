@@ -13,9 +13,10 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use santree_core::domain::{
-    CheckAnnotation, CheckRollup, CheckStatus, CheckStep, CommentKind, FileSource, MergeQueue,
-    MergeQueueEntry, MergeQueueState, PrCheck, PrComment, PrDetail, PrFile, PrState, PrThread,
-    ReviewDecision, ReviewInbox, ReviewPr, Reviewer, ReviewerKind, TeamReviews,
+    CheckAnnotation, CheckLog, CheckLogBlock, CheckLogLevel, CheckLogLine, CheckRollup, CheckStatus,
+    CheckStep, CommentKind, FileSource, MergeQueue, MergeQueueEntry, MergeQueueState, PrCheck,
+    PrComment, PrDetail, PrFile, PrLabel, PrState, PrThread, ReviewDecision, ReviewInbox, ReviewPr,
+    Reviewer, ReviewerKind, TeamReviews,
 };
 
 use crate::git;
@@ -798,9 +799,10 @@ pub async fn pr_detail(token: &str, owner: &str, name: &str, number: u32) -> Res
         pr_conversation(token, owner, name, number),
         pr_files(token, owner, name, number),
     );
-    let (body, comments, threads, checks, base_sha, head_sha) = conversation?;
+    let (body, labels, comments, threads, checks, base_sha, head_sha) = conversation?;
     Ok(PrDetail {
         body,
+        labels,
         comments,
         threads,
         files: files?,
@@ -808,6 +810,77 @@ pub async fn pr_detail(token: &str, owner: &str, name: &str, number: u32) -> Res
         base_sha,
         head_sha,
     })
+}
+
+/// The repo's full label palette (the picker's options). REST, up to 100 labels.
+pub async fn list_labels(token: &str, owner: &str, name: &str) -> Result<Vec<PrLabel>> {
+    #[derive(Deserialize)]
+    struct Label {
+        name: String,
+        color: String,
+        description: Option<String>,
+    }
+    let list: Vec<Label> = get_json(
+        format!("https://api.github.com/repos/{owner}/{name}/labels"),
+        &[("per_page", "100")],
+        token,
+    )
+    .await?;
+    Ok(list
+        .into_iter()
+        .map(|l| PrLabel {
+            name: l.name,
+            color: l.color,
+            description: l.description.filter(|d| !d.is_empty()),
+        })
+        .collect())
+}
+
+/// Replace the PR's labels with exactly `labels` (GitHub's PUT semantics — the set
+/// is overwritten, so an empty list clears them). Returns the resulting labels.
+/// Every name must be an existing repo label (the picker only offers those).
+pub async fn set_pr_labels(
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u32,
+    labels: &[String],
+) -> Result<Vec<PrLabel>> {
+    #[derive(Deserialize)]
+    struct Label {
+        name: String,
+        color: String,
+        description: Option<String>,
+    }
+    // Labels live on the underlying issue, not the pull endpoint.
+    let res = rest(
+        gql::client().put(format!(
+            "https://api.github.com/repos/{owner}/{name}/issues/{number}/labels"
+        )),
+        token,
+    )
+    .json(&serde_json::json!({ "labels": labels }))
+    .send()
+    .await?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let detail = res
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+            .unwrap_or_else(|| status.to_string());
+        bail!("GitHub: {detail}");
+    }
+    let list: Vec<Label> = res.json().await?;
+    Ok(list
+        .into_iter()
+        .map(|l| PrLabel {
+            name: l.name,
+            color: l.color,
+            description: l.description.filter(|d| !d.is_empty()),
+        })
+        .collect())
 }
 
 /// Normalize a check run's / check step's (`status`, `conclusion`) pair into the
@@ -834,12 +907,13 @@ fn check_run_status(status: &str, conclusion: Option<&str>) -> CheckStatus {
 /// Body + top-level comments (issue comments and review summaries) merged
 /// chronologically, the inline review-comment threads (grouped, with resolution
 /// and anchor line/side), and the head commit's individual CI checks.
+#[allow(clippy::type_complexity)]
 async fn pr_conversation(
     token: &str,
     owner: &str,
     name: &str,
     number: u32,
-) -> Result<(String, Vec<PrComment>, Vec<PrThread>, Vec<PrCheck>, String, String)> {
+) -> Result<(String, Vec<PrLabel>, Vec<PrComment>, Vec<PrThread>, Vec<PrCheck>, String, String)> {
     #[derive(Deserialize)]
     struct Data {
         repository: Option<Repo>,
@@ -856,6 +930,7 @@ async fn pr_conversation(
         base_ref_oid: String,
         #[serde(rename = "headRefOid")]
         head_ref_oid: String,
+        labels: Connection<LabelNode>,
         comments: Connection<Comment>,
         reviews: Connection<Review>,
         #[serde(rename = "reviewThreads")]
@@ -863,6 +938,12 @@ async fn pr_conversation(
         // Renamed (vs the module-level `CommitNode`) because this one reads the
         // rollup's individual check `contexts`, not the aggregate `state`.
         commits: Connection<DetailCommitNode>,
+    }
+    #[derive(Deserialize)]
+    struct LabelNode {
+        name: String,
+        color: String,
+        description: Option<String>,
     }
     #[derive(Deserialize)]
     struct DetailCommitNode {
@@ -991,6 +1072,7 @@ async fn pr_conversation(
               body
               baseRefOid
               headRefOid
+              labels(first: 30) { nodes { name color description } }
               comments(first: 100) { nodes { author { login avatarUrl } body createdAt } }
               reviews(first: 50) { nodes { author { login avatarUrl } body createdAt } }
               reviewThreads(first: 50) { nodes { path line diffSide isResolved isOutdated comments(first: 50) { nodes { author { login avatarUrl } body createdAt } } } }
@@ -1155,6 +1237,7 @@ async fn pr_conversation(
                 annotations,
             } => {
                 let st = check_run_status(&status, conclusion.as_deref());
+                let job_id = details_url.as_deref().and_then(job_id_from_url);
                 // Only failed checks carry their step/annotation detail — that's
                 // the only place the UI expands it, and it keeps the payload lean.
                 let (steps, annotations) = if st == CheckStatus::Failure {
@@ -1192,6 +1275,7 @@ async fn pr_conversation(
                     url: details_url,
                     steps,
                     annotations,
+                    job_id,
                 });
             }
             Ctx::StatusContext {
@@ -1211,24 +1295,227 @@ async fn pr_conversation(
                     status: st,
                     description,
                     url: target_url,
-                    // Status contexts (legacy commit statuses) have no steps or
-                    // annotations — only GitHub Actions check runs do.
+                    // Status contexts (legacy commit statuses) have no steps,
+                    // annotations, or job log — only GitHub Actions check runs do.
                     steps: Vec::new(),
                     annotations: Vec::new(),
+                    job_id: None,
                 });
             }
             Ctx::Other => {}
         }
     }
 
+    let labels = pr
+        .labels
+        .nodes
+        .into_iter()
+        .map(|l| PrLabel {
+            name: l.name,
+            color: l.color,
+            description: l.description.filter(|d| !d.is_empty()),
+        })
+        .collect();
+
     Ok((
         pr.body,
+        labels,
         comments,
         threads,
         checks,
         pr.base_ref_oid,
         pr.head_ref_oid,
     ))
+}
+
+/// Pull the GitHub Actions job id out of a check run's `detailsUrl`
+/// (`…/actions/runs/<run>/job/<job_id>`). `None` for non-Actions URLs (e.g. a
+/// third-party check's own site), which have no fetchable runner log.
+fn job_id_from_url(url: &str) -> Option<f64> {
+    let tail = url.rsplit_once("/job/")?.1;
+    let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+    // Job ids exceed u32 but are exact in an f64; parse as u64 then widen.
+    digits.parse::<u64>().ok().map(|n| n as f64)
+}
+
+/// Line cap for a single step's log. The failing step can be thousands of lines
+/// (a full test run); the error is always at the tail, so we keep the last N.
+const MAX_LOG_LINES: usize = 1000;
+
+/// Fetch a GitHub Actions job's raw log and reduce it to the failing step (see
+/// [`parse_job_log`]). `job_id` comes from [`PrCheck::job_id`]. The logs endpoint
+/// 302-redirects to a short-lived blob URL, which `reqwest` follows.
+pub async fn check_log(token: &str, owner: &str, name: &str, job_id: u64) -> Result<CheckLog> {
+    let url = format!("https://api.github.com/repos/{owner}/{name}/actions/jobs/{job_id}/logs");
+    let res = rest(gql::client().get(url), token).send().await?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(200).collect();
+        bail!("GitHub returned {status}: {snippet}");
+    }
+    Ok(parse_job_log(&res.text().await?))
+}
+
+/// Strip the runner's `2026-06-23T13:17:54.6166025Z ` timestamp prefix from a log
+/// line. The prefix is a whitespace-free ISO-8601 instant; content never looks
+/// like one, so lines without a prefix (rare) pass through unchanged.
+fn strip_timestamp(line: &str) -> &str {
+    match line.split_once(' ') {
+        Some((head, rest)) if head.ends_with('Z') && head.contains('T') => rest,
+        _ => line,
+    }
+}
+
+/// Remove ANSI SGR color escapes (`\x1b[…m` etc.) that CI tools emit — they'd
+/// render as garbage in the log pane, which does its own tinting by level.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Consume through the escape's terminating letter (`m`, `K`, …).
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Parse one timestamp-stripped line's runner marker into a level, dropping
+/// `##[endgroup]` markers entirely (pure noise). `None` = omit the line.
+fn classify_line(line: &str) -> Option<CheckLogLine> {
+    let body = line.trim_end_matches('\r');
+    let trimmed = body.trim_start();
+    if trimmed.starts_with("##[endgroup]") {
+        return None;
+    }
+    // Markers: keep the text after the marker. Normal lines: keep indentation.
+    let (level, text) = if let Some(rest) = trimmed.strip_prefix("##[error]") {
+        (CheckLogLevel::Error, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("##[warning]") {
+        (CheckLogLevel::Warning, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("##[group]") {
+        (CheckLogLevel::Command, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("##[section]") {
+        (CheckLogLevel::Command, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("##[command]") {
+        (CheckLogLevel::Command, rest)
+    } else {
+        (CheckLogLevel::Normal, body)
+    };
+    Some(CheckLogLine {
+        text: strip_ansi(text),
+        level,
+    })
+}
+
+/// Reduce a raw Actions job log to the failing step's lines. Pure (no network) so
+/// it's unit-testable. Steps: (1) strip per-line timestamps; (2) track
+/// `##[group]`/`##[endgroup]` nesting — a step starts at a depth-0
+/// `##[group]Run …` and spans until the next one; (3) keep the step whose span
+/// holds the first `##[error]` (falls back to the whole log when there's no error
+/// marker or no recognizable step); (4) keep only the tail past the line cap;
+/// (5) classify each line and drop `##[endgroup]` noise.
+fn parse_job_log(raw: &str) -> CheckLog {
+    let stripped: Vec<&str> = raw.lines().map(strip_timestamp).collect();
+
+    let mut depth: i32 = 0;
+    let mut step_starts: Vec<usize> = Vec::new();
+    let mut first_error: Option<usize> = None;
+    for (i, line) in stripped.iter().enumerate() {
+        let body = line.trim_start();
+        if let Some(rest) = body.strip_prefix("##[group]") {
+            if depth == 0 && rest.starts_with("Run ") {
+                step_starts.push(i);
+            }
+            depth += 1;
+        } else if body.starts_with("##[endgroup]") {
+            depth = (depth - 1).max(0);
+        } else if first_error.is_none() && body.starts_with("##[error]") {
+            first_error = Some(i);
+        }
+    }
+
+    let (start, end) = match first_error {
+        Some(err) => {
+            let start = step_starts
+                .iter()
+                .copied()
+                .rfind(|&s| s <= err)
+                .unwrap_or(0);
+            let end = step_starts
+                .iter()
+                .copied()
+                .find(|&s| s > start)
+                .unwrap_or(stripped.len());
+            (start, end)
+        }
+        None => (0, stripped.len()),
+    };
+    let region = &stripped[start..end];
+
+    let truncated = region.len() > MAX_LOG_LINES;
+    let region = if truncated {
+        &region[region.len() - MAX_LOG_LINES..]
+    } else {
+        region
+    };
+
+    CheckLog {
+        blocks: build_blocks(region),
+        truncated,
+    }
+}
+
+/// Split a step's (timestamp-stripped) lines into render blocks: loose lines stay
+/// visible; each top-level `##[group]…##[endgroup]` becomes one collapsible
+/// [`CheckLogBlock::Group`]. Nested sub-groups are flattened into the parent's
+/// `lines` (their headers kept as plain command lines) — one level of collapse,
+/// matching how GitHub's step view reads.
+fn build_blocks(region: &[&str]) -> Vec<CheckLogBlock> {
+    let mut blocks = Vec::new();
+    let mut i = 0;
+    while i < region.len() {
+        let trimmed = region[i].trim_start();
+        if let Some(title) = trimmed.strip_prefix("##[group]") {
+            let mut lines = Vec::new();
+            let mut depth = 1usize;
+            i += 1;
+            while i < region.len() && depth > 0 {
+                let t = region[i].trim_start();
+                if t.starts_with("##[group]") {
+                    depth += 1;
+                    lines.extend(classify_line(region[i]));
+                } else if t.starts_with("##[endgroup]") {
+                    depth -= 1; // drop the marker itself
+                } else {
+                    lines.extend(classify_line(region[i]));
+                }
+                i += 1;
+            }
+            blocks.push(CheckLogBlock::Group {
+                title: strip_ansi(title.trim_end_matches('\r')),
+                lines,
+            });
+        } else if trimmed.starts_with("##[endgroup]") {
+            i += 1; // stray closer with no opener — ignore
+        } else {
+            if let Some(l) = classify_line(region[i]) {
+                blocks.push(CheckLogBlock::Line {
+                    text: l.text,
+                    level: l.level,
+                });
+            }
+            i += 1;
+        }
+    }
+    blocks
 }
 
 /// Changed files for a PR, with their unified-diff patches (REST files API).
@@ -1299,4 +1586,106 @@ pub async fn pr_file_source(
         file_content(token, owner, name, head, path),
     );
     Ok(FileSource { old_text, new_text })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_id_parses_from_actions_url() {
+        assert_eq!(
+            job_id_from_url("https://github.com/o/r/actions/runs/28027969704/job/82960623951"),
+            Some(82960623951.0)
+        );
+        // Non-Actions check URLs have no job segment.
+        assert_eq!(job_id_from_url("https://circleci.com/build/123"), None);
+    }
+
+    /// The failing step is sliced from its `##[group]Run …` start to the next
+    /// one, teardown groups inside it are kept, and the trailing generic
+    /// "Process completed" error of the *next* step is excluded.
+    #[test]
+    fn parse_job_log_slices_to_failing_step() {
+        // Mirrors real runner output: each `##[group]Run …` header is closed
+        // immediately, so the step's command output streams at depth 0. Teardown
+        // groups (Stopping services) nest inside the step and are kept.
+        let raw = "\
+2026-01-01T00:00:00.0Z ##[group]Run actions/checkout
+2026-01-01T00:00:00.0Z with: {}
+2026-01-01T00:00:00.0Z ##[endgroup]
+2026-01-01T00:00:00.0Z Syncing repository
+2026-01-01T00:00:00.0Z ##[group]Run make test
+2026-01-01T00:00:00.0Z shell: bash
+2026-01-01T00:00:00.0Z ##[endgroup]
+2026-01-01T00:00:00.0Z \u{1b}[31mFAILED test_foo\u{1b}[0m
+2026-01-01T00:00:00.0Z 1 failed, 2 passed
+2026-01-01T00:00:00.0Z ##[group]Stopping services
+2026-01-01T00:00:00.0Z container stopped
+2026-01-01T00:00:00.0Z ##[endgroup]
+2026-01-01T00:00:00.0Z ##[error]make test exited with code 1
+2026-01-01T00:00:00.0Z ##[group]Run cleanup
+2026-01-01T00:00:00.0Z ##[endgroup]
+2026-01-01T00:00:00.0Z ##[error]Process completed with exit code 1.";
+        let log = parse_job_log(raw);
+        assert!(!log.truncated);
+
+        // The `Run make test` header opens a collapsible group; the loose test
+        // output and the error are standalone (always-visible) lines.
+        let first_group = log.blocks.iter().find_map(|b| match b {
+            CheckLogBlock::Group { title, lines } => Some((title.as_str(), lines)),
+            _ => None,
+        });
+        assert_eq!(first_group.map(|(t, _)| t), Some("Run make test"));
+
+        let loose: Vec<(&str, CheckLogLevel)> = log
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                CheckLogBlock::Line { text, level } => Some((text.as_str(), *level)),
+                _ => None,
+            })
+            .collect();
+        // ANSI stripped; the real error (loose stdout) and the marker error kept.
+        assert!(loose.iter().any(|(t, _)| *t == "FAILED test_foo"));
+        assert!(loose
+            .iter()
+            .any(|(t, l)| *t == "make test exited with code 1" && *l == CheckLogLevel::Error));
+        // Teardown group inside the step is preserved as a collapsible group.
+        assert!(log.blocks.iter().any(|b| matches!(
+            b,
+            CheckLogBlock::Group { title, .. } if title == "Stopping services"
+        )));
+        // The next step's generic error and "Run cleanup" are excluded.
+        assert!(!loose
+            .iter()
+            .any(|(t, _)| t.contains("Process completed")));
+        assert!(!log.blocks.iter().any(|b| matches!(
+            b,
+            CheckLogBlock::Group { title, .. } if title.contains("cleanup")
+        )));
+    }
+
+    #[test]
+    fn parse_job_log_keeps_only_tail_when_huge() {
+        // Loose lines (no enclosing group) so they render as standalone blocks.
+        let mut raw = String::from("2026-01-01T00:00:00.0Z ##[group]Run big\n");
+        raw.push_str("2026-01-01T00:00:00.0Z shell: bash\n");
+        raw.push_str("2026-01-01T00:00:00.0Z ##[endgroup]\n");
+        for i in 0..(MAX_LOG_LINES + 500) {
+            raw.push_str(&format!("2026-01-01T00:00:00.0Z line {i}\n"));
+        }
+        raw.push_str("2026-01-01T00:00:00.0Z ##[error]boom");
+        let log = parse_job_log(&raw);
+        assert!(log.truncated);
+        // Tail kept: the error survives, the very first content line doesn't.
+        let has = |needle: &str| {
+            log.blocks.iter().any(|b| match b {
+                CheckLogBlock::Line { text, .. } => text == needle,
+                _ => false,
+            })
+        };
+        assert!(has("boom"));
+        assert!(!has("line 0"));
+    }
 }

@@ -1,6 +1,8 @@
 //! Headless agent invocation: a one-shot `claude -p` call used by the AI helpers
-//! (commit message, PR body). Mirrors the santree CLI's `runAgent` — same flags,
-//! same large-prompt temp-file fallback — so behaviour matches the CLI.
+//! (commit message, PR body). Mirrors the santree CLI's `runAgent` — same
+//! large-prompt temp-file fallback — so behaviour matches the CLI. Runs in
+//! `--safe-mode --strict-mcp-config` so no hooks/plugins/MCP servers spin up on
+//! startup: these are latency-sensitive text tasks that need only the model.
 
 /// The model these background helpers run on. They're short, cheap, high-volume
 /// text tasks (commit messages, PR bodies), so we pin them to the cheapest tier
@@ -102,6 +104,17 @@ fn build_args(allowed_tools: &[&str], model: Option<&str>, arg: &str) -> Vec<Str
     // three stay denied for headless helpers.
     args.push("--disallowedTools".to_string());
     args.extend(["Bash", "Write", "Edit"].map(str::to_string));
+    // Speed: these helpers (commit message, PR body) are latency-sensitive and
+    // need nothing but the model. `--safe-mode` disables user customizations —
+    // hooks, plugins, auto-memory, background prefetches — that otherwise run on
+    // every `claude -p` startup (auth/model/built-in tools still work normally, so
+    // OAuth is unaffected). `--strict-mcp-config` with no `--mcp-config` spawns no
+    // MCP servers at all. Together they roughly halve wall-clock (~7s → ~3s) and
+    // also tighten the security posture — attacker-influenceable diff/PR text in
+    // the prompt can't reach a hook or MCP tool. (Not `--bare`: that forces
+    // ANTHROPIC_API_KEY and never reads OAuth, which would break signed-in users.)
+    args.push("--safe-mode".to_string());
+    args.push("--strict-mcp-config".to_string());
     if let Some(model) = model {
         args.push("--model".to_string());
         args.push(model.to_string());

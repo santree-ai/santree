@@ -329,6 +329,10 @@ interface TreesModel {
   /** Per-launch model overrides from the Issues tray, keyed by worktree id (empty
    *  ⇒ fall back to the configured Work model). Read once by the fresh-launch seed. */
   launchModels: Record<string, string>;
+  /** The on-disk CI-fix prompt file for a Fix-CI tab (from the Reviews "Fix CI
+   *  with AI" hand-off), read once by that tab's fresh-launch seed. Undefined once
+   *  a session exists on disk (a resume needs no prompt). */
+  fixCiPromptFor: (tabId: string) => string | undefined;
   requestAgentLaunch: (id: string) => void;
   clearAgentLaunch: (id: string) => void;
 
@@ -365,6 +369,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     consumeTreeLaunch,
     treeFocus,
     consumeTreeFocus,
+    fixCiLaunch,
+    consumeFixCiLaunch,
     bgLaunches,
     pendingLaunches,
     removePendingLaunch,
@@ -454,6 +460,11 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // Trees fallback (the configured Work model). Never persisted — the created
   // session carries `--model` itself, so a resume needs nothing stored.
   const [launchModels, setLaunchModels] = useState<Record<string, string>>({});
+  // The on-disk CI-fix prompt file for a Fix-CI tab, keyed by tab id. A transient
+  // hand-off from the Reviews "Fix CI with AI" flow: read once by the Fix-CI tab's
+  // fresh-launch seed (`Read <path> …`). Not persisted — after a restart the tab's
+  // session already exists on disk, so it resumes (no seed needed).
+  const [fixCiPromptByTab, setFixCiPromptByTab] = useState<Record<string, string>>({});
   // The worktree whose setup script is running in the Setup tab, and whether to
   // launch the agent once it finishes (true when setup is part of starting a task).
   const [setupFor, setSetupFor] = useState<string | null>(null);
@@ -698,6 +709,28 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     consumeTreeFocus();
   }, [treeFocus, worktrees, consumeTreeFocus, setFileFor, setTabFor]);
 
+  // Consume a "Fix CI with AI" hand-off from Reviews: once the PR's worktree has
+  // landed, open its freshly-minted Fix-CI tab (persist the row, stash the prompt
+  // path for the pane's seed, focus it). The tab's pane launches Claude with the
+  // no-git settings + the failed log; the create/prompt-write already ran in
+  // Reviews before navigating here.
+  useEffect(() => {
+    if (!fixCiLaunch) return;
+    const { worktreeId, tabId, promptPath } = fixCiLaunch;
+    if (!worktrees.some((w) => w.id === worktreeId)) return; // wait for the worktree
+    setFixCiPromptByTab((m) => ({ ...m, [tabId]: promptPath }));
+    // Idempotent: only persist the row the first time (the effect can re-run
+    // before the tabs query refetches the new row).
+    if (!(tabsByWt.get(worktreeId) ?? []).some((t) => t.id === tabId)) {
+      addTabRow({ id: tabId, worktreeId, kind: "fixCi", title: "Fix CI" });
+    }
+    setActiveId(worktreeId);
+    setFileFor(worktreeId, null);
+    setSetupFor(null);
+    setTabFor(worktreeId, extraTab(tabId));
+    consumeFixCiLaunch();
+  }, [fixCiLaunch, worktrees, tabsByWt, addTabRow, consumeFixCiLaunch, setFileFor, setTabFor]);
+
   // ⌘L toggles the file-picker panel (mirrors the Issues tab). Owned here rather
   // than in a separate consumer component so there's no shallow useTrees() caller.
   useEffect(() => {
@@ -795,6 +828,10 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       },
       launchAgents,
       launchModels,
+      // The on-disk CI-fix prompt file for a Fix-CI tab (from the Reviews hand-off),
+      // read once by that tab's fresh-launch seed. Undefined after a restart — the
+      // session then resumes instead of re-seeding.
+      fixCiPromptFor: (tabId: string) => fixCiPromptByTab[tabId],
       requestAgentLaunch: (id) => setLaunchAgents((s) => new Set(s).add(id)),
       clearAgentLaunch: (id) => {
         setLaunchAgents((s) => {
@@ -875,6 +912,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     startAgent,
     launchAgents,
     launchModels,
+    fixCiPromptByTab,
     activeRepo,
     prDialogFor,
     prSuggestFor,

@@ -112,6 +112,14 @@ interface AppUi {
   requestReviewFocus: (url: string) => void;
   consumeReviewFocus: () => void;
 
+  /** A "Fix CI with AI" launch handed off from Reviews to Trees: open a new
+   *  Fix-CI Claude tab (`tabId`) on the PR's worktree (`worktreeId`), seeded to
+   *  read the already-written `promptPath` (the failed log + guardrails). Set by
+   *  the Reviews Checks tab before navigating to Trees, consumed once there. */
+  fixCiLaunch: FixCiLaunch | null;
+  requestFixCiLaunch: (launch: FixCiLaunch) => void;
+  consumeFixCiLaunch: () => void;
+
   /** Whether the left sidebar is collapsed (Conductor-style). */
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -132,6 +140,15 @@ export interface PendingLaunch {
    *  session is created with `--model`, resuming carries it, so there's nothing to
    *  store. */
   model?: string;
+}
+
+/** A Reviews→Trees "Fix CI with AI" hand-off: which worktree + freshly-minted
+ *  Fix-CI tab to open, and the on-disk prompt file (failed log + guardrails) the
+ *  tab's Claude session should read on launch. */
+export interface FixCiLaunch {
+  worktreeId: string;
+  tabId: string;
+  promptPath: string;
 }
 
 /** Color theme preference. */
@@ -178,6 +195,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [treeFocus, setTreeFocus] = useState<string | null>(null);
   const [bgLaunches, setBgLaunches] = useState<string[]>([]);
   const [reviewFocus, setReviewFocus] = useState<string | null>(null);
+  const [fixCiLaunch, setFixCiLaunch] = useState<FixCiLaunch | null>(null);
   const [pendingLaunches, setPendingLaunches] = useState<PendingLaunch[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(new Set());
   const [theme, setThemeState] = useState<Theme>(
@@ -308,6 +326,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const consumeTreeLaunch = useCallback(() => setTreeLaunch(null), []);
   const consumeTreeFocus = useCallback(() => setTreeFocus(null), []);
   const consumeReviewFocus = useCallback(() => setReviewFocus(null), []);
+  const consumeFixCiLaunch = useCallback(() => setFixCiLaunch(null), []);
   const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), []);
   const addPendingLaunches = useCallback((items: PendingLaunch[]) => {
     setPendingLaunches((prev) => [
@@ -357,6 +376,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       reviewFocus,
       requestReviewFocus: setReviewFocus,
       consumeReviewFocus,
+      fixCiLaunch,
+      requestFixCiLaunch: setFixCiLaunch,
+      consumeFixCiLaunch,
       pendingLaunches,
       addPendingLaunches,
       removePendingLaunch,
@@ -377,6 +399,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       requestBackgroundLaunch,
       clearBackgroundLaunch,
       reviewFocus,
+      fixCiLaunch,
       pendingLaunches,
       pendingDeletes,
       sidebarCollapsed,
@@ -385,6 +408,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       consumeTreeLaunch,
       consumeTreeFocus,
       consumeReviewFocus,
+      consumeFixCiLaunch,
       toggleSidebar,
       addPendingLaunches,
       removePendingLaunch,

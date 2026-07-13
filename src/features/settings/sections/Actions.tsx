@@ -2,7 +2,10 @@
  * Triage Investigation and Issues Work today (Plan / Review later). Per-scope —
  * app defaults or repo override. */
 
+import { useEffect, useRef, useState } from "react";
+
 import type { AgentKind } from "../../../bindings";
+import { ChevronRightIcon } from "../../../components/icons";
 import { ChevronSelect, Toggle } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
 import {
@@ -17,11 +20,13 @@ import {
   TRIAGE_SNOOZED_KEY,
   useAgents,
   useBoolSetting,
+  useClaudeCommandFile,
   useClaudeCommands,
   useClaudeModels,
   useResolvedSetting,
   useSetSetting,
   useSetting,
+  useWriteClaudeCommand,
   WORK_AGENT_KEY,
   WORK_EFFORT_KEY,
   WORK_MODEL_KEY,
@@ -179,7 +184,7 @@ function AppTriagePanel() {
         <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
           <ToggleRow
             label="Be a good citizen"
-            hint="When you're off triage duty or your own queue is empty, show the team's issues so you can pitch in — instead of an empty screen."
+            hint="Show the whole team's issues — not just the ones assigned to you — so you can pitch in on anyone's tickets, on triage duty or not. Also the Mine/All toggle in the Triage header."
             on={goodCitizen}
             disabled={!enabled}
             onChange={(v) => setBool(TRIAGE_GOOD_CITIZEN_KEY, v)}
@@ -265,6 +270,9 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
   const globalCmds = cmds?.global ?? [];
   const repoCmds = cmds?.repo ?? [];
   const selectedCmd = globalCmds.find((c) => c.name === scopeCmd);
+  // The command this scope actually runs: its own pick, or (repo scope) the
+  // inherited app default. Drives the inline skill editor below.
+  const effectiveCmd = (inherits ? (scopeCmd ?? appCmd) : scopeCmd) || undefined;
 
   return (
     <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
@@ -323,6 +331,17 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
           {!inherits && selectedCmd?.description && (
             <div className="mt-2 text-[11.5px] text-muted-3">{selectedCmd.description}</div>
           )}
+          {/* Edit the selected skill's real file, right under its picker. Keyed
+                so switching skill/scope reseeds a fresh draft (and flushes the old
+                one on unmount). */}
+          {effectiveCmd && (
+            <SkillEditor
+              key={`${scope}:${effectiveCmd}`}
+              repo={repo ?? null}
+              name={effectiveCmd}
+              fromRepoScope={inherits}
+            />
+          )}
         </Field>
       )}
 
@@ -376,6 +395,136 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
           />
         </Field>
       )}
+    </div>
+  );
+}
+
+/** Debounce constant for the skill editor's autosave. */
+const SKILL_SAVE_DEBOUNCE_MS = 600;
+
+/**
+ * Collapsible inline editor for the selected Investigate skill, sitting right
+ * under its picker. Edits the *real* command `.md` file in place (the global one,
+ * or the repo's own copy, resolved on the backend repo-over-global). It's a plain
+ * Claude command file, not a jinja template, so there's no preview. Autosaves a
+ * beat after typing stops and flushes on unmount, so switching skill/scope never
+ * drops the last edit (same pattern as the commit-message draft).
+ */
+function SkillEditor({
+  repo,
+  name,
+  fromRepoScope,
+}: {
+  repo: string | null;
+  name: string;
+  fromRepoScope: boolean;
+}) {
+  const { data, isLoading } = useClaudeCommandFile(repo, name);
+  const { mutate: save, isPending } = useWriteClaudeCommand(repo, name);
+
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  // Adopt the loaded file once; if the user typed before it resolved, their input
+  // wins (never stomp active typing with the loaded value).
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (seeded.current || data === undefined) return;
+    seeded.current = true;
+    if (text === "") setText(data.content);
+  }, [data, text]);
+
+  // Autosave a beat after typing stops (no-op once it matches the file — our write
+  // updates the cached content, so `data.content` catches up after a save).
+  useEffect(() => {
+    if (!seeded.current || !data || text === data.content) return;
+    const timer = setTimeout(
+      () => save({ source: data.source, content: text }),
+      SKILL_SAVE_DEBOUNCE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [text, data, save]);
+
+  // Flush any unsaved edit synchronously on teardown (this component is keyed, so
+  // switching skill/scope unmounts it before the debounce timer fires). Refs so
+  // this doesn't re-fire per keystroke.
+  const textRef = useRef(text);
+  textRef.current = text;
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  useEffect(
+    () => () => {
+      const d = dataRef.current;
+      if (d && textRef.current !== d.content) {
+        saveRef.current({ source: d.source, content: textRef.current });
+      }
+    },
+    [],
+  );
+
+  const dirty = !!data && text !== data.content;
+  const status = isPending ? "Saving…" : dirty ? "Unsaved" : data ? "Saved" : "";
+
+  return (
+    <div className="mt-2.5">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 text-[12px] text-muted-2 hover:text-fg-2"
+      >
+        <ChevronRightIcon
+          size={12}
+          className={`flex-none transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <span className="flex-none">Edit skill file</span>
+        {open && data && (
+          <span
+            className="min-w-0 flex-1 truncate text-left font-mono text-[10.5px] text-muted-4"
+            title={data.path}
+          >
+            {data.path}
+          </span>
+        )}
+        {open && (
+          <span className={`text-[10.5px] text-muted-4 ${data ? "flex-none" : "ml-auto"}`}>
+            {status}
+          </span>
+        )}
+      </button>
+
+      {open &&
+        (isLoading ? (
+          <div className="mt-2 text-[11.5px] text-muted-3">
+            Loading <span className="font-mono">/{name}</span>…
+          </div>
+        ) : !data ? (
+          <div className="mt-2 text-[11.5px] text-muted-3">
+            Couldn't load <span className="font-mono">/{name}</span>.
+          </div>
+        ) : (
+          <>
+            {fromRepoScope && data.source === "global" && (
+              <div className="mt-2 text-[11px] leading-[1.5] text-muted-3">
+                This is a global command — edits apply to every repo.
+              </div>
+            )}
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              spellCheck={false}
+              autoCorrect="off"
+              autoCapitalize="off"
+              aria-label={`Edit the /${name} skill`}
+              // Disable ligatures/contextual alternates: the mono font otherwise
+              // renders `---`/`###`/`` `` ``/`**` as combined glyphs, so the text
+              // looks shifted and the caret doesn't line up with the characters.
+              style={{ fontVariantLigatures: "none", fontFeatureSettings: '"liga" 0, "calt" 0' }}
+              className="mt-2 h-72 w-full resize-y rounded-lg border border-line-3 bg-input px-3 py-2.5 font-mono text-[12px] leading-[1.55] text-fg-2 outline-none focus:border-line-strong"
+            />
+          </>
+        ))}
     </div>
   );
 }

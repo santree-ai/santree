@@ -232,71 +232,29 @@ describe("filterTriageQueue", () => {
   const tickets = [mine, mineSnoozed, theirs, theirsSnoozed];
 
   it("mine-only (good-citizen off): shows only the viewer's active tickets, snoozed hidden", () => {
-    const result = filterTriageQueue(tickets, {
-      goodCitizen: false,
-      showSnoozed: false,
-      onDuty: false,
-    });
+    const result = filterTriageQueue(tickets, { goodCitizen: false, showSnoozed: false });
     expect(result.visible.map((t) => t.id)).toEqual([mine.id]);
     // teamWaiting always counts others' active tickets, independent of the toggle.
     expect(result.teamWaiting).toBe(1);
   });
 
   it("mine-only + show snoozed: includes the viewer's own snoozed ticket, still excludes the team", () => {
-    const result = filterTriageQueue(tickets, {
-      goodCitizen: false,
-      showSnoozed: true,
-      onDuty: false,
-    });
+    const result = filterTriageQueue(tickets, { goodCitizen: false, showSnoozed: true });
     expect(result.visible.map((t) => t.id).sort()).toEqual([mine.id, mineSnoozed.id].sort());
   });
 
-  it("good citizen + off duty: widens to the team inbox regardless of the viewer's own queue", () => {
-    const result = filterTriageQueue(tickets, {
-      goodCitizen: true,
-      showSnoozed: false,
-      onDuty: false,
-    });
+  it("good citizen: widens to the whole team inbox (issues not assigned to you included), unconditionally", () => {
+    const result = filterTriageQueue(tickets, { goodCitizen: true, showSnoozed: false });
     expect(result.visible.map((t) => t.id).sort()).toEqual([mine.id, theirs.id].sort());
   });
 
-  it("good citizen + on duty + non-empty mine queue: stays scoped to the viewer's own tickets", () => {
-    const result = filterTriageQueue(tickets, {
-      goodCitizen: true,
-      showSnoozed: false,
-      onDuty: true,
-    });
-    expect(result.visible.map((t) => t.id)).toEqual([mine.id]);
-  });
-
-  it("good citizen + on duty + empty mine queue: falls back to the team inbox", () => {
-    // Only snoozed tickets belong to the viewer, so the *active* mine queue is
-    // empty even though `mine` tickets exist — this is the "your queue is
-    // empty" widen condition, not "you have no tickets at all".
-    const onlySnoozedMine = [mineSnoozed, theirs, theirsSnoozed];
-    const result = filterTriageQueue(onlySnoozedMine, {
-      goodCitizen: true,
-      showSnoozed: false,
-      onDuty: true,
-    });
-    expect(result.visible.map((t) => t.id)).toEqual([theirs.id]);
-  });
-
   it("show snoozed widens the team view too once good-citizen is showing it", () => {
-    const result = filterTriageQueue(tickets, {
-      goodCitizen: true,
-      showSnoozed: true,
-      onDuty: false,
-    });
+    const result = filterTriageQueue(tickets, { goodCitizen: true, showSnoozed: true });
     expect(result.visible.map((t) => t.id).sort()).toEqual(tickets.map((t) => t.id).sort());
   });
 
   it("teamWaiting excludes the viewer's own tickets and snoozed tickets, regardless of toggles", () => {
-    const result = filterTriageQueue(tickets, {
-      goodCitizen: true,
-      showSnoozed: true,
-      onDuty: true,
-    });
+    const result = filterTriageQueue(tickets, { goodCitizen: true, showSnoozed: true });
     expect(result.teamWaiting).toBe(1);
   });
 });

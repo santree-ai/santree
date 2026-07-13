@@ -86,16 +86,15 @@ pub fn db_path(app: &AppHandle) -> Option<PathBuf> {
 /// We pass Claude a settings *file* (`--settings <path>`), not inline JSON: the
 /// JSON is large, and inlining it into the interactive-shell seed command
 /// overflowed the line and left the shell stuck at a `quote>` continuation.
-pub fn claude_settings(app: &AppHandle) -> Option<String> {
+/// The hooks + statusLine map that every santree `claude` launch layers over the
+/// user's settings — shared by [`claude_settings`] and [`claude_settings_no_git`].
+/// `None` when the hook binary/db don't resolve (a dev build before the hook is
+/// compiled), in which case there's nothing to inject.
+fn base_settings_map(app: &AppHandle) -> Option<Map<String, Value>> {
     // Both the hooks and the statusline invoke `santree-hook` against the db, so
-    // resolve them once; without them there's nothing to inject (a dev build
-    // before the hook is compiled has neither).
-    let (Some(bin), Some(db_pathbuf)) = (hook_bin(app), db_path(app)) else {
-        return None;
-    };
-    let (Some(bin), Some(db)) = (bin.to_str(), db_pathbuf.to_str()) else {
-        return None;
-    };
+    // resolve them once.
+    let (bin, db_pathbuf) = (hook_bin(app)?, db_path(app)?);
+    let (bin, db) = (bin.to_str()?, db_pathbuf.to_str()?);
 
     let mut root = Map::new();
 
@@ -126,16 +125,47 @@ pub fn claude_settings(app: &AppHandle) -> Option<String> {
     // santree's own status line: the `statusline` mode of the same binary. Prints
     // a context-fill bar AND captures Claude's authoritative usage into the db.
     // Always injected — the app gates *display* of the inline bar at runtime, so
-    // capture must run regardless of the setting (see the fn doc).
+    // capture must run regardless of the setting (see [`claude_settings`]).
     root.insert(
         "statusLine".into(),
         json!({ "type": "command", "command": format!("\"{bin}\" --db \"{db}\" statusline") }),
     );
 
+    Some(root)
+}
+
+/// Write a settings map to `<app_data_dir>/<file>` and return its path.
+fn write_settings(app: &AppHandle, file: &str, root: Map<String, Value>) -> Option<String> {
     let json = serde_json::to_string_pretty(&Value::Object(root)).ok()?;
-    let out = app.path().app_data_dir().ok()?.join("claude-hooks.json");
+    let out = app.path().app_data_dir().ok()?.join(file);
     std::fs::write(&out, json).ok()?;
     Some(out.to_str()?.to_string())
+}
+
+pub fn claude_settings(app: &AppHandle) -> Option<String> {
+    write_settings(app, "claude-hooks.json", base_settings_map(app)?)
+}
+
+/// Like [`claude_settings`] but with a `permissions.deny` block that forbids git
+/// commit/push — the `--settings` file for the "Fix CI" session, whose whole point
+/// is to fix and validate but leave committing/pushing to the user (via Trees).
+/// `--permission-mode` alone can't express a tool denylist, so this is the actual
+/// enforcement; the CI-fix prompt reinforces it in prose. Written to a distinct
+/// file so it never affects normal work sessions.
+pub fn claude_settings_no_git(app: &AppHandle) -> Option<String> {
+    let mut root = base_settings_map(app)?;
+    root.insert(
+        "permissions".into(),
+        json!({
+            "deny": [
+                "Bash(git commit)",
+                "Bash(git commit:*)",
+                "Bash(git push)",
+                "Bash(git push:*)",
+            ]
+        }),
+    );
+    write_settings(app, "claude-hooks-fixci.json", root)
 }
 
 /// Every session's live usage row (from the status-line capture), newest first.

@@ -1,0 +1,17 @@
+{% if ticket_id %}You are fixing the failing CI checks for {{ ticket_id }}{% if title %} — {{ title }}{% endif %}.{% else %}You are fixing the failing CI checks on this branch.{% endif %}
+
+The pull request's CI failed. Below is the failing job's log (sliced to the failing step). Diagnose the real cause, fix it in this worktree, and validate locally.
+
+## What to do
+1. Read the log and find the actual failure. The real error is usually a few lines *above* the generic "exited with code 1" line — don't stop at the exit code.
+2. Explore the relevant code in this worktree and make the smallest correct fix for the failure. Match the surrounding style and existing patterns.
+3. Reproduce the failure locally: run the specific test / lint / build command that failed, and iterate until it passes. If the check genuinely needs Docker or backing services (Postgres, Redis, …) you can't run here, say so explicitly and describe what you verified instead — never claim it's fixed if you couldn't actually run it.
+
+## Hard rules
+- Do NOT commit. Do NOT push. Do NOT amend, create, or reset commits, and do NOT open or update a pull request. The user reviews your changes and commits + pushes them from santree's Trees tab.
+- Stay within this worktree and change only what's needed to make the failing check(s) pass.
+- When you're done, give a short summary: the root cause, the fix you made, and exactly what you ran to validate it (or why you couldn't).
+
+## Failing CI log
+
+{{ log_content }}

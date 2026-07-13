@@ -280,6 +280,11 @@ pub enum AgentSession {
 pub enum TabKind {
     Claude,
     Terminal,
+    /// A Claude session dedicated to fixing a PR's failing CI: seeded with the
+    /// failed log + guardrails, launched with a commit/push-denying settings file.
+    /// Persisted like a Claude tab (resumable), but its pane always applies the
+    /// no-git guardrail — even on resume after a restart.
+    FixCi,
 }
 
 impl TabKind {
@@ -288,6 +293,17 @@ impl TabKind {
         match self {
             TabKind::Claude => "claude",
             TabKind::Terminal => "terminal",
+            TabKind::FixCi => "fixci",
+        }
+    }
+
+    /// Parse the `worktree_tabs.kind` column back into a variant (unknown →
+    /// `Terminal`, the safe default).
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "claude" => TabKind::Claude,
+            "fixci" => TabKind::FixCi,
+            _ => TabKind::Terminal,
         }
     }
 }
@@ -591,7 +607,7 @@ pub struct CheckAnnotation {
 }
 
 /// One CI check on a PR's head commit (a GitHub check run or a status context).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PrCheck {
     pub name: String,
@@ -605,13 +621,83 @@ pub struct PrCheck {
     pub steps: Vec<CheckStep>,
     /// Error/warning annotations — populated only for failed check runs.
     pub annotations: Vec<CheckAnnotation>,
+    /// The GitHub Actions job id (parsed from `detailsUrl`), when this is an
+    /// Actions check run — lets the UI lazily fetch the job's raw log on expand.
+    /// `None` for status contexts / any check whose URL isn't an Actions job.
+    /// `f64` because Specta forbids 64-bit ints; job ids are exact in an `f64`.
+    pub job_id: Option<f64>,
+}
+
+/// How one raw-log line is classified — drives its tint and whether it stays
+/// expanded by default. Mirrors the `##[error]` / `##[warning]` / `##[group]`
+/// markers GitHub's Actions runner writes into the log stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum CheckLogLevel {
+    Error,
+    Warning,
+    /// A `##[group]` / `##[section]` / `##[command]` header — a section title.
+    Command,
+    Normal,
+}
+
+/// One line of a check run's raw job log, with its timestamp stripped and its
+/// runner marker (`##[error]` etc.) parsed off into `level`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckLogLine {
+    pub text: String,
+    pub level: CheckLogLevel,
+}
+
+/// One rendered block of a check run's log, mirroring how GitHub's Actions UI
+/// shows an expanded step: loose output is always visible; each `##[group]`
+/// section collapses behind its title. A discriminated union (`kind`) so the
+/// frontend can render + collapse it directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CheckLogBlock {
+    /// A standalone line — loose step output or a top-level error/warning. Always
+    /// visible.
+    Line { text: String, level: CheckLogLevel },
+    /// A `##[group]` section — collapsed behind its `title` by default. Nested
+    /// sub-groups are flattened into `lines` as plain command lines.
+    Group {
+        title: String,
+        lines: Vec<CheckLogLine>,
+    },
+}
+
+/// A failed check run's job log, sliced to the failing step and split into
+/// visible lines + collapsible groups. `truncated` is set when the step's log
+/// exceeded the line cap and only its tail (where the error is) was kept — the UI
+/// notes that earlier lines live on GitHub.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckLog {
+    pub blocks: Vec<CheckLogBlock>,
+    pub truncated: bool,
+}
+
+/// A GitHub label ("tag") — its name plus 6-hex color (no leading `#`, as GitHub
+/// returns it; the frontend prepends it). Used both for a PR's own labels and for
+/// the repo's full label palette in the picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PrLabel {
+    pub name: String,
+    /// 6-hex color without a leading `#`.
+    pub color: String,
+    /// The label's description, when set (shown in the picker).
+    pub description: Option<String>,
 }
 
 /// The detail panel payload for a selected PR: body, conversation, diff, checks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PrDetail {
     pub body: String,
+    /// The labels ("tags") currently assigned to the PR.
+    pub labels: Vec<PrLabel>,
     /// Top-level conversation: issue comments and review summaries, chronological.
     /// Inline review-thread comments live in `threads`, not here.
     pub comments: Vec<PrComment>,
@@ -741,6 +827,66 @@ pub struct ScriptInfo {
     pub content: String,
 }
 
+/// One documented variable a prompt template receives, shown in the editor's
+/// variable palette so users know what they can reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptVar {
+    /// The reference name, e.g. `ticket_id` (used as `{{ ticket_id }}`).
+    pub name: String,
+    pub description: String,
+}
+
+/// Whether an editable prompt runs a flow or is a reusable partial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum PromptKind {
+    /// A prompt that drives a flow: Work, Commit, PR, Fix-CI.
+    Flow,
+    /// A reusable partial embedded by flows via `{% include %}` — the built-in
+    /// `issue` context or a user-created block.
+    Block,
+}
+
+/// An editable AI prompt for the Settings → Prompts composer: its identity, the
+/// default source, the user's override for the queried scope (if any), the
+/// variable catalog, and the live composition links (what it includes / is
+/// included by).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptInfo {
+    /// Stable template name, e.g. `work` (also the `{% include %}` target).
+    pub name: String,
+    /// Human label for the editor list, e.g. "Work / start task".
+    pub label: String,
+    pub description: String,
+    pub kind: PromptKind,
+    /// False for user-created blocks — they have no embedded default and can be
+    /// deleted (their content lives entirely in the DB).
+    pub builtin: bool,
+    /// The default template source (the reset target). Empty for custom blocks.
+    pub default: String,
+    /// The user's stored override for the queried scope, or `None` when the
+    /// scope inherits (app default or built-in).
+    pub override_source: Option<String>,
+    pub variables: Vec<PromptVar>,
+    /// Names of prompts this one currently `{% include %}`s (scanned from its
+    /// effective source at the queried scope).
+    pub includes: Vec<String>,
+    /// Names of prompts that currently include this one (reverse of `includes`).
+    pub used_by: Vec<String>,
+}
+
+/// The result of rendering a draft prompt against representative sample data —
+/// either the rendered text or the render/compile error, for the live preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptPreview {
+    pub output: String,
+    /// The minijinja error when the draft doesn't compile/render, else `None`.
+    pub error: Option<String>,
+}
+
 /// An external app/location a worktree can be opened in (Conductor-style menu).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -752,7 +898,7 @@ pub struct Opener {
     pub available: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub enum Priority {
     Urgent,
     High,
@@ -796,7 +942,7 @@ pub struct TriageTicket {
 }
 
 /// A comment on a triage issue (markdown body), with threaded replies.
-#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TriageComment {
     /// Linear comment id — used as the `parentId` when posting a reply.
@@ -815,7 +961,7 @@ pub struct TriageComment {
 /// A workflow state an issue can move to (one of its team's states). Moving an
 /// issue out of the `triage` state — e.g. into `backlog`/`unstarted` — is how the
 /// UI "promotes" a triage item.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowState {
     pub id: String,
@@ -832,7 +978,7 @@ pub struct WorkflowState {
 /// description, metadata, and comment thread.
 ///
 /// Only `PartialEq` (not `Eq`) because of the `f64` timestamp fields below.
-#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TriageDetail {
     pub id: String,
@@ -987,6 +1133,34 @@ pub struct ClaudeCommands {
     pub global: Vec<ClaudeCommand>,
     /// Commands from the repo's `.claude/commands` (empty for the app scope).
     pub repo: Vec<ClaudeCommand>,
+}
+
+/// Where a slash-command's backing file lives — the user's global dir or a repo's.
+/// A repo-local file shadows a global one of the same name (Claude's own
+/// resolution), so this records which file an edit actually targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum CommandSource {
+    /// `~/.claude/commands/<name>.md`.
+    Global,
+    /// `<repo>/.claude/commands/<name>.md`.
+    Repo,
+}
+
+/// The effective backing file for a selected slash-command, so the settings editor
+/// can edit the *real* skill in place. Resolved repo-over-global, matching how
+/// Claude picks which command actually runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeCommandFile {
+    /// Invocation name (the file stem, without `.md`).
+    pub name: String,
+    /// Which directory the effective file lives in.
+    pub source: CommandSource,
+    /// Absolute path of the backing `.md` file (shown as the edit target).
+    pub path: String,
+    /// The file's full text — YAML frontmatter plus the command body.
+    pub content: String,
 }
 
 /// Aggregated Claude token counts for a bucket (a period, a model, or a session).

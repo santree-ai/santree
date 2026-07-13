@@ -10,33 +10,71 @@
  * `useTriageDetail`. Both show skeletons while loading; the header renders
  * immediately from the already-loaded list row.
  */
+import { useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 
-import type { CheckStatus, PrCheck, Reviewer, ReviewPr } from "../../bindings";
+import type {
+  CheckLog,
+  CheckLogLevel,
+  CheckLogLine,
+  CheckStatus,
+  PrCheck,
+  PrLabel,
+  Reviewer,
+  ReviewPr,
+} from "../../bindings";
+import { commands } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
 import {
   AgentsIcon,
   BranchIcon,
+  CheckIcon,
   ChevronDownIcon,
+  ClaudeSparkIcon,
+  CloseIcon,
   CopyIcon,
   GitHubLogo,
   LinearLogo,
   PanelIcon,
+  PlusIcon,
 } from "../../components/icons";
-import { Button, Dot, EmptyState, Pill, Skeleton, Tabs } from "../../components/primitives";
+import {
+  Button,
+  Dot,
+  Dropdown,
+  EmptyState,
+  MENU_ITEM,
+  Pill,
+  Skeleton,
+  Spinner,
+  Tabs,
+} from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
-import { usePrDetail, useTriageDetail } from "../../lib/queries";
+import {
+  queryKeys,
+  unwrap,
+  usePrCheckLog,
+  usePrDetail,
+  useRepoLabels,
+  useSetPrLabels,
+  useTriageDetail,
+} from "../../lib/queries";
+import { useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import {
   accentActiveStyle,
+  alpha,
   checkRollupMeta,
   checkStatusMeta,
   mergeQueueMeta,
   priorityColor,
+  readableLabelColor,
   reviewDecisionMeta,
 } from "../../theme/colors";
+import { useResolvedTheme } from "../../theme/useResolvedTheme";
 import { MergeQueuePane } from "./MergeQueuePane";
 import { useReviewsModel } from "./model";
 import { PrInfoPanel } from "./PrInfoPanel";
@@ -102,7 +140,7 @@ function PrPane({ pr }: { pr: ReviewPr }) {
     <div className="flex min-w-0 flex-1 flex-col bg-app">
       {/* Shared header — identity on the left, actions on the right; each row
           spans the full width rather than stacking everything on one side. */}
-      <div className="flex-none border-b border-hairline px-5 py-3.5">
+      <div className="flex-none border-b border-hairline px-5 pt-3.5 pb-2">
         <div className="mb-2 flex items-center gap-2">
           <span className="font-mono text-[12px] text-muted-3">{pr.repo}</span>
           <span className="font-mono text-[12px]" style={{ color: "var(--accent)" }}>
@@ -166,6 +204,7 @@ function PrPane({ pr }: { pr: ReviewPr }) {
           </span>
         </div>
         {pr.reviewers.length > 0 && <Reviewers reviewers={pr.reviewers} />}
+        <PrLabels pr={pr} />
       </div>
 
       <Tabs
@@ -221,6 +260,130 @@ function Reviewers({ reviewers }: { reviewers: Reviewer[] }) {
   );
 }
 
+/** The PR's labels ("tags"), editable inline: each is a removable colored chip,
+ *  and a "＋" dropdown toggles any of the repo's labels on or off. Labels live on
+ *  the (deduped) PR detail; edits write straight through to GitHub optimistically,
+ *  so the row updates instantly. */
+function PrLabels({ pr }: { pr: ReviewPr }) {
+  const [owner, name] = splitRepo(pr.repo);
+  const { data: detail } = usePrDetail(owner, name, pr.number);
+  const { mutate: setLabels } = useSetPrLabels(owner, name, pr.number);
+  // Fetch the repo's palette only once the picker opens (labels rarely change).
+  const [picking, setPicking] = useState(false);
+  const { data: repoLabels = [] } = useRepoLabels(owner, name, picking);
+
+  // The labels row lives on the PR detail; show nothing until it loads.
+  if (!detail) return null;
+  const labels = detail.labels;
+  const assigned = new Set(labels.map((l) => l.name));
+
+  const toggle = (label: PrLabel) =>
+    setLabels(
+      assigned.has(label.name) ? labels.filter((l) => l.name !== label.name) : [...labels, label],
+    );
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+      <span className="text-muted-4">Labels</span>
+      {labels.map((l) => (
+        <LabelChip
+          key={l.name}
+          label={l}
+          onRemove={() => setLabels(labels.filter((x) => x !== l))}
+        />
+      ))}
+      {labels.length === 0 && <span className="text-muted-3">None</span>}
+      <Dropdown
+        open={picking}
+        onOpenChange={setPicking}
+        menuClassName="w-64 overflow-hidden"
+        trigger={(t) => (
+          <button
+            type="button"
+            onClick={t}
+            title="Add or remove labels"
+            className="flex cursor-pointer items-center gap-1 rounded border border-dashed border-line-3 px-1.5 py-px text-[10.5px] text-muted-2 hover:border-line-strong hover:text-fg-2"
+          >
+            <PlusIcon size={10} /> Label
+          </button>
+        )}
+      >
+        {() => <LabelPicker labels={repoLabels} assigned={assigned} onToggle={toggle} />}
+      </Dropdown>
+    </div>
+  );
+}
+
+/** One assigned label — a colored chip with an inline remove (×) button. The
+ *  chip's whole palette derives from a lightness-clamped version of the label's
+ *  raw hex so pale labels (e.g. `risk:high`) stay legible in both themes. */
+function LabelChip({ label, onRemove }: { label: PrLabel; onRemove: () => void }) {
+  const theme = useResolvedTheme();
+  const color = readableLabelColor(label.color, theme);
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-medium"
+      style={{ color, background: alpha(14, color), border: `1px solid ${alpha(42, color)}` }}
+      title={label.description ?? undefined}
+    >
+      {label.name}
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`Remove label ${label.name}`}
+        className="flex cursor-pointer items-center opacity-70 hover:opacity-100"
+      >
+        <CloseIcon size={9} />
+      </button>
+    </span>
+  );
+}
+
+/** The add/remove-labels dropdown body: a filter box over the repo's palette, each
+ *  row a toggle (checked when currently assigned). */
+function LabelPicker({
+  labels,
+  assigned,
+  onToggle,
+}: {
+  labels: PrLabel[];
+  assigned: Set<string>;
+  onToggle: (label: PrLabel) => void;
+}) {
+  const [q, setQ] = useState("");
+  const filtered = labels.filter((l) => l.name.toLowerCase().includes(q.toLowerCase().trim()));
+  return (
+    <div>
+      <div className="border-b border-line-3 p-1.5">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Filter labels…"
+          className="w-full rounded border border-line-3 bg-input px-2 py-1 text-[11.5px] text-fg-2 outline-none focus:border-line-strong"
+        />
+      </div>
+      <div className="max-h-64 overflow-y-auto py-1">
+        {filtered.length === 0 ? (
+          <div className="px-3 py-2 text-[11.5px] text-muted-3">No labels.</div>
+        ) : (
+          filtered.map((l) => (
+            <button key={l.name} type="button" onClick={() => onToggle(l)} className={MENU_ITEM}>
+              <span
+                className="h-2.5 w-2.5 flex-none rounded-full"
+                style={{ background: `#${l.color}` }}
+              />
+              <span className="min-w-0 flex-1 truncate" title={l.description ?? undefined}>
+                {l.name}
+              </span>
+              {assigned.has(l.name) && <CheckIcon size={12} className="flex-none text-accent" />}
+            </button>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 // GitHub annotation levels → tint. `notice` is informational; error/warning
 // map to the shared status palette so they read the same as check glyphs.
 const annotationLevelColor: Record<string, string> = {
@@ -231,8 +394,125 @@ const annotationLevelColor: Record<string, string> = {
   notice: "var(--color-muted-3)",
 };
 
-/** Failed steps + error annotations for a failed check, shown when expanded. */
-function CheckDetail({ check }: { check: PrCheck }) {
+// GitHub Actions runner-marker levels → the same status palette the check glyphs
+// use, so a log error reads identically to a failed-step glyph.
+const logLevelColor: Record<CheckLogLevel, string> = {
+  Error: "var(--color-status-red)",
+  Warning: "var(--color-status-amber)",
+  Command: "var(--color-muted-3)",
+  Normal: "var(--color-muted-2)",
+};
+
+/** One raw-log line, tinted by level. Empty lines keep their height so blank
+ *  runs in the log read the way they do on GitHub. */
+function LogLine({ text, level }: { text: string; level: CheckLogLevel }) {
+  return (
+    <div className="px-3 break-words whitespace-pre-wrap" style={{ color: logLevelColor[level] }}>
+      {text || " "}
+    </div>
+  );
+}
+
+/** A `##[group]` section — collapsed behind its title by default, like GitHub. */
+function LogGroup({ title, lines }: { title: string; lines: CheckLogLine[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full cursor-pointer items-center gap-1.5 px-3 text-left text-muted-3 hover:text-fg-2"
+      >
+        <ChevronDownIcon
+          size={10}
+          className={`flex-none transition-transform ${open ? "" : "-rotate-90"}`}
+        />
+        <span className="min-w-0 truncate">{title}</span>
+      </button>
+      {open && (
+        <div className="pl-3.5">
+          {lines.map((l, i) => (
+            <LogLine key={i} text={l.text} level={l.level} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Lazily-loaded raw job log for a failed check, sliced to the failing step.
+ *  Loose output is always visible; `##[group]` sections collapse — the same
+ *  expand-on-demand shape as GitHub's step view. */
+function CheckLogSection({
+  owner,
+  name,
+  jobId,
+  url,
+}: {
+  owner: string;
+  name: string;
+  jobId: number;
+  url: string | null;
+}) {
+  const [show, setShow] = useState(false);
+  const { data: log, isLoading } = usePrCheckLog(owner, name, jobId, show);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <button
+        type="button"
+        onClick={() => setShow((v) => !v)}
+        className="flex w-fit cursor-pointer items-center gap-1.5 font-mono text-[10px] tracking-[.06em] text-muted-3 uppercase hover:text-fg-2"
+      >
+        <ChevronDownIcon
+          size={11}
+          className={`flex-none transition-transform ${show ? "" : "-rotate-90"}`}
+        />
+        {show ? "Hide output log" : "Show output log"}
+      </button>
+      {show && (
+        <div className="overflow-hidden rounded-md border border-line-2 bg-app">
+          {isLoading ? (
+            <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-muted-3">
+              <Spinner size={11} /> Loading log…
+            </div>
+          ) : !log || log.blocks.length === 0 ? (
+            <div className="px-3 py-2 text-[11px] text-muted-3">No log output.</div>
+          ) : (
+            <div className="max-h-[440px] overflow-auto py-1 font-mono text-[11px] leading-[1.55]">
+              {log.truncated && (
+                <div className="px-3 pb-1 text-[10px] text-muted-4">
+                  Earlier lines omitted —{" "}
+                  {url ? (
+                    <button
+                      type="button"
+                      onClick={() => openUrl(url)}
+                      className="cursor-pointer underline hover:text-fg-2"
+                    >
+                      open full log on GitHub
+                    </button>
+                  ) : (
+                    "see the full log on GitHub"
+                  )}
+                </div>
+              )}
+              {log.blocks.map((b, i) =>
+                b.kind === "line" ? (
+                  <LogLine key={i} text={b.text} level={b.level} />
+                ) : (
+                  <LogGroup key={i} title={b.title} lines={b.lines} />
+                ),
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Failed steps + error annotations for a failed check, plus the raw job log
+ *  (on demand), shown when expanded. */
+function CheckDetail({ check, owner, name }: { check: PrCheck; owner: string; name: string }) {
   // Steps are ordered; the failing one(s) are what matter, but showing the run's
   // step list gives context on where it broke. Highlight non-passing steps.
   const failedSteps = check.steps.filter((s) => s.status === "Failure");
@@ -285,15 +565,21 @@ function CheckDetail({ check }: { check: PrCheck }) {
           </div>
         );
       })}
+      {check.status === "Failure" && check.jobId != null && (
+        <CheckLogSection owner={owner} name={name} jobId={check.jobId} url={check.url} />
+      )}
     </div>
   );
 }
 
 /** One CI check row. Failed checks with step/annotation detail expand inline to
  *  show what broke; every row links to the run's details page when available. */
-function CheckRow({ check }: { check: PrCheck }) {
+function CheckRow({ check, owner, name }: { check: PrCheck; owner: string; name: string }) {
   const m = checkStatusMeta[check.status];
-  const hasDetail = check.steps.length > 0 || check.annotations.length > 0;
+  // A failed Actions run always has a job log to offer, even with no
+  // steps/annotations — so it's expandable on its `jobId` alone.
+  const canShowLog = check.status === "Failure" && check.jobId != null;
+  const hasDetail = check.steps.length > 0 || check.annotations.length > 0 || canShowLog;
   // Failed runs start expanded — the detail is the reason you opened this tab.
   const [open, setOpen] = useState(hasDetail);
 
@@ -351,18 +637,89 @@ function CheckRow({ check }: { check: PrCheck }) {
           </button>
         )}
       </div>
-      {open && <CheckDetail check={check} />}
+      {open && <CheckDetail check={check} owner={owner} name={name} />}
     </div>
   );
 }
 
-function CheckGroup({ checks }: { checks: PrCheck[] }) {
+function CheckGroup({ checks, owner, name }: { checks: PrCheck[]; owner: string; name: string }) {
   return (
     <div className="flex flex-col gap-1.5">
       {checks.map((c, i) => (
-        <CheckRow key={`${c.name}-${i}`} check={c} />
+        <CheckRow key={`${c.name}-${i}`} check={c} owner={owner} name={name} />
       ))}
     </div>
+  );
+}
+
+/** Flatten a fetched CheckLog back into plain text for the AI fix prompt: loose
+ *  lines verbatim, group sections as a title + indented body. */
+function checkLogToText(log: CheckLog): string {
+  return log.blocks
+    .map((b) =>
+      b.kind === "line" ? b.text : [b.title, ...b.lines.map((l) => `  ${l.text}`)].join("\n"),
+    )
+    .join("\n");
+}
+
+/** "Fix CI with AI": find-or-create the PR's worktree (checked out on its head
+ *  branch), write a CI-fix prompt from the failing job logs, then hand off to the
+ *  Trees tab which opens a Fix-CI Claude tab (commit/push denied — the user does
+ *  that from Trees). Enabled only when there's a failed check with a fetchable
+ *  Actions job log. */
+function FixCiButton({
+  pr,
+  santreeRepo,
+  failed,
+}: {
+  pr: ReviewPr;
+  santreeRepo: string;
+  failed: PrCheck[];
+}) {
+  const [owner, name] = splitRepo(pr.repo);
+  const { requestFixCiLaunch } = useAppUi();
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState(false);
+
+  // Only failed checks whose Actions job log we can actually fetch are useful.
+  const fixable = failed.filter((c) => c.jobId != null);
+  if (fixable.length === 0) return null;
+
+  async function run() {
+    setBusy(true);
+    try {
+      const issueId = ticketIdFor(pr) ?? `pr-${pr.number}`;
+      // Find-or-create a worktree on the PR's head branch (so the fix lands there).
+      const worktree = await unwrap(
+        commands.createWorktreeForPr(santreeRepo, issueId, pr.title, pr.headRef, null, "Claude"),
+      );
+      // Let the Trees list pick up the new worktree so its Fix-CI launch effect fires.
+      await qc.invalidateQueries({ queryKey: queryKeys.worktrees(santreeRepo) });
+      // Gather each failing job's log and label it by check name.
+      const logs = await Promise.all(
+        fixable.map(async (c) => {
+          const log = await unwrap(commands.prCheckLog(owner, name, c.jobId));
+          return `### ${c.name}\n\n${checkLogToText(log)}`;
+        }),
+      );
+      const promptPath = await unwrap(
+        commands.fixCiPrompt(santreeRepo, issueId, logs.join("\n\n")),
+      );
+      requestFixCiLaunch({ worktreeId: worktree.id, tabId: crypto.randomUUID(), promptPath });
+      navigate({ to: "/trees" });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Couldn't start the CI fix.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Button size="sm" onClick={run} disabled={busy} title="Fix the failing checks with Claude">
+      {busy ? <Spinner size={11} /> : <ClaudeSparkIcon size={11} />}
+      {busy ? "Starting…" : "Fix CI with AI"}
+    </Button>
   );
 }
 
@@ -371,6 +728,7 @@ function CheckGroup({ checks }: { checks: PrCheck[] }) {
  *  collapsed at the bottom (they're rarely what you're looking for). */
 function ChecksPane({ pr }: { pr: ReviewPr }) {
   const [owner, name] = splitRepo(pr.repo);
+  const { repo: santreeRepo } = useReviewsModel();
   const { data: detail, isLoading } = usePrDetail(owner, name, pr.number);
   // Section keys that are collapsed. The skipped/neutral group starts collapsed.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(["skipped"]));
@@ -429,8 +787,15 @@ function ChecksPane({ pr }: { pr: ReviewPr }) {
     });
   };
 
+  const failed = of("Failure");
+
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+      {failed.length > 0 && (
+        <div className="mb-4 flex items-center justify-end">
+          <FixCiButton pr={pr} santreeRepo={santreeRepo} failed={failed} />
+        </div>
+      )}
       {groups.map((g) => {
         const isCollapsed = collapsed.has(g.key);
         return (
@@ -448,7 +813,7 @@ function ChecksPane({ pr }: { pr: ReviewPr }) {
               />
               {g.glyph} {g.checks.length} {g.label}
             </button>
-            {!isCollapsed && <CheckGroup checks={g.checks} />}
+            {!isCollapsed && <CheckGroup checks={g.checks} owner={owner} name={name} />}
           </section>
         );
       })}

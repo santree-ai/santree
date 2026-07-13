@@ -409,6 +409,42 @@ button:focus-visible {
   color: #2f6aa8;
 }
 
+/* Jinja tokens for the Settings → Prompts editor: `{{ var }}`, `{% tag %}`,
+   `{# comment #}` (see jinjaHighlight.ts). Dark defaults + light-mode overrides. */
+.prompt-editor .token.var {
+  color: #e5a44b;
+}
+.prompt-editor .token.tag {
+  color: #c678dd;
+}
+.prompt-editor .token.comment {
+  color: var(--color-muted-3);
+  font-style: italic;
+}
+:root[data-theme="light"] .prompt-editor .token.var {
+  color: #b3711a;
+}
+
+/* Rendered-preview highlighting: the values substituted from `{{ … }}` (marked by
+   prompts.rs, spanned by highlightRendered). Same amber as the editor's var token,
+   plus a faint wash so multi-word values read as one region. */
+/* Disable ligatures/contextual alternates so markdown symbol runs (`**`, `###`,
+   `---`, `>`) render as plain characters instead of combined glyphs — matches the
+   editor pane (see EDITOR_STYLE). */
+.prompt-render {
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+.prompt-render .token.var {
+  color: #e5a44b;
+  background: color-mix(in srgb, #e5a44b 12%, transparent);
+  border-radius: 2px;
+}
+:root[data-theme="light"] .prompt-render .token.var {
+  color: #b3711a;
+  background: color-mix(in srgb, #b3711a 12%, transparent);
+}
+
 /* Syntax tokens for the read-only Trees file viewer (CodeView). Same palette as
    the setup-script editor, applied to any language refractor can tokenize. */
 .code-hl .token.comment,

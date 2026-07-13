@@ -312,6 +312,9 @@ pub async fn get(db: &Db, repo: &str, issue_id: &str) -> Result<Option<Worktree>
 /// failing. Only a genuinely new worktree is branched off the base; running its
 /// setup script is a separate step (`run_setup_streamed`) so its output streams
 /// live to the Trees "Setup" tab instead of blocking this call for minutes.
+// One focused orchestrator with clear positional args; a params struct would just
+// churn the two command wrappers + tests for no real readability win.
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     db: &Db,
     repo: &str,
@@ -320,9 +323,13 @@ pub async fn create(
     project: Option<&str>,
     base: Option<&str>,
     agent: AgentKind,
+    checkout_branch: Option<&str>,
 ) -> Result<Worktree> {
     validate_issue_id(issue_id)?;
     if let Some(b) = base {
+        validate_branch_name(b)?;
+    }
+    if let Some(b) = checkout_branch {
         validate_branch_name(b)?;
     }
     let root = repo_root(db, repo).await?;
@@ -339,6 +346,7 @@ pub async fn create(
         let issue_id = issue_id.to_string();
         let title = title.to_string();
         let base = base.map(str::to_string);
+        let checkout_branch = checkout_branch.map(str::to_string);
         tokio::task::spawn_blocking(move || -> Result<_> {
             let root_path = Path::new(&root);
             let base_branch = match base {
@@ -357,6 +365,12 @@ pub async fn create(
                     wt_path.display()
                 );
                 git::worktree_branch(root_path, &wt_path).unwrap_or(computed_branch)
+            } else if let Some(cb) = checkout_branch {
+                // Check out an existing branch (a PR's head) rather than branching new
+                // work — so commits made here land on the PR's branch.
+                git::add_worktree_for_branch(root_path, &wt_path, &cb)?;
+                log::info!("created worktree {issue_id} on existing branch {cb}");
+                cb
             } else {
                 git::create_worktree(root_path, &wt_path, &computed_branch, &base_branch)?;
                 log::info!("created worktree {issue_id} on branch {computed_branch}");
@@ -894,13 +908,16 @@ pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<Strin
     // pass `None` so `{% if ticket_id %}` in the template omits the `[__base__] `
     // prefix, matching the non-AI fallback above.
     let prompt = crate::prompts::render(
+        db,
+        Some(repo),
         "fill-commit",
         minijinja::context! {
             branch_name => branch,
             ticket_id => (issue_id != BASE_ID).then_some(issue_id),
             diff_content => diff,
         },
-    )?;
+    )
+    .await?;
 
     // Claude can take 5–30s; run it off the async runtime's worker threads.
     let cwd = path.clone();
@@ -949,6 +966,14 @@ fn prompt_file_path(prompts_root: &Path, repo_root: &str, issue_id: &str) -> Pat
         .join(format!("{issue_id}.md"))
 }
 
+/// Path of the on-disk CI-fix prompt for a worktree (distinct file so it never
+/// clobbers the normal work prompt): `<prompts_root>/<repo-key>/<issue_id>.fixci.md`.
+fn fix_ci_prompt_file_path(prompts_root: &Path, repo_root: &str, issue_id: &str) -> PathBuf {
+    prompts_root
+        .join(repo_key(repo_root))
+        .join(format!("{issue_id}.fixci.md"))
+}
+
 /// The directory santree writes agent work-prompt files into, under the app's data
 /// dir — never inside a repo checkout, so it can't surface in any worktree's
 /// `git status`. Mirrors where `claude-hooks.json` lives. `None` when no writable
@@ -958,9 +983,11 @@ pub fn prompts_root(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.path().app_data_dir().ok().map(|d| d.join("prompts"))
 }
 
-/// Best-effort delete of a worktree's on-disk work prompt (missing is fine).
+/// Best-effort delete of a worktree's on-disk prompt files — the work prompt and
+/// the CI-fix prompt (missing is fine).
 fn delete_prompt_file(prompts_root: &Path, repo_root: &str, issue_id: &str) {
     let _ = std::fs::remove_file(prompt_file_path(prompts_root, repo_root, issue_id));
+    let _ = std::fs::remove_file(fix_ci_prompt_file_path(prompts_root, repo_root, issue_id));
 }
 
 /// Render the agent's opening prompt for a freshly-started worktree, from the
@@ -982,15 +1009,28 @@ pub async fn work_prompt(
             .fetch_optional(db)
             .await?;
 
+    // Resolve the effective prompt sources once (honoring app/repo overrides) —
+    // reused to render both the embedded `issue` and the `work` prompt below.
+    let sources = crate::prompts::resolve_sources(db, Some(repo)).await?;
+
     // Fetch the full ticket (description + comment thread) and render it the way
     // the CLI does, so the agent starts with real context instead of being told
     // to re-fetch via MCP. `triage_detail` fetches any issue by id, not just
     // triage ones. On any failure we leave `ticket_content` empty and the
     // template falls back to the MCP-fetch hint.
-    let ticket_content = match crate::linear::triage_detail(db, repo, issue_id).await {
-        Ok(Some(detail)) => crate::prompts::render_ticket(&detail).ok(),
+    let detail = match crate::linear::triage_detail(db, repo, issue_id).await {
+        Ok(Some(detail)) => Some(detail),
         _ => None,
     };
+    let ticket_content = detail
+        .as_ref()
+        .and_then(|d| crate::prompts::render_ticket_from(&sources, d).ok());
+    // Also flatten the issue's fields into the context so a customized `work`
+    // prompt can `{% include "issue" %}` directly, not only via `ticket_content`.
+    let issue_ctx = detail
+        .as_ref()
+        .map(crate::prompts::issue_context)
+        .unwrap_or_else(|| minijinja::context! {});
 
     // The user's per-task notes become the work prompt's `custom_context` — the
     // app's analog of the CLI's ad-hoc launch context.
@@ -1000,7 +1040,8 @@ pub async fn work_prompt(
         .flatten()
         .filter(|n| !n.trim().is_empty());
 
-    let rendered = crate::prompts::render(
+    let rendered = crate::prompts::render_from(
+        &sources,
         "work",
         minijinja::context! {
             ticket_id => issue_id,
@@ -1008,6 +1049,7 @@ pub async fn work_prompt(
             ticket_content,
             custom_context,
             mode => "implement",
+            ..issue_ctx,
         },
     )?
     .trim()
@@ -1018,6 +1060,49 @@ pub async fn work_prompt(
     // which pulled the live ticket above) is what keeps the file current: every
     // fresh launch re-renders from the latest Linear state and overwrites.
     let path = prompt_file_path(prompts_root, &root, issue_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, &rendered)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Render the CI-fix opening prompt — the failed check log plus the guardrails
+/// (diagnose, fix, validate locally, and **never** commit/push) — to a stable
+/// per-worktree file and return its **path**. Mirrors [`work_prompt`]: the log is
+/// large, so the terminal seeds `Read <path> …` rather than typing it into the
+/// PTY. Rewritten on every launch so it reflects the latest failing run.
+pub async fn fix_ci_prompt(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    prompts_root: &Path,
+    log: &str,
+) -> Result<String> {
+    validate_issue_id(issue_id)?;
+    let root = repo_root(db, repo).await?;
+    let title: Option<String> =
+        sqlx::query_scalar("SELECT title FROM worktree_links WHERE repo_path = ? AND issue_id = ?")
+            .bind(&root)
+            .bind(issue_id)
+            .fetch_optional(db)
+            .await?;
+
+    let rendered = crate::prompts::render(
+        db,
+        Some(repo),
+        "fix-ci",
+        minijinja::context! {
+            ticket_id => issue_id,
+            title => title.unwrap_or_default(),
+            log_content => log,
+        },
+    )
+    .await?
+    .trim()
+    .to_string();
+
+    let path = fix_ci_prompt_file_path(prompts_root, &root, issue_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1344,6 +1429,7 @@ mod tests {
             Some("Booking"),
             None,
             AgentKind::Claude,
+            None,
         )
         .await
         .unwrap();
@@ -1369,6 +1455,7 @@ mod tests {
             None,
             None,
             AgentKind::Claude,
+            None,
         )
         .await
         .unwrap();
@@ -1394,6 +1481,7 @@ mod tests {
             None,
             None,
             AgentKind::Claude,
+            None,
         )
         .await
         .unwrap();
@@ -1468,7 +1556,7 @@ mod tests {
             .unwrap();
 
         // AK-1 branches off main.
-        let ak1 = create(&db, "test", "AK-1", "First", None, None, AgentKind::Claude)
+        let ak1 = create(&db, "test", "AK-1", "First", None, None, AgentKind::Claude, None)
             .await
             .unwrap();
         assert_eq!(ak1.base_branch, "main");
@@ -1482,6 +1570,7 @@ mod tests {
             None,
             Some(&ak1.branch),
             AgentKind::Claude,
+            None,
         )
         .await
         .unwrap();

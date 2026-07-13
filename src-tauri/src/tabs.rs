@@ -31,11 +31,7 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<WorktreeTab>> {
         .map(|(id, worktree_id, kind, title)| WorktreeTab {
             id,
             worktree_id,
-            kind: if kind == "claude" {
-                TabKind::Claude
-            } else {
-                TabKind::Terminal
-            },
+            kind: TabKind::from_db_str(&kind),
             title,
         })
         .collect())
@@ -172,6 +168,20 @@ mod tests {
             tabs.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
             ["tab-a", "tab-c"]
         );
+    }
+
+    #[tokio::test]
+    async fn accepts_fix_ci_kind() {
+        // Migration 0013 widened the kind CHECK to include 'fixci'; without it this
+        // INSERT fails the constraint (the AK-84 "Fix CI with AI" bug).
+        let db = test_db("fixci").await;
+        add(&db, "repo", "AK-1", "tab-fix", TabKind::FixCi, "Fix CI")
+            .await
+            .unwrap();
+        let tabs = list(&db, "repo").await.unwrap();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].kind, TabKind::FixCi);
+        assert_eq!(tabs[0].title, "Fix CI");
     }
 
     #[tokio::test]

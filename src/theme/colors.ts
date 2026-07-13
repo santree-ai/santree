@@ -240,6 +240,43 @@ export function alpha(pct: number, color: string = accentVar): string {
   return `color-mix(in srgb, ${color} ${pct}%, transparent)`;
 }
 
+/** Parse a 3- or 6-digit hex (with or without `#`) to HSL. Returns null on
+ *  anything unparseable so callers can fall back to a neutral. */
+function hexToHsl(hex: string): { h: number; s: number; l: number } | null {
+  let h = hex.replace(/^#/, "").trim();
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return null;
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (d === 0) return { h: 0, s: 0, l };
+  const s = d / (1 - Math.abs(2 * l - 1));
+  let hue: number;
+  if (max === r) hue = ((((g - b) / d) % 6) + 6) % 6;
+  else if (max === g) hue = (b - r) / d + 2;
+  else hue = (r - g) / d + 4;
+  return { h: hue * 60, s, l };
+}
+
+/**
+ * A legible text/accent color derived from a raw GitHub/Linear **label** hex.
+ * Those hexes are picked for a solid-fill chip, so using one directly as text
+ * (the way we tint a chip's background) is unreadable — pale labels vanish in
+ * light mode, dark ones in dark mode. Clamp the color's lightness into a
+ * theme-appropriate band while preserving its hue, like GitHub's label text.
+ * Falls back to a muted neutral for an unparseable hex.
+ */
+export function readableLabelColor(hex: string, theme: "light" | "dark"): string {
+  const hsl = hexToHsl(hex);
+  if (!hsl) return "var(--color-muted-2)";
+  const l = theme === "dark" ? Math.max(hsl.l, 0.62) : Math.min(hsl.l, 0.36);
+  return `hsl(${Math.round(hsl.h)} ${Math.round(hsl.s * 100)}% ${Math.round(l * 100)}%)`;
+}
+
 /**
  * The shared "active / selected" accent treatment: a faint accent fill, a
  * stronger accent border, and accent-colored text. Centralized so the fill/

@@ -160,6 +160,41 @@ pub fn create_worktree(repo: &Path, worktree_path: &Path, branch: &str, base: &s
     Ok(())
 }
 
+/// Add a worktree that checks out an **existing** branch — a PR's head branch —
+/// fetching it from origin first. Unlike [`create_worktree`] (which branches *new*
+/// work off a base), this puts the worktree on the branch itself, so commits made
+/// in it land on that branch and update the PR. If the branch already exists
+/// locally it's checked out directly; otherwise a local branch tracking
+/// `origin/<branch>` is created. `branch` must be caller-validated (no leading `-`).
+pub fn add_worktree_for_branch(repo: &Path, worktree_path: &Path, branch: &str) -> Result<()> {
+    if let Some(parent) = worktree_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if worktree_path.exists() {
+        bail!("Worktree already exists at {}", worktree_path.display());
+    }
+    let path = worktree_path.to_string_lossy();
+
+    // Freshen the branch from origin so we check out its latest tip.
+    let _ = git_capture(repo, &["fetch", "origin", branch]);
+
+    if branch_exists(repo, branch) {
+        git(repo, &["worktree", "add", &path, branch])?;
+        return Ok(());
+    }
+    let origin_ref = format!("origin/{branch}");
+    if git(repo, &["rev-parse", "--verify", &origin_ref]).is_ok() {
+        // Remote-only branch (a PR whose branch we haven't checked out): create a
+        // local branch tracking it so the worktree is on the PR's actual branch.
+        git(
+            repo,
+            &["worktree", "add", "--track", "-b", branch, &path, &origin_ref],
+        )?;
+        return Ok(());
+    }
+    bail!("branch '{branch}' not found locally or on origin (a fork PR?)");
+}
+
 /// Remove a worktree and delete its branch. Idempotent: the goal is simply that
 /// the worktree no longer exist, so a half-removed worktree (e.g. a prior delete
 /// interrupted by a hot-reload) cleans up cleanly instead of wedging forever.

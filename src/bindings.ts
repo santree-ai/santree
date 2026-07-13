@@ -183,6 +183,20 @@ export const commands = {
 	 */
 	workPrompt: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("work_prompt", { repo, issueId })),
 	/**
+	 *  Render the CI-fix opening prompt (the failing check `log` + guardrails) to a
+	 *  per-worktree file and return its **path** — the "Fix CI" terminal seeds
+	 *  `exec <agent> 'Read <path> …'` with it (the log is too large to type into the
+	 *  PTY). Rewritten each launch so it reflects the latest failing run.
+	 */
+	fixCiPrompt: (repo: string, issueId: string, log: string) => typedError<string, CmdError>(__TAURI_INVOKE("fix_ci_prompt", { repo, issueId, log })),
+	/**
+	 *  Find-or-create a worktree for a pull request: reuse the one already tracked
+	 *  under `issue_id` if present, else create one that **checks out the PR's head
+	 *  branch** (`branch`) so commits made in it land on the PR. Used by the Reviews
+	 *  "Fix CI with AI" flow. `base` is the PR's base branch (for the worktree's diff).
+	 */
+	createWorktreeForPr: (repo: string, issueId: string, title: string, branch: string, base: string | null, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree_for_pr", { repo, issueId, title, branch, base, agent })),
+	/**
 	 *  Decide how a terminal that auto-launches `claude` should (re)launch it: resume
 	 *  a still-on-disk session, start fresh with a reserved id, or a plain shell.
 	 *  `term_key` is the logical terminal id (e.g. `tree:AK-1`, `triage:AK-1`); `cwd`
@@ -256,6 +270,23 @@ export const commands = {
 	 */
 	prDetail: (owner: string, name: string, number: number) => typedError<PrDetail, CmdError>(__TAURI_INVOKE("pr_detail", { owner, name, number })),
 	/**
+	 *  The repo's full label palette — the options offered by the PR label picker.
+	 *  Empty when `gh` isn't authenticated.
+	 */
+	prRepoLabels: (owner: string, name: string) => typedError<PrLabel[], CmdError>(__TAURI_INVOKE("pr_repo_labels", { owner, name })),
+	/**
+	 *  Replace a PR's labels with exactly `labels` (GitHub PUT semantics — the set is
+	 *  overwritten, so an empty list clears them), returning the resulting labels.
+	 */
+	setPrLabels: (owner: string, name: string, number: number, labels: string[]) => typedError<PrLabel[], CmdError>(__TAURI_INVOKE("set_pr_labels", { owner, name, number, labels })),
+	/**
+	 *  The raw job log for a failed GitHub Actions check, fetched on demand when the
+	 *  user expands the check — sliced to the failing step and classified so the UI
+	 *  can tint errors/warnings and collapse the quiet runs between them. `job_id`
+	 *  comes from [`PrCheck::job_id`]; empty when `gh` isn't authenticated.
+	 */
+	prCheckLog: (owner: string, name: string, jobId: number | null) => typedError<CheckLog, CmdError>(__TAURI_INVOKE("pr_check_log", { owner, name, jobId })),
+	/**
 	 *  The old (base) + new (head) full contents of one PR file, fetched on demand so
 	 *  the diff can expand unchanged context beyond the patch hunks (GitHub-style).
 	 *  `base`/`head` are the commit OIDs from [`PrDetail`]. Empty when GitHub isn't
@@ -315,6 +346,13 @@ export const commands = {
 	 */
 	claudeHookSettings: () => __TAURI_INVOKE<string | null>("claude_hook_settings"),
 	/**
+	 *  Like [`claude_hook_settings`] but with a `permissions.deny` block forbidding
+	 *  git commit/push — the `--settings` file the "Fix CI" session launches with, so
+	 *  the AI fixes + validates but never commits or pushes (the user does that from
+	 *  Trees). `None` when the hook binary/db can't be resolved.
+	 */
+	claudeHookSettingsNoGit: () => __TAURI_INVOKE<string | null>("claude_hook_settings_no_git"),
+	/**
 	 *  The current state of every Claude session santree has launched, as recorded
 	 *  live by the injected hooks. Most-recently-updated first.
 	 */
@@ -361,6 +399,18 @@ export const commands = {
 	 */
 	listClaudeCommands: (repo: string | null) => typedError<ClaudeCommands, CmdError>(__TAURI_INVOKE("list_claude_commands", { repo })),
 	/**
+	 *  Read the effective backing file for a selected slash-command so the Triage
+	 *  settings editor can edit the real skill in place. Resolves repo-over-global
+	 *  (the repo's own copy wins), returning which file was loaded.
+	 */
+	readClaudeCommand: (repo: string | null, name: string) => typedError<ClaudeCommandFile, CmdError>(__TAURI_INVOKE("read_claude_command", { repo, name })),
+	/**
+	 *  Overwrite a slash-command's backing file. `source` comes from the matching
+	 *  [`read_claude_command`] so the edit lands on the exact file that was loaded
+	 *  (global vs the repo's own copy).
+	 */
+	writeClaudeCommand: (repo: string | null, name: string, source: CommandSource, content: string) => typedError<null, CmdError>(__TAURI_INVOKE("write_claude_command", { repo, name, source, content })),
+	/**
 	 *  The current Claude models to suggest in the model pickers — derived live from
 	 *  the fetched LiteLLM catalog (cached in SQLite, daily refresh, static fallback),
 	 *  so it tracks Anthropic's releases instead of a hardcoded/stale list and includes
@@ -374,6 +424,59 @@ export const commands = {
 	setSetting: (scope: string, key: string, value: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_setting", { scope, key, value })),
 	/**  Resolve a repo-scoped setting: the repo's override, else the app value. */
 	resolveSetting: (repo: string, key: string) => typedError<string | null, CmdError>(__TAURI_INVOKE("resolve_setting", { repo, key })),
+	/**
+	 *  Every editable AI prompt with its default, the override stored at `scope`
+	 *  (`"app"` / `"repo:<name>"`), and its variable/include catalog — for the
+	 *  Settings → Prompts editor.
+	 */
+	listPrompts: (scope: string) => typedError<PromptInfo[], CmdError>(__TAURI_INVOKE("list_prompts", { scope })),
+	/**
+	 *  Store (or clear, when `content` is null) a prompt's override for `scope`.
+	 *  Rejects a non-empty override that doesn't compile, so a broken template can
+	 *  never be persisted or reach a real flow.
+	 */
+	setPrompt: (scope: string, name: string, content: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_prompt", { scope, name, content })),
+	/**
+	 *  Render a *draft* prompt for the live editor preview. With a `detail` (the issue
+	 *  the editor already holds in cache) it renders against that real ticket;
+	 *  otherwise a built-in sample. Rendering is pure — no fetch — so the editor can
+	 *  re-render on every keystroke. Compile/render errors come back in
+	 *  `PromptPreview.error`, not as a failure, so the editor can show them inline.
+	 */
+	previewPrompt: (name: string, content: string, repo: string | null, detail: {
+	id: string,
+	title: string,
+	priority: Priority,
+	/**  Workflow state name (e.g. "Triage"). */
+	state: string,
+	/**  Id of the current workflow state (for the status picker's selection). */
+	stateId: string | null,
+	/**  All workflow states the issue can move to, ordered as in Linear. */
+	states: WorkflowState[],
+	/**  Canonical Linear URL for the issue. */
+	url: string,
+	author: string,
+	/**  Public avatar URL of the issue creator, when they have one. */
+	authorAvatarUrl: string | null,
+	/**  Epoch ms the issue was created — raw, formatted live by the frontend. */
+	createdAtMs: number | null,
+	labels: string[],
+	project: string | null,
+	/**  Absolute epoch ms the issue's SLA breaches, if it has one. */
+	slaBreachMs: number | null,
+	/**  Epoch ms the issue is snoozed until, if snoozed. */
+	snoozedUntilMs: number | null,
+	/**  Markdown description — may contain inline images. */
+	description: string,
+	comments: TriageComment[],
+} | null) => typedError<PromptPreview, CmdError>(__TAURI_INVOKE("preview_prompt", { name, content, repo, detail })),
+	/**
+	 *  Create a user-defined shared block (a reusable partial any prompt can
+	 *  `{% include %}`). Validates the name and seeds a starter body.
+	 */
+	createPromptBlock: (name: string, label: string) => typedError<null, CmdError>(__TAURI_INVOKE("create_prompt_block", { name, label })),
+	/**  Delete a user-defined shared block, clearing its content across every scope. */
+	deletePromptBlock: (name: string) => typedError<null, CmdError>(__TAURI_INVOKE("delete_prompt_block", { name })),
 	/**
 	 *  The variable names a user-referenced `.env` file defines, for the Environment
 	 *  settings' "N variables loaded" readout. Reads exactly the absolute path the
@@ -531,6 +634,53 @@ export type CheckAnnotation = {
 	rawDetails: string | null,
 };
 
+/**
+ *  A failed check run's job log, sliced to the failing step and split into
+ *  visible lines + collapsible groups. `truncated` is set when the step's log
+ *  exceeded the line cap and only its tail (where the error is) was kept — the UI
+ *  notes that earlier lines live on GitHub.
+ */
+export type CheckLog = {
+	blocks: CheckLogBlock[],
+	truncated: boolean,
+};
+
+/**
+ *  One rendered block of a check run's log, mirroring how GitHub's Actions UI
+ *  shows an expanded step: loose output is always visible; each `##[group]`
+ *  section collapses behind its title. A discriminated union (`kind`) so the
+ *  frontend can render + collapse it directly.
+ */
+export type CheckLogBlock = 
+/**
+ *  A standalone line — loose step output or a top-level error/warning. Always
+ *  visible.
+ */
+{ kind: "line"; text: string; level: CheckLogLevel } | 
+/**
+ *  A `##[group]` section — collapsed behind its `title` by default. Nested
+ *  sub-groups are flattened into `lines` as plain command lines.
+ */
+{ kind: "group"; title: string; lines: CheckLogLine[] };
+
+/**
+ *  How one raw-log line is classified — drives its tint and whether it stays
+ *  expanded by default. Mirrors the `##[error]` / `##[warning]` / `##[group]`
+ *  markers GitHub's Actions runner writes into the log stream.
+ */
+export type CheckLogLevel = "Error" | "Warning" | 
+/**  A `##[group]` / `##[section]` / `##[command]` header — a section title. */
+"Command" | "Normal";
+
+/**
+ *  One line of a check run's raw job log, with its timestamp stripped and its
+ *  runner marker (`##[error]` etc.) parsed off into `level`.
+ */
+export type CheckLogLine = {
+	text: string,
+	level: CheckLogLevel,
+};
+
 /**  Rolled-up CI/status-check state for a PR's latest commit. */
 export type CheckRollup = "Success" | "Failure" | "Pending" | 
 /**  No checks configured (GitHub returned null). */
@@ -565,6 +715,22 @@ export type ClaudeCommand = {
 };
 
 /**
+ *  The effective backing file for a selected slash-command, so the settings editor
+ *  can edit the *real* skill in place. Resolved repo-over-global, matching how
+ *  Claude picks which command actually runs.
+ */
+export type ClaudeCommandFile = {
+	/**  Invocation name (the file stem, without `.md`). */
+	name: string,
+	/**  Which directory the effective file lives in. */
+	source: CommandSource,
+	/**  Absolute path of the backing `.md` file (shown as the edit target). */
+	path: string,
+	/**  The file's full text — YAML frontmatter plus the command body. */
+	content: string,
+};
+
+/**
  *  Claude commands available to the investigate picker, split by where they live
  *  so the repo scope can distinguish its own commands from the global ones.
  */
@@ -576,6 +742,17 @@ export type ClaudeCommands = {
 };
 
 export type CmdError = string;
+
+/**
+ *  Where a slash-command's backing file lives — the user's global dir or a repo's.
+ *  A repo-local file shadows a global one of the same name (Claude's own
+ *  resolution), so this records which file an edit actually targets.
+ */
+export type CommandSource = 
+/**  `~/.claude/commands/<name>.md`. */
+"global" | 
+/**  `<repo>/.claude/commands/<name>.md`. */
+"repo";
 
 /**  Where a PR comment originated, so the UI can label/anchor it. */
 export type CommentKind = 
@@ -738,6 +915,13 @@ export type PrCheck = {
 	steps: CheckStep[],
 	/**  Error/warning annotations — populated only for failed check runs. */
 	annotations: CheckAnnotation[],
+	/**
+	 *  The GitHub Actions job id (parsed from `detailsUrl`), when this is an
+	 *  Actions check run — lets the UI lazily fetch the job's raw log on expand.
+	 *  `None` for status contexts / any check whose URL isn't an Actions job.
+	 *  `f64` because Specta forbids 64-bit ints; job ids are exact in an `f64`.
+	 */
+	jobId: number | null,
 };
 
 /**  One comment in a PR's conversation (issue comment, review, or inline thread). */
@@ -754,6 +938,8 @@ export type PrComment = {
 /**  The detail panel payload for a selected PR: body, conversation, diff, checks. */
 export type PrDetail = {
 	body: string,
+	/**  The labels ("tags") currently assigned to the PR. */
+	labels: PrLabel[],
 	/**
 	 *  Top-level conversation: issue comments and review summaries, chronological.
 	 *  Inline review-thread comments live in `threads`, not here.
@@ -799,6 +985,19 @@ export type PrFile = {
 	sha: string,
 };
 
+/**
+ *  A GitHub label ("tag") — its name plus 6-hex color (no leading `#`, as GitHub
+ *  returns it; the frontend prepends it). Used both for a PR's own labels and for
+ *  the repo's full label palette in the picker.
+ */
+export type PrLabel = {
+	name: string,
+	/**  6-hex color without a leading `#`. */
+	color: string,
+	/**  The label's description, when set (shown in the picker). */
+	description: string | null,
+};
+
 /**  The merge state of a worktree's pull request. */
 export type PrState = "Open" | "Merged" | "Closed";
 
@@ -835,6 +1034,71 @@ export type Priority = "Urgent" | "High" | "Medium" | "Low" |
  *  issues don't masquerade as low-priority; the UI shows no priority pill.
  */
 "None";
+
+/**
+ *  An editable AI prompt for the Settings → Prompts composer: its identity, the
+ *  default source, the user's override for the queried scope (if any), the
+ *  variable catalog, and the live composition links (what it includes / is
+ *  included by).
+ */
+export type PromptInfo = {
+	/**  Stable template name, e.g. `work` (also the `{% include %}` target). */
+	name: string,
+	/**  Human label for the editor list, e.g. "Work / start task". */
+	label: string,
+	description: string,
+	kind: PromptKind,
+	/**
+	 *  False for user-created blocks — they have no embedded default and can be
+	 *  deleted (their content lives entirely in the DB).
+	 */
+	builtin: boolean,
+	/**  The default template source (the reset target). Empty for custom blocks. */
+	default: string,
+	/**
+	 *  The user's stored override for the queried scope, or `None` when the
+	 *  scope inherits (app default or built-in).
+	 */
+	overrideSource: string | null,
+	variables: PromptVar[],
+	/**
+	 *  Names of prompts this one currently `{% include %}`s (scanned from its
+	 *  effective source at the queried scope).
+	 */
+	includes: string[],
+	/**  Names of prompts that currently include this one (reverse of `includes`). */
+	usedBy: string[],
+};
+
+/**  Whether an editable prompt runs a flow or is a reusable partial. */
+export type PromptKind = 
+/**  A prompt that drives a flow: Work, Commit, PR, Fix-CI. */
+"flow" | 
+/**
+ *  A reusable partial embedded by flows via `{% include %}` — the built-in
+ *  `issue` context or a user-created block.
+ */
+"block";
+
+/**
+ *  The result of rendering a draft prompt against representative sample data —
+ *  either the rendered text or the render/compile error, for the live preview.
+ */
+export type PromptPreview = {
+	output: string,
+	/**  The minijinja error when the draft doesn't compile/render, else `None`. */
+	error: string | null,
+};
+
+/**
+ *  One documented variable a prompt template receives, shown in the editor's
+ *  variable palette so users know what they can reference.
+ */
+export type PromptVar = {
+	/**  The reference name, e.g. `ticket_id` (used as `{{ ticket_id }}`). */
+	name: string,
+	description: string,
+};
 
 /**  A connected repository / task-tracker pairing. */
 export type Repo = {
@@ -1077,7 +1341,14 @@ export type SetupEvent = { type: "line"; text: string } | { type: "progress"; te
  *  What an extra Trees main-area tab hosts: a Claude agent session (resumable
  *  across app restarts via its stored session id) or a plain login shell.
  */
-export type TabKind = "claude" | "terminal";
+export type TabKind = "claude" | "terminal" | 
+/**
+ *  A Claude session dedicated to fixing a PR's failing CI: seeded with the
+ *  failed log + guardrails, launched with a commit/push-denying settings file.
+ *  Persisted like a Claude tab (resumable), but its pane always applies the
+ *  no-git guardrail — even on resume after a restart.
+ */
+"fixCi";
 
 /**  A ticket in the dependency graph. `x`/`y` are its canvas position. */
 export type Task = {

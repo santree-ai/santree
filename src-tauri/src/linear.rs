@@ -193,6 +193,9 @@ async fn valid_token(db: &Db, slug: &str) -> Result<String> {
 
 // ── GraphQL fetch ────────────────────────────────────────────────────────
 
+// `triage` is excluded alongside the terminal states: untriaged issues belong to
+// the dedicated Triage tab, not the Issues dependency graph.
+//
 // NOTE: Linear caps query complexity at 10000. This query sits near that ceiling
 // — `assignedIssues(first: 100)` × `inverseRelations(first: N)` × the per-issue
 // fields (incl. `assignee`) is the dominant cost. `first: 12` on the relations
@@ -202,7 +205,7 @@ const ASSIGNED_ISSUES_QUERY: &str = r#"
 query AssignedIssues {
   viewer {
     assignedIssues(
-      filter: { state: { type: { nin: ["completed", "canceled", "duplicate"] } } }
+      filter: { state: { type: { nin: ["triage", "completed", "canceled", "duplicate"] } } }
       orderBy: updatedAt
       first: 100
     ) {
