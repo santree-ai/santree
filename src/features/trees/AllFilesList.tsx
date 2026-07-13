@@ -10,23 +10,31 @@ import { fileIconUrl, folderIconUrl } from "./fileIcons";
 import { IndentGuides } from "./IndentGuides";
 import { useTrees } from "./model";
 
-interface TreeNode {
+export interface TreeNode {
   name: string;
   path: string;
   dir: boolean;
   children: TreeNode[];
 }
 
-function buildTree(paths: string[]): TreeNode[] {
+export function buildTree(paths: string[]): TreeNode[] {
   const root: TreeNode = { name: "", path: "", dir: true, children: [] };
+  // `children` stays an array (the render walks it in order), so keep a lookup
+  // index alongside it: scanning `children` per segment is quadratic in wide
+  // directories, and this re-runs on every worktree-files refetch.
+  const index = new Map<string, TreeNode>();
   for (const p of paths) {
     const parts = p.split("/");
     let node = root;
+    let path = "";
     parts.forEach((part, i) => {
-      const isFile = i === parts.length - 1;
-      let child = node.children.find((c) => c.name === part && c.dir === !isFile);
+      const dir = i < parts.length - 1;
+      path = path ? `${path}/${part}` : part;
+      const key = `${dir ? "d" : "f"}:${path}`;
+      let child = index.get(key);
       if (!child) {
-        child = { name: part, path: parts.slice(0, i + 1).join("/"), dir: !isFile, children: [] };
+        child = { name: part, path, dir, children: [] };
+        index.set(key, child);
         node.children.push(child);
       }
       node = child;

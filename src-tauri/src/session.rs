@@ -75,17 +75,33 @@ pub async fn resolve(
         return Ok(AgentSession::Shell);
     }
 
-    let session_id = Uuid::new_v4().to_string();
+    Ok(AgentSession::Fresh {
+        session_id: mint(db, repo, term_key, cwd).await?,
+    })
+}
+
+/// Store a new session id for the terminal and return the id it will actually
+/// run under. Two launches of the same terminal can race — both see no row and
+/// mint an id — so the insert yields to whoever got there first and we re-read:
+/// the loser adopts the winner's session instead of failing the primary key.
+async fn mint(db: &Db, repo: &str, term_key: &str, cwd: &str) -> Result<String> {
     sqlx::query(
-        "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)",
+        "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)
+         ON CONFLICT (repo, term_key) DO NOTHING",
     )
     .bind(repo)
     .bind(term_key)
     .bind(cwd)
-    .bind(&session_id)
+    .bind(Uuid::new_v4().to_string())
     .execute(db)
     .await?;
-    Ok(AgentSession::Fresh { session_id })
+    let (session_id,): (String,) =
+        sqlx::query_as("SELECT session_id FROM terminal_sessions WHERE repo = ? AND term_key = ?")
+            .bind(repo)
+            .bind(term_key)
+            .fetch_one(db)
+            .await?;
+    Ok(session_id)
 }
 
 /// The ticket ids of every triage investigation that has a *stored session* for
@@ -229,6 +245,30 @@ mod tests {
                 .unwrap(),
             AgentSession::Resume { session_id }
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn mint_adopts_the_existing_session_when_it_loses_the_race() {
+        // Second mint stands in for the loser of two concurrent launches: it must
+        // return the id already stored (not error on the primary key), so both
+        // terminals name the same conversation.
+        let base =
+            std::env::temp_dir().join(format!("santree-session-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+
+        let first = mint(&db, "repo", "tree:AK-1", "/tmp/wt").await.unwrap();
+        let second = mint(&db, "repo", "tree:AK-1", "/tmp/wt").await.unwrap();
+        assert_eq!(first, second);
+
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT session_id FROM terminal_sessions WHERE repo = 'repo'")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(first,)], "exactly one session row");
 
         let _ = std::fs::remove_dir_all(&base);
     }

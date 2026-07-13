@@ -1,4 +1,4 @@
-import { MutationCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRouter, RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -25,6 +25,20 @@ const queryClient = new QueryClient({
     // One retry still absorbs a genuine one-off network blip (Linear/GitHub).
     queries: { staleTime: 5 * 60 * 1000, refetchOnWindowFocus: false, retry: 1 },
   },
+  // Surface every failed read as a red toast, the same way mutations do below.
+  // A *not-connected* backend never errors — it returns an empty result (the
+  // no-mock-data rule), and the view shows its empty state — so a query error is
+  // always a real failure (an expired Linear token, a dead `gh`) and must never
+  // be swallowed into a cheerful "all caught up". Consumers almost all default
+  // their data (`= []`) and never read `isError`, so this is the one place it
+  // surfaces. The toast store collapses identical back-to-back messages, so a
+  // failing poll refreshes one toast instead of stacking.
+  queryCache: new QueryCache({
+    onError: (error, query) => {
+      if (query.meta?.silent) return;
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+  }),
   // Surface every failed mutation (settings save, Linear connect, status change…)
   // as a red toast in one place, so individual call sites don't each repeat it.
   // A mutation can opt out with `meta: { silent: true }` when it owns its own UI.

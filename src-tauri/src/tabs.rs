@@ -86,31 +86,53 @@ pub async fn rename(db: &Db, repo: &str, id: &str, title: &str) -> Result<()> {
 
 /// Remove a tab, and — for a Claude tab — forget its stored session so a future
 /// tab can't accidentally resume a conversation the user explicitly closed.
+///
+/// Both deletes go in one transaction: a tab that outlives its session would
+/// just reopen as a shell, but a *session* that outlives its tab is a
+/// conversation the user thought was closed, waiting to be resumed by whatever
+/// tab next lands on the same coordinates.
 pub async fn remove(db: &Db, repo: &str, id: &str) -> Result<()> {
+    let mut tx = db.begin().await?;
     let row: Option<(String,)> =
         sqlx::query_as("DELETE FROM worktree_tabs WHERE repo = ? AND id = ? RETURNING worktree_id")
             .bind(repo)
             .bind(id)
-            .fetch_optional(db)
+            .fetch_optional(&mut *tx)
             .await?;
     if let Some((worktree_id,)) = row {
-        crate::session::forget(db, repo, &term_key(&worktree_id, id)).await?;
+        sqlx::query("DELETE FROM terminal_sessions WHERE repo = ? AND term_key = ?")
+            .bind(repo)
+            .bind(term_key(&worktree_id, id))
+            .execute(&mut *tx)
+            .await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
 /// Drop every tab of a worktree (called when the worktree itself is removed),
-/// including each Claude tab's stored session.
+/// including each Claude tab's stored session — atomically, for the reason in
+/// [`remove`].
 pub async fn remove_for_worktree(db: &Db, repo: &str, worktree_id: &str) -> Result<()> {
+    let mut tx = db.begin().await?;
     let ids: Vec<(String,)> =
         sqlx::query_as("DELETE FROM worktree_tabs WHERE repo = ? AND worktree_id = ? RETURNING id")
             .bind(repo)
             .bind(worktree_id)
-            .fetch_all(db)
+            .fetch_all(&mut *tx)
             .await?;
-    for (id,) in ids {
-        crate::session::forget(db, repo, &term_key(worktree_id, &id)).await?;
+    if !ids.is_empty() {
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "DELETE FROM terminal_sessions WHERE repo = ? AND term_key IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&sql).bind(repo);
+        for (id,) in &ids {
+            q = q.bind(term_key(worktree_id, id));
+        }
+        q.execute(&mut *tx).await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 

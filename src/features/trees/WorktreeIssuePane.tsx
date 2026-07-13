@@ -38,10 +38,14 @@ export function WorktreeIssuePane({ repo, worktree }: { repo: string; worktree: 
       <div className="flex-none border-b border-hairline px-5 pt-4 pb-3.5">
         <div className="mb-1.5 flex items-center gap-2">
           <span className="font-mono text-[11px] text-muted-2">{worktree.id}</span>
-          <span className="flex items-center gap-1.5 text-[11px] text-muted-2">
-            <Dot color={statusColor[worktree.status]} size={7} />
-            {statusLabel[worktree.status]}
-          </span>
+          {/* No status when the ticket isn't in the current tasks fetch — the
+              backend doesn't invent one, and neither does the UI. */}
+          {worktree.status && (
+            <span className="flex items-center gap-1.5 text-[11px] text-muted-2">
+              <Dot color={statusColor[worktree.status]} size={7} />
+              {statusLabel[worktree.status]}
+            </span>
+          )}
           {ready && (
             <Button
               size="sm"

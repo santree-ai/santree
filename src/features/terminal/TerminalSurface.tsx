@@ -43,8 +43,8 @@ function itemOf(tab: TerminalTab): string {
 
 export function TerminalSurface() {
   const { activeRepo } = useApp();
-  const { data: repos = [] } = useRepos();
-  const repoPath = repos.find((r) => r.name === activeRepo)?.path ?? undefined;
+  const { data: repos } = useRepos();
+  const repoPath = repos?.find((r) => r.name === activeRepo)?.path ?? undefined;
   const { tabs, activeKey, setActiveKey, open, close } = useTerminals();
   const { data: worktrees = [] } = useWorktrees(activeRepo);
   const { data: baseWorktree = null } = useBaseWorktree(activeRepo);
@@ -53,12 +53,17 @@ export function TerminalSurface() {
   const [cmd, setCmd] = useState("");
   const started = useRef(false);
 
-  // Open one shell the first time the tab is visited with no sessions yet.
+  // Open one shell the first time the tab is visited with no sessions yet — but
+  // only once the cwd is actually known. Spawning is not idempotent, so the latch
+  // is one-way: starting while `repos` is still loading would open (and keep) the
+  // shell in the wrong directory forever. With no repos at all there is no cwd to
+  // wait for, so a plain shell is correct.
   useEffect(() => {
     if (started.current || tabs.length > 0) return;
+    if (!repos || (repos.length > 0 && !repoPath)) return;
     started.current = true;
     open({ title: "shell", cwd: repoPath });
-  }, [open, repoPath, tabs.length]);
+  }, [open, repos, repoPath, tabs.length]);
 
   const extraRows = useMemo(() => new Map(extraRowList.map((r) => [r.id, r])), [extraRowList]);
   const worktreeById = useMemo(() => new Map(worktrees.map((w) => [w.id, w])), [worktrees]);
@@ -156,6 +161,7 @@ export function TerminalSurface() {
               type="button"
               onClick={() => open({ title: "shell", cwd: repoPath })}
               title="New terminal"
+              aria-label="New terminal"
               className="ml-auto flex h-6 w-6 cursor-pointer items-center justify-center rounded-md border border-line-3 text-muted-2 hover:border-line-strong hover:text-fg-2"
             >
               +
@@ -277,6 +283,7 @@ export function TerminalSurface() {
                     type="button"
                     onClick={() => close(t.key)}
                     title="Close"
+                    aria-label={`Close ${meta.label}`}
                     className="flex h-4 w-4 cursor-pointer items-center justify-center rounded text-[13px] leading-none text-muted-3 hover:bg-hover hover:text-fg-2"
                   >
                     ×

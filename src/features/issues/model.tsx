@@ -224,6 +224,9 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     [focusProject],
   );
 
+  // Built once here (not per lookup) so consumers don't each rebuild the map.
+  const byId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
+
   // Focus a task (selects it for the right panel). Clicking a task in a different
   // project than the focused band clears the band focus — dimming one project
   // while viewing another's task makes no sense. The single entry point for every
@@ -233,11 +236,11 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       setFocusId(id);
       setFocusProject((p) => {
         if (p === null) return p;
-        const t = tasks.find((x) => x.id === id);
+        const t = byId.get(id);
         return t && t.project !== p ? null : p;
       });
     },
-    [tasks],
+    [byId],
   );
 
   const revealInGraph = useCallback(
@@ -245,11 +248,11 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       focusTask(id);
       // If the target is a grayed context node hidden by the filter, reveal the
       // grayed layer so the pan lands on something visible.
-      const t = tasks.find((x) => x.id === id);
+      const t = byId.get(id);
       if (t && !t.actionable) setActionableOnly(false);
       setReveal((r) => ({ id, nonce: (r?.nonce ?? 0) + 1 }));
     },
-    [focusTask, tasks],
+    [focusTask, byId],
   );
 
   // Launch agent/model: default from settings, with user overrides.
@@ -273,8 +276,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
 
   const launchAgent = agentOverride ?? configuredAgent;
   const launchModel = modelOverride ?? defaultModel;
-
-  const byId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
   // Resolve each project's color/icon once (first task wins). Live Linear values
   // take precedence; otherwise fall back to the per-name color map.
@@ -347,14 +348,14 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
 
   const toggle = useCallback(
     (id: string) => {
-      const task = tasks.find((t) => t.id === id);
+      const task = byId.get(id);
       if (!task) return;
       focusTask(id);
       if (isEligible(task)) {
         setSelected((s) => ({ ...s, [id]: !s[id] }));
       }
     },
-    [tasks, isEligible, focusTask],
+    [byId, isEligible, focusTask],
   );
 
   // Launch: jump to the Trees tab immediately and create a real worktree per

@@ -18,7 +18,6 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::db::Db;
-use crate::settings;
 
 /// Settings key holding the JSON array of `{name, value}` variables for a scope.
 pub const ENV_VARS_KEY: &str = "env_vars";
@@ -44,6 +43,25 @@ pub async fn resolve_env(db: &Db, cwd: Option<&str>) -> Vec<(String, String)> {
         None => None,
     };
 
+    // All four settings blobs (both keys × both scopes) in one round-trip — this runs
+    // on every terminal spawn. When there's no repo the scope binding collapses onto
+    // `app`, which just yields the app rows.
+    let repo_scope = repo.as_deref().unwrap_or("app");
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT scope, key, value FROM settings WHERE key IN (?, ?) AND scope IN ('app', ?)",
+    )
+    .bind(ENV_VARS_KEY)
+    .bind(ENV_FILES_KEY)
+    .bind(repo_scope)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    let blob = |scope: &str, key: &str| {
+        rows.iter()
+            .find(|(s, k, _)| s == scope && k == key)
+            .map(|(_, _, v)| v.as_str())
+    };
+
     let mut merged: HashMap<String, String> = HashMap::new();
     let mut apply = |pairs: Vec<(String, String)>| {
         for (k, v) in pairs {
@@ -51,13 +69,13 @@ pub async fn resolve_env(db: &Db, cwd: Option<&str>) -> Vec<(String, String)> {
         }
     };
 
-    apply(files_env(db, "app").await);
-    if let Some(scope) = &repo {
-        apply(files_env(db, scope).await);
+    apply(files_env(blob("app", ENV_FILES_KEY)));
+    if repo.is_some() {
+        apply(files_env(blob(repo_scope, ENV_FILES_KEY)));
     }
-    apply(vars(db, "app").await);
-    if let Some(scope) = &repo {
-        apply(vars(db, scope).await);
+    apply(vars(blob("app", ENV_VARS_KEY)));
+    if repo.is_some() {
+        apply(vars(blob(repo_scope, ENV_VARS_KEY)));
     }
 
     // Sorted for a deterministic order (env order is otherwise irrelevant).
@@ -90,26 +108,26 @@ async fn repo_scope_for_cwd(db: &Db, cwd: &str) -> Option<String> {
     best.map(|(_, name)| format!("repo:{name}"))
 }
 
-/// The explicit `{name, value}` variables stored for a scope (empty when unset or
-/// malformed — a corrupt blob must not break spawning).
-async fn vars(db: &Db, scope: &str) -> Vec<(String, String)> {
-    let Ok(Some(json)) = settings::get(db, scope, ENV_VARS_KEY).await else {
+/// The explicit `{name, value}` variables in a scope's [`ENV_VARS_KEY`] blob (empty
+/// when unset or malformed — a corrupt blob must not break spawning).
+fn vars(json: Option<&str>) -> Vec<(String, String)> {
+    let Some(json) = json else {
         return Vec::new();
     };
-    serde_json::from_str::<Vec<EnvVar>>(&json)
+    serde_json::from_str::<Vec<EnvVar>>(json)
         .unwrap_or_default()
         .into_iter()
         .map(|e| (e.name, e.value))
         .collect()
 }
 
-/// Every variable loaded from the `.env` files referenced by a scope, in list
-/// order (later files override earlier ones on a name clash).
-async fn files_env(db: &Db, scope: &str) -> Vec<(String, String)> {
-    let Ok(Some(json)) = settings::get(db, scope, ENV_FILES_KEY).await else {
+/// Every variable loaded from the `.env` files in a scope's [`ENV_FILES_KEY`] blob,
+/// in list order (later files override earlier ones on a name clash).
+fn files_env(json: Option<&str>) -> Vec<(String, String)> {
+    let Some(json) = json else {
         return Vec::new();
     };
-    let paths: Vec<String> = serde_json::from_str(&json).unwrap_or_default();
+    let paths: Vec<String> = serde_json::from_str(json).unwrap_or_default();
     paths.iter().flat_map(|p| parse_env_file(p)).collect()
 }
 
@@ -160,5 +178,63 @@ mod tests {
     #[test]
     fn missing_file_yields_nothing() {
         assert!(parse_env_file("/no/such/santree-env.env").is_empty());
+    }
+
+    /// The precedence the doc-comment promises, end to end:
+    /// app files → repo files → app vars → repo vars.
+    #[tokio::test]
+    async fn resolve_env_layers_app_under_repo_and_files_under_vars() {
+        let dir = std::env::temp_dir().join(format!("santree-env-{}", uuid::Uuid::new_v4()));
+        let repo_dir = dir.join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let repo_path = repo_dir.to_str().unwrap();
+        let db = crate::db::init(dir.join("test.db")).await.unwrap();
+
+        sqlx::query("INSERT INTO repos (name, path) VALUES ('acme', ?)")
+            .bind(repo_path)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let env_file = dir.join("app.env");
+        std::fs::write(&env_file, "FROM_FILE=file\nBOTH=file\n").unwrap();
+        let files_json = serde_json::to_string(&[env_file.to_str().unwrap()]).unwrap();
+        crate::settings::set(&db, "app", ENV_FILES_KEY, Some(files_json))
+            .await
+            .unwrap();
+        crate::settings::set(
+            &db,
+            "app",
+            ENV_VARS_KEY,
+            Some(r#"[{"name":"BOTH","value":"app"},{"name":"SCOPED","value":"app"}]"#.into()),
+        )
+        .await
+        .unwrap();
+        crate::settings::set(
+            &db,
+            "repo:acme",
+            ENV_VARS_KEY,
+            Some(r#"[{"name":"SCOPED","value":"repo"}]"#.into()),
+        )
+        .await
+        .unwrap();
+
+        // A cwd inside the repo picks up the repo scope on top of the app scope.
+        let env: HashMap<_, _> = resolve_env(&db, Some(repo_path))
+            .await
+            .into_iter()
+            .collect();
+        assert_eq!(env.get("FROM_FILE").unwrap(), "file");
+        assert_eq!(env.get("BOTH").unwrap(), "app", "vars override files");
+        assert_eq!(env.get("SCOPED").unwrap(), "repo", "repo overrides app");
+
+        // Outside any registered repo, only the app scope applies.
+        let env: HashMap<_, _> = resolve_env(&db, Some("/elsewhere"))
+            .await
+            .into_iter()
+            .collect();
+        assert_eq!(env.get("SCOPED").unwrap(), "app");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

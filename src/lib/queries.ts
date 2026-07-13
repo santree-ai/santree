@@ -73,10 +73,24 @@ function useUnwrappedQuery<T>(
     // Keep the last successful data visible while the next fetch is in flight —
     // e.g. `keepPreviousData` so a re-keyed read doesn't flash empty.
     placeholderData?: UseQueryOptions<T>["placeholderData"];
+    // `{ silent: true }` opts out of the global query-error→toast handler (see
+    // `main.tsx`), for a read that renders its own failure UI.
+    meta?: UseQueryOptions<T>["meta"];
   } = {},
 ) {
   return useQuery({ queryKey, queryFn: () => unwrap(command()), ...options });
 }
+
+/**
+ * Vars whose settle-time invalidation was deferred because a sibling mutation
+ * with the same `mutationKey` was still in flight. `invalidate` is a function
+ * *of the vars*, so the last settler only knows its own keys — it has to replay
+ * the skipped ones too (discard `a.ts`, then stage `b.ts`, and `a.ts`'s diff
+ * cache would otherwise never be invalidated). Keyed by the serialized
+ * mutationKey, not held in a ref, because the same key can be mounted by more
+ * than one hook instance and any of them may be the one that settles last.
+ */
+const deferredSettles = new Map<string, unknown[]>();
 
 /**
  * Wire an optimistic mutation correctly-by-default: cancel in-flight reads,
@@ -120,13 +134,29 @@ export function useOptimisticMutation<TVars, TData>(opts: {
     },
     onError: (_err, _vars, ctx) => ctx?.rollback?.(),
     onSettled: (_data, _err, vars) => {
+      const siblingKey = opts.mutationKey ? JSON.stringify(opts.mutationKey) : null;
       // A sibling mutation sharing this key is still running — it will
       // reconcile when *it* settles, last-write-wins. `isMutating` still
       // counts this call itself (its status flips to settled only after this
       // callback returns), so `> 1` means "someone else is still in flight".
-      if (opts.mutationKey && qc.isMutating({ mutationKey: opts.mutationKey }) > 1) return;
-      for (const queryKey of opts.invalidate?.(vars) ?? []) {
-        qc.invalidateQueries({ queryKey });
+      // Park our vars for that final settler to replay.
+      if (siblingKey && qc.isMutating({ mutationKey: opts.mutationKey }) > 1) {
+        deferredSettles.set(siblingKey, [...(deferredSettles.get(siblingKey) ?? []), vars]);
+        return;
+      }
+      const deferred = (siblingKey ? deferredSettles.get(siblingKey) : undefined) as
+        | TVars[]
+        | undefined;
+      if (siblingKey) deferredSettles.delete(siblingKey);
+
+      const seen = new Set<string>();
+      for (const v of [...(deferred ?? []), vars]) {
+        for (const queryKey of opts.invalidate?.(v) ?? []) {
+          const id = JSON.stringify(queryKey);
+          if (seen.has(id)) continue;
+          seen.add(id);
+          qc.invalidateQueries({ queryKey });
+        }
       }
     },
   });
@@ -169,6 +199,8 @@ const SETTING_STALE_TIME = Number.POSITIVE_INFINITY;
 const TASKS_STALE_TIME = 3 * 60_000;
 
 export const queryKeys = {
+  appVersion: ["app-version"] as const,
+  envFileVars: (path: string) => ["env-file-vars", path] as const,
   repos: ["repos"] as const,
   agents: ["agents"] as const,
   claudeModels: ["claude-models"] as const,
@@ -189,11 +221,19 @@ export const queryKeys = {
   worktreeFiles: (repo: string, id: string) => ["worktree-files", repo, id] as const,
   worktreeFileDiff: (repo: string, id: string, path: string) =>
     ["worktree-file-diff", repo, id, path] as const,
+  /** Prefix for every cached per-file diff of one worktree. */
+  worktreeFileDiffPrefix: (repo: string, id: string) => ["worktree-file-diff", repo, id] as const,
   worktreeFileSource: (repo: string, id: string, path: string) =>
     ["worktree-file-source", repo, id, path] as const,
+  /** Prefix for every cached full-file source of one worktree. */
+  worktreeFileSourcePrefix: (repo: string, id: string) =>
+    ["worktree-file-source", repo, id] as const,
   workPrompt: (repo: string, id: string) => ["work-prompt", repo, id] as const,
   agentSession: (repo: string, termKey: string, allowFresh: boolean) =>
     ["agent-session", repo, termKey, allowFresh] as const,
+  /** Both `allowFresh` variants of one terminal's session resolution — what a
+   *  launch/exit drops, since either may hold a decision that's now stale. */
+  agentSessionPrefix: (repo: string, termKey: string) => ["agent-session", repo, termKey] as const,
   startedInvestigations: (repo: string) => ["started-investigations", repo] as const,
   worktreeTabs: (repo: string) => ["worktree-tabs", repo] as const,
   commitDraft: (repo: string, id: string) => ["commit-draft", repo, id] as const,
@@ -212,6 +252,12 @@ export const queryKeys = {
   openers: ["openers"] as const,
   initScript: (repo: string) => ["init-script", repo] as const,
   taskNote: (repo: string, id: string) => ["task-note", repo, id] as const,
+  /** Prefixes for every repo's triage reads — invalidate these (not the
+   *  per-repo keys) when a change affects all repos at once (a fresh Linear
+   *  connection, a display-name switch). */
+  triageTicketsPrefix: ["triage-tickets"] as const,
+  triageDetailPrefix: ["triage-detail"] as const,
+  triageSchedulePrefix: ["triage-schedule"] as const,
   triageTickets: (repo: string) => ["triage-tickets", repo] as const,
   triageDetail: (repo: string, id: string) => ["triage-detail", repo, id] as const,
   triageSchedule: (repo: string) => ["triage-schedule", repo] as const,
@@ -221,9 +267,22 @@ export const queryKeys = {
     ["claude-command-file", repo, name] as const,
   setting: (scope: string, key: string) => ["setting", scope, key] as const,
   resolvedSetting: (repo: string, key: string) => ["resolved-setting", repo, key] as const,
+  /** Prefix for every repo's resolved read of any key — a repo-scoped override
+   *  changes what one resolves to, so a write reconciles through this. */
+  resolvedSettingPrefix: ["resolved-setting"] as const,
   /** Editable AI prompts (with per-scope overrides) for the Prompts editor. */
   prompts: (scope: string) => ["prompts", scope] as const,
-  promptPreview: (name: string, content: string) => ["prompt-preview", name, content] as const,
+  /** Prefix for every scope's prompt list — a shared block is visible in all. */
+  promptsPrefix: ["prompts"] as const,
+  /** Preview renders are keyed by *hashes* of the draft + sample issue, never the
+   *  text itself — see {@link promptPreviewKey}. */
+  promptPreview: (
+    name: string,
+    draftHash: string,
+    repo: string,
+    issueId: string,
+    issueHash: string,
+  ) => ["prompt-preview", name, draftHash, repo, issueId, issueHash] as const,
   /** Prefix for every repo's Linear connection status — invalidate this (not
    *  `linearStatus(repo)`) when a change (e.g. connect/disconnect) should
    *  refetch all repos' status at once. */
@@ -377,7 +436,7 @@ export const useEnvFiles = (scope: string) => {
 /** The variable names a referenced `.env` file defines (for the "N loaded" count). */
 export const useEnvFileVars = (path: string) =>
   useQuery({
-    queryKey: ["env-file-vars", path],
+    queryKey: queryKeys.envFileVars(path),
     queryFn: () => commands.envFileVars(path),
     enabled: !!path,
     staleTime: SETTING_STALE_TIME,
@@ -386,7 +445,7 @@ export const useEnvFileVars = (path: string) =>
 /** The running app's real version (single-sourced from `tauri.conf.json`), for
  * the sidebar footer and help menu. Fixed for the process lifetime. */
 export const useAppVersion = () =>
-  useQuery({ queryKey: ["app-version"], queryFn: getVersion, staleTime: Infinity });
+  useQuery({ queryKey: queryKeys.appVersion, queryFn: getVersion, staleTime: Infinity });
 
 /** Read an app-scoped boolean setting (defaults to false until loaded). */
 export const useBoolSetting = (scope: string, key: string) => {
@@ -469,25 +528,18 @@ export const useClaudeHookSettingsNoGit = () =>
     staleTime: Infinity,
   });
 
-/** Current state of every santree-launched Claude session (active/waiting/idle/
- *  exited), recorded live by the injected hooks. Kept fresh in realtime by
- *  `useSessionStateWatcher`.
- *
- *  The realtime signal covers every state change a hook *observes*, but the hooks
- *  can't reliably *clear* a state: a manually-answered prompt (accept/reject, or a
- *  typed reply) fires nothing, and a turn can end with no `Stop`. The backend
- *  reconciles the live state against the session transcript (the ground truth) on
- *  every read; this short poll guarantees a read actually happens so those
- *  transitions surface within ~10s even when no hook fires. We poll while any
- *  session is unsettled — a pending prompt (to catch resolution) or `running` (to
- *  catch it going idle without a `Stop`). Zero polling once everything is idle/
- *  exited. */
-/** States that can still change without a hook firing, so a read (and thus the
- *  backend's transcript reconciliation) must keep happening: a pending prompt (to
- *  catch resolution) and any working state (to catch it going idle without a
- *  `Stop`). Settled states — idle / exited — don't need polling. */
+/** States that can still change without a hook firing, so a read — and thus the
+ *  backend's reconciliation of the live state against the session transcript (the
+ *  ground truth) — must keep happening: a pending prompt (a manual accept/reject
+ *  or a typed reply fires nothing, so only a read catches its resolution) and any
+ *  working state (a turn can end with no `Stop`). Settled states — idle / exited
+ *  — don't need polling, so an all-quiet app polls not at all. */
 const UNSETTLED_STATES = new Set(["permission", "waiting", "active", "delegating"]);
 
+/** Current state of every santree-launched Claude session (active/waiting/idle/
+ *  exited), recorded live by the injected hooks and kept fresh in realtime by
+ *  `useSessionStateWatcher`; the short poll below covers the transitions no hook
+ *  observes (see {@link UNSETTLED_STATES}). */
 export const useSessionStates = () =>
   useUnwrappedQuery(queryKeys.sessionStates, () => commands.sessionStates(), {
     refetchInterval: (query) =>
@@ -631,8 +683,8 @@ export const useLinearConnect = () => {
       qc.invalidateQueries({ queryKey: queryKeys.tasksPrefix });
       // Triage is Linear-derived too; refresh it (all repos) so a freshly
       // connected workspace's queue/schedule appears without the 3-min wait.
-      qc.invalidateQueries({ queryKey: ["triage-tickets"] });
-      qc.invalidateQueries({ queryKey: ["triage-schedule"] });
+      qc.invalidateQueries({ queryKey: queryKeys.triageTicketsPrefix });
+      qc.invalidateQueries({ queryKey: queryKeys.triageSchedulePrefix });
       // `connect` returns the full (name-sorted) org list, so we can't single out
       // the one just added — a generic confirmation avoids naming the wrong org.
       toast.success("Linear connected.", {
@@ -758,13 +810,11 @@ export const useWorktreeWatcher = (repo: string) => {
     const unlisten = events.worktreeChanged.listen(({ payload: { issueId } }) => {
       qc.invalidateQueries({ queryKey: queryKeys.worktreeStatus(repo, issueId) });
       qc.invalidateQueries({ queryKey: queryKeys.worktreeFiles(repo, issueId) });
-      // Prefix key — every cached per-file diff for this worktree.
-      qc.invalidateQueries({ queryKey: ["worktree-file-diff", repo, issueId] });
-      // Prefix key — every cached full-file source for this worktree. DiffPane
-      // pairs this with the diff above for the diff viewer's context expansion;
-      // without it, an agent editing a file mid-view leaves expanded context
-      // lines stale for up to `WORKTREE_STALE_TIME`.
-      qc.invalidateQueries({ queryKey: ["worktree-file-source", repo, issueId] });
+      qc.invalidateQueries({ queryKey: queryKeys.worktreeFileDiffPrefix(repo, issueId) });
+      // DiffPane pairs the full-file source with the diff above for the diff
+      // viewer's context expansion; without it, an agent editing a file mid-view
+      // leaves expanded context lines stale for up to `WORKTREE_STALE_TIME`.
+      qc.invalidateQueries({ queryKey: queryKeys.worktreeFileSourcePrefix(repo, issueId) });
       // The list carries each worktree's add/del line counts, shown on the
       // sidebar card and the Issues-panel worktree card.
       qc.invalidateQueries({ queryKey: queryKeys.worktrees(repo) });
@@ -1098,6 +1148,24 @@ export const useRemoveWorktree = (repo: string) =>
     ],
   });
 
+/** Stop a running `.santree/init.sh` (the Setup tab's Stop button). The backend kills
+ *  the script's PTY, so the run ends as a failed setup through the normal path — the
+ *  streaming Channel in `AgentRuns` closes the tab itself, with nothing to invalidate. */
+export const useCancelSetup = (repo: string) =>
+  useActionMutation({
+    mutationFn: (issueId: string) => unwrap(commands.cancelWorktreeSetup(repo, issueId)),
+    invalidate: () => [],
+  });
+
+/** A bulk delete where only *some* worktrees failed. Carries the survivors so the
+ *  caller can un-hide exactly those and leave the genuinely-deleted ones hidden. */
+export class BulkDeleteError extends Error {
+  constructor(readonly failed: string[]) {
+    super(`Couldn't delete ${failed.join(", ")}.`);
+    this.name = "BulkDeleteError";
+  }
+}
+
 /** Remove several worktrees at once (e.g. all merged ones) — background, in
  *  parallel. Hiding/reappear is driven by the model's `pendingDeletes`. Throws
  *  (→ red toast) naming any that failed; the settling refetch reconciles. */
@@ -1109,7 +1177,7 @@ export const useRemoveWorktrees = (repo: string) =>
         ids.map((id) => unwrap(commands.removeWorktree(repo, id))),
       );
       const failed = ids.filter((_, i) => results[i].status === "rejected");
-      if (failed.length) throw new Error(`Couldn't delete ${failed.join(", ")}.`);
+      if (failed.length) throw new BulkDeleteError(failed);
     },
     invalidate: () => [
       queryKeys.worktrees(repo),
@@ -1299,8 +1367,7 @@ export const useStageAction = (repo: string, id: string) =>
     },
     invalidate: (a) => {
       const keys: QueryKey[] = [queryKeys.worktreeStatus(repo, id)];
-      // Prefix key — matches every cached per-file diff for this worktree.
-      const diffPrefix = ["worktree-file-diff", repo, id] as const;
+      const diffPrefix = queryKeys.worktreeFileDiffPrefix(repo, id);
       switch (a.action) {
         case "stage":
         case "unstage":
@@ -1419,7 +1486,7 @@ export const useTriageDetail = (repo: string, id: string | null) =>
     queryKeys.triageDetail(repo, id ?? ""),
     () => commands.triageDetail(repo, id ?? ""),
     {
-      enabled: !!id,
+      enabled: !!repo && !!id,
       staleTime: TRIAGE_STALE_TIME,
       gcTime: TRIAGE_GC_TIME,
     },
@@ -1463,7 +1530,9 @@ export const useRefreshTriage = (repo: string, id: string | null) => {
 /**
  * Move a triage issue to a different workflow state. On success the issue may
  * leave the triage queue (if moved out of the triage state), so we refetch the
- * queue and the issue detail.
+ * queue and the issue detail — and the Issues task graph, which the promoted
+ * issue has just *entered* (nothing else would refetch it before the stale
+ * window lapses, so it would simply be missing there).
  */
 export const useTriageSetState = (repo: string) =>
   useOptimisticMutation({
@@ -1505,6 +1574,7 @@ export const useTriageSetState = (repo: string) =>
     invalidate: (args) => [
       queryKeys.triageTickets(repo),
       queryKeys.triageDetail(repo, args.ticketId),
+      queryKeys.tasks(repo),
     ],
   });
 
@@ -1578,6 +1648,9 @@ export interface TriageQueue {
   teamWaiting: number;
   goodCitizen: boolean;
   showSnoozed: boolean;
+  /** The queue hasn't resolved yet — an empty `visible` means nothing at all. A
+   *  view must render a skeleton (not "all caught up") while this holds. */
+  loading: boolean;
 }
 
 /**
@@ -1606,14 +1679,17 @@ export function filterTriageQueue(
  * citizen" widens to the whole team inbox so you can help on anyone's tickets.
  */
 export const useTriageQueue = (repo: string): TriageQueue => {
-  const { data: tickets = [] } = useTriageTickets(repo);
+  const { data, isLoading } = useTriageTickets(repo);
   const goodCitizen = useBoolSetting("app", TRIAGE_GOOD_CITIZEN_KEY).value;
   const showSnoozed = useBoolSetting("app", TRIAGE_SNOOZED_KEY).value;
 
   return useMemo(() => {
+    const tickets = data ?? [];
     const { visible, teamWaiting } = filterTriageQueue(tickets, { goodCitizen, showSnoozed });
-    return { visible, teamWaiting, goodCitizen, showSnoozed };
-  }, [tickets, goodCitizen, showSnoozed]);
+    // A disconnected backend returns `Ok([])`, never an error or a pending
+    // read — so "still loading" is exactly "the first fetch hasn't landed".
+    return { visible, teamWaiting, goodCitizen, showSnoozed, loading: isLoading };
+  }, [data, goodCitizen, showSnoozed, isLoading]);
 };
 
 /** The persisted user settings (seeded from defaults on first run). */
@@ -1714,6 +1790,11 @@ interface SetSettingVars {
  * the same key, so settings dropdowns reflect the new value before the write
  * lands. Returns the rollback. Shared by every setting writer (see
  * `useSetSetting` / `useDisplayNames`) so there's one optimistic write path.
+ *
+ * The resolved value is `repo override ?? app default`, so every write's effect
+ * on it is knowable client-side: an app-scoped write is the fallback for every
+ * repo that has no override; a repo-scoped write always wins for that one repo;
+ * clearing a repo override falls back to the cached app value.
  */
 export function patchSettingCache(
   qc: QueryClient,
@@ -1723,14 +1804,31 @@ export function patchSettingCache(
   const prevSetting = qc.getQueryData(settingKey);
   qc.setQueryData(settingKey, value);
 
-  // App-scoped writes are the default that resolved-setting reads fall back to;
-  // patch any cached resolved entry for this key (across repos) to match.
+  // Snapshot every resolved entry up front (not just the ones we patch) so the
+  // rollback restores whatever we touched, whichever branch we took.
   const prevResolved: [QueryKey, unknown][] = qc.getQueriesData({
-    queryKey: ["resolved-setting"],
+    queryKey: queryKeys.resolvedSettingPrefix,
   });
+
   if (scope === "app") {
     for (const [k] of prevResolved) {
-      if (k[2] === key) qc.setQueryData(k, value);
+      // A repo with its own override still resolves to that override, so an
+      // app-scoped write mustn't overwrite it.
+      const repo = k[1] as string;
+      const override = qc.getQueryData<string | null>(queryKeys.setting(`repo:${repo}`, key));
+      if (k[2] === key && override == null) qc.setQueryData(k, value);
+    }
+  } else if (scope.startsWith("repo:")) {
+    const repo = scope.slice("repo:".length);
+    const resolvedKey = queryKeys.resolvedSetting(repo, key);
+    // Clearing the override (`null`) falls back to the app default — patchable
+    // only when that default is itself cached; otherwise leave it to the settle.
+    const appValue = qc.getQueryData<string | null>(queryKeys.setting("app", key));
+    const known = value != null || appValue !== undefined;
+    // Only touch an entry that's already in `prevResolved`, so the rollback can
+    // restore it (a key we minted here would survive the rollback).
+    if (known && qc.getQueryData(resolvedKey) !== undefined) {
+      qc.setQueryData(resolvedKey, value ?? appValue ?? null);
     }
   }
 
@@ -1750,7 +1848,7 @@ export const useSetSetting = () =>
     // override changes its resolved value) refetch via the prefix. Invalidating
     // the whole `["setting"]` prefix would refetch every cached setting on any
     // single write.
-    invalidate: (a) => [queryKeys.setting(a.scope, a.key), ["resolved-setting"]],
+    invalidate: (a) => [queryKeys.setting(a.scope, a.key), queryKeys.resolvedSettingPrefix],
   });
 
 // ── Editable AI prompts ──────────────────────────────────────────────────────
@@ -1790,12 +1888,53 @@ export const useSetPrompt = (scope: string) =>
     invalidate: () => [queryKeys.prompts(scope)],
   });
 
+/** Collapses a multi-KB string to a short token for a query key: FNV-1a (32-bit)
+ *  tagged with the length, so two drafts that collide must also be the same size. */
+function hashText(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `${text.length.toString(36)}.${(h >>> 0).toString(36)}`;
+}
+
+/**
+ * The cache key for one preview render. Every input the render depends on is in
+ * it — including the sample issue, so a refetched `detail` (new comment, edited
+ * body) re-renders instead of serving a stale preview forever.
+ *
+ * The draft and the issue go in *hashed*: keying on the raw text would retain a
+ * copy of every keystroke's multi-KB template in the query cache (twice — key and
+ * value), which with a never-expiring entry is an unbounded leak while typing.
+ * Exported for the key-derivation test.
+ */
+export function promptPreviewKey(
+  name: string,
+  content: string,
+  repo: string | undefined,
+  issueId: string | undefined,
+  detail: TriageDetail | undefined,
+): QueryKey {
+  return queryKeys.promptPreview(
+    name,
+    hashText(content),
+    repo ?? "",
+    issueId ?? "",
+    detail ? hashText(JSON.stringify(detail)) : "",
+  );
+}
+
 /** Render a draft prompt for the live preview. Rendering is pure on the backend —
  *  the real issue (`detail`, already in the editor's cache) is passed in, not
- *  fetched — so this re-renders instantly on each keystroke. Keyed on content +
- *  issue id; `keepPreviousData` holds the last render visible so the pane never
- *  flashes empty mid-type. Disabled while the draft is empty, or while a chosen
- *  issue's `detail` is still loading (so we never render it as the sample). */
+ *  fetched — so this re-renders instantly on each keystroke. `keepPreviousData`
+ *  holds the last render visible so the pane never flashes empty mid-type.
+ *  Disabled while the draft is empty, or while a chosen issue's `detail` is still
+ *  loading (so we never render it as the sample).
+ *
+ *  A render is pure in its key (see {@link promptPreviewKey}), so an entry never
+ *  goes stale — but the keystroke that minted it is gone the moment the next one
+ *  lands, so the entry is collected shortly after nothing observes it. */
 export const usePreviewPrompt = (
   name: string,
   content: string,
@@ -1804,11 +1943,12 @@ export const usePreviewPrompt = (
   detail: TriageDetail | undefined,
 ) =>
   useUnwrappedQuery(
-    [...queryKeys.promptPreview(name, content), repo ?? "", issueId ?? ""],
+    promptPreviewKey(name, content, repo, issueId, detail),
     () => commands.previewPrompt(name, content, repo ?? null, detail ?? null),
     {
       enabled: content.trim().length > 0 && (!issueId || detail !== undefined),
       staleTime: SETTING_STALE_TIME,
+      gcTime: 30_000,
       placeholderData: keepPreviousData,
     },
   );
@@ -1818,7 +1958,7 @@ export const useCreatePromptBlock = () =>
   useActionMutation({
     mutationFn: (v: { name: string; label: string }) =>
       unwrap(commands.createPromptBlock(v.name, v.label)),
-    invalidate: () => [["prompts"]],
+    invalidate: () => [queryKeys.promptsPrefix],
     success: (_d, v) => `Created block “${v.label || v.name}”.`,
   });
 
@@ -1826,7 +1966,7 @@ export const useCreatePromptBlock = () =>
 export const useDeletePromptBlock = () =>
   useActionMutation({
     mutationFn: (name: string) => unwrap(commands.deletePromptBlock(name)),
-    invalidate: () => [["prompts"]],
+    invalidate: () => [queryKeys.promptsPrefix],
   });
 
 export type DisplayNames = "full" | "username";
@@ -1850,9 +1990,9 @@ export const useDisplayNames = () => {
       patchSettingCache(qc, { scope: "app", key: DISPLAY_NAMES_KEY, value: v }),
     invalidate: () => [
       queryKeys.setting("app", DISPLAY_NAMES_KEY),
-      ["triage-tickets"],
-      ["triage-detail"],
-      ["triage-schedule"],
+      queryKeys.triageTicketsPrefix,
+      queryKeys.triageDetailPrefix,
+      queryKeys.triageSchedulePrefix,
       // The Issues task graph (and its blocker hover cards) resolve names
       // server-side too; `tasksPrefix` matches every repo's graph.
       queryKeys.tasksPrefix,

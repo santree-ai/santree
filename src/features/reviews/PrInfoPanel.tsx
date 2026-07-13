@@ -12,6 +12,7 @@ import { Avatar } from "../../components/Avatar";
 import { Markdown } from "../../components/Markdown";
 import { EdgeResizeHandle } from "../../components/primitives";
 import { usePrDetail } from "../../lib/queries";
+import { splitRepoSlug } from "../../lib/repo";
 import { useEdgeResize } from "../../lib/useEdgeResize";
 import { useReviewsModel } from "./model";
 import { PrThreadCard } from "./PrThreadCard";
@@ -20,14 +21,9 @@ const DEFAULT_W = 400;
 const MIN_W = 300;
 const MAX_W = 760;
 
-function splitRepo(slug: string): [string, string] {
-  const [owner, ...rest] = slug.split("/");
-  return [owner, rest.join("/")];
-}
-
 export function PrInfoPanel({ pr }: { pr: ReviewPr }) {
   const { infoCollapsed, toggleInfo, infoWidth, setInfoWidth } = useReviewsModel();
-  const [owner, name] = splitRepo(pr.repo);
+  const [owner, name] = splitRepoSlug(pr.repo);
   const { data: detail } = usePrDetail(owner, name, pr.number);
 
   const resize = useEdgeResize({

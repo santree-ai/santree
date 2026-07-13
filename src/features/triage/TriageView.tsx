@@ -20,7 +20,7 @@ import type { AgentKind, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
-import { Button, EmptyState, Segmented } from "../../components/primitives";
+import { Button, EmptyState, Segmented, Skeleton } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import {
   INVESTIGATE_AGENT_KEY,
@@ -59,6 +59,22 @@ import { ScheduleSection } from "./ScheduleSection";
 
 /** How many recently-viewed discussion panes to keep mounted (hidden). */
 const MAX_KEPT_PANES = 6;
+
+/** Placeholder queue rows for the cold load, so an unresolved queue never renders
+ *  as "all caught up" (mirrors the Reviews sidebar's skeleton). */
+function QueueSkeleton() {
+  return (
+    <div className="mt-1.5">
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} className="mb-[5px] rounded-[9px] px-[11px] py-2.5">
+          <Skeleton className="mb-2 h-2.5 w-12" />
+          <Skeleton className="mb-2 h-3 w-4/5" />
+          <Skeleton className="h-2.5 w-20" />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /**
  * Shown when your triage queue resolves to nothing — a calm "all caught up"
@@ -131,7 +147,7 @@ export function TriageView() {
   const { triageEnabled, activeRepo, settings } = useApp();
   const navigate = useNavigate();
   const { data: schedules = [] } = useTriageSchedule(activeRepo);
-  const { visible, teamWaiting, goodCitizen } = useTriageQueue(activeRepo);
+  const { visible, teamWaiting, goodCitizen, loading } = useTriageQueue(activeRepo);
   const setSetting = useSetSetting();
   // The Mine/All header toggle *is* the "be a good citizen" setting — All widens
   // to the whole team inbox (issues not assigned to you included).
@@ -219,6 +235,8 @@ export function TriageView() {
         .map((t) => t.id),
     [ordered, liveInvestigations],
   );
+  // Rows test membership on every render — a Set keeps that off the O(n²) path.
+  const eligible = useMemo(() => new Set(eligibleIds), [eligibleIds]);
   const { selected, toggle, clear, selectAll } = useInvestigateSelection(eligibleIds);
   const selectedIds = useMemo(
     () => eligibleIds.filter((id) => selected[id]),
@@ -273,7 +291,7 @@ export function TriageView() {
       key={t.id}
       ticket={t}
       active={t.id === activeId}
-      selectable={canInvestigate && eligibleIds.includes(t.id)}
+      selectable={canInvestigate && eligible.has(t.id)}
       selected={!!selected[t.id]}
       investigating={liveInvestigations.has(t.id)}
       started={startedInvestigations.has(t.id)}
@@ -322,7 +340,9 @@ export function TriageView() {
           )}
           <ScheduleSection schedules={schedules} />
           <div className="flex-1 overflow-y-auto p-2">
-            {ordered.length === 0 ? (
+            {loading ? (
+              <QueueSkeleton />
+            ) : ordered.length === 0 ? (
               <EmptyState className="py-8" title="Nothing in triage. 🎉" />
             ) : grouped ? (
               groups.map(([team, items]) => (
@@ -353,7 +373,11 @@ export function TriageView() {
       }
     >
       <div className="flex min-w-0 flex-1 flex-col bg-app">
-        {!activeTicket ? (
+        {loading ? (
+          // The queue hasn't landed yet, so we don't know there's nothing to
+          // triage — "All caught up" here would be a cheerful lie.
+          <DiscussionSkeleton />
+        ) : !activeTicket ? (
           <AllCaughtUp goodCitizen={goodCitizen} teamWaiting={teamWaiting} onTriage={onTriage} />
         ) : (
           <>

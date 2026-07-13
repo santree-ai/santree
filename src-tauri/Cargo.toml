@@ -45,9 +45,9 @@ tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 # io-std/etc, which "full" pulled in unused. Tauri and sqlx pull in whatever
 # additional tokio features they themselves need via Cargo's feature unification;
 # this list only has to cover what our own code names directly.
-tokio = { version = "1", features = ["rt", "macros", "sync"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 
-anyhow = "1"
+anyhow = { workspace = true }
 
 # Parse user-configured `.env` files into KEY=VALUE pairs (without mutating our
 # own process env) for the Environment settings — see `env.rs`.
@@ -67,7 +67,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 
 # Logging via the `log` facade, persisted to a file (+ stdout) by tauri-plugin-log
 # so Rust and JS-console logs land in one attachable file. See `lib.rs`.
-log = "0.4"
+log = { workspace = true }
 tauri-plugin-log = "2"
 
 # Linear integration: HTTP (GraphQL/OAuth) + PKCE primitives.
@@ -79,7 +79,7 @@ rand = "0.8"
 form_urlencoded = "1"
 
 # Local app database (tokens, repo links, settings).
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+sqlx = { workspace = true, features = ["migrate", "macros"] }
 # Filesystem watcher for the Trees "Changes" view: notify wraps the native
 # backend (FSEvents/inotify); the debouncer collapses event bursts. See git_watch.rs.
 notify = "8.2.0"
@@ -91,4 +91,9 @@ minijinja = "2"
 
 # Run the setup script under a PTY so its children (nix/make/…) see a TTY and emit
 # output live instead of block-buffering into a pipe. Same crate crates/pty uses.
-portable-pty = "0.9"
+portable-pty = { workspace = true }
+
+# Linear OAuth tokens live in the OS keychain (macOS Keychain / freedesktop Secret
+# Service), never in santree.db — see CLAUDE.md's secrets invariant and linear.rs.
+# Default features are exactly the two native stores we target plus the `Entry` API.
+keyring = "4"

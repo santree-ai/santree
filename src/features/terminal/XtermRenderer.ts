@@ -64,10 +64,30 @@ const themeFor = (mode: string | null) => {
 const accentDeclaration = (styleText: string | null) =>
   styleText?.match(/--accent:\s*([^;]+)/)?.[1]?.trim();
 
+/** WebKit only keeps ~16 live WebGL contexts per page; past that it silently
+ *  drops the oldest ones, and an xterm whose context is lost that way never gets
+ *  it back — it renders through the DOM fallback for the rest of the session. So
+ *  we ration contexts ourselves instead: at most this many terminals hold one at
+ *  a time (headroom left for the rest of the app's GPU surfaces), least-recently-
+ *  activated first to lose it. Overflow terminals render through the DOM
+ *  fallback deliberately, and take a context back when they're activated again. */
+export const MAX_WEBGL_CONTEXTS = 8;
+
+/** Renderers currently holding a WebGL context, least-recently-activated first. */
+const webglPool: XtermRenderer[] = [];
+
+/** A context can be lost for reasons we can't fix (GPU reset, driver crash); stop
+ *  re-acquiring after a couple of losses so we don't thrash on a broken GPU. */
+const MAX_CONTEXT_LOSSES = 2;
+
 export class XtermRenderer implements TerminalRenderer {
   private term: Terminal;
   private fitAddon: FitAddon;
   private themeObserver?: MutationObserver;
+  private webgl?: WebglAddon;
+  private mounted = false;
+  private disposed = false;
+  private contextLosses = 0;
 
   constructor() {
     this.term = new Terminal({
@@ -113,15 +133,47 @@ export class XtermRenderer implements TerminalRenderer {
 
   mount(el: HTMLElement) {
     this.term.open(el);
-    // GPU rendering for smooth output; fall back to the DOM renderer if WebGL is
-    // unavailable in this webview.
+    this.mounted = true;
+    this.acquireWebgl();
+  }
+
+  /** Take (or re-take) a WebGL context, evicting the least-recently-activated
+   *  terminal's when the pool is full. Falls back to xterm's DOM renderer when a
+   *  context isn't available — the same way `mount` always has. */
+  private acquireWebgl() {
+    if (this.disposed || !this.mounted || this.contextLosses >= MAX_CONTEXT_LOSSES) return;
+    const at = webglPool.indexOf(this);
+    if (at !== -1) webglPool.splice(at, 1);
+    if (this.webgl) {
+      webglPool.push(this); // already have one — just refresh its MRU position
+      return;
+    }
+    while (webglPool.length >= MAX_WEBGL_CONTEXTS) webglPool[0].releaseWebgl();
     try {
       const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
+      // A lost context can't be revived in place, and retrying immediately tends
+      // to lose it again — drop to the DOM renderer and re-acquire the next time
+      // this pane is activated.
+      webgl.onContextLoss(() => {
+        this.contextLosses++;
+        this.releaseWebgl();
+      });
       this.term.loadAddon(webgl);
+      this.webgl = webgl;
+      webglPool.push(this);
     } catch {
-      // No WebGL — xterm's default renderer handles it.
+      // No WebGL in this webview at all — don't keep asking for it.
+      this.contextLosses = MAX_CONTEXT_LOSSES;
+      this.webgl = undefined;
     }
+  }
+
+  /** Give up this terminal's WebGL context (xterm reverts to the DOM renderer). */
+  private releaseWebgl() {
+    const at = webglPool.indexOf(this);
+    if (at !== -1) webglPool.splice(at, 1);
+    this.webgl?.dispose();
+    this.webgl = undefined;
   }
 
   write(data: Uint8Array | string) {
@@ -142,11 +194,17 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   focus() {
+    // Activation is the app's "this terminal is on screen" signal (TerminalView
+    // focuses the visible pane), so it's also where an evicted — or context-lost —
+    // terminal earns its GPU renderer back.
+    this.acquireWebgl();
     this.term.focus();
   }
 
   dispose() {
+    this.disposed = true;
     this.themeObserver?.disconnect();
+    this.releaseWebgl();
     this.term.dispose();
   }
 }

@@ -18,13 +18,11 @@ use santree_core::{
     config,
     domain::{
         AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, CheckLog, ClaudeCommandFile,
-        ClaudeCommands, CommandSource,
-        FileSource,
-        GithubStatus, LinearOrg, LinearStatus, MergeQueue, NewPr, Opener, PrDetail, PrDraft,
-        PrLabel, PromptInfo, PromptPreview, Repo,
+        ClaudeCommands, CommandSource, FileSource, GithubStatus, LinearOrg, LinearStatus,
+        MergeQueue, NewPr, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo,
         ReviewInbox, ReviewedFile, Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings,
-        TabKind, Task,
-        TriageDetail, TriageSchedule, TriageTicket, UsageReport, Worktree, WorktreePr, WorktreeTab,
+        TabKind, Task, TriageDetail, TriageSchedule, TriageTicket, UsageReport, Worktree,
+        WorktreePr, WorktreeTab,
     },
 };
 
@@ -240,6 +238,19 @@ pub async fn run_worktree_setup_streamed(
     db: State<'_, Db>,
 ) -> CmdResult<()> {
     Ok(worktree::run_setup_streamed(&db, &repo, &issue_id, on_event).await?)
+}
+
+/// Stop a running setup script (the Setup tab's Stop button). Killing the child
+/// ends the stream, so the run reports `Done { ok: false }` and the tab closes like
+/// any other failed setup. Returns whether a run was actually stopped.
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_worktree_setup(
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<bool> {
+    Ok(worktree::cancel_setup(&db, &repo, &issue_id).await?)
 }
 
 /// Fast-forward the repo's local base branch (main/master) to origin — the
@@ -592,9 +603,18 @@ pub async fn set_pr_labels(
 /// user expands the check — sliced to the failing step and classified so the UI
 /// can tint errors/warnings and collapse the quiet runs between them. `job_id`
 /// comes from [`PrCheck::job_id`]; empty when `gh` isn't authenticated.
+///
+/// `job_id` crosses the bridge as `f64` because that's what a JS number *is* —
+/// specta has no 64-bit integer that TypeScript can represent losslessly. GitHub job
+/// ids are far below 2^53, so the cast back is exact; anything that isn't a
+/// non-negative whole number never came from a real `PrCheck` and is rejected rather
+/// than silently truncated by `as`.
 #[tauri::command]
 #[specta::specta]
 pub async fn pr_check_log(owner: String, name: String, job_id: f64) -> CmdResult<CheckLog> {
+    if !job_id.is_finite() || job_id < 0.0 || job_id.fract() != 0.0 {
+        return Err(anyhow::anyhow!("invalid job id {job_id}").into());
+    }
     Ok(reviews::check_log(&owner, &name, job_id as u64).await?)
 }
 
@@ -788,8 +808,9 @@ pub async fn triage_add_comment(
 }
 
 /// Exit the app. Called from the quit-confirmation dialog once the user confirms a
-/// ⌘Q / menu quit — `app.exit(0)` re-emits `ExitRequested` with a `Some` code, which
-/// the run-loop treats as a confirmed exit and lets through (see `run`).
+/// ⌘Q / menu quit. By the time this runs the quit is already confirmed, so the
+/// run-loop's `ExitRequested` handler doesn't gate on anything — it just reaps the
+/// terminal children (see `run` in lib.rs).
 #[tauri::command]
 #[specta::specta]
 pub fn quit_app(app: AppHandle) {
@@ -847,8 +868,14 @@ pub async fn github_status() -> GithubStatus {
 /// setting-independent, so the frontend caches the path forever.
 #[tauri::command]
 #[specta::specta]
-pub fn claude_hook_settings(app: AppHandle) -> Option<String> {
-    crate::hooks::claude_settings(&app)
+pub async fn claude_hook_settings(app: AppHandle) -> Option<String> {
+    // Writes a settings JSON file. A non-async command runs on the *main thread*,
+    // where a slow disk stalls the whole UI — everything else in this file that
+    // touches the filesystem goes through spawn_blocking for exactly this reason.
+    tokio::task::spawn_blocking(move || crate::hooks::claude_settings(&app))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Like [`claude_hook_settings`] but with a `permissions.deny` block forbidding
@@ -857,8 +884,11 @@ pub fn claude_hook_settings(app: AppHandle) -> Option<String> {
 /// Trees). `None` when the hook binary/db can't be resolved.
 #[tauri::command]
 #[specta::specta]
-pub fn claude_hook_settings_no_git(app: AppHandle) -> Option<String> {
-    crate::hooks::claude_settings_no_git(&app)
+pub async fn claude_hook_settings_no_git(app: AppHandle) -> Option<String> {
+    tokio::task::spawn_blocking(move || crate::hooks::claude_settings_no_git(&app))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Every santree-launched session's live token/context usage, captured from the
@@ -946,8 +976,10 @@ pub async fn read_claude_command(
         Some(name) => repo::path(&db, &name).await?,
         None => None,
     };
-    Ok(tokio::task::spawn_blocking(move || settings::read_command(repo_path.as_deref(), &name))
-        .await??)
+    Ok(
+        tokio::task::spawn_blocking(move || settings::read_command(repo_path.as_deref(), &name))
+            .await??,
+    )
 }
 
 /// Overwrite a slash-command's backing file. `source` comes from the matching
@@ -978,8 +1010,10 @@ pub async fn write_claude_command(
 /// there's no traversal surface — and returns an empty list if it's unreadable.
 #[tauri::command]
 #[specta::specta]
-pub fn env_file_vars(path: String) -> Vec<String> {
-    crate::env::env_file_var_names(&path)
+pub async fn env_file_vars(path: String) -> Vec<String> {
+    tokio::task::spawn_blocking(move || crate::env::env_file_var_names(&path))
+        .await
+        .unwrap_or_default()
 }
 
 /// Read a setting for an exact scope (`"app"` or `"repo:<name>"`).
@@ -990,6 +1024,7 @@ pub async fn get_setting(
     key: String,
     db: State<'_, Db>,
 ) -> CmdResult<Option<String>> {
+    settings::validate_user_scope(&scope, &key)?;
     Ok(settings::get(&db, &scope, &key).await?)
 }
 
@@ -1002,6 +1037,7 @@ pub async fn set_setting(
     value: Option<String>,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
+    settings::validate_user_scope(&scope, &key)?;
     Ok(settings::set(&db, &scope, &key, value).await?)
 }
 
@@ -1062,11 +1098,7 @@ pub async fn preview_prompt(
 /// `{% include %}`). Validates the name and seeds a starter body.
 #[tauri::command]
 #[specta::specta]
-pub async fn create_prompt_block(
-    name: String,
-    label: String,
-    db: State<'_, Db>,
-) -> CmdResult<()> {
+pub async fn create_prompt_block(name: String, label: String, db: State<'_, Db>) -> CmdResult<()> {
     Ok(crate::prompts::create_block(&db, &name, &label).await?)
 }
 

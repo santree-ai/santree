@@ -263,15 +263,31 @@ button {
    whole app invisible to keyboard navigation (WCAG 2.4.7). */
 input:focus:not(:focus-visible),
 select:focus:not(:focus-visible),
+textarea:focus:not(:focus-visible),
 button:focus:not(:focus-visible) {
   outline: none;
 }
 
 input:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
 button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* The code editors (react-simple-code-editor) lay a transparent textarea over the
+   highlighted layer, filling a wrapper that clips (Trees) or scrolls (Prompts) —
+   so the textarea's own ring would be cropped away, or scroll out of view with the
+   content. Draw it on the wrapper, inset. */
+.prompt-editor textarea:focus-visible,
+.shell-editor textarea:focus-visible {
+  outline: none;
+}
+.prompt-editor:has(textarea:focus-visible),
+.shell-editor:has(textarea:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 /* Thin dark scrollbars to match the design. */

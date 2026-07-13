@@ -85,13 +85,15 @@ function VarsCard({ scope }: { scope: string }) {
 
   // Which row is being edited (by index), or "new" for the add form, or null.
   const [editing, setEditing] = useState<number | "new" | null>(null);
-  const [revealed, setRevealed] = useState<Set<number>>(new Set());
+  // Keyed by name, not index: deleting a row shifts the ones below it up, and an
+  // index-keyed reveal would then un-mask a different variable's secret.
+  const [revealed, setRevealed] = useState<Set<string>>(new Set());
 
-  const toggleReveal = (i: number) =>
+  const toggleReveal = (name: string) =>
     setRevealed((prev) => {
       const next = new Set(prev);
-      if (next.has(i)) next.delete(i);
-      else next.add(i);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
       return next;
     });
 
@@ -143,17 +145,17 @@ function VarsCard({ scope }: { scope: string }) {
                   {v.name}
                 </span>
                 <span className="font-mono text-[11.5px] text-muted-3">
-                  {revealed.has(i) ? (
+                  {revealed.has(v.name) ? (
                     <span className="max-w-[220px] truncate text-fg-3">{v.value}</span>
                   ) : (
                     "••••••••"
                   )}
                 </span>
                 <IconBtn
-                  label={revealed.has(i) ? "Hide value" : "Reveal value"}
-                  onClick={() => toggleReveal(i)}
+                  label={revealed.has(v.name) ? "Hide value" : "Reveal value"}
+                  onClick={() => toggleReveal(v.name)}
                 >
-                  {revealed.has(i) ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
+                  {revealed.has(v.name) ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
                 </IconBtn>
                 <IconBtn label="Edit variable" onClick={() => setEditing(i)}>
                   <PencilIcon size={13} />

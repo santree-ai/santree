@@ -80,14 +80,16 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
   const [tabs, setTabs] = useState<TerminalTab[]>(() => initial.map(withKey));
   const [activeKey, setActiveKey] = useState<string | null>(tabs[0]?.key ?? null);
   const [embed, setEmbed] = useState<TerminalEmbed | null>(null);
-  // Mirror the latest tabs so `ensure` can decide without an impure (StrictMode
-  // double-invoked) state updater.
+  // Mirror the latest tabs so the mutators below can decide (and derive the next
+  // activeKey) without an impure — StrictMode double-invoked — state updater.
+  // Every writer updates the ref eagerly, so two calls in one tick see each other.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
 
   const open = useCallback((spec: TerminalSpec) => {
     const tab = withKey(spec);
-    setTabs((prev) => [...prev, tab]);
+    tabsRef.current = [...tabsRef.current, tab];
+    setTabs(tabsRef.current);
     setActiveKey(tab.key);
     return tab.key;
   }, []);
@@ -101,17 +103,19 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
     if (found) return found.key;
     const tab = withKey(spec);
     tabsRef.current = [...tabsRef.current, tab];
-    setTabs((prev) => [...prev, tab]);
+    setTabs(tabsRef.current);
     return tab.key;
   }, []);
 
+  // Closing the active tab falls back to the tab before it.
   const close = useCallback((key: string) => {
-    setTabs((prev) => {
-      const idx = prev.findIndex((t) => t.key === key);
-      const next = prev.filter((t) => t.key !== key);
-      setActiveKey((cur) => (cur === key ? (next[Math.max(0, idx - 1)]?.key ?? null) : cur));
-      return next;
-    });
+    const prev = tabsRef.current;
+    const idx = prev.findIndex((t) => t.key === key);
+    if (idx === -1) return;
+    const next = prev.filter((t) => t.key !== key);
+    tabsRef.current = next;
+    setTabs(next);
+    setActiveKey((cur) => (cur === key ? (next[Math.max(0, idx - 1)]?.key ?? null) : cur));
   }, []);
 
   return useMemo(

@@ -86,25 +86,86 @@ pub struct ModelPrice {
 /// still counted). Opus 4.5+ are listed explicitly because they cost a third of
 /// earlier Opus; everything else keys off the family fallback.
 pub fn model_pricing() -> &'static [ModelPrice] {
-    // Opus 4.5-4.8: $5/$25 (a third of earlier Opus).
-    const OPUS_45_PLUS: [&str; 4] = ["opus-4-5", "opus-4-6", "opus-4-7", "opus-4-8"];
-    const _: () = assert!(OPUS_45_PLUS.len() == 4); // keep the slice below in sync
     &[
-        ModelPrice { key: "opus-4-5", input_per_mtok: 5.0, output_per_mtok: 25.0, cache_write_per_mtok: 6.25, cache_read_per_mtok: 0.50, context_tokens: 1_000_000.0 },
-        ModelPrice { key: "opus-4-6", input_per_mtok: 5.0, output_per_mtok: 25.0, cache_write_per_mtok: 6.25, cache_read_per_mtok: 0.50, context_tokens: 1_000_000.0 },
-        ModelPrice { key: "opus-4-7", input_per_mtok: 5.0, output_per_mtok: 25.0, cache_write_per_mtok: 6.25, cache_read_per_mtok: 0.50, context_tokens: 1_000_000.0 },
-        ModelPrice { key: "opus-4-8", input_per_mtok: 5.0, output_per_mtok: 25.0, cache_write_per_mtok: 6.25, cache_read_per_mtok: 0.50, context_tokens: 1_000_000.0 },
+        // Opus 4.5-4.8: $5/$25 (a third of earlier Opus).
+        ModelPrice {
+            key: "opus-4-5",
+            input_per_mtok: 5.0,
+            output_per_mtok: 25.0,
+            cache_write_per_mtok: 6.25,
+            cache_read_per_mtok: 0.50,
+            context_tokens: 1_000_000.0,
+        },
+        ModelPrice {
+            key: "opus-4-6",
+            input_per_mtok: 5.0,
+            output_per_mtok: 25.0,
+            cache_write_per_mtok: 6.25,
+            cache_read_per_mtok: 0.50,
+            context_tokens: 1_000_000.0,
+        },
+        ModelPrice {
+            key: "opus-4-7",
+            input_per_mtok: 5.0,
+            output_per_mtok: 25.0,
+            cache_write_per_mtok: 6.25,
+            cache_read_per_mtok: 0.50,
+            context_tokens: 1_000_000.0,
+        },
+        ModelPrice {
+            key: "opus-4-8",
+            input_per_mtok: 5.0,
+            output_per_mtok: 25.0,
+            cache_write_per_mtok: 6.25,
+            cache_read_per_mtok: 0.50,
+            context_tokens: 1_000_000.0,
+        },
         // Earlier Opus (4, 4.1, 3-opus): $15/$75, 200K context.
-        ModelPrice { key: "opus", input_per_mtok: 15.0, output_per_mtok: 75.0, cache_write_per_mtok: 18.75, cache_read_per_mtok: 1.50, context_tokens: 200_000.0 },
+        ModelPrice {
+            key: "opus",
+            input_per_mtok: 15.0,
+            output_per_mtok: 75.0,
+            cache_write_per_mtok: 18.75,
+            cache_read_per_mtok: 1.50,
+            context_tokens: 200_000.0,
+        },
         // Claude 5 family. Sonnet 5 ($2/$10) is cheaper than Sonnet 4.6, so it needs
         // its own key to beat the "sonnet" fallback; Fable 5 ($10/$50) is premium.
-        ModelPrice { key: "sonnet-5", input_per_mtok: 2.0, output_per_mtok: 10.0, cache_write_per_mtok: 2.50, cache_read_per_mtok: 0.20, context_tokens: 1_000_000.0 },
-        ModelPrice { key: "fable", input_per_mtok: 10.0, output_per_mtok: 50.0, cache_write_per_mtok: 12.50, cache_read_per_mtok: 1.00, context_tokens: 1_000_000.0 },
+        ModelPrice {
+            key: "sonnet-5",
+            input_per_mtok: 2.0,
+            output_per_mtok: 10.0,
+            cache_write_per_mtok: 2.50,
+            cache_read_per_mtok: 0.20,
+            context_tokens: 1_000_000.0,
+        },
+        ModelPrice {
+            key: "fable",
+            input_per_mtok: 10.0,
+            output_per_mtok: 50.0,
+            cache_write_per_mtok: 12.50,
+            cache_read_per_mtok: 1.00,
+            context_tokens: 1_000_000.0,
+        },
         // Sonnet (3.5 / 4 / 4.5 / 4.6) all share $3/$15. Current Sonnet runs 1M;
         // (the old sonnet-4 >200k-context premium tier is omitted — a shrinking case).
-        ModelPrice { key: "sonnet", input_per_mtok: 3.0, output_per_mtok: 15.0, cache_write_per_mtok: 3.75, cache_read_per_mtok: 0.30, context_tokens: 1_000_000.0 },
+        ModelPrice {
+            key: "sonnet",
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            cache_write_per_mtok: 3.75,
+            cache_read_per_mtok: 0.30,
+            context_tokens: 1_000_000.0,
+        },
         // Haiku 4.5 ($1/$5), 200K context.
-        ModelPrice { key: "haiku", input_per_mtok: 1.0, output_per_mtok: 5.0, cache_write_per_mtok: 1.25, cache_read_per_mtok: 0.10, context_tokens: 200_000.0 },
+        ModelPrice {
+            key: "haiku",
+            input_per_mtok: 1.0,
+            output_per_mtok: 5.0,
+            cache_write_per_mtok: 1.25,
+            cache_read_per_mtok: 0.10,
+            context_tokens: 200_000.0,
+        },
     ]
 }
 

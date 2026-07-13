@@ -14,12 +14,22 @@ export function diffLabel(add: number, del: number): string {
  *  convention); the Usage counts read a null/undefined as 0. */
 type Num = number | null | undefined;
 
+const UNITS = [
+  { div: 1000, suffix: "k" },
+  { div: 1_000_000, suffix: "M" },
+  { div: 1_000_000_000, suffix: "B" },
+] as const;
+
 /** A compact token count: `812`, `51.2k`, `1.2M`, `3.4B`. */
 export function formatCompact(value: Num): string {
   const n = value ?? 0;
   if (n < 1000) return String(Math.round(n));
-  if (n < 1_000_000) return `${trimZero(n / 1000)}k`;
-  if (n < 1_000_000_000) return `${trimZero(n / 1_000_000)}M`;
+  for (const { div, suffix } of UNITS) {
+    // Rounding to one decimal can push a value past its own unit's ceiling
+    // (999_950 → "1000.0k"), so carry it into the next unit instead.
+    const label = trimZero(n / div);
+    if (Number.parseFloat(label) < 1000) return `${label}${suffix}`;
+  }
   return `${trimZero(n / 1_000_000_000)}B`;
 }
 

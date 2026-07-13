@@ -7,18 +7,81 @@
 //! id) rather than inferred from the branch name. Git itself is driven through
 //! [`crate::git`].
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, PtySize};
 use serde::Serialize;
 use specta::Type;
 use tauri::ipc::Channel;
 
-use santree_core::domain::{
-    Activity, AgentKind, ChangedFile, FileSource, ScriptInfo, TaskStatus, Worktree,
-};
+use santree_core::domain::{AgentKind, ChangedFile, FileSource, ScriptInfo, Worktree};
+
+/// How long a setup script may run before it's killed. Setup scripts run real build
+/// tooling (nix, make, a cold `npm install`), so this is deliberately generous — it's
+/// a backstop against a script that will *never* finish (waiting on stdin nobody can
+/// answer, a wedged network mount), not a performance budget. The Stop button is the
+/// normal way out.
+const SETUP_DEADLINE: Duration = Duration::from_secs(30 * 60);
+
+/// The setup scripts running right now, keyed by repo root + issue id. A process-wide
+/// singleton ([`SETUP_RUNS`]) rather than Tauri state, because the blocking reader
+/// thread outlives any borrow.
+///
+/// `stream_init_script` opens its own PTY, outside `PtyManager` — so without this
+/// registry nothing could see the child: quitting mid-setup orphaned the script and
+/// everything it spawned, a hung `init.sh` pinned a blocking-pool thread with no way
+/// to recover, and the Setup tab sat at "running" forever.
+pub static SETUP_RUNS: LazyLock<SetupRuns> = LazyLock::new(SetupRuns::default);
+
+#[derive(Default)]
+pub struct SetupRuns(Mutex<HashMap<(String, String), Box<dyn ChildKiller + Send + Sync>>>);
+
+impl SetupRuns {
+    fn insert(&self, root: &str, issue_id: &str, killer: Box<dyn ChildKiller + Send + Sync>) {
+        let mut runs = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        runs.insert((root.to_string(), issue_id.to_string()), killer);
+    }
+
+    fn remove(&self, root: &str, issue_id: &str) {
+        let mut runs = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        runs.remove(&(root.to_string(), issue_id.to_string()));
+    }
+
+    /// Whether a setup script is already running for this worktree. Re-running would
+    /// stack a second `init.sh` in the same directory.
+    fn contains(&self, root: &str, issue_id: &str) -> bool {
+        let runs = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        runs.contains_key(&(root.to_string(), issue_id.to_string()))
+    }
+
+    /// Kill one running setup script. The read loop then hits EOF and the run
+    /// finishes normally (as a failure), so the UI closes the tab on its own.
+    pub fn cancel(&self, root: &str, issue_id: &str) -> bool {
+        let mut runs = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match runs.remove(&(root.to_string(), issue_id.to_string())) {
+            Some(mut killer) => {
+                let _ = killer.kill();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Kill every running setup script — called on app exit, beside
+    /// `PtyManager::close_all`, so a quit mid-setup doesn't leave `init.sh` and its
+    /// children running headless.
+    pub fn kill_all(&self) {
+        let mut runs = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        for (_, mut killer) in runs.drain() {
+            let _ = killer.kill();
+        }
+    }
+}
 
 /// A streamed setup-script event for the Trees "Setup" tab. `Line` is a committed
 /// output line (appended). `Progress` is a transient redraw of the current line —
@@ -73,8 +136,9 @@ struct Link {
     worktree_path: String,
 }
 
-/// A full `worktree_links` row, hydrated for building a `Worktree` (list/get).
-/// One `FromRow` struct so the column list isn't spelled out as a tuple twice.
+/// A full `worktree_links` row — read back for building a `Worktree` (list/get) and
+/// built up by `create` for the insert. One `FromRow` struct so the column list
+/// isn't spelled out as a tuple twice.
 #[derive(sqlx::FromRow)]
 struct LinkRow {
     issue_id: String,
@@ -200,7 +264,9 @@ pub async fn base_worktree(db: &Db, repo: &str) -> Result<Option<Worktree>> {
         Worktree {
             id: BASE_ID.to_string(),
             title: base.clone(),
-            status: TaskStatus::InProgress,
+            // The base branch isn't a ticket, has no agent of its own, and runs no
+            // agent session — so there's nothing to report for any of the three.
+            status: None,
             // The base IS its own base, so there's no diff to summarise.
             add_lines: 0,
             del_lines: 0,
@@ -212,8 +278,8 @@ pub async fn base_worktree(db: &Db, repo: &str) -> Result<Option<Worktree>> {
             // don't surface a redundant Pull button for it.
             remote_behind: 0,
             pull_conflict: false,
-            agent: AgentKind::Claude,
-            activity: Activity::Idle,
+            agent: None,
+            activity: None,
             branch: base.clone(),
             path: root,
             project: None,
@@ -254,31 +320,50 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<Worktree>> {
     Ok(worktrees)
 }
 
-/// Build a `Worktree` (with live git stats) from a stored link row.
+/// Build a `Worktree` (with live git stats) from a stored link row, probing the
+/// branch's remote-sync state.
 fn build_worktree(row: LinkRow) -> Worktree {
+    // Freshen the branch's remote ref (throttled) so remote_behind reflects commits
+    // added to the branch upstream — nothing else fetches it. Only when there's
+    // something to pull does it run the (cheap) virtual merge to see if it'd
+    // conflict, so the Pull button can disable itself up front.
+    let remote = git::pull_state(Path::new(&row.worktree_path), &row.branch);
+    build_worktree_from(row, remote.behind, remote.conflict)
+}
+
+/// Build a `Worktree` for a branch that was *just created locally* — no remote
+/// probe. `git fetch origin <branch>` would be a guaranteed miss for a branch that
+/// has never been pushed (and, offline, would hang for git's whole timeout), so
+/// `remote_behind`/`pull_conflict` are zero by construction. An adopted worktree's
+/// remote state, if any, lands on the next `list`/`get` refresh.
+fn build_worktree_local(row: LinkRow) -> Worktree {
+    build_worktree_from(row, 0, false)
+}
+
+fn build_worktree_from(row: LinkRow, remote_behind: u32, pull_conflict: bool) -> Worktree {
     let path = PathBuf::from(&row.worktree_path);
     let (add_lines, del_lines) = branch_stats(&path, &row.base_branch);
-    let remote = git::pull_state(&path, &row.branch);
     Worktree {
         id: row.issue_id,
         title: row.title,
-        status: TaskStatus::InProgress,
+        // The link row stores no ticket status, and this path is deliberately
+        // git-only (offline-capable — it never calls Linear), so there is no real
+        // source for it here. The Trees view overlays the live status from its own
+        // tasks fetch; shipping a constant would render a confident, meaningless
+        // chip for every worktree whose issue isn't in that fetch.
+        status: None,
         add_lines,
         del_lines,
         dirty: git::is_dirty(&path),
         ahead: git::ahead(&path, &row.base_branch),
         behind: git::behind(&path, &row.base_branch),
         unpushed: git::unpushed(&path, &row.branch, &row.base_branch),
-        // Freshen the branch's remote ref (throttled) so remote_behind reflects
-        // commits added to the branch upstream — nothing else fetches it.
-        remote_behind: remote.behind,
-        // Only when there's something to pull do we run the (cheap) virtual merge
-        // to see if it'd conflict, so the Pull button can disable itself up front.
-        pull_conflict: remote.conflict,
+        remote_behind,
+        pull_conflict,
         agent: parse_agent(row.agent.as_deref()),
-        // Live agent activity needs the session-signal system (not yet wired);
-        // default to Idle until then.
-        activity: Activity::Idle,
+        // Live agent activity is derived from the running PTY sessions, which only
+        // the frontend knows about — the backend doesn't guess.
+        activity: None,
         branch: row.branch,
         path: row.worktree_path,
         project: row.project,
@@ -288,17 +373,23 @@ fn build_worktree(row: LinkRow) -> Worktree {
     }
 }
 
+/// Fetch the full link row for one issue, or `None` when the worktree isn't tracked.
+async fn link_row(db: &Db, repo_root: &str, issue_id: &str) -> Result<Option<LinkRow>> {
+    Ok(sqlx::query_as::<_, LinkRow>(&format!(
+        "SELECT {LINK_COLUMNS} FROM worktree_links WHERE repo_path = ? AND issue_id = ?"
+    ))
+    .bind(repo_root)
+    .bind(issue_id)
+    .fetch_optional(db)
+    .await?)
+}
+
 /// The tracked worktree for one issue (with live stats), or `None` if untracked.
 pub async fn get(db: &Db, repo: &str, issue_id: &str) -> Result<Option<Worktree>> {
     let root = repo_root(db, repo).await?;
-    let row = sqlx::query_as::<_, LinkRow>(&format!(
-        "SELECT {LINK_COLUMNS} FROM worktree_links WHERE repo_path = ? AND issue_id = ?"
-    ))
-    .bind(&root)
-    .bind(issue_id)
-    .fetch_optional(db)
-    .await?;
-    let Some(row) = row else { return Ok(None) };
+    let Some(row) = link_row(db, &root, issue_id).await? else {
+        return Ok(None);
+    };
     Ok(Some(
         tokio::task::spawn_blocking(move || build_worktree(row)).await?,
     ))
@@ -384,21 +475,27 @@ pub async fn create(
     // `setup_ran` always starts false: setup now only ever runs via the separate
     // `run_setup_streamed` command (driven from the Trees "Setup" tab), never as
     // part of create.
-    sqlx::query(
-        "INSERT INTO worktree_links
-            (repo_path, issue_id, title, project, branch, worktree_path, base_branch, agent, setup_ran)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
-    )
-    .bind(&root)
-    .bind(issue_id)
-    .bind(title)
-    .bind(project)
-    .bind(&branch)
-    .bind(&wt_path_str)
-    .bind(&base_branch)
-    .bind(agent.as_str())
-    .execute(db)
-    .await?;
+    let row = LinkRow {
+        issue_id: issue_id.to_string(),
+        title: title.to_string(),
+        project: project.map(str::to_string),
+        branch,
+        worktree_path: wt_path_str,
+        base_branch,
+        agent: Some(agent.as_str().to_string()),
+        setup_ran: 0,
+    };
+    let row = if insert_link(db, &root, &row).await? {
+        row
+    } else {
+        // Lost a race with a concurrent create for the same issue (double-clicked
+        // Run, or an Issues launch racing a Trees one, both past the `get` check
+        // above while the slow git work ran) — adopt the winner's row instead of
+        // reporting our own, never-persisted values.
+        link_row(db, &root, issue_id)
+            .await?
+            .ok_or_else(|| anyhow!("worktree {issue_id} missing after create"))?
+    };
 
     // If opted in, reflect the new work in Linear by moving the issue to its
     // "started" state. Best-effort and genuinely fire-and-forget — nobody awaits
@@ -421,9 +518,38 @@ pub async fn create(
         });
     }
 
-    get(db, repo, issue_id)
-        .await?
-        .ok_or_else(|| anyhow!("worktree {issue_id} missing after create"))
+    // Build the response locally: `get` would probe the remote for a branch that by
+    // construction isn't on origin yet, holding "Creating workspace…" for a doomed
+    // network round-trip on every single task start.
+    Ok(tokio::task::spawn_blocking(move || build_worktree_local(row)).await?)
+}
+
+/// Record the issue ↔ worktree link, reporting whether *this* call inserted it.
+///
+/// `ON CONFLICT DO NOTHING` rather than a plain insert: `create`'s "already tracked?"
+/// check and this write are separated by seconds of git work, so two concurrent
+/// creates for the same issue both reach it — and the loser must adopt the winner's
+/// row, not fail the whole launch with a raw primary-key error.
+async fn insert_link(db: &Db, repo_root: &str, row: &LinkRow) -> Result<bool> {
+    let inserted = sqlx::query(
+        "INSERT INTO worktree_links
+            (repo_path, issue_id, title, project, branch, worktree_path, base_branch, agent, setup_ran)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(repo_path, issue_id) DO NOTHING",
+    )
+    .bind(repo_root)
+    .bind(&row.issue_id)
+    .bind(&row.title)
+    .bind(&row.project)
+    .bind(&row.branch)
+    .bind(&row.worktree_path)
+    .bind(&row.base_branch)
+    .bind(&row.agent)
+    .bind(row.setup_ran)
+    .execute(db)
+    .await?
+    .rows_affected();
+    Ok(inserted > 0)
 }
 
 /// Remove a worktree (and its branch) and drop the link.
@@ -521,10 +647,16 @@ pub async fn run_setup_streamed(
         return Ok(());
     }
 
+    // Two `init.sh` runs in one worktree would race over the same directory.
+    if SETUP_RUNS.contains(&root, issue_id) {
+        bail!("setup is already running for '{issue_id}'");
+    }
+
     let ev = on_event.clone();
     let root_for_script = root.clone();
+    let id_for_script = issue_id.to_string();
     let ok = tokio::task::spawn_blocking(move || {
-        stream_init_script(&script, &wt_path, &root_for_script, &ev)
+        stream_init_script(&script, &wt_path, &root_for_script, &id_for_script, &ev)
     })
     .await
     .unwrap_or(false);
@@ -540,6 +672,15 @@ pub async fn run_setup_streamed(
     }
     let _ = on_event.send(SetupEvent::Done { ok });
     Ok(())
+}
+
+/// Stop the setup script running for a worktree, if any. Returns whether one was
+/// running. The kill closes the PTY, so the streaming run finishes on its own and
+/// reports failure — there's no separate teardown path to keep in sync.
+pub async fn cancel_setup(db: &Db, repo: &str, issue_id: &str) -> Result<bool> {
+    validate_issue_id(issue_id)?;
+    let root = repo_root(db, repo).await?;
+    Ok(SETUP_RUNS.cancel(&root, issue_id))
 }
 
 /// Drain complete line boundaries from `acc`, classifying each segment: `\n` (or
@@ -583,7 +724,18 @@ fn drain_setup_events(acc: &mut String, flush: bool) -> Vec<SetupEvent> {
 
 /// Spawn the setup script (stderr folded into stdout) and forward each output line
 /// to `ev`. Returns whether it exited successfully.
-fn stream_init_script(script: &Path, wt: &Path, root: &str, ev: &Channel<SetupEvent>) -> bool {
+///
+/// The child is registered in `runs` for as long as it lives, so a Stop from the UI
+/// (or an app quit) can kill it — and a watchdog kills it at [`SETUP_DEADLINE`]. In
+/// every one of those cases the read loop below hits EOF, `child.wait()` returns a
+/// failure, and the run reports `Done { ok: false }` like any other failed script.
+fn stream_init_script(
+    script: &Path,
+    wt: &Path,
+    root: &str,
+    issue_id: &str,
+    ev: &Channel<SetupEvent>,
+) -> bool {
     let _ = ev.send(SetupEvent::Line {
         text: format!("▸ {}", script.display()),
     });
@@ -638,9 +790,36 @@ fn stream_init_script(script: &Path, wt: &Path, root: &str, ev: &Channel<SetupEv
             let _ = ev.send(SetupEvent::Line {
                 text: format!("failed to read setup output: {e}"),
             });
+            let _ = child.kill();
             return false;
         }
     };
+
+    SETUP_RUNS.insert(root, issue_id, child.clone_killer());
+
+    // Backstop for a script that never finishes *at all*. Killing the child closes
+    // the last handle on the slave, which is what unblocks the read loop below —
+    // `reader.read` has no timeout of its own. The watchdog parks on a channel it
+    // never receives from, so it wakes the moment this function returns (dropping
+    // `done`) rather than sleeping out the full deadline after a fast setup.
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    {
+        let mut killer = child.clone_killer();
+        let (root, issue_id) = (root.to_string(), issue_id.to_string());
+        std::thread::spawn(move || {
+            if finished.recv_timeout(SETUP_DEADLINE)
+                != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            {
+                return; // the run finished on its own
+            }
+            log::warn!(
+                "setup for {issue_id} exceeded {}s — killing it",
+                SETUP_DEADLINE.as_secs()
+            );
+            SETUP_RUNS.cancel(&root, &issue_id);
+            let _ = killer.kill();
+        });
+    }
 
     // Read bytes and drain complete boundaries as they arrive (see
     // `drain_setup_events`), then flush any trailing partial line at EOF.
@@ -662,6 +841,8 @@ fn stream_init_script(script: &Path, wt: &Path, root: &str, ev: &Channel<SetupEv
     }
 
     let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+    SETUP_RUNS.remove(root, issue_id);
+    drop(done); // wake the watchdog so it doesn't outlive the run
     let _ = ev.send(SetupEvent::Line {
         text: format!("▸ setup {}", if ok { "complete" } else { "failed" }),
     });
@@ -957,21 +1138,52 @@ fn repo_key(repo_root: &str) -> String {
     format!("{hash:016x}")
 }
 
-/// Absolute path of the on-disk work prompt for a worktree:
-/// `<prompts_root>/<repo-key>/<issue_id>.md`. `issue_id` is `validate_issue_id`-safe
-/// (a single normal component), so it can't escape the directory.
-fn prompt_file_path(prompts_root: &Path, repo_root: &str, issue_id: &str) -> PathBuf {
-    prompts_root
+/// Absolute path of an on-disk prompt file for a worktree:
+/// `<prompts_root>/<repo-key>/<issue_id><suffix>`.
+///
+/// The `issue_id` is IPC-supplied, so it's validated *here* — at the sink that
+/// `Path::join`s it — rather than trusting each caller to have done it: a `..`-y id
+/// would otherwise escape the app data dir and let a compromised webview write a
+/// file anywhere the app can.
+fn prompt_path(
+    prompts_root: &Path,
+    repo_root: &str,
+    issue_id: &str,
+    suffix: &str,
+) -> Result<PathBuf> {
+    validate_issue_id(issue_id)?;
+    Ok(prompts_root
         .join(repo_key(repo_root))
-        .join(format!("{issue_id}.md"))
+        .join(format!("{issue_id}{suffix}")))
 }
 
-/// Path of the on-disk CI-fix prompt for a worktree (distinct file so it never
-/// clobbers the normal work prompt): `<prompts_root>/<repo-key>/<issue_id>.fixci.md`.
-fn fix_ci_prompt_file_path(prompts_root: &Path, repo_root: &str, issue_id: &str) -> PathBuf {
-    prompts_root
-        .join(repo_key(repo_root))
-        .join(format!("{issue_id}.fixci.md"))
+/// Path of a worktree's rendered work prompt.
+fn prompt_file_path(prompts_root: &Path, repo_root: &str, issue_id: &str) -> Result<PathBuf> {
+    prompt_path(prompts_root, repo_root, issue_id, ".md")
+}
+
+/// Path of a worktree's CI-fix prompt (a distinct file so it never clobbers the
+/// normal work prompt).
+fn fix_ci_prompt_file_path(
+    prompts_root: &Path,
+    repo_root: &str,
+    issue_id: &str,
+) -> Result<PathBuf> {
+    prompt_path(prompts_root, repo_root, issue_id, ".fixci.md")
+}
+
+/// Write a rendered prompt to `path` (creating its per-repo directory) and hand back
+/// the path. The fs work — and, for the CI-fix prompt, a whole embedded job log —
+/// runs on the blocking pool, like the rest of this module's filesystem I/O.
+async fn write_prompt_file(path: PathBuf, body: String) -> Result<String> {
+    tokio::task::spawn_blocking(move || -> Result<String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, body)?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await?
 }
 
 /// The directory santree writes agent work-prompt files into, under the app's data
@@ -986,8 +1198,15 @@ pub fn prompts_root(app: &tauri::AppHandle) -> Option<PathBuf> {
 /// Best-effort delete of a worktree's on-disk prompt files — the work prompt and
 /// the CI-fix prompt (missing is fine).
 fn delete_prompt_file(prompts_root: &Path, repo_root: &str, issue_id: &str) {
-    let _ = std::fs::remove_file(prompt_file_path(prompts_root, repo_root, issue_id));
-    let _ = std::fs::remove_file(fix_ci_prompt_file_path(prompts_root, repo_root, issue_id));
+    for path in [
+        prompt_file_path(prompts_root, repo_root, issue_id),
+        fix_ci_prompt_file_path(prompts_root, repo_root, issue_id),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Render the agent's opening prompt for a freshly-started worktree, from the
@@ -1059,12 +1278,8 @@ pub async fn work_prompt(
     // then the short `Read <path> …` line. Writing here (inside the launch fetch,
     // which pulled the live ticket above) is what keeps the file current: every
     // fresh launch re-renders from the latest Linear state and overwrites.
-    let path = prompt_file_path(prompts_root, &root, issue_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, &rendered)?;
-    Ok(path.to_string_lossy().into_owned())
+    let path = prompt_file_path(prompts_root, &root, issue_id)?;
+    write_prompt_file(path, rendered).await
 }
 
 /// Render the CI-fix opening prompt — the failed check log plus the guardrails
@@ -1102,12 +1317,8 @@ pub async fn fix_ci_prompt(
     .trim()
     .to_string();
 
-    let path = fix_ci_prompt_file_path(prompts_root, &root, issue_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, &rendered)?;
-    Ok(path.to_string_lossy().into_owned())
+    let path = fix_ci_prompt_file_path(prompts_root, &root, issue_id)?;
+    write_prompt_file(path, rendered).await
 }
 
 // ── Setup script (.santree/init.sh) ──────────────────────────────────────────
@@ -1210,10 +1421,11 @@ fn slugify(title: &str) -> String {
     }
 }
 
-/// Parse a stored agent string, defaulting to Claude for missing/unknown values
-/// (e.g. a row written by an older build) rather than failing the whole list.
-fn parse_agent(s: Option<&str>) -> AgentKind {
-    s.and_then(|s| s.parse().ok()).unwrap_or(AgentKind::Claude)
+/// Parse the stored agent string. `None` when the row records no agent (or one this
+/// build doesn't know) — the worktree simply reports no agent rather than claiming a
+/// made-up one, and an unknown value never fails the whole list.
+fn parse_agent(s: Option<&str>) -> Option<AgentKind> {
+    s.and_then(|s| s.parse().ok())
 }
 
 #[cfg(unix)]
@@ -1438,6 +1650,15 @@ mod tests {
             !wt.setup_ran,
             "setup is a separate streamed step, not run by create"
         );
+        // Nothing here knows the ticket's status, and no agent has run yet — report
+        // neither rather than a placeholder. The chosen agent IS a real source.
+        assert_eq!(wt.status, None);
+        assert_eq!(wt.activity, None);
+        assert_eq!(wt.agent, Some(AgentKind::Claude));
+        // A branch that has never been pushed can't be behind its remote — `create`
+        // says so without a doomed `git fetch origin <branch>` round-trip.
+        assert_eq!(wt.remote_behind, 0);
+        assert!(!wt.pull_conflict);
         let wt_dir = repo_dir.join(".santree/worktrees/AK-1");
         assert!(wt_dir.exists(), "worktree directory should exist");
 
@@ -1515,14 +1736,18 @@ mod tests {
         // A work-prompt file (normally written by `work_prompt` at launch) is
         // cleaned up on removal. Write one at the real path the removal recomputes.
         let prompts = base.join("prompts");
-        let pfile = prompt_file_path(&prompts, repo_dir.to_string_lossy().as_ref(), "AK-1");
+        let pfile =
+            prompt_file_path(&prompts, repo_dir.to_string_lossy().as_ref(), "AK-1").unwrap();
         std::fs::create_dir_all(pfile.parent().unwrap()).unwrap();
         std::fs::write(&pfile, "prompt body").unwrap();
 
         // 3. Remove the worktree + link.
         remove(&db, "test", "AK-1", Some(&prompts)).await.unwrap();
         assert!(!wt_dir.exists(), "worktree directory should be gone");
-        assert!(!pfile.exists(), "work-prompt file should be deleted with the worktree");
+        assert!(
+            !pfile.exists(),
+            "work-prompt file should be deleted with the worktree"
+        );
         assert!(
             list(&db, "test").await.unwrap().is_empty(),
             "link should be gone"
@@ -1556,9 +1781,18 @@ mod tests {
             .unwrap();
 
         // AK-1 branches off main.
-        let ak1 = create(&db, "test", "AK-1", "First", None, None, AgentKind::Claude, None)
-            .await
-            .unwrap();
+        let ak1 = create(
+            &db,
+            "test",
+            "AK-1",
+            "First",
+            None,
+            None,
+            AgentKind::Claude,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(ak1.base_branch, "main");
 
         // AK-2 is stacked on AK-1's branch.
@@ -1583,6 +1817,135 @@ mod tests {
             ak2_after.base_branch, "main",
             "AK-2 should be re-pointed to AK-1's old base, not left on the deleted branch"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `create` must not probe the remote: the branch it just cut has never been
+    /// pushed, so `remote_behind`/`pull_conflict` are zero by construction and the
+    /// `git fetch origin <branch>` is pure latency on every task start. Proven by
+    /// planting a *pending* remote commit on the branch's name: `create` still says
+    /// zero (it never looked), and the probing `get` path then reports it.
+    #[tokio::test]
+    async fn create_skips_the_remote_probe_and_get_reconciles() {
+        let base = std::env::temp_dir().join(format!("santree-noprobe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo_dir = base.join("repo");
+        let origin = base.join("origin.git");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::create_dir_all(&origin).unwrap();
+
+        run_git(&origin, &["init", "--bare", "-b", "main"]);
+        run_git(&repo_dir, &["init", "-b", "main"]);
+        run_git(&repo_dir, &["config", "user.email", "t@t.test"]);
+        run_git(&repo_dir, &["config", "user.name", "Test"]);
+        std::fs::write(repo_dir.join("README.md"), "hello\n").unwrap();
+        run_git(&repo_dir, &["add", "-A"]);
+        run_git(&repo_dir, &["commit", "-m", "init"]);
+        run_git(
+            &repo_dir,
+            &["remote", "add", "origin", origin.to_string_lossy().as_ref()],
+        );
+        run_git(&repo_dir, &["push", "-u", "origin", "main"]);
+
+        // Someone else already pushed a commit on the exact branch `create` will cut
+        // (its name is derived from the issue id + title), so origin/<branch> is one
+        // commit ahead of what the new worktree will check out.
+        let branch = "santree/ak-3-remote-work";
+        run_git(&repo_dir, &["checkout", "-b", branch]);
+        std::fs::write(repo_dir.join("remote.txt"), "from elsewhere\n").unwrap();
+        run_git(&repo_dir, &["add", "-A"]);
+        run_git(&repo_dir, &["commit", "-m", "remote commit"]);
+        run_git(&repo_dir, &["push", "origin", branch]);
+        run_git(&repo_dir, &["checkout", "main"]);
+        run_git(&repo_dir, &["branch", "-D", branch]);
+
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        sqlx::query("INSERT INTO repos (name, tracker, path) VALUES ('test','Local git',?)")
+            .bind(repo_dir.to_string_lossy().as_ref())
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let wt = create(
+            &db,
+            "test",
+            "AK-3",
+            "Remote work",
+            None,
+            None,
+            AgentKind::Claude,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(wt.branch, branch);
+        assert_eq!(
+            wt.remote_behind, 0,
+            "create reports the branch as local-only — it never probed the remote"
+        );
+        assert!(!wt.pull_conflict);
+
+        // The probing path sees what's really on origin, so nothing is lost.
+        let fetched = get(&db, "test", "AK-3").await.unwrap().unwrap();
+        assert_eq!(
+            fetched.remote_behind, 1,
+            "the pending remote commit lands on the next refresh"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The prompt-file path is a filesystem sink for an IPC-supplied `issue_id`: a
+    /// traversing id must be rejected *there*, not left to each caller to remember
+    /// (`work_prompt` didn't — and wrote an arbitrary `.md` outside the data dir).
+    #[test]
+    fn prompt_paths_reject_traversing_issue_ids() {
+        let root = Path::new("/tmp/prompts");
+        for bad in ["../../evil", "..", "/etc/passwd", "a/b", ""] {
+            assert!(
+                prompt_file_path(root, "/repo", bad).is_err(),
+                "work-prompt path should reject issue id {bad:?}"
+            );
+            assert!(
+                fix_ci_prompt_file_path(root, "/repo", bad).is_err(),
+                "CI-fix prompt path should reject issue id {bad:?}"
+            );
+        }
+
+        // A normal id still resolves under <prompts_root>/<repo-key>/.
+        let ok = prompt_file_path(root, "/repo", "AK-1").unwrap();
+        assert_eq!(ok.file_name().unwrap(), "AK-1.md");
+        assert!(ok.starts_with(root));
+    }
+
+    /// Two creates for the same issue can both get past `create`'s "already tracked?"
+    /// check while the (slow) git work runs — the second insert must adopt the first's
+    /// row instead of blowing up on the primary key.
+    #[tokio::test]
+    async fn insert_link_is_idempotent_under_a_race() {
+        let base = std::env::temp_dir().join(format!("santree-insert-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+
+        let row = |branch: &str| LinkRow {
+            issue_id: "AK-1".into(),
+            title: "First".into(),
+            project: None,
+            branch: branch.into(),
+            worktree_path: "/repo/.santree/worktrees/AK-1".into(),
+            base_branch: "main".into(),
+            agent: Some("Claude".into()),
+            setup_ran: 0,
+        };
+
+        assert!(insert_link(&db, "/repo", &row("winner")).await.unwrap());
+        // The loser's insert is a no-op — reported as such, not an error.
+        assert!(!insert_link(&db, "/repo", &row("loser")).await.unwrap());
+
+        let stored = link_row(&db, "/repo", "AK-1").await.unwrap().unwrap();
+        assert_eq!(stored.branch, "winner", "the winner's row is left intact");
 
         let _ = std::fs::remove_dir_all(&base);
     }

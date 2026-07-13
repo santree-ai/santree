@@ -146,6 +146,40 @@ describe("useTerminalTabs", () => {
       expect(result.current.activeKey).toBe(t1);
     });
 
+    it("closes every tab of a batch issued in one tick (the sidebar's close-all-for-a-ticket)", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      let t0 = "";
+      let t1 = "";
+      let t2 = "";
+      act(() => {
+        t0 = result.current.open({ title: "0" });
+        t1 = result.current.open({ title: "1" });
+        t2 = result.current.open({ title: "2" });
+      });
+
+      // No render in between, so each close must see the previous one's result.
+      act(() => {
+        result.current.close(t0);
+        result.current.close(t1);
+      });
+
+      expect(result.current.tabs.map((t) => t.key)).toEqual([t2]);
+      expect(result.current.activeKey).toBe(t2);
+    });
+
+    it("closing an unknown key is a no-op", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      let t0 = "";
+      act(() => {
+        t0 = result.current.open({ title: "0" });
+      });
+
+      act(() => result.current.close("term-does-not-exist"));
+
+      expect(result.current.tabs.map((t) => t.key)).toEqual([t0]);
+      expect(result.current.activeKey).toBe(t0);
+    });
+
     it("closing the only remaining tab leaves activeKey null", () => {
       const { result } = renderHook(() => useTerminalTabs());
       let t0 = "";

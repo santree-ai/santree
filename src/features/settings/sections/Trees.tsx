@@ -210,9 +210,11 @@ function SetupScriptField({ repo }: { repo: string }) {
   const dirty = !script?.exists || (draft !== null && draft !== base);
   const needsChmod = !!script?.exists && !script.executable;
 
+  // Drop the draft only once the write lands: on failure the optimistic rollback
+  // restores the saved script, so clearing it eagerly would destroy the edit the
+  // user is about to retry.
   const onSave = () => {
-    save(value);
-    setDraft(null);
+    save(value, { onSuccess: () => setDraft(null) });
   };
 
   return (
@@ -298,7 +300,6 @@ function SetupScriptBody({
           onValueChange={onValueChange}
           highlight={highlightShell}
           padding={12}
-          textareaClassName="outline-none"
           style={{
             fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
             fontSize: 12.5,

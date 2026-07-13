@@ -8,10 +8,11 @@
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use santree_core::domain::{SessionState, SessionUsageLive};
+use santree_core::domain::{AgentState, SessionState, SessionUsageLive};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager};
 
@@ -94,7 +95,10 @@ fn base_settings_map(app: &AppHandle) -> Option<Map<String, Value>> {
     // Both the hooks and the statusline invoke `santree-hook` against the db, so
     // resolve them once.
     let (bin, db_pathbuf) = (hook_bin(app)?, db_path(app)?);
-    let (bin, db) = (bin.to_str()?, db_pathbuf.to_str()?);
+    // Claude runs `command` through a shell, so both paths are shell-quoted:
+    // app_data_dir always has a space ("Application Support") and a home directory
+    // may contain `$`/backtick/quote characters too.
+    let (bin, db) = (sh_quote(bin.to_str()?), sh_quote(db_pathbuf.to_str()?));
 
     let mut root = Map::new();
 
@@ -102,10 +106,9 @@ fn base_settings_map(app: &AppHandle) -> Option<Map<String, Value>> {
     for &event in EVENTS {
         // SessionEnd runs synchronously (short timeout) so "exited" reliably lands
         // before session teardown; the rest are async so they never add latency to
-        // a turn. Paths are shell-double-quoted (app_data_dir has a space:
-        // "Application Support") since Claude runs `command` via a shell.
+        // a turn — and, crucially, so this hook can never gate a Claude decision.
         let is_end = event == "SessionEnd";
-        let command = format!("\"{bin}\" --db \"{db}\" {event}");
+        let command = format!("{bin} --db {db} {event}");
 
         let mut hook = Map::new();
         hook.insert("type".into(), json!("command"));
@@ -128,10 +131,18 @@ fn base_settings_map(app: &AppHandle) -> Option<Map<String, Value>> {
     // capture must run regardless of the setting (see [`claude_settings`]).
     root.insert(
         "statusLine".into(),
-        json!({ "type": "command", "command": format!("\"{bin}\" --db \"{db}\" statusline") }),
+        json!({ "type": "command", "command": format!("{bin} --db {db} statusline") }),
     );
 
     Some(root)
+}
+
+/// Quote a path for the shell Claude runs a hook/statusLine `command` through.
+/// Single quotes, because double quotes still expand `$`, backticks and `\` — and
+/// a home directory may legally contain any of them. `'` itself can't be escaped
+/// inside single quotes, so it's closed, escaped, and reopened (`'\''`).
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Write a settings map to `<app_data_dir>/<file>` and return its path.
@@ -168,12 +179,55 @@ pub fn claude_settings_no_git(app: &AppHandle) -> Option<String> {
     write_settings(app, "claude-hooks-fixci.json", root)
 }
 
+/// Cap on the session rows a single read hands back. Ordered newest-first, so
+/// this keeps the freshest N — orders of magnitude more than the handful of
+/// sessions a user has open, while keeping the query (and the reconcile pass in
+/// [`session_states`]) bounded no matter how the table grows.
+const MAX_SESSION_ROWS: i64 = 200;
+
+/// A session whose hooks *and* status line have both been silent this long is
+/// dead: a live one rewrites its row on every turn and every status-line render.
+const STALE_SESSION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+
+/// How often [`prune_stale_sessions`] actually touches the db. It rides the
+/// frontend's ~10s session poll (no separate scheduler), so it's rate-limited —
+/// a delete-nothing write every 10s would churn the WAL for no reason.
+const PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1_000;
+
+/// When the prune last ran (epoch-ms). Starts at 0, so the first poll after
+/// launch prunes.
+static LAST_PRUNE_MS: AtomicI64 = AtomicI64::new(0);
+
+/// Drop `session_state` / `session_usage_live` rows for sessions gone quiet for
+/// [`STALE_SESSION_MS`] — ad-hoc terminal and base-worktree sessions are never
+/// otherwise cleaned up, so the tables only ever grow. A running session can't be
+/// caught: any hook event or status-line render bumps its `updated_at_ms`.
+async fn prune_stale_sessions(db: &Db, now_ms: i64) -> Result<()> {
+    let last = LAST_PRUNE_MS.load(Ordering::Relaxed);
+    if now_ms - last < PRUNE_INTERVAL_MS
+        || LAST_PRUNE_MS
+            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+    {
+        return Ok(()); // too soon, or a concurrent poll claimed this round
+    }
+    let cutoff = now_ms - STALE_SESSION_MS;
+    for table in ["session_state", "session_usage_live"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE updated_at_ms < ?"))
+            .bind(cutoff)
+            .execute(db)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Every session's live usage row (from the status-line capture), newest first.
 pub async fn session_usage_live(db: &Db) -> Result<Vec<SessionUsageLive>> {
     let rows = sqlx::query_as::<_, (String, f64, i64, i64, String, f64, i64)>(
         "SELECT session_id, used_pct, input_tokens, context_size, model, cost_usd, updated_at_ms \
-         FROM session_usage_live ORDER BY updated_at_ms DESC",
+         FROM session_usage_live ORDER BY updated_at_ms DESC LIMIT ?",
     )
+    .bind(MAX_SESSION_ROWS)
     .fetch_all(db)
     .await?;
     Ok(rows
@@ -202,43 +256,64 @@ pub async fn session_usage_live(db: &Db) -> Result<Vec<SessionUsageLive>> {
 /// reject a permission, or type a reply) fires no hook, so a stored row can be
 /// stale. The transcript is the ground truth, so we correct it on read.
 pub async fn session_states(db: &Db) -> Result<Vec<SessionState>> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            i64,
-        ),
-    >(
+    let now_ms = now_ms();
+    if let Err(e) = prune_stale_sessions(db, now_ms).await {
+        log::warn!("pruning stale session rows failed: {e}");
+    }
+
+    let rows = sqlx::query_as::<_, StateRow>(
         "SELECT session_id, state, event, cwd, message, transcript_path, updated_at_ms \
-         FROM session_state ORDER BY updated_at_ms DESC",
+         FROM session_state ORDER BY updated_at_ms DESC LIMIT ?",
     )
+    .bind(MAX_SESSION_ROWS)
     .fetch_all(db)
     .await?;
 
-    let now_ms = now_ms();
-    Ok(rows
-        .into_iter()
-        .map(
-            |(session_id, mut state, event, cwd, mut message, transcript_path, updated_at_ms)| {
+    // Reconciling is real blocking fs work *per row* — a 128 KB transcript-tail
+    // read plus a JSON parse of every line, plus a subagent-dir scan with a
+    // `metadata` call per entry — and this runs on a ~10s poll. One batch hop off
+    // the async runtime, not one task per row.
+    Ok(tokio::task::spawn_blocking(move || reconcile_rows(rows, now_ms)).await?)
+}
+
+/// A `session_state` row as stored: `state` is the TEXT column, still unparsed.
+type StateRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+);
+
+/// Parse + reconcile a batch of stored rows. Blocking (transcript fs reads) —
+/// always call from `spawn_blocking`.
+fn reconcile_rows(rows: Vec<StateRow>, now_ms: i64) -> Vec<SessionState> {
+    rows.into_iter()
+        .filter_map(
+            |(session_id, stored, event, cwd, mut message, transcript_path, updated_at_ms)| {
+                let Some(mut state) = AgentState::parse(&stored) else {
+                    // The hook binary is built separately, so a stale copy on disk
+                    // can write a state this build doesn't know. Drop the row rather
+                    // than guess — a wrong badge is worse than a missing one.
+                    log::warn!("session {session_id}: unknown state {stored:?}, skipping");
+                    return None;
+                };
                 // The hook events set a state but can't reliably clear it (a manual
                 // accept/reject and a turn that ends without a `Stop` both fire
                 // nothing). So we reconcile the live state against the transcript —
                 // the ground truth — and drop the now-irrelevant prompt text when the
                 // state is no longer a "needs-you" one.
                 if let Some(live) =
-                    reconcile_live_state(&state, transcript_path.as_deref(), updated_at_ms, now_ms)
+                    reconcile_live_state(state, transcript_path.as_deref(), updated_at_ms, now_ms)
                 {
-                    if live != "permission" && live != "waiting" {
+                    if !live.is_blocked_on_user() {
                         message = None;
                     }
-                    state = live.to_string();
+                    state = live;
                 }
-                SessionState {
+                Some(SessionState {
                     session_id,
                     state,
                     event,
@@ -246,10 +321,10 @@ pub async fn session_states(db: &Db) -> Result<Vec<SessionState>> {
                     message,
                     transcript_path,
                     updated_at_ms: updated_at_ms as f64,
-                }
+                })
             },
         )
-        .collect())
+        .collect()
 }
 
 fn now_ms() -> i64 {
@@ -373,13 +448,13 @@ fn main_activity_ms(transcript_path: &str) -> Option<i64> {
 /// - `idle`/`exited`: settled — left untouched (`idle`→`active` only ever comes
 ///   from a real `UserPromptSubmit`; liveness owns `exited`).
 fn reconcile_live_state(
-    state: &str,
+    state: AgentState,
     transcript_path: Option<&str>,
     recorded_at_ms: i64,
     now_ms: i64,
-) -> Option<&'static str> {
-    let is_pending = state == "permission" || state == "waiting";
-    if !is_pending && state != "active" {
+) -> Option<AgentState> {
+    let is_pending = state.is_blocked_on_user();
+    if !is_pending && state != AgentState::Active {
         return None; // idle / exited: settled
     }
     let path = transcript_path?;
@@ -395,7 +470,7 @@ fn reconcile_live_state(
     }
 
     if now_ms - last_ms >= IDLE_QUIET_MS {
-        return Some("idle"); // everything quiet → idle
+        return Some(AgentState::Idle); // everything quiet → idle
     }
 
     // Active. Distinguish the main loop working from it being blocked on a subagent:
@@ -406,7 +481,11 @@ fn reconcile_live_state(
         (Some(_), None) => true,
         (None, _) => false,
     };
-    Some(if delegating { "delegating" } else { "active" })
+    Some(if delegating {
+        AgentState::Delegating
+    } else {
+        AgentState::Active
+    })
 }
 
 #[cfg(test)]
@@ -441,10 +520,64 @@ mod tests {
     const T: i64 = 1_700_000_000_000; // an arbitrary "prompt recorded at" instant
 
     #[test]
+    fn shell_quoting_survives_hostile_paths() {
+        // A home directory may legally contain any of these; double quotes would
+        // let `$`, a backtick and `\` through to the shell.
+        let path = "/Users/o'brien/$HOME `id` \\x/Application Support/santree.db";
+        assert_eq!(
+            sh_quote(path),
+            r"'/Users/o'\''brien/$HOME `id` \x/Application Support/santree.db'"
+        );
+        // Round-trip through a real shell: the quoted form must echo back verbatim.
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf %s {}", sh_quote(path)))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), path);
+    }
+
+    #[test]
     fn settled_states_are_never_reconciled() {
         let p = transcript("settled", &[conv("assistant", T + 5000)]);
-        assert_eq!(reconcile_live_state("idle", Some(&p), T, T + 5000), None);
-        assert_eq!(reconcile_live_state("exited", Some(&p), T, T + 5000), None);
+        assert_eq!(
+            reconcile_live_state(AgentState::Idle, Some(&p), T, T + 5000),
+            None
+        );
+        assert_eq!(
+            reconcile_live_state(AgentState::Exited, Some(&p), T, T + 5000),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_stored_state_drops_the_row() {
+        // A stale santree-hook on disk writing a state this build doesn't know must
+        // not surface as a wrong badge.
+        let rows = vec![
+            (
+                "s1".into(),
+                "teleporting".into(),
+                "Notification".into(),
+                "/w".into(),
+                None,
+                None,
+                T,
+            ),
+            (
+                "s2".into(),
+                "idle".into(),
+                "Stop".into(),
+                "/w".into(),
+                None,
+                None,
+                T,
+            ),
+        ];
+        let out = reconcile_rows(rows, T);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].session_id, "s2");
+        assert_eq!(out[0].state, AgentState::Idle);
     }
 
     #[test]
@@ -461,8 +594,14 @@ mod tests {
             ],
         );
         let now = T + 5_000;
-        assert_eq!(reconcile_live_state("permission", Some(&p), T, now), None);
-        assert_eq!(reconcile_live_state("waiting", Some(&p), T, now), None);
+        assert_eq!(
+            reconcile_live_state(AgentState::Permission, Some(&p), T, now),
+            None
+        );
+        assert_eq!(
+            reconcile_live_state(AgentState::Waiting, Some(&p), T, now),
+            None
+        );
     }
 
     #[test]
@@ -474,8 +613,8 @@ mod tests {
         );
         let now = T + 5_000; // only 2s since the last entry → not quiet
         assert_eq!(
-            reconcile_live_state("permission", Some(&p), T, now),
-            Some("active")
+            reconcile_live_state(AgentState::Permission, Some(&p), T, now),
+            Some(AgentState::Active)
         );
     }
 
@@ -487,8 +626,8 @@ mod tests {
         let p = transcript("reject-idle", &[conv("user", T + 5_000)]);
         let now = T + 5_000 + IDLE_QUIET_MS + 1; // quiet past the threshold
         assert_eq!(
-            reconcile_live_state("permission", Some(&p), T, now),
-            Some("idle")
+            reconcile_live_state(AgentState::Permission, Some(&p), T, now),
+            Some(AgentState::Idle)
         );
     }
 
@@ -497,13 +636,13 @@ mod tests {
         let p = transcript("active", &[conv("assistant", T)]);
         // Quiet long enough → idle even though no `Stop` fired.
         assert_eq!(
-            reconcile_live_state("active", Some(&p), T, T + IDLE_QUIET_MS + 1),
-            Some("idle")
+            reconcile_live_state(AgentState::Active, Some(&p), T, T + IDLE_QUIET_MS + 1),
+            Some(AgentState::Idle)
         );
         // Recent main-loop activity (mid-turn / thinking pause) → running.
         assert_eq!(
-            reconcile_live_state("active", Some(&p), T, T + 2_000),
-            Some("active")
+            reconcile_live_state(AgentState::Active, Some(&p), T, T + 2_000),
+            Some(AgentState::Active)
         );
     }
 
@@ -516,8 +655,8 @@ mod tests {
         let main = transcript("subagent", &[conv("assistant", now - 300_000)]);
         // Without the subagent that silence reads as idle…
         assert_eq!(
-            reconcile_live_state("active", Some(&main), now - 600_000, now),
-            Some("idle")
+            reconcile_live_state(AgentState::Active, Some(&main), now - 600_000, now),
+            Some(AgentState::Idle)
         );
         // …but a subagent actively writing its own file means the main loop is
         // blocked on it → "delegating", distinct from the agent itself running.
@@ -525,17 +664,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("agent-x.jsonl"), "{}").unwrap(); // mtime ≈ now
         assert_eq!(
-            reconcile_live_state("active", Some(&main), now - 600_000, now),
-            Some("delegating")
+            reconcile_live_state(AgentState::Active, Some(&main), now - 600_000, now),
+            Some(AgentState::Delegating)
         );
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
     #[test]
     fn missing_or_unreadable_transcript_leaves_state_untouched() {
-        assert_eq!(reconcile_live_state("permission", None, T, T), None);
         assert_eq!(
-            reconcile_live_state("active", Some("/no/such/file.jsonl"), T, T),
+            reconcile_live_state(AgentState::Permission, None, T, T),
+            None
+        );
+        assert_eq!(
+            reconcile_live_state(AgentState::Active, Some("/no/such/file.jsonl"), T, T),
             None
         );
     }

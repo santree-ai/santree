@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { SessionState, TabKind, Worktree, WorktreeTab } from "../../bindings";
+import type { SessionState, TabKind, TaskStatus, Worktree, WorktreeTab } from "../../bindings";
 import type { PendingLaunch } from "../../state/AppContext";
 import type { TerminalTab } from "../terminal/orchestrator";
 import {
@@ -9,20 +9,19 @@ import {
   isTreeLaunchDead,
   mergeWorktrees,
   pendingWorktree,
-  planStartAgent,
   resolveActiveTab,
-  shouldCompleteSetup,
   shouldHoldTerminal,
+  startTabFor,
   tabsToCloseForWorktree,
   withLiveWorktreeStatus,
 } from "./model";
 
-/** Minimal Worktree with backend-placeholder status/activity (the pre-fix constants). */
+/** Minimal Worktree as the backend ships it: no invented status/activity. */
 function worktree(id: string): Worktree {
   return {
     id,
     title: `Task ${id}`,
-    status: "InProgress",
+    status: null,
     addLines: 0,
     delLines: 0,
     dirty: false,
@@ -32,7 +31,7 @@ function worktree(id: string): Worktree {
     remoteBehind: 0,
     pullConflict: false,
     agent: "Claude",
-    activity: "Idle",
+    activity: null,
     branch: `santree/${id.toLowerCase()}`,
     path: "/tmp/x",
     project: null,
@@ -44,14 +43,17 @@ function worktree(id: string): Worktree {
 
 describe("withLiveWorktreeStatus", () => {
   it("overrides status with the linked Linear task's real workflow state", () => {
-    const statusByTaskId = new Map<string, Worktree["status"]>([["AK-1", "InReview"]]);
+    const statusByTaskId = new Map<string, TaskStatus>([["AK-1", "InReview"]]);
     const result = withLiveWorktreeStatus(worktree("AK-1"), statusByTaskId, new Set());
     expect(result.status).toBe("InReview");
   });
 
-  it("falls back to the backend status when the task isn't in the current tasks fetch", () => {
+  // The backend has no status to give (there's no column for it, and list/get never
+  // call Linear), so a worktree whose task isn't in the fetch has no status at all —
+  // the sidebar renders no chip rather than a confident, meaningless one.
+  it("leaves the status null when the task isn't in the current tasks fetch", () => {
     const result = withLiveWorktreeStatus(worktree("AK-1"), new Map(), new Set());
-    expect(result.status).toBe("InProgress");
+    expect(result.status).toBeNull();
   });
 
   it("reports Running only when a live PTY session exists for the worktree's main terminal", () => {
@@ -72,7 +74,7 @@ describe("withLiveWorktreeStatus", () => {
 describe("effectiveSessionState", () => {
   const running = (): Worktree => ({ ...worktree("AK-1"), activity: "Running" });
   const idle = (): Worktree => ({ ...worktree("AK-1"), activity: "Idle" });
-  const hook = (state: string): SessionState => ({
+  const hook = (state: SessionState["state"]): SessionState => ({
     sessionId: "s1",
     state,
     event: "x",
@@ -180,7 +182,8 @@ describe("mergeWorktrees", () => {
     const real = result.find((w) => w.id === "AK-1");
     const placeholder = result.find((w) => w.id === "AK-2");
     expect(real?.activity).toBe("Running");
-    expect(placeholder?.activity).toBe("Idle");
+    // A placeholder worktree doesn't exist yet — nothing is known about it.
+    expect(placeholder?.activity).toBeNull();
   });
 });
 
@@ -207,44 +210,23 @@ describe("isTreeLaunchDead", () => {
   });
 });
 
-describe("shouldCompleteSetup", () => {
-  it("completes when the finishing run still matches the current setupFor slot", () => {
-    expect(shouldCompleteSetup("AK-1", "AK-1")).toBe(true);
+describe("startTabFor", () => {
+  it("opens the Setup tab when the run-setup preference is on", () => {
+    expect(startTabFor(true)).toBe("setup");
   });
 
-  it("is a no-op once a different worktree's setup has superseded the single setupFor slot", () => {
-    expect(shouldCompleteSetup("AK-1", "AK-2")).toBe(false);
-  });
-
-  it("is a no-op once the slot has already been cleared", () => {
-    expect(shouldCompleteSetup("AK-1", null)).toBe(false);
-  });
-});
-
-describe("planStartAgent", () => {
-  it("runs setup first (Setup tab) when the run-setup preference is on", () => {
-    expect(planStartAgent(true)).toEqual({ tab: "setup", setupThenLaunch: true });
-  });
-
-  it("launches the agent immediately (Terminal tab) when the preference is off", () => {
-    expect(planStartAgent(false)).toEqual({ tab: "terminal", setupThenLaunch: false });
+  it("opens the Terminal tab when the preference is off", () => {
+    expect(startTabFor(false)).toBe("terminal");
   });
 });
 
 describe("shouldHoldTerminal", () => {
-  const idle = {
-    launching: false,
-    initialSetup: false,
-    promptFetched: false,
-    needsSeed: false,
-    sessionFetching: false,
-  };
+  const idle = { launching: false, initialSetup: false, promptFetched: false };
 
-  // Regression guard for the bare-shell launch race: while the work prompt is
-  // fetching, `needsSeed` is still false (it waits on the prompt) — the terminal
-  // must be withheld anyway, or it mounts seedless and the launch is lost (the
-  // seed only applies at PTY creation).
-  it("holds during a launch while the work prompt is still fetching, even with needsSeed false", () => {
+  // Regression guard for the bare-shell launch race: the terminal must be withheld
+  // while the work prompt is still being written, or it mounts seedless and the
+  // launch is lost (a seed only applies at PTY creation).
+  it("holds during a launch while the work prompt is still being written", () => {
     expect(shouldHoldTerminal({ ...idle, launching: true })).toBe(true);
   });
 
@@ -252,12 +234,7 @@ describe("shouldHoldTerminal", () => {
     expect(shouldHoldTerminal({ ...idle, launching: true, initialSetup: true })).toBe(false);
   });
 
-  it("holds while the session resolution is in flight", () => {
-    expect(shouldHoldTerminal({ ...idle, needsSeed: true, sessionFetching: true })).toBe(true);
-    expect(shouldHoldTerminal({ ...idle, needsSeed: true })).toBe(false);
-  });
-
-  it("releases once the prompt and session are both fresh", () => {
+  it("releases once the prompt has landed, and never holds a passive reopen", () => {
     expect(shouldHoldTerminal({ ...idle, launching: true, promptFetched: true })).toBe(false);
     expect(shouldHoldTerminal(idle)).toBe(false);
   });

@@ -18,6 +18,9 @@ export function useResolvedTheme(): "light" | "dark" {
   useEffect(() => {
     if (theme !== "auto") return;
     const mq = window.matchMedia(LIGHT_QUERY);
+    // Re-read on re-entry: while the preference wasn't "auto" we weren't
+    // listening, so the OS may have flipped since we last saw it.
+    setSystemLight(mq.matches);
     const onChange = () => setSystemLight(mq.matches);
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);

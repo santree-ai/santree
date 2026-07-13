@@ -50,6 +50,9 @@ export function useEdgeResize(opts: EdgeResizeOptions) {
   const setVar = (w: number) => document.documentElement.style.setProperty(opts.cssVar, `${w}px`);
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    // Primary button only — a right-click would otherwise take pointer capture
+    // and leave the drag armed for as long as the context menu is up.
+    if (e.button !== 0) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     startX.current = e.clientX;
     startW.current = opts.width;

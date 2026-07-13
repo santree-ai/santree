@@ -6,7 +6,7 @@ import type { SessionState, Worktree } from "../../bindings";
 import { EmptyState } from "../../components/primitives";
 import { WorktreeStats } from "../../components/WorktreeStats";
 import { useSessionStates } from "../../lib/queries";
-import { palette, sessionStateMeta, statusColor } from "../../theme/colors";
+import { palette, sessionStateMeta, statusColor, statusLabel } from "../../theme/colors";
 import { effectiveSessionState, useTrees } from "./model";
 
 export function AllAgentsView() {
@@ -81,13 +81,17 @@ function AgentCard({
       </div>
       <div className="line-clamp-2 text-[12.5px] leading-[1.35] text-muted">{w.title}</div>
       <div className="mt-auto flex flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10px] text-muted-4">
-        <span className="flex items-center gap-1">
-          <span
-            className="h-1.5 w-1.5 rounded-full"
-            style={{ background: statusColor[w.status] }}
-          />
-          {w.status}
-        </span>
+        {/* No linked ticket status (not assigned to the viewer, or the base entry)
+            ⇒ no chip. Better than a confident, meaningless one. */}
+        {w.status && (
+          <span className="flex items-center gap-1">
+            <span
+              className="h-1.5 w-1.5 rounded-full"
+              style={{ background: statusColor[w.status] }}
+            />
+            {statusLabel[w.status]}
+          </span>
+        )}
         <WorktreeStats worktree={w} />
       </div>
     </button>

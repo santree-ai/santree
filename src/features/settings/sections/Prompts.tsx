@@ -238,14 +238,15 @@ function PromptEditor({
     ta.setAttribute("spellcheck", "false");
   }, [textareaId]);
 
+  // Drop the draft only once the write lands: on failure the optimistic rollback
+  // restores the *saved* text, so clearing it eagerly would destroy the edit the
+  // user is about to retry.
   const onSave = () => {
     if (!dirty) return;
-    setPrompt({ name: prompt.name, content: value });
-    setDraft(null);
+    setPrompt({ name: prompt.name, content: value }, { onSuccess: () => setDraft(null) });
   };
   const onReset = () => {
-    setPrompt({ name: prompt.name, content: null });
-    setDraft(null);
+    setPrompt({ name: prompt.name, content: null }, { onSuccess: () => setDraft(null) });
   };
   const onDelete = () => {
     deleteBlock(prompt.name);
@@ -293,7 +294,6 @@ function PromptEditor({
               highlight={highlightJinja}
               padding={14}
               textareaId={textareaId}
-              textareaClassName="outline-none"
               style={EDITOR_STYLE}
             />
           </div>

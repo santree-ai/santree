@@ -13,6 +13,7 @@ import { EmptyState, Spinner } from "../../../components/primitives";
 import { formatCompact, formatUsd } from "../../../lib/format";
 import { useClaudeUsage, useUsageProgress } from "../../../lib/queries";
 import { formatRelativeTime, useLiveNow } from "../../../lib/relativeTime";
+import { splitRepoPath } from "../../../lib/repo";
 import { modelMeta, modelVersion } from "../../../theme/colors";
 import { Heading } from "../widgets";
 
@@ -286,15 +287,6 @@ type FolderGroup = {
 /** A stable identity for a session (repo + id) — the current-session key. */
 const sessionKey = (s: SessionUsage) => `${s.repo} ${s.sessionId}`;
 
-/** Split an `owner/repo` name into its folder (everything before the last slash)
- *  and its short label. A name without a slash is its own folder. */
-function splitRepo(repo: string): { folder: string; label: string } {
-  const i = repo.lastIndexOf("/");
-  return i === -1
-    ? { folder: repo, label: repo }
-    : { folder: repo.slice(0, i), label: repo.slice(i + 1) };
-}
-
 /** Generic recency-preserving group-by: bucket items by key in first-seen order.
  *  Sessions arrive newest-first, so a bucket's first appearance is its latest. */
 function bucket<T>(items: T[], keyOf: (item: T) => string): [string, T[]][] {
@@ -336,7 +328,7 @@ function groupByLocation(sessions: SessionUsage[]): LocationGroup[] {
 function groupByRepo(sessions: SessionUsage[]): RepoGroup[] {
   return bucket(sessions, (s) => s.repo).map(([repo, list]) => ({
     repo,
-    label: splitRepo(repo).label,
+    label: splitRepoPath(repo).label,
     locations: groupByLocation(list),
     sessions: list,
     tokens: sumTokensOf(list),
@@ -348,7 +340,7 @@ function groupByRepo(sessions: SessionUsage[]): RepoGroup[] {
 /** Fold repo groups into their owning folders, preserving recency order (repos
  *  already arrive newest-first, so a folder's first appearance is its latest). */
 function groupByFolder(repos: RepoGroup[]): FolderGroup[] {
-  return bucket(repos, (r) => splitRepo(r.repo).folder).map(([folder, list]) => ({
+  return bucket(repos, (r) => splitRepoPath(r.repo).folder).map(([folder, list]) => ({
     folder,
     repos: list,
     sessionCount: list.reduce((a, r) => a + r.sessions.length, 0),

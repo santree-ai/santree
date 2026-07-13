@@ -9,8 +9,6 @@
  * the main content from the live terminal to that file's diff/contents.
  */
 
-import { useQueryClient } from "@tanstack/react-query";
-import { Channel } from "@tauri-apps/api/core";
 import {
   createContext,
   type ReactNode,
@@ -22,21 +20,18 @@ import {
   useState,
 } from "react";
 
-import {
-  commands,
-  type SessionState,
-  type SetupEvent,
-  type TabKind,
-  type Worktree,
-  type WorktreePr,
-  type WorktreeTab,
+import type {
+  SessionState,
+  TabKind,
+  TaskStatus,
+  Worktree,
+  WorktreePr,
+  WorktreeTab,
 } from "../../bindings";
 import {
-  queryKeys,
-  TREES_RUN_SETUP_KEY,
+  BulkDeleteError,
   useAddWorktreeTab,
   useBaseWorktree,
-  useBoolSetting,
   useRemoveWorktree,
   useRemoveWorktrees,
   useRemoveWorktreeTab,
@@ -47,6 +42,7 @@ import {
   useWorktreeTabs,
 } from "../../lib/queries";
 import { inEditable } from "../../lib/useKeyboardShortcuts";
+import { useAgentRuns } from "../../state/AgentRuns";
 import { type PendingLaunch, useApp, useAppUi } from "../../state/AppContext";
 import type { TerminalTab } from "../terminal/orchestrator";
 import { useTerminals } from "../terminal/TerminalsContext";
@@ -64,7 +60,9 @@ export function pendingWorktree(p: PendingLaunch): Worktree {
   return {
     id: p.id,
     title: p.title,
-    status: "InProgress",
+    // Nothing is known about a worktree that doesn't exist yet — and a placeholder
+    // is on screen for a second or two. Don't invent a status/activity for it.
+    status: null,
     addLines: 0,
     delLines: 0,
     dirty: false,
@@ -74,7 +72,7 @@ export function pendingWorktree(p: PendingLaunch): Worktree {
     remoteBehind: 0,
     pullConflict: false,
     agent: p.agent,
-    activity: "Idle",
+    activity: null,
     branch: "",
     path: "",
     project: p.project,
@@ -84,15 +82,16 @@ export function pendingWorktree(p: PendingLaunch): Worktree {
   };
 }
 
-/** Override a worktree's backend-constant `status`/`activity` with real signals:
- *  `status` from its linked Linear task's workflow state (falling back to the
- *  backend value when the task isn't in the current tasks fetch — e.g.
- *  unassigned to the viewer); `activity` from whether a live PTY session exists
- *  for its main terminal (`tree:<id>`). Exported for testing — see
- *  model.test.ts. */
+/** Fill in a worktree's `status`/`activity` from live signals — the backend ships
+ *  both as `null` rather than guessing (see the no-placeholder rule in CLAUDE.md).
+ *  `status` comes from the linked Linear task's workflow state, and stays null when
+ *  the task isn't in the current tasks fetch (e.g. it isn't assigned to the viewer)
+ *  — the sidebar then renders no chip, rather than a confident lie. `activity` is
+ *  derived from whether a live PTY session exists for the worktree's main terminal
+ *  (`tree:<id>`), which is a real signal. Exported for testing — see model.test.ts. */
 export function withLiveWorktreeStatus(
   w: Worktree,
-  statusByTaskId: Map<string, Worktree["status"]>,
+  statusByTaskId: Map<string, TaskStatus>,
   liveTermRefIds: Set<string>,
 ): Worktree {
   return {
@@ -161,15 +160,6 @@ export function isTreeLaunchDead(
   return !stillReferenced;
 }
 
-/** A finishing setup run should only mutate state if it's still the run
- *  `setupFor` names — `setupFor` is a single slot, and a later `runSetup`/
- *  `startAgent` for a *different* worktree can overwrite it while an earlier
- *  run is still streaming server-side (see `completeSetup`'s doc comment for
- *  the full rationale). Exported for testing — see model.test.ts. */
-export function shouldCompleteSetup(finishedId: string, currentSetupFor: string | null): boolean {
-  return finishedId === currentSetupFor;
-}
-
 /** The file-picker sub-tabs (right panel). */
 export type FileTab = "all" | "changes";
 /** The main-area tabs. "issue" and "terminal" are always present (and can't be
@@ -226,36 +216,28 @@ export function resolveActiveTab(
   return remembered && tabAvailable ? remembered : fallbackTab;
 }
 
-/** Whether the main terminal must be withheld (not mounted) because its seed
- *  inputs are still being fetched. The PTY applies the seed only at session
- *  creation, so mounting early spawns a bare shell and the agent launch is
- *  silently lost — no session row is ever minted, which later strands the
- *  Resume button in a shell↔"session ended" loop. Two inputs can be in flight:
- *  the work prompt (during a launch, past any initial setup — during setup the
- *  terminal is withheld by the setup gate itself) and the session resolution.
+/** Whether the main terminal must be withheld while the *work prompt* is still
+ *  being written. The PTY applies a seed only at session creation, so mounting in
+ *  this window spawns a bare shell and the agent launch is silently lost — no
+ *  session row is ever minted, which later strands the Resume button in a
+ *  shell↔"session ended" loop. (During setup the terminal is withheld by the setup
+ *  gate instead; the rest of the seed inputs are gated inside `useAgentTab`.)
  *  Exported for testing — see model.test.ts. */
 export function shouldHoldTerminal(opts: {
   launching: boolean;
   initialSetup: boolean;
   promptFetched: boolean;
-  needsSeed: boolean;
-  sessionFetching: boolean;
 }): boolean {
-  const { launching, initialSetup, promptFetched, needsSeed, sessionFetching } = opts;
-  return (launching && !initialSetup && !promptFetched) || (needsSeed && sessionFetching);
+  const { launching, initialSetup, promptFetched } = opts;
+  return launching && !initialSetup && !promptFetched;
 }
 
-/** Decide how "begin a task" opens the worktree: run setup first (Setup tab,
- *  the agent launches once it finishes) or launch the agent immediately — per
+/** Which main tab "begin a task" opens: the Setup tab when the script runs first
+ *  (the agent launches once it finishes), otherwise straight to the terminal — per
  *  the "run setup on new worktrees" preference. Exported for testing — see
  *  model.test.ts. */
-export function planStartAgent(runSetupPref: boolean): {
-  tab: Extract<MainTab, "setup" | "terminal">;
-  setupThenLaunch: boolean;
-} {
-  return runSetupPref
-    ? { tab: "setup", setupThenLaunch: true }
-    : { tab: "terminal", setupThenLaunch: false };
+export function startTabFor(runSetupPref: boolean): Extract<MainTab, "setup" | "terminal"> {
+  return runSetupPref ? "setup" : "terminal";
 }
 
 interface TreesModel {
@@ -279,17 +261,10 @@ interface TreesModel {
   fileTab: FileTab;
   /** The file shown in the (shared) main-area File tab, or null if none is open. */
   selectedFile: string | null;
-  /** The worktree whose setup script is running in the Setup tab (meaningful only
-   *  when it equals `activeId`), or null. */
+  /** The active worktree, when its setup script is running right now — else null.
+   *  The runs themselves are owned by `AgentRuns` at the app shell (they outlive
+   *  this route); this is just the slice the tab bar and tab resolution need. */
   setupFor: string | null;
-  /** True when the running setup is part of *starting* a task (setup → agent), as
-   *  opposed to a manual "Re-run setup". Lets the pane withhold the not-yet-created
-   *  terminal during the first setup without disturbing an existing one on re-run. */
-  setupThenLaunch: boolean;
-  /** Accumulated output lines of the setup run tied to `setupFor`. Owned by the
-   *  model (not the pane) so the run survives switching to a different worktree
-   *  and back — see the effect that starts it below. */
-  setupLines: string[];
   /** Which main-area tab is showing. */
   activeTab: MainTab;
   /** Persisted extra tabs (Claude sessions / terminals) for the active worktree,
@@ -316,25 +291,16 @@ interface TreesModel {
   /** Rename a persisted extra tab (blank titles are ignored). */
   renameTab: (id: string, title: string) => void;
 
-  /** Begin a task: open the worktree and either run setup first (in the Setup tab,
-   *  then launch the agent) or launch the agent straight away — per the "run setup
-   *  on new worktrees" preference. */
+  /** Begin a task: open the worktree and hand the run to `AgentRuns` (setup first,
+   *  then the agent — or straight to the agent, per the preference). */
   startAgent: (id: string) => void;
   /** Open the Setup tab and run the script (the manual "Run setup" action). */
   runSetup: (id: string) => void;
 
-  /** Worktree ids whose terminal should launch the agent on first open — set
-   *  when a task is started, cleared once its terminal has consumed it. */
-  launchAgents: Set<string>;
-  /** Per-launch model overrides from the Issues tray, keyed by worktree id (empty
-   *  ⇒ fall back to the configured Work model). Read once by the fresh-launch seed. */
-  launchModels: Record<string, string>;
   /** The on-disk CI-fix prompt file for a Fix-CI tab (from the Reviews "Fix CI
    *  with AI" hand-off), read once by that tab's fresh-launch seed. Undefined once
    *  a session exists on disk (a resume needs no prompt). */
   fixCiPromptFor: (tabId: string) => string | undefined;
-  requestAgentLaunch: (id: string) => void;
-  clearAgentLaunch: (id: string) => void;
 
   /** The worktree the create-PR dialog is open for, or null when closed. */
   prDialogFor: string | null;
@@ -371,31 +337,30 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     consumeTreeFocus,
     fixCiLaunch,
     consumeFixCiLaunch,
-    bgLaunches,
     pendingLaunches,
     removePendingLaunch,
     pendingDeletes,
     addPendingDeletes,
     removePendingDelete,
   } = useAppUi();
+  // Setup runs and queued launches are owned by the app shell, not this route — a
+  // run must survive navigating away from Trees (see AgentRuns).
+  const { beginRun, runSetup, isSettingUp, setLaunchModel, runSetupOnStart, setVisibleWorktree } =
+    useAgentRuns();
   const { data: realWorktrees = [], isLoading: worktreesLoading } = useWorktrees(activeRepo);
   const { data: baseWorktree = null } = useBaseWorktree(activeRepo);
   const { data: worktreePrs = [] } = useWorktreePrs(activeRepo);
-  const runSetupPref = useBoolSetting("app", TREES_RUN_SETUP_KEY).value;
-  const qc = useQueryClient();
   // Owned here (a stable provider) so optimistic delete's rollback still fires
   // after the deleted worktree's pane/bottom-bar unmounts.
   const { mutate: removeOne } = useRemoveWorktree(activeRepo);
   const { mutate: removeMany } = useRemoveWorktrees(activeRepo);
 
-  // `Worktree.status`/`.activity` come back from the backend as constants (there's
-  // no session-signal system yet to source them from) — override both with real
-  // signals here rather than showing them as live data. `status` joins the linked
-  // Linear task's real workflow state (the tasks query already fetches it for
-  // Issues); `activity` reflects whether a live PTY session actually exists for
-  // the worktree's main terminal. A worktree whose task isn't in the current
-  // tasks fetch (unassigned to the viewer) keeps the backend's status as a
-  // fallback rather than guessing.
+  // The backend ships `status`/`activity` as null rather than guessing — fill them
+  // from real signals here: `status` joins the linked Linear task's workflow state
+  // (the tasks query already fetches it for Issues), `activity` reflects whether a
+  // live PTY session exists for the worktree's main terminal. A worktree whose task
+  // isn't in the current fetch (unassigned to the viewer) keeps a null status and
+  // renders no chip.
   const { data: tasks = [] } = useTasks(activeRepo);
   const statusByTaskId = useMemo(() => new Map(tasks.map((t) => [t.id, t.status])), [tasks]);
   const { tabs: terminalTabs, close: closeTerminalTab } = useTerminals();
@@ -411,6 +376,22 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const withLiveStatus = useCallback(
     (w: Worktree): Worktree => withLiveWorktreeStatus(w, statusByTaskId, liveTermRefIds),
     [statusByTaskId, liveTermRefIds],
+  );
+
+  // Tear down every terminal rooted in these worktrees. Reads the tab list through
+  // a ref: it changes on every terminal event, and depending on it directly would
+  // rebuild the whole context value — re-rendering every `useTrees()` consumer —
+  // just because a terminal somewhere emitted output.
+  const terminalTabsRef = useRef(terminalTabs);
+  terminalTabsRef.current = terminalTabs;
+  const closeWorktreeTerminals = useCallback(
+    (ids: string[]) => {
+      for (const id of ids) {
+        for (const t of tabsToCloseForWorktree(terminalTabsRef.current, id))
+          closeTerminalTab(t.key);
+      }
+    },
+    [closeTerminalTab],
   );
 
   // Show "Creating workspace…" placeholders for in-flight launches; hide worktrees
@@ -453,23 +434,11 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [rightWidth, setRightWidth] = useState(320);
   const [fileTab, setFileTab] = useState<FileTab>("changes");
-  const [launchAgents, setLaunchAgents] = useState<Set<string>>(new Set());
-  // Per-launch model chosen in the Issues tray, keyed by worktree id. A transient
-  // hand-off: captured from the pending launch when a launch is consumed, read once
-  // by the fresh-launch seed, then cleared with the agent-launch flag. Empty ⇒ the
-  // Trees fallback (the configured Work model). Never persisted — the created
-  // session carries `--model` itself, so a resume needs nothing stored.
-  const [launchModels, setLaunchModels] = useState<Record<string, string>>({});
   // The on-disk CI-fix prompt file for a Fix-CI tab, keyed by tab id. A transient
   // hand-off from the Reviews "Fix CI with AI" flow: read once by the Fix-CI tab's
   // fresh-launch seed (`Read <path> …`). Not persisted — after a restart the tab's
   // session already exists on disk, so it resumes (no seed needed).
   const [fixCiPromptByTab, setFixCiPromptByTab] = useState<Record<string, string>>({});
-  // The worktree whose setup script is running in the Setup tab, and whether to
-  // launch the agent once it finishes (true when setup is part of starting a task).
-  const [setupFor, setSetupFor] = useState<string | null>(null);
-  const [setupThenLaunch, setSetupThenLaunch] = useState(false);
-  const [setupLines, setSetupLines] = useState<string[]>([]);
   // Per-worktree main tab + open file, so switching worktrees restores whichever
   // tab/file each one was last on instead of snapping every one back to its Issue
   // tab. A worktree with no entry defaults to Issue (Terminal for the base entry,
@@ -504,114 +473,52 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const { mutate: renameTabRow } = useRenameWorktreeTab(activeRepo);
   const { mutate: removeTabRow } = useRemoveWorktreeTab(activeRepo);
 
-  // Begin a task: open it, then either run setup first (in the Setup tab, then
-  // launch the agent on finish) or launch the agent straight away, per the pref.
-  // `focus` (default true) makes the worktree active; a background launch passes
-  // false so the agent starts (setup/launch flags are all keyed by id) without
-  // switching the active worktree or the current view.
+  // The ONLY way `activeId` is written. It also publishes the selection to
+  // `AgentRuns`, in the same batch — the off-screen launcher skips the worktree
+  // Trees is showing, because that worktree's visible pane already hosts its
+  // terminal and two hosts for one session would fight over the xterm overlay.
+  // Splitting these two writes would open a window where both mount.
+  const select = useCallback(
+    (id: string) => {
+      setActiveId(id);
+      setVisibleWorktree(id || null);
+    },
+    [setVisibleWorktree],
+  );
+
+  // Trees no longer has a worktree on screen — release it, so a launch queued for
+  // it (a task the user started and then navigated away from) is picked up by the
+  // off-screen launcher and actually runs.
+  useEffect(() => () => setVisibleWorktree(null), [setVisibleWorktree]);
+
+  // Begin a task: open it and hand the run to AgentRuns. `focus` (default true)
+  // makes the worktree active; a launch that shouldn't steal the view passes false.
   const startAgent = useCallback(
     (id: string, opts?: { focus?: boolean }) => {
-      if (opts?.focus ?? true) setActiveId(id);
+      if (opts?.focus ?? true) select(id);
       setFileFor(id, null);
-      const plan = planStartAgent(runSetupPref);
-      if (plan.setupThenLaunch) {
-        setSetupFor(id);
-        setSetupThenLaunch(true);
-      } else {
-        setLaunchAgents((s) => new Set(s).add(id));
-      }
-      setTabFor(id, plan.tab);
+      setTabFor(id, startTabFor(runSetupOnStart));
+      beginRun(id);
     },
-    [runSetupPref, setFileFor, setTabFor],
+    [runSetupOnStart, beginRun, select, setFileFor, setTabFor],
   );
 
-  // The Setup tab is temporary: it closes when the script finishes. The launch
-  // flow then continues to the agent. Also frees `setupStartedForRef` below so a
-  // later re-run for the *same* worktree id (e.g. manual "Run setup" again) isn't
-  // mistaken for the run that just finished.
-  //
-  // Takes the worktree id the *finishing run* was started for (not read from
-  // `setupFor` state) and no-ops if it no longer matches: `setupFor` is a single
-  // slot, and a later `runSetup`/`startAgent` for a *different* worktree (e.g. from
-  // the sidebar, "Start a task", or a cross-view Issues launch) can overwrite it
-  // while this run is still streaming server-side. Without this check, that stale
-  // run's eventual completion would clobber the new worktree's state — dropping its
-  // queued agent launch and yanking it out of the Setup tab mid-run. The effect
-  // below also cancels the stale run's own message handling, so this is mostly
-  // belt-and-suspenders, but keeps the invariant explicit at the one place state is
-  // actually mutated.
-  const completeSetup = useCallback(
-    (id: string) => {
-      if (!shouldCompleteSetup(id, setupFor)) return;
-      setupStartedForRef.current = null;
-      qc.invalidateQueries({ queryKey: queryKeys.worktrees(activeRepo) });
-      if (setupThenLaunch) setLaunchAgents((s) => new Set(s).add(id));
-      setTabFor(id, "terminal");
-      setSetupFor(null);
-      setSetupThenLaunch(false);
-    },
-    [activeRepo, qc, setupThenLaunch, setupFor, setTabFor],
-  );
-  // `completeSetup` is recreated whenever setupFor/setupThenLaunch change; the
-  // effect below must always call the latest version without itself depending on
-  // it (the same latest-callback-in-a-ref pattern used for PTY channels).
-  const completeSetupRef = useRef(completeSetup);
-  completeSetupRef.current = completeSetup;
-
-  // Own the setup script run here (not in the per-worktree pane) so switching to
-  // another worktree mid-setup and back doesn't unmount/remount the run — that
-  // used to start a second concurrent `init.sh` in the same directory. Started
-  // once per distinct `setupFor` value (both `startAgent` and `runSetup` mint one).
-  //
-  // `setupFor` can move on to a *different* worktree while this run is still
-  // streaming (the sidebar's "Run setup" and "Start a task" aren't gated on any
-  // setup already in flight — see `completeSetup` above). The backend keeps
-  // running `init.sh` to completion regardless; `cancelled` stops this specific
-  // run's handlers from touching state once it's superseded, so a late line/
-  // complete/error event from A can't bleed into B's `setupLines` or state.
-  const setupStartedForRef = useRef<string | null>(null);
+  // The Setup tab is temporary: when the script finishes, the worktree lands on its
+  // terminal (where the agent is starting, if this run was part of a task start).
+  // The run itself is owned by AgentRuns — this just follows it in the UI.
+  const settingUpActive = isSettingUp(activeId);
+  const wasSettingUp = useRef(settingUpActive);
   useEffect(() => {
-    if (!setupFor || setupStartedForRef.current === setupFor) return;
-    setupStartedForRef.current = setupFor;
-    setSetupLines([]);
-    let lastWasProgress = false;
-    let cancelled = false;
-    const forId = setupFor;
-    const channel = new Channel<SetupEvent>();
-    channel.onmessage = (e) => {
-      if (cancelled) return;
-      if (e.type === "progress" || e.type === "line") {
-        setSetupLines((prev) => {
-          if (lastWasProgress && prev.length) {
-            const next = prev.slice();
-            next[next.length - 1] = e.text;
-            return next;
-          }
-          return [...prev, e.text];
-        });
-        lastWasProgress = e.type === "progress";
-      } else {
-        completeSetupRef.current(forId);
-      }
-    };
-    commands.runWorktreeSetupStreamed(activeRepo, setupFor, channel).then((r) => {
-      if (cancelled) return;
-      if (r.status === "error") {
-        setSetupLines((prev) => [...prev, `Error: ${r.error}`]);
-        completeSetupRef.current(forId);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [setupFor, activeRepo]);
+    if (wasSettingUp.current && !settingUpActive && activeId) setTabFor(activeId, "terminal");
+    wasSettingUp.current = settingUpActive;
+  }, [settingUpActive, activeId, setTabFor]);
 
   // Clear the selection if the active worktree vanished (e.g. it was deleted).
   // The base entry isn't in `worktrees`, so it's never cleared here.
   useEffect(() => {
     if (activeId === BASE_ID) return;
-    if (activeId && !worktrees.some((w) => w.id === activeId)) setActiveId("");
-  }, [worktrees, activeId]);
+    if (activeId && !worktrees.some((w) => w.id === activeId)) select("");
+  }, [worktrees, activeId, select]);
 
   // Tracks which treeLaunch id has already been focused (setActiveId called for
   // it), so a worktrees refetch while the real worktree hasn't landed yet
@@ -642,23 +549,17 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     if (!wt) return;
     if (focusedLaunchRef.current !== treeLaunch) {
       focusedLaunchRef.current = treeLaunch;
-      setActiveId(treeLaunch);
+      select(treeLaunch);
     }
     // Capture the tray's model now, while the pending launch is still around (it's
     // dropped once the real worktree lands, before the seed is built). Idempotent.
     const model = pendingLaunches.find((p) => p.id === treeLaunch)?.model;
-    if (model)
-      setLaunchModels((m) => (m[treeLaunch] === model ? m : { ...m, [treeLaunch]: model }));
+    if (model) setLaunchModel(treeLaunch, model);
     if (wt.pending) {
       // Pre-arm the main tab *before* the real worktree's pane can mount, so the
-      // terminal never spawns a bare shell ahead of setup: with setup, switch to
-      // the Setup tab now (terminal stays unmounted until setup finishes); without
-      // setup, mark the launch so the terminal mounts already carrying the seed.
-      if (runSetupPref) setTabFor(treeLaunch, "setup");
-      else {
-        setLaunchAgents((s) => (s.has(treeLaunch) ? s : new Set(s).add(treeLaunch)));
-        setTabFor(treeLaunch, "terminal");
-      }
+      // terminal never spawns a bare shell ahead of setup. The run itself only
+      // begins once the real worktree exists (it has no path yet).
+      setTabFor(treeLaunch, startTabFor(runSetupOnStart));
       return;
     }
     startAgent(treeLaunch);
@@ -668,32 +569,13 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     treeLaunch,
     worktrees,
     pendingLaunches,
-    runSetupPref,
+    runSetupOnStart,
     consumeTreeLaunch,
     startAgent,
+    select,
+    setLaunchModel,
     setTabFor,
   ]);
-
-  // Consume background launch requests (Issues "Run in background"): start each
-  // agent *without focusing* as soon as its real worktree lands. `startAgent`
-  // sets the launch flags the off-screen `BackgroundLaunch` host reads; that host
-  // clears the id from `bgLaunches` once the agent has actually launched. Track
-  // started ids so a worktrees refetch doesn't restart an already-running agent,
-  // and forget ids no longer requested so a later background launch of the same
-  // ticket (after its worktree was deleted) starts fresh.
-  const bgStartedRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    for (const id of bgLaunches) {
-      if (bgStartedRef.current.has(id)) continue;
-      const wt = worktrees.find((w) => w.id === id);
-      if (!wt || wt.pending) continue;
-      bgStartedRef.current.add(id);
-      startAgent(id, { focus: false });
-    }
-    for (const id of bgStartedRef.current) {
-      if (!bgLaunches.includes(id)) bgStartedRef.current.delete(id);
-    }
-  }, [bgLaunches, worktrees, startAgent]);
 
   // Consume a cross-view "open" request (from the Issues graph/"Open in Trees"):
   // select the existing worktree and land on its Issue tab — no agent start, the
@@ -702,12 +584,11 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!treeFocus) return;
     if (!worktrees.some((w) => w.id === treeFocus)) return;
-    setActiveId(treeFocus);
+    select(treeFocus);
     setFileFor(treeFocus, null);
-    setSetupFor(null);
     setTabFor(treeFocus, "issue");
     consumeTreeFocus();
-  }, [treeFocus, worktrees, consumeTreeFocus, setFileFor, setTabFor]);
+  }, [treeFocus, worktrees, consumeTreeFocus, select, setFileFor, setTabFor]);
 
   // Consume a "Fix CI with AI" hand-off from Reviews: once the PR's worktree has
   // landed, open its freshly-minted Fix-CI tab (persist the row, stash the prompt
@@ -724,12 +605,20 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     if (!(tabsByWt.get(worktreeId) ?? []).some((t) => t.id === tabId)) {
       addTabRow({ id: tabId, worktreeId, kind: "fixCi", title: "Fix CI" });
     }
-    setActiveId(worktreeId);
+    select(worktreeId);
     setFileFor(worktreeId, null);
-    setSetupFor(null);
     setTabFor(worktreeId, extraTab(tabId));
     consumeFixCiLaunch();
-  }, [fixCiLaunch, worktrees, tabsByWt, addTabRow, consumeFixCiLaunch, setFileFor, setTabFor]);
+  }, [
+    fixCiLaunch,
+    worktrees,
+    tabsByWt,
+    addTabRow,
+    consumeFixCiLaunch,
+    select,
+    setFileFor,
+    setTabFor,
+  ]);
 
   // ⌘L toggles the file-picker panel (mirrors the Issues tab). Owned here rather
   // than in a separate consumer component so there's no shallow useTrees() caller.
@@ -755,6 +644,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     // default — Issue, or Terminal for the base entry — when it's no longer
     // available; see resolveActiveTab's doc comment for why each tab can
     // become unavailable).
+    // The Setup tab only exists while THIS worktree's script is running.
+    const setupFor = settingUpActive ? activeId : null;
     const activeTab = resolveActiveTab(activeTabByWt[activeId], {
       isBaseActive: activeId === BASE_ID,
       selectedFile,
@@ -775,8 +666,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       fileTab,
       selectedFile,
       setupFor,
-      setupThenLaunch,
-      setupLines,
       activeTab,
       extraTabs,
       // Switching worktrees just changes which one is active — each remembers its
@@ -784,8 +673,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       // restores whatever it was last showing instead of snapping back to the Issue
       // tab. A never-visited worktree falls back to its default (Issue, or Terminal
       // for the base entry which has no ticket).
-      setActive: (id) => setActiveId(id),
-      showAllAgents: () => setActiveId(""),
+      setActive: select,
+      showAllAgents: () => select(""),
       toggleRightPanel: () => setRightCollapsed((c) => !c),
       setRightWidth,
       setFileTab,
@@ -822,31 +711,13 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       // A manual re-run opens the Setup tab alongside whatever's already open
       // (e.g. a File tab) — it doesn't replace it.
       runSetup: (id) => {
-        setSetupFor(id);
-        setSetupThenLaunch(false);
+        runSetup(id);
         setTabFor(id, "setup");
       },
-      launchAgents,
-      launchModels,
       // The on-disk CI-fix prompt file for a Fix-CI tab (from the Reviews hand-off),
       // read once by that tab's fresh-launch seed. Undefined after a restart — the
       // session then resumes instead of re-seeding.
       fixCiPromptFor: (tabId: string) => fixCiPromptByTab[tabId],
-      requestAgentLaunch: (id) => setLaunchAgents((s) => new Set(s).add(id)),
-      clearAgentLaunch: (id) => {
-        setLaunchAgents((s) => {
-          if (!s.has(id)) return s;
-          const next = new Set(s);
-          next.delete(id);
-          return next;
-        });
-        // The seed has been consumed — drop the one-shot model override too.
-        setLaunchModels((m) => {
-          if (!(id in m)) return m;
-          const { [id]: _, ...rest } = m;
-          return rest;
-        });
-      },
       prDialogFor,
       // Opening the dialog supersedes the suggestion bar for that worktree.
       openPrDialog: (id) => {
@@ -866,26 +737,40 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         }),
       setWorktreeSelection: (ids) => setSelectedWorktrees(new Set(ids)),
       clearWorktreeSelection: () => setSelectedWorktrees(new Set()),
-      // Hide instantly via pendingDeletes (clobber-proof), delete in the
-      // background; on failure drop from pendingDeletes so it reappears (the
-      // mutation also raises an error toast). The auto-clear effect removes it
-      // once the real list confirms it's gone. Close the worktree's terminal
-      // sessions first — otherwise the shell/agent keeps running against a cwd
-      // that's about to be deleted, and its tab lingers in the global Terminal
-      // tab with a dead name.
+      // Hide instantly via pendingDeletes (clobber-proof) and delete in the
+      // background; on failure drop it from pendingDeletes so the card reappears
+      // (the mutation also raises an error toast), and the auto-clear effect drops
+      // it once the real list confirms it's gone.
+      //
+      // The worktree's terminals are closed on SUCCESS, not up front: killing them
+      // first means a delete that then fails has already destroyed the agent session
+      // and its context, which the optimistic rollback cannot bring back — it only
+      // restores the card. Closing them after is still necessary, or the shell/agent
+      // keeps running against a cwd that no longer exists and its tab lingers in the
+      // global Terminal tab under a dead name.
       deleteWorktree: (id) => {
-        for (const t of tabsToCloseForWorktree(terminalTabs, id)) closeTerminalTab(t.key);
         addPendingDeletes([id]);
-        removeOne(id, { onError: () => removePendingDelete(id) });
+        removeOne(id, {
+          onSuccess: () => closeWorktreeTerminals([id]),
+          onError: () => removePendingDelete(id),
+        });
       },
       deleteSelected: () => {
         if (selectedWorktrees.size === 0) return;
         const ids = [...selectedWorktrees];
-        for (const id of ids) {
-          for (const t of tabsToCloseForWorktree(terminalTabs, id)) closeTerminalTab(t.key);
-        }
         addPendingDeletes(ids);
-        removeMany(ids, { onError: () => ids.forEach(removePendingDelete) });
+        removeMany(ids, {
+          onSuccess: () => closeWorktreeTerminals(ids),
+          // A partial failure deleted *some* of them. Un-hide only the ones that
+          // actually survived — un-hiding the whole batch flashes back worktrees
+          // that are already gone from disk. The ones that did delete stay hidden
+          // and are cleared by the auto-clear effect on the next fetch.
+          onError: (err) => {
+            const failed = err instanceof BulkDeleteError ? err.failed : ids;
+            closeWorktreeTerminals(ids.filter((id) => !failed.includes(id)));
+            for (const id of failed) removePendingDelete(id);
+          },
+        });
         setSelectedWorktrees(new Set());
       },
     };
@@ -903,15 +788,13 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     rightWidth,
     fileTab,
     selectedFileByWt,
-    setupFor,
-    setupThenLaunch,
-    setupLines,
+    settingUpActive,
     activeTabByWt,
     setTabFor,
     setFileFor,
+    select,
     startAgent,
-    launchAgents,
-    launchModels,
+    runSetup,
     fixCiPromptByTab,
     activeRepo,
     prDialogFor,
@@ -921,8 +804,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     removeMany,
     addPendingDeletes,
     removePendingDelete,
-    terminalTabs,
-    closeTerminalTab,
+    closeWorktreeTerminals,
   ]);
 
   return <TreesContext.Provider value={value}>{children}</TreesContext.Provider>;

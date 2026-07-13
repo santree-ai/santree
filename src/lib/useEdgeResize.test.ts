@@ -5,38 +5,42 @@ import { describe, expect, it, vi } from "vitest";
 import { useEdgeResize } from "./useEdgeResize";
 
 // The handlers only touch `currentTarget.{set,release}PointerCapture`,
-// `pointerId`, `clientX`, and `buttons`, so a minimal mock stands in for a
-// real DOM pointer event and a real HTMLDivElement.
+// `pointerId`, `clientX`, `button`, and `buttons`, so a minimal mock stands in
+// for a real DOM pointer event and a real HTMLDivElement.
 function mockTarget() {
   return { releasePointerCapture: vi.fn(), setPointerCapture: vi.fn() };
 }
 
 function fakeEvent(
   target: ReturnType<typeof mockTarget>,
-  overrides: Partial<{ clientX: number; buttons: number }> = {},
+  overrides: Partial<{ clientX: number; button: number; buttons: number }> = {},
 ) {
   return {
     currentTarget: target,
     pointerId: 1,
     clientX: 0,
+    button: 0,
     buttons: 1,
     ...overrides,
   } as unknown as ReactPointerEvent<HTMLDivElement>;
 }
 
+const setup = (onCommit: (w: number) => void) =>
+  renderHook(() =>
+    useEdgeResize({
+      cssVar: "--test-width",
+      width: 200,
+      min: 100,
+      max: 400,
+      edge: "right",
+      onCommit,
+    }),
+  );
+
 describe("useEdgeResize", () => {
   it("commits the live dragged width on pointercancel, same as pointerup", () => {
     const onCommit = vi.fn();
-    const { result } = renderHook(() =>
-      useEdgeResize({
-        cssVar: "--test-width",
-        width: 200,
-        min: 100,
-        max: 400,
-        edge: "right",
-        onCommit,
-      }),
-    );
+    const { result } = setup(onCommit);
 
     const target = mockTarget();
     result.current.onPointerDown(fakeEvent(target, { clientX: 100 }));
@@ -54,5 +58,20 @@ describe("useEdgeResize", () => {
     // A second cancel/up after the drag already ended must be a no-op.
     result.current.onPointerCancel(fakeEvent(target));
     expect(onCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a non-primary button", () => {
+    const onCommit = vi.fn();
+    const { result } = setup(onCommit);
+
+    // A right-click must not capture the pointer or arm a drag — otherwise the
+    // handle stays "dragging" for as long as the context menu is up.
+    const target = mockTarget();
+    result.current.onPointerDown(fakeEvent(target, { clientX: 100, button: 2, buttons: 2 }));
+    expect(target.setPointerCapture).not.toHaveBeenCalled();
+
+    result.current.onPointerMove(fakeEvent(target, { clientX: 150 }));
+    result.current.onPointerUp(fakeEvent(target));
+    expect(onCommit).not.toHaveBeenCalled();
   });
 });

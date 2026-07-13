@@ -7,16 +7,18 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::{LazyLock, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use santree_core::domain::{
-    CheckAnnotation, CheckLog, CheckLogBlock, CheckLogLevel, CheckLogLine, CheckRollup, CheckStatus,
-    CheckStep, CommentKind, FileSource, MergeQueue, MergeQueueEntry, MergeQueueState, PrCheck,
-    PrComment, PrDetail, PrFile, PrLabel, PrState, PrThread, ReviewDecision, ReviewInbox, ReviewPr,
-    Reviewer, ReviewerKind, TeamReviews,
+    CheckAnnotation, CheckLog, CheckLogBlock, CheckLogLevel, CheckLogLine, CheckRollup,
+    CheckStatus, CheckStep, CommentKind, FileSource, MergeQueue, MergeQueueEntry, MergeQueueState,
+    PrCheck, PrComment, PrDetail, PrFile, PrLabel, PrState, PrThread, ReviewDecision, ReviewInbox,
+    ReviewPr, Reviewer, ReviewerKind, TeamReviews,
 };
 
 use crate::git;
@@ -32,10 +34,37 @@ fn rest(builder: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilde
         .header("User-Agent", "santree")
 }
 
+/// Build an `api.github.com` REST URL from path components. Owner, repo name and
+/// file paths all arrive over IPC, so they're never interpolated into the URL with
+/// `format!`: a `?` or `#` would split off a bogus query/fragment and a `..` would
+/// re-point the request at a different endpoint. `path_segments_mut` percent-encodes
+/// each segment by construction. A component may contain `/` (a repo-relative file
+/// path) and is split into segments; `.`/`..` components are rejected — they can't
+/// name a real file, and the URL crate would silently drop them.
+fn api_url(components: &[&str]) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse("https://api.github.com").expect("static base URL");
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|()| anyhow!("GitHub API base is not a valid base URL"))?;
+        for seg in components
+            .iter()
+            .flat_map(|c| c.split('/'))
+            .filter(|s| !s.is_empty())
+        {
+            if seg == "." || seg == ".." {
+                bail!("invalid path component in GitHub URL: {seg:?}");
+            }
+            path.push(seg);
+        }
+    }
+    Ok(url)
+}
+
 /// GET a GitHub REST endpoint and decode its JSON body, erroring on a non-success
 /// status. The shared shape behind the simple REST reads.
 async fn get_json<T: DeserializeOwned>(
-    url: String,
+    url: impl reqwest::IntoUrl,
     query: &[(&str, &str)],
     token: &str,
 ) -> Result<T> {
@@ -53,16 +82,39 @@ async fn get_json<T: DeserializeOwned>(
     Ok(res.json().await?)
 }
 
+/// The last `gh auth token` read and when it was taken. Every GitHub call needs a
+/// token — including per-file diff expansion, which spawns one `gh` subprocess per
+/// file the reviewer opens — so the read is memoised. Only *hits* are cached, and
+/// only for [`TOKEN_TTL`]: a `gh auth login`/`gh auth refresh` between calls is
+/// picked up within a minute, and a signed-out `gh` is re-probed every time.
+static TOKEN_CACHE: LazyLock<RwLock<Option<(String, Instant)>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+/// How long a borrowed `gh` token is reused before re-reading it. Short enough that
+/// a re-auth is picked up promptly, long enough to collapse the burst of calls a
+/// single Reviews page-load makes.
+const TOKEN_TTL: Duration = Duration::from_secs(60);
+
 /// The GitHub token the user authorized for the `gh` CLI. `None` when `gh` isn't
-/// installed or the user hasn't run `gh auth login`. Shells out, so it runs on the
-/// blocking pool rather than the async executor.
+/// installed or the user hasn't run `gh auth login`. Shells out on a cache miss, so
+/// that runs on the blocking pool rather than the async executor.
 ///
 /// `gh` is resolved through the user's login shell (not bare `Command::new("gh")`):
 /// a Finder-launched bundle inherits a minimal PATH that misses Homebrew, so a bare
 /// spawn would find `gh` in `tauri dev` (terminal PATH) but silently fail in a
 /// release build — leaving the Reviews tab and graph PRs empty.
 pub async fn token() -> Option<String> {
-    tokio::task::spawn_blocking(|| {
+    let cached = TOKEN_CACHE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|(_, read_at)| read_at.elapsed() < TOKEN_TTL)
+        .map(|(token, _)| token.clone());
+    if let Some(token) = cached {
+        return Some(token);
+    }
+
+    let token = tokio::task::spawn_blocking(|| {
         let gh = crate::settings::discover_binary("gh")?;
         let out = Command::new(gh).args(["auth", "token"]).output().ok()?;
         out.status
@@ -72,7 +124,10 @@ pub async fn token() -> Option<String> {
     })
     .await
     .ok()
-    .flatten()
+    .flatten()?;
+
+    *TOKEN_CACHE.write().unwrap_or_else(|e| e.into_inner()) = Some((token.clone(), Instant::now()));
+    Some(token)
 }
 
 /// The `gh` CLI integration status for Settings → Integrations: whether `gh` is
@@ -130,9 +185,7 @@ pub async fn status() -> santree_core::domain::GithubStatus {
             login: String,
             name: Option<String>,
         }
-        if let Ok(user) =
-            get_json::<GhUser>("https://api.github.com/user".to_string(), &[], &token).await
-        {
+        if let Ok(user) = get_json::<GhUser>("https://api.github.com/user", &[], &token).await {
             status.authenticated = true;
             status.account = user.login;
             status.name = user.name.unwrap_or_default();
@@ -224,7 +277,7 @@ pub struct RepoPr {
 pub async fn prs_for_repo(token: &str, owner: &str, repo: &str) -> Result<Vec<RepoPr>> {
     let q = format!("repo:{owner}/{repo} type:pr");
     let body: SearchResp = get_json(
-        "https://api.github.com/search/issues".to_string(),
+        "https://api.github.com/search/issues",
         &[
             ("q", q.as_str()),
             ("per_page", "100"),
@@ -271,7 +324,7 @@ pub async fn create_pr(
     draft: bool,
 ) -> Result<(u32, String)> {
     let res = rest(
-        gql::client().post(format!("https://api.github.com/repos/{owner}/{repo}/pulls")),
+        gql::client().post(api_url(&["repos", owner, repo, "pulls"])?),
         token,
     )
     .json(&serde_json::json!({
@@ -324,9 +377,14 @@ pub async fn request_reviewers(
         return Ok(());
     }
     let res = rest(
-        gql::client().post(format!(
-            "https://api.github.com/repos/{owner}/{repo}/pulls/{number}/requested_reviewers"
-        )),
+        gql::client().post(api_url(&[
+            "repos",
+            owner,
+            repo,
+            "pulls",
+            &number.to_string(),
+            "requested_reviewers",
+        ])?),
         token,
     )
     .json(&serde_json::json!({ "reviewers": users, "team_reviewers": teams }))
@@ -364,7 +422,7 @@ pub async fn list_reviewers(token: &str, owner: &str, repo: &str) -> Result<Vec<
     }
     let me = current_login(token).await;
     let list: Vec<Collaborator> = get_json(
-        format!("https://api.github.com/repos/{owner}/{repo}/collaborators"),
+        api_url(&["repos", owner, repo, "collaborators"])?,
         &[("permission", "push"), ("per_page", "100")],
         token,
     )
@@ -388,7 +446,7 @@ async fn current_login(token: &str) -> Option<String> {
     struct GhUser {
         login: String,
     }
-    get_json::<GhUser>("https://api.github.com/user".to_string(), &[], token)
+    get_json::<GhUser>("https://api.github.com/user", &[], token)
         .await
         .ok()
         .map(|u| u.login)
@@ -579,16 +637,29 @@ impl From<PrNode> for ReviewPr {
     }
 }
 
-/// Run one `search(type: ISSUE)` query and map the PR nodes to `ReviewPr`.
+/// How many PRs one inbox category shows. The Reviews inbox is a dashboard, not a
+/// review surface — a category with 50 open PRs is already well past what anyone
+/// triages in a sitting — so we take the newest page rather than paging the whole
+/// search. Hitting the cap is logged (see [`search_prs`]) so a section that looks
+/// complete but isn't leaves a trace.
+const INBOX_SEARCH_CAP: usize = 50;
+
+/// Run one `search(type: ISSUE)` query and map the PR nodes to `ReviewPr`. Capped at
+/// [`INBOX_SEARCH_CAP`] (newest-updated first, per the caller's `sort:updated-desc`).
 async fn search_prs(token: &str, q: &str) -> Result<Vec<ReviewPr>> {
     #[derive(Deserialize)]
     struct Data {
         search: Connection<PrNode>,
     }
     let query = format!(
-        "query($q: String!) {{ search(query: $q, type: ISSUE, first: 50) {{ nodes {{ ... on PullRequest {{ {PR_FIELDS} }} }} }} }}"
+        "query($q: String!) {{ search(query: $q, type: ISSUE, first: {INBOX_SEARCH_CAP}) {{ nodes {{ ... on PullRequest {{ {PR_FIELDS} }} }} }} }}"
     );
     let data: Data = graphql(token, &query, serde_json::json!({ "q": q })).await?;
+    if data.search.nodes.len() >= INBOX_SEARCH_CAP {
+        log::warn!(
+            "Reviews: search '{q}' hit the {INBOX_SEARCH_CAP}-PR cap; older PRs are not listed"
+        );
+    }
     Ok(data.search.nodes.into_iter().map(ReviewPr::from).collect())
 }
 
@@ -633,7 +704,10 @@ pub async fn viewer_teams(token: &str, org: &str) -> Result<Vec<(String, String)
 
 /// The categorized PR inbox for `org`: PRs the viewer authored, PRs where they're
 /// individually requested, and one section per team that has open requests. All
-/// searches run concurrently; empty team sections are dropped.
+/// searches run concurrently; empty team sections are dropped. A failed *team*
+/// search degrades to an empty (and therefore dropped) section rather than failing
+/// the whole inbox — but it's logged, since an empty section is otherwise
+/// indistinguishable from "no open requests for this team".
 pub async fn review_inbox(
     token: &str,
     org: &str,
@@ -646,7 +720,10 @@ pub async fn review_inbox(
     let team_searches = futures::future::join_all(teams.iter().map(|(slug, name)| {
         let q = format!("{common} team-review-requested:{org}/{slug}");
         async move {
-            let prs = search_prs(token, &q).await.unwrap_or_default();
+            let prs = search_prs(token, &q).await.unwrap_or_else(|e| {
+                log::warn!("Reviews: review-request search for team {org}/{slug} failed: {e}");
+                Vec::new()
+            });
             (slug.clone(), name.clone(), prs)
         }
     }));
@@ -764,8 +841,10 @@ pub async fn merge_queue(token: &str, owner: &str, name: &str) -> Result<Option<
         .filter_map(|e| e.pull_request.map(|pr| (e.state, pr)))
         .enumerate()
         .map(|(i, (state, pr))| {
-            let (author, author_avatar_url) =
-                pr.author.map(|a| (a.login, a.avatar_url)).unwrap_or_default();
+            let (author, author_avatar_url) = pr
+                .author
+                .map(|a| (a.login, a.avatar_url))
+                .unwrap_or_default();
             MergeQueueEntry {
                 position: i as u32 + 1,
                 state: match state.as_deref() {
@@ -800,12 +879,14 @@ pub async fn pr_detail(token: &str, owner: &str, name: &str, number: u32) -> Res
         pr_files(token, owner, name, number),
     );
     let (body, labels, comments, threads, checks, base_sha, head_sha) = conversation?;
+    let (files, files_truncated) = files?;
     Ok(PrDetail {
         body,
         labels,
         comments,
         threads,
-        files: files?,
+        files,
+        files_truncated,
         checks,
         base_sha,
         head_sha,
@@ -821,7 +902,7 @@ pub async fn list_labels(token: &str, owner: &str, name: &str) -> Result<Vec<PrL
         description: Option<String>,
     }
     let list: Vec<Label> = get_json(
-        format!("https://api.github.com/repos/{owner}/{name}/labels"),
+        api_url(&["repos", owner, name, "labels"])?,
         &[("per_page", "100")],
         token,
     )
@@ -854,9 +935,14 @@ pub async fn set_pr_labels(
     }
     // Labels live on the underlying issue, not the pull endpoint.
     let res = rest(
-        gql::client().put(format!(
-            "https://api.github.com/repos/{owner}/{name}/issues/{number}/labels"
-        )),
+        gql::client().put(api_url(&[
+            "repos",
+            owner,
+            name,
+            "issues",
+            &number.to_string(),
+            "labels",
+        ])?),
         token,
     )
     .json(&serde_json::json!({ "labels": labels }))
@@ -868,7 +954,11 @@ pub async fn set_pr_labels(
             .json::<serde_json::Value>()
             .await
             .ok()
-            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+            .and_then(|v| {
+                v.get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+            })
             .unwrap_or_else(|| status.to_string());
         bail!("GitHub: {detail}");
     }
@@ -913,7 +1003,15 @@ async fn pr_conversation(
     owner: &str,
     name: &str,
     number: u32,
-) -> Result<(String, Vec<PrLabel>, Vec<PrComment>, Vec<PrThread>, Vec<PrCheck>, String, String)> {
+) -> Result<(
+    String,
+    Vec<PrLabel>,
+    Vec<PrComment>,
+    Vec<PrThread>,
+    Vec<PrCheck>,
+    String,
+    String,
+)> {
     #[derive(Deserialize)]
     struct Data {
         repository: Option<Repo>,
@@ -1346,7 +1444,15 @@ const MAX_LOG_LINES: usize = 1000;
 /// [`parse_job_log`]). `job_id` comes from [`PrCheck::job_id`]. The logs endpoint
 /// 302-redirects to a short-lived blob URL, which `reqwest` follows.
 pub async fn check_log(token: &str, owner: &str, name: &str, job_id: u64) -> Result<CheckLog> {
-    let url = format!("https://api.github.com/repos/{owner}/{name}/actions/jobs/{job_id}/logs");
+    let url = api_url(&[
+        "repos",
+        owner,
+        name,
+        "actions",
+        "jobs",
+        &job_id.to_string(),
+        "logs",
+    ])?;
     let res = rest(gql::client().get(url), token).send().await?;
     if !res.status().is_success() {
         let status = res.status();
@@ -1518,8 +1624,46 @@ fn build_blocks(region: &[&str]) -> Vec<CheckLogBlock> {
     blocks
 }
 
-/// Changed files for a PR, with their unified-diff patches (REST files API).
-async fn pr_files(token: &str, owner: &str, name: &str, number: u32) -> Result<Vec<PrFile>> {
+/// GitHub's page size for the PR files endpoint (its maximum).
+const PR_FILES_PER_PAGE: usize = 100;
+
+/// How many changed files we fetch for a PR. GitHub serves up to 3000, but a PR
+/// that large isn't reviewable in this pane and each page is a round-trip — 5 pages
+/// is the budget. Past it the list is truncated and [`PrDetail::files_truncated`]
+/// tells the UI to say so: a reviewer who marks every listed file "Viewed" on a
+/// silently-truncated list has approved a diff they never saw.
+const PR_FILES_CAP: usize = 500;
+
+/// What to do after a page of PR files came back. Pure so the truncation decision
+/// (the load-bearing part) is unit-testable without a network.
+#[derive(Debug, PartialEq, Eq)]
+enum FilePaging {
+    /// The page was full and we're under the cap — fetch the next one.
+    More,
+    /// The page was full but we've hit the cap — there are files we won't fetch.
+    Truncated,
+    /// A short page means GitHub had nothing more to give.
+    Done,
+}
+
+fn file_paging(fetched: usize, page_len: usize) -> FilePaging {
+    if page_len < PR_FILES_PER_PAGE {
+        FilePaging::Done
+    } else if fetched >= PR_FILES_CAP {
+        FilePaging::Truncated
+    } else {
+        FilePaging::More
+    }
+}
+
+/// Changed files for a PR, with their unified-diff patches (REST files API), paged
+/// up to [`PR_FILES_CAP`]. The bool is "there are more files we didn't fetch".
+async fn pr_files(
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u32,
+) -> Result<(Vec<PrFile>, bool)> {
     #[derive(Deserialize)]
     struct RestFile {
         filename: String,
@@ -1530,44 +1674,73 @@ async fn pr_files(token: &str, owner: &str, name: &str, number: u32) -> Result<V
         /// Blob SHA of the file at the PR's head — drives the "Viewed" mark.
         sha: String,
     }
-    let files: Vec<RestFile> = get_json(
-        format!("https://api.github.com/repos/{owner}/{name}/pulls/{number}/files"),
-        &[("per_page", "100")],
-        token,
-    )
-    .await?;
-    Ok(files
-        .into_iter()
-        .map(|f| PrFile {
+    let url = api_url(&["repos", owner, name, "pulls", &number.to_string(), "files"])?;
+    let per_page = PR_FILES_PER_PAGE.to_string();
+
+    let mut files: Vec<PrFile> = Vec::new();
+    let truncated = loop {
+        let page = files.len() / PR_FILES_PER_PAGE + 1;
+        let batch: Vec<RestFile> = get_json(
+            url.clone(),
+            &[("per_page", per_page.as_str()), ("page", &page.to_string())],
+            token,
+        )
+        .await?;
+        let paging = file_paging(files.len() + batch.len(), batch.len());
+        files.extend(batch.into_iter().map(|f| PrFile {
             path: f.filename,
             status: f.status,
             additions: f.additions,
             deletions: f.deletions,
             patch: f.patch,
             sha: f.sha,
-        })
-        .collect())
+        }));
+        match paging {
+            FilePaging::More => {}
+            FilePaging::Truncated => break true,
+            FilePaging::Done => break false,
+        }
+    };
+    if truncated {
+        log::warn!(
+            "PR {owner}/{name}#{number} has more than {PR_FILES_CAP} changed files; the diff list is truncated"
+        );
+    }
+    Ok((files, truncated))
 }
 
 /// The full text of a file at a given commit, via the REST contents API with the
-/// `raw` media type (returns the bytes directly rather than base64 JSON). A 404 —
-/// the file doesn't exist at that commit (added on the new side, or deleted on the
-/// old side) — maps to empty, which the diff viewer treats as "no content".
-async fn file_content(token: &str, owner: &str, name: &str, r#ref: &str, path: &str) -> String {
+/// `raw` media type (returns the bytes directly rather than base64 JSON). Only a
+/// 404 — the file doesn't exist at that commit (added on the new side, or deleted on
+/// the old side) — maps to empty, which the diff viewer treats as "no content".
+/// Every other failure is an error: a rate-limited 403 or a transient 5xx rendered
+/// as empty is indistinguishable from a genuinely absent file, so the expanded diff
+/// would silently claim the file has no content.
+async fn file_content(
+    token: &str,
+    owner: &str,
+    name: &str,
+    r#ref: &str,
+    path: &str,
+) -> Result<String> {
     let res = gql::client()
-        .get(format!(
-            "https://api.github.com/repos/{owner}/{name}/contents/{path}"
-        ))
+        .get(api_url(&["repos", owner, name, "contents", path])?)
         .query(&[("ref", r#ref)])
         .bearer_auth(token)
         .header("Accept", "application/vnd.github.raw")
         .header("User-Agent", "santree")
         .send()
-        .await;
-    match res {
-        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
-        _ => String::new(),
+        .await?;
+    let status = res.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(String::new());
     }
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(300).collect();
+        bail!("GitHub returned {status}: {snippet}");
+    }
+    Ok(res.text().await?)
 }
 
 /// The old (base) and new (head) full contents of a PR file, so the diff viewer
@@ -1585,12 +1758,59 @@ pub async fn pr_file_source(
         file_content(token, owner, name, base, path),
         file_content(token, owner, name, head, path),
     );
-    Ok(FileSource { old_text, new_text })
+    Ok(FileSource {
+        old_text: old_text?,
+        new_text: new_text?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_url_encodes_untrusted_components() {
+        // A `?`/`#` in a repo-relative path must stay *in* the path, not split off a
+        // query or fragment; spaces and other unsafe bytes are percent-encoded too.
+        let url = api_url(&["repos", "o", "r", "contents", "src/a b?x=1#frag.rs"]).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.github.com/repos/o/r/contents/src/a%20b%3Fx=1%23frag.rs"
+        );
+        assert_eq!(url.query(), None);
+        assert_eq!(url.fragment(), None);
+    }
+
+    #[test]
+    fn api_url_keeps_path_structure_but_rejects_traversal() {
+        // Slashes inside a component are real separators (a repo path)…
+        assert_eq!(
+            api_url(&["repos", "o", "r", "contents", "a/b/c.rs"])
+                .unwrap()
+                .path(),
+            "/repos/o/r/contents/a/b/c.rs"
+        );
+        // …but `..` would re-point the request at another endpoint.
+        assert!(api_url(&["repos", "o", "r", "contents", "../../../user"]).is_err());
+        assert!(api_url(&["repos", "o", "..", "pulls"]).is_err());
+    }
+
+    #[test]
+    fn file_paging_stops_on_short_page_and_at_the_cap() {
+        // Short page ⇒ GitHub had nothing more, regardless of how many we hold.
+        assert_eq!(file_paging(7, 7), FilePaging::Done);
+        assert_eq!(file_paging(PR_FILES_CAP, 3), FilePaging::Done);
+        // Full page under the cap ⇒ keep going.
+        assert_eq!(
+            file_paging(PR_FILES_PER_PAGE, PR_FILES_PER_PAGE),
+            FilePaging::More
+        );
+        // Full page landing on the cap ⇒ more files exist that we won't fetch.
+        assert_eq!(
+            file_paging(PR_FILES_CAP, PR_FILES_PER_PAGE),
+            FilePaging::Truncated
+        );
+    }
 
     #[test]
     fn job_id_parses_from_actions_url() {
@@ -1657,9 +1877,7 @@ mod tests {
             CheckLogBlock::Group { title, .. } if title == "Stopping services"
         )));
         // The next step's generic error and "Run cleanup" are excluded.
-        assert!(!loose
-            .iter()
-            .any(|(t, _)| t.contains("Process completed")));
+        assert!(!loose.iter().any(|(t, _)| t.contains("Process completed")));
         assert!(!log.blocks.iter().any(|b| matches!(
             b,
             CheckLogBlock::Group { title, .. } if title.contains("cleanup")

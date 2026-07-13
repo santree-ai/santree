@@ -1,12 +1,14 @@
 //! The local SQLite database: connection pool and migrations.
 //!
-//! Structured app state (Linear tokens, repo↔org links, settings) lives here.
-//! On-disk `.santree/` files (worktree scripts, etc.) are left as files.
+//! Structured app state (repo↔org links, settings) lives here. Secrets do not —
+//! the Linear OAuth tokens live in the OS keychain (`linear.rs`). On-disk
+//! `.santree/` files (worktree scripts, etc.) are left as files.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use sqlx::migrate::MigrateError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
@@ -26,11 +28,11 @@ pub fn now_ms() -> i64 {
 pub async fn init(db_path: PathBuf) -> Result<Db> {
     if let Some(dir) = db_path.parent() {
         std::fs::create_dir_all(dir).context("creating data dir")?;
-        // The db holds plaintext Linear OAuth tokens (access + refresh); lock the
-        // dir down to the owner before anything is written into it. Mitigation
-        // until the tokens move to the OS keychain — a default 0755 dir exposes
-        // the db (and its -wal/-shm sidecars) to any other local user on distros
-        // where ~/.local/share isn't already 700.
+        // Secrets live in the keychain, not here — but the db still holds the
+        // user's tickets, prompts and repo layout, so lock the dir to the owner
+        // before anything is written into it. Defense in depth: a default 0755
+        // dir exposes the db (and its -wal/-shm sidecars) to any other local user
+        // on distros where ~/.local/share isn't already 700.
         chmod(dir, 0o700)?;
     }
     // WAL + a busy timeout so the concurrent commands this app issues (Issues,
@@ -50,10 +52,23 @@ pub async fn init(db_path: PathBuf) -> Result<Db> {
         .await
         .context("opening database")?;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
+    // Hand any plaintext Linear tokens an older build stored here to the OS
+    // keychain *before* the migration that drops those columns — SQL can't reach
+    // a keychain, so this half of the move has to be Rust. No-op on a fresh
+    // install and on every start after the first.
+    let had_plaintext_tokens = crate::linear::migrate_tokens_to_keychain(&pool)
         .await
-        .context("running migrations")?;
+        .context("moving the Linear tokens into the OS keychain")?;
+
+    if let Err(e) = sqlx::migrate!("./migrations").run(&pool).await {
+        let err = migrate_error(e, &db_path);
+        log::error!("{err:#}");
+        return Err(err);
+    }
+
+    if had_plaintext_tokens {
+        scrub_freed_pages(&pool).await;
+    }
 
     // Re-lock the db file and its WAL sidecars now that they exist (a fresh
     // `create_if_missing` file starts at the process umask, e.g. 0644).
@@ -65,6 +80,44 @@ pub async fn init(db_path: PathBuf) -> Result<Db> {
     }
 
     Ok(pool)
+}
+
+/// Dropping a column doesn't erase its bytes: the old pages land on the freelist
+/// and linger in the `-wal` sidecar. After the one-time token migration, rewrite
+/// the file and truncate the WAL so the plaintext tokens are actually gone from
+/// disk. Hygiene, not correctness — a failure here isn't worth failing startup.
+async fn scrub_freed_pages(pool: &SqlitePool) {
+    if let Err(e) = sqlx::query("VACUUM").execute(pool).await {
+        log::warn!("couldn't vacuum the database after the Linear token migration: {e}");
+    }
+    if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(pool)
+        .await
+    {
+        log::warn!("couldn't truncate the write-ahead log after the Linear token migration: {e}");
+    }
+}
+
+/// Turn a migration failure into something a human can act on. The one that
+/// actually happens is a *downgrade*: manual DMG installs mean an older build can
+/// open a db a newer one already stamped, and sqlx then reports migrations it has
+/// never heard of. Everything else keeps sqlx's own message.
+fn migrate_error(err: MigrateError, db_path: &Path) -> anyhow::Error {
+    match err {
+        MigrateError::VersionMissing(v) | MigrateError::VersionNotPresent(v) => anyhow!(
+            "This database was created by a newer version of santree — it has migration {v}, \
+             which this build doesn't know about. Install the latest santree, or quit and move \
+             {} aside to start with a fresh database.",
+            db_path.display()
+        ),
+        MigrateError::VersionMismatch(v) => anyhow!(
+            "Migration {v} was already applied to this database but no longer matches this \
+             build — the database and the app are out of step. Install the latest santree, or \
+             quit and move {} aside to start with a fresh database.",
+            db_path.display()
+        ),
+        other => anyhow::Error::new(other).context("running migrations"),
+    }
 }
 
 #[cfg(unix)]
@@ -100,5 +153,30 @@ mod tests {
         assert_eq!(db_mode, 0o600, "db file must be owner-only");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A downgrade (older DMG opening a newer db) must say so, not surface sqlx's
+    /// "migration N was previously applied but is missing" to the user.
+    #[test]
+    fn migrate_error_names_the_downgrade() {
+        let err = migrate_error(
+            MigrateError::VersionMissing(14),
+            Path::new("/data/santree.db"),
+        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains("newer version of santree"), "{msg}");
+        assert!(msg.contains("migration 14"), "{msg}");
+        assert!(msg.contains("/data/santree.db"), "{msg}");
+    }
+
+    /// Anything that isn't a version skew is a genuine migration failure and must
+    /// keep sqlx's own diagnosis rather than being retold as a downgrade.
+    #[test]
+    fn migrate_error_keeps_real_failures() {
+        let err = migrate_error(MigrateError::Dirty(3), Path::new("/data/santree.db"));
+        let msg = format!("{err:#}");
+        assert!(msg.contains("running migrations"), "{msg}");
+        assert!(msg.contains("partially applied"), "{msg}");
+        assert!(!msg.contains("newer version"), "{msg}");
     }
 }

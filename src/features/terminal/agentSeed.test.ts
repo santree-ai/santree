@@ -120,6 +120,17 @@ describe("agentSessionSeed", () => {
     expect(shellQuote("safe\x15rm -rf ~\rdone")).toBe("'saferm -rf ~done'");
   });
 
+  it("strips C1 control codes (8-bit CSI/DCS/OSC introducers) from ticket text", () => {
+    // A terminal in 8-bit-control mode reads these as escape-sequence introducers,
+    // so quoting alone wouldn't contain them: \u009b = CSI, \u0090 = DCS, \u009d = OSC.
+    expect(shellQuote("Fix \u009b2J the \u0090payload\u009c thing")).toBe(
+      "'Fix 2J the payload thing'",
+    );
+    expect(agentSessionSeed(fresh, "claude", { prompt: "AK-1: \u009d0;pwned\u0007 title" })).toBe(
+      "exec 'claude' --session-id 'sess-1' 'AK-1: 0;pwned title'",
+    );
+  });
+
   it("folds embedded newlines to a space instead of breaking the quoted seed", () => {
     expect(shellQuote("line one\nline two")).toBe("'line one line two'");
   });

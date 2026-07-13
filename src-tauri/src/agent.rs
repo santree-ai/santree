@@ -13,8 +13,9 @@ pub const HELPER_MODEL: &str = "haiku";
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+use uuid::Uuid;
 
 use crate::settings;
 
@@ -26,10 +27,6 @@ const ARG_MAX_SAFE: usize = 200 * 1024;
 /// a blocking-pool thread can't leak.
 const AGENT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Distinguishes concurrent large-prompt temp files (pid alone collides when two
-/// `run_print` calls overlap).
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
 /// Turn a prompt into the argument to pass after `--`, plus an optional temp-file
 /// path the caller must delete once the agent has run. If the prompt fits within
 /// the OS arg limit it's passed directly; otherwise it's written to a unique temp
@@ -38,11 +35,14 @@ fn prompt_arg(prompt: &str) -> (String, Option<PathBuf>) {
     if prompt.len() <= ARG_MAX_SAFE {
         return (prompt.to_string(), None);
     }
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("santree-prompt-{}-{seq}.md", std::process::id()));
-    // The prompt can carry the repo diff (and thus possibly secrets), so the temp
-    // file is owner-only (0600) — never world-readable on a shared host.
-    if write_private(&path, prompt).is_ok() {
+    // The prompt can carry the repo diff (and thus possibly secrets), so it goes in
+    // santree's own 0700 dir under a random name, created exclusively (`create_new`)
+    // at 0600 — a shared `/tmp` with a predictable name lets another local user
+    // pre-plant the file and read what we then write into it. `private_dir` failing
+    // is a non-issue: create_new + a v4 name is still unguessable and unclobberable.
+    let dir = crate::private_dir().unwrap_or_else(std::env::temp_dir);
+    let path = dir.join(format!("santree-prompt-{}.md", Uuid::new_v4()));
+    if write_new_private(&path, prompt).is_ok() {
         (
             format!(
                 "Read {} and follow the instructions inside.",
@@ -58,23 +58,18 @@ fn prompt_arg(prompt: &str) -> (String, Option<PathBuf>) {
     }
 }
 
-/// Write `contents` to `path` with owner-only (0600) permissions.
-#[cfg(unix)]
-fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+/// Create `path` — failing if it already exists — with owner-only (0600) permissions
+/// and write `contents` to it.
+fn write_new_private(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(contents.as_bytes())
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
-    std::fs::write(path, contents)
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(contents.as_bytes())
 }
 
 /// Truncate `s` to at most `max` bytes, backing up to the nearest char boundary so
@@ -273,6 +268,33 @@ mod tests {
     fn build_args_omits_model_flag_when_none() {
         let args = build_args(&[], None, "prompt");
         assert!(!args.contains(&"--model".to_string()));
+    }
+
+    /// An oversized prompt spills to a file that is owner-only and that we only ever
+    /// *create* — never write through to one that already exists.
+    #[cfg(unix)]
+    #[test]
+    fn large_prompt_spills_to_an_exclusively_created_private_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let prompt = "x".repeat(ARG_MAX_SAFE + 1);
+        let (arg, temp) = prompt_arg(&prompt);
+        let path = temp.expect("an oversized prompt must spill to a file");
+        assert!(arg.contains(&path.display().to_string()));
+        assert!(
+            path.starts_with(crate::private_dir().unwrap()),
+            "prompts must not land in a shared tmp dir"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            write_new_private(&path, "planted").is_err(),
+            "an existing file must never be written through"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), prompt);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

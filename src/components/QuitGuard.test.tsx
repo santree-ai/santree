@@ -4,9 +4,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Shared mock state, matching the `logMock` pattern in lib/logging.test.ts —
 // `vi.hoisted` because the factories below run before this file's own
 // top-level `const`s would otherwise be initialized.
+// The mock signatures are declared (rather than bare `vi.fn()`) so `.mock.calls`
+// is typed — otherwise the recorded args are an empty tuple and every read of them
+// needs a cast, which is how this file's handler lookups silently stopped being
+// type-checked at all.
+type CloseHandler = (e: { preventDefault: () => void }) => void;
 const windowMock = vi.hoisted(() => ({
-  onCloseRequested: vi.fn(() => Promise.resolve(vi.fn())),
-  listen: vi.fn(() => Promise.resolve(vi.fn())),
+  onCloseRequested: vi.fn((_h: (e: { preventDefault: () => void }) => void) =>
+    Promise.resolve(vi.fn()),
+  ),
+  listen: vi.fn((_event: string, _h: () => void) => Promise.resolve(vi.fn())),
   destroy: vi.fn(() => Promise.resolve()),
 }));
 vi.mock("@tauri-apps/api/window", () => ({
@@ -35,12 +42,8 @@ import { QuitGuard } from "./QuitGuard";
 /** The close-requested / quit-requested handlers QuitGuard registered on the
  *  (mocked) window in its mount effect. */
 function handlers() {
-  const close = windowMock.onCloseRequested.mock.calls.at(-1)?.[0] as (e: {
-    preventDefault: () => void;
-  }) => void;
-  const quit = windowMock.listen.mock.calls.find(([event]) => event === "quit-requested")?.[1] as
-    | (() => void)
-    | undefined;
+  const close = windowMock.onCloseRequested.mock.calls.at(-1)?.[0] as CloseHandler;
+  const quit = windowMock.listen.mock.calls.find(([event]) => event === "quit-requested")?.[1];
   return { close, quit: quit as () => void };
 }
 

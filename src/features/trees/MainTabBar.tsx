@@ -76,11 +76,12 @@ export function MainTabBar() {
     <div className={`flex ${CHROME.subBar} flex-none items-stretch border-b border-line bg-deep`}>
       {!isBase && <Tab tab="issue" label="Issue" active={activeTab} onSelect={setActiveTab} />}
       {/* The main work terminal hosts the worktree's agent session — mark it with
-          the agent's logo (the base entry is a plain shell, so no icon). */}
+          the agent's logo once one has been launched (the base entry is a plain
+          shell, and a worktree with no agent yet has nothing to mark). */}
       <Tab
         tab="terminal"
         label="Terminal"
-        icon={!isBase && active ? <AgentTabIcon kind={active.agent} /> : undefined}
+        icon={!isBase && active?.agent ? <AgentTabIcon kind={active.agent} /> : undefined}
         active={activeTab}
         onSelect={setActiveTab}
       />
@@ -285,6 +286,7 @@ function Tab({
             type="button"
             onClick={onClose}
             title="Close"
+            aria-label={`Close ${label}`}
             className="flex h-4 w-4 cursor-pointer items-center justify-center rounded text-[13px] leading-none text-muted-3 hover:bg-hover hover:text-fg-2"
           >
             <CloseIcon size={10} />

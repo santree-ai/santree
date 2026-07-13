@@ -68,13 +68,6 @@ export const statusColor: Record<TaskStatus, string> = {
   Done: palette.purple,
 };
 
-/**
- * Color + label for a pull request's state on its chip. Uses GitHub Primer's
- * standard state colors (dark-mode values) so the chip reads like GitHub:
- *   open → neutral gray · merged → "done" purple · closed → danger red.
- * Reserved for when CI/merge-queue status is wired: enqueued → attention yellow
- * (`#d29922`), CI failing → danger red (`#f85149`).
- */
 /** Family key + label + color for a raw Claude model id (`claude-opus-4-8` →
  *  opus / "Opus" / purple), for the Usage panel's per-model bars and session
  *  badges. `key` groups every version of a family together; matched by substring
@@ -98,6 +91,9 @@ export function modelVersion(model: string): string {
   return m ? `${label} ${m[1].replace("-", ".")}` : label;
 }
 
+/** Color + label for a pull request's state on its chip. Uses GitHub Primer's
+ *  standard state colors (dark-mode values) so the chip reads like GitHub:
+ *  open → neutral gray · merged → "done" purple · closed → danger red. */
 export const prStateMeta: Record<PrState, { color: string; label: string }> = {
   Open: { color: "#848d97", label: "open" },
   Merged: { color: "#a371f7", label: "merged" },
@@ -168,7 +164,6 @@ export const priorityColor: Record<Priority, string> = {
 
 export const activityColor: Record<Activity, string> = {
   Running: "var(--accent)",
-  Awaiting: palette.amber,
   Idle: "#6b6b73",
 };
 

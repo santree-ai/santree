@@ -120,6 +120,69 @@ pub struct GithubStatus {
     pub host: String,
 }
 
+/// What a Claude session is doing right now, derived from its hook events by
+/// `crates/hook` and reconciled against the transcript in `hooks.rs`.
+///
+/// This is the single definition shared by all three: the hook binary writes
+/// `as_str()` into `session_state.state`, the app parses it back with
+/// [`AgentState::parse`], and the frontend gets a real union type over the
+/// bridge instead of `string`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    /// The model is working (a prompt was submitted, or the transcript is moving).
+    Active,
+    /// Working, but through a subagent — the main transcript is quiet while a
+    /// sidechain advances.
+    Delegating,
+    /// Blocked on a permission prompt the user has to answer.
+    Permission,
+    /// Blocked on the user for some other reason (a Notification with no
+    /// recognized subtype).
+    Waiting,
+    /// Alive but quiet — the turn ended and nothing is running.
+    Idle,
+    /// The session ended (SessionEnd).
+    Exited,
+}
+
+impl AgentState {
+    /// The wire form: what lands in the `session_state.state` TEXT column and
+    /// what crosses the bridge (kept in lockstep with `serde(snake_case)`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Delegating => "delegating",
+            Self::Permission => "permission",
+            Self::Waiting => "waiting",
+            Self::Idle => "idle",
+            Self::Exited => "exited",
+        }
+    }
+
+    /// Inverse of [`as_str`]. `None` for anything else — the hook binary is a
+    /// separately-built executable, so a stale copy on disk can write a state
+    /// this build doesn't know; callers drop those rows rather than guess.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "active" => Self::Active,
+            "delegating" => Self::Delegating,
+            "permission" => Self::Permission,
+            "waiting" => Self::Waiting,
+            "idle" => Self::Idle,
+            "exited" => Self::Exited,
+            _ => return None,
+        })
+    }
+
+    /// Whether the session is blocked on the user (permission prompt or
+    /// notification) — the states the transcript reconciler must not overrule
+    /// without evidence, and the ones the UI badges as needing attention.
+    pub fn is_blocked_on_user(self) -> bool {
+        matches!(self, Self::Permission | Self::Waiting)
+    }
+}
+
 /// The current state of one Claude session, captured live via the hooks santree
 /// injects into its `claude` launches. One per session id (a current-state row,
 /// not an event log). The frontend correlates a session back to a worktree later
@@ -130,9 +193,11 @@ pub struct GithubStatus {
 pub struct SessionState {
     /// Claude session id (the one santree minted via `--session-id`).
     pub session_id: String,
-    /// Derived agent state: "active" | "waiting" | "idle" | "exited".
-    pub state: String,
-    /// Raw Claude hook event that last set `state` (e.g. "Stop").
+    /// Derived agent state.
+    pub state: AgentState,
+    /// Raw Claude hook event that last set `state` (e.g. "Stop"). Deliberately a
+    /// free string, not an enum: it's Claude's vocabulary, not ours, and a new
+    /// event name from a CLI upgrade must not fail to deserialize.
     pub event: String,
     /// Working directory the session ran in (the worktree path).
     pub cwd: String,
@@ -704,6 +769,11 @@ pub struct PrDetail {
     /// Inline review-comment threads, anchored to files/lines (shown in the diff).
     pub threads: Vec<PrThread>,
     pub files: Vec<PrFile>,
+    /// True when the PR has more changed files than we fetched (GitHub allows up
+    /// to 3000; `github.rs` stops at `PR_FILES_CAP`). The UI must say so — a
+    /// reviewer who marks every listed file "Viewed" on a truncated list has
+    /// approved a diff they never saw.
+    pub files_truncated: bool,
     pub checks: Vec<PrCheck>,
     /// Commit OID of the PR's base (old side) — used to fetch full file content
     /// on demand so the diff can expand unchanged context (GitHub-style). Empty
@@ -729,7 +799,6 @@ pub struct ReviewedFile {
 pub enum Activity {
     Running,
     Idle,
-    Awaiting,
 }
 
 /// A live git worktree with an agent attached.
@@ -739,7 +808,10 @@ pub struct Worktree {
     /// The issue identifier this worktree was created for (e.g. "AK-165").
     pub id: String,
     pub title: String,
-    pub status: TaskStatus,
+    /// The ticket's status, when the issue is one santree knows about. `None`
+    /// when there's nothing to know (the base worktree, or a worktree whose
+    /// issue we can't resolve) — the UI renders no chip rather than a made-up one.
+    pub status: Option<TaskStatus>,
     pub add_lines: u32,
     pub del_lines: u32,
     pub dirty: bool,
@@ -759,8 +831,13 @@ pub struct Worktree {
     /// conflicting pull can't be applied automatically and must be resolved in the
     /// worktree. Always false when nothing is pending (`remote_behind == 0`).
     pub pull_conflict: bool,
-    pub agent: AgentKind,
-    pub activity: Activity,
+    /// The agent attached to this worktree, once one has actually been launched
+    /// in it. `None` for the base worktree (no agent concept) and for worktrees
+    /// with no session yet.
+    pub agent: Option<AgentKind>,
+    /// Derived from the worktree's live agent session. `None` when there is no
+    /// session to derive it from — the backend does not guess.
+    pub activity: Option<Activity>,
     /// Git branch checked out in the worktree (e.g. "feature/ak-165-…").
     pub branch: String,
     /// Absolute filesystem path of the worktree directory.

@@ -8,6 +8,14 @@ resolver = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 specta = { version = "=2.0.0-rc.25", features = ["derive"] }
+# The app and the hook binary must link exactly one libsqlite3-sys: `links =
+# "sqlite3"` allows only one copy in the graph, so a version drift between the
+# two crates is a hard build failure. Pinning here makes that structural.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1", default-features = false }
+portable-pty = "0.9"
+anyhow = "1"
+log = "0.4"
 
 [workspace.package]
 edition = "2021"
@@ -20,6 +28,12 @@ license = "MIT"
 [profile.release]
 codegen-units = 1
 lto = true
-strip = true
+# …except for debuginfo. `panic = "abort"` gives us exactly one chance to record a
+# crash: the panic hook in lib.rs, which logs a backtrace before the process dies.
+# Stripping the symbol table would reduce that backtrace to a column of hex
+# addresses, which is not a crash report. Line tables (`debug = 1`) + an unstripped
+# symbol table are what make it resolve to real frames.
+debug = 1
+strip = false
 panic = "abort"
 opt-level = "s"

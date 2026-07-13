@@ -21,6 +21,10 @@ function tick() {
 }
 
 function subscribe(listener: () => void): () => void {
+  // The clock stops with the interval when the last consumer unmounts, so the
+  // first one back re-reads it — otherwise a view revisited after an hour away
+  // would serve an hour-stale `now` until the next tick.
+  if (listeners.size === 0) now = Date.now();
   listeners.add(listener);
   timer ??= setInterval(tick, TICK_MS);
   return () => {

@@ -10,10 +10,10 @@
  * always re-review what actually changed. The toggle mutation lives here (a stable
  * parent) rather than in the card, which unmounts when collapsed.
  */
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 
 import type { PrFile, PrThread, ReviewPr } from "../../bindings";
-import { ChevronDownIcon, EyeIcon } from "../../components/icons";
+import { ChevronDownIcon, EyeIcon, WarningIcon } from "../../components/icons";
 import { EmptyState, Skeleton } from "../../components/primitives";
 import {
   usePrDetail,
@@ -21,6 +21,8 @@ import {
   useReviewedFiles,
   useSetFileReviewed,
 } from "../../lib/queries";
+import { splitRepoSlug } from "../../lib/repo";
+import { palette } from "../../theme/colors";
 import { PrFileDiff } from "./PrFileDiff";
 import { PrThreadCard } from "./PrThreadCard";
 
@@ -34,16 +36,15 @@ const STATUS_META: Record<string, { letter: string; color: string }> = {
   copied: { letter: "C", color: "var(--color-status-blue)" },
 };
 
-function splitRepo(slug: string): [string, string] {
-  const [owner, ...rest] = slug.split("/");
-  return [owner, rest.join("/")];
-}
+/** One shared empty array for thread-less files — a fresh `[]` literal per render
+ *  would be a new reference and defeat {@link PrFileCard}'s memo. */
+const NO_THREADS: PrThread[] = [];
 
 export function PrReviewPane({ pr }: { pr: ReviewPr }) {
-  const [owner, name] = splitRepo(pr.repo);
+  const [owner, name] = splitRepoSlug(pr.repo);
   const { data: detail, isLoading } = usePrDetail(owner, name, pr.number);
   const { data: reviewed = [] } = useReviewedFiles(pr.repo, pr.number);
-  const setReviewed = useSetFileReviewed(pr.repo, pr.number);
+  const { mutate: setReviewed } = useSetFileReviewed(pr.repo, pr.number);
 
   // A file counts as reviewed only while its current head SHA still matches the
   // one we stored the mark against.
@@ -66,6 +67,14 @@ export function PrReviewPane({ pr }: { pr: ReviewPr }) {
 
   const reviewedCount = files.filter((f) => reviewedSha.get(f.path) === f.sha).length;
 
+  // Takes the file rather than closing over it, so every card gets the same handler
+  // reference — a per-file closure would re-render (and re-lay-out) the whole list
+  // on any toggle or check-poll.
+  const onToggle = useCallback(
+    (file: PrFile, rev: boolean) => setReviewed({ path: file.path, sha: file.sha, reviewed: rev }),
+    [setReviewed],
+  );
+
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       {isLoading ? (
@@ -78,6 +87,17 @@ export function PrReviewPane({ pr }: { pr: ReviewPr }) {
             <span className="tracking-[.04em] uppercase">
               {reviewedCount} / {files.length} files viewed
             </span>
+            {/* The file list is capped. Say so — marking every *listed* file viewed
+                on a truncated list means approving a diff you never saw. */}
+            {detail?.filesTruncated && (
+              <span
+                className="ml-auto flex items-center gap-1 normal-case"
+                style={{ color: palette.amber }}
+              >
+                <WarningIcon size={11} />
+                Showing the first {files.length} files — this PR has more.
+              </span>
+            )}
           </div>
           {files.map((f) => (
             <PrFileCard
@@ -87,9 +107,9 @@ export function PrReviewPane({ pr }: { pr: ReviewPr }) {
               base={detail?.baseSha ?? ""}
               head={detail?.headSha ?? ""}
               file={f}
-              threads={threadsByPath.get(f.path) ?? []}
+              threads={threadsByPath.get(f.path) ?? NO_THREADS}
               reviewed={reviewedSha.get(f.path) === f.sha}
-              onToggle={(rev) => setReviewed.mutate({ path: f.path, sha: f.sha, reviewed: rev })}
+              onToggle={onToggle}
             />
           ))}
         </>
@@ -133,7 +153,7 @@ const PrFileCard = memo(function PrFileCard({
   file: PrFile;
   threads: PrThread[];
   reviewed: boolean;
-  onToggle: (reviewed: boolean) => void;
+  onToggle: (file: PrFile, reviewed: boolean) => void;
 }) {
   // Collapse follows the reviewed mark, but the chevron can override it. The
   // effect re-syncs only when `reviewed` actually flips (e.g. a new commit clears
@@ -194,7 +214,7 @@ const PrFileCard = memo(function PrFileCard({
           <input
             type="checkbox"
             checked={reviewed}
-            onChange={(e) => onToggle(e.target.checked)}
+            onChange={(e) => onToggle(file, e.target.checked)}
             className="h-3 w-3 cursor-pointer accent-[var(--accent)]"
           />
           <EyeIcon size={12} />

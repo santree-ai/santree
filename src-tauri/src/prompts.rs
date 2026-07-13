@@ -165,10 +165,7 @@ async fn custom_blocks(db: &Db) -> Vec<CustomBlock> {
 fn is_valid_block_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 40
-        && name
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_lowercase())
+        && name.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
@@ -205,7 +202,10 @@ async fn resolve_one(db: &Db, repo: Option<&str>, name: &str, fallback: &str) ->
 pub async fn resolve_sources(db: &Db, repo: Option<&str>) -> Result<Vec<(String, String)>> {
     let mut out = Vec::with_capacity(PROMPT_DEFS.len());
     for d in PROMPT_DEFS {
-        out.push((d.name.to_string(), resolve_one(db, repo, d.name, d.default).await?));
+        out.push((
+            d.name.to_string(),
+            resolve_one(db, repo, d.name, d.default).await?,
+        ));
     }
     for b in custom_blocks(db).await {
         out.push((b.name.clone(), resolve_one(db, repo, &b.name, "").await?));
@@ -453,7 +453,8 @@ pub async fn list(db: &Db, scope: &str) -> Result<Vec<PromptInfo>> {
         out.push(PromptInfo {
             name: b.name.clone(),
             label: b.label.clone(),
-            description: "A custom shared block. Include it in any prompt with {% include \"…\" %}.".into(),
+            description:
+                "A custom shared block. Include it in any prompt with {% include \"…\" %}.".into(),
             kind: PromptKind::Block,
             builtin: false,
             default: String::new(),
@@ -512,7 +513,11 @@ pub async fn create_block(db: &Db, name: &str, label: &str) -> Result<()> {
     let label = label.trim();
     blocks.push(CustomBlock {
         name: name.to_string(),
-        label: if label.is_empty() { name.to_string() } else { label.to_string() },
+        label: if label.is_empty() {
+            name.to_string()
+        } else {
+            label.to_string()
+        },
     });
     settings::set(db, "app", BLOCKS_KEY, Some(serde_json::to_string(&blocks)?)).await?;
     settings::set(
@@ -590,7 +595,10 @@ pub async fn preview(
     // is pre-rendered unmarked above, so in a flow the whole embedded issue block
     // reads as one span, while the `issue` prompt itself gets per-field spans.
     match render_marked(&sources, name, ctx) {
-        Ok(output) => Ok(PromptPreview { output, error: None }),
+        Ok(output) => Ok(PromptPreview {
+            output,
+            error: None,
+        }),
         Err(e) => Ok(PromptPreview {
             output: String::new(),
             error: Some(format!("{e:#}")),
@@ -634,7 +642,8 @@ fn sample_detail() -> TriageDetail {
     }
 }
 
-const SAMPLE_DIFF: &str = "diff --git a/src/auth.rs b/src/auth.rs\n@@\n-fn login() {}\n+fn login() { throttle(); }";
+const SAMPLE_DIFF: &str =
+    "diff --git a/src/auth.rs b/src/auth.rs\n@@\n-fn login() {}\n+fn login() { throttle(); }";
 
 #[cfg(test)]
 mod tests {
@@ -777,9 +786,14 @@ mod tests {
         );
 
         // A repo override wins over the app override.
-        set_prompt(&db, "repo:canary", "work", Some("REPO {{ ticket_id }}".into()))
-            .await
-            .unwrap();
+        set_prompt(
+            &db,
+            "repo:canary",
+            "work",
+            Some("REPO {{ ticket_id }}".into()),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             render(&db, Some("canary"), "work", ctx()).await.unwrap(),
             "REPO AK-1"
@@ -802,9 +816,14 @@ mod tests {
     async fn include_honors_overridden_issue_template() {
         let db = test_db().await;
         // Override both `work` (to include `issue`) and `issue` itself.
-        set_prompt(&db, "app", "work", Some(r#"START {% include "issue" %} END"#.into()))
-            .await
-            .unwrap();
+        set_prompt(
+            &db,
+            "app",
+            "work",
+            Some(r#"START {% include "issue" %} END"#.into()),
+        )
+        .await
+        .unwrap();
         set_prompt(&db, "app", "issue", Some("ISSUE:{{ identifier }}".into()))
             .await
             .unwrap();
@@ -821,7 +840,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            settings::get(&db, "app", "prompt.work").await.unwrap().is_none(),
+            settings::get(&db, "app", "prompt.work")
+                .await
+                .unwrap()
+                .is_none(),
             "a broken template must not be persisted"
         );
         let _ = err;
@@ -846,7 +868,10 @@ mod tests {
         assert!(plain.contains("Task AK-123: Add login throttling"));
         assert!(plain.contains("throttled"), "sample ticket embedded");
         // The interpolated values are marked; the literal prose is not.
-        assert!(p.output.contains(&format!("{MARK_OPEN}AK-123{MARK_CLOSE}")), "value marked");
+        assert!(
+            p.output.contains(&format!("{MARK_OPEN}AK-123{MARK_CLOSE}")),
+            "value marked"
+        );
         assert!(p.output.contains("Task "), "literal text stays unmarked");
     }
 
@@ -862,11 +887,13 @@ mod tests {
 
     #[test]
     fn scan_includes_finds_names_and_ignores_lookalikes() {
-        let src =
-            r#"{% include "issue" %} text {%- include 'house-style' -%} {% if includes %}{% endif %}"#;
+        let src = r#"{% include "issue" %} text {%- include 'house-style' -%} {% if includes %}{% endif %}"#;
         assert_eq!(scan_includes(src), vec!["issue", "house-style"]);
         // De-dupes and skips the `if`/word-boundary lookalikes.
-        assert_eq!(scan_includes(r#"{% include "a" %}{% include "a" %}"#), vec!["a"]);
+        assert_eq!(
+            scan_includes(r#"{% include "a" %}{% include "a" %}"#),
+            vec!["a"]
+        );
         assert!(scan_includes("no tags here").is_empty());
     }
 
@@ -874,17 +901,34 @@ mod tests {
     async fn custom_block_is_created_included_and_deleted() {
         let db = test_db().await;
         // Create a block and give it real content.
-        create_block(&db, "house-style", "House style").await.unwrap();
-        set_prompt(&db, "app", "house-style", Some("HOUSE {{ ticket_id }}".into()))
+        create_block(&db, "house-style", "House style")
             .await
             .unwrap();
+        set_prompt(
+            &db,
+            "app",
+            "house-style",
+            Some("HOUSE {{ ticket_id }}".into()),
+        )
+        .await
+        .unwrap();
         // A flow that includes it resolves the block's content.
-        set_prompt(&db, "app", "work", Some(r#"W {% include "house-style" %}"#.into()))
-            .await
-            .unwrap();
-        let out = render(&db, Some("canary"), "work", context! { ticket_id => "AK-7" })
-            .await
-            .unwrap();
+        set_prompt(
+            &db,
+            "app",
+            "work",
+            Some(r#"W {% include "house-style" %}"#.into()),
+        )
+        .await
+        .unwrap();
+        let out = render(
+            &db,
+            Some("canary"),
+            "work",
+            context! { ticket_id => "AK-7" },
+        )
+        .await
+        .unwrap();
         assert_eq!(out, "W HOUSE AK-7");
 
         // It shows up in the listing with the live composition links.
@@ -898,19 +942,37 @@ mod tests {
         // Deleting drops it from the manifest and clears its content everywhere;
         // the still-including flow now renders it empty rather than breaking.
         delete_block(&db, "house-style").await.unwrap();
-        assert!(!list(&db, "app").await.unwrap().iter().any(|p| p.name == "house-style"));
-        let out = render(&db, Some("canary"), "work", context! { ticket_id => "AK-7" })
+        assert!(!list(&db, "app")
             .await
-            .unwrap();
+            .unwrap()
+            .iter()
+            .any(|p| p.name == "house-style"));
+        let out = render(
+            &db,
+            Some("canary"),
+            "work",
+            context! { ticket_id => "AK-7" },
+        )
+        .await
+        .unwrap();
         assert_eq!(out, "W ");
     }
 
     #[tokio::test]
     async fn create_block_rejects_bad_and_colliding_names() {
         let db = test_db().await;
-        assert!(create_block(&db, "Bad Name", "x").await.is_err(), "spaces/caps rejected");
-        assert!(create_block(&db, "work", "x").await.is_err(), "built-in name rejected");
+        assert!(
+            create_block(&db, "Bad Name", "x").await.is_err(),
+            "spaces/caps rejected"
+        );
+        assert!(
+            create_block(&db, "work", "x").await.is_err(),
+            "built-in name rejected"
+        );
         create_block(&db, "dup", "Dup").await.unwrap();
-        assert!(create_block(&db, "dup", "Dup").await.is_err(), "duplicate rejected");
+        assert!(
+            create_block(&db, "dup", "Dup").await.is_err(),
+            "duplicate rejected"
+        );
     }
 }

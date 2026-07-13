@@ -1,0 +1,39 @@
+version: 2
+
+# Routine bumps land as PRs (which CI gates) rather than waiting for someone to
+# notice a stale lockfile. Security advisories are handled separately, by the
+# scheduled scans in audit.yml.
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    # tauri-specta is pinned to an rc alongside specta/specta-typescript and the
+    # three must move together — see CLAUDE.md.
+    ignore:
+      - dependency-name: tauri-specta
+      - dependency-name: specta
+      - dependency-name: specta-typescript
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday

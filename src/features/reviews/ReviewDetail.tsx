@@ -13,7 +13,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
   CheckLog,
@@ -62,6 +62,7 @@ import {
   useSetPrLabels,
   useTriageDetail,
 } from "../../lib/queries";
+import { splitRepoSlug } from "../../lib/repo";
 import { useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import {
@@ -81,12 +82,6 @@ import { PrInfoPanel } from "./PrInfoPanel";
 import { PrReviewPane } from "./PrReviewPane";
 
 type DetailTab = "pr" | "checks" | "issue";
-
-/** Split an "owner/name" slug into its parts. */
-function splitRepo(slug: string): [string, string] {
-  const [owner, ...rest] = slug.split("/");
-  return [owner, rest.join("/")];
-}
 
 /**
  * The Linear ticket id for a PR: prefer the `[AK-123]` tag in the title (the
@@ -265,7 +260,7 @@ function Reviewers({ reviewers }: { reviewers: Reviewer[] }) {
  *  the (deduped) PR detail; edits write straight through to GitHub optimistically,
  *  so the row updates instantly. */
 function PrLabels({ pr }: { pr: ReviewPr }) {
-  const [owner, name] = splitRepo(pr.repo);
+  const [owner, name] = splitRepoSlug(pr.repo);
   const { data: detail } = usePrDetail(owner, name, pr.number);
   const { mutate: setLabels } = useSetPrLabels(owner, name, pr.number);
   // Fetch the repo's palette only once the picker opens (labels rarely change).
@@ -583,6 +578,16 @@ function CheckRow({ check, owner, name }: { check: PrCheck; owner: string; name:
   // Failed runs start expanded — the detail is the reason you opened this tab.
   const [open, setOpen] = useState(hasDetail);
 
+  // A check that fails mid-poll (the common case: opened while CI was still running)
+  // expands too. Keyed on the *transition* into failure, so a failed check the user
+  // has since collapsed stays collapsed across re-renders.
+  const failed = check.status === "Failure";
+  const wasFailed = useRef(failed);
+  useEffect(() => {
+    if (failed && !wasFailed.current) setOpen(true);
+    wasFailed.current = failed;
+  }, [failed]);
+
   const header = (
     <>
       <span className="flex-none font-mono text-[12px]" style={{ color: m.color }}>
@@ -676,49 +681,56 @@ function FixCiButton({
   santreeRepo: string;
   failed: PrCheck[];
 }) {
-  const [owner, name] = splitRepo(pr.repo);
-  const { requestFixCiLaunch } = useAppUi();
+  const [owner, name] = splitRepoSlug(pr.repo);
+  const { requestFixCiLaunch, addPendingLaunches, removePendingLaunch } = useAppUi();
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const [busy, setBusy] = useState(false);
 
   // Only failed checks whose Actions job log we can actually fetch are useful.
   const fixable = failed.filter((c) => c.jobId != null);
   if (fixable.length === 0) return null;
 
-  async function run() {
-    setBusy(true);
-    try {
-      const issueId = ticketIdFor(pr) ?? `pr-${pr.number}`;
-      // Find-or-create a worktree on the PR's head branch (so the fix lands there).
-      const worktree = await unwrap(
-        commands.createWorktreeForPr(santreeRepo, issueId, pr.title, pr.headRef, null, "Claude"),
-      );
-      // Let the Trees list pick up the new worktree so its Fix-CI launch effect fires.
-      await qc.invalidateQueries({ queryKey: queryKeys.worktrees(santreeRepo) });
-      // Gather each failing job's log and label it by check name.
-      const logs = await Promise.all(
-        fixable.map(async (c) => {
-          const log = await unwrap(commands.prCheckLog(owner, name, c.jobId));
-          return `### ${c.name}\n\n${checkLogToText(log)}`;
-        }),
-      );
-      const promptPath = await unwrap(
-        commands.fixCiPrompt(santreeRepo, issueId, logs.join("\n\n")),
-      );
-      requestFixCiLaunch({ worktreeId: worktree.id, tabId: crypto.randomUUID(), promptPath });
-      navigate({ to: "/trees" });
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Couldn't start the CI fix.");
-    } finally {
-      setBusy(false);
-    }
+  // Land in Trees at once and reconcile in the background — the worktree create, a
+  // log fetch per failing job, and the prompt render are seconds of round-trips, and
+  // every other launch path in the app navigates first rather than holding the user
+  // on a spinner. The Fix-CI tab opens itself once the prompt file exists (Trees
+  // waits on `fixCiLaunch`); until then the sidebar shows the usual "Creating
+  // workspace…" placeholder.
+  function run() {
+    const issueId = ticketIdFor(pr) ?? `pr-${pr.number}`;
+    addPendingLaunches([{ id: issueId, title: pr.title, project: null, agent: "Claude" }]);
+    navigate({ to: "/trees" });
+
+    void (async () => {
+      try {
+        // Find-or-create a worktree on the PR's head branch (so the fix lands there).
+        const worktree = await unwrap(
+          commands.createWorktreeForPr(santreeRepo, issueId, pr.title, pr.headRef, null, "Claude"),
+        );
+        // Let the Trees list pick up the new worktree so its Fix-CI launch effect fires.
+        await qc.invalidateQueries({ queryKey: queryKeys.worktrees(santreeRepo) });
+        // Gather each failing job's log and label it by check name.
+        const logs = await Promise.all(
+          fixable.map(async (c) => {
+            const log = await unwrap(commands.prCheckLog(owner, name, c.jobId));
+            return `### ${c.name}\n\n${checkLogToText(log)}`;
+          }),
+        );
+        const promptPath = await unwrap(
+          commands.fixCiPrompt(santreeRepo, issueId, logs.join("\n\n")),
+        );
+        requestFixCiLaunch({ worktreeId: worktree.id, tabId: crypto.randomUUID(), promptPath });
+      } catch (e) {
+        removePendingLaunch(issueId);
+        toast.error(e instanceof Error ? e.message : "Couldn't start the CI fix.");
+      }
+    })();
   }
 
   return (
-    <Button size="sm" onClick={run} disabled={busy} title="Fix the failing checks with Claude">
-      {busy ? <Spinner size={11} /> : <ClaudeSparkIcon size={11} />}
-      {busy ? "Starting…" : "Fix CI with AI"}
+    <Button size="sm" onClick={run} title="Fix the failing checks with Claude">
+      <ClaudeSparkIcon size={11} />
+      Fix CI with AI
     </Button>
   );
 }
@@ -727,7 +739,7 @@ function FixCiButton({
  *  grouped by outcome: failed first, then running, then passed; skipped/other
  *  collapsed at the bottom (they're rarely what you're looking for). */
 function ChecksPane({ pr }: { pr: ReviewPr }) {
-  const [owner, name] = splitRepo(pr.repo);
+  const [owner, name] = splitRepoSlug(pr.repo);
   const { repo: santreeRepo } = useReviewsModel();
   const { data: detail, isLoading } = usePrDetail(owner, name, pr.number);
   // Section keys that are collapsed. The skipped/neutral group starts collapsed.

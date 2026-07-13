@@ -46,7 +46,12 @@ export const commands = {
 	/**  The issue identifier this worktree was created for (e.g. "AK-165"). */
 	id: string,
 	title: string,
-	status: TaskStatus,
+	/**
+	 *  The ticket's status, when the issue is one santree knows about. `None`
+	 *  when there's nothing to know (the base worktree, or a worktree whose
+	 *  issue we can't resolve) — the UI renders no chip rather than a made-up one.
+	 */
+	status: TaskStatus | null,
 	addLines: number,
 	delLines: number,
 	dirty: boolean,
@@ -72,8 +77,17 @@ export const commands = {
 	 *  worktree. Always false when nothing is pending (`remote_behind == 0`).
 	 */
 	pullConflict: boolean,
-	agent: AgentKind,
-	activity: Activity,
+	/**
+	 *  The agent attached to this worktree, once one has actually been launched
+	 *  in it. `None` for the base worktree (no agent concept) and for worktrees
+	 *  with no session yet.
+	 */
+	agent: AgentKind | null,
+	/**
+	 *  Derived from the worktree's live agent session. `None` when there is no
+	 *  session to derive it from — the backend does not guess.
+	 */
+	activity: Activity | null,
 	/**  Git branch checked out in the worktree (e.g. "feature/ak-165-…"). */
 	branch: string,
 	/**  Absolute filesystem path of the worktree directory. */
@@ -109,6 +123,12 @@ export const commands = {
 	 *  the Trees "Setup" tab; records it as run on success.
 	 */
 	runWorktreeSetupStreamed: (repo: string, issueId: string, onEvent: Channel<SetupEvent>) => typedError<null, CmdError>(__TAURI_INVOKE("run_worktree_setup_streamed", { repo, issueId, onEvent })),
+	/**
+	 *  Stop a running setup script (the Setup tab's Stop button). Killing the child
+	 *  ends the stream, so the run reports `Done { ok: false }` and the tab closes like
+	 *  any other failed setup. Returns whether a run was actually stopped.
+	 */
+	cancelWorktreeSetup: (repo: string, issueId: string) => typedError<boolean, CmdError>(__TAURI_INVOKE("cancel_worktree_setup", { repo, issueId })),
 	/**
 	 *  Merge the base branch into the worktree (the "pull from main/master" button).
 	 *  Errors on a conflicting merge; returns the base ref that was merged on success.
@@ -284,6 +304,12 @@ export const commands = {
 	 *  user expands the check — sliced to the failing step and classified so the UI
 	 *  can tint errors/warnings and collapse the quiet runs between them. `job_id`
 	 *  comes from [`PrCheck::job_id`]; empty when `gh` isn't authenticated.
+	 * 
+	 *  `job_id` crosses the bridge as `f64` because that's what a JS number *is* —
+	 *  specta has no 64-bit integer that TypeScript can represent losslessly. GitHub job
+	 *  ids are far below 2^53, so the cast back is exact; anything that isn't a
+	 *  non-negative whole number never came from a real `PrCheck` and is rejected rather
+	 *  than silently truncated by `as`.
 	 */
 	prCheckLog: (owner: string, name: string, jobId: number | null) => typedError<CheckLog, CmdError>(__TAURI_INVOKE("pr_check_log", { owner, name, jobId })),
 	/**
@@ -381,8 +407,9 @@ export const commands = {
 	setSettings: (settings: Settings) => typedError<null, CmdError>(__TAURI_INVOKE("set_settings", { settings })),
 	/**
 	 *  Exit the app. Called from the quit-confirmation dialog once the user confirms a
-	 *  ⌘Q / menu quit — `app.exit(0)` re-emits `ExitRequested` with a `Some` code, which
-	 *  the run-loop treats as a confirmed exit and lets through (see `run`).
+	 *  ⌘Q / menu quit. By the time this runs the quit is already confirmed, so the
+	 *  run-loop's `ExitRequested` handler doesn't gate on anything — it just reaps the
+	 *  terminal children (see `run` in lib.rs).
 	 */
 	quitApp: () => __TAURI_INVOKE<void>("quit_app"),
 	/**
@@ -524,7 +551,7 @@ export const events = {
 
 /* Types */
 /**  What an agent worktree is currently doing. */
-export type Activity = "Running" | "Idle" | "Awaiting";
+export type Activity = "Running" | "Idle";
 
 /**
  *  An agent harness's authentication / subscription status, as shown in the
@@ -598,6 +625,35 @@ export type AgentSetting = {
 	exec?: string,
 	model?: string,
 };
+
+/**
+ *  What a Claude session is doing right now, derived from its hook events by
+ *  `crates/hook` and reconciled against the transcript in `hooks.rs`.
+ * 
+ *  This is the single definition shared by all three: the hook binary writes
+ *  `as_str()` into `session_state.state`, the app parses it back with
+ *  [`AgentState::parse`], and the frontend gets a real union type over the
+ *  bridge instead of `string`.
+ */
+export type AgentState = 
+/**  The model is working (a prompt was submitted, or the transcript is moving). */
+"active" | 
+/**
+ *  Working, but through a subagent — the main transcript is quiet while a
+ *  sidechain advances.
+ */
+"delegating" | 
+/**  Blocked on a permission prompt the user has to answer. */
+"permission" | 
+/**
+ *  Blocked on the user for some other reason (a Notification with no
+ *  recognized subtype).
+ */
+"waiting" | 
+/**  Alive but quiet — the turn ended and nothing is running. */
+"idle" | 
+/**  The session ended (SessionEnd). */
+"exited";
 
 /**
  *  One entry in a worktree's working-tree status — a file with uncommitted
@@ -948,6 +1004,13 @@ export type PrDetail = {
 	/**  Inline review-comment threads, anchored to files/lines (shown in the diff). */
 	threads: PrThread[],
 	files: PrFile[],
+	/**
+	 *  True when the PR has more changed files than we fetched (GitHub allows up
+	 *  to 3000; `github.rs` stops at `PR_FILES_CAP`). The UI must say so — a
+	 *  reviewer who marks every listed file "Viewed" on a truncated list has
+	 *  approved a diff they never saw.
+	 */
+	filesTruncated: boolean,
 	checks: PrCheck[],
 	/**
 	 *  Commit OID of the PR's base (old side) — used to fetch full file content
@@ -1211,9 +1274,13 @@ export type ScriptInfo = {
 export type SessionState = {
 	/**  Claude session id (the one santree minted via `--session-id`). */
 	sessionId: string,
-	/**  Derived agent state: "active" | "waiting" | "idle" | "exited". */
-	state: string,
-	/**  Raw Claude hook event that last set `state` (e.g. "Stop"). */
+	/**  Derived agent state. */
+	state: AgentState,
+	/**
+	 *  Raw Claude hook event that last set `state` (e.g. "Stop"). Deliberately a
+	 *  free string, not an enum: it's Claude's vocabulary, not ours, and a new
+	 *  event name from a CLI upgrade must not fail to deserialize.
+	 */
 	event: string,
 	/**  Working directory the session ran in (the worktree path). */
 	cwd: string,
@@ -1601,7 +1668,12 @@ export type Worktree = {
 	/**  The issue identifier this worktree was created for (e.g. "AK-165"). */
 	id: string,
 	title: string,
-	status: TaskStatus,
+	/**
+	 *  The ticket's status, when the issue is one santree knows about. `None`
+	 *  when there's nothing to know (the base worktree, or a worktree whose
+	 *  issue we can't resolve) — the UI renders no chip rather than a made-up one.
+	 */
+	status: TaskStatus | null,
 	addLines: number,
 	delLines: number,
 	dirty: boolean,
@@ -1627,8 +1699,17 @@ export type Worktree = {
 	 *  worktree. Always false when nothing is pending (`remote_behind == 0`).
 	 */
 	pullConflict: boolean,
-	agent: AgentKind,
-	activity: Activity,
+	/**
+	 *  The agent attached to this worktree, once one has actually been launched
+	 *  in it. `None` for the base worktree (no agent concept) and for worktrees
+	 *  with no session yet.
+	 */
+	agent: AgentKind | null,
+	/**
+	 *  Derived from the worktree's live agent session. `None` when there is no
+	 *  session to derive it from — the backend does not guess.
+	 */
+	activity: Activity | null,
 	/**  Git branch checked out in the worktree (e.g. "feature/ak-165-…"). */
 	branch: string,
 	/**  Absolute filesystem path of the worktree directory. */

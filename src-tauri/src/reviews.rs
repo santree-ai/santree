@@ -35,7 +35,15 @@ pub async fn inbox(db: &Db, repo: &str) -> Result<ReviewInbox> {
     let (org, _name) =
         tokio::task::spawn_blocking(move || github::owner_repo(&root_path)).await??;
 
-    let teams = github::viewer_teams(&token, &org).await.unwrap_or_default();
+    // A failed team lookup only costs the per-team sections (the "mine"/"requested"
+    // ones still load), so it degrades rather than failing the inbox — but it's
+    // logged: without it, a rate-limited call looks exactly like "in no teams".
+    let teams = github::viewer_teams(&token, &org)
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!("Reviews: listing viewer teams in {org} failed: {e}");
+            Vec::new()
+        });
     github::review_inbox(&token, &org, &teams).await
 }
 
@@ -66,6 +74,7 @@ pub async fn detail(owner: &str, name: &str, number: u32) -> Result<PrDetail> {
             comments: vec![],
             threads: vec![],
             files: vec![],
+            files_truncated: false,
             checks: vec![],
             base_sha: String::new(),
             head_sha: String::new(),

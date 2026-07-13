@@ -202,11 +202,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     () => (localStorage.getItem(THEME_KEY) as Theme | null) ?? "dark",
   );
 
-  // Default to (and stay on) a repo that actually exists.
+  // Default to (and stay on) a repo that actually exists. When the list empties (the
+  // last repo was removed) the active repo must be *cleared*, not left pointing at a
+  // repo the backend no longer knows — every `enabled: !!repo` query would keep
+  // firing against it.
   useEffect(() => {
-    if (repos?.length && !repos.some((r) => r.name === activeRepo)) {
-      setActiveRepo(repos[0].name);
-    }
+    if (!repos) return; // still loading — don't clear a valid repo
+    if (repos.some((r) => r.name === activeRepo)) return;
+    setActiveRepo(repos[0]?.name ?? "");
   }, [repos, activeRepo]);
 
   // Warm the GitHub avatar cache for every repo up front, so pickers/dropdowns
@@ -232,9 +235,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // returning to Trees then renders fresh data, not a stale snapshot.
   useWorktreeWatcher(activeRepo);
 
-  // Keep live Claude session state flowing into the cache app-wide + in realtime
-  // (the query lands the data; the watcher pushes updates). No UI renders it yet.
-  useSessionStates();
+  // Keep live Claude session state flowing into the cache app-wide + in realtime:
+  // the watchers push updates, and <SessionStatePoller/> keeps the query observed.
+  // The Trees sidebar and the all-agents overview both render it.
   useSessionStateWatcher();
   useSessionUsageWatcher();
 
@@ -419,9 +422,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   return (
     <AppDataContext.Provider value={dataValue}>
-      <AppUiContext.Provider value={uiValue}>{children}</AppUiContext.Provider>
+      <AppUiContext.Provider value={uiValue}>
+        <SessionStatePoller />
+        {children}
+      </AppUiContext.Provider>
     </AppDataContext.Provider>
   );
+}
+
+/** Keeps the session-state query observed app-wide so its poll runs even on views
+ *  that don't read it (returning to Trees then shows current state, not a stale
+ *  snapshot). A leaf that renders nothing: subscribing from `AppProvider` itself
+ *  re-rendered the whole provider — and every consumer under it — on every tick. */
+function SessionStatePoller() {
+  useSessionStates();
+  return null;
 }
 
 export function useApp(): AppData {

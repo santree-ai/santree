@@ -17,6 +17,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use santree_core::domain::AgentState;
 use serde_json::Value;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, Connection};
@@ -39,23 +40,23 @@ use sqlx::{ConnectOptions, Connection};
 /// `waiting` back to running is NOT done here — the app reconciles that against
 /// the transcript on read (a manual accept/reject fires no reliable hook, and the
 /// per-tool events that would race a permission write are not injected).
-fn resolve_state(event: &str, payload: &Value) -> Option<&'static str> {
+fn resolve_state(event: &str, payload: &Value) -> Option<AgentState> {
     match event {
         // A turn is running — the user's prompt started it.
-        "UserPromptSubmit" => Some("active"),
-        "SessionStart" | "Stop" => Some("idle"),
-        "SessionEnd" => Some("exited"),
-        "PermissionRequest" => Some("permission"),
+        "UserPromptSubmit" => Some(AgentState::Active),
+        "SessionStart" | "Stop" => Some(AgentState::Idle),
+        "SessionEnd" => Some(AgentState::Exited),
+        "PermissionRequest" => Some(AgentState::Permission),
         "Notification" => match payload.get("notification_type").and_then(Value::as_str) {
-            Some("permission_prompt") => Some("permission"),
-            Some("agent_completed") => Some("idle"),
+            Some("permission_prompt") => Some(AgentState::Permission),
+            Some("agent_completed") => Some(AgentState::Idle),
             Some("agent_needs_input") | Some("idle_prompt") | Some("elicitation_dialog") => {
-                Some("waiting")
+                Some(AgentState::Waiting)
             }
             // Auth / elicitation-result notifications aren't a state change.
             Some(_) => None,
             // Older CLIs send no type — fall back to the prior "needs input".
-            None => Some("waiting"),
+            None => Some(AgentState::Waiting),
         },
         _ => None,
     }
@@ -104,10 +105,10 @@ fn main() {
     // (so consecutive tool events dedup to a single "running", see `record`). For
     // permission, fall back to the tool name as "run <tool>".
     let message = match state {
-        "permission" => field("message")
+        AgentState::Permission => field("message")
             .map(str::to_string)
             .or_else(|| field("tool_name").map(|t| format!("run {t}"))),
-        "waiting" => field("message").map(str::to_string),
+        AgentState::Waiting => field("message").map(str::to_string),
         _ => None,
     };
 
@@ -325,7 +326,7 @@ fn now_ms() -> i64 {
 async fn record(
     db_path: &str,
     session_id: &str,
-    state: &str,
+    state: AgentState,
     event: &str,
     cwd: &str,
     message: Option<&str>,
@@ -354,7 +355,7 @@ async fn record(
             .fetch_optional(&mut conn)
             .await?;
     if let Some((cur_state, cur_message)) = &current {
-        if cur_state == state && cur_message.as_deref() == message {
+        if cur_state == state.as_str() && cur_message.as_deref() == message {
             return Ok(false);
         }
     }
@@ -372,7 +373,7 @@ async fn record(
            updated_at_ms = excluded.updated_at_ms",
     )
     .bind(session_id)
-    .bind(state)
+    .bind(state.as_str())
     .bind(event)
     .bind(cwd)
     .bind(message)
@@ -393,11 +394,17 @@ mod tests {
     fn maps_events_to_states() {
         let nil = Value::Null;
         // SessionStart is idle (resumed / at the prompt), not active.
-        assert_eq!(resolve_state("SessionStart", &nil), Some("idle"));
-        assert_eq!(resolve_state("UserPromptSubmit", &nil), Some("active"));
-        assert_eq!(resolve_state("Stop", &nil), Some("idle"));
-        assert_eq!(resolve_state("SessionEnd", &nil), Some("exited"));
-        assert_eq!(resolve_state("PermissionRequest", &nil), Some("permission"));
+        assert_eq!(resolve_state("SessionStart", &nil), Some(AgentState::Idle));
+        assert_eq!(
+            resolve_state("UserPromptSubmit", &nil),
+            Some(AgentState::Active)
+        );
+        assert_eq!(resolve_state("Stop", &nil), Some(AgentState::Idle));
+        assert_eq!(resolve_state("SessionEnd", &nil), Some(AgentState::Exited));
+        assert_eq!(
+            resolve_state("PermissionRequest", &nil),
+            Some(AgentState::Permission)
+        );
         // Per-tool events are not mapped — clearing a resolved permission is the
         // app's transcript reconciliation's job, not this binary's.
         assert_eq!(resolve_state("PreToolUse", &nil), None);
@@ -411,16 +418,16 @@ mod tests {
         let with_type = |t: &str| serde_json::json!({ "notification_type": t });
         assert_eq!(
             resolve_state("Notification", &with_type("permission_prompt")),
-            Some("permission")
+            Some(AgentState::Permission)
         );
         // A completed turn is idle, not a red "waiting".
         assert_eq!(
             resolve_state("Notification", &with_type("agent_completed")),
-            Some("idle")
+            Some(AgentState::Idle)
         );
         assert_eq!(
             resolve_state("Notification", &with_type("agent_needs_input")),
-            Some("waiting")
+            Some(AgentState::Waiting)
         );
         // Non-state notifications don't change anything.
         assert_eq!(
@@ -428,7 +435,24 @@ mod tests {
             None
         );
         // No type (older CLI) falls back to "waiting".
-        assert_eq!(resolve_state("Notification", &Value::Null), Some("waiting"));
+        assert_eq!(
+            resolve_state("Notification", &Value::Null),
+            Some(AgentState::Waiting)
+        );
+    }
+
+    // The wire form the app reads back out of the `state` column.
+    #[test]
+    fn states_round_trip_through_the_db_column() {
+        for s in [
+            AgentState::Active,
+            AgentState::Permission,
+            AgentState::Waiting,
+            AgentState::Idle,
+            AgentState::Exited,
+        ] {
+            assert_eq!(AgentState::parse(s.as_str()), Some(s));
+        }
     }
 
     #[tokio::test]
@@ -440,11 +464,17 @@ mod tests {
         let db = db_path.to_str().unwrap();
 
         // No db yet → no-op, no panic.
-        assert!(
-            !record(db, "s1", "active", "SessionStart", "/w", None, None)
-                .await
-                .unwrap()
-        );
+        assert!(!record(
+            db,
+            "s1",
+            AgentState::Active,
+            "SessionStart",
+            "/w",
+            None,
+            None
+        )
+        .await
+        .unwrap());
 
         // Create the table the app owns (mirrors migration 0010).
         {
@@ -465,15 +495,25 @@ mod tests {
             c.close().await.unwrap();
         }
 
-        assert!(record(db, "s1", "active", "SessionStart", "/w", None, None)
-            .await
-            .unwrap());
+        assert!(record(
+            db,
+            "s1",
+            AgentState::Active,
+            "SessionStart",
+            "/w",
+            None,
+            None
+        )
+        .await
+        .unwrap());
         // Dedup: the same state + message again is a no-op (no UI nudge) — this is
         // what keeps repeated PreToolUse/PostToolUse from re-notifying every tool.
-        assert!(!record(db, "s1", "active", "PreToolUse", "/w", None, None)
-            .await
-            .unwrap());
-        assert!(record(db, "s1", "idle", "Stop", "/w", None, None)
+        assert!(
+            !record(db, "s1", AgentState::Active, "PreToolUse", "/w", None, None)
+                .await
+                .unwrap()
+        );
+        assert!(record(db, "s1", AgentState::Idle, "Stop", "/w", None, None)
             .await
             .unwrap());
 

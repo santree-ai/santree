@@ -71,6 +71,12 @@ pub struct WorktreeWatcher {
     /// touched by calls that short-circuit as a no-op, since those never
     /// write to `inner` and so can't cause a stale write.
     generation: AtomicU64,
+    /// Watch targets whose OS registration failed (the documented Linux
+    /// `max_user_watches` case). Registering a recursive watch walks the whole
+    /// subtree, so retrying a target that will just fail again would re-pay that
+    /// cost on every Trees mount / repo switch — remember it, log once, and skip
+    /// it for the rest of the session (raising the limit needs a restart anyway).
+    failed: Mutex<HashSet<PathBuf>>,
 }
 
 struct Active {
@@ -114,20 +120,6 @@ impl WorktreeWatcher {
             std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
         let worktrees_root = repo_root.join(".santree").join("worktrees");
 
-        let already_active = self
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .is_some_and(|a| {
-                a.repo_root == repo_root
-                    && a.base_debouncer.is_some()
-                    && (a.worktrees_debouncer.is_some() || !repo_root.join(".santree").exists())
-            });
-        if already_active {
-            return Ok(());
-        }
-
         // Don't create anything just because Trees was opened — merely browsing a
         // repo must not write a `.santree/` into it (the dir is created lazily by
         // the worktree-create path). Attach the recursive watch to the worktrees
@@ -141,6 +133,30 @@ impl WorktreeWatcher {
             let santree = repo_root.join(".santree");
             santree.exists().then_some(santree)
         };
+
+        // Skip a target we already know the OS refuses to watch (see `failed`), so
+        // this call has nothing left to do once the surviving watches are live.
+        let failed = self
+            .failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let watch_base = !failed.contains(&repo_root);
+        let worktrees_attempt = worktrees_target.filter(|t| !failed.contains(t));
+
+        let already_active = self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|a| {
+                a.repo_root == repo_root
+                    && (a.base_debouncer.is_some() || !watch_base)
+                    && (a.worktrees_debouncer.is_some() || worktrees_attempt.is_none())
+            });
+        if already_active {
+            return Ok(());
+        }
 
         // Claim a generation now, right before the cancel-unsafe registration
         // work below, so a call superseded by a later one can detect that once
@@ -159,9 +175,10 @@ impl WorktreeWatcher {
         // unless it also tracked create events and re-registered them — a whole
         // subsystem to maintain. The debounce window plus the skip filters
         // already collapse build churn to at most one signal per worktree/base.
-        let (worktrees_debouncer, base_debouncer) = tokio::task::spawn_blocking(
-            move || -> Result<(Option<FullDebouncer>, Option<FullDebouncer>)> {
-                let worktrees_debouncer = match worktrees_target {
+        let (worktrees_debouncer, base_debouncer, newly_failed) = tokio::task::spawn_blocking(
+            move || -> Result<(Option<FullDebouncer>, Option<FullDebouncer>, Vec<PathBuf>)> {
+                let mut newly_failed = Vec::new();
+                let worktrees_debouncer = match worktrees_attempt {
                     Some(target) => {
                         let mut d =
                             new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
@@ -194,8 +211,10 @@ impl WorktreeWatcher {
                                 // reasonably fresh without live watching.
                                 log::warn!(
                                     "worktree file watch failed for {target:?}: {e}; \
-                                     live change refresh disabled for this repo's worktrees"
+                                     live change refresh disabled for this repo's worktrees \
+                                     until restart"
                                 );
+                                newly_failed.push(target);
                                 None
                             }
                         }
@@ -203,34 +222,46 @@ impl WorktreeWatcher {
                     None => None,
                 };
 
-                let mut b = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
-                    let Ok(events) = res else { return };
-                    let changed = events
-                        .iter()
-                        .flat_map(|ev| ev.paths.iter())
-                        .any(|path| is_base_change(&base_root, path));
-                    if changed {
-                        let _ = WorktreeChanged {
-                            issue_id: BASE_ID.to_string(),
+                let base_debouncer = if watch_base {
+                    let mut b = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
+                        let Ok(events) = res else { return };
+                        let changed = events
+                            .iter()
+                            .flat_map(|ev| ev.paths.iter())
+                            .any(|path| is_base_change(&base_root, path));
+                        if changed {
+                            let _ = WorktreeChanged {
+                                issue_id: BASE_ID.to_string(),
+                            }
+                            .emit(&app_base);
                         }
-                        .emit(&app_base);
+                    })?;
+                    match b.watch(&base_watch_target, RecursiveMode::Recursive) {
+                        Ok(()) => Some(b),
+                        Err(e) => {
+                            log::warn!(
+                                "base repo file watch failed for {base_watch_target:?}: {e}; \
+                                 the base worktree's Changes tab won't live-refresh until restart"
+                            );
+                            newly_failed.push(base_watch_target);
+                            None
+                        }
                     }
-                })?;
-                let base_debouncer = match b.watch(&base_watch_target, RecursiveMode::Recursive) {
-                    Ok(()) => Some(b),
-                    Err(e) => {
-                        log::warn!(
-                            "base repo file watch failed for {base_watch_target:?}: {e}; \
-                             the base worktree's Changes tab won't live-refresh"
-                        );
-                        None
-                    }
+                } else {
+                    None
                 };
 
-                Ok((worktrees_debouncer, base_debouncer))
+                Ok((worktrees_debouncer, base_debouncer, newly_failed))
             },
         )
         .await??;
+
+        if !newly_failed.is_empty() {
+            self.failed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(newly_failed);
+        }
 
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         // A newer `watch()` call raced ahead of this one and already stored its

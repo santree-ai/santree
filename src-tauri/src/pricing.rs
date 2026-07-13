@@ -11,7 +11,6 @@
 //! network (CLAUDE.md: never block the UI on a round-trip); it refreshes the DB
 //! for the *next* read.
 
-use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -30,8 +29,6 @@ const REFRESH_INTERVAL_MS: i64 = 86_400_000;
 const RETRY_BACKOFF_MS: i64 = 60 * 60_000;
 /// Settings scope for the cached price table and its timestamps.
 const SCOPE: &str = "price_cache";
-
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 /// Per-MTok USD rates for one model, plus its context-window size. `cache_write`
 /// is the 5-minute cache-creation rate; 1-hour cache creation is derived as 2×
@@ -161,10 +158,15 @@ pub async fn claude_models(db: &Db) -> Vec<String> {
     let _ = ensure_fresh(db).await;
     let picked = latest_per_family(&cached_model_ids(db).await);
     if picked.is_empty() {
-        return ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5", "claude-fable-5"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        return [
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+            "claude-fable-5",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     }
     picked
 }
@@ -242,7 +244,7 @@ async fn build_table(db: &Db) -> PriceTable {
 /// (per-MTok). Ignores provider-prefixed/regional variants — the transcripts
 /// record plain ids, whose entries carry base list prices.
 async fn fetch_litellm() -> anyhow::Result<Vec<(String, ModelRate)>> {
-    let text = HTTP
+    let text = crate::gql::client()
         .get(LITELLM_URL)
         .timeout(Duration::from_secs(20))
         .send()
@@ -350,7 +352,7 @@ mod tests {
             "claude-haiku-4-5",
             "claude-haiku-4-5-20251001", // dated — ignored
             "claude-fable-5",
-            "claude-3-opus-20240229",  // legacy claude-3-* — ignored
+            "claude-3-opus-20240229",   // legacy claude-3-* — ignored
             "claude-3-5-sonnet-latest", // legacy — ignored
         ]
         .iter()
@@ -373,7 +375,11 @@ mod tests {
         assert!(parse_model_version("5") > parse_model_version("4-6"));
         assert!(parse_model_version("4-8") > parse_model_version("4-7"));
         assert_eq!(parse_model_version("4-7-20260416"), None, "date rejected");
-        assert_eq!(parse_model_version("4-5-20250929-v1:0"), None, "variant rejected");
+        assert_eq!(
+            parse_model_version("4-5-20250929-v1:0"),
+            None,
+            "variant rejected"
+        );
         assert_eq!(parse_model_version("5"), Some(vec![5]));
     }
 

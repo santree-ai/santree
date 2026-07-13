@@ -188,7 +188,15 @@ pub fn add_worktree_for_branch(repo: &Path, worktree_path: &Path, branch: &str) 
         // local branch tracking it so the worktree is on the PR's actual branch.
         git(
             repo,
-            &["worktree", "add", "--track", "-b", branch, &path, &origin_ref],
+            &[
+                "worktree",
+                "add",
+                "--track",
+                "-b",
+                branch,
+                &path,
+                &origin_ref,
+            ],
         )?;
         return Ok(());
     }
@@ -505,7 +513,10 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// Combines porcelain status (for state + staged flag) with `--numstat` line
 /// counts; untracked files are counted by reading them.
 pub fn status(cwd: &Path) -> Result<Vec<ChangedFile>> {
-    let raw = git_output(cwd, &["status", "--porcelain=v1", "-z"])?;
+    // `-uall` expands an untracked *directory* into its files. Without it git
+    // collapses it to a single `?? dir/` record, which then reads as a file:
+    // zero added lines, and an empty diff when the user clicks it.
+    let raw = git_output(cwd, &["status", "--porcelain=v1", "-z", "-uall"])?;
     let parts: Vec<&str> = raw.split('\0').collect();
     // HEAD is unborn on a brand-new repo (no commits yet) — diff against the
     // empty tree instead so untracked/staged files still get counted rather
@@ -633,13 +644,15 @@ const MAX_COUNTED_LINES: u32 = 10_000;
 /// where the line cap alone would never kick in.
 const MAX_SCANNED_BYTES: usize = 4 * 1024 * 1024;
 
-/// Additions / binary-ness of an untracked file. The binary check only needs the
-/// first chunk, so a huge binary (image, build artifact) is detected without a
-/// full read; a text file is then streamed for its line count, capped at
-/// [`MAX_COUNTED_LINES`]/[`MAX_SCANNED_BYTES`] so a large generated file (log,
-/// dataset, lockfile) isn't read end-to-end on every `worktree_status` poll —
-/// the file watcher's 400ms debounce would otherwise re-read it repeatedly just
-/// to show a line-count badge.
+/// Additions / binary-ness of an untracked file, counted the way `git diff`
+/// counts them: one line per newline, plus a final unterminated line, and 0 for
+/// an empty file. The binary check only needs the first chunk, so a huge binary
+/// (image, build artifact) is detected without a full read; a text file is then
+/// streamed for its line count, capped at [`MAX_COUNTED_LINES`]/
+/// [`MAX_SCANNED_BYTES`] so a large generated file (log, dataset, lockfile)
+/// isn't read end-to-end on every `worktree_status` poll — the file watcher's
+/// 400ms debounce would otherwise re-read it repeatedly just to show a
+/// line-count badge.
 fn count_new_file(cwd: &Path, path: &str) -> (u32, u32, bool) {
     use std::io::Read;
     let Ok(real) = safe_real_path(cwd, path) else {
@@ -650,25 +663,34 @@ fn count_new_file(cwd: &Path, path: &str) -> (u32, u32, bool) {
     };
     let mut reader = std::io::BufReader::new(file);
 
-    // A NUL byte in the first ~8 KB marks the file binary (git's own heuristic).
-    let mut head = [0u8; 8192];
-    let n = reader.read(&mut head).unwrap_or(0);
-    if head[..n].contains(&0) {
-        return (0, 0, true);
-    }
-    let mut lines = head[..n].iter().filter(|&&b| b == b'\n').count() as u32;
-    let mut scanned = n;
     let mut buf = [0u8; 8192];
+    let mut lines: u32 = 0;
+    let mut scanned = 0usize;
+    let mut last = b'\n';
+    let mut at_eof = false;
     while lines < MAX_COUNTED_LINES && scanned < MAX_SCANNED_BYTES {
-        match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(m) => {
-                lines += buf[..m].iter().filter(|&&b| b == b'\n').count() as u32;
-                scanned += m;
+        let n = match reader.read(&mut buf) {
+            Ok(0) => {
+                at_eof = true;
+                break;
             }
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        // A NUL byte in the first chunk marks the file binary (git's own heuristic).
+        if scanned == 0 && buf[..n].contains(&0) {
+            return (0, 0, true);
         }
+        lines += buf[..n].iter().filter(|&&b| b == b'\n').count() as u32;
+        scanned += n;
+        last = buf[n - 1];
     }
-    (lines.clamp(1, MAX_COUNTED_LINES), 0, false)
+    // A trailing line with no newline still counts as an addition (git shows it
+    // with "\ No newline at end of file"); an empty file has none at all.
+    if at_eof && last != b'\n' {
+        lines += 1;
+    }
+    (lines.min(MAX_COUNTED_LINES), 0, false)
 }
 
 /// A unified diff for a single file vs HEAD (staged + unstaged combined).
@@ -1030,6 +1052,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Without `-uall`, git collapses an untracked directory into one `?? dir/`
+    /// record — which reads as a file with 0 added lines and (on click) an empty
+    /// diff, because there's no such file to open or diff.
+    #[test]
+    fn status_expands_untracked_directories_into_files() {
+        let base = scratch_dir("status-untracked-dir");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join("newdir/nested")).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("newdir/a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(repo.join("newdir/nested/b.txt"), "solo\n").unwrap();
+
+        let files = status(&repo).unwrap();
+        let mut paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, ["newdir/a.txt", "newdir/nested/b.txt"]);
+        assert!(files.iter().all(|f| f.status == FileStatus::Untracked));
+        let a = files.iter().find(|f| f.path == "newdir/a.txt").unwrap();
+        assert_eq!(a.add_lines, 2, "the file's real line count, not 0");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     // ---- count_new_file's NUL-byte binary heuristic ----
 
     #[test]
@@ -1055,6 +1102,20 @@ mod tests {
         assert!(!binary);
         assert_eq!(add, 3);
         assert_eq!(del, 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `git diff` reports 0 additions for an empty file and counts a final line
+    /// that has no trailing newline ("\ No newline at end of file") — the badge
+    /// must say the same thing.
+    #[test]
+    fn count_new_file_matches_git_for_empty_and_unterminated_files() {
+        let base = scratch_dir("count-new-file-edges");
+        std::fs::write(base.join("empty.txt"), "").unwrap();
+        std::fs::write(base.join("no-newline.txt"), "one\ntwo").unwrap();
+
+        assert_eq!(count_new_file(&base, "empty.txt"), (0, 0, false));
+        assert_eq!(count_new_file(&base, "no-newline.txt"), (2, 0, false));
         let _ = std::fs::remove_dir_all(&base);
     }
 

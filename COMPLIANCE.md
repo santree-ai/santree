@@ -52,8 +52,9 @@ Do not wrap, re-implement, or spoof any agent's control loop or SDK. We spawn th
 real binary and render its real output — nothing more.
 
 ## Headless helpers — a scoped exception
-Two call sites intentionally sit outside the terminal pane and are the only
-sanctioned exceptions to the constraints above:
+Two call sites intentionally sit outside the terminal pane. They, and the
+session-state channel named in the next section, are the *only* sanctioned
+exceptions to the constraints above:
 - `src-tauri/src/agent.rs` (`run_print` / headless helpers) — one-shot `claude -p`
   calls that draft a commit message or a PR title/description.
 - `src-tauri/src/github.rs` (`token()`) — reads a token via `gh auth token`, GitHub's
@@ -71,6 +72,62 @@ named exception, not a license for headless/background Claude usage generally. A
 new headless call site must be justified against these same conditions before
 merging.
 
+## Session-state hooks + status line — a scoped exception
+Every santree `claude` launch layers a generated settings file over the user's own
+(`claude --settings <path>`; built in `src-tauri/src/hooks.rs`, written to
+`<app_data_dir>/claude-hooks.json`). `--settings` is a key-level override, so the
+keys below win for santree's launches and the user's other keys are untouched.
+This is a **third named exception** to "nothing more" above; it exists so the app
+can badge each worktree with what its agent is doing (running / needs-you / idle)
+and render the same context-usage bar the terminal shows.
+
+Exactly what it injects — the whole list, no more:
+- **Six session-state `hooks`**, each running the bundled `santree-hook` binary
+  (`crates/hook`) as `<bin> --db <db> <Event>`: `SessionStart`, `UserPromptSubmit`,
+  `Notification`, `PermissionRequest`, `Stop`, `SessionEnd`. Five are registered
+  `async: true` (timeout 10s); `SessionEnd` is the only synchronous one (timeout
+  5s) so "exited" lands before teardown. The per-tool events (`PreToolUse`,
+  `PostToolUse`, `PermissionDenied`) are deliberately **not** injected.
+- **A `statusLine`** (`<bin> --db <db> statusline`) — santree's own context-fill
+  bar. It prints the bar Claude renders and records Claude's authoritative usage
+  numbers into `session_usage_live`.
+- **A `permissions.deny` block**, in the *Fix CI* flow only
+  (`claude_settings_no_git`, written to a separate `claude-hooks-fixci.json`):
+  `Bash(git commit)`, `Bash(git commit:*)`, `Bash(git push)`, `Bash(git push:*)` —
+  so that session can fix and validate but leaves committing/pushing to the user.
+
+The hook binary reads the event's JSON payload on stdin, maps it to an
+`AgentState`, and UPSERTs one row per session in `session_state`. It **prints
+nothing on the hook path and always exits 0**, on every failure path.
+
+This stays inside the line — in particular inside "No automated control loop" —
+only because of the following, and any change to this channel must preserve all
+of them:
+- **It cannot gate the CLI's decisions.** Every hook Claude treats as a decision
+  channel (`PermissionRequest`, `Notification`, `UserPromptSubmit`) is registered
+  `async: true`: Claude does not wait for it and ignores whatever it emits, so the
+  hook structurally **cannot approve or deny anything**. Claude still shows the
+  user its own permission prompt; we only observe that one appeared. The single
+  synchronous hook, `SessionEnd`, fires at teardown, has no decision output to
+  give, and emits none.
+- **`permissions.deny` can only restrict, never approve.** It is declarative
+  config the CLI enforces itself — the same mechanism as a user's own
+  `settings.json` — not santree reacting to the session.
+- **The captured state is display-only.** It reaches the UI as a status badge and
+  a usage bar (`session_states` / `session_usage_live` → `WorktreeSidebar`,
+  `AllAgentsView`) and stops there.
+- **No output-parsing influences input.** Nothing derived from the hook payloads,
+  the transcript reconciliation, or the status line is ever written back to the
+  PTY. The only bytes santree writes to a terminal are the user's keystrokes and
+  the single human-initiated seed prompt.
+- **No unattended loop.** The hooks fire only while a human is driving a real
+  session; santree never starts, resumes, retries, or continues one on their
+  behalf.
+
+Reading the session transcript (`hooks.rs`'s reconciler, to tell a resolved prompt
+from a live one) is bounded by these same conditions: it is read to *label* the
+session, never to decide what to send it.
+
 ## Where this is enforced in code
 - `crates/pty` — spawns a real process behind a real PTY and streams **raw
   bytes**. No command interpretation, no output parsing. The only env it sets on
@@ -82,6 +139,12 @@ merging.
 - `src/features/terminal/orchestrator.ts` — the app's only terminal API. It does
   placement + a single optional **seed** (`terminal_write` of bytes, identical to
   human typing). It does not read output or drive the session.
+- `src-tauri/src/hooks.rs` — builds the `--settings` file described under
+  "Session-state hooks + status line" and reads back what the hooks recorded. It
+  registers every decision-capable hook `async: true` (so none can gate Claude),
+  and its output path ends at the UI: nothing it reads is ever written back to a
+  PTY. `crates/hook` is the binary those hooks run; it records state and exits 0,
+  emitting no hook decision.
 
 If a change introduces output parsing that influences input, token handling, or an
 unattended loop, it violates these constraints and must not be merged.

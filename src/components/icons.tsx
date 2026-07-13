@@ -603,6 +603,14 @@ export function CloseIcon({ size = 13, className }: IconProps) {
   );
 }
 
+export function StopIcon({ size = 13, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <rect x="6" y="6" width="12" height="12" rx="1.5" />
+    </Stroke>
+  );
+}
+
 export function SearchIcon({ size = 15, className }: IconProps) {
   return (
     <Stroke size={size} className={className}>

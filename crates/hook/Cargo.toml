@@ -11,8 +11,12 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = { workspace = true }
+# For `AgentState` — the state vocabulary is defined once in the domain crate so
+# this binary (the producer) and the app (the consumer) can't drift apart.
+santree-core = { path = "../core" }
 # Same SQLite driver + version as the app so both processes link one
 # libsqlite3-sys (rusqlite would pull a second, and `links = "sqlite3"` allows
-# only one in the graph). A one-shot insert on a current-thread runtime.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
-tokio = { version = "1", features = ["rt", "macros"] }
+# only one in the graph) — pinned in [workspace.dependencies] so it can't drift.
+# A one-shot insert on a current-thread runtime.
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

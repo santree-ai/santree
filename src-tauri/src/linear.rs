@@ -1,6 +1,7 @@
-//! Linear integration: multi-org token store (SQLite), OAuth PKCE connect flow,
-//! and the GraphQL fetch that turns assigned issues into a positioned dependency
-//! graph. Tokens and repo↔org links live in the app database; pure mapping and
+//! Linear integration: multi-org token store (OS keychain), OAuth PKCE connect
+//! flow, and the GraphQL fetch that turns assigned issues into a positioned
+//! dependency graph. OAuth tokens live in the OS keychain; the org's non-secret
+//! metadata and the repo↔org links live in the app database; pure mapping and
 //! layout live in `santree_core`.
 
 use std::io::{Read, Write};
@@ -13,7 +14,7 @@ use futures::future::join_all;
 use futures::StreamExt;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use santree_core::domain::{
@@ -33,15 +34,83 @@ const GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 const OAUTH_PORT: u16 = 8420;
 const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
 
-// ── Org token store (SQLite) ──────────────────────────────────────────────
+// ── Org token store (OS keychain + SQLite metadata) ───────────────────────
+//
+// santree spawns agent CLIs as the same user, so anything readable from the
+// user's filesystem is readable by a prompt-injected agent — the write-scoped
+// Linear tokens therefore live in the OS keychain (macOS Keychain / freedesktop
+// Secret Service), never on disk. SQLite keeps only non-secret metadata.
 
+/// Keychain service name (the app's bundle id).
+const KEYCHAIN_SERVICE: &str = "com.santree.desktop";
+
+/// One keychain entry per org, holding *both* tokens as a single JSON blob:
+/// Linear rotates the refresh token on every use, so the pair has to be written
+/// atomically — and one entry means one keychain prompt instead of two.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct Tokens {
+    access: String,
+    refresh: String,
+}
+
+/// An org's non-secret metadata. The tokens are *not* here — see [`Tokens`].
 #[derive(sqlx::FromRow)]
 struct OrgRow {
     slug: String,
     name: String,
-    access_token: String,
-    refresh_token: String,
     expires_at: i64,
+}
+
+fn keychain_entry(slug: &str) -> Result<keyring::Entry> {
+    keyring::Entry::new(KEYCHAIN_SERVICE, &format!("linear:{slug}")).map_err(keychain_err)
+}
+
+/// A keychain failure (locked keychain, no Secret Service on a headless box) must
+/// surface as a real error — degrading it into "no tokens" would read as a
+/// disconnected org, and falling back to plaintext storage is exactly what this
+/// store exists to prevent.
+fn keychain_err(e: keyring::Error) -> anyhow::Error {
+    anyhow::Error::new(e)
+        .context("the OS keychain is unavailable (santree keeps Linear tokens there)")
+}
+
+fn read_tokens_blocking(slug: &str) -> Result<Option<Tokens>> {
+    match keychain_entry(slug)?.get_password() {
+        Ok(blob) => decode_tokens(&blob).map(Some),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(keychain_err(e)),
+    }
+}
+
+fn write_tokens_blocking(slug: &str, tokens: &Tokens) -> Result<()> {
+    keychain_entry(slug)?
+        .set_password(&encode_tokens(tokens)?)
+        .map_err(keychain_err)
+}
+
+fn encode_tokens(tokens: &Tokens) -> Result<String> {
+    serde_json::to_string(tokens).context("encoding the Linear credential")
+}
+
+fn decode_tokens(blob: &str) -> Result<Tokens> {
+    serde_json::from_str(blob)
+        .context("the stored Linear credential isn't in the expected format — reconnect the org")
+}
+
+/// The org's stored token pair, or `None` when the keychain has no entry for it.
+/// Keychain calls block (they can even prompt), so they run off the async runtime.
+async fn load_tokens(slug: &str) -> Result<Option<Tokens>> {
+    let slug = slug.to_string();
+    tokio::task::spawn_blocking(move || read_tokens_blocking(&slug))
+        .await
+        .context("keychain read")?
+}
+
+async fn save_tokens(slug: &str, tokens: Tokens) -> Result<()> {
+    let slug = slug.to_string();
+    tokio::task::spawn_blocking(move || write_tokens_blocking(&slug, &tokens))
+        .await
+        .context("keychain write")?
 }
 
 /// Every connected org (slug + display name).
@@ -58,31 +127,76 @@ pub async fn list_orgs(db: &Db) -> Result<Vec<LinearOrg>> {
 
 async fn org_row(db: &Db, slug: &str) -> Result<Option<OrgRow>> {
     Ok(
-        sqlx::query_as::<_, OrgRow>("SELECT * FROM linear_orgs WHERE slug = ?")
-            .bind(slug)
-            .fetch_optional(db)
-            .await?,
+        sqlx::query_as::<_, OrgRow>(
+            "SELECT slug, name, expires_at FROM linear_orgs WHERE slug = ?",
+        )
+        .bind(slug)
+        .fetch_optional(db)
+        .await?,
     )
 }
 
-async fn upsert_org(db: &Db, org: &OrgRow) -> Result<()> {
+/// Persist an org: credential to the keychain, metadata to SQLite. Keychain
+/// first — a metadata row we couldn't back with a credential would show up as a
+/// connected org whose every call then fails.
+async fn upsert_org(db: &Db, org: &OrgRow, tokens: Tokens) -> Result<()> {
+    save_tokens(&org.slug, tokens).await?;
     sqlx::query(
-        "INSERT INTO linear_orgs (slug, name, access_token, refresh_token, expires_at)
-         VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO linear_orgs (slug, name, expires_at)
+         VALUES (?, ?, ?)
          ON CONFLICT(slug) DO UPDATE SET
            name = excluded.name,
-           access_token = excluded.access_token,
-           refresh_token = excluded.refresh_token,
            expires_at = excluded.expires_at",
     )
     .bind(&org.slug)
     .bind(&org.name)
-    .bind(&org.access_token)
-    .bind(&org.refresh_token)
     .bind(org.expires_at)
     .execute(db)
     .await?;
     Ok(())
+}
+
+/// Move any plaintext OAuth tokens an older build left in `linear_orgs` into the
+/// keychain. Called once at startup *before* the migration that drops those
+/// columns (a `.sql` migration can't reach a keychain), and idempotent: once the
+/// columns are gone — fresh install, or an install that already migrated — it's a
+/// no-op. Returns whether the db ever held plaintext tokens, so the caller can
+/// scrub the pages they were freed from.
+///
+/// A keychain failure here is loud but not fatal: the columns are dropped either
+/// way, so no token is ever left in plaintext. The user reconnects the org (one
+/// click) once their keychain works.
+pub(crate) async fn migrate_tokens_to_keychain(db: &Db) -> Result<bool> {
+    let legacy_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('linear_orgs')
+          WHERE name IN ('access_token', 'refresh_token')",
+    )
+    .fetch_one(db)
+    .await?;
+    if legacy_columns < 2 {
+        return Ok(false);
+    }
+
+    let rows = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT slug, access_token, refresh_token FROM linear_orgs
+          WHERE COALESCE(access_token, '') <> ''",
+    )
+    .fetch_all(db)
+    .await?;
+    if rows.is_empty() {
+        return Ok(false);
+    }
+
+    for (slug, access, refresh) in rows {
+        match save_tokens(&slug, Tokens { access, refresh }).await {
+            Ok(()) => log::info!("moved the Linear tokens for org {slug} into the OS keychain"),
+            Err(e) => log::error!(
+                "couldn't move the Linear tokens for org {slug} into the OS keychain ({e:#}); \
+                 dropping them rather than leaving them in plaintext — reconnect the org in Settings"
+            ),
+        }
+    }
+    Ok(true)
 }
 
 /// The org slug a repo should use: its explicit link, else the first connected org.
@@ -146,24 +260,34 @@ fn refresh_lock(slug: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
-/// A valid access token for `slug`, refreshing + persisting if near expiry.
-async fn valid_token(db: &Db, slug: &str) -> Result<String> {
+/// An org's metadata row paired with its keychain credential. A row with no
+/// keychain entry means the credential was removed out from under us (keychain
+/// reset, or a migration that couldn't reach it) — say so instead of reporting
+/// the org as simply not connected.
+async fn org_credentials(db: &Db, slug: &str) -> Result<(OrgRow, Tokens)> {
     let row = org_row(db, slug)
         .await?
         .ok_or_else(|| anyhow!("org {slug} not connected"))?;
+    let tokens = load_tokens(slug).await?.ok_or_else(|| {
+        anyhow!("no Linear credential for org {slug} in the OS keychain — reconnect it in Settings")
+    })?;
+    Ok((row, tokens))
+}
+
+/// A valid access token for `slug`, refreshing + persisting if near expiry.
+async fn valid_token(db: &Db, slug: &str) -> Result<String> {
+    let (row, tokens) = org_credentials(db, slug).await?;
     if now_ms() < row.expires_at - REFRESH_SKEW_MS {
-        return Ok(row.access_token);
+        return Ok(tokens.access);
     }
 
     // Near expiry: serialize the refresh per org, then re-read — another caller
     // may have refreshed while we waited, so we'd reuse its fresh token.
     let lock = refresh_lock(slug);
     let _guard = lock.lock().await;
-    let row = org_row(db, slug)
-        .await?
-        .ok_or_else(|| anyhow!("org {slug} not connected"))?;
+    let (row, tokens) = org_credentials(db, slug).await?;
     if now_ms() < row.expires_at - REFRESH_SKEW_MS {
-        return Ok(row.access_token);
+        return Ok(tokens.access);
     }
 
     let res = gql::client()
@@ -171,7 +295,7 @@ async fn valid_token(db: &Db, slug: &str) -> Result<String> {
         .form(&[
             ("grant_type", "refresh_token"),
             ("client_id", CLIENT_ID),
-            ("refresh_token", row.refresh_token.as_str()),
+            ("refresh_token", tokens.refresh.as_str()),
         ])
         .send()
         .await
@@ -183,12 +307,14 @@ async fn valid_token(db: &Db, slug: &str) -> Result<String> {
     let updated = OrgRow {
         slug: row.slug,
         name: row.name,
-        access_token: body.access_token,
-        refresh_token: body.refresh_token,
         expires_at: now_ms() + body.expires_in * 1000,
     };
-    upsert_org(db, &updated).await?;
-    Ok(updated.access_token)
+    let rotated = Tokens {
+        access: body.access_token,
+        refresh: body.refresh_token,
+    };
+    upsert_org(db, &updated, rotated.clone()).await?;
+    Ok(rotated.access)
 }
 
 // ── GraphQL fetch ────────────────────────────────────────────────────────
@@ -749,6 +875,12 @@ fn triage_meta(assignee: Option<&str>, labels: &[String]) -> String {
     parts.join(" · ")
 }
 
+// The nested `children` connections below are pinned to `first: 50` — Linear's
+// default page size, i.e. exactly what these queries already cost. Complexity
+// multiplies across nesting levels (100 comments × N replies) against the 10000
+// cap, so raising it here would risk a 400 on the whole pane; a thread with more
+// than 50 replies is paged out per-comment via [`COMMENT_REPLIES_PAGE_QUERY`]
+// instead, which is cheap because it fetches one comment.
 const ISSUE_DETAIL_QUERY: &str = r#"
 query GetIssue($id: String!) {
   issue(id: $id) {
@@ -763,12 +895,13 @@ query GetIssue($id: String!) {
         id body createdAt parent { id }
         user { name displayName avatarUrl }
         botActor { name avatarUrl }
-        children {
+        children(first: 50) {
           nodes {
             id body createdAt
             user { name displayName avatarUrl }
             botActor { name avatarUrl }
           }
+          pageInfo { hasNextPage endCursor }
         }
       }
       pageInfo { hasNextPage endCursor }
@@ -788,13 +921,31 @@ query GetIssueComments($id: String!, $after: String) {
         id body createdAt parent { id }
         user { name displayName avatarUrl }
         botActor { name avatarUrl }
-        children {
+        children(first: 50) {
           nodes {
             id body createdAt
             user { name displayName avatarUrl }
             botActor { name avatarUrl }
           }
+          pageInfo { hasNextPage endCursor }
         }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"#;
+
+/// The rest of one comment's replies, by cursor — for the rare thread that runs
+/// past the first page of `children` (see the note above).
+const COMMENT_REPLIES_PAGE_QUERY: &str = r#"
+query GetCommentReplies($id: String!, $after: String) {
+  comment(id: $id) {
+    children(first: 100, after: $after) {
+      nodes {
+        id body createdAt
+        user { name displayName avatarUrl }
+        botActor { name avatarUrl }
       }
       pageInfo { hasNextPage endCursor }
     }
@@ -886,15 +1037,64 @@ struct IssueCommentsPageData {
     issue: Option<IssueCommentsPage>,
 }
 
+#[derive(Deserialize)]
+struct CommentRepliesPage {
+    children: Connection<CommentNode>,
+}
+#[derive(Deserialize)]
+struct CommentRepliesPageData {
+    comment: Option<CommentRepliesPage>,
+}
+
+/// Every reply under `comment_id`, starting from the page already fetched inline
+/// with the issue. A failure while paging is logged and the replies we do have
+/// are kept — a chatty thread shouldn't take the whole discussion pane down.
+async fn all_replies(
+    token: &str,
+    comment_id: &str,
+    page: Connection<CommentNode>,
+) -> Vec<CommentNode> {
+    let mut nodes = page.nodes;
+    let mut page_info = page.page_info;
+    while page_info.has_next_page {
+        let Some(after) = page_info.end_cursor.take() else {
+            break;
+        };
+        let next: Result<CommentRepliesPageData> = graphql(
+            token,
+            COMMENT_REPLIES_PAGE_QUERY,
+            serde_json::json!({ "id": comment_id, "after": after }),
+        )
+        .await;
+        match next {
+            Ok(data) => {
+                let Some(more) = data.comment else { break };
+                nodes.extend(more.children.nodes);
+                page_info = more.children.page_info;
+            }
+            Err(e) => {
+                log::warn!(
+                    "couldn't page the replies under Linear comment {comment_id}: {e:#} — \
+                     showing the {} already fetched",
+                    nodes.len()
+                );
+                break;
+            }
+        }
+    }
+    nodes
+}
+
 /// Map one comment (and its one level of threaded replies) into the domain
 /// type, downloading inline images in each body.
 async fn map_comment(
     client: &reqwest::Client,
-    node: CommentNode,
+    mut node: CommentNode,
     token: &str,
     style: NameStyle,
 ) -> TriageComment {
-    let mut child_nodes = node.children.map(|c| c.nodes).unwrap_or_default();
+    let mut child_nodes =
+        all_replies(token, &node.id, node.children.take().unwrap_or_default()).await;
     child_nodes.sort_by_key(|c| c.created_at.as_deref().and_then(parse_ms).unwrap_or(0));
     // Inline each reply's images concurrently; join_all preserves order. Resolve
     // the timestamp up front so the per-reply futures don't borrow `ch`.
@@ -1799,9 +1999,11 @@ pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
         &OrgRow {
             slug,
             name,
-            access_token,
-            refresh_token,
             expires_at,
+        },
+        Tokens {
+            access: access_token,
+            refresh: refresh_token,
         },
     )
     .await?;
@@ -1954,8 +2156,6 @@ async fn fetch_viewer_org(access_token: &str) -> Result<(String, String)> {
 fn open_browser(url: &str) {
     let cmd = if cfg!(target_os = "macos") {
         "open"
-    } else if cfg!(target_os = "windows") {
-        "start"
     } else {
         "xdg-open"
     };
@@ -1980,12 +2180,72 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        image_spans, map_issue, parse_callback, parse_ms, refresh_lock, shift_range, splice_images,
-        triage_meta, ImageCache, IssueNode, ProjectNode, RelatedIssue, RelationNode, StateNode,
+        decode_tokens, encode_tokens, image_spans, map_issue, migrate_tokens_to_keychain,
+        parse_callback, parse_ms, refresh_lock, shift_range, splice_images, triage_meta,
+        ImageCache, IssueNode, ProjectNode, RelatedIssue, RelationNode, StateNode, Tokens,
         UserNode, IMAGE_HOST,
     };
     use crate::gql::{Connection, PageInfo};
     use std::collections::HashMap;
+
+    /// Both tokens share one keychain entry, so the blob is the only thing
+    /// standing between a refresh and a bricked org — it has to round-trip
+    /// exactly (Linear tokens are opaque and may contain any of `.`, `-`, `_`).
+    #[test]
+    fn token_blob_round_trips() {
+        let tokens = Tokens {
+            access: "lin_oauth_ac.ce-ss_1/2+3".into(),
+            refresh: "lin_oauth_re\"fresh\"".into(),
+        };
+        let blob = encode_tokens(&tokens).unwrap();
+        assert_eq!(decode_tokens(&blob).unwrap(), tokens);
+    }
+
+    /// A garbage / foreign credential must be a loud error, not a silent
+    /// "disconnected org" (which would send the user round the OAuth flow again
+    /// with no idea why).
+    #[test]
+    fn token_blob_rejects_garbage() {
+        assert!(decode_tokens("not json").is_err());
+        assert!(decode_tokens(r#"{"access":"a"}"#).is_err());
+    }
+
+    async fn memory_db() -> crate::db::Db {
+        sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap()
+    }
+
+    /// The startup drain has to be a no-op once the columns are gone — otherwise
+    /// it would hit the keychain (and could prompt) on every launch.
+    #[tokio::test]
+    async fn token_migration_is_a_noop_without_the_legacy_columns() {
+        let db = memory_db().await;
+        sqlx::query(
+            "CREATE TABLE linear_orgs (slug TEXT PRIMARY KEY, name TEXT, expires_at INTEGER)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        assert!(!migrate_tokens_to_keychain(&db).await.unwrap());
+    }
+
+    /// …and on a legacy schema with nothing to move (org rows are only written
+    /// with tokens today, but a cleared row must not re-trigger the migration).
+    #[tokio::test]
+    async fn token_migration_skips_rows_without_tokens() {
+        let db = memory_db().await;
+        sqlx::query(
+            "CREATE TABLE linear_orgs (slug TEXT PRIMARY KEY, name TEXT, access_token TEXT,
+             refresh_token TEXT, expires_at INTEGER)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO linear_orgs VALUES ('acme', 'Acme', '', '', 0)")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(!migrate_tokens_to_keychain(&db).await.unwrap());
+    }
 
     /// The exact bug class that previously shipped: naive `str::replace` on a
     /// URL that is a strict prefix of another URL in the same doc corrupted the

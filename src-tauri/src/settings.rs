@@ -18,6 +18,31 @@ use crate::db::Db;
 /// The `settings` key under which the full [`Settings`] blob is persisted (scope `"app"`).
 const SETTINGS_KEY: &str = "settings";
 
+/// Gate the *IPC* key-value surface (`get_setting` / `set_setting`), whose scope and
+/// key both arrive from the webview. Internal callers (`pricing`'s `price_cache`
+/// scope, the [`Settings`] blob itself) use [`get`]/[`set`] directly and are trusted.
+///
+/// Two things it enforces:
+///  - The scope is really `"app"` or `"repo:<name>"`. Nothing checked this before, so
+///    a typo'd scope wrote a row [`resolve`] would never read back — the setting just
+///    silently didn't apply.
+///  - The [`Settings`] blob is off-limits. It lives in this same table at
+///    `app`/`settings`, so `set_setting("app", "settings", …)` would replace the whole
+///    typed Settings object with an arbitrary string. It has its own command
+///    ([`set_settings`]).
+pub fn validate_user_scope(scope: &str, key: &str) -> Result<()> {
+    let repo_scoped = scope
+        .strip_prefix("repo:")
+        .is_some_and(|name| !name.is_empty());
+    if scope != "app" && !repo_scoped {
+        anyhow::bail!("invalid settings scope {scope:?} (expected \"app\" or \"repo:<name>\")");
+    }
+    if key == SETTINGS_KEY {
+        anyhow::bail!("the {SETTINGS_KEY:?} blob must be written through save_settings");
+    }
+    Ok(())
+}
+
 /// Read a setting for an exact scope (`"app"` or `"repo:<name>"`).
 pub async fn get(db: &Db, scope: &str, key: &str) -> Result<Option<String>> {
     let row: Option<(String,)> =
@@ -66,11 +91,21 @@ pub async fn clear_all_scopes(db: &Db, key: &str) -> Result<()> {
 }
 
 /// Resolve a repo-scoped setting: the repo's own override, else the app value.
+/// Both candidate rows come back in one round-trip; the repo scope wins when present.
 pub async fn resolve(db: &Db, repo: &str, key: &str) -> Result<Option<String>> {
-    if let Some(v) = get(db, &format!("repo:{repo}"), key).await? {
-        return Ok(Some(v));
-    }
-    get(db, "app", key).await
+    let repo_scope = format!("repo:{repo}");
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT scope, value FROM settings WHERE key = ? AND scope IN (?, 'app')")
+            .bind(key)
+            .bind(&repo_scope)
+            .fetch_all(db)
+            .await?;
+    let pick = |scope: &str| {
+        rows.iter()
+            .find(|(s, _)| s == scope)
+            .map(|(_, v)| v.clone())
+    };
+    Ok(pick(&repo_scope).or_else(|| pick("app")))
 }
 
 /// The user's settings: the persisted blob when present, else the seeded
@@ -235,8 +270,22 @@ pub fn discover_binary(name: &str) -> Option<String> {
     resolved
 }
 
+/// Whether `name` is safe to interpolate into [`resolve_binary`]'s shell command.
+/// Enforced at the sink rather than trusted from callers: everything else in a
+/// `$SHELL -lc "…"` string is quoting-sensitive, and a binary name only ever needs
+/// these characters.
+fn safe_binary_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 /// The uncached login-shell PATH probe behind [`discover_binary`].
 fn resolve_binary(name: &str) -> Option<String> {
+    if !safe_binary_name(name) {
+        return None;
+    }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let output = std::process::Command::new(&shell)
         .args(["-lc", &format!("command -v {name}")])
@@ -440,6 +489,26 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn validate_user_scope_accepts_only_real_scopes() {
+        assert!(validate_user_scope("app", "work_model").is_ok());
+        assert!(validate_user_scope("repo:acme/app", "work_model").is_ok());
+
+        // A typo'd scope used to write a row `resolve` would never read back.
+        assert!(validate_user_scope("repo", "work_model").is_err());
+        assert!(validate_user_scope("repo:", "work_model").is_err());
+        assert!(validate_user_scope("App", "work_model").is_err());
+        assert!(validate_user_scope("", "work_model").is_err());
+        // An internal scope isn't reachable from the generic IPC surface.
+        assert!(validate_user_scope("price_cache", "attempt_ms").is_err());
+    }
+
+    #[test]
+    fn the_settings_blob_cannot_be_written_through_the_generic_surface() {
+        assert!(validate_user_scope("app", SETTINGS_KEY).is_err());
+        assert!(validate_user_scope("repo:acme/app", SETTINGS_KEY).is_err());
+    }
+
     /// A real (temp-file-backed) SQLite pool, isolated per test — same pattern
     /// as `session::tests`. Each test gets its own fresh directory: `db::init`
     /// chmods the db's parent, which fails on the shared system temp root.
@@ -555,6 +624,22 @@ mod tests {
         );
     }
 
+    /// `resolve_binary` interpolates the name into a `$SHELL -lc` string, so anything
+    /// that could break out of it (or inject a flag) must never reach the shell.
+    #[test]
+    fn safe_binary_name_rejects_shell_metacharacters() {
+        assert!(safe_binary_name("claude"));
+        assert!(safe_binary_name("cursor-agent"));
+        assert!(safe_binary_name("node_18.x"));
+        assert!(!safe_binary_name("gh; rm -rf ~"));
+        assert!(!safe_binary_name("$(id)"));
+        assert!(!safe_binary_name("gh `id`"));
+        assert!(!safe_binary_name("/usr/bin/gh"));
+        assert!(!safe_binary_name(""));
+        // Rejected names take the not-found path instead of shelling out.
+        assert_eq!(resolve_binary("gh; touch /tmp/santree-pwned"), None);
+    }
+
     #[test]
     fn safe_command_name_rejects_traversal_and_separators() {
         assert!(safe_command_name("investigate-ticket").is_ok());
@@ -597,9 +682,18 @@ mod tests {
         assert_eq!(f.content, "REPO");
 
         // Editing that in place updates the repo file.
-        write_command_in(&global, Some(repo_path), "inv", CommandSource::Repo, "REPO2").unwrap();
+        write_command_in(
+            &global,
+            Some(repo_path),
+            "inv",
+            CommandSource::Repo,
+            "REPO2",
+        )
+        .unwrap();
         assert_eq!(
-            read_command_in(&global, Some(repo_path), "inv").unwrap().content,
+            read_command_in(&global, Some(repo_path), "inv")
+                .unwrap()
+                .content,
             "REPO2"
         );
 

@@ -17,7 +17,7 @@
 //! `git_watch.rs`): a debounced recursive watch emits [`UsageChanged`] so the
 //! frontend refetches without polling.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -293,13 +293,96 @@ fn parse_file(path: &Path) -> Option<FileData> {
 
 // ── Per-file cache (skip re-parsing unchanged transcripts) ──────────────────
 
-/// Path → (byte length parsed at, parsed data).
-type FileCache = HashMap<PathBuf, (u64, Arc<FileData>)>;
+/// Byte budget for the parsed-transcript cache. Bounded, because the alternative
+/// grows with every session the user has ever run: a heavy month of transcripts
+/// is hundreds of MB of parsed events. Same idiom as the Linear image cache — a
+/// count cap wouldn't bound anything, since one file's events can be arbitrarily
+/// many.
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Rough heap footprint of a parsed transcript. The event vector dominates (each
+/// event carries a message id, a request id and a model name), and this only has
+/// to keep the cache's budget honest — not be exact.
+fn approx_bytes(fd: &FileData) -> usize {
+    let opt = |s: &Option<String>| s.as_ref().map_or(0, String::len);
+    let events: usize = fd
+        .events
+        .iter()
+        .map(|e| std::mem::size_of::<Ev>() + opt(&e.id) + opt(&e.request_id) + e.model.len())
+        .sum();
+    events + fd.project.len() + opt(&fd.cwd) + fd.session_id.len()
+}
+
+struct Entry {
+    /// The file's byte length when it was parsed.
+    len: u64,
+    /// This entry's contribution to [`FileCache::bytes`].
+    bytes: usize,
+    data: Arc<FileData>,
+}
 
 /// Parsed transcripts keyed by path, tagged with the byte length they were parsed
 /// at. Transcripts are append-only, so an unchanged length means unchanged content
 /// — a live file write only re-parses that one growing file, not the whole tree.
-static CACHE: LazyLock<Mutex<FileCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Bounded by [`MAX_CACHE_BYTES`] with FIFO eviction, and pruned of transcripts
+/// that no longer exist (Claude deletes old sessions).
+#[derive(Default)]
+struct FileCache {
+    map: HashMap<PathBuf, Entry>,
+    order: VecDeque<PathBuf>,
+    bytes: usize,
+}
+
+impl FileCache {
+    /// The parse of `path`, if it was parsed at exactly `len` bytes.
+    fn get(&self, path: &Path, len: u64) -> Option<Arc<FileData>> {
+        self.map
+            .get(path)
+            .filter(|e| e.len == len)
+            .map(|e| e.data.clone())
+    }
+
+    fn insert(&mut self, path: PathBuf, len: u64, data: Arc<FileData>) {
+        self.insert_bounded(path, len, data, MAX_CACHE_BYTES);
+    }
+
+    /// `insert` with the byte cap as a parameter, so the FIFO eviction is
+    /// unit-testable without parsing real megabytes of transcript.
+    fn insert_bounded(&mut self, path: PathBuf, len: u64, data: Arc<FileData>, max_bytes: usize) {
+        let bytes = approx_bytes(&data);
+        let entry = Entry { len, bytes, data };
+        match self.map.insert(path.clone(), entry) {
+            // A grown file replaces its own entry — it keeps its place in the queue.
+            Some(old) => self.bytes -= old.bytes,
+            None => self.order.push_back(path),
+        }
+        self.bytes += bytes;
+        while self.bytes > max_bytes {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(e) = self.map.remove(&evicted) {
+                self.bytes -= e.bytes;
+            }
+        }
+    }
+
+    /// Drop every entry whose file isn't in `live` — i.e. was deleted on disk.
+    fn retain_existing(&mut self, live: &HashSet<&PathBuf>) {
+        let bytes = &mut self.bytes;
+        self.map.retain(|p, e| {
+            let keep = live.contains(p);
+            if !keep {
+                *bytes -= e.bytes;
+            }
+            keep
+        });
+        let map = &self.map;
+        self.order.retain(|p| map.contains_key(p));
+    }
+}
+
+static CACHE: LazyLock<Mutex<FileCache>> = LazyLock::new(Default::default);
 
 fn load_cached(paths: &[PathBuf], on_progress: impl Fn(usize, usize)) -> Vec<Arc<FileData>> {
     let total = paths.len();
@@ -308,26 +391,39 @@ fn load_cached(paths: &[PathBuf], on_progress: impl Fn(usize, usize)) -> Vec<Arc
     if total > 0 {
         on_progress(0, total); // let the bar appear at 0 immediately
     }
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::with_capacity(total);
     for (i, p) in paths.iter().enumerate() {
         let len = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-        if let Some((clen, data)) = cache.get(p) {
-            if *clen == len {
-                out.push(data.clone());
-                continue;
+        // The lock is only ever held for a map lookup or an insert — never across
+        // `parse_file`, or a cold parse of the whole transcript tree would block
+        // every other reader for its full duration.
+        let hit = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(p, len);
+        match hit {
+            Some(data) => out.push(data),
+            None => {
+                if let Some(fd) = parse_file(p) {
+                    let arc = Arc::new(fd);
+                    CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                        p.clone(),
+                        len,
+                        arc.clone(),
+                    );
+                    out.push(arc);
+                }
             }
-        }
-        if let Some(fd) = parse_file(p) {
-            let arc = Arc::new(fd);
-            cache.insert(p.clone(), (len, arc.clone()));
-            out.push(arc);
         }
         let done = i + 1;
         if done == total || done % step == 0 {
             on_progress(done, total);
         }
     }
+    // `paths` is a fresh scan of every transcript on disk, so anything else still
+    // in the cache is a file Claude has since pruned.
+    let live: HashSet<&PathBuf> = paths.iter().collect();
+    CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain_existing(&live);
     out
 }
 
@@ -753,6 +849,57 @@ mod tests {
     }
 
     const NOW: i64 = 1_700_000_000_000; // fixed clock for period tests
+
+    // ---- the parsed-transcript cache ----
+
+    fn cached(sid: &str) -> Arc<FileData> {
+        file(
+            "-r",
+            sid,
+            vec![ev("a", "claude-opus-4-8", NOW, 1.0, 1.0, 0.0, 0.0)],
+            None,
+        )
+    }
+
+    #[test]
+    fn file_cache_evicts_oldest_past_its_byte_budget() {
+        let mut c = FileCache::default();
+        let one = approx_bytes(&cached("s1"));
+        for (i, sid) in ["s1", "s2", "s3"].iter().enumerate() {
+            let p = PathBuf::from(format!("/t/{sid}.jsonl"));
+            c.insert_bounded(p, i as u64, cached(sid), one * 2);
+        }
+        assert!(
+            c.get(Path::new("/t/s1.jsonl"), 0).is_none(),
+            "the oldest entry is evicted once the budget is exceeded"
+        );
+        assert!(c.get(Path::new("/t/s3.jsonl"), 2).is_some());
+        assert!(c.bytes <= one * 2);
+    }
+
+    #[test]
+    fn file_cache_re_reads_grown_files_and_drops_deleted_ones() {
+        let mut c = FileCache::default();
+        let p = PathBuf::from("/t/s1.jsonl");
+        c.insert(p.clone(), 10, cached("s1"));
+        assert!(c.get(&p, 10).is_some());
+        assert!(
+            c.get(&p, 20).is_none(),
+            "an appended-to transcript must be re-parsed, not served stale"
+        );
+
+        // Re-parsing it replaces the entry rather than double-counting its bytes.
+        c.insert(p.clone(), 20, cached("s1"));
+        assert!(c.get(&p, 20).is_some());
+        assert_eq!(c.order.len(), 1);
+        assert_eq!(c.bytes, approx_bytes(&cached("s1")));
+
+        // Claude pruned the transcript: the entry goes with it.
+        c.retain_existing(&HashSet::new());
+        assert!(c.get(&p, 20).is_none());
+        assert!(c.order.is_empty());
+        assert_eq!(c.bytes, 0);
+    }
 
     /// The static built-in price table (deterministic; no network) for cost tests.
     fn tbl() -> PriceTable {

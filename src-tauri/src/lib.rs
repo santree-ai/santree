@@ -71,6 +71,7 @@ fn specta_builder() -> AppBuilder {
             commands::create_worktree,
             commands::remove_worktree,
             commands::run_worktree_setup_streamed,
+            commands::cancel_worktree_setup,
             commands::pull_worktree,
             commands::push_worktree,
             commands::pull_remote_worktree,
@@ -261,17 +262,29 @@ fn merge_paths(login: &str, current: &str) -> String {
 /// files routinely see 500ms-2s, all blocking first-window paint. So this is
 /// cached across launches in [`path_cache_file`]: a hit applies the last-known PATH
 /// immediately (no shell spawn) and kicks off a background re-probe to keep the
-/// cache fresh for *next* launch; only a genuine first run (or a cleared temp dir)
+/// cache fresh for *next* launch; only a genuine first run (or a cleared cache)
 /// pays the full synchronous cost. Deliberately not the app's SQLite settings store
 /// — reading that needs a `Db`, which needs an `AppHandle` and sqlx's tokio runtime,
 /// neither of which exist yet this early, and starting the runtime here would spawn
 /// worker threads before we're done mutating `PATH` (see the safety note below).
 #[cfg(unix)]
 fn hydrate_path() {
-    let cache = path_cache_file();
+    let probe_and_seed = |cache: Option<&std::path::Path>| {
+        if let Some(login) = settings::login_shell_path() {
+            apply_login_path(&login);
+            if let Some(cache) = cache {
+                let _ = write_private(cache, &login);
+            }
+        }
+    };
+
+    let Some(cache) = path_cache_file() else {
+        return probe_and_seed(None); // no private dir → always pay the probe
+    };
     if let Some(cached) = std::fs::read_to_string(&cache)
         .ok()
-        .filter(|s| !s.trim().is_empty())
+        .as_deref()
+        .and_then(sanitize_path_list)
     {
         apply_login_path(&cached);
         // Refresh for next launch — the user's shell rc / installed tools can
@@ -283,10 +296,7 @@ fn hydrate_path() {
     }
     // No cache yet: probe synchronously so PATH is correct for this run's own
     // children, and seed the cache so the next launch skips the shell spawn.
-    if let Some(login) = settings::login_shell_path() {
-        apply_login_path(&login);
-        let _ = std::fs::write(&cache, &login);
-    }
+    probe_and_seed(Some(&cache));
 }
 
 /// Merge a resolved login-shell PATH into the process's current PATH and apply it.
@@ -302,14 +312,63 @@ fn apply_login_path(login: &str) {
     }
 }
 
-/// Where the last resolved login-shell PATH is cached between launches. A flat
-/// file in the OS temp dir rather than app data: it needs no app identifier (so it
-/// can't drift out of sync with `migrate_legacy_data_dir`'s bundle-id handling) and
-/// no async runtime to read. Being in temp means the OS may clear it, which just
-/// costs one slow launch to reseed — acceptable for a cache.
+/// santree's private directory for files that must never live in a shared,
+/// world-writable `/tmp`: `$XDG_CACHE_HOME/santree`, else `~/.cache/santree`. Created
+/// `0700`, and re-asserted on every call, so no other local user can read what we put
+/// there — or, worse, pre-plant a file we later read back (the cached PATH is
+/// *prepended* to `PATH`, so a planted one is arbitrary code execution as us). Not the
+/// Tauri app-data dir: this has to work before an `AppHandle` exists. `None` when
+/// there's no home to anchor it to or the dir can't be created.
+fn private_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?;
+    let dir = base.join("santree");
+    std::fs::create_dir_all(&dir).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    Some(dir)
+}
+
+/// Write `contents` to `path` with owner-only (0600) permissions, replacing whatever
+/// was there.
+fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(contents.as_bytes())
+}
+
+/// Where the last resolved login-shell PATH is cached between launches. In santree's
+/// own [`private_dir`] rather than app data: it needs no app identifier (so it can't
+/// drift out of sync with `migrate_legacy_data_dir`'s bundle-id handling) and no async
+/// runtime to read. Losing it just costs one slow launch to reseed.
 #[cfg(unix)]
-fn path_cache_file() -> std::path::PathBuf {
-    std::env::temp_dir().join("santree-login-path.cache")
+fn path_cache_file() -> Option<std::path::PathBuf> {
+    Some(private_dir()?.join("login-path"))
+}
+
+/// Keep only the absolute entries of a cached PATH string; `None` when nothing usable
+/// survives. This is what we prepend to `PATH` before any subprocess spawns, so a
+/// relative entry would resolve `git`/`claude`/hooks against whatever cwd a child
+/// happens to run in — defence in depth behind the 0700 cache dir. Pure, for testability.
+#[cfg(unix)]
+fn sanitize_path_list(raw: &str) -> Option<String> {
+    let kept: Vec<&str> = raw
+        .trim()
+        .split(':')
+        .filter(|p| std::path::Path::new(p).is_absolute())
+        .collect();
+    (!kept.is_empty()).then(|| kept.join(":"))
 }
 
 /// Re-probe the login shell's PATH and rewrite the cache for the next launch.
@@ -318,7 +377,7 @@ fn path_cache_file() -> std::path::PathBuf {
 fn refresh_path_cache(cache: &std::path::Path) {
     let started = std::time::Instant::now();
     if let Some(login) = settings::login_shell_path() {
-        let _ = std::fs::write(cache, &login);
+        let _ = write_private(cache, &login);
         log::info!(
             "refreshed cached login PATH in {}ms (applies on next launch)",
             started.elapsed().as_millis()
@@ -339,18 +398,41 @@ fn fatal_startup_error(app: &tauri::App, message: &str) -> ! {
     std::process::exit(1)
 }
 
-pub fn run() {
-    // Chain onto (not replace) the default hook, so stderr output is unchanged;
-    // this just also routes panics into the log file, where they're otherwise
-    // invisible in a packaged app. Installed first so it catches panics from
-    // anything below, including `hydrate_path`'s shell-out. Before the log
-    // plugin is attached (in `.setup()` below), `log::error!` is a silent
-    // no-op — the default hook's stderr line is the only output, same as today.
-    let default_panic_hook = std::panic::take_hook();
+/// Route panics into the log file, where they're otherwise invisible: the crate
+/// builds with `panic = "abort"`, so a panic on any thread kills the app with no
+/// in-app error and nothing but a stderr line no packaged user ever sees. Chains onto
+/// (rather than replaces) the default hook, so that stderr line is unchanged.
+///
+/// Before the log plugin is attached (in `.setup()`), `log::error!` is a silent no-op,
+/// so this is installed as early as possible while still covering the long-lived app:
+/// the only window it can't record is startup itself, which still gets the default
+/// hook's stderr output.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        log::error!("panic: {info}");
-        default_panic_hook(info);
+        let payload = info.payload();
+        let msg = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown location>".into());
+        let thread = std::thread::current();
+        log::error!(
+            "panic on thread '{}' at {location}: {msg}\n{}",
+            thread.name().unwrap_or("<unnamed>"),
+            std::backtrace::Backtrace::force_capture()
+        );
+        default_hook(info);
     }));
+}
+
+pub fn run() {
+    // Installed first so it also covers `hydrate_path`'s shell-out below.
+    install_panic_hook();
 
     // Must run before any subprocess is spawned (git, hooks, setup scripts, agents).
     #[cfg(unix)]
@@ -474,6 +556,9 @@ pub fn run() {
                 if let Some(pty) = app.try_state::<santree_pty::PtyManager>() {
                     pty.close_all();
                 }
+                // Setup scripts run their own PTY, outside PtyManager — quitting
+                // mid-setup would otherwise orphan `init.sh` and everything it spawned.
+                worktree::SETUP_RUNS.kill_all();
             }
         });
 }
@@ -618,5 +703,63 @@ mod tests {
     #[test]
     fn merge_paths_skips_empty_segments() {
         assert_eq!(merge_paths("/usr/bin::", ":/bin:"), "/usr/bin:/bin");
+    }
+
+    /// A panic on *any* thread must reach the log file with enough to debug it —
+    /// `panic = "abort"` means this line is the only trace a crash leaves behind.
+    #[test]
+    fn panic_hook_logs_payload_location_thread_and_backtrace() {
+        static CAPTURED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        struct Capture;
+        impl log::Log for Capture {
+            fn enabled(&self, _: &log::Metadata) -> bool {
+                true
+            }
+            fn log(&self, record: &log::Record) {
+                CAPTURED.lock().unwrap().push(record.args().to_string());
+            }
+            fn flush(&self) {}
+        }
+        log::set_logger(&Capture).expect("no other logger is installed under test");
+        log::set_max_level(log::LevelFilter::Error);
+
+        install_panic_hook();
+        let _ = std::thread::Builder::new()
+            .name("panicky".into())
+            .spawn(|| panic!("boom"))
+            .unwrap()
+            .join();
+
+        let logged = CAPTURED.lock().unwrap().join("\n");
+        assert!(logged.contains("panic on thread 'panicky'"), "{logged}");
+        assert!(logged.contains("boom"), "{logged}");
+        assert!(logged.contains("lib.rs:"), "location: {logged}");
+        assert!(
+            logged.lines().count() > 3,
+            "a backtrace should follow: {logged}"
+        );
+    }
+
+    /// Everything we put there (the PATH cache, headless prompt files) is either read
+    /// back into `PATH` or carries repo content, so the dir must not be traversable by
+    /// another local user — the reason it isn't a shared `/tmp` path any more.
+    #[cfg(unix)]
+    #[test]
+    fn private_dir_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = private_dir().expect("a home dir to anchor the cache");
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sanitize_path_list_drops_relative_entries() {
+        assert_eq!(
+            sanitize_path_list("/opt/homebrew/bin:.:bin:/usr/bin:\n"),
+            Some("/opt/homebrew/bin:/usr/bin".to_string())
+        );
+        assert_eq!(sanitize_path_list(""), None);
+        assert_eq!(sanitize_path_list(".:relative"), None);
     }
 }

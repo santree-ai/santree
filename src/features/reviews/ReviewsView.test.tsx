@@ -22,6 +22,7 @@ function pr(id: string, number: number, title: string, repo: string): ReviewPr {
     additions: 10,
     deletions: 2,
     commentCount: 0,
+    isInMergeQueue: false,
     reviewers: [],
     updatedAt: "2026-06-29T12:00:00Z",
   };

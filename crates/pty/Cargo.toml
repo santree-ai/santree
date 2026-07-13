@@ -6,7 +6,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-portable-pty = "0.9"
-anyhow = "1"
+portable-pty = { workspace = true }
+anyhow = { workspace = true }
 # Logging via the `log` facade; the host app installs the global logger.
-log = "0.4"
+log = { workspace = true }

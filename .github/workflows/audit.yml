@@ -48,4 +48,30 @@ jobs:
 
       # --prod: dev-only tooling (Biome, Vite, Vitest, …) never ships in the
       # built app, so advisories there aren't worth paging anyone over.
-      - run: pnpm audit --prod
+      - name: pnpm audit
+        id: audit
+        continue-on-error: true
+        # pipefail: without it the pipe would mask pnpm's non-zero exit with tee's 0.
+        run: |
+          set -o pipefail
+          pnpm audit --prod | tee audit.txt
+
+      # Mirrors what rustsec/audit-check does for the Rust half: a failing
+      # scheduled run has no PR to annotate, so the advisories land as a GitHub
+      # issue instead of a red run nobody sees. One rolling issue, re-bodied on
+      # each run, so a still-unfixed advisory doesn't file a duplicate weekly.
+      - name: File advisories as an issue
+        if: steps.audit.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          title='pnpm audit: advisories in production dependencies'
+          # The backticks are markdown fences, hence the escaping.
+          body=$(printf "\`pnpm audit --prod\` failed in [this run](%s/%s/actions/runs/%s).\n\n\`\`\`\n%s\n\`\`\`\n" \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(head -c 50000 audit.txt)")
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

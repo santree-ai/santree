@@ -66,11 +66,18 @@ pub async fn path(db: &Db, name: &str) -> Result<Option<String>> {
 
 /// Validate that `path` is inside a git work tree and register it. The stored
 /// path is the repo's top level (so adding a subdirectory still works). Adding
-/// the same repo twice just refreshes it — the call is idempotent.
+/// the same *path* twice just refreshes it — the call is idempotent.
+///
+/// A row is identified by its path, not by its derived `owner/repo` name: two
+/// checkouts of the same GitHub repo derive the same name, and repointing the
+/// existing row at the second one would orphan every `worktree_links` row keyed
+/// on the first path — its worktrees would silently vanish from the sidebar. The
+/// name is still what the rest of the app *calls* a repo (settings scope, IPC
+/// args), so a colliding one is qualified rather than reused.
 pub async fn add(db: &Db, path: String) -> Result<Repo> {
     // The folder check and both git calls block; run validation+identity off the
     // async runtime's worker threads before touching the db.
-    let (toplevel, name, tracker) =
+    let (toplevel, derived, tracker) =
         tokio::task::spawn_blocking(move || -> Result<(String, String, String)> {
             let dir = Path::new(&path);
             if !dir.is_dir() {
@@ -89,24 +96,33 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
         })
         .await??;
 
-    // Repos are keyed by derived name; warn if that collides with a *different*
-    // path so a silent clobber (two checkouts whose names derive the same) is
-    // at least traceable.
-    if let Some(existing) = self::path(db, &name).await? {
-        if existing != toplevel {
-            log::warn!("repo name collision for {name}; overwriting path {existing} -> {toplevel}");
-        }
-    }
+    let registered: Option<(String,)> = sqlx::query_as("SELECT name FROM repos WHERE path = ?")
+        .bind(&toplevel)
+        .fetch_optional(db)
+        .await?;
 
-    sqlx::query(
-        "INSERT INTO repos (name, tracker, path) VALUES (?, ?, ?)
-         ON CONFLICT(name) DO UPDATE SET tracker = excluded.tracker, path = excluded.path",
-    )
-    .bind(&name)
-    .bind(&tracker)
-    .bind(&toplevel)
-    .execute(db)
-    .await?;
+    let name = match registered {
+        // Already registered: refresh the tracker but keep the stored name — a
+        // rename (the remote moved) would strand its `repo:<name>` settings scope.
+        Some((name,)) => {
+            sqlx::query("UPDATE repos SET tracker = ? WHERE path = ?")
+                .bind(&tracker)
+                .bind(&toplevel)
+                .execute(db)
+                .await?;
+            name
+        }
+        None => {
+            let name = free_name(db, &derived, Path::new(&toplevel)).await?;
+            sqlx::query("INSERT INTO repos (name, tracker, path) VALUES (?, ?, ?)")
+                .bind(&name)
+                .bind(&tracker)
+                .bind(&toplevel)
+                .execute(db)
+                .await?;
+            name
+        }
+    };
 
     // Usually 0 for a fresh repo, but re-adding an already-registered one
     // (the call is idempotent) can have existing worktree links.
@@ -123,6 +139,41 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
         agents: agents as u32,
         path: Some(toplevel),
     })
+}
+
+/// A free registry name for a checkout that isn't registered yet: its derived
+/// `owner/repo`, or — when another checkout already holds that — the same name
+/// qualified with the folder it lives in (`akamai/agent (agent-fork)`), so both
+/// stay addressable. The name is the app's repo identity, so it must be unique;
+/// the derived one isn't.
+async fn free_name(db: &Db, derived: &str, top: &Path) -> Result<String> {
+    if !name_taken(db, derived).await? {
+        return Ok(derived.to_string());
+    }
+    let folder = top
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("checkout");
+    let mut n = 1;
+    loop {
+        let candidate = if n == 1 {
+            format!("{derived} ({folder})")
+        } else {
+            format!("{derived} ({folder} {n})")
+        };
+        if !name_taken(db, &candidate).await? {
+            return Ok(candidate);
+        }
+        n += 1;
+    }
+}
+
+async fn name_taken(db: &Db, name: &str) -> Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM repos WHERE name = ?")
+        .bind(name)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.is_some())
 }
 
 /// Derive `(name, tracker)` for a repo: prefer the GitHub `owner/repo` from the
@@ -155,7 +206,78 @@ pub(crate) fn github_slug(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::github_slug;
+    use super::*;
+
+    /// A git repo at `dir` with `remote` as its origin, returned as the path
+    /// string the frontend would pass to [`add`].
+    fn init_repo(dir: &Path, remote: &str) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["remote", "add", "origin", remote],
+        ] {
+            let ok = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(&args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?} failed");
+        }
+        dir.to_string_lossy().to_string()
+    }
+
+    /// A second checkout of the same GitHub repo derives the same name — it must
+    /// get its own row rather than repoint the first one's path, which would
+    /// orphan every worktree linked to that path.
+    #[tokio::test]
+    async fn second_checkout_of_a_remote_never_repoints_the_first() {
+        let base = std::env::temp_dir().join(format!("santree-repo-add-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let remote = "git@github.com:akamai/agent.git";
+
+        let first = add(&db, init_repo(&base.join("agent"), remote))
+            .await
+            .unwrap();
+        assert_eq!(first.name, "akamai/agent");
+        let first_path = first.path.clone().unwrap();
+
+        // A worktree the user is actively working in, keyed on the first checkout.
+        sqlx::query(
+            "INSERT INTO worktree_links (repo_path, issue_id, branch, worktree_path, base_branch)
+             VALUES (?, 'AK-1', 'ak-1', '/wt/AK-1', 'main')",
+        )
+        .bind(&first_path)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let second = add(&db, init_repo(&base.join("agent-fork"), remote))
+            .await
+            .unwrap();
+        assert_eq!(
+            second.name, "akamai/agent (agent-fork)",
+            "the colliding name is qualified by the checkout's folder"
+        );
+        assert_ne!(second.path, first.path);
+
+        // The first repo still points at its own checkout, and still owns its worktree.
+        assert_eq!(path(&db, "akamai/agent").await.unwrap(), Some(first_path));
+        let repos = list(&db).await.unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].agents, 1, "worktree link survived the second add");
+        assert_eq!(repos[1].agents, 0);
+
+        // Re-adding a registered path is still idempotent — no new row, same name.
+        let again = add(&db, base.join("agent").to_string_lossy().to_string())
+            .await
+            .unwrap();
+        assert_eq!(again.name, "akamai/agent");
+        assert_eq!(list(&db).await.unwrap().len(), 2);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn parses_github_remotes() {

@@ -12,6 +12,7 @@
 use std::io::Read;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::Serialize;
@@ -33,6 +34,15 @@ pub struct SessionStateChanged {}
 #[derive(Clone, Serialize, Type, Event)]
 pub struct SessionUsageChanged {}
 
+/// A nudge is a single byte written straight after connecting, so a client that
+/// sends nothing is broken — give up on it rather than let it stall the loop
+/// (and with it every other session's live updates).
+const READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Pause after a failed `accept` so a persistent error (e.g. EMFILE while many
+/// PTYs are open) can't spin the loop hot while it lasts.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
 /// Bind the signal socket and accept nudges from `santree-hook` for the app's
 /// lifetime, emitting [`SessionStateChanged`] on each. Runs its accept loop on a
 /// detached thread (kept alive for the process's lifetime; the OS reclaims it on
@@ -50,7 +60,18 @@ pub fn start(app: &AppHandle, socket_path: &Path) -> Result<()> {
     let app = app.clone();
     std::thread::spawn(move || {
         for conn in listener.incoming() {
-            let Ok(mut stream) = conn else { break };
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(e) => {
+                    // An accept error is per-connection, not fatal to the listener:
+                    // bailing out here would kill live session updates for the rest
+                    // of the app's life over a transient fd exhaustion.
+                    log::warn!("session-signal accept failed: {e}");
+                    std::thread::sleep(ACCEPT_BACKOFF);
+                    continue;
+                }
+            };
+            let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
             // The nudge's arrival is the whole signal; its first byte tags which
             // table changed — `u` = live usage, anything else = session state.
             let mut buf = [0u8; 8];

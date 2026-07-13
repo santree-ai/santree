@@ -255,9 +255,14 @@ pub async fn reviewers(
     else {
         return Ok(vec![]);
     };
+    // An empty picker is the graceful fallback, but log why — a rate-limited or
+    // permission-denied collaborators call otherwise looks like "no collaborators".
     Ok(github::list_reviewers(&token, &owner, &name)
         .await
-        .unwrap_or_default())
+        .unwrap_or_else(|e| {
+            log::warn!("Reviewers: listing collaborators for {owner}/{name} failed: {e}");
+            Vec::new()
+        }))
 }
 
 #[cfg(test)]
