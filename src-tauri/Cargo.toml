@@ -72,7 +72,7 @@ tauri-plugin-log = "2"
 
 # Linear integration: HTTP (GraphQL/OAuth) + PKCE primitives.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
 rand = "0.8"
 # Percent-decode the OAuth callback query string (already in the tree via reqwest).
