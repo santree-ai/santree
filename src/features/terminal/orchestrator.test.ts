@@ -193,4 +193,95 @@ describe("useTerminalTabs", () => {
       expect(result.current.activeKey).toBeNull();
     });
   });
+
+  describe("embed slot", () => {
+    const host = (): HTMLElement => ({}) as HTMLElement;
+
+    it("shows the newest claim", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      act(() => {
+        result.current.attachEmbed({ host: host(), key: "a" });
+      });
+      expect(result.current.embed?.key).toBe("a");
+
+      act(() => {
+        result.current.attachEmbed({ host: host(), key: "b" });
+      });
+      expect(result.current.embed?.key).toBe("b");
+    });
+
+    // The F1 regression: releasing a claim used to blank the slot outright, so the
+    // terminal the user was actually watching went dark and — its deps unchanged —
+    // never re-registered.
+    it("releasing the newest claim hands the slot back to the previous holder", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      let releaseB = () => {};
+      act(() => {
+        result.current.attachEmbed({ host: host(), key: "a" });
+      });
+      act(() => {
+        releaseB = result.current.attachEmbed({ host: host(), key: "b" });
+      });
+
+      act(() => releaseB());
+
+      expect(result.current.embed?.key).toBe("a");
+    });
+
+    it("releasing a claim underneath the top one leaves the visible session alone", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      let releaseA = () => {};
+      act(() => {
+        releaseA = result.current.attachEmbed({ host: host(), key: "a" });
+      });
+      act(() => {
+        result.current.attachEmbed({ host: host(), key: "b" });
+      });
+
+      act(() => releaseA());
+
+      expect(result.current.embed?.key).toBe("b");
+    });
+
+    it("releasing the last claim empties the slot", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      let release = () => {};
+      act(() => {
+        release = result.current.attachEmbed({ host: host(), key: "a" });
+      });
+
+      act(() => release());
+
+      expect(result.current.embed).toBeNull();
+    });
+
+    it("detachEmbeds drops every claim on a dead session, keeping the rest", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      act(() => {
+        result.current.attachEmbed({ host: host(), key: "a" });
+        result.current.attachEmbed({ host: host(), key: "b" });
+        result.current.attachEmbed({ host: host(), key: "a" });
+      });
+
+      act(() => result.current.detachEmbeds("a"));
+
+      expect(result.current.embed?.key).toBe("b");
+    });
+
+    it("releasing an already-detached claim is a no-op", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      let releaseA = () => {};
+      act(() => {
+        releaseA = result.current.attachEmbed({ host: host(), key: "a" });
+      });
+      act(() => {
+        result.current.attachEmbed({ host: host(), key: "b" });
+      });
+      act(() => result.current.detachEmbeds("a"));
+
+      act(() => releaseA());
+
+      expect(result.current.embed?.key).toBe("b");
+    });
+  });
 });

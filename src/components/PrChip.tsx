@@ -64,8 +64,11 @@ export function PrChips({ prs }: { prs: Pr[] }) {
         {prs.length} PRs
       </Pill>
       {/* Touching the summary (top-full, no gap) so the hover stays alive while
-          moving onto the list. High z so it floats over neighbouring cards/nodes. */}
-      <span className="invisible absolute top-full right-0 z-50 flex flex-col items-end gap-1 rounded-lg border border-line-3 bg-raised p-1.5 shadow-lg group-hover/prs:visible group-focus-within/prs:visible">
+          moving onto the list. High z so it floats over neighbouring cards/nodes.
+          Hidden with opacity — not `invisible` — because visibility:hidden makes
+          the chips unfocusable, which would make focus-within (the only keyboard
+          way in: Tab onto a chip → the list appears) impossible to ever trigger. */}
+      <span className="pointer-events-none absolute top-full right-0 z-50 flex flex-col items-end gap-1 rounded-lg border border-line-3 bg-raised p-1.5 opacity-0 shadow-lg group-focus-within/prs:pointer-events-auto group-focus-within/prs:opacity-100 group-hover/prs:pointer-events-auto group-hover/prs:opacity-100">
         {prs.map((p) => (
           <PrChip key={p.number} {...p} />
         ))}

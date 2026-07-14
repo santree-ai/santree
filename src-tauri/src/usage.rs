@@ -157,6 +157,7 @@ impl Toks {
 }
 
 /// One billable turn (an `assistant` line with a `usage`).
+#[derive(Clone)]
 struct Ev {
     /// `message.id` — the dedup anchor. Turns without one are never deduped.
     id: Option<String>,
@@ -167,6 +168,7 @@ struct Ev {
 }
 
 /// The most recent turn's context size (only meaningful for a *main* transcript).
+#[derive(Clone)]
 struct Ctx {
     tokens: f64,
     ts_ms: i64,
@@ -224,12 +226,51 @@ fn parse_ts(ts: &str) -> i64 {
 
 /// Parse one transcript file into its [`FileData`]. `None` if it can't be
 /// classified or read.
-fn parse_file(path: &Path) -> Option<FileData> {
+fn parse_file(path: &Path) -> Option<Parsed> {
+    parse_from(path, 0, None)
+}
+
+/// A parse of a transcript, plus the byte offset it consumed up to — the end of
+/// the last *complete* line. A trailing partial line (Claude mid-write) is left
+/// unconsumed so the next poll re-reads it whole.
+struct Parsed {
+    data: FileData,
+    consumed: u64,
+}
+
+/// Read a transcript from byte offset `from` and fold what's there into `base`
+/// (the parse of the first `from` bytes; `None` = parse the whole file).
+///
+/// Transcripts are append-only and the active one is re-read every poll (~2s
+/// while the panel is open) as the agent writes to it — at tens to hundreds of
+/// MB, re-reading and re-parsing the whole file each time is the single most
+/// expensive thing this module does. Resuming from the previous parse's offset
+/// means each poll only touches the bytes the agent actually appended.
+///
+/// Read as bytes, not `read_to_string`: resuming mid-file can land on a line
+/// Claude is still writing, whose tail may be a truncated multi-byte char —
+/// lossy decoding keeps that confined to the partial line we're discarding
+/// anyway, where strict UTF-8 would fail the whole read.
+fn parse_from(path: &Path, from: u64, base: Option<&FileData>) -> Option<Parsed> {
+    use std::io::{Read, Seek, SeekFrom};
+
     let (project, session_id, is_main) = classify(path)?;
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut events = Vec::new();
-    let mut context = None;
-    let mut cwd = None;
+    let mut file = std::fs::File::open(path).ok()?;
+    if from > 0 {
+        file.seek(SeekFrom::Start(from)).ok()?;
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    // Only whole lines are parseable; anything after the final newline is a
+    // half-written line, so leave it for the next poll.
+    let complete = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let consumed = from + complete as u64;
+    let text = String::from_utf8_lossy(&buf[..complete]);
+
+    let (mut events, mut context, mut cwd) = match base {
+        Some(b) => (b.events.clone(), b.context.clone(), b.cwd.clone()),
+        None => (Vec::new(), None, None),
+    };
     for line in text.lines() {
         let Ok(l) = serde_json::from_str::<Line>(line) else {
             continue; // partial/metadata line
@@ -282,12 +323,15 @@ fn parse_file(path: &Path) -> Option<FileData> {
             toks,
         });
     }
-    Some(FileData {
-        project,
-        cwd,
-        session_id,
-        events,
-        context,
+    Some(Parsed {
+        data: FileData {
+            project,
+            cwd,
+            session_id,
+            events,
+            context,
+        },
+        consumed,
     })
 }
 
@@ -316,6 +360,9 @@ fn approx_bytes(fd: &FileData) -> usize {
 struct Entry {
     /// The file's byte length when it was parsed.
     len: u64,
+    /// How much of the file that parse actually consumed — `len` minus any
+    /// half-written trailing line. The resume point for the next parse.
+    consumed: u64,
     /// This entry's contribution to [`FileCache::bytes`].
     bytes: usize,
     data: Arc<FileData>,
@@ -323,9 +370,10 @@ struct Entry {
 
 /// Parsed transcripts keyed by path, tagged with the byte length they were parsed
 /// at. Transcripts are append-only, so an unchanged length means unchanged content
-/// — a live file write only re-parses that one growing file, not the whole tree.
-/// Bounded by [`MAX_CACHE_BYTES`] with FIFO eviction, and pruned of transcripts
-/// that no longer exist (Claude deletes old sessions).
+/// — a live file write only re-parses that one growing file, not the whole tree —
+/// and a *grown* file only needs the bytes past [`Entry::consumed`] (see
+/// [`FileCache::resume`]). Bounded by [`MAX_CACHE_BYTES`] with FIFO eviction, and
+/// pruned of transcripts that no longer exist (Claude deletes old sessions).
 #[derive(Default)]
 struct FileCache {
     map: HashMap<PathBuf, Entry>,
@@ -342,15 +390,38 @@ impl FileCache {
             .map(|e| e.data.clone())
     }
 
-    fn insert(&mut self, path: PathBuf, len: u64, data: Arc<FileData>) {
-        self.insert_bounded(path, len, data, MAX_CACHE_BYTES);
+    /// The resume point for a transcript that has only *grown* since it was
+    /// parsed: `(offset, previous parse)`. `None` when it's uncached or shrank —
+    /// a shorter file isn't the append-only tail of what we parsed, so the
+    /// caller re-reads it whole.
+    fn resume(&self, path: &Path, len: u64) -> Option<(u64, Arc<FileData>)> {
+        self.map
+            .get(path)
+            .filter(|e| len > e.len)
+            .map(|e| (e.consumed, e.data.clone()))
+    }
+
+    fn insert(&mut self, path: PathBuf, len: u64, consumed: u64, data: Arc<FileData>) {
+        self.insert_bounded(path, len, consumed, data, MAX_CACHE_BYTES);
     }
 
     /// `insert` with the byte cap as a parameter, so the FIFO eviction is
     /// unit-testable without parsing real megabytes of transcript.
-    fn insert_bounded(&mut self, path: PathBuf, len: u64, data: Arc<FileData>, max_bytes: usize) {
+    fn insert_bounded(
+        &mut self,
+        path: PathBuf,
+        len: u64,
+        consumed: u64,
+        data: Arc<FileData>,
+        max_bytes: usize,
+    ) {
         let bytes = approx_bytes(&data);
-        let entry = Entry { len, bytes, data };
+        let entry = Entry {
+            len,
+            consumed,
+            bytes,
+            data,
+        };
         match self.map.insert(path.clone(), entry) {
             // A grown file replaces its own entry — it keeps its place in the queue.
             Some(old) => self.bytes -= old.bytes,
@@ -384,6 +455,32 @@ impl FileCache {
 
 static CACHE: LazyLock<Mutex<FileCache>> = LazyLock::new(Default::default);
 
+/// What the cache can offer for one transcript at its current byte length.
+enum Cached {
+    /// Parsed at exactly this length — nothing to re-read.
+    Fresh(Arc<FileData>),
+    /// Appended to since: resume from this offset on top of the previous parse.
+    Grown(u64, Arc<FileData>),
+    /// Never parsed, or shrank (so not an append) — read it whole.
+    Miss,
+}
+
+/// Cache a parse and hand it to the caller's output. A transcript that vanished
+/// mid-scan, or that doesn't classify, is simply skipped.
+fn store(path: &Path, len: u64, parsed: Option<Parsed>, out: &mut Vec<Arc<FileData>>) {
+    let Some(Parsed { data, consumed }) = parsed else {
+        return;
+    };
+    let arc = Arc::new(data);
+    CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        path.to_path_buf(),
+        len,
+        consumed,
+        arc.clone(),
+    );
+    out.push(arc);
+}
+
 fn load_cached(paths: &[PathBuf], on_progress: impl Fn(usize, usize)) -> Vec<Arc<FileData>> {
     let total = paths.len();
     // Emit at most ~40 updates so a cold parse of many files doesn't flood events.
@@ -395,22 +492,24 @@ fn load_cached(paths: &[PathBuf], on_progress: impl Fn(usize, usize)) -> Vec<Arc
     for (i, p) in paths.iter().enumerate() {
         let len = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
         // The lock is only ever held for a map lookup or an insert — never across
-        // `parse_file`, or a cold parse of the whole transcript tree would block
-        // every other reader for its full duration.
-        let hit = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(p, len);
-        match hit {
-            Some(data) => out.push(data),
-            None => {
-                if let Some(fd) = parse_file(p) {
-                    let arc = Arc::new(fd);
-                    CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(
-                        p.clone(),
-                        len,
-                        arc.clone(),
-                    );
-                    out.push(arc);
-                }
+        // a parse, or a cold parse of the whole transcript tree would block every
+        // other reader for its full duration.
+        let cached = {
+            let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            match cache.get(p, len) {
+                Some(data) => Cached::Fresh(data),
+                None => match cache.resume(p, len) {
+                    Some((at, data)) => Cached::Grown(at, data),
+                    None => Cached::Miss,
+                },
             }
+        };
+        match cached {
+            Cached::Fresh(data) => out.push(data),
+            // The transcript the agent is actively writing: parse only the bytes
+            // it appended since the last poll, not the whole file again.
+            Cached::Grown(at, base) => store(p, len, parse_from(p, at, Some(&base)), &mut out),
+            Cached::Miss => store(p, len, parse_file(p), &mut out),
         }
         let done = i + 1;
         if done == total || done % step == 0 {
@@ -790,7 +889,9 @@ impl UsageWatcher {
         for root in roots {
             let app = app.clone();
             let debouncer = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
-                let Ok(events) = res else { return };
+                let Some(events) = crate::git_watch::batch("transcript", res) else {
+                    return;
+                };
                 let touched_transcript = events
                     .iter()
                     .flat_map(|ev| ev.paths.iter())
@@ -867,7 +968,8 @@ mod tests {
         let one = approx_bytes(&cached("s1"));
         for (i, sid) in ["s1", "s2", "s3"].iter().enumerate() {
             let p = PathBuf::from(format!("/t/{sid}.jsonl"));
-            c.insert_bounded(p, i as u64, cached(sid), one * 2);
+            let len = i as u64;
+            c.insert_bounded(p, len, len, cached(sid), one * 2);
         }
         assert!(
             c.get(Path::new("/t/s1.jsonl"), 0).is_none(),
@@ -881,7 +983,7 @@ mod tests {
     fn file_cache_re_reads_grown_files_and_drops_deleted_ones() {
         let mut c = FileCache::default();
         let p = PathBuf::from("/t/s1.jsonl");
-        c.insert(p.clone(), 10, cached("s1"));
+        c.insert(p.clone(), 10, 10, cached("s1"));
         assert!(c.get(&p, 10).is_some());
         assert!(
             c.get(&p, 20).is_none(),
@@ -889,7 +991,7 @@ mod tests {
         );
 
         // Re-parsing it replaces the entry rather than double-counting its bytes.
-        c.insert(p.clone(), 20, cached("s1"));
+        c.insert(p.clone(), 20, 20, cached("s1"));
         assert!(c.get(&p, 20).is_some());
         assert_eq!(c.order.len(), 1);
         assert_eq!(c.bytes, approx_bytes(&cached("s1")));
@@ -899,6 +1001,29 @@ mod tests {
         assert!(c.get(&p, 20).is_none());
         assert!(c.order.is_empty());
         assert_eq!(c.bytes, 0);
+    }
+
+    #[test]
+    fn file_cache_offers_a_resume_point_only_for_grown_files() {
+        let mut c = FileCache::default();
+        let p = PathBuf::from("/t/s1.jsonl");
+        // Parsed at 100 bytes, of which 90 were complete lines (a partial tail).
+        c.insert(p.clone(), 100, 90, cached("s1"));
+
+        let (at, _) = c.resume(&p, 150).expect("a grown transcript resumes");
+        assert_eq!(
+            at, 90,
+            "resume at the end of the last complete line, not len"
+        );
+        assert!(
+            c.resume(&p, 100).is_none(),
+            "an unchanged file is a Fresh hit, not a resume"
+        );
+        assert!(
+            c.resume(&p, 50).is_none(),
+            "a shrunk file isn't an append — it must be re-read whole"
+        );
+        assert!(c.resume(Path::new("/t/other.jsonl"), 10).is_none());
     }
 
     /// The static built-in price table (deterministic; no network) for cost tests.
@@ -1241,7 +1366,7 @@ mod tests {
             "not json at all\n",
         );
         std::fs::write(&file_path, content).unwrap();
-        let fd = parse_file(&file_path).unwrap();
+        let fd = parse_file(&file_path).unwrap().data;
         assert_eq!(fd.session_id, "sess");
         assert_eq!(fd.cwd.as_deref(), Some("/Users/me/dev/repo"));
         assert_eq!(fd.events.len(), 1, "synthetic + non-json lines skipped");
@@ -1255,5 +1380,130 @@ mod tests {
         // context = input + cache_read + (5m + 1h)
         assert_eq!(fd.context.as_ref().unwrap().tokens, 5.0 + 11.0 + 2.0 + 7.0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- incremental parse of the growing transcript ----
+
+    /// An `assistant` line with `input_tokens: n`, as Claude writes it.
+    fn turn(id: &str, input: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"2026-07-05T10:00:00.000Z","requestId":"r-{id}","cwd":"/repo","message":{{"id":"{id}","model":"claude-opus-4-8","usage":{{"input_tokens":{input},"output_tokens":0}}}}}}"#
+        )
+    }
+
+    /// A transcript file path under a `projects/<slug>/` root, so `classify` sees it.
+    fn transcript(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("santree-usage-inc-{}-{name}", std::process::id()))
+            .join("projects")
+            .join("-repo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("sess.jsonl")
+    }
+
+    #[test]
+    fn parse_from_stops_at_the_last_complete_line_and_resumes_there() {
+        let path = transcript("partial");
+        let (a, b) = (turn("m1", 10), turn("m2", 20));
+
+        // Claude is mid-write: the second line has no terminating newline yet.
+        let partial = &b[..30];
+        std::fs::write(&path, format!("{a}\n{partial}")).unwrap();
+        let first = parse_from(&path, 0, None).unwrap();
+        assert_eq!(
+            first.data.events.len(),
+            1,
+            "the half-written line is skipped"
+        );
+        assert_eq!(
+            first.consumed,
+            a.len() as u64 + 1,
+            "consume up to the last newline — not to EOF, or the partial line's \
+             remaining bytes would be lost on the next poll"
+        );
+
+        // The write completes; resuming re-reads that line whole.
+        std::fs::write(&path, format!("{a}\n{b}\n")).unwrap();
+        let second = parse_from(&path, first.consumed, Some(&first.data)).unwrap();
+        assert_eq!(
+            second
+                .data
+                .events
+                .iter()
+                .map(|e| e.id.clone().unwrap())
+                .collect::<Vec<_>>(),
+            ["m1", "m2"]
+        );
+        assert_eq!(second.consumed, (a.len() + b.len() + 2) as u64);
+        // The main transcript's context follows the *last* turn.
+        assert_eq!(second.data.context.unwrap().tokens, 20.0);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn parse_from_folds_appended_turns_in_without_re_reading_the_prefix() {
+        let path = transcript("append");
+        let (a, b) = (turn("m1", 10), turn("m2", 20));
+        std::fs::write(&path, format!("{a}\n")).unwrap();
+        let first = parse_from(&path, 0, None).unwrap();
+
+        // Overwrite the already-parsed prefix with same-length garbage, then append
+        // the next turn. Anything the incremental parse re-read would now be
+        // unparseable — so `m1` surviving proves only the appended bytes were read.
+        let garbage = "x".repeat(a.len());
+        std::fs::write(&path, format!("{garbage}\n{b}\n")).unwrap();
+
+        let second = parse_from(&path, first.consumed, Some(&first.data)).unwrap();
+        assert_eq!(
+            second
+                .data
+                .events
+                .iter()
+                .map(|e| e.id.clone().unwrap())
+                .collect::<Vec<_>>(),
+            ["m1", "m2"],
+            "m1 came from the cached parse, m2 from the appended tail"
+        );
+        assert_eq!(second.data.cwd.as_deref(), Some("/repo"));
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The same proof through the real entry point (and the process-wide cache):
+    /// the growing transcript — the one file that misses the byte-length cache on
+    /// every refetch — must be extended from its cached parse, not re-read whole.
+    #[test]
+    fn load_cached_extends_the_growing_transcript_instead_of_re_reading_it() {
+        let path = transcript("load");
+        let (a, b) = (turn("m1", 10), turn("m2", 20));
+        std::fs::write(&path, format!("{a}\n")).unwrap();
+
+        let paths = vec![path.clone()];
+        let first = load_cached(&paths, |_, _| {});
+        assert_eq!(first[0].events.len(), 1);
+
+        // Poison the prefix (same byte length) and append the next turn, exactly as
+        // above: a full re-read would drop `m1`, an incremental one keeps it.
+        std::fs::write(&path, format!("{}\n{b}\n", "x".repeat(a.len()))).unwrap();
+        let second = load_cached(&paths, |_, _| {});
+        assert_eq!(
+            second[0]
+                .events
+                .iter()
+                .map(|e| e.id.clone().unwrap())
+                .collect::<Vec<_>>(),
+            ["m1", "m2"],
+            "load_cached re-read the whole file instead of just the appended bytes"
+        );
+
+        // A file that shrank isn't an append: it's re-read whole (so the poisoned
+        // prefix is all that's left, and no event survives).
+        std::fs::write(&path, format!("{}\n", "x".repeat(a.len()))).unwrap();
+        let third = load_cached(&paths, |_, _| {});
+        assert!(third[0].events.is_empty(), "a shrunk file is re-read whole");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

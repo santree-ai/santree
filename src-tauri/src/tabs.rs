@@ -39,6 +39,12 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<WorktreeTab>> {
 
 /// Persist a new tab. The frontend mints the id (so it can patch its cache and
 /// focus the tab optimistically) and picks the initial title.
+///
+/// The next position is computed by a subquery *inside* the INSERT, not by a
+/// separate SELECT: SQLite takes the write lock before executing a write
+/// statement, so the `MAX(position)` read happens under it and concurrent adds
+/// serialize onto distinct positions. Split into two statements and they'd race
+/// (see `concurrent_adds_get_distinct_positions`).
 pub async fn add(
     db: &Db,
     repo: &str,
@@ -189,6 +195,44 @@ mod tests {
         assert_eq!(
             tabs.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
             ["tab-a", "tab-c"]
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_adds_get_distinct_positions() {
+        let db = test_db("race").await;
+        // sqlx runs each pooled connection's statements on its own thread, so these
+        // eight adds genuinely contend for the same `MAX(position) + 1`.
+        let adds = (0..8).map(|i| {
+            let db = db.clone();
+            async move {
+                add(
+                    &db,
+                    "repo",
+                    "AK-1",
+                    &format!("tab-{i}"),
+                    TabKind::Terminal,
+                    "Terminal",
+                )
+                .await
+                .unwrap();
+            }
+        });
+        futures::future::join_all(adds).await;
+
+        let mut positions: Vec<i64> =
+            sqlx::query_as("SELECT position FROM worktree_tabs WHERE repo = 'repo'")
+                .fetch_all(&db)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(p,): (i64,)| p)
+                .collect();
+        positions.sort_unstable();
+        assert_eq!(
+            positions,
+            (1..=8).collect::<Vec<_>>(),
+            "each add must claim its own position — duplicates make tab order nondeterministic"
         );
     }
 

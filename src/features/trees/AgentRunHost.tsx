@@ -6,12 +6,13 @@
  *
  *  1. Consume Issues' background-launch requests once their worktree actually exists
  *     (the create runs in parallel with the request).
- *  2. Host an off-screen terminal for every queued launch Trees isn't already
- *     showing. The terminal renders at a real size — a `display:none` host gives
- *     xterm a 0-row grid — but parked off-screen, so the PTY spawns and the agent
- *     seeds without stealing focus. Once the agent has launched, the flag clears and
- *     this unmounts; the session lives on in the `TerminalLayer` and re-attaches when
- *     the worktree is next opened. */
+ *  2. Start a *detached* session for every queued launch Trees isn't already showing:
+ *     the PTY spawns and the agent seeds, but the session is never displayed. It is
+ *     rendered — at a real size, like every other pane — inside the persistent
+ *     `TerminalLayer`, so it needs no host of its own; claiming the layer's single
+ *     inline slot would blank whatever terminal the user is currently watching.
+ *     Once the agent has launched the flag clears and this unmounts; the session
+ *     lives on in the layer and shows up when the worktree is next opened. */
 import { useEffect } from "react";
 
 import type { Worktree } from "../../bindings";
@@ -21,7 +22,7 @@ import { useApp, useAppUi } from "../../state/AppContext";
 import { useWorktreeAgent } from "./useWorktreeAgent";
 import { WorktreeTerminal } from "./WorktreeTerminal";
 
-/** Which queued launches this host must run off-screen.
+/** Which queued launches this host must start detached.
  *
  *  Excluded: the worktree Trees currently shows (its visible pane already hosts that
  *  terminal — two hosts for one session would fight over the single xterm overlay),
@@ -70,14 +71,15 @@ function QueuedLaunches() {
   return (
     <>
       {launchesToHost(launchAgents, worktrees, visibleWorktree).map((wt) => (
-        <OffscreenLaunch key={wt.id} worktree={wt} />
+        <DetachedLaunch key={wt.id} worktree={wt} />
       ))}
     </>
   );
 }
 
-/** One off-screen agent terminal for a queued launch. */
-function OffscreenLaunch({ worktree }: { worktree: Worktree }) {
+/** One detached agent session for a queued launch: spawned and seeded, rendered
+ *  nowhere. `attach={false}` is what keeps it off the layer's inline slot. */
+function DetachedLaunch({ worktree }: { worktree: Worktree }) {
   const { clearAgentLaunch } = useAgentRuns();
   const { launching, initialSetup, preparing, seed, onExited } = useWorktreeAgent(worktree);
 
@@ -86,19 +88,14 @@ function OffscreenLaunch({ worktree }: { worktree: Worktree }) {
   if (!launching || initialSetup || preparing) return null;
 
   return (
-    <div
-      aria-hidden
-      className="pointer-events-none fixed top-0 left-0 -z-50 h-[600px] w-[900px] overflow-hidden opacity-0"
-      style={{ transform: "translateX(-100000px)" }}
-    >
-      <WorktreeTerminal
-        id={worktree.id}
-        branch={worktree.branch}
-        cwd={worktree.path}
-        seed={seed}
-        onLaunched={() => clearAgentLaunch(worktree.id)}
-        onExited={onExited}
-      />
-    </div>
+    <WorktreeTerminal
+      id={worktree.id}
+      branch={worktree.branch}
+      cwd={worktree.path}
+      seed={seed}
+      attach={false}
+      onLaunched={() => clearAgentLaunch(worktree.id)}
+      onExited={onExited}
+    />
   );
 }

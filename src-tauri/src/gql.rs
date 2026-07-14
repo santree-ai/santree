@@ -58,6 +58,41 @@ struct GqlError {
     message: String,
 }
 
+/// A GraphQL POST the server rejected with a non-success status. Carries the status
+/// alongside the message so a caller can act on it without matching on message text —
+/// `linear.rs` tells a rejected access token (401) apart from every other failure that
+/// way, and refreshes it. Its `Display` is the message alone, so the status doesn't
+/// show up twice in a toast.
+#[derive(Debug)]
+pub struct HttpError {
+    pub status: reqwest::StatusCode,
+    message: String,
+}
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for HttpError {}
+
+/// The HTTP status a failed [`post`] came back with, or `None` when it failed for any
+/// other reason — a transport error, or an HTTP 200 carrying a GraphQL `errors` array
+/// (a permission/validation failure, which a retry would only repeat).
+pub fn status_of(err: &anyhow::Error) -> Option<reqwest::StatusCode> {
+    err.downcast_ref::<HttpError>().map(|e| e.status)
+}
+
+/// The error for a non-success GraphQL response: the service's own body (Linear
+/// explains a complexity overflow there, GitHub a rate limit) rather than a bare
+/// status code, with the status attached for [`status_of`].
+fn status_error(service: &str, status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    let snippet: String = body.chars().take(300).collect();
+    anyhow::Error::new(HttpError {
+        status,
+        message: format!("{service} GraphQL returned {status}: {snippet}"),
+    })
+}
+
 #[derive(Deserialize)]
 struct Envelope<T> {
     data: Option<T>,
@@ -79,11 +114,8 @@ pub async fn post<T: DeserializeOwned>(req: reqwest::RequestBuilder, service: &s
         .with_context(|| format!("{service} GraphQL request"))?;
     if !res.status().is_success() {
         let status = res.status();
-        // Linear returns HTTP 400 with a JSON body explaining a GraphQL
-        // complexity overflow; surface that instead of a bare status code.
         let body = res.text().await.unwrap_or_default();
-        let snippet: String = body.chars().take(300).collect();
-        bail!("{service} GraphQL returned {status}: {snippet}");
+        return Err(status_error(service, status, &body));
     }
     let env: Envelope<T> = res
         .json()
@@ -99,4 +131,91 @@ pub async fn post<T: DeserializeOwned>(req: reqwest::RequestBuilder, service: &s
         bail!("{service}: {joined}");
     }
     env.data.ok_or_else(|| anyhow!("empty {service} response"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Serve exactly one canned HTTP response on an ephemeral port and return its URL,
+    /// so [`post`]'s real send → status → decode path is exercised without a network.
+    fn serve_once(status_line: &'static str, body: &'static str) -> String {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // One read is enough to let the client finish writing; we don't parse the
+            // request, only answer it.
+            let _ = stream.read(&mut [0u8; 4096]);
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        });
+        url
+    }
+
+    async fn post_to(url: &str) -> anyhow::Error {
+        post::<serde_json::Value>(client().post(url), "Linear")
+            .await
+            .unwrap_err()
+    }
+
+    /// The seam `linear.rs`'s token refresh hangs off: a rejected token has to be
+    /// distinguishable from any other failure *without* sniffing the message text.
+    #[tokio::test]
+    async fn a_rejected_request_carries_its_http_status() {
+        let err = post_to(&serve_once(
+            "401 Unauthorized",
+            r#"{"error":"invalid token"}"#,
+        ))
+        .await;
+        assert_eq!(status_of(&err), Some(reqwest::StatusCode::UNAUTHORIZED));
+        // …and the service's own body still reaches the message.
+        let msg = format!("{err:#}");
+        assert!(msg.contains("Linear GraphQL returned 401"), "{msg}");
+        assert!(msg.contains("invalid token"), "{msg}");
+    }
+
+    /// The other half: a GraphQL-level failure (HTTP 200 + `errors`) carries no status,
+    /// so a caller retrying on 401 doesn't burn its single-use refresh grant on a
+    /// permission or complexity error that would only repeat.
+    #[tokio::test]
+    async fn a_graphql_errors_array_carries_no_http_status() {
+        let err = post_to(&serve_once(
+            "200 OK",
+            r#"{"data":null,"errors":[{"message":"access denied"}]}"#,
+        ))
+        .await;
+        assert_eq!(status_of(&err), None);
+        assert!(format!("{err:#}").contains("access denied"));
+    }
+
+    /// A non-401 rejection is still reported with its status (nothing about the
+    /// refresh path depends on 401 being the only one carried).
+    #[tokio::test]
+    async fn a_complexity_overflow_carries_its_status_too() {
+        let err = post_to(&serve_once(
+            "400 Bad Request",
+            r#"{"message":"too complex"}"#,
+        ))
+        .await;
+        assert_eq!(status_of(&err), Some(reqwest::StatusCode::BAD_REQUEST));
+    }
+
+    #[tokio::test]
+    async fn a_successful_response_decodes_its_data() {
+        let data: serde_json::Value = post(
+            client().post(serve_once("200 OK", r#"{"data":{"viewer":{"id":"u1"}}}"#)),
+            "Linear",
+        )
+        .await
+        .unwrap();
+        assert_eq!(data["viewer"]["id"], "u1");
+    }
 }

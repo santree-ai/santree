@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# Third-party actions are pinned to a full commit SHA (the `# vX.Y.Z` comment says
+# which release it is). A version tag is mutable — whoever owns the action can
+# repoint `v4` at new code, which then runs inside our checkout with our token. The
+# SHA can't be repointed. Re-pin deliberately, don't float.
+
 # Cancel superseded runs on the same ref.
 concurrency:
   group: ci-${{ github.ref }}
@@ -19,13 +24,31 @@ jobs:
     name: Frontend (lint · typecheck · test · build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # The app version is declared in three places that nothing keeps in sync:
+      # package.json, tauri.conf.json (what Tauri stamps into the bundle) and the
+      # workspace Cargo.toml (what the About box reads via `package_info()`). Drift
+      # is invisible until a release ships a DMG whose metadata contradicts itself,
+      # so guard it here — same idea as the bindings-drift check in the backend job.
+      - name: Versions agree (package.json · tauri.conf.json · Cargo.toml)
+        run: |
+          pkg=$(jq -r .version package.json)
+          conf=$(jq -r .version src-tauri/tauri.conf.json)
+          # [workspace.package]'s `version` — the only line starting with `version =`
+          # (dependency versions all sit inside inline tables).
+          crate=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+          echo "package.json=$pkg  tauri.conf.json=$conf  Cargo.toml=$crate"
+          if [ "$pkg" != "$conf" ] || [ "$pkg" != "$crate" ]; then
+            echo "::error::app version disagrees across package.json, tauri.conf.json and Cargo.toml"
+            exit 1
+          fi
 
       # Version is read from package.json's `packageManager` field, so it
       # can't drift from what contributors get via corepack locally.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
@@ -53,7 +76,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       # Tauri builds against the OS webview — WebKitGTK — so its dev libs are
       # required before the Rust side will compile (mirrors README's Linux deps).
@@ -78,7 +101,7 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Format check
         run: cargo fmt --all --check
@@ -113,7 +136,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       # Same WebKitGTK/GTK deps the backend job needs to compile, plus the ones
       # the .deb bundler shells out to.
@@ -132,11 +155,11 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm

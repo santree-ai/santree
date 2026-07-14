@@ -1,5 +1,9 @@
-/** Settings → Trees: worktree setup + commit preferences, and the per-repo
- *  `.santree/init.sh` setup-script editor (with bash syntax highlighting). */
+/** The worktree half of Settings → Work: setup + commit preferences, and the
+ *  per-repo `.santree/init.sh` setup-script editor (with bash syntax
+ *  highlighting). There is no "Trees" settings pane — these cards render inside
+ *  Work (see `Work.tsx`), and the legacy `?section=trees` deep-link resolves
+ *  there. The persisted keys keep their `trees_*` names (they're stored values,
+ *  not UI labels). */
 
 import { type ReactNode, useEffect, useState } from "react";
 import EditorImport from "react-simple-code-editor";
@@ -87,8 +91,8 @@ const DIFF_OPTIONS: { value: DiffMode; label: string }[] = [
 
 /** The worktree setup + commit preferences and the per-repo setup-script editor.
  *  Heading-less — rendered under the merged "Work" settings section. App
- *  defaults, or (when `forRepo` is set) per-repo overrides — same scope
- *  convention as {@link WorkActionConfig}. */
+ *  defaults, or (when `forRepo` is set) per-repo overrides — the same scope
+ *  convention as the Work action config it sits beside. */
 export function WorktreeSettings({ repo, forRepo }: { repo: string; forRepo?: string }) {
   const scope = forRepo ? `repo:${forRepo}` : "app";
   const { data: appBatch } = useSetting("app", TREES_BATCH_SETUP_KEY);

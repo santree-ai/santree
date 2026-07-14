@@ -123,10 +123,23 @@ src/
 | `pnpm test` / `cargo test` | Vitest / Rust tests |
 | `cargo clippy` | Rust linter |
 
-**Before finishing a change:** `cargo check`/`clippy`, `pnpm gen:bindings` (if commands
-changed), `npx tsc --noEmit`, `pnpm lint`, and the test suites — keep them all green.
-And for any new command taking a path/id/branch, confirm it's validated
-(`safe_path` / no-leading-dash) before it reaches fs or git.
+**Before finishing a change:** run the `/verify` skill (or at minimum its static
+gates: `cargo check`/`clippy`, `pnpm gen:bindings` if commands changed,
+`npx tsc --noEmit`, `pnpm lint`, both test suites — all green). For any new
+command taking a path/id/branch, confirm it's validated (`safe_path` /
+no-leading-dash) before it reaches fs or git.
+
+## Claude project config (committed in `.claude/`)
+
+- **Skills:** `/verify` (green checklist + real-app screenshot harness),
+  `/new-command` (end-to-end Tauri command checklist incl. security gate),
+  `/production-review` (multi-agent review + wave-pattern fix mode).
+- **Agent:** `ipc-security-auditor` — run it on any diff touching `commands.rs`,
+  `git.rs`, `terminal.rs`, or `crates/pty`.
+- **Hook:** editing `commands.rs`/`lib.rs`/`domain.rs` triggers a bindings-drift
+  reminder (`.claude/hooks/bindings-reminder.py`).
+- Session/worktree state under `.claude/` stays gitignored; only settings,
+  hooks, skills, agents, and commands are versioned.
 
 ## Gotchas
 

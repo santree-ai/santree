@@ -1,16 +1,38 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, type QueryKey } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ChangedFile, TriageDetail, TriageTicket } from "../bindings";
+import type { ChangedFile, SessionState, TriageDetail, TriageTicket } from "../bindings";
+
+// The git mutations below are exercised end-to-end (mutate → settle → invalidate),
+// so the commands they wrap are stubbed. Everything else in this file is pure.
+const git = vi.hoisted(() => ({
+  ok: vi.fn(async () => ({ status: "ok" as const, data: "main" })),
+}));
+vi.mock("../bindings", () => ({
+  commands: {
+    commitWorktree: git.ok,
+    pushWorktree: git.ok,
+    pullRemoteWorktree: git.ok,
+    updateBaseBranch: git.ok,
+  },
+  events: { worktreeChanged: { listen: vi.fn(async () => () => {}) } },
+}));
+
 import {
   applyStage,
   filterTriageQueue,
+  newestSessionByPath,
+  parseBatchSetup,
   patchSettingCache,
   promptPreviewKey,
   queryKeys,
+  useCommitWorktree,
   useOptimisticMutation,
+  usePullRemoteWorktree,
+  usePushWorktree,
+  useUpdateBaseBranch,
 } from "./queries";
 
 function makeClient() {
@@ -201,6 +223,71 @@ describe("useOptimisticMutation", () => {
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["file", "a"] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["file", "c"] });
   });
+
+  /** Two overlapping calls of one mutation site, each patching the same key. */
+  function overlapping(qc: QueryClient, key: QueryKey) {
+    const settle: Record<string, { resolve: () => void; reject: (err: Error) => void }> = {};
+    const view = renderHook(
+      () =>
+        useOptimisticMutation<string, void>({
+          mutationKey: ["overlap"],
+          mutationFn: (v) =>
+            new Promise<void>((resolve, reject) => {
+              settle[v] = { resolve, reject };
+            }),
+          optimistic: (client, v) => {
+            const prev = client.getQueryData<string>(key);
+            client.setQueryData(key, v);
+            return () => client.setQueryData(key, prev);
+          },
+          invalidate: () => [key],
+        }),
+      { wrapper: wrapper(qc) },
+    );
+    return { ...view, settle };
+  }
+
+  // Rollback is a snapshot-restore, and the snapshot the *first* call took predates
+  // the second call's patch — so restoring it on failure used to wipe the second
+  // click the user had already made (stage a.ts fails while unstage b.ts is still
+  // in flight ⇒ b.ts silently flips back). The settle-time refetch is what
+  // reconciles an overlap, so a failing call must leave the cache to it.
+  it("an erroring call doesn't roll back over a sibling that's still in flight", async () => {
+    const qc = makeClient();
+    const key = ["file"] as const;
+    qc.setQueryData(key, "before");
+    const { result, settle } = overlapping(qc, key);
+
+    act(() => result.current.mutate("a"));
+    await waitFor(() => expect(settle.a).toBeDefined());
+    act(() => result.current.mutate("b"));
+    await waitFor(() => expect(settle.b).toBeDefined());
+    expect(qc.getQueryData(key)).toBe("b");
+
+    await act(async () => settle.a.reject(new Error("boom")));
+
+    expect(qc.getQueryData(key)).toBe("b");
+
+    // …and the survivor still reconciles with the server when it settles.
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+    await act(async () => settle.b.resolve());
+    await waitFor(() => expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: key }));
+  });
+
+  it("still rolls back a failed call once it's the only one in flight", async () => {
+    const qc = makeClient();
+    const key = ["file"] as const;
+    qc.setQueryData(key, "before");
+    const { result, settle } = overlapping(qc, key);
+
+    act(() => result.current.mutate("a"));
+    await waitFor(() => expect(settle.a).toBeDefined());
+    expect(qc.getQueryData(key)).toBe("a");
+
+    await act(async () => settle.a.reject(new Error("boom")));
+
+    expect(qc.getQueryData(key)).toBe("before");
+  });
 });
 
 describe("promptPreviewKey", () => {
@@ -300,6 +387,77 @@ describe("applyStage", () => {
     const files = [file("a.ts", true), file("b.ts", true)];
     const result = applyStage(files, { action: "unstageAll" });
     expect(result.every((f) => !f.staged)).toBe(true);
+  });
+});
+
+describe("git mutations: what they refresh", () => {
+  const repo = "acme/app";
+
+  /** Fire a mutation and collect the query keys it invalidates on settle. */
+  async function invalidatedBy<TVars>(
+    hook: () => { mutate: (vars: TVars) => void; isSuccess: boolean },
+    vars: TVars,
+  ): Promise<string[]> {
+    const qc = makeClient();
+    const keys: string[] = [];
+    vi.spyOn(qc, "invalidateQueries").mockImplementation((filters) => {
+      keys.push(JSON.stringify(filters?.queryKey));
+      return Promise.resolve();
+    });
+    const { result } = renderHook(hook, { wrapper: wrapper(qc) });
+    act(() => result.current.mutate(vars));
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    return keys;
+  }
+
+  const key = (k: readonly unknown[]) => JSON.stringify(k);
+
+  // The base entry is its own query — nothing invalidated it, so "Update main from
+  // origin" left the card claiming the same divergence for a full stale window.
+  it("useUpdateBaseBranch refreshes the base worktree card it just moved", async () => {
+    const keys = await invalidatedBy(() => useUpdateBaseBranch(repo), "AK-1");
+    expect(keys).toContain(key(queryKeys.baseWorktree(repo)));
+  });
+
+  it("usePushWorktree refreshes the base card (the base branch is pushable too)", async () => {
+    const keys = await invalidatedBy(() => usePushWorktree(repo), "AK-1");
+    expect(keys).toContain(key(queryKeys.baseWorktree(repo)));
+  });
+
+  it("usePullRemoteWorktree refreshes the base card", async () => {
+    const keys = await invalidatedBy(() => usePullRemoteWorktree(repo), "AK-1");
+    expect(keys).toContain(key(queryKeys.baseWorktree(repo)));
+  });
+
+  // A commit only touches git metadata, which the filesystem watcher deliberately
+  // skips — so nothing else can drop the per-file diff cache, and a just-committed
+  // file kept rendering its pre-commit diff as if it were still pending.
+  it("useCommitWorktree drops the worktree's cached diffs and sources, and the base card", async () => {
+    const keys = await invalidatedBy(() => useCommitWorktree(repo), {
+      id: "AK-1",
+      message: "wip",
+      stageAll: false,
+    });
+    expect(keys).toContain(key(queryKeys.worktreeFileDiffPrefix(repo, "AK-1")));
+    expect(keys).toContain(key(queryKeys.worktreeFileSourcePrefix(repo, "AK-1")));
+    expect(keys).toContain(key(queryKeys.worktreeStatus(repo, "AK-1")));
+    expect(keys).toContain(key(queryKeys.baseWorktree(repo)));
+  });
+});
+
+describe("parseBatchSetup", () => {
+  it("reads the stored answer", () => {
+    expect(parseBatchSetup("always")).toBe("always");
+    expect(parseBatchSetup("never")).toBe("never");
+  });
+
+  // Unset (or anything unrecognized) asks rather than assuming — a batch that
+  // silently ran, or silently skipped, the setup script is the worse failure.
+  it("falls back to asking once", () => {
+    expect(parseBatchSetup(null)).toBe("ask");
+    expect(parseBatchSetup(undefined)).toBe("ask");
+    expect(parseBatchSetup("")).toBe("ask");
+    expect(parseBatchSetup("sometimes")).toBe("ask");
   });
 });
 
@@ -413,6 +571,76 @@ describe("patchSettingCache", () => {
 
     expect(qc.getQueryData(settingKey)).toBe("full");
     expect(qc.getQueryData(resolvedA)).toBe("full");
+  });
+
+  // The rollback used to replay a snapshot of *every* cached resolved-setting,
+  // including keys it never patched — so a failed write of one setting reverted a
+  // concurrent, successful write of an unrelated one.
+  it("rollback leaves an overlapping write to a different key alone", () => {
+    const qc = makeClient();
+    qc.setQueryData(queryKeys.resolvedSetting("acme", "display_names"), "full");
+    const otherKey = queryKeys.resolvedSetting("acme", "work_model");
+    qc.setQueryData(otherKey, "opus");
+
+    const rollbackNames = patchSettingCache(qc, {
+      scope: "app",
+      key: "display_names",
+      value: "username",
+    });
+    // A second setting is written (and lands) while the first is still in flight.
+    patchSettingCache(qc, { scope: "app", key: "work_model", value: "sonnet" });
+
+    rollbackNames();
+
+    expect(qc.getQueryData(queryKeys.resolvedSetting("acme", "display_names"))).toBe("full");
+    expect(qc.getQueryData(otherKey)).toBe("sonnet");
+  });
+
+  // `setQueryData(key, undefined)` is a no-op in TanStack Query, so restoring "it
+  // wasn't cached" by writing the snapshot back left the optimistic value in place
+  // — a failed write of a never-read setting stuck around as if it had succeeded.
+  it("rollback removes an entry that wasn't cached before the patch", () => {
+    const qc = makeClient();
+    const settingKey = queryKeys.setting("app", "work_model");
+
+    const rollback = patchSettingCache(qc, { scope: "app", key: "work_model", value: "opus" });
+    expect(qc.getQueryData(settingKey)).toBe("opus");
+
+    rollback();
+
+    expect(qc.getQueryData(settingKey)).toBeUndefined();
+  });
+});
+
+describe("newestSessionByPath", () => {
+  const at = (cwd: string, sessionId: string, updatedAtMs: number | null): SessionState => ({
+    sessionId,
+    state: "active",
+    event: "Stop",
+    cwd,
+    message: null,
+    transcriptPath: null,
+    updatedAtMs,
+  });
+
+  // A worktree can host several Claude tabs. The backend hands them over newest
+  // first, but the correlation must not *depend* on that: pick the newest.
+  it("keeps the most recently updated session for each worktree path", () => {
+    const map = newestSessionByPath([
+      at("/wt/a", "old", 1),
+      at("/wt/a", "new", 5),
+      at("/wt/b", "other", 3),
+    ]);
+
+    expect(map.get("/wt/a")?.sessionId).toBe("new");
+    expect(map.get("/wt/b")?.sessionId).toBe("other");
+    expect(map.size).toBe(2);
+  });
+
+  it("falls back to the backend's order when timestamps tie or are missing", () => {
+    const map = newestSessionByPath([at("/wt/a", "first", null), at("/wt/a", "second", null)]);
+
+    expect(map.get("/wt/a")?.sessionId).toBe("first");
   });
 });
 

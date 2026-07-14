@@ -3,6 +3,7 @@
  *  Claude tabs. App scope applies everywhere; a repo scope adds/overrides for that
  *  repo (resolved + merged in the backend, repo winning). See `env.rs`. */
 
+import { useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 
@@ -20,6 +21,7 @@ import {
   ENV_FILES_KEY,
   ENV_VARS_KEY,
   type EnvVar,
+  queryKeys,
   useEnvFiles,
   useEnvFileVars,
   useEnvVars,
@@ -111,8 +113,15 @@ function VarsCard({ scope }: { scope: string }) {
 
   return (
     <div className="overflow-hidden rounded-xl border border-line-2 bg-raised">
-      <div className="flex items-center justify-between border-b border-line px-4 py-3">
-        <span className="text-[13px] font-semibold text-fg-bright">Variables</span>
+      <div className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-[13px] font-semibold text-fg-bright">Variables</div>
+          {/* The padlock on each row is a promise, so say what backs it: `env.rs` keeps
+              the names in santree's database and the values in the OS keychain. */}
+          <div className="mt-[3px] text-[11.5px] text-muted-3">
+            Values are stored in your OS keychain, never in santree's database.
+          </div>
+        </div>
         {editing !== "new" && (
           <Button onClick={() => setEditing("new")}>
             <PlusIcon size={12} />
@@ -245,14 +254,26 @@ function VarForm({
 
 function EnvFilesCard({ scope }: { scope: string }) {
   const { files } = useEnvFiles(scope);
-  const { mutate: setSetting } = useSetSetting();
+  const { mutate: setSetting, mutateAsync: setSettingAsync } = useSetSetting();
+  const qc = useQueryClient();
   const save = (next: string[]) =>
     setSetting({ scope, key: ENV_FILES_KEY, value: JSON.stringify(next) });
 
   const addFile = async () => {
     const picked = await open({ title: "Select an .env file" });
     if (typeof picked !== "string" || files.includes(picked)) return;
-    save([...files, picked]);
+    // The optimistic patch renders the row (and fires its variable-count query)
+    // before this write lands — and until it lands the backend won't read a file
+    // it hasn't been told about (`env_file_vars` only parses registered paths), so
+    // the first count can come back empty. Re-run it once the write is durable.
+    // A failed write already toasts itself; the refetch then just reads 0, which
+    // is the truth.
+    await setSettingAsync({
+      scope,
+      key: ENV_FILES_KEY,
+      value: JSON.stringify([...files, picked]),
+    }).catch(() => undefined);
+    qc.invalidateQueries({ queryKey: queryKeys.envFileVars(picked) });
   };
 
   return (

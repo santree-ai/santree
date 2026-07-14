@@ -7,7 +7,7 @@
  *  `{{ variables }}`, branch with `{% if %}`/`{% for %}`, and embed another prompt
  *  with `{% include "name" %}`. Overrides are per app (User scope) or per repo. */
 
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import EditorImport from "react-simple-code-editor";
 
 import { useEdgeResize } from "../../../lib/useEdgeResize";
@@ -220,6 +220,15 @@ function PromptEditor({
   const overridden = prompt.overrideSource !== null;
   const isCustomAppScope = !prompt.builtin && !forRepo;
 
+  // Reset and Delete discard the draft on purpose, and both can unmount this
+  // editor before their write lands — mark it discarded so the unmount flush
+  // below can't resurrect it. Typing again re-arms the flush.
+  const discarded = useRef(false);
+  const edit = (next: string) => {
+    discarded.current = false;
+    setDraft(next);
+  };
+
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [issueId, setIssueId] = useState("");
 
@@ -246,18 +255,42 @@ function PromptEditor({
     setPrompt({ name: prompt.name, content: value }, { onSuccess: () => setDraft(null) });
   };
   const onReset = () => {
+    discarded.current = true;
     setPrompt({ name: prompt.name, content: null }, { onSuccess: () => setDraft(null) });
   };
   const onDelete = () => {
+    discarded.current = true;
     deleteBlock(prompt.name);
     onDeleted();
   };
+
+  // Selecting another prompt in the rail remounts this editor (it's keyed per
+  // prompt), and a ⌘-shortcut can navigate away mid-edit — neither fires a save.
+  // Flush an unsaved draft on teardown so typing is never silently dropped (same
+  // idiom as SkillEditor / TaskNotes). Refs so this doesn't re-fire per keystroke.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const savedRef = useRef(savedValue);
+  savedRef.current = savedValue;
+  const nameRef = useRef(prompt.name);
+  nameRef.current = prompt.name;
+  const setPromptRef = useRef(setPrompt);
+  setPromptRef.current = setPrompt;
+  useEffect(
+    () => () => {
+      const d = draftRef.current;
+      if (!discarded.current && d !== null && d !== savedRef.current) {
+        setPromptRef.current({ name: nameRef.current, content: d });
+      }
+    },
+    [],
+  );
 
   const insert = (snippet: string) => {
     const ta = document.getElementById(textareaId) as HTMLTextAreaElement | null;
     const start = ta?.selectionStart ?? value.length;
     const end = ta?.selectionEnd ?? value.length;
-    setDraft(value.slice(0, start) + snippet + value.slice(end));
+    edit(value.slice(0, start) + snippet + value.slice(end));
     requestAnimationFrame(() => {
       if (!ta) return;
       ta.focus();
@@ -290,7 +323,7 @@ function PromptEditor({
           <div className="prompt-editor min-h-0 flex-1 overflow-auto bg-input">
             <Editor
               value={value}
-              onValueChange={setDraft}
+              onValueChange={edit}
               highlight={highlightJinja}
               padding={14}
               textareaId={textareaId}

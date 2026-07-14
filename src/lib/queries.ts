@@ -27,6 +27,7 @@ import type {
   PromptInfo,
   ReviewedFile,
   ScriptInfo,
+  SessionState,
   Settings,
   TriageComment,
   TriageDetail,
@@ -132,7 +133,16 @@ export function useOptimisticMutation<TVars, TData>(opts: {
       const rollback = opts.optimistic?.(qc, vars) ?? undefined;
       return { rollback };
     },
-    onError: (_err, _vars, ctx) => ctx?.rollback?.(),
+    onError: (_err, _vars, ctx) => {
+      // Rollback is a snapshot-restore, and our snapshot predates a *sibling*
+      // call's patch as much as our own — restoring it while that sibling is
+      // still in flight would undo the user's second click. Leave the cache to
+      // the settle-time refetch (deferred to whoever settles last, which
+      // replays our keys too); the failure still red-toasts. `isMutating` counts
+      // this call itself here, same as in `onSettled`.
+      if (opts.mutationKey && qc.isMutating({ mutationKey: opts.mutationKey }) > 1) return;
+      ctx?.rollback?.();
+    },
     onSettled: (_data, _err, vars) => {
       const siblingKey = opts.mutationKey ? JSON.stringify(opts.mutationKey) : null;
       // A sibling mutation sharing this key is still running — it will
@@ -398,6 +408,11 @@ export const TREES_DEFAULT_EDITOR_KEY = "trees_default_editor";
 /** How the start-multiple flow treats the setup script. */
 export type BatchSetup = "always" | "never" | "ask";
 
+/** The stored `trees_batch_setup` value, or "ask" for anything unset/unknown —
+ *  the batch launch asks once rather than guessing. Exported for testing. */
+export const parseBatchSetup = (raw: string | null | undefined): BatchSetup =>
+  raw === "always" || raw === "never" ? raw : "ask";
+
 /**
  * Environment settings — variables (and `.env` file references) santree injects
  * into every terminal it spawns. Stored as JSON in the generic settings table,
@@ -433,13 +448,18 @@ export const useEnvFiles = (scope: string) => {
   return { files: parseJsonSetting<string[]>(q.data, []), loading: q.isLoading };
 };
 
-/** The variable names a referenced `.env` file defines (for the "N loaded" count). */
+/** The variable names a referenced `.env` file defines (for the "N loaded" count).
+ *  The file lives outside the app, so no write of ours can invalidate this: it must
+ *  re-read on every mount of the Environment panel (and when the window regains
+ *  focus, i.e. you come back from editing the file) or an edited `.env` reports a
+ *  stale count for the rest of the process's life. */
 export const useEnvFileVars = (path: string) =>
   useQuery({
     queryKey: queryKeys.envFileVars(path),
     queryFn: () => commands.envFileVars(path),
     enabled: !!path,
-    staleTime: SETTING_STALE_TIME,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
   });
 
 /** The running app's real version (single-sourced from `tauri.conf.json`), for
@@ -447,10 +467,13 @@ export const useEnvFileVars = (path: string) =>
 export const useAppVersion = () =>
   useQuery({ queryKey: queryKeys.appVersion, queryFn: getVersion, staleTime: Infinity });
 
-/** Read an app-scoped boolean setting (defaults to false until loaded). */
+/** Read a boolean setting for an exact scope (defaults to false until loaded).
+ *  `isFetched` is the *only* way to tell "off" from "not loaded yet" — `value` is
+ *  a boolean, so it reads false in both cases. Anything that gates a side effect
+ *  on it (a launch flag, the setup script) must wait for `isFetched`. */
 export const useBoolSetting = (scope: string, key: string) => {
   const q = useSetting(scope, key);
-  return { value: q.data === "true", loading: q.isLoading };
+  return { value: q.data === "true", loading: q.isLoading, isFetched: q.isFetched };
 };
 
 /** Linear connection status for a repo (which org it uses, if any). */
@@ -545,6 +568,31 @@ export const useSessionStates = () =>
     refetchInterval: (query) =>
       query.state.data?.some((s) => UNSETTLED_STATES.has(s.state)) ? 10_000 : false,
   });
+
+/**
+ * The live session for each worktree path (`cwd` — the directory Claude ran in),
+ * newest wins. A worktree can host several Claude tabs, so the correlation has to
+ * pick one: the most recently updated row, chosen explicitly rather than by
+ * trusting the backend's `ORDER BY updated_at_ms DESC` (a first-seen-wins map
+ * silently shows a stale session the day that ordering changes). Ties keep the
+ * first row, preserving the backend's order. Exported for testing.
+ */
+export function newestSessionByPath(states: SessionState[]): Map<string, SessionState> {
+  const map = new Map<string, SessionState>();
+  for (const s of states) {
+    const seen = map.get(s.cwd);
+    if (!seen || (s.updatedAtMs ?? 0) > (seen.updatedAtMs ?? 0)) map.set(s.cwd, s);
+  }
+  return map;
+}
+
+/** {@link newestSessionByPath} over the live session states — the "what is this
+ *  worktree's agent doing" signal shared by the Trees sidebar and the all-agents
+ *  grid (both key it by `worktree.path`). */
+export const useSessionByPath = (): Map<string, SessionState> => {
+  const { data } = useSessionStates();
+  return useMemo(() => newestSessionByPath(data ?? []), [data]);
+};
 
 /**
  * Keep `useSessionStates` fresh in realtime. The `santree-hook` binary bumps a
@@ -818,6 +866,12 @@ export const useWorktreeWatcher = (repo: string) => {
       // The list carries each worktree's add/del line counts, shown on the
       // sidebar card and the Issues-panel worktree card.
       qc.invalidateQueries({ queryKey: queryKeys.worktrees(repo) });
+      // The base entry is a *separate* read (it isn't in the list above) showing
+      // the same live git state — dirty/ahead/behind/unpushed for the repo root.
+      // Refreshed for any worktree's event rather than only the BASE_ID one: the
+      // sentinel lives in the Trees feature, and importing it here would point
+      // the data layer back at a module that imports from it.
+      qc.invalidateQueries({ queryKey: queryKeys.baseWorktree(repo) });
     });
     return () => {
       void unlisten.then((off) => off());
@@ -1086,12 +1140,16 @@ export const useSetFileReviewed = (prRepo: string, number: number) =>
     invalidate: () => [queryKeys.reviewedFiles(prRepo, number)],
   });
 
-/** The "open in app" targets (Finder, editors, terminals) for a worktree. */
+/** The "open in app" targets (Finder, editors, terminals) for a worktree — which
+ *  apps are *installed*, probed on disk. External state, so nothing in the app
+ *  invalidates it: cache it briefly and re-read when the window regains focus, or
+ *  an editor installed while santree is running never appears in the menu. */
 export const useOpeners = () =>
   useQuery({
     queryKey: queryKeys.openers,
     queryFn: commands.listOpeners,
-    staleTime: SETTING_STALE_TIME,
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: true,
   });
 
 /** Open a path in an external app (by opener key). */
@@ -1200,7 +1258,11 @@ export const usePullWorktree = (repo: string) =>
 export const usePushWorktree = (repo: string) =>
   useActionMutation({
     mutationFn: (issueId: string) => unwrap(commands.pushWorktree(repo, issueId)),
-    invalidate: () => [queryKeys.worktrees(repo), queryKeys.worktreePrs(repo)],
+    invalidate: () => [
+      queryKeys.worktrees(repo),
+      queryKeys.baseWorktree(repo),
+      queryKeys.worktreePrs(repo),
+    ],
     success: () => "Pushed to origin.",
   });
 
@@ -1211,7 +1273,11 @@ export const usePushWorktree = (repo: string) =>
 export const usePullRemoteWorktree = (repo: string) =>
   useActionMutation({
     mutationFn: (issueId: string) => unwrap(commands.pullRemoteWorktree(repo, issueId)),
-    invalidate: (issueId) => [queryKeys.worktrees(repo), queryKeys.worktreeStatus(repo, issueId)],
+    invalidate: (issueId) => [
+      queryKeys.worktrees(repo),
+      queryKeys.baseWorktree(repo),
+      queryKeys.worktreeStatus(repo, issueId),
+    ],
     success: () => "Pulled from origin.",
   });
 
@@ -1219,7 +1285,7 @@ export const usePullRemoteWorktree = (repo: string) =>
 export const useUpdateBaseBranch = (repo: string) =>
   useActionMutation({
     mutationFn: (issueId: string) => unwrap(commands.updateBaseBranch(repo, issueId)),
-    invalidate: () => [queryKeys.worktrees(repo)],
+    invalidate: () => [queryKeys.worktrees(repo), queryKeys.baseWorktree(repo)],
     success: (base) => `Updated ${base} from origin.`,
   });
 
@@ -1229,12 +1295,21 @@ export const useCommitMessage = (repo: string) =>
     mutationFn: (id: string) => unwrap(commands.commitMessage(repo, id)),
   });
 
-/** Commit a worktree (optionally staging everything first). */
+/** Commit a worktree (optionally staging everything first). A commit only touches
+ *  git metadata, which the filesystem watcher deliberately skips — so the cached
+ *  per-file diffs (and the sources the viewer expands from) have to be dropped
+ *  here, or a just-committed file still renders its pre-commit diff as pending. */
 export const useCommitWorktree = (repo: string) =>
   useActionMutation({
     mutationFn: (a: { id: string; message: string; stageAll: boolean }) =>
       unwrap(commands.commitWorktree(repo, a.id, a.message, a.stageAll)),
-    invalidate: (a) => [queryKeys.worktreeStatus(repo, a.id), queryKeys.worktrees(repo)],
+    invalidate: (a) => [
+      queryKeys.worktreeStatus(repo, a.id),
+      queryKeys.worktreeFileDiffPrefix(repo, a.id),
+      queryKeys.worktreeFileSourcePrefix(repo, a.id),
+      queryKeys.worktrees(repo),
+      queryKeys.baseWorktree(repo),
+    ],
     success: () => "Committed.",
   });
 
@@ -1390,7 +1465,7 @@ export const useStageAction = (repo: string, id: string) =>
 
 /**
  * The repo's `.santree/init.sh` setup script (content + executable bit), for the
- * Settings → Trees editor. Changes only on explicit writes, so it never needs a
+ * Settings → Work editor. Changes only on explicit writes, so it never needs a
  * background refetch.
  */
 export const useInitScript = (repo: string) =>
@@ -1437,8 +1512,12 @@ export interface ViewCounts {
  * so calling it from two places doesn't double-fetch.
  */
 export const useViewCounts = (repo: string): ViewCounts => {
-  const { data: tasks = [] } = useTasks(repo);
-  const { data: worktrees = [] } = useWorktrees(repo);
+  // Default *inside* the memo, not in the destructuring: a `= []` default mints a
+  // fresh array on every render while the read is still loading, so the dep array
+  // would change identity every render — the memo would do nothing at exactly the
+  // moment (mount) it matters.
+  const { data: tasks } = useTasks(repo);
+  const { data: worktrees } = useWorktrees(repo);
   const { data: reviews } = useReviews(repo);
   // `Worktree.activity` from the backend is a constant (no session-signal source
   // yet — see `worktree.rs`'s `build_worktree`), so "running" is derived here from
@@ -1450,10 +1529,10 @@ export const useViewCounts = (repo: string): ViewCounts => {
       terminalTabs.filter((t) => t.source === "issue").map((t) => t.refId),
     );
     return {
-      tasks: tasks.length,
-      tasksReady: tasks.filter((t) => t.ready).length,
-      worktrees: worktrees.length,
-      worktreesRunning: worktrees.filter((w) => liveTermRefIds.has(`tree:${w.id}`)).length,
+      tasks: tasks?.length ?? 0,
+      tasksReady: tasks?.filter((t) => t.ready).length ?? 0,
+      worktrees: worktrees?.length ?? 0,
+      worktreesRunning: worktrees?.filter((w) => liveTermRefIds.has(`tree:${w.id}`)).length ?? 0,
       // The Reviews badge counts PRs awaiting *my* review (individual + team),
       // not my own authored PRs.
       reviews:
@@ -1773,11 +1852,27 @@ export const useResolvedSetting = (repo: string, key: string) =>
   );
 
 /** Read a repo-resolved boolean setting: the repo's override, else the app
- *  value (defaults to false until loaded). */
+ *  value (defaults to false until loaded). Same false-while-loading caveat as
+ *  {@link useBoolSetting} — gate side effects on `isFetched`. */
 export const useResolvedBoolSetting = (repo: string, key: string) => {
   const q = useResolvedSetting(repo, key);
-  return { value: q.data === "true", loading: q.isLoading };
+  return { value: q.data === "true", loading: q.isLoading, isFetched: q.isFetched };
 };
+
+/**
+ * Read a repo-resolved setting *imperatively*: from the cache when it's there,
+ * fetching once when it isn't. For decisions taken in an event handler — where
+ * the hook's false-while-loading value would silently mean "off" and skip the
+ * thing the setting gates (see `AgentRuns.beginRun`, which would drop the setup
+ * script). Writes through the same key `useResolvedSetting` reads, so the two
+ * share one cache entry.
+ */
+export const ensureResolvedSetting = (qc: QueryClient, repo: string, key: string) =>
+  qc.ensureQueryData({
+    queryKey: queryKeys.resolvedSetting(repo, key),
+    queryFn: () => unwrap(commands.resolveSetting(repo, key)),
+    staleTime: SETTING_STALE_TIME,
+  });
 
 interface SetSettingVars {
   scope: string;
@@ -1800,23 +1895,25 @@ export function patchSettingCache(
   qc: QueryClient,
   { scope, key, value }: SetSettingVars,
 ): () => void {
-  const settingKey = queryKeys.setting(scope, key);
-  const prevSetting = qc.getQueryData(settingKey);
-  qc.setQueryData(settingKey, value);
+  // Record only the entries we actually write, so the rollback is an undo of
+  // *this* patch: replaying a snapshot of every resolved entry would also revert
+  // an overlapping write to a different key that landed in between.
+  const undo: [QueryKey, unknown][] = [];
+  const patch = (k: QueryKey, next: string | null) => {
+    undo.push([k, qc.getQueryData(k)]);
+    qc.setQueryData(k, next);
+  };
 
-  // Snapshot every resolved entry up front (not just the ones we patch) so the
-  // rollback restores whatever we touched, whichever branch we took.
-  const prevResolved: [QueryKey, unknown][] = qc.getQueriesData({
-    queryKey: queryKeys.resolvedSettingPrefix,
-  });
+  patch(queryKeys.setting(scope, key), value);
 
   if (scope === "app") {
-    for (const [k] of prevResolved) {
+    const resolved = qc.getQueriesData({ queryKey: queryKeys.resolvedSettingPrefix });
+    for (const [k] of resolved) {
       // A repo with its own override still resolves to that override, so an
       // app-scoped write mustn't overwrite it.
       const repo = k[1] as string;
       const override = qc.getQueryData<string | null>(queryKeys.setting(`repo:${repo}`, key));
-      if (k[2] === key && override == null) qc.setQueryData(k, value);
+      if (k[2] === key && override == null) patch(k, value);
     }
   } else if (scope.startsWith("repo:")) {
     const repo = scope.slice("repo:".length);
@@ -1825,16 +1922,21 @@ export function patchSettingCache(
     // only when that default is itself cached; otherwise leave it to the settle.
     const appValue = qc.getQueryData<string | null>(queryKeys.setting("app", key));
     const known = value != null || appValue !== undefined;
-    // Only touch an entry that's already in `prevResolved`, so the rollback can
-    // restore it (a key we minted here would survive the rollback).
+    // Only touch an entry that's already cached: a key minted here has no prior
+    // value, so the rollback would have to invent one.
     if (known && qc.getQueryData(resolvedKey) !== undefined) {
-      qc.setQueryData(resolvedKey, value ?? appValue ?? null);
+      patch(resolvedKey, value ?? appValue ?? null);
     }
   }
 
   return () => {
-    qc.setQueryData(settingKey, prevSetting);
-    for (const [k, v] of prevResolved) qc.setQueryData(k, v);
+    for (const [k, prev] of [...undo].reverse()) {
+      // `setQueryData(k, undefined)` is a no-op in TanStack Query, so an entry
+      // that didn't exist before the patch has to be *removed*, not restored —
+      // otherwise a failed write's optimistic value would survive its rollback.
+      if (prev === undefined) qc.removeQueries({ queryKey: k, exact: true });
+      else qc.setQueryData(k, prev);
+    }
   };
 }
 

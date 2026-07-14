@@ -15,18 +15,24 @@ permissions:
   issues: write
   checks: write
 
+# Third-party actions are pinned to a full commit SHA (the `# vX.Y.Z` comment says
+# which release it is) — a tag is mutable and this workflow hands `issues: write` to
+# the actions it runs. Re-pin deliberately, don't float.
+
 jobs:
   cargo-audit:
     name: cargo audit (RustSec advisories)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       # Downloads a prebuilt binary and checks Cargo.lock — no compiling the
       # workspace, so it's fast even though it runs against 650+ crates.
       # On schedule/dispatch runs it files a GitHub issue per new advisory
-      # instead of failing the run outright.
-      - uses: rustsec/audit-check@v2
+      # instead of failing the run outright. Runs cargo-audit from the repo root,
+      # so it picks up `.cargo/audit.toml` (which explains the one ignored, never-
+      # compiled advisory) exactly as a local `cargo audit` does.
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -34,12 +40,12 @@ jobs:
     name: pnpm audit (npm advisories)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       # Version is read from package.json's `packageManager` field.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm

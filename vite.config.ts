@@ -22,10 +22,14 @@ export default defineConfig({
   ],
 
   build: {
-    // Local files only — no download cost in a Tauri app — so ship them to get
-    // readable stack traces (file/line, unminified names) from production crashes
-    // instead of a wall of minified gibberish.
-    sourcemap: true,
+    // "hidden" = emit the maps but write no `//# sourceMappingURL=` comment into
+    // the JS. Tauri compiles all of `dist/` into the binary, and a `.map` carries
+    // `sourcesContent` — our original TypeScript, comments included — so shipping
+    // them publishes the whole frontend source. `scripts/stash-sourcemaps.mjs`
+    // (run from `beforeBuildCommand`) moves them to `sourcemaps/<version>/`
+    // instead: users get minified JS, and `pnpm symbolicate` still turns their
+    // stack traces back into real file/line frames against the archived maps.
+    sourcemap: "hidden",
     // The Material file-icon set (~1250 small SVGs) would otherwise be inlined as
     // base64 into the JS bundle. Emit them as standalone asset files instead — in
     // a Tauri app they load instantly from local disk, and the JS stays lean.

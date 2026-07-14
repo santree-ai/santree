@@ -1,11 +1,9 @@
 /** The project's "all agents" overview: a grid of worktree cards (the monitoring
  *  surface). Clicking a card drills into that task's terminal/diff. */
-import { useMemo } from "react";
-
 import type { SessionState, Worktree } from "../../bindings";
 import { EmptyState } from "../../components/primitives";
 import { WorktreeStats } from "../../components/WorktreeStats";
-import { useSessionStates } from "../../lib/queries";
+import { useSessionByPath } from "../../lib/queries";
 import { palette, sessionStateMeta, statusColor, statusLabel } from "../../theme/colors";
 import { effectiveSessionState, useTrees } from "./model";
 
@@ -14,12 +12,7 @@ export function AllAgentsView() {
 
   // Live Claude session state per worktree, correlated by cwd (the worktree path
   // Claude ran in) — the real "what is the agent doing" signal.
-  const { data: sessionStates = [] } = useSessionStates();
-  const sessionByPath = useMemo(() => {
-    const map = new Map<string, SessionState>();
-    for (const s of sessionStates) if (!map.has(s.cwd)) map.set(s.cwd, s);
-    return map;
-  }, [sessionStates]);
+  const sessionByPath = useSessionByPath();
 
   if (worktrees.length === 0) {
     return (

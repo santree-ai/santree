@@ -14,6 +14,16 @@ use crate::db::Db;
 use crate::github;
 use crate::repo;
 
+/// `(owner, name)` of the active repo's `origin` remote. Remote parsing shells out
+/// to git, so it runs off the async pool.
+async fn origin(db: &Db, repo: &str) -> Result<(String, String)> {
+    let root = repo::path(db, repo)
+        .await?
+        .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
+    let root_path = PathBuf::from(root);
+    tokio::task::spawn_blocking(move || github::owner_repo(&root_path)).await?
+}
+
 /// The categorized PR inbox for the org the active `repo` belongs to. Empty when
 /// `gh` isn't authenticated.
 pub async fn inbox(db: &Db, repo: &str) -> Result<ReviewInbox> {
@@ -22,45 +32,50 @@ pub async fn inbox(db: &Db, repo: &str) -> Result<ReviewInbox> {
         requested: vec![],
         teams: vec![],
     };
-    let Some(token) = github::token().await else {
+    // Independent, so they overlap: the token is a `gh auth token` subprocess on a
+    // cold cache, the origin a DB read plus a `git remote` shell-out — both on the
+    // critical path of every Reviews load.
+    let (token, remote) = tokio::join!(github::token(), origin(db, repo));
+    // Token first: an unauthenticated `gh` is an empty inbox, so a repo with no
+    // local path has to stay a non-event there, exactly as when these ran in sequence.
+    let Some(token) = token else {
         return Ok(empty);
     };
-    let root = repo::path(db, repo)
-        .await?
-        .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
+    let (org, _name) = remote?;
 
-    // The org is the owner of the repo's `origin` remote. Remote parsing shells out
-    // to git, so keep it off the async pool.
-    let root_path = PathBuf::from(&root);
-    let (org, _name) =
-        tokio::task::spawn_blocking(move || github::owner_repo(&root_path)).await??;
+    // Only the team sections need to know the viewer's teams; the two personal searches
+    // don't, so they run *alongside* that lookup rather than behind it — it used to sit
+    // on the critical path of every Reviews load.
+    let (personal, teams) = tokio::join!(github::personal_reviews(&token, &org), async {
+        // A failed team lookup only costs the per-team sections, so it degrades rather
+        // than failing the inbox — but it's logged: without it, a rate-limited call looks
+        // exactly like "in no teams".
+        let teams = github::viewer_teams(&token, &org)
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("Reviews: listing viewer teams in {org} failed: {e}");
+                Vec::new()
+            });
+        github::team_reviews(&token, &org, &teams).await
+    });
+    let (mine, requested) = personal?;
 
-    // A failed team lookup only costs the per-team sections (the "mine"/"requested"
-    // ones still load), so it degrades rather than failing the inbox — but it's
-    // logged: without it, a rate-limited call looks exactly like "in no teams".
-    let teams = github::viewer_teams(&token, &org)
-        .await
-        .unwrap_or_else(|e| {
-            log::warn!("Reviews: listing viewer teams in {org} failed: {e}");
-            Vec::new()
-        });
-    github::review_inbox(&token, &org, &teams).await
+    Ok(ReviewInbox {
+        mine,
+        requested,
+        teams,
+    })
 }
 
 /// The merge queue for the active repo's default branch — the ordered list of
 /// PRs waiting to merge, so the user can see where their own PRs sit in line.
 /// `None` when `gh` isn't authenticated or the repo has no merge queue enabled.
 pub async fn merge_queue(db: &Db, repo: &str) -> Result<Option<MergeQueue>> {
-    let Some(token) = github::token().await else {
+    let (token, remote) = tokio::join!(github::token(), origin(db, repo));
+    let Some(token) = token else {
         return Ok(None);
     };
-    let root = repo::path(db, repo)
-        .await?
-        .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
-    // owner/name from the `origin` remote — shells out to git, so off the async pool.
-    let root_path = PathBuf::from(&root);
-    let (owner, name) =
-        tokio::task::spawn_blocking(move || github::owner_repo(&root_path)).await??;
+    let (owner, name) = remote?;
     github::merge_queue(&token, &owner, &name).await
 }
 

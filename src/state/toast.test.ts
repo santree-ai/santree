@@ -21,6 +21,27 @@ describe("toast store", () => {
     dismissToast(other);
   });
 
+  // Two unrelated failures can share an error string while carrying different
+  // titles; collapsing them would show one of them under the other's heading.
+  it("keeps toasts that differ only by title or duration apart", () => {
+    const a = showToast("error", "Request failed", {
+      title: "Couldn't create the PR",
+      duration: 0,
+    });
+    const b = showToast("error", "Request failed", { title: "Couldn't push", duration: 0 });
+    expect(b).not.toBe(a);
+    expect(showToast("error", "Request failed", { title: "Couldn't push", duration: 0 })).toBe(b);
+
+    const untitled = showToast("error", "Request failed", { duration: 0 });
+    expect(untitled).not.toBe(a);
+    expect(untitled).not.toBe(b);
+
+    const shorter = showToast("error", "Request failed", { duration: 1 });
+    expect(shorter).not.toBe(untitled);
+
+    for (const id of [a, b, untitled, shorter]) dismissToast(id);
+  });
+
   it("auto-dismisses after the duration, then an identical show is fresh", () => {
     const id = toast.success("saved", { duration: 1000 });
     vi.advanceTimersByTime(999);

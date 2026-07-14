@@ -19,6 +19,7 @@ import { memo, useMemo } from "react";
 import type { PrThread } from "../../bindings";
 import { useResolvedTheme } from "../../theme/useResolvedTheme";
 import type { DiffMode } from "../trees/DiffViewer";
+import { bucketThreads } from "./bucketThreads";
 import { PrThreadCard } from "./PrThreadCard";
 
 /**
@@ -70,22 +71,7 @@ export const PrFileDiff = memo(function PrFileDiff({
     [path, status, patch, oldText, newText],
   );
 
-  // Bucket threads by the diff line they anchor to: new side for added/context
-  // lines, old side for removed lines. Skip outdated/unplaceable ones (no line) —
-  // they can't be pinned to the current diff.
-  const extendData = useMemo(() => {
-    const oldFile: Record<string, { data: PrThread[] }> = {};
-    const newFile: Record<string, { data: PrThread[] }> = {};
-    for (const t of threads) {
-      if (t.line == null || t.isOutdated) continue;
-      const bucket = t.onRight ? newFile : oldFile;
-      const key = String(t.line);
-      const entry = bucket[key] ?? { data: [] };
-      entry.data.push(t);
-      bucket[key] = entry;
-    }
-    return { oldFile, newFile };
-  }, [threads]);
+  const extendData = useMemo(() => bucketThreads(threads), [threads]);
 
   if (!patch.trim()) return null;
 

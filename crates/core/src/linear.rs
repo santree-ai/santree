@@ -7,15 +7,20 @@ use crate::domain::{Priority, TaskStatus};
 ///
 /// Linear state *types* are `triage | backlog | unstarted | started |
 /// completed | canceled | duplicate`. We also honour a state *named* "…review…"
-/// as In Review, and one named "…block…" as Blocked, since Linear has no native
-/// type for either — workspaces model them as custom `unstarted`/`started` states.
+/// as In Review, and one named "…blocked…" as Blocked, since Linear has no native
+/// type for either — workspaces model them as custom states in whichever open
+/// category they choose.
 pub fn map_status(state_name: &str, state_type: &str) -> TaskStatus {
     let name = state_name.to_lowercase();
     match state_type {
-        // A custom "Blocked" state can be typed `unstarted` or `started`; either
-        // way it's not actionable, so name takes precedence over type here. Guard
-        // on the open types so a terminal state can never be mis-read as Blocked.
-        "unstarted" | "started" if name.contains("block") => TaskStatus::Blocked,
+        // A custom "Blocked" state has no type of its own, so workspaces park it in
+        // whichever open category they like — including `backlog`, which is
+        // startable. Name therefore takes precedence over type across *every* open
+        // category. Terminal types are excluded so a closed state can never be
+        // mis-read as Blocked (and thus as still-open work).
+        "backlog" | "triage" | "unstarted" | "started" if means_blocked(&name) => {
+            TaskStatus::Blocked
+        }
         // Only a *started* state named "…review…" is In Review; a completed
         // state like "Reviewed" stays Done, driven by its type.
         "started" if name.contains("review") => TaskStatus::InReview,
@@ -27,6 +32,21 @@ pub fn map_status(state_name: &str, state_type: &str) -> TaskStatus {
         "completed" | "canceled" | "duplicate" => TaskStatus::Done,
         _ => TaskStatus::Todo,
     }
+}
+
+/// True when a lowercased state name really means *blocked*.
+///
+/// A bare substring test would read "Unblocked" — a state that means the exact
+/// opposite, and is startable — as Blocked. So a "block…" match only counts when it
+/// isn't negated by the word right before it. Separators are squashed first so
+/// "Un-blocked" and "Unblocked" are judged the same way.
+fn means_blocked(name: &str) -> bool {
+    let squashed: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
+    squashed.match_indices("block").any(|(at, _)| {
+        !["un", "not", "non"]
+            .iter()
+            .any(|neg| squashed[..at].ends_with(neg))
+    })
 }
 
 /// An issue is ready to start when it has no blockers, or all of them are done.
@@ -72,6 +92,45 @@ mod tests {
         assert_eq!(map_status("Blocked", "unstarted"), TaskStatus::Blocked);
         assert_eq!(map_status("Blocked", "started"), TaskStatus::Blocked);
         assert!(!map_status("Blocked", "unstarted").is_startable());
+    }
+
+    /// A workspace can park "Blocked" in *any* open category, backlog included.
+    /// Typing it `backlog` must not make it startable.
+    #[test]
+    fn blocked_is_blocked_in_every_open_category() {
+        for state_type in ["backlog", "triage", "unstarted", "started"] {
+            assert_eq!(
+                map_status("Blocked", state_type),
+                TaskStatus::Blocked,
+                "a state named Blocked, typed {state_type}"
+            );
+            assert!(!map_status("Blocked", state_type).is_startable());
+        }
+        // Terminal types are never re-read as Blocked, whatever they're named.
+        assert_eq!(
+            map_status("Blocked (won't do)", "canceled"),
+            TaskStatus::Done
+        );
+    }
+
+    /// "Unblocked" contains "block" but means the exact opposite — it is ready to
+    /// work on, so it must keep its category's status and stay startable.
+    #[test]
+    fn unblocked_is_not_blocked() {
+        for (name, state_type, want) in [
+            ("Unblocked", "unstarted", TaskStatus::Todo),
+            ("Unblocked", "backlog", TaskStatus::Backlog),
+            ("Un-blocked", "unstarted", TaskStatus::Todo),
+            ("Not blocked", "unstarted", TaskStatus::Todo),
+            ("Unblocked", "started", TaskStatus::InProgress),
+        ] {
+            assert_eq!(map_status(name, state_type), want, "{name} / {state_type}");
+        }
+        assert!(map_status("Unblocked", "unstarted").is_startable());
+        // …while the genuinely-blocked names still map to Blocked.
+        for name in ["Blocked", "Blocked on design", "External blocker"] {
+            assert_eq!(map_status(name, "unstarted"), TaskStatus::Blocked, "{name}");
+        }
     }
 
     #[test]

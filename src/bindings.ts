@@ -346,7 +346,12 @@ export const commands = {
 	openInApp: (path: string, opener: string) => typedError<null, CmdError>(__TAURI_INVOKE("open_in_app", { path, opener })),
 	/**  Tickets awaiting triage — live from Linear when connected, else empty. */
 	listTriageTickets: (repo: string) => typedError<TriageTicket[], CmdError>(__TAURI_INVOKE("list_triage_tickets", { repo })),
-	/**  The full triage issue (description + comments) for the discussion pane. */
+	/**
+	 *  The full triage issue (description + comments) for the discussion pane. `None`
+	 *  means no Linear org is connected — an issue that genuinely doesn't exist errors
+	 *  out of `linear::triage_detail` itself, so reporting this as "not found" would
+	 *  have misdescribed exactly the failure the user needs to diagnose.
+	 */
 	triageDetail: (repo: string, ticketId: string) => typedError<TriageDetail, CmdError>(__TAURI_INVOKE("triage_detail", { repo, ticketId })),
 	/**
 	 *  Move a triage issue to a different workflow state (the status picker). Moving
@@ -506,9 +511,19 @@ export const commands = {
 	deletePromptBlock: (name: string) => typedError<null, CmdError>(__TAURI_INVOKE("delete_prompt_block", { name })),
 	/**
 	 *  The variable names a user-referenced `.env` file defines, for the Environment
-	 *  settings' "N variables loaded" readout. Reads exactly the absolute path the
-	 *  user picked (a native file dialog) — no id is joined onto a base dir, so
-	 *  there's no traversal surface — and returns an empty list if it's unreadable.
+	 *  settings' "N variables loaded" readout. Empty when the file is unreadable.
+	 * 
+	 *  `path` is an arbitrary string from the webview, not a fact — trusting it made
+	 *  this a "does this file exist, and what keys does it define?" oracle for *any*
+	 *  path on the machine (`~/.aws/credentials`, `.ssh/config`, …). Its real domain
+	 *  is the files the user added to Settings → Environment, which santree already
+	 *  parses on every spawn, so that list is the allowlist: anything else reads as
+	 *  empty. (`env::parse_env_file` separately refuses non-regular files, so neither
+	 *  this nor a spawn can be parked on a fifo.)
+	 *  Takes the pool off the `AppHandle` rather than as a `State<'_, Db>` argument:
+	 *  an async command that borrows state must return a `Result`, and this one's
+	 *  contract (a plain `string[]`, empty when there's nothing to show) is worth
+	 *  keeping — an unreadable env file isn't an error the UI should toast.
 	 */
 	envFileVars: (path: string) => __TAURI_INVOKE<string[]>("env_file_vars", { path }),
 	/**  Connection status for a repo: whether any org is connected, and which one it uses. */
@@ -524,7 +539,16 @@ export const commands = {
 	linearListIssues: (repo: string) => typedError<Task[], CmdError>(__TAURI_INVOKE("linear_list_issues", { repo })),
 	/**  Run the Linear OAuth flow; returns the updated org list. */
 	linearConnect: () => typedError<LinearOrg[], CmdError>(__TAURI_INVOKE("linear_connect")),
-	/**  Spawn a process behind a PTY and stream its raw output over `on_output`. */
+	/**
+	 *  Spawn a process behind a PTY and stream its raw output over `on_output`.
+	 * 
+	 *  The spawn itself is `openpty` + a fork/exec with a full env copy + a reader
+	 *  thread — all blocking, and slow enough (an interactive `claude` on a cold
+	 *  cache) to stall a tokio worker, so it goes to the blocking pool like
+	 *  [`terminal_write`]. Nothing about *what* is spawned or how its bytes stream
+	 *  changes: `PtyManager::open` runs exactly once, with the same opts and the
+	 *  same verbatim byte-forwarding sink (COMPLIANCE.md).
+	 */
 	terminalOpen: (opts: TerminalOpenOpts, onOutput: Channel<ArrayBuffer>) => typedError<number, CmdError>(__TAURI_INVOKE("terminal_open", { opts, onOutput })),
 	/**
 	 *  Write raw bytes (keystrokes or a seed) to a session.

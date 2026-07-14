@@ -113,16 +113,37 @@ async fn save_tokens(slug: &str, tokens: Tokens) -> Result<()> {
         .context("keychain write")?
 }
 
-/// Every connected org (slug + display name).
-pub async fn list_orgs(db: &Db) -> Result<Vec<LinearOrg>> {
-    let rows =
+/// Every connected org as `(slug, name)`, ordered by name — the order the "first
+/// org" fallback in [`resolved_org`] is defined against.
+pub(crate) async fn orgs_by_name(db: &Db) -> Result<Vec<(String, String)>> {
+    Ok(
         sqlx::query_as::<_, (String, String)>("SELECT slug, name FROM linear_orgs ORDER BY name")
             .fetch_all(db)
-            .await?;
-    Ok(rows
+            .await?,
+    )
+}
+
+/// Every connected org (slug + display name).
+pub async fn list_orgs(db: &Db) -> Result<Vec<LinearOrg>> {
+    Ok(orgs_by_name(db)
+        .await?
         .into_iter()
         .map(|(slug, name)| LinearOrg { slug, name })
         .collect())
+}
+
+/// The org a repo resolves to, given every connected org and the repo's stored
+/// link: that link when it still names a connected org, else the first org. The one
+/// definition of the fallback — `resolve_org_slug` sends the repo's queries to this
+/// org and `repo::list` labels the repo with it, so the two must not diverge (a repo
+/// row reading "Linear · Acme" while every query went to another workspace).
+pub(crate) fn resolved_org<'a>(
+    orgs: &'a [(String, String)],
+    linked: Option<&str>,
+) -> Option<&'a (String, String)> {
+    linked
+        .and_then(|slug| orgs.iter().find(|(s, _)| s == slug))
+        .or_else(|| orgs.first())
 }
 
 async fn org_row(db: &Db, slug: &str) -> Result<Option<OrgRow>> {
@@ -199,21 +220,15 @@ pub(crate) async fn migrate_tokens_to_keychain(db: &Db) -> Result<bool> {
     Ok(true)
 }
 
-/// The org slug a repo should use: its explicit link, else the first connected org.
+/// The org slug a repo should use — see [`resolved_org`].
 async fn resolve_org_slug(db: &Db, repo: &str) -> Result<Option<String>> {
     let linked: Option<Option<String>> =
         sqlx::query_scalar("SELECT linear_org_slug FROM repos WHERE name = ?")
             .bind(repo)
             .fetch_optional(db)
             .await?;
-    if let Some(Some(slug)) = linked {
-        return Ok(Some(slug));
-    }
-    Ok(
-        sqlx::query_scalar("SELECT slug FROM linear_orgs ORDER BY name LIMIT 1")
-            .fetch_optional(db)
-            .await?,
-    )
+    let orgs = orgs_by_name(db).await?;
+    Ok(resolved_org(&orgs, linked.flatten().as_deref()).map(|(slug, _)| slug.clone()))
 }
 
 /// Bind (or clear, with `None`) the Linear org a repo uses. Updates the existing
@@ -239,6 +254,28 @@ struct TokenResponse {
     access_token: String,
     refresh_token: String,
     expires_in: i64,
+}
+
+/// POST the OAuth token endpoint (code exchange or refresh) and decode the token
+/// pair. On failure Linear's *body* is what matters — `invalid_grant` (the grant is
+/// gone; the org has to be reconnected) reads as the same bare 400 as a transient
+/// server error — so it's preserved, exactly as `gql::post` does for GraphQL.
+async fn token_request(form: &[(&str, &str)], what: &str) -> Result<TokenResponse> {
+    let res = gql::client()
+        .post(TOKEN_URL)
+        .form(form)
+        .send()
+        .await
+        .with_context(|| format!("{what} request"))?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(300).collect();
+        bail!("{what} failed ({status}): {snippet}");
+    }
+    res.json()
+        .await
+        .with_context(|| format!("decoding the {what} response"))
 }
 
 /// Per-org locks serializing token refresh. Linear rotates the refresh token on
@@ -274,36 +311,64 @@ async fn org_credentials(db: &Db, slug: &str) -> Result<(OrgRow, Tokens)> {
     Ok((row, tokens))
 }
 
+/// Whether a token expiring at `expires_at` is still usable at `now`. The skew is
+/// what stops a token that passes this check from expiring mid-flight; a call that
+/// takes longer than [`REFRESH_SKEW_MS`] would fail either way.
+fn usable_at(expires_at: i64, now: i64) -> bool {
+    now < expires_at - REFRESH_SKEW_MS
+}
+
 /// A valid access token for `slug`, refreshing + persisting if near expiry.
 async fn valid_token(db: &Db, slug: &str) -> Result<String> {
     let (row, tokens) = org_credentials(db, slug).await?;
-    if now_ms() < row.expires_at - REFRESH_SKEW_MS {
+    if usable_at(row.expires_at, now_ms()) {
         return Ok(tokens.access);
     }
 
     // Near expiry: serialize the refresh per org, then re-read — another caller
-    // may have refreshed while we waited, so we'd reuse its fresh token.
+    // may have refreshed while we waited, so we'd reuse its fresh token. Re-reading
+    // the *keychain* too (not just the row) is the load-bearing half: Linear rotates
+    // the refresh token on every use, so the one we read before the lock is already
+    // spent if someone else got there first.
     let lock = refresh_lock(slug);
     let _guard = lock.lock().await;
     let (row, tokens) = org_credentials(db, slug).await?;
-    if now_ms() < row.expires_at - REFRESH_SKEW_MS {
+    if usable_at(row.expires_at, now_ms()) {
         return Ok(tokens.access);
     }
+    rotate(db, row, tokens).await
+}
 
-    let res = gql::client()
-        .post(TOKEN_URL)
-        .form(&[
+/// Mint a fresh access token for `slug` *regardless* of the stored expiry — for when
+/// Linear rejects a token the expiry claimed was still good (see [`Session::query`]).
+///
+/// `spent` is the token that came back 401. Under the org's refresh lock we compare it
+/// against what's on file: a concurrent caller may already have rotated it, and Linear
+/// invalidates a refresh token the moment it's used, so re-spending ours would fail
+/// *and* destroy the pair that other caller just persisted.
+async fn force_refresh(db: &Db, slug: &str, spent: &str) -> Result<String> {
+    let lock = refresh_lock(slug);
+    let _guard = lock.lock().await;
+    let (row, tokens) = org_credentials(db, slug).await?;
+    if tokens.access != spent {
+        return Ok(tokens.access);
+    }
+    rotate(db, row, tokens).await
+}
+
+/// Exchange the org's refresh token for a fresh pair, persist both, and return the new
+/// access token. The caller holds the org's [`refresh_lock`] — Linear rotates the
+/// refresh token on every use, so two concurrent exchanges would spend it twice.
+async fn rotate(db: &Db, row: OrgRow, tokens: Tokens) -> Result<String> {
+    let body = token_request(
+        &[
             ("grant_type", "refresh_token"),
             ("client_id", CLIENT_ID),
             ("refresh_token", tokens.refresh.as_str()),
-        ])
-        .send()
-        .await
-        .context("refresh request")?;
-    if !res.status().is_success() {
-        bail!("token refresh failed: {}", res.status());
-    }
-    let body: TokenResponse = res.json().await?;
+        ],
+        "Linear token refresh",
+    )
+    .await?;
     let updated = OrgRow {
         slug: row.slug,
         name: row.name,
@@ -533,10 +598,12 @@ fn map_related(issue: RelatedIssue) -> Task {
 /// `None` when no org is connected. Returning `None` instead of erroring lets a
 /// not-yet-connected repo show an empty graph rather than an error state.
 pub async fn list_issues(db: &Db, repo: &str) -> Result<Option<Vec<Task>>> {
-    let Some(token) = repo_token(db, repo).await? else {
+    let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
-    let data: QueryData = graphql(&token, ASSIGNED_ISSUES_QUERY, serde_json::json!({})).await?;
+    let data: QueryData = session
+        .query(ASSIGNED_ISSUES_QUERY, serde_json::json!({}))
+        .await?;
     // Looping past the first page would multiply this query's cost, and it's
     // already near Linear's ~10000 complexity ceiling (see the NOTE above) — so a
     // >100-issue backlog is truncated rather than risking a 400. Warn instead of
@@ -598,21 +665,77 @@ pub async fn auth_status(db: &Db, repo: &str) -> Result<LinearStatus> {
 // its description + comments; inline Linear-CDN images are downloaded with the
 // access token and embedded as data URIs so the webview can render them.
 
-/// A valid access token for the org this repo uses, or `None` when no org is
-/// connected. Returning `None` (rather than erroring) lets each live command
-/// resolve the org exactly once and return an empty result when not connected.
-async fn repo_token(db: &Db, repo: &str) -> Result<Option<String>> {
+/// A repo's Linear session: the org its queries go to, plus a currently-valid access
+/// token. Every GraphQL call a command makes goes through one, so the token can be
+/// re-minted mid-command when Linear rejects it (see [`Session::query`]).
+struct Session<'a> {
+    db: &'a Db,
+    slug: String,
+    token: tokio::sync::RwLock<String>,
+}
+
+impl Session<'_> {
+    /// The current access token — for the calls that aren't GraphQL (the inline image
+    /// downloads), which have no envelope to retry through.
+    async fn token(&self) -> String {
+        self.token.read().await.clone()
+    }
+
+    /// POST a GraphQL query, retrying **once** with a force-refreshed token when Linear
+    /// answers 401.
+    ///
+    /// The stored `expires_at` said this token was good, so a 401 means the keychain and
+    /// Linear have desynced (the token was revoked, or a keychain restored from an older
+    /// backup) — without the retry the org stays bricked until that expiry finally
+    /// passes. Only a 401 retries, and only once: a GraphQL `errors` array (permission,
+    /// complexity) carries no HTTP status and would just repeat, and Linear's refresh
+    /// grant is single-use, so spending one per failed call is worse than the failure.
+    async fn query<T: DeserializeOwned>(
+        &self,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<T> {
+        let spent = self.token().await;
+        let err = match graphql(&spent, query, &variables).await {
+            Ok(data) => return Ok(data),
+            Err(e) => e,
+        };
+        if gql::status_of(&err) != Some(reqwest::StatusCode::UNAUTHORIZED) {
+            return Err(err);
+        }
+        log::warn!(
+            "Linear rejected the stored access token for org {} before its recorded expiry \
+             — re-minting it and retrying once",
+            self.slug
+        );
+        let fresh = force_refresh(self.db, &self.slug, &spent).await?;
+        *self.token.write().await = fresh.clone();
+        graphql(&fresh, query, &variables).await
+    }
+}
+
+/// A session for the org this repo uses, or `None` when no org is connected.
+/// Returning `None` (rather than erroring) lets each live command resolve the org
+/// exactly once and return an empty result when not connected.
+async fn repo_session<'a>(db: &'a Db, repo: &str) -> Result<Option<Session<'a>>> {
     let Some(slug) = resolve_org_slug(db, repo).await? else {
         return Ok(None);
     };
-    valid_token(db, &slug).await.map(Some)
+    let token = valid_token(db, &slug).await?;
+    Ok(Some(Session {
+        db,
+        slug,
+        token: tokio::sync::RwLock::new(token),
+    }))
 }
 
-/// POST a GraphQL query and return the typed `data` payload.
+/// POST a GraphQL query with a given token and return the typed `data` payload. Callers
+/// inside a command go through [`Session::query`] (which can re-mint the token); this is
+/// the raw call, for the OAuth flow's first request — where there's no org yet.
 async fn graphql<T: DeserializeOwned>(
     token: &str,
     query: &str,
-    variables: serde_json::Value,
+    variables: &serde_json::Value,
 ) -> Result<T> {
     let req = gql::client()
         .post(GRAPHQL_URL)
@@ -703,31 +826,6 @@ fn actor(
 // noise here. This mirrors the schedule strips (build via `triage_schedule`), so
 // the teams shown there are exactly the teams whose issues land in this queue.
 
-/// The signed-in user's id (for "mine") and the keys of their *rotation* teams
-/// (teams whose triage responsibility is backed by a non-empty time schedule) —
-/// both hang off the same `viewer` root, in one round-trip for the common case
-/// (`fetch_all_team_memberships` only loops past that if a user is in >100
-/// teams). Non-rotation teams are dropped so the queue stays scoped to actual
-/// on-call inboxes. Reuses [`TRIAGE_SCHEDULES_QUERY`] / [`SchedQueryData`] (a
-/// superset of what's needed
-/// here) so there's a single source of truth for the `teamMemberships` shape.
-async fn viewer_triage_scope(token: &str) -> Result<(Option<String>, Vec<String>)> {
-    let data = fetch_all_team_memberships(token).await?;
-    let Some(viewer) = data.viewer else {
-        return Ok((None, Vec::new()));
-    };
-    let keys = viewer
-        .team_memberships
-        .map(|c| c.nodes)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|m| m.team)
-        .filter(is_rotation_team)
-        .map(|t| t.key)
-        .collect();
-    Ok((viewer.id, keys))
-}
-
 const TRIAGE_INBOX_QUERY: &str = r#"
 query TriageInbox($filter: IssueFilter, $after: String) {
   issues(filter: $filter, first: 100, after: $after) {
@@ -775,21 +873,22 @@ struct TriageInboxData {
 /// The triage inbox for a repo's workspace, scoped to the viewer's teams.
 /// Active issues first, snoozed sunk to the bottom (by SLA breach time within).
 pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTicket>>> {
-    let Some(token) = repo_token(db, repo).await? else {
+    let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
-    // The viewer (for "mine") and their *rotation* teams (to scope the inbox) come
-    // from one query. Propagate a failure here rather than swallowing it into an
-    // empty scope — that used to render a transient network/auth error as the
-    // positive "All caught up" empty state. A genuinely empty scope (no rotation
-    // team configured) still comes back as `Ok((_, vec![]))` below and is the only
-    // legitimate empty-inbox path.
-    let (me, keys) = viewer_triage_scope(&token).await?;
+    // The viewer (for "mine") and their *rotation* teams (to scope the inbox). Propagate
+    // a failure here rather than swallowing it into an empty scope — that used to render
+    // a transient network/auth error as the positive "All caught up" empty state. A
+    // genuinely empty scope (no rotation team configured) is the only legitimate
+    // empty-inbox path.
+    let scope = team_scope(&session).await?;
     // No rotation team → no on-call inbox. Show an empty queue rather than
     // flooding the list with the whole workspace's (un-owned) triage issues.
-    if keys.is_empty() {
+    if scope.teams.is_empty() {
         return Ok(Some(Vec::new()));
     }
+    let me = scope.viewer_id.as_deref();
+    let keys: Vec<&str> = scope.teams.iter().map(|t| t.key.as_str()).collect();
     let filter = serde_json::json!({
         "state": { "type": { "eq": "triage" } },
         "team": { "key": { "in": keys } },
@@ -800,12 +899,12 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
     let mut nodes: Vec<TriageRow> = Vec::new();
     let mut after: Option<String> = None;
     loop {
-        let data: TriageInboxData = graphql(
-            &token,
-            TRIAGE_INBOX_QUERY,
-            serde_json::json!({ "filter": filter, "after": after }),
-        )
-        .await?;
+        let data: TriageInboxData = session
+            .query(
+                TRIAGE_INBOX_QUERY,
+                serde_json::json!({ "filter": filter, "after": after }),
+            )
+            .await?;
         let page_info = data.issues.page_info;
         nodes.extend(data.issues.nodes);
         if !page_info.has_next_page {
@@ -828,10 +927,7 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
             let labels: Vec<String> = r.labels.nodes.into_iter().map(|l| l.name).collect();
             let team = r.team.map(|t| t.key);
             let assignee_user = r.assignee;
-            let mine = match (
-                me.as_deref(),
-                assignee_user.as_ref().and_then(|u| u.id.as_deref()),
-            ) {
+            let mine = match (me, assignee_user.as_ref().and_then(|u| u.id.as_deref())) {
                 (Some(me), Some(a)) => me == a,
                 _ => false,
             };
@@ -1050,7 +1146,7 @@ struct CommentRepliesPageData {
 /// with the issue. A failure while paging is logged and the replies we do have
 /// are kept — a chatty thread shouldn't take the whole discussion pane down.
 async fn all_replies(
-    token: &str,
+    session: &Session<'_>,
     comment_id: &str,
     page: Connection<CommentNode>,
 ) -> Vec<CommentNode> {
@@ -1060,12 +1156,12 @@ async fn all_replies(
         let Some(after) = page_info.end_cursor.take() else {
             break;
         };
-        let next: Result<CommentRepliesPageData> = graphql(
-            token,
-            COMMENT_REPLIES_PAGE_QUERY,
-            serde_json::json!({ "id": comment_id, "after": after }),
-        )
-        .await;
+        let next: Result<CommentRepliesPageData> = session
+            .query(
+                COMMENT_REPLIES_PAGE_QUERY,
+                serde_json::json!({ "id": comment_id, "after": after }),
+            )
+            .await;
         match next {
             Ok(data) => {
                 let Some(more) = data.comment else { break };
@@ -1090,12 +1186,14 @@ async fn all_replies(
 async fn map_comment(
     client: &reqwest::Client,
     mut node: CommentNode,
-    token: &str,
+    session: &Session<'_>,
     style: NameStyle,
 ) -> TriageComment {
     let mut child_nodes =
-        all_replies(token, &node.id, node.children.take().unwrap_or_default()).await;
+        all_replies(session, &node.id, node.children.take().unwrap_or_default()).await;
     child_nodes.sort_by_key(|c| c.created_at.as_deref().and_then(parse_ms).unwrap_or(0));
+    // Read the token *after* the replies are in: paging them can have re-minted it.
+    let token = &session.token().await;
     // Inline each reply's images concurrently; join_all preserves order. Resolve
     // the timestamp up front so the per-reply futures don't borrow `ch`.
     let children = join_all(child_nodes.into_iter().map(|ch| {
@@ -1138,15 +1236,12 @@ async fn map_comment(
 /// The full triage issue (description + comments) for the discussion pane, with
 /// inline Linear-CDN images downloaded and embedded as data URIs.
 pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Option<TriageDetail>> {
-    let Some(token) = repo_token(db, repo).await? else {
+    let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
-    let data: IssueDetailData = graphql(
-        &token,
-        ISSUE_DETAIL_QUERY,
-        serde_json::json!({ "id": ticket_id }),
-    )
-    .await?;
+    let data: IssueDetailData = session
+        .query(ISSUE_DETAIL_QUERY, serde_json::json!({ "id": ticket_id }))
+        .await?;
     let mut issue = data
         .issue
         .ok_or_else(|| anyhow!("issue {ticket_id} not found"))?;
@@ -1157,12 +1252,12 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
     let mut cursor = issue.comments.page_info.end_cursor.clone();
     while issue.comments.page_info.has_next_page {
         let Some(after) = cursor.take() else { break };
-        let page: IssueCommentsPageData = graphql(
-            &token,
-            ISSUE_COMMENTS_PAGE_QUERY,
-            serde_json::json!({ "id": ticket_id, "after": after }),
-        )
-        .await?;
+        let page: IssueCommentsPageData = session
+            .query(
+                ISSUE_COMMENTS_PAGE_QUERY,
+                serde_json::json!({ "id": ticket_id, "after": after }),
+            )
+            .await?;
         let Some(page_issue) = page.issue else { break };
         issue.comments.nodes.extend(page_issue.comments.nodes);
         issue.comments.page_info = page_issue.comments.page_info;
@@ -1172,6 +1267,7 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
     let now = now_ms();
     let style = name_style(db).await;
     let client = gql::client();
+    let token = session.token().await;
 
     let description = inline_images(client, &issue.description.unwrap_or_default(), &token).await;
 
@@ -1187,7 +1283,7 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
     // join_all preserves the oldest-first order.
     let comments = join_all(
         top.into_iter()
-            .map(|node| map_comment(client, node, &token, style)),
+            .map(|node| map_comment(client, node, &session, style)),
     )
     .await;
 
@@ -1258,6 +1354,15 @@ pub async fn set_issue_state(
     ticket_id: &str,
     state_id: &str,
 ) -> Result<Option<()>> {
+    let Some(session) = repo_session(db, repo).await? else {
+        return Ok(None);
+    };
+    set_state(&session, ticket_id, state_id).await.map(Some)
+}
+
+/// [`set_issue_state`] on an established session — so a caller that already resolved one
+/// ([`move_issue_to_started`]) doesn't re-resolve the org and re-read the keychain.
+async fn set_state(session: &Session<'_>, ticket_id: &str, state_id: &str) -> Result<()> {
     #[derive(Deserialize)]
     struct UpdResult {
         #[serde(default)]
@@ -1268,19 +1373,16 @@ pub async fn set_issue_state(
     struct SetStateData {
         issue_update: Option<UpdResult>,
     }
-    let Some(token) = repo_token(db, repo).await? else {
-        return Ok(None);
-    };
-    let data: SetStateData = graphql(
-        &token,
-        SET_STATE_MUTATION,
-        serde_json::json!({ "id": ticket_id, "stateId": state_id }),
-    )
-    .await?;
+    let data: SetStateData = session
+        .query(
+            SET_STATE_MUTATION,
+            serde_json::json!({ "id": ticket_id, "stateId": state_id }),
+        )
+        .await?;
     if data.issue_update.map(|u| u.success).unwrap_or(false) {
-        Ok(Some(()))
+        Ok(())
     } else {
-        // `graphql()` already surfaces any `errors` array (permission/scope
+        // `Session::query` already surfaces any `errors` array (permission/scope
         // problems land there), so reaching here means a bare `success: false`
         // with no error — don't guess a specific cause.
         bail!("Linear rejected the status change")
@@ -1311,7 +1413,7 @@ pub async fn create_comment(
     parent_id: Option<&str>,
     body: &str,
 ) -> Result<Option<()>> {
-    let Some(token) = repo_token(db, repo).await? else {
+    let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
 
@@ -1323,12 +1425,9 @@ pub async fn create_comment(
     struct IssueIdData {
         issue: Option<IssueId>,
     }
-    let id_data: IssueIdData = graphql(
-        &token,
-        ISSUE_UUID_QUERY,
-        serde_json::json!({ "id": ticket_id }),
-    )
-    .await?;
+    let id_data: IssueIdData = session
+        .query(ISSUE_UUID_QUERY, serde_json::json!({ "id": ticket_id }))
+        .await?;
     let issue_uuid = id_data
         .issue
         .ok_or_else(|| anyhow!("issue {ticket_id} not found"))?
@@ -1344,16 +1443,16 @@ pub async fn create_comment(
     struct CreateCommentData {
         comment_create: Option<CreateResult>,
     }
-    let data: CreateCommentData = graphql(
-        &token,
-        CREATE_COMMENT_MUTATION,
-        serde_json::json!({ "issueId": issue_uuid, "parentId": parent_id, "body": body }),
-    )
-    .await?;
+    let data: CreateCommentData = session
+        .query(
+            CREATE_COMMENT_MUTATION,
+            serde_json::json!({ "issueId": issue_uuid, "parentId": parent_id, "body": body }),
+        )
+        .await?;
     if data.comment_create.map(|c| c.success).unwrap_or(false) {
         Ok(Some(()))
     } else {
-        // `graphql()` surfaces any `errors` array, so a bare `success: false`
+        // `Session::query` surfaces any `errors` array, so a bare `success: false`
         // here has no specific cause to report.
         bail!("Linear rejected the comment")
     }
@@ -1404,15 +1503,12 @@ pub async fn move_issue_to_started(db: &Db, repo: &str, issue_id: &str) -> Resul
         issue: Option<IssueNode>,
     }
 
-    let Some(token) = repo_token(db, repo).await? else {
+    let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
-    let data: Data = graphql(
-        &token,
-        STARTED_STATE_QUERY,
-        serde_json::json!({ "id": issue_id }),
-    )
-    .await?;
+    let data: Data = session
+        .query(STARTED_STATE_QUERY, serde_json::json!({ "id": issue_id }))
+        .await?;
     let Some(issue) = data.issue else {
         return Ok(None);
     };
@@ -1429,7 +1525,7 @@ pub async fn move_issue_to_started(db: &Db, repo: &str, issue_id: &str) -> Resul
     let Some(target) = states.first() else {
         return Ok(None); // team has no started state — nothing to do
     };
-    set_issue_state(db, repo, issue_id, &target.id).await
+    set_state(&session, issue_id, &target.id).await.map(Some)
 }
 
 const TRIAGE_SCHEDULES_QUERY: &str = r#"
@@ -1452,12 +1548,12 @@ query TriageSchedules($after: String) {
 }
 "#;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct IdRef {
     #[serde(default)]
     id: Option<String>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SchedEntry {
     #[serde(default)]
@@ -1469,14 +1565,14 @@ struct SchedEntry {
     #[serde(default)]
     user_email: Option<String>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct TimeSchedule {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     entries: Vec<SchedEntry>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct TriageResp {
     #[serde(default)]
@@ -1484,7 +1580,10 @@ struct TriageResp {
     #[serde(default)]
     time_schedule: Option<TimeSchedule>,
 }
-#[derive(Deserialize)]
+/// `Clone` because the fetched teams are shared (behind an `Arc`) by both Triage reads,
+/// and [`build_schedule`] consumes one — a handful of teams, so cloning is nothing next
+/// to re-running the query.
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct TeamNode {
     key: String,
@@ -1524,9 +1623,10 @@ struct SchedQueryData {
 /// more than a handful of teams, so unlike `assignedIssues` this is cheap to loop
 /// in full rather than truncate — a team past the first 100 would otherwise drop
 /// silently out of both the triage queue's scope and the schedule strips.
-async fn fetch_all_team_memberships(token: &str) -> Result<SchedQueryData> {
-    let mut data: SchedQueryData =
-        graphql(token, TRIAGE_SCHEDULES_QUERY, serde_json::json!({})).await?;
+async fn fetch_all_team_memberships(session: &Session<'_>) -> Result<SchedQueryData> {
+    let mut data: SchedQueryData = session
+        .query(TRIAGE_SCHEDULES_QUERY, serde_json::json!({}))
+        .await?;
     let Some(viewer) = data.viewer.as_mut() else {
         return Ok(data);
     };
@@ -1536,12 +1636,12 @@ async fn fetch_all_team_memberships(token: &str) -> Result<SchedQueryData> {
     let mut cursor = conn.page_info.end_cursor.clone();
     while conn.page_info.has_next_page {
         let Some(after) = cursor.take() else { break };
-        let page: SchedQueryData = graphql(
-            token,
-            TRIAGE_SCHEDULES_QUERY,
-            serde_json::json!({ "after": after }),
-        )
-        .await?;
+        let page: SchedQueryData = session
+            .query(
+                TRIAGE_SCHEDULES_QUERY,
+                serde_json::json!({ "after": after }),
+            )
+            .await?;
         let Some(mut page_conn) = page.viewer.and_then(|v| v.team_memberships) else {
             break;
         };
@@ -1550,6 +1650,98 @@ async fn fetch_all_team_memberships(token: &str) -> Result<SchedQueryData> {
         cursor = conn.page_info.end_cursor.clone();
     }
     Ok(data)
+}
+
+/// The viewer and the teams they're on call for — everything both Triage reads derive
+/// from the memberships query: the queue scopes itself to `teams`' keys and marks its
+/// own tickets with `viewer_id`; the schedule strips render `teams`' rotations.
+struct TeamScope {
+    viewer_id: Option<String>,
+    /// Only teams that run a triage rotation (see [`is_rotation_team`]) — a team without
+    /// one has no on-call owner, so its triage issues aren't anyone's responsibility.
+    teams: Vec<TeamNode>,
+}
+
+/// Reduce the raw memberships payload to the [`TeamScope`] both reads want.
+fn scope_of(data: SchedQueryData) -> TeamScope {
+    let Some(viewer) = data.viewer else {
+        return TeamScope {
+            viewer_id: None,
+            teams: Vec::new(),
+        };
+    };
+    TeamScope {
+        viewer_id: viewer.id,
+        teams: viewer
+            .team_memberships
+            .map(|c| c.nodes)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| m.team)
+            .filter(is_rotation_team)
+            .collect(),
+    }
+}
+
+/// How long a fetched [`TeamScope`] is reused. Triage's queue and its schedule strips are
+/// separate commands that mount together and both need this paginated query — the window
+/// only has to outlive that pair. Rotations change on a human timescale and the
+/// frontend's own triage cache is minutes long, so nothing observable goes stale.
+const TEAM_SCOPE_TTL: Duration = Duration::from_secs(60);
+
+/// Per-org [`TeamScope`] cache. The mutex is held *across* the fetch, so the second of
+/// the two concurrent Triage loads waits on the first's result instead of issuing its own
+/// copy of the same query.
+#[allow(clippy::type_complexity)]
+static TEAM_SCOPES: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            std::sync::Arc<tokio::sync::Mutex<Option<(Instant, std::sync::Arc<TeamScope>)>>>,
+        >,
+    >,
+> = std::sync::LazyLock::new(Default::default);
+
+#[allow(clippy::type_complexity)]
+fn team_scope_slot(
+    slug: &str,
+) -> std::sync::Arc<tokio::sync::Mutex<Option<(Instant, std::sync::Arc<TeamScope>)>>> {
+    // Poison-tolerant, like `refresh_lock`: the map holds only Arcs, so a thread that
+    // panicked mid-access left it structurally sound.
+    TEAM_SCOPES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(slug.to_string())
+        .or_default()
+        .clone()
+}
+
+/// The org's [`TeamScope`], fetched at most once per [`TEAM_SCOPE_TTL`] — and exactly
+/// once when both Triage commands ask at the same time. `fetch` is a parameter so the
+/// coalescing is unit-testable without a network.
+async fn cached_team_scope<F, Fut>(slug: &str, fetch: F) -> Result<std::sync::Arc<TeamScope>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<TeamScope>>,
+{
+    let slot = team_scope_slot(slug);
+    let mut entry = slot.lock().await;
+    if let Some((at, scope)) = entry.as_ref() {
+        if at.elapsed() < TEAM_SCOPE_TTL {
+            return Ok(scope.clone());
+        }
+    }
+    let scope = std::sync::Arc::new(fetch().await?);
+    *entry = Some((Instant::now(), scope.clone()));
+    Ok(scope)
+}
+
+/// The [`TeamScope`] for this session's org.
+async fn team_scope(session: &Session<'_>) -> Result<std::sync::Arc<TeamScope>> {
+    cached_team_scope(&session.slug, || async {
+        Ok(scope_of(fetch_all_team_memberships(session).await?))
+    })
+    .await
 }
 
 /// A user's display name + avatar, keyed by id in the resolved name map.
@@ -1567,31 +1759,18 @@ struct UsersData {
 /// time-schedule-backed triage responsibility (empty when none do). Rotations
 /// the viewer participates in are surfaced first.
 pub async fn triage_schedule(db: &Db, repo: &str) -> Result<Option<Vec<TriageSchedule>>> {
-    let Some(token) = repo_token(db, repo).await? else {
+    let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
-    let data = fetch_all_team_memberships(&token).await?;
-    let Some(viewer) = data.viewer else {
-        return Ok(Some(Vec::new()));
-    };
-    let viewer_id = viewer.id;
-
-    // Teams whose triage responsibility is backed by a non-empty schedule.
-    let teams: Vec<TeamNode> = viewer
-        .team_memberships
-        .map(|m| m.nodes)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|m| m.team)
-        .filter(is_rotation_team)
-        .collect();
-    if teams.is_empty() {
+    // Shared with the queue (which mounts alongside this one) — see [`cached_team_scope`].
+    let scope = team_scope(&session).await?;
+    if scope.teams.is_empty() {
         return Ok(Some(Vec::new()));
     }
 
     // Resolve all referenced user ids → display names in one batch.
     let mut ids: Vec<String> = Vec::new();
-    for t in &teams {
+    for t in &scope.teams {
         if let Some(r) = &t.triage_responsibility {
             if let Some(cu) = r.current_user.as_ref().and_then(|c| c.id.clone()) {
                 ids.push(cu);
@@ -1606,14 +1785,16 @@ pub async fn triage_schedule(db: &Db, repo: &str) -> Result<Option<Vec<TriageSch
     ids.sort();
     ids.dedup();
     let style = name_style(db).await;
-    let names = resolve_user_names(&token, &ids, style)
+    let names = resolve_user_names(&session, &ids, style)
         .await
         .unwrap_or_default();
     let now = now_ms();
 
-    let mut schedules: Vec<TriageSchedule> = teams
-        .into_iter()
-        .map(|t| build_schedule(t, viewer_id.as_deref(), &names, now))
+    let mut schedules: Vec<TriageSchedule> = scope
+        .teams
+        .iter()
+        .cloned()
+        .map(|t| build_schedule(t, scope.viewer_id.as_deref(), &names, now))
         .collect();
     // Surface rotations the viewer is part of first.
     schedules.sort_by_key(|s| !s.shifts.iter().any(|sh| sh.is_me));
@@ -1695,7 +1876,7 @@ fn build_schedule(
 }
 
 async fn resolve_user_names(
-    token: &str,
+    session: &Session<'_>,
     ids: &[String],
     style: NameStyle,
 ) -> Result<std::collections::HashMap<String, UserInfo>> {
@@ -1707,7 +1888,9 @@ query ResolveUsers($ids: [ID!]!) {
   users(filter: { id: { in: $ids } }, first: 250) { nodes { id name displayName avatarUrl } }
 }
 "#;
-    let data: UsersData = graphql(token, QUERY, serde_json::json!({ "ids": ids })).await?;
+    let data: UsersData = session
+        .query(QUERY, serde_json::json!({ "ids": ids }))
+        .await?;
     Ok(data
         .users
         .nodes
@@ -2010,6 +2193,14 @@ pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
     list_orgs(db).await
 }
 
+/// How long the whole browser round-trip gets before the connect is abandoned.
+const OAUTH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long an accepted connection gets to send its request line. Clamped to the
+/// remaining [`OAUTH_TIMEOUT`] budget, so a peer that connects and then says
+/// nothing (a browser preconnect, a port scan) can't park the thread past it.
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn wait_for_code(expected_state: &str) -> Result<String> {
     let listener = TcpListener::bind(("127.0.0.1", OAUTH_PORT)).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AddrInUse {
@@ -2020,61 +2211,143 @@ fn wait_for_code(expected_state: &str) -> Result<String> {
             anyhow::Error::new(e).context("binding oauth port")
         }
     })?;
+    accept_code(&listener, expected_state, Instant::now() + OAUTH_TIMEOUT)
+}
+
+/// Serve the OAuth callback until the browser delivers a `code` for our `state`,
+/// the user declines, or `deadline` passes. Split from [`wait_for_code`] so it can
+/// be driven over an ephemeral port in tests.
+fn accept_code(listener: &TcpListener, expected_state: &str, deadline: Instant) -> Result<String> {
+    // Non-blocking only so the accept loop can notice the deadline; each accepted
+    // socket is put back into blocking mode before it's read (see `read_request`).
     listener.set_nonblocking(true)?;
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String>>();
 
     loop {
         if Instant::now() > deadline {
             bail!("timed out waiting for Linear authorization");
         }
         match listener.accept() {
-            Ok((mut stream, _)) => {
-                let mut buf = [0u8; 2048];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]);
-                let path = req
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("");
-                let (code, returned_state, error) = parse_callback(path);
-                let state_matches = returned_state.as_deref() == Some(expected_state);
-                let ok = code.is_some() && state_matches;
-
-                let html = if ok {
-                    "<html><body><h2>Authentication successful!</h2><p>You can close this tab.</p></body></html>"
-                } else {
-                    "<html><body><h2>Authentication failed.</h2></body></html>"
-                };
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-                        html.len(),
-                        html
-                    )
-                    .as_bytes(),
-                );
-                if ok {
-                    return Ok(code.unwrap());
-                }
-                // Linear's deny redirect carries `error=access_denied` (no code) rather
-                // than a failure status — without this, a user who declines sits on the
-                // full 120s timeout before seeing an error. Only trust the error when the
-                // state matches, so a stray request to the callback port can't abort the flow.
-                if state_matches {
-                    if let Some(error) = error {
-                        bail!("Linear authorization failed: {error}");
+            // One thread per connection: a peer that connects and then says nothing
+            // (a browser preconnect, a port scan) sits on its read timeout, and must
+            // not hold the real callback behind it.
+            Ok((stream, _)) => {
+                let tx = tx.clone();
+                let state = expected_state.to_string();
+                std::thread::spawn(move || {
+                    if let Some(outcome) = serve_callback(stream, &state, deadline) {
+                        let _ = tx.send(outcome);
                     }
-                }
+                });
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => return Err(e.into()),
         }
+        // Doubles as the accept loop's idle sleep.
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(outcome) => return outcome,
+            // We hold a `tx`, so the channel can't disconnect.
+            Err(_) => continue,
+        }
     }
+}
+
+/// Answer one connection to the callback port. `Some` when it *was* the callback —
+/// a `code` carrying our `state` (Ok) or the user declining (Err) — and `None` for
+/// anything else: a stray request must neither end the flow nor tell a still-open
+/// tab that authentication failed.
+fn serve_callback(
+    mut stream: std::net::TcpStream,
+    expected_state: &str,
+    deadline: Instant,
+) -> Option<Result<String>> {
+    let req = match read_request(&mut stream, deadline) {
+        Ok(req) => req,
+        Err(e) => {
+            log::debug!("ignoring an unreadable oauth callback connection: {e}");
+            return None;
+        }
+    };
+    let path = req
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("");
+    let (code, returned_state, error) = parse_callback(path);
+    if code.is_none() && error.is_none() {
+        return None;
+    }
+    let state_matches = returned_state.as_deref() == Some(expected_state);
+    let ok = code.is_some() && state_matches;
+
+    let html = if ok {
+        "<html><body><h2>Authentication successful!</h2><p>You can close this tab.</p></body></html>"
+    } else {
+        "<html><body><h2>Authentication failed.</h2></body></html>"
+    };
+    let _ = stream.write_all(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+            html.len(),
+            html
+        )
+        .as_bytes(),
+    );
+
+    if ok {
+        return Some(Ok(code.unwrap()));
+    }
+    // Linear's deny redirect carries `error=access_denied` (no code) rather than a
+    // failure status — without this, a user who declines sits on the full timeout
+    // before seeing an error. Only trust the error when the state matches, so a stray
+    // request to the callback port can't abort the flow.
+    error
+        .filter(|_| state_matches)
+        .map(|error| Err(anyhow!("Linear authorization failed: {error}")))
+}
+
+/// Read an accepted callback connection's request line.
+///
+/// The socket has to be put back into blocking mode first: on macOS/BSD an accepted
+/// socket *inherits* the listener's non-blocking flag (on Linux it doesn't), so the
+/// first `read` would return `WouldBlock` before the browser's bytes landed — which
+/// used to be swallowed as an empty request, answered with "Authentication failed",
+/// and the auth code dropped on the floor. The read timeout is the other half: a
+/// connection that never sends anything must not hold the flow past its deadline.
+fn read_request(stream: &mut std::net::TcpStream, deadline: Instant) -> std::io::Result<String> {
+    stream.set_nonblocking(false)?;
+    let budget = deadline
+        .saturating_duration_since(Instant::now())
+        .min(CALLBACK_READ_TIMEOUT)
+        // `set_read_timeout` rejects a zero duration (it means "block forever").
+        .max(Duration::from_millis(50));
+    stream.set_read_timeout(Some(budget))?;
+
+    let mut buf = [0u8; 2048];
+    let mut len = 0;
+    while len < buf.len() {
+        match stream.read(&mut buf[len..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                len += n;
+                // The request line is all we need — don't wait for headers/body.
+                if buf[..len].contains(&b'\n') {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    if len == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the callback connection sent nothing",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&buf[..len]).into_owned())
 }
 
 /// Extract `code`, `state`, and `error` from a callback path like
@@ -2103,22 +2376,17 @@ async fn exchange_code(
     redirect_uri: &str,
     verifier: &str,
 ) -> Result<(String, String, i64)> {
-    let res = gql::client()
-        .post(TOKEN_URL)
-        .form(&[
+    let body = token_request(
+        &[
             ("grant_type", "authorization_code"),
             ("client_id", CLIENT_ID),
             ("code", code),
             ("redirect_uri", redirect_uri),
             ("code_verifier", verifier),
-        ])
-        .send()
-        .await
-        .context("code exchange")?;
-    if !res.status().is_success() {
-        bail!("token exchange failed: {}", res.status());
-    }
-    let body: TokenResponse = res.json().await?;
+        ],
+        "Linear token exchange",
+    )
+    .await?;
     Ok((
         body.access_token,
         body.refresh_token,
@@ -2146,7 +2414,7 @@ async fn fetch_viewer_org(access_token: &str) -> Result<(String, String)> {
     let data: Data = graphql(
         access_token,
         "query { viewer { organization { urlKey name } } }",
-        serde_json::json!({}),
+        &serde_json::json!({}),
     )
     .await?;
     let org = data.viewer.organization;
@@ -2180,13 +2448,16 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_tokens, encode_tokens, image_spans, map_issue, migrate_tokens_to_keychain,
-        parse_callback, parse_ms, refresh_lock, shift_range, splice_images, triage_meta,
-        ImageCache, IssueNode, ProjectNode, RelatedIssue, RelationNode, StateNode, Tokens,
-        UserNode, IMAGE_HOST,
+        accept_code, cached_team_scope, decode_tokens, encode_tokens, image_spans, map_issue,
+        migrate_tokens_to_keychain, parse_callback, parse_ms, refresh_lock, resolve_org_slug,
+        resolved_org, scope_of, shift_range, splice_images, triage_meta, usable_at, ImageCache,
+        IssueNode, ProjectNode, RelatedIssue, RelationNode, SchedQueryData, StateNode, TeamScope,
+        Tokens, UserNode, IMAGE_HOST, REFRESH_SKEW_MS,
     };
     use crate::gql::{Connection, PageInfo};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     /// Both tokens share one keychain entry, so the blob is the only thing
     /// standing between a refresh and a bricked org — it has to round-trip
@@ -2327,6 +2598,148 @@ mod tests {
     fn lookalike_host_is_not_a_match() {
         let md = format!("{IMAGE_HOST}.evil.com/x");
         assert!(image_spans(&md).is_empty());
+    }
+
+    // ── Token refresh ─────────────────────────────────────────────────────
+
+    /// Linear rotates the refresh token on every use, so both directions of this
+    /// check are load-bearing: refreshing too eagerly burns the stored grant on
+    /// every call, and refreshing too late sends a token that expires in flight.
+    #[test]
+    fn a_token_is_reused_until_the_refresh_skew() {
+        let now = 1_700_000_000_000;
+        let expires = |mins: i64| now + mins * 60 * 1000;
+        assert_eq!(REFRESH_SKEW_MS, 5 * 60 * 1000);
+
+        assert!(usable_at(expires(6), now), "still well inside its lifetime");
+        assert!(
+            !usable_at(expires(5), now),
+            "inside the skew — refresh before it expires mid-call"
+        );
+        assert!(!usable_at(expires(1), now));
+        assert!(!usable_at(expires(-1), now), "already expired");
+    }
+
+    // ── Triage team scope ─────────────────────────────────────────────────
+
+    /// The scope both Triage reads share is derived from the raw memberships payload:
+    /// the viewer's id, and *only* the teams that actually run a rotation.
+    #[test]
+    fn the_scope_keeps_rotation_teams_and_drops_the_rest() {
+        let data: SchedQueryData = serde_json::from_value(serde_json::json!({
+            "viewer": {
+                "id": "u1",
+                "teamMemberships": { "nodes": [
+                    { "team": { "key": "ENG", "name": "Engineering", "triageResponsibility": {
+                        "currentUser": { "id": "u1" },
+                        "timeSchedule": { "name": "Eng on-call", "entries": [
+                            { "startsAt": "2024-01-01T00:00:00Z", "endsAt": "2024-01-08T00:00:00Z", "userId": "u1" }
+                        ] }
+                    } } },
+                    // No triage responsibility at all → no on-call owner.
+                    { "team": { "key": "DES", "name": "Design", "triageResponsibility": null } },
+                    // Responsibility, but its schedule has no shifts → still no owner.
+                    { "team": { "key": "OPS", "name": "Ops", "triageResponsibility": {
+                        "currentUser": null,
+                        "timeSchedule": { "name": "unused", "entries": [] }
+                    } } },
+                ] }
+            }
+        }))
+        .unwrap();
+
+        let scope = scope_of(data);
+        assert_eq!(scope.viewer_id.as_deref(), Some("u1"));
+        assert_eq!(
+            scope
+                .teams
+                .iter()
+                .map(|t| t.key.as_str())
+                .collect::<Vec<_>>(),
+            ["ENG"]
+        );
+    }
+
+    #[test]
+    fn an_absent_viewer_scopes_to_nothing() {
+        let data: SchedQueryData =
+            serde_json::from_value(serde_json::json!({ "viewer": null })).unwrap();
+        let scope = scope_of(data);
+        assert!(scope.viewer_id.is_none());
+        assert!(scope.teams.is_empty());
+    }
+
+    fn empty_scope() -> TeamScope {
+        TeamScope {
+            viewer_id: Some("u1".into()),
+            teams: Vec::new(),
+        }
+    }
+
+    /// The point of the cache: the queue and the schedule strips are separate commands
+    /// that mount together, and each used to run the whole paginated memberships query.
+    /// Concurrently, they must now cost exactly one fetch — the second waits on the
+    /// first's result rather than starting its own.
+    #[tokio::test]
+    async fn the_two_concurrent_triage_reads_share_one_fetch() {
+        let slug = "scope-concurrent";
+        let fetches = AtomicUsize::new(0);
+        let fetch = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            // Long enough that the second caller is guaranteed to arrive mid-flight.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(empty_scope())
+        };
+        let (queue, strips) = tokio::join!(
+            cached_team_scope(slug, fetch),
+            cached_team_scope(slug, fetch),
+        );
+
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        // …and both read the *same* scope, not two equal copies.
+        assert!(std::sync::Arc::ptr_eq(&queue.unwrap(), &strips.unwrap()));
+    }
+
+    /// A second load inside the TTL (a refetch, a tab revisit) reuses it too — and a
+    /// different org never does.
+    #[tokio::test]
+    async fn the_scope_is_cached_per_org_within_the_ttl() {
+        let fetches = AtomicUsize::new(0);
+        let fetch = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            Ok(empty_scope())
+        };
+        cached_team_scope("scope-org-a", fetch).await.unwrap();
+        cached_team_scope("scope-org-a", fetch).await.unwrap();
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+        cached_team_scope("scope-org-b", fetch).await.unwrap();
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            2,
+            "another org is another scope"
+        );
+    }
+
+    /// A failed fetch must not be cached — the next load has to try again rather than
+    /// serve an empty scope (which Triage renders as the positive "All caught up").
+    #[tokio::test]
+    async fn a_failed_fetch_is_not_cached() {
+        let slug = "scope-failure";
+        assert!(
+            cached_team_scope(slug, || async { anyhow::bail!("network down") })
+                .await
+                .is_err()
+        );
+
+        let fetches = AtomicUsize::new(0);
+        cached_team_scope(slug, || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            Ok(empty_scope())
+        })
+        .await
+        .unwrap();
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
     }
 
     // ── refresh_lock ──────────────────────────────────────────────────────
@@ -2604,5 +3017,158 @@ mod tests {
         // TaskStatus::Todo is map_status("Unknown", "unstarted"); ready because
         // there are no blockers and the status is startable.
         assert!(task.ready);
+    }
+
+    // ── Repo → org resolution ─────────────────────────────────────────────
+
+    #[test]
+    fn an_explicit_link_wins_and_a_stale_one_falls_back() {
+        let orgs = vec![
+            ("alpha".to_string(), "Alpha".to_string()),
+            ("zulu".to_string(), "Zulu".to_string()),
+        ];
+        assert_eq!(
+            resolved_org(&orgs, Some("zulu")).map(|(s, _)| s.as_str()),
+            Some("zulu")
+        );
+        // Defensive: `repos.linear_org_slug` is FK'd `ON DELETE SET NULL`, so a link
+        // to a disconnected org shouldn't exist — if one ever did, both callers would
+        // still agree on the fallback rather than one querying a dead workspace.
+        assert_eq!(
+            resolved_org(&orgs, Some("gone")).map(|(s, _)| s.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            resolved_org(&orgs, None).map(|(s, _)| s.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(resolved_org(&[], Some("zulu")), None);
+    }
+
+    /// The invariant the repo list's tracker column promises: the workspace it
+    /// names is the one the repo's issue queries actually go to.
+    #[tokio::test]
+    async fn the_repo_list_names_the_org_its_queries_resolve_to() {
+        let dir = std::env::temp_dir().join(format!("santree-org-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = crate::db::init(dir.join("test.db")).await.unwrap();
+
+        // Not in slug order — the fallback is "first by *name*".
+        for (slug, name) in [("zzz", "Alpha"), ("aaa", "Zulu")] {
+            sqlx::query("INSERT INTO linear_orgs (slug, name, expires_at) VALUES (?, ?, 0)")
+                .bind(slug)
+                .bind(name)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO repos (name, tracker, path) VALUES ('acme/app', 'GitHub Issues', '/tmp/acme-app')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        // Unlinked: the resolver and the list must land on the *same* first org —
+        // first by name, which is neither the first by slug nor by insertion.
+        assert_eq!(
+            resolve_org_slug(&db, "acme/app").await.unwrap().as_deref(),
+            Some("zzz")
+        );
+        assert_eq!(
+            crate::repo::list(&db).await.unwrap()[0].tracker,
+            "Linear · Alpha"
+        );
+
+        // …and with an explicit link, both follow it.
+        sqlx::query("UPDATE repos SET linear_org_slug = 'aaa' WHERE name = 'acme/app'")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve_org_slug(&db, "acme/app").await.unwrap().as_deref(),
+            Some("aaa")
+        );
+        assert_eq!(
+            crate::repo::list(&db).await.unwrap()[0].tracker,
+            "Linear · Zulu"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── OAuth callback ────────────────────────────────────────────────────
+
+    /// The bug this guards: the accepted socket inherits the listener's
+    /// non-blocking flag on macOS/BSD, so the first `read` returned `WouldBlock`
+    /// before the browser's bytes arrived — the request was read as empty, answered
+    /// with "Authentication failed", and the auth code was lost. A silent peer
+    /// (browser preconnect) accepted first must not consume the flow either.
+    #[test]
+    fn the_callback_waits_for_a_slow_browser_and_ignores_a_silent_peer() {
+        use std::io::{Read as _, Write as _};
+        use std::net::{TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client = std::thread::spawn(move || {
+            let _silent = TcpStream::connect(addr).unwrap();
+            let mut real = TcpStream::connect(addr).unwrap();
+            // The request lands only after the socket has been accepted.
+            std::thread::sleep(Duration::from_millis(150));
+            real.write_all(b"GET /?code=abc%2F123&state=st HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut resp = String::new();
+            real.read_to_string(&mut resp).unwrap();
+            assert!(resp.contains("successful"), "{resp}");
+        });
+
+        let code = accept_code(&listener, "st", Instant::now() + Duration::from_secs(10)).unwrap();
+        // Percent-decoded, and not truncated to whatever arrived in the first read.
+        assert_eq!(code, "abc/123");
+        client.join().unwrap();
+    }
+
+    /// A peer that connects and says nothing must not park the flow past its
+    /// deadline (it used to be read on the accept thread, with no read timeout).
+    #[test]
+    fn a_silent_peer_cannot_park_the_callback_past_its_deadline() {
+        use std::net::{TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let _silent = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+
+        let start = Instant::now();
+        let err = accept_code(&listener, "st", start + Duration::from_millis(300)).unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err:#}");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "deadline overshot"
+        );
+    }
+
+    /// Declining in Linear redirects with `error=…` and no code: the flow ends
+    /// immediately instead of sitting out the timeout.
+    #[test]
+    fn a_denied_authorization_fails_fast() {
+        use std::io::Write as _;
+        use std::net::{TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut s = TcpStream::connect(addr).unwrap();
+            s.write_all(b"GET /?error=access_denied&state=st HTTP/1.1\r\n\r\n")
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+
+        let err =
+            accept_code(&listener, "st", Instant::now() + Duration::from_secs(10)).unwrap_err();
+        assert!(err.to_string().contains("access_denied"), "{err:#}");
     }
 }

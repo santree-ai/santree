@@ -47,13 +47,16 @@ function CommentComposer({
 
   const submit = () => {
     if (!trimmed || add.isPending) return;
+    // `useAddComment` appends the comment to the thread optimistically, so the
+    // field has to empty at once too — clearing only on success shows the text
+    // twice for the length of the round-trip. A failed post rolls the comment
+    // back (and toasts), so put the draft back rather than losing what was typed.
+    setBody("");
     add.mutate(
       { ticketId, parentId, body: trimmed },
       {
-        onSuccess: () => {
-          setBody("");
-          onClose?.();
-        },
+        onSuccess: () => onClose?.(),
+        onError: () => setBody(trimmed),
       },
     );
   };

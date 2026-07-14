@@ -3,24 +3,38 @@
  *  in the Trees sidebar. */
 import { useMemo } from "react";
 
+import type { Task, Worktree } from "../../bindings";
 import { PlusIcon } from "../../components/icons";
 import { Dropdown, Spinner } from "../../components/primitives";
 import { useCreateWorktree, useTasks } from "../../lib/queries";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { NO_PROJECT, useTrees } from "./model";
 
+/** Startable issues with no worktree of their own. `pendingDeletes` has to be
+ *  excluded explicitly: the Trees model already hides those worktrees optimistically,
+ *  so a ticket mid-delete looks worktree-less here — offering it would race a fresh
+ *  `create` against the `remove` still running on the same path. Exported for
+ *  testing — see StartTaskButton.test.ts. */
+export function startCandidates(
+  tasks: Task[],
+  worktrees: Worktree[],
+  pendingDeletes: Set<string>,
+): Task[] {
+  const taken = new Set(worktrees.map((w) => w.id));
+  return tasks.filter((t) => t.ready && !taken.has(t.id) && !pendingDeletes.has(t.id));
+}
+
 export function StartTaskButton() {
   const { repo, worktrees, startAgent } = useTrees();
   const { settings } = useApp();
-  const { addPendingLaunches, removePendingLaunch } = useAppUi();
+  const { addPendingLaunches, removePendingLaunch, pendingDeletes } = useAppUi();
   const { data: tasks = [] } = useTasks(repo);
   const { mutate: create, isPending } = useCreateWorktree(repo);
 
-  // Startable issues that don't already have a worktree.
-  const candidates = useMemo(() => {
-    const taken = new Set(worktrees.map((w) => w.id));
-    return tasks.filter((t) => t.ready && !taken.has(t.id));
-  }, [tasks, worktrees]);
+  const candidates = useMemo(
+    () => startCandidates(tasks, worktrees, pendingDeletes),
+    [tasks, worktrees, pendingDeletes],
+  );
 
   // Mirrors the Issues tab's `launch()` (see features/issues/model.tsx): register
   // a pending launch *before* creating, so the Trees sidebar shows a "Creating

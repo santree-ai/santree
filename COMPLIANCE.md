@@ -92,9 +92,15 @@ Exactly what it injects — the whole list, no more:
   bar. It prints the bar Claude renders and records Claude's authoritative usage
   numbers into `session_usage_live`.
 - **A `permissions.deny` block**, in the *Fix CI* flow only
-  (`claude_settings_no_git`, written to a separate `claude-hooks-fixci.json`):
-  `Bash(git commit)`, `Bash(git commit:*)`, `Bash(git push)`, `Bash(git push:*)` —
-  so that session can fix and validate but leaves committing/pushing to the user.
+  (`claude_settings_no_git`, written to a separate `claude-hooks-fixci.json`) —
+  eight rules, all denying the same two verbs: `Bash(git commit)`,
+  `Bash(git commit:*)`, `Bash(git push)`, `Bash(git push:*)`, plus
+  `Bash(*git commit*)` / `Bash(*git push*)` (an absolute path or wrapper before
+  `git`) and `Bash(*git * commit*)` / `Bash(*git * push*)` (an option between the
+  verb and the subcommand, e.g. `git -C <path> commit`). So that session can fix
+  and validate but leaves committing/pushing to the user. This is best-effort
+  defence-in-depth, not a hard gate — see `hooks.rs` for what it does and doesn't
+  catch.
 
 The hook binary reads the event's JSON payload on stdin, maps it to an
 `AgentState`, and UPSERTs one row per session in `session_state`. It **prints

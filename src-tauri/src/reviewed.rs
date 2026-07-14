@@ -59,3 +59,80 @@ pub async fn set(
     }
     Ok(())
 }
+
+/// How long a PR's marks outlive the last time the user touched them. A PR nobody
+/// has looked at in three months is merged, closed, or abandoned; if it somehow
+/// comes back, the marks would be stale against its new head SHAs anyway and the
+/// files would show as unreviewed regardless.
+const STALE_MARK_DAYS: i64 = 90;
+
+/// Drop the marks for PRs gone quiet for [`STALE_MARK_DAYS`]. Nothing else ever
+/// deletes a row for a PR that got merged or closed — the Reviews inbox spans the
+/// whole org — so without this the table grows monotonically with the org's PR
+/// history. Returns how many rows it dropped.
+///
+/// Grouped by PR, not by row: an old mark on a PR reviewed yesterday is still live
+/// (files that never changed are never re-marked), so pruning per-row would quietly
+/// un-review parts of an active PR.
+pub async fn prune_stale(db: &Db) -> Result<u64> {
+    let cutoff = now_ms() - STALE_MARK_DAYS * 24 * 60 * 60 * 1_000;
+    let done = sqlx::query(
+        "DELETE FROM reviewed_files WHERE (pr_repo, pr_number) IN (
+             SELECT pr_repo, pr_number FROM reviewed_files
+             GROUP BY pr_repo, pr_number
+             HAVING MAX(updated_at) < ?
+         )",
+    )
+    .bind(cutoff)
+    .execute(db)
+    .await?;
+    Ok(done.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A PR is pruned as a unit: every mark goes when its *newest* mark ages out, and
+    /// none go while any mark on it is recent.
+    #[tokio::test]
+    async fn prune_stale_drops_whole_prs_not_rows() {
+        let base = std::env::temp_dir().join(format!("santree-reviewed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+
+        let day = 24 * 60 * 60 * 1_000;
+        let now = now_ms();
+        // "old" was last touched 100 days ago; "active" has one ancient mark and one
+        // from yesterday — a file that hasn't changed since it was first reviewed.
+        for (pr, path, age_days) in [
+            ("o/r", "old-a.rs", 100),
+            ("o/r", "old-b.rs", 120),
+            ("o/other", "kept.rs", 1),
+        ] {
+            let number = if pr == "o/r" { 1 } else { 2 };
+            insert(&db, pr, number, path, now - age_days * day).await;
+        }
+        insert(&db, "o/other", 2, "ancient-but-active.rs", now - 200 * day).await;
+
+        assert_eq!(prune_stale(&db).await.unwrap(), 2);
+        assert!(list(&db, "o/r", 1).await.unwrap().is_empty());
+        assert_eq!(list(&db, "o/other", 2).await.unwrap().len(), 2);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    async fn insert(db: &Db, pr_repo: &str, pr_number: u32, path: &str, updated_at: i64) {
+        sqlx::query(
+            "INSERT INTO reviewed_files (pr_repo, pr_number, path, sha, updated_at)
+             VALUES (?, ?, ?, 'sha', ?)",
+        )
+        .bind(pr_repo)
+        .bind(pr_number)
+        .bind(path)
+        .bind(updated_at)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+}

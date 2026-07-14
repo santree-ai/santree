@@ -4,7 +4,11 @@
  *  bottom-bar "Files" toggle / ⌘L — it hides entirely when collapsed). This is
  *  the thin shell: {@link ChangesList} owns staging + the commit box, and
  *  {@link AllFilesList} owns the Material-icon file tree. */
-import { EdgeResizeHandle, underlineTabStyle } from "../../components/primitives";
+import {
+  EdgeResizeHandle,
+  onTabStripKeyDown,
+  underlineTabStyle,
+} from "../../components/primitives";
 import { useWorktreeStatus } from "../../lib/queries";
 import { useEdgeResize } from "../../lib/useEdgeResize";
 import { AllFilesList } from "./AllFilesList";
@@ -48,7 +52,11 @@ export function FilePickerPanel() {
       style={{ width: `var(--tree-right, ${DEFAULT_W}px)` }}
     >
       <EdgeResizeHandle edge="left" {...resize} />
-      <div className="flex h-9 flex-none items-stretch border-b border-line">
+      <div
+        role="tablist"
+        onKeyDown={onTabStripKeyDown}
+        className="flex h-9 flex-none items-stretch border-b border-line"
+      >
         <FileTabButton tab="all" label="All files" active={fileTab} onClick={setFileTab} />
         <FileTabButton
           tab="changes"
@@ -78,6 +86,9 @@ function FileTabButton({
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={on}
+      tabIndex={on ? 0 : -1}
       onClick={() => onClick(tab)}
       className="flex-1 cursor-pointer border-none text-[11.5px] font-medium"
       style={underlineTabStyle(on)}

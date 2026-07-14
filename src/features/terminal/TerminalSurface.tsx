@@ -12,7 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentKind } from "../../bindings";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { AgentIcon, ClaudeSparkIcon, CliIcon, TerminalIcon } from "../../components/icons";
-import { ProjectGlyph, underlineTabStyle } from "../../components/primitives";
+import { onTabStripKeyDown, ProjectGlyph, underlineTabStyle } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import {
   useBaseWorktree,
@@ -247,6 +247,7 @@ export function TerminalSurface() {
               onChange={(e) => setCmd(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && runCommand()}
               placeholder="Run a command… (e.g. htop)"
+              aria-label="Run a command in a new terminal"
               className="w-full rounded-md border border-line-3 bg-input px-2.5 py-1.5 font-mono text-[11.5px] text-fg-2 placeholder:text-muted-4"
             />
           </div>
@@ -259,19 +260,27 @@ export function TerminalSurface() {
         {/* The session tab strip. Height must stay in sync with
             TERMINAL_STRIP_PX — the TerminalLayer overlays everything below it. */}
         <div
+          role="tablist"
+          onKeyDown={onTabStripKeyDown}
           className={`flex ${CHROME.subBar} flex-none items-stretch overflow-x-auto border-b border-line bg-deep`}
         >
           {orderedStripTabs.map((t) => {
             const meta = sessionMeta(t, extraRows);
             const on = t.key === activeKey;
             return (
+              // Presentational wrapper — the tab is the label button, so the close
+              // × stays its sibling (a tab's children are presentational to AT).
               <div
                 key={t.key}
+                role="presentation"
                 className="flex flex-none items-stretch border-r border-line text-[11.5px] font-medium"
                 style={underlineTabStyle(on)}
               >
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={on}
+                  tabIndex={on ? 0 : -1}
                   onClick={() => setActiveKey(t.key)}
                   className="flex cursor-pointer items-center gap-1.5 pr-1.5 pl-3"
                 >

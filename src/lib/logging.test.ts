@@ -29,6 +29,15 @@ describe("forwardConsoleToLog", () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
   });
 
+  // `JSON.stringify(undefined)` is the value `undefined`, not a string, and
+  // `Array.join` renders that as "" — so the token that carried all the meaning
+  // ("v: undefined") used to reach the log file as a bare "v: ".
+  it("keeps undefined/null args visible in the forwarded line", () => {
+    console.warn("v:", undefined, null);
+
+    expect(logMock.warn).toHaveBeenCalledWith("v: undefined null");
+  });
+
   it("forwards unhandled promise rejections to the on-disk log", () => {
     const event = new PromiseRejectionEvent("unhandledrejection", {
       promise: Promise.reject(new Error("boom")).catch(() => {}),

@@ -39,12 +39,8 @@ pub fn layout_tasks(tasks: &mut [Task]) {
         })
         .collect();
 
-    // Column = longest blocker chain (memoised, cycle-guarded).
-    let mut layer = vec![-1i32; n];
-    let mut visiting = vec![false; n];
-    for i in 0..n {
-        compute_layer(i, &blockers, &mut layer, &mut visiting);
-    }
+    // Column = longest blocker chain.
+    let layer = compute_layers(&blockers);
 
     // Projects as vertical bands, in first-seen order. Owned so we can mutate
     // task coordinates below without holding a borrow on `tasks`.
@@ -76,26 +72,51 @@ pub fn layout_tasks(tasks: &mut [Task]) {
     }
 }
 
-fn compute_layer(
-    i: usize,
-    blockers: &[Vec<usize>],
-    layer: &mut [i32],
-    visiting: &mut [bool],
-) -> i32 {
-    if layer[i] >= 0 {
-        return layer[i];
+/// Longest blocker chain per task — its column.
+///
+/// Iterative (an explicit heap stack, not recursion): the chain depth is bounded
+/// only by the size of the Linear workspace, and issues arrive in arbitrary order,
+/// so a dependent can be visited before its blockers and force a walk the length of
+/// the whole chain. As recursion that overflows the thread stack, which under
+/// `panic = "abort"` is an unrecoverable crash rather than an error.
+///
+/// A back-edge (Linear permits blocker cycles, including a task blocking itself)
+/// contributes no depth, which breaks the cycle and leaves every task with a column.
+fn compute_layers(blockers: &[Vec<usize>]) -> Vec<i32> {
+    let n = blockers.len();
+    let mut layer = vec![-1i32; n];
+    let mut on_stack = vec![false; n];
+    // (task, index of the next blocker to descend into) — an explicit DFS frame.
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+
+    for root in 0..n {
+        if layer[root] >= 0 {
+            continue;
+        }
+        stack.push((root, 0));
+        on_stack[root] = true;
+        while let Some((i, next)) = stack.pop() {
+            if let Some(&b) = blockers[i].get(next) {
+                stack.push((i, next + 1));
+                // Skip blockers already resolved, and back-edges (still on the
+                // stack) — descending into either would loop or redo work.
+                if layer[b] < 0 && !on_stack[b] {
+                    stack.push((b, 0));
+                    on_stack[b] = true;
+                }
+                continue;
+            }
+            // Every blocker is resolved or was cut as a back-edge (`layer < 0`,
+            // contributing 0) — so this task sits one column right of the deepest.
+            layer[i] = blockers[i]
+                .iter()
+                .map(|&b| if layer[b] >= 0 { layer[b] + 1 } else { 0 })
+                .max()
+                .unwrap_or(0);
+            on_stack[i] = false;
+        }
     }
-    if visiting[i] {
-        return 0; // break dependency cycles defensively
-    }
-    visiting[i] = true;
-    let mut depth = 0;
-    for &b in &blockers[i] {
-        depth = depth.max(compute_layer(b, blockers, layer, visiting) + 1);
-    }
-    visiting[i] = false;
-    layer[i] = depth;
-    depth
+    layer
 }
 
 #[cfg(test)]
@@ -148,5 +169,66 @@ mod tests {
         layout_tasks(&mut tasks);
         // Just needs to terminate and assign coordinates.
         assert!(tasks.iter().all(|t| t.y >= PAD_Y));
+    }
+
+    /// A long blocker chain must not be bounded by the call stack: `panic = "abort"`
+    /// makes a stack overflow an unrecoverable crash, so this walks a chain far
+    /// deeper than any thread stack could hold as recursive frames.
+    #[test]
+    fn deep_blocker_chain_does_not_overflow_the_stack() {
+        // Task i is blocked by i+1, so resolving task 0 has to walk the whole chain
+        // before it can assign a single layer. Linear returns issues in arbitrary
+        // order, so a dependent-first ordering is reachable, not contrived. As
+        // recursion this aborts the process with a stack overflow.
+        let n = 200_000;
+        let blockers: Vec<Vec<usize>> = (0..n)
+            .map(|i| if i + 1 < n { vec![i + 1] } else { vec![] })
+            .collect();
+        let layer = compute_layers(&blockers);
+        assert_eq!(layer[n - 1], 0);
+        assert_eq!(layer[0], (n - 1) as i32, "each link is one column right");
+    }
+
+    /// A task that blocks itself is a degenerate cycle: it must land in column 0,
+    /// not one column right of itself.
+    #[test]
+    fn self_blocking_task_sits_in_the_first_column() {
+        let mut tasks = vec![task("A", "P", &["A"]), task("B", "P", &["A"])];
+        layout_tasks(&mut tasks);
+        assert_eq!(tasks[0].x, PAD_X, "A blocks itself → still a root");
+        assert_eq!(tasks[1].x, PAD_X + COL_STEP, "B is one column right of A");
+    }
+
+    /// Blockers pointing outside the fetched set (a blocker in another team, or one
+    /// filtered out of this query) are unresolvable — they must not shift the task's
+    /// column or drop it from the layout.
+    #[test]
+    fn blockers_outside_the_set_are_ignored() {
+        let mut tasks = vec![task("A", "P", &["GHOST-1"]), task("B", "P", &["A"])];
+        layout_tasks(&mut tasks);
+        assert_eq!(tasks[0].x, PAD_X, "an unknown blocker leaves A a root");
+        assert_eq!(tasks[1].x, PAD_X + COL_STEP);
+    }
+
+    /// A diamond (D blocked by B and C, both blocked by A) puts D one column right
+    /// of its *deepest* blocker, not its first.
+    #[test]
+    fn column_follows_the_longest_blocker_chain() {
+        let mut tasks = vec![
+            task("D", "P", &["B", "C"]),
+            task("C", "P", &["B"]),
+            task("B", "P", &["A"]),
+            task("A", "P", &[]),
+        ];
+        layout_tasks(&mut tasks);
+        let x = |i: usize| tasks[i].x;
+        assert_eq!(x(3), PAD_X, "A is the root");
+        assert_eq!(x(2), PAD_X + COL_STEP, "B");
+        assert_eq!(x(1), PAD_X + 2 * COL_STEP, "C");
+        assert_eq!(
+            x(0),
+            PAD_X + 3 * COL_STEP,
+            "D follows C, its deepest blocker"
+        );
     }
 }

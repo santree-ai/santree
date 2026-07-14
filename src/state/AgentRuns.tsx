@@ -32,7 +32,12 @@ import {
 } from "react";
 
 import { commands, type SetupEvent } from "../bindings";
-import { queryKeys, TREES_RUN_SETUP_KEY, useBoolSetting } from "../lib/queries";
+import {
+  ensureResolvedSetting,
+  queryKeys,
+  TREES_RUN_SETUP_KEY,
+  useResolvedBoolSetting,
+} from "../lib/queries";
 import { useApp } from "./AppContext";
 
 /** A setup script running for one worktree. */
@@ -56,7 +61,11 @@ interface AgentRuns {
    *  with the launch flag. Never persisted: the created session carries `--model`
    *  itself, so a resume needs nothing stored. */
   launchModels: Record<string, string>;
-  /** Whether starting a task runs `.santree/init.sh` first (the user's preference). */
+  /** Whether starting a task runs `.santree/init.sh` first (the user's preference,
+   *  resolved through any per-repo override). Presentational only — it tells Trees
+   *  which tab to open a start on. The run itself never reads it: {@link beginRun}
+   *  resolves the preference imperatively, because a false-while-loading read here
+   *  would skip the setup script outright. */
   runSetupOnStart: boolean;
 
   /** Whether a setup script is running for this worktree right now. */
@@ -68,9 +77,15 @@ interface AgentRuns {
   isInitialSetup: (id: string) => boolean;
 
   /** Begin a task in this worktree: run setup first (launching the agent when it
-   *  finishes) or launch the agent straight away, per the preference. Placement —
+   *  finishes) or launch the agent straight away, per the preference — or per the
+   *  batch's {@link planSetup} answer, when the run is part of one. Placement —
    *  which worktree is focused, which tab opens — is the caller's business. */
   beginRun: (id: string) => void;
+  /** Answer "run setup?" once for a whole multi-task launch (Settings → Trees →
+   *  "When starting several tasks at once"). Each worktree's run consumes the
+   *  answer when it actually begins — which is later, and elsewhere: the creates
+   *  are still in flight when the batch is planned. */
+  planSetup: (ids: string[], runSetup: boolean) => void;
   /** Run the setup script on its own (the manual "Run setup" action). */
   runSetup: (id: string) => void;
   requestAgentLaunch: (id: string) => void;
@@ -104,7 +119,7 @@ export function appendSetupLine(lines: string[], text: string, lastWasProgress: 
 
 export function AgentRunsProvider({ children }: { children: ReactNode }) {
   const { activeRepo } = useApp();
-  const runSetupOnStart = useBoolSetting("app", TREES_RUN_SETUP_KEY).value;
+  const runSetupOnStart = useResolvedBoolSetting(activeRepo, TREES_RUN_SETUP_KEY).value;
   const qc = useQueryClient();
 
   const [launchAgents, setLaunchAgents] = useState<Set<string>>(new Set());
@@ -117,6 +132,14 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
   // run keeps streaming across re-renders and route changes).
   const runsRef = useRef(setupRuns);
   runsRef.current = setupRuns;
+
+  // A batch's setup answer, keyed by worktree id and consumed by the run that
+  // begins for it. A ref, not state: nothing renders from it, and the run that
+  // reads it can begin several seconds later, from another view.
+  const setupPlanRef = useRef<Record<string, boolean>>({});
+  const planSetup = useCallback((ids: string[], runSetup: boolean) => {
+    for (const id of ids) setupPlanRef.current[id] = runSetup;
+  }, []);
 
   const requestAgentLaunch = useCallback((id: string) => {
     setLaunchAgents((s) => (s.has(id) ? s : new Set(s).add(id)));
@@ -197,12 +220,29 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
     [activeRepo, finishSetup],
   );
 
+  // Never decide from the *hook's* view of the preference: `useResolvedBoolSetting`
+  // reads false while the query is still in flight (its value is `data === "true"`,
+  // which can't express "unknown"), and that window is real — it reopens on every
+  // repo switch, since the resolved read is keyed by repo. Deciding inside it skips
+  // the setup script entirely and launches the agent into an unprepared worktree.
+  // So resolve it imperatively: cache-first (the common case, synchronous enough to
+  // land in the same frame), fetching only when it truly isn't loaded yet.
   const beginRun = useCallback(
     (id: string) => {
-      if (runSetupOnStart) startSetup(id, true);
-      else requestAgentLaunch(id);
+      const start = (setup: boolean) => (setup ? startSetup(id, true) : requestAgentLaunch(id));
+      const planned = setupPlanRef.current[id];
+      if (planned !== undefined) {
+        delete setupPlanRef.current[id];
+        start(planned);
+        return;
+      }
+      ensureResolvedSetting(qc, activeRepo, TREES_RUN_SETUP_KEY).then(
+        (value) => start(value === "true"),
+        // A failed settings read must never swallow the launch — start the agent.
+        () => start(false),
+      );
     },
-    [runSetupOnStart, startSetup, requestAgentLaunch],
+    [qc, activeRepo, startSetup, requestAgentLaunch],
   );
 
   const runSetup = useCallback((id: string) => startSetup(id, false), [startSetup]);
@@ -215,6 +255,7 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
       isSettingUp: (id) => id in setupRuns,
       isInitialSetup: (id) => setupRuns[id]?.thenLaunch === true,
       beginRun,
+      planSetup,
       runSetup,
       requestAgentLaunch,
       clearAgentLaunch,
@@ -228,6 +269,7 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
       runSetupOnStart,
       setupRuns,
       beginRun,
+      planSetup,
       runSetup,
       requestAgentLaunch,
       clearAgentLaunch,

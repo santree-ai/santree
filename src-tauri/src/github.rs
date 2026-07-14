@@ -17,8 +17,8 @@ use serde::Deserialize;
 use santree_core::domain::{
     CheckAnnotation, CheckLog, CheckLogBlock, CheckLogLevel, CheckLogLine, CheckRollup,
     CheckStatus, CheckStep, CommentKind, FileSource, MergeQueue, MergeQueueEntry, MergeQueueState,
-    PrCheck, PrComment, PrDetail, PrFile, PrLabel, PrState, PrThread, ReviewDecision, ReviewInbox,
-    ReviewPr, Reviewer, ReviewerKind, TeamReviews,
+    PrCheck, PrComment, PrDetail, PrFile, PrLabel, PrState, PrThread, ReviewDecision, ReviewPr,
+    Reviewer, ReviewerKind, TeamReviews,
 };
 
 use crate::git;
@@ -407,10 +407,20 @@ pub async fn request_reviewers(
     bail!("GitHub: {detail}");
 }
 
+/// GitHub's REST maximum page size, and how many pages of collaborators we pull.
+/// A repo with more than [`REVIEWERS_CAP`] pushers is an org-wide monorepo where the
+/// dialog's search box is the only usable path anyway; the cap bounds the request
+/// count and is logged when hit.
+const REVIEWERS_PER_PAGE: usize = 100;
+const REVIEWERS_CAP: usize = 1000;
+
 /// Candidate reviewers for a repo: its collaborators with push access (anyone who
 /// can be requested for review), as `User` reviewers with avatars. Excludes the
 /// signed-in user — you can't review your own PR. Empty (not an error) when the
 /// listing fails so the dialog degrades to a plain create.
+///
+/// Paged: a single page only reaches the first 100 collaborators, so on any repo
+/// with a bigger push list the reviewers past it simply couldn't be requested.
 pub async fn list_reviewers(token: &str, owner: &str, repo: &str) -> Result<Vec<Reviewer>> {
     #[derive(Deserialize)]
     struct Collaborator {
@@ -421,22 +431,47 @@ pub async fn list_reviewers(token: &str, owner: &str, repo: &str) -> Result<Vec<
         kind: String,
     }
     let me = current_login(token).await;
-    let list: Vec<Collaborator> = get_json(
-        api_url(&["repos", owner, repo, "collaborators"])?,
-        &[("permission", "push"), ("per_page", "100")],
-        token,
-    )
-    .await?;
-    Ok(list
-        .into_iter()
-        // Drop bots and the signed-in user (GitHub rejects self-review requests).
-        .filter(|c| c.kind != "Bot" && me.as_deref() != Some(c.login.as_str()))
-        .map(|c| Reviewer {
-            kind: ReviewerKind::User,
-            name: c.login,
-            avatar_url: c.avatar_url,
-        })
-        .collect())
+    let url = api_url(&["repos", owner, repo, "collaborators"])?;
+    let per_page = REVIEWERS_PER_PAGE.to_string();
+
+    let mut fetched = 0;
+    let mut reviewers: Vec<Reviewer> = Vec::new();
+    loop {
+        let page = fetched / REVIEWERS_PER_PAGE + 1;
+        let batch: Vec<Collaborator> = get_json(
+            url.clone(),
+            &[
+                ("permission", "push"),
+                ("per_page", per_page.as_str()),
+                ("page", &page.to_string()),
+            ],
+            token,
+        )
+        .await?;
+        let short_page = batch.len() < REVIEWERS_PER_PAGE;
+        fetched += batch.len();
+        reviewers.extend(
+            batch
+                .into_iter()
+                // Drop bots and the signed-in user (GitHub rejects self-review requests).
+                .filter(|c| c.kind != "Bot" && me.as_deref() != Some(c.login.as_str()))
+                .map(|c| Reviewer {
+                    kind: ReviewerKind::User,
+                    name: c.login,
+                    avatar_url: c.avatar_url,
+                }),
+        );
+        if short_page {
+            break;
+        }
+        if fetched >= REVIEWERS_CAP {
+            log::warn!(
+                "{owner}/{repo} has more than {REVIEWERS_CAP} collaborators with push access; the reviewer list is truncated"
+            );
+            break;
+        }
+    }
+    Ok(reviewers)
 }
 
 /// The signed-in GitHub login (the PR author), for excluding self from reviewer
@@ -684,7 +719,10 @@ pub async fn viewer_teams(token: &str, org: &str) -> Result<Vec<(String, String)
         slug: String,
         name: String,
     }
-    let query = "query { viewer { organizations(first: 50) { nodes { login teams(first: 50, role: MEMBER) { nodes { slug name } } } } } }";
+    // No `role:` filter: it matches the viewer's role *in the team*, so a team the
+    // user maintains (role ADMIN) would be dropped — and its review requests would
+    // be indistinguishable from "none".
+    let query = "query { viewer { organizations(first: 50) { nodes { login teams(first: 50) { nodes { slug name } } } } } }";
     let data: Data = graphql(token, query, serde_json::json!({})).await?;
     Ok(data
         .viewer
@@ -702,49 +740,55 @@ pub async fn viewer_teams(token: &str, org: &str) -> Result<Vec<(String, String)
         .unwrap_or_default())
 }
 
-/// The categorized PR inbox for `org`: PRs the viewer authored, PRs where they're
-/// individually requested, and one section per team that has open requests. All
-/// searches run concurrently; empty team sections are dropped. A failed *team*
-/// search degrades to an empty (and therefore dropped) section rather than failing
-/// the whole inbox — but it's logged, since an empty section is otherwise
-/// indistinguishable from "no open requests for this team".
-pub async fn review_inbox(
-    token: &str,
-    org: &str,
-    teams: &[(String, String)],
-) -> Result<ReviewInbox> {
-    let common = "is:open is:pr archived:false sort:updated-desc";
-    let mine_q = format!("{common} author:@me org:{org}");
-    let requested_q = format!("{common} review-requested:@me org:{org}");
+/// The filters every inbox search shares: open, non-archived PRs, newest-updated first.
+const INBOX_FILTERS: &str = "is:open is:pr archived:false sort:updated-desc";
 
-    let team_searches = futures::future::join_all(teams.iter().map(|(slug, name)| {
-        let q = format!("{common} team-review-requested:{org}/{slug}");
-        async move {
-            let prs = search_prs(token, &q).await.unwrap_or_else(|e| {
+fn mine_query(org: &str) -> String {
+    format!("{INBOX_FILTERS} author:@me org:{org}")
+}
+fn requested_query(org: &str) -> String {
+    format!("{INBOX_FILTERS} review-requested:@me org:{org}")
+}
+fn team_query(org: &str, slug: &str) -> String {
+    format!("{INBOX_FILTERS} team-review-requested:{org}/{slug}")
+}
+
+/// The PRs the viewer authored and the PRs individually requested of them, in `org` —
+/// two independent searches, run concurrently.
+///
+/// Split from the team sections ([`team_reviews`]) because those can't start until the
+/// viewer's teams are known, and neither of these depends on that: `reviews::inbox`
+/// overlaps the two halves instead of putting a `viewer_teams` round-trip on the critical
+/// path of every Reviews load.
+pub async fn personal_reviews(token: &str, org: &str) -> Result<(Vec<ReviewPr>, Vec<ReviewPr>)> {
+    let (mine_q, requested_q) = (mine_query(org), requested_query(org));
+    let (mine, requested) =
+        tokio::join!(search_prs(token, &mine_q), search_prs(token, &requested_q),);
+    Ok((mine?, requested?))
+}
+
+/// One inbox section per team with open review requests, searched concurrently; empty
+/// sections are dropped. A failed team search degrades to an empty (and therefore
+/// dropped) section rather than failing the whole inbox — but it's logged, since an empty
+/// section is otherwise indistinguishable from "no open requests for this team".
+pub async fn team_reviews(token: &str, org: &str, teams: &[(String, String)]) -> Vec<TeamReviews> {
+    futures::future::join_all(teams.iter().map(|(slug, name)| async move {
+        let prs = search_prs(token, &team_query(org, slug))
+            .await
+            .unwrap_or_else(|e| {
                 log::warn!("Reviews: review-request search for team {org}/{slug} failed: {e}");
                 Vec::new()
             });
-            (slug.clone(), name.clone(), prs)
+        TeamReviews {
+            slug: slug.clone(),
+            name: name.clone(),
+            prs,
         }
-    }));
-
-    let (mine, requested, team_results) = tokio::join!(
-        search_prs(token, &mine_q),
-        search_prs(token, &requested_q),
-        team_searches,
-    );
-
-    let teams = team_results
-        .into_iter()
-        .filter(|(_, _, prs)| !prs.is_empty())
-        .map(|(slug, name, prs)| TeamReviews { slug, name, prs })
-        .collect();
-
-    Ok(ReviewInbox {
-        mine: mine?,
-        requested: requested?,
-        teams,
-    })
+    }))
+    .await
+    .into_iter()
+    .filter(|t| !t.prs.is_empty())
+    .collect()
 }
 
 /// The repo's merge queue (its default branch's queue): the ordered list of PRs
@@ -994,6 +1038,160 @@ fn check_run_status(status: &str, conclusion: Option<&str>) -> CheckStatus {
     }
 }
 
+/// The selection every comment node in a PR's conversation uses. The follow-up page
+/// queries must request the same shape as the PR query's first page or a later page
+/// would decode into a different struct (`pr_conversation_selects_the_shared_fields`
+/// pins the two together).
+const COMMENT_FIELDS: &str = "author { login avatarUrl } body createdAt";
+
+/// A GraphQL connection's maximum page size.
+const GRAPHQL_PAGE: usize = 100;
+
+/// The PR's conversation + head-commit checks. Every connection here asks for
+/// `pageInfo` — each is drained to exhaustion (see [`drain_conversation`]), so this
+/// is the first page, not the whole story.
+const PR_CONVERSATION_QUERY: &str = r"
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          body
+          baseRefOid
+          headRefOid
+          labels(first: 30) { nodes { name color description } }
+          comments(first: 100) { nodes { author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
+          reviews(first: 100) { nodes { author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
+          reviewThreads(first: 100) {
+            nodes {
+              id path line diffSide isResolved isOutdated
+              comments(first: 100) { nodes { author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+          commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
+            nodes {
+              __typename
+              ... on CheckRun {
+                name status conclusion detailsUrl checkSuite { app { name } }
+                steps(first: 50) { nodes { number name status conclusion } }
+                annotations(first: 50) { nodes { annotationLevel message path title rawDetails location { start { line } } } }
+              }
+              ... on StatusContext { context state targetUrl description }
+            }
+            pageInfo { hasNextPage endCursor }
+          } } } } }
+        }
+      }
+    }
+";
+
+/// A follow-up query for the remaining pages of one of the PR's conversation
+/// connections. GraphQL can't parameterize a field name, so `field` is interpolated
+/// and aliased to `page` — every connection then decodes through the same shape.
+fn conversation_page_query(field: &str, node_fields: &str) -> String {
+    format!(
+        "query($owner: String!, $name: String!, $number: Int!, $after: String!) {{
+           repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{
+             page: {field}(first: {GRAPHQL_PAGE}, after: $after) {{
+               nodes {{ {node_fields} }}
+               pageInfo {{ hasNextPage endCursor }}
+             }}
+           }} }}
+         }}"
+    )
+}
+
+#[derive(Deserialize)]
+struct PageData<T> {
+    repository: Option<PageRepo<T>>,
+}
+#[derive(Deserialize)]
+struct PageRepo<T> {
+    #[serde(rename = "pullRequest")]
+    pull_request: Option<PagePr<T>>,
+}
+#[derive(Deserialize)]
+struct PagePr<T> {
+    page: Connection<T>,
+}
+
+/// Append the pages the PR query didn't return into `conn`, following the cursor
+/// until exhausted. `query` comes from [`conversation_page_query`]. Nothing is
+/// dropped silently: a reviewer who saw only the first page of `reviewThreads`
+/// would read a PR as fully resolved while an unresolved thread sat past the cut.
+async fn drain_conversation<T: DeserializeOwned>(
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u32,
+    query: &str,
+    conn: &mut Connection<T>,
+) -> Result<()> {
+    while conn.page_info.has_next_page {
+        let Some(after) = conn.page_info.end_cursor.clone() else {
+            break;
+        };
+        let data: PageData<T> = graphql(
+            token,
+            query,
+            serde_json::json!({ "owner": owner, "name": name, "number": number, "after": after }),
+        )
+        .await?;
+        let Some(page) = data.repository.and_then(|r| r.pull_request).map(|p| p.page) else {
+            break;
+        };
+        conn.nodes.extend(page.nodes);
+        conn.page_info = page.page_info;
+    }
+    Ok(())
+}
+
+/// The same, for the replies *inside* one review thread — a thread isn't reachable
+/// as a field of the PR, so its extra pages are fetched through the global `node`
+/// lookup by id.
+async fn drain_thread_comments<T: DeserializeOwned>(
+    token: &str,
+    thread_id: &str,
+    conn: &mut Connection<T>,
+) -> Result<()> {
+    #[derive(Deserialize)]
+    struct Data<T> {
+        node: Option<Node<T>>,
+    }
+    // `page` is absent when the id names something that isn't a review thread —
+    // impossible for an id we just read off one, but the shape allows it.
+    #[derive(Deserialize)]
+    struct Node<T> {
+        page: Option<Connection<T>>,
+    }
+    let query = format!(
+        "query($id: ID!, $after: String!) {{
+           node(id: $id) {{ ... on PullRequestReviewThread {{
+             page: comments(first: {GRAPHQL_PAGE}, after: $after) {{
+               nodes {{ {COMMENT_FIELDS} }}
+               pageInfo {{ hasNextPage endCursor }}
+             }}
+           }} }}
+         }}"
+    );
+    while conn.page_info.has_next_page {
+        let Some(after) = conn.page_info.end_cursor.clone() else {
+            break;
+        };
+        let data: Data<T> = graphql(
+            token,
+            &query,
+            serde_json::json!({ "id": thread_id, "after": after }),
+        )
+        .await?;
+        let Some(page) = data.node.and_then(|n| n.page) else {
+            break;
+        };
+        conn.nodes.extend(page.nodes);
+        conn.page_info = page.page_info;
+    }
+    Ok(())
+}
+
 /// Body + top-level comments (issue comments and review summaries) merged
 /// chronologically, the inline review-comment threads (grouped, with resolution
 /// and anchor line/side), and the head commit's individual CI checks.
@@ -1145,6 +1343,8 @@ async fn pr_conversation(
     }
     #[derive(Deserialize)]
     struct Thread {
+        /// Only used to page the thread's own replies (see [`drain_thread_comments`]).
+        id: String,
         path: String,
         line: Option<u32>,
         #[serde(rename = "diffSide")]
@@ -1163,33 +1363,6 @@ async fn pr_conversation(
         created_at: String,
     }
 
-    let query = r"
-        query($owner: String!, $name: String!, $number: Int!) {
-          repository(owner: $owner, name: $name) {
-            pullRequest(number: $number) {
-              body
-              baseRefOid
-              headRefOid
-              labels(first: 30) { nodes { name color description } }
-              comments(first: 100) { nodes { author { login avatarUrl } body createdAt } }
-              reviews(first: 50) { nodes { author { login avatarUrl } body createdAt } }
-              reviewThreads(first: 50) { nodes { path line diffSide isResolved isOutdated comments(first: 50) { nodes { author { login avatarUrl } body createdAt } } } }
-              commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
-                nodes {
-                  __typename
-                  ... on CheckRun {
-                    name status conclusion detailsUrl checkSuite { app { name } }
-                    steps(first: 50) { nodes { number name status conclusion } }
-                    annotations(first: 50) { nodes { annotationLevel message path title rawDetails location { start { line } } } }
-                  }
-                  ... on StatusContext { context state targetUrl description }
-                }
-                pageInfo { hasNextPage endCursor }
-              } } } } }
-            }
-          }
-        }
-    ";
     // Follow-up query for additional check-context pages (see the paging loop
     // below). Only the head commit's `contexts` connection, keyed by cursor.
     let contexts_query = r"
@@ -1214,14 +1387,46 @@ async fn pr_conversation(
     ";
     let data: Data = graphql(
         token,
-        query,
+        PR_CONVERSATION_QUERY,
         serde_json::json!({ "owner": owner, "name": name, "number": number }),
     )
     .await?;
-    let pr = data
+    let mut pr = data
         .repository
         .and_then(|r| r.pull_request)
         .ok_or_else(|| anyhow!("PR {owner}/{name}#{number} not found"))?;
+
+    // A GraphQL connection tops out at 100 nodes, and a long-running PR blows past
+    // that on any of the three conversation connections. Truncating is worse than
+    // slow here — an unresolved review thread past the first page would leave the
+    // reviewer reading a PR as clean — so each is drained to exhaustion.
+    let comments_q = conversation_page_query("comments", COMMENT_FIELDS);
+    let reviews_q = conversation_page_query("reviews", COMMENT_FIELDS);
+    let threads_q = conversation_page_query(
+        "reviewThreads",
+        &format!(
+            "id path line diffSide isResolved isOutdated \
+             comments(first: {GRAPHQL_PAGE}) {{ nodes {{ {COMMENT_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }}"
+        ),
+    );
+    let (comment_pages, review_pages, thread_pages) = tokio::join!(
+        drain_conversation(token, owner, name, number, &comments_q, &mut pr.comments),
+        drain_conversation(token, owner, name, number, &reviews_q, &mut pr.reviews),
+        drain_conversation(
+            token,
+            owner,
+            name,
+            number,
+            &threads_q,
+            &mut pr.review_threads,
+        ),
+    );
+    comment_pages?;
+    review_pages?;
+    thread_pages?;
+    for thread in &mut pr.review_threads.nodes {
+        drain_thread_comments(token, &thread.id, &mut thread.comments).await?;
+    }
 
     let actor = |a: Option<Actor>| a.map(|a| (a.login, a.avatar_url)).unwrap_or_default();
     let mut comments: Vec<PrComment> = Vec::new();
@@ -1473,22 +1678,39 @@ fn strip_timestamp(line: &str) -> &str {
     }
 }
 
-/// Remove ANSI SGR color escapes (`\x1b[…m` etc.) that CI tools emit — they'd
-/// render as garbage in the log pane, which does its own tinting by level.
+/// Remove the ANSI escapes CI tools emit — they'd render as garbage in the log
+/// pane, which does its own tinting by level. Two families need different
+/// terminators: CSI (`\x1b[31m`, ended by its final letter) and OSC (`\x1b]0;title\x07`,
+/// ended by BEL or the `ESC \` string terminator). Treating an OSC as a CSI stops at
+/// the first letter inside its payload and leaks the remainder (`;title`) into the text.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
+    let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // Consume through the escape's terminating letter (`m`, `K`, …).
-            for n in chars.by_ref() {
-                if n.is_ascii_alphabetic() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&']') {
+            chars.next();
+            while let Some(n) = chars.next() {
+                if n == '\x07' {
+                    break;
+                }
+                if n == '\x1b' {
+                    // `ESC \` — consume the backslash half of the terminator.
+                    chars.next_if_eq(&'\\');
                     break;
                 }
             }
             continue;
         }
-        out.push(c);
+        // CSI and the short two-char escapes: consume through the terminating letter.
+        for n in chars.by_ref() {
+            if n.is_ascii_alphabetic() {
+                break;
+            }
+        }
     }
     out
 }
@@ -1795,6 +2017,27 @@ mod tests {
         assert!(api_url(&["repos", "o", "..", "pulls"]).is_err());
     }
 
+    /// Splitting the inbox into [`personal_reviews`] + [`team_reviews`] moved these
+    /// queries; each still has to scope to the org (a bare `author:@me` would pull in
+    /// every PR the user has open anywhere) and share the open-PR filters, or a section
+    /// would quietly list the wrong PRs.
+    #[test]
+    fn every_inbox_search_is_org_scoped_and_shares_the_open_pr_filters() {
+        assert_eq!(
+            mine_query("acme"),
+            "is:open is:pr archived:false sort:updated-desc author:@me org:acme"
+        );
+        assert_eq!(
+            requested_query("acme"),
+            "is:open is:pr archived:false sort:updated-desc review-requested:@me org:acme"
+        );
+        // The team search is scoped by the `org/slug` handle itself.
+        assert_eq!(
+            team_query("acme", "core"),
+            "is:open is:pr archived:false sort:updated-desc team-review-requested:acme/core"
+        );
+    }
+
     #[test]
     fn file_paging_stops_on_short_page_and_at_the_cap() {
         // Short page ⇒ GitHub had nothing more, regardless of how many we hold.
@@ -1810,6 +2053,43 @@ mod tests {
             file_paging(PR_FILES_CAP, PR_FILES_PER_PAGE),
             FilePaging::Truncated
         );
+    }
+
+    /// A follow-up page decodes into the same struct as the first one, so the two
+    /// selections have to stay identical — and the paged connections have to ask
+    /// for the cursor that drives the drain at all.
+    #[test]
+    fn pr_conversation_selects_the_shared_fields() {
+        assert!(PR_CONVERSATION_QUERY.contains(COMMENT_FIELDS));
+        for field in ["comments", "reviews", "reviewThreads"] {
+            assert!(
+                conversation_page_query(field, COMMENT_FIELDS).contains(&format!("page: {field}(")),
+                "{field} page query must alias the connection to `page`"
+            );
+        }
+        assert_eq!(
+            PR_CONVERSATION_QUERY
+                .matches("pageInfo { hasNextPage endCursor }")
+                .count(),
+            5,
+            "comments, reviews, reviewThreads, thread comments and check contexts all page"
+        );
+    }
+
+    /// OSC sequences (a `##[group]`-heavy CI step often sets the window title)
+    /// don't end at the first letter the way a CSI does — consuming one as a CSI
+    /// leaked the rest of its payload into the cleaned log.
+    #[test]
+    fn strip_ansi_handles_csi_and_osc() {
+        assert_eq!(strip_ansi("\x1b[31mFAILED\x1b[0m test"), "FAILED test");
+        // OSC terminated by BEL…
+        assert_eq!(strip_ansi("\x1b]0;npm run build\x07built"), "built");
+        // …and by the `ESC \` string terminator (OSC 8 hyperlinks).
+        assert_eq!(
+            strip_ansi("see \x1b]8;;https://ci.example/log\x1b\\the log"),
+            "see the log"
+        );
+        assert_eq!(strip_ansi("plain line"), "plain line");
     }
 
     #[test]

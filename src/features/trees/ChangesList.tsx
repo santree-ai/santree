@@ -295,6 +295,7 @@ const ChangeRow = memo(function ChangeRow({
         type="checkbox"
         checked={f.staged}
         onChange={() => onToggle(f)}
+        aria-label={`Stage ${f.path}`}
         className="h-3 w-3 flex-none cursor-pointer accent-[var(--accent)]"
       />
       <button

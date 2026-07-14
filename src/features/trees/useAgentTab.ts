@@ -109,7 +109,7 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   const stdSettings = useClaudeHookSettings();
   const noGitSettings = useClaudeHookSettingsNoGit();
   const hookSettings = noGit ? noGitSettings : stdSettings;
-  const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
+  const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
 
   const chosenModel = opts.modelOverride || model.data;
   const seed = agentSessionSeed(session.data, exec, {
@@ -119,7 +119,7 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
     effortFlag: isClaude && effort.data ? `--effort ${shellQuote(effort.data)}` : undefined,
     settingsFlag:
       isClaude && hookSettings.data ? `--settings ${shellQuote(hookSettings.data)}` : undefined,
-    chrome: isClaude && startWithChrome,
+    chrome: isClaude && startWithChrome.value,
     permissionMode: isClaude ? (permissionMode.data ?? undefined) : undefined,
   });
 
@@ -127,14 +127,17 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   // session. `agentSessionSeed` builds the command once and the PTY applies it at
   // creation, so a flag that arrives late is silently dropped: a Fix-CI tab that
   // launches before `--settings` resolves runs without the commit/push-denying
-  // guardrail it exists to enforce.
+  // guardrail it exists to enforce. Gate on each query's `isFetched`, never on its
+  // value: a boolean setting reads `false` both when it's off and when it hasn't
+  // loaded, so `startWithChrome !== undefined` was true from the first render and
+  // gated nothing — a launch in that window quietly dropped `--chrome`.
   const flagsReady =
     !isClaude ||
     (model.isFetched &&
       effort.isFetched &&
       permissionMode.isFetched &&
       hookSettings.isFetched &&
-      startWithChrome !== undefined);
+      startWithChrome.isFetched);
   const preparing =
     !shellOnly && (hold === true || (needsSeed && (session.isFetching || !flagsReady)));
 

@@ -88,6 +88,19 @@ describe("groupByProject", () => {
     const sections = groupByProject(groups, () => "Core");
     expect(sections[0].tickets.map((g) => g.ticket)).toEqual(["AK-1", "AK-5", "AK-9"]);
   });
+
+  // A lexicographic sort puts AK-10 before AK-9 — the id's number has to compare
+  // numerically, or the sidebar reorders itself nonsensically past ticket 9.
+  it("sorts ticket ids numerically, not lexicographically", () => {
+    const numbered: TicketGroup[] = [
+      { ticket: "AK-10", tabs: [] },
+      { ticket: "AK-9", tabs: [] },
+      { ticket: "AK-100", tabs: [] },
+      { ticket: "AK-2", tabs: [] },
+    ];
+    const sections = groupByProject(numbered, () => "Core");
+    expect(sections[0].tickets.map((g) => g.ticket)).toEqual(["AK-2", "AK-9", "AK-10", "AK-100"]);
+  });
 });
 
 describe("sessionMeta", () => {

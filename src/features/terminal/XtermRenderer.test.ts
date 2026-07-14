@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MAX_WEBGL_CONTEXTS, XtermRenderer } from "./XtermRenderer";
+import { MAX_WEBGL_CONTEXTS, withAlpha, XtermRenderer } from "./XtermRenderer";
 
 /** Fakes for xterm + its WebGL addon: the pool logic under test is about how many
  *  addons are alive and which ones get disposed, so the fakes only need to record
@@ -42,6 +42,22 @@ vi.mock("@xterm/xterm", () => ({
     dispose() {}
   },
 }));
+
+describe("withAlpha", () => {
+  it("expands a hex accent to an rgba() literal xterm can parse", () => {
+    expect(withAlpha("#2dd4a7", 0.2)).toBe("rgba(45, 212, 167, 0.2)");
+    expect(withAlpha("2dd4a7", 0.2)).toBe("rgba(45, 212, 167, 0.2)");
+    expect(withAlpha("#0af", 0.5)).toBe("rgba(0, 170, 255, 0.5)");
+  });
+
+  // The old `${accent}33` suffix produced garbage ("var(--accent)33",
+  // "rgb(1,2,3)33") the moment the accent wasn't a plain hex. Pass those through
+  // instead — xterm parses rgb()/named colors itself, opaque but not broken.
+  it("passes a non-hex color through rather than concatenating an alpha suffix", () => {
+    expect(withAlpha("rgb(1, 2, 3)", 0.2)).toBe("rgb(1, 2, 3)");
+    expect(withAlpha("var(--accent)", 0.2)).toBe("var(--accent)");
+  });
+});
 
 /** WebGL contexts currently held across all terminals. */
 const live = () => webgl.filter((w) => !w.disposed);

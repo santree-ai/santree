@@ -343,8 +343,47 @@ export function Toggle({
 }
 
 /**
+ * The index Arrow/Home/End should move to inside a horizontal composite widget
+ * (a tablist, a radiogroup, one of the tab strips), or `null` for a key it
+ * doesn't handle. Wraps at both ends.
+ */
+function rovingTarget(key: string, current: number, count: number): number | null {
+  const from = current < 0 ? 0 : current;
+  if (key === "ArrowRight" || key === "ArrowDown") return (from + 1) % count;
+  if (key === "ArrowLeft" || key === "ArrowUp") return (from - 1 + count) % count;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  return null;
+}
+
+/**
+ * Arrow/Home/End focus roving over the `role="tab"` children of a `role="tablist"`
+ * — spread on the strip element itself. Pair it with a roving tabindex on the
+ * tabs (`tabIndex={active ? 0 : -1}`) so the strip is a single Tab stop.
+ *
+ * Manual activation (focus moves, selection doesn't follow): our tab panels are
+ * heavyweight — a route, a PTY-backed terminal — so arrowing past a tab must not
+ * activate it. Enter/Space on the focused tab still selects, via its own click.
+ */
+export function onTabStripKeyDown(e: ReactKeyboardEvent<HTMLElement>) {
+  const tabs = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]'));
+  // Only rove when a tab itself has focus: a strip also holds close buttons and
+  // (in Trees) an inline rename field, whose own arrow-key handling must win.
+  const current = tabs.indexOf(document.activeElement as HTMLElement);
+  if (current < 0) return;
+  const next = rovingTarget(e.key, current, tabs.length);
+  if (next === null) return;
+  e.preventDefault();
+  tabs[next]?.focus();
+}
+
+/**
  * A segmented button group (used for agent pickers). Generic over the option
  * value so callers stay type-safe.
+ *
+ * A real radiogroup: one Tab stop (the checked option), and the arrow keys move
+ * *and* check — which is what a radiogroup's role promises, and what the
+ * checked-follows-focus convention expects.
  */
 export function Segmented<T extends string>({
   options,
@@ -357,12 +396,22 @@ export function Segmented<T extends string>({
   onChange: (value: T) => void;
   className?: string;
 }) {
+  const checked = options.findIndex((o) => o.value === value);
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const next = rovingTarget(e.key, checked, options.length);
+    if (next === null) return;
+    e.preventDefault();
+    onChange(options[next].value);
+    (e.currentTarget.children[next] as HTMLElement | undefined)?.focus();
+  };
   return (
     <div
       role="radiogroup"
+      aria-orientation="horizontal"
+      onKeyDown={onKeyDown}
       className={`flex gap-1 rounded-lg border border-line-2 bg-input p-[3px] ${className ?? ""}`}
     >
-      {options.map((opt) => {
+      {options.map((opt, i) => {
         const active = opt.value === value;
         const style: CSSProperties = active
           ? accentActiveStyle()
@@ -374,6 +423,9 @@ export function Segmented<T extends string>({
             type="button"
             role="radio"
             aria-checked={active}
+            // Roving tabindex: with nothing checked yet, the first option is the
+            // one Tab lands on, so the group can never fall out of the tab order.
+            tabIndex={(checked < 0 ? 0 : checked) === i ? 0 : -1}
             onClick={() => onChange(opt.value)}
             className="flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md px-0.5 py-[7px] font-mono text-[11px] transition-all"
             style={style}
@@ -441,12 +493,14 @@ export function Tabs<T extends string>({
   accent?: string;
 }) {
   const inset = variant === "inset";
+  const selected = tabs.findIndex((t) => t.value === value);
   return (
     <div
       role="tablist"
+      onKeyDown={onTabStripKeyDown}
       className={`flex items-center gap-1 ${inset ? "" : "border-b border-line"} ${className ?? ""}`}
     >
-      {tabs.map((t) => {
+      {tabs.map((t, i) => {
         const active = t.value === value;
         const inactiveColor = t.dimmed ? "var(--color-muted-4)" : "var(--color-muted-2)";
         const style: CSSProperties = inset
@@ -469,6 +523,11 @@ export function Tabs<T extends string>({
             type="button"
             role="tab"
             aria-selected={active}
+            // Roving tabindex — the strip is one Tab stop; the arrow keys move
+            // between tabs (see {@link onTabStripKeyDown}). Falls back to the
+            // first tab so an unmatched `value` can't strand the whole strip
+            // outside the tab order.
+            tabIndex={(selected < 0 ? 0 : selected) === i ? 0 : -1}
             onClick={() => onChange(t.value)}
             className={`${base} ${tabClassName ?? ""}`}
             style={style}
@@ -556,6 +615,12 @@ export function Badge({
  *  where a caller sets it, and falls back to any enabled `<button>` since most
  *  existing menus (built from the shared {@link MENU_ITEM} class) don't. */
 const MENU_ITEM_SELECTOR = '[role="menuitem"]:not([disabled]), button:not([disabled])';
+
+/** Focusable-element selector — the elements a keyboard user could actually land
+ *  on. Used by {@link useModalA11y}'s Tab trap and by {@link Dropdown} to find
+ *  its trigger when handing focus back. */
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
  * A click-away dropdown: `trigger` renders the opener (it's handed a `toggle`),
@@ -672,11 +737,28 @@ export function Dropdown({
   }, [open, close]);
 
   // Move focus into the menu when it opens — covers both click-opened and
-  // controlled/shortcut-opened dropdowns (both flow through `open`).
+  // controlled/shortcut-opened dropdowns (both flow through `open`) — and hand it
+  // back to the trigger on close, so Escape / picking an item / clicking away
+  // doesn't drop focus onto <body>. The restore is skipped when the close already
+  // moved focus somewhere real (e.g. a click straight into another control), so
+  // we never yank it back out from under the user.
+  //
+  // Keyed on the portal being *mounted*, not on `open`: the menu only renders
+  // once the layout effect above has measured `coords`, a commit later — on
+  // `open` alone this ran while `menuRef` was still null and focus never moved.
+  // A boolean (not `coords` itself) so re-measuring on scroll/resize doesn't
+  // snap focus back to the first item mid-rove.
+  const menuMounted = open && coords !== null;
   useEffect(() => {
-    if (!open) return;
+    if (!menuMounted) return;
     menuRef.current?.querySelector<HTMLElement>(MENU_ITEM_SELECTOR)?.focus();
-  }, [open]);
+    return () => {
+      const active = document.activeElement;
+      const stranded = !active || active === document.body || !!menuRef.current?.contains(active);
+      if (!stranded) return;
+      ref.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)?.focus();
+    };
+  }, [menuMounted]);
 
   const onMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
@@ -739,11 +821,6 @@ export function underlineTabStyle(active: boolean): CSSProperties {
     boxShadow: active ? "inset 0 -2px 0 var(--accent)" : "none",
   };
 }
-
-/** Focusable-element selector used by {@link useModalA11y}'s Tab trap — mirrors
- *  the elements a keyboard user could actually land on. */
-const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
  * Focus management for a modal `role="dialog"`, shared by {@link ConfirmDialog}

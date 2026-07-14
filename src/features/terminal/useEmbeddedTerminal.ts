@@ -5,10 +5,10 @@
  * same subtle lifecycle, so it lives here once:
  *
  *  1. `ensure(...)` an (idempotent) session for the spec's `refId`, then point
- *     the persistent {@link TerminalLayer} at our host via `setEmbed`. The host
- *     rect is captured *synchronously* inside a `useLayoutEffect` and handed to
- *     `setEmbed`, so the layer is correctly sized on the very first paint — the
- *     ResizeObserver only re-measures afterward. Without this the PTY opens at
+ *     the persistent {@link TerminalLayer} at our host via `attachEmbed`. The
+ *     host rect is captured *synchronously* inside a `useLayoutEffect` and handed
+ *     to `attachEmbed`, so the layer is correctly sized on the very first paint —
+ *     the ResizeObserver only re-measures afterward. Without this the PTY opens at
  *     the full content-area size for a frame and reflows (documented sizing
  *     race). The layout effect (not a passive effect) also tears the embed down
  *     synchronously with the DOM commit, so the overlay never lingers over other
@@ -47,9 +47,16 @@ export function useEmbeddedTerminal(opts: {
   spec: EmbeddedTerminalSpec;
   /** Fired once when the hosted process exits (its tab is removed). */
   onExited?: () => void;
+  /**
+   * Whether to display the session over `hostRef` (default) or merely keep it
+   * running. The off-screen background launcher wants the session — a real PTY,
+   * seeded, sized by the layer like any other pane — but must NOT show it: the
+   * inline slot belongs to whatever terminal the user is actually looking at.
+   */
+  attach?: boolean;
 }): UseEmbeddedTerminalResult {
-  const { spec, onExited } = opts;
-  const { tabs, ensure, close: closeTab, setEmbed } = useTerminals();
+  const { spec, onExited, attach = true } = opts;
+  const { tabs, ensure, close: closeTab, attachEmbed, detachEmbeds } = useTerminals();
 
   const hostRef = useRef<HTMLDivElement | null>(null);
   const keyRef = useRef<string | null>(null);
@@ -67,17 +74,20 @@ export function useEmbeddedTerminal(opts: {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: argsKey stands in for args.
   useLayoutEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
     const key = ensure({ title, cwd, command, args, seed, source, refId });
     keyRef.current = key;
     seenRef.current = false;
+    const host = hostRef.current;
+    if (!attach || !host) return;
     // Capture the host's current rect synchronously so the layer is sized right
     // on first paint (opens at the correct size, not the full content area).
     const r = host.getBoundingClientRect();
-    setEmbed({ host, key, rect: { top: r.top, left: r.left, width: r.width, height: r.height } });
-    return () => setEmbed(null);
-  }, [title, cwd, command, seed, source, refId, argsKey, ensure, setEmbed]);
+    return attachEmbed({
+      host,
+      key,
+      rect: { top: r.top, left: r.left, width: r.width, height: r.height },
+    });
+  }, [title, cwd, command, seed, source, refId, argsKey, attach, ensure, attachEmbed]);
 
   // Seen-latch exit detection (see the file header).
   useEffect(() => {
@@ -94,9 +104,10 @@ export function useEmbeddedTerminal(opts: {
 
   const close = useCallback(() => {
     const key = keyRef.current;
-    if (key) closeTab(key);
-    setEmbed(null);
-  }, [closeTab, setEmbed]);
+    if (!key) return;
+    closeTab(key);
+    detachEmbeds(key);
+  }, [closeTab, detachEmbeds]);
 
   return { hostRef, close };
 }

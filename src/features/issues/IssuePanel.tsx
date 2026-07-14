@@ -483,18 +483,29 @@ function WorktreeCard({
   onOpen: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      title="Open this worktree on the Trees tab"
-      className="group flex w-full cursor-pointer flex-col gap-1.5 rounded-lg border border-line-2 bg-input px-3 py-2 text-left transition-colors hover:border-line-strong"
-    >
+    <div className="group relative flex w-full cursor-pointer flex-col gap-1.5 rounded-lg border border-line-2 bg-input px-3 py-2 text-left transition-colors hover:border-line-strong">
+      {/* The open action is a button stretched over the whole card rather than a
+          <button> wrapping it: the PR chips are buttons too, and nesting them
+          inside one would flatten them out of the a11y tree. Anything that must
+          stay clickable (the chips) is positioned, so it paints — and hit-tests —
+          above this. */}
+      <button
+        type="button"
+        onClick={onOpen}
+        title="Open this worktree on the Trees tab"
+        aria-label={`Open the ${worktree.branch} worktree on the Trees tab`}
+        className="absolute inset-0 cursor-pointer rounded-lg"
+      />
       <div className="flex items-center gap-2">
         <BranchIcon size={12} className="flex-none text-muted-3" />
         <span className="flex-1 overflow-hidden font-mono text-[11px] text-ellipsis whitespace-nowrap text-fg-2">
           {worktree.branch}
         </span>
-        <PrChips prs={prs} />
+        {prs.length > 0 && (
+          <span className="relative flex flex-none items-center">
+            <PrChips prs={prs} />
+          </span>
+        )}
         <span className="flex-none text-muted-4 transition-transform group-hover:translate-x-0.5">
           →
         </span>
@@ -502,6 +513,6 @@ function WorktreeCard({
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10px] text-muted-4">
         <WorktreeStats worktree={worktree} showClean />
       </div>
-    </button>
+    </div>
   );
 }

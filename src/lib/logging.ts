@@ -26,7 +26,11 @@ function stringifyArg(arg: unknown): string {
   if (typeof arg === "string") return arg;
   if (arg instanceof Error) return arg.stack ?? `${arg.name}: ${arg.message}`;
   try {
-    return JSON.stringify(arg);
+    // JSON.stringify returns the *value* `undefined` (not a string) for undefined,
+    // functions and symbols — its TS signature lies. Joining that into the line
+    // drops the token entirely, losing the most diagnostic part of
+    // `console.warn("v:", undefined)`.
+    return JSON.stringify(arg) ?? String(arg);
   } catch {
     return String(arg);
   }

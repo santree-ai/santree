@@ -11,11 +11,24 @@ dist
 dist-ssr
 *.local
 
+# Production source maps, moved out of dist/ by scripts/stash-sourcemaps.mjs so
+# they never reach the app bundle. Keep the matching sourcemaps/<version>/ folder
+# with each release artifact — `pnpm symbolicate` needs it to read a user's stack
+# trace — but it holds the full frontend source, so it doesn't belong in git.
+sourcemaps
+
 # TanStack Router plugin cache
 .tanstack
 
-# Claude Code local session/worktree state (nothing here is meant to be shared)
-.claude
+# Claude Code: session/worktree state stays local, but shared project config
+# (settings, hooks, skills, agents, commands) is versioned so every clone and
+# every santree-managed worktree inherits it.
+.claude/*
+!.claude/settings.json
+!.claude/hooks
+!.claude/skills
+!.claude/agents
+!.claude/commands
 
 # Rust / Cargo (workspace target)
 /target

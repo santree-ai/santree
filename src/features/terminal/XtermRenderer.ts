@@ -46,12 +46,26 @@ const LIGHT_THEME = {
 const liveAccent = () =>
   getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || DEFAULT_ACCENT;
 
+/** A translucent version of a color for xterm's theme. The app's `alpha()` helper
+ *  emits `color-mix()`, which only a CSS engine understands — xterm parses the
+ *  string itself, so it needs a literal. Expands a 3/6-digit hex to `rgba()`;
+ *  anything else (an `rgb()`/named color someone sets `--accent` to) is passed
+ *  through untouched rather than concatenated into a broken token. Exported for
+ *  testing — see XtermRenderer.test.ts. */
+export function withAlpha(color: string, opacity: number): string {
+  const hex = color.replace(/^#/, "");
+  const full = hex.length === 3 ? hex.replace(/./g, (c) => c + c) : hex;
+  if (!/^[0-9a-f]{6}$/i.test(full)) return color;
+  const [r, g, b] = [0, 2, 4].map((i) => Number.parseInt(full.slice(i, i + 2), 16));
+  return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+}
+
 const themeFor = (mode: string | null) => {
   const accent = liveAccent();
   return {
     ...(mode === "light" ? LIGHT_THEME : DARK_THEME),
     cursor: accent,
-    selectionBackground: `${accent}33`,
+    selectionBackground: withAlpha(accent, 0.2),
   };
 };
 

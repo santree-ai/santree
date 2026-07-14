@@ -177,14 +177,35 @@ export function TriageView() {
 
   const { tabs: terminalTabs } = useTerminals();
 
-  // Active issues first, snoozed sunk to the bottom (matching the CLI).
-  const ordered = useMemo(
+  // Tickets whose investigation terminal is live right now.
+  const liveInvestigations = useMemo(
     () =>
-      [...visible].sort(
-        (a, b) => Number(a.snoozedUntilMs != null) - Number(b.snoozedUntilMs != null),
+      new Set(
+        terminalTabs
+          .filter((t) => t.source === "triage" && t.refId !== undefined)
+          .map((t) => t.refId as string),
       ),
-    [visible],
+    [terminalTabs],
   );
+  // Tickets with a stored session from a past investigation (persists across app
+  // restarts) — they get the tab + resume affordance even when not live.
+  const { data: startedIds = [] } = useStartedInvestigations(activeRepo);
+  const startedInvestigations = useMemo(() => new Set(startedIds), [startedIds]);
+
+  // Investigations float above the backlog — a running agent first, then a
+  // resumable one — because that's in-flight work you're likely to return to,
+  // regardless of where SLA puts it. Snoozed still sinks to the bottom (matching
+  // the CLI). `sort` is stable, so SLA order holds within each rank.
+  const rank = useCallback(
+    (t: TriageTicket) => {
+      if (t.snoozedUntilMs != null) return 3;
+      if (liveInvestigations.has(t.id)) return 0;
+      if (startedInvestigations.has(t.id)) return 1;
+      return 2;
+    },
+    [liveInvestigations, startedInvestigations],
+  );
+  const ordered = useMemo(() => [...visible].sort((a, b) => rank(a) - rank(b)), [visible, rank]);
   // Group by team, preserving order. Only used when the queue spans >1 team.
   const groups = useMemo(() => {
     const map = new Map<string, TriageTicket[]>();
@@ -214,19 +235,6 @@ export function TriageView() {
 
   // Batch investigation: tickets are eligible while not snoozed and not already
   // running one; the checkbox selection mirrors the Issues launch queue.
-  const liveInvestigations = useMemo(
-    () =>
-      new Set(
-        terminalTabs
-          .filter((t) => t.source === "triage" && t.refId !== undefined)
-          .map((t) => t.refId as string),
-      ),
-    [terminalTabs],
-  );
-  // Tickets with a stored session from a past investigation (persists across app
-  // restarts) — they get the tab + resume affordance even when not live.
-  const { data: startedIds = [] } = useStartedInvestigations(activeRepo);
-  const startedInvestigations = useMemo(() => new Set(startedIds), [startedIds]);
   const canInvestigate = !!investigateCommand && !!repoPath;
   const eligibleIds = useMemo(
     () =>

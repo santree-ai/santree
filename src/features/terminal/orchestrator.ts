@@ -61,6 +61,15 @@ export interface TerminalEmbed {
   rect?: EmbedRect;
 }
 
+/** One claim on the inline slot, tagged with an identity so releasing it can't
+ *  drop somebody else's claim. */
+interface EmbedClaim {
+  id: number;
+  embed: TerminalEmbed;
+}
+
+let embedSeq = 0;
+
 export interface TerminalTabs {
   tabs: TerminalTab[];
   activeKey: string | null;
@@ -71,15 +80,25 @@ export interface TerminalTabs {
   ensure: (spec: TerminalSpec & { refId: string }) => string;
   /** Close a tab (the view tears its session down on unmount). */
   close: (key: string) => void;
-  /** The session currently embedded inline (e.g. the triage Investigate tab). */
+  /** The session currently embedded inline (e.g. the triage Investigate tab) —
+   *  the newest live claim. */
   embed: TerminalEmbed | null;
-  setEmbed: (embed: TerminalEmbed | null) => void;
+  /** Claim the inline slot. Returns a release fn that hands the slot back to
+   *  whoever held it before, rather than blanking it: claims overlap (a route
+   *  swap mounts the incoming host before the outgoing one's cleanup runs), and
+   *  a release that cleared the slot outright left the still-mounted host with a
+   *  layer pointed nowhere and no reason to re-register. */
+  attachEmbed: (embed: TerminalEmbed) => () => void;
+  /** Drop every claim on a session — its process died, so nothing should stay
+   *  pointed at it. */
+  detachEmbeds: (key: string) => void;
 }
 
 export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
   const [tabs, setTabs] = useState<TerminalTab[]>(() => initial.map(withKey));
   const [activeKey, setActiveKey] = useState<string | null>(tabs[0]?.key ?? null);
-  const [embed, setEmbed] = useState<TerminalEmbed | null>(null);
+  const [claims, setClaims] = useState<EmbedClaim[]>([]);
+  const embed = claims.length > 0 ? claims[claims.length - 1].embed : null;
   // Mirror the latest tabs so the mutators below can decide (and derive the next
   // activeKey) without an impure — StrictMode double-invoked — state updater.
   // Every writer updates the ref eagerly, so two calls in one tick see each other.
@@ -118,8 +137,30 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
     setActiveKey((cur) => (cur === key ? (next[Math.max(0, idx - 1)]?.key ?? null) : cur));
   }, []);
 
+  const attachEmbed = useCallback((next: TerminalEmbed) => {
+    const id = embedSeq++;
+    setClaims((prev) => [...prev, { id, embed: next }]);
+    return () => setClaims((prev) => prev.filter((c) => c.id !== id));
+  }, []);
+
+  const detachEmbeds = useCallback((key: string) => {
+    setClaims((prev) =>
+      prev.some((c) => c.embed.key === key) ? prev.filter((c) => c.embed.key !== key) : prev,
+    );
+  }, []);
+
   return useMemo(
-    () => ({ tabs, activeKey, setActiveKey, open, ensure, close, embed, setEmbed }),
-    [tabs, activeKey, open, ensure, close, embed],
+    () => ({
+      tabs,
+      activeKey,
+      setActiveKey,
+      open,
+      ensure,
+      close,
+      embed,
+      attachEmbed,
+      detachEmbeds,
+    }),
+    [tabs, activeKey, open, ensure, close, embed, attachEmbed, detachEmbeds],
   );
 }

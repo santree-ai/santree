@@ -2,6 +2,7 @@
  * and model. Mirrors the "Harnesses" screen — agent paths live here, while which
  * agent an action uses is configured under Actions. */
 
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useState } from "react";
 
 import type { AgentKind } from "../../../bindings";
@@ -214,6 +215,8 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
   );
 }
 
+const CHROME_EXTENSION_URL = "https://code.claude.com/docs/en/chrome";
+
 /** Claude-only launch/terminal behavior toggles: launch with `--chrome` (browser
  *  control), and show santree's inline context-usage bar. santree always injects
  *  its own status line into the sessions it launches (leaving the user's own
@@ -236,9 +239,15 @@ function ClaudeTerminalBlock() {
               Launch Claude with the <span className="font-mono">--chrome</span> flag so it can
               control your browser. Requires the{" "}
               <a
-                href="https://code.claude.com/docs/en/chrome"
+                href={CHROME_EXTENSION_URL}
                 target="_blank"
                 rel="noreferrer"
+                // WKWebView ignores target="_blank" (see Markdown.tsx) — hand the URL to
+                // the opener plugin instead, keeping the href for right-click-to-copy.
+                onClick={(e) => {
+                  e.preventDefault();
+                  void openUrl(CHROME_EXTENSION_URL);
+                }}
                 className="underline decoration-line-strong underline-offset-2 hover:text-fg-2"
               >
                 Claude Code Chrome extension

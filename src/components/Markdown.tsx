@@ -228,9 +228,9 @@ function literalizeUnknownHtml() {
  * Linear's editor serializes to slightly off-spec markdown — e.g. a non-breaking
  * space before a closing `**` (so `**Description: **` won't bold under
  * CommonMark) and stray lone `**` lines. Normalize those so bold renders the way
- * Linear shows it.
+ * Linear shows it. Exported for testing — see Markdown.test.ts.
  */
-function normalizeLinearMarkdown(md: string): string {
+export function normalizeLinearMarkdown(md: string): string {
   return (
     md
       // NBSP → regular space.

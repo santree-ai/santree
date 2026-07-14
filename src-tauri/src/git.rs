@@ -40,9 +40,15 @@ fn safe_path(cwd: &Path, rel: &str) -> Result<PathBuf> {
 }
 
 /// Like [`safe_path`] but also resolves symlinks and asserts the result stays
-/// under the worktree root. Required before any raw `std::fs` read/delete: the
-/// lexical check can't catch a symlink *inside* the worktree pointing out of it
+/// under the worktree root. Required before any raw `std::fs` read: the lexical
+/// check can't catch a symlink *inside* the worktree pointing out of it
 /// (`subdir/link → /etc`), and these worktrees hold agent-written, untrusted code.
+///
+/// Resolving here and *using* the path at the sink is a TOCTOU window, so nothing
+/// calls this directly — reads go through [`open_in_worktree`], which re-checks
+/// the file it actually opened. Writes and deletes don't use it at all: they go
+/// through `git`, which resolves paths itself and never follows a symlink out of
+/// the worktree.
 fn safe_real_path(cwd: &Path, rel: &str) -> Result<PathBuf> {
     let joined = safe_path(cwd, rel)?;
     let root =
@@ -65,6 +71,58 @@ fn safe_real_path(cwd: &Path, rel: &str) -> Result<PathBuf> {
         bail!("path '{rel}' escapes the worktree");
     }
     Ok(real)
+}
+
+/// Open a worktree file for reading — the only way raw `std::fs` reads a path that
+/// came over IPC.
+///
+/// Resolving a path and then opening it is inherently racy, and a worktree is the
+/// one place in this app where a *hostile* process plausibly runs: the agent's own
+/// code. It can swap a component for a symlink between [`safe_real_path`]'s
+/// `canonicalize` and the `open`, redirecting the read out of the tree. std exposes
+/// no fd-relative resolution (`openat`), so the resolution can't be made atomic —
+/// instead the file we *did* open is checked against the one that was validated:
+/// `fstat` on the descriptor must report the same inode on the same device as the
+/// `lstat` taken immediately before. A path swapped after the check is a mismatch,
+/// and is refused before a byte is read.
+///
+/// The pre-open `lstat` also rejects anything that isn't a regular file, so a FIFO
+/// sitting where git reports an untracked file can't wedge us inside a blocking
+/// `open(2)`. (One swapped *into* the check→open window still could — a local DoS on
+/// the blocking pool by the agent's own code, but never an escape or a disclosure.)
+fn open_in_worktree(cwd: &Path, rel: &str) -> Result<std::fs::File> {
+    let real = safe_real_path(cwd, rel)?;
+    let checked = std::fs::symlink_metadata(&real)?;
+    if !checked.is_file() {
+        bail!("path '{rel}' is not a regular file");
+    }
+    let file = std::fs::File::open(&real)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || !same_file(&checked, &opened) {
+        bail!("path '{rel}' was replaced while it was being opened");
+    }
+    Ok(file)
+}
+
+/// Whether two `Metadata` describe the same filesystem object — the identity check
+/// behind [`open_in_worktree`]'s post-open verification.
+#[cfg(unix)]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    (a.dev(), a.ino()) == (b.dev(), b.ino())
+}
+
+#[cfg(not(unix))]
+fn same_file(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
+    true
+}
+
+/// The full contents of a worktree file, read through [`open_in_worktree`].
+fn read_in_worktree(cwd: &Path, rel: &str) -> Result<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    open_in_worktree(cwd, rel)?.read_to_string(&mut text)?;
+    Ok(text)
 }
 
 /// Run `git -C <cwd> <args>`, returning trimmed stdout. Errors (with stderr) on
@@ -91,6 +149,8 @@ pub fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
 /// can't be spawned — a non-zero exit is reported via the bool, so callers can
 /// handle commands that exit non-zero by design (e.g. `diff --no-index`).
 fn git_capture(cwd: &Path, args: &[&str]) -> Result<(bool, String, String)> {
+    #[cfg(test)]
+    count_git_call(cwd);
     let out = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -102,6 +162,33 @@ fn git_capture(cwd: &Path, args: &[&str]) -> Result<(bool, String, String)> {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
+}
+
+/// A census of spawned `git` processes, keyed by the directory each ran in. The
+/// worktree-status build runs on every filesystem-event burst (~400ms while an agent
+/// writes), so its subprocess count per worktree is a load-bearing number — this is
+/// what lets a test pin it down instead of trusting a reading of the code. Keyed by
+/// cwd (not a bare counter) so tests, which share the process and run in parallel,
+/// each count only the git runs under their own scratch repo.
+#[cfg(test)]
+static GIT_CALLS: LazyLock<Mutex<HashMap<PathBuf, u32>>> = LazyLock::new(Default::default);
+
+#[cfg(test)]
+fn count_git_call(cwd: &Path) {
+    let mut calls = GIT_CALLS.lock().unwrap_or_else(|e| e.into_inner());
+    *calls.entry(cwd.to_path_buf()).or_default() += 1;
+}
+
+/// How many `git` processes have been spawned in (or below) `prefix` so far.
+#[cfg(test)]
+pub(crate) fn git_calls_under(prefix: &Path) -> u32 {
+    GIT_CALLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(dir, _)| dir.starts_with(prefix))
+        .map(|(_, n)| n)
+        .sum()
 }
 
 /// The default branch for the repo's `origin` remote (e.g. `main`/`master`),
@@ -267,47 +354,8 @@ pub(crate) fn compare_base(cwd: &Path, base: &str) -> String {
     }
 }
 
-/// Count commits `branch` is ahead of `base` (`<base>..HEAD`). 0 on failure.
-pub fn ahead(cwd: &Path, base: &str) -> u32 {
-    let base = compare_base(cwd, base);
-    git(cwd, &["rev-list", "--count", &format!("{base}..HEAD")])
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
-}
-
-/// Count commits HEAD is behind `origin/<base>` (`HEAD..origin/<base>`). 0 on
-/// failure (e.g. no upstream).
-pub fn behind(cwd: &Path, base: &str) -> u32 {
-    git(
-        cwd,
-        &["rev-list", "--count", &format!("HEAD..origin/{base}")],
-    )
-    .ok()
-    .and_then(|s| s.parse().ok())
-    .unwrap_or(0)
-}
-
-/// Count commits on `branch` that aren't on its remote tracking branch yet —
-/// i.e. what a `git push` would upload. When the branch has been pushed before,
-/// that's `origin/<branch>..HEAD`; when it never has (no remote ref), every commit
-/// the branch added over `base` is unpushed, so fall back to `ahead`. 0 on failure.
-pub fn unpushed(cwd: &Path, branch: &str, base: &str) -> u32 {
-    let origin_ref = format!("origin/{branch}");
-    if git(cwd, &["rev-parse", "--verify", &origin_ref]).is_ok() {
-        return git(
-            cwd,
-            &["rev-list", "--count", &format!("{origin_ref}..HEAD")],
-        )
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    }
-    ahead(cwd, base)
-}
-
 /// Best-effort, throttled `git fetch origin <branch>` so the branch's remote
-/// tracking ref (and thus [`remote_behind`]) reflects commits added upstream —
+/// tracking ref (and thus [`Stats::remote_behind`]) reflects commits added upstream —
 /// PR-UI suggestions, "Update branch", a teammate's push. Nothing else in the app
 /// fetches the worktree's own branch, so without this the ref stays stale and the
 /// Pull button never lights up.
@@ -322,7 +370,7 @@ pub fn refresh_remote_ref(cwd: &Path, branch: &str) {
     const THROTTLE: Duration = Duration::from_secs(20);
 
     {
-        let mut last = LAST_FETCH.lock().unwrap();
+        let mut last = LAST_FETCH.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         if let Some(&t) = last.get(cwd) {
             if now.duration_since(t) < THROTTLE {
@@ -336,43 +384,143 @@ pub fn refresh_remote_ref(cwd: &Path, branch: &str) {
     let _ = git_capture(cwd, &["fetch", "origin", branch]);
 }
 
-/// Pending-pull state for a worktree branch: how many commits origin/<branch> has
-/// that aren't local, and — only when there are — whether pulling them would
-/// conflict with local commits. Freshens the remote ref first (throttled). Bundled
-/// so the fetch happens once and the (cheap) virtual-merge conflict check runs only
-/// when there's actually something to pull.
-pub struct PullState {
+/// Every git stat the Trees sidebar shows for one worktree.
+///
+/// Gathered together, and deliberately so: the FS watcher invalidates the
+/// worktree-status query on every ~400ms burst, so an agent writing files re-runs
+/// this for every worktree, several times a second. Computed one stat at a time it
+/// cost ~10 `git` processes each — including `rev-parse --verify origin/<base>`
+/// spawned two or three times with the same answer. See [`stats`].
+pub struct Stats {
+    pub add_lines: u32,
+    pub del_lines: u32,
+    pub dirty: bool,
+    pub ahead: u32,
     pub behind: u32,
-    pub conflict: bool,
+    pub unpushed: u32,
+    pub remote_behind: u32,
 }
 
-pub fn pull_state(cwd: &Path, branch: &str) -> PullState {
-    refresh_remote_ref(cwd, branch);
-    let behind = remote_behind(cwd, branch);
-    let conflict = behind > 0
-        && merge_conflicts(cwd, &format!("origin/{branch}"))
-            .map(|c| !c.is_empty())
-            .unwrap_or(false);
-    PullState { behind, conflict }
-}
+/// Gather a worktree's stats in one pass. Purely local — [`refresh_remote_ref`] is
+/// the (throttled) network half, called separately, so the paths that must not touch
+/// the network don't.
+///
+/// * `ahead` / `behind` — against the ref the branch was forked from
+///   ([`compare_base`]), which is also the ref the "Pull from main" button merges.
+/// * `unpushed` / `remote_behind` — against the branch's own tracking ref: what a
+///   push would upload and what a pull would download. A branch that was never
+///   pushed has no tracking ref, so everything it added over the base is unpushed.
+pub fn stats(cwd: &Path, branch: &str, base: &str) -> Stats {
+    // One `for-each-ref` for both remote refs, rather than a `rev-parse --verify`
+    // per lookup — the same two were resolved up to five times per build.
+    let remotes = origin_refs(cwd, &[base, branch]);
+    let published = |name: &str| remotes.iter().any(|r| r == name);
 
-/// Count commits on the branch's remote tracking ref that aren't local yet —
-/// `HEAD..origin/<branch>`, i.e. what a `git pull` would download. This is commits
-/// added to the branch *remotely* (PR-UI suggestions, GitHub's "Update branch",
-/// a teammate's push), distinct from `behind` which is measured against the base.
-/// 0 when the branch has no remote ref or on failure.
-pub fn remote_behind(cwd: &Path, branch: &str) -> u32 {
-    let origin_ref = format!("origin/{branch}");
-    if git(cwd, &["rev-parse", "--verify", &origin_ref]).is_err() {
-        return 0;
+    let compare = if published(base) {
+        format!("origin/{base}")
+    } else {
+        base.to_string()
+    };
+    let (add_lines, del_lines) = numstat_totals(cwd, &compare);
+    let (behind, ahead) = left_right(cwd, &compare, "HEAD");
+    let (remote_behind, unpushed) = if published(branch) {
+        left_right(cwd, &format!("origin/{branch}"), "HEAD")
+    } else {
+        (0, ahead)
+    };
+
+    Stats {
+        add_lines,
+        del_lines,
+        dirty: is_dirty(cwd),
+        ahead,
+        behind,
+        unpushed,
+        remote_behind,
     }
-    git(
+}
+
+/// Which of `names` exist as `origin/<name>`, resolved in a single `git` process.
+/// `for-each-ref` takes several patterns at once and (unlike `rev-parse --verify`)
+/// can't mistake a name for a flag, since each is embedded in a full `refs/…` path.
+fn origin_refs(cwd: &Path, names: &[&str]) -> Vec<String> {
+    let patterns: Vec<String> = names
+        .iter()
+        .map(|n| format!("refs/remotes/origin/{n}"))
+        .collect();
+    let mut args = vec!["for-each-ref", "--format=%(refname)"];
+    args.extend(patterns.iter().map(String::as_str));
+    let Ok(out) = git_output(cwd, &args) else {
+        return Vec::new();
+    };
+    // A pattern also matches refs *below* it (`…/origin/main` matches `…/origin/main/x`),
+    // so keep only the exact names we asked about.
+    out.lines()
+        .filter_map(|l| l.strip_prefix("refs/remotes/origin/"))
+        .filter(|name| names.contains(name))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Additions/deletions of the whole worktree — committed *and* uncommitted — against
+/// its merge base with `base`, the way a PR shows them. `--merge-base` resolves the
+/// fork point inside the same process, so this is one `git` call, not a `merge-base`
+/// followed by a `diff`. `(0, 0)` when `base` can't be resolved.
+fn numstat_totals(cwd: &Path, base: &str) -> (u32, u32) {
+    let Ok(raw) = git_output(cwd, &["diff", "--merge-base", base, "--numstat"]) else {
+        return (0, 0);
+    };
+    raw.lines()
+        .filter_map(parse_numstat_line)
+        .fold((0, 0), |(a, d), (_, add, del, _)| (a + add, d + del))
+}
+
+/// The two commit counts of the symmetric difference `a...b` — what each side has
+/// that the other doesn't — in a single process instead of a `rev-list` per
+/// direction. `(0, 0)` when either ref can't be resolved.
+fn left_right(cwd: &Path, a: &str, b: &str) -> (u32, u32) {
+    let Ok(out) = git(
         cwd,
-        &["rev-list", "--count", &format!("HEAD..{origin_ref}")],
-    )
-    .ok()
-    .and_then(|s| s.parse().ok())
-    .unwrap_or(0)
+        &["rev-list", "--left-right", "--count", &format!("{a}...{b}")],
+    ) else {
+        return (0, 0);
+    };
+    let mut counts = out.split_whitespace().map(|n| n.parse().unwrap_or(0));
+    (counts.next().unwrap_or(0), counts.next().unwrap_or(0))
+}
+
+/// Whether merging `target` into HEAD would conflict — what disables the Pull button
+/// up front. Memoized per worktree on the pair of commits the answer depends on: the
+/// underlying [`merge_conflicts`] runs `merge-tree --write-tree`, which writes real
+/// objects into the object database, and the status build that asks this re-runs on
+/// every filesystem burst. Neither commit moves while an agent is merely *editing*
+/// files, so the virtual merge now runs when one of them actually does.
+pub fn would_conflict(cwd: &Path, target: &str) -> bool {
+    /// Per worktree: the commit pair the last answer was computed for, and the answer.
+    type Cache = Mutex<HashMap<PathBuf, ([String; 2], bool)>>;
+    // One entry per worktree: the previous answer is only ever consulted for the same
+    // (HEAD, target) pair, so a moved commit replaces it rather than growing the map.
+    static CACHE: LazyLock<Cache> = LazyLock::new(Default::default);
+
+    let Some(pair) = rev_pair(cwd, "HEAD", target) else {
+        return false;
+    };
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached, conflict)) = cache.get(cwd) {
+        if *cached == pair {
+            return *conflict;
+        }
+    }
+    let conflict = merge_conflicts(cwd, target).is_some_and(|c| !c.is_empty());
+    cache.insert(cwd.to_path_buf(), (pair, conflict));
+    conflict
+}
+
+/// Resolve two revs to their commit oids in one process. `None` if either is missing.
+fn rev_pair(cwd: &Path, a: &str, b: &str) -> Option<[String; 2]> {
+    let out = git(cwd, &["rev-parse", a, b]).ok()?;
+    let mut lines = out.lines();
+    Some([lines.next()?.to_string(), lines.next()?.to_string()])
 }
 
 /// Merge the freshest base branch (`origin/<base>`, else local `<base>`) into the
@@ -586,7 +734,7 @@ pub fn status(cwd: &Path) -> Result<Vec<ChangedFile>> {
 
 /// Parse one `git diff --numstat` line into `(path, additions, deletions,
 /// binary)`. Binary files report their counts as `-`.
-pub fn parse_numstat_line(line: &str) -> Option<(String, u32, u32, bool)> {
+fn parse_numstat_line(line: &str) -> Option<(String, u32, u32, bool)> {
     let mut cols = line.splitn(3, '\t');
     let a = cols.next()?;
     let d = cols.next()?;
@@ -655,10 +803,7 @@ const MAX_SCANNED_BYTES: usize = 4 * 1024 * 1024;
 /// line-count badge.
 fn count_new_file(cwd: &Path, path: &str) -> (u32, u32, bool) {
     use std::io::Read;
-    let Ok(real) = safe_real_path(cwd, path) else {
-        return (0, 0, false);
-    };
-    let Ok(file) = std::fs::File::open(real) else {
+    let Ok(file) = open_in_worktree(cwd, path) else {
         return (0, 0, false);
     };
     let mut reader = std::io::BufReader::new(file);
@@ -699,6 +844,17 @@ pub fn file_diff(cwd: &Path, path: &str, untracked: bool) -> Result<String> {
     if untracked {
         // `--no-index` reads any path on disk, so resolve symlinks and confirm
         // containment before handing it the absolute path.
+        //
+        // This is a check-then-use: git re-resolves the string, so a leaf swapped to a
+        // symlink after the check is read as its 120000 *target path* (harmless), but a
+        // swapped intermediate *directory* component would be followed to a file
+        // outside the worktree and its contents shown in the diff. Unlike the delete in
+        // `discard` (a destructive out-of-tree write, closed by routing through git) or
+        // the reads in `open_in_worktree` (an fstat recheck), this residual isn't a
+        // privilege gain: the only actor who can win the race is the agent whose code
+        // runs in this worktree, and it can already read any file the user can. Closing
+        // it would mean passing git a verified fd (`/dev/fd/N`) — which needs the fd to
+        // survive the `exec` — for no security the attacker doesn't already have.
         let abs = safe_real_path(cwd, path)?;
         // `--no-index` exits 1 when the files differ — expected, so capture.
         let (_, stdout, _) = git_capture(
@@ -720,7 +876,7 @@ pub fn file_diff(cwd: &Path, path: &str, untracked: bool) -> Result<String> {
 /// The old (HEAD) and new (working-tree) full contents of a file, for the diff
 /// viewer's context expansion. Either side is empty when absent.
 pub fn file_source(cwd: &Path, path: &str) -> Result<FileSource> {
-    let new_text = std::fs::read_to_string(safe_real_path(cwd, path)?).unwrap_or_default();
+    let new_text = read_in_worktree(cwd, path).unwrap_or_default();
     let old_text = git_output(cwd, &["show", &format!("HEAD:{path}")]).unwrap_or_default();
     Ok(FileSource { old_text, new_text })
 }
@@ -739,12 +895,17 @@ pub fn unstage(cwd: &Path, path: &str) -> Result<()> {
 
 /// Discard a file's uncommitted changes. Untracked files are deleted; tracked
 /// files are restored from HEAD (both index and working tree).
+///
+/// The untracked delete is `git clean`, not `remove_file`: git resolves the pathspec
+/// itself and never follows a symlink out of the worktree — it won't descend through
+/// a symlinked directory component, and it unlinks a symlinked leaf rather than its
+/// target. `remove_file` had to be handed an already-resolved absolute path, which an
+/// agent writing in the worktree could invalidate between the check and the `unlink`.
 pub fn discard(cwd: &Path, path: &str, untracked: bool) -> Result<()> {
-    if untracked {
-        std::fs::remove_file(safe_real_path(cwd, path)?)?;
-        return Ok(());
-    }
     safe_path(cwd, path)?;
+    if untracked {
+        return git(cwd, &["clean", "--force", "--", path]).map(|_| ());
+    }
     git(cwd, &["checkout", "HEAD", "--", path]).map(|_| ())
 }
 
@@ -1300,28 +1461,124 @@ mod tests {
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
     }
 
-    /// `remote_behind` counts commits on origin/<branch> the local branch lacks,
-    /// but only after a fetch has updated the tracking ref (it reads the local
+    /// `stats().remote_behind` counts commits on origin/<branch> the local branch
+    /// lacks, but only after a fetch has updated the tracking ref (it reads the local
     /// `origin/<branch>` ref, matching how the worktree-list builder observes it).
     #[test]
     fn remote_behind_counts_after_fetch() {
         let (_origin, seed, repo) = init_diverged_feature("remote-behind-count");
 
         // Tracking ref is stale until a fetch, so nothing looks pending yet.
-        assert_eq!(remote_behind(&repo, "feature"), 0);
+        assert_eq!(stats(&repo, "feature", "main").remote_behind, 0);
 
         run_git(&repo, &["fetch", "origin", "feature"]);
         assert_eq!(
-            remote_behind(&repo, "feature"),
+            stats(&repo, "feature", "main").remote_behind,
             1,
             "one remote commit is now pending"
         );
 
         pull_remote(&repo, "feature").expect("pull_remote should succeed");
         assert_eq!(
-            remote_behind(&repo, "feature"),
+            stats(&repo, "feature", "main").remote_behind,
             0,
             "up to date after pulling"
+        );
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    // ---- stats (the one-pass worktree-status gather) ----
+
+    /// Every counter `stats` reports, against a branch with a published tracking ref,
+    /// an unpushed local commit, and uncommitted work on top. Each used to be its own
+    /// `git` invocation (or two); they must all still agree after being folded into a
+    /// single pass over `for-each-ref` + `rev-list --left-right` + `diff --merge-base`.
+    #[test]
+    fn stats_reports_every_counter_in_one_pass() {
+        let (_origin, seed, repo) = init_origin_seed_and_clone("stats-counters");
+        run_git(&repo, &["checkout", "-b", "feature"]);
+
+        // A commit that IS pushed…
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "pushed"]);
+        run_git(&repo, &["push", "-u", "origin", "feature"]);
+        // …and one that isn't.
+        std::fs::write(repo.join("b.txt"), "three\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "local only"]);
+        // Plus uncommitted work, which the badge counts like a PR diff does.
+        std::fs::write(repo.join("c.txt"), "four\n").unwrap();
+        run_git(&repo, &["add", "c.txt"]);
+        // Meanwhile the base moved on upstream.
+        advance_origin_main(&seed, "v2\n");
+        run_git(&repo, &["fetch", "origin", "main"]);
+
+        let s = stats(&repo, "feature", "main");
+        assert_eq!(s.ahead, 2, "two commits on top of the base");
+        assert_eq!(s.behind, 1, "one commit added to the base upstream");
+        assert_eq!(s.unpushed, 1, "only the second commit is unpushed");
+        assert_eq!(
+            s.remote_behind, 0,
+            "nothing was added to the branch remotely"
+        );
+        assert!(s.dirty, "a staged-but-uncommitted file is a dirty tree");
+        // 2 (a.txt) + 1 (b.txt) + 1 (c.txt) — committed *and* uncommitted, from the
+        // merge base, so the base's own upstream commit is never folded in.
+        assert_eq!((s.add_lines, s.del_lines), (4, 0));
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    /// A branch that was never pushed has no tracking ref: nothing can be pending on
+    /// it, and *every* commit it added over the base is what a push would upload.
+    #[test]
+    fn stats_treats_a_never_pushed_branch_as_fully_unpushed() {
+        let (_origin, seed, repo) = init_origin_seed_and_clone("stats-unpushed");
+        run_git(&repo, &["checkout", "-b", "feature"]);
+        std::fs::write(repo.join("a.txt"), "x\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "c1"]);
+
+        let s = stats(&repo, "feature", "main");
+        assert_eq!((s.ahead, s.unpushed), (1, 1));
+        assert_eq!(s.remote_behind, 0, "no tracking ref, nothing to pull");
+        assert!(!s.dirty);
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    /// `would_conflict` is the Pull button's up-front check. Its `merge-tree
+    /// --write-tree` writes objects into the ODB and the status build re-runs on every
+    /// filesystem burst, so the answer is memoized on the (HEAD, target) commit pair:
+    /// repeat asks must spawn no merge at all, and a moved commit must invalidate it.
+    #[test]
+    fn would_conflict_answers_from_cache_until_a_commit_moves() {
+        let (_origin, seed, repo) = init_diverged_feature("would-conflict-cache");
+        std::fs::write(repo.join("f.txt"), "local-conflict\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "conflicting local edit"]);
+        run_git(&repo, &["fetch", "origin", "feature"]);
+
+        assert!(would_conflict(&repo, "origin/feature"));
+        // The repeat answer costs a single `rev-parse` — no second virtual merge.
+        let before = git_calls_under(&repo);
+        assert!(would_conflict(&repo, "origin/feature"));
+        assert_eq!(
+            git_calls_under(&repo) - before,
+            1,
+            "a cached answer re-resolves the commits but must not re-run merge-tree"
+        );
+
+        // Moving HEAD invalidates it: taking origin's version resolves the conflict.
+        run_git(
+            &repo,
+            &["merge", "-X", "theirs", "--no-edit", "origin/feature"],
+        );
+        assert!(
+            !would_conflict(&repo, "origin/feature"),
+            "the cache must not outlive the commit pair it was computed for"
         );
 
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
@@ -1421,46 +1678,170 @@ mod tests {
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
     }
 
-    /// `pull_state` reports the pending-pull count and flags a conflicting pull —
-    /// the field that lets the Pull button disable itself up front.
+    /// The pending-pull pair the Trees sidebar shows: how many commits origin added to
+    /// the branch, and whether taking them would conflict (which disables the button).
+    /// `refresh_remote_ref` is the fetch that makes the count live.
     #[test]
-    fn pull_state_flags_conflicting_pull() {
+    fn pending_pull_is_counted_and_flagged_as_conflicting() {
         let (_origin, seed, repo) = init_diverged_feature("pull-state-conflict");
         std::fs::write(repo.join("f.txt"), "local-conflict\n").unwrap();
         run_git(&repo, &["add", "-A"]);
         run_git(&repo, &["commit", "-m", "conflicting local edit"]);
 
-        // `pull_state` fetches internally, so the count is live without a manual fetch.
-        let state = pull_state(&repo, "feature");
-        assert_eq!(state.behind, 1, "one remote commit is pending");
+        refresh_remote_ref(&repo, "feature");
+        let s = stats(&repo, "feature", "main");
+        assert_eq!(s.remote_behind, 1, "one remote commit is pending");
         assert!(
-            state.conflict,
+            would_conflict(&repo, "origin/feature"),
             "the pending pull conflicts with the local edit"
         );
-        assert!(
-            !is_dirty(&repo),
-            "computing pull_state must not touch the tree"
-        );
+        assert!(!is_dirty(&repo), "detecting it must not touch the tree");
 
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
     }
 
-    /// A non-conflicting divergence pulls cleanly, so `pull_state.conflict` is false.
+    /// A non-conflicting divergence pulls cleanly, so the Pull button stays enabled.
     #[test]
-    fn pull_state_clean_when_no_conflict() {
+    fn pending_pull_is_not_flagged_when_it_would_merge_cleanly() {
         let (_origin, seed, repo) = init_diverged_feature("pull-state-clean");
         // Local commit on a *different* file — pending pull, but no conflict.
         std::fs::write(repo.join("g.txt"), "local only\n").unwrap();
         run_git(&repo, &["add", "-A"]);
         run_git(&repo, &["commit", "-m", "non-conflicting local edit"]);
 
-        let state = pull_state(&repo, "feature");
-        assert_eq!(state.behind, 1);
+        refresh_remote_ref(&repo, "feature");
+        assert_eq!(stats(&repo, "feature", "main").remote_behind, 1);
         assert!(
-            !state.conflict,
+            !would_conflict(&repo, "origin/feature"),
             "a non-conflicting pull must not be flagged"
         );
 
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    // ---- discard (untracked deletes go through git, not `remove_file`) ----
+
+    /// The base case: discarding an untracked file deletes it, and a tracked file is
+    /// restored from HEAD.
+    #[test]
+    fn discard_removes_untracked_and_restores_tracked() {
+        let base = scratch_dir("discard-basic");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("tracked.txt"), "original\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        // Untracked, nested inside a directory git has never seen.
+        std::fs::write(repo.join("sub/new.txt"), "x\n").unwrap();
+        discard(&repo, "sub/new.txt", true).unwrap();
+        assert!(!repo.join("sub/new.txt").exists(), "untracked file deleted");
+
+        std::fs::write(repo.join("tracked.txt"), "clobbered\n").unwrap();
+        discard(&repo, "tracked.txt", false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+            "original\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The reason the untracked delete is `git clean` and not `remove_file`: a
+    /// worktree holds agent-written code, so a path component can be a symlink out of
+    /// the tree. Discarding through it must never reach what it points at — neither by
+    /// following a symlinked *leaf* to its target, nor by descending a symlinked
+    /// *directory* component.
+    #[test]
+    #[cfg(unix)]
+    fn discard_never_deletes_through_a_symlink() {
+        let base = scratch_dir("discard-symlink");
+        let repo = base.join("repo");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), "precious\n").unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        // A symlinked leaf: the link goes, its target stays.
+        std::os::unix::fs::symlink(outside.join("victim.txt"), repo.join("link.txt")).unwrap();
+        discard(&repo, "link.txt", true).unwrap();
+        assert!(repo.join("link.txt").symlink_metadata().is_err());
+        assert!(
+            outside.join("victim.txt").exists(),
+            "the symlink's target must survive — only the link is discarded"
+        );
+
+        // A symlinked directory component: nothing beyond it may be touched.
+        std::os::unix::fs::symlink(&outside, repo.join("escape")).unwrap();
+        let _ = discard(&repo, "escape/victim.txt", true);
+        assert!(
+            outside.join("victim.txt").exists(),
+            "discard must not descend a symlinked directory out of the worktree"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- open_in_worktree (the only raw-fs read sink) ----
+
+    /// The read sink accepts exactly what it should: a regular file inside the tree —
+    /// including one reached through a symlink that stays inside it, which is a
+    /// legitimate thing for a repo to contain.
+    #[test]
+    #[cfg(unix)]
+    fn open_in_worktree_reads_regular_files_including_inside_symlinks() {
+        let base = scratch_dir("open-in-worktree-ok");
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("real.txt"), "content\n").unwrap();
+        std::os::unix::fs::symlink(root.join("real.txt"), root.join("inside-link")).unwrap();
+
+        assert_eq!(read_in_worktree(&root, "real.txt").unwrap(), "content\n");
+        assert_eq!(read_in_worktree(&root, "inside-link").unwrap(), "content\n");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// …and refuses anything that isn't a regular file. The FIFO is the load-bearing
+    /// case: `path` reaches [`file_source`] straight off the IPC boundary, and
+    /// `open(2)` on a FIFO with no writer blocks *forever* — which would pin a
+    /// blocking-pool thread and hang the read. The pre-open `lstat` is what turns that
+    /// into an error. (Without it this test doesn't fail — it hangs, which is the bug.)
+    #[test]
+    #[cfg(unix)]
+    fn open_in_worktree_refuses_anything_that_is_not_a_regular_file() {
+        let base = scratch_dir("open-in-worktree-refuse");
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("dir")).unwrap();
+        assert!(Command::new("mkfifo")
+            .arg(root.join("pipe"))
+            .status()
+            .unwrap()
+            .success());
+
+        assert!(
+            open_in_worktree(&root, "pipe").is_err(),
+            "a FIFO must be refused before open(2) can block on it"
+        );
+        assert!(
+            open_in_worktree(&root, "dir").is_err(),
+            "a directory is not a regular file"
+        );
+        // And a symlink *out* of the tree is still refused, lexically, as before.
+        let outside = base.join("outside.txt");
+        std::fs::write(&outside, "secret\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        assert!(open_in_worktree(&root, "escape").is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

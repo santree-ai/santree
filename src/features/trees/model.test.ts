@@ -6,6 +6,7 @@ import type { TerminalTab } from "../terminal/orchestrator";
 import {
   defaultTabTitle,
   effectiveSessionState,
+  finishedSetups,
   isTreeLaunchDead,
   mergeWorktrees,
   pendingWorktree,
@@ -217,6 +218,32 @@ describe("startTabFor", () => {
 
   it("opens the Terminal tab when the preference is off", () => {
     expect(startTabFor(false)).toBe("terminal");
+  });
+});
+
+describe("finishedSetups", () => {
+  it("reports the worktree whose setup just ended", () => {
+    expect(finishedSetups(new Set(["AK-1"]), new Set())).toEqual(["AK-1"]);
+  });
+
+  it("reports nothing while the setup is still running", () => {
+    expect(finishedSetups(new Set(["AK-1"]), new Set(["AK-1"]))).toEqual([]);
+  });
+
+  // The bug this replaces latched a bare "was setting up" boolean: switching away
+  // from a setting-up worktree read as "setup finished" for the *newly* selected
+  // one — dropping it onto its terminal tab (spawning a shell nobody asked for) —
+  // while the worktree that actually finished never got switched.
+  it("ignores a worktree that was never setting up, and still fires for the one that was", () => {
+    // AK-1 is mid-setup; the user switches to AK-2. Nothing finished.
+    expect(finishedSetups(new Set(["AK-1"]), new Set(["AK-1"]))).toEqual([]);
+    // AK-1's script then finishes while AK-2 is on screen — AK-1 is the one that
+    // lands on its terminal, not AK-2.
+    expect(finishedSetups(new Set(["AK-1"]), new Set())).toEqual(["AK-1"]);
+  });
+
+  it("reports every worktree that finished since the last check", () => {
+    expect(finishedSetups(new Set(["AK-1", "AK-2"]), new Set(["AK-2"]))).toEqual(["AK-1"]);
   });
 });
 

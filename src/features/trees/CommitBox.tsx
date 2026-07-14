@@ -10,11 +10,11 @@ import {
   TREES_AUTO_PR_KEY,
   TREES_AUTO_PUSH_KEY,
   TREES_STAGE_ALL_KEY,
-  useBoolSetting,
   useCommitDraft,
   useCommitMessage,
   useCommitWorktree,
   usePushWorktree,
+  useResolvedBoolSetting,
   useSetCommitDraft,
 } from "../../lib/queries";
 import { BASE_ID, useTrees } from "./model";
@@ -29,9 +29,11 @@ export function CommitBox({
   totalCount: number;
 }) {
   const { repo, activeId, openPrDialog, prsByWorktree, suggestPr } = useTrees();
-  const stageAll = useBoolSetting("app", TREES_STAGE_ALL_KEY).value;
-  const autoPr = useBoolSetting("app", TREES_AUTO_PR_KEY).value;
-  const autoPush = useBoolSetting("app", TREES_AUTO_PUSH_KEY).value;
+  // Resolved through the repo's overrides — Settings → Trees offers these per repo
+  // ("never auto-push in this one"), so reading the app default would ignore it.
+  const stageAll = useResolvedBoolSetting(repo, TREES_STAGE_ALL_KEY).value;
+  const autoPr = useResolvedBoolSetting(repo, TREES_AUTO_PR_KEY).value;
+  const autoPush = useResolvedBoolSetting(repo, TREES_AUTO_PUSH_KEY).value;
 
   const { data: saved } = useCommitDraft(repo, activeId);
   const { mutate: saveDraft } = useSetCommitDraft(repo);

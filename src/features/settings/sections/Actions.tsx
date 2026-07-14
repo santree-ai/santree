@@ -95,7 +95,7 @@ export function TriageActionSection({ repo }: { repo?: string }) {
 /** Whether Investigate passes Claude's `--remote-control` flag (see
  *  {@link INVESTIGATE_REMOTE_CONTROL_KEY}). App defaults or a per-repo override,
  *  same scope convention as {@link WorkActionConfig}'s sibling cards. */
-function RemoteControlCard({ forRepo }: { forRepo?: string }) {
+function RemoteControlCard({ forRepo, disabled }: { forRepo?: string; disabled?: boolean }) {
   const scope = forRepo ? `repo:${forRepo}` : "app";
   const appOn = useSetting("app", INVESTIGATE_REMOTE_CONTROL_KEY).data !== "false";
   const resolvedOn =
@@ -108,6 +108,7 @@ function RemoteControlCard({ forRepo }: { forRepo?: string }) {
         label="Enable Remote Control"
         hint="Names the Investigate session for Claude's Remote Control web (--remote-control). Turn off if your claude build predates the flag and Investigate exits right away."
         on={on}
+        disabled={disabled}
         onChange={(next) =>
           setSetting({ scope, key: INVESTIGATE_REMOTE_CONTROL_KEY, value: next ? null : "false" })
         }
@@ -175,6 +176,10 @@ function AppTriagePanel() {
         </div>
       </div>
 
+      {/* Grayed out while triage is off. `pointer-events-none` only stops the
+          mouse — every control below also takes the real `disabled` attribute, or
+          a keyboard user could tab straight into it and change a setting the UI
+          says is off. */}
       <div
         className={
           enabled ? "space-y-3.5" : "pointer-events-none space-y-3.5 opacity-45 select-none"
@@ -203,8 +208,8 @@ function AppTriagePanel() {
             Investigation
           </div>
           <div className="space-y-3.5">
-            <ActionConfig descriptor={INVESTIGATE} />
-            <RemoteControlCard />
+            <ActionConfig descriptor={INVESTIGATE} disabled={!enabled} />
+            <RemoteControlCard disabled={!enabled} />
           </div>
         </div>
       </div>
@@ -218,8 +223,21 @@ function AppTriagePanel() {
  * the app value), and renders the agent / optional skill / model selects. The
  * `inherits` flag flips each select between a plain concrete picker (app scope)
  * and one with a leading "inherit the app value" option (repo scope).
+ *
+ * `disabled` really disables every control (not just the wrapper's
+ * `pointer-events-none`) — it's set by the app-scope Triage panel while triage is
+ * off. Only the app scope ever disables an action, so the `inherits`
+ * (`OverrideSelect`) branches below don't carry it.
  */
-function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo?: string }) {
+function ActionConfig({
+  descriptor,
+  repo,
+  disabled,
+}: {
+  descriptor: ActionDescriptor;
+  repo?: string;
+  disabled?: boolean;
+}) {
   const inherits = repo !== undefined;
   const scope = inherits ? `repo:${repo}` : "app";
   const { settings } = useApp();
@@ -289,6 +307,7 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
           value={inherits ? (scopeAgent ?? "") : effectiveAgent}
           onChange={(v) => set(descriptor.agentKey, v)}
           inherits={inherits}
+          disabled={disabled}
           defaultLabel={`Use app default (${appAgentShort})`}
         />
       </Field>
@@ -322,6 +341,7 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
             <ChevronSelect
               value={scopeCmd ?? ""}
               onChange={(v) => set(cmdKey, v || null)}
+              disabled={disabled}
               className={SELECT_CLASS}
             >
               <option value="">None</option>
@@ -340,6 +360,7 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
               repo={repo ?? null}
               name={effectiveCmd}
               fromRepoScope={inherits}
+              disabled={disabled}
             />
           )}
         </Field>
@@ -356,6 +377,7 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
           value={inherits ? (scopeModel ?? "") : (scopeModel ?? agentDefaultModel)}
           onChange={(v) => set(descriptor.modelKey, v)}
           inherits={inherits}
+          disabled={disabled}
           defaultLabel={`Use app default${appModel ? ` (${appModel})` : ""}`}
         />
       </Field>
@@ -373,6 +395,7 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
             value={scopeEffort ?? ""}
             onChange={(v) => set(descriptor.effortKey, v)}
             inherits={inherits}
+            disabled={disabled}
             defaultLabel={`Use app default${appEffort ? ` (${appEffort})` : ""}`}
           />
         </Field>
@@ -391,6 +414,7 @@ function ActionConfig({ descriptor, repo }: { descriptor: ActionDescriptor; repo
             value={scopePerm ?? ""}
             onChange={(v) => set(permKey, v)}
             inherits={inherits}
+            disabled={disabled}
             defaultLabel={`Use app default (${permModeLabel(appPerm) ?? "Default"})`}
           />
         </Field>
@@ -414,10 +438,12 @@ function SkillEditor({
   repo,
   name,
   fromRepoScope,
+  disabled,
 }: {
   repo: string | null;
   name: string;
   fromRepoScope: boolean;
+  disabled?: boolean;
 }) {
   const { data, isLoading } = useClaudeCommandFile(repo, name);
   const { mutate: save, isPending } = useWriteClaudeCommand(repo, name);
@@ -472,6 +498,7 @@ function SkillEditor({
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
+        disabled={disabled}
         className="flex w-full items-center gap-1.5 text-[12px] text-muted-2 hover:text-fg-2"
       >
         <ChevronRightIcon
@@ -516,6 +543,7 @@ function SkillEditor({
               spellCheck={false}
               autoCorrect="off"
               autoCapitalize="off"
+              disabled={disabled}
               aria-label={`Edit the /${name} skill`}
               // Disable ligatures/contextual alternates: the mono font otherwise
               // renders `---`/`###`/`` `` ``/`**` as combined glyphs, so the text
@@ -541,12 +569,14 @@ function PermissionModeSelect({
   value,
   onChange,
   inherits,
+  disabled,
   defaultLabel,
   "aria-labelledby": ariaLabelledBy,
 }: {
   value: string;
   onChange: (v: string | null) => void;
   inherits: boolean;
+  disabled?: boolean;
   defaultLabel: string;
   "aria-labelledby"?: string;
 }) {
@@ -571,6 +601,7 @@ function PermissionModeSelect({
     <ChevronSelect
       value={value}
       onChange={(v) => onChange(v || null)}
+      disabled={disabled}
       className={SELECT_CLASS}
       aria-labelledby={ariaLabelledBy}
     >
@@ -585,12 +616,14 @@ function EffortSelect({
   value,
   onChange,
   inherits,
+  disabled,
   defaultLabel,
   "aria-labelledby": ariaLabelledBy,
 }: {
   value: string;
   onChange: (v: string | null) => void;
   inherits: boolean;
+  disabled?: boolean;
   defaultLabel: string;
   "aria-labelledby"?: string;
 }) {
@@ -615,6 +648,7 @@ function EffortSelect({
     <ChevronSelect
       value={value}
       onChange={(v) => onChange(v || null)}
+      disabled={disabled}
       className={SELECT_CLASS}
       aria-labelledby={ariaLabelledBy}
     >
@@ -632,6 +666,7 @@ function AgentSelect({
   value,
   onChange,
   inherits,
+  disabled,
   defaultLabel,
   "aria-labelledby": ariaLabelledBy,
 }: {
@@ -639,6 +674,7 @@ function AgentSelect({
   value: string;
   onChange: (v: string | null) => void;
   inherits: boolean;
+  disabled?: boolean;
   defaultLabel: string;
   "aria-labelledby"?: string;
 }) {
@@ -664,6 +700,7 @@ function AgentSelect({
     <ChevronSelect
       value={value}
       onChange={onChange}
+      disabled={disabled}
       className={SELECT_CLASS}
       aria-labelledby={ariaLabelledBy}
     >
@@ -682,6 +719,7 @@ function ModelSelect({
   value,
   onChange,
   inherits,
+  disabled,
   defaultLabel,
   "aria-labelledby": ariaLabelledBy,
 }: {
@@ -689,6 +727,7 @@ function ModelSelect({
   value: string;
   onChange: (v: string | null) => void;
   inherits: boolean;
+  disabled?: boolean;
   defaultLabel: string;
   "aria-labelledby"?: string;
 }) {
@@ -697,6 +736,7 @@ function ModelSelect({
     <ChevronSelect
       value={value}
       onChange={(v) => onChange(v || null)}
+      disabled={disabled}
       className={SELECT_CLASS}
       aria-labelledby={ariaLabelledBy}
     >

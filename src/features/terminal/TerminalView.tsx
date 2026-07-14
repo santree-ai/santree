@@ -57,6 +57,13 @@ export function TerminalView({
   // Read the latest onExit without re-running the mount-once effect.
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
+  // Same, for `active`: every pane stays laid out at full size (see TerminalLayer),
+  // so a geometry change to the shared layer resizes ALL of them at once. Only the
+  // pane on screen may act on that — a SIGWINCH to a backgrounded shell makes it
+  // reprint its prompt, and those blank prompt lines pile up unseen. A hidden pane
+  // catches up in the activation effect below, which refits when it comes back.
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   // Send a resize to the PTY only if the grid size changed since the last send.
   const commitResize = useCallback(
@@ -104,6 +111,9 @@ export function TerminalView({
         if (seed) backend.write(id, seed.endsWith("\r") ? seed : `${seed}\r`);
         renderer.focus();
       } catch (e) {
+        // The pane can close while `open` is still in flight; writing to a disposed
+        // renderer throws, and there'd be no one left to show the message to anyway.
+        if (disposed) return;
         renderer.write(`\r\n\x1b[31m[failed to start terminal: ${String(e)}]\x1b[0m\r\n`);
       }
     })();
@@ -112,6 +122,7 @@ export function TerminalView({
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     if (typeof ResizeObserver !== "undefined") {
       ro = new ResizeObserver(() => {
+        if (!activeRef.current) return;
         // DEBOUNCE the resize — don't fit/resize on every observer tick. A window or
         // panel resize fires a burst of ticks, each a slightly different size; sending
         // a SIGWINCH per intermediate size makes the shell redraw its prompt over and
@@ -120,6 +131,7 @@ export function TerminalView({
         // gives a single clean in-place redraw — the same approach VS Code uses.
         if (resizeTimer) clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
+          if (!activeRef.current) return;
           const { cols, rows } = safeFit(renderer);
           commitResize(cols, rows);
         }, 100);

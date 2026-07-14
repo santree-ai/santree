@@ -160,9 +160,25 @@ pub fn claude_settings(app: &AppHandle) -> Option<String> {
 /// Like [`claude_settings`] but with a `permissions.deny` block that forbids git
 /// commit/push — the `--settings` file for the "Fix CI" session, whose whole point
 /// is to fix and validate but leave committing/pushing to the user (via Trees).
-/// `--permission-mode` alone can't express a tool denylist, so this is the actual
-/// enforcement; the CI-fix prompt reinforces it in prose. Written to a distinct
-/// file so it never affects normal work sessions.
+/// Written to a distinct file so it never affects normal work sessions.
+///
+/// This is **best-effort defence-in-depth, not a security boundary.** Claude Code
+/// matches these rules against the command *text*, so they stop the shapes a model
+/// plausibly reaches for, not a determined bypass: `git` invoked under another name
+/// (a shell alias, a wrapper script), or a commit driven through some other tool
+/// (`gh`, a Python `subprocess`), sails straight past them. Anthropic's own docs say
+/// as much — "Bash permission patterns that try to constrain command arguments are
+/// fragile". The CI-fix prompt reinforces the intent in prose; neither is a hard gate.
+///
+/// The rules are deliberately wider than the obvious `git commit` prefix. Verified
+/// against the real CLI (2.1.207) in `--permission-mode default`: the engine already
+/// canonicalizes the `command` wrapper and splits compound commands, so `command git
+/// commit` and `x && git commit` are caught by the prefix forms alone — but an
+/// absolute path (`/usr/bin/git commit`) and an option between verb and subcommand
+/// (`git -C <path> commit`, `git -c k=v commit`) both slipped through. The leading
+/// `*` closes the first; the `*git * commit*` form closes the second. `*` matches the
+/// empty string, so these subsume the plain prefix rules; those are kept anyway,
+/// since their semantics are the ones the CLI's own `/permissions` UI writes.
 pub fn claude_settings_no_git(app: &AppHandle) -> Option<String> {
     let mut root = base_settings_map(app)?;
     root.insert(
@@ -173,6 +189,12 @@ pub fn claude_settings_no_git(app: &AppHandle) -> Option<String> {
                 "Bash(git commit:*)",
                 "Bash(git push)",
                 "Bash(git push:*)",
+                // Any path/wrapper before `git` (`/usr/bin/git commit`, `sudo git push`).
+                "Bash(*git commit*)",
+                "Bash(*git push*)",
+                // Options between `git` and the subcommand (`git -C <path> commit`).
+                "Bash(*git * commit*)",
+                "Bash(*git * push*)",
             ]
         }),
     );

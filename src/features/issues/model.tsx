@@ -18,14 +18,21 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
 import type { AgentKind, Task, Worktree, WorktreePr } from "../../bindings";
+import { ConfirmDialog, Toggle } from "../../components/primitives";
 import {
+  parseBatchSetup,
+  TREES_BATCH_SETUP_KEY,
+  TREES_RUN_SETUP_KEY,
   useAgents,
   useBoolSetting,
   useCreateWorktree,
+  useInitScript,
+  useResolvedBoolSetting,
   useResolvedSetting,
   useTasks,
   useWorktreePrs,
@@ -34,6 +41,7 @@ import {
   WORK_MODEL_KEY,
   WORK_QUEUE_KEY,
 } from "../../lib/queries";
+import { useAgentRuns } from "../../state/AgentRuns";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import { PROJECT_FALLBACK } from "../../theme/colors";
@@ -196,9 +204,28 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   const { data: worktreePrs = [] } = useWorktreePrs(activeRepo);
   const { data: agents = [] } = useAgents();
   const { mutateAsync: createWorktree } = useCreateWorktree(activeRepo);
+  const { planSetup } = useAgentRuns();
   // When off (default), the launch queue is bypassed: the panel shows a "Run"
   // button that starts the single focused ticket immediately (⌘-click → background).
   const queueEnabled = useBoolSetting("app", WORK_QUEUE_KEY).value;
+
+  // How a *multi*-task launch treats the setup script (Settings → Trees): run it
+  // in every new worktree, in none, or ask once for the whole batch. A single
+  // launch ignores this and follows the plain "run setup on new worktrees"
+  // preference — which is also what the ask-once dialog defaults to.
+  const { data: batchSetting } = useResolvedSetting(activeRepo, TREES_BATCH_SETUP_KEY);
+  const runSetupPref = useResolvedBoolSetting(activeRepo, TREES_RUN_SETUP_KEY).value;
+  const { data: initScript, isFetched: initScriptFetched } = useInitScript(activeRepo);
+  // Nothing to run ⇒ nothing to ask: a repo with no executable `.santree/init.sh`
+  // never prompts, whatever the preference says. Until that read lands we fall
+  // back to the setting, so a slow read can't silently skip a real setup script.
+  const batchSetup =
+    initScriptFetched && !(initScript?.exists && initScript.executable)
+      ? "never"
+      : parseBatchSetup(batchSetting);
+  /** The batch awaiting the ask-once answer, and the answer being edited. */
+  const [askBatch, setAskBatch] = useState<Task[] | null>(null);
+  const [askRunSetup, setAskRunSetup] = useState(false);
 
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   // No hardcoded default — the first task becomes the focus once tasks load (see
@@ -298,6 +325,20 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     if (focusId === "" && tasks.length > 0) setFocusId(tasks[0].id);
   }, [focusId, tasks]);
 
+  // Ticket ids belong to the repo they came from: carrying focus/selection across
+  // a repo switch leaves the panel on a ticket the graph and sidebar don't show,
+  // and a stale selection would silently pre-queue tickets in the new repo. Reset
+  // to "nothing focused" and let the default-focus effect above pick the new
+  // repo's first task once its tasks land.
+  const loadedRepo = useRef(activeRepo);
+  useEffect(() => {
+    if (loadedRepo.current === activeRepo) return;
+    loadedRepo.current = activeRepo;
+    setFocusId("");
+    setFocusProject(null);
+    setSelected({});
+  }, [activeRepo]);
+
   const worktreeIds = useMemo(() => new Set(worktrees.map((w) => w.id)), [worktrees]);
 
   // The real worktree (status/PR/changes) for a ticket, keyed by issue id — read
@@ -358,62 +399,97 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     [byId, isEligible, focusTask],
   );
 
-  // Launch: jump to the Trees tab immediately and create a real worktree per
-  // selected ticket *concurrently* in the background — never blocking the view
+  // Start every queued ticket: jump to the Trees tab immediately and create a real
+  // worktree per ticket *concurrently* in the background — never blocking the view
   // switch on the git round-trips. Each task is registered as a pending launch so
-  // Trees shows a "Creating workspace…" placeholder at once (dropped there once
-  // the real worktree lands); we also ask Trees to open the first one and start
-  // its agent once it's real. A failed create drops its placeholder (the global
-  // mutation cache still surfaces the error as a toast).
+  // Trees shows a "Creating workspace…" placeholder at once (dropped there once the
+  // real worktree lands). A failed create drops its placeholder (the global mutation
+  // cache still surfaces the error as a toast).
+  //
+  // How each ticket's agent starts differs by size, and it has to:
+  //  - one ticket → Trees opens it and starts the agent in the visible pane;
+  //  - several → every ticket goes through the off-screen launcher, because Trees
+  //    can only show one worktree and the visible pane is the *only* host that's
+  //    skipped by `AgentRunHost`. Handing it the first one and leaving the rest to
+  //    the (never-mounted) panes of unopened worktrees is what left "Launch 5
+  //    agents" creating five worktrees and starting exactly one agent. With none of
+  //    them selected, Trees lands on the all-agents overview — all five, running.
+  //
+  // `setup` is the batch's one answer to "run `.santree/init.sh` first?" (null for a
+  // single launch, which just follows the preference inside `beginRun`).
+  const startLaunch = useCallback(
+    (targets: Task[], setup: boolean | null) => {
+      setSelected({});
+      setAskBatch(null);
+      const projectOf = (task: Task) => (task.project === NO_PROJECT ? null : task.project);
+      // A bulk launch suppresses the per-worktree toast and raises one summary once
+      // every create settles; a single launch keeps its specific "Created … for X".
+      const bulk = targets.length > 1;
+      if (setup !== null)
+        planSetup(
+          targets.map((t) => t.id),
+          setup,
+        );
+      addPendingLaunches(
+        targets.map((task) => ({
+          id: task.id,
+          title: task.title,
+          project: projectOf(task),
+          agent: launchAgent,
+          // Carry the tray's per-launch model to the Trees fresh-launch seed.
+          model: launchModel,
+        })),
+      );
+      if (bulk) for (const task of targets) requestBackgroundLaunch(task.id);
+      else requestTreeLaunch(targets[0].id);
+      navigate({ to: "/trees" });
+      void Promise.allSettled(
+        targets.map((task) =>
+          createWorktree({
+            issueId: task.id,
+            title: task.title,
+            project: projectOf(task),
+            base: null,
+            agent: launchAgent,
+            quiet: bulk,
+          }).catch(() => {
+            removePendingLaunch(task.id);
+            clearBackgroundLaunch(task.id);
+            return null;
+          }),
+        ),
+      ).then((results) => {
+        if (!bulk) return;
+        const created = countLaunchSuccesses(results);
+        if (created > 0) toast.success(`Launched ${created} agents.`);
+      });
+    },
+    [
+      launchAgent,
+      launchModel,
+      planSetup,
+      createWorktree,
+      requestTreeLaunch,
+      requestBackgroundLaunch,
+      clearBackgroundLaunch,
+      addPendingLaunches,
+      removePendingLaunch,
+      navigate,
+    ],
+  );
+
   const launch = useCallback(() => {
     if (selectedEligible.length === 0) return;
     const targets = selectedEligible;
-    setSelected({});
-    const projectOf = (task: Task) => (task.project === NO_PROJECT ? null : task.project);
-    addPendingLaunches(
-      targets.map((task) => ({
-        id: task.id,
-        title: task.title,
-        project: projectOf(task),
-        agent: launchAgent,
-        // Carry the tray's per-launch model to the Trees fresh-launch seed.
-        model: launchModel,
-      })),
-    );
-    requestTreeLaunch(targets[0].id);
-    navigate({ to: "/trees" });
-    // A bulk launch suppresses the per-worktree toast and raises one summary once
-    // every create settles; a single launch keeps its specific "Created … for X".
-    const bulk = targets.length > 1;
-    void Promise.allSettled(
-      targets.map((task) =>
-        createWorktree({
-          issueId: task.id,
-          title: task.title,
-          project: projectOf(task),
-          base: null,
-          agent: launchAgent,
-          quiet: bulk,
-        }).catch(() => {
-          removePendingLaunch(task.id);
-          return null;
-        }),
-      ),
-    ).then((results) => {
-      if (!bulk) return;
-      const created = countLaunchSuccesses(results);
-      if (created > 0) toast.success(`Created ${created} worktrees.`);
-    });
-  }, [
-    selectedEligible,
-    launchAgent,
-    launchModel,
-    createWorktree,
-    requestTreeLaunch,
-    addPendingLaunches,
-    removePendingLaunch,
-    navigate,
-  ]);
+    // A single launch is unchanged: `beginRun` reads the setup preference itself.
+    if (targets.length === 1) return startLaunch(targets, null);
+    if (batchSetup === "ask") {
+      setAskRunSetup(runSetupPref);
+      setAskBatch(targets);
+      return;
+    }
+    startLaunch(targets, batchSetup === "always");
+  }, [selectedEligible, batchSetup, runSetupPref, startLaunch]);
 
   // The single-ticket create-worktree core shared by `run` and `runBackground`:
   // register the placeholder + kick off the git create, dropping both on failure.
@@ -612,7 +688,65 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       <IssuesHoverContext.Provider value={hover}>
         <IssueNodeDataContext.Provider value={nodeData}>{children}</IssueNodeDataContext.Provider>
       </IssuesHoverContext.Provider>
+      {/* "Ask once" (the default for several tickets at once): one confirmation for
+          the whole batch instead of a setup decision per worktree. Lives here, not
+          in the launch tray, because the answer belongs to the launch — the tray
+          unmounts the moment the selection clears. */}
+      <BatchSetupDialog
+        batch={askBatch}
+        runSetup={askRunSetup}
+        setRunSetup={setAskRunSetup}
+        onCancel={() => setAskBatch(null)}
+        onStart={startLaunch}
+      />
     </IssuesContext.Provider>
+  );
+}
+
+/** The ask-once confirmation for a multi-task launch. Cancel abandons the launch
+ *  (the selection is still there); confirming starts every ticket, running the
+ *  setup script in each new worktree or in none, per the switch. */
+function BatchSetupDialog({
+  batch,
+  runSetup,
+  setRunSetup,
+  onCancel,
+  onStart,
+}: {
+  batch: Task[] | null;
+  runSetup: boolean;
+  setRunSetup: (on: boolean) => void;
+  onCancel: () => void;
+  onStart: (targets: Task[], setup: boolean) => void;
+}) {
+  const count = batch?.length ?? 0;
+  return (
+    <ConfirmDialog
+      open={batch !== null}
+      title={`Start ${count} tasks`}
+      confirmLabel={`Start ${count} tasks`}
+      message="A worktree is created for each ticket and its agent starts in the background."
+      extra={
+        <div className="flex items-center gap-3">
+          <span id="batch-setup-label" className="min-w-0 flex-1 text-[12px] text-fg-2">
+            Run <span className="font-mono text-[11.5px]">.santree/init.sh</span> in each new
+            worktree
+          </span>
+          <Toggle
+            on={runSetup}
+            onClick={() => setRunSetup(!runSetup)}
+            ariaLabelledBy="batch-setup-label"
+          />
+        </div>
+      }
+      // Fire-and-close: the creates run in the background (each rolls back its own
+      // placeholder and toasts on failure), so there's nothing to await here.
+      onConfirm={() => {
+        if (batch) onStart(batch, runSetup);
+        return Promise.resolve();
+      }}
+      onClose={onCancel}
+    />
   );
 }
 

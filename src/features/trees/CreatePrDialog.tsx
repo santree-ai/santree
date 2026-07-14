@@ -25,10 +25,16 @@ export function CreatePrDialog() {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [base, setBase] = useState("");
-  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draftPr, setDraftPr] = useState(false);
   const [reviewers, setReviewers] = useState<string[]>([]);
+  // The prefill is a round-trip (git + the repo's PR template); the form is usable
+  // from the first frame and adopts the prefill when it lands — per field, and only
+  // if that field is still untouched, so it can never overwrite what's being typed
+  // (the same seed-if-untouched rule CommitBox uses for its saved draft).
+  const [prefilling, setPrefilling] = useState(true);
+  const titleTouched = useRef(false);
+  const bodyTouched = useRef(false);
 
   const { mutate: draft, isPending: drafting } = usePrDraft(repo);
   const { mutate: create, isPending: creating } = useCreatePr(repo);
@@ -52,19 +58,23 @@ export function CreatePrDialog() {
       { id, fill: false },
       {
         onSuccess: (d) => {
-          setTitle(d.title);
-          setBody(d.body);
+          if (!titleTouched.current) setTitle(d.title);
+          if (!bodyTouched.current) setBody(d.body);
           setBase(d.baseBranch);
-          setLoaded(true);
+          setPrefilling(false);
         },
         onError: (e) => {
           setError(e instanceof Error ? e.message : String(e));
-          setLoaded(true);
+          setPrefilling(false);
         },
       },
     );
     // `draft` (react-query mutate) is stable, so this runs once per opened worktree.
   }, [id, draft]);
+
+  // The AI fill shares the draft mutation with the prefill above — only the former
+  // is the user waiting on a "Drafting…" button for.
+  const aiDrafting = drafting && !prefilling;
 
   const onFill = () =>
     draft(
@@ -92,7 +102,7 @@ export function CreatePrDialog() {
     );
   };
 
-  const canCreate = title.trim().length > 0 && !creating && loaded && !openPr;
+  const canCreate = title.trim().length > 0 && !creating && !openPr;
 
   return (
     <div className="fixed inset-0 z-[300] flex items-center justify-center p-6">
@@ -113,65 +123,61 @@ export function CreatePrDialog() {
       >
         <div className="flex items-center gap-2">
           <span className="text-[13px] font-semibold text-fg-bright">Create pull request</span>
-          {base && (
+          {base ? (
             <span className="font-mono text-[10.5px] text-muted-3">
               {id} → {base}
             </span>
+          ) : (
+            prefilling && <Spinner size={11} />
           )}
         </div>
 
-        {!loaded ? (
-          <div className="flex items-center gap-2 py-8 text-[12px] text-muted-2">
-            <Spinner size={12} /> Preparing…
-          </div>
-        ) : (
-          <>
-            <label className="mt-3 mb-1 flex flex-col gap-1 text-[11px] font-medium text-muted-2">
-              Title
-              <input
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Pull request title"
-                className="w-full rounded-lg border border-line-3 bg-input px-2.5 py-2 text-[12.5px] text-fg-2 outline-none placeholder:text-muted-4 focus:border-line-strong"
-              />
-            </label>
+        <label className="mt-3 mb-1 flex flex-col gap-1 text-[11px] font-medium text-muted-2">
+          Title
+          <input
+            value={title}
+            onChange={(e) => {
+              titleTouched.current = true;
+              setTitle(e.target.value);
+            }}
+            placeholder="Pull request title"
+            className="w-full rounded-lg border border-line-3 bg-input px-2.5 py-2 text-[12.5px] text-fg-2 outline-none placeholder:text-muted-4 focus:border-line-strong"
+          />
+        </label>
 
-            <div className="mt-3 mb-1 flex items-center justify-between">
-              <span className="text-[11px] font-medium text-muted-2">Description</span>
-              <button
-                type="button"
-                onClick={onFill}
-                disabled={drafting}
-                title="Draft title + description with AI (from the PR template & diff)"
-                className="flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-2 hover:bg-hover hover:text-accent disabled:opacity-40"
-              >
-                {drafting ? (
-                  <Spinner size={11} />
-                ) : (
-                  <span className="text-[12px] leading-none">✨</span>
-                )}
-                {drafting ? "Drafting…" : "AI fill"}
-              </button>
-            </div>
-            <textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              placeholder="Pull request description (Markdown)"
-              rows={10}
-              className="w-full resize-none rounded-lg border border-line-3 bg-input px-2.5 py-2 font-mono text-[11.5px] leading-[1.5] text-fg-3 outline-none placeholder:text-muted-4 focus:border-line-strong"
-            />
-
-            {candidates.length > 0 && (
-              <div className="mt-3">
-                <span className="text-[11px] font-medium text-muted-2">Reviewers</span>
-                <ReviewerPicker
-                  candidates={candidates}
-                  selected={reviewers}
-                  onChange={setReviewers}
-                />
-              </div>
+        <div className="mt-3 mb-1 flex items-center justify-between">
+          <span className="text-[11px] font-medium text-muted-2">Description</span>
+          <button
+            type="button"
+            onClick={onFill}
+            disabled={drafting}
+            title="Draft title + description with AI (from the PR template & diff)"
+            className="flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-2 hover:bg-hover hover:text-accent disabled:opacity-40"
+          >
+            {aiDrafting ? (
+              <Spinner size={11} />
+            ) : (
+              <span className="text-[12px] leading-none">✨</span>
             )}
-          </>
+            {aiDrafting ? "Drafting…" : "AI fill"}
+          </button>
+        </div>
+        <textarea
+          value={body}
+          onChange={(e) => {
+            bodyTouched.current = true;
+            setBody(e.target.value);
+          }}
+          placeholder="Pull request description (Markdown)"
+          rows={10}
+          className="w-full resize-none rounded-lg border border-line-3 bg-input px-2.5 py-2 font-mono text-[11.5px] leading-[1.5] text-fg-3 outline-none placeholder:text-muted-4 focus:border-line-strong"
+        />
+
+        {candidates.length > 0 && (
+          <div className="mt-3">
+            <span className="text-[11px] font-medium text-muted-2">Reviewers</span>
+            <ReviewerPicker candidates={candidates} selected={reviewers} onChange={setReviewers} />
+          </div>
         )}
 
         {openPr && (
@@ -206,7 +212,7 @@ export function CreatePrDialog() {
               type="checkbox"
               checked={draftPr}
               onChange={(e) => setDraftPr(e.target.checked)}
-              disabled={!loaded || creating}
+              disabled={creating}
               className="h-3.5 w-3.5 cursor-pointer accent-[var(--accent)]"
             />
             Create as draft

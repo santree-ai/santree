@@ -8,7 +8,7 @@
  * you can see what (and whose) it is without navigating. There's no "open in
  * graph" button: clicking the row itself does that.
  */
-import { memo, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { Avatar } from "../../components/Avatar";
@@ -62,6 +62,10 @@ export const BlockerRow = memo(function BlockerRow({
   const scheduleClose = () => {
     closeTimer.current = window.setTimeout(() => setOpen(false), 120);
   };
+
+  // The row can unmount while the close is still pending (the inspector re-renders
+  // its dependency list as the focused ticket changes) — drop the timer with it.
+  useEffect(() => () => window.clearTimeout(closeTimer.current), []);
 
   return (
     // The button is the control; the wrapper only tracks hover so the card stays

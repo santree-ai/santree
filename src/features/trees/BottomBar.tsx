@@ -24,9 +24,10 @@ import {
   usePullRemoteWorktree,
   usePullWorktree,
   usePushWorktree,
-  useSetting,
+  useResolvedSetting,
   useUpdateBaseBranch,
 } from "../../lib/queries";
+import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { CHROME } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import { BASE_ID, useTrees } from "./model";
@@ -332,9 +333,11 @@ function DeleteButton({ worktree }: { worktree: Worktree }) {
 // ── Open in… split button ────────────────────────────────────────────────────
 
 function OpenInMenu({ path }: { path: string }) {
+  const { repo } = useTrees();
   const { data: openers = [] } = useOpeners();
   const { mutate: openIn } = useOpenInApp();
-  const { data: defaultSetting } = useSetting("app", TREES_DEFAULT_EDITOR_KEY);
+  // Repo override first, app default second — Settings → Work offers both.
+  const { data: defaultSetting } = useResolvedSetting(repo, TREES_DEFAULT_EDITOR_KEY);
 
   // Left half opens the configured default editor (falling back to the first
   // installed editor, else Finder); the chevron opens the full menu.
@@ -400,26 +403,12 @@ type MenuItem = { key: string; label: string; run: () => void };
 /** The opener menu rows. Mounted only while the menu is open, so its digit-key
  *  listener (1..N selects a row) is live exactly when the menu is visible. */
 function OpenInMenuItems({ items, close }: { items: MenuItem[]; close: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const el = document.activeElement;
-      if (
-        el instanceof HTMLInputElement ||
-        el instanceof HTMLTextAreaElement ||
-        (el instanceof HTMLElement && el.isContentEditable)
-      ) {
-        return;
-      }
-      const n = Number(e.key);
-      if (!Number.isInteger(n) || n < 1 || n > items.length) return;
-      e.preventDefault();
-      items[n - 1].run();
+  useDigitShortcuts(
+    items.map((item) => () => {
+      item.run();
       close();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [items, close]);
+    }),
+  );
 
   return (
     <>

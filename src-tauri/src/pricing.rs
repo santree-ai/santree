@@ -11,6 +11,7 @@
 //! network (CLAUDE.md: never block the UI on a round-trip); it refreshes the DB
 //! for the *next* read.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -107,39 +108,64 @@ async fn get_ms(db: &Db, key: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// Return the current price table, first kicking off a background refresh if the
-/// cached table is a day old (and we're past the post-failure backoff). Never
-/// blocks on the network: the refresh updates the DB for the *next* call, so the
-/// first-ever open uses built-in prices and later opens use the fetched ones.
-pub async fn ensure_fresh(db: &Db) -> PriceTable {
+/// Set while a refresh is in flight, so only one ever runs at a time.
+///
+/// The `attempt_ms` stamp below spaces *failed* attempts out and survives a restart,
+/// but it cannot serialize concurrent callers: the read and the write are separate
+/// awaits, so two callers can both read the old stamp before either writes it and
+/// both go on to spawn a fetch. This flag is what actually makes the fetch
+/// single-flight; `attempt_ms` is purely the backoff clock.
+static FETCHING: AtomicBool = AtomicBool::new(false);
+
+/// Kick off a background refresh if the cached table is a day old (and we're past
+/// the post-failure backoff). Returns immediately — the fetch updates the DB for
+/// the *next* read, so nothing ever blocks on the network.
+async fn maybe_refresh(db: &Db) {
     let now = now_ms();
     let fetched = get_ms(db, "fetched_ms").await;
     let attempt = get_ms(db, "attempt_ms").await;
-    if now - fetched > REFRESH_INTERVAL_MS && now - attempt > RETRY_BACKOFF_MS {
-        // Stamp the attempt up front so concurrent calls don't each spawn a fetch,
-        // and so a failure backs off for `RETRY_BACKOFF_MS` before the next try.
-        let _ = settings::set(db, SCOPE, "attempt_ms", Some(now.to_string())).await;
-        let db = db.clone();
-        tokio::spawn(async move {
-            match fetch_litellm().await {
-                Ok(entries) => match serde_json::to_string(&entries) {
-                    Ok(json) => {
-                        let _ = settings::set(&db, SCOPE, "table_json", Some(json)).await;
-                        let _ = settings::set(&db, SCOPE, "fetched_ms", Some(now_ms().to_string()))
-                            .await;
-                        log::info!(
-                            "refreshed model pricing from LiteLLM ({} models)",
-                            entries.len()
-                        );
-                    }
-                    Err(e) => log::warn!("could not serialize fetched pricing: {e}"),
-                },
-                Err(e) => {
-                    log::warn!("model price fetch failed: {e:#}; keeping cached/built-in prices");
-                }
-            }
-        });
+    if now - fetched <= REFRESH_INTERVAL_MS || now - attempt <= RETRY_BACKOFF_MS {
+        return;
     }
+    // Claim the fetch; if another caller already holds it, leave it to them.
+    if FETCHING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    // Stamp the attempt so a *failure* backs off for `RETRY_BACKOFF_MS` before the
+    // next try (and keeps backing off across restarts).
+    let _ = settings::set(db, SCOPE, "attempt_ms", Some(now.to_string())).await;
+    let db = db.clone();
+    tokio::spawn(async move {
+        match fetch_litellm().await {
+            Ok(entries) => match serde_json::to_string(&entries) {
+                Ok(json) => {
+                    let _ = settings::set(&db, SCOPE, "table_json", Some(json)).await;
+                    let _ =
+                        settings::set(&db, SCOPE, "fetched_ms", Some(now_ms().to_string())).await;
+                    log::info!(
+                        "refreshed model pricing from LiteLLM ({} models)",
+                        entries.len()
+                    );
+                }
+                Err(e) => log::warn!("could not serialize fetched pricing: {e}"),
+            },
+            Err(e) => {
+                log::warn!("model price fetch failed: {e:#}; keeping cached/built-in prices");
+            }
+        }
+        FETCHING.store(false, Ordering::Release);
+    });
+}
+
+/// Return the current price table, first kicking off a background refresh if the
+/// cached table is stale. Never blocks on the network: the refresh updates the DB
+/// for the *next* call, so the first-ever open uses built-in prices and later opens
+/// use the fetched ones.
+pub async fn ensure_fresh(db: &Db) -> PriceTable {
+    maybe_refresh(db).await;
     build_table(db).await
 }
 
@@ -155,7 +181,10 @@ pub async fn ensure_fresh(db: &Db) -> PriceTable {
 /// own offline fallback. Compliant: LiteLLM's JSON is public (no agent creds).
 pub async fn claude_models(db: &Db) -> Vec<String> {
     // Trigger the (non-blocking, once-daily) refresh, then read the cached ids.
-    let _ = ensure_fresh(db).await;
+    // Deliberately *not* `ensure_fresh`: that would build a whole `PriceTable` we
+    // then throw away, parsing the few-hundred-KB table JSON a second time on every
+    // picker open. The refresh is the only part of it we want here.
+    maybe_refresh(db).await;
     let picked = latest_per_family(&cached_model_ids(db).await);
     if picked.is_empty() {
         return [
@@ -240,19 +269,34 @@ async fn build_table(db: &Db) -> PriceTable {
     PriceTable { entries }
 }
 
+/// Cap on the price-table body we're willing to buffer. The real table is a few
+/// hundred KB, but it comes from a repo we don't control, so the size is not ours
+/// to trust — without a bound, a runaway (or hostile) body would stream straight
+/// into memory. 8 MiB leaves the table room to grow many times over.
+const MAX_PRICING_BYTES: usize = 8 * 1024 * 1024;
+
 /// Fetch LiteLLM's price JSON and extract the plain `claude-*` model rates
 /// (per-MTok). Ignores provider-prefixed/regional variants — the transcripts
 /// record plain ids, whose entries carry base list prices.
 async fn fetch_litellm() -> anyhow::Result<Vec<(String, ModelRate)>> {
-    let text = crate::gql::client()
+    let mut res = crate::gql::client()
         .get(LITELLM_URL)
         .timeout(Duration::from_secs(20))
         .send()
         .await?
-        .error_for_status()?
-        .text()
-        .await?;
-    parse_litellm(&text)
+        .error_for_status()?;
+    // Enforce the cap *while streaming* rather than checking Content-Length up
+    // front: that header can be absent or simply lie, and by the time `.text()`
+    // returned, an oversized body would already be in memory (same reasoning as
+    // linear.rs's image fetch).
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = res.chunk().await? {
+        if body.len() + chunk.len() > MAX_PRICING_BYTES {
+            anyhow::bail!("LiteLLM pricing response exceeds {MAX_PRICING_BYTES} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    parse_litellm(std::str::from_utf8(&body)?)
 }
 
 fn parse_litellm(text: &str) -> anyhow::Result<Vec<(String, ModelRate)>> {

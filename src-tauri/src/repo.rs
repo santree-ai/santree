@@ -13,6 +13,7 @@ use santree_core::domain::Repo;
 
 use crate::db::Db;
 use crate::git;
+use crate::linear;
 
 /// Every registered repository, in insertion order. The displayed tracker
 /// reflects the Linear org the repo actually resolves to (its explicit link, or
@@ -28,20 +29,15 @@ pub async fn list(db: &Db) -> Result<Vec<Repo>> {
     )
     .fetch_all(db)
     .await?;
-    let orgs =
-        sqlx::query_as::<_, (String, String)>("SELECT slug, name FROM linear_orgs ORDER BY name")
-            .fetch_all(db)
-            .await?;
-    let first_org = orgs.first();
+    // The label has to name the org the repo's queries actually go to, so it comes
+    // from the same resolver they do rather than a second copy of the fallback.
+    let orgs = linear::orgs_by_name(db).await?;
 
     Ok(rows
         .into_iter()
         .map(|(name, tracker, path, linked_slug, agents)| {
-            // The org the repo resolves to: explicit link, else the only/first org.
-            let org_name = linked_slug
-                .and_then(|slug| orgs.iter().find(|(s, _)| *s == slug))
-                .or(first_org)
-                .map(|(_, n)| n.clone());
+            let org_name = linear::resolved_org(&orgs, linked_slug.as_deref())
+                .map(|(_, org_name)| org_name.clone());
             Repo {
                 name,
                 tracker: match org_name {

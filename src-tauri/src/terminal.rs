@@ -68,6 +68,13 @@ pub struct TerminalOpenOpts {
 // UI. The PtyManager's per-session locking keeps sessions isolated from each other.
 
 /// Spawn a process behind a PTY and stream its raw output over `on_output`.
+///
+/// The spawn itself is `openpty` + a fork/exec with a full env copy + a reader
+/// thread — all blocking, and slow enough (an interactive `claude` on a cold
+/// cache) to stall a tokio worker, so it goes to the blocking pool like
+/// [`terminal_write`]. Nothing about *what* is spawned or how its bytes stream
+/// changes: `PtyManager::open` runs exactly once, with the same opts and the
+/// same verbatim byte-forwarding sink (COMPLIANCE.md).
 #[tauri::command]
 #[specta::specta]
 pub async fn terminal_open(
@@ -87,11 +94,15 @@ pub async fn terminal_open(
         rows: opts.rows,
         env,
     };
-    Ok(manager.open(opts, move |bytes| {
-        // A failed send means the channel was dropped (view unmounted); the
-        // session will be closed separately, so just stop forwarding.
-        let _ = on_output.send(RawBytes(bytes));
-    })?)
+    let manager = manager.inner().clone();
+    Ok(tokio::task::spawn_blocking(move || {
+        manager.open(opts, move |bytes| {
+            // A failed send means the channel was dropped (view unmounted); the
+            // session will be closed separately, so just stop forwarding.
+            let _ = on_output.send(RawBytes(bytes));
+        })
+    })
+    .await??)
 }
 
 /// Write raw bytes (keystrokes or a seed) to a session.

@@ -31,9 +31,14 @@ fn transcript_path(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
         .join(format!("{session_id}.jsonl"))
 }
 
-/// Whether `session_id` can still be resumed for a claude run in `cwd`.
-fn is_resumable(home: &Path, cwd: &str, session_id: &str) -> bool {
-    transcript_path(home, cwd, session_id).exists()
+/// Whether `session_id` can still be resumed for a claude run in `cwd`. The stat
+/// goes to the blocking pool: `~/.claude/projects` can sit on a slow or networked
+/// filesystem, and every caller here is on the async runtime.
+async fn is_resumable(home: &Path, cwd: &str, session_id: &str) -> bool {
+    let path = transcript_path(home, cwd, session_id);
+    tokio::task::spawn_blocking(move || path.exists())
+        .await
+        .unwrap_or(false)
 }
 
 /// Resolve how to (re)launch claude for the logical terminal `term_key` in
@@ -61,7 +66,11 @@ pub async fn resolve(
     .await?;
 
     if let Some((session_id, stored_cwd)) = row {
-        if home.is_some_and(|h| is_resumable(h, &stored_cwd, &session_id)) {
+        let resumable = match home {
+            Some(h) => is_resumable(h, &stored_cwd, &session_id).await,
+            None => false,
+        };
+        if resumable {
             return Ok(AgentSession::Resume { session_id });
         }
         return Ok(if allow_fresh {
@@ -139,9 +148,104 @@ pub async fn forget(db: &Db, repo: &str, term_key: &str) -> Result<()> {
     Ok(())
 }
 
+/// How old a stored session must be before [`reap_stale`] will consider it.
+/// A missing transcript already means "nothing left to resume", so this is purely
+/// a blast-radius guard: if Claude ever changes how it escapes `cwd` into a
+/// transcript path, *every* row would suddenly look transcript-less, and without
+/// an age floor one startup would wipe the sessions the user is actively
+/// resuming. Set past Claude's own 30-day transcript retention.
+const STALE_SESSION_DAYS: i64 = 30;
+
+/// Reap stored sessions that can never be resumed again — older than
+/// [`STALE_SESSION_DAYS`] with no transcript left on disk. Nothing else ever
+/// deletes a Triage investigation's row ([`forget`] is only called from the Trees
+/// side, on worktree delete / tab close), so without this `terminal_sessions`
+/// grows by a row per ticket ever investigated and never shrinks — and
+/// [`started_investigations`] keeps offering a resume for conversations Claude
+/// threw away months ago. Returns how many rows it dropped.
+///
+/// `home` is the user's home directory; without it transcripts can't be located
+/// at all, so we reap nothing rather than guess.
+pub async fn reap_stale(db: &Db, home: Option<&Path>) -> Result<u64> {
+    let Some(home) = home else { return Ok(0) };
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT repo, term_key, cwd, session_id FROM terminal_sessions
+         WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
+    )
+    .bind(format!("-{STALE_SESSION_DAYS} days"))
+    .fetch_all(db)
+    .await?;
+
+    let mut reaped = 0;
+    for (repo, term_key, cwd, session_id) in rows {
+        if is_resumable(home, &cwd, &session_id).await {
+            continue;
+        }
+        forget(db, &repo, &term_key).await?;
+        reaped += 1;
+    }
+    Ok(reaped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reap_stale_drops_only_old_transcript_less_sessions() {
+        let base = std::env::temp_dir().join(format!("santree-reap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let cwd = "/tmp/santree/work";
+
+        // Three aged-out rows and one recent one. `keeps-transcript` still has its
+        // transcript on disk; `recent` is young enough to be out of scope entirely.
+        for (key, age) in [
+            ("triage:AK-1", Some("-90 days")),
+            ("triage:AK-2", Some("-31 days")),
+            ("keeps-transcript", Some("-90 days")),
+            ("recent", None),
+        ] {
+            let sql = match age {
+                Some(a) => format!(
+                    "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, created_at)
+                     VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '{a}'))"
+                ),
+                None => "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id)
+                         VALUES (?, ?, ?, ?)"
+                    .into(),
+            };
+            sqlx::query(&sql)
+                .bind("repo")
+                .bind(key)
+                .bind(cwd)
+                .bind(format!("sid-{key}"))
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let live = transcript_path(&home, cwd, "sid-keeps-transcript");
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::write(&live, "{}").unwrap();
+
+        assert_eq!(reap_stale(&db, Some(&home)).await.unwrap(), 2);
+        let mut left: Vec<String> =
+            sqlx::query_as("SELECT term_key FROM terminal_sessions WHERE repo = 'repo'")
+                .fetch_all(&db)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(k,): (String,)| k)
+                .collect();
+        left.sort();
+        assert_eq!(left, vec!["keeps-transcript", "recent"]);
+
+        // No home ⇒ transcripts are unlocatable, so nothing is reaped.
+        assert_eq!(reap_stale(&db, None).await.unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[tokio::test]
     async fn resolve_mints_fresh_then_resumes_when_transcript_exists() {

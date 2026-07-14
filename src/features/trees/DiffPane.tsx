@@ -3,7 +3,7 @@
 import { EmptyState, Spinner } from "../../components/primitives";
 import {
   TREES_DIFF_MODE_KEY,
-  useSetting,
+  useResolvedSetting,
   useWorktreeFileDiff,
   useWorktreeFileSource,
   useWorktreeStatus,
@@ -13,7 +13,8 @@ import { useTrees } from "./model";
 
 export function DiffPane() {
   const { repo, activeId, selectedFile } = useTrees();
-  const { data: diffModeSetting } = useSetting("app", TREES_DIFF_MODE_KEY);
+  // Repo override first, app default second — Settings → Trees offers both.
+  const { data: diffModeSetting } = useResolvedSetting(repo, TREES_DIFF_MODE_KEY);
   const diffMode = diffModeSetting === "unified" ? "unified" : "split";
   const { data: status = [], isFetched: statusFetched } = useWorktreeStatus(repo, activeId);
   const file = status.find((f) => f.path === selectedFile);

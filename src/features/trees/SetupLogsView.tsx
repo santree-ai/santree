@@ -47,14 +47,16 @@ export function SetupLogsView({ repo, worktreeId }: { repo: string; worktreeId: 
         </Button>
       </div>
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto px-3 py-2">
-        <pre className="selectable font-mono text-[12px] leading-[1.55] whitespace-pre-wrap text-fg-3">
+        {/* One block element per line, so not a <pre> (which only takes phrasing
+            content) — the classes reproduce its rendering. */}
+        <div className="selectable font-mono text-[12px] leading-[1.55] whitespace-pre-wrap text-fg-3">
           {lines.map((line, i) => (
             // Lines only ever append or get replaced in place (progress redraws the
             // last one) — never reordered — so the index is a stable key. One node
             // per line avoids re-joining the whole buffer (O(n²)) on every event.
             <div key={i}>{line || " "}</div>
           ))}
-        </pre>
+        </div>
       </div>
     </div>
   );

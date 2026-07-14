@@ -44,7 +44,31 @@ pub fn validate_user_scope(scope: &str, key: &str) -> Result<()> {
 }
 
 /// Read a setting for an exact scope (`"app"` or `"repo:<name>"`).
+///
+/// [`env::ENV_VARS_KEY`](crate::env::ENV_VARS_KEY) is the one key whose stored
+/// value isn't the whole story: its variable *values* are secrets and live in the
+/// OS keychain, so it's reassembled by `env`. Dispatching here rather than at the
+/// IPC layer makes this the single door every reader and writer goes through —
+/// see `env`'s module docs.
 pub async fn get(db: &Db, scope: &str, key: &str) -> Result<Option<String>> {
+    if key == crate::env::ENV_VARS_KEY {
+        return crate::env::vars_json(db, scope).await;
+    }
+    get_raw(db, scope, key).await
+}
+
+/// Upsert (`Some`) or clear (`None`) a setting for a scope. Dispatches
+/// [`env::ENV_VARS_KEY`](crate::env::ENV_VARS_KEY) — see [`get`].
+pub async fn set(db: &Db, scope: &str, key: &str, value: Option<String>) -> Result<()> {
+    if key == crate::env::ENV_VARS_KEY {
+        return crate::env::set_vars_json(db, scope, value).await;
+    }
+    set_raw(db, scope, key, value).await
+}
+
+/// The row exactly as stored, with no dispatch. Only `env` (which owns the split
+/// [`get`] hides) should need this.
+pub async fn get_raw(db: &Db, scope: &str, key: &str) -> Result<Option<String>> {
     let row: Option<(String,)> =
         sqlx::query_as("SELECT value FROM settings WHERE scope = ? AND key = ?")
             .bind(scope)
@@ -54,8 +78,8 @@ pub async fn get(db: &Db, scope: &str, key: &str) -> Result<Option<String>> {
     Ok(row.map(|(v,)| v))
 }
 
-/// Upsert (`Some`) or clear (`None`) a setting for a scope.
-pub async fn set(db: &Db, scope: &str, key: &str, value: Option<String>) -> Result<()> {
+/// Write the row exactly as given, with no dispatch — the counterpart of [`get_raw`].
+pub async fn set_raw(db: &Db, scope: &str, key: &str, value: Option<String>) -> Result<()> {
     match value {
         Some(v) => {
             sqlx::query(
@@ -92,6 +116,11 @@ pub async fn clear_all_scopes(db: &Db, key: &str) -> Result<()> {
 
 /// Resolve a repo-scoped setting: the repo's own override, else the app value.
 /// Both candidate rows come back in one round-trip; the repo scope wins when present.
+///
+/// Raw rows, so *not* a way to read [`env::ENV_VARS_KEY`](crate::env::ENV_VARS_KEY)
+/// (its values aren't in the table — see [`get`]). Env vars don't resolve like this
+/// anyway: the two scopes merge per variable rather than one shadowing the other, in
+/// `env::resolve_env`.
 pub async fn resolve(db: &Db, repo: &str, key: &str) -> Result<Option<String>> {
     let repo_scope = format!("repo:{repo}");
     let rows: Vec<(String, String)> =
@@ -515,6 +544,102 @@ mod tests {
     async fn test_db() -> Db {
         let dir = std::env::temp_dir().join(format!("santree-settings-{}", Uuid::new_v4()));
         crate::db::init(dir.join("test.db")).await.unwrap()
+    }
+
+    /// Migration 0016, run against a database that looks like one 0015 has already
+    /// pruned: the rows keyed on the deleted repo's *name* are gone, and everything
+    /// belonging to a live repo — plus the `app` and `price_cache` scopes — survives.
+    /// It executes the shipped `.sql` itself, so the test can't drift from it.
+    #[tokio::test]
+    async fn orphaned_repo_rows_are_swept_and_live_ones_are_not() {
+        let db = test_db().await;
+
+        sqlx::query("INSERT INTO repos (name, path) VALUES ('acme/live', '/repos/live')")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        // Two of everything: one for the repo that still exists, one for a repo whose
+        // row 0015 deleted (a second checkout that derived the same name).
+        for (repo, note) in [("acme/live", "keep"), ("acme/gone", "drop")] {
+            set(&db, &format!("repo:{repo}"), "theme", Some(note.into()))
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO task_notes (repo, task_id, body, updated_at)
+                 VALUES (?, 'AK-1', ?, 0)",
+            )
+            .bind(repo)
+            .bind(note)
+            .execute(&db)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO commit_drafts (repo, issue_id, message, updated_at)
+                 VALUES (?, 'AK-1', ?, 0)",
+            )
+            .bind(repo)
+            .bind(note)
+            .execute(&db)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id)
+                 VALUES (?, 'tree:AK-1', '/tmp', ?)",
+            )
+            .bind(repo)
+            .bind(note)
+            .execute(&db)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO worktree_tabs (id, repo, worktree_id, kind, title, position)
+                 VALUES (?, ?, 'AK-1', 'terminal', ?, 1)",
+            )
+            .bind(format!("tab-{repo}"))
+            .bind(repo)
+            .bind(note)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        // Scopes that aren't a repo's must be untouchable by this sweep.
+        set(&db, "app", "theme", Some("keep".into())).await.unwrap();
+        set_raw(&db, "price_cache", "attempt_ms", Some("keep".into()))
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!("../migrations/0016_orphaned_repo_rows.sql"))
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let survivors = |table: &'static str, column: &'static str| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(&format!("SELECT {column} FROM {table} ORDER BY 1"))
+                    .fetch_all(&db)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(
+            survivors("settings", "scope").await,
+            ["app", "price_cache", "repo:acme/live"],
+            "only the dead repo's scope is swept"
+        );
+        for table in [
+            "task_notes",
+            "commit_drafts",
+            "terminal_sessions",
+            "worktree_tabs",
+        ] {
+            assert_eq!(
+                survivors(table, "repo").await,
+                ["acme/live"],
+                "{table}: the live repo's row must survive and the orphan must not"
+            );
+        }
     }
 
     #[tokio::test]

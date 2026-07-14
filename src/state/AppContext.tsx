@@ -222,8 +222,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Keyed on the state itself rather than wrapping the exposed setters, since
   // `activeRepo` and `sidebarCollapsed` are also written from other call sites
   // above (the repo-validation fallback) and below (`toggleSidebar`).
+  //
+  // Clearing the repo must *remove* the key, not leave the last name behind: the
+  // initial state seeds straight from localStorage, so a stale name would fire
+  // every `enabled: !!repo` query against a repo the backend no longer knows on
+  // the next launch — before the validation effect above can clear it.
   useEffect(() => {
     if (activeRepo) localStorage.setItem(REPO_KEY, activeRepo);
+    else localStorage.removeItem(REPO_KEY);
   }, [activeRepo]);
 
   useEffect(() => {

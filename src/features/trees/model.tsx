@@ -240,6 +240,15 @@ export function startTabFor(runSetupPref: boolean): Extract<MainTab, "setup" | "
   return runSetupPref ? "setup" : "terminal";
 }
 
+/** The worktrees whose setup script has just finished — each lands on its own
+ *  terminal tab. Tracked per worktree rather than as one "was setting up" flag,
+ *  which conflates them: switching away mid-setup would drop the *new* worktree
+ *  onto its terminal (spawning a shell it never asked for) while the one that
+ *  actually finished never gets switched. Exported for testing — see model.test.ts. */
+export function finishedSetups(prev: Set<string>, now: Set<string>): string[] {
+  return [...prev].filter((id) => !now.has(id));
+}
+
 interface TreesModel {
   repo: string;
   worktrees: Worktree[];
@@ -503,15 +512,20 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     [runSetupOnStart, beginRun, select, setFileFor, setTabFor],
   );
 
-  // The Setup tab is temporary: when the script finishes, the worktree lands on its
-  // terminal (where the agent is starting, if this run was part of a task start).
-  // The run itself is owned by AgentRuns — this just follows it in the UI.
+  // The Setup tab is temporary: when a worktree's script finishes, *that* worktree
+  // lands on its terminal (where the agent is starting, if the run was part of a
+  // task start) — even if the user has since switched to another one. The runs are
+  // owned by AgentRuns; this just follows them in the UI.
   const settingUpActive = isSettingUp(activeId);
-  const wasSettingUp = useRef(settingUpActive);
+  const settingUpIds = useMemo(
+    () => new Set([BASE_ID, ...worktrees.map((w) => w.id)].filter((id) => isSettingUp(id))),
+    [worktrees, isSettingUp],
+  );
+  const wasSettingUp = useRef(settingUpIds);
   useEffect(() => {
-    if (wasSettingUp.current && !settingUpActive && activeId) setTabFor(activeId, "terminal");
-    wasSettingUp.current = settingUpActive;
-  }, [settingUpActive, activeId, setTabFor]);
+    for (const id of finishedSetups(wasSettingUp.current, settingUpIds)) setTabFor(id, "terminal");
+    wasSettingUp.current = settingUpIds;
+  }, [settingUpIds, setTabFor]);
 
   // Clear the selection if the active worktree vanished (e.g. it was deleted).
   // The base entry isn't in `worktrees`, so it's never cleared here.

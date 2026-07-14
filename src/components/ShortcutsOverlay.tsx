@@ -2,8 +2,9 @@
  * The searchable keyboard-shortcuts overlay (Conductor-style): a centered card
  * over a blurred backdrop, with a filter box and shortcuts grouped into sections.
  * Opened with ⌘/ or from the help menu. The list is the single on-screen
- * reference for the bindings wired in `useKeyboardShortcuts` (global) and the
- * Triage view (local) — keep it in sync when shortcuts change.
+ * reference for the bindings wired in `useKeyboardShortcuts` (global) and in the
+ * per-view models (Issues/Trees/Reviews/Triage) — keep it in sync when shortcuts
+ * change.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -58,6 +59,10 @@ function buildSections(triageEnabled: boolean): Section[] {
     {
       title: "Trees",
       items: [{ label: "Toggle files panel", keys: ["⌘", "L"] }],
+    },
+    {
+      title: "Reviews",
+      items: [{ label: "Toggle info panel", keys: ["⌘", "L"] }],
     },
     {
       title: "Triage",

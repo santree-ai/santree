@@ -5,7 +5,7 @@
  * session's context-window fill — "how much before compaction". Live: the usage
  * watcher invalidates the query as sessions grow. */
 
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 
 import type { ModelUsage, SessionUsage, UsageTotals } from "../../../bindings";
 import { ChevronRightIcon } from "../../../components/icons";
@@ -423,9 +423,11 @@ function SessionsCard({ sessions }: { sessions: SessionUsage[] }) {
   const [openFolders, setOpenFolders] = useState<Set<string>>(() => new Set());
   const [openRepos, setOpenRepos] = useState<Set<string>>(() => new Set());
   const [openLocations, setOpenLocations] = useState<Set<string>>(() => new Set());
+  // The three-level group/sum/fold is O(sessions) and only depends on the data —
+  // without this it re-runs on every `useLiveNow` tick (and every expand/collapse).
+  const folders = useMemo(() => groupByFolder(groupByRepo(sessions)), [sessions]);
   if (sessions.length === 0) return null;
 
-  const folders = groupByFolder(groupByRepo(sessions));
   const currentKey = sessionKey(sessions[0]);
   const toggle = (setter: typeof setOpenFolders, key: string) =>
     setter((prev) => {

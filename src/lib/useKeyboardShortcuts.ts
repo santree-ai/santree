@@ -2,21 +2,51 @@
  * Global keyboard shortcuts, mounted once in the app shell.
  *
  * ⌘; / ⌘, → Settings · ⌘1…⌘N → tabs in NavTabs order (Triage when enabled,
- * then Issues/Trees/Reviews/Terminal) · ⌘B → sidebar · Esc → leave Settings.
- * Tab navigation routes are guarded by the views themselves, so an unavailable
- * target (e.g. Triage while disabled) simply redirects back.
+ * then Issues/Trees/Reviews/Terminal) · ⌘B → sidebar · Esc → back to the view
+ * Settings was opened from. Tab navigation routes are guarded by the views
+ * themselves, so an unavailable target (e.g. Triage while disabled) simply
+ * redirects back.
  */
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 import { useAppOptional, useAppUiOptional } from "../state/AppContext";
 
 /** True when focus is in a field where keystrokes should be left alone. */
 export function inEditable(target: EventTarget | null): boolean {
+  // `target` is whatever the event carried — often `window`, and `isContentEditable`
+  // is undefined on anything that isn't a real element. Compare explicitly so the
+  // declared `boolean` is the truth.
   const el = target as HTMLElement | null;
   if (!el) return false;
   const tag = el.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable;
+  return tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable === true;
+}
+
+/**
+ * Bind the digits 1..N to a menu's rows for as long as the caller is mounted —
+ * mount it with the open menu, so the listener is live exactly while the menu is
+ * on screen (the open-in menu, the new-tab menu). A `null` row is inert but still
+ * *owns* its number: the key is swallowed rather than leaking to the app (a
+ * disabled/WIP row must not fall through to a global shortcut).
+ */
+export function useDigitShortcuts(rows: readonly ((() => void) | null)[]) {
+  // The caller rebuilds its rows every render; read them through a ref so the
+  // window listener is bound once instead of re-subscribing on each keystroke.
+  const latest = useRef(rows);
+  latest.current = rows;
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey || inEditable(e.target)) return;
+      const n = Number(e.key);
+      const current = latest.current;
+      if (!Number.isInteger(n) || n < 1 || n > current.length) return;
+      e.preventDefault();
+      current[n - 1]?.();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 }
 
 export function useKeyboardShortcuts() {
@@ -30,17 +60,26 @@ export function useKeyboardShortcuts() {
   const toggleShortcuts = ui?.toggleShortcuts;
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
+  // Where Settings was opened from, so Esc goes back there instead of always
+  // dumping you on Issues (Settings is reachable from every view).
+  const lastView = useRef("/");
+  useEffect(() => {
+    if (pathname !== "/settings") lastView.current = pathname;
+  }, [pathname]);
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       // Esc leaves Settings — but never steal it from an open field.
       if (e.key === "Escape" && pathname === "/settings" && !inEditable(e.target)) {
         e.preventDefault();
-        navigate({ to: "/" });
+        navigate({ to: lastView.current });
         return;
       }
 
+      // Shift is never part of a global binding — without this, ⌘⇧; (and any other
+      // shifted combo whose base key matches) would fire the unshifted shortcut.
       const mod = e.metaKey || e.ctrlKey;
-      if (!mod || e.altKey) return;
+      if (!mod || e.altKey || e.shiftKey) return;
 
       if (e.key === ";" || e.key === ",") {
         e.preventDefault();

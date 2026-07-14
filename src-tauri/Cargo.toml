@@ -22,9 +22,6 @@ santree-pty = { path = "../crates/pty" }
 tauri = { version = "2", features = ["specta"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-# Repositions the macOS traffic lights (the `trafficLightPosition` config field is
-# ignored with titleBarStyle: Overlay); decorum does it natively + on resize.
-tauri-plugin-decorum = "1.1"
 # Guards against two instances fighting over the same santree.db (last-writer-wins
 # on settings) — a real risk on Linux, which has no OS-level single-instance
 # enforcement the way macOS's Dock/LaunchServices give app bundles for free.
@@ -97,3 +94,13 @@ portable-pty = { workspace = true }
 # Service), never in santree.db — see CLAUDE.md's secrets invariant and linear.rs.
 # Default features are exactly the two native stores we target plus the `Entry` API.
 keyring = "4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Repositions the macOS traffic lights (the `trafficLightPosition` config field is
+# ignored with titleBarStyle: Overlay); decorum does it natively + on resize.
+#
+# macOS-only on purpose: `set_traffic_lights_inset` is the single thing we call from
+# it and it's already behind `#[cfg(target_os = "macos")]` in lib.rs, while on Linux
+# decorum pulls in linicon → memmap2 0.5 (RUSTSEC-2026-0186, unsound, no fix on the
+# 0.5 line) — an unsound crate compiled into the Linux binary to power nothing.
+tauri-plugin-decorum = "1.1"

@@ -63,6 +63,8 @@ fn resolve_state(event: &str, payload: &Value) -> Option<AgentState> {
 }
 
 fn main() {
+    install_exit_zero_panic_hook();
+
     // Args: santree-hook --db <path> <EventName>
     let mut db_path: Option<String> = None;
     let mut event: Option<String> = None;
@@ -137,6 +139,23 @@ fn main() {
     if wrote {
         ping_socket(&db_path, b's');
     }
+}
+
+/// Exit 0 even on a panic.
+///
+/// "Always exits 0 on every failure path" is the invariant COMPLIANCE.md leans on so
+/// this binary can never disrupt the user's Claude session — but a panic bypasses
+/// every hand-written failure path and exits 101 (or aborts, under the release
+/// profile's `panic = "abort"`). Claude surfaces a non-zero hook exit to the user,
+/// and `SessionEnd` — the one hook registered synchronously — would show it right at
+/// teardown. So panic like normal (the message still reaches stderr, which Claude
+/// does not display at exit 0, but `claude --debug` does), then exit 0 regardless.
+fn install_exit_zero_panic_hook() {
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        report(info);
+        std::process::exit(0);
+    }));
 }
 
 /// Send a one-byte nudge over the app's signal socket (`<db_dir>/santree-signal.sock`).
@@ -311,6 +330,11 @@ async fn record_usage(
     .bind(now_ms())
     .execute(&mut conn)
     .await?;
+
+    // Close before returning: the caller nudges the app the moment this resolves, and
+    // the app then reads the row. Letting the connection drop instead hands the WAL
+    // handoff to a background close that can still be racing that read.
+    conn.close().await?;
     Ok(true)
 }
 
@@ -453,6 +477,117 @@ mod tests {
         ] {
             assert_eq!(AgentState::parse(s.as_str()), Some(s));
         }
+    }
+
+    /// The bar Claude renders. The 1.2x display nudge trips the warning colors
+    /// early, and the raw percentage is what gets persisted — so the two must not be
+    /// confused.
+    #[test]
+    fn renders_a_context_bar() {
+        let green = "\x1b[01;32m";
+        let red = "\x1b[01;31m";
+        // 50% raw → 60% shown by the 1.2x nudge, which is exactly what trips yellow.
+        let bar = render_bar(50.0, 604_000.0, "Opus");
+        assert!(
+            bar.starts_with("\x1b[01;33m"),
+            "60% shown → yellow: {bar:?}"
+        );
+        assert!(bar.contains("60%"), "{bar:?}");
+        assert!(bar.contains("604k"), "compact token count: {bar:?}");
+        assert!(bar.contains("Opus"), "{bar:?}");
+
+        assert!(render_bar(0.0, 0.0, "").starts_with(green));
+        assert!(render_bar(90.0, 0.0, "").starts_with(red));
+        // Over-full and nonsense inputs clamp instead of panicking on the repeat().
+        assert!(render_bar(150.0, 0.0, "").contains("100%"));
+        assert!(render_bar(-5.0, 0.0, "").contains("0%"));
+        assert!(render_bar(f64::NAN, 0.0, "").contains("0%"));
+        // No tokens / no model → those segments are simply omitted.
+        let bare = render_bar(10.0, 0.0, "");
+        assert!(!bare.contains('·'), "{bare:?}");
+    }
+
+    #[test]
+    fn compacts_token_counts() {
+        assert_eq!(compact(999.0), "999");
+        assert_eq!(compact(604_000.0), "604k");
+        assert_eq!(compact(1_200_000.0), "1.2M");
+    }
+
+    /// I5: the status line's usage write must land *and be closed* before the app is
+    /// nudged, and must dedup an unchanged re-render so identical status-line
+    /// repaints don't wake the UI.
+    #[tokio::test]
+    async fn upsert_records_live_usage_and_dedups_unchanged_repaints() {
+        let base = std::env::temp_dir().join(format!("santree-hook-usage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db_path = base.join("santree.db");
+        let db = db_path.to_str().unwrap();
+
+        // No db yet → no-op, no panic, and crucially no db created.
+        assert!(!record_usage(db, "s1", 10.0, 100.0, 200_000.0, "m", 0.1)
+            .await
+            .unwrap());
+        assert!(!db_path.exists(), "must never create the app's db");
+
+        // The table the app owns (mirrors migration 0011).
+        {
+            let mut c = SqliteConnectOptions::new()
+                .filename(&db_path)
+                .create_if_missing(true)
+                .connect()
+                .await
+                .unwrap();
+            sqlx::query(
+                "CREATE TABLE session_usage_live (session_id TEXT PRIMARY KEY, used_pct REAL NOT NULL, \
+                 input_tokens INTEGER NOT NULL, context_size INTEGER NOT NULL, model TEXT NOT NULL, \
+                 cost_usd REAL NOT NULL, updated_at_ms INTEGER NOT NULL)",
+            )
+            .execute(&mut c)
+            .await
+            .unwrap();
+            c.close().await.unwrap();
+        }
+
+        assert!(
+            record_usage(db, "s1", 10.0, 100.0, 200_000.0, "claude-opus-4-8", 0.1)
+                .await
+                .unwrap()
+        );
+        // Identical (used_pct, input_tokens) → no write, no UI nudge.
+        assert!(
+            !record_usage(db, "s1", 10.0, 100.0, 200_000.0, "claude-opus-4-8", 0.2)
+                .await
+                .unwrap()
+        );
+        // A real change writes again.
+        assert!(
+            record_usage(db, "s1", 24.0, 500.0, 200_000.0, "claude-opus-4-8", 0.3)
+                .await
+                .unwrap()
+        );
+
+        let mut c = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .connect()
+            .await
+            .unwrap();
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM session_usage_live")
+            .fetch_one(&mut c)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "one row per session");
+        let (used, tokens, cost): (f64, i64, f64) =
+            sqlx::query_as("SELECT used_pct, input_tokens, cost_usd FROM session_usage_live")
+                .fetch_one(&mut c)
+                .await
+                .unwrap();
+        assert_eq!((used, tokens), (24.0, 500), "latest usage won");
+        assert_eq!(cost, 0.3);
+        c.close().await.unwrap();
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]

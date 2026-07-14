@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm bundle:hook && pnpm dev:vite",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm bundle:hook && pnpm build",
+    "beforeBuildCommand": "pnpm bundle:hook && pnpm build && pnpm stash:sourcemaps",
     "frontendDist": "../dist"
   },
   "app": {

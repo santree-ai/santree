@@ -79,14 +79,22 @@ function scheduleDismiss(id: number, duration: number) {
 }
 
 /**
- * Show a toast. Identical back-to-back toasts (same variant + message) refresh
- * the existing one's timer instead of stacking, so a retrying mutation can't
- * spam the same error.
+ * Show a toast. Identical back-to-back toasts refresh the existing one's timer
+ * instead of stacking, so a retrying mutation can't spam the same error. Identity
+ * covers every field that shows: two different failures can share an error string
+ * while carrying different titles, and collapsing those would present one of them
+ * under the other's heading.
  */
 export function showToast(variant: ToastVariant, message: string, opts: ToastOptions = {}): number {
   const duration = opts.duration ?? DEFAULT_DURATION[variant];
 
-  const existing = toasts.find((t) => t.variant === variant && t.message === message);
+  const existing = toasts.find(
+    (t) =>
+      t.variant === variant &&
+      t.message === message &&
+      t.title === opts.title &&
+      t.duration === duration,
+  );
   if (existing) {
     const timer = timers.get(existing.id);
     if (timer) clearTimeout(timer);

@@ -18,6 +18,7 @@ export function WorktreeTerminal({
   branch,
   cwd,
   seed,
+  attach = true,
   onLaunched,
   onExited,
 }: {
@@ -26,6 +27,9 @@ export function WorktreeTerminal({
   cwd: string;
   /** Command to launch the agent (e.g. `exec claude '…'`), or undefined for a shell. */
   seed?: string;
+  /** False for the background launcher: spawn and seed the session, but don't
+   *  display it — the inline slot belongs to the terminal the user is watching. */
+  attach?: boolean;
   /** Fired once after mount when a seed was provided, to clear the launch flag. */
   onLaunched?: () => void;
   /** Fired once when the hosted process exits (its tab is removed). */
@@ -34,6 +38,7 @@ export function WorktreeTerminal({
   const { hostRef } = useEmbeddedTerminal({
     spec: { title: branch, cwd, source: "issue", refId: `tree:${id}`, seed },
     onExited,
+    attach,
   });
 
   const consumed = useRef(false);
@@ -47,5 +52,5 @@ export function WorktreeTerminal({
   // The TerminalLayer overlays this host with the worktree's live session. This
   // component is mounted only while the Terminal tab is active; the session itself
   // persists in the layer, so detaching here never kills or resizes the shell.
-  return <div ref={hostRef} className="h-full w-full" />;
+  return attach ? <div ref={hostRef} className="h-full w-full" /> : null;
 }

@@ -17,8 +17,13 @@ import {
   PlusIcon,
   TerminalIcon,
 } from "../../components/icons";
-import { Dropdown, MENU_ITEM, underlineTabStyle } from "../../components/primitives";
-import { inEditable } from "../../lib/useKeyboardShortcuts";
+import {
+  Dropdown,
+  MENU_ITEM,
+  onTabStripKeyDown,
+  underlineTabStyle,
+} from "../../components/primitives";
+import { inEditable, useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { CHROME } from "../../state/AppContext";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { BASE_ID, extraTab, type MainTab, useTrees } from "./model";
@@ -73,7 +78,11 @@ export function MainTabBar() {
   }, [tabs, extraTabs, activeId, closeTab]);
 
   return (
-    <div className={`flex ${CHROME.subBar} flex-none items-stretch border-b border-line bg-deep`}>
+    <div
+      role="tablist"
+      onKeyDown={onTabStripKeyDown}
+      className={`flex ${CHROME.subBar} flex-none items-stretch border-b border-line bg-deep`}
+    >
       {!isBase && <Tab tab="issue" label="Issue" active={activeTab} onSelect={setActiveTab} />}
       {/* The main work terminal hosts the worktree's agent session — mark it with
           the agent's logo once one has been launched (the base entry is a plain
@@ -188,25 +197,8 @@ function NewTabMenu({ onAdd, close }: { onAdd: (kind: TabKind) => void; close: (
     close();
   };
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey || inEditable(e.target)) return;
-      if (e.key === "1") {
-        e.preventDefault();
-        onAdd("claude");
-        close();
-      } else if (e.key === "2") {
-        e.preventDefault();
-        onAdd("terminal");
-        close();
-      } else if (e.key === "3") {
-        // Web is WIP — swallow the key so it doesn't leak, but do nothing yet.
-        e.preventDefault();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onAdd, close]);
+  // 1 → Claude, 2 → Terminal, 3 → Web (WIP: it owns the key but does nothing yet).
+  useDigitShortcuts([() => add("claude"), () => add("terminal"), null]);
 
   return (
     <>
@@ -255,7 +247,11 @@ function Tab({
   const on = active === tab;
   const [editing, setEditing] = useState(false);
   return (
+    // Presentational wrapper: the strip is the tablist and the label button is the
+    // tab — the close × has to stay a sibling of it, because a tab's children are
+    // presentational to AT and it would disappear inside one.
     <div
+      role="presentation"
       className="flex items-stretch border-r border-line text-[11.5px] font-medium"
       style={underlineTabStyle(on)}
     >
@@ -270,9 +266,23 @@ function Tab({
       ) : (
         <button
           type="button"
+          role="tab"
+          aria-selected={on}
+          tabIndex={on ? 0 : -1}
           onClick={() => onSelect(tab)}
           onDoubleClick={onRename ? () => setEditing(true) : undefined}
-          title={onRename ? "Double-click to rename" : undefined}
+          // F2 is the keyboard path to the rename the double-click opens —
+          // without it renaming a tab is pointer-only.
+          onKeyDown={
+            onRename
+              ? (e) => {
+                  if (e.key !== "F2") return;
+                  e.preventDefault();
+                  setEditing(true);
+                }
+              : undefined
+          }
+          title={onRename ? "Double-click (or F2) to rename" : undefined}
           className="flex cursor-pointer items-center gap-1.5 pr-1.5 pl-3"
         >
           {icon}

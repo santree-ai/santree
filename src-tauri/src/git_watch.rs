@@ -27,7 +27,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
+use notify_debouncer_full::{
+    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache,
+};
 use serde::Serialize;
 use specta::Type;
 use tauri::AppHandle;
@@ -109,30 +111,38 @@ impl WorktreeWatcher {
     /// worktrees carrying `node_modules`/`target`. We run that on the blocking pool
     /// rather than stalling the async executor.
     pub async fn watch(&self, app: &AppHandle, repo_root: &Path) -> Result<()> {
-        // Canonicalize once: macOS FSEvents (and `notify` generally) report
-        // resolved/canonical paths in change events (e.g. `/private/var/...`
-        // for a `/var/...` symlink), so every comparison below — idempotency,
-        // `issue_id_for`, and the base-watch filter — must use the same
-        // canonical form, or a repo opened via a symlinked path silently never
-        // matches (falls back to the lexical path if it doesn't exist yet;
-        // mirrors `git.rs`'s `worktree_branch`).
-        let repo_root =
-            std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
-        let worktrees_root = repo_root.join(".santree").join("worktrees");
+        // Resolving the targets stats the filesystem, so it goes to the blocking
+        // pool too (a cold/networked FS makes even a canonicalize slow enough to
+        // stall an executor thread).
+        let root = repo_root.to_path_buf();
+        let (repo_root, worktrees_root, worktrees_target) =
+            tokio::task::spawn_blocking(move || {
+                // Canonicalize once: macOS FSEvents (and `notify` generally) report
+                // resolved/canonical paths in change events (e.g. `/private/var/...`
+                // for a `/var/...` symlink), so every comparison below — idempotency,
+                // `issue_id_for`, and the base-watch filter — must use the same
+                // canonical form, or a repo opened via a symlinked path silently never
+                // matches (falls back to the lexical path if it doesn't exist yet;
+                // mirrors `git.rs`'s `worktree_branch`).
+                let repo_root = std::fs::canonicalize(&root).unwrap_or(root);
+                let worktrees_root = repo_root.join(".santree").join("worktrees");
 
-        // Don't create anything just because Trees was opened — merely browsing a
-        // repo must not write a `.santree/` into it (the dir is created lazily by
-        // the worktree-create path). Attach the recursive watch to the worktrees
-        // dir when it exists, else to `.santree` (so the first worktree created
-        // under it is still picked up); when neither exists yet there's simply no
-        // worktrees watch this round (the base-repo watch below is unaffected —
-        // the frontend re-calls `watch` once a worktree, and thus the dir, exists).
-        let worktrees_target = if worktrees_root.exists() {
-            Some(worktrees_root.clone())
-        } else {
-            let santree = repo_root.join(".santree");
-            santree.exists().then_some(santree)
-        };
+                // Don't create anything just because Trees was opened — merely browsing a
+                // repo must not write a `.santree/` into it (the dir is created lazily by
+                // the worktree-create path). Attach the recursive watch to the worktrees
+                // dir when it exists, else to `.santree` (so the first worktree created
+                // under it is still picked up); when neither exists yet there's simply no
+                // worktrees watch this round (the base-repo watch below is unaffected —
+                // the frontend re-calls `watch` once a worktree, and thus the dir, exists).
+                let worktrees_target = if worktrees_root.exists() {
+                    Some(worktrees_root.clone())
+                } else {
+                    let santree = repo_root.join(".santree");
+                    santree.exists().then_some(santree)
+                };
+                (repo_root, worktrees_root, worktrees_target)
+            })
+            .await?;
 
         // Skip a target we already know the OS refuses to watch (see `failed`), so
         // this call has nothing left to do once the surviving watches are live.
@@ -182,7 +192,9 @@ impl WorktreeWatcher {
                     Some(target) => {
                         let mut d =
                             new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
-                                let Ok(events) = res else { return };
+                                let Some(events) = batch("worktrees", res) else {
+                                    return;
+                                };
                                 // One signal per worktree per batch — the path storm
                                 // of a single save collapses to a single invalidation.
                                 let mut fired = HashSet::new();
@@ -224,7 +236,9 @@ impl WorktreeWatcher {
 
                 let base_debouncer = if watch_base {
                     let mut b = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
-                        let Ok(events) = res else { return };
+                        let Some(events) = batch("base repo", res) else {
+                            return;
+                        };
                         let changed = events
                             .iter()
                             .flat_map(|ev| ev.paths.iter())
@@ -275,6 +289,23 @@ impl WorktreeWatcher {
             });
         }
         Ok(())
+    }
+}
+
+/// Unwrap one debounce batch, logging what `notify` reports instead of dropping
+/// it. Its errors are exactly the "the Changes tab stopped updating" causes —
+/// an overflowed kernel event queue, or a watch invalidated because its
+/// directory was moved/deleted — and they're otherwise invisible: the watcher
+/// keeps running, just silently stops signalling.
+pub fn batch(what: &str, res: DebounceEventResult) -> Option<Vec<DebouncedEvent>> {
+    match res {
+        Ok(events) => Some(events),
+        Err(errors) => {
+            for e in errors {
+                log::warn!("{what} file watcher error: {e}; changes may stop live-refreshing");
+            }
+            None
+        }
     }
 }
 
@@ -422,5 +453,15 @@ mod tests {
     fn is_base_change_ignores_paths_outside_root() {
         let root = Path::new("/repo");
         assert!(!is_base_change(root, Path::new("/somewhere/else/file")));
+    }
+
+    /// `notify` reports a queue overflow / invalidated watch as an `Err` batch. It
+    /// carries no events, so nothing is emitted either way — the point of routing
+    /// it through [`batch`] is that it takes the logging path instead of being
+    /// pattern-matched away.
+    #[test]
+    fn error_batches_are_routed_through_the_logging_path() {
+        assert!(batch("test", Err(vec![notify::Error::generic("queue overflow")])).is_none());
+        assert!(batch("test", Ok(Vec::new())).is_some());
     }
 }

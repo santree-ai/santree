@@ -1,8 +1,9 @@
 //! Headless agent invocation: a one-shot `claude -p` call used by the AI helpers
-//! (commit message, PR body). Mirrors the santree CLI's `runAgent` — same
-//! large-prompt temp-file fallback — so behaviour matches the CLI. Runs in
-//! `--safe-mode --strict-mcp-config` so no hooks/plugins/MCP servers spin up on
-//! startup: these are latency-sensitive text tasks that need only the model.
+//! (commit message, PR body). The prompt goes in on **stdin** — never argv, which
+//! is world-readable on Linux — and tool grants are path-scoped (see
+//! [`read_within`]). Runs in `--safe-mode --strict-mcp-config` so no
+//! hooks/plugins/MCP servers spin up on startup: these are latency-sensitive text
+//! tasks that need only the model.
 
 /// The model these background helpers run on. They're short, cheap, high-volume
 /// text tasks (commit messages, PR bodies), so we pin them to the cheapest tier
@@ -10,93 +11,52 @@
 /// CLI resolves it to the latest Haiku without us pinning a dated id here.
 pub const HELPER_MODEL: &str = "haiku";
 
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::io::{Read, Write};
+use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use uuid::Uuid;
-
 use crate::settings;
-
-/// Conservative arg-size limit (bytes): macOS `ARG_MAX` is 256 KB, leave room for env.
-const ARG_MAX_SAFE: usize = 200 * 1024;
 
 /// Hard ceiling on a single headless agent call. Claude normally answers in
 /// 5–30s; this only fires when it hangs, so the UI spinner can't wait forever and
 /// a blocking-pool thread can't leak.
 const AGENT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Turn a prompt into the argument to pass after `--`, plus an optional temp-file
-/// path the caller must delete once the agent has run. If the prompt fits within
-/// the OS arg limit it's passed directly; otherwise it's written to a unique temp
-/// file and a short "read this file" instruction is passed instead.
-fn prompt_arg(prompt: &str) -> (String, Option<PathBuf>) {
-    if prompt.len() <= ARG_MAX_SAFE {
-        return (prompt.to_string(), None);
-    }
-    // The prompt can carry the repo diff (and thus possibly secrets), so it goes in
-    // santree's own 0700 dir under a random name, created exclusively (`create_new`)
-    // at 0600 — a shared `/tmp` with a predictable name lets another local user
-    // pre-plant the file and read what we then write into it. `private_dir` failing
-    // is a non-issue: create_new + a v4 name is still unguessable and unclobberable.
-    let dir = crate::private_dir().unwrap_or_else(std::env::temp_dir);
-    let path = dir.join(format!("santree-prompt-{}.md", Uuid::new_v4()));
-    if write_new_private(&path, prompt).is_ok() {
-        (
-            format!(
-                "Read {} and follow the instructions inside.",
-                path.display()
-            ),
-            Some(path),
-        )
-    } else {
-        // Fall back to truncation rather than failing outright. ARG_MAX_SAFE is a
-        // byte budget, so truncate on a char boundary (not `.chars().take()`,
-        // which counts characters and could exceed the byte limit).
-        (truncate_bytes(prompt, ARG_MAX_SAFE), None)
-    }
-}
+/// How long to wait for a pipe to reach EOF once the child is gone, before taking
+/// whatever was read so far and moving on. A grandchild that inherited the pipe
+/// keeps its write end open after the child dies, so EOF may simply never come —
+/// see [`Drain::take`].
+const READER_GRACE: Duration = Duration::from_secs(2);
 
-/// Create `path` — failing if it already exists — with owner-only (0600) permissions
-/// and write `contents` to it.
-fn write_new_private(path: &Path, contents: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    opts.open(path)?.write_all(contents.as_bytes())
-}
-
-/// Truncate `s` to at most `max` bytes, backing up to the nearest char boundary so
-/// the result stays valid UTF-8.
-fn truncate_bytes(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_string()
+/// The `--allowedTools` rule granting `Read` **only** underneath `dir`.
+///
+/// Claude's path rules are gitignore-style and spell an absolute path `//<path>`,
+/// hence the extra leading `/` on an already-absolute `dir`. Verified against the
+/// CLI: a read inside the scope succeeds, one outside is denied. Callers must pass
+/// an absolute path — a malformed rule matches nothing and every read is denied,
+/// which is the direction to fail in: each helper's real context is in its prompt,
+/// so a denied `Read` costs quality, not correctness.
+pub fn read_within(dir: &Path) -> String {
+    format!("Read(/{}/**)", dir.display())
 }
 
 /// Build the argument list for a headless `claude -p` invocation. Pure and
 /// separated out from `run_print` so the permission/tool flags are testable
-/// without spawning a process.
-fn build_args(allowed_tools: &[&str], model: Option<&str>, arg: &str) -> Vec<String> {
+/// without spawning a process. Note there is no prompt argument: the prompt is
+/// written to the child's stdin (see [`run_print`]).
+fn build_args(allowed_tools: &[&str], model: Option<&str>) -> Vec<String> {
     let mut args = vec!["--permission-mode".to_string(), "default".to_string()];
     // `default` (not `auto`) — in `-p`/print mode `default` denies any tool use
     // that isn't explicitly allowlisted below, instead of auto-approving it. These
-    // prompts embed diff/PR content that may be attacker-influenceable (a malicious
-    // diff hunk, PR text), so nothing here should be able to trigger tool use the
-    // caller didn't explicitly ask for. `--disallowedTools` is belt-and-braces on
-    // top of that: even if a future call site's `--allowedTools` is loosened, these
-    // three stay denied for headless helpers.
+    // prompts embed diff/PR/ticket content that may be attacker-influenceable (a
+    // malicious diff hunk, a Linear comment any org member can write), so nothing
+    // here should be able to trigger tool use the caller didn't explicitly ask for.
+    // `--disallowedTools` is belt-and-braces on top of that: even if a future call
+    // site's `--allowedTools` is loosened, these three stay denied for headless
+    // helpers.
     args.push("--disallowedTools".to_string());
     args.extend(["Bash", "Write", "Edit"].map(str::to_string));
     // Speed: these helpers (commit message, PR body) are latency-sensitive and
@@ -119,17 +79,23 @@ fn build_args(allowed_tools: &[&str], model: Option<&str>, arg: &str) -> Vec<Str
         args.extend(allowed_tools.iter().map(|s| s.to_string()));
     }
     args.push("-p".to_string());
-    args.extend(["--output-format", "text", "--", arg].map(str::to_string));
+    args.extend(["--output-format", "text"].map(str::to_string));
     args
 }
 
 /// Run the configured `claude` binary in non-interactive print mode and capture
 /// its text output, run with `cwd` as the working directory. `allowed_tools`
-/// maps to `--allowedTools` (empty = none); `model` maps to `--model` (`None` =
-/// the CLI default). Returns `None` when the binary isn't found, the call fails,
-/// or the output is empty — every such failure is also `log::warn!`'d (with
-/// stderr, when captured) so a signed-out CLI or a rejected flag/model shows up
-/// in the app's log file instead of silently falling back to defaults.
+/// maps to `--allowedTools` (empty = none; scope any `Read` with [`read_within`]);
+/// `model` maps to `--model` (`None` = the CLI default). Returns `None` when the
+/// binary isn't found, the call fails, or the output is empty — every such failure
+/// is also `log::warn!`'d (with stderr, when captured) so a signed-out CLI or a
+/// rejected flag/model shows up in the app's log file instead of silently falling
+/// back to defaults.
+///
+/// The prompt is piped to the child's **stdin**, not passed as an argument: these
+/// prompts carry the repo diff and ticket text, and argv is world-readable on Linux
+/// (`/proc/<pid>/cmdline`). stdin also means no size limit — no `ARG_MAX` cap, no
+/// temp-file spill.
 ///
 /// Blocking — call from `spawn_blocking` (Claude can take 5–30s).
 pub fn run_print(
@@ -140,18 +106,10 @@ pub fn run_print(
 ) -> Option<String> {
     let bin = settings::discover_binary("claude")?;
 
-    let (arg, temp) = prompt_arg(prompt);
-
     let mut cmd = Command::new(bin);
-    cmd.current_dir(cwd)
-        .args(build_args(allowed_tools, model, &arg));
+    cmd.current_dir(cwd).args(build_args(allowed_tools, model));
 
-    let out = run_with_timeout(cmd, AGENT_TIMEOUT);
-    // Clean up the large-prompt temp file regardless of how the call went.
-    if let Some(path) = temp {
-        let _ = std::fs::remove_file(path);
-    }
-    let (status, stdout, stderr) = out?;
+    let (status, stdout, stderr) = run_with_timeout(cmd, prompt, AGENT_TIMEOUT)?;
     if !status.success() {
         log::warn!(
             "claude -p failed ({status}): {}",
@@ -170,33 +128,86 @@ pub fn run_print(
     Some(text)
 }
 
-/// Run `cmd`, capturing stdout and stderr, but kill it if it hasn't exited within
-/// `timeout`. Returns `None` (after logging why) if it can't be spawned or is
-/// killed for exceeding the deadline. Dedicated threads drain stdout/stderr so a
-/// full pipe buffer can't deadlock the wait (and can't be mistaken for a hang).
+/// One child pipe, drained on its own thread into a shared buffer.
+struct Drain {
+    buf: Arc<Mutex<Vec<u8>>>,
+    eof: Receiver<()>,
+}
+
+impl Drain {
+    fn spawn(mut pipe: impl Read + Send + 'static) -> Self {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&buf);
+        let (tx, eof) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8 * 1024];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                lock(&sink).extend_from_slice(&chunk[..n]);
+            }
+            let _ = tx.send(());
+        });
+        Self { buf, eof }
+    }
+
+    /// Everything the pipe carried, after waiting until `deadline` for EOF. Both
+    /// pipes share one deadline, so a wedged child costs the grace once, not twice.
+    ///
+    /// Deliberately does **not** join the reader thread: `kill()` reaches only the
+    /// direct child, so a grandchild that inherited the pipe holds its write end
+    /// open and EOF never arrives. Joining there would park this thread — a tokio
+    /// blocking-pool thread — forever. Instead we read into a shared buffer as the
+    /// bytes arrive and snapshot it, so a wedged reader costs us the grace period
+    /// and nothing else; the abandoned thread exits whenever the pipe finally closes.
+    fn take(self, deadline: Instant) -> Vec<u8> {
+        let _ = self
+            .eof
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        std::mem::take(&mut *lock(&self.buf))
+    }
+}
+
+/// Lock through poisoning: a panicked reader thread must not take the call down.
+fn lock(buf: &Mutex<Vec<u8>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
+    buf.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Run `cmd` with `prompt` on its stdin, capturing stdout and stderr, and kill it
+/// if it hasn't exited within `timeout`. Returns `None` (after logging why) if it
+/// can't be spawned or is killed for exceeding the deadline. Dedicated threads feed
+/// stdin and drain stdout/stderr, so neither a prompt larger than the pipe buffer
+/// nor a full output pipe can deadlock the wait.
 fn run_with_timeout(
     mut cmd: Command,
+    prompt: &str,
     timeout: Duration,
-) -> Option<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
-    let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+) -> Option<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    let mut child = match cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
         Ok(child) => child,
         Err(e) => {
             log::warn!("claude -p failed to spawn: {e}");
             return None;
         }
     };
-    let mut stdout = child.stdout.take()?;
-    let mut stderr = child.stderr.take()?;
-    let stdout_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
-        buf
+    // Feed the prompt from its own thread and let the handle drop, which closes
+    // stdin and tells the CLI the prompt is complete. A prompt bigger than the pipe
+    // buffer (64 KB — and these routinely are) would otherwise block us here until
+    // the child drained it, and a child that died early would leave us on a broken
+    // pipe rather than at the deadline below.
+    let mut stdin = child.stdin.take()?;
+    let prompt = prompt.to_string();
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(prompt.as_bytes());
     });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
-        buf
-    });
+    let stdout = Drain::spawn(child.stdout.take()?);
+    let stderr = Drain::spawn(child.stderr.take()?);
 
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -214,9 +225,9 @@ fn run_with_timeout(
             }
         }
     };
-    // The readers return once their pipe closes (on exit or kill), so this never hangs.
-    let stdout = stdout_reader.join().unwrap_or_default();
-    let stderr = stderr_reader.join().unwrap_or_default();
+    let grace = Instant::now() + READER_GRACE;
+    let stdout = stdout.take(grace);
+    let stderr = stderr.take(grace);
     match status {
         Some(status) => Some((status, stdout, stderr)),
         None => {
@@ -239,7 +250,7 @@ mod tests {
     #[test]
     fn build_args_always_denies_tool_use_by_default() {
         // Commit-message call site: no allowlisted tools at all.
-        let args = build_args(&[], Some(HELPER_MODEL), "prompt");
+        let args = build_args(&[], Some(HELPER_MODEL));
         assert_eq!(
             &args[..2],
             &["--permission-mode".to_string(), "default".to_string()]
@@ -259,55 +270,109 @@ mod tests {
     /// permission-mode/disallowed-tools baseline.
     #[test]
     fn build_args_keeps_disallowed_tools_alongside_an_allowlist() {
-        let args = build_args(&["Read"], Some(HELPER_MODEL), "prompt");
+        let scoped = read_within(Path::new("/tmp/wt"));
+        let args = build_args(&[&scoped], Some(HELPER_MODEL));
         assert!(args.windows(2).any(|w| w == ["--disallowedTools", "Bash"]));
-        assert!(args.windows(2).any(|w| w == ["--allowedTools", "Read"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--allowedTools", "Read(//tmp/wt/**)"]));
     }
 
     #[test]
     fn build_args_omits_model_flag_when_none() {
-        let args = build_args(&[], None, "prompt");
+        let args = build_args(&[], None);
         assert!(!args.contains(&"--model".to_string()));
     }
 
-    /// An oversized prompt spills to a file that is owner-only and that we only ever
-    /// *create* — never write through to one that already exists.
-    #[cfg(unix)]
+    /// The prompt embeds the repo diff and ticket text; argv is world-readable on
+    /// Linux, so it must not appear there — it goes in on stdin instead.
     #[test]
-    fn large_prompt_spills_to_an_exclusively_created_private_file() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let prompt = "x".repeat(ARG_MAX_SAFE + 1);
-        let (arg, temp) = prompt_arg(&prompt);
-        let path = temp.expect("an oversized prompt must spill to a file");
-        assert!(arg.contains(&path.display().to_string()));
-        assert!(
-            path.starts_with(crate::private_dir().unwrap()),
-            "prompts must not land in a shared tmp dir"
-        );
+    fn build_args_carry_no_prompt() {
+        let args = build_args(&[], None);
         assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
+            &args[args.len() - 3..],
+            &[
+                "-p".to_string(),
+                "--output-format".to_string(),
+                "text".to_string()
+            ]
         );
-        assert!(
-            write_new_private(&path, "planted").is_err(),
-            "an existing file must never be written through"
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), prompt);
-        std::fs::remove_file(&path).unwrap();
+        assert!(!args.contains(&"--".to_string()));
     }
 
+    /// A `Read` grant is confined to one directory tree, so ticket text that says
+    /// "read ~/.ssh/id_rsa" can't. `//abs` is the CLI's absolute-path spelling.
     #[test]
-    fn build_args_ends_with_prompt_after_double_dash() {
-        let args = build_args(&[], None, "the prompt text");
+    fn read_within_scopes_the_grant_to_one_tree() {
         assert_eq!(
-            &args[args.len() - 4..],
-            &[
-                "--output-format".to_string(),
-                "text".to_string(),
-                "--".to_string(),
-                "the prompt text".to_string()
-            ]
+            read_within(Path::new("/Users/x/work/wt")),
+            "Read(//Users/x/work/wt/**)"
+        );
+    }
+
+    /// stdin carries the prompt (and is closed afterwards — `cat` would otherwise
+    /// read until the deadline instead of echoing and exiting).
+    #[cfg(unix)]
+    #[test]
+    fn the_prompt_is_fed_on_stdin() {
+        let (status, stdout, _) = run_with_timeout(
+            Command::new("cat"),
+            "secret prompt",
+            Duration::from_secs(20),
+        )
+        .expect("cat runs");
+        assert!(status.success());
+        assert_eq!(String::from_utf8_lossy(&stdout), "secret prompt");
+    }
+
+    /// stdin replaced the `ARG_MAX` cap and its temp-file spill, so size is no
+    /// longer a limit — and a prompt past the 64 KB pipe buffer must not deadlock
+    /// the writer against a child that hasn't started reading yet.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_larger_than_the_pipe_buffer_is_not_truncated() {
+        let prompt = "x".repeat(1024 * 1024);
+        let (status, stdout, _) =
+            run_with_timeout(Command::new("cat"), &prompt, Duration::from_secs(20))
+                .expect("cat runs");
+        assert!(status.success());
+        assert_eq!(stdout.len(), prompt.len());
+    }
+
+    /// `kill()` signals only the direct child, so a grandchild holding the stdout
+    /// pipe keeps it from ever reaching EOF. We must still come back — with what the
+    /// child did write — instead of parking a blocking-pool thread on the reader.
+    /// The grandchild outlives the child by 30s; we must return in the grace period
+    /// with what the child did write, not in 30s (and — before the reader threads
+    /// stopped being `join`ed — not never).
+    #[cfg(unix)]
+    #[test]
+    fn a_grandchild_holding_the_pipe_cannot_wedge_the_call() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & echo hi"]);
+        let started = Instant::now();
+        let (status, stdout, _) =
+            run_with_timeout(cmd, "", Duration::from_secs(90)).expect("sh runs");
+        assert!(status.success());
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hi");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "must not wait on the grandchild's copy of the pipe"
+        );
+    }
+
+    /// A hung child is killed at the deadline rather than held to the (much longer)
+    /// life of the process it spawned.
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_child_is_killed_at_the_deadline() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30"]);
+        let started = Instant::now();
+        assert!(run_with_timeout(cmd, "", Duration::from_millis(200)).is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "killed, not waited out"
         );
     }
 }

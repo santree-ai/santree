@@ -69,7 +69,7 @@ function useElementRect(el: HTMLElement | null): Rect | null {
 }
 
 export function TerminalLayer() {
-  const { tabs, activeKey, open, close, embed, setEmbed } = useTerminals();
+  const { tabs, activeKey, open, close, embed, detachEmbeds } = useTerminals();
   const { activeRepo } = useApp();
   const { sidebarCollapsed } = useAppUi();
   const { data: repos = [] } = useRepos();
@@ -155,7 +155,7 @@ export function TerminalLayer() {
               onExit={() => {
                 // The process ended — drop the session (so the pane disappears
                 // instead of showing a dead terminal) and release any embed.
-                if (embed?.key === t.key) setEmbed(null);
+                detachEmbeds(t.key);
                 close(t.key);
               }}
             />

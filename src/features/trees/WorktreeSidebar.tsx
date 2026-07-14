@@ -11,7 +11,7 @@ import { PrChips } from "../../components/PrChip";
 import { Button, ConfirmDialog, Dot, Skeleton, Spinner } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import { WorktreeStats } from "../../components/WorktreeStats";
-import { useSessionStates } from "../../lib/queries";
+import { useSessionByPath } from "../../lib/queries";
 import { accentActiveStyle, alpha, prStateMeta, sessionStateMeta } from "../../theme/colors";
 import { BASE_ID, effectiveSessionState, projectOf, useTrees } from "./model";
 import { StartTaskButton } from "./StartTaskButton";
@@ -34,14 +34,8 @@ export function WorktreeSidebar() {
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   // Live Claude session state per worktree, correlated by cwd (the worktree path
-  // Claude ran in). Rows are newest-first, so the first seen per cwd is the most
-  // recent — keep that one when a worktree has more than one Claude tab.
-  const { data: sessionStates = [] } = useSessionStates();
-  const sessionByPath = useMemo(() => {
-    const map = new Map<string, SessionState>();
-    for (const s of sessionStates) if (!map.has(s.cwd)) map.set(s.cwd, s);
-    return map;
-  }, [sessionStates]);
+  // Claude ran in).
+  const sessionByPath = useSessionByPath();
   // How many worktree sessions are blocked on the user right now — needing input
   // or a tool-permission approval (for the "All agents" attention dot).
   const attentionCount = useMemo(
@@ -249,32 +243,30 @@ function WorktreeEntry({
     opacity: merged && !selected ? 0.55 : 1,
   };
   return (
-    // biome-ignore lint/a11y/useSemanticElements: card holds nested buttons (select + PR link), so it can't be a <button>
     <div
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onOpen();
-        }
-      }}
       className="group relative mb-[5px] flex w-full cursor-pointer gap-2 rounded-[9px] px-[11px] py-2.5 text-left transition-colors hover:bg-hover"
       style={style}
     >
+      {/* The card's own action is a button stretched over it, not a `role="button"`
+          wrapper: the select box and the PR chips are real buttons, and ARIA makes
+          a button's children presentational — nested inside one they'd vanish from
+          the a11y tree. Those two stay positioned so they paint (and hit-test)
+          above this. */}
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={`Open ${w.id}`}
+        className="absolute inset-0 cursor-pointer rounded-[9px]"
+      />
       {!w.pending && (
         // Always visible (an empty outlined box when unselected), matching the
         // Issues/Triage rows — not hover-gated, so the select affordance is
         // discoverable without hovering every card.
         <button
           type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleSelect();
-          }}
+          onClick={onToggleSelect}
           aria-label={selected ? "Deselect worktree" : "Select worktree"}
-          className="mt-px flex h-3.5 w-3.5 flex-none items-center justify-center rounded-[4px] border transition-colors"
+          className="relative mt-px flex h-3.5 w-3.5 flex-none items-center justify-center rounded-[4px] border transition-colors"
           style={
             selected
               ? { background: "var(--accent-fill)", borderColor: "var(--accent-fill)" }
@@ -304,8 +296,11 @@ function WorktreeEntry({
                 hooks) as a leading dot, then the ticket ID, then the PR badge. */}
             <div className="mb-[5px] flex items-center gap-1.5">
               {session && (
+                // `relative` so it sits above the stretched open-button and can
+                // still be hovered for its tooltip (the message a waiting session
+                // is blocked on).
                 <span
-                  className="flex-none"
+                  className="relative flex-none"
                   title={
                     (state === "waiting" || state === "permission") && sessionState?.message
                       ? `${session.label}: ${sessionState.message}`
@@ -318,7 +313,11 @@ function WorktreeEntry({
               <span className="min-w-0 flex-1 overflow-hidden font-mono text-[11px] text-ellipsis whitespace-nowrap text-fg-2">
                 {w.id}
               </span>
-              <PrChips prs={prs} />
+              {prs.length > 0 && (
+                <span className="relative flex flex-none items-center">
+                  <PrChips prs={prs} />
+                </span>
+              )}
             </div>
             <div className="mb-1.5 overflow-hidden text-[11.5px] leading-[1.3] text-ellipsis whitespace-nowrap text-muted">
               {w.title}
@@ -328,7 +327,7 @@ function WorktreeEntry({
                 instead of overflowing the card and clipping "clean". */}
             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10px] text-muted-4">
               {session && (
-                <span style={{ color: session.color }} title={session.label}>
+                <span className="relative" style={{ color: session.color }} title={session.label}>
                   {session.short}
                 </span>
               )}

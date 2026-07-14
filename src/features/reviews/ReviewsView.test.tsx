@@ -2,7 +2,6 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ReviewInbox, ReviewPr } from "../../bindings";
-import { ticketIdFor } from "./ReviewDetail";
 import { ReviewsSidebarView } from "./ReviewsSidebar";
 
 function pr(id: string, number: number, title: string, repo: string): ReviewPr {
@@ -71,32 +70,5 @@ describe("ReviewsSidebarView", () => {
       />,
     );
     expect(screen.getByText("No open pull requests")).toBeInTheDocument();
-  });
-});
-
-describe("ticketIdFor", () => {
-  it("prefers the [AK-123] tag in the PR title", () => {
-    expect(ticketIdFor({ title: "[AK-201] Booking webhook", headRef: "you/whatever-9" })).toBe(
-      "AK-201",
-    );
-  });
-
-  it("falls back to the head branch, upper-cased", () => {
-    expect(
-      ticketIdFor({
-        title: "Hide unactioned service-ticket sources in AI explanation",
-        headRef: "jonathansandoval/msg-5033-ai-explanation-servi",
-      }),
-    ).toBe("MSG-5033");
-  });
-
-  it("does not false-match prose like 'service-ticket' in the title", () => {
-    expect(
-      ticketIdFor({ title: "Fix the service-ticket bug", headRef: "feature/no-id" }),
-    ).toBeNull();
-  });
-
-  it("returns null when neither title nor branch carries an id", () => {
-    expect(ticketIdFor({ title: "Plain title", headRef: "you/pr88" })).toBeNull();
   });
 });

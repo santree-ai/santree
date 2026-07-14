@@ -90,6 +90,10 @@ export interface ProjectSection {
   tickets: TicketGroup[];
 }
 
+/** Ticket ids are `<TEAM>-<n>`, so they must sort numerically on the number:
+ *  plain lexicographic ordering puts AK-10 ahead of AK-9. */
+const ticketOrder = new Intl.Collator(undefined, { numeric: true });
+
 /** Bucket ticket groups into per-project sections: named projects first
  *  (alphabetically), the catch-all "no project" section last. Tickets keep
  *  their id order within a section. */
@@ -112,7 +116,7 @@ export function groupByProject(
     })
     .map(([project, groups]) => ({
       project,
-      tickets: groups.slice().sort((a, b) => a.ticket.localeCompare(b.ticket)),
+      tickets: groups.slice().sort((a, b) => ticketOrder.compare(a.ticket, b.ticket)),
     }));
 }
 

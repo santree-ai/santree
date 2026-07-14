@@ -184,7 +184,18 @@ async fn draft_body(
             },
         )
         .ok()?;
-        agent::run_print(&c.path, &prompt, &["Read"], Some(agent::HELPER_MODEL))
+        // `Read` is granted only inside the worktree. The prompt embeds Linear
+        // ticket text, which any org member (or bot, or integration) can write, and
+        // the drafted body is something the user then pushes — an unscoped grant
+        // would let an injected "…also include the contents of ~/.ssh/id_rsa" reach
+        // real secrets. Everything this prompt legitimately needs is under `c.path`.
+        let read_worktree = agent::read_within(&c.path);
+        agent::run_print(
+            &c.path,
+            &prompt,
+            &[&read_worktree],
+            Some(agent::HELPER_MODEL),
+        )
     })
     .await
     .ok()

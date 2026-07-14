@@ -744,7 +744,10 @@ pub async fn list_triage_tickets(repo: String, db: State<'_, Db>) -> CmdResult<V
         .unwrap_or_default())
 }
 
-/// The full triage issue (description + comments) for the discussion pane.
+/// The full triage issue (description + comments) for the discussion pane. `None`
+/// means no Linear org is connected — an issue that genuinely doesn't exist errors
+/// out of `linear::triage_detail` itself, so reporting this as "not found" would
+/// have misdescribed exactly the failure the user needs to diagnose.
 #[tauri::command]
 #[specta::specta]
 pub async fn triage_detail(
@@ -754,7 +757,7 @@ pub async fn triage_detail(
 ) -> CmdResult<TriageDetail> {
     Ok(linear::triage_detail(&db, &repo, &ticket_id)
         .await?
-        .ok_or_else(|| format!("triage issue {ticket_id} not found"))?)
+        .ok_or("no Linear org connected")?)
 }
 
 /// The team triage rotations (who is on-call now), from Linear's responsibility
@@ -1005,12 +1008,29 @@ pub async fn write_claude_command(
 }
 
 /// The variable names a user-referenced `.env` file defines, for the Environment
-/// settings' "N variables loaded" readout. Reads exactly the absolute path the
-/// user picked (a native file dialog) — no id is joined onto a base dir, so
-/// there's no traversal surface — and returns an empty list if it's unreadable.
+/// settings' "N variables loaded" readout. Empty when the file is unreadable.
+///
+/// `path` is an arbitrary string from the webview, not a fact — trusting it made
+/// this a "does this file exist, and what keys does it define?" oracle for *any*
+/// path on the machine (`~/.aws/credentials`, `.ssh/config`, …). Its real domain
+/// is the files the user added to Settings → Environment, which santree already
+/// parses on every spawn, so that list is the allowlist: anything else reads as
+/// empty. (`env::parse_env_file` separately refuses non-regular files, so neither
+/// this nor a spawn can be parked on a fifo.)
+/// Takes the pool off the `AppHandle` rather than as a `State<'_, Db>` argument:
+/// an async command that borrows state must return a `Result`, and this one's
+/// contract (a plain `string[]`, empty when there's nothing to show) is worth
+/// keeping — an unreadable env file isn't an error the UI should toast.
 #[tauri::command]
 #[specta::specta]
-pub async fn env_file_vars(path: String) -> Vec<String> {
+pub async fn env_file_vars(path: String, app: AppHandle) -> Vec<String> {
+    use tauri::Manager;
+
+    let db = app.state::<Db>().inner().clone();
+    if !crate::env::is_registered_env_file(&db, &path).await {
+        log::warn!("refusing to read {path}: not a file added to Settings → Environment");
+        return Vec::new();
+    }
     tokio::task::spawn_blocking(move || crate::env::env_file_var_names(&path))
         .await
         .unwrap_or_default()

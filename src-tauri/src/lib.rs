@@ -446,7 +446,7 @@ pub fn run() {
     #[cfg(debug_assertions)]
     export_bindings(&builder).expect("failed to export typescript bindings");
 
-    tauri::Builder::default()
+    let tauri_builder = tauri::Builder::default()
         // Two independent instances (nothing stops this on Linux, unlike macOS's
         // Dock/LaunchServices) would run separate PTY managers and fs watchers
         // against the same santree.db, with `set_settings` last-writer-wins
@@ -460,8 +460,15 @@ pub fn run() {
         }))
         .plugin(log_plugin())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_decorum::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    // decorum's only job here is the traffic-light inset applied in `.setup()`, which
+    // is macOS-only — and on Linux the crate drags in an unsound memmap2 (see the
+    // cfg'd dependency in Cargo.toml). So it isn't even linked on other platforms.
+    #[cfg(target_os = "macos")]
+    let tauri_builder = tauri_builder.plugin(tauri_plugin_decorum::init());
+
+    tauri_builder
         .menu(build_menu)
         .on_menu_event(|app, event| {
             // Our custom Quit item (replacing the predefined one, which calls the
@@ -501,6 +508,30 @@ pub fn run() {
                     ),
                 ),
             };
+            // Garbage-collect the tables nothing else ever deletes from:
+            //  · `terminal_sessions` — no code path drops a Triage investigation's row,
+            //    so it would grow by one per ticket ever investigated;
+            //  · `reviewed_files` — no code path drops a merged/closed PR's marks, so it
+            //    would grow with the whole org's PR history.
+            // (`session_state` / `session_usage_live` are pruned on their own poll, in
+            // hooks.rs.) Best-effort and off the startup path — a failed sweep must never
+            // block the app from opening.
+            {
+                let db = db.clone();
+                tauri::async_runtime::spawn(async move {
+                    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                    match session::reap_stale(&db, home.as_deref()).await {
+                        Ok(0) => {}
+                        Ok(n) => log::info!("reaped {n} unresumable terminal session(s)"),
+                        Err(e) => log::warn!("terminal-session reap failed: {e:#}"),
+                    }
+                    match reviewed::prune_stale(&db).await {
+                        Ok(0) => {}
+                        Ok(n) => log::info!("pruned {n} reviewed-file mark(s) from stale PRs"),
+                        Err(e) => log::warn!("reviewed-file prune failed: {e:#}"),
+                    }
+                });
+            }
             app.manage(db);
 
             // Owns all live terminal sessions; commands read it from state.
