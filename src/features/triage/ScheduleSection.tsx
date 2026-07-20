@@ -12,7 +12,7 @@ import { alpha } from "../../theme/colors";
 export function ScheduleSection({ schedules }: { schedules: TriageSchedule[] }) {
   if (schedules.length === 0) return null;
   return (
-    <div className="flex-none space-y-1.5 border-b border-hairline px-[13px] py-2.5">
+    <div className="flex-none space-y-1.5 border-b border-hairline px-3 py-2.5">
       {schedules.map((s) => (
         <ScheduleStrip key={`${s.team}-${s.scheduleName}`} schedule={s} />
       ))}

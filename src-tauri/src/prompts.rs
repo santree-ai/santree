@@ -133,6 +133,21 @@ static PROMPT_DEFS: &[PromptDef] = &[
         ],
     },
     PromptDef {
+        name: "triage",
+        label: "Triage investigation",
+        description: "The agent's opening prompt when you Investigate a Triage issue. Unlike the other flows, the ticket's screenshots are kept (saved as local files the agent can Read), not stripped.",
+        kind: PromptKind::Flow,
+        default: include_str!("../prompts/triage.njk"),
+        variables: &[
+            VarDoc { name: "ticket_id", description: "The issue id, e.g. \"AK-165\"." },
+            VarDoc { name: "title", description: "The issue title." },
+            VarDoc {
+                name: "ticket_content",
+                description: "The rendered Issue block (description + comment thread). Its screenshots are rewritten to local file paths the agent can Read.",
+            },
+        ],
+    },
+    PromptDef {
         name: "issue",
         label: "Issue context",
         description: "How a Linear issue (description + comment thread) is rendered. Embedded by the Work, Commit and PR prompts as `ticket_content`.",
@@ -845,6 +860,41 @@ mod tests {
             "sentinel id must never leak into the prompt"
         );
         assert!(out.contains("diff"), "should still embed the diff");
+    }
+
+    #[test]
+    fn triage_embeds_the_ticket_and_names_screenshots() {
+        let ticket = render_ticket_from(&default_sources(), &sample_detail()).unwrap();
+        let out = render_default(
+            "triage",
+            context! { ticket_id => "AK-123", title => "Add login throttling", ticket_content => ticket },
+        )
+        .unwrap();
+        assert!(out.contains("AK-123"), "names the ticket");
+        assert!(out.contains("throttled"), "embeds the ticket body");
+        // The investigation-specific instruction: screenshots are local files to Read.
+        assert!(out.contains("Read"), "tells the agent to Read");
+        assert!(
+            out.to_lowercase().contains("screenshot"),
+            "calls out the screenshots"
+        );
+    }
+
+    /// After the investigation flow extracts a ticket's images to files, their
+    /// markdown links are plain file paths — `strip_data_uris` must leave those
+    /// intact (only `data:` URIs are stripped), so the agent sees the path to Read
+    /// instead of an `image omitted` placeholder.
+    #[test]
+    fn extracted_file_path_images_survive_the_ticket_render() {
+        let mut detail = sample_detail();
+        detail.description =
+            "Repro:\n\n![login screen](/tmp/santree/AK-123.images/0.png)\n\nSee above.".into();
+        let out = render_ticket_from(&default_sources(), &detail).unwrap();
+        assert!(
+            out.contains("![login screen](/tmp/santree/AK-123.images/0.png)"),
+            "the file-path image link is kept, got:\n{out}"
+        );
+        assert!(!out.contains("image omitted"), "a file path is not stripped");
     }
 
     #[test]

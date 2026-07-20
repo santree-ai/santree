@@ -9,7 +9,6 @@ import {
   useId,
 } from "react";
 
-import type { ClaudeCommand } from "../../bindings";
 import { Button, ChevronSelect, Toggle } from "../../components/primitives";
 
 /** A section heading: a bold title over a muted one-line subtitle. */
@@ -147,30 +146,5 @@ export function OverrideSelect({
         Reset
       </Button>
     </div>
-  );
-}
-
-/** `<option>`s for a Claude command picker, grouped by source. For the app
- * scope `repoCmds` is empty, so a single flat list is rendered. */
-export function CommandOptions({
-  globalCmds,
-  repoCmds,
-}: {
-  globalCmds: ClaudeCommand[];
-  repoCmds: ClaudeCommand[];
-}) {
-  const opt = (c: ClaudeCommand, k: string) => (
-    <option key={k} value={c.name} className="bg-input">
-      /{c.name}
-    </option>
-  );
-  if (repoCmds.length === 0) return <>{globalCmds.map((c) => opt(c, c.name))}</>;
-  return (
-    <>
-      <optgroup label="Repo commands">{repoCmds.map((c) => opt(c, `repo:${c.name}`))}</optgroup>
-      <optgroup label="Global commands">
-        {globalCmds.map((c) => opt(c, `global:${c.name}`))}
-      </optgroup>
-    </>
   );
 }

@@ -24,7 +24,6 @@ import { Button, EmptyState, Segmented, Skeleton } from "../../components/primit
 import { SidebarFooter } from "../../components/SidebarFooter";
 import {
   INVESTIGATE_AGENT_KEY,
-  INVESTIGATE_COMMAND_KEY,
   INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
   INVESTIGATE_REMOTE_CONTROL_KEY,
@@ -166,9 +165,9 @@ export function TriageView() {
   const repoPath = repos.find((r) => r.name === activeRepo)?.path ?? undefined;
 
   // The Triage Investigation action config for this repo (repo override, else
-  // the app default): which agent runs it, which skill, and which model.
+  // the app default): which agent runs it, and which model/effort. The prompt
+  // itself is the editable `triage` prompt (Settings → Prompts), not a skill.
   const { data: investigateAgent } = useResolvedSetting(activeRepo, INVESTIGATE_AGENT_KEY);
-  const { data: investigateCommand } = useResolvedSetting(activeRepo, INVESTIGATE_COMMAND_KEY);
   const { data: investigateModel } = useResolvedSetting(activeRepo, INVESTIGATE_MODEL_KEY);
   const { data: investigateEffort } = useResolvedSetting(activeRepo, INVESTIGATE_EFFORT_KEY);
   // Resolve the chosen agent to its executable from Settings → Agents.
@@ -235,7 +234,9 @@ export function TriageView() {
 
   // Batch investigation: tickets are eligible while not snoozed and not already
   // running one; the checkbox selection mirrors the Issues launch queue.
-  const canInvestigate = !!investigateCommand && !!repoPath;
+  // Investigation just needs a local repo path to run the agent in — the prompt
+  // is always available (the built-in `triage` prompt, editable in Settings).
+  const canInvestigate = !!repoPath;
   const eligibleIds = useMemo(
     () =>
       ordered
@@ -258,7 +259,6 @@ export function TriageView() {
   const batchInvestigate = useBatchInvestigate({
     repo: activeRepo,
     cwd: repoPath,
-    command: investigateCommand ?? null,
     agentExec,
     model: investigateModel ?? null,
     effort: investigateEffort ?? null,
@@ -317,7 +317,7 @@ export function TriageView() {
               queue OR team issues to widen to, so the Mine/All toggle is reachable
               even when your own queue is empty. */}
           {(ordered.length > 0 || teamWaiting > 0) && (
-            <div className="flex h-10 flex-none items-center gap-2 border-b border-hairline pr-2.5 pl-2.5">
+            <div className="flex h-10 flex-none items-center gap-2 border-b border-hairline px-3">
               <Segmented
                 options={[
                   { value: "mine", label: "Mine" },
@@ -325,7 +325,7 @@ export function TriageView() {
                 ]}
                 value={goodCitizen ? "all" : "mine"}
                 onChange={(v) => setGoodCitizen(v === "all")}
-                className="max-w-[190px] flex-1"
+                className="flex-1"
               />
               <Button
                 size="sm"
@@ -428,7 +428,6 @@ export function TriageView() {
                 repo={activeRepo}
                 ticketId={activeTicket.id}
                 cwd={repoPath}
-                command={investigateCommand ?? null}
                 agentExec={agentExec}
                 model={investigateModel ?? null}
                 effort={investigateEffort ?? null}

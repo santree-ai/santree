@@ -1207,56 +1207,6 @@ impl Default for Settings {
     }
 }
 
-/// A Claude slash-command discovered on disk under a `.claude/commands` folder.
-/// Invoked as `/<name> <arg>` — the triage "Investigate" picker offers these.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaudeCommand {
-    /// Invocation name (the file stem, without `.md`), e.g. `investigate-ticket`.
-    pub name: String,
-    /// The command's `description:` frontmatter, when present.
-    pub description: Option<String>,
-}
-
-/// Claude commands available to the investigate picker, split by where they live
-/// so the repo scope can distinguish its own commands from the global ones.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaudeCommands {
-    /// Commands from the user's `~/.claude/commands`.
-    pub global: Vec<ClaudeCommand>,
-    /// Commands from the repo's `.claude/commands` (empty for the app scope).
-    pub repo: Vec<ClaudeCommand>,
-}
-
-/// Where a slash-command's backing file lives — the user's global dir or a repo's.
-/// A repo-local file shadows a global one of the same name (Claude's own
-/// resolution), so this records which file an edit actually targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub enum CommandSource {
-    /// `~/.claude/commands/<name>.md`.
-    Global,
-    /// `<repo>/.claude/commands/<name>.md`.
-    Repo,
-}
-
-/// The effective backing file for a selected slash-command, so the settings editor
-/// can edit the *real* skill in place. Resolved repo-over-global, matching how
-/// Claude picks which command actually runs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaudeCommandFile {
-    /// Invocation name (the file stem, without `.md`).
-    pub name: String,
-    /// Which directory the effective file lives in.
-    pub source: CommandSource,
-    /// Absolute path of the backing `.md` file (shown as the edit target).
-    pub path: String,
-    /// The file's full text — YAML frontmatter plus the command body.
-    pub content: String,
-}
-
 /// Aggregated Claude token counts for a bucket (a period, a model, or a session).
 /// Every count is a raw number the frontend formats; the four token classes are
 /// kept apart because they're priced differently. `cost_usd` is *derived* from a

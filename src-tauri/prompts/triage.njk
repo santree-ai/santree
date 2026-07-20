@@ -1,0 +1,202 @@
+# Triage Investigation — Live-Data Ticket Investigation
+
+Investigate {{ ticket_id }}{% if title %} — {{ title }}{% endif %} using both the codebase and **live production data**. Code tells you what *should* happen; Groundcover + canary-mcp tell you what *actually* happened for the specific hotel/guest/thread. Most real triage answers ("did X fire? why not, for this hotel?") can only be confirmed with live data, so this flow treats that as a first-class phase, not an afterthought.
+
+The full ticket — title, description, comment thread, and any screenshots — is embedded below. Read it first; you don't need to re-fetch it.
+
+---
+
+## The ticket
+
+{% if ticket_content %}
+{{ ticket_content }}
+{% else %}
+The {{ ticket_id }} ticket couldn't be embedded. Fetch it read-only via the Linear MCP (`get_issue` / `list_comments`) before proceeding.
+{% endif %}
+
+**Screenshots**: any images in the ticket above are saved as local files and linked inline as `![alt](/path/to/image.png)`. `Read` each referenced path to actually see the screenshot — they are frequently the whole bug report (an error toast, a wrong value on screen, a broken render).
+
+---
+
+## Critical rules
+
+- **Never post, comment, push, deploy, or modify anything** (Linear, code, prod data) without explicit user approval in the current turn. Presenting a proposed comment is NOT authorization to post it.
+- **Read-only everywhere.** Linear: only `get_issue` / `list_comments` / `get_document` / `list_issues`. canary-mcp: only `get_*` providers. Groundcover/Sentry: queries only. Slack: only `slack_search_*` / `slack_read_thread` — never `slack_send_message`. Never run ORM/SQL writes or hit staging/prod write endpoints.
+- **Pick the right region first.** Using the wrong canary-mcp server (us vs eu vs ap) silently returns nothing and produces a wrong conclusion. Decide region in Phase 0.5 before any hotel lookup.
+- **Code = expectation, live data = reality.** A plausible code hypothesis is not a root cause until prod logs/metrics/state confirm it actually happened that way for this case.
+- **Cite evidence.** Code claims → `file:line`. Behavior claims → the log event name / metric / `evaluation_results` field / config value you saw, with timestamp.
+- **Fail loud.** If you can't find the code, the logs are empty, or a tool errors, say so explicitly. Don't paper over gaps.
+- **Verify Devin/Canary-Agent, don't trust them.** Treat their analysis as a hypothesis; confirm each claim against code AND data.
+- **Validate every entity you were handed — don't inherit someone else's mapping.** If a prior comment (Devin, Canary-Agent, another engineer) says "reservation X belongs to guest Y in room Z," that is a claim, not a fact. Pull the entity yourself (`reservation_context`, `get_agent_context`, or the `process_reservation` / equivalent log that carries the real guest name + value) and confirm the IDs, names, and field values before building any reasoning on them. A whole investigation can be correct in its logic and wrong because it validated the wrong reservation.
+- **Don't declare a root cause without observing the actual failing state.** Confirming that the data is correct *now*, or that a code path *could* cause the symptom, is not the same as showing it *did*. Before you commit to a mechanism, find the log/metric/state from the moment of failure. If the issue self-corrected, there's no screenshot, and the failing moment isn't logged, then you genuinely cannot confirm it — say so, label the mechanism a **hypothesis**, downgrade confidence to Low/Medium, and list what evidence (timestamp, screenshot, thread/render logs) would actually settle it. Never dress an unproven mechanism up as High confidence.
+- **Re-state which claims are proven vs inferred when challenged.** If the user pushes ("how sure are you?", "did you check X?"), re-derive from evidence rather than defending the prior answer. It's fine — expected — to correct yourself and narrow an overbroad claim.
+- **Your job is usually to guide, not to fix.** The default deliverable is a clear explanation, the `file:line` where the fix belongs, who owns it (CODEOWNERS + git history), and a routing recommendation — so the owning team or engineer can act. Do **not** jump to writing the fix. Only implement a fix yourself when you explicitly have the bandwidth and the user asks for it; otherwise hand off with enough precision that someone else can finish it quickly.
+
+---
+
+## Phase 0: Read the ticket
+
+The ticket, its comment thread, and its screenshots are embedded above — read them; do not re-fetch. Read **every** comment and **Read every referenced screenshot path**, looking for:
+- **Devin AI analysis** blocks (structured "Root Cause / Proposed Fix / Affected Files").
+- **Canary-Agent triage comment** — usually contains hotel admin links, **hotel slug**, **account UUID**, log links, and the routed team. Goldmine for entities. (Its log links may point to Datadog — that's **deprecated**; pull the same data from Groundcover instead.)
+- Team follow-ups, repro steps, and links to Sentry or Groundcover.
+
+Extract: title, description, state, priority, assignee, labels, project, SLA. If you genuinely need something the embed doesn't carry (a related issue, a linked document), fetch it **read-only** via the Linear MCP.
+
+---
+
+## Phase 0.5: Region + entities (do this before any hotel lookup)
+
+### Determine the region → pick the canary-mcp server
+
+| Signal in ticket | Region | Use server | Groundcover cluster |
+|---|---|---|---|
+| `eu.canarytechnologies.com`, label `Data Center: EU` / `Region: EMEA`, agent "eucanaryagent" | EU | `canary-mcp-eu` | `prod-main-eu-central-1` |
+| `www.canarytechnologies.com`, agent "canaryagent", `Region: NA/AMER` | US | `canary-mcp-us` | `prod-main-us-west-2` |
+| APAC / `ap-southeast`, `Region: APAC` | AP | `canary-mcp-ap` | AP cluster |
+
+If region is ambiguous, state your assumption and confirm with `get_hotel_slug` (it only returns hotels in that region's DB — a miss is a signal you picked the wrong region).
+
+### Extract the entities you'll need
+
+From the description + Canary-Agent comment, pull whatever exists:
+- **hotel slug** and/or **hotel id** (numeric) and/or **hotel UUID**
+- **account UUID** (gateway)
+- **thread id** (numeric, from `/chat/conversations/<id>` URLs) and/or **thread UUID**
+- **message id**, **reservation / confirmation id**, **guest email/phone**
+- **timestamp / window** of the incident (convert to UTC; note the hotel timezone)
+
+If you only have a hotel name → `get_hotel_slug(name)`. If you only have a numeric thread id but need the UUID for `chat_thread`/`chat_config`, resolve it via Groundcover (`CTX_thread_uuid`, see gotchas).
+
+---
+
+## Phase 1: Understand the issue
+
+- **Classify**: bug/regression · wrong behavior · performance · data integrity · config/setup.
+- **Core facts**: what happened (exact error/symptom), when, affected scope, expected vs actual, repro steps.
+- **Devin/Canary-Agent hypothesis** (if present): root cause, proposed fix, cited files/functions, stated confidence. If absent, say so and investigate from the symptom.
+
+---
+
+## Phase 2: Validate against the codebase
+
+1. **Locate** the code: `Grep` for exact error strings, model/class/function names, event names, endpoint/task/command names. `Glob`/`Read` the files. Cast wide, then narrow.
+2. **Verify each cited claim**: file exists? function exists? does the code actually exhibit the described behavior? is the path reachable from the reported trigger? Trace the call chain.
+3. Verdict per claim: **Confirmed / Partially correct / Incorrect / Can't verify (needs runtime)**.
+4. **Regression check**: if timing suggests something broke, `git log -S "<distinctive string>" origin/master -- <path>` (or `git log -p`) to find when the line was added/removed, and which PR.
+5. **Deployed-version skew**: the prod build can lag `origin/master`. Note the `version` from the logs (Phase 2.5) and, if it differs, read the code at that ref — the live branch may differ from current master (flags removed, functions moved).
+
+---
+
+## Phase 2.5: Validate against LIVE data  ← the core of this flow
+
+Confirm what the system actually did. Use the region's `canary-mcp-<region>` server and Groundcover.
+
+### A. Configuration & flags (canary-mcp)
+- **`get_feature_flags(hotel_slug)`** — many root causes are flag-gated. Note any flag where `is_default=false` (a deliberate override). Match flags to the code branches found in Phase 2.
+- **`get_hotel_settings(hotel_slug)`** — channels enabled, integrations, live/demo, features.
+- **`get_agent_context(service, provider, pk[, query])`** for the relevant state:
+  - `chat_thread` (pk = thread **UUID**) — thread flags, last messages, AI response kind/outcome.
+  - `chat_config` (pk = hotel **UUID**) — chat/AI + escalation config (recipients, channels, thresholds).
+  - `reservation_context` (pk = reservation UUID, or confirmation_id with `query="hotel_id=<id>"`).
+  - `gj_scheduled_messages`, `gj_config`, and gateway providers (`account`, `reservation`, `reservation_deltas`, `fetch_runs`) as needed.
+- Domain extras when relevant: `get_chat_analytics`, `get_voice_call(s)` / `get_voice_call_transcript` / `get_voice_configuration`, `get_kb_entries`, `get_short_link_logs`.
+
+### B. What actually happened (Groundcover)
+- **`search_logs_metadata(keywords)`** first to discover the real field names (e.g. `CTX_hotel_slug_name`, `CTX_thread_id`, `isolated_func`, `event`).
+- **`query_logs`** (gcQL) scoped by hotel + time window. Confirm the exact code path ran: search for the logger `event` names you found in Phase 2 (entry logs, skip/early-return logs, `isolate.error`, etc.). Many Canary logs dump an `evaluation_results` object with each filter field's value — use it to see *why* a gate passed/failed.
+- **`query_metrics`** (PromQL) for "did it fire / how often" counters and outcome breakdowns (e.g. `sum by (reason)(increase(<metric>[7d]))`). Remember most app metrics have **no hotel label** — they answer "is this systemic," while logs answer "what happened for this hotel."
+- **`query_traces`** for LLM/agent spans (`gen_ai.*`) or latency when relevant.
+- If the ticket links **Sentry**, use the Sentry MCP (after auth) for the stack trace / error grouping. **Groundcover is the company's logging system — Datadog is deprecated.** If a comment links Datadog, don't use it; query the equivalent in Groundcover.
+
+### C. Prior art (Slack — optional but high-value)
+If the symptom looks like a known/recurring issue, a deliberate design choice, or "didn't we change this already?", search Slack before concluding. Often the root cause, the intended behavior, or a prior fix attempt is already written down.
+- **`mcp__claude_ai_Slack__slack_search_public_and_private`** with the engineering channel + distinctive terms: the ticket ID, the error string, the model/flag/function name, or the feature (`in:messaging-eng-only is_escalated`, `from:<person> escalation`). Keyword search is AND-based — break into small queries, try the literal symbol/flag name (rare tokens hit precisely).
+- **`mcp__claude_ai_Slack__slack_read_thread`** (channel_id + parent ts) to read a promising thread in full — design intent and "we decided X" usually live in the replies.
+- Treat Slack as context, not proof: a past decision may be stale or never landed. Confirm the current behavior against code + live data. If a Slack thread explains the design intent, cite its permalink in the write-up.
+
+### D. Reconcile
+State, with evidence, whether the live data **confirms, refines, or refutes** the code hypothesis. The decisive artifact is usually a specific log event (present/absent), a metric count, an `evaluation_results` field, or a config/flag value — quote it with its timestamp. If Slack revealed design intent or a known issue, fold it in.
+
+---
+
+## Phase 2.7: Ownership & routing (who should own this?)
+
+Once Phase 2 has pinned the root-cause file(s), figure out **who actually owns that code** and whether the ticket is on the right team. The team a ticket was auto-routed to (Canary-Agent) is the team that owns the *symptom's surface* (the app/endpoint the user hit) — which is frequently **not** the team that owns the *mechanism* where the bug lives. Surface that gap explicitly.
+
+Run these against the root-cause path(s):
+
+1. **Formal owner — CODEOWNERS.** Grep the repo-root `CODEOWNERS` for the file's directory, walking from most-specific to least-specific path. **GitHub CODEOWNERS = the LAST matching pattern wins**, so the owner is the *last* line in the file whose pattern matches the path (not the first). If no line for the exact dir, walk up parents until one matches.
+   ```
+   grep -nE "<app>|<parent-dir>" CODEOWNERS        # find candidate rules
+   # then pick the LAST matching pattern for the path
+   ```
+2. **De-facto owner — git history.** Who wrote and maintains the actual lines:
+   ```
+   git log --format='%an | %s' origin/master -- <path> | head -20   # recent commits + ticket prefixes
+   git shortlog -sn origin/master -- <path>                          # commit counts by author
+   git blame -w --line-porcelain origin/master -- <path> | grep '^author ' | sort | uniq -c | sort -rn   # line ownership
+   ```
+   Note the **ticket prefixes** in commit subjects (e.g. `TOOL-`, `MSG-`, `VOX-`) — they map to the Linear team that drove the work.
+3. **Prefix → team.** For a representative recent ticket on the file, `mcp__linear__get_issue(<TICKET>)` and read `.team` + `.project`. That's the team that has been treating this code as theirs.
+4. **Caller vs mechanism.** A shared utility (owned by team A) is often invoked by an app path (owned by team B). Name both: "mechanism `<file>` → team A; the consuming path `<app>/` → team B (the routed team)." This is usually what explains a misroute.
+
+Then compare to the ticket's current team / the Canary-Agent recommendation:
+- If they **match**, say so in one line ("routed correctly to <team>").
+- If they **differ**, flag it plainly: "**Likely misrouted** — root cause lives in `<file>`, owned by **<team>** (CODEOWNERS) and built by **<people>** (`<PREFIX>-` tickets). Recommend moving to <team> + adding the `Misrouted` label." **Do not move it or relabel** without approval — recommend only.
+- Name the **most useful reviewer(s)**: the engineer(s) who authored the exact logic in the root-cause lines, not just the top-line-count contributor.
+
+---
+
+## Phase 3: Produce the write-up
+
+Plain text. No JSON. Quote code/log snippets only when they're the evidence.
+
+### Issue Summary
+- **What's the problem?** 1–2 plain sentences (what breaks, when, for whom).
+- **Region / hotel**: region + slug + the entities you used.
+- **Root cause**: one paragraph, code-level reason, cite `file:line` AND the live-data evidence (log event / metric / config) that confirms it.
+- **Confidence**: High / Medium / Low + why (High only when code AND live data agree).
+
+### Devin / Canary-Agent Assessment *(skip if none)*
+- Got right (with confirmation) · Got wrong or missed (with explanation) · Overall: Accurate / Partial / Misleading.
+
+### Routing / Ownership
+- **Owns the code**: team from CODEOWNERS (last matching rule) for the root-cause file(s).
+- **Built it / best reviewer(s)**: the engineer(s) who authored the actual logic (from git blame/log), plus the Linear team their ticket prefix maps to.
+- **Caller vs mechanism**: if the bug lives in a shared util owned by one team but the user hit a path owned by another, name both.
+- **Verdict**: routed correctly to <team>, OR **Likely misrouted → recommend <team> + `Misrouted` label** (recommend only; don't move it).
+
+### Proposed Fix
+- What changes, **file(s) + line**, step-by-step approach, and risks (migration? other callers? tests? config-vs-code?).
+
+### Proposed Comment
+First person, as the engineer who looked into it. Short sentences. No decorative hyphens, no filler ("it's worth noting", "upon closer inspection"). Don't restate the bug back to the reporter. Include: where the bug is (file:line / function), why it happens, the fix, and any open question. **200 words max**.
+
+This comment is going into **Linear, which renders Markdown** — write it as Markdown, not plain text:
+- Wrap every code symbol, function, file name, flag, and event name in backticks (`` `update_existing_reservation` ``).
+- Use a Markdown list for multiple options/steps rather than cramming them into one paragraph.
+- **Never reference code with a bare relative path** (`chat/services/thread.py:648`). Always make it a clickable Markdown link to GitHub on the **`master`** branch so the reader can jump straight to the line: `[`publish_thread_for_reservation`](https://github.com/canary-technologies-corp/canary/blob/master/<repo-relative-path>#L<line>)`. The repo root maps to the GitHub root, so a file at `backend/canary/...` links to `.../blob/master/backend/canary/...#L<line>`. Confirm the repo with `git remote get-url origin` if unsure.
+- Offer the fix as guidance for the owning team; don't imply you're about to implement it unless you've agreed to.
+
+(The write-up you show the user in this session can stay plain text; the Markdown + GitHub-link rules apply to the comment that will be pasted into Linear.)
+
+**STOP HERE.** Present the write-up and wait for explicit approval before posting anything or changing code.
+
+---
+
+## Execution notes & gotchas
+
+**Parallelize**: once you have the slug, fire `get_feature_flags` + `get_hotel_settings` + the codebase greps in parallel.
+
+**Tooling gotchas (learned the hard way):**
+- **Region**: wrong canary-mcp server returns empty, not an error. Always set region in Phase 0.5.
+- **UUID vs numeric id**: `chat_thread`/`chat_config` need UUIDs; dashboard URLs give numeric ids. Resolve numeric thread id → UUID via Groundcover: `* | filter CTX_thread_id:<id> | stats by (CTX_thread_id, CTX_thread_uuid) count()`. The `reservation_context` provider accepts a confirmation_id with `query="hotel_id=<id>"`.
+- **Groundcover output spill**: large results are saved to a file as a JSON array of `{type,text}` chunks. Concatenate the raw `.text` fragments (`jq -j '.[].text' file > out.json`) then parse — don't try to read each chunk as standalone JSON.
+- **gcQL**: queries must start with a filter or `*`; stats syntax is `stats by (field) count()`; sort is `sort by (field desc)`; numeric compares have no colon (`duration_seconds>1`); always use `_time` for time. Use `search_logs_metadata` to find field names before guessing.
+- **Metrics have no hotel label** (usually): use them for "systemic?", logs for "this hotel".
+- **Transient Groundcover errors**: a query can fail intermittently — retry once before concluding "no data".
+- **Deployed-version skew**: read the `version` in the logs; if it lags `origin/master`, validate code at that ref.
+- **Linear**: read-only only. The Canary-Agent triage comment is the fastest source of slug / account UUID / log links (its links may be Datadog — deprecated; read the same data in Groundcover).
+- **Common Devin pitfalls**: right file, wrong function; a fix that bypasses the service layer or soft-delete pattern; citing an error string that appears in several places — confirm the one actually triggered.
+- **CODEOWNERS last-match-wins**: GitHub resolves ownership to the *last* matching pattern in the file, not the first — a generic `/backend/canary/ai/` rule can override the app-specific one you expected. Always scan to the bottom for a more specific (or more generic but later) line. A shared utility under `ai/`, `shared/`, or `compendium/extraction/` is often owned by a different team than the app that calls it — that caller-vs-mechanism split is the usual reason a ticket looks misrouted.

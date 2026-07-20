@@ -8,9 +8,8 @@
  *
  * When the agent exits we don't drop straight back to the discussion — like the
  * Trees work terminal, we show a "resume when ready" pane (its conversation is
- * still on disk, so Resume continues it). Only a plain shell (no investigate
- * skill configured) falls back to the discussion on exit, since there's nothing
- * to resume.
+ * still on disk, so Resume continues it). Only a plain shell (no repo path to run
+ * in) falls back to the discussion on exit, since there's nothing to resume.
  */
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
@@ -24,6 +23,7 @@ import {
   useAgentSession,
   useBoolSetting,
   useClaudeHookSettings,
+  useInvestigatePrompt,
   useResolvedSetting,
 } from "../../lib/queries";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
@@ -34,7 +34,6 @@ export function InvestigatePane({
   repo,
   ticketId,
   cwd,
-  command,
   agentExec,
   model,
   effort,
@@ -45,8 +44,6 @@ export function InvestigatePane({
   repo: string;
   ticketId: string;
   cwd?: string;
-  /** Configured investigate skill name (a Claude slash-command), or null. */
-  command: string | null;
   /** The chosen agent's executable from settings; falls back to PATH when blank. */
   agentExec: string;
   /** Model override for the run, or null to use the agent's default. */
@@ -83,7 +80,7 @@ export function InvestigatePane({
   }, [liveSession]);
 
   const termKey = `triage:${ticketId}`;
-  const canLaunch = command != null && !!cwd;
+  const canLaunch = !!cwd;
   // Something to resume: it ran and exited in-place (liveSeen), or a past
   // investigation left a stored session. Show the resume pane instead of a dead
   // terminal — unless the user just asked to resume (then we launch).
@@ -93,6 +90,11 @@ export function InvestigatePane({
   // one the user just clicked Resume on.
   const needsSeed = canLaunch && !liveSession && !liveSeen && (resumeRequested || !resumable);
   const session = useAgentSession(repo, termKey, cwd ?? "", canLaunch, needsSeed);
+  // The opening prompt is rendered backend-side from the live ticket (its
+  // screenshots extracted to files the agent can Read) and written to a file;
+  // fetch that file's PATH only for a fresh seed. The terminal waits on it (via
+  // `ready`) so the file exists before the agent starts.
+  const investigatePrompt = useInvestigatePrompt(repo, ticketId, needsSeed);
   const exec = agentExec.trim() || "claude";
   const modelFlag = model ? `--model ${shellQuote(model)}` : undefined;
   const effortFlag = effort ? `--effort ${shellQuote(effort)}` : undefined;
@@ -105,19 +107,26 @@ export function InvestigatePane({
   // Investigate is Claude-only by design, so inject session-state hooks unconditionally.
   const hookSettings = useClaudeHookSettings().data;
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
-  const seed = command
-    ? agentSessionSeed(session.data, exec, {
-        prompt: `/${command} ${ticketId}`,
-        modelFlag,
-        effortFlag,
-        remoteControl: remoteControlEnabled ? ticketId : undefined,
-        settingsFlag: hookSettings ? `--settings ${shellQuote(hookSettings)}` : undefined,
-        chrome: startWithChrome,
-      })
-    : undefined;
-  // Hold the embed until both the seed decision and the remote-control setting
-  // are fresh, so the new PTY carries the right flags from the first frame.
-  const ready = !needsSeed || (!session.isFetching && !remoteControlSetting.isLoading);
+  const seed = agentSessionSeed(session.data, exec, {
+    // Seed the short "read the file" instruction rather than the prompt text: the
+    // rendered triage prompt (full ticket + comment thread) is far too large to
+    // type into the interactive-shell seed. The one-liner is only a fallback for
+    // the window where the path is still loading (which `ready` gates out).
+    prompt: investigatePrompt.data
+      ? `Read ${investigatePrompt.data} and follow the instructions inside.`
+      : `Investigate ${ticketId}.`,
+    modelFlag,
+    effortFlag,
+    remoteControl: remoteControlEnabled ? ticketId : undefined,
+    settingsFlag: hookSettings ? `--settings ${shellQuote(hookSettings)}` : undefined,
+    chrome: startWithChrome,
+  });
+  // Hold the embed until the seed decision, the remote-control setting, and the
+  // prompt file are all fresh, so the new PTY carries the right flags and reads a
+  // file that already exists from the first frame.
+  const ready =
+    !needsSeed ||
+    (!session.isFetching && !remoteControlSetting.isLoading && investigatePrompt.isFetched);
 
   const qc = useQueryClient();
   const dropCachedSession = useCallback(

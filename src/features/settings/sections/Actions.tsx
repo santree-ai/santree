@@ -2,16 +2,12 @@
  * Triage Investigation and Issues Work today (Plan / Review later). Per-scope —
  * app defaults or repo override. */
 
-import { useEffect, useRef, useState } from "react";
-
 import type { AgentKind } from "../../../bindings";
-import { ChevronRightIcon } from "../../../components/icons";
 import { ChevronSelect, Toggle } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
 import {
   EFFORT_LEVELS,
   INVESTIGATE_AGENT_KEY,
-  INVESTIGATE_COMMAND_KEY,
   INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
   INVESTIGATE_REMOTE_CONTROL_KEY,
@@ -20,13 +16,10 @@ import {
   TRIAGE_SNOOZED_KEY,
   useAgents,
   useBoolSetting,
-  useClaudeCommandFile,
-  useClaudeCommands,
   useClaudeModels,
   useResolvedSetting,
   useSetSetting,
   useSetting,
-  useWriteClaudeCommand,
   WORK_AGENT_KEY,
   WORK_EFFORT_KEY,
   WORK_MODEL_KEY,
@@ -34,25 +27,16 @@ import {
   WORK_QUEUE_KEY,
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
-import {
-  CommandOptions,
-  Field,
-  Heading,
-  OverrideSelect,
-  SELECT_CLASS,
-  ToggleRow,
-} from "../widgets";
+import { Field, Heading, OverrideSelect, SELECT_CLASS, ToggleRow } from "../widgets";
 
-/** Describes one configurable agent action: which setting keys it stores and
- * whether it also picks a Skill/command. App vs repo scope is expressed by the
- * descriptor's keys plus the `inherits` flag the body passes down. */
+/** Describes one configurable agent action: which setting keys it stores. App vs
+ * repo scope is expressed by the descriptor's keys plus the `inherits` flag the
+ * body passes down. */
 interface ActionDescriptor {
   agentKey: string;
   modelKey: string;
   /** Claude's `--effort` for the run (low…max). */
   effortKey: string;
-  /** Present only for actions that also run a Claude slash command (Investigate). */
-  commandKey?: string;
   /** Present only for actions that pick a start mode (Claude's `--permission-mode`). */
   permissionModeKey?: string;
 }
@@ -61,7 +45,6 @@ const INVESTIGATE: ActionDescriptor = {
   agentKey: INVESTIGATE_AGENT_KEY,
   modelKey: INVESTIGATE_MODEL_KEY,
   effortKey: INVESTIGATE_EFFORT_KEY,
-  commandKey: INVESTIGATE_COMMAND_KEY,
 };
 const WORK: ActionDescriptor = {
   agentKey: WORK_AGENT_KEY,
@@ -78,7 +61,7 @@ export function TriageActionSection({ repo }: { repo?: string }) {
     <>
       <Heading
         title="Triage"
-        subtitle="How the Triage investigation runs — pick the agent, skill, and model."
+        subtitle="How the Triage investigation runs — pick the agent and model. Edit its prompt in Settings → Prompts."
       />
       {repo ? (
         <div className="space-y-3.5">
@@ -242,28 +225,21 @@ function ActionConfig({
   const scope = inherits ? `repo:${repo}` : "app";
   const { settings } = useApp();
   const { data: agents = [] } = useAgents();
-  const { data: cmds } = useClaudeCommands(repo ?? null);
   const setSetting = useSetSetting();
   const set = (key: string, value: string | null) => setSetting.mutate({ scope, key, value });
 
   // App defaults — the repo scope inherits these when its own value is unset.
-  // Read the command keys unconditionally (with a harmless sentinel when the
-  // action has no command) so hook order stays stable across renders.
-  const cmdKey = descriptor.commandKey ?? "__none__";
-  const hasCmd = descriptor.commandKey !== undefined;
-  // Read the permission-mode key unconditionally too (harmless sentinel when the
+  // Read the permission-mode key unconditionally (harmless sentinel when the
   // action has none) so hook order stays stable across renders.
   const permKey = descriptor.permissionModeKey ?? "__none_perm__";
   const hasPerm = descriptor.permissionModeKey !== undefined;
   const appAgent = (useSetting("app", descriptor.agentKey).data as AgentKind | null) ?? "Claude";
-  const appCmd = useSetting("app", cmdKey).data;
   const appModel = useSetting("app", descriptor.modelKey).data;
   const appEffort = useSetting("app", descriptor.effortKey).data;
   const appPerm = useSetting("app", permKey).data;
 
   // This scope's stored values (null/undefined for both app + an unset repo).
   const scopeAgent = useSetting(scope, descriptor.agentKey).data as AgentKind | null;
-  const scopeCmd = useSetting(scope, cmdKey).data;
   const scopeModel = useSetting(scope, descriptor.modelKey).data;
   const scopeEffort = useSetting(scope, descriptor.effortKey).data;
   const scopePerm = useSetting(scope, permKey).data;
@@ -285,12 +261,6 @@ function ActionConfig({
   // been chosen yet.
   const agentDefaultModel =
     settings?.agents?.find((a) => a.key === effectiveAgent)?.model || models[0] || "";
-  const globalCmds = cmds?.global ?? [];
-  const repoCmds = cmds?.repo ?? [];
-  const selectedCmd = globalCmds.find((c) => c.name === scopeCmd);
-  // The command this scope actually runs: its own pick, or (repo scope) the
-  // inherited app default. Drives the inline skill editor below.
-  const effectiveCmd = (inherits ? (scopeCmd ?? appCmd) : scopeCmd) || undefined;
 
   return (
     <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
@@ -311,60 +281,6 @@ function ActionConfig({
           defaultLabel={`Use app default (${appAgentShort})`}
         />
       </Field>
-
-      {hasCmd && (
-        <Field
-          label="Skill"
-          hint={
-            inherits ? (
-              "From this repo's commands or your global ones."
-            ) : (
-              <>
-                From your global commands (<span className="font-mono">~/.claude/commands</span>).
-              </>
-            )
-          }
-        >
-          {inherits ? (
-            <OverrideSelect
-              value={scopeCmd ?? ""}
-              onChange={(v) => set(cmdKey, v)}
-              defaultLabel={`Use app default${appCmd ? ` (/${appCmd})` : ""}`}
-            >
-              <CommandOptions globalCmds={globalCmds} repoCmds={repoCmds} />
-            </OverrideSelect>
-          ) : globalCmds.length === 0 ? (
-            <div className="rounded-lg border border-line-3 bg-input px-[11px] py-2.5 text-[11.5px] text-muted-3">
-              No commands found in <span className="font-mono">~/.claude/commands</span>.
-            </div>
-          ) : (
-            <ChevronSelect
-              value={scopeCmd ?? ""}
-              onChange={(v) => set(cmdKey, v || null)}
-              disabled={disabled}
-              className={SELECT_CLASS}
-            >
-              <option value="">None</option>
-              <CommandOptions globalCmds={globalCmds} repoCmds={[]} />
-            </ChevronSelect>
-          )}
-          {!inherits && selectedCmd?.description && (
-            <div className="mt-2 text-[11.5px] text-muted-3">{selectedCmd.description}</div>
-          )}
-          {/* Edit the selected skill's real file, right under its picker. Keyed
-                so switching skill/scope reseeds a fresh draft (and flushes the old
-                one on unmount). */}
-          {effectiveCmd && (
-            <SkillEditor
-              key={`${scope}:${effectiveCmd}`}
-              repo={repo ?? null}
-              name={effectiveCmd}
-              fromRepoScope={inherits}
-              disabled={disabled}
-            />
-          )}
-        </Field>
-      )}
 
       <Field
         label="Model"
@@ -419,140 +335,6 @@ function ActionConfig({
           />
         </Field>
       )}
-    </div>
-  );
-}
-
-/** Debounce constant for the skill editor's autosave. */
-const SKILL_SAVE_DEBOUNCE_MS = 600;
-
-/**
- * Collapsible inline editor for the selected Investigate skill, sitting right
- * under its picker. Edits the *real* command `.md` file in place (the global one,
- * or the repo's own copy, resolved on the backend repo-over-global). It's a plain
- * Claude command file, not a jinja template, so there's no preview. Autosaves a
- * beat after typing stops and flushes on unmount, so switching skill/scope never
- * drops the last edit (same pattern as the commit-message draft).
- */
-function SkillEditor({
-  repo,
-  name,
-  fromRepoScope,
-  disabled,
-}: {
-  repo: string | null;
-  name: string;
-  fromRepoScope: boolean;
-  disabled?: boolean;
-}) {
-  const { data, isLoading } = useClaudeCommandFile(repo, name);
-  const { mutate: save, isPending } = useWriteClaudeCommand(repo, name);
-
-  const [open, setOpen] = useState(false);
-  const [text, setText] = useState("");
-  // Adopt the loaded file once; if the user typed before it resolved, their input
-  // wins (never stomp active typing with the loaded value).
-  const seeded = useRef(false);
-  useEffect(() => {
-    if (seeded.current || data === undefined) return;
-    seeded.current = true;
-    if (text === "") setText(data.content);
-  }, [data, text]);
-
-  // Autosave a beat after typing stops (no-op once it matches the file — our write
-  // updates the cached content, so `data.content` catches up after a save).
-  useEffect(() => {
-    if (!seeded.current || !data || text === data.content) return;
-    const timer = setTimeout(
-      () => save({ source: data.source, content: text }),
-      SKILL_SAVE_DEBOUNCE_MS,
-    );
-    return () => clearTimeout(timer);
-  }, [text, data, save]);
-
-  // Flush any unsaved edit synchronously on teardown (this component is keyed, so
-  // switching skill/scope unmounts it before the debounce timer fires). Refs so
-  // this doesn't re-fire per keystroke.
-  const textRef = useRef(text);
-  textRef.current = text;
-  const dataRef = useRef(data);
-  dataRef.current = data;
-  const saveRef = useRef(save);
-  saveRef.current = save;
-  useEffect(
-    () => () => {
-      const d = dataRef.current;
-      if (d && textRef.current !== d.content) {
-        saveRef.current({ source: d.source, content: textRef.current });
-      }
-    },
-    [],
-  );
-
-  const dirty = !!data && text !== data.content;
-  const status = isPending ? "Saving…" : dirty ? "Unsaved" : data ? "Saved" : "";
-
-  return (
-    <div className="mt-2.5">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        disabled={disabled}
-        className="flex w-full items-center gap-1.5 text-[12px] text-muted-2 hover:text-fg-2"
-      >
-        <ChevronRightIcon
-          size={12}
-          className={`flex-none transition-transform ${open ? "rotate-90" : ""}`}
-        />
-        <span className="flex-none">Edit skill file</span>
-        {open && data && (
-          <span
-            className="min-w-0 flex-1 truncate text-left font-mono text-[10.5px] text-muted-4"
-            title={data.path}
-          >
-            {data.path}
-          </span>
-        )}
-        {open && (
-          <span className={`text-[10.5px] text-muted-4 ${data ? "flex-none" : "ml-auto"}`}>
-            {status}
-          </span>
-        )}
-      </button>
-
-      {open &&
-        (isLoading ? (
-          <div className="mt-2 text-[11.5px] text-muted-3">
-            Loading <span className="font-mono">/{name}</span>…
-          </div>
-        ) : !data ? (
-          <div className="mt-2 text-[11.5px] text-muted-3">
-            Couldn't load <span className="font-mono">/{name}</span>.
-          </div>
-        ) : (
-          <>
-            {fromRepoScope && data.source === "global" && (
-              <div className="mt-2 text-[11px] leading-[1.5] text-muted-3">
-                This is a global command — edits apply to every repo.
-              </div>
-            )}
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              spellCheck={false}
-              autoCorrect="off"
-              autoCapitalize="off"
-              disabled={disabled}
-              aria-label={`Edit the /${name} skill`}
-              // Disable ligatures/contextual alternates: the mono font otherwise
-              // renders `---`/`###`/`` `` ``/`**` as combined glyphs, so the text
-              // looks shifted and the caret doesn't line up with the characters.
-              style={{ fontVariantLigatures: "none", fontFeatureSettings: '"liga" 0, "calt" 0' }}
-              className="mt-2 h-72 w-full resize-y rounded-lg border border-line-3 bg-input px-3 py-2.5 font-mono text-[12px] leading-[1.55] text-fg-2 outline-none focus:border-line-strong"
-            />
-          </>
-        ))}
     </div>
   );
 }

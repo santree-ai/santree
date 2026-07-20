@@ -20,8 +20,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AgentKind,
   ChangedFile,
-  ClaudeCommandFile,
-  CommandSource,
   PrDetail,
   PrLabel,
   PromptInfo,
@@ -239,6 +237,7 @@ export const queryKeys = {
   worktreeFileSourcePrefix: (repo: string, id: string) =>
     ["worktree-file-source", repo, id] as const,
   workPrompt: (repo: string, id: string) => ["work-prompt", repo, id] as const,
+  investigatePrompt: (repo: string, id: string) => ["investigate-prompt", repo, id] as const,
   agentSession: (repo: string, termKey: string, allowFresh: boolean) =>
     ["agent-session", repo, termKey, allowFresh] as const,
   /** Both `allowFresh` variants of one terminal's session resolution — what a
@@ -272,9 +271,6 @@ export const queryKeys = {
   triageDetail: (repo: string, id: string) => ["triage-detail", repo, id] as const,
   triageSchedule: (repo: string) => ["triage-schedule", repo] as const,
   settings: ["settings"] as const,
-  claudeCommands: (repo: string | null) => ["claude-commands", repo] as const,
-  claudeCommandFile: (repo: string | null, name: string) =>
-    ["claude-command-file", repo, name] as const,
   setting: (scope: string, key: string) => ["setting", scope, key] as const,
   resolvedSetting: (repo: string, key: string) => ["resolved-setting", repo, key] as const,
   /** Prefix for every repo's resolved read of any key — a repo-scoped override
@@ -302,10 +298,10 @@ export const queryKeys = {
   claudeUsage: ["claude-usage"] as const,
 };
 
-/** Setting keys for the Triage Investigation action (agent · skill · model ·
- *  effort). `effort` maps to the agent's `--effort` flag (Claude only). */
+/** Setting keys for the Triage Investigation action (agent · model · effort).
+ *  `effort` maps to the agent's `--effort` flag (Claude only). The investigation
+ *  prompt itself is the editable `triage` prompt (Settings → Prompts). */
 export const INVESTIGATE_AGENT_KEY = "investigate_agent";
-export const INVESTIGATE_COMMAND_KEY = "investigate_command";
 export const INVESTIGATE_MODEL_KEY = "investigate_model";
 export const INVESTIGATE_EFFORT_KEY = "investigate_effort";
 /** Whether an Investigate launch passes Claude's `--remote-control` flag
@@ -891,6 +887,19 @@ export const useWorkPrompt = (repo: string, id: string, enabled: boolean) =>
     enabled: enabled && !!repo && !!id,
     staleTime: 0,
   });
+
+/** The PATH of the on-disk Triage-investigation prompt for a ticket. Like
+ *  {@link useWorkPrompt} but for the Investigate action: the backend renders the
+ *  `triage` template from the live ticket, extracts the ticket's screenshots to
+ *  files the agent can `Read`, writes the prompt to a file, and returns its path;
+ *  the terminal seeds `claude 'Read <path> …'`. `staleTime: 0` so every fresh
+ *  launch re-renders (new comments/screenshots) and overwrites. */
+export const useInvestigatePrompt = (repo: string, id: string, enabled: boolean) =>
+  useUnwrappedQuery(
+    queryKeys.investigatePrompt(repo, id),
+    () => commands.investigatePrompt(repo, id),
+    { enabled: enabled && !!repo && !!id, staleTime: 0 },
+  );
 
 /**
  * Resolve how a terminal that auto-launches `claude` should (re)launch it —
@@ -1793,46 +1802,6 @@ export const useSaveSettings = () =>
     },
     invalidate: () => [queryKeys.settings],
   });
-
-/**
- * Claude slash-commands available to a scope. Pass `null` for the app scope
- * (global commands only); pass a repo name to also include that repo's own.
- */
-export const useClaudeCommands = (repo: string | null) =>
-  useUnwrappedQuery(queryKeys.claudeCommands(repo), () => commands.listClaudeCommands(repo));
-
-/**
- * The effective backing file for a selected slash-command (`skill`), so Settings
- * can edit the real thing in place. Resolves repo-over-global on the backend, and
- * reports which file (`source`, `path`) an edit will land on. `repo` is a repo
- * *name* (or null for the app scope); disabled until a command is picked.
- */
-export const useClaudeCommandFile = (repo: string | null, name: string) =>
-  useUnwrappedQuery(
-    queryKeys.claudeCommandFile(repo, name),
-    () => commands.readClaudeCommand(repo, name),
-    { enabled: name.trim().length > 0, staleTime: SETTING_STALE_TIME },
-  );
-
-/**
- * Save an edited slash-command back to its file. `source` comes from the matching
- * {@link useClaudeCommandFile} read so the write hits the exact file that was
- * loaded (global vs the repo's own copy). Success is silent (autosave); a failed
- * write red-toasts via the global handler. Keeps the cached file in sync with what
- * we wrote — our write is authoritative, so no refetch.
- */
-export const useWriteClaudeCommand = (repo: string | null, name: string) => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (v: { source: CommandSource; content: string }) =>
-      unwrap(commands.writeClaudeCommand(repo, name, v.source, v.content)),
-    onSuccess: (_data, v) => {
-      qc.setQueryData<ClaudeCommandFile>(queryKeys.claudeCommandFile(repo, name), (prev) =>
-        prev ? { ...prev, content: v.content } : prev,
-      );
-    },
-  });
-};
 
 /** A single setting value for an exact scope (`"app"` or `"repo:<name>"`). */
 export const useSetting = (scope: string, key: string) =>

@@ -203,6 +203,14 @@ export const commands = {
 	 */
 	workPrompt: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("work_prompt", { repo, issueId })),
 	/**
+	 *  Render the Triage-investigation opening prompt for a ticket (the `triage`
+	 *  template around the live ticket), extract its screenshots to files the agent
+	 *  can `Read`, write the prompt to a stable on-disk file, and return that file's
+	 *  **path** — the terminal seeds `exec <agent> 'Read <path> …'` with it. The
+	 *  investigation analog of [`work_prompt`]; regenerated on every launch.
+	 */
+	investigatePrompt: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("investigate_prompt", { repo, issueId })),
+	/**
 	 *  Render the CI-fix opening prompt (the failing check `log` + guardrails) to a
 	 *  per-worktree file and return its **path** — the "Fix CI" terminal seeds
 	 *  `exec <agent> 'Read <path> …'` with it (the log is too large to type into the
@@ -424,24 +432,6 @@ export const commands = {
 	taskNote: (repo: string, taskId: string) => typedError<string | null, CmdError>(__TAURI_INVOKE("task_note", { repo, taskId })),
 	/**  Save (or clear, when blank) the user's local note for a task. */
 	setTaskNote: (repo: string, taskId: string, body: string) => typedError<null, CmdError>(__TAURI_INVOKE("set_task_note", { repo, taskId, body })),
-	/**
-	 *  The Claude slash-commands offered by the triage "Investigate" picker. Always
-	 *  includes the global `~/.claude/commands`; when a repo name is given, also its
-	 *  own `.claude/commands` (so the repo scope can list both).
-	 */
-	listClaudeCommands: (repo: string | null) => typedError<ClaudeCommands, CmdError>(__TAURI_INVOKE("list_claude_commands", { repo })),
-	/**
-	 *  Read the effective backing file for a selected slash-command so the Triage
-	 *  settings editor can edit the real skill in place. Resolves repo-over-global
-	 *  (the repo's own copy wins), returning which file was loaded.
-	 */
-	readClaudeCommand: (repo: string | null, name: string) => typedError<ClaudeCommandFile, CmdError>(__TAURI_INVOKE("read_claude_command", { repo, name })),
-	/**
-	 *  Overwrite a slash-command's backing file. `source` comes from the matching
-	 *  [`read_claude_command`] so the edit lands on the exact file that was loaded
-	 *  (global vs the repo's own copy).
-	 */
-	writeClaudeCommand: (repo: string | null, name: string, source: CommandSource, content: string) => typedError<null, CmdError>(__TAURI_INVOKE("write_claude_command", { repo, name, source, content })),
 	/**
 	 *  The current Claude models to suggest in the model pickers — derived live from
 	 *  the fetched LiteLLM catalog (cached in SQLite, daily refresh, static fallback),
@@ -783,56 +773,7 @@ export type CheckStep = {
 	status: CheckStatus,
 };
 
-/**
- *  A Claude slash-command discovered on disk under a `.claude/commands` folder.
- *  Invoked as `/<name> <arg>` — the triage "Investigate" picker offers these.
- */
-export type ClaudeCommand = {
-	/**  Invocation name (the file stem, without `.md`), e.g. `investigate-ticket`. */
-	name: string,
-	/**  The command's `description:` frontmatter, when present. */
-	description: string | null,
-};
-
-/**
- *  The effective backing file for a selected slash-command, so the settings editor
- *  can edit the *real* skill in place. Resolved repo-over-global, matching how
- *  Claude picks which command actually runs.
- */
-export type ClaudeCommandFile = {
-	/**  Invocation name (the file stem, without `.md`). */
-	name: string,
-	/**  Which directory the effective file lives in. */
-	source: CommandSource,
-	/**  Absolute path of the backing `.md` file (shown as the edit target). */
-	path: string,
-	/**  The file's full text — YAML frontmatter plus the command body. */
-	content: string,
-};
-
-/**
- *  Claude commands available to the investigate picker, split by where they live
- *  so the repo scope can distinguish its own commands from the global ones.
- */
-export type ClaudeCommands = {
-	/**  Commands from the user's `~/.claude/commands`. */
-	global: ClaudeCommand[],
-	/**  Commands from the repo's `.claude/commands` (empty for the app scope). */
-	repo: ClaudeCommand[],
-};
-
 export type CmdError = string;
-
-/**
- *  Where a slash-command's backing file lives — the user's global dir or a repo's.
- *  A repo-local file shadows a global one of the same name (Claude's own
- *  resolution), so this records which file an edit actually targets.
- */
-export type CommandSource = 
-/**  `~/.claude/commands/<name>.md`. */
-"global" | 
-/**  `<repo>/.claude/commands/<name>.md`. */
-"repo";
 
 /**  Where a PR comment originated, so the UI can label/anchor it. */
 export type CommentKind = 
@@ -1057,7 +998,12 @@ export type PrDraft = {
 /**  One changed file in a PR, with its unified diff hunk (from the REST files API). */
 export type PrFile = {
 	path: string,
-	/**  GitHub's status string: "added" | "modified" | "removed" | "renamed". */
+	/**
+	 *  GitHub's status string: "added" | "removed" | "modified" | "renamed" |
+	 *  "copied" | "changed" | "unchanged". Kept as a string, not an enum: it's
+	 *  display-only, and an unrecognised value should tint like a modification
+	 *  rather than fail the whole PR's file list to deserialize.
+	 */
 	status: string,
 	additions: number,
 	deletions: number,

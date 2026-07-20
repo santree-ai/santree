@@ -17,12 +17,11 @@ use tauri_specta::Event;
 use santree_core::{
     config,
     domain::{
-        AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, CheckLog, ClaudeCommandFile,
-        ClaudeCommands, CommandSource, FileSource, GithubStatus, LinearOrg, LinearStatus,
-        MergeQueue, NewPr, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo,
-        ReviewInbox, ReviewedFile, Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings,
-        TabKind, Task, TriageDetail, TriageSchedule, TriageTicket, UsageReport, Worktree,
-        WorktreePr, WorktreeTab,
+        AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, CheckLog, FileSource,
+        GithubStatus, LinearOrg, LinearStatus, MergeQueue, NewPr, Opener, PrDetail, PrDraft,
+        PrLabel, PromptInfo, PromptPreview, Repo, ReviewInbox, ReviewedFile, Reviewer, ScriptInfo,
+        SessionState, SessionUsageLive, Settings, TabKind, Task, TriageDetail, TriageSchedule,
+        TriageTicket, UsageReport, Worktree, WorktreePr, WorktreeTab,
     },
 };
 
@@ -459,6 +458,23 @@ pub async fn work_prompt(
 ) -> CmdResult<String> {
     let prompts = worktree::prompts_root(&app).ok_or("no writable data dir for prompt file")?;
     Ok(worktree::work_prompt(&db, &repo, &issue_id, &prompts).await?)
+}
+
+/// Render the Triage-investigation opening prompt for a ticket (the `triage`
+/// template around the live ticket), extract its screenshots to files the agent
+/// can `Read`, write the prompt to a stable on-disk file, and return that file's
+/// **path** — the terminal seeds `exec <agent> 'Read <path> …'` with it. The
+/// investigation analog of [`work_prompt`]; regenerated on every launch.
+#[tauri::command]
+#[specta::specta]
+pub async fn investigate_prompt(
+    app: AppHandle,
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<String> {
+    let prompts = worktree::prompts_root(&app).ok_or("no writable data dir for prompt file")?;
+    Ok(worktree::investigate_prompt(&db, &repo, &issue_id, &prompts).await?)
 }
 
 /// Decide how a terminal that auto-launches `claude` should (re)launch it: resume
@@ -945,66 +961,6 @@ pub async fn set_task_note(
 #[specta::specta]
 pub async fn claude_models(db: State<'_, Db>) -> CmdResult<Vec<String>> {
     Ok(pricing::claude_models(&db).await)
-}
-
-/// The Claude slash-commands offered by the triage "Investigate" picker. Always
-/// includes the global `~/.claude/commands`; when a repo name is given, also its
-/// own `.claude/commands` (so the repo scope can list both).
-#[tauri::command]
-#[specta::specta]
-pub async fn list_claude_commands(
-    repo: Option<String>,
-    db: State<'_, Db>,
-) -> CmdResult<ClaudeCommands> {
-    let repo_path = match repo {
-        Some(name) => repo::path(&db, &name).await?,
-        None => None,
-    };
-    // `settings::commands` does sync `read_dir` + `read_to_string` per command
-    // file — keep it off the async runtime (mirrors `agent_auth` below).
-    Ok(tokio::task::spawn_blocking(move || settings::commands(repo_path.as_deref())).await?)
-}
-
-/// Read the effective backing file for a selected slash-command so the Triage
-/// settings editor can edit the real skill in place. Resolves repo-over-global
-/// (the repo's own copy wins), returning which file was loaded.
-#[tauri::command]
-#[specta::specta]
-pub async fn read_claude_command(
-    repo: Option<String>,
-    name: String,
-    db: State<'_, Db>,
-) -> CmdResult<ClaudeCommandFile> {
-    let repo_path = match repo {
-        Some(name) => repo::path(&db, &name).await?,
-        None => None,
-    };
-    Ok(
-        tokio::task::spawn_blocking(move || settings::read_command(repo_path.as_deref(), &name))
-            .await??,
-    )
-}
-
-/// Overwrite a slash-command's backing file. `source` comes from the matching
-/// [`read_claude_command`] so the edit lands on the exact file that was loaded
-/// (global vs the repo's own copy).
-#[tauri::command]
-#[specta::specta]
-pub async fn write_claude_command(
-    repo: Option<String>,
-    name: String,
-    source: CommandSource,
-    content: String,
-    db: State<'_, Db>,
-) -> CmdResult<()> {
-    let repo_path = match repo {
-        Some(name) => repo::path(&db, &name).await?,
-        None => None,
-    };
-    Ok(tokio::task::spawn_blocking(move || {
-        settings::write_command(repo_path.as_deref(), &name, source, &content)
-    })
-    .await??)
 }
 
 /// The variable names a user-referenced `.env` file defines, for the Environment

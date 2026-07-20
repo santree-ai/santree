@@ -15,12 +15,15 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
+use base64::Engine;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, PtySize};
 use serde::Serialize;
 use specta::Type;
 use tauri::ipc::Channel;
 
-use santree_core::domain::{AgentKind, ChangedFile, FileSource, ScriptInfo, Worktree};
+use santree_core::domain::{
+    AgentKind, ChangedFile, FileSource, ScriptInfo, TriageComment, TriageDetail, Worktree,
+};
 
 /// How long a setup script may run before it's killed. Setup scripts run real build
 /// tooling (nix, make, a cold `npm install`), so this is deliberately generous — it's
@@ -1345,6 +1348,27 @@ fn fix_ci_prompt_file_path(
     prompt_path(prompts_root, repo_root, issue_id, ".fixci.md")
 }
 
+/// Path of a ticket's Triage-investigation prompt (a distinct suffix so it never
+/// clobbers the work / CI-fix prompts).
+fn investigate_prompt_file_path(
+    prompts_root: &Path,
+    repo_root: &str,
+    issue_id: &str,
+) -> Result<PathBuf> {
+    prompt_path(prompts_root, repo_root, issue_id, ".investigate.md")
+}
+
+/// Directory the Triage investigation writes a ticket's extracted screenshots
+/// into, so the agent can `Read` the real images. Same validated `<repo-key>/
+/// <issue_id>…` sink as the prompt files.
+fn investigate_images_dir(
+    prompts_root: &Path,
+    repo_root: &str,
+    issue_id: &str,
+) -> Result<PathBuf> {
+    prompt_path(prompts_root, repo_root, issue_id, ".images")
+}
+
 /// Write a rendered prompt to `path` (creating its per-repo directory) and hand back
 /// the path. The fs work — and, for the CI-fix prompt, a whole embedded job log —
 /// runs on the blocking pool, like the rest of this module's filesystem I/O.
@@ -1368,17 +1392,22 @@ pub fn prompts_root(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.path().app_data_dir().ok().map(|d| d.join("prompts"))
 }
 
-/// Best-effort delete of a worktree's on-disk prompt files — the work prompt and
-/// the CI-fix prompt (missing is fine).
+/// Best-effort delete of a worktree's on-disk prompt files — the work, CI-fix and
+/// Triage-investigation prompts, plus the investigation's extracted-images dir
+/// (missing is fine).
 fn delete_prompt_file(prompts_root: &Path, repo_root: &str, issue_id: &str) {
     for path in [
         prompt_file_path(prompts_root, repo_root, issue_id),
         fix_ci_prompt_file_path(prompts_root, repo_root, issue_id),
+        investigate_prompt_file_path(prompts_root, repo_root, issue_id),
     ]
     .into_iter()
     .flatten()
     {
         let _ = std::fs::remove_file(path);
+    }
+    if let Ok(dir) = investigate_images_dir(prompts_root, repo_root, issue_id) {
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
@@ -1491,6 +1520,177 @@ pub async fn fix_ci_prompt(
     .to_string();
 
     let path = fix_ci_prompt_file_path(prompts_root, &root, issue_id)?;
+    write_prompt_file(path, rendered).await
+}
+
+// ── Triage investigation prompt (images kept, not stripped) ──────────────────
+//
+// The other flows strip a ticket's inlined images to an `image omitted`
+// placeholder (`prompts::strip_data_uris`) — the model can't see base64 and one
+// screenshot is megabytes. A triage investigation is the opposite: the screenshot
+// is often the whole bug report. So here we decode each inlined `data:` URI back
+// to bytes, write it to a real image file, and rewrite the markdown to link that
+// file's path. `Read`-ing that path is how Claude Code actually *sees* the image.
+//
+// This runs *before* `issue_context`, so by the time the shared ticket render
+// path sees the markdown there are no `data:` URIs left — only file paths, which
+// `strip_data_uris` passes through untouched. That's why `issue.njk`/`work` need
+// no change and keep stripping.
+
+/// Extension to save an extracted image under, from its data-URI mime. The bytes
+/// are what the agent reads; the extension is only a hint, so an unknown mime
+/// falls back to `png`.
+fn image_ext(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "png",
+    }
+}
+
+/// If `uri` (a `data:…` candidate span) is a real base64 image data URI, decode it,
+/// write it to `<images_dir>/<index>.<ext>`, bump the index, and return the file's
+/// absolute path to splice in place of the URI. Prose like "data: see below" (no
+/// `,` separator) or a non-image / non-base64 URI returns `None` and is left as-is.
+fn write_data_uri_image(
+    uri: &str,
+    images_dir: &Path,
+    next_index: &mut usize,
+) -> Result<Option<String>> {
+    // `data:[<mediatype>][;base64],<payload>` — the first comma splits metadata
+    // from the payload (the base64 alphabet has no comma, so this is unambiguous).
+    let Some(comma) = uri.find(',') else {
+        return Ok(None);
+    };
+    let meta = &uri["data:".len()..comma];
+    if !meta.contains("base64") {
+        return Ok(None);
+    }
+    let mime = meta.split(';').next().unwrap_or("");
+    if !mime.starts_with("image/") {
+        return Ok(None);
+    }
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&uri[comma + 1..]) else {
+        // A malformed payload isn't worth failing the whole launch — leave the
+        // original text so the agent at least sees there was an image here.
+        return Ok(None);
+    };
+    let idx = *next_index;
+    *next_index += 1;
+    let path = images_dir.join(format!("{idx}.{}", image_ext(mime)));
+    std::fs::create_dir_all(images_dir)?;
+    std::fs::write(&path, &bytes)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+/// Rewrite one markdown field: every inlined image data URI becomes a link to an
+/// extracted file. Mirrors the span-scan `prompts::strip_data_uris` uses, so the
+/// boundary set matches what `linear.rs` spliced the URI over.
+fn extract_field_images(md: &str, images_dir: &Path, next_index: &mut usize) -> Result<String> {
+    const DELIMS: &[char] = &[')', ' ', '\n', '\t', '"', ']', '>', '<'];
+    let mut out = String::with_capacity(md.len());
+    let mut rest = md;
+    while let Some(at) = rest.find("data:") {
+        let (before, uri) = rest.split_at(at);
+        let end = uri.find(DELIMS).unwrap_or(uri.len());
+        out.push_str(before);
+        match write_data_uri_image(&uri[..end], images_dir, next_index)? {
+            Some(path) => out.push_str(&path),
+            None => out.push_str(&uri[..end]),
+        }
+        rest = &uri[end..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// A copy of `detail` with every inlined image (description + the whole comment
+/// thread) extracted to a file under `images_dir` and its markdown rewritten to
+/// link that file. Blocking (fs writes) — call inside `spawn_blocking`.
+fn extract_detail_images(detail: &TriageDetail, images_dir: &Path) -> Result<TriageDetail> {
+    fn walk(comments: &mut [TriageComment], dir: &Path, idx: &mut usize) -> Result<()> {
+        for c in comments {
+            c.body = extract_field_images(&c.body, dir, idx)?;
+            walk(&mut c.children, dir, idx)?;
+        }
+        Ok(())
+    }
+    let mut out = detail.clone();
+    let mut idx = 0usize;
+    out.description = extract_field_images(&out.description, images_dir, &mut idx)?;
+    walk(&mut out.comments, images_dir, &mut idx)?;
+    Ok(out)
+}
+
+/// Render the Triage-investigation opening prompt for a ticket — the `triage`
+/// template (methodology) wrapped around the live ticket (description + comment
+/// thread), with the ticket's screenshots **extracted to files the agent can
+/// `Read`** rather than stripped — to a stable per-ticket file, and return its
+/// **path**. The terminal seeds `exec <agent> 'Read <path> …'` with it. Mirrors
+/// [`work_prompt`]; rewritten on every launch so it reflects the latest ticket.
+pub async fn investigate_prompt(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    prompts_root: &Path,
+) -> Result<String> {
+    let root = repo_root(db, repo).await?;
+
+    // Resolve the effective prompt sources once (honoring app/repo overrides) —
+    // reused to render both the embedded `issue` and the `triage` prompt below.
+    let sources = crate::prompts::resolve_sources(db, Some(repo)).await?;
+
+    // Fetch the full ticket. `triage_detail` fetches any issue by id. On any
+    // failure we leave `ticket_content` empty and the template says so.
+    let detail = match crate::linear::triage_detail(db, repo, issue_id).await {
+        Ok(Some(detail)) => Some(detail),
+        _ => None,
+    };
+
+    // Extract the ticket's inlined screenshots to files (clearing any stale ones
+    // from a previous launch first) and rewrite its markdown to link them.
+    let images_dir = investigate_images_dir(prompts_root, &root, issue_id)?;
+    let detail = match detail {
+        Some(d) => {
+            let dir = images_dir.clone();
+            Some(
+                tokio::task::spawn_blocking(move || -> Result<TriageDetail> {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    extract_detail_images(&d, &dir)
+                })
+                .await??,
+            )
+        }
+        None => None,
+    };
+
+    let ticket_content = detail
+        .as_ref()
+        .and_then(|d| crate::prompts::render_ticket_from(&sources, d).ok());
+    // Flatten the issue's fields into the context too, so a customized `triage`
+    // prompt can `{% include "issue" %}` directly, not only via `ticket_content`.
+    let issue_ctx = detail
+        .as_ref()
+        .map(crate::prompts::issue_context)
+        .unwrap_or_else(|| minijinja::context! {});
+    let title = detail.as_ref().map(|d| d.title.clone()).unwrap_or_default();
+
+    let rendered = crate::prompts::render_from(
+        &sources,
+        "triage",
+        minijinja::context! {
+            ticket_id => issue_id,
+            title => title,
+            ticket_content,
+            ..issue_ctx,
+        },
+    )?
+    .trim()
+    .to_string();
+
+    let path = investigate_prompt_file_path(prompts_root, &root, issue_id)?;
     write_prompt_file(path, rendered).await
 }
 
@@ -2633,12 +2833,58 @@ mod tests {
                 fix_ci_prompt_file_path(root, "/repo", bad).is_err(),
                 "CI-fix prompt path should reject issue id {bad:?}"
             );
+            assert!(
+                investigate_prompt_file_path(root, "/repo", bad).is_err(),
+                "investigate-prompt path should reject issue id {bad:?}"
+            );
+            assert!(
+                investigate_images_dir(root, "/repo", bad).is_err(),
+                "investigate-images dir should reject issue id {bad:?}"
+            );
         }
 
         // A normal id still resolves under <prompts_root>/<repo-key>/.
         let ok = prompt_file_path(root, "/repo", "AK-1").unwrap();
         assert_eq!(ok.file_name().unwrap(), "AK-1.md");
         assert!(ok.starts_with(root));
+        let inv = investigate_prompt_file_path(root, "/repo", "AK-1").unwrap();
+        assert_eq!(inv.file_name().unwrap(), "AK-1.investigate.md");
+        assert!(inv.starts_with(root));
+    }
+
+    /// The whole point of the investigation prompt: a ticket's inlined screenshot
+    /// is written out as a real file the agent can `Read`, and the markdown links
+    /// that file — the opposite of the work/PR flows, which strip it to a
+    /// placeholder. Prose that merely says "data:" is left intact.
+    #[test]
+    fn investigate_extracts_inline_images_to_files() {
+        let dir = std::env::temp_dir().join(format!("santree-imgs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A 1×1 PNG (real bytes) inlined as base64, exactly like `linear.rs` splices it.
+        let png = base64::engine::general_purpose::STANDARD.decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+        ).unwrap();
+        let data_uri = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        let mut idx = 0usize;
+        let md = format!("Repro:\n\n![login screen]({data_uri})\n\nSee data: the note above.");
+        let out = extract_field_images(&md, &dir, &mut idx).unwrap();
+
+        assert_eq!(idx, 1, "one image extracted");
+        assert!(!out.contains("base64"), "no payload survives in the markdown");
+        assert!(out.contains("See data: the note above."), "prose 'data:' intact");
+        // The image link now points at the on-disk file, which holds the real bytes.
+        let file = dir.join("0.png");
+        assert!(
+            out.contains(&format!("![login screen]({})", file.display())),
+            "markdown links the extracted file, got:\n{out}"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), png, "the decoded bytes are written");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Two creates for the same issue can both get past `create`'s "already tracked?"

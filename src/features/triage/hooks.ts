@@ -162,8 +162,6 @@ export function useBatchInvestigate(opts: {
   repo: string;
   /** The repo's local path (where the agent runs); no path ⇒ can't launch. */
   cwd: string | undefined;
-  /** Configured investigate skill (a Claude slash-command); null ⇒ can't launch. */
-  command: string | null;
   agentExec: string;
   model: string | null;
   effort: string | null;
@@ -173,18 +171,26 @@ export function useBatchInvestigate(opts: {
   const qc = useQueryClient();
   const hookSettings = useClaudeHookSettings().data;
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
-  const { repo, cwd, command, agentExec, model, effort, remoteControl } = opts;
+  const { repo, cwd, agentExec, model, effort, remoteControl } = opts;
 
   return useCallback(
     async (ids: string[]) => {
-      if (!command || !cwd || ids.length === 0) return;
+      if (!cwd || ids.length === 0) return;
       const exec = agentExec.trim() || "claude";
       const results = await Promise.allSettled(
         ids.map(async (id) => {
+          // Render + write this ticket's triage prompt (screenshots extracted to
+          // files) and seed `Read <path> …`; fall back to a bare prompt only if the
+          // render fails (e.g. Linear unreachable) so one ticket can't sink the batch.
+          const pr = await commands.investigatePrompt(repo, id);
+          const prompt =
+            pr.status === "ok"
+              ? `Read ${pr.data} and follow the instructions inside.`
+              : `Investigate ${id}.`;
           const r = await commands.agentSession(repo, `triage:${id}`, cwd, true);
           if (r.status === "error") throw new Error(r.error);
           const seed = agentSessionSeed(r.data, exec, {
-            prompt: `/${command} ${id}`,
+            prompt,
             modelFlag: model ? `--model ${shellQuote(model)}` : undefined,
             effortFlag: effort ? `--effort ${shellQuote(effort)}` : undefined,
             remoteControl: remoteControl ? id : undefined,
@@ -204,19 +210,7 @@ export function useBatchInvestigate(opts: {
       if (failed > 0)
         toast.error(`Couldn't start ${failed} investigation${failed === 1 ? "" : "s"}.`);
     },
-    [
-      repo,
-      cwd,
-      command,
-      agentExec,
-      model,
-      effort,
-      remoteControl,
-      hookSettings,
-      startWithChrome,
-      ensure,
-      qc,
-    ],
+    [repo, cwd, agentExec, model, effort, remoteControl, hookSettings, startWithChrome, ensure, qc],
   );
 }
 

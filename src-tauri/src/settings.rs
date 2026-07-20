@@ -1,17 +1,14 @@
-//! Generic app/per-repo key-value settings (the `settings` table) plus discovery
-//! of the Claude slash-commands offered by the triage "Investigate" picker.
+//! Generic app/per-repo key-value settings (the `settings` table).
 //!
 //! `scope` is `"app"` or `"repo:<name>"`: a repo value overrides the app value
 //! for the same key, and absence falls back to the app value (see [`resolve`]).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 
 use santree_core::config;
-use santree_core::domain::{
-    AgentAuth, AgentKind, ClaudeCommand, ClaudeCommandFile, ClaudeCommands, CommandSource, Settings,
-};
+use santree_core::domain::{AgentAuth, AgentKind, Settings};
 
 use crate::db::Db;
 
@@ -154,19 +151,6 @@ pub async fn set_settings(db: &Db, settings: &Settings) -> Result<()> {
     let json = serde_json::to_string(settings)?;
     set(db, "app", SETTINGS_KEY, Some(json)).await
 }
-
-/// Claude commands available to a scope: always the global set, plus the repo's
-/// own when a `repo_path` is given.
-pub fn commands(repo_path: Option<&str>) -> ClaudeCommands {
-    let global = global_commands_dir()
-        .map(|d| scan_commands(&d))
-        .unwrap_or_default();
-    let repo = repo_path
-        .map(|p| scan_commands(&Path::new(p).join(".claude").join("commands")))
-        .unwrap_or_default();
-    ClaudeCommands { global, repo }
-}
-
 /// The CLI binary name probed on PATH for each harness.
 fn agent_binary(kind: AgentKind) -> &'static str {
     match kind {
@@ -355,160 +339,6 @@ pub fn login_shell_path() -> Option<String> {
         .find_map(|l| l.strip_prefix(MARK))
         .map(str::to_string)
         .filter(|p| !p.is_empty())
-}
-
-/// The user's global Claude commands directory (`~/.claude/commands`).
-fn global_commands_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".claude").join("commands"))
-}
-
-/// Scan a `.claude/commands` directory for top-level `*.md` command files,
-/// returning each command's invocation name and `description:` frontmatter,
-/// sorted by name. A missing directory yields an empty list.
-fn scan_commands(dir: &Path) -> Vec<ClaudeCommand> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut cmds: Vec<ClaudeCommand> = entries
-        .flatten()
-        .filter_map(|e| {
-            let path = e.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("md") {
-                return None;
-            }
-            let name = path.file_stem()?.to_str()?.to_string();
-            Some(ClaudeCommand {
-                description: read_description(&path),
-                name,
-            })
-        })
-        .collect();
-    cmds.sort_by(|a, b| a.name.cmp(&b.name));
-    cmds
-}
-
-/// Validate an IPC-supplied command name is a single safe filename component
-/// before it's joined into a `.claude/commands` path. Rejects anything with a
-/// path separator, a leading dash/dot, or characters outside `[A-Za-z0-9._-]` —
-/// so it can only ever name a plain `<name>.md` file in the commands dir, never
-/// escape it (see the security invariants in CLAUDE.md).
-fn safe_command_name(name: &str) -> Result<&str> {
-    let ok = !name.is_empty()
-        && !name.starts_with(['-', '.'])
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    if ok {
-        Ok(name)
-    } else {
-        Err(anyhow::anyhow!("invalid command name: {name:?}"))
-    }
-}
-
-/// A repo's `.claude/commands/<name>.md`, when it exists — the file Claude would
-/// actually run in that repo (repo shadows global).
-fn repo_command_path(repo_path: &str, name: &str) -> PathBuf {
-    Path::new(repo_path)
-        .join(".claude")
-        .join("commands")
-        .join(format!("{name}.md"))
-}
-
-/// Read the *effective* backing file for slash-command `name`: the repo's own copy
-/// when present, else the global one. `repo_path` is the repo's filesystem root (or
-/// `None` for the app scope, which only ever sees global commands).
-pub fn read_command(repo_path: Option<&str>, name: &str) -> Result<ClaudeCommandFile> {
-    let global = global_commands_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
-    read_command_in(&global, repo_path, name)
-}
-
-/// [`read_command`] with the global commands dir injected, so tests can point it at
-/// a fixture without mutating `HOME`.
-fn read_command_in(
-    global_dir: &Path,
-    repo_path: Option<&str>,
-    name: &str,
-) -> Result<ClaudeCommandFile> {
-    let name = safe_command_name(name)?;
-    if let Some(repo) = repo_path {
-        let p = repo_command_path(repo, name);
-        if p.is_file() {
-            let content = std::fs::read_to_string(&p)?;
-            return Ok(ClaudeCommandFile {
-                name: name.to_string(),
-                source: CommandSource::Repo,
-                path: p.display().to_string(),
-                content,
-            });
-        }
-    }
-    let p = global_dir.join(format!("{name}.md"));
-    let content = std::fs::read_to_string(&p)
-        .map_err(|e| anyhow::anyhow!("can't read command '{name}': {e}"))?;
-    Ok(ClaudeCommandFile {
-        name: name.to_string(),
-        source: CommandSource::Global,
-        path: p.display().to_string(),
-        content,
-    })
-}
-
-/// Overwrite the backing file for slash-command `name` in the given `source`
-/// (creating the commands dir if needed). `source` is taken from the matching
-/// [`read_command`] so an edit always lands on the exact file that was loaded.
-pub fn write_command(
-    repo_path: Option<&str>,
-    name: &str,
-    source: CommandSource,
-    content: &str,
-) -> Result<()> {
-    let global = global_commands_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
-    write_command_in(&global, repo_path, name, source, content)
-}
-
-/// [`write_command`] with the global commands dir injected (see [`read_command_in`]).
-fn write_command_in(
-    global_dir: &Path,
-    repo_path: Option<&str>,
-    name: &str,
-    source: CommandSource,
-    content: &str,
-) -> Result<()> {
-    let name = safe_command_name(name)?;
-    let dir = match source {
-        CommandSource::Repo => {
-            let repo =
-                repo_path.ok_or_else(|| anyhow::anyhow!("a repo command needs a repo scope"))?;
-            Path::new(repo).join(".claude").join("commands")
-        }
-        CommandSource::Global => global_dir.to_path_buf(),
-    };
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join(format!("{name}.md")), content)?;
-    Ok(())
-}
-
-/// Pull the `description:` value from a command file's YAML frontmatter, if any.
-fn read_description(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines();
-    if lines.next()?.trim() != "---" {
-        return None;
-    }
-    for line in lines {
-        let line = line.trim();
-        if line == "---" {
-            break;
-        }
-        if let Some(rest) = line.strip_prefix("description:") {
-            let val = rest.trim().trim_matches(['"', '\'']).trim();
-            if !val.is_empty() {
-                return Some(val.to_string());
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -763,68 +593,5 @@ mod tests {
         assert!(!safe_binary_name(""));
         // Rejected names take the not-found path instead of shelling out.
         assert_eq!(resolve_binary("gh; touch /tmp/santree-pwned"), None);
-    }
-
-    #[test]
-    fn safe_command_name_rejects_traversal_and_separators() {
-        assert!(safe_command_name("investigate-ticket").is_ok());
-        assert!(safe_command_name("fix_ci.v2").is_ok());
-        // Anything that could escape the commands dir or inject a flag is refused.
-        assert!(safe_command_name("../etc/passwd").is_err());
-        assert!(safe_command_name("a/b").is_err());
-        assert!(safe_command_name(".hidden").is_err());
-        assert!(safe_command_name("-rf").is_err());
-        assert!(safe_command_name("").is_err());
-        assert!(safe_command_name("has space").is_err());
-    }
-
-    #[test]
-    fn read_write_command_resolves_repo_over_global_in_place() {
-        let dir = std::env::temp_dir().join(format!("santree-cmd-{}", Uuid::new_v4()));
-        let global = dir.join("home").join(".claude").join("commands");
-        let repo = dir.join("repo");
-        std::fs::create_dir_all(&global).unwrap();
-        std::fs::create_dir_all(repo.join(".claude").join("commands")).unwrap();
-        std::fs::write(global.join("inv.md"), "GLOBAL").unwrap();
-        let repo_path = repo.to_str().unwrap();
-
-        // No repo copy yet → the global file is the effective one.
-        let f = read_command_in(&global, Some(repo_path), "inv").unwrap();
-        assert_eq!(f.source, CommandSource::Global);
-        assert_eq!(f.content, "GLOBAL");
-
-        // Writing a repo-scoped copy lands in the repo, leaving global untouched.
-        write_command_in(&global, Some(repo_path), "inv", CommandSource::Repo, "REPO").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(global.join("inv.md")).unwrap(),
-            "GLOBAL",
-            "global file is not clobbered by a repo-scoped write"
-        );
-
-        // Now the repo copy shadows global (Claude's own resolution).
-        let f = read_command_in(&global, Some(repo_path), "inv").unwrap();
-        assert_eq!(f.source, CommandSource::Repo);
-        assert_eq!(f.content, "REPO");
-
-        // Editing that in place updates the repo file.
-        write_command_in(
-            &global,
-            Some(repo_path),
-            "inv",
-            CommandSource::Repo,
-            "REPO2",
-        )
-        .unwrap();
-        assert_eq!(
-            read_command_in(&global, Some(repo_path), "inv")
-                .unwrap()
-                .content,
-            "REPO2"
-        );
-
-        // App scope only ever sees the global file.
-        let f = read_command_in(&global, None, "inv").unwrap();
-        assert_eq!(f.source, CommandSource::Global);
-        assert_eq!(f.content, "GLOBAL");
     }
 }
