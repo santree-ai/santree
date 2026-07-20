@@ -546,6 +546,12 @@ pub async fn create(
         return Ok(existing);
     }
 
+    // The `worktree add` checkout bulk-writes the whole tree into the watched
+    // worktrees dir — mute its WorktreeChanged events or, on a large repo, every
+    // debounce window fires a full status-rebuild wave whose git scans starve
+    // this very checkout (see git_watch::BULK_OPS). Dropped on any exit path.
+    let _mute = crate::git_watch::suppress_events(issue_id);
+
     // The git work (branch resolution, `worktree add`, fetch) is blocking — run it
     // off the async runtime.
     let (base_branch, branch, wt_path_str) = {
@@ -715,6 +721,9 @@ pub async fn remove(
 
     {
         // Blocking git (`worktree remove`, `branch -D`) off the async runtime.
+        // Muted like create's checkout: deleting a big tree is the same kind of
+        // self-inflicted event storm (see git_watch::BULK_OPS).
+        let _mute = crate::git_watch::suppress_events(issue_id);
         let root = root.clone();
         let branch = branch.clone();
         let wt = worktree_path.clone();

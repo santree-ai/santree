@@ -837,6 +837,15 @@ export const useWorktreeFileSource = (repo: string, id: string, path: string) =>
  * Mounted once at the app root (not in the Trees view) so invalidation happens
  * even while another tab is showing: returning to Trees then sees fresh data
  * instead of a stale cache.
+ *
+ * Refetches are single-flight per worktree. `invalidateQueries`' default
+ * (`cancelRefetch: true`) cancels the in-flight fetch and fires a new one — but
+ * cancelling the JS promise doesn't kill the git subprocesses behind the IPC
+ * call, so sustained churn (events every debounce window, fetches slower than
+ * that) piles up abandoned `git status` scans until the disk saturates. With
+ * `cancelRefetch: false` an event landing mid-fetch piggybacks on it instead;
+ * the drain loop then runs one trailing pass so the final on-disk state is
+ * never left stale-at-rest.
  */
 export const useWorktreeWatcher = (repo: string) => {
   const qc = useQueryClient();
@@ -851,25 +860,65 @@ export const useWorktreeWatcher = (repo: string) => {
       if (r.status === "error") console.warn("watchWorktrees failed:", r.error);
     });
 
+    let disposed = false;
+    const draining = new Set<string>();
+    const dirty = new Set<string>();
+
+    const invalidate = (issueId: string) =>
+      Promise.all([
+        qc.invalidateQueries(
+          { queryKey: queryKeys.worktreeStatus(repo, issueId) },
+          { cancelRefetch: false },
+        ),
+        qc.invalidateQueries(
+          { queryKey: queryKeys.worktreeFiles(repo, issueId) },
+          { cancelRefetch: false },
+        ),
+        qc.invalidateQueries(
+          { queryKey: queryKeys.worktreeFileDiffPrefix(repo, issueId) },
+          { cancelRefetch: false },
+        ),
+        // DiffPane pairs the full-file source with the diff above for the diff
+        // viewer's context expansion; without it, an agent editing a file mid-view
+        // leaves expanded context lines stale for up to `WORKTREE_STALE_TIME`.
+        qc.invalidateQueries(
+          { queryKey: queryKeys.worktreeFileSourcePrefix(repo, issueId) },
+          { cancelRefetch: false },
+        ),
+        // The list carries each worktree's add/del line counts, shown on the
+        // sidebar card and the Issues-panel worktree card.
+        qc.invalidateQueries({ queryKey: queryKeys.worktrees(repo) }, { cancelRefetch: false }),
+        // The base entry is a *separate* read (it isn't in the list above) showing
+        // the same live git state — dirty/ahead/behind/unpushed for the repo root.
+        // Refreshed for any worktree's event rather than only the BASE_ID one: the
+        // sentinel lives in the Trees feature, and importing it here would point
+        // the data layer back at a module that imports from it.
+        qc.invalidateQueries({ queryKey: queryKeys.baseWorktree(repo) }, { cancelRefetch: false }),
+      ]);
+
+    const drain = async (issueId: string) => {
+      if (draining.has(issueId)) {
+        // A pass is running for this worktree — remember that more changed and
+        // let that pass's trailing loop pick it up.
+        dirty.add(issueId);
+        return;
+      }
+      draining.add(issueId);
+      try {
+        do {
+          dirty.delete(issueId);
+          await invalidate(issueId);
+        } while (dirty.has(issueId) && !disposed);
+      } finally {
+        draining.delete(issueId);
+      }
+    };
+
     const unlisten = events.worktreeChanged.listen(({ payload: { issueId } }) => {
-      qc.invalidateQueries({ queryKey: queryKeys.worktreeStatus(repo, issueId) });
-      qc.invalidateQueries({ queryKey: queryKeys.worktreeFiles(repo, issueId) });
-      qc.invalidateQueries({ queryKey: queryKeys.worktreeFileDiffPrefix(repo, issueId) });
-      // DiffPane pairs the full-file source with the diff above for the diff
-      // viewer's context expansion; without it, an agent editing a file mid-view
-      // leaves expanded context lines stale for up to `WORKTREE_STALE_TIME`.
-      qc.invalidateQueries({ queryKey: queryKeys.worktreeFileSourcePrefix(repo, issueId) });
-      // The list carries each worktree's add/del line counts, shown on the
-      // sidebar card and the Issues-panel worktree card.
-      qc.invalidateQueries({ queryKey: queryKeys.worktrees(repo) });
-      // The base entry is a *separate* read (it isn't in the list above) showing
-      // the same live git state — dirty/ahead/behind/unpushed for the repo root.
-      // Refreshed for any worktree's event rather than only the BASE_ID one: the
-      // sentinel lives in the Trees feature, and importing it here would point
-      // the data layer back at a module that imports from it.
-      qc.invalidateQueries({ queryKey: queryKeys.baseWorktree(repo) });
+      void drain(issueId);
     });
     return () => {
+      disposed = true;
       void unlisten.then((off) => off());
     };
   }, [repo, qc]);

@@ -10,14 +10,26 @@ import type { ChangedFile, SessionState, TriageDetail, TriageTicket } from "../b
 const git = vi.hoisted(() => ({
   ok: vi.fn(async () => ({ status: "ok" as const, data: "main" })),
 }));
+// Captures the worktreeChanged handler so watcher tests can fire events at it.
+const watcher = vi.hoisted(() => ({
+  handler: undefined as ((e: { payload: { issueId: string } }) => void) | undefined,
+}));
 vi.mock("../bindings", () => ({
   commands: {
     commitWorktree: git.ok,
     pushWorktree: git.ok,
     pullRemoteWorktree: git.ok,
     updateBaseBranch: git.ok,
+    watchWorktrees: vi.fn(async () => ({ status: "ok" as const, data: null })),
   },
-  events: { worktreeChanged: { listen: vi.fn(async () => () => {}) } },
+  events: {
+    worktreeChanged: {
+      listen: vi.fn(async (cb: (typeof watcher)["handler"]) => {
+        watcher.handler = cb;
+        return () => {};
+      }),
+    },
+  },
 }));
 
 import {
@@ -33,6 +45,7 @@ import {
   usePullRemoteWorktree,
   usePushWorktree,
   useUpdateBaseBranch,
+  useWorktreeWatcher,
 } from "./queries";
 
 function makeClient() {
@@ -692,5 +705,75 @@ describe("filterTriageQueue", () => {
   it("teamWaiting excludes the viewer's own tickets and snoozed tickets, regardless of toggles", () => {
     const result = filterTriageQueue(tickets, { goodCitizen: true, showSnoozed: true });
     expect(result.teamWaiting).toBe(1);
+  });
+});
+
+describe("useWorktreeWatcher: single-flight invalidation", () => {
+  // Each invalidation wave issues 6 invalidateQueries calls (status, files,
+  // diff prefix, source prefix, worktrees list, base worktree).
+  const WAVE = 6;
+
+  /** Render the hook with an invalidateQueries spy whose promises resolve only
+   *  when the test says so — a stand-in for slow `git status` fetches. */
+  function mount() {
+    const qc = makeClient();
+    let pending: Array<() => void> = [];
+    const spy = vi
+      .spyOn(qc, "invalidateQueries")
+      .mockImplementation(() => new Promise<void>((res) => pending.push(res)) as Promise<void>);
+    const view = renderHook(() => useWorktreeWatcher("repo"), { wrapper: wrapper(qc) });
+    const flush = async () => {
+      const batch = pending;
+      pending = [];
+      for (const res of batch) res();
+      // Let the drain loop's `await Promise.all` settle and issue the next wave.
+      await act(async () => {});
+    };
+    const fire = (issueId: string) => watcher.handler?.({ payload: { issueId } });
+    return { spy, fire, flush, unmount: view.unmount };
+  }
+
+  it("a burst of events during an in-flight wave collapses to one trailing pass, not one wave per event", async () => {
+    const { spy, fire, flush, unmount } = mount();
+    fire("AK-1");
+    expect(spy).toHaveBeenCalledTimes(WAVE);
+
+    // Checkout churn: four more events land while the first wave is in flight.
+    fire("AK-1");
+    fire("AK-1");
+    fire("AK-1");
+    fire("AK-1");
+    expect(spy).toHaveBeenCalledTimes(WAVE); // no new wave started
+
+    await flush(); // first wave settles → exactly one trailing pass
+    expect(spy).toHaveBeenCalledTimes(2 * WAVE);
+
+    await flush(); // trailing pass settles with nothing dirty → drain ends
+    expect(spy).toHaveBeenCalledTimes(2 * WAVE);
+
+    // Drain state is reset: a fresh event starts a fresh wave.
+    fire("AK-1");
+    expect(spy).toHaveBeenCalledTimes(3 * WAVE);
+    unmount();
+  });
+
+  it("passes cancelRefetch:false on every invalidation, so an in-flight fetch is never cancelled-and-refired", async () => {
+    const { spy, fire, flush, unmount } = mount();
+    fire("AK-1");
+    await flush();
+    expect(spy.mock.calls.length).toBeGreaterThan(0);
+    for (const call of spy.mock.calls) {
+      expect(call[1]).toMatchObject({ cancelRefetch: false });
+    }
+    unmount();
+  });
+
+  it("single-flight is per worktree: a different worktree's event starts its own wave immediately", () => {
+    const { spy, fire, unmount } = mount();
+    fire("AK-1");
+    expect(spy).toHaveBeenCalledTimes(WAVE);
+    fire("AK-2"); // not blocked behind AK-1's in-flight wave
+    expect(spy).toHaveBeenCalledTimes(2 * WAVE);
+    unmount();
   });
 });

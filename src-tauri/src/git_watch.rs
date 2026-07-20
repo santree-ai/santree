@@ -17,12 +17,15 @@
 //! churn there never feeds back into the worktrees watch and can't cause a
 //! refresh loop; the base watch explicitly skips `.git` for the same reason
 //! (and to avoid firing on *other* worktrees' ref/index updates, which live
-//! under the shared `.git`).
+//! under the shared `.git`). santree's *own* bulk writes — a `worktree add`
+//! checkout, a delete's teardown — are muted via [`suppress_events`], since
+//! reacting to our own churn is what turns one create into a git-status
+//! stampede (see [`BULK_OPS`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -56,6 +59,51 @@ const DEBOUNCE: Duration = Duration::from_millis(400);
 /// computes the changes — is already gitignore-aware; this is just a cheap
 /// volume filter so a running build doesn't wake us every debounce window.)
 const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", "dist", "build", ".next"];
+
+/// Worktrees whose files santree itself is bulk-writing right now — a
+/// `git worktree add` checking out the whole tree, or a delete tearing it down.
+/// Their events are dropped in the debouncer callback: on a large repo a create
+/// otherwise fires `WorktreeChanged` every debounce window for the entire
+/// multi-minute checkout, and each event triggers full status rebuilds whose
+/// concurrent `git status` scans starve the checkout itself (observed live
+/// 2026-07-20: an 8-minute "Creating workspace…" with ~40 piled-up git
+/// processes). Refcounted so overlapping guards for the same id can't clear
+/// each other's suppression early. Keyed by issue id alone — the watcher only
+/// covers the active repo, so a same-id collision across repos merely pauses
+/// live refresh there for the duration of the op.
+static BULK_OPS: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(Default::default);
+
+/// RAII: suppresses [`WorktreeChanged`] events for `issue_id` while alive.
+/// Hold it across any operation that bulk-writes a worktree's files.
+pub struct EventSuppression(String);
+
+pub fn suppress_events(issue_id: &str) -> EventSuppression {
+    *BULK_OPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(issue_id.to_string())
+        .or_default() += 1;
+    EventSuppression(issue_id.to_string())
+}
+
+impl Drop for EventSuppression {
+    fn drop(&mut self) {
+        let mut ops = BULK_OPS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = ops.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                ops.remove(&self.0);
+            }
+        }
+    }
+}
+
+fn is_suppressed(issue_id: &str) -> bool {
+    BULK_OPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(issue_id)
+}
 
 type FullDebouncer = Debouncer<RecommendedWatcher, RecommendedCache>;
 
@@ -201,7 +249,7 @@ impl WorktreeWatcher {
                                 for ev in events {
                                     for path in &ev.paths {
                                         if let Some(id) = issue_id_for(&watch_root, path) {
-                                            if fired.insert(id.clone()) {
+                                            if !is_suppressed(&id) && fired.insert(id.clone()) {
                                                 let _ =
                                                     WorktreeChanged { issue_id: id }.emit(&app_wt);
                                             }
@@ -453,6 +501,28 @@ mod tests {
     fn is_base_change_ignores_paths_outside_root() {
         let root = Path::new("/repo");
         assert!(!is_base_change(root, Path::new("/somewhere/else/file")));
+    }
+
+    /// The suppression guard mutes events for its worktree only while alive, and
+    /// overlapping guards for the same id are refcounted — an outer guard must
+    /// survive an inner one's drop, or a nested create/remove pair would re-open
+    /// the event floodgate mid-checkout.
+    #[test]
+    fn event_suppression_is_scoped_and_refcounted() {
+        // Unique id so parallel tests sharing the process-global set can't interfere.
+        let id = format!("TEST-{}", std::process::id());
+        assert!(!is_suppressed(&id));
+        {
+            let _outer = suppress_events(&id);
+            assert!(is_suppressed(&id));
+            {
+                let _inner = suppress_events(&id);
+                assert!(is_suppressed(&id));
+            }
+            assert!(is_suppressed(&id), "outer guard must survive inner drop");
+            assert!(!is_suppressed("TEST-other"), "unrelated ids stay live");
+        }
+        assert!(!is_suppressed(&id));
     }
 
     /// `notify` reports a queue overflow / invalidated watch as an `Err` batch. It
