@@ -4,6 +4,20 @@
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
 
+/* Kill ligatures/contextual alternates app-wide. Geist Mono's `calt` merges
+ * symbol runs (`##`, `--`, `->`, `{{`) into single wide glyphs, which breaks any
+ * surface showing markdown/code text in WKWebView: caret drift in editors,
+ * collapsed or misplaced glyph runs in textareas and read-only panes. This
+ * recurred four times as per-component fixes (prompt editor, skill editor,
+ * prompt preview, PR dialog) — so it's disabled once here. Form controls pick
+ * it up through preflight's `font: inherit`/`font-feature-settings: inherit`;
+ * the xterm canvas renderer is unaffected either way. Never re-enable
+ * per-component. */
+:root {
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+
 /* ------------------------------------------------------------------ *
  * Design tokens. These codify santree's dark palette as Tailwind
  * colors (usable as bg-*, text-*, border-*). The accent is a runtime
@@ -444,13 +458,6 @@ button:focus-visible {
 /* Rendered-preview highlighting: the values substituted from `{{ … }}` (marked by
    prompts.rs, spanned by highlightRendered). Same amber as the editor's var token,
    plus a faint wash so multi-word values read as one region. */
-/* Disable ligatures/contextual alternates so markdown symbol runs (`**`, `###`,
-   `---`, `>`) render as plain characters instead of combined glyphs — matches the
-   editor pane (see EDITOR_STYLE). */
-.prompt-render {
-  font-variant-ligatures: none;
-  font-feature-settings: "liga" 0, "calt" 0;
-}
 .prompt-render .token.var {
   color: #e5a44b;
   background: color-mix(in srgb, #e5a44b 12%, transparent);

@@ -38,11 +38,6 @@ const EDITOR_STYLE = {
   lineHeight: 1.6,
   minHeight: "100%",
   color: "var(--color-fg-2)",
-  // Kill ligatures: the transparent textarea positions the caret per character
-  // while the highlighted layer would draw a `---`/`{{`/`{%` ligature as one wide
-  // glyph, so the caret and text visibly drift around symbol runs. Code editors
-  // disable ligatures for exactly this reason.
-  fontVariantLigatures: "none",
 } as const;
 
 // Live preview pane width (px), dragged via the divider between editor and
