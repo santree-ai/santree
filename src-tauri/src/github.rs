@@ -258,7 +258,7 @@ pub struct RepoPr {
     pub state: PrState,
 }
 
-/// Every PR in `owner/repo`, newest-created first — one GitHub API call
+/// The 100 most-recently-**updated** PRs in `owner/repo` — one GitHub API call
 /// regardless of how many worktrees/issues the caller wants to match against.
 ///
 /// Replaces the old "one search per issue id" approach: GitHub's search API
@@ -270,10 +270,11 @@ pub struct RepoPr {
 /// than the branch, which GitHub deletes on merge (so merged PRs would vanish
 /// from a branch-based lookup).
 ///
-/// Capped at one page (100, GitHub's search max per page), so a repo with more
-/// than 100 PRs newer than a given worktree's PR won't surface it here — an
-/// accepted tradeoff since worktrees are actively-worked branches and their
-/// PRs are typically among the most recent. Network errors bubble up.
+/// Ordered by update (not creation) time: in a busy monorepo, hundreds of PRs
+/// can be *created* after a worktree's PR while it's still being actively
+/// worked — pushes/comments keep it in the recently-updated window. A PR
+/// outside even this window is caught by the caller's per-issue fallback
+/// ([`prs_for_issue`]). Network errors bubble up.
 pub async fn prs_for_repo(token: &str, owner: &str, repo: &str) -> Result<Vec<RepoPr>> {
     let q = format!("repo:{owner}/{repo} type:pr");
     let body: SearchResp = get_json(
@@ -281,32 +282,56 @@ pub async fn prs_for_repo(token: &str, owner: &str, repo: &str) -> Result<Vec<Re
         &[
             ("q", q.as_str()),
             ("per_page", "100"),
+            ("sort", "updated"),
+            ("order", "desc"),
+        ],
+        token,
+    )
+    .await?;
+    Ok(body.items.into_iter().map(to_repo_pr).collect())
+}
+
+/// Newest PRs whose title mentions `issue_id` — the narrow fallback for a
+/// worktree whose PR fell outside [`prs_for_repo`]'s recently-updated window
+/// (e.g. a dormant PR in a high-traffic repo). The caller still verifies the
+/// exact `[ISSUE-ID]` tag on each result; the search is just the candidate
+/// filter (GitHub's tokenizer ignores the brackets).
+pub async fn prs_for_issue(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    issue_id: &str,
+) -> Result<Vec<RepoPr>> {
+    let q = format!("repo:{owner}/{repo} type:pr in:title \"{issue_id}\"");
+    let body: SearchResp = get_json(
+        "https://api.github.com/search/issues",
+        &[
+            ("q", q.as_str()),
+            ("per_page", "10"),
             ("sort", "created"),
             ("order", "desc"),
         ],
         token,
     )
     .await?;
-    Ok(body
-        .items
-        .into_iter()
-        .map(|p| {
-            let merged = p.pull_request.and_then(|r| r.merged_at).is_some();
-            let state = if merged {
-                PrState::Merged
-            } else if p.state == "closed" {
-                PrState::Closed
-            } else {
-                PrState::Open
-            };
-            RepoPr {
-                number: p.number,
-                title: p.title,
-                url: p.html_url,
-                state,
-            }
-        })
-        .collect())
+    Ok(body.items.into_iter().map(to_repo_pr).collect())
+}
+
+fn to_repo_pr(p: SearchItem) -> RepoPr {
+    let merged = p.pull_request.and_then(|r| r.merged_at).is_some();
+    let state = if merged {
+        PrState::Merged
+    } else if p.state == "closed" {
+        PrState::Closed
+    } else {
+        PrState::Open
+    };
+    RepoPr {
+        number: p.number,
+        title: p.title,
+        url: p.html_url,
+        state,
+    }
 }
 
 /// Open a pull request via the GitHub REST API. Returns `(number, url)`.

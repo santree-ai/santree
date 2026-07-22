@@ -64,7 +64,7 @@ pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
         }
     };
 
-    Ok(prs
+    let mut out: Vec<WorktreePr> = prs
         .into_iter()
         .filter_map(|p| {
             let tag = issue_tag(&p.title)?;
@@ -75,7 +75,44 @@ pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
                 state: p.state,
             })
         })
-        .collect())
+        .collect();
+
+    // A worktree's PR can be older than everything in the recently-updated
+    // window (a dormant PR in a high-traffic monorepo) — without this fallback
+    // the UI reads that as "no PR" and re-offers Create PR. One narrow search
+    // per still-unmatched issue, capped so a burst of refetches on a repo full
+    // of PR-less worktrees can't chew through the search API's ~30/min budget;
+    // per the no-silent-caps rule, dropped ids are logged.
+    const FALLBACK_SEARCH_CAP: usize = 10;
+    let matched: HashSet<&str> = out.iter().map(|p| p.issue_id.as_str()).collect();
+    let mut unmatched: Vec<String> = issue_ids
+        .iter()
+        .filter(|id| !matched.contains(id.as_str()))
+        .cloned()
+        .collect();
+    unmatched.sort(); // deterministic order for the cap + logs
+    if unmatched.len() > FALLBACK_SEARCH_CAP {
+        log::warn!(
+            "worktreePrs: {} unmatched worktrees in {owner}/{name}, probing only the first {FALLBACK_SEARCH_CAP}",
+            unmatched.len()
+        );
+        unmatched.truncate(FALLBACK_SEARCH_CAP);
+    }
+    for id in unmatched {
+        match github::prs_for_issue(&token, &owner, &name, &id).await {
+            Ok(prs) => out.extend(prs.into_iter().filter_map(|p| {
+                (issue_tag(&p.title) == Some(id.as_str())).then(|| WorktreePr {
+                    issue_id: id.clone(),
+                    number: p.number,
+                    url: p.url,
+                    state: p.state,
+                })
+            })),
+            // Degrade like the bulk search: this issue just shows no PR chip.
+            Err(e) => log::warn!("worktreePrs: fallback PR search failed for {id}: {e}"),
+        }
+    }
+    Ok(out)
 }
 
 /// The `[ISSUE-ID]` tag this app's PR/commit flow writes at the front of a PR title
