@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ReviewInbox, ReviewPr } from "../../bindings";
 import { ReviewsSidebarView } from "./ReviewsSidebar";
@@ -40,6 +40,8 @@ const inbox: ReviewInbox = {
 };
 
 describe("ReviewsSidebarView", () => {
+  beforeEach(() => localStorage.clear());
+
   it("renders the three categories with their PRs", () => {
     render(
       <ReviewsSidebarView
@@ -56,6 +58,46 @@ describe("ReviewsSidebarView", () => {
     expect(screen.getByText("Team · Engineering")).toBeInTheDocument();
     expect(screen.getByText("Booking webhook retries")).toBeInTheDocument();
     expect(screen.getByText("Tighten rate limiter")).toBeInTheDocument();
+    expect(screen.getByText("Migrate billing jobs")).toBeInTheDocument();
+  });
+
+  it("collapses a team section on click and remembers it across mounts", () => {
+    const { unmount } = render(
+      <ReviewsSidebarView
+        inbox={inbox}
+        loading={false}
+        total={3}
+        activeId={null}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    const header = screen.getByRole("button", { name: /Team · Engineering/ });
+    expect(header).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(header);
+    expect(screen.queryByText("Migrate billing jobs")).not.toBeInTheDocument();
+    // Direct sections are unaffected.
+    expect(screen.getByText("Tighten rate limiter")).toBeInTheDocument();
+
+    // The collapse survives a remount (persisted in localStorage).
+    unmount();
+    render(
+      <ReviewsSidebarView
+        inbox={inbox}
+        loading={false}
+        total={3}
+        activeId={null}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /Team · Engineering/ })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.queryByText("Migrate billing jobs")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Team · Engineering/ }));
     expect(screen.getByText("Migrate billing jobs")).toBeInTheDocument();
   });
 

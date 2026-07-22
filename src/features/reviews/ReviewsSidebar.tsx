@@ -3,14 +3,17 @@
  * mirroring how the Trees sidebar groups worktrees by project.
  *
  *  1. **My PRs** — the viewer's open PRs, sub-grouped by repository.
- *  2. **Review requests** — PRs individually requesting the viewer's review.
- *  3. one block **per team** the viewer is on that has open requests.
+ *  2. **Review requests** — PRs *directly* requesting the viewer's review.
+ *  3. one block **per team** the viewer is on that has open requests — these are
+ *     lower-signal than a direct request, so each block is collapsible (persisted).
  *
  * `ReviewsSidebar` wires the view-model; `ReviewsSidebarView` is the pure render
  * (split out so it can be tested without AppContext/router).
  */
-import type { ReviewInbox, ReviewPr } from "../../bindings";
-import { ListIcon } from "../../components/icons";
+import { useState } from "react";
+
+import type { ReviewInbox, ReviewPr, TeamReviews } from "../../bindings";
+import { ChevronDownIcon, ChevronRightIcon, ListIcon } from "../../components/icons";
 import { Dot, EmptyState, Skeleton } from "../../components/primitives";
 import { useMergeQueue } from "../../lib/queries";
 import {
@@ -25,6 +28,19 @@ import { useReviewsModel } from "./model";
 /** Short "name" from an "owner/name" slug. */
 function repoName(slug: string): string {
   return slug.split("/").pop() ?? slug;
+}
+
+/** Which team sections the user has folded, persisted across restarts — team
+ *  requests are lower-signal than direct ones, so a collapse should stick. */
+const TEAMS_COLLAPSED_KEY = "santree-reviews-collapsed-teams";
+
+function readCollapsedTeams(): Set<string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(TEAMS_COLLAPSED_KEY) ?? "[]");
+    return new Set(Array.isArray(raw) ? raw.filter((s) => typeof s === "string") : []);
+  } catch {
+    return new Set();
+  }
 }
 
 export function ReviewsSidebar() {
@@ -69,6 +85,16 @@ export function ReviewsSidebarView({
   /** True when the viewer has a PR in the queue — nudges the button to accent. */
   mergeQueueHasMine?: boolean;
 }) {
+  const [collapsedTeams, setCollapsedTeams] = useState(readCollapsedTeams);
+  const toggleTeam = (slug: string) => {
+    setCollapsedTeams((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(slug)) next.add(slug);
+      localStorage.setItem(TEAMS_COLLAPSED_KEY, JSON.stringify([...next]));
+      return next;
+    });
+  };
+
   // Group "My PRs" by repository, preserving first-seen order.
   const mineByRepo = new Map<string, ReviewPr[]>();
   for (const pr of inbox?.mine ?? []) {
@@ -155,11 +181,16 @@ export function ReviewsSidebarView({
         )}
 
         {inbox?.teams.map((team) => (
-          <Section key={team.slug} title={`Team · ${team.name}`}>
+          <TeamSection
+            key={team.slug}
+            team={team}
+            open={!collapsedTeams.has(team.slug)}
+            onToggle={() => toggleTeam(team.slug)}
+          >
             {team.prs.map((pr) => (
               <PrRow key={pr.id} pr={pr} active={pr.id === activeId} onSelect={onSelect} showRepo />
             ))}
-          </Section>
+          </TeamSection>
         ))}
       </div>
     </>
@@ -171,6 +202,40 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div className="mb-3">
       <div className="px-2 pb-1 text-[11px] font-semibold text-fg-2">{title}</div>
       {children}
+    </div>
+  );
+}
+
+/** A per-team block: unlike the personal sections it folds away, since a team
+ *  request isn't necessarily for the viewer to act on. Rows are plain buttons
+ *  (no effects), so conditional rendering on collapse is safe. */
+function TeamSection({
+  team,
+  open,
+  onToggle,
+  children,
+}: {
+  team: TeamReviews;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  const Chevron = open ? ChevronDownIcon : ChevronRightIcon;
+  return (
+    <div className="mb-3">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="mb-1 flex w-full cursor-pointer items-center gap-1 rounded-[6px] px-2 py-0.5 text-left text-[11px] font-semibold text-fg-2 transition-colors hover:bg-hover"
+      >
+        <Chevron size={10} className="flex-none text-muted-3" />
+        <span className="truncate">Team · {team.name}</span>
+        <span className="ml-auto font-mono text-[10px] font-normal text-muted-4">
+          {team.prs.length}
+        </span>
+      </button>
+      {open && children}
     </div>
   );
 }

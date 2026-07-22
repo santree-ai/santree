@@ -698,8 +698,22 @@ async fn search_prs(token: &str, q: &str) -> Result<Vec<ReviewPr>> {
     Ok(data.search.nodes.into_iter().map(ReviewPr::from).collect())
 }
 
+/// The viewer's GitHub login.
+async fn viewer_login(token: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Data {
+        viewer: Login,
+    }
+    #[derive(Deserialize)]
+    struct Login {
+        login: String,
+    }
+    let data: Data = graphql(token, "query { viewer { login } }", serde_json::json!({})).await?;
+    Ok(data.viewer.login)
+}
+
 /// The teams (slug, name) the viewer belongs to within `org`. Empty when the
-/// viewer isn't in that org or it has no teams visible to them.
+/// viewer isn't in that org or belongs to no teams there.
 pub async fn viewer_teams(token: &str, org: &str) -> Result<Vec<(String, String)>> {
     #[derive(Deserialize)]
     struct Data {
@@ -719,11 +733,15 @@ pub async fn viewer_teams(token: &str, org: &str) -> Result<Vec<(String, String)
         slug: String,
         name: String,
     }
-    // No `role:` filter: it matches the viewer's role *in the team*, so a team the
-    // user maintains (role ADMIN) would be dropped — and its review requests would
-    // be indistinguishable from "none".
-    let query = "query { viewer { organizations(first: 50) { nodes { login teams(first: 50) { nodes { slug name } } } } } }";
-    let data: Data = graphql(token, query, serde_json::json!({})).await?;
+    // The bare teams connection lists every team in the org *visible* to the
+    // viewer — at a big org that's dozens of teams they aren't on, each spawning a
+    // review search. `userLogins` narrows it to actual memberships; it needs the
+    // viewer's login, hence the extra (cheap) round trip. `role:` can't do this:
+    // it filters by the viewer's role *in* the team, so one value or the other
+    // would drop teams they merely maintain or merely belong to.
+    let login = viewer_login(token).await?;
+    let query = "query($login: String!) { viewer { organizations(first: 50) { nodes { login teams(first: 50, userLogins: [$login]) { nodes { slug name } } } } } }";
+    let data: Data = graphql(token, query, serde_json::json!({ "login": login })).await?;
     Ok(data
         .viewer
         .organizations
@@ -747,7 +765,10 @@ fn mine_query(org: &str) -> String {
     format!("{INBOX_FILTERS} author:@me org:{org}")
 }
 fn requested_query(org: &str) -> String {
-    format!("{INBOX_FILTERS} review-requested:@me org:{org}")
+    // `user-review-requested`, not `review-requested`: the plain qualifier also
+    // matches PRs requested via a team the viewer is on, which belong to the
+    // per-team sections — this section is direct requests only.
+    format!("{INBOX_FILTERS} user-review-requested:@me org:{org}")
 }
 fn team_query(org: &str, slug: &str) -> String {
     format!("{INBOX_FILTERS} team-review-requested:{org}/{slug}")
@@ -2027,9 +2048,10 @@ mod tests {
             mine_query("acme"),
             "is:open is:pr archived:false sort:updated-desc author:@me org:acme"
         );
+        // Direct requests only — team-routed requests live in the team sections.
         assert_eq!(
             requested_query("acme"),
-            "is:open is:pr archived:false sort:updated-desc review-requested:@me org:acme"
+            "is:open is:pr archived:false sort:updated-desc user-review-requested:@me org:acme"
         );
         // The team search is scoped by the `org/slug` handle itself.
         assert_eq!(
