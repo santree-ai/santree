@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ChangedFile } from "../../bindings";
-import { buildChangeTree, type ChangeTreeNode } from "./changeTree";
+import { buildChangeTree, type ChangeTreeNode, filesUnder } from "./changeTree";
 
 /** Minimal ChangedFile for path-shape assertions (status/stats don't matter here). */
 function file(path: string): ChangedFile {
@@ -57,5 +57,25 @@ describe("buildChangeTree", () => {
     const top = tree[0];
     expect(top.kind === "dir" && top.name).toBe("pkg/src");
     expect(top.kind === "dir" && top.count).toBe(2);
+  });
+});
+
+describe("filesUnder", () => {
+  const files = [file("src/a.ts"), file("src/deep/b.ts"), file("src2/c.ts"), file("README.md")];
+
+  it("matches files at any depth under the directory", () => {
+    expect(filesUnder(files, "src").map((f) => f.path)).toEqual(["src/a.ts", "src/deep/b.ts"]);
+  });
+
+  it("respects the path boundary — `src` never captures `src2/`", () => {
+    expect(filesUnder(files, "src").some((f) => f.path.startsWith("src2"))).toBe(false);
+  });
+
+  it("works with a collapsed-chain path (the tree's full dir path)", () => {
+    expect(filesUnder(files, "src/deep").map((f) => f.path)).toEqual(["src/deep/b.ts"]);
+  });
+
+  it("returns nothing for a directory with no changed files", () => {
+    expect(filesUnder(files, "docs")).toEqual([]);
   });
 });

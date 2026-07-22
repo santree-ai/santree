@@ -17,6 +17,12 @@ export type ChangeTreeNode =
   | { kind: "file"; name: string; path: string; file: ChangedFile }
   | { kind: "dir"; name: string; path: string; count: number; children: ChangeTreeNode[] };
 
+/** Every changed file under `dir` — the payload for discarding a whole folder.
+ *  Prefix-matched on the path boundary so `src` never captures `src2/…`. */
+export function filesUnder(files: ChangedFile[], dir: string): ChangedFile[] {
+  return files.filter((f) => f.path.startsWith(`${dir}/`));
+}
+
 /** Build the changed-files tree, collapsing runs of single-child directories into
  *  one `a/b/c` row (the common case when a change sits deep in an otherwise
  *  untouched subtree). Dirs sort before files, both alphabetically. */

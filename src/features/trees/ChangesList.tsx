@@ -16,7 +16,7 @@ import {
 } from "../../lib/queries";
 import { accentActiveStyle, alpha } from "../../theme/colors";
 import { CommitBox } from "./CommitBox";
-import { buildChangeTree, type ChangeTreeNode, STATUS_META } from "./changeTree";
+import { buildChangeTree, type ChangeTreeNode, filesUnder, STATUS_META } from "./changeTree";
 import { fileIconUrl, folderIconUrl } from "./fileIcons";
 import { IndentGuides } from "./IndentGuides";
 import { useTrees } from "./model";
@@ -26,9 +26,22 @@ export function ChangesList({ files }: { files: ChangedFile[] }) {
   const { mutate: act, mutateAsync: actAsync } = useStageAction(repo, activeId);
   const stagedCount = files.filter((f) => f.staged).length;
   const allStaged = files.length > 0 && stagedCount === files.length;
-  // The file pending a discard confirmation (discard is destructive — uncommitted
-  // work is unrecoverable — so it asks first, like the worktree delete).
-  const [discarding, setDiscarding] = useState<ChangedFile | null>(null);
+  // The file or folder pending a discard confirmation (discard is destructive —
+  // uncommitted work is unrecoverable — so it asks first, like the worktree
+  // delete). Only the path is stored; the affected files are derived from the
+  // live list at render/confirm time, so a refetch while the dialog is open
+  // can't discard against a stale snapshot.
+  const [discarding, setDiscarding] = useState<{ path: string; isDir: boolean } | null>(null);
+  const discardFile = useCallback(
+    (f: ChangedFile) => setDiscarding({ path: f.path, isDir: false }),
+    [],
+  );
+  const discardDir = useCallback((path: string) => setDiscarding({ path, isDir: true }), []);
+  const discardTargets = useMemo(() => {
+    if (!discarding) return [];
+    if (discarding.isDir) return filesUnder(files, discarding.path);
+    return files.filter((f) => f.path === discarding.path);
+  }, [discarding, files]);
 
   // List vs collapsed-folder tree, persisted app-wide (default list).
   const viewSetting = useSetting("app", TREES_CHANGES_VIEW_KEY);
@@ -71,7 +84,8 @@ export function ChangesList({ files }: { files: ChangedFile[] }) {
             selectedFile={selectedFile}
             onToggle={onToggle}
             onOpen={selectFile}
-            onDiscard={setDiscarding}
+            onDiscard={discardFile}
+            onDiscardDir={discardDir}
           />
         ) : (
           files.map((f) => (
@@ -81,7 +95,7 @@ export function ChangesList({ files }: { files: ChangedFile[] }) {
               selected={f.path === selectedFile}
               onToggle={onToggle}
               onOpen={selectFile}
-              onDiscard={setDiscarding}
+              onDiscard={discardFile}
             />
           ))
         )}
@@ -97,18 +111,35 @@ export function ChangesList({ files }: { files: ChangedFile[] }) {
         confirmLabel="Discard"
         busyLabel="Discarding…"
         message={
-          <>
-            Discard your uncommitted changes to{" "}
-            <span className="font-mono text-fg-2">{discarding?.path}</span>? This can't be undone.
-          </>
+          discarding?.isDir ? (
+            <>
+              Discard your uncommitted changes to{" "}
+              {discardTargets.length === 1 ? (
+                "the 1 changed file"
+              ) : (
+                <>the {discardTargets.length} changed files</>
+              )}{" "}
+              under <span className="font-mono text-fg-2">{discarding.path}/</span>? This can't be
+              undone.
+            </>
+          ) : (
+            <>
+              Discard your uncommitted changes to{" "}
+              <span className="font-mono text-fg-2">{discarding?.path}</span>? This can't be undone.
+            </>
+          )
         }
         onConfirm={async () => {
-          if (!discarding) return;
-          await actAsync({
-            action: "discard",
-            path: discarding.path,
-            untracked: discarding.status === "Untracked",
-          });
+          // Sequential on purpose: each discard is its own validated git call, and
+          // a failure stops the run with the untouched remainder intact (the
+          // dialog stays open showing the error).
+          for (const f of discardTargets) {
+            await actAsync({
+              action: "discard",
+              path: f.path,
+              untracked: f.status === "Untracked",
+            });
+          }
         }}
         onClose={() => setDiscarding(null)}
       />
@@ -155,12 +186,14 @@ function ChangesTree({
   onToggle,
   onOpen,
   onDiscard,
+  onDiscardDir,
 }: {
   files: ChangedFile[];
   selectedFile: string | null;
   onToggle: (f: ChangedFile) => void;
   onOpen: (path: string) => void;
   onDiscard: (f: ChangedFile) => void;
+  onDiscardDir: (path: string) => void;
 }) {
   const tree = useMemo(() => buildChangeTree(files), [files]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -199,6 +232,7 @@ function ChangesTree({
             depth={depth}
             open={!collapsed.has(node.path)}
             onToggle={toggleDir}
+            onDiscard={onDiscardDir}
           />
         ) : (
           <ChangeRow
@@ -217,7 +251,10 @@ function ChangesTree({
   );
 }
 
-/** A collapsed-folder row in the changes tree (its `a/b/c` chain + a file count). */
+/** A collapsed-folder row in the changes tree (its `a/b/c` chain + a file count),
+ *  with a hover-revealed discard for everything under it. The row is a wrapper
+ *  div (not one big button) so the discard control isn't nested inside the
+ *  expand/collapse button. */
 const ChangeFolderRow = memo(function ChangeFolderRow({
   name,
   path,
@@ -225,6 +262,7 @@ const ChangeFolderRow = memo(function ChangeFolderRow({
   depth,
   open,
   onToggle,
+  onDiscard,
 }: {
   name: string;
   path: string;
@@ -232,30 +270,41 @@ const ChangeFolderRow = memo(function ChangeFolderRow({
   depth: number;
   open: boolean;
   onToggle: (path: string) => void;
+  onDiscard: (path: string) => void;
 }) {
   const leaf = name.slice(name.lastIndexOf("/") + 1);
   const icon = folderIconUrl(leaf, open);
   return (
-    <button
-      type="button"
-      onClick={() => onToggle(path)}
-      className="flex w-full cursor-pointer items-center py-[3px] pr-2.5 pl-1.5 text-left hover:bg-hover"
-    >
+    <div className="group flex items-center py-[3px] pr-2.5 pl-1.5 hover:bg-hover">
       <IndentGuides depth={depth} />
-      <span
-        className="flex flex-none items-center justify-center text-[11px] text-muted-2"
-        style={{ width: 14 }}
+      <button
+        type="button"
+        onClick={() => onToggle(path)}
+        className="flex min-w-0 flex-1 cursor-pointer items-center text-left"
       >
-        {open ? "▾" : "▸"}
-      </span>
-      {icon ? (
-        <img src={icon} alt="" className="ml-0.5 h-4 w-4 flex-none" draggable={false} />
-      ) : null}
-      <span className="ml-1.5 min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-2">
-        {name}
-      </span>
-      <span className="ml-1.5 flex-none font-mono text-[9.5px] text-muted-4">{count}</span>
-    </button>
+        <span
+          className="flex flex-none items-center justify-center text-[11px] text-muted-2"
+          style={{ width: 14 }}
+        >
+          {open ? "▾" : "▸"}
+        </span>
+        {icon ? (
+          <img src={icon} alt="" className="ml-0.5 h-4 w-4 flex-none" draggable={false} />
+        ) : null}
+        <span className="ml-1.5 min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-2">
+          {name}
+        </span>
+        <span className="ml-1.5 flex-none font-mono text-[9.5px] text-muted-4">{count}</span>
+      </button>
+      <button
+        type="button"
+        onClick={() => onDiscard(path)}
+        title={`Discard changes under ${path}/`}
+        className="ml-2 flex-none cursor-pointer text-[12px] text-muted-4 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-status-red"
+      >
+        ⟲
+      </button>
+    </div>
   );
 });
 
