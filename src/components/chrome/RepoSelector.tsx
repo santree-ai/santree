@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { useAddRepo, useLinearOrgs, useRepos, useSetRepoLinearOrg } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
+import { useLegacyMigration } from "../../state/LegacyMigration";
 import { alpha } from "../../theme/colors";
 import { ChevronDownIcon } from "../icons";
 import { Dropdown, Spinner } from "../primitives";
@@ -15,6 +16,7 @@ export function RepoSelector() {
   const { data: orgs = [] } = useLinearOrgs();
   const addRepo = useAddRepo();
   const setRepoOrg = useSetRepoLinearOrg();
+  const { offer: offerCliMigration } = useLegacyMigration();
   const [menuOpen, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A freshly-added repo awaiting a Linear workspace choice (only when >1 org).
@@ -40,9 +42,12 @@ export function RepoSelector() {
     try {
       const repo = await addRepo.mutateAsync(picked);
       setActiveRepo(repo.name);
+      // santree-CLI config may already say which workspace this repo uses —
+      // adopting it (or offering the import dialog) supersedes asking.
+      const handledByCli = await offerCliMigration(repo.name);
       // With multiple Linear workspaces connected, ask which one this repo uses;
       // with one (the common case) the backend already defaults to it.
-      if (orgs.length > 1) setPendingRepo(repo.name);
+      if (!handledByCli && orgs.length > 1) setPendingRepo(repo.name);
       else close();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

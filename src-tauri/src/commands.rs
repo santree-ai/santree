@@ -18,10 +18,10 @@ use santree_core::{
     config,
     domain::{
         AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, CheckLog, FileSource,
-        GithubStatus, LinearOrg, LinearStatus, MergeQueue, NewPr, Opener, PrDetail, PrDraft,
-        PrLabel, PromptInfo, PromptPreview, Repo, ReviewInbox, ReviewedFile, Reviewer, ScriptInfo,
-        SessionState, SessionUsageLive, Settings, TabKind, Task, TriageDetail, TriageSchedule,
-        TriageTicket, UsageReport, Worktree, WorktreePr, WorktreeTab,
+        GithubStatus, LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewPr, Opener,
+        PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewInbox, ReviewedFile,
+        Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings, TabKind, Task,
+        TriageDetail, TriageSchedule, TriageTicket, UsageReport, Worktree, WorktreePr, WorktreeTab,
     },
 };
 
@@ -29,6 +29,7 @@ use crate::commit_draft;
 use crate::db::Db;
 use crate::error::CmdResult;
 use crate::git_watch::WorktreeWatcher;
+use crate::legacy;
 use crate::linear;
 use crate::notes;
 use crate::openers;
@@ -1083,6 +1084,28 @@ pub async fn create_prompt_block(name: String, label: String, db: State<'_, Db>)
 #[specta::specta]
 pub async fn delete_prompt_block(name: String, db: State<'_, Db>) -> CmdResult<()> {
     Ok(crate::prompts::delete_block(&db, &name).await?)
+}
+
+// ── santree CLI adoption ─────────────────────────────────────────────────
+
+/// santree-CLI configuration detected in a registered repo that the app could
+/// adopt — `None` when there's nothing actionable. Detection only; tokens stay
+/// on the Rust side.
+#[tauri::command]
+#[specta::specta]
+pub async fn legacy_cli_probe(
+    repo: String,
+    db: State<'_, Db>,
+) -> CmdResult<Option<LegacyCliMigration>> {
+    Ok(legacy::probe(&db, &repo).await?)
+}
+
+/// Import the santree CLI's Linear credential for a repo's workspace (into the
+/// OS keychain, via a validating token refresh) and link the repo to it.
+#[tauri::command]
+#[specta::specta]
+pub async fn legacy_cli_migrate(repo: String, db: State<'_, Db>) -> CmdResult<LinearOrg> {
+    Ok(legacy::migrate(&db, &repo).await?)
 }
 
 // ── Linear integration ───────────────────────────────────────────────────

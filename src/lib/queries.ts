@@ -716,6 +716,34 @@ export const useSetTaskNote = (repo: string) =>
     invalidate: (a) => [queryKeys.taskNote(repo, a.taskId)],
   });
 
+/** santree-CLI config detected in a repo that the app could adopt. Imperative
+ *  (called once, right after a repo is added) rather than a query — the answer
+ *  is only meaningful at that moment, and must never be cached. */
+export const probeLegacyCli = (repo: string) => unwrap(commands.legacyCliProbe(repo));
+
+/** Import the santree CLI's Linear credential for a repo's workspace (moved
+ *  into the OS keychain, Rust-side only) and link the repo to it. Silent: the
+ *  migration dialog owns the failure UI. */
+export const useLegacyCliMigrate = () =>
+  useActionMutation({
+    mutationFn: (repo: string) => unwrap(commands.legacyCliMigrate(repo)),
+    silent: true,
+    // Same blast radius as a Linear connect, plus the repo list (its tracker
+    // label becomes "Linear · <org>").
+    invalidate: () => [
+      queryKeys.repos,
+      queryKeys.linearStatusPrefix,
+      queryKeys.linearOrgs,
+      queryKeys.tasksPrefix,
+      queryKeys.triageTicketsPrefix,
+      queryKeys.triageSchedulePrefix,
+    ],
+    success: (org) => ({
+      message: `Workspace “${org.name}” imported from the santree CLI.`,
+      title: "Linear connected",
+    }),
+  });
+
 /** Run the Linear OAuth connect flow, refreshing status + orgs + tickets. */
 export const useLinearConnect = () => {
   const qc = useQueryClient();

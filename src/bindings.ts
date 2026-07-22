@@ -530,6 +530,27 @@ export const commands = {
 	/**  Run the Linear OAuth flow; returns the updated org list. */
 	linearConnect: () => typedError<LinearOrg[], CmdError>(__TAURI_INVOKE("linear_connect")),
 	/**
+	 *  santree-CLI configuration detected in a registered repo that the app could
+	 *  adopt — `None` when there's nothing actionable. Detection only; tokens stay
+	 *  on the Rust side.
+	 */
+	legacyCliProbe: (repo: string) => typedError<{
+	/**  Linear workspace slug the CLI had this repo on. */
+	orgSlug: string,
+	/**  Display name for that workspace (the CLI's stored name, else the slug). */
+	orgName: string,
+	/**
+	 *  True when the app already has this workspace connected — no credential
+	 *  import needed, just the repo link.
+	 */
+	alreadyConnected: boolean,
+} | null, CmdError>(__TAURI_INVOKE("legacy_cli_probe", { repo })),
+	/**
+	 *  Import the santree CLI's Linear credential for a repo's workspace (into the
+	 *  OS keychain, via a validating token refresh) and link the repo to it.
+	 */
+	legacyCliMigrate: (repo: string) => typedError<LinearOrg, CmdError>(__TAURI_INVOKE("legacy_cli_migrate", { repo })),
+	/**
 	 *  Spawn a process behind a PTY and stream its raw output over `on_output`.
 	 * 
 	 *  The spawn itself is `openpty` + a fork/exec with a full env copy + a reader
@@ -828,6 +849,24 @@ export type GithubStatus = {
 export type Integrations = {
 	linear?: boolean,
 	triage?: boolean,
+};
+
+/**
+ *  santree-CLI configuration (`.santree/metadata.json` + the CLI's global auth
+ *  store) detected in a just-opened repo, offered for adoption. Only built when
+ *  something is actionable: the CLI's workspace is either already connected
+ *  (the repo just needs linking) or importable from the CLI's stored credential.
+ */
+export type LegacyCliMigration = {
+	/**  Linear workspace slug the CLI had this repo on. */
+	orgSlug: string,
+	/**  Display name for that workspace (the CLI's stored name, else the slug). */
+	orgName: string,
+	/**
+	 *  True when the app already has this workspace connected — no credential
+	 *  import needed, just the repo link.
+	 */
+	alreadyConnected: boolean,
 };
 
 /**  A connected Linear organization. */

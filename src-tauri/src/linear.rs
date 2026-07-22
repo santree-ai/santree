@@ -220,6 +220,57 @@ pub(crate) async fn migrate_tokens_to_keychain(db: &Db) -> Result<bool> {
     Ok(true)
 }
 
+/// The stored display name of a connected org — `None` when it isn't connected.
+pub(crate) async fn connected_org_name(db: &Db, slug: &str) -> Result<Option<String>> {
+    Ok(org_row(db, slug).await?.map(|r| r.name))
+}
+
+/// Import a Linear credential the santree CLI left in its global auth store.
+///
+/// The CLI's access token is typically long expired, so the stored pair is
+/// validated by spending its refresh token for a fresh one (the CLI and the app
+/// share an OAuth client, so the grant carries over) — a revoked or stale grant
+/// fails here, before anything is persisted. The org is then resolved from the
+/// fresh token rather than trusted from the CLI's files, and persisted exactly
+/// like an OAuth connect (credential → keychain, metadata → SQLite).
+pub(crate) async fn import_cli_credential(
+    db: &Db,
+    slug: &str,
+    refresh_token: String,
+) -> Result<LinearOrg> {
+    // Serialize with any in-flight refresh of the same org — Linear invalidates
+    // a refresh token the moment it's spent.
+    let lock = refresh_lock(slug);
+    let _guard = lock.lock().await;
+    let body = token_request(
+        &[
+            ("grant_type", "refresh_token"),
+            ("client_id", CLIENT_ID),
+            ("refresh_token", refresh_token.as_str()),
+        ],
+        "santree CLI credential import",
+    )
+    .await
+    .context("the santree CLI's Linear sign-in is no longer valid — connect Linear from Settings instead")?;
+
+    let (slug, name) = fetch_viewer_org(&body.access_token).await?;
+    upsert_org(
+        db,
+        &OrgRow {
+            slug: slug.clone(),
+            name: name.clone(),
+            expires_at: now_ms() + body.expires_in * 1000,
+        },
+        Tokens {
+            access: body.access_token,
+            refresh: body.refresh_token,
+        },
+    )
+    .await?;
+    log::info!("imported the Linear credential for org {slug} from the santree CLI auth store");
+    Ok(LinearOrg { slug, name })
+}
+
 /// The org slug a repo should use — see [`resolved_org`].
 async fn resolve_org_slug(db: &Db, repo: &str) -> Result<Option<String>> {
     let linked: Option<Option<String>> =

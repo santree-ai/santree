@@ -1169,6 +1169,22 @@ pub struct LinearOrg {
     pub name: String,
 }
 
+/// santree-CLI configuration (`.santree/metadata.json` + the CLI's global auth
+/// store) detected in a just-opened repo, offered for adoption. Only built when
+/// something is actionable: the CLI's workspace is either already connected
+/// (the repo just needs linking) or importable from the CLI's stored credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyCliMigration {
+    /// Linear workspace slug the CLI had this repo on.
+    pub org_slug: String,
+    /// Display name for that workspace (the CLI's stored name, else the slug).
+    pub org_name: String,
+    /// True when the app already has this workspace connected — no credential
+    /// import needed, just the repo link.
+    pub already_connected: bool,
+}
+
 /// Linear connection status surfaced to the UI for a given repo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]

@@ -14,6 +14,7 @@ mod git_watch;
 mod github;
 mod gql;
 mod hooks;
+mod legacy;
 mod linear;
 mod notes;
 mod openers;
@@ -148,6 +149,8 @@ fn specta_builder() -> AppBuilder {
             commands::set_repo_linear_org,
             commands::linear_list_issues,
             commands::linear_connect,
+            commands::legacy_cli_probe,
+            commands::legacy_cli_migrate,
             terminal::terminal_open,
             terminal::terminal_write,
             terminal::terminal_resize,
