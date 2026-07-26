@@ -27,7 +27,12 @@ vi.mock("../state/AppContext", () => ({
   }),
 }));
 
-import { inEditable, useDigitShortcuts, useKeyboardShortcuts } from "./useKeyboardShortcuts";
+import {
+  inEditable,
+  targetOwnsKey,
+  useDigitShortcuts,
+  useKeyboardShortcuts,
+} from "./useKeyboardShortcuts";
 
 /** Dispatch a keydown the way the browser would — from the focused element, so
  *  the handler's `e.target` is the field the user is typing in. */
@@ -44,6 +49,24 @@ function typeInto(tag: "input" | "textarea") {
   const el = document.createElement(tag);
   document.body.append(el);
   return el;
+}
+
+/** xterm's DOM: a hidden textarea (so `inEditable` says yes) inside `.xterm`. */
+function typeIntoTerminal() {
+  const term = document.createElement("div");
+  term.className = "xterm";
+  const helper = document.createElement("textarea");
+  helper.className = "xterm-helper-textarea";
+  term.append(helper);
+  document.body.append(term);
+  return helper;
+}
+
+/** `targetOwnsKey` takes the event; build one without dispatching it. */
+function keyOn(el: Element, key: string, init: KeyboardEventInit = {}) {
+  const event = new KeyboardEvent("keydown", { key, ...init });
+  Object.defineProperty(event, "target", { value: el });
+  return event;
 }
 
 beforeEach(() => {
@@ -70,6 +93,38 @@ describe("inEditable", () => {
     expect(inEditable(document.createElement("div"))).toBe(false);
     expect(inEditable(document.createElement("button"))).toBe(false);
     expect(inEditable(null)).toBe(false);
+  });
+});
+
+describe("targetOwnsKey", () => {
+  it("hands a text field every key, modified or not", () => {
+    const field = typeInto("input");
+    expect(targetOwnsKey(keyOn(field, "l"))).toBe(true);
+    expect(targetOwnsKey(keyOn(field, "l", { metaKey: true }))).toBe(true);
+    expect(targetOwnsKey(keyOn(field, "t", { ctrlKey: true }))).toBe(true);
+  });
+
+  it("leaves ⌘-chords to the app while a terminal has focus", () => {
+    // The whole point: ⌘T/⌘L/⌘1 are app chrome — a shell has no use for them,
+    // so an agent session must not swallow them the way a text field does.
+    const term = typeIntoTerminal();
+    expect(targetOwnsKey(keyOn(term, "t", { metaKey: true }))).toBe(false);
+    expect(targetOwnsKey(keyOn(term, "l", { metaKey: true }))).toBe(false);
+    expect(targetOwnsKey(keyOn(term, "1", { metaKey: true }))).toBe(false);
+  });
+
+  it("still gives the terminal its unmodified keys and Ctrl-chords", () => {
+    // ^C / ^D / ^R belong to the shell on every platform — releasing those would
+    // break the terminal to fix the chrome.
+    const term = typeIntoTerminal();
+    expect(targetOwnsKey(keyOn(term, "l"))).toBe(true);
+    expect(targetOwnsKey(keyOn(term, "Escape"))).toBe(true);
+    expect(targetOwnsKey(keyOn(term, "c", { ctrlKey: true }))).toBe(true);
+    expect(targetOwnsKey(keyOn(term, "l", { ctrlKey: true }))).toBe(true);
+  });
+
+  it("is false with focus nowhere in particular", () => {
+    expect(targetOwnsKey(keyOn(document.createElement("div"), "l", { metaKey: true }))).toBe(false);
   });
 });
 
@@ -219,6 +274,8 @@ describe("useDigitShortcuts", () => {
     press("1", { altKey: true });
     press("1", { on: typeInto("input") });
     press("1", { on: typeInto("textarea") });
+    // A bare digit typed at a shell is the shell's, even though ⌘-chords aren't.
+    press("1", { on: typeIntoTerminal() });
 
     expect(rows[0]).not.toHaveBeenCalled();
   });

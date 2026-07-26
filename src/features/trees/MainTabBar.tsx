@@ -23,7 +23,7 @@ import {
   onTabStripKeyDown,
   underlineTabStyle,
 } from "../../components/primitives";
-import { inEditable, useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
+import { targetOwnsKey, useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { CHROME } from "../../state/AppContext";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { BASE_ID, extraTab, type MainTab, useTrees } from "./model";
@@ -155,7 +155,7 @@ function NewTabButton({ onAdd }: { onAdd: (kind: TabKind) => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.key !== "t") return;
-      if (inEditable(e.target)) return;
+      if (targetOwnsKey(e)) return;
       e.preventDefault();
       setOpen((o) => !o);
     };

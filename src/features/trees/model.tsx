@@ -41,7 +41,7 @@ import {
   useWorktrees,
   useWorktreeTabs,
 } from "../../lib/queries";
-import { inEditable } from "../../lib/useKeyboardShortcuts";
+import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { useAgentRuns } from "../../state/AgentRuns";
 import { type PendingLaunch, useApp, useAppUi } from "../../state/AppContext";
 import type { TerminalTab } from "../terminal/orchestrator";
@@ -638,7 +638,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // than in a separate consumer component so there's no shallow useTrees() caller.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (inEditable(e.target)) return;
+      if (targetOwnsKey(e)) return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && !e.altKey && !e.shiftKey && e.code === "KeyL") {
         e.preventDefault();

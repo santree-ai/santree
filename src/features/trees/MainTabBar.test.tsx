@@ -173,6 +173,27 @@ describe("MainTabBar", () => {
       expect(trees.addTab).toHaveBeenCalledWith("terminal");
     });
 
+    // The bar is on screen precisely when an agent is running, so focus is
+    // usually in the terminal — ⌘T means nothing to a shell and must reach the
+    // menu anyway, or the shortcut is dead exactly where it's needed.
+    it("opens with ⌘T while the terminal has focus", () => {
+      mount();
+      const term = document.createElement("div");
+      term.className = "xterm";
+      const helper = document.createElement("textarea");
+      helper.className = "xterm-helper-textarea";
+      term.append(helper);
+      document.body.append(term);
+
+      act(() => {
+        helper.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "t", metaKey: true, bubbles: true }),
+        );
+      });
+
+      expect(screen.getByRole("button", { name: /Claude/ })).toBeInTheDocument();
+    });
+
     it("swallows 3 (Web is WIP) instead of opening a tab", () => {
       mount();
       openMenu();

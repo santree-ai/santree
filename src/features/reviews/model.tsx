@@ -19,7 +19,7 @@ import {
 
 import type { ReviewInbox, ReviewPr } from "../../bindings";
 import { useReviews } from "../../lib/queries";
-import { inEditable } from "../../lib/useKeyboardShortcuts";
+import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { useApp, useAppUi } from "../../state/AppContext";
 
 interface ReviewsModel {
@@ -67,7 +67,7 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
   // shallow consumer component is needed just to register the shortcut.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (inEditable(e.target)) return;
+      if (targetOwnsKey(e)) return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && !e.altKey && !e.shiftKey && e.code === "KeyL") {
         e.preventDefault();

@@ -2,7 +2,7 @@
 import { useEffect } from "react";
 
 import { ViewChrome } from "../../components/chrome/ViewChrome";
-import { inEditable } from "../../lib/useKeyboardShortcuts";
+import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { GraphCanvas } from "./GraphCanvas";
 import { IssueSidebar } from "./IssueSidebar";
 import { IssuesProvider, useIssues } from "./model";
@@ -17,7 +17,7 @@ function IssuesShortcuts() {
   const { toggleRightPanel, toggleActionableOnly } = useIssues();
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (inEditable(e.target)) return;
+      if (targetOwnsKey(e)) return;
       const mod = e.metaKey || e.ctrlKey;
       if (!mod || e.altKey) return;
       // Use e.code so the Shift modifier (which would turn "." into ">") doesn't matter.

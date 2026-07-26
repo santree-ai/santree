@@ -23,7 +23,7 @@ import {
   useBoolSetting,
   useClaudeHookSettings,
 } from "../../lib/queries";
-import { inEditable } from "../../lib/useKeyboardShortcuts";
+import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { toast } from "../../state/toast";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
@@ -231,7 +231,7 @@ export function useTriageKeyboard(opts: {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (inEditable(e.target)) return;
+      if (targetOwnsKey(e)) return;
       const mod = e.metaKey || e.ctrlKey;
 
       if (mod && !e.altKey && (e.key === "i" || e.key === "I")) {

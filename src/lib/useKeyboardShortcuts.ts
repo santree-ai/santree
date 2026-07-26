@@ -6,6 +6,9 @@
  * Settings was opened from. Tab navigation routes are guarded by the views
  * themselves, so an unavailable target (e.g. Triage while disabled) simply
  * redirects back.
+ *
+ * Also home to {@link targetOwnsKey}, the guard the view-local shortcut
+ * listeners share so they all treat text fields and terminals the same way.
  */
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
@@ -23,6 +26,28 @@ export function inEditable(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable === true;
 }
 
+/** True when focus is inside a terminal — xterm's hidden helper textarea, which
+ *  reads as a plain TEXTAREA to {@link inEditable}. `.xterm` is the class xterm
+ *  puts on the element it owns (and what its stylesheet targets). */
+function inTerminal(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  return el?.closest?.(".xterm") != null;
+}
+
+/**
+ * The guard every app shortcut starts with: true when the focused element owns
+ * this keystroke and the app should stay out of the way.
+ *
+ * A text field owns every key. A terminal is narrower: it owns unmodified keys
+ * and Ctrl-chords (^C, ^D, ^R are the shell's), but **not** ⌘/Super chords —
+ * ⌘T, ⌘L, ⌘B, ⌘1… are app chrome and mean nothing to a shell, so they have to
+ * keep working while an agent has focus.
+ */
+export function targetOwnsKey(e: KeyboardEvent): boolean {
+  if (inTerminal(e.target)) return e.ctrlKey || !e.metaKey;
+  return inEditable(e.target);
+}
+
 /**
  * Bind the digits 1..N to a menu's rows for as long as the caller is mounted —
  * mount it with the open menu, so the listener is live exactly while the menu is
@@ -37,7 +62,7 @@ export function useDigitShortcuts(rows: readonly ((() => void) | null)[]) {
   latest.current = rows;
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.metaKey || e.ctrlKey || e.altKey || inEditable(e.target)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || targetOwnsKey(e)) return;
       const n = Number(e.key);
       const current = latest.current;
       if (!Number.isInteger(n) || n < 1 || n > current.length) return;
@@ -70,7 +95,7 @@ export function useKeyboardShortcuts() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       // Esc leaves Settings — but never steal it from an open field.
-      if (e.key === "Escape" && pathname === "/settings" && !inEditable(e.target)) {
+      if (e.key === "Escape" && pathname === "/settings" && !targetOwnsKey(e)) {
         e.preventDefault();
         navigate({ to: lastView.current });
         return;
