@@ -106,6 +106,19 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
+      # tauri.conf.json declares the hook binary as a bundle resource, and Tauri's
+      # build script hard-errors ("resource path ... doesn't exist") when a declared
+      # resource is missing — so every cargo command below needs it staged first.
+      # The bundle jobs get this for free via `beforeBuildCommand` (`pnpm
+      # bundle:hook`); this job is pure cargo, so do the same build+copy here
+      # rather than pulling node/pnpm into it. Debug is fine — nothing runs the
+      # binary, the build script only checks that the path exists.
+      - name: Stage the hook bundle resource
+        run: |
+          cargo build -p santree-hook
+          mkdir -p target/bundle-resources
+          cp target/debug/santree-hook target/bundle-resources/santree-hook
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
