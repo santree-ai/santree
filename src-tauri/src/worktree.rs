@@ -1370,11 +1370,7 @@ fn investigate_prompt_file_path(
 /// Directory the Triage investigation writes a ticket's extracted screenshots
 /// into, so the agent can `Read` the real images. Same validated `<repo-key>/
 /// <issue_id>…` sink as the prompt files.
-fn investigate_images_dir(
-    prompts_root: &Path,
-    repo_root: &str,
-    issue_id: &str,
-) -> Result<PathBuf> {
+fn investigate_images_dir(prompts_root: &Path, repo_root: &str, issue_id: &str) -> Result<PathBuf> {
     prompt_path(prompts_root, repo_root, issue_id, ".images")
 }
 
@@ -2883,15 +2879,25 @@ mod tests {
         let out = extract_field_images(&md, &dir, &mut idx).unwrap();
 
         assert_eq!(idx, 1, "one image extracted");
-        assert!(!out.contains("base64"), "no payload survives in the markdown");
-        assert!(out.contains("See data: the note above."), "prose 'data:' intact");
+        assert!(
+            !out.contains("base64"),
+            "no payload survives in the markdown"
+        );
+        assert!(
+            out.contains("See data: the note above."),
+            "prose 'data:' intact"
+        );
         // The image link now points at the on-disk file, which holds the real bytes.
         let file = dir.join("0.png");
         assert!(
             out.contains(&format!("![login screen]({})", file.display())),
             "markdown links the extracted file, got:\n{out}"
         );
-        assert_eq!(std::fs::read(&file).unwrap(), png, "the decoded bytes are written");
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            png,
+            "the decoded bytes are written"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

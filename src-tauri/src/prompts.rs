@@ -894,7 +894,10 @@ mod tests {
             out.contains("![login screen](/tmp/santree/AK-123.images/0.png)"),
             "the file-path image link is kept, got:\n{out}"
         );
-        assert!(!out.contains("image omitted"), "a file path is not stripped");
+        assert!(
+            !out.contains("image omitted"),
+            "a file path is not stripped"
+        );
     }
 
     #[test]
