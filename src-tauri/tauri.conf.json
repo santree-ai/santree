@@ -7,6 +7,7 @@
     "beforeDevCommand": "pnpm bundle:hook && pnpm dev:vite",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm bundle:hook && pnpm build && pnpm stash:sourcemaps",
+    "beforeBundleCommand": "pnpm eject:stale-dmg",
     "frontendDist": "../dist"
   },
   "app": {

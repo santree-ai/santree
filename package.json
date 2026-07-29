@@ -14,6 +14,7 @@
     "bundle:hook": "set -e; base=${CARGO_TARGET_DIR:-target}; host=$(rustc -vV | awk '/^host:/{print $2}'); triple=${TAURI_ENV_TARGET_TRIPLE:-$host}; if [ x${TAURI_ENV_DEBUG:-} = xtrue ]; then profile=debug; flags=; else profile=release; flags=--release; fi; out=target/bundle-resources; mkdir -p $out; case $triple in universal-apple-darwin) cargo build -p santree-hook $flags --target aarch64-apple-darwin --target x86_64-apple-darwin; lipo -create -output $out/santree-hook $base/aarch64-apple-darwin/$profile/santree-hook $base/x86_64-apple-darwin/$profile/santree-hook;; $host) cargo build -p santree-hook $flags; cp $base/$profile/santree-hook $out/santree-hook;; *) cargo build -p santree-hook $flags --target $triple; cp $base/$triple/$profile/santree-hook $out/santree-hook;; esac",
     "gen:bindings": "cargo test --manifest-path src-tauri/Cargo.toml export_bindings_succeeds",
     "stash:sourcemaps": "node scripts/stash-sourcemaps.mjs",
+    "eject:stale-dmg": "node scripts/eject-stale-dmg.mjs",
     "symbolicate": "node scripts/symbolicate.mjs",
     "lint": "biome check .",
     "format": "biome format --write .",
