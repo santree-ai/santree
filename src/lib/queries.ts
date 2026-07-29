@@ -120,10 +120,15 @@ export function useOptimisticMutation<TVars, TData>(opts: {
    * fired twice in quick succession from the same hook instance.
    */
   mutationKey?: QueryKey;
+  /** Serialize against every other mutation sharing this id — see
+   *  {@link gitIndexScope}. The optimistic patch still lands immediately (React
+   *  Query runs `onMutate` before the scope gate); only `mutationFn` queues. */
+  scope?: { id: string };
 }) {
   const qc = useQueryClient();
   return useMutation<TData, Error, TVars, { rollback?: () => void }>({
     mutationKey: opts.mutationKey,
+    scope: opts.scope,
     mutationFn: opts.mutationFn,
     onMutate: async (vars) => {
       const keys = opts.invalidate?.(vars) ?? [];
@@ -183,10 +188,14 @@ function useActionMutation<TVars = void, TData = unknown>(opts: {
   /** Opt out of the global error→toast handler when the caller owns its own
    *  failure UI (e.g. a `ConfirmDialog` that shows the error inline). */
   silent?: boolean;
+  /** Serialize against every other mutation sharing this id — see
+   *  {@link gitIndexScope}. */
+  scope?: { id: string };
 }) {
   const qc = useQueryClient();
   return useMutation<TData, Error, TVars>({
     mutationFn: opts.mutationFn,
+    scope: opts.scope,
     meta: opts.silent ? { silent: true } : undefined,
     onSuccess: (data, vars) => {
       for (const queryKey of opts.invalidate?.(vars, data) ?? [])
@@ -1375,7 +1384,31 @@ export const useUpdateBaseBranch = (repo: string) =>
     success: (base) => `Updated ${base} from origin.`,
   });
 
-/** Draft a commit message from the staged diff (headless `claude -p`). */
+/**
+ * The shared serialization scope for everything that reads or writes one
+ * worktree's git index — staging, discarding, committing, and the AI message
+ * draft that reads `git diff --cached`.
+ *
+ * React Query runs same-scope mutations one at a time, **in call order**, which is
+ * the part the backend's index lock can't supply on its own: each Tauri command is
+ * dispatched as its own task, so a mutex grants them in arrival order, which isn't
+ * necessarily the order they were clicked. Toggling a file on and then off could
+ * otherwise land as off-then-on, leaving the index staged while the UI shows it
+ * unstaged. Queueing here keeps the two ends telling the same story — and keeps a
+ * commit behind the staging clicks that preceded it, so it can never capture a
+ * selection the user hasn't finished making.
+ *
+ * This costs nothing visually: the optimistic cache patch runs on `onMutate`,
+ * before the queue gate, so every click still repaints immediately.
+ */
+const gitIndexScope = (repo: string, id: string) => ({ id: `git-index:${repo}:${id}` });
+
+/** Draft a commit message from the staged diff (headless `claude -p`).
+ *
+ *  Deliberately *not* in {@link gitIndexScope}: it only reads the index, and it
+ *  waits on a multi-second model call — queueing staging clicks behind it would
+ *  hold their optimistic patches open long enough for a watcher-driven status
+ *  refetch to reconcile them away, flipping checkboxes back under the user. */
 export const useCommitMessage = (repo: string) =>
   useMutation({
     mutationFn: (id: string) => unwrap(commands.commitMessage(repo, id)),
@@ -1385,18 +1418,21 @@ export const useCommitMessage = (repo: string) =>
  *  git metadata, which the filesystem watcher deliberately skips — so the cached
  *  per-file diffs (and the sources the viewer expands from) have to be dropped
  *  here, or a just-committed file still renders its pre-commit diff as pending. */
-export const useCommitWorktree = (repo: string) =>
+export const useCommitWorktree = (repo: string, id: string) =>
   useActionMutation({
-    mutationFn: (a: { id: string; message: string; stageAll: boolean }) =>
-      unwrap(commands.commitWorktree(repo, a.id, a.message, a.stageAll)),
-    invalidate: (a) => [
-      queryKeys.worktreeStatus(repo, a.id),
-      queryKeys.worktreeFileDiffPrefix(repo, a.id),
-      queryKeys.worktreeFileSourcePrefix(repo, a.id),
+    mutationFn: (a: { message: string; stageAll: boolean }) =>
+      unwrap(commands.commitWorktree(repo, id, a.message, a.stageAll)),
+    invalidate: () => [
+      queryKeys.worktreeStatus(repo, id),
+      queryKeys.worktreeFileDiffPrefix(repo, id),
+      queryKeys.worktreeFileSourcePrefix(repo, id),
       queryKeys.worktrees(repo),
       queryKeys.baseWorktree(repo),
     ],
     success: () => "Committed.",
+    // Queues behind any staging click still in flight, so the commit can only ever
+    // capture the selection the user has finished making.
+    scope: gitIndexScope(repo, id),
   });
 
 /** Draft a PR title + body for the create-PR dialog. `fill` runs the AI draft;
@@ -1505,6 +1541,10 @@ export const useStageAction = (repo: string, id: string) =>
     // Rapid stage/unstage clicks on the same worktree all patch (and would
     // otherwise reconcile) the same `worktreeStatus` key — see #72.
     mutationKey: ["stage-action", repo, id],
+    // ...and each one is a separate `git` process contending for the same
+    // `.git/index.lock`, which git fails rather than queues. Run them one at a
+    // time, in click order.
+    scope: gitIndexScope(repo, id),
     mutationFn: (a: StageVars) => {
       switch (a.action) {
         case "stage":

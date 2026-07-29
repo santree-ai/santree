@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
@@ -154,6 +154,14 @@ fn git_capture(cwd: &Path, args: &[&str]) -> Result<(bool, String, String)> {
     let out = Command::new("git")
         .arg("-C")
         .arg(cwd)
+        // Read-only commands (`status`, `diff`) opportunistically take
+        // `.git/index.lock` to write back a refreshed index. That's a pure
+        // optimization, but it makes every status poll a contender for the lock
+        // that `add`/`restore`/`commit` *must* have — and this app polls status on
+        // every filesystem burst while an agent writes. Opting out (what editors
+        // and IDEs do) keeps the reads out of the fight entirely; commands whose
+        // index write is required, not optional, are unaffected.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .args(args)
         .output()
         .map_err(|e| anyhow!("failed to run git: {e}"))?;
@@ -162,6 +170,71 @@ fn git_capture(cwd: &Path, args: &[&str]) -> Result<(bool, String, String)> {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
+}
+
+/// How long to keep retrying a command blocked on a `.git/index.lock` we don't
+/// own, and how often to re-check. Bounded: a *stale* lock (a git that crashed
+/// mid-write) never clears, and the user has to be told about that rather than
+/// watch a click hang forever.
+const INDEX_LOCK_WAIT: Duration = Duration::from_secs(2);
+const INDEX_LOCK_POLL: Duration = Duration::from_millis(50);
+
+/// Serialize the git commands that write a worktree's index, and ride out a lock
+/// held by a git process we don't control.
+///
+/// Git has no wait-for-lock: a second `add`/`restore`/`commit` in the same worktree
+/// fails outright ("Unable to create '…/index.lock': File exists") instead of
+/// queueing. Two things race for that lock here. Our own commands — staging is one
+/// command per file, and clicking several checkboxes in a row fires them
+/// concurrently — which the mutex removes entirely. And the agent's CLI, which runs
+/// git in these worktrees whenever it likes; nothing in this process can serialize
+/// *that*, so the retry rides it out.
+///
+/// The mutex is deliberately held across the retry sleeps: while one santree
+/// command waits for the worktree to free up, the rest should queue behind it
+/// rather than pile onto the same contended lock.
+///
+/// Not reentrant (`std::sync::Mutex`) — a locked command must never call another
+/// one. [`commit`] is why that matters: it stages and commits inside a *single*
+/// lock rather than taking one per step, which is also what stops a staging click
+/// from landing between the two.
+fn with_index_lock<T>(cwd: &Path, mut run: impl FnMut() -> Result<T>) -> Result<T> {
+    /// One entry per worktree path — bounded by the worktrees that exist on disk.
+    /// Poison-tolerant, like the linear/pty/settings locks: the map holds only
+    /// `Arc`s, so a thread that panicked mid-access left it structurally sound.
+    static INDEX_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+        LazyLock::new(Default::default);
+
+    let lock = INDEX_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(cwd.to_path_buf())
+        .or_default()
+        .clone();
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+
+    let deadline = Instant::now() + INDEX_LOCK_WAIT;
+    loop {
+        match run() {
+            Err(e) if is_index_lock_contention(&e) && Instant::now() < deadline => {
+                std::thread::sleep(INDEX_LOCK_POLL);
+            }
+            res => return res,
+        }
+    }
+}
+
+/// Run one index-writing git command under [`with_index_lock`]; otherwise [`git`].
+fn git_indexed(cwd: &Path, args: &[&str]) -> Result<String> {
+    with_index_lock(cwd, || git(cwd, args))
+}
+
+/// Whether a git failure is "someone else is holding `.git/index.lock`" — the one
+/// error worth retrying. Both halves of git's message are required, so an unrelated
+/// failure that merely names the lock path can't be mistaken for contention.
+fn is_index_lock_contention(e: &anyhow::Error) -> bool {
+    let msg = e.to_string();
+    msg.contains("index.lock") && msg.contains("File exists")
 }
 
 /// A census of spawned `git` processes, keyed by the directory each ran in. The
@@ -585,13 +658,18 @@ fn merge_checked(cwd: &Path, target: &str) -> Result<()> {
         }
     }
     // Clean per the virtual merge (or detection unavailable). The abort is a
-    // safety net — normally unreachable after a clean pre-check.
-    let (ok, _out, err) = git_capture(cwd, &["merge", "--no-edit", target])?;
-    if !ok {
-        let _ = git_capture(cwd, &["merge", "--abort"]);
-        bail!("Can't cleanly merge {target}: {}", err.trim());
-    }
-    Ok(())
+    // safety net — normally unreachable after a clean pre-check. A merge writes
+    // the index, so it queues with staging rather than racing it; the pre-check
+    // and the network fetch above stay outside the lock (they don't need it, and
+    // holding it across a fetch would stall the commit box for seconds).
+    with_index_lock(cwd, || {
+        let (ok, _out, err) = git_capture(cwd, &["merge", "--no-edit", target])?;
+        if !ok {
+            let _ = git_capture(cwd, &["merge", "--abort"]);
+            bail!("Can't cleanly merge {target}: {}", err.trim());
+        }
+        Ok(())
+    })
 }
 
 /// Fast-forward the *local* base branch (main/master) to `origin/<base>` — the
@@ -608,7 +686,7 @@ pub fn update_base(repo: &Path, base: &str) -> Result<()> {
         if !ok {
             bail!("Couldn't fetch origin/{base}: {}", err.trim());
         }
-        git(repo, &["merge", "--ff-only", &format!("origin/{base}")])?;
+        git_indexed(repo, &["merge", "--ff-only", &format!("origin/{base}")])?;
     } else {
         // Move the local ref to origin/<base>, ff-only (errors if it would rewind).
         let (ok, _o, err) = git_capture(repo, &["fetch", "origin", &format!("{base}:{base}")])?;
@@ -636,7 +714,7 @@ pub fn pull_remote(cwd: &Path, branch: &str) -> Result<()> {
     // Prefer a clean fast-forward; `--ff-only` fails without side effects (no
     // MERGE_HEAD, tree untouched) when the branch has diverged, so we can fall
     // through to a merge.
-    if git(cwd, &["merge", "--ff-only", &origin_ref]).is_ok() {
+    if git_indexed(cwd, &["merge", "--ff-only", &origin_ref]).is_ok() {
         return Ok(());
     }
     merge_checked(cwd, &origin_ref)
@@ -884,13 +962,13 @@ pub fn file_source(cwd: &Path, path: &str) -> Result<FileSource> {
 /// Stage a single file (works for new, modified, deleted).
 pub fn stage(cwd: &Path, path: &str) -> Result<()> {
     safe_path(cwd, path)?;
-    git(cwd, &["add", "--", path]).map(|_| ())
+    git_indexed(cwd, &["add", "--", path]).map(|_| ())
 }
 
 /// Unstage a single file (leaves the working tree untouched).
 pub fn unstage(cwd: &Path, path: &str) -> Result<()> {
     safe_path(cwd, path)?;
-    git(cwd, &["restore", "--staged", "--", path]).map(|_| ())
+    git_indexed(cwd, &["restore", "--staged", "--", path]).map(|_| ())
 }
 
 /// Discard a file's uncommitted changes. Untracked files are deleted; tracked
@@ -904,24 +982,35 @@ pub fn unstage(cwd: &Path, path: &str) -> Result<()> {
 pub fn discard(cwd: &Path, path: &str, untracked: bool) -> Result<()> {
     safe_path(cwd, path)?;
     if untracked {
-        return git(cwd, &["clean", "--force", "--", path]).map(|_| ());
+        return git_indexed(cwd, &["clean", "--force", "--", path]).map(|_| ());
     }
-    git(cwd, &["checkout", "HEAD", "--", path]).map(|_| ())
+    git_indexed(cwd, &["checkout", "HEAD", "--", path]).map(|_| ())
 }
 
 /// Stage every change (new, modified, deleted).
 pub fn stage_all(cwd: &Path) -> Result<()> {
-    git(cwd, &["add", "-A"]).map(|_| ())
+    git_indexed(cwd, &["add", "-A"]).map(|_| ())
 }
 
 /// Unstage everything (mixed reset; working tree untouched).
 pub fn unstage_all(cwd: &Path) -> Result<()> {
-    git(cwd, &["reset"]).map(|_| ())
+    git_indexed(cwd, &["reset"]).map(|_| ())
 }
 
-/// Commit the staged index with `message`. Errors if nothing is staged.
-pub fn commit(cwd: &Path, message: &str) -> Result<()> {
-    git(cwd, &["commit", "-m", message]).map(|_| ())
+/// Commit the index with `message`, optionally staging everything first. Errors if
+/// nothing is staged.
+///
+/// The two steps share one lock rather than taking one each: between a separate
+/// `stage_all` and `commit`, a staging click could land and be committed silently —
+/// the commit would then contain something other than what the user had selected.
+pub fn commit(cwd: &Path, message: &str, stage_all: bool) -> Result<()> {
+    with_index_lock(cwd, || {
+        if stage_all {
+            git(cwd, &["add", "-A"])?;
+        }
+        git(cwd, &["commit", "-m", message])
+    })
+    .map(|_| ())
 }
 
 /// The full staged diff, for AI commit-message generation.
@@ -1209,6 +1298,104 @@ mod tests {
         assert!(f.staged);
         assert_eq!(f.add_lines, 3);
         assert_eq!(f.del_lines, 0);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- the per-worktree index lock ----
+
+    /// Staging is one `git add`/`git restore` per file, and ticking several
+    /// checkboxes in a row fires them at once. Git doesn't queue on
+    /// `.git/index.lock` — the losers die with "Unable to create …index.lock:
+    /// File exists" — so without [`with_index_lock`] a fast burst surfaced as a
+    /// row of red toasts *and* left the index disagreeing with the checkboxes.
+    #[test]
+    fn concurrent_staging_serializes_instead_of_failing_on_index_lock() {
+        let base = scratch_dir("index-lock-burst");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        const FILES: usize = 12;
+        for i in 0..FILES {
+            std::fs::write(repo.join(format!("f{i}.txt")), format!("line {i}\n")).unwrap();
+        }
+
+        // Every file staged from its own thread, as concurrently as the OS allows.
+        let failures: Vec<String> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..FILES)
+                .map(|i| {
+                    let repo = &repo;
+                    s.spawn(move || {
+                        stage(repo, &format!("f{i}.txt"))
+                            .err()
+                            .map(|e| e.to_string())
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().unwrap())
+                .collect()
+        });
+        assert!(
+            failures.is_empty(),
+            "concurrent staging must not fail on index.lock: {failures:?}"
+        );
+
+        // ...and the index must agree with what was asked for, not just "no error".
+        let staged: Vec<_> = status(&repo)
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.staged)
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(staged.len(), FILES, "every file must be staged: {staged:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The retry is for locks held by a git process we *don't* own (the agent's CLI
+    /// runs git in these worktrees freely), so it's exercised with a real leftover
+    /// `index.lock` rather than a second santree call — which the mutex would have
+    /// serialized before it ever reached git.
+    #[test]
+    fn staging_waits_out_a_lock_held_by_another_process() {
+        let base = scratch_dir("index-lock-foreign");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+
+        let lock = repo.join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        // Released well inside INDEX_LOCK_WAIT, the way a foreign git finishing its
+        // own write would release it.
+        let releaser = {
+            let lock = lock.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(250));
+                std::fs::remove_file(&lock).unwrap();
+            })
+        };
+
+        stage(&repo, "a.txt").expect("staging must ride out a foreign index.lock");
+        releaser.join().unwrap();
+
+        // And a lock that never clears still errors rather than hanging the click.
+        std::fs::write(&lock, "").unwrap();
+        let err = stage(&repo, "a.txt").expect_err("a stale lock must surface, not hang");
+        assert!(
+            is_index_lock_contention(&err),
+            "the give-up error should still name the lock: {err}"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

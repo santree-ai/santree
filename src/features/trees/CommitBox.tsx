@@ -38,7 +38,7 @@ export function CommitBox({
   const { data: saved } = useCommitDraft(repo, activeId);
   const { mutate: saveDraft } = useSetCommitDraft(repo);
   const { mutate: draft, isPending: drafting } = useCommitMessage(repo);
-  const { mutate: commit, isPending: committing } = useCommitWorktree(repo);
+  const { mutate: commit, isPending: committing } = useCommitWorktree(repo, activeId);
   const { mutate: push } = usePushWorktree(repo);
 
   const [message, setMessage] = useState("");
@@ -93,7 +93,7 @@ export function CommitBox({
   const onDraft = () => draft(activeId, { onSuccess: (msg) => setMessage(msg) });
   const onCommit = () =>
     commit(
-      { id: activeId, message: message.trim(), stageAll },
+      { message: message.trim(), stageAll },
       {
         onSuccess: () => {
           // The backend clears the persisted draft on commit; clear the field to

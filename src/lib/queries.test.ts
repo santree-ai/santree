@@ -446,8 +446,7 @@ describe("git mutations: what they refresh", () => {
   // skips — so nothing else can drop the per-file diff cache, and a just-committed
   // file kept rendering its pre-commit diff as if it were still pending.
   it("useCommitWorktree drops the worktree's cached diffs and sources, and the base card", async () => {
-    const keys = await invalidatedBy(() => useCommitWorktree(repo), {
-      id: "AK-1",
+    const keys = await invalidatedBy(() => useCommitWorktree(repo, "AK-1"), {
       message: "wip",
       stageAll: false,
     });

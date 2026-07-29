@@ -1214,15 +1214,11 @@ pub async fn commit(
 ) -> Result<()> {
     let path = worktree_path(db, repo, issue_id).await?;
     {
-        // Blocking git (`add`/`commit`) off the async runtime.
+        // Blocking git (`add`/`commit`) off the async runtime. Both steps run under
+        // one index lock inside `git::commit`, so a staging click can't slip in
+        // between them and end up in the commit.
         let message = message.to_string();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            if stage_all {
-                git::stage_all(&path)?;
-            }
-            git::commit(&path, &message)
-        })
-        .await??;
+        tokio::task::spawn_blocking(move || git::commit(&path, &message, stage_all)).await??;
     }
     // The message is now committed — drop the saved draft so it doesn't reappear and
     // invite a second commit of the same change. Not fatal (the commit landed), but a
