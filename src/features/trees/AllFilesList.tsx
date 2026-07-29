@@ -3,6 +3,7 @@
  *  status (VS Code-style). Directories collapse by default (large repos). */
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 
+import { ListSkeleton } from "../../components/primitives";
 import { useWorktreeFiles, useWorktreeStatus } from "../../lib/queries";
 import { alpha } from "../../theme/colors";
 import { STATUS_META } from "./changeTree";
@@ -50,9 +51,13 @@ export function buildTree(paths: string[]): TreeNode[] {
 
 export function AllFilesList() {
   const { repo, activeId, selectFile, selectedFile } = useTrees();
-  const { data: files = [] } = useWorktreeFiles(repo, activeId);
+  // Undefined until the listing lands — rendered as a skeleton rather than an
+  // empty tree, which would claim the worktree has no files. `status` keeps its
+  // default: it only tints rows, so "not loaded yet" and "nothing changed" are
+  // the same absence of tint.
+  const { data: files } = useWorktreeFiles(repo, activeId);
   const { data: status = [] } = useWorktreeStatus(repo, activeId);
-  const tree = useMemo(() => buildTree(files), [files]);
+  const tree = useMemo(() => buildTree(files ?? []), [files]);
   // Changed files are tinted by their status (VS Code-style); map path → color.
   const changeColor = useMemo(() => {
     const m = new Map<string, string>();
@@ -99,6 +104,10 @@ export function AllFilesList() {
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto py-1">
+      {files === undefined && <ListSkeleton rows={10} />}
+      {files !== undefined && rows.length === 0 && (
+        <div className="px-3 py-6 text-center text-[11.5px] text-muted-3">No files.</div>
+      )}
       {rows.map((r) => (
         <TreeRow
           key={r.node.path}

@@ -209,6 +209,34 @@ export function Skeleton({ className, style }: { className?: string; style?: CSS
   );
 }
 
+/**
+ * Placeholder rows for a list whose data hasn't arrived yet.
+ *
+ * The distinction this exists to preserve: a query with no data yet means "we
+ * don't know", which is not the same as "there is nothing". Rendering an empty
+ * state from `data ?? []` asserts the second while only the first is true — the
+ * file picker claimed "No changes." on every worktree until its status landed.
+ * Gate on `data === undefined` and render this instead.
+ *
+ * Widths vary per row so the block reads as content rather than a progress bar;
+ * they're derived from the index (not random) so re-renders don't reshuffle it.
+ */
+export function ListSkeleton({ rows = 6, className }: { rows?: number; className?: string }) {
+  return (
+    <div className={`flex flex-col gap-2 px-3 py-2 ${className ?? ""}`} aria-hidden>
+      {Array.from({ length: rows }, (_, i) => (
+        <Skeleton
+          // Static placeholders in a fixed-length list — there is no identity to
+          // key by, and the list never reorders.
+          key={i}
+          className="h-3"
+          style={{ width: `${[82, 64, 74, 56, 88, 68, 78, 60][i % 8]}%` }}
+        />
+      ))}
+    </div>
+  );
+}
+
 /** A spinning ring, themable by color. */
 export function Spinner({ size = 11, color = "var(--accent)" }: { size?: number; color?: string }) {
   return (

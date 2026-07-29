@@ -30,7 +30,10 @@ export function FilePickerPanel() {
     setRightWidth,
     toggleRightPanel,
   } = useTrees();
-  const { data: status = [] } = useWorktreeStatus(repo, activeId);
+  // No `?? []` default on purpose: `undefined` means the status hasn't loaded,
+  // which ChangesList renders as a skeleton. Defaulting here would collapse that
+  // into "no changes" and assert something we don't know yet.
+  const { data: status } = useWorktreeStatus(repo, activeId);
 
   const resize = useEdgeResize({
     cssVar: "--tree-right",
@@ -60,7 +63,7 @@ export function FilePickerPanel() {
         <FileTabButton tab="all" label="All files" active={fileTab} onClick={setFileTab} />
         <FileTabButton
           tab="changes"
-          label={`Changes${status.length ? ` · ${status.length}` : ""}`}
+          label={`Changes${status?.length ? ` · ${status.length}` : ""}`}
           active={fileTab}
           onClick={setFileTab}
         />

@@ -7,7 +7,7 @@ import { memo, useCallback, useMemo, useState } from "react";
 
 import type { ChangedFile } from "../../bindings";
 import { ListIcon, TreeIcon } from "../../components/icons";
-import { ConfirmDialog } from "../../components/primitives";
+import { ConfirmDialog, ListSkeleton } from "../../components/primitives";
 import {
   TREES_CHANGES_VIEW_KEY,
   useSetSetting,
@@ -21,11 +21,15 @@ import { fileIconUrl, folderIconUrl } from "./fileIcons";
 import { IndentGuides } from "./IndentGuides";
 import { useTrees } from "./model";
 
-export function ChangesList({ files }: { files: ChangedFile[] }) {
+/** `files === undefined` means the worktree status hasn't loaded — distinct from
+ *  `[]`, which means it loaded and there's nothing to commit. */
+export function ChangesList({ files }: { files: ChangedFile[] | undefined }) {
   const { repo, activeId, selectedFile, selectFile } = useTrees();
   const { mutate: act, mutateAsync: actAsync } = useStageAction(repo, activeId);
-  const stagedCount = files.filter((f) => f.staged).length;
-  const allStaged = files.length > 0 && stagedCount === files.length;
+  const loading = files === undefined;
+  const list = files ?? [];
+  const stagedCount = list.filter((f) => f.staged).length;
+  const allStaged = list.length > 0 && stagedCount === list.length;
   // The file or folder pending a discard confirmation (discard is destructive —
   // uncommitted work is unrecoverable — so it asks first, like the worktree
   // delete). Only the path is stored; the affected files are derived from the
@@ -39,9 +43,9 @@ export function ChangesList({ files }: { files: ChangedFile[] }) {
   const discardDir = useCallback((path: string) => setDiscarding({ path, isDir: true }), []);
   const discardTargets = useMemo(() => {
     if (!discarding) return [];
-    if (discarding.isDir) return filesUnder(files, discarding.path);
-    return files.filter((f) => f.path === discarding.path);
-  }, [discarding, files]);
+    if (discarding.isDir) return filesUnder(list, discarding.path);
+    return list.filter((f) => f.path === discarding.path);
+  }, [discarding, list]);
 
   // List vs collapsed-folder tree, persisted app-wide (default list).
   const viewSetting = useSetting("app", TREES_CHANGES_VIEW_KEY);
@@ -57,10 +61,10 @@ export function ChangesList({ files }: { files: ChangedFile[] }) {
 
   return (
     <>
-      {files.length > 0 && (
+      {!loading && list.length > 0 && (
         <div className="flex flex-none items-center justify-between gap-2 border-b border-line px-2.5 py-1.5">
           <span className="font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
-            {stagedCount}/{files.length} staged
+            {stagedCount}/{list.length} staged
           </span>
           <div className="flex items-center gap-1.5">
             <ViewToggle tree={tree} onChange={setTree} />
@@ -76,11 +80,13 @@ export function ChangesList({ files }: { files: ChangedFile[] }) {
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
-        {files.length === 0 ? (
+        {loading ? (
+          <ListSkeleton rows={7} />
+        ) : list.length === 0 ? (
           <div className="px-3 py-6 text-center text-[11.5px] text-muted-3">No changes.</div>
         ) : tree ? (
           <ChangesTree
-            files={files}
+            files={list}
             selectedFile={selectedFile}
             onToggle={onToggle}
             onOpen={selectFile}
@@ -88,7 +94,7 @@ export function ChangesList({ files }: { files: ChangedFile[] }) {
             onDiscardDir={discardDir}
           />
         ) : (
-          files.map((f) => (
+          list.map((f) => (
             <ChangeRow
               key={f.path}
               file={f}
@@ -102,7 +108,7 @@ export function ChangesList({ files }: { files: ChangedFile[] }) {
       </div>
 
       {/* Keyed per worktree so each gets its own persisted-draft instance. */}
-      <CommitBox key={activeId} stagedCount={stagedCount} totalCount={files.length} />
+      <CommitBox key={activeId} stagedCount={stagedCount} totalCount={list.length} />
 
       <ConfirmDialog
         open={discarding !== null}

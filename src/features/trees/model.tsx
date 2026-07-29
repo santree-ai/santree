@@ -42,6 +42,7 @@ import {
   useWorktreeTabs,
 } from "../../lib/queries";
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
+import { usePersistedState } from "../../lib/usePersistedState";
 import { useAgentRuns } from "../../state/AgentRuns";
 import { type PendingLaunch, useApp, useAppUi } from "../../state/AppContext";
 import type { TerminalTab } from "../terminal/orchestrator";
@@ -335,6 +336,15 @@ interface TreesModel {
   deleteSelected: () => void;
 }
 
+/** localStorage keys for the view state above. Namespaced like the AppContext
+ *  ones (`santree-*`) so everything the app persists is greppable from one place. */
+const ACTIVE_ID_KEY = "santree-trees-active-id";
+const RIGHT_COLLAPSED_KEY = "santree-trees-right-collapsed";
+const RIGHT_WIDTH_KEY = "santree-trees-right-width";
+const FILE_TAB_KEY = "santree-trees-file-tab";
+const TAB_BY_WT_KEY = "santree-trees-tab-by-worktree";
+const FILE_BY_WT_KEY = "santree-trees-file-by-worktree";
+
 const TreesContext = createContext<TreesModel | null>(null);
 
 export function TreesProvider({ children }: { children: ReactNode }) {
@@ -439,10 +449,14 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     }
   }, [realWorktrees, pendingDeletes, removePendingDelete]);
 
-  const [activeId, setActiveId] = useState("");
-  const [rightCollapsed, setRightCollapsed] = useState(false);
-  const [rightWidth, setRightWidth] = useState(320);
-  const [fileTab, setFileTab] = useState<FileTab>("changes");
+  // Persisted, not plain `useState`: this provider is route-scoped, so leaving
+  // Trees for another tab unmounts it — and every one of these resetting is what
+  // made coming back land on the all-agents overview instead of the worktree,
+  // tab and file the user left open. See usePersistedState.
+  const [activeId, setActiveId] = usePersistedState(ACTIVE_ID_KEY, "");
+  const [rightCollapsed, setRightCollapsed] = usePersistedState(RIGHT_COLLAPSED_KEY, false);
+  const [rightWidth, setRightWidth] = usePersistedState(RIGHT_WIDTH_KEY, 320);
+  const [fileTab, setFileTab] = usePersistedState<FileTab>(FILE_TAB_KEY, "changes");
   // The on-disk CI-fix prompt file for a Fix-CI tab, keyed by tab id. A transient
   // hand-off from the Reviews "Fix CI with AI" flow: read once by the Fix-CI tab's
   // fresh-launch seed (`Read <path> …`). Not persisted — after a restart the tab's
@@ -452,15 +466,24 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // tab/file each one was last on instead of snapping every one back to its Issue
   // tab. A worktree with no entry defaults to Issue (Terminal for the base entry,
   // which has no ticket); the launch flow switches to setup/terminal as it starts.
-  const [activeTabByWt, setActiveTabByWt] = useState<Record<string, MainTab>>({});
-  const [selectedFileByWt, setSelectedFileByWt] = useState<Record<string, string | null>>({});
+  const [activeTabByWt, setActiveTabByWt] = usePersistedState<Record<string, MainTab>>(
+    TAB_BY_WT_KEY,
+    {},
+  );
+  const [selectedFileByWt, setSelectedFileByWt] = usePersistedState<Record<string, string | null>>(
+    FILE_BY_WT_KEY,
+    {},
+  );
+  // The setters below come from `usePersistedState`, which returns `useState`'s
+  // own setter — stable for the component's life, so listing it changes nothing
+  // at runtime. Biome only knows that guarantee for a literal `useState` call.
   const setTabFor = useCallback(
     (id: string, tab: MainTab) => setActiveTabByWt((m) => ({ ...m, [id]: tab })),
-    [],
+    [setActiveTabByWt],
   );
   const setFileFor = useCallback(
     (id: string, file: string | null) => setSelectedFileByWt((m) => ({ ...m, [id]: file })),
-    [],
+    [setSelectedFileByWt],
   );
   const [prDialogFor, setPrDialogFor] = useState<string | null>(null);
   const [prSuggestFor, setPrSuggestFor] = useState<string | null>(null);
@@ -492,13 +515,22 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       setActiveId(id);
       setVisibleWorktree(id || null);
     },
-    [setVisibleWorktree],
+    [setActiveId, setVisibleWorktree],
   );
 
-  // Trees no longer has a worktree on screen — release it, so a launch queued for
-  // it (a task the user started and then navigated away from) is picked up by the
-  // off-screen launcher and actually runs.
-  useEffect(() => () => setVisibleWorktree(null), [setVisibleWorktree]);
+  // `select` is what normally keeps `activeId` and AgentRuns' visible worktree in
+  // step, but a selection restored from storage lands in state without passing
+  // through it — publish it once on mount, or the off-screen launcher never learns
+  // Trees is already showing that worktree and mounts a second host for its
+  // session, two of which fight over the xterm overlay.
+  const restoredId = useRef(activeId);
+  useEffect(() => {
+    setVisibleWorktree(restoredId.current || null);
+    // Trees no longer has a worktree on screen — release it, so a launch queued for
+    // it (a task the user started and then navigated away from) is picked up by the
+    // off-screen launcher and actually runs.
+    return () => setVisibleWorktree(null);
+  }, [setVisibleWorktree]);
 
   // Begin a task: open it and hand the run to AgentRuns. `focus` (default true)
   // makes the worktree active; a launch that shouldn't steal the view passes false.
@@ -531,8 +563,12 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // The base entry isn't in `worktrees`, so it's never cleared here.
   useEffect(() => {
     if (activeId === BASE_ID) return;
+    // "Not in the list" only means "gone" once there *is* a list. Without this,
+    // a restored selection is cleared on mount — the list is still empty then —
+    // which is the all-agents overview again, just one tick later.
+    if (worktreesLoading) return;
     if (activeId && !worktrees.some((w) => w.id === activeId)) select("");
-  }, [worktrees, activeId, select]);
+  }, [worktrees, activeId, select, worktreesLoading]);
 
   // Tracks which treeLaunch id has already been focused (setActiveId called for
   // it), so a worktrees refetch while the real worktree hasn't landed yet
@@ -647,7 +683,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [setRightCollapsed]);
 
   const value = useMemo<TreesModel>(() => {
     const active =
@@ -801,6 +837,9 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     rightCollapsed,
     rightWidth,
     fileTab,
+    setFileTab,
+    setRightCollapsed,
+    setRightWidth,
     selectedFileByWt,
     settingUpActive,
     activeTabByWt,
