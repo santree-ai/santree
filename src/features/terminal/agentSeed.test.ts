@@ -110,6 +110,28 @@ describe("agentSessionSeed", () => {
     ).toBe("exec 'claude' --resume 'sess-1'");
   });
 
+  it("exports the terminal identity via `env` on both fresh and resume (for /clear reconcile)", () => {
+    // Both repo + termKey ⇒ an `env NAME=value …` prefix Claude's SessionStart hook
+    // reads to adopt a new (e.g. post-/clear) session id for this exact terminal.
+    expect(
+      agentSessionSeed(fresh, "claude", { prompt: "go", repo: "@dev", termKey: "dev:/co" }),
+    ).toBe(
+      "exec env SANTREE_REPO='@dev' SANTREE_TERM_KEY='dev:/co' 'claude' --session-id 'sess-1' 'go'",
+    );
+    expect(agentSessionSeed(resume, "claude", { repo: "acme", termKey: "tree:AK-1" })).toBe(
+      "exec env SANTREE_REPO='acme' SANTREE_TERM_KEY='tree:AK-1' 'claude' --resume 'sess-1'",
+    );
+  });
+
+  it("omits the env prefix unless both repo and termKey are given", () => {
+    expect(agentSessionSeed(fresh, "claude", { prompt: "go", repo: "@dev" })).toBe(
+      "exec 'claude' --session-id 'sess-1' 'go'",
+    );
+    expect(agentSessionSeed(fresh, "claude", { prompt: "go", termKey: "dev:/co" })).toBe(
+      "exec 'claude' --session-id 'sess-1' 'go'",
+    );
+  });
+
   it("escapes embedded single quotes", () => {
     expect(shellQuote("don't fail")).toBe("'don'\\''t fail'");
   });

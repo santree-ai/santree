@@ -190,6 +190,8 @@ export function useBatchInvestigate(opts: {
           const r = await commands.agentSession(repo, `triage:${id}`, cwd, true);
           if (r.status === "error") throw new Error(r.error);
           const seed = agentSessionSeed(r.data, exec, {
+            repo,
+            termKey: `triage:${id}`,
             prompt,
             modelFlag: model ? `--model ${shellQuote(model)}` : undefined,
             effortFlag: effort ? `--effort ${shellQuote(effort)}` : undefined,

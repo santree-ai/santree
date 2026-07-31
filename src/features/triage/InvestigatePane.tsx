@@ -108,6 +108,8 @@ export function InvestigatePane({
   const hookSettings = useClaudeHookSettings().data;
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
   const seed = agentSessionSeed(session.data, exec, {
+    repo,
+    termKey,
     // Seed the short "read the file" instruction rather than the prompt text: the
     // rendered triage prompt (full ticket + comment thread) is far too large to
     // type into the interactive-shell seed. The one-liner is only a fallback for

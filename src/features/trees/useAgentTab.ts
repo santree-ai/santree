@@ -113,6 +113,8 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
 
   const chosenModel = opts.modelOverride || model.data;
   const seed = agentSessionSeed(session.data, exec, {
+    repo,
+    termKey: refId,
     prompt: opts.prompt,
     remoteControl: isClaude ? opts.remoteControl : undefined,
     modelFlag: isClaude && chosenModel ? `--model ${shellQuote(chosenModel)}` : undefined,

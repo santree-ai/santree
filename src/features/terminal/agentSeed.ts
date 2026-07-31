@@ -54,10 +54,26 @@ export function agentSessionSeed(
      *  (`plan` / `acceptEdits` / `auto` / …). A startup mode, so it's applied on
      *  both fresh and resume launches; empty/undefined leaves the flag off. */
     permissionMode?: string;
+    /** This terminal's identity (`repo` + registry `termKey`), exported into the
+     *  Claude process env so the `santree-hook` `SessionStart` hook can reconcile
+     *  the stored session id back to whatever session Claude is *actually* running
+     *  — the fix for `/clear`, which mints a new session id we'd otherwise never
+     *  learn about and keep `--resume`ing the cleared conversation forever. Both
+     *  must be set to inject; a launch without them just omits the env. */
+    repo?: string;
+    termKey?: string;
   },
 ): string | undefined {
   if (!session || session.type === "shell") return undefined;
   const bin = shellQuote(exec);
+  // Prefix `env NAME=value …` (not a `NAME=value cmd` assignment) so it works the
+  // same across the user's login shell — bash/zsh honour bare assignment prefixes
+  // but fish does not, whereas `exec env …` is universal. Inherited by the hook
+  // subprocesses Claude spawns (verified: Claude scrubs only `OTEL_*`).
+  const env =
+    opts.repo && opts.termKey
+      ? `env SANTREE_REPO=${shellQuote(opts.repo)} SANTREE_TERM_KEY=${shellQuote(opts.termKey)} `
+      : "";
   // Enable + name Remote Control (Claude's `--remote-control [name]`) with the
   // ticket id, so the session is identifiable on the Remote Control web.
   const rc = opts.remoteControl ? `--remote-control ${shellQuote(opts.remoteControl)} ` : "";
@@ -65,11 +81,11 @@ export function agentSessionSeed(
   const chrome = opts.chrome ? "--chrome " : "";
   const perm = opts.permissionMode ? `--permission-mode ${shellQuote(opts.permissionMode)} ` : "";
   if (session.type === "resume") {
-    return `exec ${bin} ${rc}${settings}${chrome}${perm}--resume ${shellQuote(session.sessionId)}`;
+    return `exec ${env}${bin} ${rc}${settings}${chrome}${perm}--resume ${shellQuote(session.sessionId)}`;
   }
   const model = opts.modelFlag ? `${opts.modelFlag} ` : "";
   const effort = opts.effortFlag ? `${opts.effortFlag} ` : "";
   // No prompt (a manual Claude tab) ⇒ launch interactive and let the user type.
   const prompt = opts.prompt !== undefined ? ` ${shellQuote(opts.prompt)}` : "";
-  return `exec ${bin} ${rc}${settings}${chrome}${perm}${model}${effort}--session-id ${shellQuote(session.sessionId)}${prompt}`;
+  return `exec ${env}${bin} ${rc}${settings}${chrome}${perm}${model}${effort}--session-id ${shellQuote(session.sessionId)}${prompt}`;
 }

@@ -62,6 +62,15 @@ fn resolve_state(event: &str, payload: &Value) -> Option<AgentState> {
     }
 }
 
+/// Whether a `SessionStart` `source` means Claude minted a *new* session id that
+/// santree didn't choose — the only case where the terminal's stored id must be
+/// repointed. `startup`/`resume` run the id we launched with, and `compact` keeps
+/// the id; only `clear` and `fork` diverge. Gating on these is what stops a stray
+/// SessionStart (an env-inheriting subprocess, a subagent) from hijacking the row.
+fn session_id_changed(source: Option<&str>) -> bool {
+    matches!(source, Some("clear") | Some("fork"))
+}
+
 fn main() {
     install_exit_zero_panic_hook();
 
@@ -121,7 +130,7 @@ fn main() {
     else {
         return;
     };
-    let wrote = rt
+    let mut wrote = rt
         .block_on(record(
             &db_path,
             session_id,
@@ -132,6 +141,32 @@ fn main() {
             transcript,
         ))
         .unwrap_or(false);
+
+    // When the user `/clear`s (or `/fork`s), Claude abandons the session santree
+    // launched and mints a brand-new session id we never chose and would otherwise
+    // never learn — so the stored id keeps pointing at the cleared conversation and
+    // every reopen `--resume`s it. Repoint the terminal's row to the live id.
+    //
+    // The terminal's own identity is exported into our env at launch, so we rewrite
+    // *only that one terminal's* row — never another tab's, even though sibling
+    // Claude tabs share a cwd. And we gate on the SessionStart `source`: only `clear`
+    // and `fork` change the id, so a normal startup/resume/compact — or a stray
+    // SessionStart from an env-inheriting subprocess — can never hijack the row.
+    if event == "SessionStart" && session_id_changed(field("source")) {
+        if let (Ok(repo), Ok(term_key)) = (
+            std::env::var("SANTREE_REPO"),
+            std::env::var("SANTREE_TERM_KEY"),
+        ) {
+            if !repo.is_empty() && !term_key.is_empty() {
+                let reconciled = rt
+                    .block_on(reconcile_terminal_session(
+                        &db_path, &repo, &term_key, session_id,
+                    ))
+                    .unwrap_or(false);
+                wrote = wrote || reconciled;
+            }
+        }
+    }
 
     // Nudge the app over its signal socket so the UI refreshes in realtime. Best
     // effort — if the app isn't running the connect just fails, and the app picks
@@ -410,6 +445,45 @@ async fn record(
     Ok(true)
 }
 
+/// Point the terminal `(repo, term_key)`'s stored session id at `session_id` — the
+/// session Claude is currently running under. Returns `Ok(true)` when a row's id
+/// actually changed (so the caller nudges the app to re-resolve). UPDATE-only: the
+/// row is created by the app when it launches the terminal, so a missing row means
+/// this isn't a santree-launched session we track (or the app db predates it) —
+/// either way there's nothing to reconcile, and we never fabricate a row. The
+/// `session_id <> ?` guard makes the common case (id unchanged) a no-op write.
+async fn reconcile_terminal_session(
+    db_path: &str,
+    repo: &str,
+    term_key: &str,
+    session_id: &str,
+) -> Result<bool, sqlx::Error> {
+    if !Path::new(db_path).exists() {
+        return Ok(false);
+    }
+    let mut conn = SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(false)
+        .busy_timeout(Duration::from_secs(3))
+        .connect()
+        .await?;
+
+    let affected = sqlx::query(
+        "UPDATE terminal_sessions SET session_id = ? \
+         WHERE repo = ? AND term_key = ? AND session_id <> ?",
+    )
+    .bind(session_id)
+    .bind(repo)
+    .bind(term_key)
+    .bind(session_id)
+    .execute(&mut conn)
+    .await?
+    .rows_affected();
+
+    conn.close().await?;
+    Ok(affected > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,6 +744,112 @@ mod tests {
                 .unwrap();
         assert_eq!(state, "idle");
         assert_eq!(event, "Stop");
+        c.close().await.unwrap();
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn only_clear_and_fork_change_the_session_id() {
+        // The divergence cases — a new id santree never chose.
+        assert!(session_id_changed(Some("clear")));
+        assert!(session_id_changed(Some("fork")));
+        // Everything else runs the id santree launched with (or keeps it), so a
+        // sibling tab / subprocess SessionStart can never repoint the row.
+        assert!(!session_id_changed(Some("startup")));
+        assert!(!session_id_changed(Some("resume")));
+        assert!(!session_id_changed(Some("compact")));
+        assert!(!session_id_changed(None));
+    }
+
+    #[tokio::test]
+    async fn reconcile_adopts_the_live_session_id_for_the_terminal() {
+        let base =
+            std::env::temp_dir().join(format!("santree-hook-reconcile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db_path = base.join("santree.db");
+        let db = db_path.to_str().unwrap();
+
+        // No db yet ⇒ silent no-op, never creates one (COMPLIANCE: never disrupt).
+        assert!(
+            !reconcile_terminal_session(db, "@dev", "dev:/checkout", "new-id")
+                .await
+                .unwrap()
+        );
+        assert!(!db_path.exists(), "reconcile must not create the db");
+
+        // The app owns this table (mirrors migration 0007). Seed one terminal
+        // pointing at the pre-`/clear` session, plus a decoy the update must not touch.
+        {
+            let mut c = SqliteConnectOptions::new()
+                .filename(&db_path)
+                .create_if_missing(true)
+                .connect()
+                .await
+                .unwrap();
+            sqlx::query(
+                "CREATE TABLE terminal_sessions (repo TEXT NOT NULL, term_key TEXT NOT NULL, \
+                 cwd TEXT NOT NULL, session_id TEXT NOT NULL, \
+                 created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (repo, term_key))",
+            )
+            .execute(&mut c)
+            .await
+            .unwrap();
+            for (repo, key, sid) in [
+                ("@dev", "dev:/checkout", "old-cleared-id"),
+                ("@dev", "dev:/other", "untouched-id"),
+            ] {
+                sqlx::query(
+                    "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) \
+                     VALUES (?, ?, '/checkout', ?)",
+                )
+                .bind(repo)
+                .bind(key)
+                .bind(sid)
+                .execute(&mut c)
+                .await
+                .unwrap();
+            }
+            c.close().await.unwrap();
+        }
+
+        // The `/clear` reconcile flips the stored id to the new live session.
+        assert!(
+            reconcile_terminal_session(db, "@dev", "dev:/checkout", "new-clear-id")
+                .await
+                .unwrap()
+        );
+        // Same id again ⇒ no-op (a normal startup/resume writes nothing, nudges nothing).
+        assert!(
+            !reconcile_terminal_session(db, "@dev", "dev:/checkout", "new-clear-id")
+                .await
+                .unwrap()
+        );
+        // A term_key with no row (never launched by santree) ⇒ nothing to adopt.
+        assert!(
+            !reconcile_terminal_session(db, "@dev", "dev:/never", "x")
+                .await
+                .unwrap()
+        );
+
+        let mut c = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .connect()
+            .await
+            .unwrap();
+        let ids: Vec<(String, String)> =
+            sqlx::query_as("SELECT term_key, session_id FROM terminal_sessions ORDER BY term_key")
+                .fetch_all(&mut c)
+                .await
+                .unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                ("dev:/checkout".to_string(), "new-clear-id".to_string()),
+                ("dev:/other".to_string(), "untouched-id".to_string()),
+            ]
+        );
         c.close().await.unwrap();
 
         let _ = std::fs::remove_dir_all(&base);

@@ -277,7 +277,7 @@ describe("useAgentTab", () => {
       const t = mount();
 
       expect(t.tab().seed).toBe(
-        "exec 'claude' --settings '/hooks.json' --chrome --permission-mode 'acceptEdits' --model 'opus' --effort 'high' --session-id 's-1'",
+        "exec env SANTREE_REPO='acme/app' SANTREE_TERM_KEY='tree:AK-1' 'claude' --settings '/hooks.json' --chrome --permission-mode 'acceptEdits' --model 'opus' --effort 'high' --session-id 's-1'",
       );
     });
 
