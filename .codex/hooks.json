@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/Users/stoscanini/dev/personal/santree-app/.codex/hooks/bindings-reminder.py'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
