@@ -103,10 +103,15 @@ export class XtermRenderer implements TerminalRenderer {
   private disposed = false;
   private contextLosses = 0;
 
-  constructor() {
+  /** `readOnly` is for panes that only ever *show* a process's output (the build
+   *  and setup logs): no keystrokes are wired to anything, so a blinking cursor and
+   *  a focusable textarea would only advertise an input that goes nowhere. */
+  constructor(opts: { readOnly?: boolean } = {}) {
     this.term = new Terminal({
       allowProposedApi: true,
-      cursorBlink: true,
+      cursorBlink: !opts.readOnly,
+      cursorInactiveStyle: opts.readOnly ? "none" : undefined,
+      disableStdin: !!opts.readOnly,
       fontFamily:
         'ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Monaco, "Cascadia Code", monospace',
       fontSize: 12,
@@ -192,6 +197,11 @@ export class XtermRenderer implements TerminalRenderer {
 
   write(data: Uint8Array | string) {
     this.term.write(data);
+  }
+
+  reset() {
+    this.term.reset();
+    this.term.clear();
   }
 
   onInput(cb: (data: string) => void) {

@@ -8,7 +8,12 @@ import type { Reviewer } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { CloseIcon } from "../../components/icons";
 import { Button, Spinner, useModalA11y } from "../../components/primitives";
-import { useCreatePr, usePrDraft, usePrReviewers } from "../../lib/queries";
+import {
+  useCreatePr,
+  usePrDraft,
+  usePrReviewers,
+  useWorktreeHasTranscripts,
+} from "../../lib/queries";
 import { toast } from "../../state/toast";
 import { alpha } from "../../theme/colors";
 import { useTrees } from "./model";
@@ -28,6 +33,10 @@ export function CreatePrDialog() {
   const [error, setError] = useState<string | null>(null);
   const [draftPr, setDraftPr] = useState(false);
   const [reviewers, setReviewers] = useState<string[]>([]);
+  // Opt-in: feed this worktree's Claude session transcript(s) to the AI fill for
+  // extra context (decisions/rationale the diff doesn't show). Only affects the ✨
+  // draft; the checkbox is shown only when there's transcript history to send.
+  const [sendTranscripts, setSendTranscripts] = useState(false);
   // The prefill is a round-trip (git + the repo's PR template); the form is usable
   // from the first frame and adopts the prefill when it lands — per field, and only
   // if that field is still untouched, so it can never overwrite what's being typed
@@ -39,6 +48,7 @@ export function CreatePrDialog() {
   const { mutate: draft, isPending: drafting } = usePrDraft(repo);
   const { mutate: create, isPending: creating } = useCreatePr(repo);
   const { data: candidates = [] } = usePrReviewers(repo, id);
+  const { data: hasTranscripts } = useWorktreeHasTranscripts(repo, id);
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -55,7 +65,7 @@ export function CreatePrDialog() {
   // Prefill from a non-AI draft (template + first-commit title) on open.
   useEffect(() => {
     draft(
-      { id, fill: false },
+      { id, fill: false, sendTranscripts: false },
       {
         onSuccess: (d) => {
           if (!titleTouched.current) setTitle(d.title);
@@ -78,7 +88,7 @@ export function CreatePrDialog() {
 
   const onFill = () =>
     draft(
-      { id, fill: true },
+      { id, fill: true, sendTranscripts },
       {
         onSuccess: (d) => {
           setTitle(d.title);
@@ -147,20 +157,37 @@ export function CreatePrDialog() {
 
         <div className="mt-3 mb-1 flex items-center justify-between">
           <span className="text-[11px] font-medium text-muted-2">Description</span>
-          <button
-            type="button"
-            onClick={onFill}
-            disabled={drafting}
-            title="Draft title + description with AI (from the PR template & diff)"
-            className="flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-2 hover:bg-hover hover:text-accent disabled:opacity-40"
-          >
-            {aiDrafting ? (
-              <Spinner size={11} />
-            ) : (
-              <span className="text-[12px] leading-none">✨</span>
+          <div className="flex items-center gap-2.5">
+            {hasTranscripts && (
+              <label
+                title="Let AI read this worktree's Claude session(s) for extra context — decisions and rationale the diff doesn't show"
+                className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-2 hover:text-fg-2"
+              >
+                <input
+                  type="checkbox"
+                  checked={sendTranscripts}
+                  onChange={(e) => setSendTranscripts(e.target.checked)}
+                  disabled={drafting}
+                  className="h-3 w-3 cursor-pointer accent-[var(--accent)]"
+                />
+                Use transcripts
+              </label>
             )}
-            {aiDrafting ? "Drafting…" : "AI fill"}
-          </button>
+            <button
+              type="button"
+              onClick={onFill}
+              disabled={drafting}
+              title="Draft title + description with AI (from the PR template & diff)"
+              className="flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-2 hover:bg-hover hover:text-accent disabled:opacity-40"
+            >
+              {aiDrafting ? (
+                <Spinner size={11} />
+              ) : (
+                <span className="text-[12px] leading-none">✨</span>
+              )}
+              {aiDrafting ? "Drafting…" : "AI fill"}
+            </button>
+          </div>
         </div>
         <textarea
           value={body}

@@ -16,11 +16,12 @@ vi.mock("@tanstack/react-router", () => ({
 
 const app = vi.hoisted(() => ({
   triageEnabled: false,
+  devEnabled: false,
   toggleSidebar: vi.fn(),
   toggleShortcuts: vi.fn(),
 }));
 vi.mock("../state/AppContext", () => ({
-  useAppOptional: () => ({ triageEnabled: app.triageEnabled }),
+  useAppOptional: () => ({ triageEnabled: app.triageEnabled, devEnabled: app.devEnabled }),
   useAppUiOptional: () => ({
     toggleSidebar: app.toggleSidebar,
     toggleShortcuts: app.toggleShortcuts,
@@ -73,6 +74,7 @@ beforeEach(() => {
   router.pathname = "/";
   router.navigate.mockClear();
   app.triageEnabled = false;
+  app.devEnabled = false;
   app.toggleSidebar.mockClear();
   app.toggleShortcuts.mockClear();
   document.body.innerHTML = "";
@@ -155,6 +157,21 @@ describe("useKeyboardShortcuts", () => {
     expect(router.navigate).toHaveBeenCalledWith({ to: "/terminal" });
 
     router.navigate.mockClear();
+    press("5", { metaKey: true });
+    expect(router.navigate).not.toHaveBeenCalled();
+  });
+
+  it("appends Dev as the last tab only while it's enabled", () => {
+    app.devEnabled = true;
+    const { unmount } = renderHook(() => useKeyboardShortcuts());
+
+    press("5", { metaKey: true });
+    expect(router.navigate).toHaveBeenCalledWith({ to: "/dev" });
+    unmount();
+
+    app.devEnabled = false;
+    router.navigate.mockClear();
+    renderHook(() => useKeyboardShortcuts());
     press("5", { metaKey: true });
     expect(router.navigate).not.toHaveBeenCalled();
   });

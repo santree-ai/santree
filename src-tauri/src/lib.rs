@@ -7,6 +7,7 @@ mod agent;
 mod commands;
 mod commit_draft;
 mod db;
+mod dev;
 mod env;
 mod error;
 mod git;
@@ -27,6 +28,7 @@ mod reviews;
 mod session;
 mod session_signal;
 mod settings;
+mod stream;
 mod tabs;
 mod terminal;
 mod text_store;
@@ -103,6 +105,7 @@ fn specta_builder() -> AppBuilder {
             commands::rename_worktree_tab,
             commands::remove_worktree_tab,
             commands::pr_draft,
+            commands::worktree_has_transcripts,
             commands::create_pull_request,
             commands::pr_reviewers,
             commands::worktree_prs,
@@ -151,6 +154,18 @@ fn specta_builder() -> AppBuilder {
             commands::linear_connect,
             commands::legacy_cli_probe,
             commands::legacy_cli_migrate,
+            dev::dev_normalize_repo,
+            dev::dev_info,
+            dev::dev_todos,
+            dev::dev_add_todo,
+            dev::dev_set_todo_done,
+            dev::dev_delete_todo,
+            dev::dev_todo_prompt,
+            dev::dev_screenshot_src,
+            dev::dev_build,
+            dev::dev_cancel_build,
+            dev::dev_install,
+            dev::dev_eject,
             terminal::terminal_open,
             terminal::terminal_write,
             terminal::terminal_resize,
@@ -590,7 +605,7 @@ pub fn run() {
                 }
                 // Setup scripts run their own PTY, outside PtyManager — quitting
                 // mid-setup would otherwise orphan `init.sh` and everything it spawned.
-                worktree::SETUP_RUNS.kill_all();
+                stream::RUNS.kill_all();
             }
         });
 }

@@ -26,6 +26,8 @@ import {
 import type { AgentKind, Settings } from "../bindings";
 import { preloadRepoAvatars } from "../components/chrome/RepoAvatar";
 import {
+  DEV_GITHUB_LOGIN,
+  useGithubStatus,
   useRepos,
   useSaveSettings,
   useSessionStates,
@@ -55,6 +57,10 @@ interface AppData {
 
   /** Triage is available only when Linear is connected and triage is enabled. */
   triageEnabled: boolean;
+
+  /** The hidden Dev (dogfooding) tab — only for the app developer's GitHub
+   *  login (see features/dev; deleted with it). */
+  devEnabled: boolean;
 
   /** Color theme preference; "auto" follows the OS setting. */
   theme: Theme;
@@ -181,6 +187,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const { data: settings = null } = useSettings();
   const { data: repos } = useRepos();
   const { mutate: saveSettings } = useSaveSettings();
+  // The hidden Dev tab's gate, derived once here (like triageEnabled) so the
+  // nav chrome and the shortcut map agree. A plain boolean dep below, so status
+  // refetches don't rebuild the memo unless the answer actually changes.
+  const { data: github } = useGithubStatus();
+  const devEnabled = github?.account === DEV_GITHUB_LOGIN;
 
   const [activeRepo, setActiveRepo] = useState(() => localStorage.getItem(REPO_KEY) ?? "");
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -317,13 +328,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
           return { ...s, integrations: { ...integrations, [key]: !integrations[key] } };
         }),
       triageEnabled: !!settings?.integrations?.linear && !!settings?.integrations?.triage,
+      devEnabled,
       theme,
       setTheme: (next: Theme) => {
         localStorage.setItem(THEME_KEY, next);
         setThemeState(next);
       },
     }),
-    [activeRepo, settings, applySettings, theme],
+    [activeRepo, settings, applySettings, theme, devEnabled],
   );
 
   // Handlers are stabilized with `useCallback` (all use functional setState, so

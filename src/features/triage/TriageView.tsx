@@ -317,7 +317,7 @@ export function TriageView() {
               queue OR team issues to widen to, so the Mine/All toggle is reachable
               even when your own queue is empty. */}
           {(ordered.length > 0 || teamWaiting > 0) && (
-            <div className="flex h-10 flex-none items-center gap-2 border-b border-hairline px-3">
+            <div className="flex h-10 flex-none items-stretch gap-2 border-b border-hairline px-3">
               <Segmented
                 options={[
                   { value: "mine", label: "Mine" },

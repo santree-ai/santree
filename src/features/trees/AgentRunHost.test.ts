@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import type { Worktree } from "../../bindings";
-import { appendSetupLine } from "../../state/AgentRuns";
 import { launchesToHost } from "./AgentRunHost";
 
 function worktree(id: string, pending = false): Worktree {
@@ -58,20 +57,5 @@ describe("launchesToHost", () => {
 
   it("ignores a launch whose worktree is gone (deleted mid-launch)", () => {
     expect(launchesToHost(new Set(["AK-9"]), wts, null)).toEqual([]);
-  });
-});
-
-describe("appendSetupLine", () => {
-  it("appends committed lines", () => {
-    expect(appendSetupLine(["a"], "b", false)).toEqual(["a", "b"]);
-  });
-
-  // A progress bar rewrites its own line (a lone `\r`) instead of scrolling.
-  it("overwrites the last line when the previous event was a progress redraw", () => {
-    expect(appendSetupLine(["a", "50%"], "60%", true)).toEqual(["a", "60%"]);
-  });
-
-  it("appends rather than overwriting when there's nothing to overwrite yet", () => {
-    expect(appendSetupLine([], "50%", true)).toEqual(["50%"]);
   });
 });

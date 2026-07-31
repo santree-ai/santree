@@ -81,6 +81,7 @@ export function useKeyboardShortcuts() {
   const app = useAppOptional();
   const ui = useAppUiOptional();
   const triageEnabled = app?.triageEnabled ?? false;
+  const devEnabled = app?.devEnabled ?? false;
   const toggleSidebar = ui?.toggleSidebar;
   const toggleShortcuts = ui?.toggleShortcuts;
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -125,14 +126,16 @@ export function useKeyboardShortcuts() {
       }
 
       // ⌘1…⌘N map to the tabs in the same left-to-right order NavTabs renders
-      // them: Triage leads when enabled, then Issues, Trees, Reviews, Terminal.
-      // Keep this in sync with NavTabs so the numbers match what's on screen.
+      // them: Triage leads when enabled, then Issues, Trees, Reviews, Terminal,
+      // and Dev trails when enabled. Keep this in sync with NavTabs so the
+      // numbers match what's on screen.
       const paths = [
         ...(triageEnabled ? ["/triage"] : []),
         "/", // Issues
         "/trees",
         "/reviews",
         "/terminal",
+        ...(devEnabled ? ["/dev"] : []),
       ];
       const idx = Number(e.key) - 1;
       const to = Number.isInteger(idx) && idx >= 0 ? paths[idx] : undefined;
@@ -144,5 +147,5 @@ export function useKeyboardShortcuts() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [navigate, pathname, triageEnabled, toggleSidebar, toggleShortcuts]);
+  }, [navigate, pathname, triageEnabled, devEnabled, toggleSidebar, toggleShortcuts]);
 }

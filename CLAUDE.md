@@ -14,6 +14,12 @@ backed by real data. **There is no mock/sample data anywhere**; when a backend i
 connected (no Linear org, no `gh` auth, no repo path) commands return real-but-empty
 results and the view shows its empty state.
 
+There is also a hidden **Dev** tab (dogfooding: build/install santree from inside
+santree, bug TODO list, its own Claude session), gated to the developer's GitHub
+login. Deliberately self-contained — `src/features/dev/`, `src-tauri/src/dev.rs`,
+migration `0017`, and a delimited block in `lib/queries.ts` — so it can be deleted
+cleanly before a public release.
+
 ## Goal & priorities (in order)
 
 1. **Snappy, native-feeling UX.** Optimistic updates + async execution everywhere a
@@ -68,7 +74,8 @@ crates/core/src/   domain.rs (types) · config.rs (static config/defaults) · li
 crates/pty/src/    lib.rs — PtyManager: spawn real process behind a PTY, stream bytes
 src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin wrappers)
                    · linear.rs (GraphQL + OAuth + token store) · db.rs (sqlx pool +
-                   migrations) · repo.rs · settings.rs · terminal.rs
+                   migrations) · repo.rs · settings.rs · terminal.rs · stream.rs
+                   (background command runs behind a PTY → read-only log panes)
 src-tauri/migrations/  0001_init … (SQLite schema; applied on startup)
 src/
   main.tsx         QueryClient (+ global mutation→toast) · providers · router

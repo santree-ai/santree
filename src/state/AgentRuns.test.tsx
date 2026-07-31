@@ -3,16 +3,16 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { SetupEvent } from "../bindings";
+import type { StreamEvent } from "../bindings";
 
 /** The Channel the streaming setup command is handed — captured so the test can
  *  play backend events into it. */
 const channels = vi.hoisted(() => ({
-  last: null as { onmessage?: (e: SetupEvent) => void } | null,
+  last: null as { onmessage?: (e: StreamEvent) => void } | null,
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   Channel: class {
-    onmessage?: (e: SetupEvent) => void;
+    onmessage?: (e: StreamEvent) => void;
     constructor() {
       channels.last = this;
     }
@@ -39,7 +39,8 @@ vi.mock("../lib/queries", () => ({
 vi.mock("../bindings", () => ({ commands: { runWorktreeSetupStreamed: backend.runSetup } }));
 vi.mock("./AppContext", () => ({ useApp: () => ({ activeRepo: "acme/app" }) }));
 
-import { AgentRunsProvider, useAgentRuns, useSetupLines } from "./AgentRuns";
+import { AgentRunsProvider, useAgentRuns } from "./AgentRuns";
+import { getRun, resetAll, setupRunKey } from "./streamRuns";
 
 function wrapper({ children }: { children: ReactNode }) {
   return (
@@ -50,6 +51,7 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 beforeEach(() => {
+  resetAll();
   channels.last = null;
   backend.runSetup.mockClear();
   backend.runSetupPref = true;
@@ -142,7 +144,7 @@ describe("AgentRuns", () => {
     expect(result.current.isInitialSetup("AK-1")).toBe(true);
     expect(result.current.launchAgents.has("AK-1")).toBe(false); // not yet — setup first
 
-    act(() => channels.last?.onmessage?.({ type: "done", ok: true } as SetupEvent));
+    act(() => channels.last?.onmessage?.({ type: "done", ok: true } as StreamEvent));
 
     await waitFor(() => expect(result.current.isSettingUp("AK-1")).toBe(false));
     expect(result.current.launchAgents.has("AK-1")).toBe(true);
@@ -156,7 +158,7 @@ describe("AgentRuns", () => {
     act(() => result.current.runSetup("AK-1"));
     expect(result.current.isInitialSetup("AK-1")).toBe(false);
 
-    act(() => channels.last?.onmessage?.({ type: "done", ok: true } as SetupEvent));
+    act(() => channels.last?.onmessage?.({ type: "done", ok: true } as StreamEvent));
 
     await waitFor(() => expect(result.current.isSettingUp("AK-1")).toBe(false));
     expect(result.current.launchAgents.has("AK-1")).toBe(false);
@@ -177,29 +179,32 @@ describe("AgentRuns", () => {
     expect(result.current.isSettingUp("AK-2")).toBe(true);
     expect(first).not.toBe(second);
 
-    act(() => second?.onmessage?.({ type: "done", ok: true } as SetupEvent));
+    act(() => second?.onmessage?.({ type: "done", ok: true } as StreamEvent));
     await waitFor(() => expect(result.current.launchAgents.has("AK-2")).toBe(true));
     // AK-1's run is untouched — its launch is still pending behind its own setup.
     expect(result.current.isSettingUp("AK-1")).toBe(true);
     expect(result.current.launchAgents.has("AK-1")).toBe(false);
 
-    act(() => first?.onmessage?.({ type: "done", ok: true } as SetupEvent));
+    act(() => first?.onmessage?.({ type: "done", ok: true } as StreamEvent));
     await waitFor(() => expect(result.current.launchAgents.has("AK-1")).toBe(true));
   });
 
-  it("streams setup output per worktree, collapsing progress redraws onto one line", async () => {
-    const { result } = renderHook(() => ({ runs: useAgentRuns(), lines: useSetupLines("AK-1") }), {
-      wrapper,
-    });
-    await beginRun(() => result.current.runs.beginRun("AK-1"));
+  // Output goes to the shared `streamRuns` store, keyed per worktree — not into
+  // this context, whose consumers must not re-render once per chunk of a chatty
+  // `npm install`. Chunks are kept raw and in order for the pane to replay.
+  it("streams setup output into the shared store, keyed by worktree", async () => {
+    const { result } = renderHook(() => useAgentRuns(), { wrapper });
+    await beginRun(() => result.current.beginRun("AK-1"));
 
     act(() => {
-      channels.last?.onmessage?.({ type: "line", text: "installing" } as SetupEvent);
-      channels.last?.onmessage?.({ type: "progress", text: "50%" } as SetupEvent);
-      channels.last?.onmessage?.({ type: "progress", text: "90%" } as SetupEvent);
+      channels.last?.onmessage?.({ type: "chunk", text: "installing\r\n" } as StreamEvent);
+      channels.last?.onmessage?.({ type: "chunk", text: "\x1b[32m50%\x1b[0m\r" } as StreamEvent);
     });
 
-    expect(result.current.lines).toEqual(["installing", "90%"]);
+    const run = getRun(setupRunKey("AK-1"));
+    expect(run.chunks).toEqual(["installing\r\n", "\x1b[32m50%\x1b[0m\r"]);
+    expect(run.running).toBe(true);
+    expect(getRun(setupRunKey("AK-2")).chunks).toEqual([]);
   });
 
   it("won't start a second run for a worktree already setting up", async () => {

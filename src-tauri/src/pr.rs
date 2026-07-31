@@ -131,7 +131,13 @@ fn issue_tag(title: &str) -> Option<&str> {
 /// first commit's subject (already a clean AI-written summary from the commit
 /// flow). With `fill`, the body is drafted by Claude from the repo's PR template
 /// + the branch diff; otherwise it's the raw template (or empty).
-pub async fn draft(db: &Db, repo: &str, issue_id: &str, fill: bool) -> Result<PrDraft> {
+pub async fn draft(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    fill: bool,
+    send_transcripts: bool,
+) -> Result<PrDraft> {
     let c = worktree::coords(db, repo, issue_id).await?;
     // `first_commit_subject` and `pr_template` shell out / read files; keep them
     // off the async runtime's worker threads.
@@ -154,7 +160,7 @@ pub async fn draft(db: &Db, repo: &str, issue_id: &str, fill: bool) -> Result<Pr
 
     let body = if fill {
         // Fall back to the raw template if Claude isn't available / fails.
-        draft_body(db, repo, &c, issue_id, template.clone())
+        draft_body(db, repo, &c, issue_id, template.clone(), send_transcripts)
             .await
             .unwrap_or_else(|| template.unwrap_or_default())
     } else {
@@ -175,6 +181,7 @@ async fn draft_body(
     c: &Coords,
     issue_id: &str,
     template: Option<String>,
+    send_transcripts: bool,
 ) -> Option<String> {
     // Resolve the effective prompt sources + fetch the issue (both async) before
     // dropping onto the blocking pool. The issue is best-effort — a missing/failed
@@ -184,6 +191,18 @@ async fn draft_body(
         .await
         .ok()
         .flatten();
+    // Opt-in: mine this worktree's Claude session transcript(s) for decisions/
+    // rationale the diff alone can't show. Best-effort — an unreadable/missing
+    // transcript just leaves `transcripts` empty. Gathered here (async file I/O on
+    // the blocking pool) rather than inside the render closure below.
+    let transcripts = if send_transcripts {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        crate::session::worktree_transcripts(db, repo, issue_id, home.as_deref())
+            .await
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     // The diff reads, prompt render, and Claude call all block — run the whole
     // chain on one blocking thread instead of shelling out git on the runtime.
@@ -217,6 +236,7 @@ async fn draft_body(
                 commit_log => git::commit_log(&c.path, &c.base_branch),
                 diff_stat => git::diff_stat(&c.path, &c.base_branch),
                 diff => diff,
+                transcripts => transcripts,
                 ..issue_ctx,
             },
         )

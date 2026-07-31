@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AgentKind,
   ChangedFile,
+  DevTodo,
   PrDetail,
   PrLabel,
   PromptInfo,
@@ -257,6 +258,8 @@ export const queryKeys = {
   commitDraft: (repo: string, id: string) => ["commit-draft", repo, id] as const,
   worktreePrs: (repo: string) => ["worktree-prs", repo] as const,
   prReviewers: (repo: string, id: string) => ["pr-reviewers", repo, id] as const,
+  worktreeHasTranscripts: (repo: string, id: string) =>
+    ["worktree-has-transcripts", repo, id] as const,
   reviews: (repo: string) => ["reviews", repo] as const,
   mergeQueue: (repo: string) => ["merge-queue", repo] as const,
   prDetail: (owner: string, name: string, number: number) =>
@@ -305,6 +308,10 @@ export const queryKeys = {
   linearStatus: (repo: string) => ["linear-status", repo] as const,
   linearOrgs: ["linear-orgs"] as const,
   claudeUsage: ["claude-usage"] as const,
+  // Dev tab (dogfooding — see features/dev; delete with it).
+  devTodos: ["dev-todos"] as const,
+  devInfo: (repoPath: string) => ["dev-info", repoPath] as const,
+  devScreenshot: (path: string) => ["dev-screenshot", path] as const,
 };
 
 /** Setting keys for the Triage Investigation action (agent · model · effort).
@@ -355,6 +362,12 @@ export const WORK_MOVE_IN_PROGRESS_KEY = "work_move_in_progress";
  *  "Run" and starts the single focused ticket immediately — ⌘-click runs it in
  *  the background without leaving the current view. App-scoped, defaults off. */
 export const WORK_QUEUE_KEY = "work_queue";
+
+/** When on, launching a ticket whose blocker is already in a worktree asks which
+ *  branch to start from — the blocker's (stacked) or the repo's default — instead
+ *  of stacking silently. App-scoped; defaults to ON (a missing value means ask),
+ *  so read it as `data !== "false"`. */
+export const WORK_ASK_BASE_KEY = "work_ask_base";
 
 /**
  * Triage queue preference keys (app-scoped, string "true"/"false").
@@ -1266,19 +1279,37 @@ export const useCreateWorktree = (repo: string) =>
       issueId: string;
       title: string;
       project: string | null;
-      base: string | null;
+      /** Branch off a blocker's worktree branch instead of the repo's default
+       *  branch (a stacked worktree). The ticket id rides along only so the toast
+       *  can name it — the backend takes the branch. */
+      stackOn: { ticket: string; branch: string } | null;
       agent: AgentKind;
       // Suppress the per-worktree toast — a bulk launch raises one summary toast
       // for the whole batch instead of N near-identical ones.
       quiet?: boolean;
-    }) => unwrap(commands.createWorktree(repo, a.issueId, a.title, a.project, a.base, a.agent)),
+    }) =>
+      unwrap(
+        commands.createWorktree(
+          repo,
+          a.issueId,
+          a.title,
+          a.project,
+          a.stackOn?.branch ?? null,
+          a.agent,
+        ),
+      ),
     // Only the worktree list — NOT tasks. The graph relies on the `tasks` query
     // reference staying stable (re-firing fitView mid-rebuild blanks the canvas),
     // and a full graph refetch on every launch is heavy. The WIP badge already
     // signals "being worked on"; a moved Linear status refreshes on the next
     // natural tasks refetch.
     invalidate: () => [queryKeys.worktrees(repo)],
-    success: (wt, a) => (a.quiet ? null : `Created worktree for ${wt.id}.`),
+    success: (wt, a) =>
+      a.quiet
+        ? null
+        : a.stackOn
+          ? `Created worktree for ${wt.id}, stacked on ${a.stackOn.ticket}.`
+          : `Created worktree for ${wt.id}.`,
   });
 
 /**
@@ -1439,10 +1470,21 @@ export const useCommitWorktree = (repo: string, id: string) =>
  *  otherwise it returns the raw PR template + first-commit-subject title. */
 export const usePrDraft = (repo: string) =>
   useMutation({
-    mutationFn: (a: { id: string; fill: boolean }) => unwrap(commands.prDraft(repo, a.id, a.fill)),
+    mutationFn: (a: { id: string; fill: boolean; sendTranscripts: boolean }) =>
+      unwrap(commands.prDraft(repo, a.id, a.fill, a.sendTranscripts)),
     // The dialog shows draft errors inline; don't double-surface as a toast.
     meta: { silent: true },
   });
+
+/** Whether the worktree has any Claude session transcript on disk — gates the PR
+ *  dialog's "use transcripts" checkbox so it only appears when there's history to
+ *  send. Cheap and rarely changes while the dialog is open. */
+export const useWorktreeHasTranscripts = (repo: string, id: string) =>
+  useUnwrappedQuery(
+    queryKeys.worktreeHasTranscripts(repo, id),
+    () => commands.worktreeHasTranscripts(repo, id),
+    { enabled: !!repo && !!id, staleTime: SETTING_STALE_TIME },
+  );
 
 /** Candidate reviewers (repo collaborators) for the create-PR dialog's picker.
  *  Empty when GitHub isn't connected. Cached a few minutes — collaborators rarely
@@ -2188,3 +2230,104 @@ export const useDisplayNames = () => {
   });
   return { value, setValue: mutate };
 };
+
+// ── Dev tab (dogfooding — everything below serves features/dev only and is
+//    deleted with it) ───────────────────────────────────────────────────────
+
+/** App-scoped setting: the santree checkout the Dev tab builds/works in. */
+export const DEV_REPO_PATH_KEY = "dev_repo_path";
+
+/** The Dev tab exists only for this GitHub login (the only developer for now). */
+export const DEV_GITHUB_LOGIN = "santiagotoscanini";
+
+/** Validate + normalize a picked folder to its git toplevel (errors toast). */
+export const useDevNormalizeRepo = () =>
+  useActionMutation<string, string>({
+    mutationFn: (path) => unwrap(commands.devNormalizeRepo(path)),
+  });
+
+/** Running-build vs checkout-HEAD vs newest-DMG status for the Dev header.
+ *  Polled while mounted: a `pnpm tauri build` finishing in the Build pane has no
+ *  event of its own, and the reads are local git/fs calls. */
+export const useDevInfo = (repoPath: string) =>
+  useUnwrappedQuery(queryKeys.devInfo(repoPath), () => commands.devInfo(repoPath), {
+    enabled: !!repoPath,
+    staleTime: 10_000,
+    refetchInterval: 15_000,
+  });
+
+/** The Dev TODO list, newest first. Changes only through the mutations below. */
+export const useDevTodos = () =>
+  useUnwrappedQuery(queryKeys.devTodos, () => commands.devTodos(), {
+    staleTime: SETTING_STALE_TIME,
+  });
+
+/** Add a TODO (id minted by the caller; screenshots as data URLs). Optimistic —
+ *  the row appears instantly; screenshot paths reconcile on settle. */
+export const useAddDevTodo = () =>
+  useOptimisticMutation<{ id: string; body: string; screenshots: string[] }, DevTodo>({
+    mutationFn: ({ id, body, screenshots }) => unwrap(commands.devAddTodo(id, body, screenshots)),
+    optimistic: (qc, { id, body }) => {
+      const prev = qc.getQueryData<DevTodo[]>(queryKeys.devTodos);
+      qc.setQueryData<DevTodo[]>(queryKeys.devTodos, (cur = []) => [
+        { id, body, done: false, screenshots: [], createdAtMs: Date.now() },
+        ...cur,
+      ]);
+      return () => qc.setQueryData(queryKeys.devTodos, prev);
+    },
+    invalidate: () => [queryKeys.devTodos],
+  });
+
+export const useSetDevTodoDone = () =>
+  useOptimisticMutation<{ id: string; done: boolean }, null>({
+    mutationFn: ({ id, done }) => unwrap(commands.devSetTodoDone(id, done)),
+    optimistic: (qc, { id, done }) => {
+      const prev = qc.getQueryData<DevTodo[]>(queryKeys.devTodos);
+      qc.setQueryData<DevTodo[]>(queryKeys.devTodos, (cur = []) =>
+        cur.map((t) => (t.id === id ? { ...t, done } : t)),
+      );
+      return () => qc.setQueryData(queryKeys.devTodos, prev);
+    },
+    invalidate: () => [queryKeys.devTodos],
+  });
+
+export const useDeleteDevTodo = () =>
+  useOptimisticMutation<string, null>({
+    mutationFn: (id) => unwrap(commands.devDeleteTodo(id)),
+    optimistic: (qc, id) => {
+      const prev = qc.getQueryData<DevTodo[]>(queryKeys.devTodos);
+      qc.setQueryData<DevTodo[]>(queryKeys.devTodos, (cur = []) => cur.filter((t) => t.id !== id));
+      return () => qc.setQueryData(queryKeys.devTodos, prev);
+    },
+    invalidate: () => [queryKeys.devTodos],
+  });
+
+/** Render a TODO into an on-disk prompt file; resolves to the file's path. */
+export const useDevTodoPrompt = () =>
+  useActionMutation<{ repoPath: string; id: string }, string>({
+    mutationFn: ({ repoPath, id }) => unwrap(commands.devTodoPrompt(repoPath, id)),
+  });
+
+/** A pasted screenshot as a data URI for inline display. Immutable once written. */
+export const useDevScreenshot = (path: string) =>
+  useUnwrappedQuery(queryKeys.devScreenshot(path), () => commands.devScreenshotSrc(path), {
+    enabled: !!path,
+    staleTime: SETTING_STALE_TIME,
+    gcTime: 5 * 60_000,
+  });
+
+/** Open the newest DMG (and, when running installed, quit for the drag-and-drop
+ *  install). Silent — the confirm dialog renders the error inline. */
+export const useDevInstall = () =>
+  useActionMutation<string, boolean>({
+    mutationFn: (repoPath) => unwrap(commands.devInstall(repoPath)),
+    silent: true,
+  });
+
+/** Eject any mounted santree DMG volume left on the desktop. */
+export const useDevEject = () =>
+  useActionMutation<void, number>({
+    mutationFn: () => unwrap(commands.devEject()),
+    success: (n) =>
+      n > 0 ? `Ejected ${n} volume${n === 1 ? "" : "s"}.` : "No santree DMG volumes are mounted.",
+  });

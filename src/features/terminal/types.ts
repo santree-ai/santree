@@ -25,6 +25,9 @@ export interface TerminalRenderer {
   mount(el: HTMLElement): void;
   /** Bytes from the PTY → screen. */
   write(data: Uint8Array | string): void;
+  /** Clear the screen and scrollback — for a view that replays a transcript from
+   *  the start rather than appending to what's already there. */
+  reset(): void;
   /** Keystrokes → bytes for the PTY. */
   onInput(cb: (data: string) => void): void;
   /** Force the grid to a specific size. */

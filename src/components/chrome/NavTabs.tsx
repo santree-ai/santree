@@ -12,7 +12,7 @@ interface TabDef {
 }
 
 export function NavTabs() {
-  const { accent, triageEnabled, activeRepo } = useApp();
+  const { accent, triageEnabled, devEnabled, activeRepo } = useApp();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const counts = useViewCounts(activeRepo);
@@ -28,6 +28,7 @@ export function NavTabs() {
     { label: "Trees", path: "/trees", count: counts.worktrees },
     { label: "Reviews", path: "/reviews", count: counts.reviews },
     { label: "Terminal", path: "/terminal", count: terminals.length },
+    ...(devEnabled ? [{ label: "Dev", path: "/dev" }] : []),
   ];
 
   // The tab value is the route path; navigation happens in onChange. Counts ride

@@ -221,10 +221,16 @@ function GitState({ worktree }: { worktree: Worktree }) {
  *  fast-forward the local base from origin ("update master"). */
 function BaseMenu({ repo, worktree }: { repo: string; worktree: Worktree }) {
   const { ahead, behind, baseBranch } = worktree;
+  const { worktrees } = useTrees();
   const { mutate: pull, isPending: pulling } = usePullWorktree(repo);
   const { mutate: updateBase, isPending: updating } = useUpdateBaseBranch(repo);
   const canPull = behind > 0;
   const busy = pulling || updating;
+  // A *stacked* worktree's base is a sibling worktree's branch, not an upstream
+  // one: git refuses to fetch into a branch checked out elsewhere, so "update from
+  // origin" could only ever fail. Pulling the parent in is still the right move
+  // (that's the restack), so only the update action goes.
+  const stacked = worktrees.some((w) => w.id !== worktree.id && w.branch === baseBranch);
 
   return (
     <Dropdown
@@ -259,18 +265,20 @@ function BaseMenu({ repo, worktree }: { repo: string; worktree: Worktree }) {
             <PullIcon />
             {canPull ? `Pull ${baseBranch} into worktree` : `Up to date with ${baseBranch}`}
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              updateBase(worktree.id);
-              close();
-            }}
-            className={MENU_ITEM}
-            title={`Fast-forward the local ${baseBranch} branch from origin`}
-          >
-            <DownloadIcon />
-            Update {baseBranch} from origin
-          </button>
+          {!stacked && (
+            <button
+              type="button"
+              onClick={() => {
+                updateBase(worktree.id);
+                close();
+              }}
+              className={MENU_ITEM}
+              title={`Fast-forward the local ${baseBranch} branch from origin`}
+            >
+              <DownloadIcon />
+              Update {baseBranch} from origin
+            </button>
+          )}
         </>
       )}
     </Dropdown>

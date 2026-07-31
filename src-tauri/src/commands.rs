@@ -234,7 +234,7 @@ pub async fn pull_remote_worktree(
 pub async fn run_worktree_setup_streamed(
     repo: String,
     issue_id: String,
-    on_event: Channel<worktree::SetupEvent>,
+    on_event: Channel<crate::stream::StreamEvent>,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
     Ok(worktree::run_setup_streamed(&db, &repo, &issue_id, on_event).await?)
@@ -549,16 +549,32 @@ pub async fn remove_worktree_tab(repo: String, id: String, db: State<'_, Db>) ->
 
 /// Draft a PR title + body for the create-PR dialog. With `fill`, the body is
 /// AI-generated from the repo's PR template + the branch diff; otherwise it's the
-/// raw template. Title defaults to the first commit's subject.
+/// raw template. Title defaults to the first commit's subject. When
+/// `send_transcripts` is set (only meaningful with `fill`), the worktree's Claude
+/// session transcript(s) are mined for extra context (decisions, rationale).
 #[tauri::command]
 #[specta::specta]
 pub async fn pr_draft(
     repo: String,
     issue_id: String,
     fill: bool,
+    send_transcripts: bool,
     db: State<'_, Db>,
 ) -> CmdResult<PrDraft> {
-    Ok(pr::draft(&db, &repo, &issue_id, fill).await?)
+    Ok(pr::draft(&db, &repo, &issue_id, fill, send_transcripts).await?)
+}
+
+/// Whether the worktree has any Claude session transcript on disk — gates the PR
+/// dialog's "use transcripts" checkbox so it only shows when there's history to send.
+#[tauri::command]
+#[specta::specta]
+pub async fn worktree_has_transcripts(
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<bool> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    Ok(session::worktree_has_transcripts(&db, &repo, &issue_id, home.as_deref()).await?)
 }
 
 /// Live PR status (number, URL, merge state) for each tracked worktree, from

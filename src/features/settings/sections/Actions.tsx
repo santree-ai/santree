@@ -21,6 +21,7 @@ import {
   useSetSetting,
   useSetting,
   WORK_AGENT_KEY,
+  WORK_ASK_BASE_KEY,
   WORK_EFFORT_KEY,
   WORK_MODEL_KEY,
   WORK_PERMISSION_MODE_KEY,
@@ -105,12 +106,14 @@ function RemoteControlCard({ forRepo, disabled }: { forRepo?: string; disabled?:
  *  "Work" settings section. */
 export function WorkActionConfig({ repo }: { repo?: string }) {
   const queue = useBoolSetting("app", WORK_QUEUE_KEY).value;
+  // Unset means ask (see WORK_ASK_BASE_KEY) — read the raw value, not useBoolSetting.
+  const { data: askBase } = useSetting("app", WORK_ASK_BASE_KEY);
   const setSetting = useSetSetting();
   return (
     <div className="space-y-3.5">
       <ActionConfig descriptor={WORK} repo={repo} />
-      {/* The queue is a global workflow choice (not a per-repo agent/model
-          override), so it only appears on the app-defaults scope. */}
+      {/* Both are global workflow choices (not per-repo agent/model overrides),
+          so they only appear on the app-defaults scope. */}
       {!repo && (
         <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
           <ToggleRow
@@ -119,6 +122,18 @@ export function WorkActionConfig({ repo }: { repo?: string }) {
             on={queue}
             onChange={(v) =>
               setSetting.mutate({ scope: "app", key: WORK_QUEUE_KEY, value: v ? "true" : null })
+            }
+          />
+          <ToggleRow
+            label="Ask which branch to start from"
+            hint="When a ticket's blocker is already in a worktree, ask whether to branch off that work (stacked) or off the repo's default branch. Off: it stacks on the blocker without asking."
+            on={askBase !== "false"}
+            onChange={(v) =>
+              setSetting.mutate({
+                scope: "app",
+                key: WORK_ASK_BASE_KEY,
+                value: v ? null : "false",
+              })
             }
           />
         </div>

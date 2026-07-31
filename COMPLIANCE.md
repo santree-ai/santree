@@ -67,10 +67,22 @@ documented print/non-interactive mode, invoked on the real unmodified binary;
 single-shot, with no loop and no retry; human-initiated by a button click, never
 automatic or background; bounded by a timeout (~120s); scoped with explicit
 `--allowedTools`/`--disallowedTools`; and their output lands in a commit message or
-PR body — it never feeds back into another agent invocation. This is a narrow,
-named exception, not a license for headless/background Claude usage generally. Any
-new headless call site must be justified against these same conditions before
-merging.
+PR body under human review — it never feeds back into an *automated* agent loop. This
+is a narrow, named exception, not a license for headless/background Claude usage
+generally. Any new headless call site must be justified against these same conditions
+before merging.
+
+One input to the PR-draft helper deserves an explicit call-out: with the opt-in "use
+transcripts" checkbox, the draft prompt is additionally fed the *interactive* Claude
+session's own on-disk transcript (`~/.claude/projects/**/<uuid>.jsonl`, via
+`session::worktree_transcripts`). That is one Claude session's output becoming another
+Claude invocation's input, so it sits in the gray zone of "no output-parsing that
+drives new prompts" — but it stays inside the line for the same reasons: it is
+opt-in and user-triggered (a checkbox + button click, never automatic), single-shot,
+**text-only with tool calls/results stripped out** (no tool output is re-fed), and the
+result is a PR body the user reviews before pushing. It is *not* an automated control
+loop reacting to agent output; it is a human asking the drafter to read the
+conversation for context.
 
 ## Session-state hooks + status line — a scoped exception
 Every santree `claude` launch layers a generated settings file over the user's own

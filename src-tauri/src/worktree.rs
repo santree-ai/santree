@@ -8,170 +8,21 @@
 //! [`crate::git`].
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use base64::Engine;
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, PtySize};
-use serde::Serialize;
-use specta::Type;
 use tauri::ipc::Channel;
 
 use santree_core::domain::{
     AgentKind, ChangedFile, FileSource, ScriptInfo, TriageComment, TriageDetail, Worktree,
 };
 
-/// How long a setup script may run before it's killed. Setup scripts run real build
-/// tooling (nix, make, a cold `npm install`), so this is deliberately generous — it's
-/// a backstop against a script that will *never* finish (waiting on stdin nobody can
-/// answer, a wedged network mount), not a performance budget. The Stop button is the
-/// normal way out.
-const SETUP_DEADLINE: Duration = Duration::from_secs(30 * 60);
-
-/// The setup scripts running right now, keyed by repo root + issue id. A process-wide
-/// singleton ([`SETUP_RUNS`]) rather than Tauri state, because the blocking reader
-/// thread outlives any borrow.
-///
-/// `stream_init_script` opens its own PTY, outside `PtyManager` — so without this
-/// registry nothing could see the child: quitting mid-setup orphaned the script and
-/// everything it spawned, a hung `init.sh` pinned a blocking-pool thread with no way
-/// to recover, and the Setup tab sat at "running" forever.
-pub static SETUP_RUNS: LazyLock<SetupRuns> = LazyLock::new(SetupRuns::default);
-
-/// One registered setup run. The child is spawned on the blocking pool a moment
-/// *after* the slot is claimed, so the killer arrives late — but the `id` names the
-/// run for its whole life, which is what keeps a finished run from evicting the
-/// entry of a newer one started under the same key.
-struct Run {
-    id: u64,
-    killer: Option<Box<dyn ChildKiller + Send + Sync>>,
-}
-
-/// A claimed "setup is running here" slot, held for the lifetime of one run.
-///
-/// Claiming is the check *and* the insert under a single lock: a `contains`-then-
-/// `insert` split let two `run_setup_streamed` calls both get past the guard and
-/// stack two `init.sh` processes over the same directory. Dropping the guard frees
-/// the slot on every path out of a run — a failed PTY alloc, an early return, a
-/// panic on the blocking pool — so a slot can't leak and wedge the Setup tab at
-/// "already running" forever.
-struct SetupSlot {
-    root: String,
-    issue_id: String,
-    id: u64,
-}
-
-impl Drop for SetupSlot {
-    fn drop(&mut self) {
-        SETUP_RUNS.release(self);
-    }
-}
-
-#[derive(Default)]
-pub struct SetupRuns {
-    runs: Mutex<HashMap<(String, String), Run>>,
-    next_id: AtomicU64,
-}
-
-impl SetupRuns {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), Run>> {
-        self.runs.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Claim the slot for this worktree, or `None` when a setup is already running in
-    /// it — re-running would stack a second `init.sh` over the same directory.
-    fn reserve(&self, root: &str, issue_id: &str) -> Option<SetupSlot> {
-        let mut runs = self.lock();
-        let key = (root.to_string(), issue_id.to_string());
-        if runs.contains_key(&key) {
-            return None;
-        }
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        runs.insert(key, Run { id, killer: None });
-        Some(SetupSlot {
-            root: root.to_string(),
-            issue_id: issue_id.to_string(),
-            id,
-        })
-    }
-
-    /// Hand the spawned child's killer to its slot. `false` when the slot is already
-    /// gone — a Stop (or an app quit) landed between the reserve and the spawn — and
-    /// the caller must then kill the child it just started, since nothing else holds
-    /// a handle on it.
-    fn attach(&self, slot: &SetupSlot, killer: Box<dyn ChildKiller + Send + Sync>) -> bool {
-        let mut runs = self.lock();
-        match runs.get_mut(&(slot.root.clone(), slot.issue_id.clone())) {
-            Some(run) if run.id == slot.id => {
-                run.killer = Some(killer);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Free a finished run's slot — but only when it's still *that* run's. A cancel
-    /// followed by a re-run puts a newer run under the same key, and an identity-less
-    /// remove would evict it: its `init.sh` would then be unkillable (neither the Stop
-    /// button nor `kill_all` on quit could see it).
-    fn release(&self, slot: &SetupSlot) {
-        let mut runs = self.lock();
-        let key = (slot.root.clone(), slot.issue_id.clone());
-        if runs.get(&key).is_some_and(|run| run.id == slot.id) {
-            runs.remove(&key);
-        }
-    }
-
-    /// Kill one running setup script. The read loop then hits EOF and the run
-    /// finishes normally (as a failure), so the UI closes the tab on its own. A run
-    /// cancelled before its child exists is stopped by the slot's absence: its
-    /// `attach` fails and the spawner kills the child immediately.
-    pub fn cancel(&self, root: &str, issue_id: &str) -> bool {
-        let mut runs = self.lock();
-        match runs.remove(&(root.to_string(), issue_id.to_string())) {
-            Some(run) => {
-                if let Some(mut killer) = run.killer {
-                    let _ = killer.kill();
-                }
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Kill every running setup script — called on app exit, beside
-    /// `PtyManager::close_all`, so a quit mid-setup doesn't leave `init.sh` and its
-    /// children running headless.
-    pub fn kill_all(&self) {
-        let mut runs = self.lock();
-        for (_, run) in runs.drain() {
-            if let Some(mut killer) = run.killer {
-                let _ = killer.kill();
-            }
-        }
-    }
-}
-
-/// A streamed setup-script event for the Trees "Setup" tab. `Line` is a committed
-/// output line (appended). `Progress` is a transient redraw of the current line —
-/// emitted when the script's output ends a line with a lone `\r` (progress bars,
-/// spinners) — which the view shows in place so a redrawing bar reads as movement
-/// instead of a frozen log. A final `Done` closes the tab.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase", tag = "type")]
-pub enum SetupEvent {
-    Line { text: String },
-    Progress { text: String },
-    Done { ok: bool },
-}
-
 use crate::db::Db;
 use crate::git;
 use crate::repo;
+use crate::stream::{self, StreamEvent};
 
 /// Sentinel worktree id for the repo root itself — the checkout the per-issue
 /// worktrees branch off, normally sitting on main/master. It isn't a tracked
@@ -707,7 +558,7 @@ pub async fn remove(
     let root = repo_root(db, repo).await?;
     // A setup script running here would keep building — and spawning children —
     // against a directory we're about to `remove_dir_all`, then outlive it headless.
-    SETUP_RUNS.cancel(&root, issue_id);
+    stream::RUNS.cancel(&setup_key(&root, issue_id));
 
     let (branch, base_branch, worktree_path) = sqlx::query_as::<_, (String, String, String)>(
         "SELECT branch, base_branch, worktree_path
@@ -783,14 +634,24 @@ pub async fn remove(
     Ok(())
 }
 
-/// Run `.santree/init.sh`, streaming each output line over `on_event` for the
-/// Trees "Setup" tab, and record it as run on success. stderr is folded into
-/// stdout so the log stays ordered. (Plain text — no TTY/colour.)
+/// The run key for a worktree's setup script — one `init.sh` at a time per
+/// worktree (two would race over the same directory), but different worktrees run
+/// concurrently.
+fn setup_key(root: &str, issue_id: &str) -> String {
+    format!("setup:{root}:{issue_id}")
+}
+
+/// Run `.santree/init.sh` in the worktree, streaming its output over `on_event`
+/// for the Trees "Setup" tab, and record it as run on success.
+///
+/// The process, the PTY and the cancel registry all belong to [`crate::stream`] —
+/// the same machinery behind the Dev tab's build. All this adds is what's specific
+/// to setup: finding the script, the worktree env, and the `setup_ran` flag.
 pub async fn run_setup_streamed(
     db: &Db,
     repo: &str,
     issue_id: &str,
-    on_event: Channel<SetupEvent>,
+    on_event: Channel<StreamEvent>,
 ) -> Result<()> {
     let root = repo_root(db, repo).await?;
     let l = link(db, &root, issue_id)
@@ -805,29 +666,43 @@ pub async fn run_setup_streamed(
     })
     .await?;
     if !runnable {
-        let _ = on_event.send(SetupEvent::Line {
-            text: "No executable .santree/init.sh — nothing to run.".into(),
+        let _ = on_event.send(StreamEvent::Chunk {
+            text: "No executable .santree/init.sh — nothing to run.\r\n".into(),
         });
-        let _ = on_event.send(SetupEvent::Done { ok: true });
+        let _ = on_event.send(StreamEvent::Done { ok: true });
         return Ok(());
     }
 
-    // Claim the run slot up front — two `init.sh` runs in one worktree would race over
-    // the same directory. Held (and freed) by the blocking run below.
-    let Some(slot) = SETUP_RUNS.reserve(&root, issue_id) else {
+    // Claim the run slot up front — two `init.sh` runs in one worktree would race
+    // over the same directory. Held (and freed) by the blocking run below.
+    let Some(slot) = stream::RUNS.reserve(&setup_key(&root, issue_id)) else {
         bail!("setup is already running for '{issue_id}'");
     };
 
     // The user's configured project env, so `init.sh` sees the same variables the
     // Terminal does — otherwise it behaves differently in the Setup tab than when the
     // user runs it by hand (a missing DATABASE_URL, a private-registry token, …).
-    let env = crate::env::resolve_env(db, Some(&l.worktree_path)).await;
+    let mut env = crate::env::resolve_env(db, Some(&l.worktree_path)).await;
+    // santree's own variables are the run's contract with the script, so they go
+    // last and aren't overridable by the user's project env.
+    env.push(("SANTREE_WORKTREE_PATH".into(), l.worktree_path.clone()));
+    env.push(("SANTREE_REPO_ROOT".into(), root.clone()));
 
     let ev = on_event.clone();
-    let ok =
-        tokio::task::spawn_blocking(move || stream_init_script(&script, &wt_path, &env, slot, &ev))
-            .await
-            .unwrap_or(false);
+    let command = format!("exec {}", shell_quote(&script.to_string_lossy()));
+    let ok = tokio::task::spawn_blocking(move || {
+        stream::run(
+            stream::Spec {
+                command,
+                cwd: &wt_path,
+                env,
+            },
+            slot,
+            &ev,
+        )
+    })
+    .await
+    .unwrap_or(false);
 
     if ok {
         let _ = sqlx::query(
@@ -838,7 +713,7 @@ pub async fn run_setup_streamed(
         .execute(db)
         .await;
     }
-    let _ = on_event.send(SetupEvent::Done { ok });
+    let _ = on_event.send(StreamEvent::Done { ok });
     Ok(())
 }
 
@@ -848,233 +723,7 @@ pub async fn run_setup_streamed(
 pub async fn cancel_setup(db: &Db, repo: &str, issue_id: &str) -> Result<bool> {
     validate_issue_id(issue_id)?;
     let root = repo_root(db, repo).await?;
-    Ok(SETUP_RUNS.cancel(&root, issue_id))
-}
-
-/// Drain complete line boundaries from `acc`, classifying each segment: `\n` (or
-/// `\r\n`) ends a committed `Line`; a lone `\r` is a transient `Progress` redraw
-/// (progress bars / spinners). A `\r` at the very end of `acc` is held — it may be
-/// the first half of a `\r\n` split across reads — unless `flush` is set (EOF),
-/// when the remainder is emitted as a final `Line`. ANSI escapes are stripped.
-fn drain_setup_events(acc: &mut String, flush: bool) -> Vec<SetupEvent> {
-    let mut out = Vec::new();
-    while let Some(idx) = acc.find(['\n', '\r']) {
-        if acc.as_bytes()[idx] == b'\r' {
-            if idx + 1 == acc.len() {
-                break; // trailing `\r` — wait for the next byte to disambiguate.
-            }
-            if acc.as_bytes()[idx + 1] == b'\n' {
-                let line: String = acc.drain(..=idx + 1).collect();
-                out.push(SetupEvent::Line {
-                    text: strip_ansi(line.trim_end_matches(['\r', '\n'])),
-                });
-            } else {
-                let line: String = acc.drain(..=idx).collect();
-                out.push(SetupEvent::Progress {
-                    text: strip_ansi(line.trim_end_matches('\r')),
-                });
-            }
-        } else {
-            let line: String = acc.drain(..=idx).collect();
-            out.push(SetupEvent::Line {
-                text: strip_ansi(line.trim_end_matches(['\r', '\n'])),
-            });
-        }
-    }
-    if flush && !acc.trim().is_empty() {
-        let line = std::mem::take(acc);
-        out.push(SetupEvent::Line {
-            text: strip_ansi(line.trim_end_matches(['\r', '\n'])),
-        });
-    }
-    out
-}
-
-/// Spawn the setup script (stderr folded into stdout) and forward each output line
-/// to `ev`. Returns whether it exited successfully.
-///
-/// The child is registered in [`SETUP_RUNS`] — under the `slot` the caller claimed —
-/// for as long as it lives, so a Stop from the UI (or an app quit) can kill it, and a
-/// watchdog kills it at [`SETUP_DEADLINE`]. In every one of those cases the read loop
-/// below hits EOF, `child.wait()` returns a failure, and the run reports
-/// `Done { ok: false }` like any other failed script. `slot` is taken by value: it
-/// frees the registry entry when this returns, however it returns.
-fn stream_init_script(
-    script: &Path,
-    wt: &Path,
-    env: &[(String, String)],
-    slot: SetupSlot,
-    ev: &Channel<SetupEvent>,
-) -> bool {
-    let _ = ev.send(SetupEvent::Line {
-        text: format!("▸ {}", script.display()),
-    });
-
-    // Run under a PTY (not a plain pipe) so the script's children — nix/make/etc.,
-    // which the init runs in parallel — see a TTY and emit output *live*. Over a
-    // pipe they block-buffer, which made the log look frozen for the whole build.
-    // `exec <script>` keeps stdout+stderr on the one pty; we strip ANSI for this
-    // plain-text view.
-    let size = PtySize {
-        rows: 40,
-        cols: 120,
-        pixel_width: 0,
-        pixel_height: 0,
-    };
-    let pair = match native_pty_system().openpty(size) {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = ev.send(SetupEvent::Line {
-                text: format!("failed to allocate pty: {e}"),
-            });
-            return false;
-        }
-    };
-
-    let mut cmd = CommandBuilder::new("/bin/bash");
-    cmd.args([
-        "-c",
-        &format!("exec {}", shell_quote(&script.to_string_lossy())),
-    ]);
-    cmd.cwd(wt);
-    // The user's project env first — santree's own variables are the run's contract
-    // with the script, so they aren't overridable by it.
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    cmd.env("SANTREE_WORKTREE_PATH", wt);
-    cmd.env("SANTREE_REPO_ROOT", &slot.root);
-    cmd.env("TERM", "xterm-256color");
-
-    let mut child = match pair.slave.spawn_command(cmd) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = ev.send(SetupEvent::Line {
-                text: format!("failed to start setup: {e}"),
-            });
-            return false;
-        }
-    };
-    // Drop the slave so the master reader hits EOF once the script *and* its
-    // children (which inherit the slave) exit — otherwise the read loop hangs.
-    drop(pair.slave);
-
-    let mut reader = match pair.master.try_clone_reader() {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = ev.send(SetupEvent::Line {
-                text: format!("failed to read setup output: {e}"),
-            });
-            let _ = child.kill();
-            return false;
-        }
-    };
-
-    // A Stop (or an app quit) can land between claiming the slot and getting here —
-    // the registry then holds nothing that could kill this child, so stop it ourselves.
-    if !SETUP_RUNS.attach(&slot, child.clone_killer()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return false;
-    }
-
-    // Backstop for a script that never finishes *at all*. Killing the child closes
-    // the last handle on the slave, which is what unblocks the read loop below —
-    // `reader.read` has no timeout of its own. The watchdog parks on a channel it
-    // never receives from, so it wakes the moment this function returns (dropping
-    // `done`) rather than sleeping out the full deadline after a fast setup. It kills
-    // only the child it holds a killer for; the registry entry is the slot's to free.
-    let (done, finished) = std::sync::mpsc::channel::<()>();
-    {
-        let mut killer = child.clone_killer();
-        let issue_id = slot.issue_id.clone();
-        std::thread::spawn(move || {
-            if finished.recv_timeout(SETUP_DEADLINE)
-                != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            {
-                return; // the run finished on its own
-            }
-            log::warn!(
-                "setup for {issue_id} exceeded {}s — killing it",
-                SETUP_DEADLINE.as_secs()
-            );
-            let _ = killer.kill();
-        });
-    }
-
-    // Read bytes and drain complete boundaries as they arrive (see
-    // `drain_setup_events`), then flush any trailing partial line at EOF.
-    let mut buf = [0u8; 4096];
-    let mut acc = String::new();
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                acc.push_str(&String::from_utf8_lossy(&buf[..n]));
-                for e in drain_setup_events(&mut acc, false) {
-                    let _ = ev.send(e);
-                }
-            }
-        }
-    }
-    for e in drain_setup_events(&mut acc, true) {
-        let _ = ev.send(e);
-    }
-
-    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
-    drop(slot); // free the registry entry — but only if it's still this run's
-    drop(done); // wake the watchdog so it doesn't outlive the run
-    let _ = ev.send(SetupEvent::Line {
-        text: format!("▸ setup {}", if ok { "complete" } else { "failed" }),
-    });
-    ok
-}
-
-/// Strip ANSI escape sequences (colour/SGR + other CSI, plus OSC) from a line so
-/// the plain-text setup log shows clean text instead of raw escape codes.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            out.push(c);
-            continue;
-        }
-        match chars.peek() {
-            // CSI: ESC `[` … <final byte 0x40–0x7e> (colours, cursor moves, etc).
-            Some('[') => {
-                chars.next();
-                while let Some(&nc) = chars.peek() {
-                    chars.next();
-                    if ('@'..='~').contains(&nc) {
-                        break;
-                    }
-                }
-            }
-            // OSC: ESC `]` … terminated by BEL or ST (`ESC \`) — e.g. a terminal
-            // title/hyperlink sequence (npm, cargo wrappers, nix all emit these).
-            // Without this, the payload *and* a raw BEL byte would leak straight
-            // into the plain-text setup log.
-            Some(']') => {
-                chars.next();
-                loop {
-                    match chars.next() {
-                        None | Some('\x07') => break,
-                        Some('\x1b') if chars.peek() == Some(&'\\') => {
-                            chars.next();
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // Other escapes: drop the escape and its single intro byte.
-            _ => {
-                chars.next();
-            }
-        }
-    }
-    out
+    Ok(stream::RUNS.cancel(&setup_key(&root, issue_id)))
 }
 
 /// Single-quote a string for a POSIX shell command line.
@@ -1145,7 +794,18 @@ where
 }
 
 pub async fn status(db: &Db, repo: &str, issue_id: &str) -> Result<Vec<ChangedFile>> {
-    with_worktree(db, repo, issue_id, git::status).await
+    with_worktree(db, repo, issue_id, |p| {
+        // Reading the changes list is where the commit box (and thus the whole-index
+        // commit) gets its state, so it's also where we enforce "re-editing a staged
+        // file unstages it": auto-unstage anything modified again since it was staged
+        // so the user re-reviews before it can be committed. Best-effort — a transient
+        // failure just leaves the old staged state rather than erroring the whole list.
+        if let Err(e) = git::reconcile_staged(p) {
+            log::warn!("reconcile_staged failed for {p:?}: {e}");
+        }
+        git::status(p)
+    })
+    .await
 }
 
 pub async fn file_diff(
@@ -1834,35 +1494,11 @@ mod tests {
     use super::*;
     use santree_core::domain::FileStatus;
     use std::process::Command;
-    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
 
-    /// Stands in for a spawned child in the [`SETUP_RUNS`] tests: records that it was
-    /// killed, without any of `stream_init_script`'s process machinery.
-    #[derive(Debug, Clone, Default)]
-    struct FakeKiller(Arc<AtomicBool>);
-
-    impl FakeKiller {
-        fn killed(&self) -> bool {
-            self.0.load(Ordering::SeqCst)
-        }
-        fn boxed(&self) -> Box<dyn ChildKiller + Send + Sync> {
-            Box::new(self.clone())
-        }
-    }
-
-    impl ChildKiller for FakeKiller {
-        fn kill(&mut self) -> std::io::Result<()> {
-            self.0.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
-            self.boxed()
-        }
-    }
-
-    /// A `Channel` that records the JSON of every `SetupEvent` sent through it — the
+    /// A `Channel` that records the JSON of every `StreamEvent` sent through it — the
     /// exact bytes the Setup tab would receive.
-    fn recording_channel() -> (Channel<SetupEvent>, Arc<Mutex<Vec<String>>>) {
+    fn recording_channel() -> (Channel<StreamEvent>, Arc<Mutex<Vec<String>>>) {
         let log: Arc<Mutex<Vec<String>>> = Arc::default();
         let sink = log.clone();
         let channel = Channel::new(move |body| {
@@ -1904,161 +1540,6 @@ mod tests {
             "#!/bin/bash\n{output}\nwhile [ ! -e '{}' ]; do sleep 0.02; done\nexit {code}\n",
             gate.display()
         )
-    }
-
-    /// The registry's whole job: one running setup per worktree. The claim has to be
-    /// the same operation as the check — a `contains`-then-`insert` split let two
-    /// `run_setup_streamed` calls both pass and stack two `init.sh` runs.
-    #[test]
-    fn setup_slot_is_exclusive_and_frees_on_drop() {
-        let (root, id) = ("/repo-excl", "AK-1");
-        let slot = SETUP_RUNS.reserve(root, id).expect("first claim wins");
-        assert!(
-            SETUP_RUNS.reserve(root, id).is_none(),
-            "a second run must not claim a slot that's taken"
-        );
-        // A different worktree is unaffected.
-        assert!(SETUP_RUNS.reserve(root, "AK-2").is_some());
-
-        drop(slot);
-        assert!(
-            SETUP_RUNS.reserve(root, id).is_some(),
-            "the slot is free once the run ends"
-        );
-    }
-
-    /// A finished run must only free *its own* entry. Cancel + re-run puts a newer run
-    /// under the same key; an identity-less remove evicted it, leaving a live `init.sh`
-    /// that neither Stop nor `kill_all` could ever see.
-    #[test]
-    fn a_finished_run_never_evicts_a_newer_one() {
-        let (root, id) = ("/repo-ident", "AK-1");
-        let old = SETUP_RUNS.reserve(root, id).unwrap();
-        let old_killer = FakeKiller::default();
-        assert!(SETUP_RUNS.attach(&old, old_killer.boxed()));
-
-        // Stop → the old run is killed and its entry is dropped, so a re-run can claim.
-        assert!(SETUP_RUNS.cancel(root, id));
-        assert!(old_killer.killed());
-        let new = SETUP_RUNS
-            .reserve(root, id)
-            .expect("re-run claims the free slot");
-        let new_killer = FakeKiller::default();
-        assert!(SETUP_RUNS.attach(&new, new_killer.boxed()));
-
-        // The cancelled run only now notices and finishes.
-        drop(old);
-
-        assert!(
-            SETUP_RUNS.reserve(root, id).is_none(),
-            "the re-run's slot survives the old run's release"
-        );
-        SETUP_RUNS.kill_all();
-        assert!(new_killer.killed(), "the re-run is still killable on quit");
-        drop(new);
-    }
-
-    /// Stop can land in the window between claiming the slot and spawning the child.
-    /// `attach` then fails, which is how the spawner learns to kill what it started —
-    /// nothing else holds a handle on it.
-    #[test]
-    fn a_slot_cancelled_before_the_spawn_refuses_the_killer() {
-        let (root, id) = ("/repo-early", "AK-1");
-        let slot = SETUP_RUNS.reserve(root, id).unwrap();
-        assert!(SETUP_RUNS.cancel(root, id), "stopped while still spawning");
-        assert!(
-            !SETUP_RUNS.attach(&slot, FakeKiller::default().boxed()),
-            "the child has nowhere to register — its spawner must kill it"
-        );
-    }
-
-    #[test]
-    fn strip_ansi_removes_colour_codes() {
-        assert_eq!(strip_ansi("\x1b[1;33m=== hi ===\x1b[0m"), "=== hi ===");
-        assert_eq!(
-            strip_ansi("\x1b[0;36m[Frontend]\x1b[0m go"),
-            "[Frontend] go"
-        );
-        assert_eq!(strip_ansi("plain"), "plain");
-    }
-
-    #[test]
-    fn strip_ansi_removes_osc_title_sequences() {
-        // BEL-terminated OSC (the common case: window/tab title-setters).
-        assert_eq!(
-            strip_ansi("\x1b]0;building…\x07building project"),
-            "building project"
-        );
-        // ST-terminated OSC (`ESC \`) — e.g. a terminal hyperlink sequence.
-        assert_eq!(
-            strip_ansi("\x1b]8;;https://example.com\x1b\\link text\x1b]8;;\x1b\\"),
-            "link text"
-        );
-        // Mixed with CSI colour codes on the same line.
-        assert_eq!(strip_ansi("\x1b]0;title\x07\x1b[32mgreen\x1b[0m"), "green");
-    }
-
-    fn line(text: &str) -> SetupEvent {
-        SetupEvent::Line { text: text.into() }
-    }
-    fn progress(text: &str) -> SetupEvent {
-        SetupEvent::Progress { text: text.into() }
-    }
-
-    #[test]
-    fn drain_splits_newlines_and_holds_partials() {
-        let mut acc = String::from("one\ntwo\nthr");
-        assert_eq!(
-            drain_setup_events(&mut acc, false),
-            vec![line("one"), line("two")]
-        );
-        assert_eq!(acc, "thr", "partial line is held for the next read");
-        acc.push_str("ee\n");
-        assert_eq!(drain_setup_events(&mut acc, false), vec![line("three")]);
-    }
-
-    #[test]
-    fn drain_treats_crlf_as_one_boundary() {
-        let mut acc = String::from("a\r\nb\r\n");
-        assert_eq!(
-            drain_setup_events(&mut acc, false),
-            vec![line("a"), line("b")]
-        );
-        assert!(acc.is_empty());
-    }
-
-    #[test]
-    fn drain_emits_lone_cr_as_progress() {
-        // A redrawing bar: each `\r`-terminated frame is a transient Progress; the
-        // final, not-yet-terminated frame is held until more bytes arrive.
-        let mut acc = String::from("10%\r20%\r30%");
-        assert_eq!(
-            drain_setup_events(&mut acc, false),
-            vec![progress("10%"), progress("20%")]
-        );
-        assert_eq!(acc, "30%");
-    }
-
-    #[test]
-    fn drain_holds_trailing_cr_until_disambiguated() {
-        // `\r` arriving as the last byte must not be emitted yet — the next read may
-        // reveal it was a `\r\n`, which is a single committed line, not Progress.
-        let mut acc = String::from("done\r");
-        assert_eq!(drain_setup_events(&mut acc, false), vec![]);
-        assert_eq!(acc, "done\r", "trailing \\r is held");
-        acc.push('\n');
-        assert_eq!(drain_setup_events(&mut acc, false), vec![line("done")]);
-        assert!(acc.is_empty());
-    }
-
-    #[test]
-    fn drain_flush_emits_trailing_partial() {
-        let mut acc = String::from("tail-no-newline");
-        assert_eq!(drain_setup_events(&mut acc, false), vec![]);
-        assert_eq!(
-            drain_setup_events(&mut acc, true),
-            vec![line("tail-no-newline")]
-        );
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
@@ -2257,8 +1738,8 @@ mod tests {
         );
 
         let (run, log) = start_setup(&db);
-        wait_for(&log, r#""type":"progress","text":"building 50%""#).await;
-        wait_for(&log, r#""type":"line","text":"done""#).await;
+        wait_for(&log, "building 50%").await;
+        wait_for(&log, "done").await;
         std::fs::write(&gate, "").unwrap();
         run.await.unwrap().unwrap();
 
@@ -2286,7 +1767,7 @@ mod tests {
         write_init_script(&repo_dir, &gated_script("echo nope >&2", &gate, 3));
 
         let (run, log) = start_setup(&db);
-        wait_for(&log, r#""type":"line","text":"nope""#).await;
+        wait_for(&log, "nope").await;
         std::fs::write(&gate, "").unwrap();
         run.await.unwrap().unwrap();
 
@@ -2363,8 +1844,8 @@ mod tests {
             "a cancelled setup is not a completed one"
         );
         // The slot is freed, so the user can hit Run again.
-        assert!(SETUP_RUNS
-            .reserve(&repo_dir.to_string_lossy(), "AK-1")
+        assert!(stream::RUNS
+            .reserve(&setup_key(&repo_dir.to_string_lossy(), "AK-1"))
             .is_some());
 
         let _ = std::fs::remove_dir_all(&base);

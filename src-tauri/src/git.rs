@@ -289,11 +289,37 @@ fn branch_exists(repo: &Path, branch: &str) -> bool {
     .is_ok()
 }
 
+/// The freshest ref to branch from / merge in for `<base>`: `origin/<base>` when
+/// it exists and the local branch hasn't got past it, else the local `<base>`.
+///
+/// The two kinds of base want opposite answers. For the repo's default branch the
+/// remote is nearly always fresher — the app never checks `master` out, so its
+/// local ref sits behind whatever `origin/master` has moved on to. For a *stacked*
+/// base (a sibling worktree's branch, see `worktree::create`) the local ref is the
+/// one being actively worked on, and preferring the remote would silently fork the
+/// child off the parent's last *pushed* commit, dropping everything the parent has
+/// committed but not pushed. "Does local already contain origin?" separates the two
+/// without having to know which kind of base this is.
+fn freshest_base(repo: &Path, base: &str) -> String {
+    let origin_ref = format!("origin/{base}");
+    if git(repo, &["rev-parse", "--verify", &origin_ref]).is_err() {
+        return base.to_string();
+    }
+    let local = format!("refs/heads/{base}");
+    let local_has_origin = branch_exists(repo, base)
+        && git(repo, &["merge-base", "--is-ancestor", &origin_ref, &local]).is_ok();
+    if local_has_origin {
+        base.to_string()
+    } else {
+        origin_ref
+    }
+}
+
 /// Create a git worktree at `worktree_path` checked out on `branch`.
 ///
 /// Best-effort fetches `base` first so the new branch starts from the freshest
-/// commit (preferring `origin/<base>` when it exists). If `branch` already
-/// exists it's checked out as-is; otherwise it's created from the base.
+/// commit ([`freshest_base`]). If `branch` already exists it's checked out as-is;
+/// otherwise it's created from the base.
 pub fn create_worktree(repo: &Path, worktree_path: &Path, branch: &str, base: &str) -> Result<()> {
     if let Some(parent) = worktree_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -308,14 +334,9 @@ pub fn create_worktree(repo: &Path, worktree_path: &Path, branch: &str, base: &s
         return Ok(());
     }
 
-    // Freshen the base, then branch from origin/<base> when available.
+    // Freshen the base, then branch from whichever of local/origin is ahead.
     let _ = git_capture(repo, &["fetch", "origin", base]);
-    let origin_ref = format!("origin/{base}");
-    let start = if git(repo, &["rev-parse", "--verify", &origin_ref]).is_ok() {
-        origin_ref
-    } else {
-        base.to_string()
-    };
+    let start = freshest_base(repo, base);
     git(repo, &["worktree", "add", "-b", branch, &path, &start])?;
     Ok(())
 }
@@ -596,17 +617,14 @@ fn rev_pair(cwd: &Path, a: &str, b: &str) -> Option<[String; 2]> {
     Some([lines.next()?.to_string(), lines.next()?.to_string()])
 }
 
-/// Merge the freshest base branch (`origin/<base>`, else local `<base>`) into the
-/// worktree's branch — the Trees "pull from main/master" button. Best-effort
-/// fetches first. On a conflicting (non-clean) merge it aborts and errors, so the
-/// worktree is left untouched. Returns the resolved base ref that was merged.
+/// Merge the freshest base branch ([`freshest_base`]) into the worktree's branch —
+/// the Trees "pull from main/master" button, and the restack for a worktree whose
+/// base is a sibling branch. Best-effort fetches first. On a conflicting (non-clean)
+/// merge it aborts and errors, so the worktree is left untouched. Returns the
+/// resolved base ref that was merged.
 pub fn pull_base(cwd: &Path, base: &str) -> Result<String> {
     let _ = git_capture(cwd, &["fetch", "origin", base]);
-    let target = if git(cwd, &["rev-parse", "--verify", &format!("origin/{base}")]).is_ok() {
-        format!("origin/{base}")
-    } else {
-        base.to_string()
-    };
+    let target = freshest_base(cwd, base);
     merge_checked(cwd, &target)?;
     Ok(target)
 }
@@ -971,6 +989,62 @@ pub fn unstage(cwd: &Path, path: &str) -> Result<()> {
     git_indexed(cwd, &["restore", "--staged", "--", path]).map(|_| ())
 }
 
+/// Auto-unstage every file that was staged and then modified again on disk, so a
+/// re-edit forces the user to re-review it before it can be committed. Returns
+/// the paths it unstaged (empty when nothing qualified).
+///
+/// Why this is load-bearing, not cosmetic: [`commit`] runs a whole-index
+/// `git commit`, so a file left staged after a further edit would silently commit
+/// the *older* snapshot captured at stage time and drop the newer changes. Fired
+/// off the worktree file-watcher on every disk change (see `git_watch.rs`).
+///
+/// A file qualifies when porcelain shows a real change in *both* columns — the
+/// index column holds a staged change (not space/untracked) and the worktree
+/// column is also dirty — i.e. `MM`, `AM`, `MD`, …. Whole-file, matching how the
+/// commit box stages.
+pub fn reconcile_staged(cwd: &Path) -> Result<Vec<String>> {
+    let raw = git_output(cwd, &["status", "--porcelain=v1", "-z", "-uall"])?;
+    let parts: Vec<&str> = raw.split('\0').collect();
+
+    let mut dirtied = Vec::new();
+    let mut i = 0;
+    while i < parts.len() {
+        let rec = parts[i];
+        if rec.len() < 3 {
+            i += 1;
+            continue;
+        }
+        let bytes = rec.as_bytes();
+        let index = bytes[0] as char;
+        let working = bytes[1] as char;
+        // A rename/copy record carries a NUL-separated original path in the next
+        // field — step over it so the following record isn't misread as one
+        // (mirrors the `i += 1` dance in `status`).
+        if matches!(index, 'R' | 'C') || matches!(working, 'R' | 'C') {
+            i += 1;
+        }
+        // Staged in the index AND changed again in the worktree since staging.
+        let staged = index != ' ' && index != '?';
+        let working_dirty = working != ' ' && working != '?';
+        if staged && working_dirty {
+            dirtied.push(rec[3..].to_string());
+        }
+        i += 1;
+    }
+
+    if dirtied.is_empty() {
+        return Ok(dirtied);
+    }
+    // Under the index lock so it serialises with the user's own stage/commit
+    // clicks on this worktree rather than colliding on `.git/index.lock`. The
+    // paths are git's own porcelain output (repo-internal, never IPC) and `--`
+    // guards against any leading-dash pathspec.
+    let mut args = vec!["restore", "--staged", "--"];
+    args.extend(dirtied.iter().map(String::as_str));
+    git_indexed(cwd, &args)?;
+    Ok(dirtied)
+}
+
 /// Discard a file's uncommitted changes. Untracked files are deleted; tracked
 /// files are restored from HEAD (both index and working tree).
 ///
@@ -1245,6 +1319,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // ---- reconcile_staged() (auto-unstage on re-edit) ----
+
+    /// The core guarantee: a file staged and then edited again on disk is
+    /// unstaged, so the stale staged snapshot can't be committed. Also asserts
+    /// the working-tree content is preserved (only the index is touched) and
+    /// that a cleanly-staged file is left alone.
+    #[test]
+    fn reconcile_staged_unstages_only_files_edited_after_staging() {
+        let base = scratch_dir("reconcile-staged");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "keep\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        // Stage an edit to a.txt, and stage b.txt's edit but leave it clean.
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "edited\n").unwrap();
+        run_git(&repo, &["add", "a.txt", "b.txt"]);
+
+        // Nothing edited-after-staging yet: reconcile is a no-op.
+        assert!(reconcile_staged(&repo).unwrap().is_empty());
+
+        // Now edit a.txt *again* on disk (porcelain `MM`); b.txt stays `M `.
+        std::fs::write(repo.join("a.txt"), "three\n").unwrap();
+
+        let unstaged = reconcile_staged(&repo).unwrap();
+        assert_eq!(
+            unstaged,
+            vec!["a.txt".to_string()],
+            "only the re-edited file"
+        );
+
+        let files = status(&repo).unwrap();
+        let a = files.iter().find(|f| f.path == "a.txt").unwrap();
+        assert!(!a.staged, "a.txt is unstaged after being re-edited");
+        let b = files.iter().find(|f| f.path == "b.txt").unwrap();
+        assert!(b.staged, "cleanly-staged b.txt is untouched");
+
+        // The working tree (the latest edit) is preserved — only the index moved.
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "three\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     // ---- status() on an unborn HEAD (freshly `git init`-ed repo) ----
 
     /// A brand-new repo (zero commits) is a valid, connected repo per this
@@ -1503,6 +1629,67 @@ mod tests {
         assert_eq!(add, 12);
         assert_eq!(del, 3);
         assert!(!binary);
+    }
+
+    // ---- create_worktree start point ----
+
+    /// A worktree stacked on a sibling branch must start from that branch's *local*
+    /// tip. The parent is a branch someone is actively working in, so its unpushed
+    /// commits are exactly the code the child is being started to build on —
+    /// preferring `origin/<parent>` (right for a stale local `master`) would fork
+    /// the child off the parent's last *pushed* commit and silently lose them.
+    #[test]
+    fn create_worktree_stacks_on_the_parent_branch_local_tip() {
+        let (_origin, seed, repo) = init_origin_seed_and_clone("stacked-base");
+
+        // The parent worktree: pushed once (it has a PR), then committed to again.
+        let parent = repo.join(".santree/worktrees/AK-274");
+        create_worktree(&repo, &parent, "santree/ak-274", "main").unwrap();
+        std::fs::write(parent.join("p.txt"), "pushed\n").unwrap();
+        run_git(&parent, &["add", "-A"]);
+        run_git(&parent, &["commit", "-m", "pushed work"]);
+        run_git(&parent, &["push", "-u", "origin", "santree/ak-274"]);
+        std::fs::write(parent.join("p.txt"), "unpushed\n").unwrap();
+        run_git(&parent, &["add", "-A"]);
+        run_git(&parent, &["commit", "-m", "unpushed work"]);
+
+        let child = repo.join(".santree/worktrees/AK-275");
+        create_worktree(&repo, &child, "santree/ak-275", "santree/ak-274").unwrap();
+
+        let parent_tip = git(&repo, &["rev-parse", "refs/heads/santree/ak-274"]).unwrap();
+        let child_head = git(&child, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(
+            child_head, parent_tip,
+            "child must fork from the parent's local tip, not its pushed one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(child.join("p.txt")).unwrap(),
+            "unpushed\n"
+        );
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    /// The stacked case above must not cost the default branch its remote-first
+    /// start point: a local `master` the app never checks out sits behind
+    /// `origin/master`, and branching from it would fork the worktree off a stale
+    /// commit (and fold every upstream commit since into its diff).
+    #[test]
+    fn create_worktree_starts_from_origin_when_the_local_base_is_stale() {
+        let (origin, seed, repo) = init_origin_seed_and_clone("stale-local-base");
+        advance_origin_main(&seed, "v2\n");
+
+        let wt = repo.join(".santree/worktrees/AK-1");
+        create_worktree(&repo, &wt, "santree/ak-1", "main").unwrap();
+
+        let origin_tip = git(&origin, &["rev-parse", "main"]).unwrap();
+        let head = git(&wt, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(
+            head, origin_tip,
+            "must fork from origin/main, not stale local"
+        );
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
     }
 
     // ---- update_base ----

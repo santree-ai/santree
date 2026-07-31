@@ -122,7 +122,7 @@ export const commands = {
 	 *  Run a worktree's setup script, streaming each output line over `on_event` for
 	 *  the Trees "Setup" tab; records it as run on success.
 	 */
-	runWorktreeSetupStreamed: (repo: string, issueId: string, onEvent: Channel<SetupEvent>) => typedError<null, CmdError>(__TAURI_INVOKE("run_worktree_setup_streamed", { repo, issueId, onEvent })),
+	runWorktreeSetupStreamed: (repo: string, issueId: string, onEvent: Channel<StreamEvent>) => typedError<null, CmdError>(__TAURI_INVOKE("run_worktree_setup_streamed", { repo, issueId, onEvent })),
 	/**
 	 *  Stop a running setup script (the Setup tab's Stop button). Killing the child
 	 *  ends the stream, so the run reports `Done { ok: false }` and the tab closes like
@@ -255,9 +255,16 @@ export const commands = {
 	/**
 	 *  Draft a PR title + body for the create-PR dialog. With `fill`, the body is
 	 *  AI-generated from the repo's PR template + the branch diff; otherwise it's the
-	 *  raw template. Title defaults to the first commit's subject.
+	 *  raw template. Title defaults to the first commit's subject. When
+	 *  `send_transcripts` is set (only meaningful with `fill`), the worktree's Claude
+	 *  session transcript(s) are mined for extra context (decisions, rationale).
 	 */
-	prDraft: (repo: string, issueId: string, fill: boolean) => typedError<PrDraft, CmdError>(__TAURI_INVOKE("pr_draft", { repo, issueId, fill })),
+	prDraft: (repo: string, issueId: string, fill: boolean, sendTranscripts: boolean) => typedError<PrDraft, CmdError>(__TAURI_INVOKE("pr_draft", { repo, issueId, fill, sendTranscripts })),
+	/**
+	 *  Whether the worktree has any Claude session transcript on disk — gates the PR
+	 *  dialog's "use transcripts" checkbox so it only shows when there's history to send.
+	 */
+	worktreeHasTranscripts: (repo: string, issueId: string) => typedError<boolean, CmdError>(__TAURI_INVOKE("worktree_has_transcripts", { repo, issueId })),
 	/**
 	 *  Push the worktree branch and open a pull request via the GitHub API (optionally
 	 *  as a draft, requesting `reviewers` by login). Returns the new PR's number and
@@ -551,6 +558,67 @@ export const commands = {
 	 */
 	legacyCliMigrate: (repo: string) => typedError<LinearOrg, CmdError>(__TAURI_INVOKE("legacy_cli_migrate", { repo })),
 	/**
+	 *  Validate + normalize a picked folder to its git toplevel (the stored dev repo
+	 *  path). Mirrors `repo::add`'s validation: absolute dir → `git rev-parse
+	 *  --show-toplevel`, so a subdirectory pick still lands on the repo root.
+	 */
+	devNormalizeRepo: (path: string) => typedError<string, CmdError>(__TAURI_INVOKE("dev_normalize_repo", { path })),
+	devInfo: (repoPath: string) => typedError<DevInfo, CmdError>(__TAURI_INVOKE("dev_info", { repoPath })),
+	/**  Every dev TODO, newest first. */
+	devTodos: () => typedError<DevTodo[], CmdError>(__TAURI_INVOKE("dev_todos")),
+	/**
+	 *  Add a TODO. `id` is a frontend-minted UUID (so the cache can be patched
+	 *  without the round-trip); `screenshots` are pasted images as
+	 *  `data:image/(png|jpeg);base64,…` URLs, written to files under the app data
+	 *  dir so the agent can `Read` them later.
+	 */
+	devAddTodo: (id: string, body: string, screenshots: string[]) => typedError<DevTodo, CmdError>(__TAURI_INVOKE("dev_add_todo", { id, body, screenshots })),
+	devSetTodoDone: (id: string, done: boolean) => typedError<null, CmdError>(__TAURI_INVOKE("dev_set_todo_done", { id, done })),
+	/**  Delete a TODO and its screenshot files (best-effort — a missing file is fine). */
+	devDeleteTodo: (id: string) => typedError<null, CmdError>(__TAURI_INVOKE("dev_delete_todo", { id })),
+	/**
+	 *  Render a TODO into an on-disk prompt file for the Dev Claude session and
+	 *  return its path — the terminal is seeded (or handed via clipboard) a short
+	 *  `Read <path>` line, mirroring how work/fix-CI prompts avoid typing large
+	 *  content into a PTY.
+	 */
+	devTodoPrompt: (repoPath: string, id: string) => typedError<string, CmdError>(__TAURI_INVOKE("dev_todo_prompt", { repoPath, id })),
+	/**
+	 *  A pasted screenshot as a `data:` URI for inline display. The path must
+	 *  resolve inside the app's own dev-shots dir — it round-trips through the
+	 *  frontend, so it's untrusted by the time it comes back.
+	 */
+	devScreenshotSrc: (path: string) => typedError<string, CmdError>(__TAURI_INVOKE("dev_screenshot_src", { path })),
+	/**
+	 *  Build the production DMG, streaming the output to a read-only pane.
+	 * 
+	 *  Deliberately not a terminal session: the build is a background process the app
+	 *  owns, so it survives leaving the Dev tab, can't be typed into, and can't be
+	 *  re-triggered by a pane remount re-seeding a shell. The frontend keeps the
+	 *  transcript after it exits — see `stream`.
+	 */
+	devBuild: (repoPath: string, onEvent: Channel<StreamEvent>) => typedError<null, CmdError>(__TAURI_INVOKE("dev_build", { repoPath, onEvent })),
+	/**
+	 *  Stop a running build. Returns whether one was running. The kill closes the PTY,
+	 *  so the streaming run finishes on its own and reports failure — there's no
+	 *  separate teardown path to keep in sync.
+	 */
+	devCancelBuild: (repoPath: string) => typedError<boolean, CmdError>(__TAURI_INVOKE("dev_cancel_build", { repoPath })),
+	/**
+	 *  Open the newest built DMG for the drag-and-drop install. When the app runs
+	 *  from an installed bundle it also spawns a detached helper that waits for the
+	 *  app to quit and be replaced, then relaunches it and ejects the DMG volume —
+	 *  and schedules this process's exit so the bundle isn't replaced under a
+	 *  running binary. Returns `true` when the app is about to quit for the install.
+	 */
+	devInstall: (repoPath: string) => typedError<boolean, CmdError>(__TAURI_INVOKE("dev_install", { repoPath })),
+	/**
+	 *  Eject any mounted santree DMG volume (the disk left on the desktop after an
+	 *  install). Only volumes that actually contain a `santree.app` are touched.
+	 *  Returns how many were detached.
+	 */
+	devEject: () => typedError<number, CmdError>(__TAURI_INVOKE("dev_eject")),
+	/**
 	 *  Spawn a process behind a PTY and stream its raw output over `on_output`.
 	 * 
 	 *  The spawn itself is `openpty` + a fork/exec with a full env copy + a reader
@@ -804,6 +872,48 @@ export type CommentKind =
 "Review" | 
 /**  An inline comment anchored to a file in a review thread. */
 "ReviewThread";
+
+/**
+ *  What the Dev tab's header shows: the running build vs the checkout's HEAD vs
+ *  the newest built DMG — enough to answer "am I running the latest code?".
+ */
+export type DevInfo = {
+	/**  The version of the *running* app (compile-time). */
+	appVersion: string,
+	/**
+	 *  True when this process runs from an installed `.app` bundle outside the
+	 *  dev checkout (vs `tauri dev` or a bundle still inside `target/`).
+	 */
+	runningInstalled: boolean,
+	headSha: string | null,
+	headSubject: string | null,
+	/**  HEAD's commit time, ms since epoch (`f64` for Specta `number`). */
+	headCommittedMs: number | null,
+	dirtyFiles: number,
+	dmgPath: string | null,
+	/**  The newest DMG's mtime, ms since epoch (`f64` for Specta `number`). */
+	dmgBuiltMs: number | null,
+	/**
+	 *  True when a DMG exists but predates HEAD (or the tree is dirty) — i.e.
+	 *  installing it would not install the current code.
+	 */
+	dmgStale: boolean,
+	logPath: string | null,
+};
+
+/**
+ *  One entry of the Dev tab's bug/task list. `screenshots` are absolute paths of
+ *  pasted images written under the app data dir (render via `dev_screenshot_src`,
+ *  hand to the agent as `Read <path>` lines).
+ */
+export type DevTodo = {
+	id: string,
+	body: string,
+	done: boolean,
+	screenshots: string[],
+	/**  ms since epoch. `f64` (not `i64`) so Specta types it as `number`. */
+	createdAtMs: number | null,
+};
 
 /**
  *  The old (HEAD) and new (working-tree) full contents of a file, used by the
@@ -1405,13 +1515,11 @@ export type Settings = {
 };
 
 /**
- *  A streamed setup-script event for the Trees "Setup" tab. `Line` is a committed
- *  output line (appended). `Progress` is a transient redraw of the current line —
- *  emitted when the script's output ends a line with a lone `\r` (progress bars,
- *  spinners) — which the view shows in place so a redrawing bar reads as movement
- *  instead of a frozen log. A final `Done` closes the tab.
+ *  A streamed run event. `Chunk` is raw PTY output — arbitrary bytes as they
+ *  arrive, *not* line-aligned and with escape sequences intact; the view feeds it
+ *  to a terminal emulator verbatim. `Done` reports the exit status.
  */
-export type SetupEvent = { type: "line"; text: string } | { type: "progress"; text: string } | { type: "done"; ok: boolean };
+export type StreamEvent = { type: "chunk"; text: string } | { type: "done"; ok: boolean };
 
 /**
  *  What an extra Trees main-area tab hosts: a Claude agent session (resumable

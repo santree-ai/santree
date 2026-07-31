@@ -23,21 +23,25 @@ import {
 } from "react";
 
 import type { AgentKind, Task, Worktree, WorktreePr } from "../../bindings";
-import { ConfirmDialog, Toggle } from "../../components/primitives";
+import { ConfirmDialog, Segmented, Toggle } from "../../components/primitives";
 import {
+  type BatchSetup,
   parseBatchSetup,
   TREES_BATCH_SETUP_KEY,
   TREES_RUN_SETUP_KEY,
   useAgents,
+  useBaseWorktree,
   useBoolSetting,
   useCreateWorktree,
   useInitScript,
   useResolvedBoolSetting,
   useResolvedSetting,
+  useSetting,
   useTasks,
   useWorktreePrs,
   useWorktrees,
   WORK_AGENT_KEY,
+  WORK_ASK_BASE_KEY,
   WORK_MODEL_KEY,
   WORK_QUEUE_KEY,
 } from "../../lib/queries";
@@ -65,6 +69,80 @@ export interface IssueVisualState {
   ready: boolean;
   /** Blocked and not chainable — can't be started. */
   blocked: boolean;
+}
+
+/**
+ * The blocker `task` would stack on — its first dependency that already has a
+ * worktree — as both the ticket id (what the ⛓ chip shows) and that worktree's
+ * git branch (what a launch branches from). Null when there's nothing to stack on.
+ *
+ * This is the *only* place the chain base is chosen: `baseFor` in the provider is
+ * this function's ticket half, so what the graph advertises with "⛓ AK-274" and
+ * what `createWorktree` is actually given as its base can't drift apart. A ticket
+ * whose blocker is already being worked on is only launchable *because* it can
+ * stack on it — branching it off master instead would build on code that isn't
+ * there yet. `ready` tickets never stack: their blockers are all done.
+ */
+export function stackBase(
+  task: Task,
+  worktreeById: Map<string, Worktree>,
+): { ticket: string; branch: string } | null {
+  if (task.ready) return null;
+  for (const ticket of task.blockedBy) {
+    const branch = worktreeById.get(ticket)?.branch;
+    if (branch) return { ticket, branch };
+  }
+  return null;
+}
+
+/** A launch waiting on the options dialog: what it would start, which questions
+ *  it has to ask first, and how to actually run it once they're answered. One
+ *  shape for both paths — a queued batch and a single "Run" — so the two can't
+ *  answer the same questions differently. */
+interface PendingLaunch {
+  targets: Task[];
+  /** The targets that would stack, each with the blocker it resolved to. That's
+   *  the blocker `stackBase` picked — not `blockedBy[0]`, which is a different
+   *  ticket whenever the first blocker has no worktree. */
+  stacking: { id: string; base: string }[];
+  askSetup: boolean;
+  askStack: boolean;
+  /** The setup answer to use when the dialog doesn't ask for one — the batch
+   *  setting's own always/never, or null for a single launch (which lets
+   *  `beginRun` read the plain preference). */
+  setup: boolean | null;
+  start: (setup: boolean | null, stack: boolean) => void;
+}
+
+/**
+ * What a launch has to ask before it can start, and the answers it already has.
+ *
+ * Both questions are resolved here so the queued-batch and single-"Run" paths
+ * can't diverge, and so a launch with nothing to ask never opens a dialog at all
+ * (the common case: a ready ticket, or stacking with the preference off).
+ */
+export function launchPlan(
+  targets: Task[],
+  opts: {
+    batchSetup: BatchSetup;
+    /** The "ask which branch to start from" preference (WORK_ASK_BASE_KEY). */
+    askBase: boolean;
+    stackOn: (t: Task) => { ticket: string; branch: string } | null;
+  },
+): Omit<PendingLaunch, "targets" | "start"> {
+  const bulk = targets.length > 1;
+  const stacking = targets.flatMap((t) => {
+    const base = opts.stackOn(t);
+    return base ? [{ id: t.id, base: base.ticket }] : [];
+  });
+  return {
+    // Only a real batch asks about setup — a single launch lets `beginRun` read
+    // the plain preference (null), which is why `setup` isn't just a boolean.
+    askSetup: bulk && opts.batchSetup === "ask",
+    setup: bulk ? opts.batchSetup === "always" : null,
+    askStack: opts.askBase && stacking.length > 0,
+    stacking,
+  };
 }
 
 export function deriveIssueState(
@@ -201,6 +279,9 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const { data: tasks = [] } = useTasks(activeRepo);
   const { data: worktrees = [] } = useWorktrees(activeRepo);
+  // Only for naming the "don't stack" option in the launch dialog — the create
+  // itself resolves the default branch backend-side from a null base.
+  const { data: baseWorktree } = useBaseWorktree(activeRepo);
   const { data: worktreePrs = [] } = useWorktreePrs(activeRepo);
   const { data: agents = [] } = useAgents();
   const { mutateAsync: createWorktree } = useCreateWorktree(activeRepo);
@@ -223,9 +304,14 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     initScriptFetched && !(initScript?.exists && initScript.executable)
       ? "never"
       : parseBatchSetup(batchSetting);
-  /** The batch awaiting the ask-once answer, and the answer being edited. */
-  const [askBatch, setAskBatch] = useState<Task[] | null>(null);
+  // When on (the default), launching a ticket that would stack asks which branch
+  // to start from rather than stacking silently. Unset means ask.
+  const askBase = useSetting("app", WORK_ASK_BASE_KEY).data !== "false";
+
+  /** The launch parked behind the options dialog, and the answers being edited. */
+  const [pending, setPending] = useState<PendingLaunch | null>(null);
   const [askRunSetup, setAskRunSetup] = useState(false);
+  const [askStack, setAskStack] = useState(true);
 
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   // No hardcoded default — the first task becomes the focus once tasks load (see
@@ -367,10 +453,14 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     [requestTreeFocus, navigate],
   );
 
-  const baseFor = useCallback(
-    (task: Task) => task.blockedBy.find((id) => worktreeIds.has(id)) ?? null,
-    [worktreeIds],
-  );
+  /** What a launch of `task` branches from (see `stackBase`). */
+  const stackOn = useCallback((task: Task) => stackBase(task, worktreeById), [worktreeById]);
+
+  // `deriveIssueState`'s view of the chain is the ticket half of the very base the
+  // launch will use — so the ⛓ chip can never promise a stack the launch doesn't
+  // make. `stackBase` re-applies the `ready` gate that `deriveIssueState` also
+  // applies here; both are cheap and neither may be dropped on its own.
+  const baseFor = useCallback((task: Task) => stackOn(task)?.ticket ?? null, [stackOn]);
 
   const isEligible = useCallback(
     (task: Task) => {
@@ -416,11 +506,13 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   //    them selected, Trees lands on the all-agents overview — all five, running.
   //
   // `setup` is the batch's one answer to "run `.santree/init.sh` first?" (null for a
-  // single launch, which just follows the preference inside `beginRun`).
+  // single launch, which just follows the preference inside `beginRun`). `stack` is
+  // the answer to "branch off the blocker's work?" — false forks off the repo's
+  // default branch instead, for every target in the launch.
   const startLaunch = useCallback(
-    (targets: Task[], setup: boolean | null) => {
+    (targets: Task[], setup: boolean | null, stack: boolean) => {
       setSelected({});
-      setAskBatch(null);
+      setPending(null);
       const projectOf = (task: Task) => (task.project === NO_PROJECT ? null : task.project);
       // A bulk launch suppresses the per-worktree toast and raises one summary once
       // every create settles; a single launch keeps its specific "Created … for X".
@@ -449,7 +541,7 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
             issueId: task.id,
             title: task.title,
             project: projectOf(task),
-            base: null,
+            stackOn: stack ? stackOn(task) : null,
             agent: launchAgent,
             quiet: bulk,
           }).catch(() => {
@@ -469,6 +561,7 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       launchModel,
       planSetup,
       createWorktree,
+      stackOn,
       requestTreeLaunch,
       requestBackgroundLaunch,
       clearBackgroundLaunch,
@@ -478,27 +571,15 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  const launch = useCallback(() => {
-    if (selectedEligible.length === 0) return;
-    const targets = selectedEligible;
-    // A single launch is unchanged: `beginRun` reads the setup preference itself.
-    if (targets.length === 1) return startLaunch(targets, null);
-    if (batchSetup === "ask") {
-      setAskRunSetup(runSetupPref);
-      setAskBatch(targets);
-      return;
-    }
-    startLaunch(targets, batchSetup === "always");
-  }, [selectedEligible, batchSetup, runSetupPref, startLaunch]);
-
   // The single-ticket create-worktree core shared by `run` and `runBackground`:
   // register the placeholder + kick off the git create, dropping both on failure.
   // `onCreated` wires up how the launch is consumed on the Trees side (focus +
   // navigate, or background) before the async create resolves.
   const startOne = useCallback(
-    (id: string, onCreated: (task: Task) => void, quiet: boolean) => {
+    (id: string, onCreated: (task: Task) => void, quiet: boolean, stack: boolean) => {
       const task = byId.get(id);
       if (!task || !isEligible(task)) return;
+      setPending(null);
       const project = task.project === NO_PROJECT ? null : task.project;
       addPendingLaunches([
         { id: task.id, title: task.title, project, agent: launchAgent, model: launchModel },
@@ -508,7 +589,7 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
         issueId: task.id,
         title: task.title,
         project,
-        base: null,
+        stackOn: stack ? stackOn(task) : null,
         agent: launchAgent,
         quiet,
       }).catch(() => {
@@ -525,23 +606,52 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       removePendingLaunch,
       clearBackgroundLaunch,
       createWorktree,
+      stackOn,
     ],
   );
+
+  /** Run the launch now, or park it behind the options dialog when there's a
+   *  question to answer first. `setup` is only ever asked for a real batch; the
+   *  base is asked whenever any target would stack and the preference says so —
+   *  both land in one dialog rather than two in a row. */
+  const beginLaunch = useCallback(
+    (targets: Task[], start: (setup: boolean | null, stack: boolean) => void) => {
+      if (targets.length === 0) return;
+      const plan = launchPlan(targets, { batchSetup, askBase, stackOn });
+      if (!plan.askSetup && !plan.askStack) {
+        start(plan.setup, true);
+        return;
+      }
+      setAskRunSetup(runSetupPref);
+      setAskStack(true);
+      setPending({ targets, ...plan, start });
+    },
+    [askBase, batchSetup, runSetupPref, stackOn],
+  );
+
+  const launch = useCallback(() => {
+    beginLaunch(selectedEligible, (setup, stack) => startLaunch(selectedEligible, setup, stack));
+  }, [selectedEligible, beginLaunch, startLaunch]);
 
   // Run a single ticket now: create its worktree and jump to Trees, starting the
   // agent there — the queue-off equivalent of selecting one ticket and launching.
   const run = useCallback(
     (id: string) => {
-      startOne(
-        id,
-        (task) => {
-          requestTreeLaunch(task.id);
-          navigate({ to: "/trees" });
-        },
-        false,
+      const task = byId.get(id);
+      if (!task) return;
+      beginLaunch([task], (_setup, stack) =>
+        startOne(
+          id,
+          (t) => {
+            requestTreeLaunch(t.id);
+            navigate({ to: "/trees" });
+          },
+          false,
+          stack,
+        ),
       );
     },
-    [startOne, requestTreeLaunch, navigate],
+    [byId, beginLaunch, startOne, requestTreeLaunch, navigate],
   );
 
   // Run a single ticket in the background: create its worktree and start the agent
@@ -549,16 +659,21 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   // it off-screen — see BackgroundLaunch). The ⌘-click path of the "Run" button.
   const runBackground = useCallback(
     (id: string) => {
-      startOne(
-        id,
-        (task) => {
-          requestBackgroundLaunch(task.id);
-          toast.success(`Running ${task.id} in the background…`);
-        },
-        true,
+      const task = byId.get(id);
+      if (!task) return;
+      beginLaunch([task], (_setup, stack) =>
+        startOne(
+          id,
+          (t) => {
+            requestBackgroundLaunch(t.id);
+            toast.success(`Running ${t.id} in the background…`);
+          },
+          true,
+          stack,
+        ),
       );
     },
-    [startOne, requestBackgroundLaunch],
+    [byId, beginLaunch, startOne, requestBackgroundLaunch],
   );
 
   // Trivial setter handlers — stable across renders so the context value below
@@ -688,61 +803,112 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       <IssuesHoverContext.Provider value={hover}>
         <IssueNodeDataContext.Provider value={nodeData}>{children}</IssueNodeDataContext.Provider>
       </IssuesHoverContext.Provider>
-      {/* "Ask once" (the default for several tickets at once): one confirmation for
-          the whole batch instead of a setup decision per worktree. Lives here, not
-          in the launch tray, because the answer belongs to the launch — the tray
-          unmounts the moment the selection clears. */}
-      <BatchSetupDialog
-        batch={askBatch}
+      {/* The launch's open questions, asked once for the whole launch instead of
+          per worktree. Lives here, not in the launch tray, because the answers
+          belong to the launch — the tray unmounts the moment the selection
+          clears, and the single-ticket "Run" path has no tray at all. */}
+      <LaunchOptionsDialog
+        pending={pending}
+        defaultBranch={baseWorktree?.baseBranch ?? null}
         runSetup={askRunSetup}
         setRunSetup={setAskRunSetup}
-        onCancel={() => setAskBatch(null)}
-        onStart={startLaunch}
+        stack={askStack}
+        setStack={setAskStack}
+        onCancel={() => setPending(null)}
       />
     </IssuesContext.Provider>
   );
 }
 
-/** The ask-once confirmation for a multi-task launch. Cancel abandons the launch
- *  (the selection is still there); confirming starts every ticket, running the
- *  setup script in each new worktree or in none, per the switch. */
-function BatchSetupDialog({
-  batch,
+/** The ask-once confirmation for a launch. Cancel abandons it (the selection is
+ *  still there); confirming starts every ticket with the answers given — the setup
+ *  script in each new worktree or in none, and each stacking ticket branched off
+ *  its blocker's work or off the repo's default branch. Only the questions the
+ *  launch actually has are rendered, so a single stacking ticket gets one line and
+ *  a plain batch gets the setup toggle it always had. */
+function LaunchOptionsDialog({
+  pending,
+  defaultBranch,
   runSetup,
   setRunSetup,
+  stack,
+  setStack,
   onCancel,
-  onStart,
 }: {
-  batch: Task[] | null;
+  pending: PendingLaunch | null;
+  /** The repo's default branch, for naming the "don't stack" option. */
+  defaultBranch: string | null;
   runSetup: boolean;
   setRunSetup: (on: boolean) => void;
+  stack: boolean;
+  setStack: (on: boolean) => void;
   onCancel: () => void;
-  onStart: (targets: Task[], setup: boolean) => void;
 }) {
-  const count = batch?.length ?? 0;
+  const count = pending?.targets.length ?? 0;
+  const stacking = pending?.stacking ?? [];
+  const label = count === 1 ? `Start ${pending?.targets[0].id}` : `Start ${count} tasks`;
   return (
     <ConfirmDialog
-      open={batch !== null}
-      title={`Start ${count} tasks`}
-      confirmLabel={`Start ${count} tasks`}
-      message="A worktree is created for each ticket and its agent starts in the background."
+      open={pending !== null}
+      title={label}
+      confirmLabel={label}
+      message={
+        count === 1
+          ? "A worktree is created for the ticket and its agent starts there."
+          : "A worktree is created for each ticket and its agent starts in the background."
+      }
       extra={
-        <div className="flex items-center gap-3">
-          <span id="batch-setup-label" className="min-w-0 flex-1 text-[12px] text-fg-2">
-            Run <span className="font-mono text-[11.5px]">.santree/init.sh</span> in each new
-            worktree
-          </span>
-          <Toggle
-            on={runSetup}
-            onClick={() => setRunSetup(!runSetup)}
-            ariaLabelledBy="batch-setup-label"
-          />
+        <div className="space-y-3">
+          {pending?.askStack && (
+            <div className="space-y-1.5">
+              <div id="launch-base-label" className="text-[12px] text-fg-2">
+                {stacking.length === 1 ? (
+                  <>
+                    <span className="font-mono text-[11.5px]">{stacking[0].id}</span> is blocked by{" "}
+                    <span className="font-mono text-[11.5px]">{stacking[0].base}</span>, which is
+                    already in a worktree. Start from:
+                  </>
+                ) : (
+                  <>
+                    {stacking.length} of these are blocked by tickets already in a worktree. Start
+                    them from:
+                  </>
+                )}
+              </div>
+              <Segmented
+                value={stack ? "stack" : "default"}
+                onChange={(v) => setStack(v === "stack")}
+                options={[
+                  {
+                    value: "stack",
+                    label: stacking.length === 1 ? stacking[0].base : "Their blockers",
+                  },
+                  { value: "default", label: defaultBranch ?? "Default branch" },
+                ]}
+              />
+            </div>
+          )}
+          {pending?.askSetup && (
+            <div className="flex items-center gap-3">
+              <span id="batch-setup-label" className="min-w-0 flex-1 text-[12px] text-fg-2">
+                Run <span className="font-mono text-[11.5px]">.santree/init.sh</span> in each new
+                worktree
+              </span>
+              <Toggle
+                on={runSetup}
+                onClick={() => setRunSetup(!runSetup)}
+                ariaLabelledBy="batch-setup-label"
+              />
+            </div>
+          )}
         </div>
       }
       // Fire-and-close: the creates run in the background (each rolls back its own
       // placeholder and toasts on failure), so there's nothing to await here.
       onConfirm={() => {
-        if (batch) onStart(batch, runSetup);
+        // A toggle that wasn't rendered can't be the answer — fall back to the one
+        // the launch already resolved (see `PendingLaunch.setup`).
+        pending?.start(pending.askSetup ? runSetup : pending.setup, stack);
         return Promise.resolve();
       }}
       onClose={onCancel}

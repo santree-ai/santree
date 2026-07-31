@@ -12,12 +12,10 @@
  *    handler; `init.sh` kept running server-side but the queued setup→agent chain
  *    was gone, and reopening the Terminal tab resolved to a bare shell.
  *
- * Split into two contexts, for the same reason `AppContext` is:
- *  - {@link useAgentRuns} — the run *flags*, which change only when a run starts or
- *    finishes.
- *  - {@link useSetupLines} — the streamed setup output, which changes once per
- *    output line (a chatty `npm install` emits thousands). Only `SetupLogsView`
- *    subscribes, so the sidebar / tab bar / file picker don't re-render per line.
+ * This context carries only the run *flags*, which change when a run starts or
+ * finishes. The script's actual output goes to `streamRuns` — a chatty
+ * `npm install` emits thousands of chunks, and only `SetupLogsView` should
+ * re-render for them, not every consumer of this context.
  */
 import { useQueryClient } from "@tanstack/react-query";
 import { Channel } from "@tauri-apps/api/core";
@@ -31,7 +29,7 @@ import {
   useState,
 } from "react";
 
-import { commands, type SetupEvent } from "../bindings";
+import { commands, type StreamEvent } from "../bindings";
 import {
   ensureResolvedSetting,
   queryKeys,
@@ -39,6 +37,7 @@ import {
   useResolvedBoolSetting,
 } from "../lib/queries";
 import { useApp } from "./AppContext";
+import { setupRunKey, startRun } from "./streamRuns";
 
 /** A setup script running for one worktree. */
 interface SetupRun {
@@ -101,22 +100,6 @@ interface AgentRuns {
 }
 
 const AgentRunsContext = createContext<AgentRuns | null>(null);
-const SetupLinesContext = createContext<ReadonlyMap<string, string[]>>(new Map());
-
-const NO_LINES: string[] = [];
-
-/** Append a streamed setup line, collapsing consecutive `progress` events onto the
- *  same line (a progress bar rewrites itself instead of scrolling). Exported for
- *  testing — see AgentRuns.test.ts. */
-export function appendSetupLine(lines: string[], text: string, lastWasProgress: boolean): string[] {
-  if (lastWasProgress && lines.length) {
-    const next = lines.slice();
-    next[next.length - 1] = text;
-    return next;
-  }
-  return [...lines, text];
-}
-
 export function AgentRunsProvider({ children }: { children: ReactNode }) {
   const { activeRepo } = useApp();
   const runSetupOnStart = useResolvedBoolSetting(activeRepo, TREES_RUN_SETUP_KEY).value;
@@ -125,7 +108,6 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
   const [launchAgents, setLaunchAgents] = useState<Set<string>>(new Set());
   const [launchModels, setLaunchModels] = useState<Record<string, string>>({});
   const [setupRuns, setSetupRuns] = useState<Record<string, SetupRun>>({});
-  const [setupLines, setSetupLines] = useState<ReadonlyMap<string, string[]>>(new Map());
   const [visibleWorktree, setVisibleWorktree] = useState<string | null>(null);
 
   // Read from the stream callbacks, which outlive the render that created them (a
@@ -193,29 +175,17 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
       const run: SetupRun = { repo, thenLaunch };
       runsRef.current = { ...runsRef.current, [id]: run };
       setSetupRuns((r) => ({ ...r, [id]: run }));
-      setSetupLines((m) => new Map(m).set(id, []));
 
-      let lastWasProgress = false;
-      const channel = new Channel<SetupEvent>();
-      channel.onmessage = (e) => {
-        if (e.type !== "progress" && e.type !== "line") {
-          finishSetup(id);
-          return;
-        }
-        // Read the flag now, not inside the updater: React runs state updaters at
-        // *render* time, so a burst of lines delivered in one tick would all see the
-        // flag's final value and overwrite each other instead of appending.
-        const overwriteLast = lastWasProgress;
-        lastWasProgress = e.type === "progress";
-        setSetupLines((m) =>
-          new Map(m).set(id, appendSetupLine(m.get(id) ?? [], e.text, overwriteLast)),
-        );
-      };
-      commands.runWorktreeSetupStreamed(repo, id, channel).then((r) => {
-        if (r.status !== "error") return;
-        setSetupLines((m) => new Map(m).set(id, [...(m.get(id) ?? []), `Error: ${r.error}`]));
-        finishSetup(id);
-      });
+      // The transcript (and the Stop/running state the log pane reads) lives in
+      // `streamRuns`; this context only tracks that a run is in flight so the
+      // setup→agent hand-off survives navigating away.
+      startRun(
+        setupRunKey(id),
+        () => new Channel<StreamEvent>(),
+        (channel) => commands.runWorktreeSetupStreamed(repo, id, channel as Channel<StreamEvent>),
+        Date.now(),
+        () => finishSetup(id),
+      );
     },
     [activeRepo, finishSetup],
   );
@@ -278,21 +248,11 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  return (
-    <AgentRunsContext.Provider value={value}>
-      <SetupLinesContext.Provider value={setupLines}>{children}</SetupLinesContext.Provider>
-    </AgentRunsContext.Provider>
-  );
+  return <AgentRunsContext.Provider value={value}>{children}</AgentRunsContext.Provider>;
 }
 
 export function useAgentRuns(): AgentRuns {
   const ctx = useContext(AgentRunsContext);
   if (!ctx) throw new Error("useAgentRuns must be used within <AgentRunsProvider>");
   return ctx;
-}
-
-/** The streamed setup output for one worktree. Subscribing re-renders on every
- *  output line — only the Setup log view should. */
-export function useSetupLines(id: string): string[] {
-  return useContext(SetupLinesContext).get(id) ?? NO_LINES;
 }

@@ -72,6 +72,7 @@ export function IssuePanel() {
     selected,
     selectedEligible,
     isEligible,
+    baseFor,
     toggle,
     setFocus,
     clearSelection,
@@ -217,6 +218,7 @@ export function IssuePanel() {
               queueEnabled={queueEnabled}
               queued={queued}
               eligible={eligible}
+              chainBase={baseFor(focus)}
               focusStatus={focus.status}
               actionable={focus.actionable}
               onToggle={() => toggle(focus.id)}
@@ -425,6 +427,7 @@ function QueueControl({
   queueEnabled,
   queued,
   eligible,
+  chainBase,
   focusStatus,
   actionable,
   onToggle,
@@ -434,6 +437,10 @@ function QueueControl({
   queueEnabled: boolean;
   queued: boolean;
   eligible: boolean;
+  /** The blocker this launch will branch from (see `stackBase`), or null for the
+   *  repo's default branch. Named here so starting a dependent ticket never
+   *  silently forks off the wrong base. */
+  chainBase: string | null;
   focusStatus: keyof typeof statusColor;
   actionable: boolean;
   onToggle: () => void;
@@ -441,10 +448,9 @@ function QueueControl({
   onRunBackground: () => void;
 }) {
   if (eligible) {
-    if (!queueEnabled) {
-      return <RunButton onRun={onRun} onRunBackground={onRunBackground} />;
-    }
-    return (
+    const control = !queueEnabled ? (
+      <RunButton onRun={onRun} onRunBackground={onRunBackground} />
+    ) : (
       <Button
         variant="tinted"
         size="lg"
@@ -456,6 +462,15 @@ function QueueControl({
         {queued ? <CheckIcon size={14} /> : <PlusIcon size={14} />}
         {queued ? "Queued" : "Add to queue"}
       </Button>
+    );
+    if (!chainBase) return control;
+    return (
+      <div className="space-y-1.5">
+        {control}
+        <div className="text-center font-mono text-[10.5px] text-muted-3">
+          ⛓ branches off {chainBase}
+        </div>
+      </div>
     );
   }
   // Not launchable — say why, disabled.
