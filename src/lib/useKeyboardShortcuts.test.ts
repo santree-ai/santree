@@ -131,16 +131,35 @@ describe("targetOwnsKey", () => {
 });
 
 describe("useKeyboardShortcuts", () => {
-  it("maps ⌘1…⌘N to the tabs in NavTabs order, Triage leading when it's enabled", () => {
+  it("maps ⌘1…⌘N to the tabs in NavTabs order, Triage leading the repo-scoped ones", () => {
     app.triageEnabled = true;
     renderHook(() => useKeyboardShortcuts());
 
     for (const [key, to] of [
-      ["1", "/triage"],
-      ["2", "/"],
-      ["3", "/trees"],
-      ["4", "/reviews"],
-      ["5", "/terminal"],
+      ["1", "/"],
+      ["2", "/triage"],
+      ["3", "/issues"],
+      ["4", "/trees"],
+      ["5", "/reviews"],
+    ]) {
+      router.navigate.mockClear();
+      press(key, { metaKey: true });
+      expect(router.navigate).toHaveBeenCalledWith({ to });
+    }
+  });
+
+  it("puts Dev second, beside Agents, since neither is repo-scoped", () => {
+    app.triageEnabled = true;
+    app.devEnabled = true;
+    renderHook(() => useKeyboardShortcuts());
+
+    for (const [key, to] of [
+      ["1", "/"],
+      ["2", "/dev"],
+      ["3", "/triage"],
+      ["4", "/issues"],
+      ["5", "/trees"],
+      ["6", "/reviews"],
     ]) {
       router.navigate.mockClear();
       press(key, { metaKey: true });
@@ -154,25 +173,36 @@ describe("useKeyboardShortcuts", () => {
     press("1", { metaKey: true });
     expect(router.navigate).toHaveBeenCalledWith({ to: "/" });
     press("4", { metaKey: true });
-    expect(router.navigate).toHaveBeenCalledWith({ to: "/terminal" });
+    expect(router.navigate).toHaveBeenCalledWith({ to: "/reviews" });
 
     router.navigate.mockClear();
     press("5", { metaKey: true });
     expect(router.navigate).not.toHaveBeenCalled();
   });
 
-  it("appends Dev as the last tab only while it's enabled", () => {
+  it("takes Dev's slot away — and shifts the rest back — once it's disabled", () => {
     app.devEnabled = true;
     const { unmount } = renderHook(() => useKeyboardShortcuts());
 
-    press("5", { metaKey: true });
+    press("2", { metaKey: true });
     expect(router.navigate).toHaveBeenCalledWith({ to: "/dev" });
     unmount();
 
     app.devEnabled = false;
     router.navigate.mockClear();
     renderHook(() => useKeyboardShortcuts());
+    press("2", { metaKey: true });
+    expect(router.navigate).toHaveBeenCalledWith({ to: "/issues" });
+
+    router.navigate.mockClear();
     press("5", { metaKey: true });
+    expect(router.navigate).not.toHaveBeenCalled();
+  });
+
+  it("ignores ⌘0 now that there is no terminal page", () => {
+    renderHook(() => useKeyboardShortcuts());
+
+    press("0", { metaKey: true });
     expect(router.navigate).not.toHaveBeenCalled();
   });
 

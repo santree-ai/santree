@@ -39,7 +39,7 @@ import {
   useTriageSchedule,
   useTriageSetState,
 } from "../../lib/queries";
-import { useApp } from "../../state/AppContext";
+import { useApp, useAppUi } from "../../state/AppContext";
 import { accentActiveStyle, alpha } from "../../theme/colors";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { DetailTabs } from "./DetailTabs";
@@ -144,6 +144,7 @@ function AllCaughtUp({
 
 export function TriageView() {
   const { triageEnabled, activeRepo, settings } = useApp();
+  const { triageFocus, consumeTriageFocus } = useAppUi();
   const navigate = useNavigate();
   const { data: schedules = [] } = useTriageSchedule(activeRepo);
   const { visible, teamWaiting, goodCitizen, loading } = useTriageQueue(activeRepo);
@@ -290,6 +291,15 @@ export function TriageView() {
   useEffect(() => {
     if (!triageEnabled) navigate({ to: "/" });
   }, [triageEnabled, navigate]);
+
+  // A ticket handed over from the Agents panel ("open this investigation"):
+  // select it once and drop the request, so a later manual selection sticks.
+  useEffect(() => {
+    if (!triageFocus) return;
+    select(triageFocus);
+    setTab(triageFocus, "investigate");
+    consumeTriageFocus();
+  }, [triageFocus, select, setTab, consumeTriageFocus]);
 
   // Vim-style queue navigation (j/k, ⌘I, ⌘O).
   useTriageKeyboard({ ordered, activeId, detail, onSelect: select, onInvestigate: investigate });

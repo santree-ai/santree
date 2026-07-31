@@ -118,6 +118,13 @@ interface AppUi {
   requestReviewFocus: (url: string) => void;
   consumeReviewFocus: () => void;
 
+  /** A ticket the Triage tab should select — set (as the ticket id) by the Agents
+   *  panel before navigating to Triage, consumed once there. Mirrors
+   *  {@link treeFocus}. */
+  triageFocus: string | null;
+  requestTriageFocus: (id: string) => void;
+  consumeTriageFocus: () => void;
+
   /** A "Fix CI with AI" launch handed off from Reviews to Trees: open a new
    *  Fix-CI Claude tab (`tabId`) on the PR's worktree (`worktreeId`), seeded to
    *  read the already-written `promptPath` (the failed log + guardrails). Set by
@@ -206,6 +213,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [treeFocus, setTreeFocus] = useState<string | null>(null);
   const [bgLaunches, setBgLaunches] = useState<string[]>([]);
   const [reviewFocus, setReviewFocus] = useState<string | null>(null);
+  const [triageFocus, setTriageFocus] = useState<string | null>(null);
   const [fixCiLaunch, setFixCiLaunch] = useState<FixCiLaunch | null>(null);
   const [pendingLaunches, setPendingLaunches] = useState<PendingLaunch[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(new Set());
@@ -347,6 +355,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const consumeTreeLaunch = useCallback(() => setTreeLaunch(null), []);
   const consumeTreeFocus = useCallback(() => setTreeFocus(null), []);
   const consumeReviewFocus = useCallback(() => setReviewFocus(null), []);
+  const consumeTriageFocus = useCallback(() => setTriageFocus(null), []);
   const consumeFixCiLaunch = useCallback(() => setFixCiLaunch(null), []);
   const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), []);
   const addPendingLaunches = useCallback((items: PendingLaunch[]) => {
@@ -397,6 +406,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       reviewFocus,
       requestReviewFocus: setReviewFocus,
       consumeReviewFocus,
+      triageFocus,
+      requestTriageFocus: setTriageFocus,
+      consumeTriageFocus,
       fixCiLaunch,
       requestFixCiLaunch: setFixCiLaunch,
       consumeFixCiLaunch,
@@ -420,6 +432,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       requestBackgroundLaunch,
       clearBackgroundLaunch,
       reviewFocus,
+      triageFocus,
       fixCiLaunch,
       pendingLaunches,
       pendingDeletes,
@@ -429,6 +442,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       consumeTreeLaunch,
       consumeTreeFocus,
       consumeReviewFocus,
+      consumeTriageFocus,
       consumeFixCiLaunch,
       toggleSidebar,
       addPendingLaunches,

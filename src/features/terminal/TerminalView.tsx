@@ -22,6 +22,10 @@ export interface TerminalViewProps {
   active?: boolean;
   /** Called once when the hosted process exits (so the tab can be torn down). */
   onExit?: () => void;
+  /** Called once the PTY is open, handing out this pane's input channel so the
+   *  session can be typed into from elsewhere (the Agents panel's reply box).
+   *  Returns a cleanup fn, run when the pane tears down. */
+  onReady?: (write: (data: string) => void) => (() => void) | undefined;
   backend?: TerminalBackend;
   createRenderer?: () => TerminalRenderer;
 }
@@ -43,6 +47,7 @@ export function TerminalView({
   seed,
   active = true,
   onExit,
+  onReady,
   backend = tauriBackend,
   createRenderer = () => new XtermRenderer(),
 }: TerminalViewProps) {
@@ -57,6 +62,8 @@ export function TerminalView({
   // Read the latest onExit without re-running the mount-once effect.
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
   // Same, for `active`: every pane stays laid out at full size (see TerminalLayer),
   // so a geometry change to the shared layer resizes ALL of them at once. Only the
   // pane on screen may act on that — a SIGWINCH to a backgrounded shell makes it
@@ -87,6 +94,7 @@ export function TerminalView({
 
     let unsub: Unsubscribe = () => {};
     let unsubExit: Unsubscribe = () => {};
+    let unregisterInput: (() => void) | undefined;
     let disposed = false;
     const { cols, rows } = safeFit(renderer);
 
@@ -108,6 +116,10 @@ export function TerminalView({
         unsub = backend.onOutput(id, (bytes) => renderer.write(bytes));
         unsubExit = backend.onExit(id, () => onExitRef.current?.());
         renderer.onInput((data) => backend.write(id, data));
+        // Hand the same input channel out, so a session can be typed into from
+        // outside its pane (the Agents panel reply box) — identical to keystrokes
+        // arriving from the renderer, just sourced from another surface.
+        unregisterInput = onReadyRef.current?.((data) => backend.write(id, data));
         if (seed) backend.write(id, seed.endsWith("\r") ? seed : `${seed}\r`);
         renderer.focus();
       } catch (e) {
@@ -145,6 +157,7 @@ export function TerminalView({
       if (resizeTimer) clearTimeout(resizeTimer);
       unsub();
       unsubExit();
+      unregisterInput?.();
       if (idRef.current !== null) backend.close(idRef.current);
       renderer.dispose();
       rendererRef.current = null;

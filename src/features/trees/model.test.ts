@@ -83,6 +83,8 @@ describe("effectiveSessionState", () => {
     message: null,
     transcriptPath: null,
     updatedAtMs: 0,
+    repo: "canary",
+    termKey: "tree:AK-1",
   });
 
   it("shows the hook state for a live session", () => {

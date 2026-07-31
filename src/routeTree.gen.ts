@@ -11,9 +11,9 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as TriageRouteImport } from './routes/triage'
 import { Route as TreesRouteImport } from './routes/trees'
-import { Route as TerminalRouteImport } from './routes/terminal'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ReviewsRouteImport } from './routes/reviews'
+import { Route as IssuesRouteImport } from './routes/issues'
 import { Route as DevRouteImport } from './routes/dev'
 import { Route as IndexRouteImport } from './routes/index'
 
@@ -27,11 +27,6 @@ const TreesRoute = TreesRouteImport.update({
   path: '/trees',
   getParentRoute: () => rootRouteImport,
 } as any)
-const TerminalRoute = TerminalRouteImport.update({
-  id: '/terminal',
-  path: '/terminal',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -40,6 +35,11 @@ const SettingsRoute = SettingsRouteImport.update({
 const ReviewsRoute = ReviewsRouteImport.update({
   id: '/reviews',
   path: '/reviews',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const IssuesRoute = IssuesRouteImport.update({
+  id: '/issues',
+  path: '/issues',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DevRoute = DevRouteImport.update({
@@ -56,18 +56,18 @@ const IndexRoute = IndexRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/dev': typeof DevRoute
+  '/issues': typeof IssuesRoute
   '/reviews': typeof ReviewsRoute
   '/settings': typeof SettingsRoute
-  '/terminal': typeof TerminalRoute
   '/trees': typeof TreesRoute
   '/triage': typeof TriageRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/dev': typeof DevRoute
+  '/issues': typeof IssuesRoute
   '/reviews': typeof ReviewsRoute
   '/settings': typeof SettingsRoute
-  '/terminal': typeof TerminalRoute
   '/trees': typeof TreesRoute
   '/triage': typeof TriageRoute
 }
@@ -75,9 +75,9 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/dev': typeof DevRoute
+  '/issues': typeof IssuesRoute
   '/reviews': typeof ReviewsRoute
   '/settings': typeof SettingsRoute
-  '/terminal': typeof TerminalRoute
   '/trees': typeof TreesRoute
   '/triage': typeof TriageRoute
 }
@@ -86,27 +86,20 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/dev'
+    | '/issues'
     | '/reviews'
     | '/settings'
-    | '/terminal'
     | '/trees'
     | '/triage'
   fileRoutesByTo: FileRoutesByTo
-  to:
-    | '/'
-    | '/dev'
-    | '/reviews'
-    | '/settings'
-    | '/terminal'
-    | '/trees'
-    | '/triage'
+  to: '/' | '/dev' | '/issues' | '/reviews' | '/settings' | '/trees' | '/triage'
   id:
     | '__root__'
     | '/'
     | '/dev'
+    | '/issues'
     | '/reviews'
     | '/settings'
-    | '/terminal'
     | '/trees'
     | '/triage'
   fileRoutesById: FileRoutesById
@@ -114,9 +107,9 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DevRoute: typeof DevRoute
+  IssuesRoute: typeof IssuesRoute
   ReviewsRoute: typeof ReviewsRoute
   SettingsRoute: typeof SettingsRoute
-  TerminalRoute: typeof TerminalRoute
   TreesRoute: typeof TreesRoute
   TriageRoute: typeof TriageRoute
 }
@@ -137,13 +130,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TreesRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/terminal': {
-      id: '/terminal'
-      path: '/terminal'
-      fullPath: '/terminal'
-      preLoaderRoute: typeof TerminalRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/settings': {
       id: '/settings'
       path: '/settings'
@@ -156,6 +142,13 @@ declare module '@tanstack/react-router' {
       path: '/reviews'
       fullPath: '/reviews'
       preLoaderRoute: typeof ReviewsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/issues': {
+      id: '/issues'
+      path: '/issues'
+      fullPath: '/issues'
+      preLoaderRoute: typeof IssuesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/dev': {
@@ -178,9 +171,9 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DevRoute: DevRoute,
+  IssuesRoute: IssuesRoute,
   ReviewsRoute: ReviewsRoute,
   SettingsRoute: SettingsRoute,
-  TerminalRoute: TerminalRoute,
   TreesRoute: TreesRoute,
   TriageRoute: TriageRoute,
 }

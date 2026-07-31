@@ -379,6 +379,34 @@ button:focus-visible {
     opacity: 0;
   }
 }
+/* The Agents panel's working indicator: a dot that breathes while a turn runs,
+   so "this agent is moving" reads at a glance without watching the transcript.
+   Deliberately animates only opacity/transform on a 7px element — animating a
+   box-shadow (or anything on a full-width row) repaints a large layer, which is
+   what crashes WKWebView's compositor on big surfaces. */
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+/* The "needs you" pulse: a ring that expands out of the dot and fades. Same
+   small-element rule as above — the ring is a pseudo-element the size of the dot. */
+@keyframes attentionPing {
+  0% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
 /* Toast cards slide up + fade in from the bottom-right viewport. */
 @keyframes toastIn {
   from {
@@ -399,6 +427,29 @@ button:focus-visible {
 }
 .animate-blink {
   animation: blink 1s steps(1) infinite;
+}
+.animate-breathe {
+  animation: breathe 1.8s ease-in-out infinite;
+}
+.animate-attention-ping::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: attentionPing 1.6s ease-out infinite;
+}
+
+/* Respect the OS "reduce motion" setting: the state colors and labels already
+   carry the meaning, so the looping indicators simply stop. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-breathe,
+  .animate-attention-ping::after {
+    animation: none;
+  }
+  .animate-attention-ping::after {
+    display: none;
+  }
 }
 
 /* Bash syntax tokens for the Trees → Setup-script editor (refractor/Prism token

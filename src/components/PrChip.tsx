@@ -21,27 +21,42 @@ type Pr = { number: number; url: string; state: PrState };
  *  the color (via {@link Pill}) and gap differ between them. */
 const PILL_CLASS = "gap-1 px-[5px] py-px font-mono text-[9px] font-semibold tracking-wide";
 
-export function PrChip({ number, url, state }: Pr) {
+/** Whether the chip is clickable. `false` renders the identical pill as a plain
+ *  `<span>` — for callers whose whole row is already one button (the Agents
+ *  panel), where a nested `<button>` is invalid HTML and gives the row two
+ *  competing actions. Those surfaces link the PR from their detail pane instead. */
+interface Interactive {
+  interactive?: boolean;
+}
+
+export function PrChip({ number, url, state, interactive = true }: Pr & Interactive) {
   const meta = prStateMeta[state];
   const openPr = useOpenPr();
+  const title = interactive
+    ? `PR #${number} (${meta.label}) — open in Reviews or on GitHub`
+    : `PR #${number} (${meta.label})`;
   return (
     <Pill
       color={meta.color}
       className={PILL_CLASS}
-      title={`PR #${number} (${meta.label}) — open in Reviews or on GitHub`}
-      onClick={(e) => {
-        e.stopPropagation();
-        openPr(url);
-      }}
+      title={title}
+      onClick={
+        interactive
+          ? (e) => {
+              e.stopPropagation();
+              openPr(url);
+            }
+          : undefined
+      }
     >
       <GitHubLogo size={9} />#{number}
     </Pill>
   );
 }
 
-export function PrChips({ prs }: { prs: Pr[] }) {
+export function PrChips({ prs, interactive = true }: { prs: Pr[] } & Interactive) {
   if (prs.length === 0) return null;
-  if (prs.length === 1) return <PrChip {...prs[0]} />;
+  if (prs.length === 1) return <PrChip {...prs[0]} interactive={interactive} />;
 
   // The summary reflects the whole set: purple only when every PR is merged (the
   // worktree is then safe to delete); otherwise gray if any is still open, else red.

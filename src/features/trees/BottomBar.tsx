@@ -25,7 +25,6 @@ import {
   usePullWorktree,
   usePushWorktree,
   useResolvedSetting,
-  useUpdateBaseBranch,
 } from "../../lib/queries";
 import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { CHROME } from "../../state/AppContext";
@@ -54,7 +53,7 @@ export function BottomBar({ worktree }: { worktree: Worktree }) {
         {!isBase && (
           <>
             <Divider />
-            <BaseMenu repo={repo} worktree={worktree} />
+            <BaseSync repo={repo} worktree={worktree} />
           </>
         )}
 
@@ -217,71 +216,36 @@ function GitState({ worktree }: { worktree: Worktree }) {
   );
 }
 
-/** The base branch: divergence chip + a menu to pull it into the worktree or to
- *  fast-forward the local base from origin ("update master"). */
-function BaseMenu({ repo, worktree }: { repo: string; worktree: Worktree }) {
+/** The base branch: its divergence summary, and one click to pull it into this
+ *  worktree. The base here is whatever this worktree branched off — the repo's
+ *  main branch for a top-level worktree, the parent worktree's branch for a
+ *  stacked one — so the same button restacks either kind.
+ *
+ *  Syncing the *local base branch itself* from origin is a repo-level action, not
+ *  a per-worktree one (it never touches the worktree), so it lives on the sidebar's
+ *  base entry instead of being a second item in a menu here. */
+function BaseSync({ repo, worktree }: { repo: string; worktree: Worktree }) {
   const { ahead, behind, baseBranch } = worktree;
-  const { worktrees } = useTrees();
   const { mutate: pull, isPending: pulling } = usePullWorktree(repo);
-  const { mutate: updateBase, isPending: updating } = useUpdateBaseBranch(repo);
   const canPull = behind > 0;
-  const busy = pulling || updating;
-  // A *stacked* worktree's base is a sibling worktree's branch, not an upstream
-  // one: git refuses to fetch into a branch checked out elsewhere, so "update from
-  // origin" could only ever fail. Pulling the parent in is still the right move
-  // (that's the restack), so only the update action goes.
-  const stacked = worktrees.some((w) => w.id !== worktree.id && w.branch === baseBranch);
 
   return (
-    <Dropdown
-      placement="up"
-      align="right"
-      trigger={(toggle) => (
-        <button
-          type="button"
-          onClick={toggle}
-          title={`${ahead} ahead of, ${behind} behind ${baseBranch}`}
-          className={`${ITEM} font-mono`}
-        >
-          {busy ? <Spinner size={11} /> : <BranchIcon size={11} />}
-          <span className="max-w-[120px] truncate">{baseBranch}</span>
-          {ahead > 0 && <span className="text-status-green">↑{ahead}</span>}
-          {behind > 0 && <span className="text-status-amber">↓{behind}</span>}
-          <ChevronDownIcon size={10} />
-        </button>
-      )}
+    <button
+      type="button"
+      disabled={!canPull || pulling}
+      onClick={() => pull(worktree.id)}
+      title={
+        canPull
+          ? `Pull ${baseBranch} into this worktree (${behind} behind, ${ahead} ahead)`
+          : `Up to date with ${baseBranch}${ahead > 0 ? ` (${ahead} ahead)` : ""}`
+      }
+      className={`${ITEM} font-mono disabled:cursor-default disabled:hover:bg-transparent`}
     >
-      {(close) => (
-        <>
-          <button
-            type="button"
-            disabled={!canPull}
-            onClick={() => {
-              pull(worktree.id);
-              close();
-            }}
-            className={MENU_ITEM}
-          >
-            <PullIcon />
-            {canPull ? `Pull ${baseBranch} into worktree` : `Up to date with ${baseBranch}`}
-          </button>
-          {!stacked && (
-            <button
-              type="button"
-              onClick={() => {
-                updateBase(worktree.id);
-                close();
-              }}
-              className={MENU_ITEM}
-              title={`Fast-forward the local ${baseBranch} branch from origin`}
-            >
-              <DownloadIcon />
-              Update {baseBranch} from origin
-            </button>
-          )}
-        </>
-      )}
-    </Dropdown>
+      {pulling ? <Spinner size={11} /> : canPull ? <PullIcon /> : <BranchIcon size={11} />}
+      <span className="max-w-[120px] truncate">{baseBranch}</span>
+      {ahead > 0 && <span className="text-status-green">↑{ahead}</span>}
+      {behind > 0 && <span className="text-status-amber">↓{behind}</span>}
+    </button>
   );
 }
 

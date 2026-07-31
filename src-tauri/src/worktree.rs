@@ -7,7 +7,7 @@
 //! id) rather than inferred from the branch name. Git itself is driven through
 //! [`crate::git`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -195,7 +195,8 @@ pub async fn base_worktree(db: &Db, repo: &str) -> Result<Option<Worktree>> {
         let p = PathBuf::from(&root);
         let branch = head_branch(&p);
         let base = git::default_branch(&p);
-        let stats = git::stats(&p, &branch, &base);
+        // The base entry's base is the repo's default branch, never a worktree's.
+        let stats = git::stats(&p, &branch, &base, git::BaseKind::Upstream);
         Worktree {
             id: BASE_ID.to_string(),
             title: branch.clone(),
@@ -241,12 +242,22 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<Worktree>> {
     .fetch_all(db)
     .await?;
 
+    // Which bases are *stacked* — i.e. another worktree's branch rather than an
+    // upstream one. Derived from the rows already in hand, so `git::stats` gets the
+    // answer without spending a process per worktree on the hottest git path.
+    let branches: HashSet<&str> = rows.iter().map(|r| r.branch.as_str()).collect();
+    let kinds: Vec<git::BaseKind> = rows
+        .iter()
+        .map(|r| base_kind(&branches, &r.base_branch))
+        .collect();
+
     // Each `build_worktree` shells out to git a handful of times (blocking). Run them
     // on the blocking pool *concurrently* — spawn first, then await — so N worktrees
     // don't gate one another (and an async runtime thread never blocks on git).
     let handles: Vec<_> = rows
         .into_iter()
-        .map(|row| tokio::task::spawn_blocking(move || build_worktree(row)))
+        .zip(kinds)
+        .map(|(row, kind)| tokio::task::spawn_blocking(move || build_worktree(row, kind)))
         .collect();
     let mut worktrees = Vec::with_capacity(handles.len());
     for handle in handles {
@@ -255,14 +266,39 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<Worktree>> {
     Ok(worktrees)
 }
 
+/// Whether `base` is another worktree's branch (a stacked worktree) or an upstream
+/// one. A pure set lookup over branches already read from SQLite — no git process,
+/// which is the point: it feeds [`git::stats`] on the hottest refresh path.
+fn base_kind(worktree_branches: &HashSet<&str>, base: &str) -> git::BaseKind {
+    if worktree_branches.contains(base) {
+        git::BaseKind::LocalBranch
+    } else {
+        git::BaseKind::Upstream
+    }
+}
+
+/// [`base_kind`] for a single worktree, when the caller doesn't already have the
+/// whole list in hand ([`get`], [`create`]). One indexed SQLite read — still no git
+/// process — versus the set `list` builds once for the whole batch.
+async fn base_kind_of(db: &Db, root: &str, base: &str) -> Result<git::BaseKind> {
+    let branches = sqlx::query_scalar::<_, String>(
+        "SELECT branch FROM worktree_links WHERE repo_path = ?",
+    )
+    .bind(root)
+    .fetch_all(db)
+    .await?;
+    let set: HashSet<&str> = branches.iter().map(String::as_str).collect();
+    Ok(base_kind(&set, base))
+}
+
 /// Build a `Worktree` (with live git stats) from a stored link row, probing the
 /// branch's remote-sync state.
-fn build_worktree(row: LinkRow) -> Worktree {
+fn build_worktree(row: LinkRow, kind: git::BaseKind) -> Worktree {
     let path = PathBuf::from(&row.worktree_path);
     // Freshen the branch's remote ref (throttled) so remote_behind reflects commits
     // added to the branch upstream — nothing else fetches it.
     git::refresh_remote_ref(&path, &row.branch);
-    let stats = git::stats(&path, &row.branch, &row.base_branch);
+    let stats = git::stats(&path, &row.branch, &row.base_branch, kind);
     // Only when there's actually something to pull is it worth asking whether it
     // would conflict, so the Pull button can disable itself up front.
     let pull_conflict =
@@ -276,9 +312,9 @@ fn build_worktree(row: LinkRow) -> Worktree {
 /// `remote_behind`/`pull_conflict` are reported as zero rather than read off a
 /// tracking ref nobody refreshed. An adopted worktree's remote state, if any, lands
 /// on the next `list`/`get` refresh.
-fn build_worktree_local(row: LinkRow) -> Worktree {
+fn build_worktree_local(row: LinkRow, kind: git::BaseKind) -> Worktree {
     let path = PathBuf::from(&row.worktree_path);
-    let mut stats = git::stats(&path, &row.branch, &row.base_branch);
+    let mut stats = git::stats(&path, &row.branch, &row.base_branch, kind);
     stats.remote_behind = 0;
     build_worktree_from(row, stats, false)
 }
@@ -331,8 +367,9 @@ pub async fn get(db: &Db, repo: &str, issue_id: &str) -> Result<Option<Worktree>
     let Some(row) = link_row(db, &root, issue_id).await? else {
         return Ok(None);
     };
+    let kind = base_kind_of(db, &root, &row.base_branch).await?;
     Ok(Some(
-        tokio::task::spawn_blocking(move || build_worktree(row)).await?,
+        tokio::task::spawn_blocking(move || build_worktree(row, kind)).await?,
     ))
 }
 
@@ -510,7 +547,8 @@ pub async fn create(
     // Build the response locally: `get` would probe the remote for a branch that by
     // construction isn't on origin yet, holding "Creating workspace…" for a doomed
     // network round-trip on every single task start.
-    Ok(tokio::task::spawn_blocking(move || build_worktree_local(row)).await?)
+    let kind = base_kind_of(db, &root, &row.base_branch).await?;
+    Ok(tokio::task::spawn_blocking(move || build_worktree_local(row, kind)).await?)
 }
 
 /// Record the issue ↔ worktree link, reporting whether *this* call inserted it.
@@ -757,17 +795,26 @@ pub async fn pull_remote(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
 }
 
 /// Fast-forward the repo's local base branch (main/master) to origin — the
-/// "update master" action. Operates on the main repo dir, not the worktree.
+/// "update base from origin" action. Operates on the main repo dir, not the
+/// worktree, so it's driven from the sidebar's base entry ([`BASE_ID`], whose base
+/// is the repo's own default branch) rather than from any one worktree.
 pub async fn update_base(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
     let root = repo_root(db, repo).await?;
-    let base = sqlx::query_scalar::<_, String>(
-        "SELECT base_branch FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
-    )
-    .bind(&root)
-    .bind(issue_id)
-    .fetch_optional(db)
-    .await?
-    .ok_or_else(|| anyhow!("no worktree for issue '{issue_id}'"))?;
+    let base = if issue_id == BASE_ID {
+        // The base entry has no `worktree_links` row — its branch is the repo's
+        // default one, the same source `base_worktree` reports it from.
+        let root = root.clone();
+        tokio::task::spawn_blocking(move || git::default_branch(Path::new(&root))).await?
+    } else {
+        sqlx::query_scalar::<_, String>(
+            "SELECT base_branch FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
+        )
+        .bind(&root)
+        .bind(issue_id)
+        .fetch_optional(db)
+        .await?
+        .ok_or_else(|| anyhow!("no worktree for issue '{issue_id}'"))?
+    };
     {
         // `update_base` fetches from origin (network + blocking).
         let root = root.clone();

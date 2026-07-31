@@ -455,7 +455,9 @@ export function Segmented<T extends string>({
             // one Tab lands on, so the group can never fall out of the tab order.
             tabIndex={(checked < 0 ? 0 : checked) === i ? 0 : -1}
             onClick={() => onChange(opt.value)}
-            className="flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md px-0.5 py-[7px] font-mono text-[11px] transition-all"
+            // `whitespace-nowrap`: the control is often placed in a fixed-height
+            // bar, where a wrapped label silently grows it past the row height.
+            className="flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md px-0.5 py-[7px] font-mono text-[11px] whitespace-nowrap transition-all"
             style={style}
           >
             {opt.icon}
@@ -476,6 +478,9 @@ export interface TabItem<T extends string> {
   badge?: ReactNode;
   /** Render the inactive label in a fainter muted tone (e.g. disabled-ish). */
   dimmed?: boolean;
+  /** Draw a vertical rule after this tab, setting it apart from the rest of the
+   *  strip (the nav's Agents section, which spans every other view). */
+  separatorAfter?: boolean;
 }
 
 /**
@@ -545,7 +550,7 @@ export function Tabs<T extends string>({
         const base = inset
           ? "flex cursor-pointer items-center gap-1.5 px-3 text-[13px] transition-colors hover:text-fg-2"
           : "-mb-px flex cursor-pointer items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] font-medium transition-colors hover:text-fg-2";
-        return (
+        const tab = (
           <button
             key={t.value}
             type="button"
@@ -564,6 +569,13 @@ export function Tabs<T extends string>({
             {t.label}
             {t.badge}
           </button>
+        );
+        if (!t.separatorAfter) return tab;
+        return (
+          <div key={t.value} className="flex h-full items-center gap-1">
+            {tab}
+            <span aria-hidden className="h-[15px] w-px flex-none bg-line" />
+          </div>
         );
       })}
     </div>

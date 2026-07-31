@@ -22,14 +22,16 @@ interface Section {
   items: Shortcut[];
 }
 
-/** Build the section list; tab numbers follow NavTabs order (Triage leads). */
-function buildSections(triageEnabled: boolean): Section[] {
+/** Build the section list; tab numbers follow NavTabs order — the repo-independent
+ *  views first (Agents, then Dev when enabled), then the repo-scoped ones. */
+function buildSections(triageEnabled: boolean, devEnabled: boolean): Section[] {
   const tabLabels = [
+    "Agents",
+    ...(devEnabled ? ["Dev"] : []),
     ...(triageEnabled ? ["Triage"] : []),
     "Issues",
     "Trees",
     "Reviews",
-    "Terminal",
   ];
   return [
     {
@@ -85,7 +87,7 @@ function Kbd({ token }: { token: string }) {
 }
 
 export function ShortcutsOverlay() {
-  const { triageEnabled } = useApp();
+  const { triageEnabled, devEnabled } = useApp();
   const { shortcutsOpen, setShortcutsOpen } = useAppUi();
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -107,13 +109,13 @@ export function ShortcutsOverlay() {
   });
 
   const sections = useMemo(() => {
-    const all = buildSections(triageEnabled);
+    const all = buildSections(triageEnabled, devEnabled);
     const q = query.trim().toLowerCase();
     if (!q) return all;
     return all
       .map((s) => ({ ...s, items: s.items.filter((i) => i.label.toLowerCase().includes(q)) }))
       .filter((s) => s.items.length > 0);
-  }, [triageEnabled, query]);
+  }, [triageEnabled, devEnabled, query]);
 
   if (!shortcutsOpen) return null;
 

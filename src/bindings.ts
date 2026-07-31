@@ -1409,6 +1409,20 @@ export type SessionState = {
 	transcriptPath: string | null,
 	/**  Epoch ms the state was last updated — raw, formatted live by the frontend. */
 	updatedAtMs: number | null,
+	/**
+	 *  Repo the session was launched for, joined from `terminal_sessions`.
+	 *  `None` for a session santree didn't register a logical terminal for.
+	 */
+	repo: string | null,
+	/**
+	 *  The logical terminal that owns this session (`tree:<id>`, `triage:<id>`,
+	 *  `dev:<path>`, …), joined from `terminal_sessions`. This — not `cwd` — is
+	 *  what identifies *which surface* an agent belongs to: several sessions can
+	 *  share one `cwd` (a worktree's extra tabs; a base agent and a triage
+	 *  investigation both running at the repo root), so a cwd-keyed correlation
+	 *  silently collapses them.
+	 */
+	termKey: string | null,
 };
 
 /**

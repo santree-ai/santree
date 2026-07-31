@@ -20,6 +20,9 @@ class FakeRenderer implements TerminalRenderer {
   onInput(cb: (data: string) => void) {
     this.inputCb = cb;
   }
+  reset() {
+    this.written = [];
+  }
   resize() {}
   fit() {
     return this.size;

@@ -283,9 +283,15 @@ pub async fn session_states(db: &Db) -> Result<Vec<SessionState>> {
         log::warn!("pruning stale session rows failed: {e}");
     }
 
+    // LEFT JOIN, not INNER: only terminals that auto-launch an agent get a
+    // `terminal_sessions` row, so an unregistered session must still show up (as
+    // an un-attributed agent) rather than vanish from the panel.
     let rows = sqlx::query_as::<_, StateRow>(
-        "SELECT session_id, state, event, cwd, message, transcript_path, updated_at_ms \
-         FROM session_state ORDER BY updated_at_ms DESC LIMIT ?",
+        "SELECT s.session_id, s.state, s.event, s.cwd, s.message, s.transcript_path, \
+                s.updated_at_ms, t.repo, t.term_key \
+         FROM session_state s \
+         LEFT JOIN terminal_sessions t ON t.session_id = s.session_id \
+         ORDER BY s.updated_at_ms DESC LIMIT ?",
     )
     .bind(MAX_SESSION_ROWS)
     .fetch_all(db)
@@ -298,7 +304,9 @@ pub async fn session_states(db: &Db) -> Result<Vec<SessionState>> {
     Ok(tokio::task::spawn_blocking(move || reconcile_rows(rows, now_ms)).await?)
 }
 
-/// A `session_state` row as stored: `state` is the TEXT column, still unparsed.
+/// A `session_state` row as stored (`state` is the TEXT column, still unparsed),
+/// with the owning logical terminal joined on: `(session_id, state, event, cwd,
+/// message, transcript_path, updated_at_ms, repo, term_key)`.
 type StateRow = (
     String,
     String,
@@ -307,6 +315,8 @@ type StateRow = (
     Option<String>,
     Option<String>,
     i64,
+    Option<String>,
+    Option<String>,
 );
 
 /// Parse + reconcile a batch of stored rows. Blocking (transcript fs reads) —
@@ -314,7 +324,17 @@ type StateRow = (
 fn reconcile_rows(rows: Vec<StateRow>, now_ms: i64) -> Vec<SessionState> {
     rows.into_iter()
         .filter_map(
-            |(session_id, stored, event, cwd, mut message, transcript_path, updated_at_ms)| {
+            |(
+                session_id,
+                stored,
+                event,
+                cwd,
+                mut message,
+                transcript_path,
+                updated_at_ms,
+                repo,
+                term_key,
+            )| {
                 let Some(mut state) = AgentState::parse(&stored) else {
                     // The hook binary is built separately, so a stale copy on disk
                     // can write a state this build doesn't know. Drop the row rather
@@ -343,6 +363,8 @@ fn reconcile_rows(rows: Vec<StateRow>, now_ms: i64) -> Vec<SessionState> {
                     message,
                     transcript_path,
                     updated_at_ms: updated_at_ms as f64,
+                    repo,
+                    term_key,
                 })
             },
         )
@@ -585,6 +607,8 @@ mod tests {
                 None,
                 None,
                 T,
+                None,
+                None,
             ),
             (
                 "s2".into(),
@@ -594,12 +618,18 @@ mod tests {
                 None,
                 None,
                 T,
+                Some("canary".into()),
+                Some("tree:AK-1".into()),
             ),
         ];
         let out = reconcile_rows(rows, T);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].session_id, "s2");
         assert_eq!(out[0].state, AgentState::Idle);
+        // The joined owner rides along untouched — it's what the Agents panel
+        // attributes the session to.
+        assert_eq!(out[0].term_key.as_deref(), Some("tree:AK-1"));
+        assert_eq!(out[0].repo.as_deref(), Some("canary"));
     }
 
     #[test]

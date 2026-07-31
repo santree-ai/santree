@@ -305,14 +305,30 @@ fn freshest_base(repo: &Path, base: &str) -> String {
     if git(repo, &["rev-parse", "--verify", &origin_ref]).is_err() {
         return base.to_string();
     }
-    let local = format!("refs/heads/{base}");
-    let local_has_origin = branch_exists(repo, base)
-        && git(repo, &["merge-base", "--is-ancestor", &origin_ref, &local]).is_ok();
-    if local_has_origin {
+    if local_base_is_fresher(repo, base) {
         base.to_string()
     } else {
         origin_ref
     }
+}
+
+/// Whether the local `<base>` branch already contains `origin/<base>` — the test
+/// that tells a stacked base from an upstream one without having to know which it
+/// is (see [`freshest_base`]). A local ref that doesn't exist, or that sits behind
+/// the remote, both fail the ancestry check, which is the answer callers want:
+/// prefer `origin/<base>`. One process — an unresolvable ref makes `merge-base`
+/// exit non-zero, so no separate existence check is needed.
+fn local_base_is_fresher(repo: &Path, base: &str) -> bool {
+    git(
+        repo,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &format!("origin/{base}"),
+            &format!("refs/heads/{base}"),
+        ],
+    )
+    .is_ok()
 }
 
 /// Create a git worktree at `worktree_path` checked out on `branch`.
@@ -495,25 +511,49 @@ pub struct Stats {
     pub remote_behind: u32,
 }
 
+/// What kind of branch a worktree's base is, which decides whether the local ref or
+/// `origin/<base>` is the authoritative tip to measure divergence against.
+///
+/// The caller knows this for free (a stacked worktree's base is another worktree's
+/// branch, straight out of `worktree_links`), so [`stats`] never has to spend a git
+/// process working it out — it runs on the app's hottest refresh path. See
+/// [`freshest_base`] for the same distinction where it *does* have to be probed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaseKind {
+    /// The repo's default branch (main/master) — never checked out by the app, so
+    /// its local ref lags and `origin/<base>` is the fresher one.
+    Upstream,
+    /// Another worktree's branch (a stacked worktree) — local is authoritative.
+    LocalBranch,
+}
+
 /// Gather a worktree's stats in one pass. Purely local — [`refresh_remote_ref`] is
 /// the (throttled) network half, called separately, so the paths that must not touch
 /// the network don't.
 ///
-/// * `ahead` / `behind` — against the ref the branch was forked from
-///   ([`compare_base`]), which is also the ref the "Pull from main" button merges.
+/// * `ahead` / `behind` — against the ref the branch was forked from (per `kind`),
+///   which is also the ref the "Pull from main" button merges.
 /// * `unpushed` / `remote_behind` — against the branch's own tracking ref: what a
 ///   push would upload and what a pull would download. A branch that was never
 ///   pushed has no tracking ref, so everything it added over the base is unpushed.
-pub fn stats(cwd: &Path, branch: &str, base: &str) -> Stats {
+pub fn stats(cwd: &Path, branch: &str, base: &str, kind: BaseKind) -> Stats {
     // One `for-each-ref` for both remote refs, rather than a `rev-parse --verify`
     // per lookup — the same two were resolved up to five times per build.
     let remotes = origin_refs(cwd, &[base, branch]);
     let published = |name: &str| remotes.iter().any(|r| r == name);
 
-    let compare = if published(base) {
-        format!("origin/{base}")
-    } else {
-        base.to_string()
+    // Which ref *is* the base right now, so the number we display agrees with what
+    // Pull would actually merge (`freshest_base`). The caller says which kind of
+    // base this is, because it can answer for free from the worktree list — asking
+    // git would cost another fork+exec on the app's hottest path.
+    let compare = match kind {
+        // A sibling worktree's branch: the local ref is the one being worked on. It
+        // advances on every parent pull/commit, long before any of that is pushed —
+        // measuring against `origin/<parent>` would report the child up to date with
+        // a parent that has moved on, and disable the Pull that would restack it.
+        BaseKind::LocalBranch => base.to_string(),
+        BaseKind::Upstream if published(base) => format!("origin/{base}"),
+        BaseKind::Upstream => base.to_string(),
     };
     let (add_lines, del_lines) = numstat_totals(cwd, &compare);
     let (behind, ahead) = left_right(cwd, &compare, "HEAD");
@@ -1670,6 +1710,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
     }
 
+    /// A stacked child's divergence must be measured against its parent's **local**
+    /// tip. Pulling master into the parent advances only the local branch — its
+    /// `origin/<parent>` ref doesn't move until a push — so comparing against the
+    /// remote leaves the child reporting "up to date" with a parent that has moved
+    /// on, and its Pull button disabled with no way to restack.
+    #[test]
+    fn stats_measure_a_stacked_child_against_the_parent_local_tip() {
+        let (_origin, seed, repo) = init_origin_seed_and_clone("stacked-stats");
+
+        // Parent worktree, pushed (so `origin/santree/ak-274` exists — it has a PR).
+        let parent = repo.join(".santree/worktrees/AK-274");
+        create_worktree(&repo, &parent, "santree/ak-274", "main").unwrap();
+        std::fs::write(parent.join("p.txt"), "pushed\n").unwrap();
+        run_git(&parent, &["add", "-A"]);
+        run_git(&parent, &["commit", "-m", "pushed work"]);
+        run_git(&parent, &["push", "-u", "origin", "santree/ak-274"]);
+
+        // Child stacked on the parent, in sync at this point.
+        let child = repo.join(".santree/worktrees/AK-275");
+        create_worktree(&repo, &child, "santree/ak-275", "santree/ak-274").unwrap();
+        assert_eq!(
+            stats(&child, "santree/ak-275", "santree/ak-274", BaseKind::LocalBranch).behind,
+            0,
+            "freshly stacked child starts level with its parent"
+        );
+
+        // The parent moves on locally only — exactly what "pull master into the
+        // parent" does. Nothing is pushed, so origin/santree/ak-274 stays put.
+        std::fs::write(parent.join("p.txt"), "local only\n").unwrap();
+        run_git(&parent, &["add", "-A"]);
+        run_git(&parent, &["commit", "-m", "merged master locally"]);
+
+        assert_eq!(
+            stats(&child, "santree/ak-275", "santree/ak-274", BaseKind::LocalBranch).behind,
+            1,
+            "child must see the parent's unpushed advance, so it can restack"
+        );
+
+        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
     /// The stacked case above must not cost the default branch its remote-first
     /// start point: a local `master` the app never checks out sits behind
     /// `origin/master`, and branching from it would fork the worktree off a stale
@@ -1843,18 +1924,18 @@ mod tests {
         let (_origin, seed, repo) = init_diverged_feature("remote-behind-count");
 
         // Tracking ref is stale until a fetch, so nothing looks pending yet.
-        assert_eq!(stats(&repo, "feature", "main").remote_behind, 0);
+        assert_eq!(stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind, 0);
 
         run_git(&repo, &["fetch", "origin", "feature"]);
         assert_eq!(
-            stats(&repo, "feature", "main").remote_behind,
+            stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind,
             1,
             "one remote commit is now pending"
         );
 
         pull_remote(&repo, "feature").expect("pull_remote should succeed");
         assert_eq!(
-            stats(&repo, "feature", "main").remote_behind,
+            stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind,
             0,
             "up to date after pulling"
         );
@@ -1889,7 +1970,7 @@ mod tests {
         advance_origin_main(&seed, "v2\n");
         run_git(&repo, &["fetch", "origin", "main"]);
 
-        let s = stats(&repo, "feature", "main");
+        let s = stats(&repo, "feature", "main", BaseKind::Upstream);
         assert_eq!(s.ahead, 2, "two commits on top of the base");
         assert_eq!(s.behind, 1, "one commit added to the base upstream");
         assert_eq!(s.unpushed, 1, "only the second commit is unpushed");
@@ -1915,7 +1996,7 @@ mod tests {
         run_git(&repo, &["add", "-A"]);
         run_git(&repo, &["commit", "-m", "c1"]);
 
-        let s = stats(&repo, "feature", "main");
+        let s = stats(&repo, "feature", "main", BaseKind::Upstream);
         assert_eq!((s.ahead, s.unpushed), (1, 1));
         assert_eq!(s.remote_behind, 0, "no tracking ref, nothing to pull");
         assert!(!s.dirty);
@@ -2063,7 +2144,7 @@ mod tests {
         run_git(&repo, &["commit", "-m", "conflicting local edit"]);
 
         refresh_remote_ref(&repo, "feature");
-        let s = stats(&repo, "feature", "main");
+        let s = stats(&repo, "feature", "main", BaseKind::Upstream);
         assert_eq!(s.remote_behind, 1, "one remote commit is pending");
         assert!(
             would_conflict(&repo, "origin/feature"),
@@ -2084,7 +2165,7 @@ mod tests {
         run_git(&repo, &["commit", "-m", "non-conflicting local edit"]);
 
         refresh_remote_ref(&repo, "feature");
-        assert_eq!(stats(&repo, "feature", "main").remote_behind, 1);
+        assert_eq!(stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind, 1);
         assert!(
             !would_conflict(&repo, "origin/feature"),
             "a non-conflicting pull must not be flagged"

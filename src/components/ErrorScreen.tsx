@@ -46,20 +46,23 @@ export function ErrorScreen({ error, onRetry }: { error?: Error; onRetry?: () =>
         <div>
           <div className="text-[18px] font-semibold text-fg-bright">Something went wrong</div>
           <p className="mt-1.5 text-[13px] leading-relaxed text-muted-2">
-            santree hit an unexpected error. Try again — and if it keeps happening, please report it
-            so we can fix it.
+            santree hit an unexpected error. Try again, or go back to Agents — and if it keeps
+            happening, please report it so we can fix it.
           </p>
         </div>
 
         <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
-          <Button
-            variant="primary"
-            size="lg"
-            onClick={() => (onRetry ? onRetry() : window.location.reload())}
-          >
+          {/* Retrying re-renders whatever just threw, so on its own it can strand
+              you on a permanently broken view. "Back to Agents" is the way out:
+              a hard load of the root route, which also rebuilds the module graph
+              (the fix when the failure was a chunk that wouldn't import). */}
+          <Button variant="primary" size="lg" onClick={() => window.location.assign("/")}>
+            Back to Agents
+          </Button>
+          <Button size="lg" onClick={() => (onRetry ? onRetry() : window.location.reload())}>
             Try again
           </Button>
-          <Button size="lg" onClick={report}>
+          <Button variant="ghost" size="lg" onClick={report}>
             Report issue
           </Button>
           <Button variant="ghost" size="lg" onClick={copy}>

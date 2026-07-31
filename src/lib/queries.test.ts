@@ -633,6 +633,8 @@ describe("newestSessionByPath", () => {
     message: null,
     transcriptPath: null,
     updatedAtMs,
+    repo: "canary",
+    termKey: null,
   });
 
   // A worktree can host several Claude tabs. The backend hands them over newest

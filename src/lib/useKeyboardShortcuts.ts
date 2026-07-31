@@ -126,16 +126,16 @@ export function useKeyboardShortcuts() {
       }
 
       // ⌘1…⌘N map to the tabs in the same left-to-right order NavTabs renders
-      // them: Triage leads when enabled, then Issues, Trees, Reviews, Terminal,
-      // and Dev trails when enabled. Keep this in sync with NavTabs so the
-      // numbers match what's on screen.
+      // them: the repo-independent views lead (Agents, then Dev when enabled),
+      // then the repo-scoped ones — Triage when enabled, Issues, Trees, Reviews.
+      // Keep this in sync with NavTabs so the numbers match what's on screen.
       const paths = [
+        "/", // Agents
+        ...(devEnabled ? ["/dev"] : []),
         ...(triageEnabled ? ["/triage"] : []),
-        "/", // Issues
+        "/issues",
         "/trees",
         "/reviews",
-        "/terminal",
-        ...(devEnabled ? ["/dev"] : []),
       ];
       const idx = Number(e.key) - 1;
       const to = Number.isInteger(idx) && idx >= 0 ? paths[idx] : undefined;

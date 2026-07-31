@@ -6,14 +6,9 @@
  */
 import { useCallback, useMemo, useRef, useState } from "react";
 
-/** Where a terminal was opened from — drives the grouping in the Terminal tab. */
+/** Where a terminal was opened from. Pairs with `refId` to identify a session:
+ *  the Agents panel maps a stored `term_key` back to its live PTY through it. */
 export type TerminalSource = "shell" | "triage" | "issue";
-
-/** Height (px) of the Terminal tab's session tab strip. The strip is rendered
- *  by `TerminalSurface` with `CHROME.subBar` (h-9 = 36px); `TerminalLayer`
- *  offsets its full-area overlay by the same amount so the strip stays visible
- *  above the terminals. Keep the two in sync. */
-export const TERMINAL_STRIP_PX = 36;
 
 /** A terminal to open: a cwd + command (empty ⇒ login shell), optional seed. */
 export interface TerminalSpec {
@@ -92,6 +87,17 @@ export interface TerminalTabs {
   /** Drop every claim on a session — its process died, so nothing should stay
    *  pointed at it. */
   detachEmbeds: (key: string) => void;
+  /** Register a live session's input channel, so it can be typed into from
+   *  outside its pane. Called by the render layer once the PTY is open; returns
+   *  an unregister fn. */
+  registerInput: (key: string, write: (data: string) => void) => () => void;
+  /** Type `data` into a live session as if the user typed it there — used by the
+   *  Agents panel's reply box. Returns false when the session has no live PTY.
+   *
+   *  Placement + human-initiated input only (see COMPLIANCE.md): the text is
+   *  whatever the user wrote, nothing here reads the agent's output or decides
+   *  what to send. */
+  send: (key: string, data: string) => boolean;
 }
 
 export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
@@ -137,6 +143,27 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
     setActiveKey((cur) => (cur === key ? (next[Math.max(0, idx - 1)]?.key ?? null) : cur));
   }, []);
 
+  // Input channels of the live panes, keyed by tab. A ref, not state: this is a
+  // side-channel for imperative writes and re-rendering on registration would
+  // churn every consumer of the context for no visual change.
+  const inputs = useRef(new Map<string, (data: string) => void>());
+
+  const registerInput = useCallback((key: string, write: (data: string) => void) => {
+    inputs.current.set(key, write);
+    return () => {
+      // Only drop our own registration — a remounting pane can register the next
+      // writer before the previous one's cleanup runs.
+      if (inputs.current.get(key) === write) inputs.current.delete(key);
+    };
+  }, []);
+
+  const send = useCallback((key: string, data: string) => {
+    const write = inputs.current.get(key);
+    if (!write) return false;
+    write(data);
+    return true;
+  }, []);
+
   const attachEmbed = useCallback((next: TerminalEmbed) => {
     const id = embedSeq++;
     setClaims((prev) => [...prev, { id, embed: next }]);
@@ -160,7 +187,9 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
       embed,
       attachEmbed,
       detachEmbeds,
+      registerInput,
+      send,
     }),
-    [tabs, activeKey, open, ensure, close, embed, attachEmbed, detachEmbeds],
+    [tabs, activeKey, open, ensure, close, embed, attachEmbed, detachEmbeds, registerInput, send],
   );
 }

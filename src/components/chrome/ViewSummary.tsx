@@ -14,9 +14,11 @@ export function ViewSummary() {
   let value = "";
   let color = "var(--color-status-green)";
 
-  if (path === "/") {
+  if (path.startsWith("/issues")) {
     lead = `${counts.tasks} tasks · `;
     value = `${counts.tasksReady} ready`;
+    // Agents has no header summary — its own sub-bar already carries the totals,
+    // and the nav badge carries the "needs you" count.
   } else if (path.startsWith("/trees")) {
     lead = `${counts.worktrees} worktrees · `;
     value = `${counts.worktreesRunning} running`;

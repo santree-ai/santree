@@ -1,24 +1,19 @@
 /**
  * The persistent terminal render layer. Mounted once at the app shell so PTY
- * sessions and their xterm state survive navigation between tabs. It is a fixed
- * overlay that renders in one of two places:
+ * sessions and their xterm state survive navigation between tabs.
  *
- *  - the **Terminal tab** content area (right of the sidebar, below the title
- *    bar), showing the active session; or
- *  - **embedded** over an arbitrary host element (the triage Investigate tab),
- *    showing that ticket's session.
+ * Every session is *embedded*: the layer is a fixed overlay positioned over a
+ * host element some view registered (a worktree's terminal pane, the triage
+ * Investigate tab, the Dev console, the Settings login box). On every other
+ * route it stays mounted but hidden, so nothing reflows or dies when you switch
+ * tabs.
  *
- * On every other route it stays mounted but hidden, so nothing reflows or dies
- * when you switch tabs.
+ * There is no standalone terminal page any more — a session belongs to the
+ * surface that started it, and that surface hosts it.
  */
 
-import { useRouterState } from "@tanstack/react-router";
 import { type CSSProperties, useLayoutEffect, useRef, useState } from "react";
 
-import { Button } from "../../components/primitives";
-import { useRepos } from "../../lib/queries";
-import { useApp, useAppUi } from "../../state/AppContext";
-import { TERMINAL_STRIP_PX } from "./orchestrator";
 import { useTerminals } from "./TerminalsContext";
 import { TerminalView } from "./TerminalView";
 
@@ -69,12 +64,7 @@ function useElementRect(el: HTMLElement | null): Rect | null {
 }
 
 export function TerminalLayer() {
-  const { tabs, activeKey, open, close, embed, detachEmbeds } = useTerminals();
-  const { activeRepo } = useApp();
-  const { sidebarCollapsed } = useAppUi();
-  const { data: repos = [] } = useRepos();
-  const repoPath = repos.find((r) => r.name === activeRepo)?.path ?? undefined;
-  const onTerminal = useRouterState({ select: (s) => s.location.pathname === "/terminal" });
+  const { tabs, close, embed, detachEmbeds, registerInput } = useTerminals();
 
   // Live-measured rect, falling back to the rect captured at embed time so the
   // very first render is already correctly sized (no full-area flash that would
@@ -82,28 +72,15 @@ export function TerminalLayer() {
   const liveRect = useElementRect(embed?.host ?? null);
   const embedRect = liveRect ?? embed?.rect ?? null;
   const embedded = !!embed && !!embedRect;
-  const visible = embedded || onTerminal;
-  // The session to display: the embedded one when embedding, else the active tab.
-  const shownKey = embedded ? embed.key : activeKey;
+  const shownKey = embedded ? embed.key : null;
 
-  // Remember the last embed rect so that when the embed goes away (e.g. the
-  // Trees pane navigates to the all-agents overview, or a file diff is opened
-  // over the terminal), the hidden overlay keeps the *same* geometry instead of
-  // snapping to the full content area. That snap would resize the xterm grid and
-  // make zsh reprint its prompt — a spurious blank prompt line every time you
-  // came back. Frozen-at-last-size means no resize, so no reprint.
+  // Remember the last embed rect so that when the embed goes away (a diff opened
+  // over the terminal, or a tab switch), the hidden overlay keeps the *same*
+  // geometry instead of snapping to the full content area. That snap would resize
+  // the xterm grid and make zsh reprint its prompt — a spurious blank prompt line
+  // every time you came back. Frozen-at-last-size means no resize, no reprint.
   const lastEmbedRect = useRef<Rect | null>(null);
   if (embedded && embedRect) lastEmbedRect.current = embedRect;
-
-  // On /terminal the overlay starts below the session tab strip TerminalSurface
-  // renders at the top of the content area (same height, kept in sync via the
-  // shared constant).
-  const fullArea = {
-    top: TOP_BAR + TERMINAL_STRIP_PX,
-    bottom: 0,
-    left: sidebarCollapsed ? 0 : "var(--sidebar-width)",
-    right: 0,
-  };
 
   let style: CSSProperties;
   if (embedded) {
@@ -114,54 +91,46 @@ export function TerminalLayer() {
       height: embedRect.height,
       zIndex: 30,
     };
-  } else if (onTerminal) {
-    style = { ...fullArea, zIndex: 5 };
   } else if (lastEmbedRect.current) {
     // Hidden, but frozen at the last embed size (see above).
     const r = lastEmbedRect.current;
     style = { top: r.top, left: r.left, width: r.width, height: r.height, zIndex: -1 };
   } else {
-    style = { ...fullArea, zIndex: -1 };
+    // Never embedded yet (a session launched in the background). Park it at a
+    // plausible content-area size so its grid isn't degenerate before first view.
+    style = { top: TOP_BAR, left: 0, right: 0, bottom: 0, zIndex: -1 };
   }
 
   return (
     <div
-      className={`fixed bg-panel ${visible ? "" : "invisible pointer-events-none"}`}
+      className={`fixed bg-panel ${embedded ? "" : "invisible pointer-events-none"}`}
       style={style}
     >
-      {tabs.length === 0 && onTerminal && !embedded ? (
-        <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-          <div className="text-[14px] font-medium text-fg-2">No terminals open</div>
-          <Button variant="primary" onClick={() => open({ title: "shell", cwd: repoPath })}>
-            New terminal
-          </Button>
+      {tabs.map((t) => (
+        // Keep every pane laid out at full size (not display:none) so xterm
+        // never reflows from a zero-size state when switching panes/tabs.
+        <div
+          key={t.key}
+          className={`absolute inset-0 p-2 ${
+            t.key === shownKey ? "" : "invisible pointer-events-none"
+          }`}
+        >
+          <TerminalView
+            cwd={t.cwd}
+            command={t.command}
+            args={t.args}
+            seed={t.seed}
+            active={embedded && t.key === shownKey}
+            onReady={(write) => registerInput(t.key, write)}
+            onExit={() => {
+              // The process ended — drop the session (so the pane disappears
+              // instead of showing a dead terminal) and release any embed.
+              detachEmbeds(t.key);
+              close(t.key);
+            }}
+          />
         </div>
-      ) : (
-        tabs.map((t) => (
-          // Keep every pane laid out at full size (not display:none) so xterm
-          // never reflows from a zero-size state when switching panes/tabs.
-          <div
-            key={t.key}
-            className={`absolute inset-0 p-2 ${
-              t.key === shownKey ? "" : "invisible pointer-events-none"
-            }`}
-          >
-            <TerminalView
-              cwd={t.cwd}
-              command={t.command}
-              args={t.args}
-              seed={t.seed}
-              active={visible && t.key === shownKey}
-              onExit={() => {
-                // The process ended — drop the session (so the pane disappears
-                // instead of showing a dead terminal) and release any embed.
-                detachEmbeds(t.key);
-                close(t.key);
-              }}
-            />
-          </div>
-        ))
-      )}
+      ))}
     </div>
   );
 }

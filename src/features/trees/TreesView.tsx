@@ -11,7 +11,6 @@ import { SessionEndedPane } from "../../components/SessionEndedPane";
 import { CLAUDE_STATUS_LINE_KEY, useBoolSetting } from "../../lib/queries";
 import { useAgentRuns } from "../../state/AgentRuns";
 import { alpha } from "../../theme/colors";
-import { AllAgentsView } from "./AllAgentsView";
 import { BottomBar } from "./BottomBar";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { FilePickerPanel } from "./FilePickerPanel";
@@ -59,7 +58,13 @@ function TreesContent() {
           <WorktreePane key={active.id} worktree={active} />
         )
       ) : (
-        <AllAgentsView />
+        // The cross-surface overview moved out of Trees into the Agents section —
+        // it was never a worktree view, and half of what it should show (triage
+        // investigations, Dev) never had a worktree to hang off.
+        <EmptyState
+          title="No worktree selected"
+          subtitle="Pick one from the sidebar, or see every running agent in the Agents tab (⌘1)."
+        />
       )}
     </div>
   );

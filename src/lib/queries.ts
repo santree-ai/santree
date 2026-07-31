@@ -11,6 +11,7 @@ import {
   type UseQueryOptions,
   useIsFetching,
   useMutation,
+  useQueries,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -823,6 +824,58 @@ export const useWorktrees = (repo: string) =>
     enabled: !!repo,
     staleTime: WORKTREE_STALE_TIME,
   });
+
+/**
+ * Run one repo-scoped read per repo and index the results by repo — the shape
+ * the cross-repo Agents panel needs, where "the active repo" doesn't apply.
+ *
+ * Uses the SAME query keys as the single-repo hooks above, so the two share one
+ * cache: opening the panel doesn't refetch what Trees already loaded, and an
+ * invalidation from either side updates both.
+ */
+function useResultsByRepo<T>(
+  repos: string[],
+  keyFor: (repo: string) => QueryKey,
+  command: (repo: string) => CommandResult<T>,
+  staleTime: number,
+): Map<string, T> {
+  const results = useQueries({
+    queries: repos.map((repo) => ({
+      queryKey: keyFor(repo),
+      queryFn: () => unwrap(command(repo)),
+      staleTime,
+    })),
+  });
+  // `useQueries` returns a fresh array every render, so memoising on it directly
+  // would rebuild the map (and re-render every consumer) on every render. The
+  // update stamps change only when data actually changes, which is the real dep.
+  const signature = results.map((r) => r.dataUpdatedAt).join("|");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on `signature` (see above) rather than the unstable `results` identity.
+  return useMemo(() => {
+    const map = new Map<string, T>();
+    repos.forEach((repo, i) => {
+      const data = results[i]?.data;
+      if (data !== undefined) map.set(repo, data);
+    });
+    return map;
+  }, [repos, signature]);
+}
+
+/** {@link useWorktrees} across several repos at once, keyed by repo. */
+export const useWorktreesByRepo = (repos: string[]) =>
+  useResultsByRepo(repos, queryKeys.worktrees, commands.worktrees, WORKTREE_STALE_TIME);
+
+/** {@link useBaseWorktree} across several repos at once, keyed by repo. */
+export const useBaseWorktreesByRepo = (repos: string[]) =>
+  useResultsByRepo(repos, queryKeys.baseWorktree, commands.baseWorktree, WORKTREE_STALE_TIME);
+
+/** {@link useTasks} across several repos at once, keyed by repo. */
+export const useTasksByRepo = (repos: string[]) =>
+  useResultsByRepo(repos, queryKeys.tasks, commands.linearListIssues, TASKS_STALE_TIME);
+
+/** {@link useWorktreePrs} across several repos at once, keyed by repo. */
+export const useWorktreePrsByRepo = (repos: string[]) =>
+  useResultsByRepo(repos, queryKeys.worktreePrs, commands.worktreePrs, 60_000);
 
 /** The repo's base branch as a worktree-like entry (repo root on main/master) —
  *  the Trees "main" entry. `null` when the repo has no local path. */
