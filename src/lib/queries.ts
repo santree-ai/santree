@@ -25,13 +25,13 @@ import type {
   PrDetail,
   PrLabel,
   PromptInfo,
-  ReviewedFile,
   ScriptInfo,
   SessionState,
   Settings,
   TriageComment,
   TriageDetail,
   TriageTicket,
+  ViewedMarks,
   WorktreeTab,
 } from "../bindings";
 import { commands, events } from "../bindings";
@@ -267,6 +267,8 @@ export const queryKeys = {
     ["pr-detail", owner, name, number] as const,
   prRepoLabels: (owner: string, name: string) => ["pr-repo-labels", owner, name] as const,
   reviewedFiles: (prRepo: string, number: number) => ["reviewed-files", prRepo, number] as const,
+  /** Every PR's marks — invalidated when the local/synced source itself changes. */
+  reviewedFilesPrefix: ["reviewed-files"] as const,
   prFileSource: (owner: string, name: string, base: string, head: string, path: string) =>
     ["pr-file-source", owner, name, base, head, path] as const,
   prCheckLog: (owner: string, name: string, jobId: number) =>
@@ -402,6 +404,12 @@ export const CLAUDE_STATUS_LINE_KEY = "claude_status_line";
  *  to OFF (`data === "true"` means on). Threaded into the agent seed as
  *  `opts.chrome` at every Claude launch site. */
 export const CLAUDE_START_WITH_CHROME_KEY = "claude_start_with_chrome";
+
+/** Send Reviews "Viewed" marks to GitHub instead of this machine's table, so they
+ *  are the same checkbox as the github.com Files tab. App-scoped, defaults to OFF
+ *  (`data === "true"` = on) — the local store needs no network. Read by Rust
+ *  (`reviewed.rs`), which also requires a `gh` token before honoring it. */
+export const SYNC_VIEWED_KEY = "reviews_sync_viewed";
 
 /**
  * Trees (worktree) preference keys (string-valued settings):
@@ -1282,23 +1290,56 @@ export const useReviewedFiles = (prRepo: string, number: number, enabled = true)
     { enabled: enabled && !!prRepo && number > 0, staleTime: Number.POSITIVE_INFINITY },
   );
 
-/** Toggle a PR file's "Viewed" mark, persisting (or clearing) its blob SHA.
- *  Optimistic — patches the reviewed-files cache so the checkbox + diff collapse
- *  react instantly; the mutationKey lets rapid toggles reconcile last-write-wins. */
-export const useSetFileReviewed = (prRepo: string, number: number) =>
+/** Toggle a PR file's "Viewed" mark in whichever store is live — this machine's
+ *  table (against the file's blob SHA) or GitHub's own per-viewer state. `prId` is
+ *  the PR's GraphQL node id, which the synced path marks against.
+ *
+ *  Optimistic — patches the marks cache so the checkbox + diff collapse react
+ *  instantly even when the write is a GitHub round-trip; the mutationKey lets rapid
+ *  toggles reconcile last-write-wins. The patch mirrors whichever variant is cached
+ *  rather than assuming one: applying a local-shaped patch to synced marks would
+ *  drop the toggle on the floor. */
+export const useSetFileReviewed = (prRepo: string, number: number, prId: string) =>
   useOptimisticMutation<{ path: string; sha: string; reviewed: boolean }, null>({
     mutationKey: ["set-file-reviewed", prRepo, number],
-    mutationFn: (v) => unwrap(commands.setFileReviewed(prRepo, number, v.path, v.sha, v.reviewed)),
+    mutationFn: (v) =>
+      unwrap(commands.setFileReviewed(prRepo, number, prId, v.path, v.sha, v.reviewed)),
     optimistic: (qc, v) => {
       const key = queryKeys.reviewedFiles(prRepo, number);
-      const prev = qc.getQueryData<ReviewedFile[]>(key);
-      qc.setQueryData<ReviewedFile[]>(key, (cur = []) => {
-        const rest = cur.filter((f) => f.path !== v.path);
-        return v.reviewed ? [...rest, { path: v.path, sha: v.sha }] : rest;
+      const prev = qc.getQueryData<ViewedMarks>(key);
+      qc.setQueryData<ViewedMarks>(key, (cur) => {
+        // Nothing cached yet: the load in flight brings the truth, and inventing a
+        // variant here would guess at which store is live.
+        if (!cur) return cur;
+        if (cur.source === "synced") {
+          const rest = cur.paths.filter((p) => p !== v.path);
+          return { ...cur, paths: v.reviewed ? [...rest, v.path] : rest };
+        }
+        const rest = cur.files.filter((f) => f.path !== v.path);
+        return { ...cur, files: v.reviewed ? [...rest, { path: v.path, sha: v.sha }] : rest };
       });
       return () => qc.setQueryData(key, prev);
     },
     invalidate: () => [queryKeys.reviewedFiles(prRepo, number)],
+  });
+
+/** Flip whether "Viewed" marks live on GitHub or on this machine.
+ *
+ *  Beyond writing the setting it drops every PR's cached marks: the two stores
+ *  answer in different shapes and with different staleness rules, so a cache from
+ *  the old source would otherwise sit there — showing marks the new source doesn't
+ *  have — until something else happened to refetch it. */
+export const useSetSyncViewed = () =>
+  useOptimisticMutation<boolean, null>({
+    mutationKey: ["set-sync-viewed"],
+    mutationFn: (on) => unwrap(commands.setSetting("app", SYNC_VIEWED_KEY, on ? "true" : "false")),
+    optimistic: (qc, on) =>
+      patchSettingCache(qc, {
+        scope: "app",
+        key: SYNC_VIEWED_KEY,
+        value: on ? "true" : "false",
+      }),
+    invalidate: () => [queryKeys.setting("app", SYNC_VIEWED_KEY), queryKeys.reviewedFilesPrefix],
   });
 
 /** The "open in app" targets (Finder, editors, terminals) for a worktree — which

@@ -335,13 +335,18 @@ export const commands = {
 	 */
 	prFileSource: (owner: string, name: string, base: string, head: string, path: string) => typedError<FileSource, CmdError>(__TAURI_INVOKE("pr_file_source", { owner, name, base, head, path })),
 	/**
-	 *  The files a user has marked "Viewed" for a PR, each with the blob SHA it was
-	 *  marked at. The frontend keeps a mark only while the file's current head SHA
-	 *  still matches (a new commit changing the file drops the mark automatically).
+	 *  The files a user has marked "Viewed" for a PR, tagged with which store they came
+	 *  from — this machine's table (marks carry the blob SHA they were made at, and go
+	 *  stale when the file changes) or GitHub's own per-viewer state (paths only, since
+	 *  GitHub resolves staleness itself). The `reviews_sync_viewed` setting picks.
 	 */
-	reviewedFiles: (prRepo: string, prNumber: number) => typedError<ReviewedFile[], CmdError>(__TAURI_INVOKE("reviewed_files", { prRepo, prNumber })),
-	/**  Mark a PR file reviewed (persisting its current blob `sha`) or clear the mark. */
-	setFileReviewed: (prRepo: string, prNumber: number, path: string, sha: string, reviewed: boolean) => typedError<null, CmdError>(__TAURI_INVOKE("set_file_reviewed", { prRepo, prNumber, path, sha, reviewed })),
+	reviewedFiles: (prRepo: string, prNumber: number) => typedError<ViewedMarks, CmdError>(__TAURI_INVOKE("reviewed_files", { prRepo, prNumber })),
+	/**
+	 *  Mark a PR file reviewed or clear the mark, in whichever store is live. `sha` is
+	 *  used by the local store (it's what makes the mark expire when the file changes);
+	 *  `pr_id` — the PR's GraphQL node id — by the synced one.
+	 */
+	setFileReviewed: (prRepo: string, prNumber: number, prId: string, path: string, sha: string, reviewed: boolean) => typedError<null, CmdError>(__TAURI_INVOKE("set_file_reviewed", { prRepo, prNumber, prId, path, sha, reviewed })),
 	/**  The repo's `.santree/init.sh` setup script (for the Settings editor). */
 	worktreeInitScript: (repo: string) => typedError<ScriptInfo, CmdError>(__TAURI_INVOKE("worktree_init_script", { repo })),
 	/**  Write the repo's `.santree/init.sh` setup script. */
@@ -1776,6 +1781,26 @@ export type UsageTotals = {
 	cacheWriteTokens: number | null,
 	costUsd: number | null,
 };
+
+/**
+ *  A PR's "Viewed" marks, and — load-bearing — *where they came from*, because the
+ *  two sources carry different staleness rules and the UI must not apply the wrong
+ *  one. Which source is live is the `reviews_sync_viewed` app setting.
+ */
+export type ViewedMarks = 
+/**
+ *  This machine's `reviewed_files` table. Each mark carries the blob SHA it was
+ *  made at, and the frontend must compare it against the file's current
+ *  [`PrFile::sha`] — a stale mark means the file changed and needs re-reviewing.
+ */
+{ source: "local"; files: ReviewedFile[] } | 
+/**
+ *  GitHub's own per-viewer state (`viewerViewedState`), shared with github.com.
+ *  Paths only, and the frontend must *not* re-check the SHA: GitHub already
+ *  resolved staleness by returning `DISMISSED` (which never reaches this list)
+ *  for a file that changed since it was marked.
+ */
+{ source: "synced"; paths: string[] };
 
 /**
  *  A workflow state an issue can move to (one of its team's states). Moving an

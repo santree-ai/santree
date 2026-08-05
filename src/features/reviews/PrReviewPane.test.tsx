@@ -1,7 +1,7 @@
 import { render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { PrDetail, PrFile, ReviewedFile, ReviewPr } from "../../bindings";
+import type { PrDetail, PrFile, ReviewPr, ViewedMarks } from "../../bindings";
 import { PrReviewPane } from "./PrReviewPane";
 
 // Counts how often a file card actually re-renders: the diff is rendered *inside*
@@ -18,7 +18,7 @@ vi.mock("./PrFileDiff", () => ({
 vi.mock("../../lib/queries", () => ({
   usePrDetail: () => ({ data: detail, isLoading: false }),
   usePrFileSource: () => ({ data: undefined }),
-  useReviewedFiles: () => ({ data: reviewed }),
+  useReviewedFiles: () => ({ data: marks }),
   useSetFileReviewed: () => ({ mutate: spies.mutate }),
 }));
 
@@ -45,7 +45,13 @@ const detail: PrDetail = {
   headSha: "head",
 };
 
-let reviewed: ReviewedFile[] = [];
+let marks: ViewedMarks = { source: "local", files: [] };
+
+/** Marks as the local table returns them — path + the blob SHA they were made at. */
+const local = (...files: { path: string; sha: string }[]): ViewedMarks => ({
+  source: "local",
+  files,
+});
 
 function pr(overrides: Partial<ReviewPr> = {}): ReviewPr {
   return {
@@ -73,7 +79,7 @@ function pr(overrides: Partial<ReviewPr> = {}): ReviewPr {
 
 describe("PrReviewPane", () => {
   it("keeps the file cards memoized across an unrelated re-render", () => {
-    reviewed = [];
+    marks = local();
     const { rerender } = render(<PrReviewPane pr={pr()} />);
     expect(spies.renderDiff).toHaveBeenCalledTimes(2);
     spies.renderDiff.mockClear();
@@ -85,15 +91,40 @@ describe("PrReviewPane", () => {
   });
 
   it("re-renders only the file whose Viewed mark changed", () => {
-    reviewed = [];
+    marks = local();
     const { rerender } = render(<PrReviewPane pr={pr()} />);
     spies.renderDiff.mockClear();
 
-    reviewed = [{ path: "a.ts", sha: "sha-a.ts" }];
+    marks = local({ path: "a.ts", sha: "sha-a.ts" });
     rerender(<PrReviewPane pr={pr()} />);
 
     // a.ts re-renders (then collapses); b.ts's memo must hold — no re-layout of a
     // diff the user didn't touch.
     expect(spies.renderDiff.mock.calls.flat()).not.toContain("b.ts");
+  });
+
+  it("expires a local mark once the file's blob SHA moves on", () => {
+    marks = local({ path: "a.ts", sha: "sha-from-an-older-commit" });
+    const { getAllByRole } = render(<PrReviewPane pr={pr()} />);
+
+    // The whole point of storing the SHA: a new commit touching a.ts must drop the
+    // mark, so the file re-opens instead of staying signed off at stale content.
+    expect(getAllByRole("checkbox").map((c) => (c as HTMLInputElement).checked)).toEqual([
+      false,
+      false,
+    ]);
+  });
+
+  it("honors a synced mark by path, with no SHA to match against", () => {
+    // GitHub's marks carry no blob SHA — it resolves staleness itself by reporting
+    // a changed file as DISMISSED, which never reaches `paths`. Applying the local
+    // SHA rule here would clear every synced mark, since none can ever match.
+    marks = { source: "synced", paths: ["a.ts"] };
+    const { getAllByRole } = render(<PrReviewPane pr={pr()} />);
+
+    expect(getAllByRole("checkbox").map((c) => (c as HTMLInputElement).checked)).toEqual([
+      true,
+      false,
+    ]);
   });
 });

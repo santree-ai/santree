@@ -1977,6 +1977,119 @@ async fn pr_files(
     Ok((files, truncated))
 }
 
+/// The node fields behind GitHub's own per-viewer "Viewed" marks. Shared by the
+/// first-page query and the cursor follow-ups so the two can't drift.
+const VIEWED_FILE_FIELDS: &str = "path viewerViewedState";
+
+/// The paths this token's user has marked "Viewed" on the PR — GitHub's own state,
+/// the same marks the github.com Files tab shows.
+///
+/// Only `VIEWED` is kept. GitHub flips a mark to `DISMISSED` when the file changes
+/// after being viewed, which is exactly the "re-review whatever actually changed"
+/// rule the local store reimplements with blob SHAs — so dropping `DISMISSED` here
+/// is what makes the synced and local modes behave identically.
+///
+/// Note the REST files endpoint (`pr_files`) has no equivalent field; viewed state
+/// is GraphQL-only, which is why this is a second request rather than one more
+/// column on the file list.
+pub async fn pr_viewed_files(
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u32,
+) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Data {
+        repository: Option<Repo>,
+    }
+    #[derive(Deserialize)]
+    struct Repo {
+        #[serde(rename = "pullRequest")]
+        pull_request: Option<Pr>,
+    }
+    #[derive(Deserialize)]
+    struct Pr {
+        files: Connection<ViewedFile>,
+    }
+    #[derive(Deserialize)]
+    struct ViewedFile {
+        path: String,
+        #[serde(rename = "viewerViewedState")]
+        state: String,
+    }
+
+    let query = format!(
+        "query($owner: String!, $name: String!, $number: Int!) {{
+           repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{
+             files(first: {GRAPHQL_PAGE}) {{
+               nodes {{ {VIEWED_FILE_FIELDS} }}
+               pageInfo {{ hasNextPage endCursor }}
+             }}
+           }} }}
+         }}"
+    );
+    let vars = serde_json::json!({ "owner": owner, "name": name, "number": number });
+    let data: Data = graphql(token, &query, vars).await?;
+    let Some(mut files) = data.repository.and_then(|r| r.pull_request).map(|p| p.files) else {
+        return Ok(vec![]);
+    };
+
+    // Bounded by the same [`PR_FILES_CAP`] as the file list itself, not drained to
+    // exhaustion like the conversation connections: a mark for a file past the cap
+    // belongs to a file the review pane never renders, so paging further would be
+    // round-trips spent on rows nothing can display.
+    let page_query = conversation_page_query("files", VIEWED_FILE_FIELDS);
+    while files.page_info.has_next_page && files.nodes.len() < PR_FILES_CAP {
+        let Some(after) = files.page_info.end_cursor.clone() else {
+            break;
+        };
+        let page: PageData<ViewedFile> = graphql(
+            token,
+            &page_query,
+            serde_json::json!({ "owner": owner, "name": name, "number": number, "after": after }),
+        )
+        .await?;
+        let Some(page) = page.repository.and_then(|r| r.pull_request).map(|p| p.page) else {
+            break;
+        };
+        files.nodes.extend(page.nodes);
+        files.page_info = page.page_info;
+    }
+
+    Ok(files
+        .nodes
+        .into_iter()
+        .filter(|f| f.state == "VIEWED")
+        .map(|f| f.path)
+        .collect())
+}
+
+/// Set (or clear) GitHub's own "Viewed" mark for one PR file, for the token's user.
+///
+/// `pr_id` is the PR's GraphQL node id — the frontend already holds it as
+/// [`ReviewPr::id`], so the mark costs one round-trip instead of a lookup plus a
+/// mutation. It reaches GitHub as a JSON *variable*, never spliced into the query
+/// text, so an untrusted id can't reshape the document; a bad one is a GraphQL
+/// error, which `graphql` surfaces.
+pub async fn set_file_viewed(token: &str, pr_id: &str, path: &str, viewed: bool) -> Result<()> {
+    let mutation = if viewed {
+        "mutation($id: ID!, $path: String!) {
+           markFileAsViewed(input: { pullRequestId: $id, path: $path }) { clientMutationId }
+         }"
+    } else {
+        "mutation($id: ID!, $path: String!) {
+           unmarkFileAsViewed(input: { pullRequestId: $id, path: $path }) { clientMutationId }
+         }"
+    };
+    let _: serde_json::Value = graphql(
+        token,
+        mutation,
+        serde_json::json!({ "id": pr_id, "path": path }),
+    )
+    .await?;
+    Ok(())
+}
+
 /// The full text of a file at a given commit, via the REST contents API with the
 /// `raw` media type (returns the bytes directly rather than base64 JSON). Only a
 /// 404 — the file doesn't exist at that commit (added on the new side, or deleted on

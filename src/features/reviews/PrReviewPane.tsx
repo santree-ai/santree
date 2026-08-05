@@ -4,11 +4,13 @@
  * anchored inline. The PR description and conversation live in the full-height
  * {@link PrInfoPanel} rail beside the whole detail area, not here.
  *
- * "Viewed" is persisted per (PR, file) against the file's blob SHA: a marked file
- * collapses and stays marked across sessions, but the moment a new commit changes
- * the file (its SHA differs) the mark auto-clears and the file re-expands — so you
- * always re-review what actually changed. The toggle mutation lives here (a stable
- * parent) rather than in the card, which unmounts when collapsed.
+ * A marked file collapses and stays marked across sessions, but re-expands the
+ * moment a new commit changes it — so you always re-review what actually changed.
+ * Which store holds the mark is a setting: this machine's table (where the rule is
+ * enforced here, by comparing the file's blob SHA against the one the mark was made
+ * at) or GitHub's own per-viewer state (the same checkbox as the github.com Files
+ * tab, where GitHub enforces the rule for us). The toggle mutation lives here (a
+ * stable parent) rather than in the card, which unmounts when collapsed.
  */
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 
@@ -43,16 +45,23 @@ const NO_THREADS: PrThread[] = [];
 export function PrReviewPane({ pr }: { pr: ReviewPr }) {
   const [owner, name] = splitRepoSlug(pr.repo);
   const { data: detail, isLoading } = usePrDetail(owner, name, pr.number);
-  const { data: reviewed = [] } = useReviewedFiles(pr.repo, pr.number);
-  const { mutate: setReviewed } = useSetFileReviewed(pr.repo, pr.number);
+  const { data: marks } = useReviewedFiles(pr.repo, pr.number);
+  const { mutate: setReviewed } = useSetFileReviewed(pr.repo, pr.number, pr.id);
 
-  // A file counts as reviewed only while its current head SHA still matches the
-  // one we stored the mark against.
-  const reviewedSha = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const r of reviewed) m.set(r.path, r.sha);
-    return m;
-  }, [reviewed]);
+  // Which staleness rule applies depends on where the marks came from, so it can't
+  // be decided here — the backend says. Local marks are stored against a blob SHA
+  // and expire when the file changes; GitHub's own marks already did that work
+  // (a changed file comes back DISMISSED, so it isn't in `paths` at all) and would
+  // be wrongly cleared by a second SHA check, since no SHA is carried.
+  const isViewed = useMemo(() => {
+    if (!marks) return () => false;
+    if (marks.source === "synced") {
+      const paths = new Set(marks.paths);
+      return (f: PrFile) => paths.has(f.path);
+    }
+    const sha = new Map(marks.files.map((r) => [r.path, r.sha]));
+    return (f: PrFile) => sha.get(f.path) === f.sha;
+  }, [marks]);
 
   const files = detail?.files ?? [];
   const threadsByPath = useMemo(() => {
@@ -65,7 +74,7 @@ export function PrReviewPane({ pr }: { pr: ReviewPr }) {
     return m;
   }, [detail?.threads]);
 
-  const reviewedCount = files.filter((f) => reviewedSha.get(f.path) === f.sha).length;
+  const reviewedCount = files.filter(isViewed).length;
 
   // Takes the file rather than closing over it, so every card gets the same handler
   // reference — a per-file closure would re-render (and re-lay-out) the whole list
@@ -108,7 +117,7 @@ export function PrReviewPane({ pr }: { pr: ReviewPr }) {
               head={detail?.headSha ?? ""}
               file={f}
               threads={threadsByPath.get(f.path) ?? NO_THREADS}
-              reviewed={reviewedSha.get(f.path) === f.sha}
+              reviewed={isViewed(f)}
               onToggle={onToggle}
             />
           ))}

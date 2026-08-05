@@ -19,9 +19,9 @@ use santree_core::{
     domain::{
         AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, CheckLog, FileSource,
         GithubStatus, LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewPr, Opener,
-        PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewInbox, ReviewedFile,
-        Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings, TabKind, Task,
-        TriageDetail, TriageSchedule, TriageTicket, UsageReport, Worktree, WorktreePr, WorktreeTab,
+        PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewInbox, Reviewer,
+        ScriptInfo, SessionState, SessionUsageLive, Settings, TabKind, Task, TriageDetail,
+        TriageSchedule, TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreePr, WorktreeTab,
     },
 };
 
@@ -667,31 +667,35 @@ pub async fn pr_file_source(
     Ok(reviews::file_source(&owner, &name, &base, &head, &path).await?)
 }
 
-/// The files a user has marked "Viewed" for a PR, each with the blob SHA it was
-/// marked at. The frontend keeps a mark only while the file's current head SHA
-/// still matches (a new commit changing the file drops the mark automatically).
+/// The files a user has marked "Viewed" for a PR, tagged with which store they came
+/// from — this machine's table (marks carry the blob SHA they were made at, and go
+/// stale when the file changes) or GitHub's own per-viewer state (paths only, since
+/// GitHub resolves staleness itself). The `reviews_sync_viewed` setting picks.
 #[tauri::command]
 #[specta::specta]
 pub async fn reviewed_files(
     pr_repo: String,
     pr_number: u32,
     db: State<'_, Db>,
-) -> CmdResult<Vec<ReviewedFile>> {
-    Ok(reviewed::list(&db, &pr_repo, pr_number).await?)
+) -> CmdResult<ViewedMarks> {
+    Ok(reviewed::marks(&db, &pr_repo, pr_number).await?)
 }
 
-/// Mark a PR file reviewed (persisting its current blob `sha`) or clear the mark.
+/// Mark a PR file reviewed or clear the mark, in whichever store is live. `sha` is
+/// used by the local store (it's what makes the mark expire when the file changes);
+/// `pr_id` — the PR's GraphQL node id — by the synced one.
 #[tauri::command]
 #[specta::specta]
 pub async fn set_file_reviewed(
     pr_repo: String,
     pr_number: u32,
+    pr_id: String,
     path: String,
     sha: String,
     reviewed: bool,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
-    Ok(reviewed::set(&db, &pr_repo, pr_number, &path, &sha, reviewed).await?)
+    Ok(reviewed::set_mark(&db, &pr_repo, pr_number, &pr_id, &path, &sha, reviewed).await?)
 }
 
 /// Push the worktree branch and open a pull request via the GitHub API (optionally

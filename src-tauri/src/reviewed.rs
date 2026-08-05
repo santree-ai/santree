@@ -1,14 +1,88 @@
-//! Persisted "Viewed" marks for the Reviews tab. Marking a PR file reviewed
-//! stores its current blob SHA; the UI shows the file as reviewed only while its
-//! head SHA still matches, so a commit that changes the file auto-clears the mark
-//! (see `reviewed_files` in migration 0012). Local-only, never synced. Keyed by
-//! the PR's own repo ("owner/name") + number + path, since the inbox spans repos.
+//! "Viewed" marks for the Reviews tab, from one of two stores.
+//!
+//! **Local** (the default): marking a PR file reviewed stores its current blob SHA
+//! in this machine's `reviewed_files` table; the UI shows the file as reviewed only
+//! while its head SHA still matches, so a commit that changes the file auto-clears
+//! the mark (see migration 0012). Keyed by the PR's own repo ("owner/name") +
+//! number + path, since the inbox spans repos.
+//!
+//! **Synced**: the mark is GitHub's own per-viewer `viewerViewedState`, so it's the
+//! same checkbox as the github.com Files tab and follows the user across machines.
+//! GitHub does the staleness work itself (a changed file comes back `DISMISSED`),
+//! so no SHA is stored or compared.
+//!
+//! [`sync_token`] picks between them, and [`ViewedMarks`] tells the frontend which
+//! it got — the staleness rules differ, so the mode can't be inferred client-side.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
-use santree_core::domain::ReviewedFile;
+use santree_core::domain::{ReviewedFile, ViewedMarks};
 
 use crate::db::{now_ms, Db};
+use crate::{github, settings};
+
+/// App-scoped setting: send "Viewed" marks to GitHub instead of this machine's
+/// table. Off unless explicitly `"true"` — the local store is the safe default
+/// since it needs no network and can't touch anyone else's view of the PR.
+pub const SYNC_VIEWED_KEY: &str = "reviews_sync_viewed";
+
+/// The token to round-trip marks through, or `None` to use the local table.
+///
+/// A token is required as well as the setting: with sync on but `gh` signed out
+/// there's nothing to read or write through, and the Reviews tab has no PRs to show
+/// marks for either, so falling back to local is the only behavior that can't drop
+/// a mark on the floor. Cheap to call twice — `github::token` is cached (60s TTL).
+async fn sync_token(db: &Db) -> Option<String> {
+    let on = settings::get(db, "app", SYNC_VIEWED_KEY)
+        .await
+        .unwrap_or_default()
+        .as_deref()
+        == Some("true");
+    if !on {
+        return None;
+    }
+    github::token().await
+}
+
+/// `(owner, name)` from an "owner/name" slug. The slug crosses IPC, so a malformed
+/// one is rejected rather than being pasted into a GitHub request.
+fn split_slug(pr_repo: &str) -> Result<(&str, &str)> {
+    match pr_repo.split_once('/') {
+        Some((owner, name)) if !owner.is_empty() && !name.is_empty() => Ok((owner, name)),
+        _ => Err(anyhow!("malformed repo slug: {pr_repo:?}")),
+    }
+}
+
+/// Every "Viewed" mark for a PR, tagged with the store it came from.
+pub async fn marks(db: &Db, pr_repo: &str, pr_number: u32) -> Result<ViewedMarks> {
+    let Some(token) = sync_token(db).await else {
+        return Ok(ViewedMarks::Local {
+            files: list(db, pr_repo, pr_number).await?,
+        });
+    };
+    let (owner, name) = split_slug(pr_repo)?;
+    Ok(ViewedMarks::Synced {
+        paths: github::pr_viewed_files(&token, owner, name, pr_number).await?,
+    })
+}
+
+/// Set or clear one file's mark in whichever store is live. `pr_id` is the PR's
+/// GraphQL node id, needed only by the synced path (the local table is keyed by
+/// repo + number); `sha` is needed only by the local path.
+pub async fn set_mark(
+    db: &Db,
+    pr_repo: &str,
+    pr_number: u32,
+    pr_id: &str,
+    path: &str,
+    sha: &str,
+    viewed: bool,
+) -> Result<()> {
+    let Some(token) = sync_token(db).await else {
+        return set(db, pr_repo, pr_number, path, sha, viewed).await;
+    };
+    github::set_file_viewed(&token, pr_id, path, viewed).await
+}
 
 /// Every marked-viewed file for a PR (its path + the SHA it was marked at). The
 /// frontend keeps a mark only while the file's current head SHA still matches.

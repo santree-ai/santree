@@ -821,6 +821,23 @@ pub struct ReviewedFile {
     pub sha: String,
 }
 
+/// A PR's "Viewed" marks, and — load-bearing — *where they came from*, because the
+/// two sources carry different staleness rules and the UI must not apply the wrong
+/// one. Which source is live is the `reviews_sync_viewed` app setting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "source", rename_all = "camelCase")]
+pub enum ViewedMarks {
+    /// This machine's `reviewed_files` table. Each mark carries the blob SHA it was
+    /// made at, and the frontend must compare it against the file's current
+    /// [`PrFile::sha`] — a stale mark means the file changed and needs re-reviewing.
+    Local { files: Vec<ReviewedFile> },
+    /// GitHub's own per-viewer state (`viewerViewedState`), shared with github.com.
+    /// Paths only, and the frontend must *not* re-check the SHA: GitHub already
+    /// resolved staleness by returning `DISMISSED` (which never reaches this list)
+    /// for a file that changed since it was marked.
+    Synced { paths: Vec<String> },
+}
+
 /// What an agent worktree is currently doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 pub enum Activity {
