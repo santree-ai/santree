@@ -151,6 +151,18 @@ describe("pendingWorktree", () => {
       delLines: 0,
       dirty: false,
     });
+    // A root launch has no base — an invented one would make the sidebar hunt for a
+    // parent that doesn't exist.
+    expect(w.baseBranch).toBe("");
+  });
+
+  // The stack is decided at launch, so the placeholder must carry its base through
+  // to `stackWorktrees`. Without this the sidebar shows a sub-task as a root — and
+  // placeholders sort first, so it appears *above* the parent it belongs under —
+  // until the git worktree finishes creating seconds later.
+  it("carries a stacked launch's base branch so the placeholder can nest at once", () => {
+    const w = pendingWorktree(pendingLaunch("AK-277", { baseBranch: "santree/ak-275" }));
+    expect(w.baseBranch).toBe("santree/ak-275");
   });
 });
 

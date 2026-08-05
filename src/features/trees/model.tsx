@@ -77,7 +77,9 @@ export function pendingWorktree(p: PendingLaunch): Worktree {
     branch: "",
     path: "",
     project: p.project,
-    baseBranch: "",
+    // Known up front for a stacked launch, so `stackWorktrees` can indent the
+    // placeholder immediately; empty for a root launch, same as before.
+    baseBranch: p.baseBranch ?? "",
     setupRan: false,
     pending: true,
   };
@@ -282,7 +284,6 @@ interface TreesModel {
   extraTabs: WorktreeTab[];
 
   setActive: (id: string) => void;
-  showAllAgents: () => void;
   toggleRightPanel: () => void;
   setRightWidth: (w: number) => void;
   setFileTab: (tab: FileTab) => void;
@@ -724,7 +725,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       // tab. A never-visited worktree falls back to its default (Issue, or Terminal
       // for the base entry which has no ticket).
       setActive: select,
-      showAllAgents: () => select(""),
       toggleRightPanel: () => setRightCollapsed((c) => !c),
       setRightWidth,
       setFileTab,

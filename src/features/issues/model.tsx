@@ -522,6 +522,10 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
           targets.map((t) => t.id),
           setup,
         );
+      // One expression decides the base for both the placeholder and the create, so
+      // the sidebar can't indent a launch under a parent the create won't branch off
+      // — the same "can't drift apart" rule `stackBase` documents.
+      const baseOf = (task: Task) => (stack ? stackOn(task) : null);
       addPendingLaunches(
         targets.map((task) => ({
           id: task.id,
@@ -530,6 +534,9 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
           agent: launchAgent,
           // Carry the tray's per-launch model to the Trees fresh-launch seed.
           model: launchModel,
+          // Nest the placeholder under its blocker right away, rather than leaving a
+          // sub-task looking like a root until the worktree finishes creating.
+          baseBranch: baseOf(task)?.branch,
         })),
       );
       if (bulk) for (const task of targets) requestBackgroundLaunch(task.id);
@@ -541,7 +548,7 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
             issueId: task.id,
             title: task.title,
             project: projectOf(task),
-            stackOn: stack ? stackOn(task) : null,
+            stackOn: baseOf(task),
             agent: launchAgent,
             quiet: bulk,
           }).catch(() => {
@@ -581,15 +588,24 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       if (!task || !isEligible(task)) return;
       setPending(null);
       const project = task.project === NO_PROJECT ? null : task.project;
+      // Decided once, for the placeholder and the create alike — see `launch`.
+      const base = stack ? stackOn(task) : null;
       addPendingLaunches([
-        { id: task.id, title: task.title, project, agent: launchAgent, model: launchModel },
+        {
+          id: task.id,
+          title: task.title,
+          project,
+          agent: launchAgent,
+          model: launchModel,
+          baseBranch: base?.branch,
+        },
       ]);
       onCreated(task);
       void createWorktree({
         issueId: task.id,
         title: task.title,
         project,
-        stackOn: stack ? stackOn(task) : null,
+        stackOn: base,
         agent: launchAgent,
         quiet,
       }).catch(() => {

@@ -107,6 +107,25 @@ describe("stackWorktrees", () => {
     ]);
   });
 
+  // A stacked launch knows its base the moment it starts, so the placeholder nests
+  // straight away. Waiting for the create to finish showed a sub-task as a root —
+  // at the top of the group, no less — for the seconds the git worktree takes.
+  it("nests a pending placeholder under its parent as soon as it launches", () => {
+    const parent = worktree("AK-275");
+    const pending = {
+      ...worktree("AK-277"),
+      branch: "",
+      baseBranch: parent.branch,
+      pending: true,
+    } as Worktree;
+    // Placeholders are merged ahead of the real worktrees (see `mergeWorktrees`), so
+    // the child arrives first in the list and still has to end up under its parent.
+    expect(shape([pending, parent])).toEqual([
+      ["AK-275", 0],
+      ["AK-277", 1],
+    ]);
+  });
+
   // Can't happen through the app (a base always exists before the branch that uses
   // it), but a cycle must not recurse forever or silently drop rows from the rail.
   it("still renders every worktree if the bases somehow form a cycle", () => {

@@ -169,7 +169,6 @@ export function WorktreeSidebar() {
     baseWorktree,
     activeId,
     setActive,
-    showAllAgents,
     selectedWorktrees,
     toggleWorktreeSelected,
     setWorktreeSelection,
@@ -181,16 +180,6 @@ export function WorktreeSidebar() {
   // Live Claude session state per worktree, correlated by cwd (the worktree path
   // Claude ran in).
   const sessionByPath = useSessionByPath();
-  // How many worktree sessions are blocked on the user right now — needing input
-  // or a tool-permission approval (for the "All agents" attention dot).
-  const attentionCount = useMemo(
-    () =>
-      worktrees.filter((w) => {
-        const s = effectiveSessionState(w, sessionByPath.get(w.path));
-        return s === "waiting" || s === "permission";
-      }).length,
-    [worktrees, sessionByPath],
-  );
 
   // A worktree can have several PRs over its life; treat one as "merged" (dimmed /
   // safe to delete) only when *every* PR is merged.
@@ -238,28 +227,6 @@ export function WorktreeSidebar() {
 
       <div className="flex-1 overflow-y-auto p-2">
         {baseWorktree && <BaseEntry worktree={baseWorktree} active={activeId === BASE_ID} />}
-        <button
-          type="button"
-          onClick={showAllAgents}
-          className="mb-2 flex w-full cursor-pointer items-center gap-2 rounded-[9px] px-[11px] py-2 text-left text-[12px] hover:bg-hover"
-          style={{
-            background: activeId === "" ? alpha(8) : "transparent",
-            color: activeId === "" ? "var(--accent)" : "var(--color-muted-2)",
-          }}
-        >
-          ⊞ All agents
-          <div className="ml-auto flex items-center gap-1.5">
-            {attentionCount > 0 && (
-              <span
-                title={`${attentionCount} session${attentionCount === 1 ? "" : "s"} need your attention`}
-                className="flex items-center"
-              >
-                <Dot color={sessionStateMeta.waiting.color} size={6} glow />
-              </span>
-            )}
-            <span className="font-mono text-[9.5px] text-muted-4">{worktrees.length}</span>
-          </div>
-        </button>
 
         {loading && groups.length === 0 && <SidebarSkeleton />}
 
@@ -367,8 +334,13 @@ function WorktreeEntry({
   const session = state ? sessionStateMeta[state] : undefined;
   // Dimmed only when fully merged (every PR) — a worktree with any open PR stays lit.
   const merged = prs.length > 0 && prs.every((p) => p.state === "Merged");
+  // Every card carries an edge, not just the active one. The stack connector's elbow
+  // has to *land* on something: against a borderless parent the spine appeared to
+  // start in mid-air, which is precisely the hierarchy the indent exists to show.
+  // Inactive cards use the same hairline as the connector (and as every other card
+  // in the app) so the rail reads as one system; active still wins with the accent.
   const cardStyle: CSSProperties = {
-    border: `1px solid ${active ? alpha(40) : "transparent"}`,
+    border: `1px solid ${active ? alpha(40) : "var(--color-line-2)"}`,
     background: active ? alpha(6) : "transparent",
   };
   return (

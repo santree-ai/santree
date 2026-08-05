@@ -153,6 +153,13 @@ export interface PendingLaunch {
    *  session is created with `--model`, resuming carries it, so there's nothing to
    *  store. */
   model?: string;
+  /** The branch this launch will stack on, when it's a chained one — the same base
+   *  `createWorktree` is given. Carried so the sidebar can nest the "Creating
+   *  workspace…" placeholder under its parent straight away: the stack is already
+   *  decided at launch, so waiting for the real worktree to land before indenting it
+   *  makes a sub-task look like a root for the seconds the create takes. Absent for
+   *  a root launch. */
+  baseBranch?: string;
 }
 
 /** A Reviews→Trees "Fix CI with AI" hand-off: which worktree + freshly-minted
