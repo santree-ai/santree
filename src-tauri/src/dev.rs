@@ -250,6 +250,16 @@ pub async fn dev_cancel_build(repo_path: String) -> CmdResult<bool> {
     Ok(stream::RUNS.cancel(&build_key(&root)))
 }
 
+/// Re-grid a running build's PTY to the pane showing it, so the tool wraps its
+/// remaining output — and sizes its progress bars — to the width you're actually
+/// looking at. Returns whether a build was running to re-grid.
+#[tauri::command]
+#[specta::specta]
+pub async fn dev_resize_build(repo_path: String, cols: u16, rows: u16) -> CmdResult<bool> {
+    let root = repo_root(&repo_path)?;
+    Ok(stream::RUNS.resize(&build_key(&root), cols, rows))
+}
+
 // ── Install / eject (macOS) ────────────────────────────────────────────────
 
 /// Open the newest built DMG for the drag-and-drop install. When the app runs

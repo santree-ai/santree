@@ -764,6 +764,20 @@ pub async fn cancel_setup(db: &Db, repo: &str, issue_id: &str) -> Result<bool> {
     Ok(stream::RUNS.cancel(&setup_key(&root, issue_id)))
 }
 
+/// Re-grid a running setup script's PTY to the pane showing it, so its remaining
+/// output wraps to the width on screen. Returns whether one was running.
+pub async fn resize_setup(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<bool> {
+    validate_issue_id(issue_id)?;
+    let root = repo_root(db, repo).await?;
+    Ok(stream::RUNS.resize(&setup_key(&root, issue_id), cols, rows))
+}
+
 /// Single-quote a string for a POSIX shell command line.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))

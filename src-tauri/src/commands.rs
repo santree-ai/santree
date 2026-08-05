@@ -253,6 +253,22 @@ pub async fn cancel_worktree_setup(
     Ok(worktree::cancel_setup(&db, &repo, &issue_id).await?)
 }
 
+/// Re-grid a running setup script's PTY to the pane showing it — the Setup tab
+/// reports its terminal size on mount and whenever it's resized, so the script's
+/// output wraps to the pane instead of to a fixed starting width. Returns whether a
+/// run was there to re-grid.
+#[tauri::command]
+#[specta::specta]
+pub async fn resize_worktree_setup(
+    repo: String,
+    issue_id: String,
+    cols: u16,
+    rows: u16,
+    db: State<'_, Db>,
+) -> CmdResult<bool> {
+    Ok(worktree::resize_setup(&db, &repo, &issue_id, cols, rows).await?)
+}
+
 /// Fast-forward the repo's local base branch (main/master) to origin — the
 /// "update master" action. Returns the base branch that was updated.
 #[tauri::command]

@@ -8,6 +8,7 @@
  */
 import { useState } from "react";
 
+import { commands } from "../../bindings";
 import { OutputPane } from "../../components/OutputPane";
 import { useCancelSetup } from "../../lib/queries";
 import { markStopped, setupRunKey } from "../../state/streamRuns";
@@ -21,6 +22,9 @@ export function SetupLogsView({ repo, worktreeId }: { repo: string; worktreeId: 
       runKey={setupRunKey(worktreeId)}
       label=".santree/init.sh"
       stopping={stopping}
+      // Re-grid the script's PTY to the pane so its remaining output wraps to the
+      // width on screen (see OutputPane's `onResize`).
+      onResize={(cols, rows) => void commands.resizeWorktreeSetup(repo, worktreeId, cols, rows)}
       onStop={() => {
         setStopping(true);
         cancelSetup(worktreeId, {

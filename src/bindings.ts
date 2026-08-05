@@ -130,6 +130,13 @@ export const commands = {
 	 */
 	cancelWorktreeSetup: (repo: string, issueId: string) => typedError<boolean, CmdError>(__TAURI_INVOKE("cancel_worktree_setup", { repo, issueId })),
 	/**
+	 *  Re-grid a running setup script's PTY to the pane showing it — the Setup tab
+	 *  reports its terminal size on mount and whenever it's resized, so the script's
+	 *  output wraps to the pane instead of to a fixed starting width. Returns whether a
+	 *  run was there to re-grid.
+	 */
+	resizeWorktreeSetup: (repo: string, issueId: string, cols: number, rows: number) => typedError<boolean, CmdError>(__TAURI_INVOKE("resize_worktree_setup", { repo, issueId, cols, rows })),
+	/**
 	 *  Merge the base branch into the worktree (the "pull from main/master" button).
 	 *  Errors on a conflicting merge; returns the base ref that was merged on success.
 	 */
@@ -609,6 +616,12 @@ export const commands = {
 	 *  separate teardown path to keep in sync.
 	 */
 	devCancelBuild: (repoPath: string) => typedError<boolean, CmdError>(__TAURI_INVOKE("dev_cancel_build", { repoPath })),
+	/**
+	 *  Re-grid a running build's PTY to the pane showing it, so the tool wraps its
+	 *  remaining output — and sizes its progress bars — to the width you're actually
+	 *  looking at. Returns whether a build was running to re-grid.
+	 */
+	devResizeBuild: (repoPath: string, cols: number, rows: number) => typedError<boolean, CmdError>(__TAURI_INVOKE("dev_resize_build", { repoPath, cols, rows })),
 	/**
 	 *  Open the newest built DMG for the drag-and-drop install. When the app runs
 	 *  from an installed bundle it also spawns a detached helper that waits for the

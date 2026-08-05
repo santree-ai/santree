@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use specta::Type;
 use tauri::ipc::Channel;
@@ -33,11 +33,11 @@ use tauri::ipc::Channel;
 /// normal way out. Generous: a cold `cargo build --release` is genuinely slow.
 const DEADLINE: Duration = Duration::from_secs(60 * 60);
 
-/// The PTY grid every run gets. Fixed rather than fitted to the pane: the pane can
-/// be hidden (or not yet mounted) when a run starts, and a build's output is wrapped
-/// once, at write time — a later resize can't rewrap it. 120 columns is wide enough
-/// for cargo/vite output to lay out as intended, and the view pins its own grid to
-/// the same width so the wrapping it renders is the wrapping the tool chose.
+/// The grid a run *starts* on, before any pane has reported its width — a run can be
+/// kicked off with its pane hidden or not yet mounted, so there's nothing to measure
+/// at spawn time. Once a pane is showing the run it re-grids it (see [`Runs::resize`])
+/// and this stops mattering. 120 is wide enough that a build watched entirely from a
+/// closed tab still reads correctly.
 pub const COLS: u16 = 120;
 const ROWS: u16 = 40;
 
@@ -67,6 +67,11 @@ pub static RUNS: LazyLock<Runs> = LazyLock::new(Runs::default);
 struct Run {
     id: u64,
     killer: Option<Box<dyn ChildKiller + Send + Sync>>,
+    /// The PTY master, kept so the grid can follow the pane showing it. Resizing it
+    /// is what makes the *running* tool re-wrap: it's a `TIOCSWINSZ` plus a
+    /// `SIGWINCH`, which cargo/vite re-read exactly as they would in a real terminal
+    /// being dragged wider.
+    master: Option<Box<dyn MasterPty + Send>>,
 }
 
 /// A claimed "something is running under this key" slot, held for one run's lifetime.
@@ -110,7 +115,14 @@ impl Runs {
             return None;
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        runs.insert(key.to_string(), Run { id, killer: None });
+        runs.insert(
+            key.to_string(),
+            Run {
+                id,
+                killer: None,
+                master: None,
+            },
+        );
         Some(Slot {
             runs: self,
             key: key.to_string(),
@@ -128,15 +140,48 @@ impl Runs {
     /// gone — a Stop (or an app quit) landed between the reserve and the spawn — and
     /// the caller must then kill the child it just started, since nothing else holds
     /// a handle on it.
-    fn attach(&self, slot: &Slot<'_>, killer: Box<dyn ChildKiller + Send + Sync>) -> bool {
+    fn attach(
+        &self,
+        slot: &Slot<'_>,
+        killer: Box<dyn ChildKiller + Send + Sync>,
+        master: Box<dyn MasterPty + Send>,
+    ) -> bool {
         let mut runs = self.lock();
         match runs.get_mut(&slot.key) {
             Some(run) if run.id == slot.id => {
                 run.killer = Some(killer);
+                run.master = Some(master);
                 true
             }
             _ => false,
         }
+    }
+
+    /// Re-grid a running command's PTY to match the pane showing it.
+    ///
+    /// This is the half xterm can't do for us. The view reflows its *existing* lines
+    /// on its own (nothing hard-wrapped them — the tool emits long lines whole and
+    /// the terminal wraps at render time), but a tool still drawing progress bars
+    /// sizes them to the width the kernel reports, so without this the live output
+    /// keeps arriving laid out for the old grid.
+    ///
+    /// `false` when no run is registered under `key` — the pane outlives the run, so
+    /// a resize after a build finishes is expected, not an error.
+    pub fn resize(&self, key: &str, cols: u16, rows: u16) -> bool {
+        let runs = self.lock();
+        let Some(master) = runs.get(key).and_then(|run| run.master.as_ref()) else {
+            return false;
+        };
+        // A zero dimension is a degenerate grid some tools divide by; the pane can
+        // briefly measure one while it's laying out.
+        master
+            .resize(PtySize {
+                rows: rows.max(1),
+                cols: cols.max(1),
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .is_ok()
     }
 
     /// Free a finished run's slot — but only when it's still *that* run's. A cancel
@@ -218,7 +263,11 @@ pub fn run(spec: Spec<'_>, slot: Slot<'_>, ev: &Channel<StreamEvent>) -> bool {
     }
     // Claim a colour-capable terminal — this is why we bothered with a PTY.
     cmd.env("TERM", "xterm-256color");
-    cmd.env("COLUMNS", COLS.to_string());
+    // Deliberately *not* setting COLUMNS: it's a snapshot taken at spawn, and a
+    // `SIGWINCH` can't update it. A tool that prefers the env var over the tty's own
+    // size would stay pinned to the starting grid for the whole run, which is exactly
+    // the behaviour [`Runs::resize`] exists to remove. With a real PTY on stdout,
+    // cargo/vite/tsc all ask the kernel instead, and get the live answer.
 
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
@@ -242,7 +291,9 @@ pub fn run(spec: Spec<'_>, slot: Slot<'_>, ev: &Channel<StreamEvent>) -> bool {
 
     // A Stop (or an app quit) can land between claiming the slot and getting here —
     // the registry then holds nothing that could kill this child, so stop it ourselves.
-    if !slot.runs.attach(&slot, child.clone_killer()) {
+    // The master goes in beside the killer so a pane can re-grid the run (see
+    // [`Runs::resize`]); the reader was already cloned off it above.
+    if !slot.runs.attach(&slot, child.clone_killer(), pair.master) {
         let _ = child.kill();
         let _ = child.wait();
         return false;
@@ -414,14 +465,14 @@ mod tests {
         let runs = Runs::default();
         let old = runs.reserve("k").unwrap();
         let old_killer = FakeKiller::default();
-        assert!(runs.attach(&old, old_killer.boxed()));
+        assert!(runs.attach(&old, old_killer.boxed(), test_master()));
 
         // Stop → the old run is killed and its entry dropped, so a re-run can claim.
         assert!(runs.cancel("k"));
         assert!(old_killer.killed());
         let new = runs.reserve("k").expect("re-run claims the free slot");
         let new_killer = FakeKiller::default();
-        assert!(runs.attach(&new, new_killer.boxed()));
+        assert!(runs.attach(&new, new_killer.boxed(), test_master()));
 
         // The cancelled run only now notices and finishes.
         drop(old);
@@ -470,6 +521,40 @@ mod tests {
         assert!(sent.contains("green"), "{sent}");
     }
 
+    /// A real PTY master for the registry to hold. Cheap (a pair of fds) and the
+    /// genuine type, so these tests exercise the same storage the spawner uses.
+    fn test_master() -> Box<dyn MasterPty + Send> {
+        native_pty_system()
+            .openpty(PtySize {
+                rows: ROWS,
+                cols: COLS,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty")
+            .master
+    }
+
+    /// A pane can only re-grid a run that's actually registered — and it asks on
+    /// mount, which routinely happens while looking at a *finished* build. That must
+    /// be an ordinary "no", not an error the view has to special-case.
+    #[test]
+    fn resize_reaches_a_live_run_and_ignores_a_finished_one() {
+        let runs = Runs::default();
+        assert!(!runs.resize("k", 200, 50), "no run under the key yet");
+
+        let slot = runs.reserve("k").unwrap();
+        assert!(
+            !runs.resize("k", 200, 50),
+            "reserved but not spawned — there's no pty to grid yet"
+        );
+        assert!(runs.attach(&slot, FakeKiller::default().boxed(), test_master()));
+        assert!(runs.resize("k", 200, 50), "a live run takes the new grid");
+
+        drop(slot);
+        assert!(!runs.resize("k", 200, 50), "the run is gone");
+    }
+
     /// Stop can land in the window between claiming the slot and spawning the child.
     /// `attach` then fails, which is how the spawner learns to kill what it started —
     /// nothing else holds a handle on it.
@@ -479,7 +564,7 @@ mod tests {
         let slot = runs.reserve("k").unwrap();
         assert!(runs.cancel("k"), "stopped while still spawning");
         assert!(
-            !runs.attach(&slot, FakeKiller::default().boxed()),
+            !runs.attach(&slot, FakeKiller::default().boxed(), test_master()),
             "the child has nowhere to register — its spawner must kill it"
         );
     }

@@ -442,6 +442,9 @@ function DevBuildPane({
       runKey={runKey}
       label="pnpm tauri build"
       stopping={stopping}
+      // Re-grid the build's PTY to the pane, so cargo wraps its remaining output —
+      // and draws its progress bar — to the width actually on screen.
+      onResize={(cols, rows) => void commands.devResizeBuild(repoPath, cols, rows)}
       onStop={() => {
         setStopping(true);
         void commands.devCancelBuild(repoPath).finally(() => {

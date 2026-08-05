@@ -9,25 +9,20 @@
  * `streamRuns` — so leaving the tab mid-build and coming back shows the same run
  * still going, and a finished run stays on screen until the next one starts.
  */
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import { StopIcon } from "../components/icons";
 import { XtermRenderer } from "../features/terminal/XtermRenderer";
 import { formatRelativeTime, useLiveNow } from "../lib/relativeTime";
+import { getRun } from "../state/streamRuns";
 import { useStreamRun } from "../state/useStreamRun";
 import { Button, Spinner } from "./primitives";
-
-/** Matches the PTY grid the backend runs commands under (`stream::COLS`). Pinning
- *  the view to the same width is what makes the output lay out as the tool intended:
- *  it wrapped its lines for 120 columns once, at write time, and no later resize can
- *  rewrap them. A narrower pane scrolls horizontally instead of re-wrapping into a
- *  mess. */
-const COLS = 120;
 
 export function OutputPane({
   runKey,
   label,
   onStop,
+  onResize,
   stopping = false,
 }: {
   /** Which run in `streamRuns` to show (and follow). */
@@ -36,6 +31,17 @@ export function OutputPane({
   label: string;
   /** Omit to render no Stop button (a run that can't be cancelled). */
   onStop?: () => void;
+  /**
+   * Report the pane's grid so the backend can re-grid the run's PTY to match.
+   *
+   * The view reflows the output it already has on its own — nothing hard-wrapped
+   * those lines, so widening merges them back — but a tool still writing sizes its
+   * progress bars to what the kernel tells it. Without this the live half of the log
+   * keeps arriving laid out for the starting width. Owned by the call site, like
+   * `onStop`, because the backend addresses runs by repo/worktree rather than by the
+   * `streamRuns` key this component holds.
+   */
+  onResize?: (cols: number, rows: number) => void;
   stopping?: boolean;
 }) {
   const run = useStreamRun(runKey);
@@ -45,6 +51,41 @@ export function OutputPane({
    *  generation that cursor refers to. A generation change means the buffer was
    *  replaced or trimmed, so the cursor is meaningless and we replay from zero. */
   const written = useRef({ gen: -1, count: 0 });
+  // Read the latest reporter without re-running the mount-once effect, which would
+  // tear down and rebuild the terminal.
+  const onResizeRef = useRef(onResize);
+  onResizeRef.current = onResize;
+  // Last grid reported to the backend. A ResizeObserver fires on every pixel nudge
+  // and most of those land on the same character grid, so — as in TerminalView —
+  // only a real grid change is worth an IPC round-trip and a SIGWINCH.
+  const sentRef = useRef({ cols: 0, rows: 0 });
+
+  const commitResize = useCallback((cols: number, rows: number) => {
+    if (cols <= 0 || rows <= 0) return;
+    if (cols === sentRef.current.cols && rows === sentRef.current.rows) return;
+    sentRef.current = { cols, rows };
+    onResizeRef.current?.(cols, rows);
+  }, []);
+
+  /**
+   * Re-emulate the whole transcript at the terminal's current grid.
+   *
+   * xterm's live reflow is *lossy in one direction*: its buffer holds at most
+   * `scrollback` rows, and narrowing turns each line into more rows, so the oldest
+   * content is evicted — permanently, since the buffer was the only copy inside the
+   * terminal. Widening back can't recover it. The bytes do survive, in `streamRuns`,
+   * whose cap is in characters and so doesn't move with the width; replaying them is
+   * what makes a resize lossless. Measured at ~20ms for a full 2MB transcript.
+   */
+  const replay = useCallback(
+    (term: XtermRenderer) => {
+      const run = getRun(runKey);
+      term.reset();
+      for (const chunk of run.chunks) term.write(chunk);
+      written.current = { gen: run.gen, count: run.chunks.length };
+    },
+    [runKey],
+  );
 
   // One renderer per mount. Not memoized into the module: xterm holds DOM and
   // (rationed) WebGL resources, so an unmounted pane must give them back — the
@@ -57,21 +98,52 @@ export function OutputPane({
     termRef.current = term;
     written.current = { gen: -1, count: 0 };
 
-    // Height follows the pane; width stays at the PTY's.
+    // Both dimensions follow the pane. `fit()` re-grids the terminal, which reflows
+    // what's on screen for immediate feedback; `commitResize` re-grids the PTY so the
+    // rest of the run arrives at the same width. A hidden pane measures zero, and
+    // fit() then leaves the grid alone — the activation refit picks it up on return.
+    // Seeded from the first fit rather than 0, so mounting doesn't count as a width
+    // change: the feed effect below already paints the transcript, and replaying on
+    // top of it would re-emulate the whole thing for nothing.
+    const initial = term.fit();
+    let lastCols = initial.cols;
+    commitResize(initial.cols, initial.rows);
+
+    let settle: ReturnType<typeof setTimeout> | undefined;
     const resize = () => {
-      const { rows } = term.fit();
-      term.resize(COLS, Math.max(rows, 1));
+      const { cols, rows } = term.fit();
+      commitResize(cols, rows);
+      if (cols === lastCols) return;
+      lastCols = cols;
+      // Once the drag settles, rebuild from the source bytes — xterm's own reflow got
+      // us something to look at instantly, but only a replay is lossless (see
+      // `replay`). Debounced because a drag fires this every few pixels and each
+      // replay re-emulates the entire transcript.
+      clearTimeout(settle);
+      settle = setTimeout(() => replay(term), 120);
     };
-    resize();
     const observer = new ResizeObserver(resize);
     observer.observe(host);
 
     return () => {
+      clearTimeout(settle);
       observer.disconnect();
       term.dispose();
       termRef.current = null;
     };
-  }, []);
+  }, [commitResize, replay]);
+
+  // A run started under an already-mounted pane comes up on the backend's default
+  // grid, and nothing resizes the pane afterwards to correct it. Re-send on the
+  // transition into `running` — that PTY has never been told this pane's size.
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (run.running && !wasRunning.current) {
+      const { cols, rows } = sentRef.current;
+      if (cols > 0 && rows > 0) onResizeRef.current?.(cols, rows);
+    }
+    wasRunning.current = run.running;
+  }, [run.running]);
 
   // Feed the terminal whatever it hasn't seen. Runs after every store change (and
   // once on mount, which is what replays a finished run when you come back to it).
@@ -103,8 +175,9 @@ export function OutputPane({
           </Button>
         )}
       </div>
-      {/* The grid is a fixed 120 columns wide (see COLS) — let it scroll rather
-          than squeeze. `min-h-0` so the flex child can actually shrink. */}
+      {/* The grid is fitted to this box, so nothing should overflow horizontally —
+          `overflow-auto` stays for the odd line a tool draws past the width it was
+          told. `min-h-0` so the flex child can actually shrink. */}
       <div ref={hostRef} className="min-h-0 flex-1 overflow-auto px-2 py-1" />
     </div>
   );
