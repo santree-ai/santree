@@ -20,10 +20,11 @@ use std::time::{Duration, Instant};
 
 use crate::settings;
 
-/// Hard ceiling on a single headless agent call. Claude normally answers in
+/// Default ceiling on a single headless agent call. Claude normally answers in
 /// 5–30s; this only fires when it hangs, so the UI spinner can't wait forever and
-/// a blocking-pool thread can't leak.
-const AGENT_TIMEOUT: Duration = Duration::from_secs(120);
+/// a blocking-pool thread can't leak. Callers whose work legitimately runs longer
+/// pass their own via [`run_print_within`].
+pub const AGENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long to wait for a pipe to reach EOF once the child is gone, before taking
 /// whatever was read so far and moving on. A grandchild that inherited the pipe
@@ -104,12 +105,30 @@ pub fn run_print(
     allowed_tools: &[&str],
     model: Option<&str>,
 ) -> Option<String> {
+    run_print_within(cwd, prompt, allowed_tools, model, AGENT_TIMEOUT)
+}
+
+/// [`run_print`] with an explicit deadline, for the calls [`AGENT_TIMEOUT`] isn't
+/// sized for.
+///
+/// That ceiling assumes this module's original shape of work: a small prompt and a
+/// one-line answer, where two minutes only ever elapses because something hung. A
+/// call that reads tens of thousands of tokens and writes a structured answer
+/// spends minutes legitimately, and killing it at 120s isn't a safety net — it's a
+/// guaranteed failure the user pays for and waits out.
+pub fn run_print_within(
+    cwd: &Path,
+    prompt: &str,
+    allowed_tools: &[&str],
+    model: Option<&str>,
+    timeout: Duration,
+) -> Option<String> {
     let bin = settings::discover_binary("claude")?;
 
     let mut cmd = Command::new(bin);
     cmd.current_dir(cwd).args(build_args(allowed_tools, model));
 
-    let (status, stdout, stderr) = run_with_timeout(cmd, prompt, AGENT_TIMEOUT)?;
+    let (status, stdout, stderr) = run_with_timeout(cmd, prompt, timeout)?;
     if !status.success() {
         log::warn!(
             "claude -p failed ({status}): {}",

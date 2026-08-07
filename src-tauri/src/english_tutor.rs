@@ -17,6 +17,7 @@
 //! an existing practice history carries straight over.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{Local, NaiveDate};
@@ -41,6 +42,16 @@ pub const ANALYSIS_MODEL_KEY: &str = "english_tutor_model";
 /// produces a confident-sounding list that isn't grounded in the log. A wrong
 /// priority order is worse than none, because the user acts on it.
 const DEFAULT_ANALYSIS_MODEL: &str = "sonnet";
+
+/// Ceiling on one analysis run.
+///
+/// Deliberately far above [`agent::AGENT_TIMEOUT`]: that 120s default is sized for
+/// a one-line commit message, and a thousand corrections in with a structured
+/// answer out ran straight past it (observed: killed at exactly 120s with empty
+/// stderr, which reads as "Claude returned nothing" rather than as a deadline).
+/// This is a button the user pressed and is watching a spinner for, so the ceiling
+/// only needs to be short enough that a genuinely hung call can't wait forever.
+const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Byte budget for the log text handed to the analysis. ~4× a log of a thousand
 /// entries, so in practice nothing is cut; if it ever is, the **newest** entries
@@ -349,9 +360,13 @@ pub async fn analyze(db: &Db, scope: AnalysisScope) -> Result<EnglishAnalysis> {
         .parent()
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("log path has no parent directory"))?;
-    let text = tokio::task::spawn_blocking(move || agent::run_print(&cwd, &prompt, &[], Some(&model)))
-        .await?
-        .ok_or_else(|| anyhow!("Claude didn't return an analysis — see the app log for why"))?;
+    let text = tokio::task::spawn_blocking(move || {
+        agent::run_print_within(&cwd, &prompt, &[], Some(&model), ANALYSIS_TIMEOUT)
+    })
+    .await?
+    .ok_or_else(|| {
+        anyhow!("Claude didn't finish the analysis — it may have timed out. See santree.log, and try a narrower window if the log is large.")
+    })?;
 
     let analysis = EnglishAnalysis {
         text,
