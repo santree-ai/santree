@@ -17,8 +17,8 @@ use tauri_specta::Event;
 use santree_core::{
     config,
     domain::{
-        AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, CheckLog, EnglishAnalysis,
-        EnglishLog, FileSource,
+        AgentAuth, AgentDef, AgentKind, AgentSession, AnalysisScope, ChangedFile, CheckLog,
+        EnglishAnalysis, EnglishLog, FileSource,
         GithubStatus, LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewInlineComment,
         NewPr, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewBrief,
         ReviewEvent, ReviewInbox, Reviewer, ReviewTarget, ScriptInfo, SessionState,
@@ -1145,12 +1145,16 @@ pub async fn english_analysis(db: State<'_, Db>) -> CmdResult<Option<EnglishAnal
     Ok(english_tutor::stored(&db).await?)
 }
 
-/// Analyze the practice log and store the result, replacing any previous one.
-/// Explicit and user-triggered — this is a paid model call, never automatic.
+/// Analyze `scope` of the practice log and store the result, replacing any
+/// previous one. Explicit and user-triggered — this is a paid model call, never
+/// automatic.
 #[tauri::command]
 #[specta::specta]
-pub async fn run_english_analysis(db: State<'_, Db>) -> CmdResult<EnglishAnalysis> {
-    Ok(english_tutor::analyze(&db).await?)
+pub async fn run_english_analysis(
+    db: State<'_, Db>,
+    scope: AnalysisScope,
+) -> CmdResult<EnglishAnalysis> {
+    Ok(english_tutor::analyze(&db, scope).await?)
 }
 
 /// Every santree-launched session's live token/context usage, captured from the

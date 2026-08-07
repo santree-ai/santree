@@ -516,13 +516,19 @@ export const commands = {
 	 *  current count to see how stale it is.
 	 */
 	entryCount: number | null,
+	/**
+	 *  Which slice of the log this run covered, so the UI can say what the advice
+	 *  is actually about.
+	 */
+	scope: AnalysisScope,
 	createdAtMs: number | null,
 } | null, CmdError>(__TAURI_INVOKE("english_analysis")),
 	/**
-	 *  Analyze the practice log and store the result, replacing any previous one.
-	 *  Explicit and user-triggered — this is a paid model call, never automatic.
+	 *  Analyze `scope` of the practice log and store the result, replacing any
+	 *  previous one. Explicit and user-triggered — this is a paid model call, never
+	 *  automatic.
 	 */
-	runEnglishAnalysis: () => typedError<EnglishAnalysis, CmdError>(__TAURI_INVOKE("run_english_analysis")),
+	runEnglishAnalysis: (scope: AnalysisScope) => typedError<EnglishAnalysis, CmdError>(__TAURI_INVOKE("run_english_analysis", { scope })),
 	/**
 	 *  The current state of every Claude session santree has launched, as recorded
 	 *  live by the injected hooks. Most-recently-updated first.
@@ -889,6 +895,20 @@ export type AgentState =
 /**  The session ended (SessionEnd). */
 "exited";
 
+/**  How much of the log an analysis run covers. */
+export type AnalysisScope = 
+/**  The last 7 days — what's going wrong right now. */
+"LastWeek" | 
+/**  The last 30 days — current habits, with enough volume to be real. */
+"LastMonth" | 
+/**
+ *  Everything added since the previous analysis. Falls back to the whole log
+ *  when there isn't one.
+ */
+"SinceLast" | 
+/**  The whole log — trends, and what's actually been retired. */
+"Everything";
+
 /**
  *  One entry in a worktree's working-tree status — a file with uncommitted
  *  changes, as shown in the commit box. `staged` reflects whether the index
@@ -1058,21 +1078,61 @@ export type EnglishAnalysis = {
 	 *  current count to see how stale it is.
 	 */
 	entryCount: number | null,
+	/**
+	 *  Which slice of the log this run covered, so the UI can say what the advice
+	 *  is actually about.
+	 */
+	scope: AnalysisScope,
 	createdAtMs: number | null,
 };
 
+/**  One day's corrections, under a single `## YYYY-MM-DD` heading. */
+export type EnglishDay = {
+	/**
+	 *  ISO `YYYY-MM-DD`, exactly as stored. A *calendar* date, not an instant —
+	 *  it deliberately doesn't cross as epoch-ms, because there's no defensible
+	 *  time-of-day to attach to it. The frontend formats it for display.
+	 */
+	date: string,
+	entries: EnglishEntry[],
+};
+
 /**
- *  The English tutor's practice log: every correction the agent has appended,
- *  verbatim. Shown read-only — the file belongs to the agent that writes it, and a
- *  hand-edit racing an in-flight append would lose one of the two.
+ *  One correction from the practice log, split into its parts so the UI can
+ *  render it as a change rather than as a line of text.
+ */
+export type EnglishEntry = {
+	/**  What the user wrote. */
+	original: string,
+	/**  What it should have been. */
+	correction: string,
+	/**
+	 *  The rule, in the agent's own words. Free text — empty when the line
+	 *  carried no `(reason)`.
+	 */
+	reason: string,
+};
+
+/**
+ *  The English tutor's practice log, parsed. Read-only — the file belongs to the
+ *  agent that writes it, and a hand-edit racing an in-flight append would lose one
+ *  of the two.
  */
 export type EnglishLog = {
 	/**  Absolute path, surfaced so the user can open the file themselves. */
 	path: string,
-	/**  The whole file, markdown. */
-	text: string,
-	/**  Corrections in the log — the `- ` bullets, not the date headings. */
+	/**
+	 *  Days oldest-first, matching the file. The UI reverses for display; the
+	 *  analysis wants them in this order.
+	 */
+	days: EnglishDay[],
+	/**  Corrections across every day. */
 	entryCount: number | null,
+	/**
+	 *  Lines that looked like content but didn't parse. Surfaced rather than
+	 *  swallowed: a parser that quietly hides entries is worse than no parser.
+	 */
+	unparsed: number | null,
 	/**  Last-modified time (epoch ms); `None` when the filesystem won't say. */
 	updatedAtMs: number | null,
 };

@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type {
   AgentKind,
+  AnalysisScope,
   ChangedFile,
   DevTodo,
   NewInlineComment,
@@ -2429,11 +2430,11 @@ export const useEnglishAnalysis = () =>
     staleTime: SETTING_STALE_TIME,
   });
 
-/** Analyze the practice log and store the result. A real (paid) model call that
- *  takes tens of seconds, so it's only ever fired by the Analyze button. */
+/** Analyze one scope of the practice log and store the result. A real (paid) model
+ *  call that takes tens of seconds, so it's only ever fired by an Analyze button. */
 export const useRunEnglishAnalysis = () =>
   useActionMutation({
-    mutationFn: () => unwrap(commands.runEnglishAnalysis()),
+    mutationFn: (scope: AnalysisScope) => unwrap(commands.runEnglishAnalysis(scope)),
     invalidate: () => [queryKeys.englishAnalysis],
   });
 

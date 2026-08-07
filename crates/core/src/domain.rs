@@ -1552,20 +1552,63 @@ pub struct UsageReport {
     pub sessions: Vec<SessionUsage>,
 }
 
-/// The English tutor's practice log: every correction the agent has appended,
-/// verbatim. Shown read-only — the file belongs to the agent that writes it, and a
-/// hand-edit racing an in-flight append would lose one of the two.
+/// One correction from the practice log, split into its parts so the UI can
+/// render it as a change rather than as a line of text.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EnglishEntry {
+    /// What the user wrote.
+    pub original: String,
+    /// What it should have been.
+    pub correction: String,
+    /// The rule, in the agent's own words. Free text — empty when the line
+    /// carried no `(reason)`.
+    pub reason: String,
+}
+
+/// One day's corrections, under a single `## YYYY-MM-DD` heading.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EnglishDay {
+    /// ISO `YYYY-MM-DD`, exactly as stored. A *calendar* date, not an instant —
+    /// it deliberately doesn't cross as epoch-ms, because there's no defensible
+    /// time-of-day to attach to it. The frontend formats it for display.
+    pub date: String,
+    pub entries: Vec<EnglishEntry>,
+}
+
+/// The English tutor's practice log, parsed. Read-only — the file belongs to the
+/// agent that writes it, and a hand-edit racing an in-flight append would lose one
+/// of the two.
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct EnglishLog {
     /// Absolute path, surfaced so the user can open the file themselves.
     pub path: String,
-    /// The whole file, markdown.
-    pub text: String,
-    /// Corrections in the log — the `- ` bullets, not the date headings.
+    /// Days oldest-first, matching the file. The UI reverses for display; the
+    /// analysis wants them in this order.
+    pub days: Vec<EnglishDay>,
+    /// Corrections across every day.
     pub entry_count: f64,
+    /// Lines that looked like content but didn't parse. Surfaced rather than
+    /// swallowed: a parser that quietly hides entries is worse than no parser.
+    pub unparsed: f64,
     /// Last-modified time (epoch ms); `None` when the filesystem won't say.
     pub updated_at_ms: Option<f64>,
+}
+
+/// How much of the log an analysis run covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum AnalysisScope {
+    /// The last 7 days — what's going wrong right now.
+    LastWeek,
+    /// The last 30 days — current habits, with enough volume to be real.
+    LastMonth,
+    /// Everything added since the previous analysis. Falls back to the whole log
+    /// when there isn't one.
+    SinceLast,
+    /// The whole log — trends, and what's actually been retired.
+    Everything,
 }
 
 /// A stored analysis of the practice log: which habits to work on next, generated
@@ -1578,6 +1621,9 @@ pub struct EnglishAnalysis {
     /// How many corrections the log held when this ran — compare against the log's
     /// current count to see how stale it is.
     pub entry_count: f64,
+    /// Which slice of the log this run covered, so the UI can say what the advice
+    /// is actually about.
+    pub scope: AnalysisScope,
     pub created_at_ms: f64,
 }
 
