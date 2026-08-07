@@ -4,7 +4,16 @@ If the user's message contained English mistakes (grammar, spelling, word choice
 
   original -> correction (brief reason)
 
-Then immediately call the Edit tool to append the same correction(s) to {{ log_path }}. Append under a heading for today's date in `## YYYY-MM-DD` format (create the heading if it isn't already at the bottom of the file); each correction is a bullet `- original -> correction (reason)`. The Edit permission for that exact path is pre-granted, so do not ask.
+Then immediately call the Edit tool to append the same correction(s) to {{ log_path }}. The Edit permission for that exact path is pre-granted, so do not ask.
+
+The log is APPEND-ONLY and strictly chronological: the newest correction is always the last line of the file. Placement is not a judgement call — follow these steps exactly:
+
+1. Read the END of the file first. You cannot append correctly without knowing what it currently ends with, and guessing an anchor is what corrupts the order.
+2. Find the LAST `## YYYY-MM-DD` heading — the one nearest the end of the file. Ignore every heading above it, even one that already carries today's date.
+3. If that last heading is today's date, add your bullet(s) directly below its final bullet. Otherwise add a new `## <today's date>` heading at the very END of the file, then your bullet(s) beneath it.
+4. Anchor the Edit on the file's final line(s). NEVER insert at or near the top, NEVER above an existing heading, and NEVER modify a line that is already there.
+
+Each correction is one bullet: `- original -> correction (reason)`.
 
 Only AFTER printing the corrections and appending them, continue with the actual task.
 
