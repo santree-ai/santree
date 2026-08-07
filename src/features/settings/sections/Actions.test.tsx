@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { TriageActionSection } from "./Actions";
+import { ReviewActionSection, TriageActionSection } from "./Actions";
 
 // Settings → Actions is a leaf view over the settings hooks: mock the data layer
 // (and AppContext) so the panel can render without a Tauri backend.
@@ -14,6 +14,9 @@ vi.mock("../../../lib/queries", () => ({
   INVESTIGATE_EFFORT_KEY: "investigate.effort",
   INVESTIGATE_MODEL_KEY: "investigate.model",
   INVESTIGATE_REMOTE_CONTROL_KEY: "investigate.remoteControl",
+  REVIEW_BRIEF_MODEL_KEY: "review.briefModel",
+  REVIEW_EFFORT_KEY: "review.effort",
+  REVIEW_MODEL_KEY: "review.model",
   TRIAGE_GOOD_CITIZEN_KEY: "triage.goodCitizen",
   TRIAGE_SNOOZED_KEY: "triage.snoozed",
   WORK_AGENT_KEY: "work.agent",
@@ -63,5 +66,25 @@ describe("app-scope Triage settings", () => {
 
     for (const select of screen.getAllByRole("combobox")) expect(select).toBeEnabled();
     for (const s of screen.getAllByRole("switch")) expect(s).toBeEnabled();
+  });
+});
+
+describe("app-scope Reviews settings", () => {
+  it("offers no agent picker, since the review session is Claude-only", () => {
+    // The read-only guarantee rests on a Claude `--settings` deny-list, so the
+    // launch path ignores any other agent — a picker here would be a control that
+    // silently does nothing.
+    render(<ReviewActionSection />);
+    expect(screen.queryByText("Agent")).not.toBeInTheDocument();
+  });
+
+  it("configures the session and the brief separately", () => {
+    render(<ReviewActionSection />);
+    expect(screen.getByText("Ask AI session")).toBeInTheDocument();
+    expect(screen.getByText("Review brief")).toBeInTheDocument();
+    // Session: model + effort. Brief: model only — it's one headless call, with no
+    // effort or start mode to set.
+    expect(screen.getAllByText("Model")).toHaveLength(2);
+    expect(screen.getAllByText("Effort")).toHaveLength(1);
   });
 });

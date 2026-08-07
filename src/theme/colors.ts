@@ -16,8 +16,10 @@ import type {
   MergeQueueState,
   Priority,
   PrState,
+  ReadingRole,
   ReviewDecision,
   TaskStatus,
+  WatchOutKind,
 } from "../bindings";
 
 /** Raw palette — kept in sync with the `@theme` tokens in styles.css. */
@@ -116,6 +118,57 @@ export const checkRollupMeta: Record<CheckRollup, { color: string; glyph: string
     Pending: { color: palette.amber, glyph: "◴", label: "checks running" },
     None: { color: palette.slate, glyph: "–", label: "no checks" },
   };
+
+/**
+ * Color for "this has been waiting on you for N days".
+ *
+ * The thresholds are the point of the chip, so they live here rather than being
+ * spelled inline: under a day is fine, a couple of days is a nudge, and past three
+ * the PR's author is blocked on you. Muted below a day so a healthy inbox isn't a
+ * wall of color — only the ones that have actually aged pick up a tint.
+ */
+export function reviewAgeColor(days: number): string {
+  if (days < 1) return palette.muted;
+  if (days <= 3) return palette.amber;
+  return palette.red;
+}
+
+/** Color for the review-effort size chip: the small ones read as "you could do
+ *  this now", the big ones as "block out time". */
+export const prSizeColor: Record<"XS" | "S" | "M" | "L" | "XL", string> = {
+  XS: palette.green,
+  S: palette.green,
+  M: palette.slate,
+  L: palette.amber,
+  XL: palette.red,
+};
+
+/**
+ * Label + color for a reading-order step's role.
+ *
+ * The three skimmable roles share one muted tone deliberately: the reading order's
+ * job is to say where attention goes, and painting "generated" the same grey as
+ * "trivial" is the visual form of "you don't need to read these closely".
+ */
+export const readingRoleMeta: Record<ReadingRole, { label: string; color: string }> = {
+  entryPoint: { label: "start here", color: palette.indigo },
+  coreLogic: { label: "core", color: palette.blue },
+  test: { label: "tests", color: palette.green },
+  config: { label: "config", color: palette.muted },
+  generated: { label: "generated", color: palette.muted },
+  trivial: { label: "skim", color: palette.muted },
+};
+
+/** Label + color for a watch-out's kind. `question` is neutral on purpose — it's
+ *  the model saying "I can't tell", which must not read like a found defect. */
+export const watchOutMeta: Record<WatchOutKind, { label: string; color: string }> = {
+  correctness: { label: "correctness", color: palette.red },
+  security: { label: "security", color: palette.red },
+  performance: { label: "perf", color: palette.amber },
+  testing: { label: "tests", color: palette.amber },
+  style: { label: "style", color: palette.slate },
+  question: { label: "question", color: palette.cyan },
+};
 
 /** Badge for a PR sitting in the repo's merge queue (GitHub's "Queued" state).
  *  Attention-yellow, matching the reserved merge-queue color noted above. */

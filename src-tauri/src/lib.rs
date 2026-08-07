@@ -8,6 +8,7 @@ mod commands;
 mod commit_draft;
 mod db;
 mod dev;
+mod english_tutor;
 mod env;
 mod error;
 mod git;
@@ -23,6 +24,7 @@ mod pr;
 mod pricing;
 mod prompts;
 mod repo;
+mod review_ai;
 mod reviewed;
 mod reviews;
 mod session;
@@ -111,10 +113,22 @@ fn specta_builder() -> AppBuilder {
             commands::pr_reviewers,
             commands::worktree_prs,
             commands::reviews,
+            commands::pr_tickets,
+            commands::review_workspace,
+            commands::remove_review_workspace,
+            commands::review_prompt,
+            commands::pr_review_brief,
+            commands::generate_pr_review_brief,
             commands::merge_queue,
             commands::pr_detail,
             commands::pr_repo_labels,
             commands::set_pr_labels,
+            commands::add_pr_inline_comment,
+            commands::reply_to_pr_thread,
+            commands::set_pr_thread_resolved,
+            commands::submit_pr_review,
+            commands::discard_pr_review,
+            commands::add_pr_comment,
             commands::pr_check_log,
             commands::pr_file_source,
             commands::reviewed_files,
@@ -130,6 +144,10 @@ fn specta_builder() -> AppBuilder {
             commands::triage_add_comment,
             commands::claude_hook_settings,
             commands::claude_hook_settings_no_git,
+            commands::claude_hook_settings_review,
+            commands::english_log,
+            commands::english_analysis,
+            commands::run_english_analysis,
             commands::session_states,
             commands::session_usage_live,
             commands::triage_schedule,
@@ -547,6 +565,9 @@ pub fn run() {
                         Ok(0) => {}
                         Ok(n) => log::info!("pruned {n} reviewed-file mark(s) from stale PRs"),
                         Err(e) => log::warn!("reviewed-file prune failed: {e:#}"),
+                    }
+                    if let Err(e) = review_ai::gc(&db).await {
+                        log::warn!("review-brief sweep failed: {e:#}");
                     }
                 });
             }

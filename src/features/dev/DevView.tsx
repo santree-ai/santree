@@ -74,15 +74,19 @@ export function DevView() {
 
   const repoPath = useSetting("app", DEV_REPO_PATH_KEY);
 
-  return (
-    <ViewChrome>
-      {!enabled || !repoPath.isFetched ? null : repoPath.data ? (
-        <DevContent repoPath={repoPath.data} />
-      ) : (
+  // `DevContent` mounts its own chrome rather than being wrapped here: the bug
+  // list is the view's left column, and it goes through `ViewChrome`'s `sidebar`
+  // (so the top bar's divider lines up with it) — which needs the send handler
+  // that lives inside `DevContent`.
+  if (!enabled || !repoPath.isFetched) return <ViewChrome>{null}</ViewChrome>;
+  if (!repoPath.data) {
+    return (
+      <ViewChrome>
         <PickRepo />
-      )}
-    </ViewChrome>
-  );
+      </ViewChrome>
+    );
+  }
+  return <DevContent repoPath={repoPath.data} />;
 }
 
 /** Pick + validate the santree checkout; stores its git toplevel. */
@@ -202,10 +206,11 @@ function DevContent({ repoPath }: { repoPath: string }) {
   );
 
   return (
-    <div className="flex min-h-0 flex-1">
-      <aside className="flex w-[340px] flex-none flex-col border-r border-line">
-        <TodoPanel onSend={sendTodo} />
-      </aside>
+    // The bug list is a plain panel, not a navigable tree, so the repo switcher
+    // stays in the top bar rather than becoming a header above it — but the
+    // column itself is ViewChrome's, which is what puts its right edge under the
+    // top bar's divider (and gets it the shared width, resizer and collapse).
+    <ViewChrome repoInTopBar sidebar={<TodoPanel onSend={sendTodo} />}>
       <div className="flex min-w-0 flex-1 flex-col">
         <DevBar
           repoPath={repoPath}
@@ -233,7 +238,7 @@ function DevContent({ repoPath }: { repoPath: string }) {
           )}
         </div>
       </div>
-    </div>
+    </ViewChrome>
   );
 }
 

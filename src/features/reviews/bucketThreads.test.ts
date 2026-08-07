@@ -5,11 +5,15 @@ import { bucketThreads } from "./bucketThreads";
 
 function thread(over: Partial<PrThread> = {}): PrThread {
   return {
+    id: "T_1",
+    replyToId: "1",
     path: "a.ts",
     line: 10,
     onRight: true,
     isResolved: false,
     isOutdated: false,
+    viewerCanResolve: true,
+    viewerCanUnresolve: false,
     comments: [],
     ...over,
   };

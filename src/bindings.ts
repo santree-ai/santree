@@ -295,6 +295,63 @@ export const commands = {
 	 */
 	reviews: (repo: string) => typedError<ReviewInbox, CmdError>(__TAURI_INVOKE("reviews", { repo })),
 	/**
+	 *  Resolve Linear identifiers to `(project, title)` so the Reviews sidebar can
+	 *  group PRs by project. Empty when no Linear org is connected — the sidebar then
+	 *  simply offers no project grouping.
+	 */
+	prTickets: (repo: string, ids: string[]) => typedError<TicketRef[], CmdError>(__TAURI_INVOKE("pr_tickets", { repo, ids })),
+	/**
+	 *  Find-or-create the read-only checkout of a PR's head for an AI review session
+	 *  to read real code in — a detached worktree under `.santree/reviews/`, pruned to
+	 *  the few most recent. `None` when the PR lives in a repo the active santree repo
+	 *  isn't a clone of; the session then runs diff-only.
+	 */
+	reviewWorkspace: (repo: string, target: ReviewTarget) => typedError<string | null, CmdError>(__TAURI_INVOKE("review_workspace", { repo, target })),
+	/**  Delete a PR's review checkout. Idempotent. */
+	removeReviewWorkspace: (repo: string, number: number) => typedError<null, CmdError>(__TAURI_INVOKE("remove_review_workspace", { repo, number })),
+	/**
+	 *  Render the AI-review opening prompt for a PR (its description, conversation and
+	 *  diff around the `review` template), write it to a file, and return that file's
+	 *  **path** — the terminal seeds `Read <path> …` with it, since a whole PR diff is
+	 *  far too large for a shell seed. The Reviews analog of [`investigate_prompt`].
+	 */
+	reviewPrompt: (repo: string, target: ReviewTarget) => typedError<string, CmdError>(__TAURI_INVOKE("review_prompt", { repo, target })),
+	/**
+	 *  The cached AI review brief for a PR (summary, reading order, watch-outs), or
+	 *  `None` when none has been generated. A single row read — the panel renders its
+	 *  "generate" state off this without waiting on any model.
+	 */
+	prReviewBrief: (prRepo: string, number: number) => typedError<{
+	summary: string,
+	readingOrder: ReadingStep[],
+	/**  Empty is a real answer, not a failure: a PR that reads clean *is* clean. */
+	watchOuts: WatchOut[],
+	questions: string[],
+	/**
+	 *  The diff didn't fit the prompt budget, so the brief covers only part of the
+	 *  PR. Surfaced in the UI — a silent cap reads as full coverage.
+	 */
+	truncated: boolean,
+	/**
+	 *  The head commit this was generated against. When it no longer matches the
+	 *  PR's head, the UI offers a regenerate rather than quietly showing stale
+	 *  advice about code that has since changed.
+	 */
+	headSha: string,
+	/**
+	 *  Epoch ms this was generated, for the "generated 2h ago" line — raw, so the
+	 *  frontend can tick it live. `f64` (not `i64`) because Specta forbids
+	 *  exporting 64-bit ints; epoch ms are exact in an `f64` for millennia.
+	 */
+	generatedAtMs: number | null,
+} | null, CmdError>(__TAURI_INVOKE("pr_review_brief", { prRepo, number })),
+	/**
+	 *  Generate (and cache) the AI review brief for a PR. The expensive one — a
+	 *  headless model call over the PR's diff, taking tens of seconds. Read-only: it
+	 *  produces a document and nothing else.
+	 */
+	generatePrReviewBrief: (repo: string, target: ReviewTarget) => typedError<ReviewBrief, CmdError>(__TAURI_INVOKE("generate_pr_review_brief", { repo, target })),
+	/**
 	 *  The merge queue for the active `repo`'s default branch — the ordered list of
 	 *  PRs waiting to merge, so the user can see where their own PRs sit. `None` when
 	 *  `gh` isn't authenticated or the repo has no merge queue enabled.
@@ -321,6 +378,33 @@ export const commands = {
 	 *  overwritten, so an empty list clears them), returning the resulting labels.
 	 */
 	setPrLabels: (owner: string, name: string, number: number, labels: string[]) => typedError<PrLabel[], CmdError>(__TAURI_INVOKE("set_pr_labels", { owner, name, number, labels })),
+	/**
+	 *  Leave an inline review comment on a PR line — GitHub's `+` button on a diff
+	 *  row. Posted immediately, or held in the viewer's pending review when
+	 *  `pending` is set ("Start a review" / "Add to review").
+	 * 
+	 *  Every write path here is the **user** acting. The AI review surfaces get no
+	 *  command that posts anything (and launch under a deny list) — comments,
+	 *  approvals and change-requests go out under the user's name, so the user
+	 *  writes them.
+	 */
+	addPrInlineComment: (comment: NewInlineComment) => typedError<null, CmdError>(__TAURI_INVOKE("add_pr_inline_comment", { comment })),
+	/**
+	 *  Reply under an existing inline review thread. `reply_to_id` is the thread's
+	 *  [`PrThread::reply_to_id`] — GitHub threads replies off the root comment.
+	 */
+	replyToPrThread: (prRepo: string, number: number, replyToId: string, body: string) => typedError<null, CmdError>(__TAURI_INVOKE("reply_to_pr_thread", { prRepo, number, replyToId, body })),
+	/**  Mark an inline review thread resolved, or reopen it. */
+	setPrThreadResolved: (threadId: string, resolved: boolean) => typedError<null, CmdError>(__TAURI_INVOKE("set_pr_thread_resolved", { threadId, resolved })),
+	/**
+	 *  Submit the viewer's pending review — its draft comments become visible and the
+	 *  verdict lands on the PR.
+	 */
+	submitPrReview: (reviewId: string, event: ReviewEvent, body: string) => typedError<null, CmdError>(__TAURI_INVOKE("submit_pr_review", { reviewId, event, body })),
+	/**  Discard the viewer's pending review and every draft comment in it. */
+	discardPrReview: (reviewId: string) => typedError<null, CmdError>(__TAURI_INVOKE("discard_pr_review", { reviewId })),
+	/**  Post a top-level comment on a PR's conversation (not anchored to a diff line). */
+	addPrComment: (prRepo: string, number: number, body: string) => typedError<null, CmdError>(__TAURI_INVOKE("add_pr_comment", { prRepo, number, body })),
 	/**
 	 *  The raw job log for a failed GitHub Actions check, fetched on demand when the
 	 *  user expands the check — sliced to the failing step and classified so the UI
@@ -399,8 +483,9 @@ export const commands = {
 	 *  the context-fill bar and captures live usage into the db). Both are always
 	 *  present — capture is unconditional; whether the app *displays* the inline
 	 *  usage bar is a runtime frontend decision. `None` when the hook binary/db can't
-	 *  be resolved — the frontend then launches without the flag. The content is
-	 *  setting-independent, so the frontend caches the path forever.
+	 *  be resolved — the frontend then launches without the flag. Its content depends
+	 *  only on the English-tutor setting, so the frontend caches the path until that
+	 *  one flips.
 	 */
 	claudeHookSettings: () => __TAURI_INVOKE<string | null>("claude_hook_settings"),
 	/**
@@ -410,6 +495,34 @@ export const commands = {
 	 *  Trees). `None` when the hook binary/db can't be resolved.
 	 */
 	claudeHookSettingsNoGit: () => __TAURI_INVOKE<string | null>("claude_hook_settings_no_git"),
+	/**
+	 *  The `--settings` file an **AI review** session launches with: everything
+	 *  [`claude_hook_settings_no_git`] denies, plus every `gh` route that could post a
+	 *  comment, approve, or otherwise speak as the user on a PR. `None` when the hook
+	 *  binary/db can't be resolved.
+	 */
+	claudeHookSettingsReview: () => __TAURI_INVOKE<string | null>("claude_hook_settings_review"),
+	/**
+	 *  The English tutor's practice log, read-only. Creates the file when it's missing,
+	 *  so a fresh install shows an empty log rather than an error.
+	 */
+	englishLog: () => typedError<EnglishLog, CmdError>(__TAURI_INVOKE("english_log")),
+	/**  The stored analysis of the practice log, or `None` if it's never been run. */
+	englishAnalysis: () => typedError<{
+	/**  The model's answer, markdown. */
+	text: string,
+	/**
+	 *  How many corrections the log held when this ran — compare against the log's
+	 *  current count to see how stale it is.
+	 */
+	entryCount: number | null,
+	createdAtMs: number | null,
+} | null, CmdError>(__TAURI_INVOKE("english_analysis")),
+	/**
+	 *  Analyze the practice log and store the result, replacing any previous one.
+	 *  Explicit and user-triggered — this is a paid model call, never automatic.
+	 */
+	runEnglishAnalysis: () => typedError<EnglishAnalysis, CmdError>(__TAURI_INVOKE("run_english_analysis")),
 	/**
 	 *  The current state of every Claude session santree has launched, as recorded
 	 *  live by the injected hooks. Most-recently-updated first.
@@ -934,6 +1047,37 @@ export type DevTodo = {
 };
 
 /**
+ *  A stored analysis of the practice log: which habits to work on next, generated
+ *  on demand rather than on session start.
+ */
+export type EnglishAnalysis = {
+	/**  The model's answer, markdown. */
+	text: string,
+	/**
+	 *  How many corrections the log held when this ran — compare against the log's
+	 *  current count to see how stale it is.
+	 */
+	entryCount: number | null,
+	createdAtMs: number | null,
+};
+
+/**
+ *  The English tutor's practice log: every correction the agent has appended,
+ *  verbatim. Shown read-only — the file belongs to the agent that writes it, and a
+ *  hand-edit racing an in-flight append would lose one of the two.
+ */
+export type EnglishLog = {
+	/**  Absolute path, surfaced so the user can open the file themselves. */
+	path: string,
+	/**  The whole file, markdown. */
+	text: string,
+	/**  Corrections in the log — the `- ` bullets, not the date headings. */
+	entryCount: number | null,
+	/**  Last-modified time (epoch ms); `None` when the filesystem won't say. */
+	updatedAtMs: number | null,
+};
+
+/**
  *  The old (HEAD) and new (working-tree) full contents of a file, used by the
  *  diff viewer to expand unchanged context above/below a hunk (GitHub-style).
  *  Either side is empty when it doesn't exist (added vs. deleted).
@@ -1073,6 +1217,46 @@ export type ModelUsage = {
 	totals: UsageTotals,
 };
 
+/**
+ *  A new inline review comment the **user** is leaving on a diff line.
+ * 
+ *  One struct rather than nine arguments (specta caps a command's arity), and it
+ *  keeps the two ways GitHub lets you leave an inline comment — post it now, or
+ *  stack it into a pending review — as one shape that differs by a flag.
+ */
+export type NewInlineComment = {
+	/**  "owner/name" — the PR's own repo, which need not be the active one. */
+	prRepo: string,
+	number: number,
+	/**  The PR's GraphQL node id — what a *new* pending review is opened against. */
+	prId: string,
+	/**
+	 *  Head commit the comment anchors to. GitHub rejects a comment whose commit
+	 *  isn't the one the line numbers refer to, so this is not optional.
+	 */
+	headSha: string,
+	path: string,
+	/**
+	 *  Line number **within the side named by `on_right`** — the new file's
+	 *  numbering on the right, the old file's on the left. Same convention as
+	 *  [`PrThread::line`], which is how the diff view keys its rows.
+	 */
+	line: number,
+	onRight: boolean,
+	body: string,
+	/**
+	 *  Hold it in the viewer's pending review instead of posting it now — the
+	 *  "Start a review" half of GitHub's composer. Drafts stay invisible to the
+	 *  PR's author until the review is submitted.
+	 */
+	pending: boolean,
+	/**
+	 *  The viewer's existing pending review ([`PrDetail::pending_review_id`]),
+	 *  when they have one. Only consulted when `pending`; `None` opens a new one.
+	 */
+	reviewId: string | null,
+};
+
 /**  The result of creating a PR: its number and web URL (to open in the browser). */
 export type NewPr = {
 	number: number,
@@ -1121,6 +1305,12 @@ export type PrComment = {
 	kind: CommentKind,
 	/**  File path for inline (`ReviewThread`) comments; `None` otherwise. */
 	path: string | null,
+	/**
+	 *  Part of the viewer's own unsubmitted review — drafted, not posted. Only
+	 *  the author can see these, and they stay invisible to the PR's author
+	 *  until the review is submitted, so the UI must label them as drafts.
+	 */
+	isPending: boolean,
 };
 
 /**  The detail panel payload for a selected PR: body, conversation, diff, checks. */
@@ -1152,6 +1342,14 @@ export type PrDetail = {
 	baseSha: string,
 	/**  Commit OID of the PR's head (new side) — the other end of the expand fetch. */
 	headSha: string,
+	/**
+	 *  The viewer's own **unsubmitted** review on this PR, when they have one
+	 *  (GitHub allows at most one). Its node id is what further draft comments
+	 *  attach to and what "Submit review" submits; `None` means the next draft
+	 *  comment starts a new review. Nobody else's pending review is ever visible,
+	 *  so this can only ever be the viewer's.
+	 */
+	pendingReviewId: string | null,
 };
 
 /**  A proposed PR (title + body) for the create-PR dialog, before it's opened. */
@@ -1208,6 +1406,20 @@ export type PrState = "Open" | "Merged" | "Closed";
  *  which are the issue-level conversation.
  */
 export type PrThread = {
+	/**
+	 *  The thread's GraphQL node id — what resolve/unresolve mutates. Reaches
+	 *  GitHub as a variable, never spliced into a query.
+	 */
+	id: string,
+	/**
+	 *  The **decimal** database id of the thread's first comment, which is what
+	 *  GitHub's REST reply endpoint takes (`…/pulls/N/comments/{id}/replies`).
+	 *  Kept as a string because the ids have outgrown GraphQL's 32-bit `Int` (so
+	 *  it comes back from `fullDatabaseId`, a `BigInt`) — and it only ever needs
+	 *  to be a URL path segment. Empty when the thread has no comment to reply
+	 *  under, which the UI reads as "replying isn't possible here".
+	 */
+	replyToId: string,
 	path: string,
 	/**
 	 *  Line the thread is anchored to (in the file named by `path`). `None` when
@@ -1225,6 +1437,13 @@ export type PrThread = {
 	 *  or changed under it). Such threads can't be shown inline in the diff.
 	 */
 	isOutdated: boolean,
+	/**
+	 *  Whether GitHub will let *this* viewer resolve / unresolve the thread —
+	 *  repo permissions decide, so the button is offered only when it would work
+	 *  rather than failing on click.
+	 */
+	viewerCanResolve: boolean,
+	viewerCanUnresolve: boolean,
 	comments: PrComment[],
 };
 
@@ -1300,6 +1519,29 @@ export type PromptVar = {
 	description: string,
 };
 
+/**
+ *  What a file contributes to a PR, which is what decides where it belongs in the
+ *  reading order. The last three are the "you can skim this" bucket — knowing what
+ *  *not* to read closely is half of what makes a reading order worth having.
+ */
+export type ReadingRole = 
+/**  Where the change starts — the interface, route, or caller. */
+"entryPoint" | 
+/**  The substance of the change. */
+"coreLogic" | "test" | "config" | 
+/**  Machine-written (lockfiles, generated bindings, snapshots). */
+"generated" | 
+/**  Mechanical: renames, formatting, one-line follow-through. */
+"trivial";
+
+/**  One step of the suggested reading order. */
+export type ReadingStep = {
+	path: string,
+	role: ReadingRole,
+	/**  One line on why this file sits at this point in the order. */
+	why: string,
+};
+
 /**  A connected repository / task-tracker pairing. */
 export type Repo = {
 	name: string,
@@ -1316,12 +1558,54 @@ export type Repo = {
 	path: string | null,
 };
 
+/**
+ *  An AI-generated orientation for a pull request: what it does, what order to
+ *  read it in, and where to look hardest.
+ * 
+ *  Advisory throughout — it never posts anything and never gates a review. Cached
+ *  against [`Self::head_sha`] so it regenerates exactly when the code changes.
+ *  `PartialEq` but not `Eq` — `generated_at_ms` is an `f64` (see its note).
+ */
+export type ReviewBrief = {
+	summary: string,
+	readingOrder: ReadingStep[],
+	/**  Empty is a real answer, not a failure: a PR that reads clean *is* clean. */
+	watchOuts: WatchOut[],
+	questions: string[],
+	/**
+	 *  The diff didn't fit the prompt budget, so the brief covers only part of the
+	 *  PR. Surfaced in the UI — a silent cap reads as full coverage.
+	 */
+	truncated: boolean,
+	/**
+	 *  The head commit this was generated against. When it no longer matches the
+	 *  PR's head, the UI offers a regenerate rather than quietly showing stale
+	 *  advice about code that has since changed.
+	 */
+	headSha: string,
+	/**
+	 *  Epoch ms this was generated, for the "generated 2h ago" line — raw, so the
+	 *  frontend can tick it live. `f64` (not `i64`) because Specta forbids
+	 *  exporting 64-bit ints; epoch ms are exact in an `f64` for millennia.
+	 */
+	generatedAtMs: number | null,
+};
+
 /**  GitHub's aggregate review decision for a PR. */
 export type ReviewDecision = "Approved" | "ChangesRequested" | 
 /**  A review is required but none satisfying it has been given yet. */
 "ReviewRequired" | 
 /**  No review has been requested/required (or GitHub returned null). */
 "None";
+
+/**
+ *  How a review is submitted — GitHub's three review verdicts. Chosen explicitly
+ *  in the submit dialog; there is no default, because "approve" is not something
+ *  to arrive at by pressing return.
+ */
+export type ReviewEvent = 
+/**  Comment without a verdict. */
+"Comment" | "Approve" | "RequestChanges";
 
 /**  The categorized PR inbox for the Reviews tab, scoped to one org. */
 export type ReviewInbox = {
@@ -1348,6 +1632,13 @@ export type ReviewPr = {
 	repo: string,
 	/**  The PR's head branch name (shown in the header, click-to-copy). */
 	headRef: string,
+	/**  The branch the PR merges into — context for the AI review session. */
+	baseRef: string,
+	/**
+	 *  The PR's head commit. What the review checkout detaches at and what a
+	 *  cached review brief is keyed on, so both track the PR's current code.
+	 */
+	headSha: string,
 	author: string,
 	authorAvatarUrl: string,
 	state: PrState,
@@ -1362,11 +1653,56 @@ export type ReviewPr = {
 	isInMergeQueue: boolean,
 	additions: number,
 	deletions: number,
+	/**
+	 *  How many files the PR touches — the third input (with additions/deletions)
+	 *  to the sidebar's review-effort size chip.
+	 */
+	changedFiles: number,
 	commentCount: number,
 	/**  Reviewers requested on the PR (people and teams). */
 	reviewers: Reviewer[],
 	/**  ISO-8601 timestamp of the last update. */
 	updatedAt: string,
+	/**  ISO-8601 timestamp the PR was opened. */
+	createdAt: string,
+	/**
+	 *  When the review clock started **for this viewer**: the newest
+	 *  review-request event naming them or one of their teams, falling back to
+	 *  [`Self::created_at`] when the PR carries no such event (their own PRs, or a
+	 *  request older than the timeline page we fetch). Drives the "waiting 6d" age
+	 *  chip and the waiting-longest sort.
+	 */
+	waitingSince: string,
+	/**
+	 *  ISO-8601 commit date of the PR's head commit. Compared against
+	 *  [`ViewerReview::submitted_at`] to spot a review that predates the current
+	 *  code — `updated_at` can't do this, since a comment bumps it too.
+	 */
+	headCommittedAt: string,
+	/**  The viewer's own latest review, when they've submitted one. */
+	viewerReview: ViewerReview | null,
+};
+
+/**
+ *  Which pull request an AI review surface is working on.
+ * 
+ *  One struct rather than eight arguments because all three review commands
+ *  (checkout, session prompt, brief) need the same identity, and the frontend
+ *  already holds it whole as the selected [`ReviewPr`] — passing it once keeps the
+ *  three call sites from drifting apart on which fields they carry.
+ */
+export type ReviewTarget = {
+	/**  "owner/name" — the PR's own repo, which need not be the active one. */
+	prRepo: string,
+	number: number,
+	title: string,
+	author: string,
+	headRef: string,
+	baseRef: string,
+	/**  Head commit the checkout detaches at, and the brief is cached against. */
+	headSha: string,
+	/**  The linked Linear ticket, when the PR names one. */
+	ticketId: string | null,
 };
 
 /**
@@ -1636,6 +1972,22 @@ export type TerminalOpenOpts = {
 	rows: number,
 };
 
+/**
+ *  The handful of tracker fields the Reviews sidebar needs to group PRs by Linear
+ *  project. Deliberately not a [`Task`]: these are *other people's* issues (the
+ *  ones you review), which the viewer-assigned `list_issues` query never returns,
+ *  and none of `Task`'s graph fields (position, blockers, actionable) apply.
+ */
+export type TicketRef = {
+	/**  e.g. "AK-165" — the key the frontend joins back to a PR. */
+	identifier: string,
+	title: string,
+	/**  Project name, defaulted the same way [`Task::project`] is. */
+	project: string,
+	projectColor: string | null,
+	projectIcon: string | null,
+};
+
 /**  A comment on a triage issue (markdown body), with threaded replies. */
 export type TriageComment = {
 	/**  Linear comment id — used as the `parentId` when posting a reply. */
@@ -1814,6 +2166,47 @@ export type ViewedMarks =
  *  for a file that changed since it was marked.
  */
 { source: "synced"; paths: string[] };
+
+/**
+ *  The viewer's own latest review on a PR, with when it landed — compared against
+ *  the PR's head-commit date to tell "you reviewed this" from "you reviewed an
+ *  older version of this".
+ */
+export type ViewerReview = {
+	state: ViewerReviewState,
+	/**  ISO-8601 timestamp the review was submitted. */
+	submittedAt: string,
+};
+
+/**
+ *  The state of the review *the viewer themselves* last submitted on a PR.
+ *  Distinct from [`ReviewDecision`], which is GitHub's aggregate across everyone:
+ *  this is what separates "still waiting on you" from "you've had your say".
+ */
+export type ViewerReviewState = "Approved" | "ChangesRequested" | 
+/**  A review left as a plain comment (no approve / request-changes verdict). */
+"Commented" | 
+/**
+ *  Submitted but neither approving nor blocking (GitHub's `DISMISSED`), or a
+ *  state we don't model.
+ */
+"Other";
+
+/**  One place worth extra attention, anchored in the diff so the UI can jump to it. */
+export type WatchOut = {
+	path: string,
+	/**  Line in the *new* file, when one can be named. */
+	line: number | null,
+	kind: WatchOutKind,
+	note: string,
+};
+
+/**
+ *  What kind of attention a spot in the diff wants. `Question` is deliberately
+ *  first-class: "I can't tell whether this is right" is honest and actionable,
+ *  where dressing it up as a finding is neither.
+ */
+export type WatchOutKind = "correctness" | "security" | "performance" | "testing" | "style" | "question";
 
 /**
  *  A workflow state an issue can move to (one of its team's states). Moving an

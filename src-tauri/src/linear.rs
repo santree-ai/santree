@@ -4,6 +4,7 @@
 //! metadata and the repo↔org links live in the app database; pure mapping and
 //! layout live in `santree_core`.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
@@ -18,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use santree_core::domain::{
-    LinearOrg, LinearStatus, Task, TaskStatus, TriageComment, TriageDetail, TriageSchedule,
-    TriageShift, TriageTicket, WorkflowState,
+    LinearOrg, LinearStatus, Task, TaskStatus, TicketRef, TriageComment, TriageDetail,
+    TriageSchedule, TriageShift, TriageTicket, WorkflowState,
 };
 use santree_core::{layout, linear as core_linear};
 
@@ -694,6 +695,122 @@ pub async fn list_issues(db: &Db, repo: &str) -> Result<Option<Vec<Task>>> {
 
     layout::layout_tasks(&mut tasks);
     Ok(Some(tasks))
+}
+
+/// Split a Linear identifier into its team key and issue number — `"AK-165"` →
+/// `("AK", 165)`. `None` for anything that isn't the `<KEY>-<number>` shape, with
+/// the same key rule the frontend's `ticketIdFor` uses (uppercase, alphanumeric,
+/// 2–10 chars) so the two agree on what counts as an id.
+fn split_identifier(id: &str) -> Option<(&str, u64)> {
+    let (key, number) = id.rsplit_once('-')?;
+    let key_ok = (2..=10).contains(&key.len())
+        && key.starts_with(|c: char| c.is_ascii_uppercase())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+    key_ok.then_some(())?;
+    Some((key, number.parse().ok()?))
+}
+
+/// How many identifiers one lookup resolves. The Reviews inbox caps each section
+/// at 50 PRs across a handful of sections, so this only bites on a very large
+/// inbox — and truncating the *grouping* metadata is far better than risking
+/// Linear's complexity cap and losing it entirely.
+const TICKET_LOOKUP_CAP: usize = 200;
+
+/// Resolve Linear identifiers (`AK-165`, …) to just enough to group PRs by project.
+///
+/// Deliberately not [`list_issues`], which fetches the *viewer's assigned* issues:
+/// the whole point here is other people's tickets — the ones attached to PRs you
+/// review — which that query never returns.
+///
+/// One round-trip for the whole batch. The filter is a cross-product (`team.key IN
+/// (…) AND number IN (…)`), so it over-matches — `AK-5` + `MSG-9` also matches
+/// `AK-9` and `MSG-5` — and the result is intersected back against the exact
+/// identifiers asked for. `None` when no org is connected, so the sidebar simply
+/// offers no project grouping rather than erroring.
+pub async fn tickets_by_identifier(
+    db: &Db,
+    repo: &str,
+    ids: &[String],
+) -> Result<Option<Vec<TicketRef>>> {
+    let Some(session) = repo_session(db, repo).await? else {
+        return Ok(None);
+    };
+
+    let mut wanted: HashSet<&str> = HashSet::new();
+    let mut keys: HashSet<&str> = HashSet::new();
+    let mut numbers: HashSet<u64> = HashSet::new();
+    for id in ids.iter().take(TICKET_LOOKUP_CAP) {
+        if let Some((key, number)) = split_identifier(id) {
+            wanted.insert(id.as_str());
+            keys.insert(key);
+            numbers.insert(number);
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(Some(vec![]));
+    }
+    if ids.len() > TICKET_LOOKUP_CAP {
+        log::warn!(
+            "Reviews: resolving only the first {TICKET_LOOKUP_CAP} of {} ticket ids for project \
+             grouping; the rest group as \"No Project\"",
+            ids.len()
+        );
+    }
+
+    #[derive(Deserialize)]
+    struct QueryData {
+        issues: Connection<TicketNode>,
+    }
+    #[derive(Deserialize)]
+    struct TicketNode {
+        identifier: String,
+        title: String,
+        #[serde(default)]
+        project: Option<ProjectNode>,
+    }
+
+    // The filter goes over as one `IssueFilter` variable rather than as separate
+    // `[String!]!`/`[Float!]!` lists — it keeps the query free of Linear's exact
+    // scalar choice for `number`, which is the sort of thing that 400s at runtime.
+    const QUERY: &str = r"
+        query TicketRefs($filter: IssueFilter!, $first: Int!) {
+          issues(filter: $filter, first: $first) {
+            nodes { identifier title project { name color icon } }
+          }
+        }
+    ";
+    let keys: Vec<&str> = keys.into_iter().collect();
+    let numbers: Vec<u64> = numbers.into_iter().collect();
+    let data: QueryData = session
+        .query(
+            QUERY,
+            serde_json::json!({
+                "filter": { "team": { "key": { "in": keys } }, "number": { "in": numbers } },
+                // Room for the cross-product's false positives on top of the real hits.
+                "first": 250,
+            }),
+        )
+        .await?;
+
+    Ok(Some(
+        data.issues
+            .nodes
+            .into_iter()
+            .filter(|n| wanted.contains(n.identifier.as_str()))
+            .map(|n| {
+                let (project, project_color, project_icon) = project_fields(n.project);
+                TicketRef {
+                    identifier: n.identifier,
+                    title: n.title,
+                    project,
+                    project_color,
+                    project_icon,
+                }
+            })
+            .collect(),
+    ))
 }
 
 /// Connection status for a repo: whether any org is connected, and which one this repo uses.
@@ -2501,9 +2618,9 @@ mod tests {
     use super::{
         accept_code, cached_team_scope, decode_tokens, encode_tokens, image_spans, map_issue,
         migrate_tokens_to_keychain, parse_callback, parse_ms, refresh_lock, resolve_org_slug,
-        resolved_org, scope_of, shift_range, splice_images, triage_meta, usable_at, ImageCache,
-        IssueNode, ProjectNode, RelatedIssue, RelationNode, SchedQueryData, StateNode, TeamScope,
-        Tokens, UserNode, IMAGE_HOST, REFRESH_SKEW_MS,
+        resolved_org, scope_of, shift_range, splice_images, split_identifier, triage_meta,
+        usable_at, ImageCache, IssueNode, ProjectNode, RelatedIssue, RelationNode, SchedQueryData,
+        StateNode, TeamScope, Tokens, UserNode, IMAGE_HOST, REFRESH_SKEW_MS,
     };
     use crate::gql::{Connection, PageInfo};
     use std::collections::HashMap;
@@ -3221,5 +3338,27 @@ mod tests {
         let err =
             accept_code(&listener, "st", Instant::now() + Duration::from_secs(10)).unwrap_err();
         assert!(err.to_string().contains("access_denied"), "{err:#}");
+    }
+
+    #[test]
+    fn split_identifier_accepts_real_linear_ids() {
+        assert_eq!(split_identifier("AK-165"), Some(("AK", 165)));
+        assert_eq!(split_identifier("MSG-5033"), Some(("MSG", 5033)));
+        // Digits are legal *inside* a team key, and the split is from the right.
+        assert_eq!(split_identifier("A11Y-7"), Some(("A11Y", 7)));
+    }
+
+    #[test]
+    fn split_identifier_rejects_things_that_only_look_like_ids() {
+        // Lower-case is how `ticketIdFor` avoids reading prose as an id; keep the
+        // two sides of the bridge agreeing on that, or grouping silently over-matches.
+        assert_eq!(split_identifier("ak-165"), None);
+        assert_eq!(split_identifier("A-1"), None); // key too short
+        assert_eq!(split_identifier("TOOLONGAKEY-1"), None);
+        assert_eq!(split_identifier("AK-"), None);
+        assert_eq!(split_identifier("AK-1a"), None);
+        assert_eq!(split_identifier("AK-1.5"), None);
+        assert_eq!(split_identifier("AK165"), None);
+        assert_eq!(split_identifier("AK--1"), None);
     }
 }

@@ -85,17 +85,35 @@ function build(over: Partial<BuildInput> = {}): BuildInput {
 
 describe("parseTermKey", () => {
   it("parses each launch site's convention", () => {
-    expect(parseTermKey("tree:AK-1")).toEqual({ kind: "tree", ticket: "AK-1", tabId: null });
+    expect(parseTermKey("tree:AK-1")).toEqual({
+      kind: "tree",
+      ticket: "AK-1",
+      tabId: null,
+      pr: null,
+    });
     expect(parseTermKey("tree:AK-1:tab:6f9a")).toEqual({
       kind: "tree-tab",
       ticket: "AK-1",
       tabId: "6f9a",
+      pr: null,
     });
-    expect(parseTermKey("triage:AK-9")).toEqual({ kind: "triage", ticket: "AK-9", tabId: null });
+    expect(parseTermKey("triage:AK-9")).toEqual({
+      kind: "triage",
+      ticket: "AK-9",
+      tabId: null,
+      pr: null,
+    });
+    expect(parseTermKey("review:acme/web#4821")).toEqual({
+      kind: "review",
+      ticket: null,
+      tabId: null,
+      pr: "acme/web#4821",
+    });
     expect(parseTermKey("dev:/Users/me/repo")).toEqual({
       kind: "dev",
       ticket: null,
       tabId: null,
+      pr: null,
     });
   });
 

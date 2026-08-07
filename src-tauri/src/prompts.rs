@@ -148,6 +148,69 @@ static PROMPT_DEFS: &[PromptDef] = &[
         ],
     },
     PromptDef {
+        name: "review",
+        label: "Review with AI",
+        description: "The agent's opening prompt for an AI review session on a pull request. Read-only by design — its hard-rules block is what keeps the agent from ever commenting or approving on your behalf.",
+        kind: PromptKind::Flow,
+        default: include_str!("../prompts/review.njk"),
+        variables: &[
+            VarDoc { name: "pr_number", description: "The pull request number." },
+            VarDoc { name: "pr_title", description: "The pull request title." },
+            VarDoc { name: "pr_body", description: "The pull request description (markdown)." },
+            VarDoc { name: "pr_author", description: "The author's GitHub login." },
+            VarDoc { name: "base_ref", description: "The PR's base branch." },
+            VarDoc { name: "head_ref", description: "The PR's head branch." },
+            VarDoc { name: "head_sha", description: "The PR's head commit SHA." },
+            VarDoc { name: "diff_stat", description: "One-line summary of the changed files." },
+            VarDoc { name: "diff", description: "The PR's full diff (capped; see `truncated`)." },
+            VarDoc { name: "conversation", description: "The PR's existing comments and review threads." },
+            VarDoc { name: "ticket_content", description: "The rendered Issue block for the PR's linked ticket. Empty when it has none." },
+            VarDoc {
+                name: "workspace",
+                description: "True when a checkout of the PR's head exists for the agent to read. False for a PR in a repo santree has no local clone of — the prompt then tells the agent it only has the diff.",
+            },
+        ],
+    },
+    PromptDef {
+        name: "review-brief",
+        label: "Review brief",
+        description: "Generates the reading order, watch-outs and questions shown beside a pull request (headless). Must return JSON — edit the shape at your own risk.",
+        kind: PromptKind::Flow,
+        default: include_str!("../prompts/review-brief.njk"),
+        variables: &[
+            VarDoc { name: "pr_number", description: "The pull request number." },
+            VarDoc { name: "pr_title", description: "The pull request title." },
+            VarDoc { name: "pr_body", description: "The pull request description (markdown)." },
+            VarDoc { name: "pr_author", description: "The author's GitHub login." },
+            VarDoc { name: "diff_stat", description: "One-line-per-file summary of the changed files." },
+            VarDoc { name: "diff", description: "The PR's full diff (capped; see `truncated`)." },
+            VarDoc { name: "truncated", description: "True when the diff was cut to fit the budget." },
+            VarDoc { name: "ticket_content", description: "The rendered Issue block for the PR's linked ticket. Empty when it has none." },
+        ],
+    },
+    PromptDef {
+        name: "english-tutor",
+        label: "English tutor",
+        description: "Injected into every Claude session santree launches while the English tutor is on (Settings → English tutor). It tells the agent to open with any corrections and append them to the practice log itself.",
+        kind: PromptKind::Flow,
+        default: include_str!("../prompts/english-tutor.njk"),
+        variables: &[VarDoc {
+            name: "log_path",
+            description: "Absolute path of the practice log the agent appends corrections to. It has a matching `Edit` grant — point this somewhere else and the append will stop on a permission prompt.",
+        }],
+    },
+    PromptDef {
+        name: "english-analysis",
+        label: "English analysis",
+        description: "Turns the practice log into a priority list of habits to work on (headless). Runs only when you press Analyze.",
+        kind: PromptKind::Flow,
+        default: include_str!("../prompts/english-analysis.njk"),
+        variables: &[
+            VarDoc { name: "log", description: "The practice log, newest entries last (capped at ~400 KB, oldest cut first)." },
+            VarDoc { name: "entry_count", description: "How many corrections the log holds." },
+        ],
+    },
+    PromptDef {
         name: "issue",
         label: "Issue context",
         description: "How a Linear issue (description + comment thread) is rendered. Embedded by the Work, Commit and PR prompts as `ticket_content`.",
@@ -410,7 +473,12 @@ fn strip_data_uris(md: &str) -> String {
 }
 
 /// The largest char-boundary offset in `s` at or below `max` bytes.
-fn floor_char_boundary(s: &str, max: usize) -> usize {
+///
+/// Every prompt budget in the app is counted in bytes while the text is UTF-8, so
+/// slicing at a raw budget offset panics the moment a multi-byte character
+/// straddles it. Anything trimming untrusted text to a byte budget goes through
+/// here (see also `review_ai::truncate_at_line`).
+pub fn floor_char_boundary(s: &str, max: usize) -> usize {
     if max >= s.len() {
         return s.len();
     }

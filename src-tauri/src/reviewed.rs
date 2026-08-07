@@ -14,7 +14,7 @@
 //! [`sync_token`] picks between them, and [`ViewedMarks`] tells the frontend which
 //! it got — the staleness rules differ, so the mode can't be inferred client-side.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
 use santree_core::domain::{ReviewedFile, ViewedMarks};
 
@@ -44,14 +44,7 @@ async fn sync_token(db: &Db) -> Option<String> {
     github::token().await
 }
 
-/// `(owner, name)` from an "owner/name" slug. The slug crosses IPC, so a malformed
-/// one is rejected rather than being pasted into a GitHub request.
-fn split_slug(pr_repo: &str) -> Result<(&str, &str)> {
-    match pr_repo.split_once('/') {
-        Some((owner, name)) if !owner.is_empty() && !name.is_empty() => Ok((owner, name)),
-        _ => Err(anyhow!("malformed repo slug: {pr_repo:?}")),
-    }
-}
+use github::split_slug;
 
 /// Every "Viewed" mark for a PR, tagged with the store it came from.
 pub async fn marks(db: &Db, pr_repo: &str, pr_number: u32) -> Result<ViewedMarks> {

@@ -2,7 +2,9 @@
  * A PR file's unified diff with inline review comments anchored to their lines —
  * the GitHub PR feel. Wraps `@git-diff-view/react` directly (rather than the
  * Trees {@link DiffViewer}) because it needs the library's `extendData` /
- * `renderExtendLine` API to render {@link PrThreadCard}s pinned to diff lines.
+ * `renderExtendLine` API to render {@link PrThreadCard}s pinned to diff lines,
+ * and its `renderWidgetLine` / gutter `+` to open the {@link InlineCommentBox} on
+ * one — the same affordance as GitHub's Files tab.
  *
  * Threads are placed on the new (right) side for added/context lines and the old
  * (left) side for removed lines. Outdated / unplaceable threads (no line) are the
@@ -20,6 +22,8 @@ import type { PrThread } from "../../bindings";
 import { useResolvedTheme } from "../../theme/useResolvedTheme";
 import type { DiffMode } from "../trees/DiffViewer";
 import { bucketThreads } from "./bucketThreads";
+import { type CommentTarget, isRightSide } from "./commentTarget";
+import { InlineCommentBox } from "./InlineCommentBox";
 import { PrThreadCard } from "./PrThreadCard";
 
 /**
@@ -39,6 +43,7 @@ export const PrFileDiff = memo(function PrFileDiff({
   status,
   patch,
   threads,
+  target,
   oldText,
   newText,
   mode = "unified",
@@ -50,6 +55,10 @@ export const PrFileDiff = memo(function PrFileDiff({
   patch: string;
   /** Review threads on this file — placed inline by line, or skipped if outdated. */
   threads: PrThread[];
+  /** Where a new comment would go. The gutter `+` is offered only once this
+   *  carries a head commit — until the detail loads there's no commit to anchor
+   *  a comment to, and GitHub rejects one without it. */
+  target: CommentTarget;
   /** Full base-side file content; when present (with `newText`), enables
    *  GitHub-style expand-unchanged-context. Undefined until fetched on demand. */
   oldText?: string;
@@ -83,9 +92,24 @@ export const PrFileDiff = memo(function PrFileDiff({
         renderExtendLine={({ data }) => (
           <div className="border-y border-hairline">
             {data.map((t, i) => (
-              <PrThreadCard key={`${t.path}:${t.line}:${i}`} thread={t} />
+              <PrThreadCard
+                key={`${t.path}:${t.line}:${i}`}
+                thread={t}
+                prRepo={target.prRepo}
+                number={target.number}
+              />
             ))}
           </div>
+        )}
+        diffViewAddWidget={!!target.headSha}
+        renderWidgetLine={({ lineNumber, side, onClose }) => (
+          <InlineCommentBox
+            target={target}
+            path={path}
+            line={lineNumber}
+            onRight={isRightSide(side)}
+            onClose={onClose}
+          />
         )}
         diffViewMode={mode === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified}
         diffViewTheme={theme}

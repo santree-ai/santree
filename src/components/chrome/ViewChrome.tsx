@@ -7,6 +7,12 @@
  * sidebar** when it's open, and moves **into the top bar** when the sidebar is
  * collapsed (or the view has no sidebar). Views provide sidebar *content*;
  * ViewChrome owns the column chrome (shared width, border, repo header, resize).
+ *
+ * The left cell takes the sidebar's width whenever the column is shown, so the
+ * vertical divider runs unbroken from the title bar down through the content.
+ * That's the reason a view with a left column should pass it as `sidebar` rather
+ * than rendering its own aside: a hand-rolled column is a different width from
+ * the cell above it, and the divider visibly steps.
  */
 import type { ReactNode } from "react";
 
@@ -32,6 +38,13 @@ interface ViewChromeProps {
   rightCell?: ReactNode;
   /** Show the repo switcher (default true; off for Settings, which has scope tabs). */
   showRepoSelector?: boolean;
+  /**
+   * Keep the repo switcher in the top bar even while the sidebar column is open,
+   * instead of moving it into the column's header. For a view whose column is a
+   * panel rather than a navigable tree (Dev's bug list), a repo header would be
+   * a row of chrome above content that doesn't belong to a repo.
+   */
+  repoInTopBar?: boolean;
 }
 
 /**
@@ -64,6 +77,7 @@ export function ViewChrome({
   leftCell,
   rightCell,
   showRepoSelector = true,
+  repoInTopBar: keepRepoInTopBar = false,
 }: ViewChromeProps) {
   const { sidebarCollapsed, toggleSidebar } = useAppUi();
 
@@ -72,8 +86,15 @@ export function ViewChrome({
   // is their own control.
   const collapsible = hasSidebar && leftCell === undefined;
   const showColumn = hasSidebar && !(collapsible && sidebarCollapsed);
-  // The repo switcher rides in the top bar whenever the sidebar column isn't shown.
-  const repoInTopBar = showRepoSelector && !showColumn;
+  // The repo switcher rides in the top bar whenever the sidebar column isn't
+  // shown — or whenever the view asked to keep it there.
+  const repoInTopBar = showRepoSelector && (!showColumn || keepRepoInTopBar);
+  // The cell's right border is a divider between two things, so it's drawn only
+  // when there is a second thing: a column continuing below it, or the repo
+  // switcher grouped inside it. A view with neither (Agents, which scopes itself
+  // with its own multi-repo picker) would otherwise show a stub rule hanging off
+  // the traffic lights with nothing beneath it.
+  const dividedCell = showColumn || repoInTopBar || leftCell !== undefined;
 
   return (
     <div className="flex h-full flex-col">
@@ -83,7 +104,9 @@ export function ViewChrome({
       >
         <div
           data-tauri-drag-region
-          className="flex min-w-0 flex-none items-center gap-2 border-r border-line pr-2.5"
+          className={`flex min-w-0 flex-none items-center gap-2 pr-2.5 ${
+            dividedCell ? "border-r border-line" : ""
+          }`}
           style={{
             width: showColumn ? "var(--sidebar-width)" : undefined,
             paddingLeft: TRAFFIC_LIGHTS_INSET,
@@ -95,7 +118,10 @@ export function ViewChrome({
                 canCollapse={collapsible}
                 collapsed={sidebarCollapsed}
                 onToggle={toggleSidebar}
-                fill={showColumn}
+                // Filling pushes back/forward to the cell's right edge, which
+                // only works when nothing follows them — with the switcher here,
+                // the controls group tight and it takes the remaining width.
+                fill={showColumn && !repoInTopBar}
               />
               {repoInTopBar && <RepoSelector />}
             </>
@@ -120,7 +146,7 @@ export function ViewChrome({
             className="relative flex flex-none flex-col border-r border-line bg-panel"
             style={{ width: "var(--sidebar-width)" }}
           >
-            {showRepoSelector && (
+            {showRepoSelector && !repoInTopBar && (
               <div
                 className={`flex ${CHROME.subBar} flex-none items-center border-b border-hairline px-3`}
               >

@@ -489,6 +489,31 @@ pub struct Reviewer {
     pub avatar_url: String,
 }
 
+/// The state of the review *the viewer themselves* last submitted on a PR.
+/// Distinct from [`ReviewDecision`], which is GitHub's aggregate across everyone:
+/// this is what separates "still waiting on you" from "you've had your say".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum ViewerReviewState {
+    Approved,
+    ChangesRequested,
+    /// A review left as a plain comment (no approve / request-changes verdict).
+    Commented,
+    /// Submitted but neither approving nor blocking (GitHub's `DISMISSED`), or a
+    /// state we don't model.
+    Other,
+}
+
+/// The viewer's own latest review on a PR, with when it landed — compared against
+/// the PR's head-commit date to tell "you reviewed this" from "you reviewed an
+/// older version of this".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerReview {
+    pub state: ViewerReviewState,
+    /// ISO-8601 timestamp the review was submitted.
+    pub submitted_at: String,
+}
+
 /// A pull request shown in the Reviews dashboard. Spans repos within one org, so
 /// it carries its own `repo` (owner/name) rather than relying on a single active
 /// checkout the way [`WorktreePr`] does.
@@ -504,6 +529,11 @@ pub struct ReviewPr {
     pub repo: String,
     /// The PR's head branch name (shown in the header, click-to-copy).
     pub head_ref: String,
+    /// The branch the PR merges into — context for the AI review session.
+    pub base_ref: String,
+    /// The PR's head commit. What the review checkout detaches at and what a
+    /// cached review brief is keyed on, so both track the PR's current code.
+    pub head_sha: String,
     pub author: String,
     pub author_avatar_url: String,
     pub state: PrState,
@@ -516,11 +546,28 @@ pub struct ReviewPr {
     pub is_in_merge_queue: bool,
     pub additions: u32,
     pub deletions: u32,
+    /// How many files the PR touches — the third input (with additions/deletions)
+    /// to the sidebar's review-effort size chip.
+    pub changed_files: u32,
     pub comment_count: u32,
     /// Reviewers requested on the PR (people and teams).
     pub reviewers: Vec<Reviewer>,
     /// ISO-8601 timestamp of the last update.
     pub updated_at: String,
+    /// ISO-8601 timestamp the PR was opened.
+    pub created_at: String,
+    /// When the review clock started **for this viewer**: the newest
+    /// review-request event naming them or one of their teams, falling back to
+    /// [`Self::created_at`] when the PR carries no such event (their own PRs, or a
+    /// request older than the timeline page we fetch). Drives the "waiting 6d" age
+    /// chip and the waiting-longest sort.
+    pub waiting_since: String,
+    /// ISO-8601 commit date of the PR's head commit. Compared against
+    /// [`ViewerReview::submitted_at`] to spot a review that predates the current
+    /// code — `updated_at` can't do this, since a comment bumps it too.
+    pub head_committed_at: String,
+    /// The viewer's own latest review, when they've submitted one.
+    pub viewer_review: Option<ViewerReview>,
 }
 
 /// Review requests waiting on a specific team the viewer belongs to.
@@ -542,6 +589,124 @@ pub struct ReviewInbox {
     pub requested: Vec<ReviewPr>,
     /// PRs requested via a team the viewer is on — one section per team.
     pub teams: Vec<TeamReviews>,
+}
+
+/// Which pull request an AI review surface is working on.
+///
+/// One struct rather than eight arguments because all three review commands
+/// (checkout, session prompt, brief) need the same identity, and the frontend
+/// already holds it whole as the selected [`ReviewPr`] — passing it once keeps the
+/// three call sites from drifting apart on which fields they carry.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewTarget {
+    /// "owner/name" — the PR's own repo, which need not be the active one.
+    pub pr_repo: String,
+    pub number: u32,
+    pub title: String,
+    pub author: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    /// Head commit the checkout detaches at, and the brief is cached against.
+    pub head_sha: String,
+    /// The linked Linear ticket, when the PR names one.
+    pub ticket_id: Option<String>,
+}
+
+/// What a file contributes to a PR, which is what decides where it belongs in the
+/// reading order. The last three are the "you can skim this" bucket — knowing what
+/// *not* to read closely is half of what makes a reading order worth having.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum ReadingRole {
+    /// Where the change starts — the interface, route, or caller.
+    EntryPoint,
+    /// The substance of the change.
+    CoreLogic,
+    Test,
+    Config,
+    /// Machine-written (lockfiles, generated bindings, snapshots).
+    Generated,
+    /// Mechanical: renames, formatting, one-line follow-through.
+    Trivial,
+}
+
+/// What kind of attention a spot in the diff wants. `Question` is deliberately
+/// first-class: "I can't tell whether this is right" is honest and actionable,
+/// where dressing it up as a finding is neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum WatchOutKind {
+    Correctness,
+    Security,
+    Performance,
+    Testing,
+    Style,
+    Question,
+}
+
+/// One step of the suggested reading order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingStep {
+    pub path: String,
+    pub role: ReadingRole,
+    /// One line on why this file sits at this point in the order.
+    pub why: String,
+}
+
+/// One place worth extra attention, anchored in the diff so the UI can jump to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchOut {
+    pub path: String,
+    /// Line in the *new* file, when one can be named.
+    pub line: Option<u32>,
+    pub kind: WatchOutKind,
+    pub note: String,
+}
+
+/// An AI-generated orientation for a pull request: what it does, what order to
+/// read it in, and where to look hardest.
+///
+/// Advisory throughout — it never posts anything and never gates a review. Cached
+/// against [`Self::head_sha`] so it regenerates exactly when the code changes.
+/// `PartialEq` but not `Eq` — `generated_at_ms` is an `f64` (see its note).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewBrief {
+    pub summary: String,
+    pub reading_order: Vec<ReadingStep>,
+    /// Empty is a real answer, not a failure: a PR that reads clean *is* clean.
+    pub watch_outs: Vec<WatchOut>,
+    pub questions: Vec<String>,
+    /// The diff didn't fit the prompt budget, so the brief covers only part of the
+    /// PR. Surfaced in the UI — a silent cap reads as full coverage.
+    pub truncated: bool,
+    /// The head commit this was generated against. When it no longer matches the
+    /// PR's head, the UI offers a regenerate rather than quietly showing stale
+    /// advice about code that has since changed.
+    pub head_sha: String,
+    /// Epoch ms this was generated, for the "generated 2h ago" line — raw, so the
+    /// frontend can tick it live. `f64` (not `i64`) because Specta forbids
+    /// exporting 64-bit ints; epoch ms are exact in an `f64` for millennia.
+    pub generated_at_ms: f64,
+}
+
+/// The handful of tracker fields the Reviews sidebar needs to group PRs by Linear
+/// project. Deliberately not a [`Task`]: these are *other people's* issues (the
+/// ones you review), which the viewer-assigned `list_issues` query never returns,
+/// and none of `Task`'s graph fields (position, blockers, actionable) apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TicketRef {
+    /// e.g. "AK-165" — the key the frontend joins back to a PR.
+    pub identifier: String,
+    pub title: String,
+    /// Project name, defaulted the same way [`Task::project`] is.
+    pub project: String,
+    pub project_color: Option<String>,
+    pub project_icon: Option<String>,
 }
 
 /// A merge-queue entry's state (GitHub's `MergeQueueEntryState`). Drives the
@@ -614,6 +779,10 @@ pub struct PrComment {
     pub kind: CommentKind,
     /// File path for inline (`ReviewThread`) comments; `None` otherwise.
     pub path: Option<String>,
+    /// Part of the viewer's own unsubmitted review — drafted, not posted. Only
+    /// the author can see these, and they stay invisible to the PR's author
+    /// until the review is submitted, so the UI must label them as drafts.
+    pub is_pending: bool,
 }
 
 /// One changed file in a PR, with its unified diff hunk (from the REST files API).
@@ -644,6 +813,16 @@ pub struct PrFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PrThread {
+    /// The thread's GraphQL node id — what resolve/unresolve mutates. Reaches
+    /// GitHub as a variable, never spliced into a query.
+    pub id: String,
+    /// The **decimal** database id of the thread's first comment, which is what
+    /// GitHub's REST reply endpoint takes (`…/pulls/N/comments/{id}/replies`).
+    /// Kept as a string because the ids have outgrown GraphQL's 32-bit `Int` (so
+    /// it comes back from `fullDatabaseId`, a `BigInt`) — and it only ever needs
+    /// to be a URL path segment. Empty when the thread has no comment to reply
+    /// under, which the UI reads as "replying isn't possible here".
+    pub reply_to_id: String,
     pub path: String,
     /// Line the thread is anchored to (in the file named by `path`). `None` when
     /// GitHub can't place it anymore (outdated threads on since-changed lines).
@@ -655,6 +834,11 @@ pub struct PrThread {
     /// The thread's anchor line no longer matches the current diff (the code moved
     /// or changed under it). Such threads can't be shown inline in the diff.
     pub is_outdated: bool,
+    /// Whether GitHub will let *this* viewer resolve / unresolve the thread —
+    /// repo permissions decide, so the button is offered only when it would work
+    /// rather than failing on click.
+    pub viewer_can_resolve: bool,
+    pub viewer_can_unresolve: bool,
     pub comments: Vec<PrComment>,
 }
 
@@ -808,6 +992,55 @@ pub struct PrDetail {
     pub base_sha: String,
     /// Commit OID of the PR's head (new side) — the other end of the expand fetch.
     pub head_sha: String,
+    /// The viewer's own **unsubmitted** review on this PR, when they have one
+    /// (GitHub allows at most one). Its node id is what further draft comments
+    /// attach to and what "Submit review" submits; `None` means the next draft
+    /// comment starts a new review. Nobody else's pending review is ever visible,
+    /// so this can only ever be the viewer's.
+    pub pending_review_id: Option<String>,
+}
+
+/// How a review is submitted — GitHub's three review verdicts. Chosen explicitly
+/// in the submit dialog; there is no default, because "approve" is not something
+/// to arrive at by pressing return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum ReviewEvent {
+    /// Comment without a verdict.
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+/// A new inline review comment the **user** is leaving on a diff line.
+///
+/// One struct rather than nine arguments (specta caps a command's arity), and it
+/// keeps the two ways GitHub lets you leave an inline comment — post it now, or
+/// stack it into a pending review — as one shape that differs by a flag.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct NewInlineComment {
+    /// "owner/name" — the PR's own repo, which need not be the active one.
+    pub pr_repo: String,
+    pub number: u32,
+    /// The PR's GraphQL node id — what a *new* pending review is opened against.
+    pub pr_id: String,
+    /// Head commit the comment anchors to. GitHub rejects a comment whose commit
+    /// isn't the one the line numbers refer to, so this is not optional.
+    pub head_sha: String,
+    pub path: String,
+    /// Line number **within the side named by `on_right`** — the new file's
+    /// numbering on the right, the old file's on the left. Same convention as
+    /// [`PrThread::line`], which is how the diff view keys its rows.
+    pub line: u32,
+    pub on_right: bool,
+    pub body: String,
+    /// Hold it in the viewer's pending review instead of posting it now — the
+    /// "Start a review" half of GitHub's composer. Drafts stay invisible to the
+    /// PR's author until the review is submitted.
+    pub pending: bool,
+    /// The viewer's existing pending review ([`PrDetail::pending_review_id`]),
+    /// when they have one. Only consulted when `pending`; `None` opens a new one.
+    pub review_id: Option<String>,
 }
 
 /// A file's persisted "Viewed" mark in the Reviews tab: the file path plus the
@@ -1317,6 +1550,35 @@ pub struct UsageReport {
     pub month: UsageTotals,
     pub by_model: Vec<ModelUsage>,
     pub sessions: Vec<SessionUsage>,
+}
+
+/// The English tutor's practice log: every correction the agent has appended,
+/// verbatim. Shown read-only — the file belongs to the agent that writes it, and a
+/// hand-edit racing an in-flight append would lose one of the two.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EnglishLog {
+    /// Absolute path, surfaced so the user can open the file themselves.
+    pub path: String,
+    /// The whole file, markdown.
+    pub text: String,
+    /// Corrections in the log — the `- ` bullets, not the date headings.
+    pub entry_count: f64,
+    /// Last-modified time (epoch ms); `None` when the filesystem won't say.
+    pub updated_at_ms: Option<f64>,
+}
+
+/// A stored analysis of the practice log: which habits to work on next, generated
+/// on demand rather than on session start.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EnglishAnalysis {
+    /// The model's answer, markdown.
+    pub text: String,
+    /// How many corrections the log held when this ran — compare against the log's
+    /// current count to see how stale it is.
+    pub entry_count: f64,
+    pub created_at_ms: f64,
 }
 
 #[cfg(test)]

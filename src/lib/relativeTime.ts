@@ -49,6 +49,17 @@ export function useLiveNow(): number {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
+/**
+ * An ISO-8601 timestamp (what GitHub's API returns) as epoch ms, or `null` if it
+ * can't be parsed. The `null` matters: `RelativeTime` renders nothing for it,
+ * where the `NaN` that `Date.parse` returns for junk would render "NaN ago".
+ */
+export function isoMs(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
+
 /** A compact "time ago" label for an absolute timestamp, e.g. "just now",
  *  "5m ago", "2h ago", "3d ago", "5w ago", "3mo ago", or "2y ago". */
 export function formatRelativeTime(thenMs: number, nowMs: number): string {

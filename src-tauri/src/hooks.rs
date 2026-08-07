@@ -5,6 +5,10 @@
 //! session-state event, each running the shipped `santree-hook` binary. This
 //! module builds that `--settings` JSON (with the resolved binary + db paths
 //! baked in) and reads back the states the binary records into `session_state`.
+//!
+//! The same file is where the optional English tutor rides in — see
+//! [`crate::english_tutor`] — because it's the one place every santree `claude`
+//! launch already passes through.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -63,19 +67,24 @@ pub fn db_path(app: &AppHandle) -> Option<PathBuf> {
 
 /// Build the `--settings` JSON santree layers over the user's own settings for
 /// its `claude` launches, write it to `<app_data_dir>/claude-hooks.json`, and
-/// return that file's **path**. Two things go in it, both invoking the bundled
-/// `santree-hook` binary (so both need it + the db path to resolve):
+/// return that file's **path**. Three things go in it; the first two invoke the
+/// bundled `santree-hook` binary (so both need it + the db path to resolve):
 ///  - the session-state **hooks** (one per event);
 ///  - a **`statusLine`** pointing at the binary's `statusline` mode — santree's
 ///    own context-fill bar, which *always* captures Claude's authoritative usage
 ///    into the db (so the app can render the inline bar for any session) and
-///    overrides the user's/project's status line for these launches.
+///    overrides the user's/project's status line for these launches;
+///  - the **English tutor** hook, only when that setting is on (`tutor`).
 ///
 /// The status line is injected **unconditionally**: capture is decoupled from
 /// display. Whether the app *shows* the inline usage bar is a pure runtime,
 /// frontend decision (the `claude_status_line` setting) — so toggling it lights
-/// up already-running tabs without relaunching. This file is therefore
-/// setting-independent and cached forever by the caller.
+/// up already-running tabs without relaunching.
+///
+/// The English tutor is the one part that isn't setting-independent: it changes
+/// what the agent *says* every turn, so it can only be a launch-time decision.
+/// Flipping it must therefore invalidate the caller's cached path, and only
+/// affects sessions started afterwards.
 ///
 /// `--settings` is a *key-level* override (the keys we set win over the user's
 /// `settings.json`; keys we omit keep their file values), so setting `statusLine`
@@ -91,7 +100,11 @@ pub fn db_path(app: &AppHandle) -> Option<PathBuf> {
 /// user's settings — shared by [`claude_settings`] and [`claude_settings_no_git`].
 /// `None` when the hook binary/db don't resolve (a dev build before the hook is
 /// compiled), in which case there's nothing to inject.
-fn base_settings_map(app: &AppHandle) -> Option<Map<String, Value>> {
+///
+/// `tutor` is the rendered English-tutor instruction, or `None` when the tutor is
+/// off — see [`tutor_entry`]. It's passed in rather than read here because it's an
+/// editable prompt with a db-backed override, and this builder is sync.
+fn base_settings_map(app: &AppHandle, tutor: Option<&str>) -> Option<Map<String, Value>> {
     // Both the hooks and the statusline invoke `santree-hook` against the db, so
     // resolve them once.
     let (bin, db_pathbuf) = (hook_bin(app)?, db_path(app)?);
@@ -123,6 +136,32 @@ fn base_settings_map(app: &AppHandle) -> Option<Map<String, Value>> {
             json!([{ "hooks": [Value::Object(hook)] }]),
         );
     }
+
+    // The English tutor rides along as a *second* `UserPromptSubmit` entry, next to
+    // the state hook above (Claude runs every entry for an event). Two things about
+    // it are load-bearing and easy to get wrong:
+    //  - it is **synchronous** — no `async: true`. An async hook is fire-and-forget
+    //    and its stdout is discarded, so the instruction would never reach the model
+    //    and the tutor would silently do nothing.
+    //  - it grants `Edit` on the log, because the instruction ends by telling the
+    //    agent to append the corrections there; without the grant every turn stops
+    //    on a permission prompt.
+    if let Some(instruction) = tutor {
+        if let Some((prompt_file, log)) = tutor_files(app, instruction) {
+            if let Some(entries) = hooks.get_mut("UserPromptSubmit").and_then(Value::as_array_mut) {
+                entries.push(json!({ "hooks": [{
+                    "type": "command",
+                    "command": format!("cat {}", sh_quote(&prompt_file)),
+                    "timeout": 5,
+                }]}));
+            }
+            root.insert(
+                "permissions".into(),
+                json!({ "allow": [format!("Edit({log})")] }),
+            );
+        }
+    }
+
     root.insert("hooks".into(), Value::Object(hooks));
 
     // santree's own status line: the `statusline` mode of the same binary. Prints
@@ -145,6 +184,24 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Spill the English-tutor instruction to `<app_data_dir>/english-tutor.md` and
+/// return `(that path, the practice-log path)`, both already shell-quoted for the
+/// hook `command` / ready for the permission rule respectively. `None` when either
+/// path can't be resolved or the write fails — the caller then simply omits the
+/// tutor, leaving the rest of the settings intact.
+///
+/// A file, not inline text, for the same reason the settings themselves are one:
+/// the instruction is ~1.5 KB of prose with quotes and newlines in it, and that
+/// does not survive a trip through a shell `command` string.
+fn tutor_files(app: &AppHandle, instruction: &str) -> Option<(String, String)> {
+    let out = app.path().app_data_dir().ok()?.join("english-tutor.md");
+    std::fs::write(&out, instruction)
+        .inspect_err(|e| log::warn!("english tutor: writing {}: {e}", out.display()))
+        .ok()?;
+    let log = crate::english_tutor::log_path()?;
+    Some((out.to_str()?.to_string(), log.to_str()?.to_string()))
+}
+
 /// Write a settings map to `<app_data_dir>/<file>` and return its path.
 fn write_settings(app: &AppHandle, file: &str, root: Map<String, Value>) -> Option<String> {
     let json = serde_json::to_string_pretty(&Value::Object(root)).ok()?;
@@ -153,8 +210,8 @@ fn write_settings(app: &AppHandle, file: &str, root: Map<String, Value>) -> Opti
     Some(out.to_str()?.to_string())
 }
 
-pub fn claude_settings(app: &AppHandle) -> Option<String> {
-    write_settings(app, "claude-hooks.json", base_settings_map(app)?)
+pub fn claude_settings(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
+    write_settings(app, "claude-hooks.json", base_settings_map(app, tutor)?)
 }
 
 /// Like [`claude_settings`] but with a `permissions.deny` block that forbids git
@@ -179,26 +236,83 @@ pub fn claude_settings(app: &AppHandle) -> Option<String> {
 /// `*` closes the first; the `*git * commit*` form closes the second. `*` matches the
 /// empty string, so these subsume the plain prefix rules; those are kept anyway,
 /// since their semantics are the ones the CLI's own `/permissions` UI writes.
-pub fn claude_settings_no_git(app: &AppHandle) -> Option<String> {
-    let mut root = base_settings_map(app)?;
-    root.insert(
-        "permissions".into(),
-        json!({
-            "deny": [
-                "Bash(git commit)",
-                "Bash(git commit:*)",
-                "Bash(git push)",
-                "Bash(git push:*)",
-                // Any path/wrapper before `git` (`/usr/bin/git commit`, `sudo git push`).
-                "Bash(*git commit*)",
-                "Bash(*git push*)",
-                // Options between `git` and the subcommand (`git -C <path> commit`).
-                "Bash(*git * commit*)",
-                "Bash(*git * push*)",
-            ]
-        }),
-    );
-    write_settings(app, "claude-hooks-fixci.json", root)
+pub fn claude_settings_no_git(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
+    deny_settings(app, "claude-hooks-fixci.json", &NO_GIT_RULES, tutor)
+}
+
+/// The git-writing shapes both restricted variants block. Each verb appears in
+/// three forms for the reasons documented on [`claude_settings_no_git`].
+const NO_GIT_RULES: [&str; 8] = [
+    "Bash(git commit)",
+    "Bash(git commit:*)",
+    "Bash(git push)",
+    "Bash(git push:*)",
+    // Any path/wrapper before `git` (`/usr/bin/git commit`, `sudo git push`).
+    "Bash(*git commit*)",
+    "Bash(*git push*)",
+    // Options between `git` and the subcommand (`git -C <path> commit`).
+    "Bash(*git * commit*)",
+    "Bash(*git * push*)",
+];
+
+/// The `--settings` file for an **AI review** session: everything
+/// [`claude_settings_no_git`] denies, plus every `gh` route that would speak on the
+/// user's behalf.
+///
+/// The review assistant exists to read a PR and answer questions about it. Posting
+/// a comment, approving, or requesting changes is the *user's* act and must stay
+/// that way — an agent that reviews on your behalf is worse than no agent, because
+/// its output goes out under your name.
+///
+/// Same caveat as [`claude_settings_no_git`]: **best-effort defence-in-depth, not a
+/// security boundary.** These match command text, so a wrapper script, an alias, or
+/// a `curl` straight at the REST API sails past. The real control is the `review`
+/// prompt's hard-rules block, which states the constraint in prose; this catches
+/// the shapes a model actually reaches for when asked to "leave a comment".
+///
+/// `gh api` is denied wholesale rather than by method: it's the one `gh` surface
+/// that can reach *every* mutation endpoint, and losing its read uses (which
+/// nothing here needs — the PR's content is already in the prompt) is a cheap price
+/// for not having to enumerate them.
+pub fn claude_settings_review(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
+    let gh: [&str; 16] = [
+        "Bash(gh pr review:*)",
+        "Bash(*gh pr review*)",
+        "Bash(gh pr comment:*)",
+        "Bash(*gh pr comment*)",
+        "Bash(gh pr merge:*)",
+        "Bash(*gh pr merge*)",
+        "Bash(gh pr close:*)",
+        "Bash(*gh pr close*)",
+        "Bash(gh pr edit:*)",
+        "Bash(*gh pr edit*)",
+        "Bash(gh pr ready:*)",
+        "Bash(*gh pr ready*)",
+        "Bash(gh issue comment:*)",
+        "Bash(*gh issue comment*)",
+        "Bash(gh api:*)",
+        "Bash(*gh api*)",
+    ];
+    let rules: Vec<&str> = NO_GIT_RULES.iter().copied().chain(gh).collect();
+    deny_settings(app, "claude-hooks-review.json", &rules, tutor)
+}
+
+/// The base settings plus a `permissions.deny` block, written to its own file so
+/// one restricted variant can never affect another launch.
+///
+/// The deny list is *merged* into whatever `permissions` the base already set (the
+/// English tutor's `Edit` allow), not written over it — replacing the object would
+/// silently drop the tutor's grant and stop every turn on a permission prompt.
+fn deny_settings(
+    app: &AppHandle,
+    file: &str,
+    rules: &[&str],
+    tutor: Option<&str>,
+) -> Option<String> {
+    let mut root = base_settings_map(app, tutor)?;
+    let perms = root.entry("permissions").or_insert_with(|| json!({}));
+    perms.as_object_mut()?.insert("deny".into(), json!(rules));
+    write_settings(app, file, root)
 }
 
 /// Cap on the session rows a single read hands back. Ordered newest-first, so

@@ -8,7 +8,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 
 /** Where a terminal was opened from. Pairs with `refId` to identify a session:
  *  the Agents panel maps a stored `term_key` back to its live PTY through it. */
-export type TerminalSource = "shell" | "triage" | "issue";
+export type TerminalSource = "shell" | "triage" | "issue" | "review";
 
 /** A terminal to open: a cwd + command (empty ⇒ login shell), optional seed. */
 export interface TerminalSpec {

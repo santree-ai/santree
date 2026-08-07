@@ -12,6 +12,9 @@ import {
   INVESTIGATE_MODEL_KEY,
   INVESTIGATE_REMOTE_CONTROL_KEY,
   PERMISSION_MODES,
+  REVIEW_BRIEF_MODEL_KEY,
+  REVIEW_EFFORT_KEY,
+  REVIEW_MODEL_KEY,
   TRIAGE_GOOD_CITIZEN_KEY,
   TRIAGE_SNOOZED_KEY,
   useAgents,
@@ -34,7 +37,10 @@ import { Field, Heading, OverrideSelect, SELECT_CLASS, ToggleRow } from "../widg
  * repo scope is expressed by the descriptor's keys plus the `inherits` flag the
  * body passes down. */
 interface ActionDescriptor {
-  agentKey: string;
+  /** Absent for actions that are Claude-only by design (the AI review session).
+   *  No agent picker is rendered then — offering one that the launch path ignores
+   *  would be a control that lies. */
+  agentKey?: string;
   modelKey: string;
   /** Claude's `--effort` for the run (low…max). */
   effortKey: string;
@@ -53,6 +59,85 @@ const WORK: ActionDescriptor = {
   effortKey: WORK_EFFORT_KEY,
   permissionModeKey: WORK_PERMISSION_MODE_KEY,
 };
+/** No `agentKey`: the review session launches Claude specifically, because its
+ *  read-only guarantee rests on a Claude `--settings` deny-list we can't express
+ *  for another harness. */
+const REVIEW: ActionDescriptor = {
+  modelKey: REVIEW_MODEL_KEY,
+  effortKey: REVIEW_EFFORT_KEY,
+};
+
+/**
+ * The Reviews tab's two AI surfaces: the interactive "Ask AI" session, and the
+ * headless review brief.
+ *
+ * They're configured separately because they're different jobs. The session is a
+ * conversation you steer, so it follows the same model/effort convention as every
+ * other action. The brief is one shot at deciding where your attention goes, which
+ * is worth a stronger model than the app's other headless helpers (commit
+ * messages, PR bodies) get.
+ */
+export function ReviewActionSection({ repo }: { repo?: string }) {
+  return (
+    <>
+      <Heading
+        title="Reviews"
+        subtitle="How the Reviews tab's AI runs. It only ever reads and explains — it never comments, approves, or pushes on your behalf. Edit its prompts in Settings → Prompts."
+      />
+      <div className="space-y-3.5">
+        <div>
+          <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
+            Ask AI session
+          </div>
+          <ActionConfig descriptor={REVIEW} repo={repo} />
+        </div>
+        <div>
+          <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
+            Review brief
+          </div>
+          <BriefModelCard repo={repo} />
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** The brief's model picker. Its own card rather than a third `ActionConfig`
+ *  field: the brief is a single headless call with no effort or start mode, and
+ *  padding it with inert controls would suggest otherwise. */
+function BriefModelCard({ repo }: { repo?: string }) {
+  const inherits = repo !== undefined;
+  const scope = inherits ? `repo:${repo}` : "app";
+  const models = useClaudeModels().data ?? [];
+  const appModel = useSetting("app", REVIEW_BRIEF_MODEL_KEY).data;
+  const scopeModel = useSetting(scope, REVIEW_BRIEF_MODEL_KEY).data;
+  const setSetting = useSetSetting();
+
+  return (
+    <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
+      <Field
+        label="Model"
+        hint={
+          inherits
+            ? undefined
+            : "Reads the whole diff once to produce the reading order and watch-outs. Worth a capable model — a cheap one returns a plausible order that isn't grounded in the code, which is worse than none because you'd trust it. Defaults to Sonnet."
+        }
+      >
+        <ModelSelect
+          models={models}
+          value={inherits ? (scopeModel ?? "") : (scopeModel ?? DEFAULT_BRIEF_MODEL)}
+          onChange={(v) => setSetting.mutate({ scope, key: REVIEW_BRIEF_MODEL_KEY, value: v })}
+          inherits={inherits}
+          defaultLabel={`Use app default (${appModel || DEFAULT_BRIEF_MODEL})`}
+        />
+      </Field>
+    </div>
+  );
+}
+
+/** Mirrors `review_ai.rs`'s `DEFAULT_BRIEF_MODEL` — shown as the picker's value
+ *  when nothing has been chosen, so the UI doesn't imply "no model". */
+const DEFAULT_BRIEF_MODEL = "sonnet";
 
 /** The Triage Investigation action. Triage is global: the enable switch + queue
  * prefs live at the app level; a repo only overrides which agent/skill/model the
@@ -248,13 +333,17 @@ function ActionConfig({
   // action has none) so hook order stays stable across renders.
   const permKey = descriptor.permissionModeKey ?? "__none_perm__";
   const hasPerm = descriptor.permissionModeKey !== undefined;
-  const appAgent = (useSetting("app", descriptor.agentKey).data as AgentKind | null) ?? "Claude";
+  // Same sentinel trick as `permKey`: an agent-less action still reads the key so
+  // hook order stays stable, and falls back to Claude (the only agent it runs).
+  const agentKey = descriptor.agentKey ?? "__none_agent__";
+  const hasAgent = descriptor.agentKey !== undefined;
+  const appAgent = (useSetting("app", agentKey).data as AgentKind | null) ?? "Claude";
   const appModel = useSetting("app", descriptor.modelKey).data;
   const appEffort = useSetting("app", descriptor.effortKey).data;
   const appPerm = useSetting("app", permKey).data;
 
   // This scope's stored values (null/undefined for both app + an unset repo).
-  const scopeAgent = useSetting(scope, descriptor.agentKey).data as AgentKind | null;
+  const scopeAgent = useSetting(scope, agentKey).data as AgentKind | null;
   const scopeModel = useSetting(scope, descriptor.modelKey).data;
   const scopeEffort = useSetting(scope, descriptor.effortKey).data;
   const scopePerm = useSetting(scope, permKey).data;
@@ -279,23 +368,25 @@ function ActionConfig({
 
   return (
     <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
-      <Field
-        label="Agent"
-        hint={
-          inherits
-            ? "Anything left on the default inherits the app setting."
-            : "Only one agent runs an action. More harnesses are coming."
-        }
-      >
-        <AgentSelect
-          agents={agents}
-          value={inherits ? (scopeAgent ?? "") : effectiveAgent}
-          onChange={(v) => set(descriptor.agentKey, v)}
-          inherits={inherits}
-          disabled={disabled}
-          defaultLabel={`Use app default (${appAgentShort})`}
-        />
-      </Field>
+      {hasAgent && (
+        <Field
+          label="Agent"
+          hint={
+            inherits
+              ? "Anything left on the default inherits the app setting."
+              : "Only one agent runs an action. More harnesses are coming."
+          }
+        >
+          <AgentSelect
+            agents={agents}
+            value={inherits ? (scopeAgent ?? "") : effectiveAgent}
+            onChange={(v) => set(agentKey, v)}
+            inherits={inherits}
+            disabled={disabled}
+            defaultLabel={`Use app default (${appAgentShort})`}
+          />
+        </Field>
+      )}
 
       <Field
         label="Model"

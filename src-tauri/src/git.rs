@@ -400,6 +400,87 @@ pub fn add_worktree_for_branch(repo: &Path, worktree_path: &Path, branch: &str) 
     bail!("branch '{branch}' not found locally or on origin (a fork PR?)");
 }
 
+/// Reject anything that isn't a plain git object id before it reaches a `git`
+/// argv.
+///
+/// The SHA arrives over IPC (it comes from the PR detail the webview holds), and
+/// it's passed positionally to `worktree add` / `checkout` — so a value starting
+/// with `-` would be read as a **flag**, not a commit. Hex-only closes that and
+/// every other shape at once; the length band is git's own (a short SHA is at
+/// least 4, a full one 40, and SHA-256 repos use 64).
+fn safe_sha(sha: &str) -> Result<&str> {
+    if !(4..=64).contains(&sha.len()) || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("'{sha}' is not a git object id");
+    }
+    Ok(sha)
+}
+
+/// Check out a PR's head commit, **detached**, in a throwaway worktree used only
+/// for reading the PR's code.
+///
+/// Two deliberate differences from [`add_worktree_for_branch`], which exists to
+/// *work on* a PR:
+///
+///  - It fetches `refs/pull/<number>/head` rather than the head branch. GitHub
+///    exposes that ref on the base repo for every PR, including **forks** — whose
+///    branch doesn't exist on `origin` at all, which is exactly the case
+///    `add_worktree_for_branch` has to bail on.
+///  - It checks out detached at the SHA, so no local branch is created and
+///    nothing done here can land on the PR's branch.
+///
+/// Idempotent: an existing checkout is fast-forwarded to `head_sha` in place, so
+/// re-opening a PR after new commits costs a fetch rather than a re-clone.
+pub fn add_review_worktree(
+    repo: &Path,
+    worktree_path: &Path,
+    number: u32,
+    head_sha: &str,
+) -> Result<()> {
+    let sha = safe_sha(head_sha)?;
+    if let Some(parent) = worktree_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // `--no-tags` keeps a big repo's tag list out of a fetch we only need one
+    // commit from. The ref is fetched into FETCH_HEAD; we check out the SHA
+    // itself, so nothing depends on a local ref surviving.
+    let pull_ref = format!("refs/pull/{number}/head");
+    let fetched = git(repo, &["fetch", "--no-tags", "origin", &pull_ref]);
+
+    if worktree_path.exists() {
+        // Already checked out — move it to the current head. If that fails the
+        // directory is unusable (interrupted create, manual deletion), so start over.
+        if git(worktree_path, &["checkout", "--detach", sha]).is_ok() {
+            return Ok(());
+        }
+        remove_review_worktree(repo, worktree_path);
+    }
+
+    // Only now does a failed fetch matter: without it the SHA may not be local.
+    // Reported as the cause rather than as a bare "invalid reference".
+    if let Err(e) = fetched {
+        if git(repo, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_err() {
+            bail!("couldn't fetch PR #{number} from origin: {e}");
+        }
+    }
+    let path = worktree_path.to_string_lossy();
+    git(repo, &["worktree", "add", "--detach", &path, sha])?;
+    Ok(())
+}
+
+/// Tear down a review checkout. Best-effort by design — it holds nothing the user
+/// authored (it's detached, read-only, and re-creatable from origin), so a failure
+/// to remove it is never worth failing a caller over. No branch to delete, unlike
+/// [`remove_worktree`].
+pub fn remove_review_worktree(repo: &Path, worktree_path: &Path) {
+    let path = worktree_path.to_string_lossy().into_owned();
+    let _ = git(repo, &["worktree", "remove", "--force", &path]);
+    if worktree_path.exists() {
+        let _ = std::fs::remove_dir_all(worktree_path);
+    }
+    let _ = git(repo, &["worktree", "prune"]);
+}
+
 /// Remove a worktree and delete its branch. Idempotent: the goal is simply that
 /// the worktree no longer exist, so a half-removed worktree (e.g. a prior delete
 /// interrupted by a hot-reload) cleans up cleanly instead of wedging forever.
@@ -1200,6 +1281,28 @@ pub fn list_files(cwd: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_sha_accepts_real_object_ids() {
+        assert!(safe_sha("a1b2c3d").is_ok());
+        assert!(safe_sha(&"0".repeat(40)).is_ok());
+        // SHA-256 repos.
+        assert!(safe_sha(&"f".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn safe_sha_rejects_anything_that_could_be_read_as_a_flag() {
+        // The SHA is passed positionally to `worktree add` / `checkout`, so a
+        // leading dash is flag injection, not a bad commit.
+        assert!(safe_sha("--force").is_err());
+        assert!(safe_sha("-abc123").is_err());
+        assert!(safe_sha("HEAD").is_err());
+        assert!(safe_sha("main").is_err());
+        assert!(safe_sha("a1b2c3d; rm -rf /").is_err());
+        assert!(safe_sha("").is_err());
+        assert!(safe_sha("abc").is_err());
+        assert!(safe_sha(&"a".repeat(65)).is_err());
+    }
 
     /// A unique scratch dir under the OS temp dir, cleaned before use. Mirrors
     /// the ad-hoc temp-repo harness in `worktree.rs`'s test module (this

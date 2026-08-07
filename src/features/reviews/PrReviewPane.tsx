@@ -4,6 +4,10 @@
  * anchored inline. The PR description and conversation live in the full-height
  * {@link PrInfoPanel} rail beside the whole detail area, not here.
  *
+ * Comments are written here too: every diff line carries GitHub's `+` button, and
+ * anything left as a draft is held in the viewer's pending review until the
+ * {@link ReviewSubmitBar} at the foot of the pane sends it.
+ *
  * A marked file collapses and stays marked across sessions, but re-expands the
  * moment a new commit changes it — so you always re-review what actually changed.
  * Which store holds the mark is a setting: this machine's table (where the rule is
@@ -12,7 +16,7 @@
  * tab, where GitHub enforces the rule for us). The toggle mutation lives here (a
  * stable parent) rather than in the card, which unmounts when collapsed.
  */
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { PrFile, PrThread, ReviewPr } from "../../bindings";
 import { ChevronDownIcon, EyeIcon, WarningIcon } from "../../components/icons";
@@ -25,8 +29,11 @@ import {
 } from "../../lib/queries";
 import { splitRepoSlug } from "../../lib/repo";
 import { palette } from "../../theme/colors";
+import type { CommentTarget } from "./commentTarget";
+import type { FileFocus } from "./model";
 import { PrFileDiff } from "./PrFileDiff";
 import { PrThreadCard } from "./PrThreadCard";
+import { draftCount, ReviewSubmitBar } from "./ReviewSubmitBar";
 
 /** GitHub's lowercase file-status strings → a status letter + tint. */
 const STATUS_META: Record<string, { letter: string; color: string }> = {
@@ -42,7 +49,15 @@ const STATUS_META: Record<string, { letter: string; color: string }> = {
  *  would be a new reference and defeat {@link PrFileCard}'s memo. */
 const NO_THREADS: PrThread[] = [];
 
-export function PrReviewPane({ pr }: { pr: ReviewPr }) {
+export function PrReviewPane({
+  pr,
+  fileFocus = null,
+}: {
+  pr: ReviewPr;
+  /** A jump request from the review brief. Passed in rather than read from the
+   *  model so this pane stays renderable on its own (as its tests do). */
+  fileFocus?: FileFocus | null;
+}) {
   const [owner, name] = splitRepoSlug(pr.repo);
   const { data: detail, isLoading } = usePrDetail(owner, name, pr.number);
   const { data: marks } = useReviewedFiles(pr.repo, pr.number);
@@ -76,6 +91,19 @@ export function PrReviewPane({ pr }: { pr: ReviewPr }) {
 
   const reviewedCount = files.filter(isViewed).length;
 
+  // Every file card takes this, and every card is memoized — so it's built from
+  // the *fields* rather than from `pr`/`detail` themselves. `useReviews` hands
+  // back a fresh ReviewPr object on each 30s poll, and keying on that identity
+  // would mint a new target and re-lay-out every diff in the list.
+  const { repo: prRepo, number: prNumber, id: prId } = pr;
+  const headSha = detail?.headSha ?? "";
+  const pendingReviewId = detail?.pendingReviewId ?? null;
+  const target = useMemo<CommentTarget>(
+    () => ({ prRepo, number: prNumber, prId, headSha, pendingReviewId }),
+    [prRepo, prNumber, prId, headSha, pendingReviewId],
+  );
+  const drafts = draftCount(detail);
+
   // Takes the file rather than closing over it, so every card gets the same handler
   // reference — a per-file closure would re-render (and re-lay-out) the whole list
   // on any toggle or check-poll.
@@ -84,46 +112,76 @@ export function PrReviewPane({ pr }: { pr: ReviewPr }) {
     [setReviewed],
   );
 
+  // A jump from the review brief: scroll that file's card into view and force it
+  // open, even if it's marked viewed. `nonce` (not the path) is the dependency, so
+  // clicking the same entry twice re-scrolls instead of being a silent no-op.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [forcedOpen, setForcedOpen] = useState<string | null>(null);
+  useEffect(() => {
+    if (!fileFocus) return;
+    setForcedOpen(fileFocus.path);
+    // Wait a frame: the card may have been collapsed until this render, so its
+    // final height (and therefore its offset) isn't settled yet.
+    const id = requestAnimationFrame(() => {
+      scrollRef.current
+        ?.querySelector(`[data-path="${CSS.escape(fileFocus.path)}"]`)
+        ?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [fileFocus]);
+
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      {isLoading ? (
-        <div className="px-4 py-4">
-          <PaneSkeleton />
-        </div>
-      ) : files.length > 0 ? (
-        <>
-          <div className="flex items-center gap-2 border-b border-hairline px-4 py-2 font-mono text-[10.5px] text-muted-3">
-            <span className="tracking-[.04em] uppercase">
-              {reviewedCount} / {files.length} files viewed
-            </span>
-            {/* The file list is capped. Say so — marking every *listed* file viewed
-                on a truncated list means approving a diff you never saw. */}
-            {detail?.filesTruncated && (
-              <span
-                className="ml-auto flex items-center gap-1 normal-case"
-                style={{ color: palette.amber }}
-              >
-                <WarningIcon size={11} />
-                Showing the first {files.length} files — this PR has more.
-              </span>
-            )}
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
+        {isLoading ? (
+          <div className="px-4 py-4">
+            <PaneSkeleton />
           </div>
-          {files.map((f) => (
-            <PrFileCard
-              key={f.path}
-              owner={owner}
-              name={name}
-              base={detail?.baseSha ?? ""}
-              head={detail?.headSha ?? ""}
-              file={f}
-              threads={threadsByPath.get(f.path) ?? NO_THREADS}
-              reviewed={isViewed(f)}
-              onToggle={onToggle}
-            />
-          ))}
-        </>
-      ) : (
-        <EmptyState title="No file changes" />
+        ) : files.length > 0 ? (
+          <>
+            <div className="flex items-center gap-2 border-b border-hairline px-4 py-2 font-mono text-[10.5px] text-muted-3">
+              <span className="tracking-[.04em] uppercase">
+                {reviewedCount} / {files.length} files viewed
+              </span>
+              {/* The file list is capped. Say so — marking every *listed* file viewed
+                  on a truncated list means approving a diff you never saw. */}
+              {detail?.filesTruncated && (
+                <span
+                  className="ml-auto flex items-center gap-1 normal-case"
+                  style={{ color: palette.amber }}
+                >
+                  <WarningIcon size={11} />
+                  Showing the first {files.length} files — this PR has more.
+                </span>
+              )}
+            </div>
+            {files.map((f) => (
+              <PrFileCard
+                key={f.path}
+                owner={owner}
+                name={name}
+                base={detail?.baseSha ?? ""}
+                head={detail?.headSha ?? ""}
+                file={f}
+                threads={threadsByPath.get(f.path) ?? NO_THREADS}
+                target={target}
+                reviewed={isViewed(f)}
+                forceOpen={forcedOpen === f.path}
+                onToggle={onToggle}
+              />
+            ))}
+          </>
+        ) : (
+          <EmptyState title="No file changes" />
+        )}
+      </div>
+      {detail?.pendingReviewId && (
+        <ReviewSubmitBar
+          prRepo={pr.repo}
+          number={pr.number}
+          reviewId={detail.pendingReviewId}
+          drafts={drafts}
+        />
       )}
     </div>
   );
@@ -152,7 +210,9 @@ const PrFileCard = memo(function PrFileCard({
   head,
   file,
   threads,
+  target,
   reviewed,
+  forceOpen,
   onToggle,
 }: {
   owner: string;
@@ -161,7 +221,11 @@ const PrFileCard = memo(function PrFileCard({
   head: string;
   file: PrFile;
   threads: PrThread[];
+  target: CommentTarget;
   reviewed: boolean;
+  /** The review brief jumped here — open regardless of the viewed mark, since
+   *  landing on a collapsed card would defeat the jump. */
+  forceOpen: boolean;
   onToggle: (file: PrFile, reviewed: boolean) => void;
 }) {
   // Collapse follows the reviewed mark, but the chevron can override it. The
@@ -169,6 +233,9 @@ const PrFileCard = memo(function PrFileCard({
   // the mark → the file re-expands), not on manual chevron toggles.
   const [collapsed, setCollapsed] = useState(reviewed);
   useEffect(() => setCollapsed(reviewed), [reviewed]);
+  useEffect(() => {
+    if (forceOpen) setCollapsed(false);
+  }, [forceOpen]);
 
   // Full file source powers context expansion — fetched only once the card is
   // expanded (and only for a text file), so collapsed/binary files cost nothing.
@@ -185,7 +252,8 @@ const PrFileCard = memo(function PrFileCard({
   const outdated = threads.filter((t) => t.line == null || t.isOutdated);
 
   return (
-    <div className="border-b border-line-2">
+    // `data-path` is the anchor the review brief's jumps scroll to.
+    <div data-path={file.path} className="border-b border-line-2">
       <div className="sticky top-0 z-[5] flex items-center gap-2 border-b border-line-2 bg-raised px-3 py-1.5">
         <button
           type="button"
@@ -239,6 +307,7 @@ const PrFileCard = memo(function PrFileCard({
               status={file.status}
               patch={file.patch}
               threads={threads}
+              target={target}
               oldText={source?.oldText}
               newText={source?.newText}
               mode="unified"
@@ -250,7 +319,12 @@ const PrFileCard = memo(function PrFileCard({
                 </div>
                 <div className="overflow-hidden rounded-md border border-line-2">
                   {outdated.map((t, i) => (
-                    <PrThreadCard key={`${t.path}:${t.line}:${i}`} thread={t} />
+                    <PrThreadCard
+                      key={`${t.path}:${t.line}:${i}`}
+                      thread={t}
+                      prRepo={target.prRepo}
+                      number={target.number}
+                    />
                   ))}
                 </div>
               </div>

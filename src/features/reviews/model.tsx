@@ -17,10 +17,20 @@ import {
   useState,
 } from "react";
 
-import type { ReviewInbox, ReviewPr } from "../../bindings";
-import { useReviews } from "../../lib/queries";
+import type { ReviewInbox, ReviewPr, TicketRef } from "../../bindings";
+import { usePrTickets, useReviews } from "../../lib/queries";
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
+import { usePersistedState } from "../../lib/usePersistedState";
 import { useApp, useAppUi } from "../../state/AppContext";
+import type { Grouping, SortMode } from "./grouping";
+import { ticketIdFor } from "./ticket";
+
+/** Which file (and optionally line) the diff should scroll to and expand. */
+export interface FileFocus {
+  path: string;
+  line: number | null;
+  nonce: number;
+}
 
 interface ReviewsModel {
   repo: string;
@@ -28,6 +38,20 @@ interface ReviewsModel {
   loading: boolean;
   /** Every PR across all categories, for selection lookup. */
   allPrs: ReviewPr[];
+  /** How the sidebar buckets rows, and what orders them. Sidebar chrome, so both
+   *  persist to localStorage rather than the settings table. */
+  grouping: Grouping;
+  setGrouping: (g: Grouping) => void;
+  sort: SortMode;
+  setSort: (s: SortMode) => void;
+  /** The Linear ticket behind a PR, when it has one and Linear knows it — the
+   *  project grouping's input. */
+  ticketFor: (pr: ReviewPr) => TicketRef | undefined;
+  /** A jump request from the review brief into the diff. `nonce` (not just the
+   *  path) so clicking the same entry twice re-scrolls rather than being a no-op
+   *  the second time. */
+  fileFocus: FileFocus | null;
+  focusFile: (path: string, line?: number | null) => void;
   activeId: string | null;
   setActive: (id: string | null) => void;
   /** The currently selected PR, or null. */
@@ -44,6 +68,11 @@ interface ReviewsModel {
 }
 
 const ReviewsContext = createContext<ReviewsModel | null>(null);
+
+/** Sidebar chrome, so localStorage rather than the settings table (see the
+ *  persistence split in CLAUDE.md). */
+const GROUPING_KEY = "santree-reviews-grouping";
+const SORT_KEY = "santree-reviews-sort";
 
 export function ReviewsProvider({ children }: { children: ReactNode }) {
   const { activeRepo: repo } = useApp();
@@ -78,10 +107,49 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  const [grouping, setGrouping] = usePersistedState<Grouping>(GROUPING_KEY, "category");
+  const [sort, setSort] = usePersistedState<SortMode>(SORT_KEY, "waiting");
+
   const allPrs = useMemo(
     () => (inbox ? [...inbox.mine, ...inbox.requested, ...inbox.teams.flatMap((t) => t.prs)] : []),
     [inbox],
   );
+
+  // Resolve every PR's ticket in one batched Linear call. Sorted + deduped so the
+  // query key is stable across refetches that return the same inbox in a different
+  // order — otherwise every poll would look like a new key and refetch.
+  const ticketIds = useMemo(
+    () => [...new Set(allPrs.map(ticketIdFor).filter((id): id is string => !!id))].sort(),
+    [allPrs],
+  );
+  // Only fetched when the grouping actually needs it — no Linear round-trip for
+  // someone who never leaves the default category view.
+  const { data: tickets } = usePrTickets(repo, ticketIds, grouping === "project");
+  const ticketsById = useMemo(
+    () => new Map((tickets ?? []).map((t) => [t.identifier, t])),
+    [tickets],
+  );
+  const ticketFor = useCallback(
+    (pr: ReviewPr) => {
+      const id = ticketIdFor(pr);
+      return id ? ticketsById.get(id) : undefined;
+    },
+    [ticketsById],
+  );
+
+  const [fileFocus, setFileFocus] = useState<FileFocus | null>(null);
+  const focusFile = useCallback((path: string, line: number | null = null) => {
+    setFileFocus((prev) => ({ path, line, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
+  // A focus belongs to *one* PR's diff; carrying it across a selection change
+  // would scroll the next PR to a path that may not even be in it. Reset during
+  // render (React's adjust-state-on-prop-change pattern) rather than in an effect,
+  // so the diff never sees the previous PR's focus for a frame.
+  const [focusOwner, setFocusOwner] = useState(activeId);
+  if (focusOwner !== activeId) {
+    setFocusOwner(activeId);
+    setFileFocus(null);
+  }
 
   // Select the first PR once the inbox loads, and re-select when the current
   // selection falls out of the list — e.g. after switching the active repo (and
@@ -109,6 +177,13 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
       inbox,
       loading: isLoading,
       allPrs,
+      grouping,
+      setGrouping,
+      sort,
+      setSort,
+      ticketFor,
+      fileFocus,
+      focusFile,
       activeId,
       setActive,
       active: allPrs.find((p) => p.id === activeId) ?? null,
@@ -124,6 +199,13 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
       inbox,
       isLoading,
       allPrs,
+      grouping,
+      setGrouping,
+      sort,
+      setSort,
+      ticketFor,
+      fileFocus,
+      focusFile,
       activeId,
       setActive,
       showMergeQueue,

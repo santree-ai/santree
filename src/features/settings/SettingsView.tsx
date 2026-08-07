@@ -21,17 +21,20 @@ import {
   GearIcon,
   KeyIcon,
   LinearLogo,
+  PencilIcon,
   PlayIcon,
   PlugIcon,
+  PrIcon,
   TelescopeIcon,
 } from "../../components/icons";
 import { Dropdown, Tabs } from "../../components/primitives";
 import { useRepos } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
-import { TriageActionSection } from "./sections/Actions";
+import { ReviewActionSection, TriageActionSection } from "./sections/Actions";
 import { AgentsSection } from "./sections/Agents";
 import { AppearanceSection } from "./sections/Appearance";
+import { EnglishTutorSection } from "./sections/EnglishTutor";
 import { EnvironmentSection } from "./sections/Environment";
 import { GeneralSection } from "./sections/General";
 import { IntegrationsSection } from "./sections/Integrations";
@@ -83,6 +86,12 @@ const workEntry = (forRepo: boolean): SectionDef => ({
   icon: <PlayIcon size={ICON_SIZE} />,
   render: (repo) => <WorkSection repo={repo} forRepo={forRepo} />,
 });
+const reviewEntry = (forRepo: boolean): SectionDef => ({
+  key: "review",
+  label: "Reviews",
+  icon: <PrIcon size={ICON_SIZE} />,
+  render: (repo) => <ReviewActionSection repo={forRepo ? repo : undefined} />,
+});
 const promptsEntry = (forRepo: boolean): SectionDef => ({
   key: "prompts",
   label: "Prompts",
@@ -117,6 +126,12 @@ const APP_NAV: NavNode[] = [
     render: () => <AgentsSection />,
   },
   {
+    key: "english-tutor",
+    label: "English tutor",
+    icon: <PencilIcon size={ICON_SIZE} />,
+    render: () => <EnglishTutorSection />,
+  },
+  {
     key: "environment",
     label: "Environment",
     icon: <KeyIcon size={ICON_SIZE} />,
@@ -130,7 +145,7 @@ const APP_NAV: NavNode[] = [
   },
   {
     group: "Actions",
-    sections: [triageEntry(false), workEntry(false), promptsEntry(false)],
+    sections: [triageEntry(false), workEntry(false), reviewEntry(false), promptsEntry(false)],
   },
 ];
 
@@ -147,7 +162,10 @@ const REPO_NAV: NavNode[] = [
     icon: <KeyIcon size={ICON_SIZE} />,
     render: (repo) => <EnvironmentSection repo={repo} />,
   },
-  { group: "Actions", sections: [triageEntry(true), workEntry(true), promptsEntry(true)] },
+  {
+    group: "Actions",
+    sections: [triageEntry(true), workEntry(true), reviewEntry(true), promptsEntry(true)],
+  },
 ];
 
 /** The default section key for a scope (the first one in its nav). */

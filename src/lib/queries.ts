@@ -22,9 +22,13 @@ import type {
   AgentKind,
   ChangedFile,
   DevTodo,
+  NewInlineComment,
   PrDetail,
   PrLabel,
   PromptInfo,
+  ReviewBrief,
+  ReviewEvent,
+  ReviewTarget,
   ScriptInfo,
   SessionState,
   Settings,
@@ -40,6 +44,7 @@ import { commands, events } from "../bindings";
 // mounted at the app root and is the single source of live-session state.
 import { useTerminals } from "../features/terminal/TerminalsContext";
 import { type ToastOptions, toast } from "../state/toast";
+import { splitRepoSlug } from "./repo";
 
 /** The shape of a generated `Result`-typed command's promise. */
 type CommandResult<T> = Promise<{ status: "ok"; data: T } | { status: "error"; error: string }>;
@@ -227,6 +232,9 @@ export const queryKeys = {
   githubStatus: ["github-status"] as const,
   claudeHookSettings: ["claude-hook-settings"] as const,
   claudeHookSettingsNoGit: ["claude-hook-settings-no-git"] as const,
+  claudeHookSettingsReview: ["claude-hook-settings-review"] as const,
+  englishLog: ["english-log"] as const,
+  englishAnalysis: ["english-analysis"] as const,
   sessionStates: ["session-states"] as const,
   sessionUsageLive: ["session-usage-live"] as const,
   /** Prefix for every repo's task graph — invalidate this (not `tasks(repo)`)
@@ -262,6 +270,14 @@ export const queryKeys = {
   worktreeHasTranscripts: (repo: string, id: string) =>
     ["worktree-has-transcripts", repo, id] as const,
   reviews: (repo: string) => ["reviews", repo] as const,
+  prTickets: (repo: string, ids: string[]) => ["pr-tickets", repo, ids] as const,
+  /** Keyed on the head SHA: a PR that gains commits needs a fresh checkout, not
+   *  the one an agent already read. */
+  reviewWorkspace: (repo: string, prRepo: string, number: number, headSha: string) =>
+    ["review-workspace", repo, prRepo, number, headSha] as const,
+  reviewPrompt: (repo: string, prRepo: string, number: number) =>
+    ["review-prompt", repo, prRepo, number] as const,
+  prReviewBrief: (prRepo: string, number: number) => ["pr-review-brief", prRepo, number] as const,
   mergeQueue: (repo: string) => ["merge-queue", repo] as const,
   prDetail: (owner: string, name: string, number: number) =>
     ["pr-detail", owner, name, number] as const,
@@ -329,6 +345,14 @@ export const INVESTIGATE_EFFORT_KEY = "investigate_effort";
  *  `claude` old enough to predate the flag has an escape hatch (CLAUDE.md's
  *  "verify vendor flags" gotcha). */
 export const INVESTIGATE_REMOTE_CONTROL_KEY = "investigate_remote_control";
+
+/** Setting keys for the Reviews tab's AI surfaces. `review_model`/`review_effort`
+ *  drive the interactive review session; `review_brief_model` the headless brief
+ *  (which defaults to a stronger tier than the other headless helpers — deciding a
+ *  reading order is real reasoning, not a commit message). */
+export const REVIEW_MODEL_KEY = "review_model";
+export const REVIEW_EFFORT_KEY = "review_effort";
+export const REVIEW_BRIEF_MODEL_KEY = "review_brief_model";
 
 /** Setting keys for the Issues "Work" action (agent · model · effort) used by the
  *  launch tray. Unlike triage, this action is always on — there's no enable switch. */
@@ -410,6 +434,15 @@ export const CLAUDE_START_WITH_CHROME_KEY = "claude_start_with_chrome";
  *  (`data === "true"` = on) — the local store needs no network. Read by Rust
  *  (`reviewed.rs`), which also requires a `gh` token before honoring it. */
 export const SYNC_VIEWED_KEY = "reviews_sync_viewed";
+
+/** Inject the English-tutor correction hook into every Claude session santree
+ *  launches. App-scoped, defaults to OFF (`data === "true"` = on).
+ *
+ *  Unlike {@link CLAUDE_STATUS_LINE_KEY} this is *not* a runtime display toggle:
+ *  it's baked into the `--settings` file the session launches with, so flipping it
+ *  only affects sessions started afterwards — and `useSetSetting` invalidates the
+ *  three cached-forever `--settings` paths when it changes. */
+export const ENGLISH_TUTOR_KEY = "english_tutor";
 
 /**
  * Trees (worktree) preference keys (string-valued settings):
@@ -555,9 +588,10 @@ export const useGithubStatus = () =>
  * can't be resolved). A file path — not inline JSON — because the config is too
  * large to inline into the PTY seed command without breaking its shell quoting.
  *
- * The content is setting-independent (the statusLine is *always* injected so
- * usage is always captured), so this is cached forever. Whether the app renders
- * the inline usage bar is gated separately at the render site via
+ * Cached until {@link ENGLISH_TUTOR_KEY} flips (the one setting baked into the
+ * file — `useSetSetting` invalidates this key when it changes). The statusLine is
+ * *always* injected so usage is always captured; whether the app renders the
+ * inline usage bar is gated separately at the render site via
  * {@link CLAUDE_STATUS_LINE_KEY} — a runtime decision, so it works for
  * already-running tabs.
  */
@@ -570,11 +604,21 @@ export const useClaudeHookSettings = () =>
 
 /** Like {@link useClaudeHookSettings} but the commit/push-denying variant — the
  *  `--settings` path a "Fix CI" session launches with, so the AI fixes + validates
- *  but never commits/pushes. Content is setting-independent, so cache forever. */
+ *  but never commits/pushes. Same caching rule as {@link useClaudeHookSettings}. */
 export const useClaudeHookSettingsNoGit = () =>
   useQuery({
     queryKey: queryKeys.claudeHookSettingsNoGit,
     queryFn: () => commands.claudeHookSettingsNoGit(),
+    staleTime: Infinity,
+  });
+
+/** The `--settings` path an AI *review* session launches with: the no-git denials
+ *  plus every `gh` route that could comment, approve, or request changes as the
+ *  user. Same caching rule as {@link useClaudeHookSettings}. */
+export const useClaudeHookSettingsReview = () =>
+  useQuery({
+    queryKey: queryKeys.claudeHookSettingsReview,
+    queryFn: () => commands.claudeHookSettingsReview(),
     staleTime: Infinity,
   });
 
@@ -1171,6 +1215,93 @@ export const useReviews = (repo: string) =>
     staleTime: 60_000,
   });
 
+/** Linear project/title for each of `ids` — what lets the Reviews sidebar group
+ *  PRs by project. Empty when no Linear org is connected (the sidebar then just
+ *  doesn't offer the grouping). Cached long: a ticket's project rarely moves, and
+ *  the key already changes whenever the inbox's ticket set does. */
+export const usePrTickets = (repo: string, ids: string[], enabled = true) =>
+  useUnwrappedQuery(queryKeys.prTickets(repo, ids), () => commands.prTickets(repo, ids), {
+    enabled: enabled && !!repo && ids.length > 0,
+    staleTime: 10 * 60_000,
+  });
+
+/**
+ * The read-only checkout of a PR's head that an AI review session runs in, created
+ * on demand. `null` when the PR lives in a repo santree has no clone of — the
+ * session then runs diff-only, which the pane says out loud.
+ *
+ * Keyed on the head SHA so a PR that gains commits gets a fresh checkout instead
+ * of an agent reading last week's code. `staleTime: Infinity` because the backend
+ * call is find-or-create: once a key has resolved, re-running it would only redo
+ * a fetch that changed nothing.
+ */
+export const useReviewWorkspace = (repo: string, target: ReviewTarget | null, enabled: boolean) =>
+  useUnwrappedQuery(
+    queryKeys.reviewWorkspace(
+      repo,
+      target?.prRepo ?? "",
+      target?.number ?? 0,
+      target?.headSha ?? "",
+    ),
+    // biome-ignore lint/style/noNonNullAssertion: gated by `enabled` below.
+    () => commands.reviewWorkspace(repo, target!),
+    { enabled: enabled && !!repo && !!target?.headSha, staleTime: Number.POSITIVE_INFINITY },
+  );
+
+/** The PATH of the on-disk AI-review prompt for a PR (its description,
+ *  conversation and diff around the `review` template). Like
+ *  {@link useInvestigatePrompt}: the terminal seeds `Read <path> …`, since a whole
+ *  PR diff is far too large for a shell seed. `staleTime: 0` so each fresh launch
+ *  re-renders against the PR's current state — including whether a checkout now
+ *  exists, which the backend derives rather than taking from here. */
+export const useReviewPrompt = (repo: string, target: ReviewTarget | null, enabled: boolean) =>
+  useUnwrappedQuery(
+    queryKeys.reviewPrompt(repo, target?.prRepo ?? "", target?.number ?? 0),
+    // biome-ignore lint/style/noNonNullAssertion: gated by `enabled` below.
+    () => commands.reviewPrompt(repo, target!),
+    { enabled: enabled && !!repo && !!target, staleTime: 0 },
+  );
+
+/** The cached AI review brief for a PR, or `null` when none exists yet. One row
+ *  read — no model call — so the panel renders instantly and offers to generate. */
+export const usePrReviewBrief = (prRepo: string, number: number) =>
+  useUnwrappedQuery(
+    queryKeys.prReviewBrief(prRepo, number),
+    () => commands.prReviewBrief(prRepo, number),
+    { enabled: !!prRepo && number > 0, staleTime: Number.POSITIVE_INFINITY },
+  );
+
+/** Generate (or regenerate) a PR's review brief. Slow — a headless model call over
+ *  the whole diff — so it's explicit rather than automatic, and its result is
+ *  written straight into the cache the panel reads. */
+export const useGenerateReviewBrief = (repo: string) => {
+  const qc = useQueryClient();
+  return useActionMutation<ReviewTarget, ReviewBrief>({
+    mutationFn: (target) => unwrap(commands.generatePrReviewBrief(repo, target)),
+    // Seed the cache directly: the command already returns the brief the panel
+    // wants, so an invalidate would just re-read the row we just wrote.
+    invalidate: (target, data) => {
+      qc.setQueryData(queryKeys.prReviewBrief(target.prRepo, target.number), data);
+      return [];
+    },
+  });
+};
+
+/** Delete a PR's review checkout — the pane's "Remove checkout" action. */
+export const useRemoveReviewWorkspace = (repo: string) => {
+  const qc = useQueryClient();
+  return useActionMutation<{ prRepo: string; number: number; headSha: string }, null>({
+    mutationFn: ({ number }) => unwrap(commands.removeReviewWorkspace(repo, number)),
+    invalidate: ({ prRepo, number, headSha }) => {
+      // Drop the memoized path so the next open recreates rather than handing the
+      // terminal a cwd that no longer exists.
+      qc.removeQueries({ queryKey: queryKeys.reviewWorkspace(repo, prRepo, number, headSha) });
+      return [];
+    },
+    success: () => "Review checkout removed.",
+  });
+};
+
 /** The active repo's merge queue (its default branch's queue) — the ordered PRs
  *  waiting to merge, for the Reviews tab's merge-queue panel. `null` when GitHub
  *  isn't connected or the repo has no merge queue. Positions shift as PRs merge,
@@ -1239,6 +1370,102 @@ export const useSetPrLabels = (owner: string, name: string, number: number) => {
     },
   });
 };
+
+/** The cached detail of a PR the caller knows by its `owner/name` slug — the write
+ *  hooks below all reconcile through it, since every one of them changes what the
+ *  conversation, the threads, or the pending review look like. */
+const prDetailKey = (prRepo: string, number: number) => {
+  const [owner, name] = splitRepoSlug(prRepo);
+  return queryKeys.prDetail(owner, name, number);
+};
+
+/**
+ * Leave an inline review comment on a PR line — the diff's `+` button.
+ *
+ * `pending` picks between GitHub's two halves: post it now, or stack it into the
+ * viewer's pending review (invisible to the author until it's submitted). Not
+ * optimistic: a comment that appears in the diff and then vanishes because GitHub
+ * rejected the line is worse than a beat of latency, and the round-trip is one
+ * REST call.
+ *
+ * Every hook in this block is the **user** writing. Nothing in santree's AI review
+ * surfaces can reach these — they get no posting command at all.
+ */
+export const useAddPrInlineComment = (prRepo: string, number: number) =>
+  useActionMutation<NewInlineComment, null>({
+    mutationFn: (c) => unwrap(commands.addPrInlineComment(c)),
+    invalidate: () => [prDetailKey(prRepo, number)],
+    success: (_d, c) => (c.pending ? "Added to your review." : "Comment posted."),
+  });
+
+/** Reply under an existing inline review thread. */
+export const useReplyToPrThread = (prRepo: string, number: number) =>
+  useActionMutation<{ replyToId: string; body: string }, null>({
+    mutationFn: (v) => unwrap(commands.replyToPrThread(prRepo, number, v.replyToId, v.body)),
+    invalidate: () => [prDetailKey(prRepo, number)],
+    success: () => "Reply posted.",
+  });
+
+/** Resolve an inline review thread, or reopen it. Optimistic: the card collapses
+ *  the moment it's clicked, since the whole point is clearing what you've dealt
+ *  with, and a resolve that lags reads as a dead button. */
+export const useSetPrThreadResolved = (prRepo: string, number: number) =>
+  useOptimisticMutation<{ threadId: string; resolved: boolean }, null>({
+    mutationKey: ["set-pr-thread-resolved", prRepo, number],
+    mutationFn: (v) => unwrap(commands.setPrThreadResolved(v.threadId, v.resolved)),
+    optimistic: (qc, v) => {
+      const key = prDetailKey(prRepo, number);
+      const prev = qc.getQueryData<PrDetail>(key);
+      qc.setQueryData<PrDetail>(key, (d) =>
+        d
+          ? {
+              ...d,
+              threads: d.threads.map((t) =>
+                t.id === v.threadId ? { ...t, isResolved: v.resolved } : t,
+              ),
+            }
+          : d,
+      );
+      return () => qc.setQueryData(key, prev);
+    },
+    invalidate: () => [prDetailKey(prRepo, number)],
+  });
+
+/** Submit the viewer's pending review — its draft comments become visible and the
+ *  verdict (comment / approve / request changes) lands on the PR. Also refreshes
+ *  the inbox: the sidebar buckets on whether you've reviewed a PR. */
+export const useSubmitPrReview = (repo: string, prRepo: string, number: number) =>
+  useActionMutation<{ reviewId: string; event: ReviewEvent; body: string }, null>({
+    mutationFn: (v) => unwrap(commands.submitPrReview(v.reviewId, v.event, v.body)),
+    // The submit dialog shows GitHub's rejection inline and stays open to retry
+    // ("Can not approve your own pull request"), so a toast would double it.
+    silent: true,
+    invalidate: () => [prDetailKey(prRepo, number), queryKeys.reviews(repo)],
+    success: (_d, v) =>
+      v.event === "Approve"
+        ? "Review submitted — approved."
+        : v.event === "RequestChanges"
+          ? "Review submitted — changes requested."
+          : "Review submitted.",
+  });
+
+/** Discard the viewer's pending review and every draft comment in it. */
+export const useDiscardPrReview = (prRepo: string, number: number) =>
+  useActionMutation<string, null>({
+    mutationFn: (reviewId) => unwrap(commands.discardPrReview(reviewId)),
+    // Confirmed in a dialog that owns its own error UI.
+    silent: true,
+    invalidate: () => [prDetailKey(prRepo, number)],
+    success: () => "Draft review discarded.",
+  });
+
+/** Post a top-level comment on a PR's conversation (not anchored to a diff line). */
+export const useAddPrConversationComment = (prRepo: string, number: number) =>
+  useActionMutation<string, null>({
+    mutationFn: (body) => unwrap(commands.addPrComment(prRepo, number, body)),
+    invalidate: () => [prDetailKey(prRepo, number)],
+    success: () => "Comment posted.",
+  });
 
 /** One PR file's old (base) + new (head) full contents, fetched on demand so the
  *  diff can expand unchanged context (GitHub-style). Gated by `enabled` so it only
@@ -2172,7 +2399,42 @@ export const useSetSetting = () =>
     // override changes its resolved value) refetch via the prefix. Invalidating
     // the whole `["setting"]` prefix would refetch every cached setting on any
     // single write.
-    invalidate: (a) => [queryKeys.setting(a.scope, a.key), queryKeys.resolvedSettingPrefix],
+    invalidate: (a) => [
+      queryKeys.setting(a.scope, a.key),
+      queryKeys.resolvedSettingPrefix,
+      // The English tutor is the one setting baked into the `--settings` files,
+      // which are otherwise cached forever. Refetch them here rather than at the
+      // toggle's call site, so any future writer of this key gets it too.
+      ...(a.key === ENGLISH_TUTOR_KEY
+        ? [
+            queryKeys.claudeHookSettings,
+            queryKeys.claudeHookSettingsNoGit,
+            queryKeys.claudeHookSettingsReview,
+          ]
+        : []),
+    ],
+  });
+
+// ── English tutor ────────────────────────────────────────────────────────────
+
+/** The practice log the tutor appends corrections to, read-only. `staleTime: 0`
+ *  because agents append to it in the background — coming back to the pane should
+ *  show what they wrote, not what was there last time. */
+export const useEnglishLog = () =>
+  useUnwrappedQuery(queryKeys.englishLog, () => commands.englishLog(), { staleTime: 0 });
+
+/** The stored analysis of the practice log; `null` until one has been run. */
+export const useEnglishAnalysis = () =>
+  useUnwrappedQuery(queryKeys.englishAnalysis, () => commands.englishAnalysis(), {
+    staleTime: SETTING_STALE_TIME,
+  });
+
+/** Analyze the practice log and store the result. A real (paid) model call that
+ *  takes tens of seconds, so it's only ever fired by the Analyze button. */
+export const useRunEnglishAnalysis = () =>
+  useActionMutation({
+    mutationFn: () => unwrap(commands.runEnglishAnalysis()),
+    invalidate: () => [queryKeys.englishAnalysis],
   });
 
 // ── Editable AI prompts ──────────────────────────────────────────────────────

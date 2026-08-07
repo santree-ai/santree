@@ -76,6 +76,10 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    · linear.rs (GraphQL + OAuth + token store) · db.rs (sqlx pool +
                    migrations) · repo.rs · settings.rs · terminal.rs · stream.rs
                    (background command runs behind a PTY → read-only log panes)
+                   · hooks.rs (the `--settings` file EVERY santree `claude` launch
+                   layers on: session-state hooks, statusLine, English tutor)
+                   · english_tutor.rs (opt-in writing coach: hook + practice log
+                   + on-demand analysis)
 src-tauri/migrations/  0001_init … (SQLite schema; applied on startup)
 src/
   main.tsx         QueryClient (+ global mutation→toast) · providers · router

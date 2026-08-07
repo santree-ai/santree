@@ -17,8 +17,9 @@ use serde::Deserialize;
 use santree_core::domain::{
     CheckAnnotation, CheckLog, CheckLogBlock, CheckLogLevel, CheckLogLine, CheckRollup,
     CheckStatus, CheckStep, CommentKind, FileSource, MergeQueue, MergeQueueEntry, MergeQueueState,
-    PrCheck, PrComment, PrDetail, PrFile, PrLabel, PrState, PrThread, ReviewDecision, ReviewPr,
-    Reviewer, ReviewerKind, TeamReviews,
+    NewInlineComment, PrCheck, PrComment, PrDetail, PrFile, PrLabel, PrState, PrThread,
+    ReviewDecision, ReviewEvent, ReviewPr, Reviewer, ReviewerKind, TeamReviews, ViewerReview,
+    ViewerReviewState,
 };
 
 use crate::git;
@@ -80,6 +81,38 @@ async fn get_json<T: DeserializeOwned>(
         bail!("GitHub returned {status}: {snippet}");
     }
     Ok(res.json().await?)
+}
+
+/// Turn a failed REST response into an error carrying GitHub's own `message`
+/// ("Validation Failed", "line must be part of the diff", "Can not approve your
+/// own pull request"). The status alone is useless to a user leaving a comment —
+/// a 422 says nothing about *which* field GitHub rejected.
+async fn rest_error(res: reqwest::Response) -> anyhow::Error {
+    let status = res.status();
+    let detail = res
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| status.to_string());
+    anyhow!("GitHub: {detail}")
+}
+
+/// POST a JSON body to a REST endpoint, discarding the (unused) response body.
+/// The shared shape behind the write paths that only need "did it work".
+async fn rest_post(token: &str, url: reqwest::Url, body: serde_json::Value) -> Result<()> {
+    let res = rest(gql::client().post(url), token)
+        .json(&body)
+        .send()
+        .await?;
+    if !res.status().is_success() {
+        return Err(rest_error(res).await);
+    }
+    Ok(())
 }
 
 /// The last `gh auth token` read and when it was taken. Every GitHub call needs a
@@ -531,20 +564,40 @@ async fn graphql<T: DeserializeOwned>(
 }
 
 // The PR fields the Reviews list needs — shared by all three category searches.
+//
+// `timelineItems` is the one non-obvious cost here: 50 search results × the 30
+// events below is ~1.5k nodes, well inside GitHub's per-query node limit, and it
+// buys the only honest answer to "how long has this been waiting on *me*" —
+// `createdAt` alone counts from before the viewer was ever asked. A PR with more
+// than 30 review-request events falls back to `createdAt`, which errs toward
+// looking like it has waited *longer*, never shorter.
 const PR_FIELDS: &str = r"
-    id number title url isDraft updatedAt headRefName isInMergeQueue
+    id number title url isDraft updatedAt createdAt headRefName baseRefName isInMergeQueue
     repository { nameWithOwner }
     author { login avatarUrl }
     reviewDecision
     comments { totalCount }
-    additions deletions
-    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+    additions deletions changedFiles
+    viewerLatestReview { state submittedAt }
+    commits(last: 1) { nodes { commit { oid committedDate statusCheckRollup { state } } } }
     reviewRequests(first: 20) {
       nodes {
         requestedReviewer {
           __typename
           ... on User { login avatarUrl }
           ... on Team { name }
+        }
+      }
+    }
+    timelineItems(last: 30, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+      nodes {
+        ... on ReviewRequestedEvent {
+          createdAt
+          requestedReviewer {
+            __typename
+            ... on User { login }
+            ... on Team { slug }
+          }
         }
       }
     }
@@ -577,10 +630,45 @@ struct Rollup {
 struct CommitWrap {
     #[serde(rename = "statusCheckRollup")]
     status_check_rollup: Option<Rollup>,
+    #[serde(rename = "committedDate")]
+    committed_date: Option<String>,
+    #[serde(default)]
+    oid: Option<String>,
 }
 #[derive(Deserialize)]
 struct CommitNode {
     commit: CommitWrap,
+}
+
+#[derive(Deserialize)]
+struct LatestReviewNode {
+    state: Option<String>,
+    #[serde(rename = "submittedAt")]
+    submitted_at: Option<String>,
+}
+
+/// Who a `ReviewRequestedEvent` named. Only the identity matters here (not the
+/// avatar the sidebar's reviewer list needs), so this is a leaner union than
+/// [`RequestedReviewer`] — and it carries a team's **slug**, since that's what
+/// [`viewer_teams`] returns and what we match against.
+#[derive(Deserialize)]
+#[serde(tag = "__typename")]
+enum RequestedIdentity {
+    User { login: String },
+    Team { slug: String },
+    #[serde(other)]
+    Other,
+}
+
+/// One `REVIEW_REQUESTED_EVENT` off the PR timeline. Every field is optional: the
+/// timeline union yields a bare `{}` for any node that isn't the type we asked
+/// for, and a request whose reviewer has since been deleted has no reviewer.
+#[derive(Deserialize)]
+struct ReviewRequestedEvent {
+    #[serde(rename = "createdAt")]
+    created_at: Option<String>,
+    #[serde(rename = "requestedReviewer")]
+    requested_reviewer: Option<RequestedIdentity>,
 }
 
 #[derive(Deserialize)]
@@ -617,6 +705,8 @@ struct PrNode {
     updated_at: String,
     #[serde(rename = "headRefName")]
     head_ref_name: String,
+    #[serde(rename = "baseRefName")]
+    base_ref_name: String,
     #[serde(rename = "isInMergeQueue")]
     is_in_merge_queue: bool,
     repository: RepoRef,
@@ -626,74 +716,160 @@ struct PrNode {
     comments: TotalCount,
     additions: u32,
     deletions: u32,
+    #[serde(rename = "changedFiles")]
+    changed_files: u32,
+    #[serde(rename = "createdAt")]
+    created_at: String,
+    #[serde(rename = "viewerLatestReview")]
+    viewer_latest_review: Option<LatestReviewNode>,
     commits: Connection<CommitNode>,
     #[serde(rename = "reviewRequests")]
     review_requests: Connection<ReviewRequestNode>,
+    #[serde(rename = "timelineItems")]
+    timeline_items: Connection<ReviewRequestedEvent>,
 }
 
-impl From<PrNode> for ReviewPr {
-    fn from(n: PrNode) -> Self {
-        let (author, author_avatar_url) = n
-            .author
-            .map(|a| (a.login, a.avatar_url))
-            .unwrap_or_default();
-        let review_decision = match n.review_decision.as_deref() {
-            Some("APPROVED") => ReviewDecision::Approved,
-            Some("CHANGES_REQUESTED") => ReviewDecision::ChangesRequested,
-            Some("REVIEW_REQUIRED") => ReviewDecision::ReviewRequired,
-            _ => ReviewDecision::None,
-        };
-        let checks = n
-            .commits
-            .nodes
-            .first()
-            .and_then(|c| c.commit.status_check_rollup.as_ref())
-            .map(|r| match r.state.as_str() {
-                "SUCCESS" => CheckRollup::Success,
-                "FAILURE" | "ERROR" => CheckRollup::Failure,
-                "PENDING" | "EXPECTED" => CheckRollup::Pending,
-                _ => CheckRollup::None,
-            })
-            .unwrap_or(CheckRollup::None);
-        let reviewers = n
-            .review_requests
-            .nodes
-            .into_iter()
-            .filter_map(|r| match r.requested_reviewer {
-                Some(RequestedReviewer::User { login, avatar_url }) => Some(Reviewer {
-                    kind: ReviewerKind::User,
-                    name: login,
-                    avatar_url,
-                }),
-                Some(RequestedReviewer::Team { name }) => Some(Reviewer {
-                    kind: ReviewerKind::Team,
-                    name,
-                    avatar_url: String::new(),
-                }),
-                _ => None,
-            })
-            .collect();
-        ReviewPr {
-            id: n.id,
-            number: n.number,
-            title: n.title,
-            url: n.url,
-            repo: n.repository.name_with_owner,
-            head_ref: n.head_ref_name,
-            author,
-            author_avatar_url,
-            // The dashboard only ever queries `is:open`, so these are open PRs.
-            state: PrState::Open,
-            is_draft: n.is_draft,
-            review_decision,
-            checks,
-            is_in_merge_queue: n.is_in_merge_queue,
-            additions: n.additions,
-            deletions: n.deletions,
-            comment_count: n.comments.total_count,
-            reviewers,
-            updated_at: n.updated_at,
+/// Who the inbox is being built for. Threaded into the PR mapping because
+/// "waiting since" is viewer-relative: the same PR has a different answer for the
+/// author, for a directly-requested reviewer, and for someone on a requested team.
+pub struct ViewerCtx {
+    pub login: String,
+    /// Slugs of the teams the viewer belongs to in this org.
+    pub team_slugs: Vec<String>,
+}
+
+impl ViewerCtx {
+    /// Whether a review-request event named this viewer, directly or through one of
+    /// their teams.
+    fn is_for_viewer(&self, who: &RequestedIdentity) -> bool {
+        match who {
+            RequestedIdentity::User { login } => login.eq_ignore_ascii_case(&self.login),
+            RequestedIdentity::Team { slug } => self
+                .team_slugs
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(slug)),
+            RequestedIdentity::Other => false,
         }
+    }
+}
+
+/// When the review clock started for `viewer` on this PR: the **newest**
+/// review-request event naming them or one of their teams.
+///
+/// Newest rather than oldest because a re-request is a fresh ask — the author
+/// pushed changes and wants another look, and dating that from the original
+/// request would show a week-old age for something that landed on your plate an
+/// hour ago. `None` when no event names the viewer (their own PR, a request older
+/// than the fetched page, or a reviewer added at creation time — GitHub doesn't
+/// always emit a timeline event for those), and the caller falls back to the PR's
+/// creation date.
+fn viewer_requested_at(events: &[ReviewRequestedEvent], viewer: &ViewerCtx) -> Option<String> {
+    events
+        .iter()
+        .filter(|e| {
+            e.requested_reviewer
+                .as_ref()
+                .is_some_and(|who| viewer.is_for_viewer(who))
+        })
+        .filter_map(|e| e.created_at.as_deref())
+        // ISO-8601 UTC from GitHub is fixed-width, so lexical max is chronological max.
+        .max()
+        .map(str::to_owned)
+}
+
+/// Map one PR search node into the domain type, from `viewer`'s point of view.
+///
+/// Not a `From` impl: two of the fields (`waiting_since`, and the meaning of
+/// `viewer_review`) only exist relative to who is asking.
+fn to_review_pr(n: PrNode, viewer: &ViewerCtx) -> ReviewPr {
+    let (author, author_avatar_url) = n
+        .author
+        .map(|a| (a.login, a.avatar_url))
+        .unwrap_or_default();
+    let review_decision = match n.review_decision.as_deref() {
+        Some("APPROVED") => ReviewDecision::Approved,
+        Some("CHANGES_REQUESTED") => ReviewDecision::ChangesRequested,
+        Some("REVIEW_REQUIRED") => ReviewDecision::ReviewRequired,
+        _ => ReviewDecision::None,
+    };
+    let head_commit = n.commits.nodes.first().map(|c| &c.commit);
+    let checks = head_commit
+        .and_then(|c| c.status_check_rollup.as_ref())
+        .map(|r| match r.state.as_str() {
+            "SUCCESS" => CheckRollup::Success,
+            "FAILURE" | "ERROR" => CheckRollup::Failure,
+            "PENDING" | "EXPECTED" => CheckRollup::Pending,
+            _ => CheckRollup::None,
+        })
+        .unwrap_or(CheckRollup::None);
+    let head_committed_at = head_commit
+        .and_then(|c| c.committed_date.clone())
+        .unwrap_or_else(|| n.created_at.clone());
+    let head_sha = head_commit
+        .and_then(|c| c.oid.clone())
+        .unwrap_or_default();
+    // A review with no `submittedAt` is still pending (a started-but-unsent
+    // review) — it hasn't reached the author, so it doesn't count as "you had
+    // your say", and there's no timestamp to date it against the head commit.
+    let viewer_review = n
+        .viewer_latest_review
+        .and_then(|r| Some((r.state?, r.submitted_at?)))
+        .map(|(state, submitted_at)| ViewerReview {
+            state: match state.as_str() {
+                "APPROVED" => ViewerReviewState::Approved,
+                "CHANGES_REQUESTED" => ViewerReviewState::ChangesRequested,
+                "COMMENTED" => ViewerReviewState::Commented,
+                _ => ViewerReviewState::Other,
+            },
+            submitted_at,
+        });
+    let waiting_since =
+        viewer_requested_at(&n.timeline_items.nodes, viewer).unwrap_or_else(|| n.created_at.clone());
+    let reviewers = n
+        .review_requests
+        .nodes
+        .into_iter()
+        .filter_map(|r| match r.requested_reviewer {
+            Some(RequestedReviewer::User { login, avatar_url }) => Some(Reviewer {
+                kind: ReviewerKind::User,
+                name: login,
+                avatar_url,
+            }),
+            Some(RequestedReviewer::Team { name }) => Some(Reviewer {
+                kind: ReviewerKind::Team,
+                name,
+                avatar_url: String::new(),
+            }),
+            _ => None,
+        })
+        .collect();
+    ReviewPr {
+        id: n.id,
+        number: n.number,
+        title: n.title,
+        url: n.url,
+        repo: n.repository.name_with_owner,
+        head_ref: n.head_ref_name,
+        base_ref: n.base_ref_name,
+        head_sha,
+        author,
+        author_avatar_url,
+        // The dashboard only ever queries `is:open`, so these are open PRs.
+        state: PrState::Open,
+        is_draft: n.is_draft,
+        review_decision,
+        checks,
+        is_in_merge_queue: n.is_in_merge_queue,
+        additions: n.additions,
+        deletions: n.deletions,
+        changed_files: n.changed_files,
+        comment_count: n.comments.total_count,
+        reviewers,
+        updated_at: n.updated_at,
+        created_at: n.created_at,
+        waiting_since,
+        head_committed_at,
+        viewer_review,
     }
 }
 
@@ -706,7 +882,7 @@ const INBOX_SEARCH_CAP: usize = 50;
 
 /// Run one `search(type: ISSUE)` query and map the PR nodes to `ReviewPr`. Capped at
 /// [`INBOX_SEARCH_CAP`] (newest-updated first, per the caller's `sort:updated-desc`).
-async fn search_prs(token: &str, q: &str) -> Result<Vec<ReviewPr>> {
+async fn search_prs(token: &str, q: &str, viewer: &ViewerCtx) -> Result<Vec<ReviewPr>> {
     #[derive(Deserialize)]
     struct Data {
         search: Connection<PrNode>,
@@ -720,11 +896,27 @@ async fn search_prs(token: &str, q: &str) -> Result<Vec<ReviewPr>> {
             "Reviews: search '{q}' hit the {INBOX_SEARCH_CAP}-PR cap; older PRs are not listed"
         );
     }
-    Ok(data.search.nodes.into_iter().map(ReviewPr::from).collect())
+    Ok(data
+        .search
+        .nodes
+        .into_iter()
+        .map(|n| to_review_pr(n, viewer))
+        .collect())
+}
+
+/// `(owner, name)` from an "owner/name" slug. The slug crosses IPC, so a malformed
+/// one is rejected rather than being pasted into a GitHub request or a path.
+pub fn split_slug(pr_repo: &str) -> Result<(&str, &str)> {
+    match pr_repo.split_once('/') {
+        Some((owner, name)) if !owner.is_empty() && !name.is_empty() && !name.contains('/') => {
+            Ok((owner, name))
+        }
+        _ => Err(anyhow!("malformed repo slug: {pr_repo:?}")),
+    }
 }
 
 /// The viewer's GitHub login.
-async fn viewer_login(token: &str) -> Result<String> {
+pub async fn viewer_login(token: &str) -> Result<String> {
     #[derive(Deserialize)]
     struct Data {
         viewer: Login,
@@ -739,7 +931,11 @@ async fn viewer_login(token: &str) -> Result<String> {
 
 /// The teams (slug, name) the viewer belongs to within `org`. Empty when the
 /// viewer isn't in that org or belongs to no teams there.
-pub async fn viewer_teams(token: &str, org: &str) -> Result<Vec<(String, String)>> {
+///
+/// `login` is passed in rather than looked up here: the inbox needs it anyway (to
+/// decide which review-request events started *its* clock), and fetching it twice
+/// would put a second round-trip on the critical path of every Reviews load.
+pub async fn viewer_teams(token: &str, org: &str, login: &str) -> Result<Vec<(String, String)>> {
     #[derive(Deserialize)]
     struct Data {
         viewer: Viewer,
@@ -764,7 +960,6 @@ pub async fn viewer_teams(token: &str, org: &str) -> Result<Vec<(String, String)
     // viewer's login, hence the extra (cheap) round trip. `role:` can't do this:
     // it filters by the viewer's role *in* the team, so one value or the other
     // would drop teams they merely maintain or merely belong to.
-    let login = viewer_login(token).await?;
     let query = "query($login: String!) { viewer { organizations(first: 50) { nodes { login teams(first: 50, userLogins: [$login]) { nodes { slug name } } } } } }";
     let data: Data = graphql(token, query, serde_json::json!({ "login": login })).await?;
     Ok(data
@@ -806,10 +1001,16 @@ fn team_query(org: &str, slug: &str) -> String {
 /// viewer's teams are known, and neither of these depends on that: `reviews::inbox`
 /// overlaps the two halves instead of putting a `viewer_teams` round-trip on the critical
 /// path of every Reviews load.
-pub async fn personal_reviews(token: &str, org: &str) -> Result<(Vec<ReviewPr>, Vec<ReviewPr>)> {
+pub async fn personal_reviews(
+    token: &str,
+    org: &str,
+    viewer: &ViewerCtx,
+) -> Result<(Vec<ReviewPr>, Vec<ReviewPr>)> {
     let (mine_q, requested_q) = (mine_query(org), requested_query(org));
-    let (mine, requested) =
-        tokio::join!(search_prs(token, &mine_q), search_prs(token, &requested_q),);
+    let (mine, requested) = tokio::join!(
+        search_prs(token, &mine_q, viewer),
+        search_prs(token, &requested_q, viewer),
+    );
     Ok((mine?, requested?))
 }
 
@@ -817,9 +1018,14 @@ pub async fn personal_reviews(token: &str, org: &str) -> Result<(Vec<ReviewPr>, 
 /// sections are dropped. A failed team search degrades to an empty (and therefore
 /// dropped) section rather than failing the whole inbox — but it's logged, since an empty
 /// section is otherwise indistinguishable from "no open requests for this team".
-pub async fn team_reviews(token: &str, org: &str, teams: &[(String, String)]) -> Vec<TeamReviews> {
+pub async fn team_reviews(
+    token: &str,
+    org: &str,
+    teams: &[(String, String)],
+    viewer: &ViewerCtx,
+) -> Vec<TeamReviews> {
     futures::future::join_all(teams.iter().map(|(slug, name)| async move {
-        let prs = search_prs(token, &team_query(org, slug))
+        let prs = search_prs(token, &team_query(org, slug), viewer)
             .await
             .unwrap_or_else(|e| {
                 log::warn!("Reviews: review-request search for team {org}/{slug} failed: {e}");
@@ -968,18 +1174,19 @@ pub async fn pr_detail(token: &str, owner: &str, name: &str, number: u32) -> Res
         pr_conversation(token, owner, name, number),
         pr_files(token, owner, name, number),
     );
-    let (body, labels, comments, threads, checks, base_sha, head_sha) = conversation?;
+    let c = conversation?;
     let (files, files_truncated) = files?;
     Ok(PrDetail {
-        body,
-        labels,
-        comments,
-        threads,
+        body: c.body,
+        labels: c.labels,
+        comments: c.comments,
+        threads: c.threads,
         files,
         files_truncated,
-        checks,
-        base_sha,
-        head_sha,
+        checks: c.checks,
+        base_sha: c.base_sha,
+        head_sha: c.head_sha,
+        pending_review_id: c.pending_review_id,
     })
 }
 
@@ -1039,18 +1246,7 @@ pub async fn set_pr_labels(
     .send()
     .await?;
     if !res.status().is_success() {
-        let status = res.status();
-        let detail = res
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|v| {
-                v.get("message")
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| status.to_string());
-        bail!("GitHub: {detail}");
+        return Err(rest_error(res).await);
     }
     let list: Vec<Label> = res.json().await?;
     Ok(list
@@ -1061,6 +1257,221 @@ pub async fn set_pr_labels(
             description: l.description.filter(|d| !d.is_empty()),
         })
         .collect())
+}
+
+// ── Writing a review ─────────────────────────────────────────────────────────
+//
+// Everything below is driven by an explicit click by the *user*, never by an
+// agent: santree's AI review surfaces are read-only by construction (they get no
+// bridge command that posts, and their `claude` process launches under a deny
+// list — see `hooks::claude_settings_review`). Reviews go out under the user's
+// own name, so the user writes them.
+
+/// Which side of the diff a line lives on, in GitHub's spelling. RIGHT is the
+/// head/new file, LEFT the base/old one.
+fn diff_side(on_right: bool) -> &'static str {
+    if on_right {
+        "RIGHT"
+    } else {
+        "LEFT"
+    }
+}
+
+/// A comment id on its way into a URL path segment. GitHub's ids are decimal, so
+/// anything else came from somewhere other than a `PrThread` we handed out — and
+/// `api_url` would happily percent-encode it into a request at a different
+/// endpoint's expense. Reject rather than encode.
+fn safe_comment_id(id: &str) -> Result<&str> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        bail!("'{id}' is not a GitHub comment id");
+    }
+    Ok(id)
+}
+
+/// Post one inline review comment to a PR line, immediately — GitHub's "Add
+/// single comment". It lands as a one-comment review the author is notified of.
+pub async fn add_review_comment(
+    token: &str,
+    owner: &str,
+    name: &str,
+    c: &NewInlineComment,
+) -> Result<()> {
+    rest_post(
+        token,
+        api_url(&[
+            "repos",
+            owner,
+            name,
+            "pulls",
+            &c.number.to_string(),
+            "comments",
+        ])?,
+        serde_json::json!({
+            "body": c.body,
+            "commit_id": c.head_sha,
+            "path": c.path,
+            "line": c.line,
+            "side": diff_side(c.on_right),
+        }),
+    )
+    .await
+}
+
+/// Open a *pending* review on the PR carrying this first draft comment — GitHub's
+/// "Start a review". Omitting `event` is what leaves it unsubmitted: the comment
+/// is invisible to everyone else until [`submit_review`] runs.
+pub async fn start_review(token: &str, c: &NewInlineComment) -> Result<()> {
+    let mutation = "mutation($pr: ID!, $oid: GitObjectID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) {
+        addPullRequestReview(input: {
+          pullRequestId: $pr,
+          commitOID: $oid,
+          threads: [{ path: $path, line: $line, side: $side, body: $body }]
+        }) { clientMutationId }
+      }";
+    let _: serde_json::Value = graphql(
+        token,
+        mutation,
+        serde_json::json!({
+            "pr": c.pr_id,
+            "oid": c.head_sha,
+            "path": c.path,
+            "line": c.line,
+            "side": diff_side(c.on_right),
+            "body": c.body,
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Add another draft comment to an already-open pending review.
+pub async fn add_pending_review_comment(
+    token: &str,
+    review_id: &str,
+    c: &NewInlineComment,
+) -> Result<()> {
+    let mutation = "mutation($review: ID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) {
+        addPullRequestReviewThread(input: {
+          pullRequestReviewId: $review, path: $path, line: $line, side: $side, body: $body
+        }) { clientMutationId }
+      }";
+    let _: serde_json::Value = graphql(
+        token,
+        mutation,
+        serde_json::json!({
+            "review": review_id,
+            "path": c.path,
+            "line": c.line,
+            "side": diff_side(c.on_right),
+            "body": c.body,
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Reply under an existing inline review thread. `reply_to_id` is the thread's
+/// first comment ([`PrThread::reply_to_id`]) — GitHub threads replies off the
+/// root comment, not off whichever one you were reading.
+pub async fn reply_to_review_thread(
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u32,
+    reply_to_id: &str,
+    body: &str,
+) -> Result<()> {
+    rest_post(
+        token,
+        api_url(&[
+            "repos",
+            owner,
+            name,
+            "pulls",
+            &number.to_string(),
+            "comments",
+            safe_comment_id(reply_to_id)?,
+            "replies",
+        ])?,
+        serde_json::json!({ "body": body }),
+    )
+    .await
+}
+
+/// Mark an inline review thread resolved (or reopen it).
+pub async fn set_thread_resolved(token: &str, thread_id: &str, resolved: bool) -> Result<()> {
+    let mutation = if resolved {
+        "mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { clientMutationId } }"
+    } else {
+        "mutation($id: ID!) { unresolveReviewThread(input: { threadId: $id }) { clientMutationId } }"
+    };
+    let _: serde_json::Value =
+        graphql(token, mutation, serde_json::json!({ "id": thread_id })).await?;
+    Ok(())
+}
+
+/// Submit the viewer's pending review — its draft comments become visible and the
+/// verdict (comment / approve / request changes) lands on the PR.
+pub async fn submit_review(
+    token: &str,
+    review_id: &str,
+    event: ReviewEvent,
+    body: &str,
+) -> Result<()> {
+    let mutation = "mutation($review: ID!, $event: PullRequestReviewEvent!, $body: String) {
+        submitPullRequestReview(input: { pullRequestReviewId: $review, event: $event, body: $body }) { clientMutationId }
+      }";
+    let event = match event {
+        ReviewEvent::Comment => "COMMENT",
+        ReviewEvent::Approve => "APPROVE",
+        ReviewEvent::RequestChanges => "REQUEST_CHANGES",
+    };
+    let _: serde_json::Value = graphql(
+        token,
+        mutation,
+        serde_json::json!({
+            "review": review_id,
+            "event": event,
+            // An absent body and an empty one are different to GitHub: `""` fails
+            // validation on APPROVE, where "no summary" is the normal case.
+            "body": (!body.trim().is_empty()).then_some(body),
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Throw away the viewer's pending review and every draft comment in it.
+pub async fn discard_review(token: &str, review_id: &str) -> Result<()> {
+    let mutation = "mutation($review: ID!) {
+        deletePullRequestReview(input: { pullRequestReviewId: $review }) { clientMutationId }
+      }";
+    let _: serde_json::Value =
+        graphql(token, mutation, serde_json::json!({ "review": review_id })).await?;
+    Ok(())
+}
+
+/// Post a top-level conversation comment (the PR's issue thread, not a diff line).
+pub async fn add_issue_comment(
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u32,
+    body: &str,
+) -> Result<()> {
+    rest_post(
+        token,
+        api_url(&[
+            "repos",
+            owner,
+            name,
+            "issues",
+            &number.to_string(),
+            "comments",
+        ])?,
+        serde_json::json!({ "body": body }),
+    )
+    .await
 }
 
 /// Normalize a check run's / check step's (`status`, `conclusion`) pair into the
@@ -1090,6 +1501,18 @@ fn check_run_status(status: &str, conclusion: Option<&str>) -> CheckStatus {
 /// pins the two together).
 const COMMENT_FIELDS: &str = "author { login avatarUrl } body createdAt";
 
+/// The same, for a *review* node. Beyond the shared comment shape it carries the
+/// three fields that identify the viewer's own unsubmitted review, which is what
+/// further draft comments attach to (and what must be kept out of the displayed
+/// conversation — a pending review's body is not something anyone has posted yet).
+const REVIEW_FIELDS: &str = "id state viewerDidAuthor author { login avatarUrl } body createdAt";
+
+/// The same, for a comment *inside* a review thread. `fullDatabaseId` is the id
+/// GitHub's REST reply endpoint takes (`databaseId` is a 32-bit `Int` and review
+/// comment ids have outgrown it); `state` marks the viewer's own drafts.
+const THREAD_COMMENT_FIELDS: &str =
+    "fullDatabaseId state author { login avatarUrl } body createdAt";
+
 /// A GraphQL connection's maximum page size.
 const GRAPHQL_PAGE: usize = 100;
 
@@ -1105,11 +1528,11 @@ const PR_CONVERSATION_QUERY: &str = r"
           headRefOid
           labels(first: 30) { nodes { name color description } }
           comments(first: 100) { nodes { author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
-          reviews(first: 100) { nodes { author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
+          reviews(first: 100) { nodes { id state viewerDidAuthor author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
           reviewThreads(first: 100) {
             nodes {
-              id path line diffSide isResolved isOutdated
-              comments(first: 100) { nodes { author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
+              id path line diffSide isResolved isOutdated viewerCanResolve viewerCanUnresolve
+              comments(first: 100) { nodes { fullDatabaseId state author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
             }
             pageInfo { hasNextPage endCursor }
           }
@@ -1213,7 +1636,7 @@ async fn drain_thread_comments<T: DeserializeOwned>(
         "query($id: ID!, $after: String!) {{
            node(id: $id) {{ ... on PullRequestReviewThread {{
              page: comments(first: {GRAPHQL_PAGE}, after: $after) {{
-               nodes {{ {COMMENT_FIELDS} }}
+               nodes {{ {THREAD_COMMENT_FIELDS} }}
                pageInfo {{ hasNextPage endCursor }}
              }}
            }} }}
@@ -1238,24 +1661,31 @@ async fn drain_thread_comments<T: DeserializeOwned>(
     Ok(())
 }
 
+/// Everything [`pr_conversation`] reads off one PR — the half of [`PrDetail`] that
+/// isn't the changed-file list. A struct rather than a tuple because it has long
+/// since outgrown one: seven of these are `String`/`Vec`, and a mis-ordered pair
+/// at the call site would still compile.
+struct Conversation {
+    body: String,
+    labels: Vec<PrLabel>,
+    comments: Vec<PrComment>,
+    threads: Vec<PrThread>,
+    checks: Vec<PrCheck>,
+    base_sha: String,
+    head_sha: String,
+    pending_review_id: Option<String>,
+}
+
 /// Body + top-level comments (issue comments and review summaries) merged
 /// chronologically, the inline review-comment threads (grouped, with resolution
-/// and anchor line/side), and the head commit's individual CI checks.
-#[allow(clippy::type_complexity)]
+/// and anchor line/side), the head commit's individual CI checks, and the id of
+/// the viewer's own unsubmitted review when they have one.
 async fn pr_conversation(
     token: &str,
     owner: &str,
     name: &str,
     number: u32,
-) -> Result<(
-    String,
-    Vec<PrLabel>,
-    Vec<PrComment>,
-    Vec<PrThread>,
-    Vec<PrCheck>,
-    String,
-    String,
-)> {
+) -> Result<Conversation> {
     #[derive(Deserialize)]
     struct Data {
         repository: Option<Repo>,
@@ -1382,6 +1812,12 @@ async fn pr_conversation(
     }
     #[derive(Deserialize)]
     struct Review {
+        id: String,
+        /// `PENDING` for the viewer's own unsubmitted review; `APPROVED` /
+        /// `CHANGES_REQUESTED` / `COMMENTED` / `DISMISSED` once submitted.
+        state: String,
+        #[serde(rename = "viewerDidAuthor")]
+        viewer_did_author: bool,
         author: Option<Actor>,
         body: String,
         #[serde(rename = "createdAt")]
@@ -1389,7 +1825,8 @@ async fn pr_conversation(
     }
     #[derive(Deserialize)]
     struct Thread {
-        /// Only used to page the thread's own replies (see [`drain_thread_comments`]).
+        /// Pages the thread's own replies (see [`drain_thread_comments`]), and is
+        /// what resolve/unresolve mutates.
         id: String,
         path: String,
         line: Option<u32>,
@@ -1399,10 +1836,21 @@ async fn pr_conversation(
         is_resolved: bool,
         #[serde(rename = "isOutdated")]
         is_outdated: bool,
+        #[serde(rename = "viewerCanResolve")]
+        viewer_can_resolve: bool,
+        #[serde(rename = "viewerCanUnresolve")]
+        viewer_can_unresolve: bool,
         comments: Connection<ThreadComment>,
     }
     #[derive(Deserialize)]
     struct ThreadComment {
+        /// GitHub's `BigInt` scalar — a JSON *string* of digits, not a number.
+        /// Kept untyped so a future representation change can't fail the whole
+        /// PR's conversation to deserialize over an id only the reply path uses.
+        #[serde(rename = "fullDatabaseId")]
+        full_database_id: Option<serde_json::Value>,
+        /// `PENDING` while it belongs to an unsubmitted review of the viewer's.
+        state: Option<String>,
         author: Option<Actor>,
         body: String,
         #[serde(rename = "createdAt")]
@@ -1447,12 +1895,12 @@ async fn pr_conversation(
     // slow here — an unresolved review thread past the first page would leave the
     // reviewer reading a PR as clean — so each is drained to exhaustion.
     let comments_q = conversation_page_query("comments", COMMENT_FIELDS);
-    let reviews_q = conversation_page_query("reviews", COMMENT_FIELDS);
+    let reviews_q = conversation_page_query("reviews", REVIEW_FIELDS);
     let threads_q = conversation_page_query(
         "reviewThreads",
         &format!(
-            "id path line diffSide isResolved isOutdated \
-             comments(first: {GRAPHQL_PAGE}) {{ nodes {{ {COMMENT_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }}"
+            "id path line diffSide isResolved isOutdated viewerCanResolve viewerCanUnresolve \
+             comments(first: {GRAPHQL_PAGE}) {{ nodes {{ {THREAD_COMMENT_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }}"
         ),
     );
     let (comment_pages, review_pages, thread_pages) = tokio::join!(
@@ -1485,9 +1933,21 @@ async fn pr_conversation(
             created_at: c.created_at,
             kind: CommentKind::Issue,
             path: None,
+            is_pending: false,
         });
     }
+    // GitHub allows one unsubmitted review per user, and shows nobody else's — so
+    // at most one node can match, and it can only be the viewer's.
+    let mut pending_review_id = None;
     for r in pr.reviews.nodes {
+        if r.state == "PENDING" {
+            if r.viewer_did_author {
+                pending_review_id = Some(r.id);
+            }
+            // Its body is a draft summary nobody has posted; showing it in the
+            // conversation would read as a review the author can already see.
+            continue;
+        }
         // Skip empty-body reviews (bare approvals add no conversation).
         if r.body.trim().is_empty() {
             continue;
@@ -1500,6 +1960,7 @@ async fn pr_conversation(
             created_at: r.created_at,
             kind: CommentKind::Review,
             path: None,
+            is_pending: false,
         });
     }
     comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -1508,6 +1969,15 @@ async fn pr_conversation(
     // anchored in the diff), rather than being flattened into `comments`.
     let mut threads: Vec<PrThread> = Vec::new();
     for t in pr.review_threads.nodes {
+        // The first comment is what a reply is posted *under* — GitHub's reply
+        // endpoint takes the thread's root, not any comment in it.
+        let reply_to_id = t
+            .comments
+            .nodes
+            .first()
+            .and_then(|c| c.full_database_id.as_ref())
+            .map(bigint_to_string)
+            .unwrap_or_default();
         let mut thread_comments: Vec<PrComment> = Vec::new();
         for c in t.comments.nodes {
             let (author, author_avatar_url) = actor(c.author);
@@ -1518,12 +1988,15 @@ async fn pr_conversation(
                 created_at: c.created_at,
                 kind: CommentKind::ReviewThread,
                 path: Some(t.path.clone()),
+                is_pending: c.state.as_deref() == Some("PENDING"),
             });
         }
         if thread_comments.is_empty() {
             continue;
         }
         threads.push(PrThread {
+            id: t.id,
+            reply_to_id,
             path: t.path,
             line: t.line,
             // GitHub's `diffSide` is RIGHT for the new side, LEFT for the old;
@@ -1531,6 +2004,8 @@ async fn pr_conversation(
             on_right: t.diff_side.as_deref() != Some("LEFT"),
             is_resolved: t.is_resolved,
             is_outdated: t.is_outdated,
+            viewer_can_resolve: t.viewer_can_resolve,
+            viewer_can_unresolve: t.viewer_can_unresolve,
             comments: thread_comments,
         });
     }
@@ -1666,15 +2141,28 @@ async fn pr_conversation(
         })
         .collect();
 
-    Ok((
-        pr.body,
+    Ok(Conversation {
+        body: pr.body,
         labels,
         comments,
         threads,
         checks,
-        pr.base_ref_oid,
-        pr.head_ref_oid,
-    ))
+        base_sha: pr.base_ref_oid,
+        head_sha: pr.head_ref_oid,
+        pending_review_id,
+    })
+}
+
+/// GitHub's `BigInt` scalar comes back as a JSON *string* of digits; older
+/// integer-valued fields come back as numbers. Render either as the decimal
+/// string a REST path segment needs, and anything else as empty (the caller
+/// treats that as "no id", never as a usable one).
+fn bigint_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
 }
 
 /// Pull the GitHub Actions job id out of a check run's `detailsUrl`
@@ -2149,6 +2637,92 @@ pub async fn pr_file_source(
 mod tests {
     use super::*;
 
+    fn viewer() -> ViewerCtx {
+        ViewerCtx {
+            login: "santiago".into(),
+            team_slugs: vec!["agent-knowledge".into()],
+        }
+    }
+
+    fn requested(at: &str, who: RequestedIdentity) -> ReviewRequestedEvent {
+        ReviewRequestedEvent {
+            created_at: Some(at.into()),
+            requested_reviewer: Some(who),
+        }
+    }
+
+    #[test]
+    fn waiting_since_takes_the_newest_request_naming_the_viewer() {
+        // A re-request is a fresh ask — dating the wait from the *original* request
+        // would show a week-old age for something that landed an hour ago.
+        let events = [
+            requested(
+                "2026-08-01T10:00:00Z",
+                RequestedIdentity::User {
+                    login: "santiago".into(),
+                },
+            ),
+            requested(
+                "2026-08-05T09:00:00Z",
+                RequestedIdentity::User {
+                    login: "santiago".into(),
+                },
+            ),
+        ];
+        assert_eq!(
+            viewer_requested_at(&events, &viewer()).as_deref(),
+            Some("2026-08-05T09:00:00Z")
+        );
+    }
+
+    #[test]
+    fn waiting_since_counts_a_request_via_one_of_the_viewers_teams() {
+        let events = [requested(
+            "2026-08-04T08:00:00Z",
+            RequestedIdentity::Team {
+                slug: "agent-knowledge".into(),
+            },
+        )];
+        assert_eq!(
+            viewer_requested_at(&events, &viewer()).as_deref(),
+            Some("2026-08-04T08:00:00Z")
+        );
+    }
+
+    #[test]
+    fn waiting_since_ignores_requests_aimed_at_other_people() {
+        // Someone else being (re-)asked must not restart *your* clock — that's the
+        // whole failure mode of using the PR's `updatedAt` as a waiting signal.
+        let events = [
+            requested(
+                "2026-08-05T09:00:00Z",
+                RequestedIdentity::User {
+                    login: "someone-else".into(),
+                },
+            ),
+            requested(
+                "2026-08-06T09:00:00Z",
+                RequestedIdentity::Team {
+                    slug: "platform".into(),
+                },
+            ),
+            requested("2026-08-06T10:00:00Z", RequestedIdentity::Other),
+        ];
+        assert_eq!(viewer_requested_at(&events, &viewer()), None);
+    }
+
+    #[test]
+    fn waiting_since_matches_logins_and_slugs_case_insensitively() {
+        // GitHub echoes back whatever casing the login/slug was created with.
+        let events = [requested(
+            "2026-08-04T08:00:00Z",
+            RequestedIdentity::User {
+                login: "Santiago".into(),
+            },
+        )];
+        assert!(viewer_requested_at(&events, &viewer()).is_some());
+    }
+
     #[test]
     fn api_url_encodes_untrusted_components() {
         // A `?`/`#` in a repo-relative path must stay *in* the path, not split off a
@@ -2220,7 +2794,15 @@ mod tests {
     /// for the cursor that drives the drain at all.
     #[test]
     fn pr_conversation_selects_the_shared_fields() {
-        assert!(PR_CONVERSATION_QUERY.contains(COMMENT_FIELDS));
+        // Each connection's first page (spelled out in the query) and its
+        // follow-up pages (built from these consts) must select the same shape,
+        // or a later page decodes into a different struct than the first.
+        for fields in [COMMENT_FIELDS, REVIEW_FIELDS, THREAD_COMMENT_FIELDS] {
+            assert!(
+                PR_CONVERSATION_QUERY.contains(fields),
+                "PR_CONVERSATION_QUERY must select `{fields}`"
+            );
+        }
         for field in ["comments", "reviews", "reviewThreads"] {
             assert!(
                 conversation_page_query(field, COMMENT_FIELDS).contains(&format!("page: {field}(")),
@@ -2250,6 +2832,31 @@ mod tests {
             "see the log"
         );
         assert_eq!(strip_ansi("plain line"), "plain line");
+    }
+
+    /// A reply's target id becomes a URL path segment, so only digits may reach
+    /// it: `api_url` percent-encodes rather than rejects, so `../../user` would
+    /// otherwise become a request against a different endpoint.
+    #[test]
+    fn safe_comment_id_takes_digits_only() {
+        assert!(safe_comment_id("2317450981").is_ok());
+        assert!(safe_comment_id("").is_err());
+        assert!(safe_comment_id("../../user").is_err());
+        assert!(safe_comment_id("-1").is_err());
+        assert!(safe_comment_id("12a").is_err());
+    }
+
+    /// `fullDatabaseId` is a GraphQL `BigInt` — a JSON string. Reading it as a
+    /// number would round ids past 2^53 and silently reply to the wrong comment.
+    #[test]
+    fn bigint_renders_either_json_shape() {
+        assert_eq!(
+            bigint_to_string(&serde_json::json!("2317450981")),
+            "2317450981"
+        );
+        assert_eq!(bigint_to_string(&serde_json::json!(42)), "42");
+        // Anything else is "no id" — never a usable one.
+        assert_eq!(bigint_to_string(&serde_json::Value::Null), "");
     }
 
     #[test]

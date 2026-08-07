@@ -11,22 +11,26 @@
 //! flattened to the `string` the frontend expects (see [`crate::error`]).
 
 use tauri::ipc::Channel;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_specta::Event;
 
 use santree_core::{
     config,
     domain::{
-        AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, CheckLog, FileSource,
-        GithubStatus, LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewPr, Opener,
-        PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewInbox, Reviewer,
-        ScriptInfo, SessionState, SessionUsageLive, Settings, TabKind, Task, TriageDetail,
-        TriageSchedule, TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreePr, WorktreeTab,
+        AgentAuth, AgentDef, AgentKind, AgentSession, ChangedFile, CheckLog, EnglishAnalysis,
+        EnglishLog, FileSource,
+        GithubStatus, LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewInlineComment,
+        NewPr, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewBrief,
+        ReviewEvent, ReviewInbox, Reviewer, ReviewTarget, ScriptInfo, SessionState,
+        SessionUsageLive, Settings, TabKind, Task, TicketRef,
+        TriageDetail, TriageSchedule, TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreePr,
+        WorktreeTab,
     },
 };
 
 use crate::commit_draft;
 use crate::db::Db;
+use crate::english_tutor;
 use crate::error::CmdResult;
 use crate::git_watch::WorktreeWatcher;
 use crate::legacy;
@@ -36,6 +40,7 @@ use crate::openers;
 use crate::pr;
 use crate::pricing;
 use crate::repo;
+use crate::review_ai;
 use crate::reviewed;
 use crate::reviews;
 use crate::session;
@@ -610,6 +615,88 @@ pub async fn reviews(repo: String, db: State<'_, Db>) -> CmdResult<ReviewInbox> 
     Ok(reviews::inbox(&db, &repo).await?)
 }
 
+/// Resolve Linear identifiers to `(project, title)` so the Reviews sidebar can
+/// group PRs by project. Empty when no Linear org is connected — the sidebar then
+/// simply offers no project grouping.
+#[tauri::command]
+#[specta::specta]
+pub async fn pr_tickets(
+    repo: String,
+    ids: Vec<String>,
+    db: State<'_, Db>,
+) -> CmdResult<Vec<TicketRef>> {
+    Ok(linear::tickets_by_identifier(&db, &repo, &ids)
+        .await?
+        .unwrap_or_default())
+}
+
+/// Find-or-create the read-only checkout of a PR's head for an AI review session
+/// to read real code in — a detached worktree under `.santree/reviews/`, pruned to
+/// the few most recent. `None` when the PR lives in a repo the active santree repo
+/// isn't a clone of; the session then runs diff-only.
+#[tauri::command]
+#[specta::specta]
+pub async fn review_workspace(
+    repo: String,
+    target: ReviewTarget,
+    db: State<'_, Db>,
+) -> CmdResult<Option<String>> {
+    Ok(reviews::review_workspace(&db, &repo, &target).await?)
+}
+
+/// Delete a PR's review checkout. Idempotent.
+#[tauri::command]
+#[specta::specta]
+pub async fn remove_review_workspace(
+    repo: String,
+    number: u32,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(reviews::remove_review_workspace(&db, &repo, number).await?)
+}
+
+/// Render the AI-review opening prompt for a PR (its description, conversation and
+/// diff around the `review` template), write it to a file, and return that file's
+/// **path** — the terminal seeds `Read <path> …` with it, since a whole PR diff is
+/// far too large for a shell seed. The Reviews analog of [`investigate_prompt`].
+#[tauri::command]
+#[specta::specta]
+pub async fn review_prompt(
+    app: AppHandle,
+    repo: String,
+    target: ReviewTarget,
+    db: State<'_, Db>,
+) -> CmdResult<String> {
+    let prompts = worktree::prompts_root(&app).ok_or("no writable data dir for prompt file")?;
+    Ok(review_ai::review_prompt(&db, &repo, &prompts, &target).await?)
+}
+
+/// The cached AI review brief for a PR (summary, reading order, watch-outs), or
+/// `None` when none has been generated. A single row read — the panel renders its
+/// "generate" state off this without waiting on any model.
+#[tauri::command]
+#[specta::specta]
+pub async fn pr_review_brief(
+    pr_repo: String,
+    number: u32,
+    db: State<'_, Db>,
+) -> CmdResult<Option<ReviewBrief>> {
+    Ok(review_ai::cached_brief(&db, &pr_repo, number).await?)
+}
+
+/// Generate (and cache) the AI review brief for a PR. The expensive one — a
+/// headless model call over the PR's diff, taking tens of seconds. Read-only: it
+/// produces a document and nothing else.
+#[tauri::command]
+#[specta::specta]
+pub async fn generate_pr_review_brief(
+    repo: String,
+    target: ReviewTarget,
+    db: State<'_, Db>,
+) -> CmdResult<ReviewBrief> {
+    Ok(review_ai::generate_brief(&db, &repo, &target).await?)
+}
+
 /// The merge queue for the active `repo`'s default branch — the ordered list of
 /// PRs waiting to merge, so the user can see where their own PRs sit. `None` when
 /// `gh` isn't authenticated or the repo has no merge queue enabled.
@@ -646,6 +733,66 @@ pub async fn set_pr_labels(
     labels: Vec<String>,
 ) -> CmdResult<Vec<PrLabel>> {
     Ok(reviews::set_pr_labels(&owner, &name, number, labels).await?)
+}
+
+/// Leave an inline review comment on a PR line — GitHub's `+` button on a diff
+/// row. Posted immediately, or held in the viewer's pending review when
+/// `pending` is set ("Start a review" / "Add to review").
+///
+/// Every write path here is the **user** acting. The AI review surfaces get no
+/// command that posts anything (and launch under a deny list) — comments,
+/// approvals and change-requests go out under the user's name, so the user
+/// writes them.
+#[tauri::command]
+#[specta::specta]
+pub async fn add_pr_inline_comment(comment: NewInlineComment) -> CmdResult<()> {
+    Ok(reviews::add_inline_comment(comment).await?)
+}
+
+/// Reply under an existing inline review thread. `reply_to_id` is the thread's
+/// [`PrThread::reply_to_id`] — GitHub threads replies off the root comment.
+#[tauri::command]
+#[specta::specta]
+pub async fn reply_to_pr_thread(
+    pr_repo: String,
+    number: u32,
+    reply_to_id: String,
+    body: String,
+) -> CmdResult<()> {
+    Ok(reviews::reply_to_thread(&pr_repo, number, &reply_to_id, &body).await?)
+}
+
+/// Mark an inline review thread resolved, or reopen it.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_pr_thread_resolved(thread_id: String, resolved: bool) -> CmdResult<()> {
+    Ok(reviews::set_thread_resolved(&thread_id, resolved).await?)
+}
+
+/// Submit the viewer's pending review — its draft comments become visible and the
+/// verdict lands on the PR.
+#[tauri::command]
+#[specta::specta]
+pub async fn submit_pr_review(
+    review_id: String,
+    event: ReviewEvent,
+    body: String,
+) -> CmdResult<()> {
+    Ok(reviews::submit_review(&review_id, event, &body).await?)
+}
+
+/// Discard the viewer's pending review and every draft comment in it.
+#[tauri::command]
+#[specta::specta]
+pub async fn discard_pr_review(review_id: String) -> CmdResult<()> {
+    Ok(reviews::discard_review(&review_id).await?)
+}
+
+/// Post a top-level comment on a PR's conversation (not anchored to a diff line).
+#[tauri::command]
+#[specta::specta]
+pub async fn add_pr_comment(pr_repo: String, number: u32, body: String) -> CmdResult<()> {
+    Ok(reviews::add_conversation_comment(&pr_repo, number, &body).await?)
 }
 
 /// The raw job log for a failed GitHub Actions check, fetched on demand when the
@@ -920,16 +1067,35 @@ pub async fn github_status() -> GithubStatus {
 /// the context-fill bar and captures live usage into the db). Both are always
 /// present — capture is unconditional; whether the app *displays* the inline
 /// usage bar is a runtime frontend decision. `None` when the hook binary/db can't
-/// be resolved — the frontend then launches without the flag. The content is
-/// setting-independent, so the frontend caches the path forever.
+/// be resolved — the frontend then launches without the flag. Its content depends
+/// only on the English-tutor setting, so the frontend caches the path until that
+/// one flips.
 #[tauri::command]
 #[specta::specta]
 pub async fn claude_hook_settings(app: AppHandle) -> Option<String> {
+    let tutor = tutor_instruction(&app).await;
     // Writes a settings JSON file. A non-async command runs on the *main thread*,
     // where a slow disk stalls the whole UI — everything else in this file that
     // touches the filesystem goes through spawn_blocking for exactly this reason.
-    tokio::task::spawn_blocking(move || crate::hooks::claude_settings(&app))
+    tokio::task::spawn_blocking(move || crate::hooks::claude_settings(&app, tutor.as_deref()))
         .await
+        .ok()
+        .flatten()
+}
+
+/// The English-tutor instruction to inject into a launch, or `None` when the tutor
+/// is off. Resolved from the `AppHandle`'s db rather than a `State<'_, Db>` arg so
+/// the three `claude_hook_settings*` commands keep returning a bare `Option<String>`
+/// (a borrowed-state arg would force them all to `Result`, for a read whose only
+/// failure mode is "no tutor").
+///
+/// A failure here is logged and treated as off: a session that launches without the
+/// tutor is a missing nicety, one that fails to launch is a broken app.
+async fn tutor_instruction(app: &AppHandle) -> Option<String> {
+    let db = app.try_state::<Db>()?.inner().clone();
+    english_tutor::instruction(&db)
+        .await
+        .inspect_err(|e| log::warn!("english tutor: rendering the instruction failed: {e}"))
         .ok()
         .flatten()
 }
@@ -941,10 +1107,50 @@ pub async fn claude_hook_settings(app: AppHandle) -> Option<String> {
 #[tauri::command]
 #[specta::specta]
 pub async fn claude_hook_settings_no_git(app: AppHandle) -> Option<String> {
-    tokio::task::spawn_blocking(move || crate::hooks::claude_settings_no_git(&app))
+    let tutor = tutor_instruction(&app).await;
+    tokio::task::spawn_blocking(move || crate::hooks::claude_settings_no_git(&app, tutor.as_deref()))
         .await
         .ok()
         .flatten()
+}
+
+/// The `--settings` file an **AI review** session launches with: everything
+/// [`claude_hook_settings_no_git`] denies, plus every `gh` route that could post a
+/// comment, approve, or otherwise speak as the user on a PR. `None` when the hook
+/// binary/db can't be resolved.
+#[tauri::command]
+#[specta::specta]
+pub async fn claude_hook_settings_review(app: AppHandle) -> Option<String> {
+    let tutor = tutor_instruction(&app).await;
+    tokio::task::spawn_blocking(move || crate::hooks::claude_settings_review(&app, tutor.as_deref()))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The English tutor's practice log, read-only. Creates the file when it's missing,
+/// so a fresh install shows an empty log rather than an error.
+#[tauri::command]
+#[specta::specta]
+pub async fn english_log() -> CmdResult<EnglishLog> {
+    Ok(tokio::task::spawn_blocking(english_tutor::read_log)
+        .await
+        .map_err(anyhow::Error::from)??)
+}
+
+/// The stored analysis of the practice log, or `None` if it's never been run.
+#[tauri::command]
+#[specta::specta]
+pub async fn english_analysis(db: State<'_, Db>) -> CmdResult<Option<EnglishAnalysis>> {
+    Ok(english_tutor::stored(&db).await?)
+}
+
+/// Analyze the practice log and store the result, replacing any previous one.
+/// Explicit and user-triggered — this is a paid model call, never automatic.
+#[tauri::command]
+#[specta::specta]
+pub async fn run_english_analysis(db: State<'_, Db>) -> CmdResult<EnglishAnalysis> {
+    Ok(english_tutor::analyze(&db).await?)
 }
 
 /// Every santree-launched session's live token/context usage, captured from the

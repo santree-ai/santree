@@ -43,6 +43,7 @@ const detail: PrDetail = {
   checks: [],
   baseSha: "base",
   headSha: "head",
+  pendingReviewId: null,
 };
 
 let marks: ViewedMarks = { source: "local", files: [] };
@@ -61,6 +62,8 @@ function pr(overrides: Partial<ReviewPr> = {}): ReviewPr {
     url: "https://github.com/acme/booking-agent/pull/483",
     repo: "acme/booking-agent",
     headRef: "you/pr-483",
+    baseRef: "main",
+    headSha: "head",
     author: "you",
     authorAvatarUrl: "",
     state: "Open",
@@ -70,9 +73,14 @@ function pr(overrides: Partial<ReviewPr> = {}): ReviewPr {
     isInMergeQueue: false,
     additions: 10,
     deletions: 2,
+    changedFiles: 2,
     commentCount: 0,
     reviewers: [],
     updatedAt: "2026-06-29T12:00:00Z",
+    createdAt: "2026-06-28T12:00:00Z",
+    waitingSince: "2026-06-28T12:00:00Z",
+    headCommittedAt: "2026-06-28T12:00:00Z",
+    viewerReview: null,
     ...overrides,
   };
 }

@@ -20,38 +20,45 @@ import type { TerminalTab } from "../terminal/orchestrator";
 export const BASE_TICKET = "__base__";
 
 /** Which surface a session belongs to, parsed from its `term_key`. */
-export type AgentOriginKind = "tree" | "tree-tab" | "triage" | "dev" | "unknown";
+export type AgentOriginKind = "tree" | "tree-tab" | "triage" | "review" | "dev" | "unknown";
 
 export interface AgentOrigin {
   kind: AgentOriginKind;
   /** Ticket id for `tree`/`tree-tab`/`triage` ({@link BASE_TICKET} for the base
-   *  entry); `null` for `dev` and `unknown`. */
+   *  entry); `null` for `review`, `dev` and `unknown`. */
   ticket: string | null;
   /** The persisted extra tab's id, for `tree-tab` only. */
   tabId: string | null;
+  /** `owner/name#number` for `review` only — which PR the session is reading. */
+  pr: string | null;
 }
 
-const UNKNOWN_ORIGIN: AgentOrigin = { kind: "unknown", ticket: null, tabId: null };
+const UNKNOWN_ORIGIN: AgentOrigin = { kind: "unknown", ticket: null, tabId: null, pr: null };
 
 /**
  * Parse a `terminal_sessions.term_key` into its owning surface. The conventions
  * are minted by the launch sites — `useAgentTab` (`tree:<id>`,
- * `tree:<id>:tab:<n>`), `InvestigatePane` (`triage:<id>`) and `DevView`
- * (`dev:<path>`) — and mirrored here rather than imported, so this panel doesn't
- * take a dependency on the three features it reports on.
+ * `tree:<id>:tab:<n>`), `InvestigatePane` (`triage:<id>`), `AiReviewPane`
+ * (`review:<owner>/<name>#<number>`) and `DevView` (`dev:<path>`) — and mirrored
+ * here rather than imported, so this panel doesn't take a dependency on the
+ * features it reports on.
  */
 export function parseTermKey(termKey: string | null | undefined): AgentOrigin {
   if (!termKey) return UNKNOWN_ORIGIN;
   if (termKey.startsWith("triage:")) {
-    return { kind: "triage", ticket: termKey.slice("triage:".length), tabId: null };
+    return { ...UNKNOWN_ORIGIN, kind: "triage", ticket: termKey.slice("triage:".length) };
   }
-  if (termKey.startsWith("dev:")) return { kind: "dev", ticket: null, tabId: null };
+  if (termKey.startsWith("review:")) {
+    return { ...UNKNOWN_ORIGIN, kind: "review", pr: termKey.slice("review:".length) };
+  }
+  if (termKey.startsWith("dev:")) return { ...UNKNOWN_ORIGIN, kind: "dev" };
   if (termKey.startsWith("tree:")) {
     const rest = termKey.slice("tree:".length);
     const sep = rest.indexOf(":");
-    if (sep === -1) return { kind: "tree", ticket: rest, tabId: null };
+    if (sep === -1) return { ...UNKNOWN_ORIGIN, kind: "tree", ticket: rest };
     const tail = rest.slice(sep + 1);
     return {
+      ...UNKNOWN_ORIGIN,
       kind: "tree-tab",
       ticket: rest.slice(0, sep),
       tabId: tail.startsWith("tab:") ? tail.slice("tab:".length) : null,
@@ -72,6 +79,7 @@ export function terminalRefFor(
 ): { source: string; refId: string } | null {
   if (!termKey) return null;
   if (origin.kind === "triage") return { source: "triage", refId: origin.ticket ?? "" };
+  if (origin.kind === "review") return { source: "review", refId: termKey };
   return { source: "issue", refId: termKey };
 }
 
