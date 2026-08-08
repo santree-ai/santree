@@ -14,6 +14,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 
 import { useAppOptional, useAppUiOptional } from "../state/AppContext";
+import { applyZoom, DEFAULT_ZOOM, loadZoom, step } from "./zoom";
 
 /** True when focus is in a field where keystrokes should be left alone. */
 export function inEditable(target: EventTarget | null): boolean {
@@ -102,9 +103,27 @@ export function useKeyboardShortcuts() {
         return;
       }
 
+      const mod = e.metaKey || e.ctrlKey;
+
+      // Text size. Checked before the shift guard below, because ⌘+ *is* a shifted
+      // chord on most layouts (⌘⇧=) — and handled even inside a focused terminal,
+      // since scaling the app is chrome, not something a shell can mean.
+      if (mod && !e.altKey) {
+        const dir = e.key === "+" || e.key === "=" ? 1 : e.key === "-" || e.key === "_" ? -1 : 0;
+        if (dir !== 0) {
+          e.preventDefault();
+          applyZoom(step(loadZoom(), dir as 1 | -1));
+          return;
+        }
+        if (e.key === "0") {
+          e.preventDefault();
+          applyZoom(DEFAULT_ZOOM);
+          return;
+        }
+      }
+
       // Shift is never part of a global binding — without this, ⌘⇧; (and any other
       // shifted combo whose base key matches) would fire the unshifted shortcut.
-      const mod = e.metaKey || e.ctrlKey;
       if (!mod || e.altKey || e.shiftKey) return;
 
       if (e.key === ";" || e.key === ",") {

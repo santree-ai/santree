@@ -9,6 +9,7 @@
     "opener:allow-default-urls",
     "core:window:allow-start-dragging",
     "core:window:allow-destroy",
+    "core:webview:allow-set-webview-zoom",
     "dialog:allow-open",
     "log:default"
   ]
