@@ -1552,6 +1552,27 @@ pub struct UsageReport {
     pub sessions: Vec<SessionUsage>,
 }
 
+/// Where santree found a CLI it shells out to, and what it reports about itself.
+/// Drives the "not found" panels, which otherwise tell users to install something
+/// they already have.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BinaryStatus {
+    /// The binary's name, e.g. `"gh"`.
+    pub name: String,
+    /// The absolute path santree will actually use, or `None` when nothing
+    /// resolved. An override wins over discovery, so this equals `overridePath`
+    /// whenever one is set and still valid.
+    pub path: Option<String>,
+    /// The user-set path, if any — kept separate from `path` so the UI can show
+    /// the field's own value and offer to clear it.
+    pub override_path: Option<String>,
+    /// First line of `<path> --version`. `None` when it isn't resolved, or when
+    /// the binary refused to report one — which is a hint the path points at the
+    /// wrong thing.
+    pub version: Option<String>,
+}
+
 /// One correction from the practice log, split into its parts so the UI can
 /// render it as a change rather than as a line of text.
 #[derive(Debug, Clone, Serialize, Type)]

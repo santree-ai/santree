@@ -478,6 +478,16 @@ export const commands = {
 	 */
 	triageAddComment: (repo: string, ticketId: string, parentId: string | null, body: string) => typedError<null, CmdError>(__TAURI_INVOKE("triage_add_comment", { repo, ticketId, parentId, body })),
 	/**
+	 *  Where santree resolves `name` to, plus any user-set override and the binary's
+	 *  own `--version`. Drives the "not found" panels and the manual-path field.
+	 */
+	binaryStatus: (name: string) => typedError<BinaryStatus, CmdError>(__TAURI_INVOKE("binary_status", { name })),
+	/**
+	 *  Set (or clear, with `None`) the path santree uses for `name`. Validated before
+	 *  it's stored — this value is later executed.
+	 */
+	setBinaryPath: (name: string, path: string | null) => typedError<BinaryStatus, CmdError>(__TAURI_INVOKE("set_binary_path", { name, path })),
+	/**
 	 *  Path to the settings file santree passes as `claude --settings <path>`,
 	 *  carrying the session-state hooks and santree's own `statusLine` (which prints
 	 *  the context-fill bar and captures live usage into the db). Both are always
@@ -908,6 +918,33 @@ export type AnalysisScope =
 "SinceLast" | 
 /**  The whole log — trends, and what's actually been retired. */
 "Everything";
+
+/**
+ *  Where santree found a CLI it shells out to, and what it reports about itself.
+ *  Drives the "not found" panels, which otherwise tell users to install something
+ *  they already have.
+ */
+export type BinaryStatus = {
+	/**  The binary's name, e.g. `"gh"`. */
+	name: string,
+	/**
+	 *  The absolute path santree will actually use, or `None` when nothing
+	 *  resolved. An override wins over discovery, so this equals `overridePath`
+	 *  whenever one is set and still valid.
+	 */
+	path: string | null,
+	/**
+	 *  The user-set path, if any — kept separate from `path` so the UI can show
+	 *  the field's own value and offer to clear it.
+	 */
+	overridePath: string | null,
+	/**
+	 *  First line of `<path> --version`. `None` when it isn't resolved, or when
+	 *  the binary refused to report one — which is a hint the path points at the
+	 *  wrong thing.
+	 */
+	version: string | null,
+};
 
 /**
  *  One entry in a worktree's working-tree status — a file with uncommitted

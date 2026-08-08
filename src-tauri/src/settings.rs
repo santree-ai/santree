@@ -3,12 +3,12 @@
 //! `scope` is `"app"` or `"repo:<name>"`: a repo value overrides the app value
 //! for the same key, and absence falls back to the app value (see [`resolve`]).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 use santree_core::config;
-use santree_core::domain::{AgentAuth, AgentKind, Settings};
+use santree_core::domain::{AgentAuth, AgentKind, BinaryStatus, Settings};
 
 use crate::db::Db;
 
@@ -36,6 +36,13 @@ pub fn validate_user_scope(scope: &str, key: &str) -> Result<()> {
     }
     if key == SETTINGS_KEY {
         anyhow::bail!("the {SETTINGS_KEY:?} blob must be written through save_settings");
+    }
+    // Binary paths get executed, so they go through `set_binary_path`, which
+    // validates and refreshes the in-process override map. Written through here
+    // they'd skip both — landing a row that never takes effect until restart, and
+    // never gets checked at all.
+    if key.starts_with("binary_path.") {
+        anyhow::bail!("binary paths must be written through set_binary_path");
     }
     Ok(())
 }
@@ -149,7 +156,11 @@ pub async fn get_settings(db: &Db) -> Result<Settings> {
 /// Persist the full settings blob (integration toggles, agent execs/models, …).
 pub async fn set_settings(db: &Db, settings: &Settings) -> Result<()> {
     let json = serde_json::to_string(settings)?;
-    set(db, "app", SETTINGS_KEY, Some(json)).await
+    set(db, "app", SETTINGS_KEY, Some(json)).await?;
+    // An agent's `exec` feeds the override map, so a save that changes one has to
+    // be reflected before the next lookup — otherwise it applies to interactive
+    // launches immediately and to the headless helpers only after a restart.
+    refresh_binary_overrides(db).await
 }
 /// The CLI binary name probed on PATH for each harness.
 fn agent_binary(kind: AgentKind) -> &'static str {
@@ -260,11 +271,102 @@ static BINARY_CACHE: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, String>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+/// The settings key holding a user-set absolute path for `name` (scope `"app"`).
+pub fn binary_path_key(name: &str) -> String {
+    format!("binary_path.{name}")
+}
+
+/// User-set binary paths, mirrored out of the `settings` table.
+///
+/// [`discover_binary`] is sync and called from places with no `Db` handle, so the
+/// overrides are loaded once at startup ([`load_binary_overrides`]) and updated in
+/// place whenever one is written ([`set_binary_override`]) rather than read from
+/// SQLite per lookup.
+static BINARY_OVERRIDES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Rebuild [`BINARY_OVERRIDES`] from the database. Call at startup and after any
+/// write that could change it.
+///
+/// Two sources, in precedence order:
+///  1. an agent's **`exec`**, when the user set it to an absolute path. Without
+///     this, that setting only steered *interactive* launches (the frontend reads
+///     it directly) while every headless helper — commit message, PR body, review
+///     brief, English analysis — kept resolving `claude` on its own and silently
+///     ran a different binary.
+///  2. an explicit **`binary_path.<name>`**, which wins: it's the validated,
+///     purpose-built override, and the only one that can name a binary no agent
+///     corresponds to (`gh`).
+pub async fn refresh_binary_overrides(db: &Db) -> Result<()> {
+    let mut next: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    for agent in get_settings(db).await?.agents {
+        let exec = agent.exec.trim();
+        // A bare name (the default, `"claude"`) is not an override — it's just the
+        // thing discovery was going to look for anyway.
+        if Path::new(exec).is_absolute() {
+            next.insert(agent_binary(agent.key).to_string(), exec.to_string());
+        }
+    }
+
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT key, value FROM settings WHERE scope = 'app' AND key LIKE ?")
+            .bind("binary_path.%")
+            .fetch_all(db)
+            .await?;
+    for (key, value) in rows {
+        if let Some(name) = key.strip_prefix("binary_path.") {
+            next.insert(name.to_string(), value);
+        }
+    }
+
+    let mut map = BINARY_OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
+    *map = next;
+    drop(map);
+    // Anything resolved under the previous set may now be wrong.
+    BINARY_CACHE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    Ok(())
+}
+
+/// Set (or clear, with `None`) the override for `name` and drop any memoised
+/// resolution for it, so the next lookup reflects the change without a restart.
+pub fn set_binary_override(name: &str, path: Option<&str>) {
+    let mut map = BINARY_OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
+    match path {
+        Some(p) => map.insert(name.to_string(), p.to_string()),
+        None => map.remove(name),
+    };
+    BINARY_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(name);
+}
+
+/// The override for `name`, if the user set one and it's still executable. A
+/// stale override (the binary was removed or moved) falls through to discovery
+/// rather than failing every call — better to quietly find a working one than to
+/// stay broken until the user notices the setting.
+fn binary_override(name: &str) -> Option<String> {
+    let path = BINARY_OVERRIDES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(name)
+        .cloned()?;
+    is_executable_file(Path::new(&path)).then_some(path)
+}
+
 /// Resolve a CLI binary the way the user's terminal would: through their login
 /// shell, so PATH matches a real terminal (macOS GUI apps inherit a minimal PATH
 /// that usually misses Homebrew, version managers, etc.). Returns the absolute
 /// path, or `None` when the binary isn't found. Hits are memoised (see [`BINARY_CACHE`]).
+///
+/// A user-set path ([`set_binary_override`]) wins over discovery — it's the escape
+/// hatch for installs no probe finds, and for choosing between several copies.
 pub fn discover_binary(name: &str) -> Option<String> {
+    if let Some(path) = binary_override(name) {
+        return Some(path);
+    }
     if let Some(hit) = BINARY_CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -283,6 +385,112 @@ pub fn discover_binary(name: &str) -> Option<String> {
     resolved
 }
 
+/// What santree resolves `name` to right now, plus the override behind it and the
+/// binary's own `--version`. Blocking (discovery may spawn a shell).
+pub fn binary_status(name: &str) -> BinaryStatus {
+    let override_path = BINARY_OVERRIDES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(name)
+        .cloned();
+    let path = discover_binary(name);
+    let version = path.as_deref().and_then(probe_version);
+    BinaryStatus {
+        name: name.to_string(),
+        path,
+        override_path,
+        version,
+    }
+}
+
+/// First line of `<path> --version`, or `None` if it can't run or says nothing.
+/// The path is executed directly — never through a shell, so nothing in it is
+/// interpreted.
+fn probe_version(path: &str) -> Option<String> {
+    let out = std::process::Command::new(path).arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+}
+
+/// Persist a user-set path for `name` (or clear it with `None`) and return the
+/// resulting status.
+///
+/// Validated at the sink, because this value is later **executed**: it has to be
+/// an absolute path to a file with an execute bit. A relative path would resolve
+/// against whatever cwd the caller happens to have, and a path to a directory or a
+/// non-executable fails later, somewhere far less obvious than this input.
+pub async fn set_binary_path(db: &Db, name: &str, path: Option<String>) -> Result<BinaryStatus> {
+    if !safe_binary_name(name) {
+        anyhow::bail!("invalid binary name {name:?}");
+    }
+    let path = path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    if let Some(p) = &path {
+        let candidate = Path::new(p);
+        if !candidate.is_absolute() {
+            anyhow::bail!("enter an absolute path (starting with /) — got {p:?}");
+        }
+        if !candidate.exists() {
+            anyhow::bail!("nothing exists at {p}");
+        }
+        if !is_executable_file(candidate) {
+            anyhow::bail!("{p} isn't an executable file");
+        }
+    }
+    set(db, "app", &binary_path_key(name), path.clone()).await?;
+    set_binary_override(name, path.as_deref());
+    Ok(binary_status(name))
+}
+
+/// Whether `p` is something we could actually execute.
+fn is_executable_file(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
+}
+
+/// Directories to probe by hand when no shell reports the binary.
+///
+/// The shell probes below cover the usual cases, but they inherit whatever the
+/// user's rc files happen to set — and package managers disagree about where that
+/// belongs. Nix's macOS installer, for one, writes its hook into `/etc/zshrc`,
+/// which zsh reads for *interactive* shells only: `zsh -lc` never sees it, so a
+/// perfectly good `gh` in `~/.nix-profile/bin` reads as "not installed". Probing
+/// the known roots directly is the backstop that doesn't care whose rc file it is.
+fn well_known_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(home) = &home {
+        dirs.push(home.join(".nix-profile/bin"));
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".cargo/bin"));
+        dirs.push(home.join("bin"));
+    }
+    dirs.extend(
+        [
+            "/nix/var/nix/profiles/default/bin",
+            "/run/current-system/sw/bin", // nix-darwin / NixOS
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ]
+        .map(PathBuf::from),
+    );
+    dirs
+}
+
 /// Whether `name` is safe to interpolate into [`resolve_binary`]'s shell command.
 /// Enforced at the sink rather than trusted from callers: everything else in a
 /// `$SHELL -lc "…"` string is quoting-sensitive, and a binary name only ever needs
@@ -294,14 +502,41 @@ fn safe_binary_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// The uncached login-shell PATH probe behind [`discover_binary`].
+/// The uncached probe behind [`discover_binary`], in three tiers, cheapest first:
+///
+/// 1. `$SHELL -lc` — a **login, non-interactive** shell. Covers the common case
+///    (Homebrew, version managers) in one spawn.
+/// 2. `$SHELL -ilc` — login **and interactive**, which is what actually reads
+///    `.zshrc` / `/etc/zshrc`. zsh sources those for interactive shells only, so
+///    tier 1 is blind to anything configured there — Nix's macOS installer being
+///    the case that prompted this. Only run on a tier-1 miss, since an interactive
+///    rc file can be slow (prompt frameworks, completion init).
+/// 3. [`well_known_dirs`] — a direct filesystem probe, for when the binary isn't
+///    on any shell's PATH or `$SHELL` is something whose flags don't mean this
+///    (fish, nushell). Costs no process at all.
 fn resolve_binary(name: &str) -> Option<String> {
     if !safe_binary_name(name) {
         return None;
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let output = std::process::Command::new(&shell)
-        .args(["-lc", &format!("command -v {name}")])
+    for flags in ["-lc", "-ilc"] {
+        if let Some(path) = shell_probe(&shell, flags, name) {
+            return Some(path);
+        }
+    }
+    well_known_dirs()
+        .into_iter()
+        .map(|d| d.join(name))
+        .find(|p| is_executable_file(p))
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// One `command -v` through `shell` with `flags`. `None` if the shell errors, the
+/// binary isn't found, or what came back isn't an executable file — an rc file that
+/// prints on startup can otherwise pass its own chatter off as a path.
+fn shell_probe(shell: &str, flags: &str, name: &str) -> Option<String> {
+    let output = std::process::Command::new(shell)
+        .args([flags, &format!("command -v {name}")])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -313,7 +548,7 @@ fn resolve_binary(name: &str) -> Option<String> {
         .map(str::trim)
         .rfind(|l| !l.is_empty())?
         .to_string();
-    Some(path)
+    is_executable_file(Path::new(&path)).then_some(path)
 }
 
 /// The user's PATH as a real login shell sees it — recovered by running
@@ -327,18 +562,41 @@ fn resolve_binary(name: &str) -> Option<String> {
 pub fn login_shell_path() -> Option<String> {
     const MARK: &str = "__santree_path__=";
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let output = std::process::Command::new(&shell)
-        .args(["-lc", &format!("printf '%s%s\\n' '{MARK}' \"$PATH\"")])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    let ask = |flags: &str| -> Option<String> {
+        let output = std::process::Command::new(&shell)
+            .args([flags, &format!("printf '%s%s\\n' '{MARK}' \"$PATH\"")])
+            .output()
+            .ok()?;
+        output.status.success().then_some(())?;
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix(MARK))
+            .map(str::to_string)
+            .filter(|p| !p.is_empty())
+    };
+
+    // Both shells, then the known roots — for the same reason [`resolve_binary`]
+    // has tiers: `-lc` never reads `.zshrc`/`/etc/zshrc`, where Nix (among others)
+    // puts its PATH setup. These are *merged* rather than first-wins, because each
+    // source legitimately contributes entries the others don't.
+    let mut merged: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |entry: String| {
+        if !entry.is_empty() && seen.insert(entry.clone()) {
+            merged.push(entry);
+        }
+    };
+    for flags in ["-lc", "-ilc"] {
+        for entry in ask(flags).unwrap_or_default().split(':') {
+            push(entry.to_string());
+        }
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|l| l.strip_prefix(MARK))
-        .map(str::to_string)
-        .filter(|p| !p.is_empty())
+    for dir in well_known_dirs() {
+        if dir.is_dir() {
+            push(dir.to_string_lossy().into_owned());
+        }
+    }
+    (!merged.is_empty()).then(|| merged.join(":"))
 }
 
 #[cfg(test)]
@@ -366,6 +624,118 @@ mod tests {
     fn the_settings_blob_cannot_be_written_through_the_generic_surface() {
         assert!(validate_user_scope("app", SETTINGS_KEY).is_err());
         assert!(validate_user_scope("repo:acme/app", SETTINGS_KEY).is_err());
+    }
+
+    /// Binary paths are executed, so they must not be reachable from the generic
+    /// key-value surface — that route skips validation *and* the in-process map.
+    #[test]
+    fn binary_paths_cannot_be_written_through_the_generic_surface() {
+        assert!(validate_user_scope("app", &binary_path_key("gh")).is_err());
+        assert!(validate_user_scope("app", "binary_path.claude").is_err());
+        // Neighbouring keys are unaffected.
+        assert!(validate_user_scope("app", "binary_pathological").is_ok());
+    }
+
+    /// The backstop that fixes the Nix case: a binary on no shell's PATH is still
+    /// found when it sits in a known root.
+    #[test]
+    fn well_known_dirs_cover_the_nix_install_roots() {
+        let dirs: Vec<String> = well_known_dirs()
+            .iter()
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect();
+        assert!(dirs.iter().any(|d| d.ends_with("/.nix-profile/bin")), "{dirs:?}");
+        assert!(dirs.iter().any(|d| d == "/nix/var/nix/profiles/default/bin"), "{dirs:?}");
+        assert!(dirs.iter().any(|d| d == "/run/current-system/sw/bin"), "{dirs:?}");
+        assert!(dirs.iter().any(|d| d == "/opt/homebrew/bin"), "{dirs:?}");
+    }
+
+    #[test]
+    fn only_executable_files_count_as_binaries() {
+        let dir = std::env::temp_dir().join(format!("santree-bin-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("plain");
+        std::fs::write(&plain, "#!/bin/sh\n").unwrap();
+
+        // A readable file with no execute bit is not a binary — treating it as one
+        // stores a path that fails at spawn time, far from this input.
+        assert!(!is_executable_file(&plain));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(is_executable_file(&plain));
+        }
+        // A directory never counts, however executable it looks.
+        assert!(!is_executable_file(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_manual_binary_path_must_be_absolute_and_executable() {
+        let db = test_db().await;
+        let dir = std::env::temp_dir().join(format!("santree-bin-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let not_exec = dir.join("gh");
+        std::fs::write(&not_exec, "").unwrap();
+
+        for bad in [
+            "gh".to_string(),                          // relative — resolves against an unknown cwd
+            "/nope/does/not/exist".to_string(),        // absent
+            not_exec.to_string_lossy().into_owned(),   // present but not executable
+        ] {
+            assert!(
+                set_binary_path(&db, "gh", Some(bad.clone())).await.is_err(),
+                "should have rejected {bad:?}"
+            );
+        }
+        // Rejected input leaves nothing behind.
+        assert!(get(&db, "app", &binary_path_key("gh")).await.unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_explicit_binary_path_outranks_an_agent_exec() {
+        let db = test_db().await;
+        let mut settings = config::default_settings();
+        settings.agents = vec![AgentSetting {
+            key: AgentKind::Claude,
+            exec: "/usr/bin/true".into(),
+            model: "opus".into(),
+        }];
+        set_settings(&db, &settings).await.unwrap();
+
+        // The agent's absolute exec becomes the override, so the headless helpers
+        // resolve the same binary the interactive launch uses.
+        refresh_binary_overrides(&db).await.unwrap();
+        assert_eq!(binary_override("claude").as_deref(), Some("/usr/bin/true"));
+
+        // An explicit path wins — it's the validated, purpose-built one.
+        set_binary_path(&db, "claude", Some("/bin/echo".into())).await.unwrap();
+        refresh_binary_overrides(&db).await.unwrap();
+        assert_eq!(binary_override("claude").as_deref(), Some("/bin/echo"));
+
+        // Clearing it falls back to the agent exec rather than to nothing.
+        set_binary_path(&db, "claude", None).await.unwrap();
+        refresh_binary_overrides(&db).await.unwrap();
+        assert_eq!(binary_override("claude").as_deref(), Some("/usr/bin/true"));
+    }
+
+    /// A bare command name is what discovery would look for anyway, so it must not
+    /// be stored as an override — doing so would short-circuit the probe with a
+    /// path that isn't one.
+    #[tokio::test]
+    async fn a_bare_agent_exec_is_not_treated_as_an_override() {
+        let db = test_db().await;
+        let mut settings = config::default_settings();
+        settings.agents = vec![AgentSetting {
+            key: AgentKind::Claude,
+            exec: "claude".into(),
+            model: "opus".into(),
+        }];
+        set_settings(&db, &settings).await.unwrap();
+        refresh_binary_overrides(&db).await.unwrap();
+        assert_eq!(binary_override("claude"), None);
     }
 
     /// A real (temp-file-backed) SQLite pool, isolated per test — same pattern

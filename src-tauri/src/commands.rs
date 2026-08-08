@@ -17,7 +17,8 @@ use tauri_specta::Event;
 use santree_core::{
     config,
     domain::{
-        AgentAuth, AgentDef, AgentKind, AgentSession, AnalysisScope, ChangedFile, CheckLog,
+        AgentAuth, AgentDef, AgentKind, AgentSession, AnalysisScope, BinaryStatus, ChangedFile,
+        CheckLog,
         EnglishAnalysis, EnglishLog, FileSource,
         GithubStatus, LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewInlineComment,
         NewPr, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewBrief,
@@ -1060,6 +1061,30 @@ pub async fn agent_auth(kind: AgentKind) -> AgentAuth {
 #[specta::specta]
 pub async fn github_status() -> GithubStatus {
     crate::github::status().await
+}
+
+/// Where santree resolves `name` to, plus any user-set override and the binary's
+/// own `--version`. Drives the "not found" panels and the manual-path field.
+#[tauri::command]
+#[specta::specta]
+pub async fn binary_status(name: String) -> CmdResult<BinaryStatus> {
+    // Discovery may spawn a login shell (and now a second, interactive one on a
+    // miss), so keep it off the async runtime like the other probes do.
+    Ok(tokio::task::spawn_blocking(move || settings::binary_status(&name))
+        .await
+        .map_err(anyhow::Error::from)?)
+}
+
+/// Set (or clear, with `None`) the path santree uses for `name`. Validated before
+/// it's stored — this value is later executed.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_binary_path(
+    db: State<'_, Db>,
+    name: String,
+    path: Option<String>,
+) -> CmdResult<BinaryStatus> {
+    Ok(settings::set_binary_path(&db, &name, path).await?)
 }
 
 /// Path to the settings file santree passes as `claude --settings <path>`,

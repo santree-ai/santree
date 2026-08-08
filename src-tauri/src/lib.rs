@@ -142,6 +142,8 @@ fn specta_builder() -> AppBuilder {
             commands::triage_detail,
             commands::triage_set_state,
             commands::triage_add_comment,
+            commands::binary_status,
+            commands::set_binary_path,
             commands::claude_hook_settings,
             commands::claude_hook_settings_no_git,
             commands::claude_hook_settings_review,
@@ -544,6 +546,14 @@ pub fn run() {
                     ),
                 ),
             };
+            // Mirror any user-set binary paths into the process before anything
+            // resolves a CLI. Synchronous on purpose: `discover_binary` is sync and
+            // reachable from the first frame, so an override loaded a tick late
+            // would silently lose to discovery on the very lookups it exists to fix.
+            if let Err(e) = tauri::async_runtime::block_on(settings::refresh_binary_overrides(&db)) {
+                log::warn!("loading binary path overrides failed: {e:#}");
+            }
+
             // Garbage-collect the tables nothing else ever deletes from:
             //  · `terminal_sessions` — no code path drops a Triage investigation's row,
             //    so it would grow by one per ticket ever investigated;

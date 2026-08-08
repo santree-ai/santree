@@ -23,6 +23,7 @@ import {
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
 import { alpha, LINEAR_BRAND } from "../../../theme/colors";
+import { BinaryPathField } from "../BinaryPathField";
 import { Heading, KvRow, ToggleRow } from "../widgets";
 
 /** Linear's real app-icon treatment — the official monochrome logomark, white on
@@ -188,10 +189,17 @@ function LocalGitHubCard() {
                 </span>{" "}
                 Install it (<span className="font-mono text-fg-3">brew install gh</span>) and run{" "}
                 <span className="font-mono text-fg-3">gh auth login</span> — without it,
-                pull-request creation and the Reviews tab stay empty.
+                pull-request creation and the Reviews tab stay empty. Already installed? Point
+                santree at it below.
               </div>
             </div>
           )}
+
+          {/* Offered in both states: not-found is when you need it most, but a
+              second install (or the wrong one on PATH) is a real case too. */}
+          <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
+            <BinaryPathField name="gh" hint="only needed if santree can't find it itself" />
+          </div>
 
           {gh?.installed && (
             <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">

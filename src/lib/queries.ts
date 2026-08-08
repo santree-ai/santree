@@ -231,6 +231,7 @@ export const queryKeys = {
   claudeModels: ["claude-models"] as const,
   agentAuth: (kind: AgentKind) => ["agent-auth", kind] as const,
   githubStatus: ["github-status"] as const,
+  binaryStatus: (name: string) => ["binary-status", name] as const,
   claudeHookSettings: ["claude-hook-settings"] as const,
   claudeHookSettingsNoGit: ["claude-hook-settings-no-git"] as const,
   claudeHookSettingsReview: ["claude-hook-settings-review"] as const,
@@ -2413,6 +2414,32 @@ export const useSetSetting = () =>
             queryKeys.claudeHookSettingsReview,
           ]
         : []),
+    ],
+  });
+
+// ── CLI binaries ─────────────────────────────────────────────────────────────
+
+/** Where santree resolves a CLI to, plus any user-set override and its
+ *  `--version`. Not cached: discovery can spawn a shell, but this is only read by
+ *  the settings panels, and a stale "not found" is exactly what it exists to fix. */
+export const useBinaryStatus = (name: string) =>
+  useUnwrappedQuery(queryKeys.binaryStatus(name), () => commands.binaryStatus(name), {
+    staleTime: 0,
+  });
+
+/** Set (or clear, with `null`) the path santree uses for a CLI. Errors are shown
+ *  inline by the caller — a rejected path needs to be visible next to the field
+ *  that produced it, not in a corner toast. */
+export const useSetBinaryPath = (name: string) =>
+  useActionMutation({
+    mutationFn: (path: string | null) => unwrap(commands.setBinaryPath(name, path)),
+    silent: true,
+    // `githubStatus` and `agentAuth` are the panels that told the user to install
+    // something they already had — both have to re-probe, not just this key.
+    invalidate: () => [
+      queryKeys.binaryStatus(name),
+      queryKeys.githubStatus,
+      queryKeys.agentAuth("Claude"),
     ],
   });
 
