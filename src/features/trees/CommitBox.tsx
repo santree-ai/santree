@@ -39,7 +39,7 @@ export function CommitBox({
   const { mutate: saveDraft } = useSetCommitDraft(repo);
   const { mutate: draft, isPending: drafting } = useCommitMessage(repo);
   const { mutate: commit, isPending: committing } = useCommitWorktree(repo, activeId);
-  const { mutate: push } = usePushWorktree(repo);
+  const { mutate: push, isPending: pushing } = usePushWorktree(repo);
 
   const [message, setMessage] = useState("");
   // The saved draft loads asynchronously; adopt it into the field exactly once so
@@ -139,7 +139,12 @@ export function CommitBox({
       <Button variant="primary" onClick={onCommit} disabled={!canCommit} className="mt-2 w-full">
         {committing
           ? "Committing…"
-          : `Commit${committable ? ` ${committable} file${committable === 1 ? "" : "s"}` : ""}`}
+          : pushing
+            ? "Pushing…"
+            : // With "push after every commit" on, the click does both — say so.
+              `${autoPush ? "Commit and push" : "Commit"}${
+                committable ? ` ${committable} file${committable === 1 ? "" : "s"}` : ""
+              }`}
       </Button>
     </div>
   );
