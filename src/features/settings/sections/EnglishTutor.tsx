@@ -22,7 +22,7 @@ import {
   WarningIcon,
 } from "../../../components/icons";
 import { Markdown } from "../../../components/Markdown";
-import { Button, EmptyState, Spinner } from "../../../components/primitives";
+import { Button, EmptyState, RunningStatus, Spinner } from "../../../components/primitives";
 import { RelativeTime } from "../../../components/RelativeTime";
 import {
   ENGLISH_TUTOR_KEY,
@@ -156,6 +156,17 @@ export function EnglishTutorSection() {
               </Button>
             ))}
           </div>
+          {isPending && (
+            <div className="mb-3 rounded-xl border border-line-2 bg-raised px-4 py-3">
+              <RunningStatus
+                active
+                label={`Reading the log${running ? ` (${SCOPE_LABEL[running]})` : ""}…`}
+                // A thousand corrections in and a structured answer out is minutes
+                // of work, not a stall — the run has its own long deadline.
+                slowLabel="Still working — a long log takes a few minutes."
+              />
+            </div>
+          )}
           {analysis ? (
             <>
               <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-muted-3">

@@ -31,6 +31,10 @@ use crate::stream::{self, StreamEvent};
 /// terminal / file browser / commit box for the base branch itself.
 pub const BASE_ID: &str = "__base__";
 
+/// Settings key for the model the AI commit message is drafted on (app or
+/// per-repo scope). Defaults to [`crate::agent::HELPER_MODEL`].
+pub const COMMIT_MODEL_KEY: &str = "commit_message_model";
+
 /// Reject an `issue_id` that isn't safe to `Path::join` onto the worktrees dir —
 /// mirrors `git.rs`'s `safe_path` guard. IPC-supplied, so a value like `".."` or
 /// `"/etc"` must not be allowed to escape `.santree/worktrees` and later get
@@ -1002,10 +1006,29 @@ pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<Strin
     )
     .await?;
 
+    // Configurable per repo (Settings → Actions), defaulting to the cheap tier: a
+    // subject line from a capped diff is the one helper that genuinely is a
+    // small text task.
+    let model = crate::settings::resolve(db, repo, COMMIT_MODEL_KEY)
+        .await
+        .ok()
+        .flatten()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| crate::agent::HELPER_MODEL.to_string());
+
     // Claude can take 5–30s; run it off the async runtime's worker threads.
     let cwd = path.clone();
     let drafted = tokio::task::spawn_blocking(move || {
-        crate::agent::run_print(&cwd, &prompt, &[], Some(crate::agent::HELPER_MODEL))
+        // Best-effort: falls back to the generated subject below. `run_print` has
+        // already logged the reason.
+        crate::agent::run_print(
+            &cwd,
+            &prompt,
+            &[],
+            Some(&model),
+            crate::agent::SHORT_TIMEOUT,
+        )
+        .ok()
     })
     .await
     .ok()

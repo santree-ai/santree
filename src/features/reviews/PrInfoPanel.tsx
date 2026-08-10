@@ -1,35 +1,70 @@
 /**
- * The Reviews tab's full-height right rail: the AI {@link ReviewBriefSection}, the
- * selected PR's description and top-level conversation (issue comments + review
- * summaries), plus any inline threads whose file isn't in the diff. It spans the
- * whole detail area — header, tabs, and body — so the brief's reading order and
- * the description stay beside you while you move between the Pull request /
- * Checks / Issue tabs. Collapsible + resizable (drag its left edge or ⌘L); when
- * collapsed it renders nothing (the header's panel button / ⌘L bring it back).
- * Reuses the already-cached `usePrDetail` fetch, so it's free here.
+ * The Reviews tab's full-height right rail — everything you consult *while*
+ * reading a PR, in three tabs:
+ *  - **Description** — the AI {@link ReviewBriefSection}, the PR's body and
+ *    top-level conversation, plus any inline threads whose file isn't in the diff.
+ *  - **Issue** — the linked Linear ticket, found from the PR title / branch (the
+ *    same PR↔ticket convention the worktree flow uses).
+ *  - **Ask AI** — a Claude session that has read the PR and can answer questions
+ *    about it. Read-only: it never comments or approves (see {@link AiReviewPane}).
+ *
+ * The rail spans the whole detail area — header, tabs, and body — so whichever of
+ * these you're consulting stays *beside* the diff instead of replacing it. That's
+ * why the ticket and the AI live here rather than in the main tab bar: a review is
+ * the code read against its ticket, and a tab that hides the code to show the
+ * ticket makes you flip back and forth to do it.
+ *
+ * Collapsible + resizable (drag its left edge or ⌘L). Reuses the already-cached
+ * `usePrDetail` fetch, so the description costs nothing here.
  */
 import type { PrComment, ReviewPr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
+import { ClaudeSparkIcon } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
-import { EdgeResizeHandle } from "../../components/primitives";
+import { EdgeResizeHandle, Tabs } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
 import { useAddPrConversationComment, usePrDetail } from "../../lib/queries";
 import { isoMs } from "../../lib/relativeTime";
 import { splitRepoSlug } from "../../lib/repo";
 import { useEdgeResize } from "../../lib/useEdgeResize";
+import { AiReviewPane } from "./AiReviewPane";
 import { CommentComposer } from "./CommentComposer";
 import { useReviewsModel } from "./model";
 import { PrThreadCard } from "./PrThreadCard";
 import { ReviewBriefSection } from "./ReviewBriefSection";
+import { ReviewIssuePane } from "./ReviewIssuePane";
+import { ticketIdFor } from "./ticket";
+
+export type PanelTab = "description" | "issue" | "ai";
 
 const DEFAULT_W = 400;
 const MIN_W = 300;
-const MAX_W = 760;
+// Roomier than the rail needs for prose: the Ask AI tab is a terminal, and a
+// session you actually converse with wants more than a description column.
+const MAX_W = 1000;
 
-export function PrInfoPanel({ pr }: { pr: ReviewPr }) {
-  const { infoCollapsed, toggleInfo, infoWidth, setInfoWidth } = useReviewsModel();
+export function PrInfoPanel({
+  pr,
+  tab,
+  onTabChange,
+  aiOpened,
+}: {
+  pr: ReviewPr;
+  tab: PanelTab;
+  onTabChange: (tab: PanelTab) => void;
+  /** Whether the AI session has ever been opened for this PR (see `ReviewDetail`). */
+  aiOpened: boolean;
+}) {
+  const {
+    infoCollapsed,
+    toggleInfo,
+    infoWidth,
+    setInfoWidth,
+    repo: santreeRepo,
+  } = useReviewsModel();
   const [owner, name] = splitRepoSlug(pr.repo);
   const { data: detail } = usePrDetail(owner, name, pr.number);
+  const ticketId = ticketIdFor(pr);
 
   const resize = useEdgeResize({
     cssVar: "--rev-right",
@@ -41,39 +76,68 @@ export function PrInfoPanel({ pr }: { pr: ReviewPr }) {
     collapse: { at: 200, resetTo: DEFAULT_W, onCollapse: toggleInfo },
   });
 
-  // Fully hidden when collapsed — the header's panel button (⌘L) brings it back.
-  if (infoCollapsed) return null;
-
   const files = new Set((detail?.files ?? []).map((f) => f.path));
   const orphanThreads = (detail?.threads ?? []).filter((t) => !files.has(t.path));
 
   return (
+    // Hidden rather than unmounted when collapsed: the Ask AI tab owns a live PTY
+    // and a checkout, and returning null here would kill the session every time
+    // the rail was toggled (⌘L) — the same non-idempotent-effect rule that keeps
+    // the pane mounted across tab switches.
     <div
-      className="relative flex flex-none flex-col overflow-hidden border-l border-hairline bg-deep"
+      className={`relative flex-none flex-col overflow-hidden border-l border-hairline bg-deep ${
+        infoCollapsed ? "hidden" : "flex"
+      }`}
       style={{ width: `var(--rev-right, ${DEFAULT_W}px)` }}
     >
       <EdgeResizeHandle edge="left" {...resize} />
-      <div className="selectable min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        <ReviewBriefSection pr={pr} />
-        <SidebarLabel>Description</SidebarLabel>
-        <Markdown>{detail?.body?.trim() || "_No description._"}</Markdown>
-        {orphanThreads.length > 0 && (
-          <div className="mt-6 border-t border-hairline pt-4">
-            <SidebarLabel>Comments on other files</SidebarLabel>
-            <div className="overflow-hidden rounded-lg border border-line-2">
-              {orphanThreads.map((t, i) => (
-                <PrThreadCard
-                  key={`${t.path}:${t.line}:${i}`}
-                  thread={t}
-                  prRepo={pr.repo}
-                  number={pr.number}
-                />
-              ))}
+
+      <Tabs
+        className="flex-none px-4"
+        value={tab}
+        onChange={onTabChange}
+        tabs={[
+          { value: "description", label: "Description" },
+          { value: "issue", label: "Issue", dimmed: !ticketId },
+          { value: "ai", label: "Ask AI", badge: <ClaudeSparkIcon size={11} /> },
+        ]}
+      />
+
+      {tab === "description" && (
+        <div className="selectable min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          <ReviewBriefSection pr={pr} />
+          <SidebarLabel>Description</SidebarLabel>
+          <Markdown>{detail?.body?.trim() || "_No description._"}</Markdown>
+          {orphanThreads.length > 0 && (
+            <div className="mt-6 border-t border-hairline pt-4">
+              <SidebarLabel>Comments on other files</SidebarLabel>
+              <div className="overflow-hidden rounded-lg border border-line-2">
+                {orphanThreads.map((t, i) => (
+                  <PrThreadCard
+                    key={`${t.path}:${t.line}:${i}`}
+                    thread={t}
+                    prRepo={pr.repo}
+                    number={pr.number}
+                  />
+                ))}
+              </div>
             </div>
-          </div>
-        )}
-        <Conversation pr={pr} comments={detail?.comments ?? []} />
-      </div>
+          )}
+          <Conversation pr={pr} comments={detail?.comments ?? []} />
+        </div>
+      )}
+
+      {tab === "issue" && (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <ReviewIssuePane repo={santreeRepo} ticketId={ticketId} />
+        </div>
+      )}
+
+      {aiOpened && (
+        <div className={tab === "ai" ? "flex min-h-0 flex-1" : "hidden"}>
+          <AiReviewPane pr={pr} />
+        </div>
+      )}
     </div>
   );
 }

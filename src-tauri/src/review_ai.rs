@@ -15,6 +15,7 @@
 //! `Read` only inside the working directory (see [`generate_brief`]).
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use santree_core::domain::{
@@ -38,6 +39,16 @@ const PER_FILE_BUDGET: usize = 24_000;
 
 /// Settings key for the model the brief runs on (app or per-repo scope).
 pub const BRIEF_MODEL_KEY: &str = "review_brief_model";
+
+/// Ceiling on one brief.
+///
+/// The call reads up to [`DIFF_BUDGET`] of diff on a capable model and writes
+/// structured JSON — minutes of legitimate work, not a hung process. It ran on
+/// [`agent::SHORT_TIMEOUT`] until 2026-08-10, which meant every brief for a PR big
+/// enough to need one was killed mid-answer at 120s and surfaced as an empty
+/// result. Same bug the tutor analysis hit; the deadline is now an argument so a
+/// call site can't inherit one that isn't sized for it.
+const BRIEF_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The brief's default model.
 ///
@@ -402,10 +413,10 @@ pub async fn generate_brief(db: &Db, repo: &str, target: &ReviewTarget) -> Resul
 
     let text = tokio::task::spawn_blocking(move || {
         let read_scope = agent::read_within(&cwd);
-        agent::run_print(&cwd, &prompt, &[&read_scope], Some(&model))
+        agent::run_print(&cwd, &prompt, &[&read_scope], Some(&model), BRIEF_TIMEOUT)
     })
     .await?
-    .ok_or_else(|| anyhow!("Claude didn't return a review brief — see the app log for why"))?;
+    .context("couldn't generate the review brief")?;
 
     let brief = parse_brief(&text, &head_sha, truncated)?;
     let json = serde_json::to_string(&brief)?;

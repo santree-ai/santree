@@ -31,7 +31,14 @@ import {
   WORK_QUEUE_KEY,
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
-import { Field, Heading, OverrideSelect, SELECT_CLASS, ToggleRow } from "../widgets";
+import {
+  Field,
+  Heading,
+  HeadlessModelField,
+  OverrideSelect,
+  SELECT_CLASS,
+  ToggleRow,
+} from "../widgets";
 
 /** Describes one configurable agent action: which setting keys it stores. App vs
  * repo scope is expressed by the descriptor's keys plus the `inherits` flag the
@@ -106,31 +113,15 @@ export function ReviewActionSection({ repo }: { repo?: string }) {
  *  field: the brief is a single headless call with no effort or start mode, and
  *  padding it with inert controls would suggest otherwise. */
 function BriefModelCard({ repo }: { repo?: string }) {
-  const inherits = repo !== undefined;
-  const scope = inherits ? `repo:${repo}` : "app";
-  const models = useClaudeModels().data ?? [];
-  const appModel = useSetting("app", REVIEW_BRIEF_MODEL_KEY).data;
-  const scopeModel = useSetting(scope, REVIEW_BRIEF_MODEL_KEY).data;
-  const setSetting = useSetSetting();
-
   return (
     <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
-      <Field
+      <HeadlessModelField
         label="Model"
-        hint={
-          inherits
-            ? undefined
-            : "Reads the whole diff once to produce the reading order and watch-outs. Worth a capable model — a cheap one returns a plausible order that isn't grounded in the code, which is worse than none because you'd trust it. Defaults to Sonnet."
-        }
-      >
-        <ModelSelect
-          models={models}
-          value={inherits ? (scopeModel ?? "") : (scopeModel ?? DEFAULT_BRIEF_MODEL)}
-          onChange={(v) => setSetting.mutate({ scope, key: REVIEW_BRIEF_MODEL_KEY, value: v })}
-          inherits={inherits}
-          defaultLabel={`Use app default (${appModel || DEFAULT_BRIEF_MODEL})`}
-        />
-      </Field>
+        hint="Reads the whole diff once to produce the reading order and watch-outs. Worth a capable model — a cheap one returns a plausible order that isn't grounded in the code, which is worse than none because you'd trust it. Defaults to Sonnet."
+        settingKey={REVIEW_BRIEF_MODEL_KEY}
+        defaultModel={DEFAULT_BRIEF_MODEL}
+        forRepo={repo}
+      />
     </div>
   );
 }

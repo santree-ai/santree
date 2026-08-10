@@ -45,7 +45,7 @@ const DEFAULT_ANALYSIS_MODEL: &str = "sonnet";
 
 /// Ceiling on one analysis run.
 ///
-/// Deliberately far above [`agent::AGENT_TIMEOUT`]: that 120s default is sized for
+/// Deliberately far above [`agent::SHORT_TIMEOUT`]: that ceiling is sized for
 /// a one-line commit message, and a thousand corrections in with a structured
 /// answer out ran straight past it (observed: killed at exactly 120s with empty
 /// stderr, which reads as "Claude returned nothing" rather than as a deadline).
@@ -361,12 +361,10 @@ pub async fn analyze(db: &Db, scope: AnalysisScope) -> Result<EnglishAnalysis> {
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("log path has no parent directory"))?;
     let text = tokio::task::spawn_blocking(move || {
-        agent::run_print_within(&cwd, &prompt, &[], Some(&model), ANALYSIS_TIMEOUT)
+        agent::run_print(&cwd, &prompt, &[], Some(&model), ANALYSIS_TIMEOUT)
     })
     .await?
-    .ok_or_else(|| {
-        anyhow!("Claude didn't finish the analysis — it may have timed out. See santree.log, and try a narrower window if the log is large.")
-    })?;
+    .context("the analysis didn't finish — try a narrower window if the log is large")?;
 
     let analysis = EnglishAnalysis {
         text,

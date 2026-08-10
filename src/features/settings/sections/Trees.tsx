@@ -18,6 +18,9 @@ import { ChevronDownIcon } from "../../../components/icons";
 import { Button, ChevronSelect, Segmented } from "../../../components/primitives";
 import {
   type BatchSetup,
+  COMMIT_MESSAGE_MODEL_KEY,
+  DEFAULT_HELPER_MODEL,
+  PR_BODY_MODEL_KEY,
   TREES_AUTO_PR_KEY,
   TREES_AUTO_PUSH_KEY,
   TREES_BATCH_SETUP_KEY,
@@ -36,7 +39,7 @@ import {
   useSetting,
 } from "../../../lib/queries";
 import { highlightShell } from "../shellHighlight";
-import { Field, SELECT_CLASS, ToggleRow } from "../widgets";
+import { Field, HeadlessModelField, SELECT_CLASS, ToggleRow } from "../widgets";
 
 const STARTER_SCRIPT = `#!/usr/bin/env bash
 # Runs in a new worktree right after it's created.
@@ -159,6 +162,30 @@ export function WorktreeSettings({ repo, forRepo }: { repo: string; forRepo?: st
           settingKey={TREES_AUTO_PR_KEY}
           label="Open the PR dialog after a commit"
           hint="When a worktree has a commit and no PR yet, automatically open the create-PR dialog after committing. Requires the GitHub CLI (gh) to be authenticated."
+          forRepo={forRepo}
+        />
+      </Card>
+
+      <Card>
+        <div className="pt-2.5 pb-0.5">
+          <div className="text-[13px] font-semibold text-fg-bright">AI drafts</div>
+          <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+            The models behind the ✨ commit message and the PR description. Edit what they're asked
+            in Settings → Prompts.
+          </div>
+        </div>
+        <HeadlessModelField
+          label="Commit message"
+          hint="Writes a subject line from the staged diff. The cheap tier is genuinely enough here — it's a one-line summary of a capped diff."
+          settingKey={COMMIT_MESSAGE_MODEL_KEY}
+          defaultModel={DEFAULT_HELPER_MODEL}
+          forRepo={forRepo}
+        />
+        <HeadlessModelField
+          label="PR description"
+          hint="Fills the PR body from the diff, the ticket, and (optionally) the worktree's session transcripts. Worth a stronger model on a large PR — there's real reading to do."
+          settingKey={PR_BODY_MODEL_KEY}
+          defaultModel={DEFAULT_HELPER_MODEL}
           forRepo={forRepo}
         />
       </Card>

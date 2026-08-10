@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 
@@ -15,6 +16,7 @@ use crate::git;
 use crate::github;
 use crate::prompts;
 use crate::repo;
+use crate::settings;
 use crate::worktree::{self, Coords};
 
 /// Live PR status for every tracked worktree in `repo`, fetched from GitHub with a
@@ -174,6 +176,15 @@ pub async fn draft(
     })
 }
 
+/// Settings key for the model the PR body is drafted on (app or per-repo scope).
+pub const BODY_MODEL_KEY: &str = "pr_body_model";
+
+/// Ceiling on one PR-body draft. Above [`agent::SHORT_TIMEOUT`] because the prompt
+/// carries a capped diff plus (optionally) whole session transcripts, and a
+/// stronger model than the default reads them slower — but this one has a template
+/// to fall back on, so it doesn't need the brief's patience.
+const BODY_TIMEOUT: Duration = Duration::from_secs(240);
+
 /// Draft the PR body with a headless Claude call against the `fill-pr` template.
 async fn draft_body(
     db: &Db,
@@ -187,6 +198,15 @@ async fn draft_body(
     // dropping onto the blocking pool. The issue is best-effort — a missing/failed
     // fetch just leaves `ticket_content` empty, same as the work flow.
     let sources = prompts::resolve_sources(db, Some(repo)).await.ok()?;
+    // Configurable per repo (Settings → Actions): the default tier writes a fine
+    // body from a small diff, but a large PR — or one whose transcripts carry the
+    // reasoning — is worth a stronger model.
+    let model = settings::resolve(db, repo, BODY_MODEL_KEY)
+        .await
+        .ok()
+        .flatten()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| agent::HELPER_MODEL.to_string());
     let detail = crate::linear::triage_detail(db, repo, issue_id)
         .await
         .ok()
@@ -251,8 +271,12 @@ async fn draft_body(
             &c.path,
             &prompt,
             &[&read_worktree],
-            Some(agent::HELPER_MODEL),
+            Some(&model),
+            BODY_TIMEOUT,
         )
+        // Best-effort: the caller falls back to the raw template. `run_print` has
+        // already logged why, so the reason isn't lost here.
+        .ok()
     })
     .await
     .ok()

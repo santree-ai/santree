@@ -22,7 +22,7 @@ import {
   RefreshIcon,
   WarningIcon,
 } from "../../components/icons";
-import { Button, Pill, Spinner } from "../../components/primitives";
+import { Button, Pill, RunningStatus } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
 import { useGenerateReviewBrief, usePrReviewBrief } from "../../lib/queries";
 import { toast } from "../../state/toast";
@@ -71,7 +71,20 @@ export function ReviewBriefSection({ pr }: { pr: ReviewPr }) {
         )}
       </div>
 
-      {isPending && !brief && <GeneratingState />}
+      {isPending && (
+        <div
+          className={`rounded-lg border border-line-2 bg-raised px-3 py-3 ${brief ? "mb-2.5" : ""}`}
+        >
+          <RunningStatus
+            active
+            label="Reading the pull request…"
+            // A big diff on a capable model runs for minutes. Say so at the point
+            // the wait starts feeling wrong, instead of leaving the user to guess
+            // whether it died (it used to, silently, at 120s).
+            slowLabel="Still reading — a large diff takes a few minutes."
+          />
+        </div>
+      )}
 
       {!brief && !isPending && (
         <div className="rounded-lg border border-line-2 bg-raised px-3 py-3">
@@ -87,15 +100,6 @@ export function ReviewBriefSection({ pr }: { pr: ReviewPr }) {
       )}
 
       {brief && <BriefBody brief={brief} stale={stale} onJump={focusFile} pending={isPending} />}
-    </div>
-  );
-}
-
-function GeneratingState() {
-  return (
-    <div className="flex items-center gap-2 rounded-lg border border-line-2 bg-raised px-3 py-3 text-[11.5px] text-muted-3">
-      <Spinner size={12} />
-      Reading the pull request…
     </div>
   );
 }

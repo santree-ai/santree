@@ -8,7 +8,14 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 
 import type { Reviewer, ReviewPr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
-import { AgentsIcon, BranchIcon, CopyIcon, GitHubLogo, PanelIcon } from "../../components/icons";
+import {
+  AgentsIcon,
+  BranchIcon,
+  ClaudeSparkIcon,
+  CopyIcon,
+  GitHubLogo,
+  PanelIcon,
+} from "../../components/icons";
 import { Button, Pill } from "../../components/primitives";
 import { toast } from "../../state/toast";
 import {
@@ -20,7 +27,7 @@ import {
 import { useReviewsModel } from "./model";
 import { PrLabels } from "./PrLabels";
 
-export function ReviewHeader({ pr }: { pr: ReviewPr }) {
+export function ReviewHeader({ pr, onAskAi }: { pr: ReviewPr; onAskAi: () => void }) {
   const { infoCollapsed, toggleInfo } = useReviewsModel();
   const decision = reviewDecisionMeta[pr.reviewDecision];
   const checks = checkRollupMeta[pr.checks];
@@ -48,6 +55,18 @@ export function ReviewHeader({ pr }: { pr: ReviewPr }) {
             <span className="truncate">{pr.headRef}</span>
             <CopyIcon size={11} className="flex-none text-muted-3 group-hover:text-fg-2" />
           </button>
+          {/* The session itself lives in the rail (see PrInfoPanel) — this is the
+              way in from the diff, so asking a question never costs you the code
+              you're looking at. */}
+          <Button
+            size="sm"
+            onClick={onAskAi}
+            title="Ask Claude about this PR"
+            className="flex-none"
+          >
+            <ClaudeSparkIcon size={11} />
+            Ask AI
+          </Button>
           <Button
             size="sm"
             onClick={() => openUrl(pr.url)}

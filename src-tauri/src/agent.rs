@@ -18,13 +18,22 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use anyhow::{anyhow, Result};
+
 use crate::settings;
 
-/// Default ceiling on a single headless agent call. Claude normally answers in
-/// 5–30s; this only fires when it hangs, so the UI spinner can't wait forever and
-/// a blocking-pool thread can't leak. Callers whose work legitimately runs longer
-/// pass their own via [`run_print_within`].
-pub const AGENT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Ceiling for a **short** headless call — a prompt in, a line or two out (a
+/// commit message). Claude normally answers in 5–30s, so this only ever fires
+/// when something hangs: the UI spinner can't wait forever and a blocking-pool
+/// thread can't leak.
+///
+/// Not a default: [`run_print`] takes the deadline as an argument precisely so a
+/// call site that reads a whole diff can't silently inherit a ceiling sized for a
+/// one-liner. It has happened twice — the tutor analysis and the review brief were
+/// both killed mid-work at 120s, which surfaces as "Claude returned nothing"
+/// rather than as a deadline. Size the constant to the work, name it at the call
+/// site.
+pub const SHORT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long to wait for a pipe to reach EOF once the child is gone, before taking
 /// whatever was read so far and moving on. A grandchild that inherited the pipe
@@ -87,64 +96,64 @@ fn build_args(allowed_tools: &[&str], model: Option<&str>) -> Vec<String> {
 /// Run the configured `claude` binary in non-interactive print mode and capture
 /// its text output, run with `cwd` as the working directory. `allowed_tools`
 /// maps to `--allowedTools` (empty = none; scope any `Read` with [`read_within`]);
-/// `model` maps to `--model` (`None` = the CLI default). Returns `None` when the
-/// binary isn't found, the call fails, or the output is empty — every such failure
-/// is also `log::warn!`'d (with stderr, when captured) so a signed-out CLI or a
-/// rejected flag/model shows up in the app's log file instead of silently falling
-/// back to defaults.
+/// `model` maps to `--model` (`None` = the CLI default); `timeout` kills the call
+/// if it hasn't answered by then — see [`SHORT_TIMEOUT`] for why every caller
+/// names its own.
+///
+/// The error says *which* failure it was — a missing binary, a non-zero exit, an
+/// empty answer, or the deadline — because these run behind a spinner the user is
+/// watching, and "nothing came back" is the one message that can't be acted on.
+/// Every failure is `log::warn!`'d too (with stderr, when captured), so a
+/// signed-out CLI or a rejected flag still lands in the app log even where the
+/// caller swallows the error to fall back.
 ///
 /// The prompt is piped to the child's **stdin**, not passed as an argument: these
 /// prompts carry the repo diff and ticket text, and argv is world-readable on Linux
 /// (`/proc/<pid>/cmdline`). stdin also means no size limit — no `ARG_MAX` cap, no
 /// temp-file spill.
 ///
-/// Blocking — call from `spawn_blocking` (Claude can take 5–30s).
+/// Blocking — call from `spawn_blocking` (Claude can take 5–30s, and much longer
+/// for the calls that read a diff).
 pub fn run_print(
     cwd: &Path,
     prompt: &str,
     allowed_tools: &[&str],
     model: Option<&str>,
-) -> Option<String> {
-    run_print_within(cwd, prompt, allowed_tools, model, AGENT_TIMEOUT)
-}
-
-/// [`run_print`] with an explicit deadline, for the calls [`AGENT_TIMEOUT`] isn't
-/// sized for.
-///
-/// That ceiling assumes this module's original shape of work: a small prompt and a
-/// one-line answer, where two minutes only ever elapses because something hung. A
-/// call that reads tens of thousands of tokens and writes a structured answer
-/// spends minutes legitimately, and killing it at 120s isn't a safety net — it's a
-/// guaranteed failure the user pays for and waits out.
-pub fn run_print_within(
-    cwd: &Path,
-    prompt: &str,
-    allowed_tools: &[&str],
-    model: Option<&str>,
     timeout: Duration,
-) -> Option<String> {
-    let bin = settings::discover_binary("claude")?;
+) -> Result<String> {
+    let bin = settings::discover_binary("claude").ok_or_else(|| {
+        warn("the `claude` CLI wasn't found — set its path in Settings → Integrations".into())
+    })?;
 
     let mut cmd = Command::new(bin);
     cmd.current_dir(cwd).args(build_args(allowed_tools, model));
 
     let (status, stdout, stderr) = run_with_timeout(cmd, prompt, timeout)?;
+    let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
     if !status.success() {
-        log::warn!(
-            "claude -p failed ({status}): {}",
-            String::from_utf8_lossy(&stderr).trim()
-        );
-        return None;
+        return Err(warn(format!("claude exited {status}: {stderr}")));
     }
     let text = String::from_utf8_lossy(&stdout).trim().to_string();
     if text.is_empty() {
-        log::warn!(
-            "claude -p exited successfully but produced no output; stderr: {}",
-            String::from_utf8_lossy(&stderr).trim()
-        );
-        return None;
+        return Err(warn(format!(
+            "claude exited cleanly but produced no output; stderr: {stderr}"
+        )));
     }
-    Some(text)
+    Ok(text)
+}
+
+/// Log a headless failure and hand back the same message as an error, so the app
+/// log records it even when the caller swallows the error to fall back.
+fn warn(message: String) -> anyhow::Error {
+    log::warn!("claude -p: {message}");
+    anyhow!(message)
+}
+
+/// One of the spawned child's pipes. `Stdio::piped()` was just requested for all
+/// three, so `None` here is unreachable — but it's `Option`-typed, and this is the
+/// one place that has to say so without a `?` that swallows which pipe it was.
+fn pipe<T>(handle: Option<T>) -> Result<T> {
+    handle.ok_or_else(|| anyhow!("a child pipe was missing"))
 }
 
 /// One child pipe, drained on its own thread into a shared buffer.
@@ -194,15 +203,15 @@ fn lock(buf: &Mutex<Vec<u8>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
 }
 
 /// Run `cmd` with `prompt` on its stdin, capturing stdout and stderr, and kill it
-/// if it hasn't exited within `timeout`. Returns `None` (after logging why) if it
-/// can't be spawned or is killed for exceeding the deadline. Dedicated threads feed
-/// stdin and drain stdout/stderr, so neither a prompt larger than the pipe buffer
-/// nor a full output pipe can deadlock the wait.
+/// if it hasn't exited within `timeout`. Errors (after logging why) if it can't be
+/// spawned or is killed for exceeding the deadline. Dedicated threads feed stdin
+/// and drain stdout/stderr, so neither a prompt larger than the pipe buffer nor a
+/// full output pipe can deadlock the wait.
 fn run_with_timeout(
     mut cmd: Command,
     prompt: &str,
     timeout: Duration,
-) -> Option<(ExitStatus, Vec<u8>, Vec<u8>)> {
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
     let mut child = match cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -210,52 +219,43 @@ fn run_with_timeout(
         .spawn()
     {
         Ok(child) => child,
-        Err(e) => {
-            log::warn!("claude -p failed to spawn: {e}");
-            return None;
-        }
+        Err(e) => return Err(warn(format!("failed to spawn: {e}"))),
     };
     // Feed the prompt from its own thread and let the handle drop, which closes
     // stdin and tells the CLI the prompt is complete. A prompt bigger than the pipe
     // buffer (64 KB — and these routinely are) would otherwise block us here until
     // the child drained it, and a child that died early would leave us on a broken
     // pipe rather than at the deadline below.
-    let mut stdin = child.stdin.take()?;
+    let mut stdin = pipe(child.stdin.take())?;
     let prompt = prompt.to_string();
     std::thread::spawn(move || {
         let _ = stdin.write_all(prompt.as_bytes());
     });
-    let stdout = Drain::spawn(child.stdout.take()?);
-    let stderr = Drain::spawn(child.stderr.take()?);
+    let stdout = Drain::spawn(pipe(child.stdout.take())?);
+    let stderr = Drain::spawn(pipe(child.stderr.take())?);
 
     let deadline = Instant::now() + timeout;
-    let status = loop {
+    let outcome = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
+            Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break None;
+                break Err(format!("timed out after {}s", timeout.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => {
-                log::warn!("claude -p: error waiting on child process: {e}");
-                break None;
-            }
+            Err(e) => break Err(format!("error waiting on child process: {e}")),
         }
     };
     let grace = Instant::now() + READER_GRACE;
     let stdout = stdout.take(grace);
     let stderr = stderr.take(grace);
-    match status {
-        Some(status) => Some((status, stdout, stderr)),
-        None => {
-            log::warn!(
-                "claude -p timed out after {timeout:?}; stderr so far: {}",
-                String::from_utf8_lossy(&stderr).trim()
-            );
-            None
-        }
+    match outcome {
+        Ok(status) => Ok((status, stdout, stderr)),
+        Err(why) => Err(warn(format!(
+            "{why}; stderr so far: {}",
+            String::from_utf8_lossy(&stderr).trim()
+        ))),
     }
 }
 
@@ -388,7 +388,15 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "sleep 30"]);
         let started = Instant::now();
-        assert!(run_with_timeout(cmd, "", Duration::from_millis(200)).is_none());
+        let err = run_with_timeout(cmd, "", Duration::from_millis(200))
+            .expect_err("a child past its deadline must be an error, not an empty answer");
+        // The message is the point: "timed out" is what tells the user (and the log)
+        // that the work was killed mid-flight rather than that Claude had nothing
+        // to say — the two are indistinguishable from an empty result.
+        assert!(
+            err.to_string().contains("timed out"),
+            "the deadline must be named in the error, got: {err}"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "killed, not waited out"

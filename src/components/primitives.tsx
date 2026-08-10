@@ -19,6 +19,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { formatElapsed, useElapsed } from "../lib/useElapsed";
 import { accentActiveStyle, alpha } from "../theme/colors";
 import { ChevronDownIcon } from "./icons";
 
@@ -233,6 +234,50 @@ export function ListSkeleton({ rows = 6, className }: { rows?: number; className
           style={{ width: `${[82, 64, 74, 56, 88, 68, 78, 60][i % 8]}%` }}
         />
       ))}
+    </div>
+  );
+}
+
+/**
+ * "This is still running" — a spinner, a label, and a ticking m:ss clock, for the
+ * AI calls that legitimately take minutes (the review brief, the tutor analysis).
+ *
+ * The clock is the point. A bare spinner looks identical whether the model is
+ * reading a 200 KB diff or the process died three minutes ago, so the user's only
+ * move is to guess and press the button again. Past `slowAfterMs` the label swaps
+ * to `slowLabel`, which sets the expectation *while* the wait is happening rather
+ * than after it.
+ */
+export function RunningStatus({
+  active,
+  label,
+  slowLabel,
+  slowAfterMs = 45_000,
+  className = "",
+}: {
+  active: boolean;
+  label: string;
+  /** Shown once the run passes `slowAfterMs`. Defaults to `label`. */
+  slowLabel?: string;
+  slowAfterMs?: number;
+  className?: string;
+}) {
+  const elapsed = useElapsed(active);
+  if (!active) return null;
+  const slow = elapsed >= slowAfterMs;
+  return (
+    <div
+      // Announce politely: the label changes mid-run, and a live region is how a
+      // screen reader learns the wait is still progressing rather than stuck.
+      role="status"
+      aria-live="polite"
+      className={`flex items-center gap-2 text-[11.5px] text-muted-3 ${className}`}
+    >
+      <Spinner size={12} />
+      <span className="min-w-0 flex-1">{slow ? (slowLabel ?? label) : label}</span>
+      <span className="flex-none font-mono text-[10.5px] text-muted-4 tabular-nums">
+        {formatElapsed(elapsed)}
+      </span>
     </div>
   );
 }

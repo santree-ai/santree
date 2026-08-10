@@ -366,6 +366,16 @@ export const REVIEW_MODEL_KEY = "review_model";
 export const REVIEW_EFFORT_KEY = "review_effort";
 export const REVIEW_BRIEF_MODEL_KEY = "review_brief_model";
 
+/** Models for the two headless writing helpers, mirroring `worktree.rs`'s
+ *  `COMMIT_MODEL_KEY` and `pr.rs`'s `BODY_MODEL_KEY`. Both default to the cheap
+ *  tier (a subject line from a capped diff really is a small text task), but a PR
+ *  body drawn from session transcripts often isn't — hence the override. */
+export const COMMIT_MESSAGE_MODEL_KEY = "commit_message_model";
+export const PR_BODY_MODEL_KEY = "pr_body_model";
+/** Mirrors `agent.rs`'s `HELPER_MODEL` — shown as the pickers' value when nothing
+ *  has been chosen, so the UI never implies "no model". */
+export const DEFAULT_HELPER_MODEL = "haiku";
+
 /** Setting keys for the Issues "Work" action (agent · model · effort) used by the
  *  launch tray. Unlike triage, this action is always on — there's no enable switch. */
 export const WORK_AGENT_KEY = "work_agent";

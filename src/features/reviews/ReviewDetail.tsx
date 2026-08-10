@@ -1,34 +1,33 @@
 /**
  * Right pane of the Reviews tab. A shared header ({@link ReviewHeader}: repo ·
- * #number · branch · open) sits above four tabs:
- *  - **Pull request** — the PR's per-file diff with inline review comments.
- *  - **Checks** — the head commit's CI checks, with "Fix CI with AI".
- *  - **Issue** — the linked Linear ticket, found from the PR title / branch (the
- *    same PR↔ticket convention the worktree flow uses) and rendered with the
- *    shared `DiscussionPane`, like the Trees "Issue" tab.
- *  - **Ask AI** — a Claude session that has read the PR and can answer questions
- *    about it. Read-only: it never comments or approves (see {@link AiReviewPane}).
+ * #number · branch · open) sits above two tabs — **Pull request** (the per-file
+ * diff with inline review comments) and **Checks** (the head commit's CI, with
+ * "Fix CI with AI") — beside the {@link PrInfoPanel} rail, which carries the
+ * reading material: the description and conversation, the linked ticket, and the
+ * Ask AI session.
  *
- * Each tab fetches lazily and shows a skeleton while loading; the header renders
- * immediately from the already-loaded list row.
+ * The split is by *what you do with it*: the two main tabs are the change itself,
+ * the rail is everything you consult while reading it. Keeping the ticket and the
+ * AI beside the diff instead of replacing it is the whole point — reading a PR
+ * against its ticket used to mean flipping away from the code.
+ *
+ * Panel tab and "has the AI been opened" live here rather than in the view model
+ * because this subtree is keyed by PR: clicking a different PR must not carry the
+ * Ask AI tab over with it and spawn a session for a PR the user only glanced at.
  */
 import { useEffect, useState } from "react";
 
 import type { ReviewPr } from "../../bindings";
-import { ClaudeSparkIcon } from "../../components/icons";
 import { EmptyState, Tabs } from "../../components/primitives";
 import { checkRollupMeta } from "../../theme/colors";
-import { AiReviewPane } from "./AiReviewPane";
 import { ChecksPane } from "./ChecksPane";
 import { MergeQueuePane } from "./MergeQueuePane";
 import { useReviewsModel } from "./model";
-import { PrInfoPanel } from "./PrInfoPanel";
+import { type PanelTab, PrInfoPanel } from "./PrInfoPanel";
 import { PrReviewPane } from "./PrReviewPane";
 import { ReviewHeader } from "./ReviewHeader";
-import { ReviewIssuePane } from "./ReviewIssuePane";
-import { ticketIdFor } from "./ticket";
 
-type DetailTab = "pr" | "checks" | "issue" | "ai";
+type DetailTab = "pr" | "checks";
 
 export function ReviewDetail() {
   const { active, showMergeQueue } = useReviewsModel();
@@ -45,25 +44,38 @@ export function ReviewDetail() {
       </div>
     );
   }
-  // Keyed remount so per-PR query state, the active tab, and scroll reset on switch.
-  // The info rail spans the whole detail area (header, tabs, body) alongside the
-  // PR pane, so the description stays visible across every tab.
+  // Keyed remount so per-PR query state, the active tabs, and scroll reset on switch.
+  return <Detail key={active.id} pr={active} />;
+}
+
+function Detail({ pr }: { pr: ReviewPr }) {
+  const { infoCollapsed, toggleInfo } = useReviewsModel();
+  const [panelTab, setPanelTab] = useState<PanelTab>("description");
+  // The AI pane spawns a PTY and checks the PR out — non-idempotent effects, so it
+  // must never be unmounted and remounted by a tab switch (CLAUDE.md's gotcha). It
+  // mounts on first open and then stays, hidden. Gated on an explicit open so
+  // merely selecting a PR never costs a checkout.
+  const [aiOpened, setAiOpened] = useState(false);
+
+  /** Show a rail tab, un-collapsing the rail if it's hidden — the one entry point,
+   *  so a caller can't leave the user staring at a tab they can't see. */
+  const openPanel = (tab: PanelTab) => {
+    if (tab === "ai") setAiOpened(true);
+    setPanelTab(tab);
+    if (infoCollapsed) toggleInfo();
+  };
+
   return (
-    <div key={active.id} className="flex min-w-0 flex-1">
-      <PrPane pr={active} />
-      <PrInfoPanel pr={active} />
+    <div className="flex min-w-0 flex-1">
+      <PrPane pr={pr} onAskAi={() => openPanel("ai")} />
+      <PrInfoPanel pr={pr} tab={panelTab} onTabChange={openPanel} aiOpened={aiOpened} />
     </div>
   );
 }
 
-function PrPane({ pr }: { pr: ReviewPr }) {
-  const { repo: santreeRepo, fileFocus } = useReviewsModel();
+function PrPane({ pr, onAskAi }: { pr: ReviewPr; onAskAi: () => void }) {
+  const { fileFocus } = useReviewsModel();
   const [tab, setTab] = useState<DetailTab>("pr");
-  // The AI pane spawns a PTY and checks the PR out — non-idempotent effects, so it
-  // must never be unmounted and remounted by a tab switch (CLAUDE.md's gotcha).
-  // It mounts on first open and then stays, hidden.
-  const [aiOpened, setAiOpened] = useState(false);
-  const ticketId = ticketIdFor(pr);
   const checks = checkRollupMeta[pr.checks];
 
   // The brief's rail is visible from every tab, so a jump from it has to bring the
@@ -75,15 +87,12 @@ function PrPane({ pr }: { pr: ReviewPr }) {
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">
-      <ReviewHeader pr={pr} />
+      <ReviewHeader pr={pr} onAskAi={onAskAi} />
 
       <Tabs
         className="flex-none px-5"
         value={tab}
-        onChange={(v) => {
-          if (v === "ai") setAiOpened(true);
-          setTab(v);
-        }}
+        onChange={setTab}
         tabs={[
           { value: "pr", label: "Pull request" },
           {
@@ -95,19 +104,11 @@ function PrPane({ pr }: { pr: ReviewPr }) {
               </span>
             ),
           },
-          { value: "issue", label: "Issue", dimmed: !ticketId },
-          { value: "ai", label: "Ask AI", badge: <ClaudeSparkIcon size={11} /> },
         ]}
       />
 
       {tab === "pr" && <PrReviewPane pr={pr} fileFocus={fileFocus} />}
       {tab === "checks" && <ChecksPane pr={pr} />}
-      {tab === "issue" && <ReviewIssuePane repo={santreeRepo} ticketId={ticketId} />}
-      {aiOpened && (
-        <div className={tab === "ai" ? "flex min-h-0 flex-1" : "hidden"}>
-          <AiReviewPane pr={pr} />
-        </div>
-      )}
     </div>
   );
 }
