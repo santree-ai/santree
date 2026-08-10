@@ -18,14 +18,12 @@ use santree_core::{
     config,
     domain::{
         AgentAuth, AgentDef, AgentKind, AgentSession, AnalysisScope, BinaryStatus, ChangedFile,
-        CheckLog,
-        EnglishAnalysis, EnglishLog, FileSource,
-        GithubStatus, LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewInlineComment,
-        NewPr, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewBrief,
-        ReviewEvent, ReviewInbox, Reviewer, ReviewTarget, ScriptInfo, SessionState,
-        SessionUsageLive, Settings, TabKind, Task, TicketRef,
-        TriageDetail, TriageSchedule, TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreePr,
-        WorktreeTab,
+        CheckLog, EnglishAnalysis, EnglishLog, FileSource, GithubStatus, LegacyCliMigration,
+        LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr, Opener, PrDetail, PrDraft,
+        PrLabel, PromptInfo, PromptPreview, Repo, ReviewBrief, ReviewEvent, ReviewInbox,
+        ReviewTarget, Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings, TabKind,
+        Task, TicketRef, TriageDetail, TriageSchedule, TriageTicket, UsageReport, ViewedMarks,
+        Worktree, WorktreePr, WorktreeTab,
     },
 };
 
@@ -1070,9 +1068,11 @@ pub async fn github_status() -> GithubStatus {
 pub async fn binary_status(name: String) -> CmdResult<BinaryStatus> {
     // Discovery may spawn a login shell (and now a second, interactive one on a
     // miss), so keep it off the async runtime like the other probes do.
-    Ok(tokio::task::spawn_blocking(move || settings::binary_status(&name))
-        .await
-        .map_err(anyhow::Error::from)?)
+    Ok(
+        tokio::task::spawn_blocking(move || settings::binary_status(&name))
+            .await
+            .map_err(anyhow::Error::from)?,
+    )
 }
 
 /// Set (or clear, with `None`) the path santree uses for `name`. Validated before
@@ -1133,10 +1133,12 @@ async fn tutor_instruction(app: &AppHandle) -> Option<String> {
 #[specta::specta]
 pub async fn claude_hook_settings_no_git(app: AppHandle) -> Option<String> {
     let tutor = tutor_instruction(&app).await;
-    tokio::task::spawn_blocking(move || crate::hooks::claude_settings_no_git(&app, tutor.as_deref()))
-        .await
-        .ok()
-        .flatten()
+    tokio::task::spawn_blocking(move || {
+        crate::hooks::claude_settings_no_git(&app, tutor.as_deref())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The `--settings` file an **AI review** session launches with: everything
@@ -1147,10 +1149,12 @@ pub async fn claude_hook_settings_no_git(app: AppHandle) -> Option<String> {
 #[specta::specta]
 pub async fn claude_hook_settings_review(app: AppHandle) -> Option<String> {
     let tutor = tutor_instruction(&app).await;
-    tokio::task::spawn_blocking(move || crate::hooks::claude_settings_review(&app, tutor.as_deref()))
-        .await
-        .ok()
-        .flatten()
+    tokio::task::spawn_blocking(move || {
+        crate::hooks::claude_settings_review(&app, tutor.as_deref())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The English tutor's practice log, read-only. Creates the file when it's missing,

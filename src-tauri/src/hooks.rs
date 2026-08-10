@@ -148,7 +148,10 @@ fn base_settings_map(app: &AppHandle, tutor: Option<&str>) -> Option<Map<String,
     //    on a permission prompt.
     if let Some(instruction) = tutor {
         if let Some((prompt_file, log)) = tutor_files(app, instruction) {
-            if let Some(entries) = hooks.get_mut("UserPromptSubmit").and_then(Value::as_array_mut) {
+            if let Some(entries) = hooks
+                .get_mut("UserPromptSubmit")
+                .and_then(Value::as_array_mut)
+            {
                 entries.push(json!({ "hooks": [{
                     "type": "command",
                     "command": format!("cat {}", sh_quote(&prompt_file)),

@@ -1834,7 +1834,13 @@ mod tests {
         let child = repo.join(".santree/worktrees/AK-275");
         create_worktree(&repo, &child, "santree/ak-275", "santree/ak-274").unwrap();
         assert_eq!(
-            stats(&child, "santree/ak-275", "santree/ak-274", BaseKind::LocalBranch).behind,
+            stats(
+                &child,
+                "santree/ak-275",
+                "santree/ak-274",
+                BaseKind::LocalBranch
+            )
+            .behind,
             0,
             "freshly stacked child starts level with its parent"
         );
@@ -1846,7 +1852,13 @@ mod tests {
         run_git(&parent, &["commit", "-m", "merged master locally"]);
 
         assert_eq!(
-            stats(&child, "santree/ak-275", "santree/ak-274", BaseKind::LocalBranch).behind,
+            stats(
+                &child,
+                "santree/ak-275",
+                "santree/ak-274",
+                BaseKind::LocalBranch
+            )
+            .behind,
             1,
             "child must see the parent's unpushed advance, so it can restack"
         );
@@ -2027,7 +2039,10 @@ mod tests {
         let (_origin, seed, repo) = init_diverged_feature("remote-behind-count");
 
         // Tracking ref is stale until a fetch, so nothing looks pending yet.
-        assert_eq!(stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind, 0);
+        assert_eq!(
+            stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind,
+            0
+        );
 
         run_git(&repo, &["fetch", "origin", "feature"]);
         assert_eq!(
@@ -2268,7 +2283,10 @@ mod tests {
         run_git(&repo, &["commit", "-m", "non-conflicting local edit"]);
 
         refresh_remote_ref(&repo, "feature");
-        assert_eq!(stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind, 1);
+        assert_eq!(
+            stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind,
+            1
+        );
         assert!(
             !would_conflict(&repo, "origin/feature"),
             "a non-conflicting pull must not be flagged"

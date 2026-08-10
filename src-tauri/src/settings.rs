@@ -325,7 +325,10 @@ pub async fn refresh_binary_overrides(db: &Db) -> Result<()> {
     *map = next;
     drop(map);
     // Anything resolved under the previous set may now be wrong.
-    BINARY_CACHE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    BINARY_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     Ok(())
 }
 
@@ -407,7 +410,10 @@ pub fn binary_status(name: &str) -> BinaryStatus {
 /// The path is executed directly — never through a shell, so nothing in it is
 /// interpreted.
 fn probe_version(path: &str) -> Option<String> {
-    let out = std::process::Command::new(path).arg("--version").output().ok()?;
+    let out = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -644,9 +650,19 @@ mod tests {
             .iter()
             .map(|d| d.to_string_lossy().into_owned())
             .collect();
-        assert!(dirs.iter().any(|d| d.ends_with("/.nix-profile/bin")), "{dirs:?}");
-        assert!(dirs.iter().any(|d| d == "/nix/var/nix/profiles/default/bin"), "{dirs:?}");
-        assert!(dirs.iter().any(|d| d == "/run/current-system/sw/bin"), "{dirs:?}");
+        assert!(
+            dirs.iter().any(|d| d.ends_with("/.nix-profile/bin")),
+            "{dirs:?}"
+        );
+        assert!(
+            dirs.iter()
+                .any(|d| d == "/nix/var/nix/profiles/default/bin"),
+            "{dirs:?}"
+        );
+        assert!(
+            dirs.iter().any(|d| d == "/run/current-system/sw/bin"),
+            "{dirs:?}"
+        );
         assert!(dirs.iter().any(|d| d == "/opt/homebrew/bin"), "{dirs:?}");
     }
 
@@ -680,9 +696,9 @@ mod tests {
         std::fs::write(&not_exec, "").unwrap();
 
         for bad in [
-            "gh".to_string(),                          // relative — resolves against an unknown cwd
-            "/nope/does/not/exist".to_string(),        // absent
-            not_exec.to_string_lossy().into_owned(),   // present but not executable
+            "gh".to_string(),                   // relative — resolves against an unknown cwd
+            "/nope/does/not/exist".to_string(), // absent
+            not_exec.to_string_lossy().into_owned(), // present but not executable
         ] {
             assert!(
                 set_binary_path(&db, "gh", Some(bad.clone())).await.is_err(),
@@ -690,7 +706,10 @@ mod tests {
             );
         }
         // Rejected input leaves nothing behind.
-        assert!(get(&db, "app", &binary_path_key("gh")).await.unwrap().is_none());
+        assert!(get(&db, "app", &binary_path_key("gh"))
+            .await
+            .unwrap()
+            .is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -711,7 +730,9 @@ mod tests {
         assert_eq!(binary_override("claude").as_deref(), Some("/usr/bin/true"));
 
         // An explicit path wins — it's the validated, purpose-built one.
-        set_binary_path(&db, "claude", Some("/bin/echo".into())).await.unwrap();
+        set_binary_path(&db, "claude", Some("/bin/echo".into()))
+            .await
+            .unwrap();
         refresh_binary_overrides(&db).await.unwrap();
         assert_eq!(binary_override("claude").as_deref(), Some("/bin/echo"));
 

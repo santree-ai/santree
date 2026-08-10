@@ -827,11 +827,9 @@ mod tests {
                 .unwrap()
         );
         // A term_key with no row (never launched by santree) ⇒ nothing to adopt.
-        assert!(
-            !reconcile_terminal_session(db, "@dev", "dev:/never", "x")
-                .await
-                .unwrap()
-        );
+        assert!(!reconcile_terminal_session(db, "@dev", "dev:/never", "x")
+            .await
+            .unwrap());
 
         let mut c = SqliteConnectOptions::new()
             .filename(&db_path)

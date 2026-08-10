@@ -654,8 +654,12 @@ struct LatestReviewNode {
 #[derive(Deserialize)]
 #[serde(tag = "__typename")]
 enum RequestedIdentity {
-    User { login: String },
-    Team { slug: String },
+    User {
+        login: String,
+    },
+    Team {
+        slug: String,
+    },
     #[serde(other)]
     Other,
 }
@@ -744,10 +748,9 @@ impl ViewerCtx {
     fn is_for_viewer(&self, who: &RequestedIdentity) -> bool {
         match who {
             RequestedIdentity::User { login } => login.eq_ignore_ascii_case(&self.login),
-            RequestedIdentity::Team { slug } => self
-                .team_slugs
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(slug)),
+            RequestedIdentity::Team { slug } => {
+                self.team_slugs.iter().any(|s| s.eq_ignore_ascii_case(slug))
+            }
             RequestedIdentity::Other => false,
         }
     }
@@ -805,9 +808,7 @@ fn to_review_pr(n: PrNode, viewer: &ViewerCtx) -> ReviewPr {
     let head_committed_at = head_commit
         .and_then(|c| c.committed_date.clone())
         .unwrap_or_else(|| n.created_at.clone());
-    let head_sha = head_commit
-        .and_then(|c| c.oid.clone())
-        .unwrap_or_default();
+    let head_sha = head_commit.and_then(|c| c.oid.clone()).unwrap_or_default();
     // A review with no `submittedAt` is still pending (a started-but-unsent
     // review) — it hasn't reached the author, so it doesn't count as "you had
     // your say", and there's no timestamp to date it against the head commit.
@@ -823,8 +824,8 @@ fn to_review_pr(n: PrNode, viewer: &ViewerCtx) -> ReviewPr {
             },
             submitted_at,
         });
-    let waiting_since =
-        viewer_requested_at(&n.timeline_items.nodes, viewer).unwrap_or_else(|| n.created_at.clone());
+    let waiting_since = viewer_requested_at(&n.timeline_items.nodes, viewer)
+        .unwrap_or_else(|| n.created_at.clone());
     let reviewers = n
         .review_requests
         .nodes
@@ -1350,7 +1351,8 @@ pub async fn add_pending_review_comment(
     review_id: &str,
     c: &NewInlineComment,
 ) -> Result<()> {
-    let mutation = "mutation($review: ID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) {
+    let mutation =
+        "mutation($review: ID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) {
         addPullRequestReviewThread(input: {
           pullRequestReviewId: $review, path: $path, line: $line, side: $side, body: $body
         }) { clientMutationId }
@@ -2518,7 +2520,11 @@ pub async fn pr_viewed_files(
     );
     let vars = serde_json::json!({ "owner": owner, "name": name, "number": number });
     let data: Data = graphql(token, &query, vars).await?;
-    let Some(mut files) = data.repository.and_then(|r| r.pull_request).map(|p| p.files) else {
+    let Some(mut files) = data
+        .repository
+        .and_then(|r| r.pull_request)
+        .map(|p| p.files)
+    else {
         return Ok(vec![]);
     };
 

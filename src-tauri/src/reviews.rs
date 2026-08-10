@@ -52,13 +52,20 @@ fn review_dir_name(owner: &str, name: &str, number: u32) -> String {
 /// a clone of. The Reviews inbox is org-scoped, so most PRs in it belong to repos
 /// the user has never cloned; the caller falls back to a diff-only session rather
 /// than refusing to open.
-pub async fn review_workspace(db: &Db, repo: &str, target: &ReviewTarget) -> Result<Option<String>> {
+pub async fn review_workspace(
+    db: &Db,
+    repo: &str,
+    target: &ReviewTarget,
+) -> Result<Option<String>> {
     let root = repo::path(db, repo)
         .await?
         .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
     let (owner, name) = origin(db, repo).await?;
     // Parse-and-compare, never a prefix/contains match on the slug.
-    if !target.pr_repo.eq_ignore_ascii_case(&format!("{owner}/{name}")) {
+    if !target
+        .pr_repo
+        .eq_ignore_ascii_case(&format!("{owner}/{name}"))
+    {
         return Ok(None);
     }
 
@@ -123,7 +130,10 @@ pub async fn existing_review_workspace(
         return Ok(None);
     };
     let (owner, name) = origin(db, repo).await?;
-    if !target.pr_repo.eq_ignore_ascii_case(&format!("{owner}/{name}")) {
+    if !target
+        .pr_repo
+        .eq_ignore_ascii_case(&format!("{owner}/{name}"))
+    {
         return Ok(None);
     }
     let path = PathBuf::from(root)
@@ -191,25 +201,22 @@ pub async fn inbox(db: &Db, repo: &str) -> Result<ReviewInbox> {
         login: login.clone(),
         team_slugs: vec![],
     };
-    let (personal, teams) = tokio::join!(
-        github::personal_reviews(&token, &org, &solo),
-        async {
-            // A failed team lookup only costs the per-team sections, so it degrades rather
-            // than failing the inbox — but it's logged: without it, a rate-limited call looks
-            // exactly like "in no teams".
-            let teams = github::viewer_teams(&token, &org, &login)
-                .await
-                .unwrap_or_else(|e| {
-                    log::warn!("Reviews: listing viewer teams in {org} failed: {e}");
-                    Vec::new()
-                });
-            let viewer = github::ViewerCtx {
-                login: login.clone(),
-                team_slugs: teams.iter().map(|(slug, _)| slug.clone()).collect(),
-            };
-            github::team_reviews(&token, &org, &teams, &viewer).await
-        }
-    );
+    let (personal, teams) = tokio::join!(github::personal_reviews(&token, &org, &solo), async {
+        // A failed team lookup only costs the per-team sections, so it degrades rather
+        // than failing the inbox — but it's logged: without it, a rate-limited call looks
+        // exactly like "in no teams".
+        let teams = github::viewer_teams(&token, &org, &login)
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("Reviews: listing viewer teams in {org} failed: {e}");
+                Vec::new()
+            });
+        let viewer = github::ViewerCtx {
+            login: login.clone(),
+            team_slugs: teams.iter().map(|(slug, _)| slug.clone()).collect(),
+        };
+        github::team_reviews(&token, &org, &teams, &viewer).await
+    });
     let (mine, requested) = personal?;
 
     Ok(ReviewInbox {

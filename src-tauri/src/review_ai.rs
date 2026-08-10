@@ -116,7 +116,12 @@ fn render_diff_stat(detail: &PrDetail) -> String {
     let mut out = detail
         .files
         .iter()
-        .map(|f| format!("{} ({}, +{} −{})", f.path, f.status, f.additions, f.deletions))
+        .map(|f| {
+            format!(
+                "{} ({}, +{} −{})",
+                f.path, f.status, f.additions, f.deletions
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     if detail.files_truncated {
@@ -139,7 +144,11 @@ fn render_conversation(detail: &PrDetail) -> String {
             None => t.path.clone(),
         };
         for c in &t.comments {
-            parts.push(format!("**{}** on `{anchor}`:\n{}", c.author, c.body.trim()));
+            parts.push(format!(
+                "**{}** on `{anchor}`:\n{}",
+                c.author,
+                c.body.trim()
+            ));
         }
     }
     parts.join("\n\n")
@@ -472,7 +481,10 @@ mod tests {
         // Mid-way through "line two" → keeps only the first complete line.
         assert_eq!(truncate_at_line(s, 14), "line one");
         // A budget past the end keeps everything up to the final break.
-        assert_eq!(truncate_at_line(s, s.len()), "line one\nline two\nline three");
+        assert_eq!(
+            truncate_at_line(s, s.len()),
+            "line one\nline two\nline three"
+        );
     }
 
     #[test]

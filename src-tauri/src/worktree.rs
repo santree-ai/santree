@@ -294,12 +294,11 @@ fn base_kind(worktree_branches: &HashSet<&str>, base: &str) -> git::BaseKind {
 /// whole list in hand ([`get`], [`create`]). One indexed SQLite read — still no git
 /// process — versus the set `list` builds once for the whole batch.
 async fn base_kind_of(db: &Db, root: &str, base: &str) -> Result<git::BaseKind> {
-    let branches = sqlx::query_scalar::<_, String>(
-        "SELECT branch FROM worktree_links WHERE repo_path = ?",
-    )
-    .bind(root)
-    .fetch_all(db)
-    .await?;
+    let branches =
+        sqlx::query_scalar::<_, String>("SELECT branch FROM worktree_links WHERE repo_path = ?")
+            .bind(root)
+            .fetch_all(db)
+            .await?;
     let set: HashSet<&str> = branches.iter().map(String::as_str).collect();
     Ok(base_kind(&set, base))
 }
@@ -2034,7 +2033,10 @@ mod tests {
         );
         run_git(&other, &["config", "user.email", "t@t.test"]);
         run_git(&other, &["config", "user.name", "Test"]);
-        run_git(&other, &["commit", "--allow-empty", "-m", "landed upstream"]);
+        run_git(
+            &other,
+            &["commit", "--allow-empty", "-m", "landed upstream"],
+        );
         run_git(&other, &["push", "origin", "main"]);
 
         let wt = base_worktree(&db, "test").await.unwrap().unwrap();

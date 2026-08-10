@@ -78,15 +78,14 @@ pub fn log_path() -> Option<PathBuf> {
 /// The log path, creating the file (and its directory) with [`LOG_STUB`] when it
 /// doesn't exist yet. Blocking.
 fn ensure_log() -> Result<PathBuf> {
-    let path = log_path().ok_or_else(|| anyhow!("no HOME or XDG_CONFIG_HOME to store the log in"))?;
+    let path =
+        log_path().ok_or_else(|| anyhow!("no HOME or XDG_CONFIG_HOME to store the log in"))?;
     if !path.exists() {
         let dir = path
             .parent()
             .ok_or_else(|| anyhow!("log path has no parent directory"))?;
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
-        std::fs::write(&path, LOG_STUB)
-            .with_context(|| format!("creating {}", path.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::write(&path, LOG_STUB).with_context(|| format!("creating {}", path.display()))?;
     }
     Ok(path)
 }
@@ -170,7 +169,11 @@ fn parse_log(text: &str) -> (Vec<EnglishDay>, usize) {
             continue;
         }
         match (open, parse_entry(line)) {
-            (true, Some(entry)) => days.last_mut().expect("open implies a day").entries.push(entry),
+            (true, Some(entry)) => days
+                .last_mut()
+                .expect("open implies a day")
+                .entries
+                .push(entry),
             _ => unparsed += 1,
         }
     }
@@ -212,9 +215,8 @@ fn days_in_scope(days: &[EnglishDay], scope: AnalysisScope, analyzed: usize) -> 
             .to_string()
     };
     // ISO dates sort lexically exactly as they sort chronologically.
-    let from = |c: String| -> Vec<EnglishDay> {
-        days.iter().filter(|d| d.date >= c).cloned().collect()
-    };
+    let from =
+        |c: String| -> Vec<EnglishDay> { days.iter().filter(|d| d.date >= c).cloned().collect() };
 
     match scope {
         AnalysisScope::Everything => days.to_vec(),
@@ -423,12 +425,14 @@ pub async fn stored(db: &Db) -> Result<Option<EnglishAnalysis>> {
     )
     .fetch_optional(db)
     .await?;
-    Ok(row.map(|(text, entry_count, scope, created_at)| EnglishAnalysis {
-        text,
-        entry_count: entry_count as f64,
-        scope: scope_from(&scope),
-        created_at_ms: created_at as f64,
-    }))
+    Ok(
+        row.map(|(text, entry_count, scope, created_at)| EnglishAnalysis {
+            text,
+            entry_count: entry_count as f64,
+            scope: scope_from(&scope),
+            created_at_ms: created_at as f64,
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -459,7 +463,10 @@ mod tests {
         let e = parse_entry(r#"- allow to select -> allow selecting ("allow" needs an object (a noun); use a gerund)"#).unwrap();
         assert_eq!(e.original, "allow to select");
         assert_eq!(e.correction, "allow selecting");
-        assert_eq!(e.reason, r#""allow" needs an object (a noun); use a gerund"#);
+        assert_eq!(
+            e.reason,
+            r#""allow" needs an object (a noun); use a gerund"#
+        );
     }
 
     /// A correction can itself contain an arrow, so the *first* ` -> ` is the
@@ -551,8 +558,14 @@ mod tests {
     fn tail_keeps_whole_lines_and_the_newest_entries() {
         let log = "## old\n- first -> 1 (r)\n- second -> 2 (r)\n- third -> 3 (r)\n";
         let cut = tail_within(log, 24);
-        assert!(cut.starts_with("- "), "must start on a line boundary: {cut:?}");
-        assert!(cut.ends_with("- third -> 3 (r)\n"), "must keep the newest: {cut:?}");
+        assert!(
+            cut.starts_with("- "),
+            "must start on a line boundary: {cut:?}"
+        );
+        assert!(
+            cut.ends_with("- third -> 3 (r)\n"),
+            "must keep the newest: {cut:?}"
+        );
         assert!(!cut.contains("first"), "must drop the oldest: {cut:?}");
     }
 
