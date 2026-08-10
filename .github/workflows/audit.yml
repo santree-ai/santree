@@ -24,7 +24,7 @@ jobs:
     name: cargo audit (RustSec advisories)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Downloads a prebuilt binary and checks Cargo.lock — no compiling the
       # workspace, so it's fast even though it runs against 650+ crates.
@@ -40,7 +40,7 @@ jobs:
     name: pnpm audit (npm advisories)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Version is read from package.json's `packageManager` field.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
