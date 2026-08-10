@@ -199,6 +199,15 @@ pub async fn base_worktree(db: &Db, repo: &str) -> Result<Option<Worktree>> {
         let p = PathBuf::from(&root);
         let branch = head_branch(&p);
         let base = git::default_branch(&p);
+        // Freshen `origin/<branch>` (throttled, same as every per-issue worktree)
+        // before measuring against it. `behind` below is a comparison with a
+        // *remote-tracking* ref, which only moves when something fetches — and the
+        // only things that ever fetched this one were creating a worktree and
+        // pressing "Update base". In a repo where neither had happened lately the
+        // row reported "up to date" off a weeks-old snapshot: observed on
+        // canary-kubernetes with an `origin/main` 33 days and 52k objects stale,
+        // while `git pull` in a terminal had plenty to do.
+        git::refresh_remote_ref(&p, &branch);
         // The base entry's base is the repo's default branch, never a worktree's.
         let stats = git::stats(&p, &branch, &base, git::BaseKind::Upstream);
         Worktree {
@@ -1995,6 +2004,44 @@ mod tests {
             "both launches report the same worktree"
         );
         assert_eq!(list(&db, "test").await.unwrap().len(), 1, "one link");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The base card's `behind` — what lights up "Update base from origin" — is a
+    /// comparison against `origin/<branch>`, a *remote-tracking* ref that only moves
+    /// when something fetches. Nothing here did: the only fetches that ever touched
+    /// it were creating a worktree and the update action itself, so a repo you
+    /// hadn't started a task in reported "up to date" off a snapshot weeks old.
+    /// Observed on canary-kubernetes with an `origin/main` 33 days stale while
+    /// `git pull` in a terminal had 52k objects to collect.
+    #[tokio::test]
+    async fn base_worktree_sees_commits_pushed_since_the_last_local_fetch() {
+        let (base, _repo_dir, db) = test_repo_with_origin("base-behind").await;
+
+        // Land a commit on origin through a *different* clone, so the local repo's
+        // tracking ref has no way to know — the real shape of "a teammate pushed
+        // while you weren't fetching". Pushing from the local repo instead would
+        // update `origin/main` as a side effect and prove nothing.
+        let other = base.join("other");
+        run_git(
+            &base,
+            &[
+                "clone",
+                base.join("origin.git").to_string_lossy().as_ref(),
+                "other",
+            ],
+        );
+        run_git(&other, &["config", "user.email", "t@t.test"]);
+        run_git(&other, &["config", "user.name", "Test"]);
+        run_git(&other, &["commit", "--allow-empty", "-m", "landed upstream"]);
+        run_git(&other, &["push", "origin", "main"]);
+
+        let wt = base_worktree(&db, "test").await.unwrap().unwrap();
+        assert_eq!(
+            wt.behind, 1,
+            "the base card must freshen origin/<branch> before measuring against it"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
