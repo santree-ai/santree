@@ -9,6 +9,9 @@
 //! The tab itself is gated in the frontend to the developer's GitHub login.
 
 use std::path::{Path, PathBuf};
+// Only the macOS-gated helpers (install/spawn_install_watcher/eject) shell
+// out — on Linux this import would be unused and fail `-D warnings`.
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::UNIX_EPOCH;
 
