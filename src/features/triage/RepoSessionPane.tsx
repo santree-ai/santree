@@ -1,0 +1,174 @@
+/**
+ * The repo session: a Claude session on the base checkout that belongs to no
+ * ticket — for asking questions about the codebase, running a CLI command, or
+ * anything the queue hasn't got a row for.
+ *
+ * The Trees rail has always had this (its `master` entry gives the repo root a
+ * terminal); Triage only ever offered agents *attached to a ticket*, so wanting
+ * to ask one general question meant hijacking some unrelated investigation.
+ *
+ * Deliberately thinner than {@link InvestigatePane}: no rendered ticket prompt to
+ * wait on, no `--remote-control` name (there's no ticket to name it after), and
+ * no stored-investigation registry to consult. What it does share is the session
+ * plumbing — a persisted `--session-id` resolved by the backend, seeding only
+ * (see COMPLIANCE.md), and the same "resume when ready" pane on exit so quitting
+ * the agent can't spin into a relaunch loop.
+ */
+import { useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useState } from "react";
+
+import { Spinner } from "../../components/primitives";
+import { SessionEndedPane } from "../../components/SessionEndedPane";
+import {
+  CLAUDE_START_WITH_CHROME_KEY,
+  useAgentSession,
+  useBoolSetting,
+  useClaudeHookSettings,
+} from "../../lib/queries";
+import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
+import { useTerminals } from "../terminal/TerminalsContext";
+import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
+
+/**
+ * Terminal `refId` for a repo's session — a sentinel, never a ticket id, so the
+ * registry keys it apart from every investigation while still grouping it under
+ * "Triage" in the Terminal tab. Can't collide with a Linear id (which never
+ * contains `__`).
+ *
+ * **Scoped by repo**, because the registry dedups on `(source, refId)` alone —
+ * no cwd, no repo (see `orchestrator.ts`'s `ensure`). A bare `__repo__` would
+ * hand the second repo's session the first one's live PTY, still running in the
+ * first one's directory. Per-ticket panes get this for free from globally unique
+ * Linear ids; a sentinel has to earn it.
+ */
+export const repoSessionRefId = (repo: string) => `__repo__:${repo}`;
+
+export function RepoSessionPane({
+  repo,
+  branch,
+  cwd,
+  agentExec,
+  model,
+  effort,
+}: {
+  /** Active repo name — scopes the persisted Claude session. */
+  repo: string;
+  /** The base branch it runs on, for the resume pane's copy. */
+  branch: string;
+  /** The repo root — the same checkout investigations run in. */
+  cwd?: string;
+  /** The chosen agent's executable from settings; falls back to PATH when blank. */
+  agentExec: string;
+  /** Model override for the run, or null to use the agent's default. */
+  model: string | null;
+  /** Effort level (Claude's --effort), or null for the CLI default. */
+  effort: string | null;
+}) {
+  const refId = repoSessionRefId(repo);
+  const { tabs } = useTerminals();
+  const liveSession = tabs.some((t) => t.source === "triage" && t.refId === refId);
+  // Latch that we've seen it live (as state, so the exit re-renders): without it,
+  // quitting the agent would immediately re-seed and restart it.
+  const [liveSeen, setLiveSeen] = useState(false);
+  const [resumeRequested, setResumeRequested] = useState(false);
+  useEffect(() => {
+    if (liveSession) {
+      setLiveSeen(true);
+      setResumeRequested(false);
+    }
+  }, [liveSession]);
+
+  const termKey = `triage:${refId}`;
+  const canLaunch = !!cwd;
+  // Unlike an investigation, opening this launches straight away — it's a scratch
+  // session you opened to ask something, not a saved piece of work to decide about
+  // resuming. The backend still reuses the stored session id, so what you get is
+  // the same conversation continued rather than a fresh one each time.
+  const ended = canLaunch && !liveSession && liveSeen && !resumeRequested;
+  const needsSeed = canLaunch && !liveSession && (!liveSeen || resumeRequested);
+  const session = useAgentSession(repo, termKey, cwd ?? "", canLaunch, needsSeed);
+
+  const exec = agentExec.trim() || "claude";
+  const hookSettings = useClaudeHookSettings().data;
+  const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
+  const seed = agentSessionSeed(session.data, exec, {
+    repo,
+    termKey,
+    // No opening prompt: the whole point is that you bring the question.
+    modelFlag: model ? `--model ${shellQuote(model)}` : undefined,
+    effortFlag: effort ? `--effort ${shellQuote(effort)}` : undefined,
+    settingsFlag: hookSettings ? `--settings ${shellQuote(hookSettings)}` : undefined,
+    chrome: startWithChrome,
+  });
+  // Hold the embed until the seed decision is fresh, so the new PTY carries the
+  // right flags from its first frame.
+  const ready = !needsSeed || !session.isFetching;
+
+  const qc = useQueryClient();
+  const dropCachedSession = useCallback(
+    // Drop the cached resolution so the next launch re-asks the backend instead of
+    // replaying a stale "fresh" decision whose transcript now exists on disk.
+    () => qc.removeQueries({ queryKey: ["agent-session", repo, termKey] }),
+    [qc, repo, termKey],
+  );
+
+  if (ended) {
+    return (
+      <SessionEndedPane
+        title="Session ended"
+        subtitle={
+          <>
+            Your session on <span className="font-mono text-fg-3">{branch}</span> is saved — resume
+            the same conversation whenever you're ready.
+          </>
+        }
+        onResume={() => {
+          dropCachedSession();
+          setResumeRequested(true);
+          setLiveSeen(false);
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="min-h-0 flex-1">
+      {ready ? (
+        <RepoSessionTerminal
+          refId={refId}
+          branch={branch}
+          cwd={cwd}
+          seed={seed}
+          onExited={dropCachedSession}
+        />
+      ) : (
+        <div className="flex h-full items-center justify-center">
+          <Spinner size={16} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The embedded terminal host, split out so it fully unmounts when the pane swaps
+ *  to the resume state — tearing the embed down cleanly instead of leaving it
+ *  pointed at a detached node. */
+function RepoSessionTerminal({
+  refId,
+  branch,
+  cwd,
+  seed,
+  onExited,
+}: {
+  refId: string;
+  branch: string;
+  cwd?: string;
+  seed?: string;
+  onExited: () => void;
+}) {
+  const { hostRef } = useEmbeddedTerminal({
+    spec: { title: branch, cwd, source: "triage", refId, seed },
+    onExited,
+  });
+  return <div ref={hostRef} className="h-full w-full" />;
+}

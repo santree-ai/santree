@@ -5,6 +5,7 @@
  *  regenerate it with AI. Mount with `key={worktreeId}` for a per-worktree draft. */
 import { useEffect, useRef, useState } from "react";
 
+import { ClaudeSparkIcon } from "../../components/icons";
 import { Button, Spinner } from "../../components/primitives";
 import {
   TREES_AUTO_PR_KEY,
@@ -133,7 +134,7 @@ export function CommitBox({
           title="Draft a message with AI"
           className="absolute top-2 right-2 flex h-6 w-6 cursor-pointer items-center justify-center rounded-md text-muted-2 hover:bg-hover hover:text-accent disabled:opacity-40"
         >
-          {drafting ? <Spinner size={12} /> : <span className="text-[13px] leading-none">✨</span>}
+          {drafting ? <Spinner size={12} /> : <ClaudeSparkIcon size={12} />}
         </button>
       </div>
       <Button variant="primary" onClick={onCommit} disabled={!canCommit} className="mt-2 w-full">

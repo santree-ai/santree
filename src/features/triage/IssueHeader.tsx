@@ -7,7 +7,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 
 import type { TriageDetail, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
-import { InvestigateIcon, LinearLogo, RefreshIcon } from "../../components/icons";
+import { ClaudeSparkIcon, LinearLogo, RefreshIcon } from "../../components/icons";
 import { Button, Skeleton } from "../../components/primitives";
 import { RelativeTime, SlaCountdown } from "../../components/RelativeTime";
 import { formatSnoozeLabel } from "../../lib/relativeTime";
@@ -64,7 +64,7 @@ export function IssueHeader({
             title="Open a terminal to investigate this issue"
             style={investigating ? { borderColor: alpha(55), background: alpha(20) } : undefined}
           >
-            <InvestigateIcon size={13} />
+            <ClaudeSparkIcon size={12} />
             Investigate
           </Button>
         </div>

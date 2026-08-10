@@ -482,7 +482,7 @@ export function Segmented<T extends string>({
       role="radiogroup"
       aria-orientation="horizontal"
       onKeyDown={onKeyDown}
-      className={`flex gap-1 rounded-lg border border-line-2 bg-input p-[3px] ${className ?? ""}`}
+      className={`flex gap-1 rounded-lg border border-line-2 bg-input p-[2px] ${className ?? ""}`}
     >
       {options.map((opt, i) => {
         const active = opt.value === value;
@@ -502,7 +502,10 @@ export function Segmented<T extends string>({
             onClick={() => onChange(opt.value)}
             // `whitespace-nowrap`: the control is often placed in a fixed-height
             // bar, where a wrapped label silently grows it past the row height.
-            className="flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md px-0.5 py-[7px] font-mono text-[11px] whitespace-nowrap transition-all"
+            // `leading-none`: the inherited 1.5 line-height adds ~5px of invisible
+            // box around an 11px label, which — doubled by this control's box-in-a-box
+            // nesting — is most of why the pill used to tower over its own text.
+            className="flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md px-0.5 py-[3px] font-mono text-[11px] leading-none whitespace-nowrap transition-all"
             style={style}
           >
             {opt.icon}

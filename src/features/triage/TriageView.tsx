@@ -14,12 +14,13 @@
  */
 
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { AgentKind, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
+import { BranchIcon, ClaudeSparkIcon } from "../../components/icons";
 import { Button, EmptyState, Segmented, Skeleton } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import {
@@ -28,6 +29,7 @@ import {
   INVESTIGATE_MODEL_KEY,
   INVESTIGATE_REMOTE_CONTROL_KEY,
   TRIAGE_GOOD_CITIZEN_KEY,
+  useBaseWorktree,
   usePrefetchOnHover,
   useRefreshTriage,
   useRepos,
@@ -54,7 +56,49 @@ import {
 import { InvestigatePane } from "./InvestigatePane";
 import { IssueHeader } from "./IssueHeader";
 import { QueueRow } from "./QueueRow";
+import { RepoSessionPane } from "./RepoSessionPane";
 import { ScheduleSection } from "./ScheduleSection";
+
+/**
+ * The repo-session row at the top of the rail — Triage's answer to the Trees
+ * rail's `master` entry. Selecting it opens a Claude session on the base
+ * checkout that isn't attached to any ticket.
+ *
+ * Shaped like Trees' `BaseEntry` on purpose (branch icon, branch name, the row's
+ * own action as a stretched button) so the two read as the same idea in two
+ * views; the spark marks it as the one row here that opens an agent rather than
+ * a ticket.
+ */
+function RepoSessionEntry({
+  branch,
+  active,
+  onSelect,
+}: {
+  branch: string;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <div
+      className="relative mb-1 flex items-center gap-2 rounded-[9px] px-[11px] py-2 text-[12px] hover:bg-hover"
+      style={{
+        background: active ? alpha(8) : "transparent",
+        color: active ? "var(--accent)" : "var(--color-muted-2)",
+      }}
+    >
+      <button
+        type="button"
+        onClick={onSelect}
+        aria-label={`Ask Claude on ${branch}`}
+        title={`Ask Claude on ${branch} — a session not tied to any ticket`}
+        className="absolute inset-0 cursor-pointer rounded-[9px]"
+      />
+      <BranchIcon size={13} className="flex-none" />
+      <span className="min-w-0 flex-1 truncate font-mono">{branch}</span>
+      <ClaudeSparkIcon size={12} className="relative flex-none" />
+    </div>
+  );
+}
 
 /** How many recently-viewed discussion panes to keep mounted (hidden). */
 const MAX_KEPT_PANES = 6;
@@ -222,6 +266,19 @@ export function TriageView() {
   // The selected ticket, kept valid as the queue loads / changes.
   const { activeId, activeTicket, select } = useTriageSelection(ordered, visible);
 
+  // The repo session is its own selection, not a ticket id: `useTriageSelection`
+  // snaps any id that isn't in the visible queue back to the first ticket, so a
+  // sentinel threaded through it could never stay selected.
+  const [repoSessionOpen, setRepoSessionOpen] = useState(false);
+  const { data: baseWorktree } = useBaseWorktree(activeRepo);
+  const selectTicket = useCallback(
+    (id: string) => {
+      setRepoSessionOpen(false);
+      select(id);
+    },
+    [select],
+  );
+
   // Header and body both key off `activeId`, so they switch together in one
   // render — never a new title over the previous ticket's content.
   const { data: detail } = useTriageDetail(activeRepo, activeId);
@@ -296,13 +353,20 @@ export function TriageView() {
   // select it once and drop the request, so a later manual selection sticks.
   useEffect(() => {
     if (!triageFocus) return;
-    select(triageFocus);
+    selectTicket(triageFocus);
     setTab(triageFocus, "investigate");
     consumeTriageFocus();
-  }, [triageFocus, select, setTab, consumeTriageFocus]);
+  }, [triageFocus, selectTicket, setTab, consumeTriageFocus]);
 
   // Vim-style queue navigation (j/k, ⌘I, ⌘O).
-  useTriageKeyboard({ ordered, activeId, detail, onSelect: select, onInvestigate: investigate });
+  // j/k must land you back on the queue, not scroll it behind an open session.
+  useTriageKeyboard({
+    ordered,
+    activeId,
+    detail,
+    onSelect: selectTicket,
+    onInvestigate: investigate,
+  });
 
   const renderRow = (t: TriageTicket) => (
     <QueueRow
@@ -313,7 +377,7 @@ export function TriageView() {
       selected={!!selected[t.id]}
       investigating={liveInvestigations.has(t.id)}
       started={startedInvestigations.has(t.id)}
-      onSelect={select}
+      onSelect={selectTicket}
       onToggleSelect={toggle}
       onHover={onHoverRow}
     />
@@ -327,7 +391,11 @@ export function TriageView() {
               queue OR team issues to widen to, so the Mine/All toggle is reachable
               even when your own queue is empty. */}
           {(ordered.length > 0 || teamWaiting > 0) && (
-            <div className="flex h-10 flex-none items-stretch gap-2 border-b border-hairline px-3">
+            // `items-center` with an explicit control height, never `items-stretch`:
+            // stretching makes the controls *be* the row, so they run edge to edge
+            // between the two hairlines with no air around them, however short the
+            // row is. Both carry the same height so they read as one pair.
+            <div className="flex h-9 flex-none items-center gap-2 border-b border-hairline px-3">
               <Segmented
                 options={[
                   { value: "mine", label: "Mine" },
@@ -335,7 +403,7 @@ export function TriageView() {
                 ]}
                 value={goodCitizen ? "all" : "mine"}
                 onChange={(v) => setGoodCitizen(v === "all")}
-                className="flex-1"
+                className="h-[26px] flex-1"
               />
               <Button
                 size="sm"
@@ -346,7 +414,7 @@ export function TriageView() {
                     ? "Select every ticket for investigation"
                     : "Configure the Investigation action in Settings first"
                 }
-                className="flex-none"
+                className="h-[26px] flex-none"
                 style={allEligibleSelected ? accentActiveStyle() : undefined}
               >
                 Select all
@@ -358,6 +426,16 @@ export function TriageView() {
           )}
           <ScheduleSection schedules={schedules} />
           <div className="flex-1 overflow-y-auto p-2">
+            {/* Above the queue, like Trees' base entry: the one row here that
+                isn't a ticket. Needs the base branch's name, so it waits for
+                that read rather than rendering a nameless row. */}
+            {baseWorktree && (
+              <RepoSessionEntry
+                branch={baseWorktree.branch}
+                active={repoSessionOpen}
+                onSelect={() => setRepoSessionOpen(true)}
+              />
+            )}
             {loading ? (
               <QueueSkeleton />
             ) : ordered.length === 0 ? (
@@ -391,7 +469,20 @@ export function TriageView() {
       }
     >
       <div className="flex min-w-0 flex-1 flex-col bg-app">
-        {loading ? (
+        {repoSessionOpen && baseWorktree ? (
+          // Takes the whole detail area — there's no ticket to head it with, and
+          // the queue is still one click away in the rail. Runs the same agent
+          // config the Investigation action uses, since it's the Triage view's
+          // agent either way.
+          <RepoSessionPane
+            repo={activeRepo}
+            branch={baseWorktree.branch}
+            cwd={repoPath}
+            agentExec={agentExec}
+            model={investigateModel ?? null}
+            effort={investigateEffort ?? null}
+          />
+        ) : loading ? (
           // The queue hasn't landed yet, so we don't know there's nothing to
           // triage — "All caught up" here would be a cheerful lie.
           <DiscussionSkeleton />

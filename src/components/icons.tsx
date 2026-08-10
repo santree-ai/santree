@@ -842,23 +842,6 @@ export function DiagIcon({ size = 15, className }: IconProps) {
   );
 }
 
-/** The AI "spark" glyph for the Investigate action — a big 4-point star + a small one. */
-export function InvestigateIcon({ size = 13, className }: IconProps) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      className={className}
-      aria-hidden
-    >
-      <path d="M12 2.2c.3 2.6 1 4.5 2.2 5.6 1.1 1.2 3 1.9 5.6 2.2-2.6.3-4.5 1-5.6 2.2-1.2 1.1-1.9 3-2.2 5.6-.3-2.6-1-4.5-2.2-5.6-1.1-1.2-3-1.9-5.6-2.2 2.6-.3 4.5-1 5.6-2.2 1.2-1.1 1.9-3 2.2-5.6Z" />
-      <path d="M18.5 14.5c.15 1.3.5 2.25 1.1 2.8.55.6 1.5.95 2.8 1.1-1.3.15-2.25.5-2.8 1.1-.6.55-.95 1.5-1.1 2.8-.15-1.3-.5-2.25-1.1-2.8-.55-.6-1.5-.95-2.8-1.1 1.3-.15 2.25-.5 2.8-1.1.6-.55.95-1.5 1.1-2.8Z" />
-    </svg>
-  );
-}
-
 /** Flat list — three full-width rows. Pairs with TreeIcon for the changes view toggle. */
 export function ListIcon({ size = 12, className }: IconProps) {
   return (
