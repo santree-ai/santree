@@ -13,7 +13,8 @@
       "!dist",
       "!**/target",
       "!src-tauri/gen",
-      "!src/styles.css"
+      "!src/styles.css",
+      "!website/src/styles.css"
     ]
   },
   "formatter": {

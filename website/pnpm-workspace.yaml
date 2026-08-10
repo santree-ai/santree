@@ -1,0 +1,25 @@
+# pnpm 11 reads project settings from this file, not .npmrc.
+#
+# This file also makes website/ its OWN pnpm workspace root — pnpm stops
+# walking up here, so the website never becomes a member of the app's root
+# project. That isolation is deliberate: the website pins its own node/pnpm
+# versions (package.json engines + packageManager) and keeps its own
+# lockfile, so nothing here can drift the app's toolchain or CI.
+
+# Supply-chain cooldown: refuse a package version published less than 7 days
+# ago, so a freshly-published (possibly compromised) release ages out before
+# it can be depended on. Enforced in TWO places: at resolution
+# (`pnpm add`/`update`), and at EVERY install including `--frozen-lockfile`,
+# which re-verifies all lockfile entries against the policy — so a lockfile
+# written with the cooldown disabled breaks CI even though nothing is being
+# resolved.
+minimumReleaseAge: 10080 # 7 days in minutes
+
+# Treat package.json "engines" as a hard requirement rather than a warning.
+engineStrict: true
+
+# Postinstall scripts are blocked by default; anything not listed stays
+# blocked — a compromised transitive dependency cannot run code at install
+# time. esbuild is Vite's dep-optimizer binary.
+allowBuilds:
+  esbuild: true

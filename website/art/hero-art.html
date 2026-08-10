@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<style>
+  * { margin: 0; padding: 0; }
+  body { width: 1200px; height: 800px; background: #07080a; overflow: hidden; }
+  .stage { position: relative; width: 1200px; height: 800px; overflow: hidden; }
+  .stage > * { position: absolute; inset: 0; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <svg width="1200" height="800">
+    <defs>
+      <!-- Light gradients: bright core fading along the streak -->
+      <linearGradient id="deep" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#0f4437" stop-opacity="0"/>
+        <stop offset="0.45" stop-color="#166350" stop-opacity="0.85"/>
+        <stop offset="1" stop-color="#0a2e25" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="mid" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#2dd4a7" stop-opacity="0"/>
+        <stop offset="0.4" stop-color="#2dd4a7" stop-opacity="0.85"/>
+        <stop offset="0.75" stop-color="#1f9c7d" stop-opacity="0.4"/>
+        <stop offset="1" stop-color="#0c6f59" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="cyanmid" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#6fd3e0" stop-opacity="0"/>
+        <stop offset="0.45" stop-color="#6fd3e0" stop-opacity="0.55"/>
+        <stop offset="1" stop-color="#2b6f7a" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="core" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#eafff7" stop-opacity="0"/>
+        <stop offset="0.35" stop-color="#e2fff5" stop-opacity="0.95"/>
+        <stop offset="0.7" stop-color="#8beed0" stop-opacity="0.5"/>
+        <stop offset="1" stop-color="#4fd4ad" stop-opacity="0"/>
+      </linearGradient>
+      <!-- Organic edges: turbulence-displace the shard geometry -->
+      <filter id="rough-far" x="-40%" y="-40%" width="180%" height="180%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.012 0.03" numOctaves="3" seed="7" result="n"/>
+        <feDisplacementMap in="SourceGraphic" in2="n" scale="90"/>
+        <feGaussianBlur stdDeviation="42"/>
+      </filter>
+      <filter id="rough-mid" x="-40%" y="-40%" width="180%" height="180%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.006 0.02" numOctaves="2" seed="3" result="n"/>
+        <feDisplacementMap in="SourceGraphic" in2="n" scale="34"/>
+        <feGaussianBlur stdDeviation="16"/>
+      </filter>
+      <filter id="rough-near" x="-60%" y="-60%" width="220%" height="220%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.004 0.016" numOctaves="2" seed="11" result="n"/>
+        <feDisplacementMap in="SourceGraphic" in2="n" scale="12"/>
+        <feGaussianBlur stdDeviation="3.4"/>
+      </filter>
+      <filter id="halo" x="-80%" y="-80%" width="260%" height="260%">
+        <feGaussianBlur stdDeviation="18"/>
+      </filter>
+    </defs>
+
+    <!-- Everything shares one diagonal axis -->
+    <g transform="rotate(24 600 400)">
+      <!-- FAR: wide deep-emerald wedges -->
+      <g filter="url(#rough-far)">
+        <polygon points="470,-160 380,760 640,760" fill="url(#deep)"/>
+        <polygon points="800,-220 740,700 980,700" fill="url(#deep)" opacity="0.7"/>
+        <polygon points="210,-60 150,720 350,720" fill="url(#deep)" opacity="0.55"/>
+      </g>
+
+      <!-- MID: saturated emerald + one cyan shard. Two clusters — upper
+           short, lower long — the mark's stacked-triangle silhouette. -->
+      <g filter="url(#rough-mid)">
+        <polygon points="560,-140 520,330 660,330" fill="url(#mid)" opacity="0.85"/>
+        <polygon points="620,120 560,760 780,760" fill="url(#mid)" opacity="0.7"/>
+        <polygon points="760,-180 730,420 850,420" fill="url(#cyanmid)" opacity="0.8"/>
+        <polygon points="360,-40 330,560 460,560" fill="url(#mid)" opacity="0.55"/>
+        <polygon points="930,-120 910,520 1010,520" fill="url(#mid)" opacity="0.4"/>
+      </g>
+
+      <!-- NEAR: crisp bright cores + soft halos (drawn twice) -->
+      <g filter="url(#halo)" opacity="0.85">
+        <polygon points="588,-120 570,380 620,380" fill="url(#core)"/>
+        <polygon points="652,140 636,720 690,720" fill="url(#core)" opacity="0.8"/>
+        <polygon points="778,-140 766,330 800,330" fill="url(#core)" opacity="0.6"/>
+      </g>
+      <g filter="url(#rough-near)">
+        <polygon points="588,-120 568,380 618,380" fill="url(#core)" opacity="0.95"/>
+        <polygon points="652,140 636,720 686,720" fill="url(#core)" opacity="0.8"/>
+        <polygon points="778,-140 764,330 800,330" fill="url(#core)" opacity="0.65"/>
+        <polygon points="382,-20 374,460 398,460" fill="url(#core)" opacity="0.4"/>
+      </g>
+    </g>
+  </svg>
+
+  <!-- Floor bloom -->
+  <div style="background: radial-gradient(ellipse 42% 30% at 52% 62%, rgba(45,212,167,0.14), transparent 65%);"></div>
+
+  <!-- Vignette: melt into page black -->
+  <div style="background:
+      radial-gradient(ellipse 72% 62% at 50% 46%, transparent 40%, #07080a 92%),
+      linear-gradient(180deg, rgba(5,6,7,0.7) 0%, transparent 20%, transparent 68%, #07080a 96%);"></div>
+
+</div>
+</body>
+</html>

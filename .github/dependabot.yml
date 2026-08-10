@@ -32,6 +32,21 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
 
+  # The website is a standalone nested pnpm project with its own lockfile.
+  # Note: dependabot does not honor the supply-chain cooldown in
+  # website/pnpm-workspace.yaml, but the Website CI's --frozen-lockfile
+  # install re-verifies every entry against it and fails too-young bumps.
+  - package-ecosystem: npm
+    directory: /website
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      website-npm:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

@@ -1,0 +1,383 @@
+@import "tailwindcss";
+/* Tailwind v4 scans outward from THIS file's directory — without explicit
+ * @source directives the build succeeds and emits an empty utility layer. */
+@source "./routes";
+@source "./components";
+@source "./lib";
+
+/* Bundled locally so the site never phones Google for fonts. */
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+/* Design tokens. Surfaces sit on a near-black page; depth comes from light
+ * (aurora, blooms, grain) and hairline borders in white-alpha, not from
+ * stacked grays. Accent + semantic colors are the app's own. */
+@theme {
+  --font-sans: "Geist Variable", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+
+  /* Page + card surfaces */
+  --color-app: #07080a;
+  --color-panel: #0b0c0f;
+  --color-surface: #0d0e11;
+  --color-skeleton: #1e1f24;
+
+  /* Hairlines on black read best as white-alpha */
+  --color-hairline: rgba(255, 255, 255, 0.06);
+  --color-line: rgba(255, 255, 255, 0.08);
+  --color-line-2: rgba(255, 255, 255, 0.12);
+
+  /* Text */
+  --color-fg: #f2f2f4;
+  --color-muted: #a3a3ab;
+  --color-muted-2: #7c7c85;
+  --color-muted-4: #5d5d66;
+
+  /* Status (agent states in the tree motif) */
+  --color-status-green: #3fb950;
+  --color-status-blue: #4493f8;
+  --color-status-amber: #d29922;
+  --color-status-red: #f85149;
+  --color-status-purple: #a78bfa;
+  --color-term-cyan: #6fd3e0;
+
+  /* Accent */
+  --color-accent: #2dd4a7;
+  --color-on-accent: #06231a;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html {
+  background: var(--color-app);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* Geist Mono's `calt` merges symbol runs (`--`, `->`) into single wide
+ * glyphs; keep code/terminal surfaces literal. */
+.font-mono {
+  font-variant-ligatures: none;
+  font-feature-settings:
+    "liga" 0,
+    "calt" 0;
+}
+
+/* Visible keyboard focus everywhere; never remove without replacing. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: rgba(45, 212, 167, 0.25);
+}
+
+/* ---------------------------------------------------------------- *
+ * Atmosphere
+ * ---------------------------------------------------------------- */
+
+/* Film grain: a tiny tiled noise SVG over the whole page. Texture, not
+ * effect — barely perceptible, but it kills the "flat vector void" look. */
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.032;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ---------------------------------------------------------------- *
+ * Buttons
+ * ---------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 0.625rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+.btn:active {
+  transform: translateY(1px);
+}
+
+/* Primary: near-white, Apple-style — soft top sheen + ambient shadow. */
+.btn-primary {
+  background: linear-gradient(180deg, #ffffff 0%, #ebecee 100%);
+  color: #101114;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    0 8px 24px -8px rgba(0, 0, 0, 0.7);
+}
+.btn-primary:hover {
+  background: linear-gradient(180deg, #ffffff 0%, #f4f5f6 100%);
+}
+
+/* Ghost: quiet bordered surface. */
+.btn-ghost {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--color-fg);
+}
+.btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+/* ---------------------------------------------------------------- *
+ * Cards
+ * ---------------------------------------------------------------- */
+
+/* The one card treatment used everywhere: faint fill, hairline border, a
+ * 1px light catch along the top edge. */
+.card {
+  position: relative;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background-clip: padding-box;
+}
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 40%);
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Pointer-tracking highlight, dialed way down — a hint, not a flashlight. */
+.spotlight::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    420px circle at var(--mx, 50%) var(--my, 50%),
+    rgba(45, 212, 167, 0.05),
+    transparent 70%
+  );
+  opacity: 0;
+  transition: opacity 0.4s ease;
+  pointer-events: none;
+}
+.spotlight:hover::after {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .spotlight::after {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------- *
+ * Small pieces
+ * ---------------------------------------------------------------- */
+
+/* Inline "Soon" chip — sits in the text flow, never rotated, never
+ * absolutely positioned. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.1rem 0.45rem;
+  font-family: var(--font-mono);
+  font-size: 0.5625rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+.chip::before {
+  content: "";
+  width: 0.28rem;
+  height: 0.28rem;
+  border-radius: 9999px;
+  background: var(--color-status-amber);
+}
+
+/* Hero text sits ON the artwork — a soft dark halo keeps it legible where
+ * a bright streak passes underneath. */
+.hero-text {
+  text-shadow:
+    0 1px 2px rgba(4, 5, 6, 0.6),
+    0 6px 32px rgba(4, 5, 6, 0.55);
+}
+.hero-text .btn {
+  text-shadow: none;
+}
+
+/* Section divider: a hairline horizon with an emerald heart. */
+.divider {
+  position: relative;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.07) 25%,
+    rgba(45, 212, 167, 0.35) 50%,
+    rgba(255, 255, 255, 0.07) 75%,
+    transparent
+  );
+}
+.divider::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -14px;
+  width: 220px;
+  height: 28px;
+  transform: translateX(-50%);
+  background: radial-gradient(ellipse 50% 50% at 50% 50%, rgba(45, 212, 167, 0.18), transparent 70%);
+}
+
+/* The pipeline wire behind the loop cards: a hairline the cards sit on,
+ * with a light pulse travelling left → right. */
+.pipeline-wire {
+  position: absolute;
+  left: 2%;
+  right: 2%;
+  top: 2.05rem;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+.pipeline-wire::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 140px;
+  background: linear-gradient(90deg, transparent, rgba(45, 212, 167, 0.9), transparent);
+  animation: wire-pulse 5s linear infinite;
+}
+@keyframes wire-pulse {
+  from {
+    left: -140px;
+  }
+  to {
+    left: 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pipeline-wire::after {
+    animation: none;
+    opacity: 0;
+  }
+}
+
+/* The five agents behind the parallelism claim: thin light shards on the
+ * artwork's 24° axis, drifting almost imperceptibly. */
+.shard {
+  position: absolute;
+  width: 3px;
+  border-radius: 9999px;
+  transform: rotate(24deg);
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(45, 212, 167, var(--shard-a, 0.5)) 40%,
+    rgba(200, 246, 231, calc(var(--shard-a, 0.5) * 0.7)) 55%,
+    transparent
+  );
+  filter: blur(0.5px);
+  animation: shard-drift 9s ease-in-out infinite alternate;
+}
+@keyframes shard-drift {
+  from {
+    transform: rotate(24deg) translateY(-8px);
+  }
+  to {
+    transform: rotate(24deg) translateY(8px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .shard {
+    animation: none;
+  }
+}
+
+/* Scroll reveal (progressive enhancement — see reveal.tsx). Elements are
+ * visible in the static HTML; hydration adds .reveal-pre only to content
+ * still below the fold, and .reveal-in transitions it in on scroll. */
+.reveal-pre {
+  opacity: 0;
+  transform: translateY(10px);
+  transition:
+    opacity 0.45s cubic-bezier(0.21, 0.47, 0.32, 0.98),
+    transform 0.45s cubic-bezier(0.21, 0.47, 0.32, 0.98);
+}
+.reveal-pre.reveal-in {
+  opacity: 1;
+  transform: none;
+}
+
+/* Hero entrance: pure CSS so the prerendered HTML paints immediately —
+ * no JS, no hydration wait, no opacity-0 baked into the static page. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise 0.7s cubic-bezier(0.21, 0.47, 0.32, 0.98) both;
+}
+.rise-1 {
+  animation-delay: 0.1s;
+}
+.rise-2 {
+  animation-delay: 0.2s;
+}
+.rise-3 {
+  animation-delay: 0.4s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rise {
+    animation-duration: 0.001s;
+    animation-delay: 0s;
+  }
+}
+
+/* Emerald gradient text, from the icon's own stops. */
+.text-gradient-emerald {
+  background: linear-gradient(100deg, #d9fbf0 0%, #6fe3c0 40%, var(--color-accent) 75%, #23b28c 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}

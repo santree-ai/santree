@@ -1,0 +1,16 @@
+<svg width="288" height="288" viewBox="112 112 288 288" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="emerald" x1="140" y1="120" x2="372" y2="392" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#c8f6e7"/>
+      <stop offset="0.24" stop-color="#4fd4ad"/>
+      <stop offset="0.47" stop-color="#e2fff5"/>
+      <stop offset="0.6" stop-color="#1f9c7d"/>
+      <stop offset="0.8" stop-color="#5fceac"/>
+      <stop offset="1" stop-color="#0c6f59"/>
+    </linearGradient>
+  </defs>
+  <g fill="url(#emerald)">
+    <path d="M256 128 L173 232 L339 232 Z"/>
+    <path d="M256 248 L148 384 L364 384 Z"/>
+  </g>
+</svg>
