@@ -26,6 +26,14 @@ vi.mock("./zoom", async (orig) => {
   return { ...real, applyZoom: zoom.apply, loadZoom: () => zoom.level };
 });
 
+// Stubbed like the app context above: this file tests the window handler, not
+// the query cache — and the real hook needs a QueryClientProvider the bare
+// `renderHook` here deliberately doesn't mount.
+const external = vi.hoisted(() => ({ refresh: vi.fn() }));
+vi.mock("./queries", () => ({
+  useRefreshExternal: () => ({ refresh: external.refresh, fetching: false }),
+}));
+
 vi.mock("../state/AppContext", () => ({
   useAppOptional: () => ({ triageEnabled: app.triageEnabled, devEnabled: app.devEnabled }),
   useAppUiOptional: () => ({
@@ -408,5 +416,40 @@ describe("text size shortcuts", () => {
     renderHook(() => useKeyboardShortcuts());
     press("-", { metaKey: true, altKey: true });
     expect(zoom.apply).not.toHaveBeenCalled();
+  });
+});
+
+describe("refresh shortcut", () => {
+  beforeEach(() => {
+    external.refresh.mockClear();
+  });
+
+  // ⌘⇧R is shifted, so — like ⌘+ above — it has to be handled before the guard
+  // that drops every shifted chord, and `e.key` arrives as the capital.
+  it("re-pulls external data on ⌘⇧R", () => {
+    renderHook(() => useKeyboardShortcuts());
+
+    press("R", { metaKey: true, shiftKey: true });
+    expect(external.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  // Plain ⌘R is the webview's own reload — binding it would throw away every
+  // terminal session in the app.
+  it("leaves unshifted ⌘R alone", () => {
+    renderHook(() => useKeyboardShortcuts());
+
+    press("r", { metaKey: true });
+    expect(external.refresh).not.toHaveBeenCalled();
+  });
+
+  it("still fires while a terminal has focus (⌘ chords are app chrome)", () => {
+    renderHook(() => useKeyboardShortcuts());
+    const term = document.createElement("div");
+    term.className = "xterm";
+    document.body.append(term);
+
+    press("R", { metaKey: true, shiftKey: true, on: term });
+    expect(external.refresh).toHaveBeenCalledTimes(1);
+    term.remove();
   });
 });

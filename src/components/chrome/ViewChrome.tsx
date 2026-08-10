@@ -21,6 +21,7 @@ import { CHROME, SIDEBAR, useAppUi } from "../../state/AppContext";
 import { EdgeResizeHandle } from "../primitives";
 import { ChromeControls } from "./ChromeControls";
 import { NavTabs } from "./NavTabs";
+import { RefreshButton } from "./RefreshButton";
 import { RepoSelector } from "./RepoSelector";
 import { ViewSummary } from "./ViewSummary";
 
@@ -132,8 +133,9 @@ export function ViewChrome({
             <>
               <NavTabs />
               <div data-tauri-drag-region className="h-full flex-1" />
-              <div className="flex items-center">
+              <div className="flex items-center gap-2.5">
                 <ViewSummary />
+                <RefreshButton />
               </div>
             </>
           )}

@@ -40,6 +40,7 @@ function buildSections(triageEnabled: boolean, devEnabled: boolean): Section[] {
         { label: "Keyboard shortcuts", keys: ["⌘", "/"] },
         { label: "Settings", keys: ["⌘", ","] },
         { label: "Toggle sidebar", keys: ["⌘", "B"] },
+        { label: "Refresh Linear and GitHub data", keys: ["⌘", "⇧", "R"] },
         { label: "Bigger text", keys: ["⌘", "+"] },
         { label: "Smaller text", keys: ["⌘", "−"] },
         { label: "Reset text size", keys: ["⌘", "0"] },

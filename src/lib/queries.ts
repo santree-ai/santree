@@ -283,6 +283,16 @@ export const queryKeys = {
   mergeQueue: (repo: string) => ["merge-queue", repo] as const,
   prDetail: (owner: string, name: string, number: number) =>
     ["pr-detail", owner, name, number] as const,
+  /** Prefixes for the reads that come from an external service (Linear, GitHub)
+   *  rather than local disk — the set {@link useRefreshExternal} re-pulls. They
+   *  can't be scoped by repo from one place (`pr-detail` is keyed by owner/name/
+   *  number, `pr-tickets` by a ticket-id list), and don't need to be: see the
+   *  hook for why a prefix costs the same as a repo-scoped key. */
+  reviewsPrefix: ["reviews"] as const,
+  worktreePrsPrefix: ["worktree-prs"] as const,
+  mergeQueuePrefix: ["merge-queue"] as const,
+  prDetailPrefix: ["pr-detail"] as const,
+  prTicketsPrefix: ["pr-tickets"] as const,
   prRepoLabels: (owner: string, name: string) => ["pr-repo-labels", owner, name] as const,
   reviewedFiles: (prRepo: string, number: number) => ["reviewed-files", prRepo, number] as const,
   /** Every PR's marks — invalidated when the local/synced source itself changes. */
@@ -2031,6 +2041,51 @@ export const useViewCounts = (repo: string): ViewCounts => {
         (reviews?.teams.reduce((n, t) => n + t.prs.length, 0) ?? 0),
     };
   }, [tasks, worktrees, reviews, terminalTabs]);
+};
+
+/** What {@link useRefreshExternal} re-pulls: every read sourced from Linear or
+ *  GitHub. Local git state is deliberately absent — it has a filesystem watcher
+ *  and refreshes itself, so a manual refresh would only duplicate that. */
+const EXTERNAL_PREFIXES = [
+  queryKeys.tasksPrefix,
+  queryKeys.triageTicketsPrefix,
+  queryKeys.triageDetailPrefix,
+  queryKeys.triageSchedulePrefix,
+  queryKeys.reviewsPrefix,
+  queryKeys.worktreePrsPrefix,
+  queryKeys.mergeQueuePrefix,
+  queryKeys.prDetailPrefix,
+  queryKeys.prTicketsPrefix,
+] as const;
+
+/**
+ * Force-refetch everything santree reads from Linear and GitHub — the chrome's
+ * Refresh button and ⌘⇧R.
+ *
+ * Nothing polls those services and `refetchOnWindowFocus` is off globally, so a
+ * ticket created seconds ago is otherwise invisible until the view remounts
+ * *and* its stale window has lapsed. This is the only way to pull on demand.
+ *
+ * Invalidated by *prefix* rather than scoped to the active repo on purpose:
+ * TanStack refetches only the queries something is currently rendering
+ * (`refetchType: "active"` by default) and merely marks the rest stale for their
+ * next mount — so the wide net costs exactly the same network as a repo-scoped
+ * one, while also covering the cross-repo views (Agents reads several repos at
+ * once) that a single-repo key would miss.
+ */
+export const useRefreshExternal = () => {
+  const qc = useQueryClient();
+  const refresh = useCallback(() => {
+    for (const queryKey of EXTERNAL_PREFIXES) qc.invalidateQueries({ queryKey });
+  }, [qc]);
+  // Spin whenever external data is in flight, whoever asked for it. Note this
+  // also catches `usePrDetail`'s 30s poll while a CI check is pending — which is
+  // why the button must not disable itself on `fetching`, or a polling PR would
+  // block manual refreshes for as long as its checks run.
+  const fetching = useIsFetching({
+    predicate: (q) => EXTERNAL_PREFIXES.some(([head]) => q.queryKey[0] === head),
+  });
+  return { refresh, fetching: fetching > 0 };
 };
 
 // Triage data (queue, issue detail, schedule) changes slowly, so cache it and

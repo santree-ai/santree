@@ -44,6 +44,7 @@ import {
   useOptimisticMutation,
   usePullRemoteWorktree,
   usePushWorktree,
+  useRefreshExternal,
   useUpdateBaseBranch,
   useWorktreeWatcher,
 } from "./queries";
@@ -776,5 +777,57 @@ describe("useWorktreeWatcher: single-flight invalidation", () => {
     fire("AK-2"); // not blocked behind AK-1's in-flight wave
     expect(spy).toHaveBeenCalledTimes(2 * WAVE);
     unmount();
+  });
+});
+
+describe("useRefreshExternal", () => {
+  const key = (k: readonly unknown[]) => JSON.stringify(k);
+
+  /** Click the refresh and collect the query keys it invalidated. */
+  function refreshed(): string[] {
+    const qc = makeClient();
+    const keys: string[] = [];
+    vi.spyOn(qc, "invalidateQueries").mockImplementation((filters) => {
+      keys.push(JSON.stringify(filters?.queryKey));
+      return Promise.resolve();
+    });
+    const { result } = renderHook(() => useRefreshExternal(), { wrapper: wrapper(qc) });
+    act(() => result.current.refresh());
+    return keys;
+  }
+
+  // Nothing polls Linear/GitHub and window-focus refetching is off, so this hook
+  // is the *only* way a just-created ticket or PR reaches the UI before the view
+  // remounts past its stale window. A key missing here is silently unrefreshable.
+  it("invalidates every external-service read", () => {
+    const keys = refreshed();
+    for (const prefix of [
+      queryKeys.tasksPrefix,
+      queryKeys.triageTicketsPrefix,
+      queryKeys.triageDetailPrefix,
+      queryKeys.triageSchedulePrefix,
+      queryKeys.reviewsPrefix,
+      queryKeys.worktreePrsPrefix,
+      queryKeys.mergeQueuePrefix,
+      queryKeys.prDetailPrefix,
+      queryKeys.prTicketsPrefix,
+    ]) {
+      expect(keys).toContain(key(prefix));
+    }
+  });
+
+  // Local git state has a filesystem watcher; re-pulling it here would duplicate
+  // that watcher's work on every click (and on every ⌘⇧R held down).
+  it("leaves locally-sourced reads alone", () => {
+    const keys = refreshed();
+    expect(keys).not.toContain(key(queryKeys.worktrees("acme/app")));
+    expect(keys).not.toContain(key(queryKeys.settings));
+    expect(keys.some((k) => k.includes("worktree-status"))).toBe(false);
+  });
+
+  // The keys are prefixes, not repo-scoped: only what's rendered refetches, so
+  // one click covers every repo the cross-repo Agents view is showing.
+  it("invalidates by prefix, so no key carries a repo", () => {
+    for (const k of refreshed()) expect(JSON.parse(k)).toHaveLength(1);
   });
 });

@@ -2,10 +2,10 @@
  * Global keyboard shortcuts, mounted once in the app shell.
  *
  * ⌘; / ⌘, → Settings · ⌘1…⌘N → tabs in NavTabs order (Triage when enabled,
- * then Issues/Trees/Reviews/Terminal) · ⌘B → sidebar · Esc → back to the view
- * Settings was opened from. Tab navigation routes are guarded by the views
- * themselves, so an unavailable target (e.g. Triage while disabled) simply
- * redirects back.
+ * then Issues/Trees/Reviews/Terminal) · ⌘B → sidebar · ⌘⇧R → re-pull Linear and
+ * GitHub · Esc → back to the view Settings was opened from. Tab navigation
+ * routes are guarded by the views themselves, so an unavailable target (e.g.
+ * Triage while disabled) simply redirects back.
  *
  * Also home to {@link targetOwnsKey}, the guard the view-local shortcut
  * listeners share so they all treat text fields and terminals the same way.
@@ -14,6 +14,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 
 import { useAppOptional, useAppUiOptional } from "../state/AppContext";
+import { useRefreshExternal } from "./queries";
 import { applyZoom, DEFAULT_ZOOM, loadZoom, step } from "./zoom";
 
 /** True when focus is in a field where keystrokes should be left alone. */
@@ -85,6 +86,7 @@ export function useKeyboardShortcuts() {
   const devEnabled = app?.devEnabled ?? false;
   const toggleSidebar = ui?.toggleSidebar;
   const toggleShortcuts = ui?.toggleShortcuts;
+  const { refresh } = useRefreshExternal();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   // Where Settings was opened from, so Esc goes back there instead of always
@@ -118,6 +120,15 @@ export function useKeyboardShortcuts() {
         if (e.key === "0") {
           e.preventDefault();
           applyZoom(DEFAULT_ZOOM);
+          return;
+        }
+        // ⌘⇧R — re-pull Linear + GitHub. Shifted on purpose (plain ⌘R is the
+        // webview's own reload), which is also why it's handled up here, above
+        // the guard below that drops every shifted chord. `e.key` is the shifted
+        // character, so match the capital.
+        if (e.shiftKey && e.key === "R") {
+          e.preventDefault();
+          refresh();
           return;
         }
       }
@@ -166,5 +177,5 @@ export function useKeyboardShortcuts() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [navigate, pathname, triageEnabled, devEnabled, toggleSidebar, toggleShortcuts]);
+  }, [navigate, pathname, triageEnabled, devEnabled, toggleSidebar, toggleShortcuts, refresh]);
 }
