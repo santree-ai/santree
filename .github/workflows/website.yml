@@ -63,10 +63,10 @@ jobs:
 
       - name: Assert prerendered pages
         run: |
-          test -f .output/public/index.html
-          test -f .output/public/docs/index.html
-          grep -q "shipped in parallel" .output/public/index.html
-          grep -q "docs are growing" .output/public/docs/index.html
+          test -f dist/client/index.html
+          test -f dist/client/docs/index.html
+          grep -q "shipped in parallel" dist/client/index.html
+          grep -q "docs are growing" dist/client/docs/index.html
 
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'
