@@ -1,16 +1,25 @@
-import { Reveal } from "~/components/reveal";
+import { m, useScroll, useTransform } from "framer-motion";
+import { useRef } from "react";
+import { DemoWindow } from "~/components/app-demo";
+import { FadeUp } from "~/components/motion/fade-up";
 import type { Feature } from "~/components/sections/features";
-import { ScreenshotFrame } from "~/components/ui/screenshot-frame";
+import { usePrefersReducedMotion } from "~/lib/use-reduced-motion";
 
-/** One alternating feature row: copy on one side, the view's screenshot slot
- * on the other. Still — the frame doesn't chase the pointer. */
+/** One alternating feature row: copy on one side, a frozen frame of the
+ * real demo window on the other, drifting a touch slower than the scroll. */
 export function FeatureRow({ feature, flip }: { feature: Feature; flip: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const reduced = usePrefersReducedMotion();
+  const { scrollYProgress } = useScroll({ target: ref, offset: ["start end", "end start"] });
+  const y = useTransform(scrollYProgress, [0, 1], reduced ? [0, 0] : [20, -20]);
+
   return (
     <div
       id={feature.id}
+      ref={ref}
       className="grid scroll-mt-28 items-center gap-12 lg:grid-cols-[2fr_3fr] lg:gap-20"
     >
-      <Reveal className={flip ? "lg:order-2" : ""}>
+      <FadeUp className={flip ? "lg:order-2" : ""}>
         <p
           className="font-mono text-[11px] uppercase tracking-[0.18em]"
           style={{ color: feature.color }}
@@ -26,10 +35,12 @@ export function FeatureRow({ feature, flip }: { feature: Feature; flip: boolean 
             {feature.extra}
           </p>
         ) : null}
-      </Reveal>
-      <Reveal delay={0.08} className={flip ? "lg:order-1" : ""}>
-        <ScreenshotFrame view={feature.kicker} />
-      </Reveal>
+      </FadeUp>
+      <FadeUp delay={0.08} className={flip ? "lg:order-1" : ""}>
+        <m.div style={{ y }}>
+          <DemoWindow view={feature.id} />
+        </m.div>
+      </FadeUp>
     </div>
   );
 }

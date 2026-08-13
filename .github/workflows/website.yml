@@ -66,6 +66,11 @@ jobs:
           test -f dist/client/index.html
           test -f dist/client/docs/index.html
           grep -q "shipped in parallel" dist/client/index.html
+          # The app demo's DOM must be prerendered (SSR of the mockup views)
+          grep -q "SAN-142" dist/client/index.html
+          # Lazy below-fold sections must still land in the static HTML
+          grep -q "All branches merge eventually" dist/client/index.html
+          grep -q "never reads, stores, or proxies" dist/client/index.html
           grep -q "docs are growing" dist/client/docs/index.html
 
       - name: Upload Pages artifact

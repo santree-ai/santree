@@ -1,4 +1,5 @@
 import { createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
+import { LazyMotion, MotionConfig } from "framer-motion";
 import { Footer } from "~/components/footer";
 import { Nav } from "~/components/nav";
 
@@ -6,6 +7,8 @@ import { Nav } from "~/components/nav";
 // injected by JS after the client bundle evaluates, so the SSR document
 // would arrive unstyled and repaint.
 import stylesCss from "../styles.css?url";
+
+const loadMotionFeatures = () => import("~/lib/motion-features").then((mod) => mod.default);
 
 const SITE_URL = "https://santree.toscanini.me";
 const TITLE = "santree — your backlog, shipped in parallel";
@@ -56,9 +59,16 @@ function RootDocument({ children }: { children: React.ReactNode }) {
           Skip to content
         </a>
         <div className="grain" aria-hidden />
-        <Nav />
-        {children}
-        <Footer />
+        {/* reducedMotion="user" neutralizes transform animations globally under
+            OS reduced-motion; LazyMotion strict keeps the full runtime in an
+            async chunk and throws if a `motion.*` (not `m.*`) import sneaks in. */}
+        <MotionConfig reducedMotion="user">
+          <LazyMotion features={loadMotionFeatures} strict>
+            <Nav />
+            {children}
+            <Footer />
+          </LazyMotion>
+        </MotionConfig>
         <Scripts />
       </body>
     </html>

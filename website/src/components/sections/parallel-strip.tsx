@@ -1,4 +1,4 @@
-import { Reveal } from "~/components/reveal";
+import { FadeUp } from "~/components/motion/fade-up";
 
 /** The parallelism proof strip: one bold claim in open space, lit from
  * behind. Honest pre-release framing — no fake metrics. */
@@ -35,7 +35,7 @@ export function ParallelStrip() {
         ))}
       </div>
       <div className="relative mx-auto max-w-3xl px-6 text-center">
-        <Reveal>
+        <FadeUp>
           <h2 className="text-balance text-5xl font-semibold tracking-[-0.03em] sm:text-6xl">
             Run five agents
             <br />
@@ -45,7 +45,7 @@ export function ParallelStrip() {
             santree schedules nothing for you — it just makes parallel safe. Isolation from git,
             oversight from you.
           </p>
-        </Reveal>
+        </FadeUp>
       </div>
     </section>
   );

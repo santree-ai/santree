@@ -50,6 +50,13 @@
   color-scheme: dark;
 }
 
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 html {
   background: var(--color-app);
   color: var(--color-fg);
@@ -227,13 +234,15 @@ html {
   background: var(--color-status-amber);
 }
 
-/* Hero text sits ON the artwork — a soft dark halo keeps it legible where
- * a bright streak passes underneath. */
+/* Hero body copy sits on the glyph field — a soft dark halo keeps it
+ * legible. The h1 is exempt: a shadow under gradient-clipped text reads
+ * as a muddy emboss, and the scrim already seats it. */
 .hero-text {
   text-shadow:
     0 1px 2px rgba(4, 5, 6, 0.6),
     0 6px 32px rgba(4, 5, 6, 0.55);
 }
+.hero-text h1,
 .hero-text .btn {
   text-shadow: none;
 }
@@ -262,40 +271,8 @@ html {
   background: radial-gradient(ellipse 50% 50% at 50% 50%, rgba(45, 212, 167, 0.18), transparent 70%);
 }
 
-/* The pipeline wire behind the loop cards: a hairline the cards sit on,
- * with a light pulse travelling left → right. */
-.pipeline-wire {
-  position: absolute;
-  left: 2%;
-  right: 2%;
-  top: 2.05rem;
-  height: 1px;
-  background: rgba(255, 255, 255, 0.07);
-  overflow: hidden;
-}
-.pipeline-wire::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 140px;
-  background: linear-gradient(90deg, transparent, rgba(45, 212, 167, 0.9), transparent);
-  animation: wire-pulse 5s linear infinite;
-}
-@keyframes wire-pulse {
-  from {
-    left: -140px;
-  }
-  to {
-    left: 100%;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .pipeline-wire::after {
-    animation: none;
-    opacity: 0;
-  }
-}
+/* (Loop stage progress lives inside each card as a top rule — see
+ * LoopCard in loop.tsx. No standalone wire element.) */
 
 /* The five agents behind the parallelism claim: thin light shards on the
  * artwork's 24° axis, drifting almost imperceptibly. */
@@ -328,19 +305,29 @@ html {
   }
 }
 
-/* Scroll reveal (progressive enhancement — see reveal.tsx). Elements are
- * visible in the static HTML; hydration adds .reveal-pre only to content
- * still below the fold, and .reveal-in transitions it in on scroll. */
-.reveal-pre {
-  opacity: 0;
-  transform: translateY(10px);
-  transition:
-    opacity 0.45s cubic-bezier(0.21, 0.47, 0.32, 0.98),
-    transform 0.45s cubic-bezier(0.21, 0.47, 0.32, 0.98);
+/* FAQ items on native <details>: hairline separators, plus-to-x marker. */
+.faq-item {
+  border-bottom: 1px solid var(--color-hairline);
 }
-.reveal-pre.reveal-in {
-  opacity: 1;
-  transform: none;
+.faq-item:first-child {
+  border-top: 1px solid var(--color-hairline);
+}
+.faq-item summary {
+  list-style: none;
+}
+.faq-item summary::-webkit-details-marker {
+  display: none;
+}
+.faq-icon svg {
+  transition: transform 0.25s ease;
+}
+.faq-item[open] .faq-icon svg {
+  transform: rotate(45deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .faq-icon svg {
+    transition: none;
+  }
 }
 
 /* Hero entrance: pure CSS so the prerendered HTML paints immediately —
@@ -374,9 +361,153 @@ html {
   }
 }
 
-/* Emerald gradient text, from the icon's own stops. */
+/* ---------------------------------------------------------------- *
+ * Hero background + status line
+ * ---------------------------------------------------------------- */
+
+/* The SSR-visible base light: layered emerald radials. The canvas paints on
+ * top of this; with JS off (or reduced motion pre-hydration) this alone
+ * carries the hero. */
+.hero-aurora {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 58% 44% at 50% 14%, rgba(45, 212, 167, 0.17), transparent 65%),
+    radial-gradient(ellipse 80% 62% at 50% 0%, rgba(111, 227, 192, 0.08), transparent 70%),
+    radial-gradient(ellipse 40% 32% at 26% 40%, rgba(31, 156, 125, 0.09), transparent 70%),
+    radial-gradient(ellipse 40% 32% at 76% 30%, rgba(79, 212, 173, 0.07), transparent 70%);
+}
+
+/* The glyph canvas dissolves before it reaches the demo window. */
+.hero-canvas-mask {
+  -webkit-mask-image: linear-gradient(to bottom, black 55%, transparent 88%);
+  mask-image: linear-gradient(to bottom, black 55%, transparent 88%);
+}
+
+/* Rotating status line caret. Blinks via CSS (works no-JS), solid while
+ * typing, still under reduced motion. */
+.type-caret {
+  display: inline-block;
+  width: 6px;
+  height: 0.95em;
+  margin-left: 3px;
+  vertical-align: text-bottom;
+  background: var(--color-accent);
+  opacity: 0.8;
+  animation: demo-blink 1.1s steps(1) infinite;
+}
+.type-caret-solid {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .type-caret {
+    animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------- *
+ * App demo (the fake santree window in the hero)
+ * ---------------------------------------------------------------- */
+
+/* Scale-to-fit for the fixed 1280×800 design canvas. Three layers:
+ * 1. Stepped media-query defaults (container width / 1280) so the static
+ *    HTML is roughly right with no JS — the canvas is centered inside an
+ *    overflow-hidden aspect box, so any error reads as symmetric letterbox.
+ * 2. An exact container-query calc for browsers with typed arithmetic.
+ * 3. use-fit-scale.ts writes the measured value after hydration. */
+.demo-fit {
+  container-type: inline-size;
+  background: var(--color-panel);
+  --demo-scale: 0.27;
+}
+@media (min-width: 640px) {
+  .demo-fit {
+    --demo-scale: 0.4625;
+  }
+}
+@media (min-width: 768px) {
+  .demo-fit {
+    --demo-scale: 0.5625;
+  }
+}
+@media (min-width: 1024px) {
+  .demo-fit {
+    --demo-scale: 0.7625;
+  }
+}
+@media (min-width: 1152px) {
+  .demo-fit {
+    --demo-scale: 0.8625;
+  }
+}
+@supports (opacity: calc(100cqw / 1280px)) {
+  .demo-fit {
+    --demo-scale: calc(100cqw / 1280px);
+  }
+}
+.demo-canvas {
+  transform: translate(-50%, -50%) scale(var(--demo-scale));
+}
+
+/* Agent status dots — the glow pulse is one of the demo's two "life signs". */
+.demo-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: var(--dot-color, var(--color-muted-2));
+}
+.demo-dot-pulse {
+  box-shadow: 0 0 6px 1px color-mix(in srgb, var(--dot-color) 55%, transparent);
+  animation: demo-dot-pulse 2.4s ease-in-out infinite;
+}
+@keyframes demo-dot-pulse {
+  50% {
+    box-shadow: 0 0 2px 0 color-mix(in srgb, var(--dot-color) 25%, transparent);
+  }
+}
+
+/* Terminal caret. Steady (not blinking) under reduced motion. */
+.demo-caret {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  background: var(--color-fg);
+  opacity: 0.7;
+  animation: demo-blink 1.1s steps(1) infinite;
+}
+@keyframes demo-blink {
+  50% {
+    opacity: 0.1;
+  }
+}
+
+/* Auto-advance progress underline on the active selector pill. */
+.demo-advance {
+  transform-origin: left;
+  animation: demo-advance 7s linear both;
+}
+@keyframes demo-advance {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .demo-dot-pulse,
+  .demo-caret,
+  .demo-advance {
+    animation: none;
+  }
+}
+
+/* Emerald gradient text — bright throughout, no dark tail (a dark stop
+ * over the near-black page reads as dirt, not depth). */
 .text-gradient-emerald {
-  background: linear-gradient(100deg, #d9fbf0 0%, #6fe3c0 40%, var(--color-accent) 75%, #23b28c 100%);
+  background: linear-gradient(97deg, #eafff7 0%, #8beed2 34%, #46e2b6 68%, var(--color-accent) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;

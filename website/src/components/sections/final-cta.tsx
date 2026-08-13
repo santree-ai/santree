@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { GitHubLogo } from "~/components/icons";
-import { Reveal } from "~/components/reveal";
+import { FadeUp } from "~/components/motion/fade-up";
 
 const CLONE = "git clone https://github.com/santree-ai/santree.git";
 
-/** Closing CTA: open-source pitch over a soft floor glow, with a copyable
- * clone line. */
-export function OpenSource() {
+/** Closing CTA: the open-source pitch over light rising from below the
+ * horizon — the shard language from the parallel strip, closing the page
+ * the way the aurora opened it. */
+export function FinalCta() {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {
@@ -21,26 +22,40 @@ export function OpenSource() {
 
   return (
     <section id="oss" className="relative scroll-mt-28 overflow-hidden py-36">
-      {/* The hero artwork returns, mirrored — light rising from below the
-          horizon to close the page the way it opened. */}
-      <div aria-hidden className="absolute inset-x-0 bottom-0 flex justify-center overflow-hidden">
-        <img
-          src="/hero-art.jpg"
-          alt=""
-          width={2400}
-          height={1600}
-          loading="lazy"
-          draggable={false}
-          className="w-[1500px] max-w-none flex-none -scale-y-100 select-none opacity-60"
+      <div aria-hidden className="absolute inset-x-0 bottom-0 h-[26rem]">
+        {/* Floor bloom */}
+        <div
+          className="absolute inset-x-0 -bottom-40 h-[30rem]"
           style={{
-            maskImage: "linear-gradient(to top, rgba(0,0,0,0.9), transparent 78%)",
-            WebkitMaskImage: "linear-gradient(to top, rgba(0,0,0,0.9), transparent 78%)",
+            background:
+              "radial-gradient(ellipse 60% 55% at 50% 100%, rgba(45,212,167,0.14), rgba(31,156,125,0.05) 55%, transparent 75%)",
           }}
         />
+        {/* Light rising from below the horizon, on the 24° axis. */}
+        {[
+          { left: "22%", h: 200, a: 0.2, d: "-2s" },
+          { left: "38%", h: 280, a: 0.32, d: "-5s" },
+          { left: "55%", h: 340, a: 0.4, d: "0s" },
+          { left: "71%", h: 260, a: 0.3, d: "-3.5s" },
+          { left: "85%", h: 190, a: 0.2, d: "-7s" },
+        ].map((s) => (
+          <span
+            key={s.left}
+            className="shard bottom-0"
+            style={
+              {
+                left: s.left,
+                height: s.h,
+                "--shard-a": s.a,
+                animationDelay: s.d,
+              } as React.CSSProperties
+            }
+          />
+        ))}
       </div>
 
       <div className="relative mx-auto max-w-2xl px-6 text-center">
-        <Reveal>
+        <FadeUp>
           <h2 className="text-balance text-4xl font-semibold tracking-[-0.02em] sm:text-[2.75rem]">
             All branches merge eventually.
           </h2>
@@ -48,8 +63,8 @@ export function OpenSource() {
             santree is open source under the MIT license. Star the repo to follow along, or watch
             releases to catch the first public build.
           </p>
-        </Reveal>
-        <Reveal delay={0.08}>
+        </FadeUp>
+        <FadeUp delay={0.08}>
           <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
             <a href="https://github.com/santree-ai/santree" className="btn btn-primary h-11 px-5">
               <GitHubLogo size={15} />
@@ -62,8 +77,8 @@ export function OpenSource() {
               Watch releases
             </a>
           </div>
-        </Reveal>
-        <Reveal delay={0.14}>
+        </FadeUp>
+        <FadeUp delay={0.14}>
           <div className="card mx-auto mt-12 flex max-w-md items-center justify-between gap-3 px-4 py-3">
             <code className="select-all overflow-x-auto whitespace-nowrap font-mono text-[12.5px] text-muted">
               {CLONE}
@@ -76,7 +91,7 @@ export function OpenSource() {
               {copied ? "copied" : "copy"}
             </button>
           </div>
-        </Reveal>
+        </FadeUp>
       </div>
     </section>
   );

@@ -1,5 +1,5 @@
 import { ClaudeLogo, GitHubLogo, LinearLogo } from "~/components/icons";
-import { Reveal } from "~/components/reveal";
+import { FadeUpGroup, FadeUpItem } from "~/components/motion/fade-up";
 import { SectionHeading } from "~/components/ui/section-heading";
 import { SpotlightCard } from "~/components/ui/spotlight-card";
 
@@ -29,9 +29,9 @@ export function Integrations() {
     <section className="py-32">
       <div className="mx-auto max-w-5xl px-6">
         <SectionHeading kicker="Integrations" title="Plays the tools you already play." />
-        <div className="mt-14 grid gap-3 sm:grid-cols-3">
-          {INTEGRATIONS.map((it, i) => (
-            <Reveal key={it.name} delay={i * 0.06}>
+        <FadeUpGroup className="mt-14 grid gap-3 sm:grid-cols-3">
+          {INTEGRATIONS.map((it) => (
+            <FadeUpItem key={it.name}>
               <SpotlightCard className="card group flex h-full flex-col items-center px-6 py-9 text-center">
                 <span
                   className="text-muted-2 transition-colors duration-300 group-hover:text-[var(--it-color)]"
@@ -44,9 +44,9 @@ export function Integrations() {
                   {it.line}
                 </p>
               </SpotlightCard>
-            </Reveal>
+            </FadeUpItem>
           ))}
-        </div>
+        </FadeUpGroup>
       </div>
     </section>
   );

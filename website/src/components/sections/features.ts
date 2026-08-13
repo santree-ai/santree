@@ -1,7 +1,9 @@
+import type { DemoView } from "~/components/app-demo";
+
 /** The four feature rows, mapped 1:1 to the app's real views. `color` is the
  * agent-status color the section's spine node lights up in. */
 export interface Feature {
-  id: string;
+  id: DemoView;
   kicker: string;
   title: string;
   body: string;

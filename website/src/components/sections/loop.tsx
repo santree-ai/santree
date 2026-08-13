@@ -1,6 +1,9 @@
-import { Reveal } from "~/components/reveal";
+import { type MotionValue, m, useMotionValueEvent, useScroll, useTransform } from "framer-motion";
+import { useRef, useState } from "react";
+import { FadeUpGroup, FadeUpItem } from "~/components/motion/fade-up";
 import { SectionHeading } from "~/components/ui/section-heading";
 import { SpotlightCard } from "~/components/ui/spotlight-card";
+import { usePrefersReducedMotion } from "~/lib/use-reduced-motion";
 
 const STEPS = [
   {
@@ -35,7 +38,61 @@ const STEPS = [
   },
 ];
 
+function LoopCard({
+  step,
+  index,
+  lit,
+  progress,
+  reduced,
+}: {
+  step: (typeof STEPS)[number];
+  index: number;
+  lit: boolean;
+  progress: MotionValue<number>;
+  reduced: boolean;
+}) {
+  // Each card carries its own top rule that fills in the step's color as
+  // scroll hands the loop from stage to stage — no line crossing the gaps.
+  const fill = useTransform(
+    progress,
+    [index / STEPS.length, (index + 1) / STEPS.length],
+    reduced ? [1, 1] : [0, 1],
+  );
+
+  return (
+    <SpotlightCard className="card h-full overflow-hidden p-5 transition-[transform,border-color] duration-200 hover:-translate-y-0.5 hover:border-white/[0.12]">
+      <m.span
+        className="absolute inset-x-5 top-0 h-px origin-left"
+        style={{ scaleX: fill, background: step.color, opacity: 0.75 }}
+        aria-hidden
+      />
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[11px] text-muted-4">{step.n}</span>
+        <span
+          className="size-1.5 rounded-full transition-[opacity,box-shadow] duration-500"
+          style={{
+            background: step.color,
+            opacity: lit ? 1 : 0.4,
+            boxShadow: lit ? `0 0 10px ${step.color}80` : "none",
+          }}
+          aria-hidden
+        />
+      </div>
+      <h3 className="mt-5 text-[15px] font-medium">{step.title}</h3>
+      <p className="mt-2 text-[13px] leading-relaxed text-muted">{step.body}</p>
+    </SpotlightCard>
+  );
+}
+
 export function Loop() {
+  const ref = useRef<HTMLDivElement>(null);
+  const reduced = usePrefersReducedMotion();
+  const { scrollYProgress } = useScroll({ target: ref, offset: ["start 0.85", "end 0.55"] });
+  const [lit, setLit] = useState(0);
+  useMotionValueEvent(scrollYProgress, "change", (v) => {
+    setLit(reduced ? STEPS.length : Math.min(STEPS.length, Math.max(0, Math.ceil(v * 5.2))));
+  });
+
   return (
     <section id="loop" className="scroll-mt-28 py-32">
       <div className="mx-auto max-w-6xl px-6">
@@ -44,28 +101,20 @@ export function Loop() {
           title="One loop. Run it in parallel."
           sub="Ticket in, PR out — and nothing says you can only run it once at a time."
         />
-        <div className="relative mt-16">
-          {/* The wire the five stages hang on — a pulse of light runs the
-              loop left to right. Visible only in the gaps between cards. */}
-          <div className="pipeline-wire hidden lg:block" aria-hidden />
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <div ref={ref} className="relative mt-16">
+          <FadeUpGroup className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             {STEPS.map((s, i) => (
-              <Reveal key={s.n} delay={i * 0.05}>
-                <SpotlightCard className="card h-full p-5 transition-[transform,border-color] duration-200 hover:-translate-y-0.5 hover:border-white/[0.12]">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-[11px] text-muted-4">{s.n}</span>
-                    <span
-                      className="size-1.5 rounded-full"
-                      style={{ background: s.color, boxShadow: `0 0 10px ${s.color}80` }}
-                      aria-hidden
-                    />
-                  </div>
-                  <h3 className="mt-5 text-[15px] font-medium">{s.title}</h3>
-                  <p className="mt-2 text-[13px] leading-relaxed text-muted">{s.body}</p>
-                </SpotlightCard>
-              </Reveal>
+              <FadeUpItem key={s.n} className="h-full">
+                <LoopCard
+                  step={s}
+                  index={i}
+                  lit={i < lit}
+                  progress={scrollYProgress}
+                  reduced={reduced}
+                />
+              </FadeUpItem>
             ))}
-          </div>
+          </FadeUpGroup>
         </div>
       </div>
     </section>
