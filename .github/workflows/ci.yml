@@ -198,3 +198,15 @@ jobs:
             deb=$(ls target/release/bundle/deb/*.deb)
             dpkg-deb -c "$deb" | grep -q '/santree-hook$'
           fi
+
+      # The assertions above prove the bundle's *shape*; this proves it runs.
+      # SANTREE_SMOKE makes the app exit 0 once its window has loaded (and fail
+      # on a watchdog if it never does) — so a panic in setup or a frontend that
+      # didn't make it into the bundle fails here rather than at release time.
+      # macOS only: the Linux job has no display to open a window on.
+      - name: Smoke-launch the bundle
+        if: matrix.os == 'macos-latest'
+        timeout-minutes: 5
+        env:
+          SANTREE_SMOKE: "1"
+        run: target/release/bundle/macos/santree.app/Contents/MacOS/santree

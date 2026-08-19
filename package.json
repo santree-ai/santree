@@ -23,7 +23,8 @@
     "test:watch": "vitest",
     "site:dev": "cd website && pnpm dev",
     "site:build": "cd website && pnpm build",
-    "site:typecheck": "cd website && pnpm typecheck"
+    "site:typecheck": "cd website && pnpm typecheck",
+    "sign:resources": "node scripts/sign-resources.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",

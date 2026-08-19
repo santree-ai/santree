@@ -34,6 +34,7 @@ mod stream;
 mod tabs;
 mod terminal;
 mod text_store;
+mod update;
 mod usage;
 mod worktree;
 
@@ -62,7 +63,8 @@ fn specta_builder() -> AppBuilder {
             session_signal::SessionStateChanged,
             session_signal::SessionUsageChanged,
             usage::UsageChanged,
-            usage::UsageProgress
+            usage::UsageProgress,
+            update::UpdateProgress
         ])
         .commands(collect_commands![
             commands::list_repos,
@@ -175,6 +177,8 @@ fn specta_builder() -> AppBuilder {
             commands::linear_connect,
             commands::legacy_cli_probe,
             commands::legacy_cli_migrate,
+            commands::check_for_update,
+            commands::install_update,
             dev::dev_normalize_repo,
             dev::dev_info,
             dev::dev_todos,
@@ -498,7 +502,8 @@ pub fn run() {
         }))
         .plugin(log_plugin())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init());
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build());
 
     // decorum's only job here is the traffic-light inset applied in `.setup()`, which
     // is macOS-only — and on Linux the crate drags in an unsound memmap2 (see the
@@ -507,6 +512,15 @@ pub fn run() {
     let tauri_builder = tauri_builder.plugin(tauri_plugin_decorum::init());
 
     tauri_builder
+        .on_page_load(|webview, payload| {
+            // The smoke run's success condition: the window's document loaded, so
+            // the frontend bundle shipped and the webview came up.
+            let loaded = matches!(payload.event(), tauri::webview::PageLoadEvent::Finished);
+            if smoke_enabled() && loaded {
+                log::info!("smoke: the window finished loading; exiting 0");
+                webview.app_handle().exit(0);
+            }
+        })
         .menu(build_menu)
         .on_menu_event(|app, event| {
             // Our custom Quit item (replacing the predefined one, which calls the
@@ -583,6 +597,10 @@ pub fn run() {
             }
             app.manage(db);
 
+            // Holds the `Update` handle a check produced, for the install that
+            // follows it (see `update`).
+            app.manage(update::PendingUpdate::default());
+
             // Owns all live terminal sessions; commands read it from state.
             app.manage(santree_pty::PtyManager::new());
 
@@ -623,6 +641,22 @@ pub fn run() {
             }
 
             log::info!("santree started");
+
+            // CI's packaged-app probe (see `smoke_enabled`). The hook resource is
+            // asserted *through* `resource_dir()` rather than with a `test -x` on
+            // the bundle, because resolving it that way is what the app itself
+            // does — a bundle can carry the file at a path the runtime can't find.
+            if smoke_enabled() {
+                match hooks::hook_bin(app.handle()) {
+                    Some(p) => log::info!("smoke: resolved the bundled hook at {}", p.display()),
+                    None => {
+                        eprintln!("smoke: FAILED — the bundled santree-hook did not resolve");
+                        std::process::exit(2);
+                    }
+                }
+                start_smoke_watchdog();
+            }
+
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -842,4 +876,34 @@ mod tests {
         assert_eq!(sanitize_path_list(""), None);
         assert_eq!(sanitize_path_list(".:relative"), None);
     }
+}
+
+/// CI's "does the packaged app actually start?" probe, enabled with
+/// `SANTREE_SMOKE=1`: the app exits 0 once its window has loaded, and the
+/// watchdog below fails the run if that never happens.
+///
+/// Everything else in the release pipeline inspects the *bundle* — codesign,
+/// notarization, the stapled ticket, the hook resource being present. Nothing
+/// runs it. So a panic in `setup`, a `frontendDist` that didn't ship, or a
+/// resource the bundle lists but the runtime can't resolve would all reach users
+/// through a green pipeline. This is deliberately start-and-quit rather than
+/// end-to-end: `tauri-driver` can't drive WKWebView, so "the window loaded" is
+/// the strongest signal available on macOS.
+fn smoke_enabled() -> bool {
+    std::env::var_os("SANTREE_SMOKE").is_some_and(|v| v != "0")
+}
+
+/// Fail the smoke run if the window never loads. Without it a hang would sit
+/// until the CI job's own timeout, reported as an infrastructure flake rather
+/// than as the app failing to start.
+fn start_smoke_watchdog() {
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(90);
+    std::thread::spawn(move || {
+        std::thread::sleep(LIMIT);
+        eprintln!(
+            "smoke: FAILED — the window did not finish loading within {}s",
+            LIMIT.as_secs()
+        );
+        std::process::exit(3);
+    });
 }

@@ -1434,3 +1434,25 @@ pub async fn linear_list_issues(repo: String, db: State<'_, Db>) -> CmdResult<Ve
 pub async fn linear_connect(db: State<'_, Db>) -> CmdResult<Vec<LinearOrg>> {
     Ok(linear::connect(&db).await?)
 }
+
+// ── Updates ──────────────────────────────────────────────────────────────────
+
+/// Ask the configured release channel whether a newer version exists. `None`
+/// means this install is current *for its channel* — on beta that includes the
+/// case where a newer stable exists but hasn't overtaken the running beta yet.
+#[tauri::command]
+#[specta::specta]
+pub async fn check_for_update(
+    app: AppHandle,
+    db: State<'_, Db>,
+) -> CmdResult<Option<crate::update::UpdateInfo>> {
+    Ok(crate::update::check(&app, &db).await?)
+}
+
+/// Download and install the update the last check found, then relaunch. Never
+/// returns on success — the process is replaced.
+#[tauri::command]
+#[specta::specta]
+pub async fn install_update(app: AppHandle) -> CmdResult<()> {
+    Ok(crate::update::install(&app).await?)
+}
