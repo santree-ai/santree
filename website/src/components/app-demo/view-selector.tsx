@@ -14,10 +14,10 @@ export function ViewSelector({
   onSelect: (view: DemoView) => void;
 }) {
   return (
-    // biome-ignore lint/a11y/useSemanticElements: fieldset's UA-magic layout
-    // (min-inline-size:min-content, special legend handling) breaks the
-    // overflow-x-auto strip and stretches the mobile page — div+group is the
-    // reliable equivalent here.
+    // fieldset's UA-magic layout (min-inline-size:min-content, special legend
+    // handling) breaks the overflow-x-auto strip and stretches the mobile page —
+    // div+group is the reliable equivalent here.
+    // biome-ignore lint/a11y/useSemanticElements: see the note above
     <div
       role="group"
       aria-label="Choose a santree view to preview"
