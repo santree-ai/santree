@@ -36,6 +36,7 @@ import type {
   TriageComment,
   TriageDetail,
   TriageTicket,
+  UpdateProgress,
   ViewedMarks,
   WorktreeTab,
 } from "../bindings";
@@ -585,9 +586,7 @@ export const useInstallUpdate = () =>
 /** Bytes downloaded during an install, or `null` before the first chunk lands.
  *  `total` is null when the server sent no content-length. */
 export const useUpdateProgress = () => {
-  const [progress, setProgress] = useState<{ downloaded: number; total: number | null } | null>(
-    null,
-  );
+  const [progress, setProgress] = useState<UpdateProgress | null>(null);
   useEffect(() => {
     const unlisten = events.updateProgress.listen(({ payload }) => setProgress(payload));
     return () => {
