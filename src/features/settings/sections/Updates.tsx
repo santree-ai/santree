@@ -31,7 +31,10 @@ export function UpdatesSection() {
 
   // `undefined` = never checked this session; `null` = checked, already current.
   const update = check.data;
-  const percent = progress?.total ? Math.round((progress.downloaded / progress.total) * 100) : null;
+  // f64 crosses the bridge as `number | null` (JSON carries no NaN/Infinity), so
+  // both fields need a floor before any arithmetic — same as the usage totals.
+  const downloaded = progress?.downloaded ?? 0;
+  const percent = progress?.total ? Math.round((downloaded / progress.total) * 100) : null;
 
   return (
     <>
@@ -67,7 +70,7 @@ export function UpdatesSection() {
               ? percent !== null
                 ? `Downloading… ${percent}%`
                 : progress
-                  ? `Downloading… ${mb(progress.downloaded)}`
+                  ? `Downloading… ${mb(downloaded)}`
                   : "Starting the download…"
               : update
                 ? `Version ${update.version} is available.`
