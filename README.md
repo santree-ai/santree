@@ -133,6 +133,60 @@ pnpm test         # Frontend: Vitest
 
 ---
 
+## Releasing
+
+Releases are cut by pushing a tag; `.github/workflows/release.yml` does the rest
+(universal macOS build → codesign → notarize → staple → smoke-launch → publish).
+macOS only: the Linux jobs in CI exist to keep the code portable, not to produce
+downloads.
+
+```sh
+# bump the version in all three places CI checks: package.json,
+# src-tauri/tauri.conf.json, Cargo.toml ([workspace.package])
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+**The tag picks the channel.** `v0.2.0` publishes a normal release (the stable
+channel, which reads GitHub's `releases/latest` pointer). `v0.2.0-beta.1`
+publishes a pre-release, which that pointer skips — so only beta users see it.
+The semver ordering is what makes a beta roll onto stable later:
+`0.2.0-beta.1 < 0.2.0`. Updates only ever move forward, so switching from beta
+back to stable means waiting for a stable release that passes the installed
+beta; the Settings → Updates panel says so.
+
+Beta's endpoint is a fixed pre-release tag, `updater-beta`, whose `latest.json`
+**every** release overwrites — stable ones included. That's what stops a beta
+user from being stranded on an old beta once a newer stable ships.
+
+**Credentials** live in the repo's `release` GitHub environment, which is
+restricted to `v*` tags so no other workflow can reach them: the Developer ID
+certificate (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_SIGNING_IDENTITY`), the App Store Connect API key used for notarization
+(`APPLE_API_ISSUER`, `APPLE_API_KEY_ID`, `APPLE_API_KEY`), and the updater
+signing key (`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`).
+
+> **The updater private key has no recovery path.** Installed copies only accept
+> an update signed by the key whose public half was compiled into them
+> (`plugins.updater.pubkey` in `tauri.conf.json`). Lose it and every install
+> silently stops updating forever — the only fix is asking users to re-download.
+> The Apple certificate, by contrast, is replaceable: shipped apps keep
+> validating, because their signatures are timestamped.
+
+Two subtleties worth knowing before touching this:
+
+- **Bundle resources aren't signed by Tauri.** `santree-hook` ships via
+  `bundle.resources`, and notarization rejects any unsigned Mach-O in the
+  bundle, so `scripts/sign-resources.mjs` signs it from `beforeBundleCommand` —
+  after it's staged, before the bundler seals it in. The script is a no-op
+  without `APPLE_SIGNING_IDENTITY`, which is why keyless local builds still work.
+- **Updater artifacts are release-only.** Generating them *requires* the signing
+  key, so `createUpdaterArtifacts` is passed by the release workflow
+  (`--config '{"bundle":{"createUpdaterArtifacts":true}}'`) rather than committed
+  to `tauri.conf.json` — otherwise every keyless build, including CI's bundle
+  smoke and any local `pnpm tauri build`, would fail.
+
+---
+
 ## Terminals (real PTY emulation)
 
 The **Terminal** tab is a real terminal emulator — architecturally like iTerm or

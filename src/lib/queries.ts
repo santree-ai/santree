@@ -439,6 +439,21 @@ export const DISPLAY_NAMES_KEY = "display_names";
  *  missing value means confirm), so read it as `data !== "false"`. */
 export const CONFIRM_ON_QUIT_KEY = "confirm_on_quit";
 
+/** Which release channel this install follows. App-scoped, defaults to stable.
+ *  Read by Rust (`update.rs`) to pick the update manifest, so the string here and
+ *  `UPDATE_CHANNEL_KEY` there are one key with two declarations — same split as
+ *  {@link CONFIRM_ON_QUIT_KEY}. */
+export const UPDATE_CHANNEL_KEY = "update_channel";
+
+/** The release channels the updater knows about. */
+export type UpdateChannelSetting = "stable" | "beta";
+
+/** The stored `update_channel` value, or "stable" for anything unset/unknown —
+ *  mirroring the same fallback in Rust, so a hand-edited row can't strand an
+ *  install on a channel that publishes nothing. Exported for testing. */
+export const parseUpdateChannel = (raw: string | null | undefined): UpdateChannelSetting =>
+  raw === "beta" ? "beta" : "stable";
+
 /** Show santree's inline context-usage bar in the app (Trees, above the bottom
  *  bar). App-scoped, defaults to OFF (`data === "true"` = on). Display-only: the
  *  usage itself is *always* captured (the `--settings` statusLine is injected
@@ -548,6 +563,39 @@ export const useEnvFileVars = (path: string) =>
  * the sidebar footer and help menu. Fixed for the process lifetime. */
 export const useAppVersion = () =>
   useQuery({ queryKey: queryKeys.appVersion, queryFn: getVersion, staleTime: Infinity });
+
+/**
+ * Ask the release channel whether a newer version exists; the result lives on the
+ * mutation (`data`), which is `null` when this install is current.
+ *
+ * A mutation rather than a query because it's a user-pressed button with a real
+ * network round-trip, and because the *answer* is not cacheable state: the
+ * backend parks the matching update handle for {@link useInstallUpdate}, so a
+ * cached "yes" that React Query replayed would offer an install the backend no
+ * longer has.
+ */
+export const useCheckForUpdate = () =>
+  useActionMutation({ mutationFn: () => unwrap(commands.checkForUpdate()) });
+
+/** Download + install the update the last check found, then relaunch. Never
+ *  resolves on success — the process is replaced mid-call. */
+export const useInstallUpdate = () =>
+  useActionMutation({ mutationFn: () => unwrap(commands.installUpdate()) });
+
+/** Bytes downloaded during an install, or `null` before the first chunk lands.
+ *  `total` is null when the server sent no content-length. */
+export const useUpdateProgress = () => {
+  const [progress, setProgress] = useState<{ downloaded: number; total: number | null } | null>(
+    null,
+  );
+  useEffect(() => {
+    const unlisten = events.updateProgress.listen(({ payload }) => setProgress(payload));
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
+  return progress;
+};
 
 /** Read a boolean setting for an exact scope (defaults to false until loaded).
  *  `isFetched` is the *only* way to tell "off" from "not loaded yet" — `value` is

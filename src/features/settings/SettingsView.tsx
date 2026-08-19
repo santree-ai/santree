@@ -18,6 +18,7 @@ import {
   ChevronDownIcon,
   ClaudeSparkIcon,
   ContrastIcon,
+  DownloadIcon,
   GearIcon,
   KeyIcon,
   LinearLogo,
@@ -40,6 +41,7 @@ import { GeneralSection } from "./sections/General";
 import { IntegrationsSection } from "./sections/Integrations";
 import { PromptsSection } from "./sections/Prompts";
 import { RepoLinearSection } from "./sections/RepoLinear";
+import { UpdatesSection } from "./sections/Updates";
 import { UsageSection } from "./sections/Usage";
 import { WorkSection } from "./sections/Work";
 
@@ -106,6 +108,12 @@ const APP_NAV: NavNode[] = [
     label: "General",
     icon: <GearIcon size={ICON_SIZE} />,
     render: () => <GeneralSection />,
+  },
+  {
+    key: "updates",
+    label: "Updates",
+    icon: <DownloadIcon size={ICON_SIZE} />,
+    render: () => <UpdatesSection />,
   },
   {
     key: "integrations",

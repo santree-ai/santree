@@ -1,0 +1,239 @@
+# Tag -> a signed, notarized macOS release that installed copies can update to.
+#
+# CI (ci.yml) proves the code is good; this proves the *artifact* is. Everything
+# between the two — codesigning, notarization, the updater signature, and the
+# manifest clients poll — only exists here, so a tag is the only thing that
+# exercises it. Linux and Windows are deliberately out of scope: the app ships
+# for macOS, and ci.yml's Linux jobs exist to keep the code portable, not to
+# produce downloads.
+#
+# Channels are a property of the TAG, not of the build:
+#   v0.2.0          -> stable  (a normal release; GitHub's `releases/latest`
+#                               pointer picks it up, which is the stable endpoint)
+#   v0.2.0-beta.1   -> beta    (published as a pre-release, so `releases/latest`
+#                               skips it)
+# The rolling `updater-beta` release's manifest is overwritten by EVERY run of
+# this workflow, stable ones included — that's what stops a beta user from being
+# stranded on an old beta once a newer stable ships. See src-tauri/src/update.rs.
+#
+# Convention (shared with ci.yml): third-party actions are pinned to full commit
+# SHAs — a tag is mutable, and this workflow runs with signing secrets in scope.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# `gh release create` writes; nothing else here needs a token.
+permissions:
+  contents: write
+
+# Never cancel a release mid-notarization: a half-published release is worse
+# than a slow one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Cheap, secret-free, and fast to fail: a bad tag shouldn't cost 20 minutes of
+  # macOS runner time and a notarization round-trip to discover.
+  guard:
+    name: Guard (tag matches the declared version)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      channel: ${{ steps.check.outputs.channel }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # ci.yml already asserts the three declared versions agree with each other;
+      # a release additionally has to agree with the tag, or the DMG, the About
+      # box and the updater manifest would each claim something different.
+      - name: Versions agree (tag · package.json · tauri.conf.json · Cargo.toml)
+        id: check
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          pkg=$(jq -r .version package.json)
+          conf=$(jq -r .version src-tauri/tauri.conf.json)
+          crate=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+          echo "tag=$version  package.json=$pkg  tauri.conf.json=$conf  Cargo.toml=$crate"
+          if [ "$version" != "$pkg" ] || [ "$version" != "$conf" ] || [ "$version" != "$crate" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} disagrees with the declared app version"
+            exit 1
+          fi
+          # A semver pre-release suffix is what makes this a beta. The updater
+          # compares versions with semver rules, so 0.2.0-beta.1 < 0.2.0 and a
+          # beta user rolls onto the stable release when it lands.
+          case "$version" in
+            *-*) channel=beta;   prerelease=true ;;
+            *)   channel=stable; prerelease=false ;;
+          esac
+          echo "releasing $version on the $channel channel"
+          {
+            echo "version=$version"
+            echo "channel=$channel"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Build · sign · notarize · publish
+    needs: guard
+    runs-on: macos-latest
+    # The signing secrets live in this environment, which is restricted to `v*`
+    # tags — so no other workflow in the repo can reach them.
+    environment: release
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      # One universal binary rather than two per-arch downloads: Intel Macs are
+      # still out there, and a missing arch in the updater manifest reads to the
+      # client as "no update available", not as an error.
+      - name: Add the macOS targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # notarytool authenticates with the .p8 itself, which Tauri passes by path.
+      - name: Stage the notarization key
+        env:
+          ASC_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$ASC_KEY" > "$RUNNER_TEMP/asc-api-key.p8"
+
+      # `--config` flips on the updater artifacts. It is passed here rather than
+      # committed to tauri.conf.json because generating them REQUIRES the signing
+      # key: with it on by default, every keyless build — ci.yml's bundle smoke,
+      # and anyone's local `pnpm tauri build` — would fail.
+      - name: Bundle, sign and notarize
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Tauri's APPLE_API_KEY holds the *Key ID*; the key material goes in by
+          # path. Our secret names say what they contain, so the two cross here.
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/asc-api-key.p8
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          pnpm tauri build \
+            --target universal-apple-darwin \
+            --bundles app,dmg \
+            --config '{"bundle":{"createUpdaterArtifacts":true}}'
+
+      - name: Locate the artifacts
+        id: artifacts
+        run: |
+          out=target/universal-apple-darwin/release/bundle
+          app="$out/macos/santree.app"
+          dmg=$(ls "$out"/dmg/*.dmg)
+          archive="$out/macos/santree.app.tar.gz"
+          test -d "$app"
+          test -f "$dmg"
+          test -f "$archive"
+          test -f "$archive.sig"
+          {
+            echo "app=$app"
+            echo "dmg=$dmg"
+            echo "archive=$archive"
+            echo "signature=$archive.sig"
+          } >> "$GITHUB_OUTPUT"
+
+      # What a user's Mac will check, checked here instead of by them. `spctl` is
+      # Gatekeeper's own verdict — the one that decides between "downloaded from
+      # the Internet, open it?" and "cannot be opened".
+      - name: Verify the signature and the notarization
+        run: |
+          app='${{ steps.artifacts.outputs.app }}'
+          codesign --verify --deep --strict --verbose=2 "$app"
+          # The sidecar is a separate Mach-O inside the bundle: unsigned, it fails
+          # notarization outright, so assert it explicitly rather than trusting
+          # --deep to have covered it.
+          codesign --verify --strict --verbose=2 "$app/Contents/Resources/santree-hook"
+          spctl --assess --type exec --verbose=4 "$app"
+          xcrun stapler validate "$app"
+          # The DMG's own ticket is a nicety — a Mac that's online fetches the
+          # verdict for the stapled .app inside it either way — so report it
+          # rather than failing a release that is otherwise correct.
+          xcrun stapler validate '${{ steps.artifacts.outputs.dmg }}' \
+            || echo "::warning::the DMG is not stapled (the .app inside it is)"
+
+      # Nothing above ever RUNS the thing we're about to ship. A panic in setup, a
+      # frontend bundle that didn't make it in, or a resource the runtime can't
+      # resolve all produce a perfectly signed app that dies on launch.
+      - name: Smoke-launch the signed app
+        timeout-minutes: 5
+        env:
+          SANTREE_SMOKE: "1"
+          APP: ${{ steps.artifacts.outputs.app }}
+        run: "$APP/Contents/MacOS/santree"
+
+      # Generated before the release exists, not read back off a draft: a draft has
+      # no tag ref on the remote, so `gh release view <tag>` can't reliably find
+      # one. This endpoint produces the same notes `--generate-notes` would.
+      - name: Generate the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$GITHUB_REF_NAME" -q .body > "$RUNNER_TEMP/notes.md"
+
+      # The manifest carries the same notes as the release page, so the in-app
+      # "what's new" and GitHub can't disagree.
+      - name: Build latest.json
+        run: |
+          node scripts/updater-manifest.mjs \
+            --version '${{ needs.guard.outputs.version }}' \
+            --archive '${{ steps.artifacts.outputs.archive }}' \
+            --signature '${{ steps.artifacts.outputs.signature }}' \
+            --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/santree.app.tar.gz" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --out "$RUNNER_TEMP/latest.json"
+          cat "$RUNNER_TEMP/latest.json"
+
+      # One atomic create with every asset attached. Publishing the release before
+      # its latest.json existed would leave the stable endpoint 404ing for as long
+      # as the upload took.
+      - name: Publish the release (${{ needs.guard.outputs.channel }})
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --title "santree ${{ needs.guard.outputs.version }}" \
+            ${{ needs.guard.outputs.prerelease == 'true' && '--prerelease' || '' }} \
+            '${{ steps.artifacts.outputs.dmg }}' \
+            '${{ steps.artifacts.outputs.archive }}' \
+            '${{ steps.artifacts.outputs.signature }}' \
+            "$RUNNER_TEMP/latest.json"
+
+      # Every release, both channels. A beta user's endpoint is this fixed tag, so
+      # if a stable release didn't refresh it they'd stay on the last beta forever
+      # — the failure mode that makes people abandon a beta channel.
+      - name: Point the beta channel at this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view updater-beta >/dev/null 2>&1; then
+            gh release create updater-beta \
+              --prerelease \
+              --title "Updater: beta channel" \
+              --notes "Rolling manifest for the beta update channel. Overwritten by every release; not a downloadable build — the artifacts live on the real release tags."
+          fi
+          gh release upload updater-beta "$RUNNER_TEMP/latest.json" --clobber

@@ -48,7 +48,7 @@ const EVENTS: &[&str] = &[
 /// Resolve the absolute path to the bundled `santree-hook` binary: the resource
 /// dir in a bundled build, else a sibling of the running executable in dev (both
 /// land in `target/debug`). `None` if neither exists.
-fn hook_bin(app: &AppHandle) -> Option<PathBuf> {
+pub(crate) fn hook_bin(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(res) = app.path().resource_dir() {
         let p = res.join("santree-hook");
         if p.exists() {

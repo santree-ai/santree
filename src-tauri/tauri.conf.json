@@ -7,7 +7,7 @@
     "beforeDevCommand": "pnpm bundle:hook && pnpm dev:vite",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm bundle:hook && pnpm build && pnpm stash:sourcemaps",
-    "beforeBundleCommand": "pnpm eject:stale-dmg",
+    "beforeBundleCommand": "pnpm eject:stale-dmg && pnpm sign:resources",
     "frontendDist": "../dist"
   },
   "app": {
@@ -47,6 +47,12 @@
         "appPosition": { "x": 180, "y": 170 },
         "applicationFolderPosition": { "x": 480, "y": 170 }
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwNzg4MjFEMDk3NzZGOTYKUldTV2IzY0pIWUo0a0MzQWQxQ2Z5VlZLQWxMOUI4cnNBVkxic1orajUwdVVraDh6WjJpN3lmREkK",
+      "endpoints": ["https://github.com/santree-ai/santree/releases/latest/download/latest.json"]
     }
   }
 }

@@ -27,6 +27,11 @@ tauri-plugin-dialog = "2"
 # enforcement the way macOS's Dock/LaunchServices give app bundles for free.
 tauri-plugin-single-instance = "2"
 
+# Self-update from the GitHub releases the release workflow publishes. Both
+# channels (stable / beta) are served by one binary — see src/update.rs for why
+# the endpoint is chosen at runtime rather than read from tauri.conf.json.
+tauri-plugin-updater = "2"
+
 serde = { workspace = true }
 serde_json = { workspace = true }
 
