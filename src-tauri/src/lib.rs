@@ -786,6 +786,36 @@ fn confirm_on_quit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     value.as_deref() != Some("false")
 }
 
+/// CI's "does the packaged app actually start?" probe, enabled with
+/// `SANTREE_SMOKE=1`: the app exits 0 once its window has loaded, and the
+/// watchdog below fails the run if that never happens.
+///
+/// Everything else in the release pipeline inspects the *bundle* — codesign,
+/// notarization, the stapled ticket, the hook resource being present. Nothing
+/// runs it. So a panic in `setup`, a `frontendDist` that didn't ship, or a
+/// resource the bundle lists but the runtime can't resolve would all reach users
+/// through a green pipeline. This is deliberately start-and-quit rather than
+/// end-to-end: `tauri-driver` can't drive WKWebView, so "the window loaded" is
+/// the strongest signal available on macOS.
+fn smoke_enabled() -> bool {
+    std::env::var_os("SANTREE_SMOKE").is_some_and(|v| v != "0")
+}
+
+/// Fail the smoke run if the window never loads. Without it a hang would sit
+/// until the CI job's own timeout, reported as an infrastructure flake rather
+/// than as the app failing to start.
+fn start_smoke_watchdog() {
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(90);
+    std::thread::spawn(move || {
+        std::thread::sleep(LIMIT);
+        eprintln!(
+            "smoke: FAILED — the window did not finish loading within {}s",
+            LIMIT.as_secs()
+        );
+        std::process::exit(3);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,34 +906,4 @@ mod tests {
         assert_eq!(sanitize_path_list(""), None);
         assert_eq!(sanitize_path_list(".:relative"), None);
     }
-}
-
-/// CI's "does the packaged app actually start?" probe, enabled with
-/// `SANTREE_SMOKE=1`: the app exits 0 once its window has loaded, and the
-/// watchdog below fails the run if that never happens.
-///
-/// Everything else in the release pipeline inspects the *bundle* — codesign,
-/// notarization, the stapled ticket, the hook resource being present. Nothing
-/// runs it. So a panic in `setup`, a `frontendDist` that didn't ship, or a
-/// resource the bundle lists but the runtime can't resolve would all reach users
-/// through a green pipeline. This is deliberately start-and-quit rather than
-/// end-to-end: `tauri-driver` can't drive WKWebView, so "the window loaded" is
-/// the strongest signal available on macOS.
-fn smoke_enabled() -> bool {
-    std::env::var_os("SANTREE_SMOKE").is_some_and(|v| v != "0")
-}
-
-/// Fail the smoke run if the window never loads. Without it a hang would sit
-/// until the CI job's own timeout, reported as an infrastructure flake rather
-/// than as the app failing to start.
-fn start_smoke_watchdog() {
-    const LIMIT: std::time::Duration = std::time::Duration::from_secs(90);
-    std::thread::spawn(move || {
-        std::thread::sleep(LIMIT);
-        eprintln!(
-            "smoke: FAILED — the window did not finish loading within {}s",
-            LIMIT.as_secs()
-        );
-        std::process::exit(3);
-    });
 }
