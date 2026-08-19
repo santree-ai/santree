@@ -699,6 +699,27 @@ export const commands = {
 	 */
 	legacyCliMigrate: (repo: string) => typedError<LinearOrg, CmdError>(__TAURI_INVOKE("legacy_cli_migrate", { repo })),
 	/**
+	 *  Ask the configured release channel whether a newer version exists. `None`
+	 *  means this install is current *for its channel* — on beta that includes the
+	 *  case where a newer stable exists but hasn't overtaken the running beta yet.
+	 */
+	checkForUpdate: () => typedError<{
+	/**  The version on offer. */
+	version: string,
+	/**
+	 *  The version running now — rendered as "x -> y" rather than made the
+	 *  frontend's job to fetch separately.
+	 */
+	currentVersion: string,
+	/**  The release notes from the manifest, if the release carried a body. */
+	notes: string | null,
+} | null, CmdError>(__TAURI_INVOKE("check_for_update")),
+	/**
+	 *  Download and install the update the last check found, then relaunch. Never
+	 *  returns on success — the process is replaced.
+	 */
+	installUpdate: () => typedError<null, CmdError>(__TAURI_INVOKE("install_update")),
+	/**
 	 *  Validate + normalize a picked folder to its git toplevel (the stored dev repo
 	 *  path). Mirrors `repo::add`'s validation: absolute dir → `git rev-parse
 	 *  --show-toplevel`, so a subdirectory pick still lands on the repo root.
@@ -794,6 +815,7 @@ export const commands = {
 export const events = {
 	sessionStateChanged: makeEvent<SessionStateChanged>("session-state-changed"),
 	sessionUsageChanged: makeEvent<SessionUsageChanged>("session-usage-changed"),
+	updateProgress: makeEvent<UpdateProgress>("update-progress"),
 	usageChanged: makeEvent<UsageChanged>("usage-changed"),
 	usageProgress: makeEvent<UsageProgress>("usage-progress"),
 	worktreeChanged: makeEvent<WorktreeChanged>("worktree-changed"),
@@ -2197,6 +2219,29 @@ export type TriageTicket = {
 	 *  viewer's own issues; others' are shown only when "be a good citizen" is on.
 	 */
 	mine: boolean,
+};
+
+/**  What the Updates panel shows when a newer version exists. */
+export type UpdateInfo = {
+	/**  The version on offer. */
+	version: string,
+	/**
+	 *  The version running now — rendered as "x -> y" rather than made the
+	 *  frontend's job to fetch separately.
+	 */
+	currentVersion: string,
+	/**  The release notes from the manifest, if the release carried a body. */
+	notes: string | null,
+};
+
+/**
+ *  Download progress, emitted while [`install`] runs. `total` is `None` when the
+ *  server sends no content-length (the panel then shows an indeterminate bar).
+ *  Bytes cross as `f64` per the domain's "numbers are JS numbers" convention.
+ */
+export type UpdateProgress = {
+	downloaded: number | null,
+	total: number | null,
 };
 
 /**
