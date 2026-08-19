@@ -206,7 +206,11 @@ mod tests {
     fn beta_manifest_is_a_fixed_tag_not_the_latest_pointer() {
         // `releases/latest` skips pre-releases — if beta ever pointed there it
         // would silently become a second stable channel.
-        assert!(UpdateChannel::Beta.manifest_url().contains("/download/updater-beta/"));
-        assert!(UpdateChannel::Stable.manifest_url().contains("/releases/latest/"));
+        assert!(UpdateChannel::Beta
+            .manifest_url()
+            .contains("/download/updater-beta/"));
+        assert!(UpdateChannel::Stable
+            .manifest_url()
+            .contains("/releases/latest/"));
     }
 }
