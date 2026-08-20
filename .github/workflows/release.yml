@@ -184,9 +184,15 @@ jobs:
           test -f "$dmg"
           test -f "$archive"
           test -f "$archive.sig"
+          # A second copy under a fixed, version-free name. GitHub's
+          # `releases/latest/download/<name>` redirect matches on an exact asset
+          # name, so this is what lets santree.toscanini.me link straight to the
+          # newest stable DMG without a GitHub API call or a site rebuild.
+          cp "$dmg" "$RUNNER_TEMP/santree-macos.dmg"
           {
             echo "app=$app"
             echo "dmg=$dmg"
+            echo "stable_dmg=$RUNNER_TEMP/santree-macos.dmg"
             echo "archive=$archive"
             echo "signature=$archive.sig"
           } >> "$GITHUB_OUTPUT"
@@ -255,6 +261,7 @@ jobs:
             --title "santree ${{ needs.guard.outputs.version }}" \
             ${{ needs.guard.outputs.prerelease == 'true' && '--prerelease' || '' }} \
             '${{ steps.artifacts.outputs.dmg }}' \
+            '${{ steps.artifacts.outputs.stable_dmg }}' \
             '${{ steps.artifacts.outputs.archive }}' \
             '${{ steps.artifacts.outputs.signature }}' \
             "$RUNNER_TEMP/latest.json"
