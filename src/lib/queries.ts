@@ -690,7 +690,7 @@ export const parseLinearScope = (raw: string | null | undefined): LinearScope =>
 /** Said wherever a Linear write is disabled, so the four places that gate on it
  *  can't drift into four different explanations. */
 export const LINEAR_READ_ONLY_HINT =
-  "Linear is connected read-only. Reconnect it with write access from Settings → Integrations to change issues from santree.";
+  "santree can't change Linear right now — it is set to read-only, or the workspace was connected without write access. Both live in Settings → Integrations.";
 
 /**
  * True only when Linear is connected *and* the grant is read-only.
@@ -2614,6 +2614,10 @@ export const useSetSetting = () =>
             queryKeys.claudeHookSettingsReview,
           ]
         : []),
+      // Read-only mode is folded into what the backend reports as writable, so
+      // the status has to be re-read for the write controls to gray out at once
+      // — the whole point of the switch is that it applies without reconnecting.
+      ...(a.key === LINEAR_SCOPE_KEY ? [queryKeys.linearStatusPrefix, queryKeys.linearOrgs] : []),
     ],
   });
 

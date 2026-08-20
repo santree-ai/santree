@@ -60,6 +60,28 @@ fn scopes_allow_write(scopes: &str) -> bool {
     scopes.is_empty() || scopes.split(',').any(|s| s.trim() == "write")
 }
 
+/// Whether santree may write to `slug` *right now*.
+///
+/// Two independent brakes: the workspace's own grant, and the user's read-only
+/// mode. The mode counts here rather than only at connect time because a switch
+/// that does nothing until you reconnect isn't a switch — flipping it has to
+/// disable the writes on the connection you already have.
+async fn can_write_to(db: &Db, slug: &str) -> Result<bool> {
+    if read_only_mode(db).await? {
+        return Ok(false);
+    }
+    let scopes = org_row(db, slug)
+        .await?
+        .map(|row| row.scopes)
+        .unwrap_or_default();
+    Ok(scopes_allow_write(&scopes))
+}
+
+/// Whether the user has put Linear in read-only mode.
+async fn read_only_mode(db: &Db) -> Result<bool> {
+    Ok(requested_scope(db).await? == "read")
+}
+
 // ── Org token store (OS keychain + SQLite metadata) ───────────────────────
 //
 // santree spawns agent CLIs as the same user, so anything readable from the
@@ -153,6 +175,8 @@ pub(crate) async fn orgs_by_name(db: &Db) -> Result<Vec<(String, String)>> {
 
 /// Every connected org (slug + display name).
 pub async fn list_orgs(db: &Db) -> Result<Vec<LinearOrg>> {
+    // Read once for the whole list: the mode is app-wide, the grant is per-org.
+    let read_only = read_only_mode(db).await?;
     // Its own query rather than `orgs_by_name`: that one feeds `resolved_org`, whose
     // (slug, name) shape several callers depend on.
     let rows = sqlx::query_as::<_, (String, String, String)>(
@@ -163,7 +187,7 @@ pub async fn list_orgs(db: &Db) -> Result<Vec<LinearOrg>> {
     Ok(rows
         .into_iter()
         .map(|(slug, name, scopes)| LinearOrg {
-            can_write: scopes_allow_write(&scopes),
+            can_write: !read_only && scopes_allow_write(&scopes),
             slug,
             name,
         })
@@ -991,11 +1015,14 @@ async fn repo_write_session<'a>(db: &'a Db, repo: &str) -> Result<Option<Session
     let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
-    let scopes = org_row(db, &session.slug)
-        .await?
-        .map(|row| row.scopes)
-        .unwrap_or_default();
-    if !scopes_allow_write(&scopes) {
+    if !can_write_to(db, &session.slug).await? {
+        // Two causes, two fixes — saying "reconnect" to someone who only has to
+        // flip a switch sends them through an OAuth round-trip for nothing.
+        if read_only_mode(db).await? {
+            anyhow::bail!(
+                "santree is set to read-only for Linear. Change it under Settings → Integrations."
+            );
+        }
         anyhow::bail!(
             "This Linear workspace is connected read-only. Reconnect it with write access from Settings → Integrations."
         );

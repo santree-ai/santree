@@ -3,16 +3,17 @@
  *  is live; the GitHub App (OAuth) and Personal Access Token methods are shown as
  *  work-in-progress, mirroring the WIP harnesses on the Agents screen. */
 
-import type { ReactNode } from "react";
+import { useState } from "react";
 import {
   CliIcon,
+  GitHubLogo,
   GlobeIcon,
   KeyIcon,
   LinearLogo,
   RefreshIcon,
   WarningIcon,
 } from "../../../components/icons";
-import { Badge, Button, ChevronSelect } from "../../../components/primitives";
+import { Badge, Button, ChevronSelect, Tabs } from "../../../components/primitives";
 import {
   LINEAR_SCOPE_KEY,
   type LinearScope,
@@ -26,7 +27,7 @@ import {
   useSetting,
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
-import { alpha, LINEAR_BRAND } from "../../../theme/colors";
+import { LINEAR_BRAND } from "../../../theme/colors";
 import { BinaryPathField } from "../BinaryPathField";
 import { Heading, KvRow, ToggleRow } from "../widgets";
 
@@ -170,13 +171,15 @@ function ViewedMarksCard() {
   );
 }
 
-/** How santree authenticates GitHub, Conductor-style: a radio group of methods.
- *  Only the `gh` CLI method is live today — it borrows the CLI's own session and
- *  powers PR creation + the Reviews dashboard. The GitHub App (OAuth) and
- *  Personal Access Token methods are shown as work-in-progress and can't be
- *  selected yet, matching the WIP harnesses on the Agents screen. */
+/** How santree authenticates GitHub: one card, one tab strip, one panel — the
+ *  same shape as the Agents screen, where the harnesses are also a set of
+ *  alternatives of which only some are live. Only the `gh` CLI method works
+ *  today; it borrows the CLI's own session and powers PR creation + Reviews. */
+type GhMethod = "cli" | "app" | "pat";
+
 function LocalGitHubCard() {
   const { data: gh, refetch, isFetching } = useGithubStatus();
+  const [method, setMethod] = useState<GhMethod>("cli");
 
   const badge = !gh ? null : !gh.installed ? (
     <Badge color="var(--color-status-amber)">not found</Badge>
@@ -186,23 +189,50 @@ function LocalGitHubCard() {
     <Badge color="var(--color-status-amber)">signed out</Badge>
   );
 
+  const wipBadge = <Badge color="var(--color-muted-2)">WIP</Badge>;
+
   return (
     <>
       <div className="mb-2.5 flex items-center gap-2">
+        <GitHubLogo size={15} className="text-fg-2" />
         <span className="text-[13px] font-semibold text-fg-bright">Local GitHub</span>
         <span className="text-[11.5px] text-muted-3">
           Choose how santree authenticates GitHub operations on your machine.
         </span>
       </div>
 
-      <div className="flex flex-col gap-4">
-        {/* gh CLI auth — the one live method, so it's always the selected radio. */}
-        <MethodCard
-          icon={<CliIcon size={16} className="text-fg-2" />}
-          title="gh CLI auth"
-          selected
-          trailing={
+      <div className="overflow-hidden rounded-xl border border-line-2 bg-raised">
+        <div className="flex items-center gap-3 px-4 pt-2.5">
+          <Tabs<GhMethod>
+            tabs={[
+              { value: "cli", label: "gh CLI auth", icon: <CliIcon size={14} /> },
+              {
+                value: "app",
+                label: "GitHub App",
+                icon: <GlobeIcon size={14} />,
+                dimmed: true,
+                badge: wipBadge,
+              },
+              {
+                value: "pat",
+                label: "Access token",
+                icon: <KeyIcon size={14} />,
+                dimmed: true,
+                badge: wipBadge,
+              },
+            ]}
+            value={method}
+            onChange={setMethod}
+            className="min-w-0 flex-1"
+          />
+        </div>
+
+        {method === "cli" ? (
+          <div className="flex flex-col gap-3.5 px-4 py-4">
             <div className="flex items-center gap-3">
+              <span className="flex-1 text-[12.5px] text-muted-3">
+                santree runs the `gh` CLI as you — no separate sign-in.
+              </span>
               {badge}
               <button
                 type="button"
@@ -213,124 +243,57 @@ function LocalGitHubCard() {
                 Refresh
               </button>
             </div>
-          }
-        >
-          {gh && !gh.installed && (
-            <div className="flex items-start gap-2 text-[11.5px]">
-              <WarningIcon size={13} className="mt-px flex-none text-status-amber" />
-              <div className="text-muted-3">
-                <span className="font-medium text-status-amber">
-                  GitHub CLI not found on your PATH.
-                </span>{" "}
-                Install it (<span className="font-mono text-fg-3">brew install gh</span>) and run{" "}
-                <span className="font-mono text-fg-3">gh auth login</span> — without it,
-                pull-request creation and the Reviews tab stay empty. Already installed? Point
-                santree at it below.
-              </div>
-            </div>
-          )}
 
-          {/* Offered in both states: not-found is when you need it most, but a
-              second install (or the wrong one on PATH) is a real case too. */}
-          <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
-            <BinaryPathField name="gh" hint="only needed if santree can't find it itself" />
-          </div>
-
-          {gh?.installed && (
-            <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
-              {gh.authenticated && <KvRow label="Account" value={gh.account} />}
-              {gh.authenticated && gh.name && <KvRow label="Name" value={gh.name} />}
-              {gh.authenticated && <KvRow label="Host" value={gh.host} />}
-              <KvRow label="CLI path" value={gh.detectedExec} />
-              {gh.version && <KvRow label="Version" value={gh.version} />}
-              {!gh.authenticated && (
-                <div className="flex items-start gap-2 border-t border-line px-3 py-2.5 text-[11.5px]">
-                  <WarningIcon size={13} className="mt-px flex-none text-status-amber" />
-                  <div className="text-muted-3">
-                    <span className="font-medium text-status-amber">Not signed in.</span> Run{" "}
-                    <span className="font-mono text-fg-3">gh auth login</span> in a terminal, then
-                    Refresh.
-                  </div>
+            {gh && !gh.installed && (
+              <div className="flex items-start gap-2 text-[11.5px]">
+                <WarningIcon size={13} className="mt-px flex-none text-status-amber" />
+                <div className="text-muted-3">
+                  <span className="font-medium text-status-amber">
+                    GitHub CLI not found on your PATH.
+                  </span>{" "}
+                  Install it (<span className="font-mono text-fg-3">brew install gh</span>) and run{" "}
+                  <span className="font-mono text-fg-3">gh auth login</span> — without it,
+                  pull-request creation and the Reviews tab stay empty. Already installed? Point
+                  santree at it below.
                 </div>
-              )}
+              </div>
+            )}
+
+            {/* Offered in both states: not-found is when you need it most, but a
+                second install (or the wrong one on PATH) is a real case too. */}
+            <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
+              <BinaryPathField name="gh" hint="only needed if santree can't find it itself" />
             </div>
-          )}
-        </MethodCard>
 
-        {/* GitHub App (OAuth) — WIP: sign in from within santree, no gh CLI. */}
-        <MethodCard
-          icon={<GlobeIcon size={16} className="text-muted-2" />}
-          title="GitHub App (OAuth)"
-          wip
-        />
-
-        {/* Personal Access Token — WIP: paste a token santree stores in the keychain. */}
-        <MethodCard
-          icon={<KeyIcon size={16} className="text-muted-2" />}
-          title="Personal Access Token"
-          wip
-        />
+            {gh?.installed && (
+              <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
+                {gh.authenticated && <KvRow label="Account" value={gh.account} />}
+                {gh.authenticated && gh.name && <KvRow label="Name" value={gh.name} />}
+                {gh.authenticated && <KvRow label="Host" value={gh.host} />}
+                <KvRow label="CLI path" value={gh.detectedExec} />
+                {gh.version && <KvRow label="Version" value={gh.version} />}
+                {!gh.authenticated && (
+                  <div className="flex items-start gap-2 border-t border-line px-3 py-2.5 text-[11.5px]">
+                    <WarningIcon size={13} className="mt-px flex-none text-status-amber" />
+                    <div className="text-muted-3">
+                      <span className="font-medium text-status-amber">Not signed in.</span> Run{" "}
+                      <span className="font-mono text-fg-3">gh auth login</span> in a terminal, then
+                      Refresh.
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="px-4 py-6 text-center text-[12px] text-muted-3">
+            {method === "app"
+              ? "Sign in to GitHub from inside santree, without the gh CLI."
+              : "Paste a personal access token; santree keeps it in the OS keychain."}
+            <div className="mt-1 text-[11.5px] text-muted-4">Not built yet.</div>
+          </div>
+        )}
       </div>
     </>
-  );
-}
-
-/** One row in the Local GitHub method picker: a radio, an icon, a title, an
- *  optional trailing slot, and expanded detail below when live. WIP methods are
- *  dimmed, get a WIP badge, and can't be selected. */
-function MethodCard({
-  icon,
-  title,
-  selected = false,
-  wip = false,
-  trailing,
-  children,
-}: {
-  icon: ReactNode;
-  title: string;
-  selected?: boolean;
-  wip?: boolean;
-  trailing?: ReactNode;
-  children?: ReactNode;
-}) {
-  return (
-    <div
-      className="rounded-xl border bg-raised px-4 py-3.5"
-      style={
-        selected
-          ? { borderColor: alpha(45), background: alpha(7) }
-          : { borderColor: "var(--color-line-2)" }
-      }
-    >
-      <div className="flex items-center gap-3">
-        <Radio checked={selected} dimmed={wip} />
-        <span className={wip ? "opacity-55" : undefined}>{icon}</span>
-        <span
-          className={`flex-1 text-[13px] font-semibold ${wip ? "text-muted-2" : "text-fg-bright"}`}
-        >
-          {title}
-        </span>
-        {wip ? <Badge color="var(--color-muted-2)">WIP</Badge> : trailing}
-      </div>
-      {/* Only the selected method expands its detail; the rest collapse to a row. */}
-      {selected && children && <div className="mt-3">{children}</div>}
-    </div>
-  );
-}
-
-/** A read-only radio dot — the picker is single-choice and locked to gh CLI. */
-function Radio({ checked, dimmed }: { checked: boolean; dimmed?: boolean }) {
-  return (
-    <span
-      className="flex h-[15px] w-[15px] flex-none items-center justify-center rounded-full border"
-      style={{
-        borderColor: checked ? "var(--accent)" : "var(--color-line-strong)",
-        opacity: dimmed ? 0.6 : 1,
-      }}
-    >
-      {checked && (
-        <span className="h-[7px] w-[7px] rounded-full" style={{ background: "var(--accent)" }} />
-      )}
-    </span>
   );
 }
