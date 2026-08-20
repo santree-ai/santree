@@ -48,11 +48,15 @@ export function UpdatesSection() {
               check.reset();
               setSetting({ scope: "app", key: UPDATE_CHANNEL_KEY, value });
             }}
-            className="w-[148px] rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-[12px] text-fg-3"
-            wrapperClassName="flex-none"
+            className="w-full rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-[12px] text-fg-3"
+            wrapperClassName="w-[148px]"
           >
-            <option value="stable">Stable</option>
-            <option value="beta">Beta</option>
+            <option value="stable" className="bg-input">
+              Stable
+            </option>
+            <option value="beta" className="bg-input">
+              Beta
+            </option>
           </ChevronSelect>
         </Field>
       </div>

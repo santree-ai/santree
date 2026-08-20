@@ -16,7 +16,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { getVersion } from "@tauri-apps/api/app";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   AgentKind,
@@ -565,6 +565,9 @@ export const useEnvFileVars = (path: string) =>
 export const useAppVersion = () =>
   useQuery({ queryKey: queryKeys.appVersion, queryFn: getVersion, staleTime: Infinity });
 
+/** Shared mutation scope for every updater call — see {@link useCheckForUpdate}. */
+const UPDATE_SCOPE = { id: "santree-update" };
+
 /**
  * Ask the release channel whether a newer version exists; the result lives on the
  * mutation (`data`), which is `null` when this install is current.
@@ -575,13 +578,21 @@ export const useAppVersion = () =>
  * cached "yes" that React Query replayed would offer an install the backend no
  * longer has.
  */
-export const useCheckForUpdate = () =>
-  useActionMutation({ mutationFn: () => unwrap(commands.checkForUpdate()) });
-
+export const useCheckForUpdate = ({ silent = false }: { silent?: boolean } = {}) =>
+  useActionMutation({
+    mutationFn: () => unwrap(commands.checkForUpdate()),
+    // Every update mutation shares one scope so React Query runs them serially: a
+    // background check that landed between a manual check and its install would
+    // otherwise clear the parked handle and turn Install into "no update ready".
+    scope: UPDATE_SCOPE,
+    // The watcher runs unattended — a failed check offline must not raise the
+    // global red toast for something nobody asked for.
+    silent,
+  });
 /** Download + install the update the last check found, then relaunch. Never
  *  resolves on success — the process is replaced mid-call. */
 export const useInstallUpdate = () =>
-  useActionMutation({ mutationFn: () => unwrap(commands.installUpdate()) });
+  useActionMutation({ mutationFn: () => unwrap(commands.installUpdate()), scope: UPDATE_SCOPE });
 
 /** Bytes downloaded during an install, or `null` before the first chunk lands.
  *  `total` is null when the server sent no content-length. */
@@ -594,6 +605,51 @@ export const useUpdateProgress = () => {
     };
   }, []);
   return progress;
+};
+
+/** How often santree asks its channel whether something newer exists. Deliberately
+ *  long: an app that nags is worse than one that's a few hours late, and the
+ *  Updates pane is always there for an answer on demand. */
+const UPDATE_POLL_MS = 6 * 60 * 60_000;
+/** Delay before the first check, so it never competes with startup — the DB open,
+ *  the watchers and the first render all matter more than an update banner. */
+const UPDATE_FIRST_CHECK_MS = 15_000;
+
+/**
+ * Background update checks. Mounted once by the app shell, because nothing else
+ * would ever tell you a release happened: the plugin has no polling of its own,
+ * so without this the updater only works for people who think to go looking.
+ *
+ * Announces through a toast rather than a modal — an update is news, not an
+ * interruption — and at most once per version per session, so leaving santree
+ * open for a week can't turn into a week of reminders.
+ */
+export const useUpdateWatcher = () => {
+  const { mutate: check } = useCheckForUpdate({ silent: true });
+  const announced = useRef<string | null>(null);
+
+  useEffect(() => {
+    const run = () =>
+      check(undefined, {
+        onSuccess: (update) => {
+          if (!update || announced.current === update.version) return;
+          announced.current = update.version;
+          toast.info(
+            `santree ${update.version} is available — install it from Settings → Updates.`,
+            {
+              title: "Update available",
+              duration: 12_000,
+            },
+          );
+        },
+      });
+    const first = setTimeout(run, UPDATE_FIRST_CHECK_MS);
+    const repeat = setInterval(run, UPDATE_POLL_MS);
+    return () => {
+      clearTimeout(first);
+      clearInterval(repeat);
+    };
+  }, [check]);
 };
 
 /** Read a boolean setting for an exact scope (defaults to false until loaded).

@@ -4,7 +4,7 @@ import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import { WelcomeScreen } from "../components/WelcomeScreen";
 import { TerminalLayer } from "../features/terminal/TerminalLayer";
 import { AgentRunHost } from "../features/trees/AgentRunHost";
-import { useRepos } from "../lib/queries";
+import { useRepos, useUpdateWatcher } from "../lib/queries";
 import { useKeyboardShortcuts } from "../lib/useKeyboardShortcuts";
 import { AgentRunsProvider } from "../state/AgentRuns";
 import { LegacyMigrationProvider } from "../state/LegacyMigration";
@@ -27,6 +27,7 @@ export const Route = createRootRoute({
  */
 function AppShell() {
   useKeyboardShortcuts();
+  useUpdateWatcher();
   const { data: repos } = useRepos();
   return (
     <AgentRunsProvider>
