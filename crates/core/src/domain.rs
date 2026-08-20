@@ -1427,6 +1427,10 @@ impl Default for Integrations {
 pub struct LinearOrg {
     pub slug: String,
     pub name: String,
+    /// Whether the OAuth grant includes `write`. Orgs connected before santree
+    /// recorded scopes read as writable — they all went through the old
+    /// unconditional read,write flow.
+    pub can_write: bool,
 }
 
 /// santree-CLI configuration (`.santree/metadata.json` + the CLI's global auth
@@ -1455,6 +1459,10 @@ pub struct LinearStatus {
     pub org_slug: Option<String>,
     /// Display name of that org.
     pub org: Option<String>,
+    /// Whether this repo's org can be written to. False when nothing is
+    /// connected, so read `authenticated` first: "not connected" and "connected
+    /// read-only" are different things to say to a user.
+    pub can_write: bool,
 }
 
 /// User settings, persisted as a JSON blob in the `settings` table. Seeded from

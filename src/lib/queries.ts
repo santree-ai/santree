@@ -673,6 +673,38 @@ export const useLinearOrgs = () =>
     staleTime: SETTING_STALE_TIME,
   });
 
+/** What santree asks Linear for when connecting: `"read"` or `"read_write"`.
+ *  App-scoped, defaults to read_write — what it requested unconditionally before
+ *  the choice existed. Read by Rust (`linear.rs`), so the two declarations of
+ *  this key have to agree, same split as {@link CONFIRM_ON_QUIT_KEY}. */
+export const LINEAR_SCOPE_KEY = "linear_scope";
+
+/** The permission levels santree can request from Linear. */
+export type LinearScope = "read" | "read_write";
+
+/** The stored `linear_scope`, or read_write for anything unset/unknown —
+ *  mirroring the Rust fallback, so a bad value can't quietly strip access. */
+export const parseLinearScope = (raw: string | null | undefined): LinearScope =>
+  raw === "read" ? "read" : "read_write";
+
+/** Said wherever a Linear write is disabled, so the four places that gate on it
+ *  can't drift into four different explanations. */
+export const LINEAR_READ_ONLY_HINT =
+  "Linear is connected read-only. Reconnect it with write access from Settings → Integrations to change issues from santree.";
+
+/**
+ * True only when Linear is connected *and* the grant is read-only.
+ *
+ * Deliberately not `!canWrite`: "nothing connected" and "connected read-only"
+ * want different words, and while the status is still loading nothing should
+ * flicker to disabled. The backend refuses the write either way — this is the
+ * courtesy, `repo_write_session` is the guarantee.
+ */
+export const useLinearReadOnly = (repo: string) => {
+  const { data } = useLinearStatus(repo);
+  return data?.authenticated === true && data.canWrite === false;
+};
+
 export const useRepos = () =>
   useUnwrappedQuery(queryKeys.repos, () => commands.listRepos(), {
     staleTime: SETTING_STALE_TIME,

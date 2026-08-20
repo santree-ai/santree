@@ -23,6 +23,7 @@ export function IssueHeader({
   onInvestigate,
   onRefresh,
   refreshing,
+  linearReadOnly = false,
 }: {
   ticket: TriageTicket;
   detail?: TriageDetail;
@@ -31,13 +32,15 @@ export function IssueHeader({
   onInvestigate: () => void;
   onRefresh: () => void;
   refreshing: boolean;
+  /** Linear granted read-only, so the status picker is shown but inert. */
+  linearReadOnly?: boolean;
 }) {
   return (
     <div className="flex-none border-b border-hairline px-5 pt-4 pb-3.5">
       <div className="mb-2 flex items-center gap-2.5">
         <span className="font-mono text-[11.5px] text-muted-2">{ticket.id}</span>
         <PriorityPill priority={ticket.priority} />
-        <StatusPicker detail={detail} onSetState={onSetState} />
+        <StatusPicker detail={detail} onSetState={onSetState} readOnly={linearReadOnly} />
         <SlaCountdown
           breachMs={ticket.slaBreachMs}
           className="font-mono text-[10.5px] text-status-red/90"

@@ -11,13 +11,17 @@
 import type { TriageDetail } from "../../bindings";
 import { ChevronDownIcon } from "../../components/icons";
 import { Dropdown } from "../../components/primitives";
+import { LINEAR_READ_ONLY_HINT } from "../../lib/queries";
 
 export function StatusPicker({
   detail,
   onSetState,
+  readOnly = false,
 }: {
   detail?: TriageDetail;
   onSetState: (stateId: string) => void;
+  /** Linear is connected without `write`: show the state, refuse to change it. */
+  readOnly?: boolean;
 }) {
   if (!detail) {
     return (
@@ -30,22 +34,26 @@ export function StatusPicker({
   const current = detail.states.find((s) => s.id === detail.stateId);
   const label = current?.name ?? detail.state;
   const color = current?.color ?? "var(--color-muted-3)";
-  const disabled = detail.states.length === 0;
+  const disabled = readOnly || detail.states.length === 0;
 
   return (
     <Dropdown
       menuClassName="min-w-[170px] px-1"
       trigger={(toggle) => (
-        <button
-          type="button"
-          onClick={() => !disabled && toggle()}
-          disabled={disabled}
-          className="flex cursor-pointer items-center gap-1.5 rounded border border-line-2 bg-input px-[7px] py-[2.5px] text-[10.5px] text-fg-2 hover:border-line-strong disabled:cursor-default disabled:opacity-60"
-        >
-          <span className="h-1.5 w-1.5 flex-none rounded-full" style={{ background: color }} />
-          {label}
-          <ChevronDownIcon size={10} className="text-muted-3" />
-        </button>
+        // A `title` on a disabled button is suppressed by the browser, so the
+        // explanation rides on a wrapper that is still hoverable.
+        <span title={readOnly ? LINEAR_READ_ONLY_HINT : undefined}>
+          <button
+            type="button"
+            onClick={() => !disabled && toggle()}
+            disabled={disabled}
+            className="flex cursor-pointer items-center gap-1.5 rounded border border-line-2 bg-input px-[7px] py-[2.5px] text-[10.5px] text-fg-2 hover:border-line-strong disabled:cursor-default disabled:opacity-60"
+          >
+            <span className="h-1.5 w-1.5 flex-none rounded-full" style={{ background: color }} />
+            {label}
+            <ChevronDownIcon size={10} className="text-muted-3" />
+          </button>
+        </span>
       )}
     >
       {(close) =>

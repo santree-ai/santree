@@ -30,6 +30,7 @@ import {
   INVESTIGATE_REMOTE_CONTROL_KEY,
   TRIAGE_GOOD_CITIZEN_KEY,
   useBaseWorktree,
+  useLinearReadOnly,
   usePrefetchOnHover,
   useRefreshTriage,
   useRepos,
@@ -207,6 +208,8 @@ export function TriageView() {
   // Warm a ticket's detail on hover so the click renders instantly.
   const onHoverRow = usePrefetchOnHover(activeRepo);
   const setState = useTriageSetState(activeRepo);
+  // A read-only Linear grant leaves everything here readable; only the writes go.
+  const linearReadOnly = useLinearReadOnly(activeRepo);
   const repoPath = repos.find((r) => r.name === activeRepo)?.path ?? undefined;
 
   // The Triage Investigation action config for this repo (repo override, else
@@ -496,6 +499,7 @@ export function TriageView() {
               ticket={activeTicket}
               detail={detail?.id === activeTicket.id ? detail : undefined}
               onSetState={(stateId) => setState.mutate({ ticketId: activeTicket.id, stateId })}
+              linearReadOnly={linearReadOnly}
               investigating={selectedTab === "investigate"}
               onInvestigate={investigate}
               onRefresh={refresh}

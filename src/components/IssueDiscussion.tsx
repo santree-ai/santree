@@ -8,7 +8,7 @@
 import { memo, useState } from "react";
 
 import type { TriageComment, TriageDetail } from "../bindings";
-import { useAddComment } from "../lib/queries";
+import { LINEAR_READ_ONLY_HINT, useAddComment, useLinearReadOnly } from "../lib/queries";
 import { Avatar } from "./Avatar";
 import { Markdown } from "./Markdown";
 import { Button, Skeleton } from "./primitives";
@@ -43,10 +43,13 @@ function CommentComposer({
 }) {
   const [body, setBody] = useState("");
   const add = useAddComment(repo);
+  const readOnly = useLinearReadOnly(repo);
   const trimmed = body.trim();
 
   const submit = () => {
-    if (!trimmed || add.isPending) return;
+    // Guarded here rather than only on the button: ⌘⏎ reaches this directly, and
+    // a disabled button would still leave the keyboard path open.
+    if (!trimmed || add.isPending || readOnly) return;
     // `useAddComment` appends the comment to the thread optimistically, so the
     // field has to empty at once too — clearing only on success shows the text
     // twice for the length of the round-trip. A failed post rolls the comment
@@ -77,18 +80,26 @@ function CommentComposer({
             onClose();
           }
         }}
-        placeholder={placeholder}
+        placeholder={readOnly ? "Linear is connected read-only" : placeholder}
+        disabled={readOnly}
         rows={parentId ? 2 : 3}
         className="w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] leading-[1.55] text-fg-2 placeholder:text-muted-4 focus:border-line-strong focus:outline-none"
       />
       <div className="mt-1.5 flex items-center justify-end gap-2">
-        <span className="mr-auto font-mono text-[9px] text-muted-4">⌘⏎ to send</span>
+        <span className="mr-auto text-[9.5px] text-muted-4">
+          {readOnly ? LINEAR_READ_ONLY_HINT : <span className="font-mono">⌘⏎ to send</span>}
+        </span>
         {onClose && (
           <Button variant="ghost" size="sm" onClick={onClose}>
             Cancel
           </Button>
         )}
-        <Button variant="primary" size="sm" onClick={submit} disabled={!trimmed || add.isPending}>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={submit}
+          disabled={!trimmed || add.isPending || readOnly}
+        >
           {add.isPending ? "Posting…" : parentId ? "Reply" : "Comment"}
         </Button>
       </div>
@@ -116,6 +127,7 @@ function CommentItem({
   ticketId: string;
 }) {
   const [replying, setReplying] = useState(false);
+  const readOnly = useLinearReadOnly(repo);
   return (
     <div
       className="rounded-[10px] border border-hairline bg-panel px-3.5 py-3"
@@ -154,7 +166,9 @@ function CommentItem({
           <button
             type="button"
             onClick={() => setReplying(true)}
-            className="mt-2.5 cursor-pointer text-[11px] font-medium text-muted-3 hover:text-fg-2"
+            disabled={readOnly}
+            title={readOnly ? LINEAR_READ_ONLY_HINT : undefined}
+            className="mt-2.5 cursor-pointer text-[11px] font-medium text-muted-3 hover:text-fg-2 disabled:cursor-default disabled:opacity-50 disabled:hover:text-muted-3"
           >
             Reply
           </button>

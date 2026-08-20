@@ -12,12 +12,16 @@ import {
   RefreshIcon,
   WarningIcon,
 } from "../../../components/icons";
-import { Badge, Button } from "../../../components/primitives";
+import { Badge, Button, ChevronSelect } from "../../../components/primitives";
 import {
+  LINEAR_SCOPE_KEY,
+  type LinearScope,
+  parseLinearScope,
   SYNC_VIEWED_KEY,
   useGithubStatus,
   useLinearConnect,
   useLinearOrgs,
+  useSetSetting,
   useSetSyncViewed,
   useSetting,
 } from "../../../lib/queries";
@@ -41,6 +45,8 @@ export function IntegrationsSection() {
   const { settings } = useApp();
   const { data: orgs = [] } = useLinearOrgs();
   const connect = useLinearConnect();
+  const scope: LinearScope = parseLinearScope(useSetting("app", LINEAR_SCOPE_KEY).data);
+  const { mutate: setSetting } = useSetSetting();
   if (!settings) return null;
   const connected = orgs.length > 0;
 
@@ -77,6 +83,34 @@ export function IntegrationsSection() {
           </Button>
         </div>
 
+        {/* What the NEXT connect asks for. Deliberately not derived from the
+            connected orgs: the grant is fixed at authorize time, so this is a
+            request, and changing it only matters on the trip through Linear. */}
+        <div className="flex items-center gap-4 border-t border-line px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <div className="mb-[3px] text-[12.5px] font-medium text-fg-3">
+              Permissions to request
+            </div>
+            <div className="text-[11.5px] text-muted-3">
+              Read-only workspaces still show issues, triage and comments — santree just can't
+              change anything. Reconnect a workspace to move it between the two.
+            </div>
+          </div>
+          <ChevronSelect
+            value={scope}
+            onChange={(value) => setSetting({ scope: "app", key: LINEAR_SCOPE_KEY, value })}
+            className="w-[148px] rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-[12px] text-fg-3"
+            wrapperClassName="flex-none"
+          >
+            <option value="read_write" className="bg-input">
+              Read &amp; write
+            </option>
+            <option value="read" className="bg-input">
+              Read-only
+            </option>
+          </ChevronSelect>
+        </div>
+
         {connected && (
           <div className="border-t border-line bg-surface px-4 py-2">
             {orgs.map((org) => (
@@ -84,6 +118,7 @@ export function IntegrationsSection() {
                 <span className="h-1.5 w-1.5 rounded-full" style={{ background: LINEAR_BRAND }} />
                 <span className="text-[12px] text-fg-3">{org.name}</span>
                 <span className="font-mono text-[10.5px] text-muted-4">{org.slug}</span>
+                {!org.canWrite && <Badge>read-only</Badge>}
               </div>
             ))}
           </div>

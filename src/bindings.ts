@@ -1264,6 +1264,12 @@ export type LegacyCliMigration = {
 export type LinearOrg = {
 	slug: string,
 	name: string,
+	/**
+	 *  Whether the OAuth grant includes `write`. Orgs connected before santree
+	 *  recorded scopes read as writable — they all went through the old
+	 *  unconditional read,write flow.
+	 */
+	canWrite: boolean,
 };
 
 /**  Linear connection status surfaced to the UI for a given repo. */
@@ -1274,6 +1280,12 @@ export type LinearStatus = {
 	orgSlug: string | null,
 	/**  Display name of that org. */
 	org: string | null,
+	/**
+	 *  Whether this repo's org can be written to. False when nothing is
+	 *  connected, so read `authenticated` first: "not connected" and "connected
+	 *  read-only" are different things to say to a user.
+	 */
+	canWrite: boolean,
 };
 
 /**

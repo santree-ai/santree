@@ -3,7 +3,9 @@
  *  Merges what used to be the separate "Issues" and "Trees" sections. */
 
 import {
+  LINEAR_READ_ONLY_HINT,
   useBoolSetting,
+  useLinearOrgs,
   useResolvedBoolSetting,
   useSetSetting,
   WORK_MOVE_IN_PROGRESS_KEY,
@@ -21,12 +23,21 @@ function TrackingCard({ forRepo }: { forRepo?: string }) {
   const resolvedValue = useResolvedBoolSetting(forRepo ?? "", WORK_MOVE_IN_PROGRESS_KEY).value;
   const value = forRepo ? resolvedValue : appValue;
   const { mutate: setSetting } = useSetSetting();
+  // Scoped to the orgs rather than a repo: this row also renders app-wide, where
+  // there is no repo to resolve an org from.
+  const { data: orgs = [] } = useLinearOrgs();
+  const readOnly = orgs.length > 0 && orgs.every((o) => !o.canWrite);
   return (
     <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
       <ToggleRow
         label="Move issue to In Progress when a worktree starts"
-        hint="Update the Linear issue to its “started” status so Linear reflects what you're actually working on. Needs Linear connected with write access."
-        on={value}
+        hint={
+          readOnly
+            ? LINEAR_READ_ONLY_HINT
+            : "Update the Linear issue to its “started” status so Linear reflects what you're actually working on. Needs Linear connected with write access."
+        }
+        on={value && !readOnly}
+        disabled={readOnly}
         onChange={(next) =>
           setSetting({
             scope,

@@ -1,0 +1,11 @@
+-- What OAuth scopes each connected org actually granted.
+--
+-- santree used to request `read,write` unconditionally; a workspace where that
+-- isn't approved would connect fine and then fail at the first write with a
+-- generic GraphQL permission error. Recording what was granted lets the UI
+-- disable the write controls instead, and lets the backend refuse before the
+-- round-trip.
+--
+-- Empty means "connected before santree recorded this" — every such org went
+-- through the old read,write flow, so they are treated as write-capable.
+ALTER TABLE linear_orgs ADD COLUMN scopes TEXT NOT NULL DEFAULT '';

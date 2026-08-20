@@ -35,6 +35,31 @@ const GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 const OAUTH_PORT: u16 = 8420;
 const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
 
+/// The `settings` row (scope `"app"`) choosing what santree *asks* Linear for.
+/// Absent = read,write, which is what it always requested before the choice existed.
+pub const LINEAR_SCOPE_KEY: &str = "linear_scope";
+
+/// The OAuth scope string for a connection, from the [`LINEAR_SCOPE_KEY`] setting.
+/// Only `"read"` opts down; anything else (unset, or a hand-edited value) keeps
+/// the historical read,write so a typo can't silently strip someone's access.
+async fn requested_scope(db: &Db) -> Result<&'static str> {
+    let raw = settings::get(db, "app", LINEAR_SCOPE_KEY).await?;
+    Ok(if raw.as_deref() == Some("read") {
+        "read"
+    } else {
+        "read,write"
+    })
+}
+
+/// Whether a stored scope string permits writes.
+///
+/// Empty means the org connected before santree recorded scopes — every one of
+/// those went through the unconditional read,write flow, so treating them as
+/// write-capable is the truthful reading, not a lenient default.
+fn scopes_allow_write(scopes: &str) -> bool {
+    scopes.is_empty() || scopes.split(',').any(|s| s.trim() == "write")
+}
+
 // ── Org token store (OS keychain + SQLite metadata) ───────────────────────
 //
 // santree spawns agent CLIs as the same user, so anything readable from the
@@ -60,6 +85,8 @@ struct OrgRow {
     slug: String,
     name: String,
     expires_at: i64,
+    /// Comma-separated OAuth scopes Linear granted; see `scopes_allow_write`.
+    scopes: String,
 }
 
 fn keychain_entry(slug: &str) -> Result<keyring::Entry> {
@@ -126,10 +153,20 @@ pub(crate) async fn orgs_by_name(db: &Db) -> Result<Vec<(String, String)>> {
 
 /// Every connected org (slug + display name).
 pub async fn list_orgs(db: &Db) -> Result<Vec<LinearOrg>> {
-    Ok(orgs_by_name(db)
-        .await?
+    // Its own query rather than `orgs_by_name`: that one feeds `resolved_org`, whose
+    // (slug, name) shape several callers depend on.
+    let rows = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT slug, name, scopes FROM linear_orgs ORDER BY name",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
         .into_iter()
-        .map(|(slug, name)| LinearOrg { slug, name })
+        .map(|(slug, name, scopes)| LinearOrg {
+            can_write: scopes_allow_write(&scopes),
+            slug,
+            name,
+        })
         .collect())
 }
 
@@ -148,14 +185,12 @@ pub(crate) fn resolved_org<'a>(
 }
 
 async fn org_row(db: &Db, slug: &str) -> Result<Option<OrgRow>> {
-    Ok(
-        sqlx::query_as::<_, OrgRow>(
-            "SELECT slug, name, expires_at FROM linear_orgs WHERE slug = ?",
-        )
-        .bind(slug)
-        .fetch_optional(db)
-        .await?,
+    Ok(sqlx::query_as::<_, OrgRow>(
+        "SELECT slug, name, expires_at, scopes FROM linear_orgs WHERE slug = ?",
     )
+    .bind(slug)
+    .fetch_optional(db)
+    .await?)
 }
 
 /// Persist an org: credential to the keychain, metadata to SQLite. Keychain
@@ -164,15 +199,17 @@ async fn org_row(db: &Db, slug: &str) -> Result<Option<OrgRow>> {
 async fn upsert_org(db: &Db, org: &OrgRow, tokens: Tokens) -> Result<()> {
     save_tokens(&org.slug, tokens).await?;
     sqlx::query(
-        "INSERT INTO linear_orgs (slug, name, expires_at)
-         VALUES (?, ?, ?)
+        "INSERT INTO linear_orgs (slug, name, expires_at, scopes)
+         VALUES (?, ?, ?, ?)
          ON CONFLICT(slug) DO UPDATE SET
            name = excluded.name,
-           expires_at = excluded.expires_at",
+           expires_at = excluded.expires_at,
+           scopes = excluded.scopes",
     )
     .bind(&org.slug)
     .bind(&org.name)
     .bind(org.expires_at)
+    .bind(&org.scopes)
     .execute(db)
     .await?;
     Ok(())
@@ -255,12 +292,18 @@ pub(crate) async fn import_cli_credential(
     .context("the santree CLI's Linear sign-in is no longer valid — connect Linear from Settings instead")?;
 
     let (slug, name) = fetch_viewer_org(&body.access_token).await?;
+    let scopes = body
+        .scope
+        .as_ref()
+        .map(GrantedScope::as_csv)
+        .unwrap_or_default();
     upsert_org(
         db,
         &OrgRow {
             slug: slug.clone(),
             name: name.clone(),
             expires_at: now_ms() + body.expires_in * 1000,
+            scopes: scopes.clone(),
         },
         Tokens {
             access: body.access_token,
@@ -269,7 +312,11 @@ pub(crate) async fn import_cli_credential(
     )
     .await?;
     log::info!("imported the Linear credential for org {slug} from the santree CLI auth store");
-    Ok(LinearOrg { slug, name })
+    Ok(LinearOrg {
+        can_write: scopes_allow_write(&scopes),
+        slug,
+        name,
+    })
 }
 
 /// The org slug a repo should use — see [`resolved_org`].
@@ -306,6 +353,35 @@ struct TokenResponse {
     access_token: String,
     refresh_token: String,
     expires_in: i64,
+    /// What Linear actually granted. Deserialized permissively because the
+    /// shape is the server's to choose: absent on some responses, a JSON list
+    /// on others, a delimited string elsewhere. Guessing one and being wrong
+    /// would make every connection look read-only.
+    #[serde(default)]
+    scope: Option<GrantedScope>,
+}
+
+/// Linear's `scope` field, in whichever shape it arrives.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum GrantedScope {
+    List(Vec<String>),
+    Text(String),
+}
+
+impl GrantedScope {
+    /// Normalized to the comma-separated form stored on the org row.
+    fn as_csv(&self) -> String {
+        match self {
+            Self::List(items) => items.join(","),
+            // Linear documents commas; OAuth generally uses spaces. Accept both.
+            Self::Text(s) => s
+                .split([',', ' '])
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join(","),
+        }
+    }
 }
 
 /// POST the OAuth token endpoint (code exchange or refresh) and decode the token
@@ -425,6 +501,13 @@ async fn rotate(db: &Db, row: OrgRow, tokens: Tokens) -> Result<String> {
         slug: row.slug,
         name: row.name,
         expires_at: now_ms() + body.expires_in * 1000,
+        // A refresh response need not repeat the grant; keeping the recorded scopes
+        // stops a routine token refresh from silently demoting the org to read-only.
+        scopes: body
+            .scope
+            .as_ref()
+            .map(GrantedScope::as_csv)
+            .unwrap_or(row.scopes),
     };
     let rotated = Tokens {
         access: body.access_token,
@@ -817,13 +900,14 @@ pub async fn tickets_by_identifier(
 pub async fn auth_status(db: &Db, repo: &str) -> Result<LinearStatus> {
     let orgs = list_orgs(db).await?;
     let slug = resolve_org_slug(db, repo).await?;
-    let org = slug
+    let resolved = slug
         .as_ref()
-        .and_then(|s| orgs.iter().find(|o| &o.slug == s).map(|o| o.name.clone()));
+        .and_then(|s| orgs.iter().find(|o| &o.slug == s));
     Ok(LinearStatus {
         authenticated: !orgs.is_empty(),
+        org: resolved.map(|o| o.name.clone()),
+        can_write: resolved.is_some_and(|o| o.can_write),
         org_slug: slug,
-        org,
     })
 }
 
@@ -895,6 +979,28 @@ async fn repo_session<'a>(db: &'a Db, repo: &str) -> Result<Option<Session<'a>>>
         slug,
         token: tokio::sync::RwLock::new(token),
     }))
+}
+
+/// [`repo_session`], refused up front when the workspace granted read-only.
+///
+/// Linear's own answer to a missing scope is a generic GraphQL permission error,
+/// which reads as "santree is broken" rather than "you connected read-only". Every
+/// mutating path resolves its session through here, so a new one can't quietly
+/// skip the check — the UI gate is the courtesy, this is the guarantee.
+async fn repo_write_session<'a>(db: &'a Db, repo: &str) -> Result<Option<Session<'a>>> {
+    let Some(session) = repo_session(db, repo).await? else {
+        return Ok(None);
+    };
+    let scopes = org_row(db, &session.slug)
+        .await?
+        .map(|row| row.scopes)
+        .unwrap_or_default();
+    if !scopes_allow_write(&scopes) {
+        anyhow::bail!(
+            "This Linear workspace is connected read-only. Reconnect it with write access from Settings → Integrations."
+        );
+    }
+    Ok(Some(session))
 }
 
 /// POST a GraphQL query with a given token and return the typed `data` payload. Callers
@@ -1522,7 +1628,7 @@ pub async fn set_issue_state(
     ticket_id: &str,
     state_id: &str,
 ) -> Result<Option<()>> {
-    let Some(session) = repo_session(db, repo).await? else {
+    let Some(session) = repo_write_session(db, repo).await? else {
         return Ok(None);
     };
     set_state(&session, ticket_id, state_id).await.map(Some)
@@ -1581,7 +1687,7 @@ pub async fn create_comment(
     parent_id: Option<&str>,
     body: &str,
 ) -> Result<Option<()>> {
-    let Some(session) = repo_session(db, repo).await? else {
+    let Some(session) = repo_write_session(db, repo).await? else {
         return Ok(None);
     };
 
@@ -1671,7 +1777,7 @@ pub async fn move_issue_to_started(db: &Db, repo: &str, issue_id: &str) -> Resul
         issue: Option<IssueNode>,
     }
 
-    let Some(session) = repo_session(db, repo).await? else {
+    let Some(session) = repo_write_session(db, repo).await? else {
         return Ok(None);
     };
     let data: Data = session
@@ -2318,13 +2424,15 @@ pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
     let state = hex(&random_bytes(16));
 
     let redirect_uri = format!("http://localhost:{OAUTH_PORT}");
+    let scope = requested_scope(db).await?;
     let params = [
         ("client_id", CLIENT_ID),
         ("redirect_uri", redirect_uri.as_str()),
         ("response_type", "code"),
-        // `write` lets the app move issues between workflow states (the triage
-        // status picker). Read-only tokens from older connects must reconnect.
-        ("scope", "read,write"),
+        // `write` lets the app move issues between workflow states, comment and
+        // promote tickets. Which one we ask for is the user's choice — a workspace
+        // that only approves reads still connects, and the UI disables the rest.
+        ("scope", scope),
         ("state", state.as_str()),
         ("code_challenge", challenge.as_str()),
         ("code_challenge_method", "S256"),
@@ -2341,7 +2449,7 @@ pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
         .await
         .context("oauth listener task")??;
 
-    let (access_token, refresh_token, expires_at) =
+    let (access_token, refresh_token, expires_at, scopes) =
         exchange_code(&code, &redirect_uri, &verifier).await?;
     let (slug, name) = fetch_viewer_org(&access_token).await?;
 
@@ -2351,6 +2459,7 @@ pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
             slug,
             name,
             expires_at,
+            scopes,
         },
         Tokens {
             access: access_token,
@@ -2543,7 +2652,7 @@ async fn exchange_code(
     code: &str,
     redirect_uri: &str,
     verifier: &str,
-) -> Result<(String, String, i64)> {
+) -> Result<(String, String, i64, String)> {
     let body = token_request(
         &[
             ("grant_type", "authorization_code"),
@@ -2559,6 +2668,10 @@ async fn exchange_code(
         body.access_token,
         body.refresh_token,
         now_ms() + body.expires_in * 1000,
+        body.scope
+            .as_ref()
+            .map(GrantedScope::as_csv)
+            .unwrap_or_default(),
     ))
 }
 
