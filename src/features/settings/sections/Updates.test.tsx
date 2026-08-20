@@ -41,7 +41,7 @@ describe("Settings → Updates", () => {
 
   it("defaults to the stable channel when nothing is stored", () => {
     render(<UpdatesSection />);
-    expect(screen.getByRole("radio", { name: "Stable" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("combobox")).toHaveValue("stable");
     expect(screen.getByText("0.1.0 (stable)")).toBeInTheDocument();
   });
 
@@ -77,7 +77,7 @@ describe("Settings → Updates", () => {
     checkData = { version: "0.2.0", currentVersion: "0.1.0", notes: null };
     render(<UpdatesSection />);
 
-    fireEvent.click(screen.getByRole("radio", { name: "Beta" }));
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "beta" } });
     expect(checkReset).toHaveBeenCalledTimes(1);
     expect(setSetting).toHaveBeenCalledWith({
       scope: "app",

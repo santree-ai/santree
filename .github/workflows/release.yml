@@ -167,6 +167,12 @@ jobs:
           APPLE_API_KEY_PATH: ${{ runner.temp }}/asc-api-key.p8
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # GitHub sets CI=true, which makes the bundler pass `--skip-jenkins` to
+          # bundle_dmg.sh — dropping the Finder AppleScript that paints the
+          # background and positions the icons, so the DMG ships with default
+          # layout and no artwork (tauri-apps/tauri#592). This is the bundler's
+          # own opt-out; the runners do have a window server for it to talk to.
+          TAURI_BUNDLER_DMG_IGNORE_CI: "true"
         run: |
           pnpm tauri build \
             --target universal-apple-darwin \

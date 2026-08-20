@@ -1,9 +1,8 @@
 /** Settings → Updates: the release channel, and the manual check + install. */
-import { Button, Segmented } from "../../../components/primitives";
+import { Button, ChevronSelect } from "../../../components/primitives";
 import {
   parseUpdateChannel,
   UPDATE_CHANNEL_KEY,
-  type UpdateChannelSetting,
   useAppVersion,
   useCheckForUpdate,
   useInstallUpdate,
@@ -12,11 +11,6 @@ import {
   useUpdateProgress,
 } from "../../../lib/queries";
 import { Field, Heading, KvRow } from "../widgets";
-
-const CHANNELS: { value: UpdateChannelSetting; label: string }[] = [
-  { value: "stable", label: "Stable" },
-  { value: "beta", label: "Beta" },
-];
 
 const mb = (bytes: number) => `${(bytes / 1_000_000).toFixed(1)} MB`;
 
@@ -45,8 +39,7 @@ export function UpdatesSection() {
           label="Release channel"
           hint="Beta gets every release as soon as it builds. Switching back to Stable takes effect once a stable release passes the beta you're on — updates only ever move forward."
         >
-          <Segmented<UpdateChannelSetting>
-            options={CHANNELS}
+          <ChevronSelect
             value={channel}
             onChange={(value) => {
               // Drop the previous answer with the channel that produced it: the
@@ -55,7 +48,12 @@ export function UpdatesSection() {
               check.reset();
               setSetting({ scope: "app", key: UPDATE_CHANNEL_KEY, value });
             }}
-          />
+            className="w-[148px] rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-[12px] text-fg-3"
+            wrapperClassName="flex-none"
+          >
+            <option value="stable">Stable</option>
+            <option value="beta">Beta</option>
+          </ChevronSelect>
         </Field>
       </div>
 
