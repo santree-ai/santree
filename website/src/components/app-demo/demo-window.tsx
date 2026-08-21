@@ -38,7 +38,7 @@ export function DemoWindow({ view, live = false }: { view: DemoView; live?: bool
       className="demo-fit relative aspect-16/10 w-full overflow-hidden rounded-xl border border-hairline shadow-[0_1px_1px_rgba(0,0,0,0.45),0_24px_60px_-16px_rgba(0,0,0,0.65),0_48px_120px_-24px_rgba(0,0,0,0.8),0_0_120px_-40px_rgba(45,212,167,0.3)]"
     >
       <div
-        className="demo-canvas pointer-events-none absolute left-1/2 top-1/2 flex select-none flex-col bg-panel text-left"
+        className="demo-canvas pointer-events-none absolute left-1/2 top-1/2 flex select-none flex-col bg-app text-left"
         style={{ width: DESIGN_W, height: DESIGN_H }}
       >
         <WindowTopBar view={view} />

@@ -19,13 +19,13 @@ export const DEMO_VIEWS: readonly DemoViewMeta[] = [
     id: "triage",
     label: "Triage",
     count: 5,
-    aria: "Preview of santree's Triage view: a Linear inbox with priority-ranked tickets, one being investigated by a Claude agent, and an Investigate button in the detail pane.",
+    aria: "Preview of santree's Triage view: a Linear inbox with priority-ranked tickets, one being investigated by a Claude agent, and an Investigate button in the issue header.",
   },
   {
     id: "issues",
     label: "Issues",
     count: 12,
-    aria: "Preview of santree's Issues view: a dependency graph of tickets with status-colored nodes; one node is highlighted as an agent launches on it.",
+    aria: "Preview of santree's Issues view: a grouped ticket list beside a dependency graph with project bands; one ticket is queued in the launch tray as an agent launches on it.",
   },
   {
     id: "trees",
@@ -37,9 +37,24 @@ export const DEMO_VIEWS: readonly DemoViewMeta[] = [
     id: "reviews",
     label: "Reviews",
     count: 3,
-    aria: "Preview of santree's Reviews view: a pull-request dashboard with a diff and an AI review comment anchored to the changed lines.",
+    aria: "Preview of santree's Reviews view: a pull-request inbox with a diff and an AI review comment anchored to the changed lines.",
   },
 ] as const;
+
+/** The nav bar's Agents badge: agents blocked on you (SAN-138 is waiting). */
+export const NEEDS_YOU = 1;
+
+/** The right-aligned status summary in the top bar, per view (Triage has none —
+ * its tab badge already carries the count, like the real app). */
+export const VIEW_SUMMARY: Record<
+  DemoView,
+  { lead?: string; value: string; color: "accent" | "green" } | null
+> = {
+  triage: null,
+  issues: { lead: "12 tasks · ", value: "2 ready", color: "green" },
+  trees: { lead: "5 worktrees · ", value: "2 running", color: "accent" },
+  reviews: { value: "3 awaiting review", color: "accent" },
+};
 
 /* ---------------------------------------------------------------- *
  * Trees
@@ -50,15 +65,13 @@ export type SessionState = "running" | "waiting" | "delegating" | "merged";
 export interface DemoWorktree {
   ticket: string;
   title: string;
-  branch: string;
   /** 1 = stacked under the previous depth-0 entry (elbow connector). */
   depth: 0 | 1;
   state: SessionState;
-  /** Seconds already on the clock at t=0; the live clock counts up from here. */
-  clockBaseSec?: number;
   add: number;
   del: number;
   ahead?: number;
+  dirty?: boolean;
   pr?: { num: number; state: "open" | "merged" };
   active?: boolean;
 }
@@ -67,40 +80,35 @@ export const WORKTREES: readonly DemoWorktree[] = [
   {
     ticket: "SAN-142",
     title: "Fix OAuth token refresh race",
-    branch: "santree/san-142-oauth-refresh",
     depth: 0,
     state: "running",
-    clockBaseSec: 252,
     add: 186,
     del: 44,
     ahead: 2,
+    dirty: true,
     active: true,
   },
   {
     ticket: "SAN-127",
     title: "Session restore on relaunch",
-    branch: "santree/san-127-session-restore",
     depth: 1,
     state: "delegating",
-    clockBaseSec: 71,
     add: 58,
     del: 3,
   },
   {
     ticket: "SAN-138",
     title: "Webhook retries duplicate on 429",
-    branch: "santree/san-138-webhook-retries",
     depth: 0,
     state: "waiting",
-    clockBaseSec: 767,
     add: 94,
     del: 12,
     ahead: 1,
+    pr: { num: 816, state: "open" },
   },
   {
     ticket: "SAN-119",
     title: "Bound the image cache",
-    branch: "santree/san-119-image-cache",
     depth: 0,
     state: "merged",
     add: 61,
@@ -151,11 +159,12 @@ export const SESSION_STATUS = {
   cost: "$1.87",
 } as const;
 
+/** The worktree's VS Code-style bottom bar: git state + the base-branch chip. */
 export const BOTTOM_BAR = {
-  branch: "santree/san-142-oauth-refresh",
-  add: 186,
-  del: 44,
-  uncommitted: true,
+  dirty: true,
+  base: "main",
+  ahead: 2,
+  push: 2,
 } as const;
 
 /* ---------------------------------------------------------------- *
@@ -169,25 +178,50 @@ export interface DemoTicket {
   title: string;
   priority: TicketPriority;
   age: string;
+  /** The team · project line under the title, like the real queue row. */
+  meta: string;
+  /** SLA countdown shown at the row's bottom right (urgent/high only). */
+  sla?: string;
   state?: "investigating" | "snoozed";
 }
 
 export const TRIAGE_QUEUE: readonly DemoTicket[] = [
-  { id: "SAN-151", title: "Webhook retries duplicate on 429", priority: "urgent", age: "2h" },
+  {
+    id: "SAN-151",
+    title: "Webhook retries duplicate on 429",
+    priority: "urgent",
+    age: "2h",
+    meta: "Engineering · Webhooks",
+    sla: "SLA 4h",
+  },
   {
     id: "SAN-149",
     title: "Terminal loses scrollback on resize",
     priority: "high",
     age: "5h",
+    meta: "Engineering · Terminal",
     state: "investigating",
   },
-  { id: "SAN-150", title: "Empty diff view after fast rebase", priority: "high", age: "3h" },
-  { id: "SAN-147", title: "Dark mode flash on cold start", priority: "medium", age: "1d" },
+  {
+    id: "SAN-150",
+    title: "Empty diff view after fast rebase",
+    priority: "high",
+    age: "3h",
+    meta: "Engineering · Git",
+  },
+  {
+    id: "SAN-147",
+    title: "Dark mode flash on cold start",
+    priority: "medium",
+    age: "1d",
+    meta: "Engineering · Shell",
+  },
   {
     id: "SAN-133",
     title: "Migrate settings to per-repo scope",
     priority: "low",
     age: "6d",
+    meta: "Engineering · Settings",
     state: "snoozed",
   },
 ] as const;
@@ -197,6 +231,11 @@ export const TRIAGE_DETAIL = {
   title: "Webhook retries duplicate on 429",
   priority: "urgent" as TicketPriority,
   status: "Triage",
+  sla: "SLA 4h",
+  author: "Maya Torres",
+  authorInitials: "MT",
+  created: "2h ago",
+  project: "Webhooks",
   body: [
     "Linear webhooks that hit our rate limit are retried by both the queue and the handler, so a single event can apply twice.",
     "Repro: burst 30 label updates; watch the audit log double-count. Likely fix is an idempotency key on the delivery id.",
@@ -204,10 +243,19 @@ export const TRIAGE_DETAIL = {
 } as const;
 
 /* ---------------------------------------------------------------- *
- * Issues (dependency graph)
+ * Issues (dependency graph + grouped list)
  * ---------------------------------------------------------------- */
 
 export type NodeStatus = "done" | "started" | "todo" | "blocked";
+
+/** Mirrors the app's Linear status colors: In Progress amber, Todo blue,
+ * Blocked red, Done purple. */
+export const ISSUE_STATUS_META: Record<NodeStatus, { color: string; label: string }> = {
+  done: { color: "var(--color-status-purple)", label: "Done" },
+  started: { color: "var(--color-status-amber)", label: "In Progress" },
+  todo: { color: "var(--color-status-blue)", label: "Todo" },
+  blocked: { color: "var(--color-status-red)", label: "Blocked" },
+};
 
 export interface GraphNode {
   id: string;
@@ -215,8 +263,15 @@ export interface GraphNode {
   x: number;
   y: number;
   status: NodeStatus;
-  /** The story node: accent ring + spinner, "agent launching". */
+  /** Which project band (and sidebar group) the node belongs to. */
+  band: string;
+  /** A worktree exists — amber edge tint + WIP badge, like the real graph. */
+  working?: boolean;
+  /** Ready to start (unblocked): the green RDY badge. */
+  ready?: boolean;
+  /** The story node: queued in the launch tray, accent-filled card. */
   launching?: boolean;
+  pr?: { num: number; state: "open" | "merged" };
 }
 
 export interface GraphEdge {
@@ -224,22 +279,87 @@ export interface GraphEdge {
   to: string;
 }
 
-/** Coordinates are design-canvas px inside the graph pane (x: 0-940, y: 0-620). */
+/** A translucent project grouping band drawn behind its nodes. */
+export interface ProjectBand {
+  name: string;
+  color: string;
+  count: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export const PROJECT_BANDS: readonly ProjectBand[] = [
+  { name: "Session hardening", color: "#4493f8", count: 4, x: 36, y: 56, w: 920, h: 300 },
+  { name: "Webhook reliability", color: "#a78bfa", count: 3, x: 36, y: 396, w: 568, h: 300 },
+] as const;
+
+/** Coordinates are design-canvas px inside the graph pane. */
 export const GRAPH_NODES: readonly GraphNode[] = [
-  { id: "SAN-119", title: "Bound the image cache", x: 60, y: 88, status: "done" },
-  { id: "SAN-142", title: "Fix OAuth token refresh race", x: 60, y: 250, status: "started" },
-  { id: "SAN-127", title: "Session restore on relaunch", x: 380, y: 178, status: "started" },
-  { id: "SAN-138", title: "Webhook retries duplicate on 429", x: 60, y: 415, status: "started" },
+  {
+    id: "SAN-119",
+    title: "Bound the image cache",
+    x: 60,
+    y: 100,
+    status: "done",
+    band: "Session hardening",
+    pr: { num: 812, state: "merged" },
+  },
+  {
+    id: "SAN-142",
+    title: "Fix OAuth token refresh race",
+    x: 60,
+    y: 218,
+    status: "started",
+    band: "Session hardening",
+    working: true,
+  },
+  {
+    id: "SAN-127",
+    title: "Session restore on relaunch",
+    x: 392,
+    y: 158,
+    status: "started",
+    band: "Session hardening",
+    working: true,
+  },
+  {
+    id: "SAN-160",
+    title: "Ship session hardening",
+    x: 724,
+    y: 218,
+    status: "todo",
+    band: "Session hardening",
+  },
+  {
+    id: "SAN-138",
+    title: "Webhook retries duplicate on 429",
+    x: 60,
+    y: 446,
+    status: "started",
+    band: "Webhook reliability",
+    working: true,
+    pr: { num: 816, state: "open" },
+  },
   {
     id: "SAN-151",
     title: "Idempotency keys for deliveries",
-    x: 380,
-    y: 345,
+    x: 392,
+    y: 430,
     status: "todo",
+    band: "Webhook reliability",
+    ready: true,
     launching: true,
   },
-  { id: "SAN-153", title: "Audit log double-count guard", x: 380, y: 505, status: "blocked" },
-  { id: "SAN-160", title: "Ship session hardening", x: 700, y: 262, status: "todo" },
+  {
+    id: "SAN-153",
+    title: "Audit log double-count guard",
+    x: 392,
+    y: 560,
+    status: "blocked",
+    band: "Webhook reliability",
+  },
 ] as const;
 
 export const GRAPH_EDGES: readonly GraphEdge[] = [
@@ -252,6 +372,13 @@ export const GRAPH_EDGES: readonly GraphEdge[] = [
   { from: "SAN-151", to: "SAN-160" },
 ] as const;
 
+/** The launch tray at the bottom of the Issues sidebar. */
+export const LAUNCH_TRAY = {
+  agent: "Claude",
+  model: "Opus 4.8",
+  count: 1,
+} as const;
+
 /* ---------------------------------------------------------------- *
  * Reviews
  * ---------------------------------------------------------------- */
@@ -263,19 +390,50 @@ export interface DemoPr {
   ticket: string;
   title: string;
   checks: CheckState;
+  /** Review decision dot, GitHub-style. */
+  decision: "approved" | "required";
+  /** How long it's been waiting on a review. */
+  waiting: string;
+  size: "S" | "M" | "L";
+  comments?: number;
   active?: boolean;
 }
 
-export const REVIEW_PRS: readonly DemoPr[] = [
-  { num: 812, ticket: "SAN-119", title: "Bound the image cache", checks: "pass" },
+/** Split like the real inbox: a direct request first, then your own PRs. */
+export const REVIEW_REQUESTED: readonly DemoPr[] = [
   {
     num: 815,
     ticket: "SAN-142",
     title: "Fix OAuth token refresh race",
     checks: "pass",
+    decision: "required",
+    waiting: "4h",
+    size: "M",
+    comments: 3,
     active: true,
   },
-  { num: 816, ticket: "SAN-138", title: "Webhook retry backoff", checks: "pending" },
+] as const;
+
+export const REVIEW_MINE: readonly DemoPr[] = [
+  {
+    num: 816,
+    ticket: "SAN-138",
+    title: "Webhook retry backoff",
+    checks: "pending",
+    decision: "required",
+    waiting: "2h",
+    size: "S",
+  },
+  {
+    num: 809,
+    ticket: "SAN-101",
+    title: "Session restore telemetry",
+    checks: "pass",
+    decision: "approved",
+    waiting: "3d",
+    size: "S",
+    comments: 1,
+  },
 ] as const;
 
 export interface DiffLine {
@@ -322,8 +480,12 @@ export const AI_REVIEW = {
 } as const;
 
 export const REVIEW_META = {
+  repo: "santree-ai/santree",
+  num: 815,
   title: "Fix OAuth token refresh race",
   branch: "santree/san-142-oauth-refresh",
+  author: "maya",
+  authorInitials: "M",
   add: 186,
   del: 44,
   files: 4,
