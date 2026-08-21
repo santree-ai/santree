@@ -6,8 +6,12 @@ Guidance for working in this repo. Keep it accurate as the code changes.
 
 **santree** — a cross-platform (macOS + Linux) desktop app for **managing AI coding
 agents** across a repo's tickets. Tauri 2 + React 19, with a **fully-typed
-Rust ↔ TypeScript bridge** (tauri-specta). Pre-release, **zero users** — so there's
-no backwards-compatibility burden: prefer deleting dead/old code over keeping shims.
+Rust ↔ TypeScript bridge** (tauri-specta). Shipped via GitHub Releases with a
+built-in updater, but with ~zero external users — prefer deleting dead/old code
+over keeping shims. The exceptions, now that installs update themselves: the
+updater contract (the pubkey and endpoints in `tauri.conf.json`, the
+`update_channel` setting) and the SQLite migrations are real compat surfaces —
+an installed app will meet their future versions.
 
 **Views:** all of them — Triage, Issues, Trees, Reviews, Settings, Terminal — are
 backed by real data. **There is no mock/sample data anywhere**; when a backend isn't
@@ -139,6 +143,68 @@ gates: `cargo check`/`clippy`, `pnpm gen:bindings` if commands changed,
 `npx tsc --noEmit`, `pnpm lint`, both test suites — all green). For any new
 command taking a path/id/branch, confirm it's validated (`safe_path` /
 no-leading-dash) before it reaches fs or git.
+
+## Releasing & the self-updater
+
+The app ships from CI only: a `v*` tag drives `.github/workflows/release.yml`
+(universal macOS build → codesign → notarize → staple → `spctl` verify →
+smoke-launch the signed .app → publish). No local machine signs anything — the
+credentials live in the repo's `release` GitHub environment, restricted to `v*`
+tags. README "Releasing" is the operator story; this is what an implementer
+must not break.
+
+**Cutting a release** is a version bump and a tag, nothing else: set the same
+version in `package.json`, `src-tauri/tauri.conf.json` and `Cargo.toml`
+(`[workspace.package]`, which `Cargo.lock` mirrors for the workspace crates),
+then `git tag vX.Y.Z && git push origin vX.Y.Z`. The guard job fails the tag
+unless all three match it.
+
+**The tag picks the channel.** `v0.2.0` = stable — GitHub's `releases/latest`
+pointer, which is also what the website's download button resolves through.
+`v0.2.0-beta.N` = beta, published as a pre-release so that pointer skips it.
+Semver ordering is load-bearing: `0.2.0-beta.1 < 0.2.0` is what rolls a beta
+user onto the next stable, and the updater never downgrades.
+
+**The beta manifest is rolling.** Every release — stable included — re-uploads
+`latest.json` to the fixed `updater-beta` pre-release. A release published
+outside the workflow skips that and strands every beta user on their last
+beta, silently.
+
+**The updater is `tauri-plugin-updater`; channels are ours.** One binary
+serves both: `src-tauri/src/update.rs` picks the endpoint per check from the
+`update_channel` setting, because the endpoint list in `tauri.conf.json` is
+baked in at build time. The `pubkey` there pairs with
+`TAURI_SIGNING_PRIVATE_KEY` in CI — **that key has no recovery path**;
+installed apps accept only updates it signed, so losing it strands every
+install until users re-download by hand. `useUpdateWatcher` (mounted by the
+app shell) checks 15s after launch and every 6h, announcing via one toast per
+version.
+
+**Traps, each paid for once already:**
+
+- Tauri does **not** sign `bundle.resources`, and notarization rejects any
+  unsigned Mach-O in the bundle. `scripts/sign-resources.mjs` signs
+  `santree-hook` from `beforeBundleCommand` — after staging, before the
+  bundler seals it — and no-ops without `APPLE_SIGNING_IDENTITY` so keyless
+  builds keep working. A new resource binary must be added there.
+- The signing certificate is imported into a keychain in its own workflow step
+  *before* the build. Tauri's own import happens at its signing phase, which is
+  after `beforeBundleCommand` — too late for the hook. That ordering was the
+  first release's failure.
+- `createUpdaterArtifacts` is passed via `--config` in the release workflow,
+  not committed: generating updater artifacts *requires* the signing key, so
+  committing it would break every keyless build, including CI's bundle smoke.
+- `TAURI_BUNDLER_DMG_IGNORE_CI=true` in the release env re-enables the Finder
+  AppleScript that paints the DMG background and places the icons — with
+  `CI=true` the bundler otherwise passes `--skip-jenkins` and ships a
+  default-looking DMG (background.png present but no `.DS_Store` to use it).
+- The version-free `santree-macos.dmg` asset exists for the website's
+  `releases/latest/download/…` link. Stop uploading it and the download button
+  404s on the next release.
+- `SANTREE_SMOKE=1` (lib.rs) is CI's launch probe — exit 0 once the window
+  loads, watchdog exit 3 if it never does. It runs in ci.yml's macOS bundle
+  smoke and against the signed .app in the release job; it is the only thing
+  that ever *runs* what ships.
 
 ## Claude project config (committed in `.claude/`)
 
