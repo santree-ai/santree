@@ -76,6 +76,20 @@ jobs:
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
 
+      # A stable release without notes means the release page and the in-app
+      # "What's new" both show a bare commit-compare link — checked here so the
+      # miss costs seconds, not a macOS build. Betas are exempt: they fall back
+      # to the compare link in the notes step.
+      - name: Changelog entry exists (stable releases)
+        run: |
+          if [ "${{ steps.check.outputs.prerelease }}" = "false" ]; then
+            if ! awk -v v="${{ steps.check.outputs.version }}" \
+                '$1=="##" && $2==v {found=1} END{exit !found}' CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no '## ${{ steps.check.outputs.version }}' section — stable releases require one"
+              exit 1
+            fi
+          fi
+
   release:
     name: Build · sign · notarize · publish
     needs: guard
@@ -232,16 +246,24 @@ jobs:
           APP: ${{ steps.artifacts.outputs.app }}
         run: "$APP/Contents/MacOS/santree"
 
-      # Generated before the release exists, not read back off a draft: a draft has
-      # no tag ref on the remote, so `gh release view <tag>` can't reliably find
-      # one. This endpoint produces the same notes `--generate-notes` would.
-      - name: Generate the release notes
+      # The release body and the updater's "What's new" are the CHANGELOG entry
+      # for this version. Generated notes are the fallback for betas without one
+      # — and, being built from merged PRs, they are nearly empty for the
+      # direct-to-main pushes this repo mostly ships, which is why the curated
+      # file is the primary source.
+      - name: Assemble the release notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
-            -f tag_name="$GITHUB_REF_NAME" -q .body > "$RUNNER_TEMP/notes.md"
-
+          version='${{ needs.guard.outputs.version }}'
+          if awk -v v="$version" '$1=="##" && $2==v {found=1} END{exit !found}' CHANGELOG.md; then
+            awk -v v="$version" '$1=="##" && $2==v {on=1; next} on && $1=="##" {exit} on' CHANGELOG.md \
+              | sed '/./,$!d' > "$RUNNER_TEMP/notes.md"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="$GITHUB_REF_NAME" -q .body > "$RUNNER_TEMP/notes.md"
+          fi
+          cat "$RUNNER_TEMP/notes.md"
       # The manifest carries the same notes as the release page, so the in-app
       # "what's new" and GitHub can't disagree.
       - name: Build latest.json

@@ -148,11 +148,15 @@ credentials live in the repo's `release` GitHub environment, restricted to `v*`
 tags. README "Releasing" is the operator story; this is what an implementer
 must not break.
 
-**Cutting a release** is a version bump and a tag, nothing else: set the same
-version in `package.json`, `src-tauri/tauri.conf.json` and `Cargo.toml`
-(`[workspace.package]`, which `Cargo.lock` mirrors for the workspace crates),
-then `git tag vX.Y.Z && git push origin vX.Y.Z`. The guard job fails the tag
-unless all three match it.
+**Cutting a release** is a version bump, a changelog entry and a tag, nothing
+else: set the same version in `package.json`, `src-tauri/tauri.conf.json` and
+`Cargo.toml` (`[workspace.package]`, which `Cargo.lock` mirrors for the
+workspace crates), add a `## X.Y.Z` section to `CHANGELOG.md`, then
+`git tag vX.Y.Z && git push origin vX.Y.Z`. The guard fails the tag unless the
+three versions match it, and fails a *stable* tag without its changelog entry
+— that section becomes the release body and the in-app "What's new", so write
+it for users, in plain bullets (the app renders it as text). Betas without an
+entry fall back to a commit-compare link.
 
 **The tag picks the channel.** `v0.2.0` = stable — GitHub's `releases/latest`
 pointer, which is also what the website's download button resolves through.
