@@ -598,15 +598,21 @@ pub fn run() {
                     }
                 });
             }
+
+            // Owns the `caffeinate` child while the keep-awake hold is on (see
+            // `awake` — macOS only). The hold is remembered across launches, so
+            // re-apply it here. Synchronous, and before `db` is moved into managed
+            // state: settled a tick late, the chrome's toggle would paint "off"
+            // and then flip under the user on the first refetch.
+            let keep_awake = awake::KeepAwake::default();
+            tauri::async_runtime::block_on(awake::restore(&db, &keep_awake));
+            app.manage(keep_awake);
+
             app.manage(db);
 
             // Holds the `Update` handle a check produced, for the install that
             // follows it (see `update`).
             app.manage(update::PendingUpdate::default());
-
-            // Owns the `caffeinate` child while the keep-awake hold is on (see
-            // `awake` — macOS only, session-scoped by design).
-            app.manage(awake::KeepAwake::default());
 
             // Owns all live terminal sessions; commands read it from state.
             app.manage(santree_pty::PtyManager::new());

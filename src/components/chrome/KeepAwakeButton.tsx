@@ -2,8 +2,8 @@
  * The top bar's keep-awake toggle (macOS only): hold the Mac awake — no display
  * sleep, so no lock screen — while long agent runs are on screen. Backed by
  * `caffeinate` tied to the app's pid (quitting santree always releases it), and
- * session-scoped on purpose: it never persists, so a toggle forgotten weeks ago
- * can't leave the laptop permanently unlocked. Renders nothing off-macOS.
+ * remembered across launches: once on, it stays on until it's turned off. Off is
+ * the default. Renders nothing off-macOS.
  */
 import { useKeepAwake } from "../../lib/queries";
 import { CoffeeIcon } from "../icons";

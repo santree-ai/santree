@@ -7,12 +7,28 @@
 //! crashes or quits, caffeinate exits on its own and the machine sleeps
 //! normally, with no cleanup path to get wrong. Toggling off kills the child.
 //!
-//! Deliberately session-scoped: the hold is never persisted, so a fresh launch
-//! always starts with sleep allowed — a toggle forgotten weeks ago can't leave
-//! a laptop permanently insomniac.
+//! The hold is sticky: [`set`] remembers it in the `keep_awake` app setting and
+//! [`restore`] re-applies it at startup, so turning it on keeps the Mac awake
+//! across relaunches until it is turned off again. Off is the default — the row
+//! is absent until the toggle is first used.
+//!
+//! Only a hold that *took* is remembered: [`set`] persists the resulting state,
+//! never the requested one, so a failed spawn or a non-macOS run can't leave a
+//! phantom "on" behind for the next launch to trip over.
 
 use std::process::{Child, Command};
 use std::sync::Mutex;
+
+use anyhow::Result;
+
+use crate::db::Db;
+use crate::settings;
+
+/// The app-scope `settings` key holding the remembered hold (`"true"`, or the
+/// row absent for off). Blocked from the generic `set_setting` IPC — see
+/// [`settings::validate_user_scope`] — because a value written there would be
+/// remembered without a `caffeinate` ever being spawned.
+pub const KEEP_AWAKE_KEY: &str = "keep_awake";
 
 /// Whether this platform can hold the machine awake at all. Compiled on every
 /// platform (the bindings export runs on Linux in CI, so the command set must
@@ -40,9 +56,14 @@ impl KeepAwake {
         }
     }
 
-    /// Turn the hold on or off; returns the resulting state rather than the
-    /// requested one (the spawn can fail, and unsupported platforms stay off).
-    pub fn set(&self, on: bool) -> std::io::Result<KeepAwakeStatus> {
+    /// Turn the hold on or off at the process level; returns the resulting state
+    /// rather than the requested one (the spawn can fail, and unsupported
+    /// platforms stay off).
+    ///
+    /// Private on purpose: every caller goes through [`set`] or [`restore`], so
+    /// there is no path that changes the hold without settling what the next
+    /// launch will do with it.
+    fn apply(&self, on: bool) -> std::io::Result<KeepAwakeStatus> {
         let mut slot = self.0.lock().unwrap();
         if on && SUPPORTED {
             if !alive(&mut slot) {
@@ -58,6 +79,32 @@ impl KeepAwake {
             supported: SUPPORTED,
             active: alive(&mut slot),
         })
+    }
+}
+
+/// Toggle the hold and remember it for the next launch. Returns the resulting
+/// state, which is also what gets persisted — see the module docs.
+pub async fn set(db: &Db, awake: &KeepAwake, on: bool) -> Result<KeepAwakeStatus> {
+    let status = awake.apply(on)?;
+    let value = status.active.then(|| "true".to_string());
+    settings::set(db, "app", KEEP_AWAKE_KEY, value).await?;
+    Ok(status)
+}
+
+/// Re-apply the remembered hold, once, at startup.
+///
+/// Best-effort: if the spawn fails the machine just sleeps normally, and the
+/// setting is deliberately left as-is so the next launch tries again rather than
+/// silently forgetting a hold the user never turned off.
+pub async fn restore(db: &Db, awake: &KeepAwake) {
+    match settings::get(db, "app", KEEP_AWAKE_KEY).await {
+        Ok(Some(v)) if v == "true" => {
+            if let Err(e) = awake.apply(true) {
+                log::warn!("restoring the keep-awake hold failed: {e:#}");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("reading the remembered keep-awake hold failed: {e:#}"),
     }
 }
 

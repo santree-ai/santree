@@ -570,8 +570,8 @@ export const useAppVersion = () =>
 /**
  * The keep-awake hold (macOS `caffeinate` behind `set_keep_awake`): status +
  * optimistic toggle for the chrome's button. `supported` is false off-macOS —
- * the button renders nothing. Deliberately session-scoped: the backend never
- * persists the hold, so a fresh launch always starts with sleep allowed.
+ * the button renders nothing. The hold is remembered: the backend persists it
+ * and re-applies it at launch, so it stays on until it is turned off.
  */
 export const useKeepAwake = () => {
   const status = useQuery({

@@ -725,9 +725,10 @@ export const commands = {
 	 */
 	keepAwakeStatus: () => __TAURI_INVOKE<KeepAwakeStatus>("keep_awake_status"),
 	/**
-	 *  Toggle the keep-awake hold (macOS `caffeinate` tied to our pid). Returns the
-	 *  *resulting* state, not the requested one — the spawn can fail, and
-	 *  unsupported platforms always stay off.
+	 *  Toggle the keep-awake hold (macOS `caffeinate` tied to our pid) and remember
+	 *  it, so the hold survives a relaunch and stays on until it is turned off.
+	 *  Returns the *resulting* state, not the requested one — the spawn can fail,
+	 *  and unsupported platforms always stay off.
 	 */
 	setKeepAwake: (on: boolean) => typedError<KeepAwakeStatus, CmdError>(__TAURI_INVOKE("set_keep_awake", { on })),
 	/**

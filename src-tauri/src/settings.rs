@@ -44,6 +44,13 @@ pub fn validate_user_scope(scope: &str, key: &str) -> Result<()> {
     if key.starts_with("binary_path.") {
         anyhow::bail!("binary paths must be written through set_binary_path");
     }
+    // The keep-awake hold is a live `caffeinate` child, not just a row: writing it
+    // here would be remembered for the next launch without holding anything awake
+    // now (and the toggle's icon would disagree with the machine). It has its own
+    // command ([`set_keep_awake`]).
+    if key == crate::awake::KEEP_AWAKE_KEY {
+        anyhow::bail!("the keep-awake hold must be written through set_keep_awake");
+    }
     Ok(())
 }
 

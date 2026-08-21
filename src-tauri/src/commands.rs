@@ -27,7 +27,7 @@ use santree_core::{
     },
 };
 
-use crate::awake::{KeepAwake, KeepAwakeStatus};
+use crate::awake::{self, KeepAwake, KeepAwakeStatus};
 use crate::commit_draft;
 use crate::db::Db;
 use crate::english_tutor;
@@ -1028,13 +1028,18 @@ pub fn keep_awake_status(awake: State<'_, KeepAwake>) -> KeepAwakeStatus {
     awake.status()
 }
 
-/// Toggle the keep-awake hold (macOS `caffeinate` tied to our pid). Returns the
-/// *resulting* state, not the requested one — the spawn can fail, and
-/// unsupported platforms always stay off.
+/// Toggle the keep-awake hold (macOS `caffeinate` tied to our pid) and remember
+/// it, so the hold survives a relaunch and stays on until it is turned off.
+/// Returns the *resulting* state, not the requested one — the spawn can fail,
+/// and unsupported platforms always stay off.
 #[tauri::command]
 #[specta::specta]
-pub fn set_keep_awake(on: bool, awake: State<'_, KeepAwake>) -> CmdResult<KeepAwakeStatus> {
-    Ok(awake.set(on)?)
+pub async fn set_keep_awake(
+    on: bool,
+    awake: State<'_, KeepAwake>,
+    db: State<'_, Db>,
+) -> CmdResult<KeepAwakeStatus> {
+    Ok(awake::set(&db, &awake, on).await?)
 }
 
 /// User settings, persisted in the database (seeded from defaults on first run).
