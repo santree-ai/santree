@@ -7,6 +7,14 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2-beta.1 — 2026-08-21
+
+- New keep-awake toggle in the top bar (the coffee cup, macOS only): hold the
+  Mac awake — no sleep, no lock screen — while a long agent run is on screen.
+- The keep-awake toggle is now remembered. Turn it on and it stays on across
+  restarts until you turn it off; it starts off on a fresh install. Quitting
+  santree always lets the Mac sleep again.
+
 ## 0.1.1 — 2026-08-20
 
 - santree now updates itself. Settings → Updates checks your release channel,
