@@ -71,7 +71,9 @@ jobs:
           # Lazy below-fold sections must still land in the static HTML
           grep -q "All branches merge eventually" dist/client/index.html
           grep -q "never reads, stores, or proxies" dist/client/index.html
-          grep -q "docs are growing" dist/client/docs/index.html
+          # The docs page: section rail + a section body must be in the static HTML
+          grep -q "Connect your tools" dist/client/docs/index.html
+          grep -q "Keyboard shortcuts" dist/client/docs/index.html
 
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'
