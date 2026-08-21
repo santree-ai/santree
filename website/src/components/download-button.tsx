@@ -7,6 +7,8 @@
  * the site fully static: no GitHub API call at runtime, nothing to rebuild when
  * a release ships, and no version here that can go stale.
  */
+import { AppleLogo } from "~/components/icons";
+
 const DOWNLOAD_URL =
   "https://github.com/santree-ai/santree/releases/latest/download/santree-macos.dmg";
 
@@ -16,6 +18,8 @@ export function DownloadButton({ size = "lg" }: { size?: "lg" | "sm" }) {
       href={DOWNLOAD_URL}
       className={`btn btn-primary ${size === "lg" ? "h-11 px-5" : "h-9 px-4 text-[13px]"}`}
     >
+      {/* Nudged up: the Apple glyph's visual center sits below its box's. */}
+      <AppleLogo size={size === "lg" ? 15 : 13} className="-mt-px" />
       {size === "lg" ? "Download for macOS" : "Download"}
     </a>
   );
