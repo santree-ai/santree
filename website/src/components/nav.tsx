@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import { DownloadButton } from "~/components/download-button";
 import { GitHubLogo } from "~/components/icons";
 import { Logo } from "~/components/logo";
-import { WipPill } from "~/components/wip-pill";
 
 // Router Links with `to="/"` + hash (not bare `#loop` anchors) so they work
 // from ANY page — a bare hash on /docs points at nothing and goes nowhere.
@@ -72,10 +71,9 @@ export function Nav() {
           ))}
           <Link
             to="/docs"
-            className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13.5px] text-muted transition-colors hover:text-fg"
+            className="rounded-md px-2.5 py-1.5 text-[13.5px] text-muted transition-colors hover:text-fg"
           >
             Docs
-            <WipPill />
           </Link>
         </div>
 

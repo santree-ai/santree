@@ -1,6 +1,5 @@
 import { Link } from "@tanstack/react-router";
 import { Logo } from "~/components/logo";
-import { WipPill } from "~/components/wip-pill";
 
 export function Footer() {
   return (
@@ -28,9 +27,13 @@ export function Footer() {
                 Features
               </Link>
             </li>
-            <li className="inline-flex items-center gap-2">
-              <span>Download</span>
-              <WipPill />
+            <li>
+              <a
+                href="https://github.com/santree-ai/santree/releases/latest/download/santree-macos.dmg"
+                className="transition-colors hover:text-fg"
+              >
+                Download
+              </a>
             </li>
           </ul>
         </nav>
@@ -39,11 +42,10 @@ export function Footer() {
             Resources
           </p>
           <ul className="mt-4 space-y-2.5 text-[13px] text-muted">
-            <li className="inline-flex items-center gap-2">
+            <li>
               <Link to="/docs" className="transition-colors hover:text-fg">
                 Docs
               </Link>
-              <WipPill />
             </li>
             <li>
               <a

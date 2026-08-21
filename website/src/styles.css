@@ -210,30 +210,6 @@ html {
  * Small pieces
  * ---------------------------------------------------------------- */
 
-/* Inline "Soon" chip — sits in the text flow, never rotated, never
- * absolutely positioned. */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  border-radius: 9999px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.04);
-  padding: 0.1rem 0.45rem;
-  font-family: var(--font-mono);
-  font-size: 0.5625rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--color-muted);
-}
-.chip::before {
-  content: "";
-  width: 0.28rem;
-  height: 0.28rem;
-  border-radius: 9999px;
-  background: var(--color-status-amber);
-}
-
 /* Hero body copy sits on the glyph field — a soft dark halo keeps it
  * legible. The h1 is exempt: a shadow under gradient-clipped text reads
  * as a muddy emboss, and the scrim already seats it. */
