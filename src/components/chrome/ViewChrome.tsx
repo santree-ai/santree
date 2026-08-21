@@ -20,6 +20,7 @@ import { useEdgeResize } from "../../lib/useEdgeResize";
 import { CHROME, SIDEBAR, useAppUi } from "../../state/AppContext";
 import { EdgeResizeHandle } from "../primitives";
 import { ChromeControls } from "./ChromeControls";
+import { KeepAwakeButton } from "./KeepAwakeButton";
 import { NavTabs } from "./NavTabs";
 import { RefreshButton } from "./RefreshButton";
 import { RepoSelector } from "./RepoSelector";
@@ -135,6 +136,7 @@ export function ViewChrome({
               <div data-tauri-drag-region className="h-full flex-1" />
               <div className="flex items-center gap-2.5">
                 <ViewSummary />
+                <KeepAwakeButton />
                 <RefreshButton />
               </div>
             </>

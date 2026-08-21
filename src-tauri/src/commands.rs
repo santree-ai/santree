@@ -27,6 +27,7 @@ use santree_core::{
     },
 };
 
+use crate::awake::{KeepAwake, KeepAwakeStatus};
 use crate::commit_draft;
 use crate::db::Db;
 use crate::english_tutor;
@@ -1017,6 +1018,23 @@ pub async fn triage_add_comment(
 #[specta::specta]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+/// The keep-awake hold's current state. `supported` is false off-macOS — the
+/// chrome uses it to not render the toggle at all.
+#[tauri::command]
+#[specta::specta]
+pub fn keep_awake_status(awake: State<'_, KeepAwake>) -> KeepAwakeStatus {
+    awake.status()
+}
+
+/// Toggle the keep-awake hold (macOS `caffeinate` tied to our pid). Returns the
+/// *resulting* state, not the requested one — the spawn can fail, and
+/// unsupported platforms always stay off.
+#[tauri::command]
+#[specta::specta]
+pub fn set_keep_awake(on: bool, awake: State<'_, KeepAwake>) -> CmdResult<KeepAwakeStatus> {
+    Ok(awake.set(on)?)
 }
 
 /// User settings, persisted in the database (seeded from defaults on first run).

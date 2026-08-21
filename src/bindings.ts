@@ -720,6 +720,17 @@ export const commands = {
 	 */
 	installUpdate: () => typedError<null, CmdError>(__TAURI_INVOKE("install_update")),
 	/**
+	 *  The keep-awake hold's current state. `supported` is false off-macOS — the
+	 *  chrome uses it to not render the toggle at all.
+	 */
+	keepAwakeStatus: () => __TAURI_INVOKE<KeepAwakeStatus>("keep_awake_status"),
+	/**
+	 *  Toggle the keep-awake hold (macOS `caffeinate` tied to our pid). Returns the
+	 *  *resulting* state, not the requested one — the spawn can fail, and
+	 *  unsupported platforms always stay off.
+	 */
+	setKeepAwake: (on: boolean) => typedError<KeepAwakeStatus, CmdError>(__TAURI_INVOKE("set_keep_awake", { on })),
+	/**
 	 *  Validate + normalize a picked folder to its git toplevel (the stored dev repo
 	 *  path). Mirrors `repo::add`'s validation: absolute dir → `git rev-parse
 	 *  --show-toplevel`, so a subdirectory pick still lands on the repo root.
@@ -1240,6 +1251,15 @@ export type GithubStatus = {
 export type Integrations = {
 	linear?: boolean,
 	triage?: boolean,
+};
+
+/**
+ *  The current keep-awake state, as the chrome needs it: `supported` decides
+ *  whether the toggle renders at all, `active` its on/off look.
+ */
+export type KeepAwakeStatus = {
+	supported: boolean,
+	active: boolean,
 };
 
 /**

@@ -4,6 +4,7 @@
 //! [`commands`], and the real logic lives in the `santree-core` crate.
 
 mod agent;
+mod awake;
 mod commands;
 mod commit_draft;
 mod db;
@@ -179,6 +180,8 @@ fn specta_builder() -> AppBuilder {
             commands::legacy_cli_migrate,
             commands::check_for_update,
             commands::install_update,
+            commands::keep_awake_status,
+            commands::set_keep_awake,
             dev::dev_normalize_repo,
             dev::dev_info,
             dev::dev_todos,
@@ -600,6 +603,10 @@ pub fn run() {
             // Holds the `Update` handle a check produced, for the install that
             // follows it (see `update`).
             app.manage(update::PendingUpdate::default());
+
+            // Owns the `caffeinate` child while the keep-awake hold is on (see
+            // `awake` — macOS only, session-scoped by design).
+            app.manage(awake::KeepAwake::default());
 
             // Owns all live terminal sessions; commands read it from state.
             app.manage(santree_pty::PtyManager::new());

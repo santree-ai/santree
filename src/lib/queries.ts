@@ -23,6 +23,7 @@ import type {
   AnalysisScope,
   ChangedFile,
   DevTodo,
+  KeepAwakeStatus,
   NewInlineComment,
   PrDetail,
   PrLabel,
@@ -226,6 +227,7 @@ const TASKS_STALE_TIME = 3 * 60_000;
 
 export const queryKeys = {
   appVersion: ["app-version"] as const,
+  keepAwake: ["keep-awake"] as const,
   envFileVars: (path: string) => ["env-file-vars", path] as const,
   repos: ["repos"] as const,
   agents: ["agents"] as const,
@@ -564,6 +566,39 @@ export const useEnvFileVars = (path: string) =>
  * the sidebar footer and help menu. Fixed for the process lifetime. */
 export const useAppVersion = () =>
   useQuery({ queryKey: queryKeys.appVersion, queryFn: getVersion, staleTime: Infinity });
+
+/**
+ * The keep-awake hold (macOS `caffeinate` behind `set_keep_awake`): status +
+ * optimistic toggle for the chrome's button. `supported` is false off-macOS —
+ * the button renders nothing. Deliberately session-scoped: the backend never
+ * persists the hold, so a fresh launch always starts with sleep allowed.
+ */
+export const useKeepAwake = () => {
+  const status = useQuery({
+    queryKey: queryKeys.keepAwake,
+    queryFn: () => commands.keepAwakeStatus(),
+    // The child can die outside the app (killed externally); a focus refetch
+    // self-corrects the icon without polling.
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+  });
+  const toggle = useOptimisticMutation<boolean, KeepAwakeStatus>({
+    mutationFn: (on) => unwrap(commands.setKeepAwake(on)),
+    // Flip the icon on click; the settle-refetch reconciles with the backend's
+    // actual state (a failed spawn comes back `active: false`).
+    optimistic: (qc, on) => {
+      const prev = qc.getQueryData<KeepAwakeStatus>(queryKeys.keepAwake);
+      qc.setQueryData<KeepAwakeStatus>(queryKeys.keepAwake, { supported: true, active: on });
+      return () => qc.setQueryData(queryKeys.keepAwake, prev);
+    },
+    invalidate: () => [queryKeys.keepAwake],
+  });
+  return {
+    supported: status.data?.supported ?? false,
+    active: status.data?.active ?? false,
+    toggle: toggle.mutate,
+  };
+};
 
 /** Shared mutation scope for every updater call — see {@link useCheckForUpdate}. */
 const UPDATE_SCOPE = { id: "santree-update" };
