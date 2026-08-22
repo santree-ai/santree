@@ -42,8 +42,8 @@ export function ParallelStrip() {
             <span className="text-gradient-emerald">before lunch.</span>
           </h2>
           <p className="mx-auto mt-6 max-w-md text-pretty text-[15px] leading-relaxed text-muted">
-            santree schedules nothing for you — it just makes parallel safe. Isolation from git,
-            oversight from you.
+            santree schedules nothing for you. It just makes parallel safe: git handles isolation,
+            you handle oversight.
           </p>
         </FadeUp>
       </div>

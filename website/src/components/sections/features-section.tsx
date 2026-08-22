@@ -9,8 +9,8 @@ export function FeaturesSection() {
       <div className="mx-auto max-w-6xl px-6">
         <SectionHeading
           kicker="The views"
-          title="Four views. One pipeline."
-          sub="Each view in santree is one stage of the loop, backed by real data — Linear, git, GitHub."
+          title="Four views, one pipeline"
+          sub="Each view in santree is one stage of the loop, backed by real data: Linear, git, GitHub."
         />
         <div className="mt-24 flex flex-col gap-36">
           {FEATURES.map((f, i) => (

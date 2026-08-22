@@ -18,7 +18,7 @@ const INTEGRATIONS = [
   },
   {
     name: "Claude",
-    line: "The hands on the keyboard. Bring your own subscription.",
+    line: "The hands on the keyboard, running on your own subscription.",
     color: "#d97757",
     Icon: ClaudeLogo,
   },
@@ -28,7 +28,7 @@ export function Integrations() {
   return (
     <section className="py-32">
       <div className="mx-auto max-w-5xl px-6">
-        <SectionHeading kicker="Integrations" title="Plays the tools you already play." />
+        <SectionHeading kicker="Integrations" title="The tools you already use" />
         <FadeUpGroup className="mt-14 grid gap-3 sm:grid-cols-3">
           {INTEGRATIONS.map((it) => (
             <FadeUpItem key={it.name}>

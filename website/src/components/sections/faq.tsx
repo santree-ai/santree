@@ -19,7 +19,7 @@ const FAQS = [
   },
   {
     q: "How is this different from Claude Code in a bunch of tmux panes?",
-    a: "Isolation and oversight. Every agent gets its own git worktree, so five agents can't step on one diff. Around the terminals you get triage from Linear, a dependency graph, diff review with an AI companion, and a PR dashboard — the workflow, not just the panes.",
+    a: "Isolation and oversight. Every agent gets its own git worktree, so five agents can't step on one diff. Around the terminals you get triage from Linear, a dependency graph, diff review with an AI companion, and a PR dashboard. The workflow, not the panes.",
   },
   {
     q: "Which platforms?",
@@ -35,7 +35,7 @@ export function Faq() {
   return (
     <section id="faq" className="scroll-mt-28 py-32">
       <div className="mx-auto max-w-2xl px-6">
-        <SectionHeading kicker="FAQ" title="The questions that matter." />
+        <SectionHeading kicker="FAQ" title="Questions" />
         <FadeUp className="mt-12">
           <div className="flex flex-col">
             {FAQS.map((item) => (

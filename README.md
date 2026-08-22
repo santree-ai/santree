@@ -6,8 +6,8 @@
 
 **Your backlog, shipped in parallel.**
 
-santree is a desktop app that runs Claude agents across your repo's tickets —
-each in its own git worktree you can watch, steer, and merge.
+santree is a desktop app that runs Claude agents across your repo's tickets.
+Each one gets an isolated git worktree you can watch, steer, and merge.
 Triage in, PRs out.
 
 [![Latest release](https://img.shields.io/github/v/release/santree-ai/santree?color=2dd4a7&label=release)](https://github.com/santree-ai/santree/releases/latest)
@@ -24,7 +24,7 @@ Triage in, PRs out.
 
 Running one coding agent is easy. Running five is a workflow problem: they step
 on each other's diffs, you lose track of who's blocked on you, and the actual
-job — tickets in, reviewed PRs out — lives scattered across a tracker, a
+job (tickets in, reviewed PRs out) lives scattered across a tracker, a
 terminal multiplexer, and a browser.
 
 santree puts the whole loop in one window. Every task gets an **isolated git
@@ -37,18 +37,18 @@ live data, and an unconnected view simply shows its honest empty state.
 
 ## One loop, five views
 
-- 🔍 **Triage** — your team's untriaged Linear inbox, ranked by priority and
+- **Triage**: your team's untriaged Linear inbox, ranked by priority and
   SLA. Hit **Investigate** and an agent starts digging while you read the next
   ticket.
-- 🗺 **Issues** — tickets drawn as a dependency graph, so you can see what's
+- **Issues**: tickets drawn as a dependency graph, so you can see what's
   unblocked. Select the ready ones, pick a model, and launch agents in
   parallel.
-- 🌲 **Trees** — the heart of the app: one worktree + one live terminal per
+- **Trees**: the heart of the app, one worktree + one live terminal per
   task. Watch, interrupt, redirect; review the diff and open the PR without
   leaving.
-- ✅ **Reviews** — a PR inbox with the diff, inline comments, CI (and
+- **Reviews**: a PR inbox with the diff, inline comments, CI (and
   "Fix CI with AI"), plus **Ask AI** to interrogate a PR beside the code.
-- ⚙️ **Settings** — integrations, agents and models, env vars, appearance,
+- **Settings**: integrations, agents and models, env vars, appearance,
   updates. App-wide defaults, per-repo overrides.
 
 ## Install

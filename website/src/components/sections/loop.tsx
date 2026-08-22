@@ -9,7 +9,7 @@ const STEPS = [
   {
     n: "01",
     title: "Triage",
-    body: "Pull tickets from Linear. Decide what an agent should take.",
+    body: "Pull tickets from Linear and decide what an agent should take.",
     color: "#4493f8",
   },
   {
@@ -98,8 +98,8 @@ export function Loop() {
       <div className="mx-auto max-w-6xl px-6">
         <SectionHeading
           kicker="How it works"
-          title="One loop. Run it in parallel."
-          sub="Ticket in, PR out — and nothing says you can only run it once at a time."
+          title="One loop, run in parallel."
+          sub="Ticket in, PR out. And nothing says you can only run it once at a time."
         />
         <div ref={ref} className="relative mt-16">
           <FadeUpGroup className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">

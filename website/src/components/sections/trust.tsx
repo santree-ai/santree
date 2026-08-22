@@ -9,7 +9,7 @@ import { SpotlightCard } from "~/components/ui/spotlight-card";
 const CARDS = [
   {
     title: "Local-first",
-    body: "A desktop app, not a cloud IDE. Worktrees, terminals, and diffs live on your disk — santree itself sends nothing anywhere.",
+    body: "A desktop app, not a cloud IDE. Worktrees, terminals, and diffs live on your disk, and santree itself sends nothing anywhere.",
     icon: (
       <svg
         viewBox="0 0 20 20"
@@ -27,8 +27,8 @@ const CARDS = [
     ),
   },
   {
-    title: "Your keys stay yours",
-    body: "The terminal runs the real, unmodified Claude CLI — you log in yourself, and santree never reads, stores, or proxies an agent's credentials.",
+    title: "You log in, not santree",
+    body: "The terminal runs the real, unmodified Claude CLI. You log in yourself, and santree never reads, stores, or proxies an agent's credentials.",
     icon: (
       <svg
         viewBox="0 0 20 20"
@@ -70,7 +70,7 @@ export function Trust() {
         <SectionHeading
           kicker="Local-first"
           title="Your repo never leaves your machine."
-          sub="Running agents against your code is a trust decision. santree keeps it a small one."
+          sub="santree keeps that decision small."
         />
         <FadeUpGroup className="mt-14 grid gap-3 sm:grid-cols-3">
           {CARDS.map((card) => (

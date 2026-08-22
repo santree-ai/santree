@@ -11,9 +11,9 @@ import stylesCss from "../styles.css?url";
 const loadMotionFeatures = () => import("~/lib/motion-features").then((mod) => mod.default);
 
 const SITE_URL = "https://santree.toscanini.me";
-const TITLE = "santree — your backlog, shipped in parallel";
+const TITLE = "santree: your backlog, shipped in parallel";
 const DESCRIPTION =
-  "A desktop app for running Claude agents across your repo's tickets — each one in an isolated git worktree you can watch, steer, and merge.";
+  "A desktop app for running Claude agents across your repo's tickets. Each one gets an isolated git worktree you can watch, steer, and merge.";
 
 export const Route = createRootRoute({
   head: () => ({

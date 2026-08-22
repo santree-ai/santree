@@ -11,7 +11,7 @@ export const Route = createFileRoute("/docs")({
   component: DocsPage,
   head: () => ({
     meta: [
-      { title: "docs — santree" },
+      { title: "santree docs" },
       {
         name: "description",
         content:
@@ -154,7 +154,7 @@ function DocsPage() {
             <h1 className="text-4xl font-semibold tracking-[-0.02em]">santree docs</h1>
             <p className="mt-4 max-w-xl text-[15px] leading-relaxed text-muted">
               Everything you need to go from a downloaded app to agents shipping tickets. Short on
-              purpose — the app explains itself as you go, and <Kbd>⌘</Kbd> <Kbd>/</Kbd> lists every
+              purpose. The app explains itself as you go, and <Kbd>⌘</Kbd> <Kbd>/</Kbd> lists every
               shortcut from anywhere.
             </p>
           </header>
@@ -166,9 +166,9 @@ function DocsPage() {
                 href="https://github.com/santree-ai/santree/releases/latest/download/santree-macos.dmg"
               >
                 Download santree for macOS
-              </a>{" "}
-              — a signed, notarized DMG. It keeps itself up to date after that. On Linux, santree
-              runs as a native app too, but there are no packaged builds yet:{" "}
+              </a>
+              . It&rsquo;s a signed, notarized DMG. It keeps itself up to date after that. On Linux,
+              santree runs as a native app too, but there are no packaged builds yet:{" "}
               <a
                 className="text-fg underline decoration-line-2 underline-offset-2 hover:decoration-fg"
                 href="https://github.com/santree-ai/santree#building-from-source"
@@ -179,7 +179,7 @@ function DocsPage() {
             </p>
             <H3>First launch</H3>
             <p>
-              santree asks you to <B>open a repository</B> — pick any folder inside a git checkout.
+              santree asks you to <B>open a repository</B>: pick any folder inside a git checkout.
               That registers the repo and the tabs light up. Add more repos any time from the repo
               switcher at the top of the sidebar; every setting can be overridden per repo.
             </p>
@@ -190,15 +190,15 @@ function DocsPage() {
               </li>
               <li>
                 <B>Claude Code</B> installed and logged in. santree drives the CLI you already have,
-                on your existing subscription — <B>no API key</B>, and santree never touches the
+                on your existing subscription. <B>No API key</B>, and santree never touches the
                 CLI&rsquo;s credentials.
               </li>
               <li>
-                <B>GitHub CLI</B> (<Code>gh</Code>), signed in — optional, powers Reviews and PR
+                <B>GitHub CLI</B> (<Code>gh</Code>), signed in. Optional; it powers Reviews and PR
                 chips.
               </li>
               <li>
-                A <B>Linear</B> workspace — optional, powers Triage and the Issues graph.
+                A <B>Linear</B> workspace. Optional; it powers Triage and the Issues graph.
               </li>
             </ul>
             <p>
@@ -217,7 +217,7 @@ function DocsPage() {
             <H3>GitHub</H3>
             <p>
               Run <Code>gh auth login</Code> in any terminal and santree picks it up. Prefer not to
-              install <Code>gh</Code>? Paste a personal access token instead — it also lives in the
+              install <Code>gh</Code>? Paste a personal access token instead. It also lives in the
               keychain.
             </p>
             <H3>Agents</H3>
@@ -241,7 +241,7 @@ function DocsPage() {
             </p>
             <p>
               Reading a ticket is half the job; <B>Investigate</B> (<Keys keys={["⌘", "I"]} />) is
-              the other half — it opens a real terminal in the repo with your agent already reading
+              the other half. It opens a real terminal in the repo with your agent already reading
               the issue. Select several tickets and launch the batch. The status picker promotes an
               issue without leaving the keyboard, and <Kbd>J</Kbd>/<Kbd>K</Kbd> walk the queue.
             </p>
@@ -250,7 +250,7 @@ function DocsPage() {
           <Section id="issues" title="Issues">
             <p>
               Tickets are a dependency graph, so santree draws one: blocked-by edges between cards,
-              translucent bands grouping each Linear project, and badges for state — <B>RDY</B> when
+              translucent bands grouping each Linear project, and badges for state: <B>RDY</B> when
               nothing blocks a ticket, <B>WIP</B> once a worktree exists for it.
             </p>
             <p>
@@ -263,13 +263,14 @@ function DocsPage() {
 
           <Section id="trees" title="Trees">
             <p>
-              The heart of the app. Every task lives in its own <B>git worktree</B> — five agents
-              can run at once and never step on each other&rsquo;s diff, and your own checkout stays
-              clean. Sidebar cards show each session&rsquo;s live state: <B>running</B>,{" "}
-              <B>delegating</B> to a subagent, or <B>waiting</B> on you.
+              Trees is where you&rsquo;ll spend most of your time. Every task lives in its own{" "}
+              <B>git worktree</B>, so five agents can run at once and never step on each
+              other&rsquo;s diff, and your own checkout stays clean. Sidebar cards show each
+              session&rsquo;s live state: <B>running</B>, <B>delegating</B> to a subagent, or{" "}
+              <B>waiting</B> on you.
             </p>
             <p>
-              The terminal is a real PTY running the real CLI — interrupt it, answer it, run{" "}
+              The terminal is a real PTY running the real CLI: interrupt it, answer it, run{" "}
               <Code>vim</Code> in it. The <B>Issue</B> tab keeps the ticket beside the terminal, and{" "}
               <B>Files</B> (<Keys keys={["⌘", "L"]} />) opens the diff and commit panel. From the
               bottom bar you push, open a PR, or pull the base branch through the worktree.
@@ -287,7 +288,7 @@ function DocsPage() {
               CI state, and how long a PR has waited.
             </p>
             <p>
-              The detail pane is a full review surface — the diff with inline comment threads, the
+              The detail pane is a full review surface: the diff with inline comment threads, the
               linked ticket, and <B>Ask AI</B>, which checks the PR out and opens a Claude session
               beside the code instead of on top of it. The <B>Checks</B> tab shows CI with logs
               inline, and <B>Fix CI with AI</B> hands a failing run straight to an agent.
@@ -296,7 +297,7 @@ function DocsPage() {
 
           <Section id="shortcuts" title="Keyboard shortcuts">
             <p>
-              The canonical list lives in the app — press <Keys keys={["⌘", "/"]} /> anywhere. The
+              The canonical list lives in the app. Press <Keys keys={["⌘", "/"]} /> anywhere. The
               ones worth memorizing:
             </p>
             <div className="mt-1 flex flex-col gap-5">
@@ -328,7 +329,7 @@ function DocsPage() {
               which gets every release as soon as it builds.
             </p>
             <p>
-              Updates only move forward — switching from Beta back to Stable takes effect once a
+              Updates only move forward. Switching from Beta back to Stable takes effect once a
               stable release passes the beta you&rsquo;re on.
             </p>
           </Section>
@@ -341,8 +342,8 @@ function DocsPage() {
               </li>
               <li>
                 <B>Your agent&rsquo;s login is its own.</B> santree runs the unmodified CLI in a
-                real terminal — it never reads, stores, or proxies the agent&rsquo;s credentials,
-                and never drives it unattended.
+                real terminal. It never reads, stores, or proxies the agent&rsquo;s credentials, and
+                never drives it unattended.
               </li>
               <li>
                 <B>Integration tokens live in the OS keychain</B> — Linear OAuth and GitHub PATs
@@ -368,7 +369,7 @@ function DocsPage() {
           <Section id="troubleshooting" title="Troubleshooting">
             <H3>A view is empty</H3>
             <p>
-              That&rsquo;s the real state, not a bug — santree never fabricates data. No Linear
+              That&rsquo;s the real state, not a bug. santree never fabricates data. No Linear
               connection means an empty Triage; no <Code>gh</Code> auth means an empty Reviews.
               Connect the tool and refresh (<Keys keys={["⌘", "⇧", "R"]} />
               ).
@@ -386,8 +387,8 @@ function DocsPage() {
                 href="https://github.com/santree-ai/santree/issues"
               >
                 Open an issue
-              </a>{" "}
-              — pre-release means fast-moving, and reports genuinely steer what gets fixed next.
+              </a>
+              . Pre-release means fast-moving, and reports genuinely steer what gets fixed next.
             </p>
           </Section>
         </div>
