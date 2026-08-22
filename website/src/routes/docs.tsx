@@ -202,8 +202,8 @@ function DocsPage() {
               </li>
             </ul>
             <p>
-              Nothing is required up front: without a connection a view simply shows its real, empty
-              state. There is no sample data anywhere in santree.
+              Nothing is required up front: without a connection a view shows its real, empty state.
+              There is no sample data anywhere in santree.
             </p>
           </Section>
 

@@ -156,8 +156,8 @@ export function InvestigatePane({
         title="Investigation ended"
         subtitle={
           <>
-            The investigation for <span className="font-mono text-fg-3">{ticketId}</span> is saved —
-            resume the same conversation whenever you're ready.
+            The investigation for <span className="font-mono text-fg-3">{ticketId}</span> is saved.
+            Resume the same conversation whenever you're ready.
           </>
         }
         onResume={() => {

@@ -118,7 +118,7 @@ export function RepoSessionPane({
         title="Session ended"
         subtitle={
           <>
-            Your session on <span className="font-mono text-fg-3">{branch}</span> is saved — resume
+            Your session on <span className="font-mono text-fg-3">{branch}</span> is saved. Resume
             the same conversation whenever you're ready.
           </>
         }

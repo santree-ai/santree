@@ -27,7 +27,7 @@ const FAQS = [
   },
   {
     q: "Does it require Linear?",
-    a: "No. Without Linear connected, the views simply show what's real: worktrees, terminals, and PRs all work. Connect a Linear org and triage lights up.",
+    a: "No. Without Linear connected, the views show what's real: worktrees, terminals, and PRs all work. Connect a Linear org and triage lights up.",
   },
 ];
 

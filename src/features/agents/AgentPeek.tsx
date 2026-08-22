@@ -158,7 +158,7 @@ export function AgentPeek({
         )}
         {entry.state === "permission" && entry.live && (
           <p className="mt-auto text-[11px] leading-[1.5] text-muted-3">
-            Permission prompts are answered in the session itself — santree never approves or denies
+            Permission prompts are answered in the session itself. santree never approves or denies
             on your behalf.
           </p>
         )}

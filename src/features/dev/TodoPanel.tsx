@@ -74,7 +74,7 @@ export function TodoPanel({ onSend }: { onSend: (id: string) => void }) {
             }
           }}
           rows={3}
-          placeholder="Found a bug? Write it down — screenshots paste right here."
+          placeholder="Found a bug? Write it down. Screenshots paste right here."
           aria-label="New dev todo"
           className="selectable w-full resize-none rounded-md border border-line-2 bg-input px-2.5 py-2 text-[12px] text-fg-2 placeholder:text-muted-4 focus:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)]"
         />

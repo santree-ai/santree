@@ -147,7 +147,7 @@ function PullRemoteButton({ worktree }: { worktree: Worktree }) {
       disabled={isPending || conflict}
       title={
         conflict
-          ? `Pulling ${commits} would conflict with your local changes — resolve it in the worktree (open Terminal → git merge origin/${worktree.branch})`
+          ? `Pulling ${commits} would conflict with your local changes. Resolve it in the worktree (open Terminal → git merge origin/${worktree.branch})`
           : `Pull ${commits} from origin/${worktree.branch}`
       }
       className={`${ITEM} disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent`}

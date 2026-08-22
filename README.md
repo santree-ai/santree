@@ -33,7 +33,7 @@ login, your subscription, no API key. Around the terminals it builds the
 workflow: a triage inbox from Linear, a dependency graph of your tickets, live
 session states ("running", "waiting on you"), diff review with an AI
 companion, and a PR dashboard. Nothing is mocked — every view is backed by
-live data, and an unconnected view simply shows its honest empty state.
+live data, and an unconnected view shows its honest empty state.
 
 ## One loop, five views
 

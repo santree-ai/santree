@@ -670,7 +670,7 @@ export const useUpdateWatcher = () => {
           if (!update || announced.current === update.version) return;
           announced.current = update.version;
           toast.info(
-            `santree ${update.version} is available — install it from Settings → Updates.`,
+            `santree ${update.version} is available. Install it from Settings → Updates.`,
             {
               title: "Update available",
               duration: 12_000,
@@ -725,7 +725,7 @@ export const parseLinearScope = (raw: string | null | undefined): LinearScope =>
 /** Said wherever a Linear write is disabled, so the four places that gate on it
  *  can't drift into four different explanations. */
 export const LINEAR_READ_ONLY_HINT =
-  "santree can't change Linear right now — it is set to read-only, or the workspace was connected without write access. Both live in Settings → Integrations.";
+  "santree can't change Linear right now: it is set to read-only, or the workspace was connected without write access. Both live in Settings → Integrations.";
 
 /**
  * True only when Linear is connected *and* the grant is read-only.
