@@ -61,7 +61,7 @@ export function FinalCta() {
           </h2>
           <p className="mx-auto mt-5 max-w-lg text-pretty text-[15px] leading-relaxed text-muted">
             santree is open source under the MIT license. Star the repo to follow along, or watch
-            releases to catch the first public build.
+            releases to catch each build as it ships.
           </p>
         </FadeUp>
         <FadeUp delay={0.08}>

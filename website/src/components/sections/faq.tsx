@@ -7,7 +7,7 @@ import { SectionHeading } from "~/components/ui/section-heading";
 const FAQS = [
   {
     q: "Can I use santree today?",
-    a: "It's pre-release and moving fast. Star the repo or watch releases. The first public build lands there, and building from source works today.",
+    a: "Yes. Download the macOS app — a signed, notarized DMG that keeps itself up to date. On Linux there are no packaged builds yet, but building from source takes a few minutes.",
   },
   {
     q: "Do I need an API key?",
@@ -23,7 +23,7 @@ const FAQS = [
   },
   {
     q: "Which platforms?",
-    a: "macOS and Linux, as a native desktop app built on Tauri.",
+    a: "macOS today — one universal download for Apple silicon and Intel. santree is a native Tauri app and runs on Linux too, from source until packaged builds ship.",
   },
   {
     q: "Does it require Linear?",
