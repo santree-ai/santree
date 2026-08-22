@@ -7,11 +7,11 @@ import { SectionHeading } from "~/components/ui/section-heading";
 const FAQS = [
   {
     q: "Can I use santree today?",
-    a: "It's pre-release and moving fast. Star the repo or watch releases — the first public build lands there. Building from source works today.",
+    a: "It's pre-release and moving fast. Star the repo or watch releases. The first public build lands there, and building from source works today.",
   },
   {
     q: "Do I need an API key?",
-    a: "No. santree drives the Claude Code CLI you already have, with your existing login and subscription. It never reads, stores, or proxies an agent's credentials — you authenticate in the terminal, exactly as you would without santree.",
+    a: "No. santree drives the Claude Code CLI you already have, with your existing login and subscription. It never reads, stores, or proxies an agent's credentials. You authenticate in the terminal, exactly as you would without santree.",
   },
   {
     q: "Is my code sent anywhere?",
@@ -27,7 +27,7 @@ const FAQS = [
   },
   {
     q: "Does it require Linear?",
-    a: "No. Without Linear connected, the views simply show what's real — worktrees, terminals, and PRs all work. Connect a Linear org and triage lights up.",
+    a: "No. Without Linear connected, the views simply show what's real: worktrees, terminals, and PRs all work. Connect a Linear org and triage lights up.",
   },
 ];
 
