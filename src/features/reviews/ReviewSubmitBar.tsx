@@ -79,7 +79,7 @@ export function ReviewSubmitBar({
       <span className="min-w-0 flex-1 truncate">
         <span className="font-medium">{drafted(drafts) || "Draft review in progress"}</span>
         <span className="text-muted-3">
-          {drafts > 0 ? " — nobody can see them until you submit." : " — nothing is posted yet."}
+          {drafts > 0 ? ". Nobody can see them until you submit." : ". Nothing is posted yet."}
         </span>
       </span>
       <Button size="sm" variant="ghost" onClick={() => setDiscarding(true)}>

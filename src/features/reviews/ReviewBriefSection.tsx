@@ -81,7 +81,7 @@ export function ReviewBriefSection({ pr }: { pr: ReviewPr }) {
             // A big diff on a capable model runs for minutes. Say so at the point
             // the wait starts feeling wrong, instead of leaving the user to guess
             // whether it died (it used to, silently, at 120s).
-            slowLabel="Still reading — a large diff takes a few minutes."
+            slowLabel="Still reading. A large diff takes a few minutes."
           />
         </div>
       )}
@@ -89,7 +89,7 @@ export function ReviewBriefSection({ pr }: { pr: ReviewPr }) {
       {!brief && !isPending && (
         <div className="rounded-lg border border-line-2 bg-raised px-3 py-3">
           <p className="mb-2.5 text-[11.5px] leading-[1.6] text-muted-2">
-            Get a summary, a suggested reading order, and the spots worth a closer look — before you
+            Get a summary, a suggested reading order, and the spots worth a closer look, before you
             open the diff.
           </p>
           <Button size="sm" variant="primary" onClick={run}>
@@ -129,7 +129,7 @@ function BriefBody({
       {brief.truncated && (
         <div className="mb-2.5 flex items-start gap-1.5 text-[10.5px] leading-[1.5] text-muted-4">
           <WarningIcon size={10} className="mt-[2px] flex-none" />
-          <span>The diff was too large to send whole — this covers only part of the PR.</span>
+          <span>The diff was too large to send whole. This covers only part of the PR.</span>
         </div>
       )}
 

@@ -46,8 +46,8 @@ export function ErrorScreen({ error, onRetry }: { error?: Error; onRetry?: () =>
         <div>
           <div className="text-[18px] font-semibold text-fg-bright">Something went wrong</div>
           <p className="mt-1.5 text-[13px] leading-relaxed text-muted-2">
-            santree hit an unexpected error. Try again, or go back to Agents — and if it keeps
-            happening, please report it so we can fix it.
+            santree hit an unexpected error. Try again, or go back to Agents. If it keeps happening,
+            please report it.
           </p>
         </div>
 

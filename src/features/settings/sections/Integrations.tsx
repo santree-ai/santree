@@ -93,8 +93,8 @@ export function IntegrationsSection() {
               Permissions to request
             </div>
             <div className="text-[11.5px] text-muted-3">
-              Read-only workspaces still show issues, triage and comments — santree just can't
-              change anything. Reconnect a workspace to move it between the two.
+              Read-only workspaces still show issues, triage and comments. santree just can't change
+              anything. Reconnect a workspace to move it between the two.
             </div>
           </div>
           <ChevronSelect
@@ -252,7 +252,7 @@ function LocalGitHubCard() {
                     GitHub CLI not found on your PATH.
                   </span>{" "}
                   Install it (<span className="font-mono text-fg-3">brew install gh</span>) and run{" "}
-                  <span className="font-mono text-fg-3">gh auth login</span> — without it,
+                  <span className="font-mono text-fg-3">gh auth login</span>. Without it,
                   pull-request creation and the Reviews tab stay empty. Already installed? Point
                   santree at it below.
                 </div>

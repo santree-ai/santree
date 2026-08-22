@@ -89,7 +89,7 @@ export function ReviewActionSection({ repo }: { repo?: string }) {
     <>
       <Heading
         title="Reviews"
-        subtitle="How the Reviews tab's AI runs. It only ever reads and explains — it never comments, approves, or pushes on your behalf. Edit its prompts in Settings → Prompts."
+        subtitle="How the Reviews tab's AI runs. It only ever reads and explains. It never comments, approves, or pushes on your behalf. Edit its prompts in Settings → Prompts."
       />
       <div className="space-y-3.5">
         <div>
@@ -117,7 +117,7 @@ function BriefModelCard({ repo }: { repo?: string }) {
     <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
       <HeadlessModelField
         label="Model"
-        hint="Reads the whole diff once to produce the reading order and watch-outs. Worth a capable model — a cheap one returns a plausible order that isn't grounded in the code, which is worse than none because you'd trust it. Defaults to Sonnet."
+        hint="Reads the whole diff once to produce the reading order and watch-outs. Worth a capable model. A cheap one returns a plausible order that isn't grounded in the code, which is worse than none because you'd trust it. Defaults to Sonnet."
         settingKey={REVIEW_BRIEF_MODEL_KEY}
         defaultModel={DEFAULT_BRIEF_MODEL}
         forRepo={repo}
@@ -138,7 +138,7 @@ export function TriageActionSection({ repo }: { repo?: string }) {
     <>
       <Heading
         title="Triage"
-        subtitle="How the Triage investigation runs — pick the agent and model. Edit its prompt in Settings → Prompts."
+        subtitle="How the Triage investigation runs. Pick the agent and model, and edit its prompt in Settings → Prompts."
       />
       {repo ? (
         <div className="space-y-3.5">
@@ -194,7 +194,7 @@ export function WorkActionConfig({ repo }: { repo?: string }) {
         <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
           <ToggleRow
             label="Queue work before launching"
-            hint="On: add several tickets to a queue and launch them together (the launch tray). Off: each issue's panel shows a single “Run” button that starts it right away — ⌘-click runs it in the background without leaving your current view."
+            hint="On: add several tickets to a queue and launch them together (the launch tray). Off: each issue's panel shows a single “Run” button that starts it right away. ⌘-click runs it in the background without leaving your current view."
             on={queue}
             onChange={(v) =>
               setSetting.mutate({ scope: "app", key: WORK_QUEUE_KEY, value: v ? "true" : null })
@@ -263,7 +263,7 @@ function AppTriagePanel() {
         <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
           <ToggleRow
             label="Be a good citizen"
-            hint="Show the whole team's issues — not just the ones assigned to you — so you can pitch in on anyone's tickets, on triage duty or not. Also the Mine/All toggle in the Triage header."
+            hint="Show the whole team's issues, not only the ones assigned to you, so you can pitch in on anyone's tickets, on triage duty or not. Also the Mine/All toggle in the Triage header."
             on={goodCitizen}
             disabled={!enabled}
             onChange={(v) => setBool(TRIAGE_GOOD_CITIZEN_KEY, v)}

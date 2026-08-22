@@ -37,7 +37,7 @@ export function UpdatesSection() {
       <div className="mb-3.5 rounded-xl border border-line-2 bg-raised px-4 py-0.5">
         <Field
           label="Release channel"
-          hint="Beta gets every release as soon as it builds. Switching back to Stable takes effect once a stable release passes the beta you're on — updates only ever move forward."
+          hint="Beta gets every release as soon as it builds. Switching back to Stable takes effect once a stable release passes the beta you're on. Updates only ever move forward."
         >
           <ChevronSelect
             value={channel}

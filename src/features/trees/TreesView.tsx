@@ -113,7 +113,7 @@ function PrSuggestionBar({ worktree }: { worktree: Worktree }) {
       {/* Take the row's free width but stay one line — a long branch name
           truncates with an ellipsis instead of wrapping the strip taller. */}
       <span className="min-w-0 flex-1 truncate text-fg-2">
-        Pushed to origin — open a pull request for{" "}
+        Pushed to origin. Open a pull request for{" "}
         <span className="font-mono text-fg-3">{worktree.branch}</span>?
       </span>
       <Button
@@ -182,8 +182,8 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
                 endedSubtitle={
                   <>
                     This is the main work terminal for{" "}
-                    <span className="font-mono text-fg-3">{worktree.id}</span>. The agent exited —
-                    resume it whenever you're ready.
+                    <span className="font-mono text-fg-3">{worktree.id}</span>. The agent exited.
+                    Resume it whenever you're ready.
                   </>
                 }
                 seed={seed}
@@ -354,7 +354,7 @@ function AgentTabPane({
       preparingTitle="Starting Claude…"
       preparingSubtitle={
         fixCi
-          ? "Reading the CI failure — the terminal opens in a moment."
+          ? "Reading the CI failure. The terminal opens in a moment."
           : "The terminal opens in a moment."
       }
       ended={ended}
@@ -362,12 +362,12 @@ function AgentTabPane({
       endedSubtitle={
         fixCi ? (
           <>
-            <span className="font-mono text-fg-3">{tab.title}</span> keeps its conversation — resume
+            <span className="font-mono text-fg-3">{tab.title}</span> keeps its conversation. Resume
             it to keep working, or close the tab. Commit &amp; push your fix from the bottom bar.
           </>
         ) : (
           <>
-            <span className="font-mono text-fg-3">{tab.title}</span> keeps its conversation — resume
+            <span className="font-mono text-fg-3">{tab.title}</span> keeps its conversation. Resume
             it whenever you're ready, or close the tab to discard it.
           </>
         )

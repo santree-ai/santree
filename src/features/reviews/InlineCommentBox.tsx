@@ -70,7 +70,7 @@ export function InlineCommentBox({
           label: inReview ? "Add to review" : "Start a review",
           busyLabel: "Saving…",
           title: inReview
-            ? "Add this to your pending review — nobody sees it until you submit"
+            ? "Add this to your pending review. Nobody sees it until you submit"
             : "Begin a batched review; nothing is posted until you submit it",
           onSubmit: post(true),
         }}

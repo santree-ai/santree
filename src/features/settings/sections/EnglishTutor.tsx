@@ -101,7 +101,7 @@ export function EnglishTutorSection() {
         <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
           <ToggleRow
             label="Correct my English"
-            hint="Every Claude session santree starts opens its reply with any mistakes in your message, then appends them to the practice log below. Takes effect on sessions started from now on — running ones keep the setting they launched with."
+            hint="Every Claude session santree starts opens its reply with any mistakes in your message, then appends them to the practice log below. Takes effect on sessions started from now on. Running ones keep the setting they launched with."
             on={enabled}
             onChange={(next) =>
               setSetting({ scope: "app", key: ENGLISH_TUTOR_KEY, value: next ? "true" : "false" })
@@ -136,7 +136,7 @@ export function EnglishTutorSection() {
 
         <Block
           title="Analysis"
-          subtitle="Turns the log into a shortlist of habits to break, weighted toward recent entries. One Claude call per run — nothing happens until you pick a window."
+          subtitle="Turns the log into a shortlist of habits to break, weighted toward recent entries. One Claude call per run. Nothing happens until you pick a window."
         >
           <div className="mb-3 flex flex-wrap gap-2">
             {SCOPES.map(({ scope, label, hint }) => (
@@ -163,7 +163,7 @@ export function EnglishTutorSection() {
                 label={`Reading the log${running ? ` (${SCOPE_LABEL[running]})` : ""}…`}
                 // A thousand corrections in and a structured answer out is minutes
                 // of work, not a stall — the run has its own long deadline.
-                slowLabel="Still working — a long log takes a few minutes."
+                slowLabel="Still working. A long log takes a few minutes."
               />
             </div>
           )}
@@ -191,7 +191,7 @@ export function EnglishTutorSection() {
               title={entries === 0 ? "Nothing to analyze yet." : "No analysis yet."}
               subtitle={
                 entries === 0
-                  ? "Turn the tutor on and write a few messages — corrections land in the log, and the log is what gets analyzed."
+                  ? "Turn the tutor on and write a few messages. Corrections land in the log, and the log is what gets analyzed."
                   : "Pick a window above to turn the log into a shortlist of what to work on."
               }
             />

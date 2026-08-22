@@ -176,14 +176,14 @@ export function WorktreeSettings({ repo, forRepo }: { repo: string; forRepo?: st
         </div>
         <HeadlessModelField
           label="Commit message"
-          hint="Writes a subject line from the staged diff. The cheap tier is genuinely enough here — it's a one-line summary of a capped diff."
+          hint="Writes a subject line from the staged diff. The cheap tier is genuinely enough here. It's a one-line summary of a capped diff."
           settingKey={COMMIT_MESSAGE_MODEL_KEY}
           defaultModel={DEFAULT_HELPER_MODEL}
           forRepo={forRepo}
         />
         <HeadlessModelField
           label="PR description"
-          hint="Fills the PR body from the diff, the ticket, and (optionally) the worktree's session transcripts. Worth a stronger model on a large PR — there's real reading to do."
+          hint="Fills the PR body from the diff, the ticket, and (optionally) the worktree's session transcripts. Worth a stronger model on a large PR. There's real reading to do."
           settingKey={PR_BODY_MODEL_KEY}
           defaultModel={DEFAULT_HELPER_MODEL}
           forRepo={forRepo}

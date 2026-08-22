@@ -197,7 +197,7 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
         {!execValue.trim() && !auth?.detectedExec && (
           <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-status-amber">
             <WarningIcon size={12} />
-            Couldn't find {def.short} on your PATH — set the path manually.
+            Couldn't find {def.short} on your PATH. Set the path manually.
           </div>
         )}
       </Block>

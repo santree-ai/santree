@@ -155,7 +155,7 @@ export function AiReviewPane({ pr }: { pr: ReviewPr }) {
             <span className="font-mono text-fg-3">
               {pr.repo}#{pr.number}
             </span>{" "}
-            is saved — pick it back up whenever you're ready.
+            is saved. Pick it back up whenever you're ready.
           </>
         }
         onResume={() => {
@@ -225,13 +225,13 @@ function ReviewFooter({ pr, hasWorkspace }: { pr: ReviewPr; hasWorkspace: boolea
     <div className="flex flex-none items-center gap-2 border-t border-hairline bg-raised px-3 py-1.5 text-[10.5px] text-muted-3">
       <ClaudeSparkIcon size={11} className="flex-none" />
       <span className="min-w-0 flex-1 truncate">
-        Reads this PR and answers questions. It never comments, approves, or pushes —{" "}
+        Reads this PR and answers questions. It never comments, approves, or pushes.{" "}
         <span className="text-fg-3">you do that.</span>
       </span>
       {!hasWorkspace && (
         <span
           className="flex flex-none items-center gap-1 text-status-amber"
-          title="santree has no local clone of this PR's repository, so the session only has the diff — it can't grep the codebase or open files the diff doesn't touch."
+          title="santree has no local clone of this PR's repository, so the session only has the diff. It can't grep the codebase or open files the diff doesn't touch."
         >
           <WarningIcon size={11} />
           diff only

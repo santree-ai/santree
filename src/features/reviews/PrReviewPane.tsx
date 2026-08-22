@@ -151,7 +151,7 @@ export function PrReviewPane({
                   style={{ color: palette.amber }}
                 >
                   <WarningIcon size={11} />
-                  Showing the first {files.length} files — this PR has more.
+                  Showing the first {files.length} files. This PR has more.
                 </span>
               )}
             </div>

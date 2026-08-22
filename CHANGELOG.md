@@ -10,7 +10,7 @@ commit-compare link.
 ## 0.1.2-beta.1 — 2026-08-21
 
 - New keep-awake toggle in the top bar (the coffee cup, macOS only): hold the
-  Mac awake — no sleep, no lock screen — while a long agent run is on screen.
+  Mac awake (no sleep, no lock screen) while a long agent run is on screen.
 - The keep-awake toggle is now remembered. Turn it on and it stays on across
   restarts until you turn it off; it starts off on a fresh install. Quitting
   santree always lets the Mac sleep again.
@@ -24,8 +24,8 @@ commit-compare link.
   ships. The channel is a dropdown in Settings → Updates, and updates only
   ever move forward.
 - Linear can be connected read-only. Choose the permissions santree requests
-  in Settings → Integrations; everything that writes to Linear — status
-  changes, comments, the "move to In Progress" automation — disables itself
+  in Settings → Integrations; everything that writes to Linear (status
+  changes, comments, the "move to In Progress" automation) disables itself
   with an explanation when writes aren't available. Flipping to read-only
   applies immediately, no reconnect needed.
 - Local GitHub settings are one tabbed card, matching the Agents screen.

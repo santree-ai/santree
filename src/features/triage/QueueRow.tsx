@@ -120,7 +120,7 @@ export const QueueRow = memo(function QueueRow({
           <PriorityPill priority={ticket.priority} muted={snoozed} />
           {snoozed ? (
             <span className="ml-auto flex flex-none items-center gap-1 font-mono text-[10px] text-muted-4">
-              💤 {snoozeLabel}
+              {snoozeLabel}
             </span>
           ) : (
             <RelativeTime

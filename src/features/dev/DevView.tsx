@@ -129,7 +129,7 @@ function PickRepo() {
   return (
     <CenterNote
       title="Where does santree live?"
-      subtitle="Pick your santree checkout — the Dev tab builds, installs, and runs Claude there."
+      subtitle="Pick your santree checkout. The Dev tab builds, installs, and runs Claude there."
     >
       <Button variant="primary" onClick={() => void choose()}>
         Choose folder…
@@ -195,8 +195,8 @@ function DevContent({ repoPath }: { repoPath: string }) {
         if (!claudeLive) setPendingPrompt(line);
         toast.success(
           claudeLive
-            ? "Prompt copied — paste it into the Claude session."
-            : "Prompt copied — it also seeds the Claude launch.",
+            ? "Prompt copied. Paste it into the Claude session."
+            : "Prompt copied. It also seeds the Claude launch.",
         );
       } catch {
         // the mutation's global error toast already fired
@@ -331,14 +331,14 @@ function DevBar({
         title="Install the new build?"
         message={
           info?.runningInstalled
-            ? "The newest DMG opens for a drag-and-drop install. santree then quits so the app can be replaced — after you drop the new build into Applications it reopens itself and ejects the DMG."
+            ? "The newest DMG opens for a drag-and-drop install. santree then quits so the app can be replaced. After you drop the new build into Applications it reopens itself and ejects the DMG."
             : "The newest DMG opens for a drag-and-drop install. You're running a dev build, so the app keeps running."
         }
         confirmLabel="Open DMG"
         busyLabel="Opening…"
         onConfirm={async () => {
           const quitting = await install.mutateAsync(repoPath);
-          if (!quitting) toast.success("DMG opened — drag santree into Applications.");
+          if (!quitting) toast.success("DMG opened. Drag santree into Applications.");
         }}
         onClose={() => setConfirmInstall(false)}
       />
@@ -379,7 +379,7 @@ function DevClaudePane({
     return (
       <CenterNote
         title="Claude session ended"
-        subtitle="The conversation is kept — resume it whenever you're ready."
+        subtitle="The conversation is kept. Resume it whenever you're ready."
       >
         <Button size="sm" variant="tinted" onClick={resume}>
           Resume session
@@ -434,7 +434,7 @@ function DevBuildPane({
     return (
       <CenterNote
         title="No build yet"
-        subtitle="Builds the production DMG with pnpm tauri build (a few minutes). It runs in the background — you can leave this tab."
+        subtitle="Builds the production DMG with pnpm tauri build (a few minutes). It runs in the background, so you can leave this tab."
       >
         <Button size="sm" variant="tinted" onClick={onStart}>
           Build DMG

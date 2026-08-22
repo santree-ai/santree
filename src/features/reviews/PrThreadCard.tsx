@@ -75,7 +75,7 @@ export function PrThreadCard({
           <Pill
             color={palette.amber}
             className="px-1 py-px text-[9.5px] font-medium"
-            title="In your unsubmitted review — nobody else can see this yet"
+            title="In your unsubmitted review. Nobody else can see this yet"
           >
             Draft
           </Pill>

@@ -111,8 +111,8 @@ export function IssueHeader({
       </div>
       {ticket.snoozedUntilMs != null && (
         <div className="mt-2.5 flex items-center gap-2 rounded-md border border-line-2 bg-input px-2.5 py-1.5 text-[11px] text-muted-2">
-          💤 Snoozed until {formatSnoozeLabel(ticket.snoozedUntilMs)} — sits at the bottom of the
-          queue until then.
+          Snoozed until {formatSnoozeLabel(ticket.snoozedUntilMs)}. Sits at the bottom of the queue
+          until then.
         </div>
       )}
     </div>

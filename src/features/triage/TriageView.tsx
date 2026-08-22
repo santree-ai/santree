@@ -442,7 +442,7 @@ export function TriageView() {
             {loading ? (
               <QueueSkeleton />
             ) : ordered.length === 0 ? (
-              <EmptyState className="py-8" title="Nothing in triage. 🎉" />
+              <EmptyState className="py-8" title="Nothing in triage." />
             ) : grouped ? (
               groups.map(([team, items]) => (
                 <div key={team} className="mb-2">

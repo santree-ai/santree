@@ -68,7 +68,7 @@ export function EnvironmentSection({ repo }: { repo?: string }) {
         subtitle={
           repo
             ? "Variables for this repo, merged over your app-level ones (repo wins). Injected into every terminal santree starts here."
-            : "Variables injected into every terminal santree starts — triage, worktree agents, the Terminal tab, and Claude tabs."
+            : "Variables injected into every terminal santree starts: triage, worktree agents, the Terminal tab, and Claude tabs."
         }
       />
       <div className="space-y-5">
