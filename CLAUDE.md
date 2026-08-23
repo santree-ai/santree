@@ -142,8 +142,11 @@ src/
 | `cargo clippy` | Rust linter |
 
 **Before finishing a change:** run the `/verify` skill (or at minimum its static
-gates: `cargo check`/`clippy`, `pnpm gen:bindings` if commands changed,
-`npx tsc --noEmit`, `pnpm lint`, both test suites — all green). For any new
+gates: `cargo fmt --all --check`, `cargo check`/`clippy`, `pnpm gen:bindings` if
+commands changed, `npx tsc --noEmit`, `pnpm lint`, both test suites — all green).
+`cargo fmt` is first because it is the gate that keeps getting skipped: clippy
+and the tests pass happily on unformatted code, and CI's backend job runs `fmt`
+*before* them, so the drift fails the build and masks everything after it. For any new
 command taking a path/id/branch, confirm it's validated (`safe_path` /
 no-leading-dash) before it reaches fs or git.
 

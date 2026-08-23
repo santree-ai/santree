@@ -35,10 +35,7 @@ export function DiffPane() {
 
   if (!selectedFile) {
     return (
-      <EmptyState
-        title="No file selected"
-        subtitle="Pick a changed file from the Changes list."
-      />
+      <EmptyState title="No file selected" subtitle="Pick a changed file from the Changes list." />
     );
   }
   if (file?.binary) {

@@ -103,11 +103,7 @@ fn repo_root(path: &str) -> Result<String> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn dev_info(
-    app: AppHandle,
-    repo_path: String,
-    db: State<'_, Db>,
-) -> CmdResult<DevInfo> {
+pub async fn dev_info(app: AppHandle, repo_path: String, db: State<'_, Db>) -> CmdResult<DevInfo> {
     let log_path = app
         .path()
         .app_log_dir()
@@ -1098,8 +1094,11 @@ fn release(repo_path: &str, version: &str, notes: &str) -> Result<DevRelease> {
     // say this version, the tag belongs to something else and going ahead would
     // publish a second, different release under one name.
     let pkg = std::fs::read_to_string(rootp.join("package.json"))?;
-    let resuming = git::git(rootp, &["rev-parse", "-q", "--verify", &format!("refs/tags/{tag}")])
-        .is_ok();
+    let resuming = git::git(
+        rootp,
+        &["rev-parse", "-q", "--verify", &format!("refs/tags/{tag}")],
+    )
+    .is_ok();
     if resuming && declared_json_version(&pkg).as_deref() != Some(version.as_str()) {
         bail!("{tag} already exists");
     }
@@ -1129,7 +1128,10 @@ fn release(repo_path: &str, version: &str, notes: &str) -> Result<DevRelease> {
     };
     write("package.json", set_json_version(&pkg, &version)?)?;
     let conf = std::fs::read_to_string(rootp.join("src-tauri/tauri.conf.json"))?;
-    write("src-tauri/tauri.conf.json", set_json_version(&conf, &version)?)?;
+    write(
+        "src-tauri/tauri.conf.json",
+        set_json_version(&conf, &version)?,
+    )?;
     let toml = std::fs::read_to_string(rootp.join("Cargo.toml"))?;
     write("Cargo.toml", set_cargo_toml_version(&toml, &version)?)?;
     let lock = std::fs::read_to_string(rootp.join("Cargo.lock"))?;
@@ -1194,11 +1196,11 @@ mod tests {
         for bad in [
             "1.2",
             "1.2.3.4",
-            "v1.2.3",          // the `v` belongs to the tag, not the version
-            "1.2.3-rc.1",      // release.yml only splits on -beta
+            "v1.2.3",     // the `v` belongs to the tag, not the version
+            "1.2.3-rc.1", // release.yml only splits on -beta
             "1.2.3-beta",
             "1.2.3-beta.x",
-            "-1.2.3",          // would become a git flag
+            "-1.2.3", // would become a git flag
             "1.2.3 --force",
             "",
         ] {
@@ -1223,7 +1225,10 @@ mod tests {
     #[test]
     fn a_running_beta_offers_to_become_its_own_stable() {
         let n = next_versions(v("0.2.0-beta.3"));
-        assert_eq!(n.release, "0.2.0", "a beta finishes as that version, not the next");
+        assert_eq!(
+            n.release, "0.2.0",
+            "a beta finishes as that version, not the next"
+        );
         assert_eq!(n.beta, "0.2.0-beta.4");
         let n = next_versions(v("0.1.1"));
         assert_eq!(n.release, "0.1.2");
@@ -1254,7 +1259,9 @@ mod tests {
         assert!(out.contains("  \"version\": \"0.2.0\"\n"));
         assert_eq!(declared_json_version(&out).as_deref(), Some("0.2.0"));
         // …and a comma is still a comma.
-        assert!(set_json_version(PKG, "0.2.0").unwrap().contains("\"0.2.0\","));
+        assert!(set_json_version(PKG, "0.2.0")
+            .unwrap()
+            .contains("\"0.2.0\","));
     }
 
     #[test]
@@ -1282,7 +1289,11 @@ mod tests {
         assert!(out.contains("name = \"other\"\nversion = \"3.0.0\""));
         // `santreeish` isn't ours — the prefix match must require the hyphen.
         assert!(out.contains("name = \"santreeish\"\nversion = \"7.7.7\""));
-        assert!(set_cargo_lock_version("[[package]]\nname = \"other\"\nversion = \"1\"\n", "0.2.0").is_err());
+        assert!(set_cargo_lock_version(
+            "[[package]]\nname = \"other\"\nversion = \"1\"\n",
+            "0.2.0"
+        )
+        .is_err());
     }
 
     // ── CHANGELOG ──────────────────────────────────────────────────────────
@@ -1320,7 +1331,11 @@ mod tests {
             let declared = declared_json_version(&text);
             assert!(declared.is_some(), "{rel} has no readable version");
             let out = set_json_version(&text, "9.9.9").unwrap();
-            assert_eq!(declared_json_version(&out).as_deref(), Some("9.9.9"), "{rel}");
+            assert_eq!(
+                declared_json_version(&out).as_deref(),
+                Some("9.9.9"),
+                "{rel}"
+            );
         }
 
         let toml = read("Cargo.toml");
@@ -1332,14 +1347,23 @@ mod tests {
         let lock = read("Cargo.lock");
         let out = set_cargo_lock_version(&lock, "9.9.9").unwrap();
         let bumped = out.matches("version = \"9.9.9\"").count();
-        assert!(bumped >= 4, "expected the 4 santree crates, bumped {bumped}");
+        assert!(
+            bumped >= 4,
+            "expected the 4 santree crates, bumped {bumped}"
+        );
 
         // The declared versions agree today, which is what the release guard
         // requires of any tag.
         let pkg = declared_json_version(&read("package.json")).unwrap();
-        assert_eq!(declared_json_version(&read("src-tauri/tauri.conf.json")), Some(pkg.clone()));
+        assert_eq!(
+            declared_json_version(&read("src-tauri/tauri.conf.json")),
+            Some(pkg.clone())
+        );
         assert_eq!(declared_cargo_version(&toml), Some(pkg.clone()));
-        assert!(pkg.parse::<Version>().is_ok(), "{pkg} must parse as a release version");
+        assert!(
+            pkg.parse::<Version>().is_ok(),
+            "{pkg} must parse as a release version"
+        );
     }
 
     #[test]
@@ -1375,21 +1399,33 @@ mod tests {
         g(&work, &["init", "-b", "main"]);
         g(&work, &["config", "user.email", "dev@example.com"]);
         g(&work, &["config", "user.name", "dev"]);
-        g(&work, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        g(
+            &work,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
 
         let write = |rel: &str, body: &str| {
             let path = work.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, body).unwrap();
         };
-        write("package.json", "{\n  \"name\": \"x\",\n  \"version\": \"0.1.1\"\n}\n");
+        write(
+            "package.json",
+            "{\n  \"name\": \"x\",\n  \"version\": \"0.1.1\"\n}\n",
+        );
         write(
             "src-tauri/tauri.conf.json",
             "{\n  \"productName\": \"santree\",\n  \"version\": \"0.1.1\"\n}\n",
         );
         write("Cargo.toml", "[workspace.package]\nversion = \"0.1.1\"\n");
-        write("Cargo.lock", "[[package]]\nname = \"santree\"\nversion = \"0.1.1\"\n");
-        write("CHANGELOG.md", "# Changelog\n\n## 0.1.1 — 2026-08-20\n\n- old\n");
+        write(
+            "Cargo.lock",
+            "[[package]]\nname = \"santree\"\nversion = \"0.1.1\"\n",
+        );
+        write(
+            "CHANGELOG.md",
+            "# Changelog\n\n## 0.1.1 — 2026-08-20\n\n- old\n",
+        );
         write("src/app.ts", "committed\n");
         g(&work, &["add", "-A"]);
         g(&work, &["commit", "-m", "init"]);
@@ -1404,16 +1440,25 @@ mod tests {
         assert_eq!(out.tag, "v0.2.0-beta.1");
         assert!(out.pushed);
         assert!(out.commit.is_some(), "the bump should have been committed");
-        assert_eq!(g(&work, &["log", "-1", "--format=%s"]), "release: 0.2.0-beta.1");
+        assert_eq!(
+            g(&work, &["log", "-1", "--format=%s"]),
+            "release: 0.2.0-beta.1"
+        );
 
         // Every declared version moved, in lockstep — the guard fails a tag otherwise.
         let read = |rel: &str| std::fs::read_to_string(work.join(rel)).unwrap();
-        assert_eq!(declared_json_version(&read("package.json")).as_deref(), Some("0.2.0-beta.1"));
+        assert_eq!(
+            declared_json_version(&read("package.json")).as_deref(),
+            Some("0.2.0-beta.1")
+        );
         assert_eq!(
             declared_json_version(&read("src-tauri/tauri.conf.json")).as_deref(),
             Some("0.2.0-beta.1")
         );
-        assert_eq!(declared_cargo_version(&read("Cargo.toml")).as_deref(), Some("0.2.0-beta.1"));
+        assert_eq!(
+            declared_cargo_version(&read("Cargo.toml")).as_deref(),
+            Some("0.2.0-beta.1")
+        );
         assert!(read("Cargo.lock").contains("version = \"0.2.0-beta.1\""));
         assert!(read("CHANGELOG.md").contains("## 0.2.0-beta.1 — "));
 
@@ -1423,7 +1468,13 @@ mod tests {
         touched.sort_unstable();
         assert_eq!(
             touched,
-            ["CHANGELOG.md", "Cargo.lock", "Cargo.toml", "package.json", "src-tauri/tauri.conf.json"]
+            [
+                "CHANGELOG.md",
+                "Cargo.lock",
+                "Cargo.toml",
+                "package.json",
+                "src-tauri/tauri.conf.json"
+            ]
         );
         // …and the work in progress is still uncommitted, exactly as it was.
         assert_eq!(read("src/app.ts"), "half-finished\n");
@@ -1433,7 +1484,10 @@ mod tests {
         // The tag is on the release commit, and it reached the remote.
         let head = g(&work, &["rev-parse", "HEAD"]);
         assert_eq!(g(&work, &["rev-parse", "v0.2.0-beta.1^{commit}"]), head);
-        assert_eq!(git::git(&remote, &["rev-parse", "v0.2.0-beta.1^{commit}"]).unwrap(), head);
+        assert_eq!(
+            git::git(&remote, &["rev-parse", "v0.2.0-beta.1^{commit}"]).unwrap(),
+            head
+        );
 
         // Re-running is the recovery path for a push that failed: it finishes
         // rather than refusing, writes nothing new, and doesn't duplicate the

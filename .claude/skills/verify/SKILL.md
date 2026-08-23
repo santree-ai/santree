@@ -12,6 +12,10 @@ the real app and *observe* the change. A change is verified only when both pass.
 
 Run in this order (cheapest first). All must be green:
 
+0. `cargo fmt --all --check` — first, and never skipped. Clippy and the tests
+   pass on unformatted code, so nothing else catches this; CI's backend job runs
+   it *before* them, so drift fails the build and hides every later gate. If it
+   reports a diff, `cargo fmt --all` and re-check.
 1. `cargo check --workspace`
 2. If anything touched `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`, or a
    `specta::Type` in `crates/core/src/domain.rs`:
@@ -21,7 +25,9 @@ Run in this order (cheapest first). All must be green:
 3. `npx tsc --noEmit` — and if test files changed, also `pnpm typecheck:test`
    (vitest strips types without checking them; this is the only place test files
    are type-checked).
-4. `pnpm lint` (Biome: lint + format + import sorting)
+4. `pnpm lint` (Biome: lint + format + import sorting). The *frontend* half
+   of the same trap — `biome check` fails on formatting too, so run
+   `pnpm format` and re-check rather than reading past it.
 5. `cargo clippy --workspace --all-targets -- -D warnings`
 6. `pnpm test` (vitest) and `cargo test --workspace`
 7. For any new/changed command taking a path, id, or branch: confirm it's
