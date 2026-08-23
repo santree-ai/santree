@@ -57,7 +57,7 @@ export function Hero() {
           <DownloadButton size="lg" />
           <a href="https://github.com/santree-ai/santree" className="btn btn-ghost h-11 px-5">
             <GitHubLogo size={15} />
-            Star on GitHub
+            Read the source
           </a>
         </div>
         <div className="rise rise-3 mt-7">
