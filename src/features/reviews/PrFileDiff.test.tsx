@@ -76,6 +76,12 @@ describe("PrFileDiff", () => {
   });
 });
 
+/** The code cell of the row carrying `line` on the new side. */
+function content(container: HTMLElement, line: number) {
+  const span = container.querySelector(`span[data-line-new-num="${line}"]`);
+  return span?.closest("tr")?.querySelector("td.diff-line-content") as HTMLElement;
+}
+
 /** The `+` of the row carrying `line` on the new side, and its line-number cell. */
 function gutter(container: HTMLElement, line: number) {
   const span = container.querySelector(`span[data-line-new-num="${line}"]`);
@@ -114,6 +120,30 @@ describe("commenting on a range", () => {
       expect(container.textContent).toContain("Add a comment on lines R41 to R43"),
     );
     expect(getByText("Start a review")).toBeTruthy();
+  });
+
+  it("follows the drag down the code, not just the line-number column", async () => {
+    // What the pointer actually crosses. The + sits on the boundary between the
+    // gutter and the code, so dragging straight down from it lands on the content
+    // cells — and the library only extends a range while the pointer is over the
+    // line numbers, so the range stopped at the line that was pressed.
+    const { container } = render(
+      <PrFileDiff
+        path="a.ts"
+        status="modified"
+        patch={RANGE}
+        threads={NO_THREADS}
+        target={TARGET}
+      />,
+    );
+
+    fireEvent.mouseDown(gutter(container, 41).plus);
+    fireEvent.mouseOver(content(container, 43));
+    fireEvent.mouseUp(document);
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("Add a comment on lines R41 to R43"),
+    );
   });
 
   it("still opens on one line when the + is only clicked", async () => {
