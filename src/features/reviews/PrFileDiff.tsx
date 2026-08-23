@@ -6,6 +6,12 @@
  * and its `renderWidgetLine` / gutter `+` to open the {@link InlineCommentBox} on
  * one — the same affordance as GitHub's Files tab.
  *
+ * Uses the `WithMultiSelect` variant so a comment can cover a **line range**, as
+ * on github.com: drag down the line-number gutter, then click the `+` on the last
+ * line of the selection (the library drops the range if the `+` is clicked
+ * anywhere else, which is the same rule GitHub's UI enforces by only offering the
+ * button there). `renderWidgetLine` then reports both ends of the range.
+ *
  * Threads are placed on the new (right) side for added/context lines and the old
  * (left) side for removed lines. Outdated / unplaceable threads (no line) are the
  * caller's job — they're listed below the diff, not anchored here.
@@ -14,7 +20,7 @@
  * diff — there's no expand-unchanged-context. Memoized: `DiffView` re-lays-out on
  * every render, and the host re-renders on unrelated Reviews-context changes.
  */
-import { DiffModeEnum, DiffView } from "@git-diff-view/react";
+import { DiffModeEnum, DiffViewWithMultiSelect } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { memo, useMemo } from "react";
 
@@ -25,6 +31,7 @@ import { bucketThreads } from "./bucketThreads";
 import { type CommentTarget, isRightSide } from "./commentTarget";
 import { InlineCommentBox } from "./InlineCommentBox";
 import { PrThreadCard } from "./PrThreadCard";
+import { clampToHunk } from "./patchLines";
 
 /**
  * GitHub's REST `patch` is only the hunk body (it starts at `@@`) — it omits the
@@ -86,7 +93,7 @@ export const PrFileDiff = memo(function PrFileDiff({
 
   return (
     <div className="diff-viewer selectable min-w-0 text-[12.5px]">
-      <DiffView<PrThread[]>
+      <DiffViewWithMultiSelect<PrThread[]>
         data={data}
         extendData={extendData}
         renderExtendLine={({ data }) => (
@@ -97,16 +104,32 @@ export const PrFileDiff = memo(function PrFileDiff({
                 thread={t}
                 prRepo={target.prRepo}
                 number={target.number}
+                patch={patch}
               />
             ))}
           </div>
         )}
+        // A range that crosses a hunk boundary is a comment GitHub refuses, so the
+        // drag stops at the end of the hunk it started in rather than being posted
+        // and 422'd back.
+        scopeMultiSelectToHunk={(range) => {
+          const clamped = clampToHunk(
+            patch,
+            range.side === "new",
+            range.startLineNumber,
+            range.endLineNumber,
+          );
+          if (!clamped) return null;
+          return { ...range, startLineNumber: clamped[0], endLineNumber: clamped[1] };
+        }}
         diffViewAddWidget={!!target.headSha}
-        renderWidgetLine={({ lineNumber, side, onClose }) => (
+        renderWidgetLine={({ lineNumber, fromLineNumber, side, onClose }) => (
           <InlineCommentBox
             target={target}
             path={path}
+            patch={patch}
             line={lineNumber}
+            startLine={fromLineNumber}
             onRight={isRightSide(side)}
             onClose={onClose}
           />

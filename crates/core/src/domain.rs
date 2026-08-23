@@ -827,6 +827,10 @@ pub struct PrThread {
     /// Line the thread is anchored to (in the file named by `path`). `None` when
     /// GitHub can't place it anymore (outdated threads on since-changed lines).
     pub line: Option<u32>,
+    /// First line of a multi-line thread — `line` is its last. `None` for the
+    /// single-line case. GitHub anchors a range thread at its last line either
+    /// way, so this is only needed to show what a suggestion would replace.
+    pub start_line: Option<u32>,
     /// Which side of the diff the anchor line lives on: `true` = the new/right
     /// side (an added/context line), `false` = the old/left side (a removed line).
     pub on_right: bool,
@@ -1032,6 +1036,11 @@ pub struct NewInlineComment {
     /// numbering on the right, the old file's on the left. Same convention as
     /// [`PrThread::line`], which is how the diff view keys its rows.
     pub line: u32,
+    /// The **first** line of the range, when the comment covers several lines —
+    /// `line` is then its last. `None` for the single-line case. Both ends sit on
+    /// the side named by `on_right`; GitHub rejects a start that isn't strictly
+    /// before the end, and a range that leaves the hunk.
+    pub start_line: Option<u32>,
     pub on_right: bool,
     pub body: String,
     /// Hold it in the viewer's pending review instead of posting it now — the

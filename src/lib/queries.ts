@@ -22,6 +22,7 @@ import type {
   AgentKind,
   AnalysisScope,
   ChangedFile,
+  DevRelease,
   DevTodo,
   KeepAwakeStatus,
   NewInlineComment,
@@ -275,6 +276,7 @@ export const queryKeys = {
   worktreeHasTranscripts: (repo: string, id: string) =>
     ["worktree-has-transcripts", repo, id] as const,
   reviews: (repo: string) => ["reviews", repo] as const,
+  githubViewer: () => ["github-viewer"] as const,
   prTickets: (repo: string, ids: string[]) => ["pr-tickets", repo, ids] as const,
   /** Keyed on the head SHA: a PR that gains commits needs a fresh checkout, not
    *  the one an agent already read. */
@@ -346,6 +348,7 @@ export const queryKeys = {
   devTodos: ["dev-todos"] as const,
   devInfo: (repoPath: string) => ["dev-info", repoPath] as const,
   devScreenshot: (path: string) => ["dev-screenshot", path] as const,
+  devVersion: (repoPath: string) => ["dev-version", repoPath] as const,
 };
 
 /** Setting keys for the Triage Investigation action (agent · model · effort).
@@ -1588,6 +1591,14 @@ export const useAddPrInlineComment = (prRepo: string, number: number) =>
     mutationFn: (c) => unwrap(commands.addPrInlineComment(c)),
     invalidate: () => [prDetailKey(prRepo, number)],
     success: (_d, c) => (c.pending ? "Added to your review." : "Comment posted."),
+  });
+
+/** The signed-in GitHub user's login — who the review composer writes as. Not
+ *  repo-scoped and effectively fixed for the session, so it's cached for an hour
+ *  rather than re-asked on every PR. `null` when `gh` isn't authenticated. */
+export const useGithubViewerLogin = () =>
+  useUnwrappedQuery(queryKeys.githubViewer(), () => commands.githubViewerLogin(), {
+    staleTime: 60 * 60_000,
   });
 
 /** Reply under an existing inline review thread. */
@@ -2945,6 +2956,34 @@ export const useDevInstall = () =>
   useActionMutation<string, boolean>({
     mutationFn: (repoPath) => unwrap(commands.devInstall(repoPath)),
     silent: true,
+  });
+
+/** Where the checkout's declared version sits, what it could become, and the
+ *  reasons a release from here would be refused. Cheap local git/fs reads, but
+ *  a bump changes all of it — so it's invalidated by {@link useDevRelease}. */
+export const useDevVersion = (repoPath: string) =>
+  useUnwrappedQuery(queryKeys.devVersion(repoPath), () => commands.devVersion(repoPath), {
+    enabled: !!repoPath,
+    staleTime: 10_000,
+  });
+
+/** Bump the version files, commit them, tag and push — which starts the signed
+ *  release in CI. Not optimistic and not silent: this one reports exactly what
+ *  it did, because a half-finished release is a thing you have to know about.
+ *  The dialog confirms before it ever gets here. */
+export const useDevRelease = (repoPath: string) =>
+  useActionMutation<{ version: string; notes: string }, DevRelease>({
+    mutationFn: ({ version, notes }) => unwrap(commands.devRelease(repoPath, version, notes)),
+    // The release commit moves the working tree the Files pane is showing. Its
+    // queries are keyed by repo *name*, which this hook doesn't have — the
+    // prefixes cover every repo, and re-reading a clean status is cheap.
+    invalidate: () => [
+      queryKeys.devVersion(repoPath),
+      queryKeys.devInfo(repoPath),
+      ["worktree-status"],
+      ["worktree-file-diff"],
+    ],
+    success: (r) => `${r.tag} pushed. CI is building the release.`,
   });
 
 /** Eject any mounted santree DMG volume left on the desktop. */

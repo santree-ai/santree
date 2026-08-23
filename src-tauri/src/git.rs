@@ -1208,6 +1208,30 @@ pub fn commit(cwd: &Path, message: &str, stage_all: bool) -> Result<()> {
     .map(|_| ())
 }
 
+/// Commit **only** `paths`, taking their working-tree contents — whatever else is
+/// staged or modified stays exactly where it is. `Ok(None)` when none of them
+/// differ from HEAD.
+///
+/// A pathspec commit is what lets a release bump go in on its own from a tree
+/// that has work in progress in it. Whether there's anything to commit is asked
+/// separately rather than read off a failed `git commit`: that call also fails
+/// for reasons that must not be mistaken for "nothing to do" (a rejecting
+/// pre-commit hook, no configured identity). Both steps share one index lock, so
+/// a staging click can't land between them and ride along.
+pub fn commit_paths(cwd: &Path, message: &str, paths: &[&str]) -> Result<Option<String>> {
+    with_index_lock(cwd, || {
+        let mut diff = vec!["diff", "--name-only", "HEAD", "--"];
+        diff.extend_from_slice(paths);
+        if git_output(cwd, &diff)?.trim().is_empty() {
+            return Ok(None);
+        }
+        let mut args = vec!["commit", "-m", message, "--"];
+        args.extend_from_slice(paths);
+        git(cwd, &args)?;
+        Ok(Some(git(cwd, &["rev-parse", "--short", "HEAD"])?))
+    })
+}
+
 /// The full staged diff, for AI commit-message generation.
 pub fn staged_diff(cwd: &Path) -> String {
     git_output(cwd, &["diff", "--cached"]).unwrap_or_default()

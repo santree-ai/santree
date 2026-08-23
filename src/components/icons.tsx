@@ -45,6 +45,28 @@ export function PlusIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** A framed `+`/`−` pair — GitHub's "add a suggestion" glyph, for the composer
+ *  button that inserts a ```suggestion block. */
+export function SuggestionIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <rect x="3" y="3" width="18" height="18" rx="3" />
+      <path d="M8 9.5h5M10.5 7v5M8 16h8" />
+    </svg>
+  );
+}
+
 /** A check glyph — confirmed / queued state. */
 export function CheckIcon({ size = 14, className }: IconProps) {
   return (

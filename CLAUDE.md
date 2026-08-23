@@ -19,10 +19,13 @@ connected (no Linear org, no `gh` auth, no repo path) commands return real-but-e
 results and the view shows its empty state.
 
 There is also a hidden **Dev** tab (dogfooding: build/install santree from inside
-santree, bug TODO list, its own Claude session), gated to the developer's GitHub
-login. Deliberately self-contained — `src/features/dev/`, `src-tauri/src/dev.rs`,
-migration `0017`, and a delimited block in `lib/queries.ts` — so it can be deleted
-cleanly before a public release.
+santree, browse/diff/commit the checkout, cut a release, bug TODO list, its own
+Claude session), gated to the developer's GitHub login. Deliberately
+self-contained — `src/features/dev/`, `src-tauri/src/dev.rs`, migration `0017`,
+and a delimited block in `lib/queries.ts` — so it can be deleted cleanly before a
+public release. Its Files pane is the one place it leans on the rest: it reads
+the checkout through the shared `worktree_*` commands as the repo root
+(`BASE_ID`), so the checkout has to be a registered repo.
 
 ## Goal & priorities (in order)
 
@@ -162,6 +165,14 @@ three versions match it, and fails a *stable* tag without its changelog entry
 — that section becomes the release body and the in-app "What's new", so write
 it for users, in plain bullets (the app renders it as text). Betas without an
 entry fall back to a commit-compare link.
+
+The **Dev tab's Release pane** does all of that from inside the app — it writes
+the four files, inserts the changelog section, commits *only those paths* (work
+in progress stays put), tags and pushes. It refuses before writing anything if
+the declared versions disagree, a stable release has no notes, the tag is taken,
+or the version isn't newer than the latest tag; and re-running after a failed
+push finishes the job instead of refusing. The tag is annotated with a message —
+a bare `git tag` fails outright under `tag.gpgsign`.
 
 **The tag picks the channel.** `v0.2.0` = stable — GitHub's `releases/latest`
 pointer, which is also what the website's download button resolves through.

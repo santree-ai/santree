@@ -19,24 +19,43 @@ import { CheckIcon, ChevronDownIcon } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
 import { Button, Pill } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
+import { SuggestionOriginal } from "../../components/Suggestion";
 import { useReplyToPrThread, useSetPrThreadResolved } from "../../lib/queries";
 import { isoMs } from "../../lib/relativeTime";
 import { palette, successColor } from "../../theme/colors";
 import { CommentComposer } from "./CommentComposer";
+import { patchLineRange } from "./patchLines";
 
 function basename(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/** `auth.rs:14`, or `auth.rs:10-14` for a thread covering a range. */
+function anchorOf(thread: PrThread): string {
+  const file = basename(thread.path);
+  if (thread.line == null) return file;
+  const from = thread.startLine;
+  return from != null && from < thread.line
+    ? `${file}:${from}-${thread.line}`
+    : `${file}:${thread.line}`;
 }
 
 export function PrThreadCard({
   thread,
   prRepo,
   number,
+  patch,
 }: {
   thread: PrThread;
   /** "owner/name" of the PR this thread belongs to — the reply/resolve target. */
   prRepo: string;
   number: number;
+  /** The file's patch, when the card is rendered against one. It's the only
+   *  source for the lines a ```suggestion in this thread would replace — GitHub
+   *  keeps them out of the comment body and derives them from the anchor. Absent
+   *  where the card is listed away from its file (the sidebar's other-files list,
+   *  the outdated-comments list), where a suggestion renders on its own. */
+  patch?: string;
 }) {
   // Resolved conversations collapse to their header by default (GitHub's UI);
   // everything else opens so unresolved feedback is visible without a click.
@@ -45,8 +64,14 @@ export function PrThreadCard({
   const reply = useReplyToPrThread(prRepo, number);
   const { mutate: setResolved } = useSetPrThreadResolved(prRepo, number);
 
-  const anchor = `${basename(thread.path)}${thread.line != null ? `:${thread.line}` : ""}`;
+  const anchor = anchorOf(thread);
   const count = thread.comments.length;
+  // What a suggestion in this thread proposes to replace. GitHub anchors a range
+  // thread at its *last* line, so the range runs from `startLine` to `line`.
+  const original =
+    patch && thread.line != null
+      ? patchLineRange(patch, thread.onRight, thread.startLine ?? thread.line, thread.line)
+      : null;
   // A draft thread has nothing posted in it yet, so there's nothing to reply to
   // and nothing to resolve — it's still just text in the viewer's own review.
   const isDraft = thread.comments.every((c) => c.isPending);
@@ -102,7 +127,9 @@ export function PrThreadCard({
                   />
                 </div>
                 <div className="text-[12px]">
-                  <Markdown>{c.body}</Markdown>
+                  <SuggestionOriginal value={original}>
+                    <Markdown>{c.body}</Markdown>
+                  </SuggestionOriginal>
                 </div>
               </div>
             </div>

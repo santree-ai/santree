@@ -1297,6 +1297,19 @@ pub async fn add_review_comment(
     name: &str,
     c: &NewInlineComment,
 ) -> Result<()> {
+    let mut body = serde_json::json!({
+        "body": c.body,
+        "commit_id": c.head_sha,
+        "path": c.path,
+        "line": c.line,
+        "side": diff_side(c.on_right),
+    });
+    // Sent only for a range. An explicit `start_line: null` is not the same as
+    // omitting it here — GitHub 422s on the former.
+    if let Some(start) = c.start_line {
+        body["start_line"] = start.into();
+        body["start_side"] = diff_side(c.on_right).into();
+    }
     rest_post(
         token,
         api_url(&[
@@ -1307,13 +1320,7 @@ pub async fn add_review_comment(
             &c.number.to_string(),
             "comments",
         ])?,
-        serde_json::json!({
-            "body": c.body,
-            "commit_id": c.head_sha,
-            "path": c.path,
-            "line": c.line,
-            "side": diff_side(c.on_right),
-        }),
+        body,
     )
     .await
 }
@@ -1322,11 +1329,11 @@ pub async fn add_review_comment(
 /// "Start a review". Omitting `event` is what leaves it unsubmitted: the comment
 /// is invisible to everyone else until [`submit_review`] runs.
 pub async fn start_review(token: &str, c: &NewInlineComment) -> Result<()> {
-    let mutation = "mutation($pr: ID!, $oid: GitObjectID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) {
+    let mutation = "mutation($pr: ID!, $oid: GitObjectID!, $path: String!, $line: Int!, $startLine: Int, $side: DiffSide!, $startSide: DiffSide, $body: String!) {
         addPullRequestReview(input: {
           pullRequestId: $pr,
           commitOID: $oid,
-          threads: [{ path: $path, line: $line, side: $side, body: $body }]
+          threads: [{ path: $path, line: $line, startLine: $startLine, side: $side, startSide: $startSide, body: $body }]
         }) { clientMutationId }
       }";
     let _: serde_json::Value = graphql(
@@ -1337,7 +1344,11 @@ pub async fn start_review(token: &str, c: &NewInlineComment) -> Result<()> {
             "oid": c.head_sha,
             "path": c.path,
             "line": c.line,
+            // Both range ends move together: null for a single-line comment, and
+            // the same side as the end otherwise (a range can't straddle sides).
+            "startLine": c.start_line,
             "side": diff_side(c.on_right),
+            "startSide": c.start_line.map(|_| diff_side(c.on_right)),
             "body": c.body,
         }),
     )
@@ -1351,10 +1362,10 @@ pub async fn add_pending_review_comment(
     review_id: &str,
     c: &NewInlineComment,
 ) -> Result<()> {
-    let mutation =
-        "mutation($review: ID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) {
+    let mutation = "mutation($review: ID!, $path: String!, $line: Int!, $startLine: Int, $side: DiffSide!, $startSide: DiffSide, $body: String!) {
         addPullRequestReviewThread(input: {
-          pullRequestReviewId: $review, path: $path, line: $line, side: $side, body: $body
+          pullRequestReviewId: $review, path: $path, line: $line, startLine: $startLine,
+          side: $side, startSide: $startSide, body: $body
         }) { clientMutationId }
       }";
     let _: serde_json::Value = graphql(
@@ -1364,7 +1375,9 @@ pub async fn add_pending_review_comment(
             "review": review_id,
             "path": c.path,
             "line": c.line,
+            "startLine": c.start_line,
             "side": diff_side(c.on_right),
+            "startSide": c.start_line.map(|_| diff_side(c.on_right)),
             "body": c.body,
         }),
     )
@@ -1533,7 +1546,7 @@ const PR_CONVERSATION_QUERY: &str = r"
           reviews(first: 100) { nodes { id state viewerDidAuthor author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
           reviewThreads(first: 100) {
             nodes {
-              id path line diffSide isResolved isOutdated viewerCanResolve viewerCanUnresolve
+              id path line startLine diffSide isResolved isOutdated viewerCanResolve viewerCanUnresolve
               comments(first: 100) { nodes { fullDatabaseId state author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
             }
             pageInfo { hasNextPage endCursor }
@@ -1832,6 +1845,8 @@ async fn pr_conversation(
         id: String,
         path: String,
         line: Option<u32>,
+        #[serde(rename = "startLine")]
+        start_line: Option<u32>,
         #[serde(rename = "diffSide")]
         diff_side: Option<String>,
         #[serde(rename = "isResolved")]
@@ -1901,7 +1916,7 @@ async fn pr_conversation(
     let threads_q = conversation_page_query(
         "reviewThreads",
         &format!(
-            "id path line diffSide isResolved isOutdated viewerCanResolve viewerCanUnresolve \
+            "id path line startLine diffSide isResolved isOutdated viewerCanResolve viewerCanUnresolve \
              comments(first: {GRAPHQL_PAGE}) {{ nodes {{ {THREAD_COMMENT_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }}"
         ),
     );
@@ -2001,6 +2016,7 @@ async fn pr_conversation(
             reply_to_id,
             path: t.path,
             line: t.line,
+            start_line: t.start_line,
             // GitHub's `diffSide` is RIGHT for the new side, LEFT for the old;
             // default to the new side when absent (the common single-line case).
             on_right: t.diff_side.as_deref() != Some("LEFT"),

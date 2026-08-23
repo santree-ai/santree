@@ -9,6 +9,7 @@ function thread(over: Partial<PrThread> = {}): PrThread {
     replyToId: "1",
     path: "a.ts",
     line: 10,
+    startLine: null,
     onRight: true,
     isResolved: false,
     isOutdated: false,

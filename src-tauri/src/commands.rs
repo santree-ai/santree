@@ -749,6 +749,14 @@ pub async fn add_pr_inline_comment(comment: NewInlineComment) -> CmdResult<()> {
     Ok(reviews::add_inline_comment(comment).await?)
 }
 
+/// The signed-in GitHub user's login, for the review composer's header avatar.
+/// `None` when `gh` isn't authenticated.
+#[tauri::command]
+#[specta::specta]
+pub async fn github_viewer_login() -> CmdResult<Option<String>> {
+    Ok(reviews::viewer_login().await?)
+}
+
 /// Reply under an existing inline review thread. `reply_to_id` is the thread's
 /// [`PrThread::reply_to_id`] — GitHub threads replies off the root comment.
 #[tauri::command]

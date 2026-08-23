@@ -42,6 +42,8 @@ import { useStreamRun } from "../../state/useStreamRun";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
 import { useAgentTab } from "../trees/useAgentTab";
+import { DevFilesPane } from "./DevFilesPane";
+import { DevReleasePane } from "./DevReleasePane";
 import { TodoPanel } from "./TodoPanel";
 import { useDevEnabled } from "./useDevEnabled";
 
@@ -62,7 +64,7 @@ let devTermSeq = 0;
  *  run key, so two checkouts can build at once and one can't build twice. */
 const devBuildKey = (repoPath: string) => `dev-build:${repoPath}`;
 
-type Pane = "claude" | "build" | "log";
+type Pane = "claude" | "files" | "release" | "build" | "log";
 
 export function DevView() {
   const { enabled, fetched } = useDevEnabled();
@@ -230,6 +232,10 @@ function DevContent({ repoPath }: { repoPath: string }) {
               onPromptConsumed={() => setPendingPrompt(undefined)}
             />
           )}
+          {pane === "files" && (
+            <DevFilesPane repoPath={repoPath} repoName={info.data?.repoName ?? null} />
+          )}
+          {pane === "release" && <DevReleasePane repoPath={repoPath} />}
           {pane === "build" && (
             <DevBuildPane repoPath={repoPath} runKey={buildKey} onStart={startBuild} />
           )}
@@ -268,6 +274,8 @@ function DevBar({
         <Tabs<Pane>
           tabs={[
             { value: "claude", label: "Claude" },
+            { value: "files", label: "Files" },
+            { value: "release", label: "Release" },
             { value: "build", label: "Build" },
             { value: "log", label: "App log" },
           ]}

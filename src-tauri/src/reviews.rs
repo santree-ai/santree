@@ -270,11 +270,17 @@ async fn write_token() -> Result<String> {
 /// Leave an inline comment on a PR line: posted now, or held in the viewer's
 /// pending review when `pending` is set (GitHub's "Start a review" / "Add to
 /// review"). The user's own click, always — see the note in `github.rs`.
-pub async fn add_inline_comment(c: NewInlineComment) -> Result<()> {
+pub async fn add_inline_comment(mut c: NewInlineComment) -> Result<()> {
     let token = write_token().await?;
     let (owner, name) = github::split_slug(&c.pr_repo)?;
     if c.body.trim().is_empty() {
         return Err(anyhow!("a comment needs a body"));
+    }
+    // A range that doesn't actually span lines is a single-line comment, and
+    // GitHub 422s on a start that isn't strictly before the end. Normalizing here
+    // covers every write path below at once, whatever the diff view handed up.
+    if c.start_line.is_some_and(|start| start >= c.line) {
+        c.start_line = None;
     }
     if !c.pending {
         return github::add_review_comment(&token, owner, name, &c).await;
@@ -283,6 +289,17 @@ pub async fn add_inline_comment(c: NewInlineComment) -> Result<()> {
         Some(review) => github::add_pending_review_comment(&token, review, &c).await,
         None => github::start_review(&token, &c).await,
     }
+}
+
+/// The signed-in GitHub user's login — who the review composer is writing as.
+/// `None` when `gh` isn't authenticated, which the composer renders as a
+/// nameless avatar rather than an error: not knowing who you are doesn't stop
+/// you drafting a comment.
+pub async fn viewer_login() -> Result<Option<String>> {
+    let Some(token) = github::token().await else {
+        return Ok(None);
+    };
+    Ok(Some(github::viewer_login(&token).await?))
 }
 
 /// Reply under an existing inline review thread.

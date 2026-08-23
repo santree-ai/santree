@@ -12,6 +12,8 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 
+import { SuggestedChange } from "./Suggestion";
+
 // GitHub-flavored content embeds raw HTML — most visibly Linear's linkback, which
 // wraps the issue body in a collapsible `<details><summary>…</summary>`. Without
 // raw-HTML rendering those tags (and the `<!-- linear-linkback -->` comment) leak
@@ -100,11 +102,24 @@ const components: Components = {
       </code>
     );
   },
-  pre: ({ children }) => (
-    <pre className="mb-2.5 overflow-x-auto rounded-lg border border-line-2 bg-input p-3 font-mono text-[11.5px] leading-[1.55] whitespace-pre text-fg-3">
-      {children}
-    </pre>
-  ),
+  // A ```suggestion fence is a review suggestion, not code — GitHub renders it as
+  // the diff it describes. Intercepted on the `pre` (not the `code`) because the
+  // panel replaces the whole block, chrome included. The language class survives
+  // rehype-sanitize, whose default schema allows `language-*` on `code`.
+  pre: ({ children, node }) => {
+    const code = node?.children?.[0];
+    const cls = code?.type === "element" ? code.properties?.className : undefined;
+    const lang = Array.isArray(cls) ? cls.join(" ") : String(cls ?? "");
+    if (lang.split(/\s+/).includes("language-suggestion")) {
+      const text = code?.type === "element" ? code.children[0] : undefined;
+      return <SuggestedChange text={text?.type === "text" ? text.value : ""} />;
+    }
+    return (
+      <pre className="mb-2.5 overflow-x-auto rounded-lg border border-line-2 bg-input p-3 font-mono text-[11.5px] leading-[1.55] whitespace-pre text-fg-3">
+        {children}
+      </pre>
+    );
+  },
   blockquote: ({ children }) => (
     <blockquote className="my-2 border-l-2 border-line-strong pl-3 text-muted-2 italic">
       {children}

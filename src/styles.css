@@ -581,3 +581,52 @@ button:focus-visible {
 :root[data-theme="light"] .code-hl .token.property {
   color: #2f6aa8;
 }
+
+/* ------------------------------------------------------------------ *
+ * @git-diff-view — every DiffView we render sits inside `.diff-viewer`
+ * (Trees' DiffViewer, Reviews' PrFileDiff).
+ * ------------------------------------------------------------------ */
+
+/* The library ships GitHub's own canvas (#0d1117 dark / #ffffff light), which
+   reads as a blue-grey island in santree's neutral surfaces — and turns the rows
+   we render *into* the diff (the inline comment composer, thread cards, all on
+   `bg-app`) into visible holes in it. Repoint the neutral half of its palette at
+   our tokens so diff and app are one surface; the add/del tints stay the
+   library's, since those carry meaning. Matching on the bare `[data-theme]`
+   attribute is what outranks its own `[data-theme="dark"]` / `="light"` blocks
+   from a single rule — the values below are tokens, so they flip themselves. */
+.diff-viewer .diff-tailwindcss-wrapper[data-theme] .diff-style-root {
+  --diff-plain-content--: var(--color-app);
+  --diff-plain-lineNumber--: var(--color-hover);
+  --diff-plain-lineNumber-color--: var(--color-muted-4);
+  --diff-expand-content--: var(--color-well);
+  --diff-expand-lineNumber--: var(--color-well);
+  --diff-expand-lineNumber-color--: var(--color-muted-4);
+  --diff-empty-content--: var(--color-deep);
+  --diff-border--: var(--color-line);
+  /* The gutter `+` that opens the composer: the app's accent, not GitHub blue. */
+  --diff-add-widget--: var(--accent-fill);
+  --diff-add-widget-color--: var(--on-accent);
+  /* The line range being dragged for a multi-line comment — the library's stock
+     yellow/blue belongs to no theme we have. Both are painted at low opacity by
+     the library, so the raw accent is right here rather than the solid fill. */
+  --diff-multi-select-bg: var(--accent);
+  --diff-multi-select-border: var(--accent);
+
+  color: var(--color-fg);
+}
+
+/* The library guards its widget/extend rows with `* { color: initial }` so they
+   can't inherit the `color: white` it sets on the diff root. That ships
+   UNLAYERED, and Tailwind v4's utilities live in `@layer utilities` — layered
+   always loses — so it beat every text color inside the comment composer and
+   thread cards: in dark mode the whole subtree collapsed to `canvastext` white,
+   flattening the muted hierarchy and putting white text on the accent-filled
+   button (which pairs with near-black `--on-accent`). `revert-layer` from here
+   — unlayered, therefore the last layer — hands the cascade back to the
+   utilities layer, so our own colors apply again; anything that never had one
+   falls through to inheriting `--color-fg` set above. */
+.diff-viewer .diff-line-widget-wrapper *,
+.diff-viewer .diff-line-extend-wrapper * {
+  color: revert-layer;
+}

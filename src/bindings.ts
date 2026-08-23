@@ -390,6 +390,11 @@ export const commands = {
 	 */
 	addPrInlineComment: (comment: NewInlineComment) => typedError<null, CmdError>(__TAURI_INVOKE("add_pr_inline_comment", { comment })),
 	/**
+	 *  The signed-in GitHub user's login, for the review composer's header avatar.
+	 *  `None` when `gh` isn't authenticated.
+	 */
+	githubViewerLogin: () => typedError<string | null, CmdError>(__TAURI_INVOKE("github_viewer_login")),
+	/**
 	 *  Reply under an existing inline review thread. `reply_to_id` is the thread's
 	 *  [`PrThread::reply_to_id`] — GitHub threads replies off the root comment.
 	 */
@@ -738,6 +743,18 @@ export const commands = {
 	 */
 	devNormalizeRepo: (path: string) => typedError<string, CmdError>(__TAURI_INVOKE("dev_normalize_repo", { path })),
 	devInfo: (repoPath: string) => typedError<DevInfo, CmdError>(__TAURI_INVOKE("dev_info", { repoPath })),
+	devVersion: (repoPath: string) => typedError<DevVersion, CmdError>(__TAURI_INVOKE("dev_version", { repoPath })),
+	/**
+	 *  Bump the checkout to `version`, commit just the version files, tag it and
+	 *  push the tag — which is what starts the signed, notarized release in CI.
+	 * 
+	 *  Every refusal happens *before* anything is written, so a rejected release
+	 *  leaves the checkout exactly as it was. The steps after that are idempotent:
+	 *  re-running after a push that failed rewrites the same values, skips a
+	 *  CHANGELOG section that already exists, finds nothing to commit, and gets as
+	 *  far as it can — so recovery is the same button, not a manual cleanup.
+	 */
+	devRelease: (repoPath: string, version: string, notes: string) => typedError<DevRelease, CmdError>(__TAURI_INVOKE("dev_release", { repoPath, version, notes })),
 	/**  Every dev TODO, newest first. */
 	devTodos: () => typedError<DevTodo[], CmdError>(__TAURI_INVOKE("dev_todos")),
 	/**
@@ -1121,6 +1138,43 @@ export type DevInfo = {
 	 */
 	dmgStale: boolean,
 	logPath: string | null,
+	/**
+	 *  The repo *name* this checkout is registered under, when it is. The Files
+	 *  pane reads the working tree through the shared `worktree_*` commands,
+	 *  which take a registered name rather than a path — so without this there's
+	 *  nothing to read, and the pane offers to add the checkout instead.
+	 */
+	repoName: string | null,
+};
+
+/**  The version bump options offered for the current version. */
+export type DevNextVersions = {
+	/**  Finish the beta that's running, or bump the patch when none is. */
+	release: string,
+	minor: string,
+	major: string,
+	/**
+	 *  The next beta: `-beta.N+1` while one is running, otherwise the first beta
+	 *  of the next minor.
+	 */
+	beta: string,
+};
+
+/**
+ *  A finished release: what was written, committed, tagged and pushed. Every
+ *  field is what actually happened, so a partial run reports the truth.
+ */
+export type DevRelease = {
+	version: string,
+	tag: string,
+	/**
+	 *  Paths whose contents changed (empty when the checkout already declared
+	 *  this version — re-running after a failed tag is expected to write nothing).
+	 */
+	written: string[],
+	/**  The release commit, or `None` when there was nothing left to commit. */
+	commit: string | null,
+	pushed: boolean,
 };
 
 /**
@@ -1135,6 +1189,35 @@ export type DevTodo = {
 	screenshots: string[],
 	/**  ms since epoch. `f64` (not `i64`) so Specta types it as `number`. */
 	createdAtMs: number | null,
+};
+
+/**
+ *  What the Release pane shows before anything is written: where the checkout's
+ *  declared version sits, what it could become, and every reason a release from
+ *  here would be refused — so the refusal is visible up front rather than after
+ *  the button.
+ */
+export type DevVersion = {
+	/**  The version declared in `package.json`. */
+	current: string,
+	/**
+	 *  Files whose declared version disagrees with `current`. The release guard
+	 *  fails the tag on any disagreement, so this has to be visible before the
+	 *  bump, not after CI rejects it.
+	 */
+	mismatched: string[],
+	/**  Newest `v*` tag in the checkout, by release order (not commit date). */
+	latestTag: string | null,
+	next: DevNextVersions,
+	/**  Versions that already have a `## <version>` section in CHANGELOG.md. */
+	changelogVersions: string[],
+	branch: string,
+	/**
+	 *  Uncommitted files. A release commit takes only the version files, so this
+	 *  doesn't block one — it's shown because releasing off a dirty tree usually
+	 *  means something was meant to go in.
+	 */
+	dirtyFiles: number,
 };
 
 /**
@@ -1394,6 +1477,13 @@ export type NewInlineComment = {
 	 *  [`PrThread::line`], which is how the diff view keys its rows.
 	 */
 	line: number,
+	/**
+	 *  The **first** line of the range, when the comment covers several lines —
+	 *  `line` is then its last. `None` for the single-line case. Both ends sit on
+	 *  the side named by `on_right`; GitHub rejects a start that isn't strictly
+	 *  before the end, and a range that leaves the hunk.
+	 */
+	startLine: number | null,
 	onRight: boolean,
 	body: string,
 	/**
@@ -1578,6 +1668,12 @@ export type PrThread = {
 	 *  GitHub can't place it anymore (outdated threads on since-changed lines).
 	 */
 	line: number | null,
+	/**
+	 *  First line of a multi-line thread — `line` is its last. `None` for the
+	 *  single-line case. GitHub anchors a range thread at its last line either
+	 *  way, so this is only needed to show what a suggestion would replace.
+	 */
+	startLine: number | null,
 	/**
 	 *  Which side of the diff the anchor line lives on: `true` = the new/right
 	 *  side (an added/context line), `false` = the old/left side (a removed line).

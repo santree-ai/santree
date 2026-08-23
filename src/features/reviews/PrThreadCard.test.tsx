@@ -31,6 +31,7 @@ function thread(over: Partial<PrThread> = {}): PrThread {
     replyToId: "2317450981",
     path: "src/retry.ts",
     line: 42,
+    startLine: null,
     onRight: true,
     isResolved: false,
     isOutdated: false,
@@ -42,6 +43,47 @@ function thread(over: Partial<PrThread> = {}): PrThread {
 }
 
 const card = (t: PrThread) => render(<PrThreadCard thread={t} prRepo="acme/api" number={7} />);
+
+// new side: 41 → "const a = 1;", 42 → "const b = 2;".
+const PATCH = ["@@ -41,2 +41,2 @@", " const a = 1;", "-const b = 1;", "+const b = 2;"].join("\n");
+
+const suggesting = (body: string) => thread({ line: 42, comments: [comment({ body })] });
+
+describe("suggestions", () => {
+  it("renders a suggestion as the change it proposes", () => {
+    const { getByText, container } = render(
+      <PrThreadCard
+        thread={suggesting("Try:\n\n```suggestion\nconst b = 3;\n```")}
+        prRepo="acme/api"
+        number={7}
+        patch={PATCH}
+      />,
+    );
+
+    expect(getByText("Suggested change")).toBeTruthy();
+    // The line it replaces comes from the patch (GitHub keeps it out of the
+    // comment body), the proposed one from the fence.
+    expect(container.textContent).toContain("const b = 2;");
+    expect(container.textContent).toContain("const b = 3;");
+    // …and not as literal backticks: a suggestion rendered as code is a
+    // suggestion the reader has to diff in their head.
+    expect(container.textContent).not.toContain("```");
+  });
+
+  it("shows the proposal alone when the file's patch isn't at hand", () => {
+    const { getByText, container } = render(
+      <PrThreadCard
+        thread={suggesting("```suggestion\nconst b = 3;\n```")}
+        prRepo="acme/api"
+        number={7}
+      />,
+    );
+
+    expect(getByText("Suggested change")).toBeTruthy();
+    expect(container.textContent).toContain("const b = 3;");
+    expect(container.textContent).not.toContain("const b = 2;");
+  });
+});
 
 describe("PrThreadCard", () => {
   it("replies under the thread's root comment", () => {
