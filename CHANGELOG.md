@@ -7,6 +7,24 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2-beta.2 — 2026-08-23
+
+- Review comments can cover a range of lines. Drag down the line numbers in a
+  PR diff and click the + on the last line you picked; the comment lands on
+  the whole range, the way it does on GitHub.
+- Suggest a change from the comment box. The Suggestion button drops in a
+  block already filled with the lines you're commenting on, and a suggestion
+  someone posts now shows as the change it proposes: the lines it replaces in
+  red above the ones it suggests in green.
+- The comment box itself reads like GitHub's: who you're commenting as, which
+  line you're on, and Cancel / Comment / Start a review.
+- Fixed the colours inside a diff in dark mode. Comment boxes and comment
+  threads had lost their text shades and sat on a different black from the
+  diff around them.
+- The hidden Dev tab gained two panes: Files, to browse the checkout, read the
+  diff of what changed and commit it; and Release, to bump the version, write
+  the changelog entry, tag and push a release without leaving the app.
+
 ## 0.1.2-beta.1 — 2026-08-21
 
 - New keep-awake toggle in the top bar (the coffee cup, macOS only): hold the
