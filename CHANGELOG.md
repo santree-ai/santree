@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2-beta.4 — 2026-08-23
+
+- Pressing the + in a diff and dragging now covers every line you drag over.
+  In beta.3 it still stopped at the line you started from: the range only grew
+  while the pointer was over the line numbers, and the + sits half over the
+  code, so dragging down left the gutter immediately.
+
 ## 0.1.2-beta.3 — 2026-08-23
 
 - Range comments now start where you reach for them. Press the + in a diff's
