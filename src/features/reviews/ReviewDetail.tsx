@@ -37,10 +37,7 @@ export function ReviewDetail() {
   if (!active) {
     return (
       <div className="flex min-w-0 flex-1 flex-col bg-app">
-        <EmptyState
-          title="Select a pull request"
-          subtitle="Pick a PR from the left to review it."
-        />
+        <EmptyState title="Select a pull request" subtitle="Pick one from the list on the left." />
       </div>
     );
   }

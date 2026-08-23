@@ -118,7 +118,7 @@ export function ReviewSubmitBar({
               onChange={(e) => setSummary(e.target.value)}
               rows={4}
               placeholder={
-                event === "Approve" ? "Summary (optional)…" : "Summary — required by GitHub…"
+                event === "Approve" ? "Summary (optional)…" : "Summary (required by GitHub)…"
               }
               className="w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] leading-[1.55] text-fg-2 placeholder:text-muted-4 focus:border-line-strong focus:outline-none"
             />

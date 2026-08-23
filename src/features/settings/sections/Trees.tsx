@@ -176,14 +176,14 @@ export function WorktreeSettings({ repo, forRepo }: { repo: string; forRepo?: st
         </div>
         <HeadlessModelField
           label="Commit message"
-          hint="Writes a subject line from the staged diff. The cheap tier is genuinely enough here. It's a one-line summary of a capped diff."
+          hint="Writes a subject line from the staged diff. The cheap tier is enough for a one-line summary of a capped diff."
           settingKey={COMMIT_MESSAGE_MODEL_KEY}
           defaultModel={DEFAULT_HELPER_MODEL}
           forRepo={forRepo}
         />
         <HeadlessModelField
           label="PR description"
-          hint="Fills the PR body from the diff, the ticket, and (optionally) the worktree's session transcripts. Worth a stronger model on a large PR. There's real reading to do."
+          hint="Fills the PR body from the diff, the ticket, and (optionally) the worktree's session transcripts. Worth a stronger model on a large PR, where there's real reading to do."
           settingKey={PR_BODY_MODEL_KEY}
           defaultModel={DEFAULT_HELPER_MODEL}
           forRepo={forRepo}
@@ -258,7 +258,7 @@ function SetupScriptField({ repo }: { repo: string }) {
         <div className="min-w-0 flex-1">
           <div className="text-[12.5px] font-medium text-fg-3">Setup script</div>
           <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
-            <code className="text-fg-3">.santree/init.sh</code> — runs in each new worktree.
+            <code className="text-fg-3">.santree/init.sh</code> runs in each new worktree.
             {needsChmod && !open && <span className="text-status-amber"> · not executable</span>}
           </div>
         </div>

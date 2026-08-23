@@ -221,7 +221,7 @@ function BriefBody({
       )}
 
       <div className="mt-3 text-[10px] text-muted-4">
-        Generated <RelativeTime ms={brief.generatedAtMs} /> · suggestions only, nothing was posted.
+        Generated <RelativeTime ms={brief.generatedAtMs} />. Suggestions only, nothing was posted.
       </div>
     </div>
   );

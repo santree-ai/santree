@@ -442,7 +442,7 @@ function DevBuildPane({
     return (
       <CenterNote
         title="No build yet"
-        subtitle="Builds the production DMG with pnpm tauri build (a few minutes). It runs in the background, so you can leave this tab."
+        subtitle="Builds the production DMG with pnpm tauri build (a few minutes). It keeps running if you leave this tab."
       >
         <Button size="sm" variant="tinted" onClick={onStart}>
           Build DMG

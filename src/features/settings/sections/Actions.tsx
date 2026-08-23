@@ -89,7 +89,7 @@ export function ReviewActionSection({ repo }: { repo?: string }) {
     <>
       <Heading
         title="Reviews"
-        subtitle="How the Reviews tab's AI runs. It only ever reads and explains. It never comments, approves, or pushes on your behalf. Edit its prompts in Settings → Prompts."
+        subtitle="How the Reviews tab's AI runs. It reads and explains; it never comments, approves, or pushes on your behalf. Edit its prompts in Settings → Prompts."
       />
       <div className="space-y-3.5">
         <div>
@@ -263,7 +263,7 @@ function AppTriagePanel() {
         <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
           <ToggleRow
             label="Be a good citizen"
-            hint="Show the whole team's issues, not only the ones assigned to you, so you can pitch in on anyone's tickets, on triage duty or not. Also the Mine/All toggle in the Triage header."
+            hint="Show the whole team's issues, not only the ones assigned to you. Same switch as the Mine/All toggle in the Triage header."
             on={goodCitizen}
             disabled={!enabled}
             onChange={(v) => setBool(TRIAGE_GOOD_CITIZEN_KEY, v)}
@@ -420,7 +420,7 @@ function ActionConfig({
           hint={
             inherits
               ? undefined
-              : "Which permission mode a worktree's agent starts (and restarts) in — Claude's --permission-mode. Default keeps Claude's normal mode."
+              : "Claude's --permission-mode, applied when a worktree's agent starts and restarts. Default keeps Claude's normal mode."
           }
         >
           <PermissionModeSelect

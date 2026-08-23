@@ -160,7 +160,7 @@ export function CreatePrDialog() {
           <div className="flex items-center gap-2.5">
             {hasTranscripts && (
               <label
-                title="Let AI read this worktree's Claude session(s) for extra context — decisions and rationale the diff doesn't show"
+                title="Let AI read this worktree's Claude session(s) for the decisions and rationale the diff doesn't show"
                 className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-2 hover:text-fg-2"
               >
                 <input

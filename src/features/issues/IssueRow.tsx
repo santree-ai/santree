@@ -74,7 +74,7 @@ export const IssueRow = memo(
           // ⌘/Ctrl-click adds the ticket to the launch queue (same as the checkbox);
           // a plain click reveals it in the graph.
           onClick={(e) => (e.metaKey || e.ctrlKey ? vm.onToggleSelect() : vm.onReveal())}
-          title="Click to reveal · ⌘-click to add to queue"
+          title="Click to reveal. ⌘-click to add to queue."
           className="flex min-w-0 flex-1 cursor-pointer gap-2 rounded-r-md rounded-l-none py-[7px] pr-2 pl-1 text-left"
         >
           <span className="mt-[5px] flex-none">

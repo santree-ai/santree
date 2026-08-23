@@ -407,7 +407,7 @@ function RunButton({ onRun, onRunBackground }: { onRun: () => void; onRunBackgro
       variant="tinted"
       size="lg"
       onClick={(e) => (e.metaKey || e.ctrlKey ? onRunBackground() : onRun())}
-      title="Run now — ⌘-click to run in the background"
+      title="Run now. ⌘-click to run in the background."
       className="w-full transition-colors"
       // Armed look while ⌘/Ctrl is held: a stronger fill + accent border makes
       // the background-launch mode unmistakable, matching the swapped label.
@@ -477,8 +477,8 @@ function QueueControl({
   const reason = !actionable
     ? "Not assigned to you"
     : focusStatus === "InProgress" || focusStatus === "InReview" || focusStatus === "Done"
-      ? `${statusLabel[focusStatus]} — can't queue`
-      : "Blocked — resolve blockers first";
+      ? `${statusLabel[focusStatus]}, can't queue`
+      : "Blocked. Resolve blockers first.";
   return (
     <div className="flex cursor-default items-center justify-center gap-1.5 rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] font-medium text-muted-3">
       {reason}

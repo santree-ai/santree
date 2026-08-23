@@ -47,7 +47,7 @@ const SCOPES: { scope: AnalysisScope; label: string; hint: string }[] = [
   {
     scope: "Everything",
     label: "Everything",
-    hint: "Trends — including what you've already retired",
+    hint: "Trends, including what you've already retired",
   },
 ];
 

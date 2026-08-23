@@ -117,7 +117,7 @@ export const BUCKET_LABEL: Record<AgentBucket, string> = {
 
 /** One-line explanation under a group header, where the name isn't self-evident. */
 export const BUCKET_HINT: Partial<Record<AgentBucket, string>> = {
-  detached: "not running here — open to resume",
+  detached: "not running here; open to resume",
 };
 
 /** `live` is whether a PTY for the session is open in this app right now. */

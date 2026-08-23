@@ -18,7 +18,7 @@ export function KeepAwakeButton() {
       aria-pressed={active}
       title={
         active
-          ? "Keeping the Mac awake — click to allow sleep"
+          ? "Keeping the Mac awake. Click to allow sleep."
           : "Keep the Mac awake (no sleep, no lock)"
       }
       aria-label={active ? "Allow the Mac to sleep" : "Keep the Mac awake"}

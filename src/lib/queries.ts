@@ -1646,9 +1646,9 @@ export const useSubmitPrReview = (repo: string, prRepo: string, number: number) 
     invalidate: () => [prDetailKey(prRepo, number), queryKeys.reviews(repo)],
     success: (_d, v) =>
       v.event === "Approve"
-        ? "Review submitted — approved."
+        ? "Approved."
         : v.event === "RequestChanges"
-          ? "Review submitted — changes requested."
+          ? "Changes requested."
           : "Review submitted.",
   });
 

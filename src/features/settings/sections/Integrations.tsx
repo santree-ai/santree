@@ -68,7 +68,7 @@ export function IntegrationsSection() {
             </div>
             <div className="mt-[3px] text-[11.5px] text-muted-3">
               {connected
-                ? `${orgs.length} ${orgs.length === 1 ? "org" : "orgs"} connected · chosen per repo`
+                ? `${orgs.length} ${orgs.length === 1 ? "org" : "orgs"} connected, chosen per repo`
                 : "Connect to sync your assigned issues"}
             </div>
           </div>
@@ -231,7 +231,7 @@ function LocalGitHubCard() {
           <div className="flex flex-col gap-3.5 px-4 py-4">
             <div className="flex items-center gap-3">
               <span className="flex-1 text-[12.5px] text-muted-3">
-                santree runs the `gh` CLI as you — no separate sign-in.
+                santree runs the `gh` CLI as you. No separate sign-in.
               </span>
               {badge}
               <button

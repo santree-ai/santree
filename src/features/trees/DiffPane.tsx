@@ -37,7 +37,7 @@ export function DiffPane() {
     return (
       <EmptyState
         title="No file selected"
-        subtitle="Pick a changed file from the Changes list to view its diff."
+        subtitle="Pick a changed file from the Changes list."
       />
     );
   }

@@ -112,7 +112,7 @@ describe("ReviewsSidebarView", () => {
       />,
     );
     expect(screen.queryByText("Needs your review")).not.toBeInTheDocument();
-    expect(screen.getByText("Reviewed — waiting on author")).toBeInTheDocument();
+    expect(screen.getByText("Reviewed, waiting on author")).toBeInTheDocument();
   });
 
   it("brings a reviewed PR back once the author pushes again", () => {
@@ -135,7 +135,7 @@ describe("ReviewsSidebarView", () => {
       />,
     );
     expect(screen.getByText("Needs your review")).toBeInTheDocument();
-    expect(screen.queryByText("Reviewed — waiting on author")).not.toBeInTheDocument();
+    expect(screen.queryByText("Reviewed, waiting on author")).not.toBeInTheDocument();
   });
 
   it("collapses a team section on click and remembers it across mounts", () => {

@@ -331,7 +331,7 @@ const PrFileCard = memo(function PrFileCard({
             )}
           </>
         ) : (
-          <div className="px-3 py-3 text-[11.5px] text-muted-3">Binary file — no preview.</div>
+          <div className="px-3 py-3 text-[11.5px] text-muted-3">Binary file. No preview.</div>
         ))}
     </div>
   );

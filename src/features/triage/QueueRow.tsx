@@ -111,7 +111,7 @@ export const QueueRow = memo(function QueueRow({
               one already shows the bright spark in the checkbox column. */}
           {started && !investigating && (
             <span
-              title="Investigation started — resumable"
+              title="Investigation started; resumable"
               className="flex flex-none items-center opacity-60"
             >
               <ClaudeSparkIcon size={11} />

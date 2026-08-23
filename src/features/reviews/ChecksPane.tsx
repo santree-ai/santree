@@ -293,17 +293,17 @@ function CheckLogSection({
             <div className="max-h-[440px] overflow-auto py-1 font-mono text-[11px] leading-[1.55]">
               {log.truncated && (
                 <div className="px-3 pb-1 text-[10px] text-muted-4">
-                  Earlier lines omitted —{" "}
+                  Earlier lines omitted.{" "}
                   {url ? (
                     <button
                       type="button"
                       onClick={() => openUrl(url)}
                       className="cursor-pointer underline hover:text-fg-2"
                     >
-                      open full log on GitHub
+                      Open the full log on GitHub
                     </button>
                   ) : (
-                    "see the full log on GitHub"
+                    "See the full log on GitHub."
                   )}
                 </div>
               )}

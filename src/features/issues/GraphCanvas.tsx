@@ -262,8 +262,8 @@ function Flow() {
           aria-pressed={actionableOnly}
           title={
             actionableOnly
-              ? "Showing only tickets you can act on — click to reveal blockers owned by others or already done"
-              : "Showing all related tickets — click to hide non-actionable ones"
+              ? "Showing only tickets you can act on. Click to reveal blockers owned by others or already done."
+              : "Showing all related tickets. Click to hide the non-actionable ones."
           }
           className="flex items-center gap-1.5 rounded-lg border border-line-2 bg-panel px-2.5 py-1.5 text-[11.5px] font-medium text-fg-2 shadow-lg transition-colors hover:border-line-strong"
         >

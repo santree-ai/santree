@@ -103,7 +103,7 @@ export function TaskNotes({ repo, taskId }: { repo: string; taskId: string }) {
           onBlur={() => {
             if (draft !== saved) saveNote({ taskId, body: draft });
           }}
-          placeholder="Context for this task — stored locally, never synced to Linear. Sent to agents as prompt context later."
+          placeholder="Context for this task. Stored locally, never synced to Linear. Agents get it as prompt context later."
           className="mt-1.5 max-h-[40vh] min-h-[88px] w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] leading-[1.55] text-fg-2 placeholder:text-muted-4 focus:border-line-strong focus:outline-none"
         />
       )}

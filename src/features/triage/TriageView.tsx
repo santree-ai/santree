@@ -91,7 +91,7 @@ function RepoSessionEntry({
         type="button"
         onClick={onSelect}
         aria-label={`Ask Claude on ${branch}`}
-        title={`Ask Claude on ${branch} — a session not tied to any ticket`}
+        title={`Ask Claude on ${branch}. This session isn't tied to a ticket.`}
         className="absolute inset-0 cursor-pointer rounded-[9px]"
       />
       <BranchIcon size={13} className="flex-none" />

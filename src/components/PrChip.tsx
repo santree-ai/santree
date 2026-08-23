@@ -33,7 +33,7 @@ export function PrChip({ number, url, state, interactive = true }: Pr & Interact
   const meta = prStateMeta[state];
   const openPr = useOpenPr();
   const title = interactive
-    ? `PR #${number} (${meta.label}) — open in Reviews or on GitHub`
+    ? `Open PR #${number} (${meta.label}) in Reviews or on GitHub`
     : `PR #${number} (${meta.label})`;
   return (
     <Pill
