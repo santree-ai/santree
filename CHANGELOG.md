@@ -7,6 +7,15 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2-beta.3 — 2026-08-23
+
+- Range comments now start where you reach for them. Press the + in a diff's
+  line-number gutter and drag; let go, and the comment box opens on every line
+  you covered. Pressing the + used to open the box straight away, which left no
+  way to drag past the first line. Clicking it without dragging still comments
+  on that one line.
+- Reworded a lot of the text across the app and the website.
+
 ## 0.1.2-beta.2 — 2026-08-23
 
 - Review comments can cover a range of lines. Drag down the line numbers in a

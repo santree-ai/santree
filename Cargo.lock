@@ -4253,7 +4253,7 @@ dependencies = [
 
 [[package]]
 name = "santree"
-version = "0.1.2-beta.2"
+version = "0.1.2-beta.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4292,7 +4292,7 @@ dependencies = [
 
 [[package]]
 name = "santree-core"
-version = "0.1.2-beta.2"
+version = "0.1.2-beta.3"
 dependencies = [
  "serde",
  "specta",
@@ -4300,7 +4300,7 @@ dependencies = [
 
 [[package]]
 name = "santree-hook"
-version = "0.1.2-beta.2"
+version = "0.1.2-beta.3"
 dependencies = [
  "santree-core",
  "serde_json",
@@ -4310,7 +4310,7 @@ dependencies = [
 
 [[package]]
 name = "santree-pty"
-version = "0.1.2-beta.2"
+version = "0.1.2-beta.3"
 dependencies = [
  "anyhow",
  "log",
