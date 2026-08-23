@@ -395,6 +395,14 @@ html {
   container-type: inline-size;
   background: var(--color-panel);
   --demo-scale: 0.27;
+  /* Canvas x the phone crop starts at — just past the 248px sidebar, so the
+   * view itself leads rather than the nav rail. */
+  --demo-focus: 250;
+  /* iOS Safari won't clip a scaled (composited) child at an overflow-hidden
+   * edge; in crop mode the canvas leaks out of the frame and pans the page.
+   * `contain: paint` forces a real clip boundary. */
+  contain: paint;
+  transform: translateZ(0);
 }
 @media (min-width: 640px) {
   .demo-fit {
@@ -423,6 +431,32 @@ html {
 }
 .demo-canvas {
   transform: translate(-50%, -50%) scale(var(--demo-scale));
+}
+
+/* On a phone, fitting 1280px into a ~340px column scales 13px chrome to 3px
+ * — an unreadable smear that says nothing about the app. Below `sm` the
+ * window stops being a whole screenshot and becomes a viewport: the canvas
+ * holds a legible scale, anchors top-left, and the frame crops to the region
+ * worth seeing. A cropped screenshot is a familiar object; a smeared one is
+ * not. */
+@media (max-width: 639px) {
+  .demo-fit {
+    aspect-ratio: 0.84;
+    --demo-scale: 0.58;
+  }
+  /* Beat the @supports container-query rule, which is later in cascade order. */
+  @supports (opacity: calc(100cqw / 1280px)) {
+    .demo-fit {
+      --demo-scale: 0.58;
+    }
+  }
+  .demo-canvas {
+    left: 0;
+    top: 0;
+    transform-origin: 0 0;
+    transform: translateX(calc(var(--demo-focus) * var(--demo-scale) * -1px))
+      scale(var(--demo-scale));
+  }
 }
 
 /* Agent status dots — the glow pulse is one of the demo's two "life signs". */

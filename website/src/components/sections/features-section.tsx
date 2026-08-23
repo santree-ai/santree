@@ -6,7 +6,9 @@ import { SectionHeading } from "~/components/ui/section-heading";
 export function FeaturesSection() {
   return (
     <section id="features" className="scroll-mt-28 py-16">
-      <div className="mx-auto max-w-6xl px-6">
+      {/* Wider than the page's other sections on purpose: these rows exist
+          to show the app, and at max-w-6xl the window was too small to read. */}
+      <div className="mx-auto max-w-7xl px-6">
         <SectionHeading
           kicker="The views"
           title="Four views, one pipeline"

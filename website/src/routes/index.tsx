@@ -17,7 +17,6 @@ const Integrations = lazy(() =>
   import("~/components/sections/integrations").then((m) => ({ default: m.Integrations })),
 );
 const Trust = lazy(() => import("~/components/sections/trust").then((m) => ({ default: m.Trust })));
-const Faq = lazy(() => import("~/components/sections/faq").then((m) => ({ default: m.Faq })));
 const FinalCta = lazy(() =>
   import("~/components/sections/final-cta").then((m) => ({ default: m.FinalCta })),
 );
@@ -45,9 +44,6 @@ function Landing() {
       </Suspense>
       <Suspense fallback={<section id="trust" className="min-h-[28rem]" />}>
         <Trust />
-      </Suspense>
-      <Suspense fallback={<section id="faq" className="min-h-[60vh]" />}>
-        <Faq />
       </Suspense>
       <div className="divider mx-auto max-w-4xl" aria-hidden />
       <Suspense fallback={<section id="oss" className="min-h-[40vh]" />}>

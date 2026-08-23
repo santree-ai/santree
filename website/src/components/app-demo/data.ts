@@ -290,9 +290,12 @@ export interface ProjectBand {
   h: number;
 }
 
+/** Bands and nodes keep ~100px of the 1008×738 graph pane clear on the
+ * right and bottom. Tighter than that and the last node of each row reads
+ * as falling out of the window once the canvas is scaled down. */
 export const PROJECT_BANDS: readonly ProjectBand[] = [
-  { name: "Session hardening", color: "#4493f8", count: 4, x: 36, y: 56, w: 920, h: 300 },
-  { name: "Webhook reliability", color: "#a78bfa", count: 3, x: 36, y: 396, w: 568, h: 300 },
+  { name: "Session hardening", color: "#4493f8", count: 4, x: 20, y: 44, w: 884, h: 286 },
+  { name: "Webhook reliability", color: "#a78bfa", count: 3, x: 20, y: 370, w: 572, h: 272 },
 ] as const;
 
 /** Coordinates are design-canvas px inside the graph pane. */
@@ -300,8 +303,8 @@ export const GRAPH_NODES: readonly GraphNode[] = [
   {
     id: "SAN-119",
     title: "Bound the image cache",
-    x: 60,
-    y: 100,
+    x: 44,
+    y: 88,
     status: "done",
     band: "Session hardening",
     pr: { num: 812, state: "merged" },
@@ -309,8 +312,8 @@ export const GRAPH_NODES: readonly GraphNode[] = [
   {
     id: "SAN-142",
     title: "Fix OAuth token refresh race",
-    x: 60,
-    y: 218,
+    x: 44,
+    y: 200,
     status: "started",
     band: "Session hardening",
     working: true,
@@ -318,8 +321,8 @@ export const GRAPH_NODES: readonly GraphNode[] = [
   {
     id: "SAN-127",
     title: "Session restore on relaunch",
-    x: 392,
-    y: 158,
+    x: 356,
+    y: 144,
     status: "started",
     band: "Session hardening",
     working: true,
@@ -327,16 +330,16 @@ export const GRAPH_NODES: readonly GraphNode[] = [
   {
     id: "SAN-160",
     title: "Ship session hardening",
-    x: 724,
-    y: 218,
+    x: 668,
+    y: 196,
     status: "todo",
     band: "Session hardening",
   },
   {
     id: "SAN-138",
     title: "Webhook retries duplicate on 429",
-    x: 60,
-    y: 446,
+    x: 44,
+    y: 414,
     status: "started",
     band: "Webhook reliability",
     working: true,
@@ -345,8 +348,8 @@ export const GRAPH_NODES: readonly GraphNode[] = [
   {
     id: "SAN-151",
     title: "Idempotency keys for deliveries",
-    x: 392,
-    y: 430,
+    x: 356,
+    y: 398,
     status: "todo",
     band: "Webhook reliability",
     ready: true,
@@ -355,8 +358,8 @@ export const GRAPH_NODES: readonly GraphNode[] = [
   {
     id: "SAN-153",
     title: "Audit log double-count guard",
-    x: 392,
-    y: 560,
+    x: 356,
+    y: 518,
     status: "blocked",
     band: "Webhook reliability",
   },

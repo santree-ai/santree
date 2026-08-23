@@ -17,7 +17,12 @@ export function FeatureRow({ feature, flip }: { feature: Feature; flip: boolean 
     <div
       id={feature.id}
       ref={ref}
-      className="grid scroll-mt-28 items-center gap-12 lg:grid-cols-[2fr_3fr] lg:gap-20"
+      // The column template has to flip WITH the order — `flip` alone only
+      // reorders, which parked the window in the 2fr column and shrank it
+      // on every other row.
+      className={`grid scroll-mt-28 items-center gap-12 lg:gap-16 ${
+        flip ? "lg:grid-cols-[7fr_4fr]" : "lg:grid-cols-[4fr_7fr]"
+      }`}
     >
       <FadeUp className={flip ? "lg:order-2" : ""}>
         <p

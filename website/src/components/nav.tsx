@@ -9,7 +9,6 @@ import { Logo } from "~/components/logo";
 const links = [
   { label: "How it works", hash: "loop" },
   { label: "Features", hash: "features" },
-  { label: "FAQ", hash: "faq" },
 ];
 
 /** Slim full-width header: invisible over the hero, gaining a hairline

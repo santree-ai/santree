@@ -19,6 +19,13 @@ export function useFitScale(ref: RefObject<HTMLElement | null>) {
     const el = ref.current;
     if (!el) return;
     const apply = () => {
+      // Below `sm` the window is a CROP, not a whole screenshot, and the
+      // stylesheet owns the scale. An inline measured value would beat that
+      // rule and put the smear back, so clear it instead of writing one.
+      if (window.matchMedia("(max-width: 639px)").matches) {
+        el.style.removeProperty("--demo-scale");
+        return;
+      }
       el.style.setProperty("--demo-scale", String(el.clientWidth / DESIGN_W));
     };
     apply();

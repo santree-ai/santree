@@ -5,7 +5,18 @@ import { FadeUp } from "~/components/motion/fade-up";
 export function ParallelStrip() {
   return (
     <section className="relative overflow-hidden py-40">
-      <div aria-hidden className="absolute inset-0">
+      {/* The glow is taller than this section, so `overflow-hidden` used to
+          guillotine it — a hard bright line across the top and bottom edges.
+          Masking the whole art layer lets it reach zero before the clip. */}
+      <div
+        aria-hidden
+        className="absolute inset-0"
+        style={{
+          maskImage: "linear-gradient(to bottom, transparent, black 22%, black 78%, transparent)",
+          WebkitMaskImage:
+            "linear-gradient(to bottom, transparent, black 22%, black 78%, transparent)",
+        }}
+      >
         <div
           className="absolute left-1/2 top-1/2 size-[46rem] -translate-x-1/2 -translate-y-1/2 rounded-full"
           style={{
