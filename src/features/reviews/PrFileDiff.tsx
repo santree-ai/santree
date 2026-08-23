@@ -22,7 +22,7 @@
  */
 import { DiffModeEnum, DiffViewWithMultiSelect } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
-import { memo, useMemo } from "react";
+import { memo, useMemo, useRef } from "react";
 
 import type { PrThread } from "../../bindings";
 import { useResolvedTheme } from "../../theme/useResolvedTheme";
@@ -32,6 +32,7 @@ import { type CommentTarget, isRightSide } from "./commentTarget";
 import { InlineCommentBox } from "./InlineCommentBox";
 import { PrThreadCard } from "./PrThreadCard";
 import { clampToHunk } from "./patchLines";
+import { useGutterDrag } from "./useGutterDrag";
 
 /**
  * GitHub's REST `patch` is only the hunk body (it starts at `@@`) — it omits the
@@ -74,6 +75,10 @@ export const PrFileDiff = memo(function PrFileDiff({
   mode?: DiffMode;
 }) {
   const theme = useResolvedTheme();
+  // The gutter `+` is press-and-drag, like github.com's — see useGutterDrag for
+  // why that needs a listener of our own rather than a prop.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const { bindWidgetStore, onSelection } = useGutterDrag(rootRef);
 
   // The patch hunks stay authoritative for what's shown; `content` (once fetched)
   // only lets the viewer fill unchanged context on expand. Omitted until then, so
@@ -92,7 +97,7 @@ export const PrFileDiff = memo(function PrFileDiff({
   if (!patch.trim()) return null;
 
   return (
-    <div className="diff-viewer selectable min-w-0 text-[12.5px]">
+    <div ref={rootRef} className="diff-viewer selectable min-w-0 text-[12.5px]">
       <DiffViewWithMultiSelect<PrThread[]>
         data={data}
         extendData={extendData}
@@ -122,6 +127,14 @@ export const PrFileDiff = memo(function PrFileDiff({
           if (!clamped) return null;
           return { ...range, startLineNumber: clamped[0], endLineNumber: clamped[1] };
         }}
+        onMultiSelectComplete={({ range }) =>
+          onSelection({
+            side: range.side,
+            from: range.startLineNumber,
+            to: range.endLineNumber,
+          })
+        }
+        onCreateUseWidgetHook={(hook) => bindWidgetStore(hook.getReadonlyState().setWidget)}
         diffViewAddWidget={!!target.headSha}
         renderWidgetLine={({ lineNumber, fromLineNumber, side, onClose }) => (
           <InlineCommentBox
