@@ -25,27 +25,6 @@ export function Nav() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Best-effort star count next to the GitHub icon; renders nothing until
-  // (unless) the unauthenticated API answers. Cached per tab.
-  const [stars, setStars] = useState<string | null>(null);
-  useEffect(() => {
-    const cached = sessionStorage.getItem("gh-stars");
-    if (cached) {
-      setStars(cached);
-      return;
-    }
-    fetch("https://api.github.com/repos/santree-ai/santree")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d: { stargazers_count?: number } | null) => {
-        if (typeof d?.stargazers_count === "number") {
-          const s = Intl.NumberFormat("en", { notation: "compact" }).format(d.stargazers_count);
-          sessionStorage.setItem("gh-stars", s);
-          setStars(s);
-        }
-      })
-      .catch(() => {});
-  }, []);
-
   return (
     <header
       className={`fixed inset-x-0 top-0 z-40 border-b transition-colors duration-300 ${
@@ -84,7 +63,6 @@ export function Nav() {
             className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-muted transition-colors hover:text-fg"
           >
             <GitHubLogo size={16} />
-            {stars && <span className="font-mono text-[11.5px] tabular-nums">{stars}</span>}
           </a>
           <div className="hidden sm:block">
             <DownloadButton size="sm" />

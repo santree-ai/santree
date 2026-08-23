@@ -167,15 +167,15 @@ function DocsPage() {
               >
                 Download santree for macOS
               </a>
-              . It&rsquo;s a signed, notarized DMG. It keeps itself up to date after that. On Linux,
-              santree runs as a native app too, but there are no packaged builds yet:{" "}
+              . It&rsquo;s a signed, notarized DMG. It keeps itself up to date after that. Prefer to
+              see the machinery?{" "}
               <a
                 className="text-fg underline decoration-line-2 underline-offset-2 hover:decoration-fg"
                 href="https://github.com/santree-ai/santree#building-from-source"
               >
-                build from source
+                Build from source
               </a>{" "}
-              in a few minutes.
+              instead.
             </p>
             <H3>First launch</H3>
             <p>

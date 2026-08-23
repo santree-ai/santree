@@ -4,11 +4,9 @@ import { SectionHeading } from "~/components/ui/section-heading";
 /** FAQ on native <details>/<summary> — SSR-complete, indexed, works with
  * JS disabled. The open/close ease and marker rotation are pure CSS. */
 
+// Only questions whose answers aren't already on the page — the download
+// button says what you can run and where; it doesn't need an echo here.
 const FAQS = [
-  {
-    q: "Can I use santree today?",
-    a: "Yes. Download the macOS app — a signed, notarized DMG that keeps itself up to date. On Linux there are no packaged builds yet, but building from source takes a few minutes.",
-  },
   {
     q: "Do I need an API key?",
     a: "No. santree drives the Claude Code CLI you already have, with your existing login and subscription. It never reads, stores, or proxies an agent's credentials. You authenticate in the terminal, exactly as you would without santree.",
@@ -20,10 +18,6 @@ const FAQS = [
   {
     q: "How is this different from Claude Code in a bunch of tmux panes?",
     a: "Isolation and oversight. Every agent gets its own git worktree, so five agents can't step on one diff. Around the terminals you get triage from Linear, a dependency graph, diff review with an AI companion, and a PR dashboard. The workflow, not the panes.",
-  },
-  {
-    q: "Which platforms?",
-    a: "macOS today — one universal download for Apple silicon and Intel. santree is a native Tauri app and runs on Linux too, from source until packaged builds ship.",
   },
   {
     q: "Does it require Linear?",
