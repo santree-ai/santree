@@ -15,7 +15,7 @@
  * Collapsible + resizable (drag its left edge or ⌘L). Reuses the already-cached
  * `usePrDetail` fetch, so the description costs nothing here.
  */
-import type { PrComment, ReviewPr } from "../../bindings";
+import type { AgentKind, PrComment, ReviewPr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { Markdown } from "../../components/Markdown";
 import { EdgeResizeHandle, Tabs } from "../../components/primitives";
@@ -42,10 +42,12 @@ export function PrInfoPanel({
   pr,
   tab,
   onTabChange,
+  activeReviewAgent,
 }: {
   pr: ReviewPr;
   tab: PanelTab;
   onTabChange: (tab: PanelTab) => void;
+  activeReviewAgent: AgentKind | null;
 }) {
   const {
     infoCollapsed,
@@ -97,7 +99,7 @@ export function PrInfoPanel({
 
       {tab === "description" && (
         <div className="selectable min-h-0 flex-1 overflow-y-auto px-4 py-4">
-          <ReviewBriefSection pr={pr} />
+          <ReviewBriefSection pr={pr} activeReviewAgent={activeReviewAgent} />
           <SidebarLabel>Description</SidebarLabel>
           <Markdown>{detail?.body?.trim() || "_No description._"}</Markdown>
           {orphanThreads.length > 0 && (

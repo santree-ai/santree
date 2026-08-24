@@ -58,6 +58,7 @@ export function ReviewDetail() {
 function Detail({ pr }: { pr: ReviewPr }) {
   const { infoCollapsed, toggleInfo } = useReviewsModel();
   const [panelTab, setPanelTab] = useState<PanelTab>("description");
+  const [detailTab, setDetailTab] = useState<DetailTab>("pr");
   /** Show a rail tab, un-collapsing the rail if it's hidden — the one entry point,
    *  so a caller can't leave the user staring at a tab they can't see. */
   const openPanel = (tab: PanelTab) => {
@@ -67,15 +68,27 @@ function Detail({ pr }: { pr: ReviewPr }) {
 
   return (
     <div className="flex min-w-0 flex-1">
-      <PrPane pr={pr} />
-      <PrInfoPanel pr={pr} tab={panelTab} onTabChange={openPanel} />
+      <PrPane pr={pr} tab={detailTab} setTab={setDetailTab} />
+      <PrInfoPanel
+        pr={pr}
+        tab={panelTab}
+        onTabChange={openPanel}
+        activeReviewAgent={detailTab === "Codex" || detailTab === "Claude" ? detailTab : null}
+      />
     </div>
   );
 }
 
-function PrPane({ pr }: { pr: ReviewPr }) {
+function PrPane({
+  pr,
+  tab,
+  setTab,
+}: {
+  pr: ReviewPr;
+  tab: DetailTab;
+  setTab: (tab: DetailTab) => void;
+}) {
   const { repo, fileFocus, aiReviewRequest } = useReviewsModel();
-  const [tab, setTab] = useState<DetailTab>("pr");
   const [mountedProviders, setMountedProviders] = useState<AgentKind[]>([]);
   const checks = checkRollupMeta[pr.checks];
   const { data: drafts } = useReviewDrafts(pr.repo, pr.number);
@@ -90,17 +103,20 @@ function PrPane({ pr }: { pr: ReviewPr }) {
   const providers = REVIEW_AGENTS.filter(
     (agent) => storedProviders.includes(agent) || mountedProviders.includes(agent),
   );
-  const openReview = useCallback((agent: AgentKind) => {
-    setMountedProviders((current) => (current.includes(agent) ? current : [...current, agent]));
-    setTab(agent);
-  }, []);
+  const openReview = useCallback(
+    (agent: AgentKind) => {
+      setMountedProviders((current) => (current.includes(agent) ? current : [...current, agent]));
+      setTab(agent);
+    },
+    [setTab],
+  );
 
   // The brief's rail is visible from every tab, so a jump from it has to bring the
   // diff back with it — otherwise clicking a reading-order entry from Checks looks
   // like nothing happened.
   useEffect(() => {
     if (fileFocus) setTab("pr");
-  }, [fileFocus]);
+  }, [fileFocus, setTab]);
 
   // "Start AI review" comes from the rail, which is beside this column rather than
   // in it. A nonce, so asking again on an already-open tab still brings it forward.

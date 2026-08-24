@@ -34,12 +34,14 @@ beforeEach(() => {
 
 describe("PrInfoPanel", () => {
   it("shows the pull request description without an Ask AI rail", () => {
-    render(<PrInfoPanel pr={pr} tab="description" onTabChange={vi.fn()} />);
+    render(
+      <PrInfoPanel pr={pr} tab="description" onTabChange={vi.fn()} activeReviewAgent={null} />,
+    );
     expect(screen.queryByText("Ask AI")).toBeNull();
   });
 
   it("shows the linked issue tab", () => {
-    render(<PrInfoPanel pr={pr} tab="issue" onTabChange={vi.fn()} />);
+    render(<PrInfoPanel pr={pr} tab="issue" onTabChange={vi.fn()} activeReviewAgent={null} />);
     expect(screen.getByTestId("issue-pane")).toBeTruthy();
   });
 });
