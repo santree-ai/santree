@@ -36,19 +36,23 @@ const OAUTH_PORT: u16 = 8420;
 const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
 
 /// The `settings` row (scope `"app"`) choosing what santree *asks* Linear for.
-/// Absent = read,write, which is what it always requested before the choice existed.
+/// Absent = read-only. Write access must be an explicit user choice.
 pub const LINEAR_SCOPE_KEY: &str = "linear_scope";
 
 /// The OAuth scope string for a connection, from the [`LINEAR_SCOPE_KEY`] setting.
-/// Only `"read"` opts down; anything else (unset, or a hand-edited value) keeps
-/// the historical read,write so a typo can't silently strip someone's access.
+/// Only the exact UI value opts up; unset or malformed values fail closed so a
+/// typo can never silently request permission to mutate Linear.
 async fn requested_scope(db: &Db) -> Result<&'static str> {
     let raw = settings::get(db, "app", LINEAR_SCOPE_KEY).await?;
-    Ok(if raw.as_deref() == Some("read") {
-        "read"
-    } else {
+    Ok(scope_from_setting(raw.as_deref()))
+}
+
+fn scope_from_setting(raw: Option<&str>) -> &'static str {
+    if raw == Some("read_write") {
         "read,write"
-    })
+    } else {
+        "read"
+    }
 }
 
 /// Whether a stored scope string permits writes.
@@ -2779,14 +2783,23 @@ mod tests {
     use super::{
         accept_code, cached_team_scope, decode_tokens, encode_tokens, image_spans, map_issue,
         migrate_tokens_to_keychain, parse_callback, parse_ms, refresh_lock, resolve_org_slug,
-        resolved_org, scope_of, shift_range, splice_images, split_identifier, triage_meta,
-        usable_at, ImageCache, IssueNode, ProjectNode, RelatedIssue, RelationNode, SchedQueryData,
-        StateNode, TeamScope, Tokens, UserNode, IMAGE_HOST, REFRESH_SKEW_MS,
+        resolved_org, scope_from_setting, scope_of, shift_range, splice_images, split_identifier,
+        triage_meta, usable_at, ImageCache, IssueNode, ProjectNode, RelatedIssue, RelationNode,
+        SchedQueryData, StateNode, TeamScope, Tokens, UserNode, IMAGE_HOST, REFRESH_SKEW_MS,
     };
     use crate::gql::{Connection, PageInfo};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn linear_scope_requires_an_explicit_write_choice() {
+        assert_eq!(scope_from_setting(Some("read_write")), "read,write");
+        assert_eq!(scope_from_setting(Some("read")), "read");
+        assert_eq!(scope_from_setting(None), "read");
+        assert_eq!(scope_from_setting(Some("")), "read");
+        assert_eq!(scope_from_setting(Some("read,write")), "read");
+    }
 
     /// Both tokens share one keychain entry, so the blob is the only thing
     /// standing between a refresh and a bricked org — it has to round-trip

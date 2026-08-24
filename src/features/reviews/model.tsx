@@ -118,10 +118,17 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
   const [grouping, setGrouping] = usePersistedState<Grouping>(GROUPING_KEY, "category");
   const [sort, setSort] = usePersistedState<SortMode>(SORT_KEY, "waiting");
 
-  const allPrs = useMemo(
-    () => (inbox ? [...inbox.mine, ...inbox.requested, ...inbox.teams.flatMap((t) => t.prs)] : []),
-    [inbox],
-  );
+  const allPrs = useMemo(() => {
+    if (!inbox) return [];
+    const seen = new Set<string>();
+    return [...inbox.mine, ...inbox.requested, ...inbox.teams.flatMap((team) => team.prs)].filter(
+      (pr) => {
+        if (seen.has(pr.id)) return false;
+        seen.add(pr.id);
+        return true;
+      },
+    );
+  }, [inbox]);
 
   // Resolve every PR's ticket in one batched Linear call. Sorted + deduped so the
   // query key is stable across refetches that return the same inbox in a different

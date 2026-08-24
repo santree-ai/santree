@@ -149,7 +149,7 @@ export interface PendingLaunch {
   id: string;
   title: string;
   project: string | null;
-  agent: AgentKind;
+  agent: AgentKind | null;
   /** The per-launch model chosen in the Issues tray (empty ⇒ the settings default).
    *  A transient hand-off to the Trees fresh-launch seed — not persisted; once the
    *  session is created with `--model`, resuming carries it, so there's nothing to

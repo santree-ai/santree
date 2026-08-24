@@ -17,14 +17,15 @@ use tauri_specta::Event;
 use santree_core::{
     config,
     domain::{
-        AgentAuth, AgentDef, AgentKind, AgentSession, AiReviewLaunch, AnalysisScope, BinaryStatus,
-        ChangedFile, CheckLog, CodexAccount, CodexHealth, CodexLogin, CodexModel, CodexRateLimits,
-        EnglishAnalysis, EnglishLog, FileSource, GithubStatus, LegacyCliMigration, LinearOrg,
-        LinearStatus, MergeQueue, NewInlineComment, NewPr, Opener, PrDetail, PrDraft, PrLabel,
-        PromptInfo, PromptPreview, Repo, ReviewBrief, ReviewDraft, ReviewEvent, ReviewInbox,
-        ReviewPublishOutcome, ReviewTarget, Reviewer, ScriptInfo, SessionState, SessionUsageLive,
-        Settings, TabKind, Task, TicketRef, TriageDetail, TriageSchedule, TriageSession,
-        TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreePr, WorktreeTab,
+        AgentAuth, AgentDef, AgentKind, AgentSession, AgentVersionStatus, AiReviewLaunch,
+        AnalysisScope, BinaryStatus, ChangedFile, CheckLog, CodexAccount, CodexHealth, CodexLogin,
+        CodexModel, CodexRateLimits, EnglishAnalysis, EnglishLog, FileSource, GithubStatus,
+        LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr, Opener,
+        PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewBrief, ReviewDraft,
+        ReviewEvent, ReviewInbox, ReviewPublishOutcome, ReviewTarget, Reviewer, ScriptInfo,
+        SessionState, SessionUsageLive, Settings, TabKind, Task, TicketRef, TriageDetail,
+        TriageSchedule, TriageSession, TriageTicket, UsageReport, ViewedMarks, Worktree,
+        WorktreePr, WorktreeTab,
     },
 };
 
@@ -209,27 +210,32 @@ pub async fn create_worktree(
         &title,
         project.as_deref(),
         base.as_deref(),
-        agent,
+        Some(agent),
         None,
     )
     .await?)
 }
 
 /// Find-or-create a worktree for a pull request: reuse the one already tracked
-/// under `issue_id` if present, else create one that **checks out the PR's head
-/// branch** (`branch`) so commits made in it land on the PR. Used by the Reviews
-/// "Fix CI with AI" flow. `base` is the PR's base branch (for the worktree's diff).
+/// under `issue_id` or `branch` if present, else create one that **checks out the
+/// PR's head branch** so commits made in it land on the PR. `pr_repo` must match
+/// this registered checkout's origin; org-wide Reviews must never route a PR to
+/// whichever repo happens to be active. Used by both Open-as-tree and Fix CI.
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)] // Typed IPC fields stay explicit at this security boundary.
 pub async fn create_worktree_for_pr(
     repo: String,
+    pr_repo: String,
     issue_id: String,
     title: String,
     branch: String,
     base: Option<String>,
-    agent: AgentKind,
+    agent: Option<AgentKind>,
     db: State<'_, Db>,
 ) -> CmdResult<Worktree> {
+    let (local_owner, local_name) = reviews::origin(&db, &repo).await?;
+    validate_pr_repo(&pr_repo, &local_owner, &local_name)?;
     Ok(worktree::create(
         &db,
         &repo,
@@ -241,6 +247,16 @@ pub async fn create_worktree_for_pr(
         Some(&branch),
     )
     .await?)
+}
+
+fn validate_pr_repo(pr_repo: &str, local_owner: &str, local_name: &str) -> anyhow::Result<()> {
+    let (pr_owner, pr_name) = crate::github::split_slug(pr_repo)?;
+    if pr_owner.eq_ignore_ascii_case(local_owner) && pr_name.eq_ignore_ascii_case(local_name) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "pull request repo {pr_repo:?} does not match local repo {local_owner}/{local_name}"
+    )
 }
 
 /// Render the CI-fix opening prompt (the failing check `log` + guardrails) to a
@@ -1512,6 +1528,18 @@ pub async fn agent_auth(kind: AgentKind) -> AgentAuth {
         .unwrap_or_default()
 }
 
+/// Installed and latest published CLI versions for one provider. Registry
+/// failures are represented as an absent latest version, not a failed Settings
+/// screen or a misleading update prompt.
+#[tauri::command]
+#[specta::specta]
+pub async fn agent_version_status(
+    kind: AgentKind,
+    db: State<'_, Db>,
+) -> CmdResult<AgentVersionStatus> {
+    Ok(crate::provider::version_status(&db, kind).await)
+}
+
 /// The `gh` CLI integration status for Settings → Integrations: installed?
 /// authenticated? as which account? Infallible — a missing or signed-out `gh`
 /// is reported via the status flags rather than as an error, since GitHub can't
@@ -2040,5 +2068,12 @@ mod tests {
         assert!(review_identity("ai-review:acme/project/other#42").is_err());
         assert!(review_identity("ai-review:acme/project#not-a-number").is_err());
         assert!(review_identity("triage:AK-42").is_err());
+    }
+
+    #[test]
+    fn pr_tree_creation_is_bound_to_the_registered_origin() {
+        assert!(validate_pr_repo("Acme/Project", "acme", "project").is_ok());
+        assert!(validate_pr_repo("acme/other", "acme", "project").is_err());
+        assert!(validate_pr_repo("acme/project/extra", "acme", "project").is_err());
     }
 }

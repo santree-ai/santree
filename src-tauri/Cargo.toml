@@ -43,11 +43,12 @@ tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 
 # Async runtime — used pervasively (every #[tauri::command] is async, plus sqlx,
 # reqwest, and PTY streaming). We only need `spawn`/`spawn_blocking` (rt),
-# `join!`/#[tokio::test] (macros), and tokio::sync::Mutex (sync) — no signal/net/
+# `join!`/#[tokio::test] (macros), tokio::sync::Mutex (sync), and bounded
+# provider-version probes (process/io-util) — no signal/net/
 # io-std/etc, which "full" pulled in unused. Tauri and sqlx pull in whatever
 # additional tokio features they themselves need via Cargo's feature unification;
 # this list only has to cover what our own code names directly.
-tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "process", "io-util"] }
 
 anyhow = { workspace = true }
 async-trait = "0.1"

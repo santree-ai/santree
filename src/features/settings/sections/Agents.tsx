@@ -1,6 +1,5 @@
 /** The Agents section: one tab per harness, each with its own auth, executable,
- * and model. Mirrors the "Harnesses" screen — agent paths live here, while which
- * agent an action uses is configured under Actions. */
+ * version, and provider-specific behavior. Workflow models live under Actions. */
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useState } from "react";
@@ -19,19 +18,21 @@ import {
 import { Badge, Button, Tabs } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
 import {
+  CLAUDE_REMOTE_CONTROL_KEY,
   CLAUDE_START_WITH_CHROME_KEY,
   CLAUDE_STATUS_LINE_KEY,
   useAgentAuth,
   useAgents,
+  useAgentVersionStatus,
   useBoolSetting,
   useCancelCodexLogin,
   useCodexAccount,
   useCodexHealth,
   useCodexLogin,
   useCodexLogout,
-  useCodexModels,
   useCodexRateLimits,
   useSetSetting,
+  useSetting,
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
 import { alpha } from "../../../theme/colors";
@@ -47,7 +48,7 @@ export function AgentsSection() {
     <>
       <Heading
         title="Agents"
-        subtitle="Each agent harness has its own authentication, executable, and model. Choose which one an action uses under Actions."
+        subtitle="Configure each provider's authentication, executable, version, and behavior. Workflow models live under Actions."
       />
       <Tabs
         tabs={agents.map((a) => ({
@@ -221,16 +222,17 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
         </Block>
       )}
 
+      {provider.capabilities.terminalSettings === "claude" && <ClaudeVersionBlock />}
+
       {provider.capabilities.terminalSettings === "claude" && <ClaudeTerminalBlock />}
     </div>
   );
 }
 
 function CodexPanel() {
-  const { settings, setAgentExec, setAgentModel } = useApp();
+  const { settings, setAgentExec } = useApp();
   const health = useCodexHealth();
   const account = useCodexAccount();
-  const models = useCodexModels();
   const limits = useCodexRateLimits();
   const login = useCodexLogin();
   const cancelLogin = useCancelCodexLogin();
@@ -344,28 +346,6 @@ function CodexPanel() {
       </Block>
 
       <Block
-        title="Model"
-        subtitle="Recommended follows the App Server default. Existing threads keep their original model and effort."
-      >
-        <select
-          className="w-full rounded-lg border border-line-3 bg-input px-3 py-2 text-[12px]"
-          value={configured?.model ?? ""}
-          onChange={(event) => setAgentModel("Codex", event.target.value)}
-        >
-          <option value="">Recommended</option>
-          {configured?.model && !models.data?.some((model) => model.id === configured.model) && (
-            <option value={configured.model}>{configured.model} (unavailable)</option>
-          )}
-          {(models.data ?? []).map((model) => (
-            <option key={model.id} value={model.id}>
-              {model.displayName}
-              {model.isDefault ? " (default)" : ""}
-            </option>
-          ))}
-        </select>
-      </Block>
-
-      <Block
         title="Codex executable path"
         subtitle="Leave empty to use the executable found on PATH."
       >
@@ -385,12 +365,48 @@ function CodexPanel() {
 
 const CHROME_EXTENSION_URL = "https://code.claude.com/docs/en/chrome";
 
+function ClaudeVersionBlock() {
+  const versions = useAgentVersionStatus("Claude");
+  const current = versions.data?.installed ?? "Not detected";
+  const latest = versions.data?.latest ?? "Unavailable";
+
+  return (
+    <Block
+      title="Version"
+      subtitle="Santree only checks for updates. Install Claude Code updates through its own installer or package manager."
+    >
+      <div className="mb-3 flex items-center justify-between">
+        {versions.data?.updateAvailable ? (
+          <Badge color="var(--color-status-amber)">Update available</Badge>
+        ) : versions.data?.installed && versions.data.latest ? (
+          <Badge color="var(--color-status-green)">Up to date</Badge>
+        ) : (
+          <Badge color="var(--color-muted-2)">Unknown</Badge>
+        )}
+        <button
+          type="button"
+          onClick={() => versions.refetch()}
+          aria-label="Refresh Claude Code versions"
+          className="cursor-pointer text-[11px] text-muted-2 hover:text-fg-2"
+        >
+          <RefreshIcon size={12} className={versions.isFetching ? "animate-spin" : ""} />
+        </button>
+      </div>
+      <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
+        <KvRow label="Installed" value={current} />
+        <KvRow label="Latest" value={latest} />
+      </div>
+    </Block>
+  );
+}
+
 /** Claude-only launch/terminal behavior toggles: launch with `--chrome` (browser
  *  control), and show santree's inline context-usage bar. santree always injects
  *  its own status line into the sessions it launches (leaving the user's own
  *  `~/.claude/settings.json` untouched), so usage is always captured; the toggle
  *  only gates the in-app bar. */
 function ClaudeTerminalBlock() {
+  const remoteControl = useSetting("app", CLAUDE_REMOTE_CONTROL_KEY);
   const { value: startWithChrome } = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
   const { value: santreeStatusLine } = useBoolSetting("app", CLAUDE_STATUS_LINE_KEY);
   const { mutate: setSetting } = useSetSetting();
@@ -400,6 +416,18 @@ function ClaudeTerminalBlock() {
   return (
     <Block title="Behavior">
       <div className="rounded-xl border border-line-3 bg-surface px-3.5 py-0.5">
+        <ToggleRow
+          label="Enable Remote Control"
+          hint="Name Claude work and investigation sessions for Claude's Remote Control web. Turn this off if the installed Claude Code version does not support --remote-control."
+          on={remoteControl.data !== "false"}
+          onChange={(next) =>
+            setSetting({
+              scope: "app",
+              key: CLAUDE_REMOTE_CONTROL_KEY,
+              value: next ? null : "false",
+            })
+          }
+        />
         <ToggleRow
           label="Start with Chrome"
           hint={

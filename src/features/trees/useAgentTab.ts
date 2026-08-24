@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import type { AgentKind, AgentSession } from "../../bindings";
 import {
+  CLAUDE_REMOTE_CONTROL_KEY,
   CLAUDE_START_WITH_CHROME_KEY,
   queryKeys,
   useAgentSession,
@@ -21,6 +22,7 @@ import {
   useClaudeHookSettings,
   useClaudeHookSettingsNoGit,
   useResolvedProviderSetting,
+  useSetting,
   WORK_AGENT_KEY,
   WORK_EFFORT_KEY,
   WORK_MODEL_KEY,
@@ -114,13 +116,17 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   const noGitSettings = useClaudeHookSettingsNoGit();
   const hookSettings = noGit ? noGitSettings : stdSettings;
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
+  const remoteControl = useSetting("app", CLAUDE_REMOTE_CONTROL_KEY);
 
   const chosenModel = opts.modelOverride || model.data;
   const seed = agentSessionSeed(session.data, {
     repo,
     termKey: refId,
     prompt: opts.prompt,
-    remoteControl: provider.capabilities.remoteControl ? opts.remoteControl : undefined,
+    remoteControl:
+      provider.capabilities.remoteControl && remoteControl.data !== "false"
+        ? opts.remoteControl
+        : undefined,
     modelFlag:
       provider.capabilities.cliLaunchOptions && chosenModel
         ? `--model ${shellQuote(chosenModel)}`
@@ -153,7 +159,8 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
       effort.isFetched &&
       permissionMode.isFetched &&
       hookSettings.isFetched &&
-      startWithChrome.isFetched);
+      startWithChrome.isFetched &&
+      remoteControl.isFetched);
   const preparing =
     !shellOnly && (hold === true || (needsSeed && (session.isFetching || !flagsReady)));
 

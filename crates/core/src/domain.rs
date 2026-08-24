@@ -119,6 +119,16 @@ pub struct AgentAuth {
     pub detected_exec: String,
 }
 
+/// Installed and published versions for an agent CLI. An unavailable registry
+/// leaves `latest` empty; the installed CLI remains usable and visible.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentVersionStatus {
+    pub installed: Option<String>,
+    pub latest: Option<String>,
+    pub update_available: bool,
+}
+
 /// Operational status of Santree's private Codex App Server. Transport details
 /// deliberately stop here: the frontend only needs a remedy, never a socket or
 /// raw protocol error.

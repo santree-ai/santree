@@ -7,6 +7,21 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2-beta.13 — 2026-08-24
+
+- Agent settings now keep provider-specific workflow choices separate, show
+  Claude Code version availability, and place Claude Remote Control with the
+  Claude Code agent settings.
+- Trees now name new agent tabs for the provider that actually runs them and
+  consistently use the configured Work agent.
+- The Reviews sidebar now puts your PRs first, makes every section collapsible,
+  and removes duplicate review rows and counts.
+- Opening a pull request as a tree now reuses its existing checkout, targets the
+  correct registered repository, and prevents conflicting branch or worktree
+  identities from launching against the wrong code.
+- Agent integrations are marked as work in progress, and new Linear connections
+  request read-only access by default.
+
 ## 0.1.2-beta.11 — 2026-08-24
 
 - Commit-message and PR-description controls now show the provider configured

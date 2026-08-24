@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use base64::Engine;
 use tauri::ipc::Channel;
 
@@ -384,21 +384,19 @@ pub async fn get(db: &Db, repo: &str, issue_id: &str) -> Result<Option<Worktree>
 
 type CreateLock = Arc<tokio::sync::Mutex<()>>;
 
-/// Per-worktree locks serializing [`create`]. Two launches for the same issue (a
-/// double-clicked Run, an Issues launch racing a Trees one) would otherwise both get
-/// past the "already tracked?" check and then race `git worktree add` on the same
-/// path — the loser failing outright ("Worktree already exists") instead of adopting
-/// the winner's. Mirrors `linear.rs`'s per-org refresh locks.
+/// Identity locks serializing [`create`]. Issue IDs protect destination paths and PR
+/// branches protect Git's one-checkout-per-branch invariant. Mirrors `linear.rs`'s
+/// per-org refresh locks.
 static CREATE_LOCKS: LazyLock<Mutex<HashMap<(String, String), CreateLock>>> =
     LazyLock::new(Default::default);
 
-fn create_lock(root: &str, issue_id: &str) -> CreateLock {
+fn create_lock(root: &str, identity: &str) -> CreateLock {
     // Poison-tolerant (matching the other locks in the app): the map holds only Arcs,
     // so a thread that panicked mid-access left it structurally sound.
     CREATE_LOCKS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .entry((root.to_string(), issue_id.to_string()))
+        .entry((root.to_string(), identity.to_string()))
         .or_default()
         .clone()
 }
@@ -421,7 +419,7 @@ pub async fn create(
     title: &str,
     project: Option<&str>,
     base: Option<&str>,
-    agent: AgentKind,
+    agent: Option<AgentKind>,
     checkout_branch: Option<&str>,
 ) -> Result<Worktree> {
     validate_issue_id(issue_id)?;
@@ -434,13 +432,55 @@ pub async fn create(
     let root = repo_root(db, repo).await?;
 
     // Held across the whole create: the tracked-check, the (slow) git work and the
-    // insert must be one unit, or a concurrent create for the same issue races us.
-    let lock = create_lock(&root, issue_id);
-    let _guard = lock.lock().await;
+    // insert must be one unit. PR trees have two independent identities: their
+    // destination path (issue id) and checked-out branch. Lock both in stable order
+    // so neither two branches racing one path nor one branch racing two paths can
+    // reach `git worktree add` concurrently.
+    let target_branch = checkout_branch
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("santree/{}-{}", issue_id.to_lowercase(), slugify(title)));
+    let mut lock_keys = [
+        format!("issue:{issue_id}"),
+        format!("branch:{target_branch}"),
+    ];
+    lock_keys.sort_unstable();
+    let primary_lock = create_lock(&root, &lock_keys[0]);
+    let secondary_lock = lock_keys.get(1).map(|key| create_lock(&root, key));
+    let _primary_guard = primary_lock.lock().await;
+    let _secondary_guard = if let Some(lock) = secondary_lock.as_ref() {
+        Some(lock.lock().await)
+    } else {
+        None
+    };
 
-    // Already tracked → just open it.
+    // Already tracked → just open it, unless a PR caller is asking for a different
+    // branch. Returning the old checkout would give the new PR prompt authority over
+    // unrelated files under a deceptively matching ticket id.
     if let Some(existing) = get(db, repo, issue_id).await? {
+        if let Some(requested_branch) = checkout_branch {
+            ensure!(
+                existing.branch == requested_branch,
+                "worktree {issue_id} already tracks branch {}, not requested branch {requested_branch}",
+                existing.branch
+            );
+        }
         return Ok(existing);
+    }
+    // A PR can already be represented by a ticket-named tree (for example
+    // AK-276) rather than this caller's synthetic review id. The checked-out
+    // branch is the shared identity at the git sink, and must not be added to a
+    // second worktree even when the UI cache is stale.
+    let existing_issue = sqlx::query_scalar::<_, String>(
+        "SELECT issue_id FROM worktree_links WHERE repo_path = ? AND branch = ? LIMIT 1",
+    )
+    .bind(&root)
+    .bind(&target_branch)
+    .fetch_optional(db)
+    .await?;
+    if let Some(existing_issue) = existing_issue {
+        return get(db, repo, &existing_issue)
+            .await?
+            .ok_or_else(|| anyhow!("tracked worktree {existing_issue} disappeared"));
     }
 
     // The `worktree add` checkout bulk-writes the whole tree into the watched
@@ -454,9 +494,9 @@ pub async fn create(
     let (base_branch, branch, wt_path_str) = {
         let root = root.clone();
         let issue_id = issue_id.to_string();
-        let title = title.to_string();
         let base = base.map(str::to_string);
         let checkout_branch = checkout_branch.map(str::to_string);
+        let target_branch = target_branch.clone();
         tokio::task::spawn_blocking(move || -> Result<_> {
             let root_path = Path::new(&root);
             let base_branch = match base {
@@ -464,9 +504,6 @@ pub async fn create(
                 None => git::default_branch(root_path),
             };
             let wt_path = root_path.join(".santree").join("worktrees").join(&issue_id);
-            let computed_branch =
-                format!("santree/{}-{}", issue_id.to_lowercase(), slugify(&title));
-
             // Only a *registered* worktree may be adopted. A directory git doesn't know
             // as one (an interrupted delete, a pruned admin entry, a hand-made dir) sits
             // inside the repo's own working tree, so every later `git -C <dir>` resolves
@@ -474,7 +511,7 @@ pub async fn create(
             // checkout's branch under this issue's label. Reclaim an empty leftover;
             // refuse anything with contents rather than delete work we didn't create.
             let adopted = is_registered_worktree(&wt_path).then(|| {
-                git::worktree_branch(root_path, &wt_path).unwrap_or(computed_branch.clone())
+                git::worktree_branch(root_path, &wt_path).unwrap_or(target_branch.clone())
             });
             if adopted.is_none() && wt_path.exists() {
                 std::fs::remove_dir(&wt_path).map_err(|e| {
@@ -498,9 +535,9 @@ pub async fn create(
                 log::info!("created worktree {issue_id} on existing branch {cb}");
                 cb
             } else {
-                git::create_worktree(root_path, &wt_path, &computed_branch, &base_branch)?;
-                log::info!("created worktree {issue_id} on branch {computed_branch}");
-                computed_branch
+                git::create_worktree(root_path, &wt_path, &target_branch, &base_branch)?;
+                log::info!("created worktree {issue_id} on branch {target_branch}");
+                target_branch
             };
             Ok((base_branch, branch, wt_path.to_string_lossy().into_owned()))
         })
@@ -517,7 +554,7 @@ pub async fn create(
         branch,
         worktree_path: wt_path_str,
         base_branch,
-        agent: Some(agent.as_str().to_string()),
+        agent: agent.map(|kind| kind.as_str().to_string()),
         setup_ran: 0,
     };
     let row = if insert_link(db, &root, &row).await? {
@@ -1696,7 +1733,7 @@ mod tests {
             "Do a thing",
             None,
             None,
-            AgentKind::Claude,
+            Some(AgentKind::Claude),
             None,
         )
         .await
@@ -1961,7 +1998,7 @@ mod tests {
             "Stale",
             None,
             None,
-            AgentKind::Claude,
+            Some(AgentKind::Claude),
             None,
         )
         .await
@@ -2155,7 +2192,7 @@ mod tests {
             "Do a thing",
             Some("Booking"),
             None,
-            AgentKind::Claude,
+            Some(AgentKind::Claude),
             None,
         )
         .await
@@ -2190,7 +2227,7 @@ mod tests {
             "Do a thing",
             None,
             None,
-            AgentKind::Claude,
+            Some(AgentKind::Claude),
             None,
         )
         .await
@@ -2201,6 +2238,43 @@ mod tests {
             1,
             "no duplicate link"
         );
+
+        // A caller presenting the same destination id for another PR branch must
+        // never be handed the existing checkout. Fix CI and review prompts are
+        // branch-specific, so that would run them against unrelated code.
+        let branch_conflict = create(
+            &db,
+            "test",
+            "AK-1",
+            "Different pull request",
+            Some("Reviews"),
+            None,
+            None,
+            Some("different-pr-branch"),
+        )
+        .await
+        .unwrap_err();
+        assert!(branch_conflict
+            .to_string()
+            .contains("not requested branch different-pr-branch"));
+
+        // A PR hand-off may know only its branch and mint a review-specific id,
+        // while the existing tree is ticket-named. Branch identity must reuse it
+        // instead of asking git to check out one branch in two worktrees.
+        let by_branch = create(
+            &db,
+            "test",
+            "review-4-acme-3-app-1",
+            "Same pull request",
+            Some("Reviews"),
+            None,
+            None,
+            Some(&wt.branch),
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_branch.id, "AK-1");
+        assert_eq!(list(&db, "test").await.unwrap().len(), 1);
 
         // Adopt: drop the link but keep the on-disk worktree (mimics one made by
         // the CLI / a prior run), then create — it re-links and opens, not errors.
@@ -2216,7 +2290,7 @@ mod tests {
             "Do a thing",
             None,
             None,
-            AgentKind::Claude,
+            Some(AgentKind::Claude),
             None,
         )
         .await
@@ -2321,7 +2395,7 @@ mod tests {
             "First",
             None,
             None,
-            AgentKind::Claude,
+            Some(AgentKind::Claude),
             None,
         )
         .await
@@ -2336,7 +2410,7 @@ mod tests {
             "Second",
             None,
             Some(&ak1.branch),
-            AgentKind::Claude,
+            Some(AgentKind::Claude),
             None,
         )
         .await
@@ -2407,7 +2481,7 @@ mod tests {
             "Remote work",
             None,
             None,
-            AgentKind::Claude,
+            Some(AgentKind::Claude),
             None,
         )
         .await

@@ -3,10 +3,10 @@
  *  in the Trees sidebar. */
 import { useMemo } from "react";
 
-import type { Task, Worktree } from "../../bindings";
+import type { AgentKind, Task, Worktree } from "../../bindings";
 import { PlusIcon } from "../../components/icons";
 import { Dropdown, Spinner } from "../../components/primitives";
-import { useCreateWorktree, useTasks } from "../../lib/queries";
+import { useCreateWorktree, useResolvedSetting, useTasks, WORK_AGENT_KEY } from "../../lib/queries";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { NO_PROJECT, useTrees } from "./model";
 
@@ -29,6 +29,7 @@ export function StartTaskButton() {
   const { settings } = useApp();
   const { addPendingLaunches, removePendingLaunch, pendingDeletes } = useAppUi();
   const { data: tasks = [] } = useTasks(repo);
+  const { data: workAgent } = useResolvedSetting(repo, WORK_AGENT_KEY);
   const { mutate: create, isPending } = useCreateWorktree(repo);
 
   const candidates = useMemo(
@@ -43,7 +44,7 @@ export function StartTaskButton() {
   // with no feedback beyond the trigger button's tiny spinner. A failed create
   // drops the placeholder (the global mutation cache still surfaces the toast).
   const start = (t: { id: string; title: string; project: string }) => {
-    const agent = settings?.defaultAgent ?? "Claude";
+    const agent = (workAgent as AgentKind | null) ?? settings?.defaultAgent ?? "Claude";
     const project = t.project === NO_PROJECT ? null : t.project;
     addPendingLaunches([{ id: t.id, title: t.title, project, agent }]);
     create(

@@ -331,26 +331,40 @@ function extraTabRow(id: string, kind: TabKind, title: string): WorktreeTab {
 
 describe("defaultTabTitle", () => {
   it("names the first Codex tab plain 'Codex', then numbers from 2", () => {
-    expect(defaultTabTitle("agent", [])).toBe("Codex");
-    expect(defaultTabTitle("agent", [extraTabRow("a", "agent", "Codex")])).toBe("Codex 2");
+    expect(defaultTabTitle("agent", "Codex", [])).toBe("Codex");
+    expect(defaultTabTitle("agent", "Codex", [extraTabRow("a", "agent", "Codex")])).toBe("Codex 2");
+  });
+
+  it("names and numbers Claude Code independently from Codex", () => {
+    expect(defaultTabTitle("agent", "Claude", [])).toBe("Claude Code");
+    expect(defaultTabTitle("agent", "Claude", [extraTabRow("a", "agent", "Claude Code")])).toBe(
+      "Claude Code 2",
+    );
+    expect(defaultTabTitle("agent", "Claude", [extraTabRow("a", "agent", "Codex")])).toBe(
+      "Claude Code",
+    );
   });
 
   it("numbers terminals from 2 — the primary Terminal tab is #1 implicitly", () => {
-    expect(defaultTabTitle("terminal", [])).toBe("Terminal 2");
-    expect(defaultTabTitle("terminal", [extraTabRow("a", "terminal", "Terminal 2")])).toBe(
+    expect(defaultTabTitle("terminal", null, [])).toBe("Terminal 2");
+    expect(defaultTabTitle("terminal", null, [extraTabRow("a", "terminal", "Terminal 2")])).toBe(
       "Terminal 3",
     );
   });
 
   it("skips past renamed/deleted gaps to stay unique among existing titles", () => {
     // "Codex" was renamed away → the base name is free again.
-    expect(defaultTabTitle("agent", [extraTabRow("a", "agent", "Debugging")])).toBe("Codex");
+    expect(defaultTabTitle("agent", "Codex", [extraTabRow("a", "agent", "Debugging")])).toBe(
+      "Codex",
+    );
     // A middle title was taken back by a rename — pick the first free number.
     const taken = [extraTabRow("a", "agent", "Codex"), extraTabRow("b", "agent", "Codex 3")];
-    expect(defaultTabTitle("agent", taken)).toBe("Codex 2");
+    expect(defaultTabTitle("agent", "Codex", taken)).toBe("Codex 2");
   });
 
   it("ignores the other kind's titles", () => {
-    expect(defaultTabTitle("agent", [extraTabRow("a", "terminal", "Terminal 2")])).toBe("Codex");
+    expect(defaultTabTitle("agent", "Codex", [extraTabRow("a", "terminal", "Terminal 2")])).toBe(
+      "Codex",
+    );
   });
 });

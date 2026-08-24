@@ -92,7 +92,8 @@ export function IntegrationsSection() {
             </div>
             <div className="text-[11.5px] text-muted-3">
               Read-only workspaces still show issues, triage and comments. santree just can't change
-              anything. Reconnect a workspace to move it between the two.
+              anything. Choose write access intentionally; reconnect any workspace that was granted
+              read-only.
             </div>
           </div>
           <ChevronSelect
@@ -101,11 +102,11 @@ export function IntegrationsSection() {
             className="w-[148px] rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-[12px] text-fg-3"
             wrapperClassName="flex-none"
           >
-            <option value="read_write" className="bg-input">
-              Read &amp; write
-            </option>
             <option value="read" className="bg-input">
               Read-only
+            </option>
+            <option value="read_write" className="bg-input">
+              Read &amp; write
             </option>
           </ChevronSelect>
         </div>

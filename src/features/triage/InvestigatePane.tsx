@@ -18,12 +18,12 @@ import type { AgentKind } from "../../bindings";
 import { Spinner } from "../../components/primitives";
 import { SessionEndedPane } from "../../components/SessionEndedPane";
 import {
+  CLAUDE_REMOTE_CONTROL_KEY,
   CLAUDE_START_WITH_CHROME_KEY,
   INVESTIGATE_AGENT_KEY,
   INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
   INVESTIGATE_PERMISSION_MODE_KEY,
-  INVESTIGATE_REMOTE_CONTROL_KEY,
   queryKeys,
   useAgentSession,
   useBoolSetting,
@@ -127,11 +127,11 @@ export function InvestigatePane({
     resolvedAgent === agentKind && model.data ? `--model ${shellQuote(model.data)}` : undefined;
   const effortFlag =
     resolvedAgent === agentKind && effort.data ? `--effort ${shellQuote(effort.data)}` : undefined;
-  // `--remote-control` is opt-out (Settings → Investigation): some environments
+  // `--remote-control` is opt-out (Settings → Agents → Claude Code): some environments
   // run a `claude` build old enough to predate the flag, which would otherwise
   // fail every launch with no visible cause (see CLAUDE.md's "verify vendor
   // flags" gotcha) and no way to turn it off.
-  const remoteControlSetting = useResolvedSetting(repo, INVESTIGATE_REMOTE_CONTROL_KEY);
+  const remoteControlSetting = useResolvedSetting(repo, CLAUDE_REMOTE_CONTROL_KEY);
   const remoteControlEnabled = remoteControlSetting.data !== "false";
   // Claude keeps its hook-backed state pipeline; Codex state comes from App Server.
   const hookSettings = useClaudeHookSettings().data;

@@ -3,7 +3,14 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ChangedFile, SessionState, TriageDetail, TriageTicket } from "../bindings";
+import type {
+  ChangedFile,
+  ReviewInbox,
+  ReviewPr,
+  SessionState,
+  TriageDetail,
+  TriageTicket,
+} from "../bindings";
 
 // The git mutations below are exercised end-to-end (mutate → settle → invalidate),
 // so the commands they wrap are stubbed. Everything else in this file is pure.
@@ -37,10 +44,12 @@ import {
   filterTriageQueue,
   newestSessionByPath,
   parseBatchSetup,
+  parseLinearScope,
   patchSettingCache,
   promptPreviewKey,
   queryKeys,
   resolveHelperAgent,
+  reviewAwaitingCount,
   useCommitWorktree,
   useOptimisticMutation,
   usePullRemoteWorktree,
@@ -49,6 +58,34 @@ import {
   useUpdateBaseBranch,
   useWorktreeWatcher,
 } from "./queries";
+
+describe("reviewAwaitingCount", () => {
+  const review = (
+    id: string,
+    viewerReview: ReviewPr["viewerReview"] = null,
+    headCommittedAt = "2026-08-24T10:00:00Z",
+  ) => ({ id, viewerReview, headCommittedAt }) as ReviewPr;
+
+  it("deduplicates direct/team requests and excludes already-reviewed heads", () => {
+    const direct = review("direct");
+    const reviewed = review("reviewed", {
+      state: "Approved",
+      submittedAt: "2026-08-24T11:00:00Z",
+    });
+    const pushed = review(
+      "pushed",
+      { state: "ChangesRequested", submittedAt: "2026-08-24T09:00:00Z" },
+      "2026-08-24T12:00:00Z",
+    );
+    const inbox = {
+      mine: [],
+      requested: [direct, reviewed],
+      teams: [{ slug: "eng", name: "Engineering", prs: [direct, pushed] }],
+    } satisfies ReviewInbox;
+
+    expect(reviewAwaitingCount(inbox)).toBe(2);
+  });
+});
 
 describe("resolveHelperAgent", () => {
   it("keeps helper assignments independent from the interactive Work provider", () => {
@@ -489,6 +526,17 @@ describe("parseBatchSetup", () => {
     expect(parseBatchSetup(undefined)).toBe("ask");
     expect(parseBatchSetup("")).toBe("ask");
     expect(parseBatchSetup("sometimes")).toBe("ask");
+  });
+});
+
+describe("parseLinearScope", () => {
+  it("requires an explicit read-write choice", () => {
+    expect(parseLinearScope("read_write")).toBe("read_write");
+    expect(parseLinearScope("read")).toBe("read");
+    expect(parseLinearScope(null)).toBe("read");
+    expect(parseLinearScope(undefined)).toBe("read");
+    expect(parseLinearScope("")).toBe("read");
+    expect(parseLinearScope("read,write")).toBe("read");
   });
 });
 

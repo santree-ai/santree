@@ -329,7 +329,7 @@ async fn migrate_helper_agents(db: &Db) -> Result<()> {
     Ok(())
 }
 /// The CLI binary name probed on PATH for each harness.
-fn agent_binary(kind: AgentKind) -> &'static str {
+pub fn agent_binary(kind: AgentKind) -> &'static str {
     match kind {
         AgentKind::Claude => "claude",
         AgentKind::Codex => "codex",

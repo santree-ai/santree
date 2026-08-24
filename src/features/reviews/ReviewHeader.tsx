@@ -8,12 +8,12 @@
 import { useNavigate } from "@tanstack/react-router";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
-import type { AgentKind, Reviewer, ReviewPr } from "../../bindings";
+import type { Reviewer, ReviewPr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { AgentsIcon, BranchIcon, CopyIcon, GitHubLogo, PanelIcon } from "../../components/icons";
 import { Button, Pill } from "../../components/primitives";
-import { useCreateReviewWorktree, useResolvedSetting, WORK_AGENT_KEY } from "../../lib/queries";
-import { useAppUi } from "../../state/AppContext";
+import { useCreateReviewWorktree, useRepos, useWorktreePrs, useWorktrees } from "../../lib/queries";
+import { useApp, useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import {
   accentActiveStyle,
@@ -24,31 +24,60 @@ import {
 import { useReviewsModel } from "./model";
 import { PrLabels } from "./PrLabels";
 
+/** Collision-free, path-safe id for a PR tree. GitHub owner/repo components are
+ * already validated by the backend; lengths distinguish ambiguous joined slugs. */
+export function reviewTreeId(pr: Pick<ReviewPr, "repo" | "number">): string {
+  const [owner, name] = pr.repo.split("/");
+  return `review-${owner.length}-${owner}-${name.length}-${name}-${pr.number}`;
+}
+
 export function ReviewHeader({ pr }: { pr: ReviewPr }) {
-  const { infoCollapsed, toggleInfo } = useReviewsModel();
-  const { repo } = useReviewsModel();
-  const { data: configuredAgent } = useResolvedSetting(repo, WORK_AGENT_KEY);
-  const agent = (configuredAgent as AgentKind | null) ?? "Codex";
-  const createTree = useCreateReviewWorktree(repo);
+  const { infoCollapsed, toggleInfo, inbox } = useReviewsModel();
+  const { setActiveRepo } = useApp();
+  const { data: repos = [] } = useRepos();
+  const targetRepo = repos.find(
+    (candidate) => candidate.name.toLowerCase() === pr.repo.toLowerCase(),
+  );
+  const repoName = targetRepo?.name ?? "";
+  const { data: worktrees = [] } = useWorktrees(repoName);
+  const { data: worktreePrs = [] } = useWorktreePrs(repoName);
+  const createTree = useCreateReviewWorktree(repoName);
   const { addPendingLaunches, removePendingLaunch, requestTreeFocus } = useAppUi();
   const navigate = useNavigate();
   const decision = reviewDecisionMeta[pr.reviewDecision];
   const checks = checkRollupMeta[pr.checks];
-  const treeId = `review-${pr.repo}-${pr.number}`.replace(/[^A-Za-z0-9._-]+/g, "-");
+  const treeId = reviewTreeId(pr);
+  const linkedTreeId = worktreePrs.find((candidate) => candidate.url === pr.url)?.issueId;
+  const existingTree = worktrees.find(
+    (worktree) => worktree.id === linkedTreeId || worktree.branch === pr.headRef,
+  );
+  const isMine = inbox?.mine.some((candidate) => candidate.id === pr.id) ?? false;
+
+  const viewTree = () => {
+    if (!targetRepo || !existingTree) return;
+    setActiveRepo(targetRepo.name);
+    requestTreeFocus(existingTree.id);
+    navigate({ to: "/trees" });
+  };
 
   const openAsTree = () => {
-    addPendingLaunches([{ id: treeId, title: pr.title, project: "Reviews", agent }]);
+    if (!targetRepo || existingTree || isMine) return;
+    addPendingLaunches([{ id: treeId, title: pr.title, project: "Reviews", agent: null }]);
+    setActiveRepo(targetRepo.name);
     navigate({ to: "/trees" });
     createTree.mutate(
       {
+        prRepo: pr.repo,
         id: treeId,
         title: pr.title,
         branch: pr.headRef,
         base: pr.baseRef || null,
-        agent,
       },
       {
-        onSuccess: (worktree) => requestTreeFocus(worktree.id),
+        onSuccess: (worktree) => {
+          removePendingLaunch(treeId);
+          requestTreeFocus(worktree.id);
+        },
         onError: () => removePendingLaunch(treeId),
       },
     );
@@ -77,15 +106,40 @@ export function ReviewHeader({ pr }: { pr: ReviewPr }) {
             <span className="truncate">{pr.headRef}</span>
             <CopyIcon size={11} className="flex-none text-muted-3 group-hover:text-fg-2" />
           </button>
-          <Button
-            size="sm"
-            onClick={openAsTree}
-            title="Open this PR as a tree"
-            className="flex-none"
-          >
-            <BranchIcon size={11} />
-            Open as tree
-          </Button>
+          {!isMine && existingTree && (
+            <Button
+              size="sm"
+              onClick={viewTree}
+              title="Show the existing tree"
+              className="flex-none"
+            >
+              <BranchIcon size={11} />
+              View tree
+            </Button>
+          )}
+          {!isMine && !existingTree && targetRepo && (
+            <Button
+              size="sm"
+              onClick={openAsTree}
+              disabled={createTree.isPending}
+              title="Open this PR as a tree"
+              className="flex-none"
+            >
+              <BranchIcon size={11} />
+              Open as tree
+            </Button>
+          )}
+          {!isMine && !targetRepo && (
+            <Button
+              size="sm"
+              disabled
+              title={`Add ${pr.repo} as a local repository before opening this PR as a tree`}
+              className="flex-none"
+            >
+              <BranchIcon size={11} />
+              Open as tree
+            </Button>
+          )}
           <Button
             size="sm"
             onClick={() => openUrl(pr.url)}

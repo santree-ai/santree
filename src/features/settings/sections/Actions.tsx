@@ -17,7 +17,6 @@ import {
   INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
   INVESTIGATE_PERMISSION_MODE_KEY,
-  INVESTIGATE_REMOTE_CONTROL_KEY,
   PERMISSION_MODES,
   PR_BODY_AGENT_KEY,
   PR_BODY_MODEL_KEY,
@@ -32,7 +31,6 @@ import {
   useBoolSetting,
   useClaudeModels,
   useCodexModels,
-  useResolvedSetting,
   useSetSetting,
   useSetting,
   WORK_AGENT_KEY,
@@ -127,37 +125,11 @@ export function TriageActionSection({ repo }: { repo?: string }) {
       {repo ? (
         <div className="space-y-3.5">
           <ActionConfig descriptor={INVESTIGATE} repo={repo} />
-          <RemoteControlCard forRepo={repo} />
         </div>
       ) : (
         <AppTriagePanel />
       )}
     </>
-  );
-}
-
-/** Whether Investigate passes Claude's `--remote-control` flag (see
- *  {@link INVESTIGATE_REMOTE_CONTROL_KEY}). App defaults or a per-repo override,
- *  same scope convention as {@link WorkActionConfig}'s sibling cards. */
-function RemoteControlCard({ forRepo, disabled }: { forRepo?: string; disabled?: boolean }) {
-  const scope = forRepo ? `repo:${forRepo}` : "app";
-  const appOn = useSetting("app", INVESTIGATE_REMOTE_CONTROL_KEY).data !== "false";
-  const resolvedOn =
-    useResolvedSetting(forRepo ?? "", INVESTIGATE_REMOTE_CONTROL_KEY).data !== "false";
-  const on = forRepo ? resolvedOn : appOn;
-  const { mutate: setSetting } = useSetSetting();
-  return (
-    <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
-      <ToggleRow
-        label="Enable Remote Control"
-        hint="Names the Investigate session for Claude's Remote Control web (--remote-control). Turn off if your claude build predates the flag and Investigate exits right away."
-        on={on}
-        disabled={disabled}
-        onChange={(next) =>
-          setSetting({ scope, key: INVESTIGATE_REMOTE_CONTROL_KEY, value: next ? null : "false" })
-        }
-      />
-    </div>
   );
 }
 
@@ -272,7 +244,6 @@ function AppTriagePanel() {
           </div>
           <div className="space-y-3.5">
             <ActionConfig descriptor={INVESTIGATE} disabled={!enabled} />
-            <RemoteControlCard disabled={!enabled} />
           </div>
         </div>
       </div>

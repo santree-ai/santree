@@ -36,12 +36,14 @@ const backend = vi.hoisted(() => ({
   effort: "high" as string | null,
   permissionMode: "acceptEdits" as string | null,
   chrome: true,
+  remoteControl: true,
   /** Every `useAgentSession(…)` call, so a test can assert whether the hook is
    *  still asking the backend to resolve a (re)launch. */
   sessionCalls: [] as { allowFresh: boolean; enabled: boolean }[],
 }));
 
 vi.mock("../../lib/queries", () => ({
+  CLAUDE_REMOTE_CONTROL_KEY: "claude_remote_control",
   CLAUDE_START_WITH_CHROME_KEY: "claude_start_with_chrome",
   WORK_AGENT_KEY: "work_agent",
   WORK_EFFORT_KEY: "work_effort",
@@ -76,6 +78,10 @@ vi.mock("../../lib/queries", () => ({
     isFetched: backend.flagsFetched,
   }),
   useBoolSetting: () => ({ value: backend.chrome, isFetched: backend.flagsFetched }),
+  useSetting: () => ({
+    data: backend.remoteControl ? null : "false",
+    isFetched: backend.flagsFetched,
+  }),
   useClaudeHookSettings: () => ({ data: "/hooks.json", isFetched: backend.flagsFetched }),
   useClaudeHookSettingsNoGit: () => ({
     data: "/hooks-no-git.json",
@@ -143,6 +149,7 @@ beforeEach(() => {
   backend.effort = "high";
   backend.permissionMode = "acceptEdits";
   backend.chrome = true;
+  backend.remoteControl = true;
   backend.sessionCalls = [];
 });
 
@@ -317,6 +324,13 @@ describe("useAgentTab", () => {
     });
 
     // Claude-only flags: another agent's CLI would just fail to launch on them.
+    it("omits Remote Control when it is disabled in Claude settings", () => {
+      backend.remoteControl = false;
+      const t = mount(opts({ remoteControl: "AK-1" }));
+
+      expect(t.tab().seed).not.toContain("--remote-control");
+    });
+
     it("passes no Claude-only flags to another agent", () => {
       backend.session = {
         type: "fresh",

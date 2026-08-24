@@ -84,6 +84,7 @@ fn specta_builder() -> AppBuilder {
             commands::codex_logout,
             commands::claude_usage,
             commands::agent_auth,
+            commands::agent_version_status,
             commands::github_status,
             commands::worktrees,
             commands::base_worktree,

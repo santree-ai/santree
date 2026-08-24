@@ -26,16 +26,26 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<WorktreeTab>> {
     .bind(repo)
     .fetch_all(db)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(id, worktree_id, kind, agent_kind, title)| WorktreeTab {
-            id,
-            worktree_id,
-            kind: TabKind::from_db_str(&kind),
-            agent_kind: agent_kind.and_then(|kind| kind.parse().ok()),
-            title,
+    rows.into_iter()
+        .map(|(id, worktree_id, raw_kind, raw_agent, title)| {
+            let kind = TabKind::from_db_str(&raw_kind);
+            let agent_kind = match kind {
+                TabKind::Terminal => None,
+                TabKind::Agent | TabKind::FixCi => Some(
+                    raw_agent
+                        .ok_or_else(|| anyhow::anyhow!("agent tab {id:?} has no provider"))?
+                        .parse()?,
+                ),
+            };
+            Ok(WorktreeTab {
+                id,
+                worktree_id,
+                kind,
+                agent_kind,
+                title,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Persist a new tab. The frontend mints the id (so it can patch its cache and
@@ -58,6 +68,11 @@ pub async fn add(
     let title = title.trim();
     if title.is_empty() {
         bail!("tab title can't be empty");
+    }
+    match (kind, agent_kind) {
+        (TabKind::Terminal, Some(_)) => bail!("terminal tabs cannot have an agent provider"),
+        (TabKind::Agent | TabKind::FixCi, None) => bail!("agent tabs require a provider"),
+        _ => {}
     }
     sqlx::query(
         "INSERT INTO worktree_tabs (id, repo, worktree_id, kind, agent_kind, title, position)
@@ -278,6 +293,33 @@ mod tests {
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].kind, TabKind::FixCi);
         assert_eq!(tabs[0].title, "Fix CI");
+    }
+
+    #[tokio::test]
+    async fn provider_identity_is_required_exactly_for_agent_tabs() {
+        let db = test_db("provider-invariant").await;
+        assert!(add(
+            &db,
+            "repo",
+            "AK-1",
+            "agent-without-provider",
+            TabKind::Agent,
+            None,
+            "Agent",
+        )
+        .await
+        .is_err());
+        assert!(add(
+            &db,
+            "repo",
+            "AK-1",
+            "terminal-with-provider",
+            TabKind::Terminal,
+            Some(AgentKind::Claude),
+            "Terminal",
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]

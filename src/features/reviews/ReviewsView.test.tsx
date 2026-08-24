@@ -75,9 +75,51 @@ describe("ReviewsSidebarView", () => {
     expect(screen.getByText("Migrate billing jobs")).toBeInTheDocument();
   });
 
-  it("leads with the review queue, not with your own PRs", () => {
-    // The whole point of the reorder: the thing you're trying to do more of is the
-    // first thing in the panel.
+  it("orders My PRs, direct requests, then every team", () => {
+    const twoTeams = {
+      ...inbox,
+      teams: [
+        ...inbox.teams,
+        {
+          slug: "voice",
+          name: "Voice",
+          prs: [pr("t2", 499, "Tune call routing", "acme/voice")],
+        },
+      ],
+    };
+    render(
+      <ReviewsSidebarView
+        inbox={twoTeams}
+        loading={false}
+        total={4}
+        activeId={null}
+        onSelect={vi.fn()}
+      />,
+    );
+    const headings = screen
+      .getAllByText(/Needs your review|Team · Engineering|Team · Voice|My PRs/)
+      .map((el) => el.textContent);
+    expect(headings).toEqual(["My PRs", "Needs your review", "Team · Engineering", "Team · Voice"]);
+  });
+
+  it("collapses My PRs and direct requests independently and remembers them", () => {
+    const { unmount } = render(
+      <ReviewsSidebarView
+        inbox={inbox}
+        loading={false}
+        total={3}
+        activeId={null}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /My PRs/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Needs your review/ }));
+    expect(screen.queryByText("Booking webhook retries")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tighten rate limiter")).not.toBeInTheDocument();
+    expect(screen.getByText("Migrate billing jobs")).toBeInTheDocument();
+
+    unmount();
     render(
       <ReviewsSidebarView
         inbox={inbox}
@@ -87,10 +129,14 @@ describe("ReviewsSidebarView", () => {
         onSelect={vi.fn()}
       />,
     );
-    const headings = screen
-      .getAllByText(/Needs your review|Team · Engineering|My PRs/)
-      .map((el) => el.textContent);
-    expect(headings).toEqual(["Needs your review", "Team · Engineering", "My PRs"]);
+    expect(screen.getByRole("button", { name: /My PRs/ })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: /Needs your review/ })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
   });
 
   it("moves a PR you've already reviewed into its own folded block", () => {
@@ -210,6 +256,26 @@ describe("ReviewsSidebarView", () => {
     expect(screen.getByText("Migrate billing jobs")).toBeInTheDocument();
     // The category signal survives the regroup on the one direct request.
     expect(screen.getAllByText("@you")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /Voice/ }));
+    expect(screen.queryByText("Tighten rate limiter")).not.toBeInTheDocument();
+  });
+
+  it("renders a direct-and-team request only in the direct section", () => {
+    render(
+      <ReviewsSidebarView
+        inbox={{
+          ...inbox,
+          teams: [{ ...inbox.teams[0], prs: [inbox.requested[0], ...inbox.teams[0].prs] }],
+        }}
+        loading={false}
+        total={3}
+        activeId={null}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText("Tighten rate limiter")).toHaveLength(1);
   });
 
   it("shows an empty state when there are no PRs", () => {

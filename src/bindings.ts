@@ -34,6 +34,12 @@ export const commands = {
 	 */
 	agentAuth: (kind: AgentKind) => __TAURI_INVOKE<AgentAuth>("agent_auth", { kind }),
 	/**
+	 *  Installed and latest published CLI versions for one provider. Registry
+	 *  failures are represented as an absent latest version, not a failed Settings
+	 *  screen or a misleading update prompt.
+	 */
+	agentVersionStatus: (kind: AgentKind) => typedError<AgentVersionStatus, CmdError>(__TAURI_INVOKE("agent_version_status", { kind })),
+	/**
 	 *  The `gh` CLI integration status for Settings → Integrations: installed?
 	 *  authenticated? as which account? Infallible — a missing or signed-out `gh`
 	 *  is reported via the status flags rather than as an error, since GitHub can't
@@ -233,11 +239,12 @@ export const commands = {
 	fixCiPrompt: (repo: string, issueId: string, log: string) => typedError<string, CmdError>(__TAURI_INVOKE("fix_ci_prompt", { repo, issueId, log })),
 	/**
 	 *  Find-or-create a worktree for a pull request: reuse the one already tracked
-	 *  under `issue_id` if present, else create one that **checks out the PR's head
-	 *  branch** (`branch`) so commits made in it land on the PR. Used by the Reviews
-	 *  "Fix CI with AI" flow. `base` is the PR's base branch (for the worktree's diff).
+	 *  under `issue_id` or `branch` if present, else create one that **checks out the
+	 *  PR's head branch** so commits made in it land on the PR. `pr_repo` must match
+	 *  this registered checkout's origin; org-wide Reviews must never route a PR to
+	 *  whichever repo happens to be active. Used by both Open-as-tree and Fix CI.
 	 */
-	createWorktreeForPr: (repo: string, issueId: string, title: string, branch: string, base: string | null, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree_for_pr", { repo, issueId, title, branch, base, agent })),
+	createWorktreeForPr: (repo: string, prRepo: string, issueId: string, title: string, branch: string, base: string | null, agent: "Claude" | "Codex" | "Cursor" | "Opencode" | null) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree_for_pr", { repo, prRepo, issueId, title, branch, base, agent })),
 	agentSession: (repo: string, termKey: string, cwd: string, allowFresh: boolean, agent: AgentKind) => typedError<AgentSession, CmdError>(__TAURI_INVOKE("agent_session", { repo, termKey, cwd, allowFresh, agent })),
 	/**
 	 *  Stored Triage surfaces and their sticky providers. Drives resume affordances
@@ -977,6 +984,16 @@ export type AgentState =
 "idle" | 
 /**  The session ended (SessionEnd). */
 "exited";
+
+/**
+ *  Installed and published versions for an agent CLI. An unavailable registry
+ *  leaves `latest` empty; the installed CLI remains usable and visible.
+ */
+export type AgentVersionStatus = {
+	installed: string | null,
+	latest: string | null,
+	updateAvailable: boolean,
+};
 
 /**
  *  The three files an AI-review session launches with, resolved in one call so a

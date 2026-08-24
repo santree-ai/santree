@@ -46,6 +46,7 @@ import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { usePersistedState } from "../../lib/usePersistedState";
 import { useAgentRuns } from "../../state/AgentRuns";
 import { type PendingLaunch, useApp, useAppUi } from "../../state/AppContext";
+import { agentLabel } from "../../theme/colors";
 import type { TerminalTab } from "../terminal/orchestrator";
 import { useTerminals } from "../terminal/TerminalsContext";
 
@@ -175,10 +176,16 @@ export type MainTab = "issue" | "terminal" | "file" | "setup" | `tab:${string}`;
 export const extraTab = (id: string): MainTab => `tab:${id}`;
 
 /** Default title for a new extra tab, unique among the worktree's existing tab
- *  titles: "Claude", "Claude 2", … / "Terminal 2", "Terminal 3", … (the primary
- *  Terminal tab is #1 implicitly). Exported for testing — see model.test.ts. */
-export function defaultTabTitle(kind: TabKind, existing: WorktreeTab[]): string {
-  const base = kind === "agent" ? "Codex" : kind === "fixCi" ? "Fix CI" : "Terminal";
+ *  titles and derived from the selected provider: "Claude Code", "Codex 2", … /
+ *  "Terminal 2", "Terminal 3", … (the primary Terminal tab is #1 implicitly).
+ *  Exported for testing — see model.test.ts. */
+export function defaultTabTitle(
+  kind: TabKind,
+  agentKind: AgentKind | null,
+  existing: WorktreeTab[],
+): string {
+  const base =
+    kind === "agent" ? agentLabel(agentKind ?? "Codex") : kind === "fixCi" ? "Fix CI" : "Terminal";
   const titles = new Set(existing.map((t) => t.title));
   let n = kind === "agent" || kind === "fixCi" ? 1 : 2;
   const candidate = () => (n === 1 ? base : `${base} ${n}`);
@@ -746,12 +753,13 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       addTab: (kind, agentKind) => {
         if (!activeId) return;
         const id = crypto.randomUUID();
+        const resolvedAgent = kind === "terminal" ? null : (agentKind ?? "Codex");
         addTabRow({
           id,
           worktreeId: activeId,
           kind,
-          agentKind: kind === "terminal" ? null : (agentKind ?? "Codex"),
-          title: defaultTabTitle(kind, extraTabs),
+          agentKind: resolvedAgent,
+          title: defaultTabTitle(kind, resolvedAgent, extraTabs),
         });
         setTabFor(activeId, extraTab(id));
       },

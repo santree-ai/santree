@@ -24,11 +24,11 @@ import { AgentIcon, AgentsIcon } from "../../components/icons";
 import { Button, EmptyState, Segmented, Skeleton } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import {
+  CLAUDE_REMOTE_CONTROL_KEY,
   INVESTIGATE_AGENT_KEY,
   INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
   INVESTIGATE_PERMISSION_MODE_KEY,
-  INVESTIGATE_REMOTE_CONTROL_KEY,
   TRIAGE_GOOD_CITIZEN_KEY,
   useBaseWorktree,
   useLinearReadOnly,
@@ -346,10 +346,7 @@ export function TriageView() {
     [eligibleIds, selected],
   );
   const allEligibleSelected = eligibleIds.length > 0 && eligibleIds.every((id) => selected[id]);
-  const { data: remoteControlSetting } = useResolvedSetting(
-    activeRepo,
-    INVESTIGATE_REMOTE_CONTROL_KEY,
-  );
+  const { data: remoteControlSetting } = useResolvedSetting(activeRepo, CLAUDE_REMOTE_CONTROL_KEY);
   const batchInvestigate = useBatchInvestigate({
     repo: activeRepo,
     cwd: repoPath,

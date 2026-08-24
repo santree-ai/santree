@@ -6,7 +6,7 @@ import { useAttentionCount } from "../../features/agents/useAgents";
 import { useTriageQueue, useViewCounts } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import { sessionStateMeta } from "../../theme/colors";
-import { Tabs } from "../primitives";
+import { Badge, Tabs } from "../primitives";
 
 interface TabDef {
   label: string;
@@ -32,15 +32,19 @@ export function NavTabs() {
       path: "/",
       // Not a count of agents — a count of agents *blocked on you*. The nav bar
       // is the only chrome visible from every view, so it carries the alert.
-      badge:
-        needsYou > 0 ? (
-          <span
-            className="font-mono text-[10px] font-semibold"
-            style={{ color: sessionStateMeta.waiting.color }}
-          >
-            {needsYou}
-          </span>
-        ) : undefined,
+      badge: (
+        <span className="flex items-center gap-1">
+          <Badge color="var(--color-status-amber)">WIP</Badge>
+          {needsYou > 0 && (
+            <span
+              className="font-mono text-[10px] font-semibold"
+              style={{ color: sessionStateMeta.waiting.color }}
+            >
+              {needsYou}
+            </span>
+          )}
+        </span>
+      ),
     },
     // Dev sits beside Agents: both span every repo rather than being scoped to
     // the active one, which is what the divider below separates.

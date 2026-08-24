@@ -31,6 +31,7 @@ import type {
   PromptInfo,
   ReviewDraft,
   ReviewEvent,
+  ReviewInbox,
   ReviewPublishOutcome,
   ReviewTarget,
   ScriptInfo,
@@ -235,6 +236,7 @@ export const queryKeys = {
   agents: ["agents"] as const,
   claudeModels: ["claude-models"] as const,
   agentAuth: (kind: AgentKind) => ["agent-auth", kind] as const,
+  agentVersionStatus: (kind: AgentKind) => ["agent-version-status", kind] as const,
   codexHealth: ["codex-health"] as const,
   codexAccount: ["codex-account"] as const,
   codexModels: ["codex-models"] as const,
@@ -370,12 +372,10 @@ export const INVESTIGATE_AGENT_KEY = "investigate_agent";
 export const INVESTIGATE_MODEL_KEY = "investigate_model";
 export const INVESTIGATE_EFFORT_KEY = "investigate_effort";
 export const INVESTIGATE_PERMISSION_MODE_KEY = "investigate_permission_mode";
-/** Whether an Investigate launch passes Claude's `--remote-control` flag
- *  (names the session for Remote Control web). Defaults to on — missing/unset
- *  means enabled, only the literal `"false"` turns it off — so a build of
- *  `claude` old enough to predate the flag has an escape hatch (CLAUDE.md's
- *  "verify vendor flags" gotcha). */
-export const INVESTIGATE_REMOTE_CONTROL_KEY = "investigate_remote_control";
+/** Whether Claude launches pass `--remote-control`. The storage key predates
+ *  the provider settings panel; retaining it preserves existing choices while
+ *  the UI correctly presents this as a Claude capability, not a Triage action. */
+export const CLAUDE_REMOTE_CONTROL_KEY = "investigate_remote_control";
 
 /** Setting keys for the Reviews tab's AI-review sessions. */
 export const REVIEW_AGENT_KEY = "review_agent";
@@ -736,18 +736,18 @@ export const useLinearOrgs = () =>
   });
 
 /** What santree asks Linear for when connecting: `"read"` or `"read_write"`.
- *  App-scoped, defaults to read_write — what it requested unconditionally before
- *  the choice existed. Read by Rust (`linear.rs`), so the two declarations of
- *  this key have to agree, same split as {@link CONFIRM_ON_QUIT_KEY}. */
+ *  App-scoped, defaults to read-only. Read by Rust (`linear.rs`), so the two
+ *  declarations of this key have to agree, same split as
+ *  {@link CONFIRM_ON_QUIT_KEY}. */
 export const LINEAR_SCOPE_KEY = "linear_scope";
 
 /** The permission levels santree can request from Linear. */
 export type LinearScope = "read" | "read_write";
 
-/** The stored `linear_scope`, or read_write for anything unset/unknown —
- *  mirroring the Rust fallback, so a bad value can't quietly strip access. */
+/** The stored `linear_scope`, or read-only for anything unset/unknown —
+ *  mirroring the Rust fallback, so a bad value can't quietly request writes. */
 export const parseLinearScope = (raw: string | null | undefined): LinearScope =>
-  raw === "read" ? "read" : "read_write";
+  raw === "read_write" ? "read_write" : "read";
 
 /** Said wherever a Linear write is disabled, so the four places that gate on it
  *  can't drift into four different explanations. */
@@ -796,6 +796,12 @@ export const useClaudeModels = () =>
 /** An agent harness's authentication / subscription status. */
 export const useAgentAuth = (kind: AgentKind) =>
   useQuery({ queryKey: queryKeys.agentAuth(kind), queryFn: () => commands.agentAuth(kind) });
+
+/** Installed CLI version plus the provider's latest published release. */
+export const useAgentVersionStatus = (kind: AgentKind) =>
+  useUnwrappedQuery(queryKeys.agentVersionStatus(kind), () => commands.agentVersionStatus(kind), {
+    staleTime: 5 * 60 * 1000,
+  });
 
 export const useCodexHealth = () =>
   useUnwrappedQuery(queryKeys.codexHealth, () => commands.codexHealth(), { staleTime: 30_000 });
@@ -1988,14 +1994,22 @@ export const useCreateWorktree = (repo: string) =>
 export const useCreateReviewWorktree = (repo: string) =>
   useActionMutation({
     mutationFn: (args: {
+      prRepo: string;
       id: string;
       title: string;
       branch: string;
       base: string | null;
-      agent: AgentKind;
     }) =>
       unwrap(
-        commands.createWorktreeForPr(repo, args.id, args.title, args.branch, args.base, args.agent),
+        commands.createWorktreeForPr(
+          repo,
+          args.prRepo,
+          args.id,
+          args.title,
+          args.branch,
+          args.base,
+          null,
+        ),
       ),
     invalidate: () => [queryKeys.worktrees(repo)],
     success: (worktree) => `Opened ${worktree.branch} as a tree.`,
@@ -2358,8 +2372,19 @@ export interface ViewCounts {
   tasksReady: number;
   worktrees: number;
   worktreesRunning: number;
-  /** Worktrees with an open PR — the Reviews count. */
+  /** Unique PRs still awaiting this viewer's review. */
   reviews: number;
+}
+
+/** Count unique direct/team requests whose current head has not been reviewed. */
+export function reviewAwaitingCount(inbox: ReviewInbox | undefined): number {
+  if (!inbox) return 0;
+  const seen = new Set<string>();
+  return [...inbox.requested, ...inbox.teams.flatMap((team) => team.prs)].filter((pr) => {
+    if (seen.has(pr.id)) return false;
+    seen.add(pr.id);
+    return !pr.viewerReview || pr.headCommittedAt > pr.viewerReview.submittedAt;
+  }).length;
 }
 
 /**
@@ -2392,9 +2417,7 @@ export const useViewCounts = (repo: string): ViewCounts => {
       worktreesRunning: worktrees?.filter((w) => liveTermRefIds.has(`tree:${w.id}`)).length ?? 0,
       // The Reviews badge counts PRs awaiting *my* review (individual + team),
       // not my own authored PRs.
-      reviews:
-        (reviews?.requested.length ?? 0) +
-        (reviews?.teams.reduce((n, t) => n + t.prs.length, 0) ?? 0),
+      reviews: reviewAwaitingCount(reviews),
     };
   }, [tasks, worktrees, reviews, terminalTabs]);
 };

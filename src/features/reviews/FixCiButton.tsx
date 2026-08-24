@@ -68,7 +68,15 @@ export function FixCiButton({
       try {
         // Find-or-create a worktree on the PR's head branch (so the fix lands there).
         const worktree = await unwrap(
-          commands.createWorktreeForPr(santreeRepo, issueId, pr.title, pr.headRef, null, "Codex"),
+          commands.createWorktreeForPr(
+            santreeRepo,
+            pr.repo,
+            issueId,
+            pr.title,
+            pr.headRef,
+            null,
+            "Codex",
+          ),
         );
         // Let the Trees list pick up the new worktree so its Fix-CI launch effect fires.
         await qc.invalidateQueries({ queryKey: queryKeys.worktrees(santreeRepo) });
