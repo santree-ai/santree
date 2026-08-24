@@ -4,7 +4,6 @@ import type { CSSProperties } from "react";
 import { memo } from "react";
 
 import { Badge, Dot } from "../../components/primitives";
-import { successColor } from "../../theme/colors";
 
 export interface IssueRowVM {
   id: string;
@@ -84,17 +83,10 @@ export const IssueRow = memo(
             <div className="flex items-center gap-1.5">
               <span className="flex-none font-mono text-[10px] text-muted-2">{vm.id}</span>
               <span className="ml-auto flex items-center gap-1">
-                {vm.showWorking && <Badge color="var(--color-status-amber)">WIP</Badge>}
-                {vm.showRdy && <Badge color={successColor}>RDY</Badge>}
-                {vm.showChain && (
-                  <span
-                    className="font-mono text-[8px] font-semibold"
-                    style={{ color: "var(--accent)" }}
-                  >
-                    ⛓ {vm.chainBase}
-                  </span>
-                )}
-                {vm.showBlocked && <span className="font-mono text-[10px] text-muted-4">⊘</span>}
+                {vm.showWorking && <Badge color="var(--color-status-amber)">In progress</Badge>}
+                {vm.showRdy && <Badge color="var(--color-status-green)">Ready</Badge>}
+                {vm.showChain && <Badge color="var(--accent)">After {vm.chainBase}</Badge>}
+                {vm.showBlocked && <Badge color="var(--color-muted-3)">Blocked</Badge>}
               </span>
             </div>
             <div className="mt-0.5 overflow-hidden text-[11.5px] leading-[1.3] text-ellipsis whitespace-nowrap text-fg-3">

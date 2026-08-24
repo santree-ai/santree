@@ -1279,9 +1279,10 @@ pub async fn pr_file_source(
     name: String,
     base: String,
     head: String,
-    path: String,
+    old_path: String,
+    new_path: String,
 ) -> CmdResult<FileSource> {
-    Ok(reviews::file_source(&owner, &name, &base, &head, &path).await?)
+    Ok(reviews::file_source(&owner, &name, &base, &head, &old_path, &new_path).await?)
 }
 
 /// The files a user has marked "Viewed" for a PR, tagged with which store they came

@@ -6,13 +6,19 @@
 import type { CSSProperties } from "react";
 import { useMemo, useState } from "react";
 
-import type { SessionState, Worktree, WorktreePr } from "../../bindings";
-import { BranchIcon, CheckIcon, DownloadIcon, TrashIcon } from "../../components/icons";
+import type { SessionState, TicketRef, Worktree, WorktreePr } from "../../bindings";
+import { AgentIcon, BranchIcon, CheckIcon, DownloadIcon, TrashIcon } from "../../components/icons";
 import { PrChips } from "../../components/PrChip";
 import { Button, ConfirmDialog, Dot, Skeleton, Spinner } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
+import { ChangeSizeBars, PriorityBars, ProjectDueDate } from "../../components/WorkSignals";
 import { WorktreeStats } from "../../components/WorktreeStats";
-import { useSessionByPath, useUpdateBaseBranch } from "../../lib/queries";
+import {
+  usePrTickets,
+  useSessionByPath,
+  useUpdateBaseBranch,
+  useWorktreeStatus,
+} from "../../lib/queries";
 import { accentActiveStyle, alpha, prStateMeta, sessionStateMeta } from "../../theme/colors";
 import { BASE_ID, effectiveSessionState, projectOf, useTrees } from "./model";
 import { StartTaskButton } from "./StartTaskButton";
@@ -78,9 +84,9 @@ function BaseEntry({ worktree, active }: { worktree: Worktree; active: boolean }
     // the update action can be a real sibling button rather than an illegal nested
     // one (ARIA makes a button's children presentational).
     <div
-      className="relative mb-1 flex items-center gap-2 rounded-[9px] px-[11px] py-2 text-[12px] hover:bg-hover"
+      className="entity-card relative mb-2 flex items-center gap-2 px-[11px] py-2.5 text-[12px]"
+      data-active={active}
       style={{
-        background: active ? alpha(8) : "transparent",
         color: active ? "var(--accent)" : "var(--color-muted-2)",
       }}
     >
@@ -91,8 +97,15 @@ function BaseEntry({ worktree, active }: { worktree: Worktree; active: boolean }
         title={`Base branch (${worktree.branch})`}
         className="absolute inset-0 cursor-pointer rounded-[9px]"
       />
-      <BranchIcon size={13} className="flex-none" />
-      <span className="min-w-0 flex-1 truncate font-mono">{worktree.branch}</span>
+      <span className="flex h-7 w-7 flex-none items-center justify-center rounded-[var(--radius-sm)] border border-line-2 bg-input">
+        <BranchIcon size={13} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[11.5px] font-medium text-fg-2">Base workspace</span>
+        <span className="mt-0.5 block truncate font-mono text-[9.5px] text-muted-4">
+          {worktree.branch}
+        </span>
+      </span>
       {worktree.dirty && (
         <span title="Uncommitted changes" className="relative text-status-amber">
           ●
@@ -106,7 +119,8 @@ function BaseEntry({ worktree, active }: { worktree: Worktree; active: boolean }
           title={`Fast-forward ${worktree.branch} from origin (${behind} behind)`}
           className="relative flex flex-none cursor-pointer items-center gap-1 rounded px-1 py-0.5 font-mono text-[10px] text-status-amber hover:bg-hover hover:text-accent"
         >
-          {isPending ? <Spinner size={9} /> : <DownloadIcon />}↓{behind}
+          {isPending ? <Spinner size={9} /> : <DownloadIcon />}
+          {behind}
         </button>
       )}
     </div>
@@ -163,6 +177,7 @@ export function stackWorktrees(list: Worktree[]): { worktree: Worktree; depth: n
 
 export function WorktreeSidebar() {
   const {
+    repo,
     worktrees,
     prsByWorktree,
     loading,
@@ -180,6 +195,15 @@ export function WorktreeSidebar() {
   // Live Claude session state per worktree, correlated by cwd (the worktree path
   // Claude ran in).
   const sessionByPath = useSessionByPath();
+  const ticketIds = useMemo(
+    () => worktrees.filter((w) => !w.pending).map((w) => w.id),
+    [worktrees],
+  );
+  const { data: tickets = [] } = usePrTickets(repo, ticketIds);
+  const ticketsById = useMemo(
+    () => new Map(tickets.map((ticket) => [ticket.identifier, ticket])),
+    [tickets],
+  );
 
   // A worktree can have several PRs over its life; treat one as "merged" (dimmed /
   // safe to delete) only when *every* PR is merged.
@@ -209,8 +233,14 @@ export function WorktreeSidebar() {
       list.push(w);
       map.set(key, list);
     }
-    return [...map.entries()].map(([project, list]) => [project, stackWorktrees(list)] as const);
-  }, [worktrees]);
+    return [...map.entries()].map(([project, list]) => ({
+      project,
+      list: stackWorktrees(list),
+      targetDate: list
+        .map((worktree) => ticketsById.get(worktree.id)?.projectTargetDate)
+        .find((date) => !!date),
+    }));
+  }, [ticketsById, worktrees]);
 
   const showActions = mergedIds.length > 0 || selectedWorktrees.size > 0;
 
@@ -230,10 +260,11 @@ export function WorktreeSidebar() {
 
         {loading && groups.length === 0 && <SidebarSkeleton />}
 
-        {groups.map(([project, list]) => (
+        {groups.map(({ project, list, targetDate }) => (
           <div key={project} className="mb-1.5">
-            <div className="px-2 pt-1 pb-1 font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
-              {project}
+            <div className="flex items-center gap-1.5 px-2 pt-1 pb-1 font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
+              <span className="truncate">{project}</span>
+              <ProjectDueDate date={targetDate} />
             </div>
             {list.map(({ worktree: w, depth }) => (
               <WorktreeEntry
@@ -244,6 +275,7 @@ export function WorktreeSidebar() {
                 prs={prsByWorktree.get(w.id) ?? []}
                 selected={selectedWorktrees.has(w.id)}
                 sessionState={sessionByPath.get(w.path)}
+                ticket={ticketsById.get(w.id)}
                 onOpen={() => setActive(w.id)}
                 onToggleSelect={() => toggleWorktreeSelected(w.id)}
               />
@@ -315,6 +347,7 @@ function WorktreeEntry({
   prs,
   selected,
   sessionState,
+  ticket,
   onOpen,
   onToggleSelect,
 }: {
@@ -325,6 +358,7 @@ function WorktreeEntry({
   prs: WorktreePr[];
   selected: boolean;
   sessionState: SessionState | undefined;
+  ticket: TicketRef | undefined;
   onOpen: () => void;
   onToggleSelect: () => void;
 }) {
@@ -332,6 +366,8 @@ function WorktreeEntry({
   // "exited" even if the last hook said active/waiting.
   const state = effectiveSessionState(w, sessionState);
   const session = state ? sessionStateMeta[state] : undefined;
+  const { repo } = useTrees();
+  const { data: changedFiles } = useWorktreeStatus(repo, w.pending ? "" : w.id);
   // Dimmed only when fully merged (every PR) — a worktree with any open PR stays lit.
   const merged = prs.length > 0 && prs.every((p) => p.state === "Merged");
   // Every card carries an edge, not just the active one. The stack connector's elbow
@@ -354,7 +390,8 @@ function WorktreeEntry({
     >
       <StackConnector depth={depth} />
       <div
-        className="group relative flex min-w-0 flex-1 cursor-pointer gap-2 rounded-[9px] px-[11px] py-2.5 text-left transition-colors hover:bg-hover"
+        className="entity-card group relative flex min-w-0 flex-1 cursor-pointer gap-2 px-[11px] py-2.5 text-left"
+        data-active={active}
         style={cardStyle}
       >
         {/* The card's own action is a button stretched over it, not a `role="button"`
@@ -402,23 +439,10 @@ function WorktreeEntry({
             </>
           ) : (
             <>
-              {/* Lead with the live Claude session state (from the session-signal
-                hooks) as a leading dot, then the ticket ID, then the PR badge. */}
+              {/* Identity first: ticket urgency, id, then the PR it produced. */}
               <div className="mb-[5px] flex items-center gap-1.5">
-                {session && (
-                  // `relative` so it sits above the stretched open-button and can
-                  // still be hovered for its tooltip (the message a waiting session
-                  // is blocked on).
-                  <span
-                    className="relative flex-none"
-                    title={
-                      (state === "waiting" || state === "permission") && sessionState?.message
-                        ? `${session.label}: ${sessionState.message}`
-                        : session.label
-                    }
-                  >
-                    <Dot color={session.color} size={7} glow={session.glow} />
-                  </span>
+                {ticket && ticket.priority !== "None" && (
+                  <PriorityBars priority={ticket.priority} />
                 )}
                 <span className="min-w-0 flex-1 overflow-hidden font-mono text-[11px] text-ellipsis whitespace-nowrap text-fg-2">
                   {w.id}
@@ -432,16 +456,36 @@ function WorktreeEntry({
               <div className="mb-1.5 overflow-hidden text-[11.5px] leading-[1.3] text-ellipsis whitespace-nowrap text-muted">
                 {w.title}
               </div>
-              {/* Wrap: with several stats (adds/dels/ahead/behind/clean) the row can
-                be wider than the narrow sidebar — let it reflow to a second line
-                instead of overflowing the card and clipping "clean". */}
-              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10px] text-muted-4">
-                {session && (
-                  <span className="relative" style={{ color: session.color }} title={session.label}>
-                    {session.short}
-                  </span>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] text-muted-4">
+                {changedFiles && (
+                  <>
+                    <ChangeSizeBars
+                      additions={w.addLines}
+                      deletions={w.delLines}
+                      files={changedFiles.length}
+                      noun="change"
+                    />
+                    <span title={`${changedFiles.length} changed files`}>
+                      {changedFiles.length} file{changedFiles.length === 1 ? "" : "s"}
+                    </span>
+                  </>
                 )}
                 <WorktreeStats worktree={w} showClean />
+                {w.agent && (
+                  <span
+                    className="relative ml-auto flex items-center gap-1"
+                    style={{ color: session?.color ?? "var(--color-muted-3)" }}
+                    title={
+                      (state === "waiting" || state === "permission") && sessionState?.message
+                        ? `${session?.label}: ${sessionState.message}`
+                        : (session?.label ?? "Agent not running")
+                    }
+                  >
+                    {session && <Dot color={session.color} size={6} glow={session.glow} />}
+                    <AgentIcon kind={w.agent} size={10} />
+                    <span>{session?.short ?? "offline"}</span>
+                  </span>
+                )}
               </div>
             </>
           )}

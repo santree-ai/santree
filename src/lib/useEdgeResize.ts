@@ -10,6 +10,8 @@
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type RefObject,
+  useEffect,
   useRef,
 } from "react";
 
@@ -21,6 +23,9 @@ const KEY_STEP = 16;
 export interface EdgeResizeOptions {
   /** CSS custom property updated live during the drag (e.g. `--sidebar-width`). */
   cssVar: string;
+  /** Element that owns the layout variable. Keeping it local avoids invalidating
+   *  styles (and mutation observers) across the entire application. */
+  target?: RefObject<HTMLElement | null>;
   /** Current committed width (px). */
   width: number;
   min: number;
@@ -46,8 +51,29 @@ export function useEdgeResize(opts: EdgeResizeOptions) {
   const startW = useRef(0);
   const latest = useRef(opts.width);
   const dragging = useRef(false);
+  const frame = useRef<number | null>(null);
 
-  const setVar = (w: number) => document.documentElement.style.setProperty(opts.cssVar, `${w}px`);
+  const setVar = (w: number) =>
+    (opts.target?.current ?? document.documentElement).style.setProperty(opts.cssVar, `${w}px`);
+  const cancelFrame = () => {
+    if (frame.current === null) return;
+    cancelAnimationFrame(frame.current);
+    frame.current = null;
+  };
+  const scheduleVar = () => {
+    if (frame.current !== null) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = null;
+      setVar(latest.current);
+    });
+  };
+
+  useEffect(
+    () => () => {
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+    },
+    [],
+  );
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     // Primary button only — a right-click would otherwise take pointer capture
@@ -69,6 +95,7 @@ export function useEdgeResize(opts: EdgeResizeOptions) {
       dragging.current = false;
       e.currentTarget.releasePointerCapture(e.pointerId);
       latest.current = opts.collapse.resetTo;
+      cancelFrame();
       setVar(opts.collapse.resetTo);
       opts.collapse.onCollapse();
       opts.onCommit(opts.collapse.resetTo);
@@ -77,7 +104,7 @@ export function useEdgeResize(opts: EdgeResizeOptions) {
 
     const clamped = Math.min(opts.max, Math.max(opts.min, next));
     latest.current = clamped;
-    setVar(clamped);
+    scheduleVar();
   };
 
   // Shared by pointerup and pointercancel: commit the dragged width to state
@@ -89,6 +116,8 @@ export function useEdgeResize(opts: EdgeResizeOptions) {
     if (!dragging.current) return;
     dragging.current = false;
     e.currentTarget.releasePointerCapture(e.pointerId);
+    cancelFrame();
+    setVar(latest.current);
     opts.onCommit(latest.current);
   };
 

@@ -1,5 +1,5 @@
 import { createRootRoute, Outlet } from "@tanstack/react-router";
-
+import { CommandPalette } from "../components/CommandPalette";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import { WelcomeScreen } from "../components/WelcomeScreen";
 import { TerminalLayer } from "../features/terminal/TerminalLayer";
@@ -43,6 +43,7 @@ function AppShell() {
               runs. It used to live under the Trees route, which meant it only ran if
               you happened to be looking at it. */}
           <AgentRunHost />
+          <CommandPalette />
           <ShortcutsOverlay />
         </div>
       </LegacyMigrationProvider>

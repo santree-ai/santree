@@ -4,6 +4,8 @@
  *  bottom-bar "Files" toggle / ⌘L — it hides entirely when collapsed). This is
  *  the thin shell: {@link ChangesList} owns staging + the commit box, and
  *  {@link AllFilesList} owns the Material-icon file tree. */
+import { type CSSProperties, useRef } from "react";
+
 import {
   EdgeResizeHandle,
   onTabStripKeyDown,
@@ -20,6 +22,7 @@ const MAX_W = 560;
 const DEFAULT_W = 320;
 
 export function FilePickerPanel() {
+  const resizeTarget = useRef<HTMLDivElement>(null);
   const {
     repo,
     activeId,
@@ -37,6 +40,7 @@ export function FilePickerPanel() {
 
   const resize = useEdgeResize({
     cssVar: "--tree-right",
+    target: resizeTarget,
     width: rightWidth,
     min: MIN_W,
     max: MAX_W,
@@ -51,8 +55,14 @@ export function FilePickerPanel() {
 
   return (
     <div
+      ref={resizeTarget}
       className="relative flex flex-none flex-col border-l border-line bg-deep"
-      style={{ width: `var(--tree-right, ${DEFAULT_W}px)` }}
+      style={
+        {
+          "--tree-right": `${rightWidth}px`,
+          width: `var(--tree-right, ${DEFAULT_W}px)`,
+        } as CSSProperties
+      }
     >
       <EdgeResizeHandle edge="left" {...resize} />
       <div

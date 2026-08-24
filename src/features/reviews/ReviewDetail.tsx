@@ -67,7 +67,7 @@ function Detail({ pr }: { pr: ReviewPr }) {
   };
 
   return (
-    <div className="flex min-w-0 flex-1">
+    <div className="relative flex min-w-0 flex-1 overflow-hidden">
       <PrPane pr={pr} tab={detailTab} setTab={setDetailTab} />
       <PrInfoPanel
         pr={pr}

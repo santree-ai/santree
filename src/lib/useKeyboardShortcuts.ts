@@ -86,6 +86,7 @@ export function useKeyboardShortcuts() {
   const devEnabled = app?.devEnabled ?? false;
   const toggleSidebar = ui?.toggleSidebar;
   const toggleShortcuts = ui?.toggleShortcuts;
+  const toggleCommandPalette = ui?.toggleCommandPalette;
   const { refresh } = useRefreshExternal();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
@@ -149,6 +150,12 @@ export function useKeyboardShortcuts() {
         return;
       }
 
+      if (e.key.toLowerCase() === "k" && toggleCommandPalette) {
+        e.preventDefault();
+        toggleCommandPalette();
+        return;
+      }
+
       if (e.key === "b" && toggleSidebar) {
         e.preventDefault();
         toggleSidebar();
@@ -177,5 +184,14 @@ export function useKeyboardShortcuts() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [navigate, pathname, triageEnabled, devEnabled, toggleSidebar, toggleShortcuts, refresh]);
+  }, [
+    navigate,
+    pathname,
+    triageEnabled,
+    devEnabled,
+    toggleSidebar,
+    toggleShortcuts,
+    toggleCommandPalette,
+    refresh,
+  ]);
 }

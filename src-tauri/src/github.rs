@@ -865,6 +865,9 @@ fn to_review_pr(n: PrNode, viewer: &ViewerCtx) -> ReviewPr {
         deletions: n.deletions,
         changed_files: n.changed_files,
         comment_count: n.comments.total_count,
+        // Santree enriches this from its durable review sessions after the
+        // GitHub inbox lands. GitHub has no concept of these local conversations.
+        ai_review_count: 0,
         reviewers,
         updated_at: n.updated_at,
         created_at: n.created_at,
@@ -1177,6 +1180,10 @@ pub async fn pr_detail(token: &str, owner: &str, name: &str, number: u32) -> Res
     );
     let c = conversation?;
     let (files, files_truncated) = files?;
+    // GitHub's PR patches are based on the merge base, not today's base-branch
+    // tip. Loading old file contents from `baseRefOid` makes context expansion
+    // disagree with every hunk after the base branch advances.
+    let base_sha = merge_base_sha(token, owner, name, &c.base_sha, &c.head_sha).await?;
     Ok(PrDetail {
         body: c.body,
         labels: c.labels,
@@ -1185,10 +1192,38 @@ pub async fn pr_detail(token: &str, owner: &str, name: &str, number: u32) -> Res
         files,
         files_truncated,
         checks: c.checks,
-        base_sha: c.base_sha,
+        base_sha,
         head_sha: c.head_sha,
         pending_review_id: c.pending_review_id,
     })
+}
+
+/// Merge base behind GitHub's PR file patches. The compare endpoint exposes the
+/// exact commit those hunks use; `baseRefOid` is only the moving branch tip.
+async fn merge_base_sha(
+    token: &str,
+    owner: &str,
+    name: &str,
+    base: &str,
+    head: &str,
+) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Compare {
+        merge_base_commit: Commit,
+    }
+    #[derive(Deserialize)]
+    struct Commit {
+        sha: String,
+    }
+
+    let range = format!("{base}...{head}");
+    let compare: Compare = get_json(
+        api_url(&["repos", owner, name, "compare", &range])?,
+        &[],
+        token,
+    )
+    .await?;
+    Ok(compare.merge_base_commit.sha)
 }
 
 /// The repo's full label palette (the picker's options). REST, up to 100 labels.
@@ -2537,6 +2572,7 @@ async fn pr_files(
     #[derive(Deserialize)]
     struct RestFile {
         filename: String,
+        previous_filename: Option<String>,
         status: String,
         additions: u32,
         deletions: u32,
@@ -2559,6 +2595,7 @@ async fn pr_files(
         let paging = file_paging(files.len() + batch.len(), batch.len());
         files.extend(batch.into_iter().map(|f| PrFile {
             path: f.filename,
+            previous_path: f.previous_filename,
             status: f.status,
             additions: f.additions,
             deletions: f.deletions,
@@ -2739,11 +2776,12 @@ pub async fn pr_file_source(
     name: &str,
     base: &str,
     head: &str,
-    path: &str,
+    old_path: &str,
+    new_path: &str,
 ) -> Result<FileSource> {
     let (old_text, new_text) = tokio::join!(
-        file_content(token, owner, name, base, path),
-        file_content(token, owner, name, head, path),
+        file_content(token, owner, name, base, old_path),
+        file_content(token, owner, name, head, new_path),
     );
     Ok(FileSource {
         old_text: old_text?,

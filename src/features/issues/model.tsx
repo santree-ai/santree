@@ -271,6 +271,8 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   const {
     requestTreeLaunch,
     requestTreeFocus,
+    issueFocus,
+    consumeIssueFocus,
     requestBackgroundLaunch,
     clearBackgroundLaunch,
     addPendingLaunches,
@@ -326,6 +328,19 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   );
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [rightWidth, setRightWidth] = useState(304);
+
+  // Compact layouts preserve the graph as the primary workspace. The inspector
+  // starts as a slim right-edge handle and opens over the graph on demand.
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const compact = window.matchMedia("(max-width: 1500px)");
+    const collapse = (event: MediaQueryListEvent | MediaQueryList) => {
+      if (event.matches) setRightCollapsed(true);
+    };
+    collapse(compact);
+    compact.addEventListener("change", collapse);
+    return () => compact.removeEventListener("change", collapse);
+  }, []);
 
   // Focus a project band (toggle) and, when focusing, pan the graph onto it.
   const revealProject = useCallback(
@@ -410,6 +425,15 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (focusId === "" && tasks.length > 0) setFocusId(tasks[0].id);
   }, [focusId, tasks]);
+
+  // Cross-view navigation, such as the command palette, hands us a concrete
+  // ticket. Commit both inspector focus and a graph reveal once the task exists.
+  useEffect(() => {
+    if (!issueFocus || !tasks.some((task) => task.id === issueFocus)) return;
+    setFocusId(issueFocus);
+    setReveal((current) => ({ id: issueFocus, nonce: (current?.nonce ?? 0) + 1 }));
+    consumeIssueFocus();
+  }, [consumeIssueFocus, issueFocus, tasks]);
 
   // Ticket ids belong to the repo they came from: carrying focus/selection across
   // a repo switch leaves the panel on a ticket the graph and sidebar don't show,

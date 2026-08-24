@@ -20,7 +20,16 @@
 import { useState } from "react";
 
 import type { ReviewInbox, ReviewPr, TeamReviews, TicketRef } from "../../bindings";
-import { ChevronDownIcon, ChevronRightIcon, ListIcon } from "../../components/icons";
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  ClockIcon,
+  CloseIcon,
+  ListIcon,
+  MessageSquareIcon,
+  SparklesIcon,
+} from "../../components/icons";
 import {
   ChevronSelect,
   Dot,
@@ -28,6 +37,7 @@ import {
   ProjectGlyph,
   Skeleton,
 } from "../../components/primitives";
+import { ChangeSizeBars, PriorityBars, ProjectDueDate } from "../../components/WorkSignals";
 import { useMergeQueue } from "../../lib/queries";
 import {
   accentActiveStyle,
@@ -35,7 +45,7 @@ import {
   checkRollupMeta,
   mergeQueueMeta,
   PROJECT_FALLBACK,
-  prSizeColor,
+  palette,
   reviewAgeColor,
   reviewDecisionMeta,
 } from "../../theme/colors";
@@ -44,7 +54,6 @@ import {
   groupPrs,
   repoName,
   type SortMode,
-  sizeOf,
   sortPrs,
   splitByStance,
   waitingDays,
@@ -239,6 +248,7 @@ export function ReviewsSidebarView({
               sort={sort}
               activeId={activeId}
               onSelect={onSelect}
+              ticketFor={ticketFor}
               collapsed={collapsed}
               onToggle={toggle}
             />
@@ -266,6 +276,7 @@ function CategorySections({
   sort,
   activeId,
   onSelect,
+  ticketFor,
   collapsed,
   onToggle,
 }: {
@@ -273,18 +284,12 @@ function CategorySections({
   sort: SortMode;
   activeId: string | null;
   onSelect: (id: string) => void;
+  ticketFor: (pr: ReviewPr) => TicketRef | undefined;
   collapsed: Set<string>;
   onToggle: (key: string) => void;
 }) {
   const { waiting, reviewed } = splitByStance(sortPrs(inbox.requested, sort));
 
-  // Group "My PRs" by repository, preserving first-seen order.
-  const mineByRepo = new Map<string, ReviewPr[]>();
-  for (const pr of sortPrs(inbox.mine, sort)) {
-    const list = mineByRepo.get(pr.repo) ?? [];
-    list.push(pr);
-    mineByRepo.set(pr.repo, list);
-  }
   // GitHub can report the same PR as both a direct request and through one or
   // more teams. Category headings express priority, so render it only in the
   // first applicable section: direct before the ordered team list.
@@ -300,23 +305,23 @@ function CategorySections({
 
   return (
     <>
-      {mineByRepo.size > 0 && (
+      {inbox.mine.length > 0 && (
         <FoldingSection
           title="My PRs"
           count={inbox.mine.length}
           open={!collapsed.has(MINE_KEY)}
           onToggle={() => onToggle(MINE_KEY)}
         >
-          {[...mineByRepo].map(([repo, prs]) => (
-            <div key={repo} className="mb-1">
-              <div className="px-2 pt-1 pb-1 font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
-                {repoName(repo)}
-              </div>
-              {prs.map((pr) => (
-                <PrRow key={pr.id} pr={pr} active={pr.id === activeId} onSelect={onSelect} />
-              ))}
-            </div>
-          ))}
+          <ProjectSections
+            scope="mine"
+            prs={inbox.mine}
+            sort={sort}
+            ticketFor={ticketFor}
+            activeId={activeId}
+            onSelect={onSelect}
+            collapsed={collapsed}
+            onToggle={onToggle}
+          />
         </FoldingSection>
       )}
 
@@ -327,9 +332,16 @@ function CategorySections({
           open={!collapsed.has(REQUESTED_KEY)}
           onToggle={() => onToggle(REQUESTED_KEY)}
         >
-          {waiting.map((pr) => (
-            <PrRow key={pr.id} pr={pr} active={pr.id === activeId} onSelect={onSelect} showRepo />
-          ))}
+          <ProjectSections
+            scope="requested"
+            prs={waiting}
+            sort={sort}
+            ticketFor={ticketFor}
+            activeId={activeId}
+            onSelect={onSelect}
+            collapsed={collapsed}
+            onToggle={onToggle}
+          />
         </FoldingSection>
       )}
 
@@ -342,6 +354,9 @@ function CategorySections({
           onToggle={() => onToggle(team.slug)}
           activeId={activeId}
           onSelect={onSelect}
+          ticketFor={ticketFor}
+          collapsed={collapsed}
+          onProjectToggle={onToggle}
         />
       ))}
 
@@ -352,9 +367,16 @@ function CategorySections({
           open={!collapsed.has(REVIEWED_KEY)}
           onToggle={() => onToggle(REVIEWED_KEY)}
         >
-          {reviewed.map((pr) => (
-            <PrRow key={pr.id} pr={pr} active={pr.id === activeId} onSelect={onSelect} showRepo />
-          ))}
+          <ProjectSections
+            scope="reviewed"
+            prs={reviewed}
+            sort={sort}
+            ticketFor={ticketFor}
+            activeId={activeId}
+            onSelect={onSelect}
+            collapsed={collapsed}
+            onToggle={onToggle}
+          />
         </FoldingSection>
       )}
     </>
@@ -404,6 +426,7 @@ function FlatSections({
               <ProjectGlyph color={group.color ?? PROJECT_FALLBACK} icon={group.icon} />
             ) : undefined
           }
+          meta={grouping === "project" ? <ProjectDueDate date={group.targetDate} /> : undefined}
         >
           {group.prs.map((pr) => (
             <PrRow
@@ -413,6 +436,7 @@ function FlatSections({
               onSelect={onSelect}
               showRepo={grouping !== "repo"}
               direct={directIds.has(pr.id)}
+              ticket={ticketFor(pr)}
             />
           ))}
         </FoldingSection>
@@ -455,6 +479,7 @@ function FoldingSection({
   open,
   onToggle,
   glyph,
+  meta,
   children,
 }: {
   title: string;
@@ -462,6 +487,7 @@ function FoldingSection({
   open: boolean;
   onToggle: () => void;
   glyph?: React.ReactNode;
+  meta?: React.ReactNode;
   children: React.ReactNode;
 }) {
   const Chevron = open ? ChevronDownIcon : ChevronRightIcon;
@@ -476,11 +502,76 @@ function FoldingSection({
         <Chevron size={10} className="flex-none text-muted-3" />
         {glyph}
         <span className="truncate">{title}</span>
-        <span className="ml-auto font-mono text-[10px] font-normal text-muted-4">{count}</span>
+        {meta}
+        <span
+          className={
+            meta
+              ? "font-mono text-[10px] font-normal text-muted-4"
+              : "ml-auto font-mono text-[10px] font-normal text-muted-4"
+          }
+        >
+          {count}
+        </span>
       </button>
       {open && children}
     </div>
   );
+}
+
+/** Responsibility remains the top-level inbox axis; within it, Linear projects
+ *  make a long queue scannable without losing why each PR is present. */
+function ProjectSections({
+  scope,
+  prs,
+  sort,
+  ticketFor,
+  activeId,
+  onSelect,
+  collapsed,
+  onToggle,
+}: {
+  scope: string;
+  prs: ReviewPr[];
+  sort: SortMode;
+  ticketFor: (pr: ReviewPr) => TicketRef | undefined;
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  collapsed: Set<string>;
+  onToggle: (key: string) => void;
+}) {
+  return groupPrs(prs, "project", sort, ticketFor).map((group) => {
+    const key = `category-project:${scope}:${group.key}`;
+    const open = !collapsed.has(key);
+    const Chevron = open ? ChevronDownIcon : ChevronRightIcon;
+    const showRepo = new Set(group.prs.map((pr) => pr.repo)).size > 1;
+    return (
+      <div key={group.key} className="mb-2">
+        <button
+          type="button"
+          onClick={() => onToggle(key)}
+          aria-expanded={open}
+          className="mb-1 flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2 py-0.5 text-left font-mono text-[9.5px] tracking-[.05em] text-muted-3 uppercase transition-colors hover:bg-hover hover:text-fg-2"
+        >
+          <Chevron size={9} className="flex-none text-muted-4" />
+          <ProjectGlyph color={group.color ?? PROJECT_FALLBACK} icon={group.icon} size={5} />
+          <span className="truncate">{group.label}</span>
+          <ProjectDueDate date={group.targetDate} />
+          <span className="font-normal text-muted-4">{group.prs.length}</span>
+        </button>
+        {open &&
+          group.prs.map((pr) => (
+            <PrRow
+              key={pr.id}
+              pr={pr}
+              active={pr.id === activeId}
+              onSelect={onSelect}
+              showRepo={showRepo}
+              ticket={ticketFor(pr)}
+            />
+          ))}
+      </div>
+    );
+  });
 }
 
 /** A per-team block: unlike a direct request, a team request isn't necessarily for
@@ -493,6 +584,9 @@ function TeamSection({
   onToggle,
   activeId,
   onSelect,
+  ticketFor,
+  collapsed,
+  onProjectToggle,
 }: {
   team: TeamReviews;
   sort: SortMode;
@@ -500,6 +594,9 @@ function TeamSection({
   onToggle: () => void;
   activeId: string | null;
   onSelect: (id: string) => void;
+  ticketFor: (pr: ReviewPr) => TicketRef | undefined;
+  collapsed: Set<string>;
+  onProjectToggle: (key: string) => void;
 }) {
   const { waiting } = splitByStance(sortPrs(team.prs, sort));
   if (waiting.length === 0) return null;
@@ -510,9 +607,16 @@ function TeamSection({
       open={open}
       onToggle={onToggle}
     >
-      {waiting.map((pr) => (
-        <PrRow key={pr.id} pr={pr} active={pr.id === activeId} onSelect={onSelect} showRepo />
-      ))}
+      <ProjectSections
+        scope={`team:${team.slug}`}
+        prs={waiting}
+        sort={sort}
+        ticketFor={ticketFor}
+        activeId={activeId}
+        onSelect={onSelect}
+        collapsed={collapsed}
+        onToggle={onProjectToggle}
+      />
     </FoldingSection>
   );
 }
@@ -523,6 +627,7 @@ function PrRow({
   onSelect,
   showRepo = false,
   direct = false,
+  ticket,
 }: {
   pr: ReviewPr;
   active: boolean;
@@ -531,26 +636,28 @@ function PrRow({
   /** Requested of the viewer personally. Only rendered under the flat groupings,
    *  where the section heading no longer says so. */
   direct?: boolean;
+  ticket?: TicketRef;
 }) {
   const decision = reviewDecisionMeta[pr.reviewDecision];
   const checks = checkRollupMeta[pr.checks];
   const days = waitingDays(pr);
-  const size = sizeOf(pr);
+  const priority = ticket?.priority ?? "None";
 
   return (
     <button
       type="button"
       onClick={() => onSelect(pr.id)}
-      className="mb-[3px] flex w-full cursor-pointer flex-col gap-[5px] rounded-[9px] px-[11px] py-2 text-left transition-colors hover:bg-hover"
+      className="mb-[5px] flex w-full cursor-pointer flex-col gap-[5px] rounded-[9px] px-[11px] py-2 text-left transition-colors hover:border-line-strong hover:bg-hover"
       style={
         active
           ? accentActiveStyle()
-          : { border: "1px solid transparent", background: "transparent" }
+          : { border: "1px solid var(--color-line-2)", background: "var(--color-deep)" }
       }
     >
       <div className="flex items-center gap-1.5">
         <Dot color={decision.color} size={6} />
         <span className="font-mono text-[10.5px] text-muted-2">#{pr.number}</span>
+        {priority !== "None" && <PriorityBars priority={priority} />}
         {direct && (
           <span
             className="rounded-[4px] px-1 font-mono text-[8.5px] uppercase"
@@ -577,12 +684,8 @@ function PrRow({
             queued
           </span>
         )}
-        <span
-          className="ml-auto font-mono text-[10px]"
-          style={{ color: checks.color }}
-          title={checks.label}
-        >
-          {checks.glyph}
+        <span className="ml-auto" style={{ color: checks.color }} title={checks.label}>
+          <CheckStateIcon state={pr.checks} />
         </span>
       </div>
       <div
@@ -598,17 +701,44 @@ function PrRow({
         >
           {waitingLabel(days)}
         </span>
-        <span
-          style={{ color: prSizeColor[size] }}
-          title={`${pr.changedFiles} file${pr.changedFiles === 1 ? "" : "s"}, +${pr.additions} −${pr.deletions}`}
-        >
-          {size}
-        </span>
         {showRepo && <span className="truncate">{repoName(pr.repo)}</span>}
-        {pr.commentCount > 0 && <span className="ml-auto">💬 {pr.commentCount}</span>}
+        <span className="ml-auto flex items-center gap-2">
+          <ChangeSizeBars
+            additions={pr.additions}
+            deletions={pr.deletions}
+            files={pr.changedFiles}
+            noun="review"
+          />
+          {pr.aiReviewCount > 0 && (
+            <span
+              className="flex items-center gap-1"
+              style={{ color: palette.purple }}
+              title={`${pr.aiReviewCount} AI review session${pr.aiReviewCount === 1 ? "" : "s"}`}
+            >
+              <SparklesIcon size={10} />
+              <span className="tabular-nums">{pr.aiReviewCount}</span>
+            </span>
+          )}
+          {pr.commentCount > 0 && (
+            <span
+              className="flex items-center gap-1 text-muted-3"
+              title={`${pr.commentCount} comments`}
+            >
+              <MessageSquareIcon size={10} />
+              <span className="tabular-nums">{pr.commentCount}</span>
+            </span>
+          )}
+        </span>
       </div>
     </button>
   );
+}
+
+function CheckStateIcon({ state }: { state: ReviewPr["checks"] }) {
+  if (state === "Success") return <CheckIcon size={10} />;
+  if (state === "Failure") return <CloseIcon size={10} />;
+  if (state === "Pending") return <ClockIcon size={10} />;
+  return <span className="block h-2.5 w-2.5" />;
 }
 
 function SidebarSkeleton() {

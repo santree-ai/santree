@@ -1,6 +1,6 @@
 /** The diff pane: renders the selected changed file's diff via {@link DiffViewer}.
  *  The split/unified layout is an app setting (Settings → Trees). */
-import { EmptyState, Spinner } from "../../components/primitives";
+import { EmptyState, TerminalActivity } from "../../components/primitives";
 import {
   TREES_DIFF_MODE_KEY,
   useResolvedSetting,
@@ -46,7 +46,7 @@ export function DiffPane() {
   if (isLoading || diff === undefined) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center">
-        <Spinner />
+        <TerminalActivity label="Loading diff…" />
       </div>
     );
   }

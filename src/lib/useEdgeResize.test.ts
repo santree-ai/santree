@@ -25,10 +25,11 @@ function fakeEvent(
   } as unknown as ReactPointerEvent<HTMLDivElement>;
 }
 
-const setup = (onCommit: (w: number) => void) =>
+const setup = (onCommit: (w: number) => void, target?: HTMLElement) =>
   renderHook(() =>
     useEdgeResize({
       cssVar: "--test-width",
+      target: target ? { current: target } : undefined,
       width: 200,
       min: 100,
       max: 400,
@@ -38,6 +39,20 @@ const setup = (onCommit: (w: number) => void) =>
   );
 
 describe("useEdgeResize", () => {
+  it("keeps live layout writes inside the supplied resize scope", () => {
+    const scope = document.createElement("div");
+    document.documentElement.style.removeProperty("--test-width");
+    const { result } = setup(vi.fn(), scope);
+    const target = mockTarget();
+
+    result.current.onPointerDown(fakeEvent(target, { clientX: 100 }));
+    result.current.onPointerMove(fakeEvent(target, { clientX: 150 }));
+    result.current.onPointerUp(fakeEvent(target));
+
+    expect(scope.style.getPropertyValue("--test-width")).toBe("250px");
+    expect(document.documentElement.style.getPropertyValue("--test-width")).toBe("");
+  });
+
   it("commits the live dragged width on pointercancel, same as pointerup", () => {
     const onCommit = vi.fn();
     const { result } = setup(onCommit);

@@ -5,8 +5,8 @@ import type { ReactNode } from "react";
 
 import type { Worktree, WorktreeTab } from "../../bindings";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
-import { CloseIcon, PrIcon } from "../../components/icons";
-import { Button, EmptyState, Spinner } from "../../components/primitives";
+import { AgentIcon, BranchIcon, CloseIcon, PrIcon, TreeIcon } from "../../components/icons";
+import { Button, EmptyState, TerminalActivity } from "../../components/primitives";
 import { SessionEndedPane } from "../../components/SessionEndedPane";
 import { CLAUDE_STATUS_LINE_KEY, useBoolSetting } from "../../lib/queries";
 import { useAgentRuns } from "../../state/AgentRuns";
@@ -20,6 +20,7 @@ import { MainTabBar } from "./MainTabBar";
 import { BASE_ID, extraTab, TreesProvider, useTrees } from "./model";
 import { SessionStatusLine } from "./SessionStatusLine";
 import { SetupLogsView } from "./SetupLogsView";
+import { StartTaskButton } from "./StartTaskButton";
 import { sessionIdOf, useAgentTab } from "./useAgentTab";
 import { useWorktreeAgent } from "./useWorktreeAgent";
 import { WorktreeIssuePane } from "./WorktreeIssuePane";
@@ -37,12 +38,11 @@ function TreesContent() {
     return (
       <div className="flex min-w-0 flex-1 flex-col bg-app">
         {loading ? (
-          <EmptyState icon={<Spinner size={18} />} title="Loading worktrees…" />
+          <div className="flex flex-1 items-center justify-center">
+            <TerminalActivity label="Loading worktrees…" />
+          </div>
         ) : (
-          <EmptyState
-            title="No worktrees yet"
-            subtitle="Start a task from the sidebar to create a worktree and an agent terminal."
-          />
+          <WorkspaceLaunchSurface />
         )}
       </div>
     );
@@ -62,11 +62,97 @@ function TreesContent() {
         // The cross-surface overview moved out of Trees into the Agents section —
         // it was never a worktree view, and half of what it should show (triage
         // investigations, Dev) never had a worktree to hang off.
-        <EmptyState
-          title="No worktree selected"
-          subtitle="Pick one from the sidebar, or see every running agent in the Agents tab (⌘1)."
-        />
+        <WorkspaceLaunchSurface />
       )}
+    </div>
+  );
+}
+
+/** Useful home for Trees when no worktree is selected. It teaches the surface
+ * while keeping recent work one click away instead of spending the largest pane
+ * in the app on a generic empty message. */
+function WorkspaceLaunchSurface() {
+  const { worktrees, baseWorktree, setActive } = useTrees();
+  const recent = worktrees.filter((worktree) => !worktree.pending).slice(0, 4);
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-10">
+      <div className="w-full max-w-[720px]">
+        <div className="mb-7 flex items-start gap-4">
+          <span className="flex h-11 w-11 flex-none items-center justify-center rounded-[var(--radius-lg)] border border-line-2 bg-raised text-accent">
+            <TreeIcon size={19} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h1 className="text-[18px] font-semibold tracking-[-.01em] text-fg-bright">
+              Choose a workspace
+            </h1>
+            <p className="mt-1 max-w-[560px] text-[12.5px] leading-5 text-muted-3">
+              Return to recent work, open the repository base, or create a focused workspace from an
+              issue.
+            </p>
+          </div>
+          <StartTaskButton />
+        </div>
+
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {baseWorktree && (
+            <button
+              type="button"
+              onClick={() => setActive(BASE_ID)}
+              className="entity-card flex cursor-pointer items-center gap-3 p-3 text-left"
+            >
+              <span className="flex h-8 w-8 flex-none items-center justify-center rounded-[var(--radius-sm)] border border-line-2 bg-input text-muted-2">
+                <BranchIcon />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[12px] font-medium text-fg-2">Base workspace</span>
+                <span className="mt-0.5 block truncate font-mono text-[9.5px] text-muted-4">
+                  {baseWorktree.branch}
+                </span>
+              </span>
+            </button>
+          )}
+          {recent.map((worktree) => (
+            <button
+              key={worktree.id}
+              type="button"
+              onClick={() => setActive(worktree.id)}
+              className="entity-card flex cursor-pointer items-center gap-3 p-3 text-left"
+            >
+              <span className="flex h-8 w-8 flex-none items-center justify-center rounded-[var(--radius-sm)] border border-line-2 bg-input text-muted-2">
+                {worktree.agent ? (
+                  <AgentIcon kind={worktree.agent} size={13} />
+                ) : (
+                  <TreeIcon size={13} />
+                )}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-mono text-[10.5px] text-fg-2">
+                  {worktree.id}
+                </span>
+                <span className="mt-0.5 block truncate text-[11px] text-muted-3">
+                  {worktree.title}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line pt-4 font-mono text-[10px] text-muted-4">
+          <span>
+            <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">⌘K</kbd>{" "}
+            find anything
+          </span>
+          <span>
+            <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">⌘B</kbd>{" "}
+            sidebar
+          </span>
+          <span>
+            <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">⌘L</kbd>{" "}
+            files
+          </span>
+          <span className="ml-auto">workspaces stay isolated · sessions restore automatically</span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -77,10 +163,9 @@ function TreesContent() {
 function CreatingPane({ worktree }: { worktree: Worktree }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 bg-app text-center">
-      <Spinner size={20} />
+      <TerminalActivity label="Creating workspace…" />
       <div>
-        <div className="text-[13px] font-medium text-fg-2">Creating workspace…</div>
-        <div className="mt-1 text-[11.5px] text-muted-3">
+        <div className="text-[11.5px] text-muted-3">
           {worktree.id} · {worktree.title}
         </div>
       </div>

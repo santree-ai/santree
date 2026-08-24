@@ -11,6 +11,7 @@ import {
   DONE_WINDOW_MS,
   filterAgents,
   groupAgents,
+  groupAgentsByProject,
   parseTermKey,
   type RepoData,
   repoLabel,
@@ -220,6 +221,35 @@ describe("buildAgentEntries", () => {
     );
     expect(entries.map((e) => e.subtitle)).toEqual(["Task AK-1", "Task AK-9"]);
     expect(entries.map((e) => e.worktree?.branch)).toEqual(["santree/ak-1", "santree/ak-9"]);
+  });
+
+  it("identifies ticket work, fixed workspaces and review sessions by purpose", () => {
+    const base = worktree("__base__");
+    base.branch = "master";
+    const ticket = worktree("AK-1");
+    ticket.project = "Knowledge Base";
+    const entries = buildAgentEntries(
+      build({
+        repos: [repoData({ worktrees: [ticket], baseWorktree: base })],
+        sessions: [
+          session({ sessionId: "base", termKey: "tree:__base__" }),
+          session({ sessionId: "base-tab", termKey: "tree:__base__:tab:one" }),
+          session({ sessionId: "work", termKey: "tree:AK-1" }),
+          session({ sessionId: "desk", termKey: "triage:__repo__:canary" }),
+          session({ sessionId: "review", termKey: "ai-review:acme/app#7" }),
+          session({ sessionId: "dev", termKey: "dev:/repo" }),
+        ],
+      }),
+    );
+
+    expect(entries.map(({ project, purpose, title }) => ({ project, purpose, title }))).toEqual([
+      { project: "Workspace", purpose: "Base workspace", title: "master" },
+      { project: "Workspace", purpose: "Base workspace tab", title: "master" },
+      { project: "Knowledge Base", purpose: "Worktree", title: "AK-1" },
+      { project: "Workspace", purpose: "Triage desk", title: "Triage desk" },
+      { project: "Reviews", purpose: "AI review", title: "acme/app#7" },
+      { project: "Santree", purpose: "Dev workspace", title: "Dev" },
+    ]);
   });
 
   it("drops sessions from repos that aren't selected", () => {
@@ -454,5 +484,27 @@ describe("filterAgents", () => {
 
   it("returns everything for an empty query", () => {
     expect(filterAgents(entries, "  ")).toHaveLength(2);
+  });
+});
+
+describe("groupAgentsByProject", () => {
+  it("keeps first-seen project order and sessions together", () => {
+    const entries = buildAgentEntries(
+      build({
+        repos: [repoData({ worktrees: [worktree("AK-1"), worktree("AK-2")] })],
+        sessions: [
+          session({ sessionId: "a", termKey: "tree:AK-1" }),
+          session({ sessionId: "b", termKey: "ai-review:acme/app#7" }),
+          session({ sessionId: "c", termKey: "tree:AK-2" }),
+        ],
+      }),
+    );
+    entries[0].project = "Voice";
+    entries[2].project = "Voice";
+
+    expect(groupAgentsByProject(entries).map((g) => [g.project, g.entries.length])).toEqual([
+      ["Voice", 2],
+      ["Reviews", 1],
+    ]);
   });
 });

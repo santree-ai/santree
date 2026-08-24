@@ -14,10 +14,16 @@ import { useMemo, useState } from "react";
 import type { WorktreePr } from "../../bindings";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { AgentsIcon, CheckIcon, ChevronDownIcon, SearchIcon } from "../../components/icons";
-import { Dropdown, EmptyState, ListSkeleton, MENU_ITEM } from "../../components/primitives";
+import {
+  Dropdown,
+  EmptyState,
+  ListSkeleton,
+  MENU_ITEM,
+  ProjectGlyph,
+} from "../../components/primitives";
 import { useSessionUsageLive, useWorktreePrsByRepo } from "../../lib/queries";
 import { CHROME } from "../../state/AppContext";
-import { palette, sessionStateMeta } from "../../theme/colors";
+import { PROJECT_FALLBACK, palette, sessionStateMeta } from "../../theme/colors";
 import { AgentCard } from "./AgentCard";
 import { AgentPeek } from "./AgentPeek";
 import {
@@ -26,6 +32,7 @@ import {
   BUCKET_LABEL,
   filterAgents,
   groupAgents,
+  groupAgentsByProject,
   repoLabel,
 } from "./registry";
 import { type RepoFilter, useAgentEntries, useRepoFilter } from "./useAgents";
@@ -174,8 +181,8 @@ export function AgentsView() {
           ) : (
             <div data-agent-list className="flex min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-3">
               {groups.map((group) => (
-                <section key={group.bucket} className="flex flex-col gap-2">
-                  <h2 className="flex items-baseline gap-2 px-0.5 font-mono text-[10px] tracking-wide text-muted-3">
+                <section key={group.bucket} className="flex flex-col gap-2.5">
+                  <h2 className="flex items-baseline gap-2 px-1 font-mono text-[10px] tracking-wide text-muted-3">
                     <span
                       aria-hidden
                       className="h-[3px] w-[3px] self-center rounded-full"
@@ -189,21 +196,32 @@ export function AgentsView() {
                       </span>
                     )}
                   </h2>
-                  {/* auto-fill so a wide window tiles several cards per row and a
-                      narrow one collapses to a single column, with no breakpoints. */}
-                  <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] items-stretch gap-2.5">
-                    {group.entries.map((entry) => (
-                      <AgentCard
-                        key={entry.sessionId}
-                        entry={entry}
-                        selected={entry.sessionId === selectedId}
-                        usedPct={usedPctBySession.get(entry.sessionId) ?? null}
-                        prs={prsFor(entry.repo, entry.ticket)}
-                        onSelect={() => setSelectedId(entry.sessionId)}
-                        onOpen={() => entry.openable && openAgent(entry)}
-                      />
-                    ))}
-                  </div>
+                  {groupAgentsByProject(group.entries).map((project) => (
+                    <div key={project.project} className="flex flex-col gap-1.5">
+                      <div className="flex items-center gap-1.5 px-1 font-mono text-[9.5px] tracking-[.05em] text-muted-4 uppercase">
+                        <ProjectGlyph
+                          color={project.color ?? PROJECT_FALLBACK}
+                          icon={project.icon}
+                          size={5}
+                        />
+                        <span className="truncate">{project.project}</span>
+                        <span className="text-muted-5">{project.entries.length}</span>
+                      </div>
+                      <div className="overflow-hidden rounded-[9px] border border-line-2 bg-deep divide-y divide-line">
+                        {project.entries.map((entry) => (
+                          <AgentCard
+                            key={entry.sessionId}
+                            entry={entry}
+                            selected={entry.sessionId === selectedId}
+                            usedPct={usedPctBySession.get(entry.sessionId) ?? null}
+                            prs={prsFor(entry.repo, entry.ticket)}
+                            onSelect={() => setSelectedId(entry.sessionId)}
+                            onOpen={() => entry.openable && openAgent(entry)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </section>
               ))}
             </div>

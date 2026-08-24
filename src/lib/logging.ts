@@ -21,6 +21,21 @@ const FORWARD: Record<ConsoleLevel, (message: string) => Promise<void>> = {
   debug,
 };
 
+/**
+ * Browser-side diagnostics that are expected during a Vite reload and do not
+ * describe an application failure. Keep them in WebKit's console for framework
+ * debugging, but do not copy dozens of identical lines into Santree's log file.
+ */
+export function isTransientReloadDiagnostic(args: unknown[]): boolean {
+  const message = args[0];
+  if (typeof message !== "string") return false;
+  return (
+    message.startsWith(
+      "IPC custom protocol failed, Tauri will now use the postMessage interface instead",
+    ) || message.startsWith("[TAURI] Couldn't find callback id ")
+  );
+}
+
 /** Render a console argument as a readable string (Errors keep their stack). */
 function stringifyArg(arg: unknown): string {
   if (typeof arg === "string") return arg;
@@ -48,6 +63,7 @@ export function forwardConsoleToLog(): void {
     const forward = FORWARD[level];
     console[level] = (...args: unknown[]) => {
       original(...args);
+      if (isTransientReloadDiagnostic(args)) return;
       // Fire-and-forget; never let a logging failure surface to the app (and
       // never route it back through the patched console — that would recurse).
       forward(args.map(stringifyArg).join(" ")).catch(() => {});

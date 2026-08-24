@@ -12,7 +12,7 @@ import { alpha } from "../../theme/colors";
 export function ScheduleSection({ schedules }: { schedules: TriageSchedule[] }) {
   if (schedules.length === 0) return null;
   return (
-    <div className="flex-none space-y-1.5 border-b border-hairline px-3 py-2.5">
+    <div className="flex-none space-y-2 border-b border-hairline px-3 py-3">
       {schedules.map((s) => (
         <ScheduleStrip key={`${s.team}-${s.scheduleName}`} schedule={s} />
       ))}
@@ -23,26 +23,44 @@ export function ScheduleSection({ schedules }: { schedules: TriageSchedule[] }) 
 function ScheduleStrip({ schedule }: { schedule: TriageSchedule }) {
   const [open, setOpen] = useState(false);
   const { accent } = useApp();
+  const scheduleLabel =
+    schedule.scheduleName.replace(schedule.team, "").trim() || schedule.scheduleName;
 
   return (
-    <div className="relative">
+    <div className="relative entity-card overflow-hidden">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 rounded-lg border border-line-2 bg-input px-2.5 py-2 text-left transition-colors hover:border-line-strong"
+        className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2.5 text-left"
       >
+        <span className="text-[16px]" aria-hidden>
+          🌱
+        </span>
         <div className="min-w-0 flex-1">
-          <div className="truncate font-mono text-[9px] tracking-[.06em] text-muted-4 uppercase">
-            {schedule.scheduleName}
+          <div className="flex items-center gap-1.5">
+            <span className="truncate text-[11.5px] font-medium text-fg-2">{schedule.team}</span>
+            <span className="truncate font-mono text-[9px] text-muted-4">{scheduleLabel}</span>
           </div>
-          <div className="mt-[5px] flex items-center gap-1.5">
-            <Avatar name={schedule.currentName ?? "—"} src={schedule.currentAvatarUrl} size={18} />
-            <span className="truncate text-[12px] font-medium text-fg-2">
-              {schedule.currentName ?? "—"}
+          <div className="mt-1.5 flex items-center gap-1.5">
+            {schedule.currentName ? (
+              <Avatar name={schedule.currentName} src={schedule.currentAvatarUrl} size={19} />
+            ) : (
+              <span className="flex h-[19px] w-[19px] items-center justify-center rounded-full border border-line-strong bg-input font-mono text-[9px] text-muted-4">
+                ?
+              </span>
+            )}
+            <span className="truncate text-[11px] text-muted-2">
+              {schedule.currentName ?? "No active coverage"}
             </span>
+            {schedule.currentIsMe ? (
+              <Badge color={accent}>You are covering</Badge>
+            ) : schedule.currentName ? (
+              <span className="font-mono text-[9px] text-status-green">covered</span>
+            ) : (
+              <span className="font-mono text-[9px] text-status-red">uncovered</span>
+            )}
           </div>
         </div>
-        {schedule.currentIsMe && <Badge color={accent}>YOU</Badge>}
         <span
           className="flex-none text-muted-3 transition-transform duration-150"
           style={{ transform: open ? "rotate(180deg)" : "none" }}
@@ -52,7 +70,7 @@ function ScheduleStrip({ schedule }: { schedule: TriageSchedule }) {
       </button>
 
       {open && (
-        <div className="mt-1.5 rounded-lg border border-line-2 bg-input p-1.5">
+        <div className="border-t border-line bg-input/40 p-1.5">
           {(schedule.shifts ?? []).map((s) => (
             <div
               key={`${s.name}-${s.range}`}

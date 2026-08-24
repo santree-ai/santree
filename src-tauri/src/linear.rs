@@ -631,6 +631,8 @@ struct ProjectNode {
     color: Option<String>,
     #[serde(default)]
     icon: Option<String>,
+    #[serde(default, rename = "targetDate")]
+    target_date: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -674,14 +676,17 @@ fn assignee_fields(u: Option<UserNode>) -> (Option<String>, Option<String>) {
 }
 
 /// A project's `(name, color, icon)` for a Task, defaulting the name when unset.
-fn project_fields(p: Option<ProjectNode>) -> (String, Option<String>, Option<String>) {
+fn project_fields(
+    p: Option<ProjectNode>,
+) -> (String, Option<String>, Option<String>, Option<String>) {
     match p {
         Some(p) => (
             p.name.unwrap_or_else(|| "No Project".into()),
             p.color,
             p.icon,
+            p.target_date,
         ),
-        None => ("No Project".into(), None, None),
+        None => ("No Project".into(), None, None, None),
     }
 }
 
@@ -712,7 +717,7 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
         }
     }
 
-    let (project, project_color, project_icon) = project_fields(node.project);
+    let (project, project_color, project_icon, _) = project_fields(node.project);
     let (assignee, assignee_avatar_url) = assignee_fields(node.assignee);
     let task = Task {
         id: node.identifier,
@@ -738,7 +743,7 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
 /// non-actionable context node (no children — we don't recurse).
 fn map_related(issue: RelatedIssue) -> Task {
     let state = issue.state.unwrap_or_default();
-    let (project, project_color, project_icon) = project_fields(issue.project);
+    let (project, project_color, project_icon, _) = project_fields(issue.project);
     let (assignee, assignee_avatar_url) = assignee_fields(issue.assignee);
     Task {
         id: issue.identifier,
@@ -878,6 +883,7 @@ pub async fn tickets_by_identifier(
     struct TicketNode {
         identifier: String,
         title: String,
+        priority: i64,
         #[serde(default)]
         project: Option<ProjectNode>,
     }
@@ -888,7 +894,7 @@ pub async fn tickets_by_identifier(
     const QUERY: &str = r"
         query TicketRefs($filter: IssueFilter!, $first: Int!) {
           issues(filter: $filter, first: $first) {
-            nodes { identifier title project { name color icon } }
+            nodes { identifier title priority project { name color icon targetDate } }
           }
         }
     ";
@@ -911,13 +917,16 @@ pub async fn tickets_by_identifier(
             .into_iter()
             .filter(|n| wanted.contains(n.identifier.as_str()))
             .map(|n| {
-                let (project, project_color, project_icon) = project_fields(n.project);
+                let (project, project_color, project_icon, project_target_date) =
+                    project_fields(n.project);
                 TicketRef {
                     identifier: n.identifier,
                     title: n.title,
+                    priority: core_linear::map_priority(n.priority),
                     project,
                     project_color,
                     project_icon,
+                    project_target_date,
                 }
             })
             .collect(),
@@ -3269,6 +3278,7 @@ mod tests {
                 name: Some("Roadmap".into()),
                 color: Some("#fff".into()),
                 icon: None,
+                target_date: Some("2026-09-30".into()),
             }),
             assignee: Some(UserNode {
                 id: Some("u1".into()),

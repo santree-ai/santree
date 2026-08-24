@@ -91,6 +91,20 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
   const [infoCollapsed, setInfoCollapsed] = useState(false);
   const [infoWidth, setInfoWidth] = useState(400);
 
+  // On compact windows the reading rail becomes an overlay instead of squeezing
+  // the diff. Start it closed whenever the viewport crosses into that mode; the
+  // header button and ⌘L still open it on demand without losing any information.
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const compact = window.matchMedia("(max-width: 1500px)");
+    const collapse = (event: MediaQueryListEvent | MediaQueryList) => {
+      if (event.matches) setInfoCollapsed(true);
+    };
+    collapse(compact);
+    compact.addEventListener("change", collapse);
+    return () => compact.removeEventListener("change", collapse);
+  }, []);
+
   // Selecting a PR always returns to the PR detail view; opening the merge queue
   // swaps the pane without disturbing which PR is selected underneath.
   const setActive = useCallback((id: string | null) => {
@@ -137,9 +151,9 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
     () => [...new Set(allPrs.map(ticketIdFor).filter((id): id is string => !!id))].sort(),
     [allPrs],
   );
-  // Only fetched when the grouping actually needs it — no Linear round-trip for
-  // someone who never leaves the default category view.
-  const { data: tickets } = usePrTickets(repo, ticketIds, grouping === "project");
+  // Category sections also use project + priority metadata, so one cached batch
+  // enriches both the default inbox and the explicit project grouping.
+  const { data: tickets } = usePrTickets(repo, ticketIds);
   const ticketsById = useMemo(
     () => new Map((tickets ?? []).map((t) => [t.identifier, t])),
     [tickets],

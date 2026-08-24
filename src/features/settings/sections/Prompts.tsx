@@ -7,7 +7,7 @@
  *  `{{ variables }}`, branch with `{% if %}`/`{% for %}`, and embed another prompt
  *  with `{% include "name" %}`. Overrides are per app (User scope) or per repo. */
 
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
 import EditorImport from "react-simple-code-editor";
 
 import { useEdgeResize } from "../../../lib/useEdgeResize";
@@ -20,7 +20,13 @@ const Editor = ((EditorImport as unknown as { default?: typeof EditorImport }).d
 
 import type { PromptInfo } from "../../../bindings";
 import { PlusIcon, TrashIcon } from "../../../components/icons";
-import { Badge, Button, ChevronSelect, EdgeResizeHandle } from "../../../components/primitives";
+import {
+  Badge,
+  Button,
+  ChevronSelect,
+  EdgeResizeHandle,
+  TerminalActivity,
+} from "../../../components/primitives";
 import {
   useCreatePromptBlock,
   useDeletePromptBlock,
@@ -153,7 +159,9 @@ export function PromptsSection({ repo, forRepo }: { repo: string; forRepo: boole
             onDeleted={() => setSelected("work")}
           />
         ) : (
-          <div className="p-8 text-[12px] text-muted-3">Loading prompts…</div>
+          <div className="flex flex-1 items-center justify-center">
+            <TerminalActivity label="Loading prompts…" />
+          </div>
         )}
       </div>
     </div>
@@ -469,6 +477,7 @@ function PreviewPane({
   width: number;
   onWidth: (w: number) => void;
 }) {
+  const resizeTarget = useRef<HTMLDivElement>(null);
   // The chosen issue is already cached (fetched once, keyed by id) — pass it to the
   // renderer rather than re-fetching, so the preview updates on every keystroke.
   const { data: detail } = useTriageDetail(repo, issueId || null);
@@ -487,23 +496,23 @@ function PreviewPane({
 
   const resize = useEdgeResize({
     cssVar: "--prompt-preview",
+    target: resizeTarget,
     width,
     min: PREVIEW_MIN,
     max: PREVIEW_MAX,
     edge: "left",
     onCommit: onWidth,
   });
-  // The CSS var lives on documentElement and outlives this pane's remounts (it
-  // remounts per selected prompt); re-assert the committed width on mount so a
-  // stale var from an earlier drag can't desync from `width`.
-  useEffect(() => {
-    document.documentElement.style.setProperty("--prompt-preview", `${width}px`);
-  }, [width]);
-
   return (
     <div
+      ref={resizeTarget}
       className="relative flex flex-none flex-col"
-      style={{ width: `var(--prompt-preview, ${width}px)` }}
+      style={
+        {
+          "--prompt-preview": `${width}px`,
+          width: `var(--prompt-preview, ${width}px)`,
+        } as CSSProperties
+      }
     >
       <EdgeResizeHandle edge="left" {...resize} />
       <div className="flex flex-none items-center gap-2 border-b border-line px-4 py-2">

@@ -103,6 +103,7 @@ export interface PrGroup {
   /** Project color/icon, when grouping by project. */
   color?: string | null;
   icon?: string | null;
+  targetDate?: string | null;
 }
 
 /** Short "name" from an "owner/name" slug. */
@@ -140,6 +141,7 @@ export function groupPrs(
       prs: [pr],
       color: ticket?.projectColor,
       icon: ticket?.projectIcon,
+      targetDate: ticket?.projectTargetDate,
     });
   }
 

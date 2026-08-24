@@ -42,14 +42,59 @@ import { useGutterDrag } from "./useGutterDrag";
  * file and its hunks ("No hunks found" without it). Synthesize a minimal header,
  * with `/dev/null` on the missing side for added/removed files.
  */
-function toUnifiedDiff(path: string, status: string, patch: string): string {
-  const oldPath = status === "added" ? "/dev/null" : `a/${path}`;
+function toUnifiedDiff(
+  path: string,
+  previousPath: string | null | undefined,
+  status: string,
+  patch: string,
+): string {
+  const oldPath = status === "added" ? "/dev/null" : `a/${previousPath ?? path}`;
   const newPath = status === "removed" ? "/dev/null" : `b/${path}`;
   return `diff --git a/${path} b/${path}\n--- ${oldPath}\n+++ ${newPath}\n${patch}`;
 }
 
+/**
+ * Confirm that full-file content and GitHub's patch describe the same snapshots.
+ * A branch can move between the two API reads, and a stale pair makes the diff
+ * library emit warnings and expand context from the wrong revision. The patch is
+ * still authoritative, so callers can safely omit incompatible full content.
+ */
+function contentMatchesPatch(patch: string, oldText: string, newText: string): boolean {
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
+  let sawHunk = false;
+
+  for (const line of patch.split("\n")) {
+    const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (header) {
+      oldLine = Number(header[1]);
+      newLine = Number(header[2]);
+      inHunk = true;
+      sawHunk = true;
+      continue;
+    }
+    if (!inHunk || line === "\\ No newline at end of file") continue;
+
+    const marker = line[0];
+    const text = line.slice(1);
+    if (marker === " " || marker === "-") {
+      if (oldLines[oldLine - 1] !== text) return false;
+      oldLine += 1;
+    }
+    if (marker === " " || marker === "+") {
+      if (newLines[newLine - 1] !== text) return false;
+      newLine += 1;
+    }
+  }
+  return sawHunk;
+}
+
 export const PrFileDiff = memo(function PrFileDiff({
   path,
+  previousPath,
   status,
   patch,
   threads,
@@ -60,6 +105,8 @@ export const PrFileDiff = memo(function PrFileDiff({
   mode = "unified",
 }: {
   path: string;
+  /** Base-side path for a rename/copy. */
+  previousPath?: string | null;
   /** GitHub's file status ("added" | "modified" | "removed" | "renamed"). */
   status: string;
   /** The file's unified diff patch body (`PrFile.patch`). */
@@ -86,16 +133,24 @@ export const PrFileDiff = memo(function PrFileDiff({
   const rootRef = useRef<HTMLDivElement>(null);
   const { bindWidgetStore, onSelection } = useGutterDrag(rootRef);
 
+  const compatibleContent = useMemo(
+    () =>
+      oldText !== undefined &&
+      newText !== undefined &&
+      contentMatchesPatch(patch, oldText, newText),
+    [patch, oldText, newText],
+  );
+
   // The patch hunks stay authoritative for what's shown; `content` (once fetched)
   // only lets the viewer fill unchanged context on expand. Omitted until then, so
   // the diff renders immediately from the hunks alone.
   const data = useMemo(
     () => ({
-      oldFile: { fileName: path, content: oldText },
-      newFile: { fileName: path, content: newText },
-      hunks: [toUnifiedDiff(path, status, patch)],
+      oldFile: { fileName: previousPath ?? path, content: compatibleContent ? oldText : undefined },
+      newFile: { fileName: path, content: compatibleContent ? newText : undefined },
+      hunks: [toUnifiedDiff(path, previousPath, status, patch)],
     }),
-    [path, status, patch, oldText, newText],
+    [path, previousPath, status, patch, compatibleContent, oldText, newText],
   );
 
   const extendData = useMemo(() => bucketAnnotations(threads, drafts), [threads, drafts]);

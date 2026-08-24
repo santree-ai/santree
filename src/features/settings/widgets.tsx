@@ -14,10 +14,10 @@ import { Button, ChevronSelect, Toggle } from "../../components/primitives";
 /** A section heading: a bold title over a muted one-line subtitle. */
 export function Heading({ title, subtitle }: { title: string; subtitle: string }) {
   return (
-    <>
-      <div className="mb-1 text-[17px] font-semibold text-fg-bright">{title}</div>
-      <div className="mb-[22px] text-[12.5px] text-muted-3">{subtitle}</div>
-    </>
+    <header className="mb-5 border-b border-line pb-4">
+      <div className="text-[17px] font-semibold tracking-[-.01em] text-fg-bright">{title}</div>
+      <div className="mt-1 max-w-[620px] text-[12px] leading-[1.55] text-muted-3">{subtitle}</div>
+    </header>
   );
 }
 
@@ -114,7 +114,7 @@ export function KvRow({ label, value }: { label: string; value: string }) {
 /** Shared classes for the settings dropdowns — used as the `<select>` className
  *  inside {@link ChevronSelect} (which adds the chevron + `appearance-none`). */
 export const SELECT_CLASS =
-  "w-full rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] font-mono text-[12px] text-fg-3";
+  "w-full rounded-[var(--radius-md)] border border-line-3 bg-input py-2 pr-8 pl-[11px] font-mono text-[12px] text-fg-3";
 
 /** A `<select>` whose empty option inherits the app default, with a Reset. */
 export function OverrideSelect({

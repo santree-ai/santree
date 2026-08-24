@@ -10,7 +10,7 @@ import { memo } from "react";
 
 import { PrChips } from "../../components/PrChip";
 import { Badge, Dot } from "../../components/primitives";
-import { accentVar as accent, alpha, successColor } from "../../theme/colors";
+import { accentVar as accent, alpha } from "../../theme/colors";
 import { useIssueHover, useIssueNodeData } from "./model";
 
 export interface IssueNodeData {
@@ -59,13 +59,9 @@ function cardStyleFor(data: IssueNodeData, working: boolean): CSSProperties {
     style.border = `1px solid ${alpha(55, amber)}`;
     style.background = alpha(7, amber);
   }
-  if (data.selected) {
-    // Queued for launch: a clearly accent-FILLED card (not just a ring), so it
-    // reads differently from a focus/hover ring.
-    style.border = `1px solid ${accent}`;
-    style.background = alpha(15);
-    style.boxShadow = `0 0 0 1px ${alpha(50)}, 0 8px 26px -8px ${alpha(33)}`;
-  }
+  // Queue membership is metadata, rendered as a label below. Focus is the only
+  // state allowed to take over the whole card, so the graph never presents two
+  // competing selection treatments.
   return style;
 }
 
@@ -136,7 +132,7 @@ export const IssueNode = memo(
           <span
             aria-hidden
             className="pointer-events-none absolute -inset-px rounded-[12px]"
-            style={{ animation: "nodeSelected 1.6s ease-out infinite" }}
+            style={{ boxShadow: `0 0 0 2px ${accent}, 0 12px 34px -16px ${alpha(65)}` }}
           />
         ) : hovered ? (
           <span
@@ -153,12 +149,17 @@ export const IssueNode = memo(
           <span className="font-mono text-[11px] text-muted-2">{id}</span>
           <div className="ml-auto flex items-center gap-1">
             {working && <Badge color="var(--color-status-amber)">WIP</Badge>}
-            {data.ready && !working && <Badge color={successColor}>RDY</Badge>}
-            {data.chainBase && !working && <Badge>⛓ {data.chainBase}</Badge>}
+            {data.selected && !working && <Badge color={accent}>Queued</Badge>}
+            {data.ready && !working && !data.selected && (
+              <Badge color="var(--color-status-green)">RDY</Badge>
+            )}
+            {data.chainBase && !working && !data.selected && (
+              <Badge color={accent}>After {data.chainBase}</Badge>
+            )}
             {/* "Blocked" is contradictory once a node is being worked on or has a
                 PR — suppress it so the cluster stays clean. */}
             {data.blocked && !working && !hasPr && (
-              <span className="font-mono text-[10px] text-muted-3">⊘</span>
+              <Badge color="var(--color-muted-3)">Blocked</Badge>
             )}
             {hasPr && <PrChips prs={prs} />}
           </div>

@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render } from "@testing-library/react";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ChangedFile } from "../../bindings";
 import { DevFilesPane } from "./DevFilesPane";
@@ -26,15 +26,6 @@ vi.mock("../../lib/queries", () => ({
 }));
 
 vi.mock("../../state/AppContext", () => ({ useApp: () => ({ accent: "#2dd4a7" }) }));
-
-beforeAll(() => {
-  // @git-diff-view (pulled in by DiffViewer) measures text against a 2D canvas,
-  // which jsdom doesn't implement.
-  HTMLCanvasElement.prototype.getContext = (() => ({
-    font: "",
-    measureText: (t: string) => ({ width: t.length * 7 }),
-  })) as unknown as HTMLCanvasElement["getContext"];
-});
 
 function changed(over: Partial<ChangedFile> = {}): ChangedFile {
   return {

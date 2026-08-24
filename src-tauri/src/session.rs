@@ -368,6 +368,30 @@ pub async fn providers(db: &Db, repo: &str, term_key: &str) -> Result<Vec<AgentK
         .collect()
 }
 
+/// Durable AI-review conversations keyed by their full logical terminal key.
+/// A surface is unique per provider, so the grouped row count is exactly the
+/// number of provider review tabs the user can resume for that PR.
+pub async fn ai_review_counts(
+    db: &Db,
+    repo: &str,
+) -> Result<std::collections::HashMap<String, u32>> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT term_key, COUNT(*) FROM terminal_sessions
+         WHERE repo = ? AND term_key LIKE 'ai-review:%'
+         GROUP BY term_key",
+    )
+    .bind(repo)
+    .fetch_all(db)
+    .await?;
+    rows.into_iter()
+        .map(|(key, count)| {
+            let count = u32::try_from(count)
+                .map_err(|_| anyhow::anyhow!("invalid AI review session count for {key}"))?;
+            Ok((key, count))
+        })
+        .collect()
+}
+
 /// Max characters of mined transcript text fed to the PR-draft prompt. Generous
 /// (Haiku has plenty of context) but bounded so a long-running worktree's history
 /// can't blow up the prompt size or the 120s helper timeout. Tune here.
@@ -947,6 +971,41 @@ mod tests {
                 },
             ]
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn ai_review_counts_group_provider_tabs_by_review_surface() {
+        let base =
+            std::env::temp_dir().join(format!("santree-ai-review-counts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+
+        for (repo, key, agent, session_id) in [
+            ("repo", "ai-review:acme/app#7", "Claude", "c-7"),
+            ("repo", "ai-review:acme/app#7", "Codex", "x-7"),
+            ("repo", "ai-review:acme/app#8", "Codex", "x-8"),
+            ("repo", "tree:AK-1", "Codex", "tree"),
+            ("other", "ai-review:acme/app#7", "Claude", "other"),
+        ] {
+            sqlx::query(
+                "INSERT INTO terminal_sessions
+                 (repo, term_key, cwd, session_id, agent_kind) VALUES (?, ?, '/tmp', ?, ?)",
+            )
+            .bind(repo)
+            .bind(key)
+            .bind(session_id)
+            .bind(agent)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+
+        let counts = ai_review_counts(&db, "repo").await.unwrap();
+        assert_eq!(counts.get("ai-review:acme/app#7"), Some(&2));
+        assert_eq!(counts.get("ai-review:acme/app#8"), Some(&1));
+        assert_eq!(counts.len(), 2);
 
         let _ = std::fs::remove_dir_all(&base);
     }

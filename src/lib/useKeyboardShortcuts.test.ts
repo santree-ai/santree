@@ -19,6 +19,7 @@ const app = vi.hoisted(() => ({
   devEnabled: false,
   toggleSidebar: vi.fn(),
   toggleShortcuts: vi.fn(),
+  toggleCommandPalette: vi.fn(),
 }));
 const zoom = vi.hoisted(() => ({ apply: vi.fn(), level: 1 }));
 vi.mock("./zoom", async (orig) => {
@@ -39,6 +40,7 @@ vi.mock("../state/AppContext", () => ({
   useAppUiOptional: () => ({
     toggleSidebar: app.toggleSidebar,
     toggleShortcuts: app.toggleShortcuts,
+    toggleCommandPalette: app.toggleCommandPalette,
   }),
 }));
 
@@ -228,6 +230,15 @@ describe("useKeyboardShortcuts", () => {
 
     expect(router.navigate).toHaveBeenCalledTimes(2);
     expect(router.navigate).toHaveBeenCalledWith({ to: "/settings" });
+  });
+
+  it("opens the command palette with ⌘K", () => {
+    renderHook(() => useKeyboardShortcuts());
+
+    const event = press("k", { metaKey: true });
+
+    expect(app.toggleCommandPalette).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(true);
   });
 
   it("toggles the sidebar (⌘B) and the shortcuts overlay (⌘/)", () => {

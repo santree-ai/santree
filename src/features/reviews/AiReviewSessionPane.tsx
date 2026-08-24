@@ -17,7 +17,7 @@ import { useCallback, useEffect, useMemo } from "react";
 
 import type { AgentKind, ReviewPr } from "../../bindings";
 import { AgentIcon, WarningIcon } from "../../components/icons";
-import { Button, Spinner } from "../../components/primitives";
+import { Button, TerminalActivity } from "../../components/primitives";
 import { SessionEndedPane } from "../../components/SessionEndedPane";
 import {
   CLAUDE_START_WITH_CHROME_KEY,
@@ -206,11 +206,10 @@ export function AiReviewSessionPane({
             </Button>
           </div>
         ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-2">
-            <Spinner size={16} />
-            <span className="text-[11px] text-muted-3">
-              {workspace.isFetching ? "Checking out the PR…" : "Reading the pull request…"}
-            </span>
+          <div className="flex h-full flex-col items-center justify-center">
+            <TerminalActivity
+              label={workspace.isFetching ? "Checking out the PR…" : "Reading the pull request…"}
+            />
           </div>
         )}
       </div>

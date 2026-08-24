@@ -10,6 +10,7 @@
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import type { PrState } from "../../bindings";
+import { AgentIcon } from "../../components/icons";
 import { PrChips } from "../../components/PrChip";
 import { RelativeTime } from "../../components/RelativeTime";
 import { WorktreeStats } from "../../components/WorktreeStats";
@@ -95,6 +96,7 @@ export function AgentCard({
   const color = entryColor(entry);
   const pct = usedPct == null ? null : displayFill(usedPct);
   const asking = entry.bucket === "attention";
+  const providerLabel = entry.agentKind === "Claude" ? "Claude" : entry.agentKind;
 
   return (
     <button
@@ -111,77 +113,82 @@ export function AgentCard({
         onOpen();
       }}
       aria-current={selected}
-      className="flex h-full cursor-pointer flex-col gap-2 rounded-[10px] border p-3 text-left transition-colors"
+      className="group flex w-full cursor-pointer items-start gap-3 px-3 py-2.5 text-left transition-colors hover:bg-hover focus-visible:relative focus-visible:z-10"
       style={{
-        borderColor: selected ? alpha(50, color) : "var(--color-line-2)",
-        background: selected ? alpha(9, color) : "var(--color-deep)",
+        background: selected ? alpha(9, color) : "transparent",
+        boxShadow: selected ? `inset 2px 0 0 ${color}` : undefined,
       }}
     >
-      <div className="flex min-w-0 items-center gap-2">
+      <div className="flex h-7 flex-none items-center">
         <StateDot entry={entry} />
-        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-2">
-          {entry.title}
-        </span>
-        <span className="flex-none font-mono text-[9.5px] tracking-wide" style={{ color }}>
-          {meta?.short ?? "—"}
-        </span>
-        <RelativeTime
-          ms={entry.updatedAtMs}
-          className="flex-none font-mono text-[10px] text-muted-4 tabular-nums"
-        />
       </div>
 
-      {entry.subtitle && (
-        <div className="line-clamp-2 text-[12px] leading-[1.35] text-muted-2">{entry.subtitle}</div>
-      )}
+      <div className="flex w-[76px] flex-none items-center gap-1.5 pt-[5px] text-muted-3">
+        <AgentIcon kind={entry.agentKind} size={12} className="flex-none" />
+        <span className="truncate font-mono text-[10px]">{providerLabel}</span>
+      </div>
 
-      {/* The pending question is the only line that ever demands a decision, so
-          it gets a tinted panel when the agent is actually blocked, and plain
-          muted text otherwise. */}
-      {entry.message &&
-        (asking ? (
-          <div
-            className="line-clamp-3 rounded-md border px-2 py-1.5 text-[11.5px] leading-[1.4] text-fg-3"
-            style={{ borderColor: alpha(30, color), background: alpha(8, color) }}
-          >
-            {entry.message}
-          </div>
-        ) : (
-          <div className="line-clamp-2 text-[11.5px] leading-[1.4] text-muted-3">
-            {entry.message}
-          </div>
-        ))}
-
-      <div className="mt-auto flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 pt-0.5 font-mono text-[10px] text-muted-4">
-        {entry.repo && (
-          <span className="max-w-full flex-none truncate rounded bg-input px-1 py-px text-muted-3">
-            {repoLabel(entry.repo)}
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate font-mono text-[12px] font-medium text-fg-2">
+            {entry.title}
           </span>
-        )}
-        {/* Static: the whole card is one button, so a clickable chip would be an
-            invalid nested <button> and a second competing action. The peek panel
-            carries the real link. */}
-        {prs.length > 0 && <PrChips prs={prs} interactive={false} />}
-        {entry.worktree && <WorktreeStats worktree={entry.worktree} />}
+          <span className="flex-none font-mono text-[9.5px] tracking-wide" style={{ color }}>
+            {meta?.short ?? "—"}
+          </span>
+          <span aria-hidden className="text-[9px] text-muted-5">
+            ·
+          </span>
+          <span className="flex-none font-mono text-[9.5px] text-muted-3">{entry.purpose}</span>
+        </div>
+        <div className="mt-1 flex min-w-0 items-center gap-2 text-[11px] leading-[1.35]">
+          {(entry.message || entry.subtitle) && (
+            <span
+              className={`min-w-0 flex-1 truncate ${asking ? "text-fg-3" : "text-muted-3"}`}
+              title={entry.message ?? entry.subtitle ?? undefined}
+            >
+              {entry.message ?? entry.subtitle}
+            </span>
+          )}
+          {!entry.message && !entry.subtitle && (
+            <span
+              className="min-w-0 flex-1 font-mono text-[9.5px] text-muted-4"
+              title={
+                entry.openable
+                  ? undefined
+                  : "Santree cannot identify which workspace owns this session"
+              }
+            >
+              {entry.openable ? "No recent activity" : "Workspace unavailable"}
+            </span>
+          )}
+          <span className="flex min-w-0 flex-none items-center gap-2 font-mono text-[9.5px] text-muted-4">
+            {entry.repo && <span className="max-w-[230px] truncate">{repoLabel(entry.repo)}</span>}
+            {prs.length > 0 && <PrChips prs={prs} interactive={false} />}
+            {entry.worktree && <WorktreeStats worktree={entry.worktree} />}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex w-[70px] flex-none flex-col items-end gap-1.5 pt-[3px]">
+        <RelativeTime
+          ms={entry.updatedAtMs}
+          className="font-mono text-[10px] text-muted-4 tabular-nums"
+        />
         {pct !== null && (
-          <span className="flex flex-none items-center gap-1" title={`Context ${pct}% full`}>
-            <span className="h-1 w-8 overflow-hidden rounded-full bg-input">
+          <span className="flex items-center gap-1.5" title={`Context ${pct}% full`}>
+            <span className="h-1 w-9 overflow-hidden rounded-full bg-input">
               <span
                 className="block h-full rounded-full"
                 style={{ width: `${pct}%`, background: fillColor(pct) }}
               />
             </span>
-            <span className="tabular-nums" style={{ color: fillColor(pct) }}>
+            <span
+              className="w-7 text-right font-mono text-[9.5px] tabular-nums"
+              style={{ color: fillColor(pct) }}
+            >
               {pct}%
             </span>
-          </span>
-        )}
-        {!entry.openable && (
-          <span
-            className="flex-none"
-            title="santree can't tell which workspace this session belongs to, so it can't open it"
-          >
-            unattributed
           </span>
         )}
       </div>

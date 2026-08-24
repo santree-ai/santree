@@ -138,13 +138,13 @@ export const BUCKET_LABEL: Record<AgentBucket, string> = {
   attention: "Needs you",
   working: "Working",
   idle: "Idle",
-  detached: "Detached",
+  detached: "Paused",
   done: "Recently finished",
 };
 
 /** One-line explanation under a group header, where the name isn't self-evident. */
 export const BUCKET_HINT: Partial<Record<AgentBucket, string>> = {
-  detached: "not running here; open to resume",
+  detached: "not running; open to resume",
 };
 
 /** `live` is whether a PTY for the session is open in this app right now. */
@@ -167,6 +167,9 @@ export const MAX_DONE = 20;
 /** One agent as the panel renders it. */
 export interface AgentEntry {
   sessionId: string;
+  /** Provider that owns this durable session. Kept on the display model so the
+   *  control surface never has to infer identity from a title or terminal key. */
+  agentKind: AgentKind;
   state: AgentState;
   bucket: AgentBucket;
   origin: AgentOrigin;
@@ -186,6 +189,13 @@ export interface AgentEntry {
    *  to a surface — the action is disabled and says so, rather than doing nothing. */
   openable: boolean;
   ticket: string | null;
+  /** Human-facing ownership axis. Linear-backed work uses its project; fixed
+   *  application sessions use a stable workspace name instead. */
+  project: string;
+  projectColor: string | null;
+  projectIcon: string | null;
+  /** Why this session exists, independent of provider and live state. */
+  purpose: string;
   title: string;
   subtitle: string | null;
   /** The owning worktree, when it's a tree session in the active repo. */
@@ -290,8 +300,10 @@ export function buildAgentEntries(input: BuildInput): AgentEntry[] {
       : null;
     const task = origin.ticket ? (data?.tasks.get(origin.ticket) ?? null) : null;
 
+    const identity = sessionIdentity(origin, worktree, task);
     entries.push({
       sessionId: s.sessionId,
+      agentKind: s.agentKind,
       state: s.state,
       bucket,
       origin,
@@ -307,11 +319,67 @@ export function buildAgentEntries(input: BuildInput): AgentEntry[] {
       // doing nothing (which is exactly how it felt).
       openable: origin.kind !== "unknown",
       ticket: origin.ticket,
+      ...identity,
       ...label(origin, worktree, task, s.cwd),
       worktree,
     });
   }
   return entries;
+}
+
+/** Project ownership and session purpose are separate dimensions: a Codex
+ *  investigation and a Claude worktree can belong to the same Linear project,
+ *  while fixed surfaces (the Triage desk, base workspace and Dev) have a clear
+ *  home without pretending they came from a ticket. */
+function sessionIdentity(
+  origin: AgentOrigin,
+  worktree: Worktree | null,
+  task: Task | null,
+): Pick<AgentEntry, "project" | "projectColor" | "projectIcon" | "purpose"> {
+  const taskProject = task?.project || worktree?.project;
+  const project = taskProject || "Unassigned";
+  const projectMeta = {
+    projectColor: task?.projectColor ?? null,
+    projectIcon: task?.projectIcon ?? null,
+  };
+
+  switch (origin.kind) {
+    case "tree":
+      return origin.ticket === BASE_TICKET
+        ? { project: "Workspace", projectColor: null, projectIcon: null, purpose: "Base workspace" }
+        : { project, ...projectMeta, purpose: "Worktree" };
+    case "tree-tab":
+      return origin.ticket === BASE_TICKET
+        ? {
+            project: "Workspace",
+            projectColor: null,
+            projectIcon: null,
+            purpose: "Base workspace tab",
+          }
+        : { project, ...projectMeta, purpose: "Worktree tab" };
+    case "triage":
+      return origin.ticket?.startsWith("__repo__:")
+        ? { project: "Workspace", projectColor: null, projectIcon: null, purpose: "Triage desk" }
+        : { project, ...projectMeta, purpose: "Investigation" };
+    case "review":
+      return { project: "Reviews", projectColor: null, projectIcon: null, purpose: "PR session" };
+    case "ai-review":
+      return { project: "Reviews", projectColor: null, projectIcon: null, purpose: "AI review" };
+    case "dev":
+      return {
+        project: "Santree",
+        projectColor: null,
+        projectIcon: null,
+        purpose: "Dev workspace",
+      };
+    default:
+      return {
+        project: "Unassigned",
+        projectColor: null,
+        projectIcon: null,
+        purpose: "Unlinked session",
+      };
+  }
 }
 
 /** Title + subtitle for one entry, by origin. */
@@ -335,6 +403,9 @@ function label(
       };
     }
     case "triage":
+      if (origin.ticket?.startsWith("__repo__:")) {
+        return { title: "Triage desk", subtitle: "Ask general questions about the repository" };
+      }
       return { title: origin.ticket ?? basename(cwd), subtitle: summary ?? "investigation" };
     case "review":
       return { title: origin.pr ?? basename(cwd), subtitle: "asking about a PR" };
@@ -350,6 +421,31 @@ function label(
 export interface AgentGroup {
   bucket: AgentBucket;
   entries: AgentEntry[];
+}
+
+export interface AgentProjectGroup {
+  project: string;
+  color: string | null;
+  icon: string | null;
+  entries: AgentEntry[];
+}
+
+/** Preserve the actionability ordering inside a state bucket, then carve it into
+ *  project-sized reading chunks. First appearance wins so a recently active
+ *  project's place does not jump independently from its sessions. */
+export function groupAgentsByProject(entries: AgentEntry[]): AgentProjectGroup[] {
+  const groups = new Map<string, AgentProjectGroup>();
+  for (const entry of entries) {
+    const group = groups.get(entry.project) ?? {
+      project: entry.project,
+      color: entry.projectColor,
+      icon: entry.projectIcon,
+      entries: [],
+    };
+    group.entries.push(entry);
+    groups.set(entry.project, group);
+  }
+  return [...groups.values()];
 }
 
 /**
@@ -420,7 +516,7 @@ export function filterAgents(entries: AgentEntry[], query: string): AgentEntry[]
   const q = query.trim().toLowerCase();
   if (!q) return entries;
   return entries.filter((e) =>
-    [e.title, e.subtitle, e.repo, e.message, e.ticket]
+    [e.title, e.subtitle, e.repo, e.message, e.ticket, e.project, e.purpose]
       .filter((v): v is string => !!v)
       .some((v) => v.toLowerCase().includes(q)),
   );

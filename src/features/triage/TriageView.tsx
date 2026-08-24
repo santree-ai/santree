@@ -20,7 +20,7 @@ import type { AgentKind, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
-import { AgentIcon, AgentsIcon } from "../../components/icons";
+import { AgentIcon } from "../../components/icons";
 import { Button, EmptyState, Segmented, Skeleton } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import {
@@ -82,9 +82,9 @@ function RepoSessionEntry({
 }) {
   return (
     <div
-      className="relative mb-1 flex items-center gap-2 rounded-[9px] px-[11px] py-2 text-[12px] hover:bg-hover"
+      className="entity-card relative mb-2 flex items-center gap-2.5 px-[11px] py-2.5 text-[12px]"
+      data-active={active}
       style={{
-        background: active ? alpha(8) : "transparent",
         color: active ? "var(--accent)" : "var(--color-muted-2)",
       }}
     >
@@ -95,8 +95,18 @@ function RepoSessionEntry({
         title={`Open the Triage desk with ${agentProvider(agentKind).label}`}
         className="absolute inset-0 cursor-pointer rounded-[9px]"
       />
-      <AgentsIcon size={13} className="flex-none" />
-      <span className="min-w-0 flex-1 truncate">Triage desk</span>
+      <span
+        className="flex h-7 w-7 flex-none items-center justify-center rounded-[var(--radius-sm)] border border-line-2 bg-input text-[14px]"
+        aria-hidden
+      >
+        👋
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[11.5px] font-medium text-fg-2">Triage desk</span>
+        <span className="mt-0.5 block truncate font-mono text-[9.5px] text-muted-4">
+          permanent workspace
+        </span>
+      </span>
       <AgentIcon kind={agentKind} size={12} className="relative flex-none" />
     </div>
   );
@@ -153,7 +163,6 @@ function AllCaughtUp({
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
       {offer && onTriage ? (
-        // We know who's holding the fort — wave their face around for a nudge.
         <div className="relative mb-1">
           <Avatar name={onTriage.name} src={onTriage.avatarUrl} size={62} />
           <span

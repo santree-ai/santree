@@ -30,3 +30,11 @@ Object.defineProperty(globalThis, "localStorage", {
   value: new MemoryStorage(),
   configurable: true,
 });
+
+// Diff viewers measure monospace text while their modules initialize. jsdom's
+// canvas method only emits a "not implemented" diagnostic, so provide the small
+// deterministic surface the components need before test modules are imported.
+HTMLCanvasElement.prototype.getContext = (() => ({
+  font: "",
+  measureText: (text: string) => ({ width: text.length * 7 }),
+})) as unknown as HTMLCanvasElement["getContext"];

@@ -17,6 +17,7 @@ use crate::db::Db;
 use crate::git;
 use crate::github;
 use crate::repo;
+use crate::session;
 
 /// `(owner, name)` of the active repo's `origin` remote. Remote parsing shells out
 /// to git, so it runs off the async pool.
@@ -227,7 +228,22 @@ pub async fn inbox(db: &Db, repo: &str) -> Result<ReviewInbox> {
         };
         github::team_reviews(&token, &org, &teams, &viewer).await
     });
-    let (mine, requested) = personal?;
+    let (mut mine, mut requested) = personal?;
+    let mut teams = teams;
+
+    // GitHub owns the inbox, but the AI-review conversations are durable local
+    // state. Join them here so every sidebar row gets one authoritative count
+    // without issuing a database query per visible PR.
+    let ai_counts = session::ai_review_counts(db, repo).await?;
+    let attach_count = |pr: &mut santree_core::domain::ReviewPr| {
+        let key = format!("ai-review:{}#{}", pr.repo, pr.number);
+        pr.ai_review_count = ai_counts.get(&key).copied().unwrap_or(0);
+    };
+    mine.iter_mut().for_each(attach_count);
+    requested.iter_mut().for_each(attach_count);
+    for team in &mut teams {
+        team.prs.iter_mut().for_each(attach_count);
+    }
 
     Ok(ReviewInbox {
         mine,
@@ -411,7 +427,8 @@ pub async fn file_source(
     name: &str,
     base: &str,
     head: &str,
-    path: &str,
+    old_path: &str,
+    new_path: &str,
 ) -> Result<FileSource> {
     let Some(token) = github::token().await else {
         return Ok(FileSource {
@@ -419,7 +436,7 @@ pub async fn file_source(
             new_text: String::new(),
         });
     };
-    github::pr_file_source(&token, owner, name, base, head, path).await
+    github::pr_file_source(&token, owner, name, base, head, old_path, new_path).await
 }
 
 #[cfg(test)]

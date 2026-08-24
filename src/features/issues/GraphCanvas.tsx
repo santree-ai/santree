@@ -142,15 +142,15 @@ function Flow() {
         const chained = worktreeIds.has(depId);
         const crossProject = a.project !== t.project;
 
-        let stroke = chained ? alpha(67) : "var(--color-line-strong)";
-        let width = chained ? 1.8 : 1.5;
+        let stroke = chained ? alpha(78) : "var(--color-muted-3)";
+        let width = chained ? 2.2 : 1.8;
         let dash: string | undefined;
-        let opacity = chained ? 0.85 : 0.6;
+        let opacity = chained ? 0.95 : 0.78;
         if (crossProject) {
           stroke = palette.cross;
           dash = "4 5";
           opacity = 0.85;
-          width = 1.6;
+          width = 2;
         }
 
         list.push({

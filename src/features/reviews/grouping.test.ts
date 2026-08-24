@@ -33,6 +33,7 @@ function pr(over: Partial<ReviewPr> = {}): ReviewPr {
     deletions: 5,
     changedFiles: 1,
     commentCount: 0,
+    aiReviewCount: 0,
     reviewers: [],
     updatedAt: "2026-08-05T00:00:00Z",
     createdAt: "2026-08-01T00:00:00Z",
@@ -179,9 +180,11 @@ describe("groupPrs", () => {
   const ticket = (over: Partial<TicketRef>): TicketRef => ({
     identifier: "AK-1",
     title: "t",
+    priority: "None",
     project: "Roadmap",
     projectColor: null,
     projectIcon: null,
+    projectTargetDate: null,
     ...over,
   });
 

@@ -124,7 +124,7 @@ const APP_NAV: NavNode[] = [
   },
   {
     key: "agents",
-    label: "Agents",
+    label: "Provider setup",
     icon: <AgentsIcon size={ICON_SIZE} />,
     render: () => <AgentsSection />,
   },
@@ -147,7 +147,7 @@ const APP_NAV: NavNode[] = [
     render: () => <UsageSection />,
   },
   {
-    group: "Actions",
+    group: "Workflow defaults",
     sections: [triageEntry(false), workEntry(false), reviewEntry(false)],
   },
   promptsEntry(false),
@@ -167,7 +167,7 @@ const REPO_NAV: NavNode[] = [
     render: (repo) => <EnvironmentSection repo={repo} />,
   },
   {
-    group: "Actions",
+    group: "Workflow defaults",
     sections: [triageEntry(true), workEntry(true), reviewEntry(true)],
   },
   promptsEntry(true),
@@ -310,7 +310,7 @@ export function SettingsView() {
         <div className="flex min-h-0 flex-1 bg-app">{active.render(settingsRepo)}</div>
       ) : (
         <div className="flex-1 overflow-y-auto bg-app">
-          <div className="mx-auto max-w-[660px] px-[30px] pt-[26px] pb-11">
+          <div className="settings-pane mx-auto w-full max-w-[720px] px-5 pt-6 pb-11 sm:px-[30px]">
             {active.render(settingsRepo)}
           </div>
         </div>

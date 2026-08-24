@@ -10,7 +10,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { CheckLogLevel, CheckLogLine, PrCheck, ReviewPr } from "../../bindings";
 import { ChevronDownIcon, GitHubLogo } from "../../components/icons";
-import { EmptyState, Skeleton, Spinner } from "../../components/primitives";
+import { EmptyState, Skeleton, TerminalActivity } from "../../components/primitives";
 import { usePrCheckLog, usePrDetail } from "../../lib/queries";
 import { splitRepoSlug } from "../../lib/repo";
 import { checkStatusMeta } from "../../theme/colors";
@@ -285,7 +285,7 @@ function CheckLogSection({
         <div className="overflow-hidden rounded-md border border-line-2 bg-app">
           {isLoading ? (
             <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-muted-3">
-              <Spinner size={11} /> Loading log…
+              <TerminalActivity label="Loading log…" />
             </div>
           ) : !log || log.blocks.length === 0 ? (
             <div className="px-3 py-2 text-[11px] text-muted-3">No log output.</div>

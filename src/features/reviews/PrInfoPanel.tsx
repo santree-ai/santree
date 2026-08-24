@@ -15,6 +15,8 @@
  * Collapsible + resizable (drag its left edge or ⌘L). Reuses the already-cached
  * `usePrDetail` fetch, so the description costs nothing here.
  */
+import { type CSSProperties, useRef } from "react";
+
 import type { AgentKind, PrComment, ReviewPr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { Markdown } from "../../components/Markdown";
@@ -49,6 +51,7 @@ export function PrInfoPanel({
   onTabChange: (tab: PanelTab) => void;
   activeReviewAgent: AgentKind | null;
 }) {
+  const resizeTarget = useRef<HTMLDivElement>(null);
   const {
     infoCollapsed,
     toggleInfo,
@@ -63,6 +66,7 @@ export function PrInfoPanel({
 
   const resize = useEdgeResize({
     cssVar: "--rev-right",
+    target: resizeTarget,
     width: infoWidth,
     min: MIN_W,
     max: MAX_W,
@@ -80,10 +84,16 @@ export function PrInfoPanel({
 
   return (
     <div
-      className={`relative flex-none flex-col overflow-hidden border-l border-hairline bg-deep ${
+      ref={resizeTarget}
+      className={`relative flex-none flex-col overflow-hidden border-l border-hairline bg-deep max-[1500px]:absolute max-[1500px]:inset-y-0 max-[1500px]:right-0 max-[1500px]:z-20 max-[1500px]:max-w-[min(78vw,560px)] max-[1500px]:shadow-2xl ${
         infoCollapsed ? "hidden" : "flex"
       }`}
-      style={{ width: `var(--rev-right, ${DEFAULT_W}px)` }}
+      style={
+        {
+          "--rev-right": `${infoWidth}px`,
+          width: `var(--rev-right, ${DEFAULT_W}px)`,
+        } as CSSProperties
+      }
     >
       <EdgeResizeHandle edge="left" {...resize} />
 

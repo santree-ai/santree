@@ -461,7 +461,7 @@ export const commands = {
 	 *  `base`/`head` are the commit OIDs from [`PrDetail`]. Empty when GitHub isn't
 	 *  connected or the file doesn't exist on that side (added/deleted).
 	 */
-	prFileSource: (owner: string, name: string, base: string, head: string, path: string) => typedError<FileSource, CmdError>(__TAURI_INVOKE("pr_file_source", { owner, name, base, head, path })),
+	prFileSource: (owner: string, name: string, base: string, head: string, oldPath: string, newPath: string) => typedError<FileSource, CmdError>(__TAURI_INVOKE("pr_file_source", { owner, name, base, head, oldPath, newPath })),
 	/**
 	 *  The files a user has marked "Viewed" for a PR, tagged with which store they came
 	 *  from — this machine's table (marks carry the blob SHA they were made at, and go
@@ -1699,9 +1699,9 @@ export type PrDetail = {
 	filesTruncated: boolean,
 	checks: PrCheck[],
 	/**
-	 *  Commit OID of the PR's base (old side) — used to fetch full file content
-	 *  on demand so the diff can expand unchanged context (GitHub-style). Empty
-	 *  when `gh` isn't authenticated.
+	 *  Merge-base commit anchoring GitHub's PR patches. Used to fetch full old-side
+	 *  content on demand so the diff can expand unchanged context. Empty when `gh`
+	 *  isn't authenticated.
 	 */
 	baseSha: string,
 	/**  Commit OID of the PR's head (new side) — the other end of the expand fetch. */
@@ -1727,6 +1727,11 @@ export type PrDraft = {
 /**  One changed file in a PR, with its unified diff hunk (from the REST files API). */
 export type PrFile = {
 	path: string,
+	/**
+	 *  Path on the base side for a renamed/copied file. `None` when both sides
+	 *  use [`Self::path`].
+	 */
+	previousPath: string | null,
 	/**
 	 *  GitHub's status string: "added" | "removed" | "modified" | "renamed" |
 	 *  "copied" | "changed" | "unchanged". Kept as a string, not an enum: it's
@@ -2086,6 +2091,12 @@ export type ReviewPr = {
 	 */
 	changedFiles: number,
 	commentCount: number,
+	/**
+	 *  Durable AI-review conversations attached to this PR. One logical review
+	 *  surface can have one conversation per provider, so this counts provider
+	 *  review tabs rather than transient launches or draft comments.
+	 */
+	aiReviewCount: number,
 	/**  Reviewers requested on the PR (people and teams). */
 	reviewers: Reviewer[],
 	/**  ISO-8601 timestamp of the last update. */
@@ -2430,10 +2441,17 @@ export type TicketRef = {
 	/**  e.g. "AK-165" — the key the frontend joins back to a PR. */
 	identifier: string,
 	title: string,
+	/**
+	 *  Linear priority for the issue attached to the PR. Review rows use this as
+	 *  an urgency signal; `None` remains visually absent rather than fabricated.
+	 */
+	priority: Priority,
 	/**  Project name, defaulted the same way [`Task::project`] is. */
 	project: string,
 	projectColor: string | null,
 	projectIcon: string | null,
+	/**  Linear project's target date (`YYYY-MM-DD`), when the project has one. */
+	projectTargetDate: string | null,
 };
 
 /**  A comment on a triage issue (markdown body), with threaded replies. */

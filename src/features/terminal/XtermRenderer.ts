@@ -71,10 +71,7 @@ const themeFor = (mode: string | null) => {
 
 /** Pulls the `--accent` declaration out of a raw `style` attribute string, so
  *  the mutation observer below can tell whether an accent change is what
- *  triggered a `style` mutation without forcing a style recalc via
- *  `getComputedStyle` on every call (that attribute also carries
- *  `--sidebar-width`, which is written on every pointermove of a sidebar
- *  drag). */
+ *  triggered a `style` mutation without forcing a style recalc. */
 const accentDeclaration = (styleText: string | null) =>
   styleText?.match(/--accent:\s*([^;]+)/)?.[1]?.trim();
 

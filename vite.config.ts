@@ -1,13 +1,28 @@
 import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
+import { createLogger } from "vite";
 import { defineConfig } from "vitest/config";
 
 // @ts-expect-error -- process is a Node global, not typed in the browser env.
 const host = process.env.TAURI_DEV_HOST;
 
+const viteLogger = createLogger();
+const logInfo = viteLogger.info.bind(viteLogger);
+viteLogger.info = (message, options) => {
+  // React Refresh intentionally falls back to a page reload for modules that
+  // export both providers/components and hooks or constants. The reload itself
+  // is useful, but listing every non-component export after a generated-binding
+  // update obscures real build diagnostics in the terminal.
+  if (message.includes("Could not Fast Refresh (") && message.includes("export is incompatible")) {
+    return;
+  }
+  logInfo(message, options);
+};
+
 // https://vite.dev/config/
 export default defineConfig({
+  customLogger: viteLogger,
   plugins: [
     // The router plugin must run before the React plugin so generated route
     // modules are transformed by React's Fast Refresh.

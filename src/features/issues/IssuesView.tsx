@@ -40,10 +40,12 @@ export function IssuesView() {
     <IssuesProvider>
       <IssuesShortcuts />
       <ViewChrome sidebar={<IssueSidebar />}>
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-app">
-          <GraphCanvas />
+        <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-app">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <GraphCanvas />
+          </div>
+          <RightPanel />
         </div>
-        <RightPanel />
       </ViewChrome>
     </IssuesProvider>
   );

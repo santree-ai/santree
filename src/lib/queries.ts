@@ -316,8 +316,14 @@ export const queryKeys = {
   reviewedFiles: (prRepo: string, number: number) => ["reviewed-files", prRepo, number] as const,
   /** Every PR's marks — invalidated when the local/synced source itself changes. */
   reviewedFilesPrefix: ["reviewed-files"] as const,
-  prFileSource: (owner: string, name: string, base: string, head: string, path: string) =>
-    ["pr-file-source", owner, name, base, head, path] as const,
+  prFileSource: (
+    owner: string,
+    name: string,
+    base: string,
+    head: string,
+    oldPath: string,
+    newPath: string,
+  ) => ["pr-file-source", owner, name, base, head, oldPath, newPath] as const,
   prCheckLog: (owner: string, name: string, jobId: number) =>
     ["pr-check-log", owner, name, jobId] as const,
   openers: ["openers"] as const,
@@ -1832,14 +1838,15 @@ export const usePrFileSource = (
   name: string,
   base: string,
   head: string,
-  path: string,
+  oldPath: string,
+  newPath: string,
   enabled: boolean,
 ) =>
   useUnwrappedQuery(
-    queryKeys.prFileSource(owner, name, base, head, path),
-    () => commands.prFileSource(owner, name, base, head, path),
+    queryKeys.prFileSource(owner, name, base, head, oldPath, newPath),
+    () => commands.prFileSource(owner, name, base, head, oldPath, newPath),
     {
-      enabled: enabled && !!owner && !!name && !!head && !!path,
+      enabled: enabled && !!owner && !!name && !!base && !!head && !!oldPath && !!newPath,
       staleTime: Number.POSITIVE_INFINITY,
     },
   );

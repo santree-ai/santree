@@ -14,7 +14,7 @@
  * than rendering its own aside: a hand-rolled column is a different width from
  * the cell above it, and the divider visibly steps.
  */
-import type { ReactNode } from "react";
+import { type CSSProperties, type ReactNode, type RefObject, useRef } from "react";
 
 import { useEdgeResize } from "../../lib/useEdgeResize";
 import { CHROME, SIDEBAR, useAppUi } from "../../state/AppContext";
@@ -54,10 +54,11 @@ interface ViewChromeProps {
  * threshold collapses the sidebar (resetting the stored width so re-expanding
  * restores a sensible size). See {@link useEdgeResize} for the resize mechanics.
  */
-function SidebarResizer() {
+function SidebarResizer({ target }: { target: RefObject<HTMLDivElement | null> }) {
   const { sidebarWidth, setSidebarWidth, setSidebarCollapsed } = useAppUi();
   const resize = useEdgeResize({
     cssVar: "--sidebar-width",
+    target,
     width: sidebarWidth,
     min: SIDEBAR.min,
     max: SIDEBAR.max,
@@ -81,7 +82,8 @@ export function ViewChrome({
   showRepoSelector = true,
   repoInTopBar: keepRepoInTopBar = false,
 }: ViewChromeProps) {
-  const { sidebarCollapsed, toggleSidebar } = useAppUi();
+  const { sidebarCollapsed, sidebarWidth, toggleSidebar } = useAppUi();
+  const resizeScope = useRef<HTMLDivElement>(null);
 
   const hasSidebar = sidebar !== undefined;
   // Views with a custom leftCell (Settings) aren't collapsible — their left cell
@@ -99,7 +101,11 @@ export function ViewChrome({
   const dividedCell = showColumn || repoInTopBar || leftCell !== undefined;
 
   return (
-    <div className="flex h-full flex-col">
+    <div
+      ref={resizeScope}
+      className="flex h-full flex-col"
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+    >
       <div
         data-tauri-drag-region
         className="flex h-[46px] flex-none border-b border-line bg-surface"
@@ -158,7 +164,7 @@ export function ViewChrome({
               </div>
             )}
             <div className="flex min-h-0 flex-1 flex-col">{sidebar}</div>
-            <SidebarResizer />
+            <SidebarResizer target={resizeScope} />
           </div>
         )}
         {children}

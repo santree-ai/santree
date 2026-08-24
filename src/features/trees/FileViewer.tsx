@@ -1,7 +1,7 @@
 /** The File tab's content: the file picked in the right-hand explorer/changes
  *  list. Changed files render as a diff; any other file shows its current
  *  contents. A slim header names the file (the tab bar owns navigation). */
-import { EmptyState, Spinner } from "../../components/primitives";
+import { EmptyState, TerminalActivity } from "../../components/primitives";
 import { useWorktreeFileSource, useWorktreeStatus } from "../../lib/queries";
 import { CodeView } from "./CodeView";
 import { DiffPane } from "./DiffPane";
@@ -34,7 +34,7 @@ function PlainFileView() {
   if (isLoading || source === undefined) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center">
-        <Spinner />
+        <TerminalActivity label="Loading file…" />
       </div>
     );
   }

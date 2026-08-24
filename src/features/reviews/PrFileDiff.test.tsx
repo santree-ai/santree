@@ -18,13 +18,6 @@ vi.mock("../../lib/queries", () => ({
 }));
 
 beforeAll(() => {
-  // @git-diff-view sizes its columns by measuring text against a 2D canvas, which
-  // jsdom doesn't implement (getContext returns null and the library throws on
-  // it). A fixed-width stub is all it needs to lay out.
-  HTMLCanvasElement.prototype.getContext = (() => ({
-    font: "",
-    measureText: (t: string) => ({ width: t.length * 7 }),
-  })) as unknown as HTMLCanvasElement["getContext"];
   // The open composer is measured with a ResizeObserver, which jsdom doesn't
   // implement. Nothing here depends on the sizes it would report.
   globalThis.ResizeObserver ??= class {
@@ -79,6 +72,25 @@ describe("PrFileDiff", () => {
       />,
     );
     expect(container.firstChild).toBeNull();
+  });
+
+  it("drops incompatible full content before it reaches the diff viewer", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    render(
+      <PrFileDiff
+        path="src/retry.ts"
+        status="modified"
+        patch={PATCH}
+        oldText="this is not the patch's base"
+        newText="this is not the patch's head"
+        threads={NO_THREADS}
+        drafts={NO_DRAFTS}
+        target={TARGET}
+      />,
+    );
+
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("Mismatch detected"));
+    warn.mockRestore();
   });
 
   it("pins an AI draft to its line, beside any thread there", () => {

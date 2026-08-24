@@ -650,6 +650,10 @@ pub struct ReviewPr {
     /// to the sidebar's review-effort size chip.
     pub changed_files: u32,
     pub comment_count: u32,
+    /// Durable AI-review conversations attached to this PR. One logical review
+    /// surface can have one conversation per provider, so this counts provider
+    /// review tabs rather than transient launches or draft comments.
+    pub ai_review_count: u32,
     /// Reviewers requested on the PR (people and teams).
     pub reviewers: Vec<Reviewer>,
     /// ISO-8601 timestamp of the last update.
@@ -891,10 +895,15 @@ pub struct TicketRef {
     /// e.g. "AK-165" — the key the frontend joins back to a PR.
     pub identifier: String,
     pub title: String,
+    /// Linear priority for the issue attached to the PR. Review rows use this as
+    /// an urgency signal; `None` remains visually absent rather than fabricated.
+    pub priority: Priority,
     /// Project name, defaulted the same way [`Task::project`] is.
     pub project: String,
     pub project_color: Option<String>,
     pub project_icon: Option<String>,
+    /// Linear project's target date (`YYYY-MM-DD`), when the project has one.
+    pub project_target_date: Option<String>,
 }
 
 /// A merge-queue entry's state (GitHub's `MergeQueueEntryState`). Drives the
@@ -978,6 +987,9 @@ pub struct PrComment {
 #[serde(rename_all = "camelCase")]
 pub struct PrFile {
     pub path: String,
+    /// Path on the base side for a renamed/copied file. `None` when both sides
+    /// use [`Self::path`].
+    pub previous_path: Option<String>,
     /// GitHub's status string: "added" | "removed" | "modified" | "renamed" |
     /// "copied" | "changed" | "unchanged". Kept as a string, not an enum: it's
     /// display-only, and an unrecognised value should tint like a modification
@@ -1178,9 +1190,9 @@ pub struct PrDetail {
     /// approved a diff they never saw.
     pub files_truncated: bool,
     pub checks: Vec<PrCheck>,
-    /// Commit OID of the PR's base (old side) — used to fetch full file content
-    /// on demand so the diff can expand unchanged context (GitHub-style). Empty
-    /// when `gh` isn't authenticated.
+    /// Merge-base commit anchoring GitHub's PR patches. Used to fetch full old-side
+    /// content on demand so the diff can expand unchanged context. Empty when `gh`
+    /// isn't authenticated.
     pub base_sha: String,
     /// Commit OID of the PR's head (new side) — the other end of the expand fetch.
     pub head_sha: String,

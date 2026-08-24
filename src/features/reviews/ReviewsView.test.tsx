@@ -30,6 +30,7 @@ function pr(
     deletions: 2,
     changedFiles: 2,
     commentCount: 0,
+    aiReviewCount: 0,
     isInMergeQueue: false,
     reviewers: [],
     updatedAt: "2026-06-29T12:00:00Z",
@@ -73,6 +74,36 @@ describe("ReviewsSidebarView", () => {
     expect(screen.getByText("Booking webhook retries")).toBeInTheDocument();
     expect(screen.getByText("Tighten rate limiter")).toBeInTheDocument();
     expect(screen.getByText("Migrate billing jobs")).toBeInTheDocument();
+  });
+
+  it("organizes category rows by project and exposes urgency, effort and comments", () => {
+    const mine = { ...inbox.mine[0], commentCount: 4, aiReviewCount: 2 };
+    const ticket: TicketRef = {
+      identifier: "AK-483",
+      title: "Booking webhook retries",
+      priority: "High",
+      project: "Booking Platform",
+      projectColor: "#4493f8",
+      projectIcon: null,
+      projectTargetDate: "2026-09-30",
+    };
+    render(
+      <ReviewsSidebarView
+        inbox={{ ...inbox, mine: [mine] }}
+        loading={false}
+        total={3}
+        activeId={null}
+        onSelect={vi.fn()}
+        ticketFor={(pr) => (pr.id === mine.id ? ticket : undefined)}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Booking Platform/ })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "High priority" })).toBeInTheDocument();
+    expect(screen.getAllByRole("img", { name: /Small review/ })).not.toHaveLength(0);
+    expect(screen.getByTitle("4 comments")).toHaveTextContent("4");
+    expect(screen.getByTitle("2 AI review sessions")).toHaveTextContent("2");
+    expect(screen.getByTitle(/Project target date/)).toHaveTextContent(/due/i);
   });
 
   it("orders My PRs, direct requests, then every team", () => {
@@ -229,9 +260,11 @@ describe("ReviewsSidebarView", () => {
       r1: {
         identifier: "AK-1",
         title: "t",
+        priority: "High",
         project: "Voice",
         projectColor: null,
         projectIcon: null,
+        projectTargetDate: null,
       },
     };
     render(

@@ -26,6 +26,7 @@ vi.mock("../../lib/queries", () => ({
 function file(path: string): PrFile {
   return {
     path,
+    previousPath: null,
     status: "modified",
     additions: 3,
     deletions: 1,
@@ -76,6 +77,7 @@ function pr(overrides: Partial<ReviewPr> = {}): ReviewPr {
     deletions: 2,
     changedFiles: 2,
     commentCount: 0,
+    aiReviewCount: 0,
     reviewers: [],
     updatedAt: "2026-06-29T12:00:00Z",
     createdAt: "2026-06-28T12:00:00Z",

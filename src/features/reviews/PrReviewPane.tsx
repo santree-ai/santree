@@ -21,7 +21,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { PrFile, PrThread, ReviewDraft, ReviewPr } from "../../bindings";
-import { AgentIcon, ChevronDownIcon, EyeIcon, WarningIcon } from "../../components/icons";
+import { AgentIcon, ChevronDownIcon, MessageSquareIcon, WarningIcon } from "../../components/icons";
 import { EmptyState, Skeleton } from "../../components/primitives";
 import {
   usePrDetail,
@@ -161,6 +161,19 @@ export function PrReviewPane({
               <span className="tracking-[.04em] uppercase">
                 {reviewedCount} / {files.length} files viewed
               </span>
+              <span
+                role="progressbar"
+                aria-label={`${reviewedCount} of ${files.length} files viewed`}
+                aria-valuemin={0}
+                aria-valuemax={files.length}
+                aria-valuenow={reviewedCount}
+                className="h-[3px] w-16 overflow-hidden rounded-full bg-line-2"
+              >
+                <span
+                  className="block h-full rounded-full bg-accent transition-[width]"
+                  style={{ width: `${files.length ? (reviewedCount / files.length) * 100 : 0}%` }}
+                />
+              </span>
               {/* The file list is capped. Say so — marking every *listed* file viewed
                   on a truncated list means approving a diff you never saw. */}
               {detail?.filesTruncated && (
@@ -266,6 +279,7 @@ const PrFileCard = memo(function PrFileCard({
     name,
     base,
     head,
+    file.previousPath ?? file.path,
     file.path,
     !collapsed && !!file.patch,
   );
@@ -310,7 +324,13 @@ const PrFileCard = memo(function PrFileCard({
           {file.path}
         </span>
         {threads.length > 0 && (
-          <span className="flex-none font-mono text-[10px] text-muted-4">💬 {threads.length}</span>
+          <span
+            className="flex flex-none items-center gap-1 font-mono text-[10px] text-muted-4"
+            title={`${threads.length} review comment${threads.length === 1 ? "" : "s"}`}
+          >
+            <MessageSquareIcon size={10} />
+            {threads.length}
+          </span>
         )}
         {drafts.length > 0 && (
           <span
@@ -329,9 +349,9 @@ const PrFileCard = memo(function PrFileCard({
           <span className="text-status-red">−{file.deletions}</span>
         </span>
         <label
-          className="flex flex-none cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 py-1 text-[10.5px] text-muted-2 select-none hover:border-line-strong"
+          className="flex flex-none cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-[10.5px] text-muted-3 select-none hover:bg-hover hover:text-fg-2"
           title="Mark this file as reviewed. It re-opens automatically when a new commit changes it."
-          style={reviewed ? { color: "var(--fg-2)" } : undefined}
+          style={reviewed ? { color: "var(--accent)" } : undefined}
         >
           <input
             type="checkbox"
@@ -339,7 +359,6 @@ const PrFileCard = memo(function PrFileCard({
             onChange={(e) => onToggle(file, e.target.checked)}
             className="h-3 w-3 cursor-pointer accent-[var(--accent)]"
           />
-          <EyeIcon size={12} />
           Viewed
         </label>
       </div>
@@ -349,6 +368,7 @@ const PrFileCard = memo(function PrFileCard({
           <>
             <PrFileDiff
               path={file.path}
+              previousPath={file.previousPath}
               status={file.status}
               patch={file.patch}
               threads={threads}

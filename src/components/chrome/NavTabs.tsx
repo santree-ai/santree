@@ -6,11 +6,13 @@ import { useAttentionCount } from "../../features/agents/useAgents";
 import { useTriageQueue, useViewCounts } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import { sessionStateMeta } from "../../theme/colors";
+import { AgentsIcon, ListIcon, PrIcon, TelescopeIcon, TerminalIcon, TreeIcon } from "../icons";
 import { Badge, Tabs } from "../primitives";
 
 interface TabDef {
   label: string;
   path: string;
+  icon: ReactNode;
   count?: number;
   badge?: ReactNode;
 }
@@ -30,6 +32,7 @@ export function NavTabs() {
     {
       label: "Agents",
       path: "/",
+      icon: <AgentsIcon size={13} />,
       // Not a count of agents — a count of agents *blocked on you*. The nav bar
       // is the only chrome visible from every view, so it carries the alert.
       badge: (
@@ -48,11 +51,20 @@ export function NavTabs() {
     },
     // Dev sits beside Agents: both span every repo rather than being scoped to
     // the active one, which is what the divider below separates.
-    ...(devEnabled ? [{ label: "Dev", path: "/dev" }] : []),
-    ...(triageEnabled ? [{ label: "Triage", path: "/triage", count: triageVisible.length }] : []),
-    { label: "Issues", path: "/issues", count: counts.tasks },
-    { label: "Trees", path: "/trees", count: counts.worktrees },
-    { label: "Reviews", path: "/reviews", count: counts.reviews },
+    ...(devEnabled ? [{ label: "Dev", path: "/dev", icon: <TerminalIcon size={12} /> }] : []),
+    ...(triageEnabled
+      ? [
+          {
+            label: "Triage",
+            path: "/triage",
+            icon: <TelescopeIcon size={13} />,
+            count: triageVisible.length,
+          },
+        ]
+      : []),
+    { label: "Issues", path: "/issues", icon: <ListIcon size={12} />, count: counts.tasks },
+    { label: "Trees", path: "/trees", icon: <TreeIcon size={12} />, count: counts.worktrees },
+    { label: "Reviews", path: "/reviews", icon: <PrIcon size={12} />, count: counts.reviews },
   ];
 
   // The rule drawn after the last repo-independent tab, splitting "spans
@@ -64,9 +76,11 @@ export function NavTabs() {
   // full-height underline look.
   return (
     <Tabs
-      tabs={defs.map((t) => ({
+      tabs={defs.map((t, index) => ({
         value: t.path,
         label: t.label,
+        title: `${t.label} (⌘${index + 1})`,
+        icon: t.icon,
         separatorAfter: t.path === dividerAfter,
         badge:
           t.badge ??

@@ -45,6 +45,28 @@ export function PlusIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** A provider-neutral AI sparkle. Unlike the Claude logomark, this represents
+ * AI-authored work regardless of which agent produced it. */
+export function SparklesIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="m12 3 .8 2.5A5.3 5.3 0 0 0 16.5 9l2.5.8-2.5.8a5.3 5.3 0 0 0-3.7 3.5L12 17l-.8-2.9a5.3 5.3 0 0 0-3.7-3.5L5 9.8 7.5 9a5.3 5.3 0 0 0 3.7-3.5L12 3Z" />
+      <path d="m19 15 .4 1.2a2.5 2.5 0 0 0 1.6 1.6l1 .3-1 .3a2.5 2.5 0 0 0-1.6 1.6l-.4 1-.4-1a2.5 2.5 0 0 0-1.6-1.6l-1-.3 1-.3a2.5 2.5 0 0 0 1.6-1.6L19 15Z" />
+    </svg>
+  );
+}
+
 /** A framed `+`/`−` pair — GitHub's "add a suggestion" glyph, for the composer
  *  button that inserts a ```suggestion block. */
 export function SuggestionIcon({ size = 14, className }: IconProps) {
@@ -882,6 +904,25 @@ export function ListIcon({ size = 12, className }: IconProps) {
       <line x1="3" y1="8" x2="13" y2="8" />
       <line x1="3" y1="12" x2="13" y2="12" />
     </svg>
+  );
+}
+
+/** A quiet conversation count — replaces platform-dependent emoji in inbox rows. */
+export function MessageSquareIcon({ size = 12, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={1.8}>
+      <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
+    </Stroke>
+  );
+}
+
+/** Clock face for a running/pending state. */
+export function ClockIcon({ size = 12, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={1.8}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </Stroke>
   );
 }
 

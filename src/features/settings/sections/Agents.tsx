@@ -47,8 +47,8 @@ export function AgentsSection() {
   return (
     <>
       <Heading
-        title="Agents"
-        subtitle="Configure each provider's authentication, executable, version, and behavior. Workflow models live under Actions."
+        title="Provider setup"
+        subtitle="Connect and maintain each provider here. Which provider and model performs a job is configured separately under Workflow defaults."
       />
       <Tabs
         tabs={agents.map((a) => ({

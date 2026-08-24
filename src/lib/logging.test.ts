@@ -10,7 +10,24 @@ const logMock = vi.hoisted(() => ({
 }));
 vi.mock("@tauri-apps/plugin-log", () => logMock);
 
-import { forwardConsoleToLog } from "./logging";
+import { forwardConsoleToLog, isTransientReloadDiagnostic } from "./logging";
+
+describe("isTransientReloadDiagnostic", () => {
+  it("recognizes Tauri's expected HMR transport fallback", () => {
+    expect(
+      isTransientReloadDiagnostic([
+        "IPC custom protocol failed, Tauri will now use the postMessage interface instead",
+        new TypeError("Load failed"),
+      ]),
+    ).toBe(true);
+    expect(isTransientReloadDiagnostic(["[TAURI] Couldn't find callback id 1234."])).toBe(true);
+  });
+
+  it("does not hide actionable warnings", () => {
+    expect(isTransientReloadDiagnostic(["Failed to reload /src/App.tsx"])).toBe(false);
+    expect(isTransientReloadDiagnostic([new Error("IPC failed")])).toBe(false);
+  });
+});
 
 describe("forwardConsoleToLog", () => {
   // Patches `console.*` and adds `window` listeners as a side effect — call it
@@ -36,6 +53,15 @@ describe("forwardConsoleToLog", () => {
     console.warn("v:", undefined, null);
 
     expect(logMock.warn).toHaveBeenCalledWith("v: undefined null");
+  });
+
+  it("keeps transient reload diagnostics out of the persistent log", () => {
+    console.warn(
+      "IPC custom protocol failed, Tauri will now use the postMessage interface instead",
+      new TypeError("Load failed"),
+    );
+
+    expect(logMock.warn).not.toHaveBeenCalled();
   });
 
   it("forwards unhandled promise rejections to the on-disk log", () => {

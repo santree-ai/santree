@@ -15,7 +15,7 @@ import type {
   UsageTotals,
 } from "../../../bindings";
 import { AgentIcon, ChevronRightIcon } from "../../../components/icons";
-import { EmptyState, Spinner, Tabs } from "../../../components/primitives";
+import { EmptyState, Tabs, TerminalActivity } from "../../../components/primitives";
 import { formatCompact, formatUsd } from "../../../lib/format";
 import {
   useClaudeUsage,
@@ -135,7 +135,11 @@ function CodexUsagePanel() {
   const limits = useCodexRateLimits();
 
   if (account.isLoading || limits.isLoading) {
-    return <EmptyState className="py-10" icon={<Spinner size={18} />} title="Reading usage…" />;
+    return (
+      <div className="flex justify-center py-12">
+        <TerminalActivity label="Reading usage…" />
+      </div>
+    );
   }
   if (!account.data?.connected) {
     return (
@@ -185,7 +189,9 @@ function CodexUsagePanel() {
 function UsageLoading({ progress }: { progress: { done: number; total: number } | null }) {
   if (!progress || progress.total === 0) {
     return (
-      <EmptyState className="py-10" icon={<Spinner size={18} />} title="Reading transcripts…" />
+      <div className="flex justify-center py-12">
+        <TerminalActivity label="Reading transcripts…" />
+      </div>
     );
   }
   const pct = Math.min(100, (progress.done / progress.total) * 100);

@@ -7,6 +7,28 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2 — 2026-08-24
+
+- Codex is now a first-class agent throughout Santree, with its real interactive
+  terminal, Codex-managed authentication, live models and reasoning options,
+  durable sessions, and provider-aware state and usage.
+- Claude Code and Codex can work side by side in Work, Triage, Trees, and
+  Reviews. Existing sessions keep their original provider, while each workflow
+  remembers separate settings for every configured agent.
+- AI reviews now support provider-specific sessions, briefs, and draft comments.
+  Codex reviews receive Santree's review tools without exposing GitHub writes,
+  and drafts remain private until you explicitly add and submit them.
+- Work helpers can independently use the configured provider for commit messages
+  and pull request descriptions, regardless of which agent wrote the code.
+- Reviews, Trees, Triage, Issues, Agents, and Settings have a cleaner shared
+  visual system with stronger grouping, clearer priority and activity signals,
+  responsive panels, and less visual noise.
+- A global command palette and discoverable keyboard shortcuts provide fast
+  access to tickets, pull requests, worktrees, sessions, and navigation.
+- Fixed review diff rendering, stale or duplicated review counts, incorrect
+  provider branding, sluggish panel resizing, noisy development warnings, and
+  several startup and session-resume failures found during the beta cycle.
+
 ## 0.1.2-beta.13 — 2026-08-24
 
 - Agent settings now keep provider-specific workflow choices separate, show

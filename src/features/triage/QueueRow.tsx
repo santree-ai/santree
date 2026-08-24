@@ -4,9 +4,9 @@ import { type CSSProperties, memo } from "react";
 import type { AgentKind, TriageTicket } from "../../bindings";
 import { AgentIcon } from "../../components/icons";
 import { RelativeTime, SlaCountdown } from "../../components/RelativeTime";
+import { PriorityBars } from "../../components/WorkSignals";
 import { formatSnoozeLabel } from "../../lib/relativeTime";
 import { alpha } from "../../theme/colors";
-import { PriorityPill } from "./PriorityPill";
 
 /**
  * Memoized so re-renders of the queue (selection change, background refetch)
@@ -128,7 +128,7 @@ export const QueueRow = memo(function QueueRow({
               </span>
             </span>
           )}
-          <PriorityPill priority={ticket.priority} muted={snoozed} />
+          {ticket.priority !== "None" && <PriorityBars priority={ticket.priority} />}
           {snoozed ? (
             <span className="ml-auto flex flex-none items-center gap-1 font-mono text-[10px] text-muted-4">
               {snoozeLabel}

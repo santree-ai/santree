@@ -37,6 +37,7 @@ function buildSections(triageEnabled: boolean, devEnabled: boolean): Section[] {
     {
       title: "General",
       items: [
+        { label: "Command palette", keys: ["⌘", "K"] },
         { label: "Keyboard shortcuts", keys: ["⌘", "/"] },
         { label: "Settings", keys: ["⌘", ","] },
         { label: "Toggle sidebar", keys: ["⌘", "B"] },
@@ -153,7 +154,7 @@ export function ShortcutsOverlay() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search shortcuts…"
-              className="w-full bg-transparent text-[13px] text-fg-2 outline-none placeholder:text-muted-4"
+              className="overlay-search-input w-full bg-transparent text-[13px] text-fg-2 outline-none placeholder:text-muted-4"
             />
           </div>
         </div>

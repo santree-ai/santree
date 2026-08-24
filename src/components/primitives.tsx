@@ -299,6 +299,31 @@ export function Spinner({ size = 11, color = "var(--accent)" }: { size?: number;
   );
 }
 
+/** Six-pixel terminal activity chase for pane-level work. Unlike the compact ring
+ *  spinner used inside buttons, this reads as part of the IDE's own language. */
+export function TerminalActivity({
+  label = "Working…",
+  className = "",
+}: {
+  label?: string;
+  className?: string;
+}) {
+  return (
+    <span
+      role="status"
+      aria-label={label}
+      className={`inline-flex items-center gap-2 font-mono text-[10.5px] text-muted-3 ${className}`}
+    >
+      <span className="terminal-activity" aria-hidden>
+        {Array.from({ length: 6 }, (_, index) => (
+          <span key={index} style={{ animationDelay: `${index * 110}ms` }} />
+        ))}
+      </span>
+      <span>{label}</span>
+    </span>
+  );
+}
+
 /** A small status dot, optionally glowing. */
 export function Dot({
   color,
@@ -522,6 +547,8 @@ export interface TabItem<T extends string> {
   value: T;
   label: string;
   icon?: ReactNode;
+  /** Native tooltip, useful for discoverable keyboard shortcuts in chrome. */
+  title?: string;
   /** Arbitrary trailing slot (a count, a pill, a {@link Badge}). */
   badge?: ReactNode;
   /** Render the inactive label in a fainter muted tone (e.g. disabled-ish). */
@@ -602,6 +629,7 @@ export function Tabs<T extends string>({
           <button
             key={t.value}
             type="button"
+            title={t.title}
             role="tab"
             aria-selected={active}
             // Roving tabindex — the strip is one Tab stop; the arrow keys move

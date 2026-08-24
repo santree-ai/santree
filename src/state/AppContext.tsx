@@ -71,6 +71,16 @@ interface AppData {
 
 /** Volatile UI state — toggling these re-renders only their own consumers. */
 interface AppUi {
+  /** Global entity and navigation command palette (⌘K). */
+  commandPaletteOpen: boolean;
+  setCommandPaletteOpen: (open: boolean) => void;
+  toggleCommandPalette: () => void;
+
+  /** A ticket the Issues graph should focus after cross-view navigation. */
+  issueFocus: string | null;
+  requestIssueFocus: (id: string) => void;
+  consumeIssueFocus: () => void;
+
   /** The searchable keyboard-shortcuts overlay (⌘/ or the help menu). */
   shortcutsOpen: boolean;
   setShortcutsOpen: (open: boolean) => void;
@@ -210,6 +220,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const devEnabled = github?.account === DEV_GITHUB_LOGIN;
 
   const [activeRepo, setActiveRepo] = useState(() => localStorage.getItem(REPO_KEY) ?? "");
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true",
@@ -219,6 +230,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return stored >= SIDEBAR.min && stored <= SIDEBAR.max ? stored : SIDEBAR.default;
   });
   const [treeLaunch, setTreeLaunch] = useState<string | null>(null);
+  const [issueFocus, setIssueFocus] = useState<string | null>(null);
   const [treeFocus, setTreeFocus] = useState<string | null>(null);
   const [bgLaunches, setBgLaunches] = useState<string[]>([]);
   const [reviewFocus, setReviewFocus] = useState<string | null>(null);
@@ -290,12 +302,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     document.documentElement.style.setProperty("--accent", DEFAULT_ACCENT);
   }, []);
 
-  // Mirror the committed width into the `--sidebar-width` CSS variable. During a
-  // drag the resizer writes this variable directly (no React render); this keeps
-  // it in sync on the initial value and the pointer-up commit. Also persist it,
-  // same as theme, so a resize survives a relaunch.
+  // The active ViewChrome owns the live `--sidebar-width` variable so dragging it
+  // does not invalidate styles across the entire app. Persist only the committed
+  // value here so a resize survives a relaunch.
   useEffect(() => {
-    document.documentElement.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
     localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
   }, [sidebarWidth]);
 
@@ -371,6 +381,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // refs changed whenever volatile UI state did (help menu, sidebar drag), those
   // models would rebuild and re-render every consumer on every unrelated toggle.
   const toggleShortcuts = useCallback(() => setShortcutsOpen((o) => !o), []);
+  const toggleCommandPalette = useCallback(() => setCommandPaletteOpen((o) => !o), []);
+  const consumeIssueFocus = useCallback(() => setIssueFocus(null), []);
   const consumeTreeLaunch = useCallback(() => setTreeLaunch(null), []);
   const consumeTreeFocus = useCallback(() => setTreeFocus(null), []);
   const consumeReviewFocus = useCallback(() => setReviewFocus(null), []);
@@ -410,6 +422,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const uiValue = useMemo<AppUi>(
     () => ({
+      commandPaletteOpen,
+      setCommandPaletteOpen,
+      toggleCommandPalette,
+      issueFocus,
+      requestIssueFocus: setIssueFocus,
+      consumeIssueFocus,
       shortcutsOpen,
       setShortcutsOpen,
       toggleShortcuts,
@@ -444,6 +462,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setSidebarWidth,
     }),
     [
+      commandPaletteOpen,
+      issueFocus,
       shortcutsOpen,
       treeLaunch,
       treeFocus,
@@ -458,6 +478,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sidebarCollapsed,
       sidebarWidth,
       toggleShortcuts,
+      toggleCommandPalette,
+      consumeIssueFocus,
       consumeTreeLaunch,
       consumeTreeFocus,
       consumeReviewFocus,

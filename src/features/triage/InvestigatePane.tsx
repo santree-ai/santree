@@ -15,7 +15,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 
 import type { AgentKind } from "../../bindings";
-import { Spinner } from "../../components/primitives";
+import { TerminalActivity } from "../../components/primitives";
 import { SessionEndedPane } from "../../components/SessionEndedPane";
 import {
   CLAUDE_REMOTE_CONTROL_KEY,
@@ -226,7 +226,7 @@ export function InvestigatePane({
         />
       ) : (
         <div className="flex h-full items-center justify-center">
-          <Spinner size={16} />
+          <TerminalActivity label="Preparing investigation…" />
         </div>
       )}
     </div>
