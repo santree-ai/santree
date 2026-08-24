@@ -7,6 +7,21 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2-beta.5 — 2026-08-23
+
+- New: AI review. In the Reviews tab, "Review with AI" opens a Claude session
+  on the pull request that reads it and writes its findings back into santree:
+  a brief beside the diff, and draft comments anchored to the lines they are
+  about. You edit or delete each one and add the ones you keep to your own
+  pending review, then send it with Finish review as usual. Nothing it writes
+  reaches GitHub until you add it.
+- The session can read your connected tools while it reviews, so it can check
+  the change against the ticket and the documents that ticket links to.
+- A draft written before someone pushed is flagged rather than sent, since its
+  line numbers no longer describe the code.
+- The review brief is now written by that session instead of a separate
+  background call, so it arrives while you watch and you can ask for changes.
+
 ## 0.1.2-beta.4 — 2026-08-23
 
 - Pressing the + in a diff and dragging now covers every line you drag over.
