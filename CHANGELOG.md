@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2-beta.11 — 2026-08-24
+
+- Commit-message and PR-description controls now show the provider configured
+  for that helper instead of always showing Claude Code.
+- Review actions now follow the selected provider tab, with the correct icon and
+  explicit labels such as "Open Codex review" and "Open Claude Code review."
+
 ## 0.1.2-beta.10 — 2026-08-24
 
 - AI review tabs now show only the draft comments created by that provider, so
