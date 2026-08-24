@@ -1,7 +1,7 @@
 {
   "name": "santree-app",
   "private": true,
-  "version": "0.1.2-beta.6",
+  "version": "0.1.2-beta.7",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.0.6",

@@ -96,6 +96,12 @@ minijinja = "2"
 # output live instead of block-buffering into a pipe. Same crate crates/pty uses.
 portable-pty = { workspace = true }
 
+# The remote-TUI listener is WebSocket-over-Unix-socket. Keep the framing local
+# (no TLS is needed for an app-private socket) so the control client and TUI can
+# share one App Server process.
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+socket2 = "0.6"
+
 # Linear OAuth tokens live in the OS keychain (macOS Keychain / freedesktop Secret
 # Service), never in santree.db — see CLAUDE.md's secrets invariant and linear.rs.
 # Default features are exactly the two native stores we target plus the `Entry` API.

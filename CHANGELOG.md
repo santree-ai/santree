@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2-beta.7 — 2026-08-24
+
+- Fixed Codex settings and agent launches failing with “Codex initialize timed
+  out.” Santree now speaks the App Server's Unix WebSocket transport correctly,
+  with bounded startup time, short private socket paths, and reliable process
+  cleanup when a connection fails.
+
 ## 0.1.2-beta.6 — 2026-08-24
 
 - Codex is now the default agent for new work, investigations, Ask AI, Fix CI,

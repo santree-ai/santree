@@ -1,13 +1,16 @@
-//! Santree-owned Codex App Server and its newline-delimited JSON-RPC control
-//! channel. The experimental remote-TUI socket is isolated in this module; no
-//! caller depends on it beyond receiving an opaque `unix://…` address.
+//! Santree-owned Codex App Server and its WebSocket-over-Unix-socket control
+//! channel. The experimental remote-TUI transport is isolated in this module;
+//! no caller depends on it beyond receiving an opaque `unix://…` address.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::hash::{Hash, Hasher};
+use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,9 +21,12 @@ use santree_core::domain::{
     CodexReasoningEffort,
 };
 use serde_json::{json, Value};
+use socket2::{Domain, SockAddr, Socket, Type};
+use tungstenite::{Message, WebSocket};
 
 const MIN_VERSION: (u64, u64, u64) = (0, 149, 0);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
+const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,19 +40,49 @@ type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
 
 struct Connection {
     executable: String,
-    server: Child,
-    proxy: Child,
-    stdin: Arc<Mutex<ChildStdin>>,
+    server: ManagedChild,
+    outbound: mpsc::Sender<String>,
     pending: Pending,
     next_id: AtomicU64,
     alive: Arc<AtomicBool>,
 }
 
+struct ManagedChild(Child);
+
+impl ManagedChild {
+    fn terminate(&mut self) {
+        if self.0.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl Deref for ManagedChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for ManagedChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
 impl Drop for Connection {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Release);
-        let _ = self.proxy.kill();
-        let _ = self.server.kill();
+        self.server.terminate();
         for (_, tx) in self
             .pending
             .lock()
@@ -69,18 +105,13 @@ impl Connection {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id, tx);
-        let line = serde_json::to_string(&json!({
-            "jsonrpc": "2.0", "id": id, "method": method, "params": params
-        }))?;
-        if let Err(e) = writeln!(
-            self.stdin.lock().unwrap_or_else(|p| p.into_inner()),
-            "{line}"
-        ) {
+        let line = serde_json::to_string(&request_payload(id, method, params))?;
+        if self.outbound.send(line).is_err() {
             self.pending
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .remove(&id);
-            return Err(e).context("writing to Codex control proxy");
+            bail!("Codex control connection closed");
         }
         match rx.recv_timeout(REQUEST_TIMEOUT) {
             Ok(Ok(value)) => Ok(value),
@@ -97,13 +128,10 @@ impl Connection {
     }
 
     fn notify(&self, method: &str, params: Value) -> Result<()> {
-        let line = serde_json::to_string(&json!({
-            "jsonrpc": "2.0", "method": method, "params": params
-        }))?;
-        writeln!(
-            self.stdin.lock().unwrap_or_else(|p| p.into_inner()),
-            "{line}"
-        )?;
+        let line = serde_json::to_string(&notification_payload(method, params))?;
+        self.outbound
+            .send(line)
+            .map_err(|_| anyhow!("Codex control connection closed"))?;
         Ok(())
     }
 }
@@ -119,7 +147,7 @@ pub struct CodexRuntime {
 
 impl CodexRuntime {
     pub fn new(data_dir: &Path) -> Self {
-        let runtime_dir = data_dir.join("codex-runtime");
+        let runtime_dir = short_runtime_dir(data_dir);
         let socket = runtime_dir.join("codex.sock");
         Self {
             runtime_dir,
@@ -356,36 +384,38 @@ impl CodexRuntime {
         prepare_runtime_dir(&self.runtime_dir)?;
         remove_stale_socket(&self.socket)?;
         let listen = format!("unix://{}", self.socket.display());
-        let mut server = Command::new(executable)
-            .args([
-                "app-server",
-                // This field is consumed by Codex's permission-layer loader but
-                // is not in 0.149's strict Config schema. Verify the sessionFlags
-                // layer after initialization so an incompatible CLI fails closed.
-                "-c",
-                "sandbox_permissions=[]",
-                "-c",
-                "mcp_servers={}",
-                "-c",
-                "apps={}",
-                "-c",
-                "plugins={}",
-                "-c",
-                "hooks={}",
-                "-c",
-                "web_search=\"disabled\"",
-                "-c",
-                "sandbox_workspace_write.network_access=false",
-                "-c",
-                "sandbox_workspace_write.writable_roots=[]",
-                "--listen",
-                &listen,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("starting Codex App Server")?;
+        let mut server = ManagedChild(
+            Command::new(executable)
+                .args([
+                    "app-server",
+                    // This field is consumed by Codex's permission-layer loader but
+                    // is not in 0.149's strict Config schema. Verify the sessionFlags
+                    // layer after initialization so an incompatible CLI fails closed.
+                    "-c",
+                    "sandbox_permissions=[]",
+                    "-c",
+                    "mcp_servers={}",
+                    "-c",
+                    "apps={}",
+                    "-c",
+                    "plugins={}",
+                    "-c",
+                    "hooks={}",
+                    "-c",
+                    "web_search=\"disabled\"",
+                    "-c",
+                    "sandbox_workspace_write.network_access=false",
+                    "-c",
+                    "sandbox_workspace_write.writable_roots=[]",
+                    "--listen",
+                    &listen,
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .context("starting Codex App Server")?,
+        );
         let started = Instant::now();
         loop {
             if fs::symlink_metadata(&self.socket)
@@ -397,44 +427,17 @@ impl CodexRuntime {
                 bail!("Codex App Server exited during startup ({status})");
             }
             if started.elapsed() >= STARTUP_TIMEOUT {
-                let _ = server.kill();
                 bail!("Codex App Server did not create its socket within 8 seconds");
             }
             std::thread::sleep(Duration::from_millis(25));
         }
-        let mut proxy = match Command::new(executable)
-            .args(["app-server", "proxy", "--sock"])
-            .arg(&self.socket)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(proxy) => proxy,
-            Err(error) => {
-                let _ = server.kill();
-                return Err(error).context("starting Codex control proxy");
-            }
-        };
-        let Some(proxy_stdin) = proxy.stdin.take() else {
-            let _ = proxy.kill();
-            let _ = server.kill();
-            bail!("opening Codex control proxy stdin");
-        };
-        let Some(stdout) = proxy.stdout.take() else {
-            let _ = proxy.kill();
-            let _ = server.kill();
-            bail!("opening Codex control proxy stdout");
-        };
-        let stdin = Arc::new(Mutex::new(proxy_stdin));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
-        spawn_reader(stdout, pending.clone(), alive.clone(), stdin.clone());
+        let outbound = connect_control(&self.socket, pending.clone(), alive.clone())?;
         let connection = Connection {
             executable: executable.to_string(),
             server,
-            proxy,
-            stdin,
+            outbound,
             pending,
             next_id: AtomicU64::new(1),
             alive,
@@ -451,6 +454,12 @@ impl CodexRuntime {
         verify_sandbox_permission_override(&config)?;
         Ok(connection)
     }
+}
+
+fn short_runtime_dir(data_dir: &Path) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    data_dir.hash(&mut hasher);
+    PathBuf::from("/tmp").join(format!("santree-codex-{:016x}", hasher.finish()))
 }
 
 fn prepare_runtime_dir(runtime_dir: &Path) -> Result<()> {
@@ -505,18 +514,112 @@ fn verify_sandbox_permission_override(config: &Value) -> Result<()> {
     Ok(())
 }
 
-fn spawn_reader(
-    stdout: impl std::io::Read + Send + 'static,
+fn request_payload(id: u64, method: &str, params: Value) -> Value {
+    // Codex uses JSON-RPC semantics but deliberately omits the JSON-RPC version
+    // member on the wire.
+    json!({"id": id, "method": method, "params": params})
+}
+
+fn notification_payload(method: &str, params: Value) -> Value {
+    json!({"method": method, "params": params})
+}
+
+fn connect_control(
+    socket_path: &Path,
     pending: Pending,
     alive: Arc<AtomicBool>,
-    stdin: Arc<Mutex<ChildStdin>>,
+) -> Result<mpsc::Sender<String>> {
+    connect_control_with_timeout(socket_path, pending, alive, CONTROL_CONNECT_TIMEOUT)
+}
+
+fn connect_control_with_timeout(
+    socket_path: &Path,
+    pending: Pending,
+    alive: Arc<AtomicBool>,
+    timeout: Duration,
+) -> Result<mpsc::Sender<String>> {
+    let socket =
+        Socket::new(Domain::UNIX, Type::STREAM, None).context("opening Codex control socket")?;
+    let address = SockAddr::unix(socket_path).context("addressing Codex control socket")?;
+    socket
+        .connect_timeout(&address, timeout)
+        .context("connecting to Codex control socket")?;
+    let stream: UnixStream = socket.into();
+    stream
+        .set_read_timeout(Some(timeout))
+        .context("setting Codex control handshake read timeout")?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .context("setting Codex control handshake write timeout")?;
+    let (mut socket, _) = tungstenite::client("ws://localhost/", stream)
+        .map_err(|error| anyhow!("opening Codex control WebSocket: {error}"))?;
+    socket
+        .get_mut()
+        .set_read_timeout(None)
+        .context("clearing Codex control read timeout")?;
+    socket
+        .get_mut()
+        .set_write_timeout(None)
+        .context("clearing Codex control write timeout")?;
+    socket
+        .get_mut()
+        .set_nonblocking(true)
+        .context("configuring Codex control socket")?;
+    let (outbound, receiver) = mpsc::channel();
+    spawn_router(socket, receiver, pending, alive);
+    Ok(outbound)
+}
+
+fn spawn_router(
+    mut socket: WebSocket<UnixStream>,
+    outbound: mpsc::Receiver<String>,
+    pending: Pending,
+    alive: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            let Ok(message) = serde_json::from_str::<Value>(&line) else {
-                log::warn!("Codex control proxy emitted malformed JSON");
-                continue;
+        while alive.load(Ordering::Acquire) {
+            while let Ok(line) = outbound.try_recv() {
+                if let Err(error) = socket.send(Message::Text(line.into())) {
+                    log::warn!("Codex control WebSocket write failed: {error}");
+                    alive.store(false, Ordering::Release);
+                    break;
+                }
+            }
+            if !alive.load(Ordering::Acquire) {
+                break;
+            }
+            let message = match socket.read() {
+                Ok(Message::Text(line)) => match serde_json::from_str::<Value>(line.as_str()) {
+                    Ok(message) => message,
+                    Err(_) => {
+                        log::warn!("Codex control WebSocket emitted malformed JSON");
+                        continue;
+                    }
+                },
+                Ok(Message::Ping(payload)) => {
+                    if socket.send(Message::Pong(payload)).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                Ok(Message::Close(_)) => break,
+                Ok(_) => continue,
+                Err(tungstenite::Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                    break;
+                }
+                Err(error) => {
+                    log::warn!("Codex control WebSocket read failed: {error}");
+                    break;
+                }
             };
             if let Some(method) = message.get("method").and_then(Value::as_str) {
                 // A method plus an id is a server request, not a response to one
@@ -524,11 +627,10 @@ fn spawn_reader(
                 if let Some(id) = message.get("id") {
                     log::warn!("rejecting unhandled Codex server request {method}");
                     let reply = json!({
-                        "jsonrpc": "2.0",
                         "id": id,
                         "error": {"code": -32601, "message": "Unsupported server request"}
                     });
-                    let _ = writeln!(stdin.lock().unwrap_or_else(|e| e.into_inner()), "{reply}");
+                    let _ = socket.send(Message::Text(reply.to_string().into()));
                 } else {
                     log::debug!("Codex notification {method}");
                 }
@@ -556,7 +658,7 @@ fn spawn_reader(
         }
         alive.store(false, Ordering::Release);
         for (_, tx) in pending.lock().unwrap_or_else(|e| e.into_inner()).drain() {
-            let _ = tx.send(Err("Codex control proxy exited".into()));
+            let _ = tx.send(Err("Codex control connection closed".into()));
         }
     });
 }
@@ -651,6 +753,140 @@ fn string_field(value: &Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn short_socket_test_dir(prefix: &str) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        let root = PathBuf::from("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let root = std::env::temp_dir();
+        root.join(format!("{prefix}-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn codex_wire_envelopes_omit_jsonrpc_version() {
+        let request = request_payload(7, "account/read", json!({}));
+        assert_eq!(request.get("id").and_then(Value::as_u64), Some(7));
+        assert!(request.get("jsonrpc").is_none());
+
+        let notification = notification_payload("initialized", json!({}));
+        assert!(notification.get("id").is_none());
+        assert!(notification.get("jsonrpc").is_none());
+    }
+
+    #[test]
+    fn websocket_router_round_trips_over_unix_socket() {
+        // macOS Unix socket paths are capped at 104 bytes; its per-user temp
+        // directory is long enough to make an otherwise ordinary fixture fail.
+        let base = short_socket_test_dir("santree-codex-ws");
+        fs::create_dir(&base).unwrap();
+        let socket_path = base.join("codex.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let Message::Text(line) = socket.read().unwrap() else {
+                panic!("expected a text request");
+            };
+            let request: Value = serde_json::from_str(line.as_str()).unwrap();
+            assert_eq!(
+                request.get("method").and_then(Value::as_str),
+                Some("initialize")
+            );
+            assert!(request.get("jsonrpc").is_none());
+            socket
+                .send(Message::Text(
+                    json!({"id": 1, "result": {"platformFamily": "unix"}})
+                        .to_string()
+                        .into(),
+                ))
+                .unwrap();
+        });
+
+        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let alive = Arc::new(AtomicBool::new(true));
+        let outbound = connect_control(&socket_path, pending.clone(), alive.clone()).unwrap();
+        let (tx, rx) = mpsc::channel();
+        pending.lock().unwrap().insert(1, tx);
+        outbound
+            .send(
+                request_payload(
+                    1,
+                    "initialize",
+                    json!({"clientInfo": {"name": "santree", "version": "test"}}),
+                )
+                .to_string(),
+            )
+            .unwrap();
+        let response = rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        assert_eq!(
+            response.get("platformFamily").and_then(Value::as_str),
+            Some("unix")
+        );
+        alive.store(false, Ordering::Release);
+        server.join().unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn websocket_handshake_has_a_deadline() {
+        let base = short_socket_test_dir("santree-codex-stall");
+        fs::create_dir(&base).unwrap();
+        let socket_path = base.join("codex.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        });
+
+        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let alive = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+        assert!(connect_control_with_timeout(
+            &socket_path,
+            pending,
+            alive,
+            Duration::from_millis(25),
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        server.join().unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn runtime_socket_path_stays_below_unix_platform_limits() {
+        let deep_data_dir = PathBuf::from("/Users").join("x".repeat(256));
+        let runtime = CodexRuntime::new(&deep_data_dir);
+        assert!(runtime.socket.as_os_str().len() < 104);
+    }
+
+    #[test]
+    fn managed_children_are_reaped_on_termination() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "sleep 10"])
+            .spawn()
+            .unwrap();
+        let mut child = ManagedChild(child);
+        child.terminate();
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    #[ignore = "requires SANTREE_CODEX_BIN pointing to an installed Codex CLI"]
+    fn installed_codex_control_handshake() {
+        let executable = std::env::var("SANTREE_CODEX_BIN").expect("set SANTREE_CODEX_BIN");
+        let base = short_socket_test_dir("santree-codex-installed");
+        fs::create_dir(&base).unwrap();
+        let runtime = CodexRuntime::new(&base);
+        let account = runtime.account(&executable).unwrap();
+        assert!(runtime.health(Some(executable.clone())).running);
+        assert!(!runtime.models(&executable).unwrap().is_empty());
+        if account.connected {
+            runtime.rate_limits(&executable).unwrap();
+        }
+        drop(runtime);
+        let _ = fs::remove_dir_all(base);
+    }
 
     #[test]
     fn parses_additive_model_payload() {
