@@ -7,6 +7,16 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2-beta.9 — 2026-08-24
+
+- Fixed new Codex terminals failing to attach with a request-rejected error.
+  Threads are now made durable before the interactive Codex terminal resumes
+  them, and unusable thread IDs created by beta.8 recover automatically.
+- Codex reasoning-effort menus now come from each model's live capabilities,
+  including model-specific defaults and options such as ultra where supported.
+- Fixed ended AI-review sessions collapsing against the left edge instead of
+  filling the review pane.
+
 ## 0.1.2-beta.7 — 2026-08-24
 
 - Fixed Codex settings and agent launches failing with “Codex initialize timed
