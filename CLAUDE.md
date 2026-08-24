@@ -48,7 +48,8 @@ the checkout through the shared `worktree_*` commands as the repo root
 - **Frontend:** React 19, Vite 8, TanStack Router + Query v5, Tailwind v4 (CSS-first,
   no `tailwind.config`), xterm.js, react-markdown. Biome for lint+format. Vitest.
 - **Cargo workspace:** `src-tauri` (thin Tauri adapter) + `crates/core` (pure domain
-  + static config, no Tauri dep) + `crates/pty` (PTY manager, Tauri-agnostic).
+  + static config, no Tauri dep) + `crates/pty` (PTY manager, Tauri-agnostic) +
+  `crates/hook` (the bundled `santree-hook`: Claude hooks, status line, MCP server).
 
 ## Architecture & data flow
 
@@ -77,14 +78,23 @@ React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
 
 ```
 crates/core/src/   domain.rs (types) · config.rs (static config/defaults) · linear.rs
-                   (mapping) · layout.rs (dagre-free graph helpers) · lib.rs
+                   (mapping) · layout.rs (dagre-free graph helpers) · diff_index.rs
+                   (a PR's commentable hunk spans; written by the app, read by the
+                   AI review's MCP server) · lib.rs
 crates/pty/src/    lib.rs — PtyManager: spawn real process behind a PTY, stream bytes
+crates/hook/src/   main.rs — the bundled `santree-hook`: Claude's session-state
+                   hooks + statusLine, and `mcp` mode (mcp.rs · review_tools.rs),
+                   the AI review's draft-comment tools
 src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin wrappers)
                    · linear.rs (GraphQL + OAuth + token store) · db.rs (sqlx pool +
                    migrations) · repo.rs · settings.rs · terminal.rs · stream.rs
                    (background command runs behind a PTY → read-only log panes)
                    · hooks.rs (the `--settings` file EVERY santree `claude` launch
-                   layers on: session-state hooks, statusLine, English tutor)
+                   layers on: session-state hooks, statusLine, English tutor; plus
+                   the AI review's deny/allow variant and its `--mcp-config`)
+                   · review_ai.rs (both review prompts + the AI-review launch)
+                   · review_drafts.rs (the AI's drafts, and the ONE path that puts
+                   them on GitHub — on a click, into the user's pending review)
                    · english_tutor.rs (opt-in writing coach: hook + practice log
                    + on-demand analysis)
 src-tauri/migrations/  0001_init … (SQLite schema; applied on startup)
@@ -129,6 +139,11 @@ src/
 - **App-owned secrets** (Linear tokens) belong in the OS keychain, not plaintext
   SQLite. Don't add new plaintext-secret columns. (Distinct from `COMPLIANCE.md`,
   which bars *agent-CLI* creds — this is our own OAuth.)
+- **Nothing an agent writes reaches GitHub without a click.** The AI review's MCP
+  tools write santree's own rows; `review_drafts::publish` is the only path out,
+  and it runs on a user action into their pending review. A new command that lets
+  an agent-authored value reach a `github.rs` write is the line this feature exists
+  to hold.
 
 ## Commands
 

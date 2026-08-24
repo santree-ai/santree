@@ -17,13 +17,13 @@ use tauri_specta::Event;
 use santree_core::{
     config,
     domain::{
-        AgentAuth, AgentDef, AgentKind, AgentSession, AnalysisScope, BinaryStatus, ChangedFile,
-        CheckLog, EnglishAnalysis, EnglishLog, FileSource, GithubStatus, LegacyCliMigration,
-        LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr, Opener, PrDetail, PrDraft,
-        PrLabel, PromptInfo, PromptPreview, Repo, ReviewBrief, ReviewEvent, ReviewInbox,
-        ReviewTarget, Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings, TabKind,
-        Task, TicketRef, TriageDetail, TriageSchedule, TriageTicket, UsageReport, ViewedMarks,
-        Worktree, WorktreePr, WorktreeTab,
+        AgentAuth, AgentDef, AgentKind, AgentSession, AiReviewLaunch, AnalysisScope, BinaryStatus,
+        ChangedFile, CheckLog, EnglishAnalysis, EnglishLog, FileSource, GithubStatus,
+        LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr, Opener,
+        PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewBrief, ReviewDraft,
+        ReviewEvent, ReviewInbox, ReviewPublishOutcome, ReviewTarget, Reviewer, ScriptInfo,
+        SessionState, SessionUsageLive, Settings, TabKind, Task, TicketRef, TriageDetail,
+        TriageSchedule, TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreePr, WorktreeTab,
     },
 };
 
@@ -41,6 +41,7 @@ use crate::pr;
 use crate::pricing;
 use crate::repo;
 use crate::review_ai;
+use crate::review_drafts;
 use crate::reviewed;
 use crate::reviews;
 use crate::session;
@@ -684,17 +685,83 @@ pub async fn pr_review_brief(
     Ok(review_ai::cached_brief(&db, &pr_repo, number).await?)
 }
 
-/// Generate (and cache) the AI review brief for a PR. The expensive one — a
-/// headless model call over the PR's diff, taking tens of seconds. Read-only: it
-/// produces a document and nothing else.
+/// Resolve everything an **AI review** session launches with: its rendered prompt,
+/// its `--settings` file, and the `--mcp-config` registering santree's review
+/// tools for this PR. One command for all three — the terminal seed is built once,
+/// so a flag that resolves late is silently dropped (see [`review_ai::launch`]).
 #[tauri::command]
 #[specta::specta]
-pub async fn generate_pr_review_brief(
+pub async fn ai_review_launch(
+    app: AppHandle,
     repo: String,
     target: ReviewTarget,
     db: State<'_, Db>,
-) -> CmdResult<ReviewBrief> {
-    Ok(review_ai::generate_brief(&db, &repo, &target).await?)
+) -> CmdResult<AiReviewLaunch> {
+    let tutor = tutor_instruction(&app).await;
+    Ok(review_ai::launch(&app, &db, &repo, &target, tutor.as_deref()).await?)
+}
+
+/// The AI review's draft comments for a PR — written by its MCP tools, held in
+/// santree until the user publishes them. Empty until an AI review has run.
+#[tauri::command]
+#[specta::specta]
+pub async fn review_drafts(
+    pr_repo: String,
+    number: u32,
+    db: State<'_, Db>,
+) -> CmdResult<Vec<ReviewDraft>> {
+    Ok(review_drafts::list(&db, &pr_repo, number).await?)
+}
+
+/// Rewrite a draft the user edited before sending it. Local only — nothing has
+/// reached GitHub at this point.
+#[tauri::command]
+#[specta::specta]
+pub async fn update_review_draft(
+    id: String,
+    body: String,
+    suggestion: Option<String>,
+    db: State<'_, Db>,
+) -> CmdResult<ReviewDraft> {
+    Ok(review_drafts::update(&db, &id, &body, suggestion.as_deref()).await?)
+}
+
+/// Drop one draft the user doesn't want to send.
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_review_draft(id: String, db: State<'_, Db>) -> CmdResult<()> {
+    Ok(review_drafts::delete(&db, &id).await?)
+}
+
+/// Drop every draft on a PR — "I've read these and none are worth sending", which
+/// is a real outcome of an AI review.
+#[tauri::command]
+#[specta::specta]
+pub async fn clear_review_drafts(
+    pr_repo: String,
+    number: u32,
+    db: State<'_, Db>,
+) -> CmdResult<u32> {
+    Ok(review_drafts::clear(&db, &pr_repo, number).await?)
+}
+
+/// Send the named drafts to GitHub as comments in the user's pending review,
+/// deleting each one that lands. **This is the user acting** — the only step in the
+/// whole AI-review flow that leaves the machine, and it happens on a click.
+///
+/// Takes only the PR: the commit the comments anchor to and the review they join
+/// are read from GitHub inside, so neither can be handed in. Reports how many
+/// actually went — it stops at the first failure, and whatever didn't go is still a
+/// draft (see [`review_drafts::publish`]).
+#[tauri::command]
+#[specta::specta]
+pub async fn publish_review_drafts(
+    pr_repo: String,
+    number: u32,
+    ids: Vec<String>,
+    db: State<'_, Db>,
+) -> CmdResult<ReviewPublishOutcome> {
+    Ok(review_drafts::publish(&db, &pr_repo, number, &ids).await?)
 }
 
 /// The merge queue for the active `repo`'s default branch — the ordered list of
@@ -739,14 +806,18 @@ pub async fn set_pr_labels(
 /// row. Posted immediately, or held in the viewer's pending review when
 /// `pending` is set ("Start a review" / "Add to review").
 ///
-/// Every write path here is the **user** acting. The AI review surfaces get no
-/// command that posts anything (and launch under a deny list) — comments,
-/// approvals and change-requests go out under the user's name, so the user
-/// writes them.
+/// Every write path here is the **user** acting. The AI review session cannot post
+/// anything: it writes drafts into santree's own table through its MCP tools, and
+/// the user publishes the ones they keep (`publish_review_drafts`). Comments,
+/// approvals and change-requests go out under the user's name, so the user decides
+/// what they say.
 #[tauri::command]
 #[specta::specta]
 pub async fn add_pr_inline_comment(comment: NewInlineComment) -> CmdResult<()> {
-    Ok(reviews::add_inline_comment(comment).await?)
+    // The new review's id (when this opened one) matters only to a batch publish;
+    // a single comment from the composer refetches the PR anyway.
+    reviews::add_inline_comment(comment).await?;
+    Ok(())
 }
 
 /// The signed-in GitHub user's login, for the review composer's header avatar.

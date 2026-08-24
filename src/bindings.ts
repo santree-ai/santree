@@ -346,11 +346,40 @@ export const commands = {
 	generatedAtMs: number | null,
 } | null, CmdError>(__TAURI_INVOKE("pr_review_brief", { prRepo, number })),
 	/**
-	 *  Generate (and cache) the AI review brief for a PR. The expensive one — a
-	 *  headless model call over the PR's diff, taking tens of seconds. Read-only: it
-	 *  produces a document and nothing else.
+	 *  Resolve everything an **AI review** session launches with: its rendered prompt,
+	 *  its `--settings` file, and the `--mcp-config` registering santree's review
+	 *  tools for this PR. One command for all three — the terminal seed is built once,
+	 *  so a flag that resolves late is silently dropped (see [`review_ai::launch`]).
 	 */
-	generatePrReviewBrief: (repo: string, target: ReviewTarget) => typedError<ReviewBrief, CmdError>(__TAURI_INVOKE("generate_pr_review_brief", { repo, target })),
+	aiReviewLaunch: (repo: string, target: ReviewTarget) => typedError<AiReviewLaunch, CmdError>(__TAURI_INVOKE("ai_review_launch", { repo, target })),
+	/**
+	 *  The AI review's draft comments for a PR — written by its MCP tools, held in
+	 *  santree until the user publishes them. Empty until an AI review has run.
+	 */
+	reviewDrafts: (prRepo: string, number: number) => typedError<ReviewDraft[], CmdError>(__TAURI_INVOKE("review_drafts", { prRepo, number })),
+	/**
+	 *  Rewrite a draft the user edited before sending it. Local only — nothing has
+	 *  reached GitHub at this point.
+	 */
+	updateReviewDraft: (id: string, body: string, suggestion: string | null) => typedError<ReviewDraft, CmdError>(__TAURI_INVOKE("update_review_draft", { id, body, suggestion })),
+	/**  Drop one draft the user doesn't want to send. */
+	deleteReviewDraft: (id: string) => typedError<null, CmdError>(__TAURI_INVOKE("delete_review_draft", { id })),
+	/**
+	 *  Drop every draft on a PR — "I've read these and none are worth sending", which
+	 *  is a real outcome of an AI review.
+	 */
+	clearReviewDrafts: (prRepo: string, number: number) => typedError<number, CmdError>(__TAURI_INVOKE("clear_review_drafts", { prRepo, number })),
+	/**
+	 *  Send the named drafts to GitHub as comments in the user's pending review,
+	 *  deleting each one that lands. **This is the user acting** — the only step in the
+	 *  whole AI-review flow that leaves the machine, and it happens on a click.
+	 * 
+	 *  Takes only the PR: the commit the comments anchor to and the review they join
+	 *  are read from GitHub inside, so neither can be handed in. Reports how many
+	 *  actually went — it stops at the first failure, and whatever didn't go is still a
+	 *  draft (see [`review_drafts::publish`]).
+	 */
+	publishReviewDrafts: (prRepo: string, number: number, ids: string[]) => typedError<ReviewPublishOutcome, CmdError>(__TAURI_INVOKE("publish_review_drafts", { prRepo, number, ids })),
 	/**
 	 *  The merge queue for the active `repo`'s default branch — the ordered list of
 	 *  PRs waiting to merge, so the user can see where their own PRs sit. `None` when
@@ -383,10 +412,11 @@ export const commands = {
 	 *  row. Posted immediately, or held in the viewer's pending review when
 	 *  `pending` is set ("Start a review" / "Add to review").
 	 * 
-	 *  Every write path here is the **user** acting. The AI review surfaces get no
-	 *  command that posts anything (and launch under a deny list) — comments,
-	 *  approvals and change-requests go out under the user's name, so the user
-	 *  writes them.
+	 *  Every write path here is the **user** acting. The AI review session cannot post
+	 *  anything: it writes drafts into santree's own table through its MCP tools, and
+	 *  the user publishes the ones they keep (`publish_review_drafts`). Comments,
+	 *  approvals and change-requests go out under the user's name, so the user decides
+	 *  what they say.
 	 */
 	addPrInlineComment: (comment: NewInlineComment) => typedError<null, CmdError>(__TAURI_INVOKE("add_pr_inline_comment", { comment })),
 	/**
@@ -842,6 +872,7 @@ export const commands = {
 
 /** Events */
 export const events = {
+	reviewAiChanged: makeEvent<ReviewAiChanged>("review-ai-changed"),
 	sessionStateChanged: makeEvent<SessionStateChanged>("session-state-changed"),
 	sessionUsageChanged: makeEvent<SessionUsageChanged>("session-usage-changed"),
 	updateProgress: makeEvent<UpdateProgress>("update-progress"),
@@ -955,6 +986,29 @@ export type AgentState =
 "idle" | 
 /**  The session ended (SessionEnd). */
 "exited";
+
+/**
+ *  The three files an AI-review session launches with, resolved in one call so a
+ *  launch can't race past any of them.
+ * 
+ *  The seed is built once, at PTY creation: a flag that arrives late is silently
+ *  dropped, and a session missing its MCP config can't write drafts while one
+ *  missing its settings could post to GitHub. One command, all three, or none.
+ */
+export type AiReviewLaunch = {
+	/**
+	 *  The rendered `pr-review` prompt, seeded as `Read <path> …` (a whole PR diff
+	 *  is far too large to type into a shell).
+	 */
+	promptPath: string,
+	/**
+	 *  `--settings`: santree's hooks and status line, the review deny list, and the
+	 *  grant for the santree-review tools.
+	 */
+	settingsPath: string,
+	/**  `--mcp-config`: the santree-review server, scoped by argv to this PR. */
+	mcpConfigPath: string,
+};
 
 /**  How much of the log an analysis run covers. */
 export type AnalysisScope = 
@@ -1807,6 +1861,17 @@ export type Repo = {
 };
 
 /**
+ *  "An AI-review session wrote something" — a draft review comment or a review
+ *  brief, through the `santree-review` MCP server (which is the same binary, in
+ *  `mcp` mode). The frontend refetches the drafts and the brief, so a comment the
+ *  agent writes appears in the diff while the user is looking at it.
+ * 
+ *  Empty like its siblings: the tables are small, and the signal's arrival is the
+ *  whole message.
+ */
+export type ReviewAiChanged = Record<string, never>;
+
+/**
  *  An AI-generated orientation for a pull request: what it does, what order to
  *  read it in, and where to look hardest.
  * 
@@ -1845,6 +1910,50 @@ export type ReviewDecision = "Approved" | "ChangesRequested" |
 "ReviewRequired" | 
 /**  No review has been requested/required (or GitHub returned null). */
 "None";
+
+/**
+ *  One AI-written draft review comment — a "santree draft".
+ * 
+ *  Written only by the `santree-review` MCP server an AI-review session runs
+ *  with, and held in santree's own database: GitHub never sees it until the user
+ *  adds it to their pending review, which deletes the row. The user can edit,
+ *  re-anchor or delete it first, because the comment goes out under their name.
+ * 
+ *  `line`/`start_line` follow [`NewInlineComment`]'s convention exactly (numbered
+ *  within the side named by `on_right`), so publishing is a straight mapping.
+ *  `PartialEq` but not `Eq` — the timestamps are `f64` (Specta forbids 64-bit
+ *  ints), see [`ReviewBrief::generated_at_ms`].
+ */
+export type ReviewDraft = {
+	/**  Opaque row key minted by the MCP server. Never a path or a URL component. */
+	id: string,
+	/**  "owner/name" — the PR's own repo. */
+	prRepo: string,
+	prNumber: number,
+	/**
+	 *  The head the draft was written against. When it no longer matches the PR's
+	 *  head, the UI flags the draft and publishing refuses it: the line numbers
+	 *  describe code that has since moved.
+	 */
+	headSha: string,
+	path: string,
+	line: number,
+	/**
+	 *  First line of a multi-line range; `line` is then its last. `None` for the
+	 *  single-line case, which is just as normal a comment.
+	 */
+	startLine: number | null,
+	onRight: boolean,
+	body: string,
+	/**
+	 *  The exact replacement for the covered lines, without a fence — stored apart
+	 *  from `body` so the two can be edited independently. The ```suggestion block
+	 *  is composed once, at publish time.
+	 */
+	suggestion: string | null,
+	createdAtMs: number | null,
+	updatedAtMs: number | null,
+};
 
 /**
  *  How a review is submitted — GitHub's three review verdicts. Chosen explicitly
@@ -1929,6 +2038,30 @@ export type ReviewPr = {
 	headCommittedAt: string,
 	/**  The viewer's own latest review, when they've submitted one. */
 	viewerReview: ViewerReview | null,
+};
+
+/**  The draft a batch publish stopped on, and why. */
+export type ReviewPublishFailure = {
+	draftId: string,
+	error: string,
+};
+
+/**
+ *  What a batch publish actually did.
+ * 
+ *  Publishing stops at the first failure and reports it: `published` is how many
+ *  really reached GitHub, and every draft that didn't is still a draft. A count
+ *  with a failure attached is the honest answer — "2 of 5 went" is actionable,
+ *  where a bare error would leave the user guessing which half landed.
+ */
+export type ReviewPublishOutcome = {
+	published: number,
+	/**
+	 *  The pending review the drafts landed in — the one that was already open, or
+	 *  the one the first draft opened.
+	 */
+	reviewId: string | null,
+	failed: ReviewPublishFailure | null,
 };
 
 /**

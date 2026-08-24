@@ -23,7 +23,7 @@ import { ClaudeSparkIcon } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
 import { EdgeResizeHandle, Tabs } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
-import { useAddPrConversationComment, usePrDetail } from "../../lib/queries";
+import { useAddPrConversationComment, usePrDetail, useReviewDrafts } from "../../lib/queries";
 import { isoMs } from "../../lib/relativeTime";
 import { splitRepoSlug } from "../../lib/repo";
 import { useEdgeResize } from "../../lib/useEdgeResize";
@@ -32,6 +32,7 @@ import { CommentComposer } from "./CommentComposer";
 import { useReviewsModel } from "./model";
 import { PrThreadCard } from "./PrThreadCard";
 import { ReviewBriefSection } from "./ReviewBriefSection";
+import { ReviewDraftCard } from "./ReviewDraftCard";
 import { ReviewIssuePane } from "./ReviewIssuePane";
 import { ticketIdFor } from "./ticket";
 
@@ -64,6 +65,7 @@ export function PrInfoPanel({
   } = useReviewsModel();
   const [owner, name] = splitRepoSlug(pr.repo);
   const { data: detail } = usePrDetail(owner, name, pr.number);
+  const { data: drafts } = useReviewDrafts(pr.repo, pr.number);
   const ticketId = ticketIdFor(pr);
 
   const resize = useEdgeResize({
@@ -78,6 +80,10 @@ export function PrInfoPanel({
 
   const files = new Set((detail?.files ?? []).map((f) => f.path));
   const orphanThreads = (detail?.threads ?? []).filter((t) => !files.has(t.path));
+  // A draft on a file the diff doesn't list at all (GitHub caps the file list, and
+  // a push can drop a file). It has no card to sit under, so it surfaces here
+  // rather than silently not existing.
+  const orphanDrafts = (drafts ?? []).filter((d) => !files.has(d.path));
 
   return (
     // Hidden rather than unmounted when collapsed: the Ask AI tab owns a live PTY
@@ -123,6 +129,27 @@ export function PrInfoPanel({
               </div>
             </div>
           )}
+          {orphanDrafts.length > 0 && (
+            <div className="mt-6 border-t border-hairline pt-4">
+              <SidebarLabel>AI drafts on other files</SidebarLabel>
+              <div className="overflow-hidden rounded-lg border border-line-2">
+                {orphanDrafts.map((d) => (
+                  <ReviewDraftCard
+                    key={d.id}
+                    draft={d}
+                    target={{
+                      prRepo: pr.repo,
+                      number: pr.number,
+                      prId: pr.id,
+                      headSha: detail?.headSha ?? "",
+                      pendingReviewId: detail?.pendingReviewId ?? null,
+                    }}
+                    stale={!!detail?.headSha && d.headSha !== detail.headSha}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
           <Conversation pr={pr} comments={detail?.comments ?? []} />
         </div>
       )}
@@ -135,7 +162,11 @@ export function PrInfoPanel({
 
       {aiOpened && (
         <div className={tab === "ai" ? "flex min-h-0 flex-1" : "hidden"}>
-          <AiReviewPane pr={pr} />
+          {/* `visible` releases the inline terminal slot when this tab isn't the
+              one on screen. There's one slot app-wide and the AI review's pane is
+              a second claimant, so a hidden-but-mounted host holding it would
+              leave whichever is showing blank. */}
+          <AiReviewPane pr={pr} visible={tab === "ai" && !infoCollapsed} />
         </div>
       )}
     </div>

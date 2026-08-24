@@ -4303,6 +4303,7 @@ name = "santree-hook"
 version = "0.1.2-beta.4"
 dependencies = [
  "santree-core",
+ "serde",
  "serde_json",
  "sqlx",
  "tokio",

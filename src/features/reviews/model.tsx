@@ -52,6 +52,14 @@ interface ReviewsModel {
    *  the second time. */
   fileFocus: FileFocus | null;
   focusFile: (path: string, line?: number | null) => void;
+  /** Bumped by {@link ReviewsModel.openAiReview}. A nonce rather than a boolean so
+   *  asking twice re-opens the tab instead of being a silent no-op. */
+  aiReviewRequest: number;
+  /** "Review this PR with AI" — opens the main panel's AI review tab, launching
+   *  the session on first open. Lives here because the ask comes from the rail's
+   *  brief section and the tab it opens is in the other column: the same gap
+   *  {@link ReviewsModel.fileFocus} crosses. */
+  openAiReview: () => void;
   activeId: string | null;
   setActive: (id: string | null) => void;
   /** The currently selected PR, or null. */
@@ -145,10 +153,15 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
   // would scroll the next PR to a path that may not even be in it. Reset during
   // render (React's adjust-state-on-prop-change pattern) rather than in an effect,
   // so the diff never sees the previous PR's focus for a frame.
+  const [aiReviewRequest, setAiReviewRequest] = useState(0);
+  const openAiReview = useCallback(() => setAiReviewRequest((n) => n + 1), []);
   const [focusOwner, setFocusOwner] = useState(activeId);
   if (focusOwner !== activeId) {
     setFocusOwner(activeId);
     setFileFocus(null);
+    // Same reason: a pending ask must not open the *next* PR's review tab and
+    // spend a checkout on a PR the user only clicked past.
+    setAiReviewRequest(0);
   }
 
   // Select the first PR once the inbox loads, and re-select when the current
@@ -184,6 +197,8 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
       ticketFor,
       fileFocus,
       focusFile,
+      aiReviewRequest,
+      openAiReview,
       activeId,
       setActive,
       active: allPrs.find((p) => p.id === activeId) ?? null,
@@ -206,6 +221,8 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
       ticketFor,
       fileFocus,
       focusFile,
+      aiReviewRequest,
+      openAiReview,
       activeId,
       setActive,
       showMergeQueue,

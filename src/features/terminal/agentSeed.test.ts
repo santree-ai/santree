@@ -72,6 +72,18 @@ describe("agentSessionSeed", () => {
     );
   });
 
+  it("adds --mcp-config on both fresh and resume, right after --settings", () => {
+    const mcpFlag = "--mcp-config '/data/mcp/acme-web-42.mcp.json'";
+    const settingsFlag = "--settings '/data/claude-hooks-ai-review.json'";
+    expect(agentSessionSeed(fresh, "claude", { prompt: "go", settingsFlag, mcpFlag })).toBe(
+      "exec 'claude' --settings '/data/claude-hooks-ai-review.json' --mcp-config '/data/mcp/acme-web-42.mcp.json' --session-id 'sess-1' 'go'",
+    );
+    // A resumed AI review still needs its tools, or it has nowhere to write.
+    expect(agentSessionSeed(resume, "claude", { settingsFlag, mcpFlag })).toBe(
+      "exec 'claude' --settings '/data/claude-hooks-ai-review.json' --mcp-config '/data/mcp/acme-web-42.mcp.json' --resume 'sess-1'",
+    );
+  });
+
   it("adds --chrome on both fresh and resume, and omits it when off", () => {
     expect(
       agentSessionSeed(fresh, "claude", { prompt: "go", chrome: true, remoteControl: "AK-9" }),

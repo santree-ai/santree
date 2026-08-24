@@ -17,7 +17,7 @@ import type { AgentEntry } from "./registry";
 export function useOpenAgent(): (entry: AgentEntry) => void {
   const navigate = useNavigate();
   const { activeRepo, setActiveRepo } = useApp();
-  const { requestTreeFocus, requestTriageFocus } = useAppUi();
+  const { requestTreeFocus, requestTriageFocus, requestReviewFocus } = useAppUi();
 
   return useCallback(
     (entry: AgentEntry) => {
@@ -35,6 +35,17 @@ export function useOpenAgent(): (entry: AgentEntry) => void {
           if (entry.origin.ticket) requestTriageFocus(entry.origin.ticket);
           navigate({ to: "/triage" });
           return;
+        case "review":
+        case "ai-review":
+          // Reviews selects a PR by its URL (the same handoff a PR pill uses).
+          // Which of the two sessions it is isn't addressable cross-view, so this
+          // lands on the PR and its last-used tab.
+          if (entry.origin.pr) {
+            const [repo, number] = entry.origin.pr.split("#");
+            if (repo && number) requestReviewFocus(`https://github.com/${repo}/pull/${number}`);
+          }
+          navigate({ to: "/reviews" });
+          return;
         case "dev":
           navigate({ to: "/dev" });
           return;
@@ -44,6 +55,6 @@ export function useOpenAgent(): (entry: AgentEntry) => void {
         // unreachable from the UI — it stays exhaustive rather than silent.
       }
     },
-    [navigate, activeRepo, setActiveRepo, requestTreeFocus, requestTriageFocus],
+    [navigate, activeRepo, setActiveRepo, requestTreeFocus, requestTriageFocus, requestReviewFocus],
   );
 }

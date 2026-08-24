@@ -14,7 +14,6 @@ vi.mock("../../../lib/queries", () => ({
   INVESTIGATE_EFFORT_KEY: "investigate.effort",
   INVESTIGATE_MODEL_KEY: "investigate.model",
   INVESTIGATE_REMOTE_CONTROL_KEY: "investigate.remoteControl",
-  REVIEW_BRIEF_MODEL_KEY: "review.briefModel",
   REVIEW_EFFORT_KEY: "review.effort",
   REVIEW_MODEL_KEY: "review.model",
   TRIAGE_GOOD_CITIZEN_KEY: "triage.goodCitizen",
@@ -78,13 +77,12 @@ describe("app-scope Reviews settings", () => {
     expect(screen.queryByText("Agent")).not.toBeInTheDocument();
   });
 
-  it("configures the session and the brief separately", () => {
+  it("configures one session, since both review sessions share it", () => {
+    // Ask AI and the AI review read the same PR and differ only in what they're
+    // asked to produce, so a second model picker would be two controls for one
+    // decision.
     render(<ReviewActionSection />);
-    expect(screen.getByText("Ask AI session")).toBeInTheDocument();
-    expect(screen.getByText("Review brief")).toBeInTheDocument();
-    // Session: model + effort. Brief: model only — it's one headless call, with no
-    // effort or start mode to set.
-    expect(screen.getAllByText("Model")).toHaveLength(2);
+    expect(screen.getAllByText("Model")).toHaveLength(1);
     expect(screen.getAllByText("Effort")).toHaveLength(1);
   });
 });

@@ -270,7 +270,11 @@ async fn write_token() -> Result<String> {
 /// Leave an inline comment on a PR line: posted now, or held in the viewer's
 /// pending review when `pending` is set (GitHub's "Start a review" / "Add to
 /// review"). The user's own click, always — see the note in `github.rs`.
-pub async fn add_inline_comment(mut c: NewInlineComment) -> Result<()> {
+///
+/// Returns the id of the pending review this *opened*, and `None` otherwise, so a
+/// caller posting several comments in a row can put the rest into the same review
+/// (see `review_drafts::publish`).
+pub async fn add_inline_comment(mut c: NewInlineComment) -> Result<Option<String>> {
     let token = write_token().await?;
     let (owner, name) = github::split_slug(&c.pr_repo)?;
     if c.body.trim().is_empty() {
@@ -283,11 +287,15 @@ pub async fn add_inline_comment(mut c: NewInlineComment) -> Result<()> {
         c.start_line = None;
     }
     if !c.pending {
-        return github::add_review_comment(&token, owner, name, &c).await;
+        github::add_review_comment(&token, owner, name, &c).await?;
+        return Ok(None);
     }
     match c.review_id.as_deref() {
-        Some(review) => github::add_pending_review_comment(&token, review, &c).await,
-        None => github::start_review(&token, &c).await,
+        Some(review) => {
+            github::add_pending_review_comment(&token, review, &c).await?;
+            Ok(None)
+        }
+        None => github::start_review(&token, &c).await.map(Some),
     }
 }
 

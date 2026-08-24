@@ -12,7 +12,6 @@ import {
   INVESTIGATE_MODEL_KEY,
   INVESTIGATE_REMOTE_CONTROL_KEY,
   PERMISSION_MODES,
-  REVIEW_BRIEF_MODEL_KEY,
   REVIEW_EFFORT_KEY,
   REVIEW_MODEL_KEY,
   TRIAGE_GOOD_CITIZEN_KEY,
@@ -31,14 +30,7 @@ import {
   WORK_QUEUE_KEY,
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
-import {
-  Field,
-  Heading,
-  HeadlessModelField,
-  OverrideSelect,
-  SELECT_CLASS,
-  ToggleRow,
-} from "../widgets";
+import { Field, Heading, OverrideSelect, SELECT_CLASS, ToggleRow } from "../widgets";
 
 /** Describes one configurable agent action: which setting keys it stores. App vs
  * repo scope is expressed by the descriptor's keys plus the `inherits` flag the
@@ -89,46 +81,12 @@ export function ReviewActionSection({ repo }: { repo?: string }) {
     <>
       <Heading
         title="Reviews"
-        subtitle="How the Reviews tab's AI runs. It reads and explains; it never comments, approves, or pushes on your behalf. Edit its prompts in Settings → Prompts."
+        subtitle="How the Reviews tab's AI sessions run. Ask AI reads and explains; AI review also writes drafts you can edit. Neither can comment or approve: nothing reaches GitHub until you add it to your own review. Edit their prompts in Settings → Prompts."
       />
-      <div className="space-y-3.5">
-        <div>
-          <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
-            Ask AI session
-          </div>
-          <ActionConfig descriptor={REVIEW} repo={repo} />
-        </div>
-        <div>
-          <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
-            Review brief
-          </div>
-          <BriefModelCard repo={repo} />
-        </div>
-      </div>
+      <ActionConfig descriptor={REVIEW} repo={repo} />
     </>
   );
 }
-
-/** The brief's model picker. Its own card rather than a third `ActionConfig`
- *  field: the brief is a single headless call with no effort or start mode, and
- *  padding it with inert controls would suggest otherwise. */
-function BriefModelCard({ repo }: { repo?: string }) {
-  return (
-    <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
-      <HeadlessModelField
-        label="Model"
-        hint="Reads the whole diff once to produce the reading order and watch-outs. Worth a capable model. A cheap one returns a plausible order that isn't grounded in the code, which is worse than none because you'd trust it. Defaults to Sonnet."
-        settingKey={REVIEW_BRIEF_MODEL_KEY}
-        defaultModel={DEFAULT_BRIEF_MODEL}
-        forRepo={repo}
-      />
-    </div>
-  );
-}
-
-/** Mirrors `review_ai.rs`'s `DEFAULT_BRIEF_MODEL` — shown as the picker's value
- *  when nothing has been chosen, so the UI doesn't imply "no model". */
-const DEFAULT_BRIEF_MODEL = "sonnet";
 
 /** The Triage Investigation action. Triage is global: the enable switch + queue
  * prefs live at the app level; a repo only overrides which agent/skill/model the

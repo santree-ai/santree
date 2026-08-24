@@ -35,6 +35,7 @@ export function CommentComposer({
   primary,
   secondary,
   suggestion,
+  initialValue = "",
   placeholder = "Leave a comment…",
   autoFocus = false,
   rows = 3,
@@ -52,6 +53,9 @@ export function CommentComposer({
    *  suggest against (a reply, the PR conversation box), and by the diff
    *  composer when the patch can't produce every line of the range. */
   suggestion?: string[];
+  /** Text the box opens with — editing something that already exists rather than
+   *  writing something new. */
+  initialValue?: string;
   placeholder?: string;
   autoFocus?: boolean;
   rows?: number;
@@ -59,7 +63,7 @@ export function CommentComposer({
   pending?: boolean;
   onCancel?: () => void;
 }) {
-  const [body, setBody] = useState("");
+  const [body, setBody] = useState(initialValue);
   const boxRef = useRef<HTMLTextAreaElement>(null);
   // Where to put the caret once React has committed a programmatic edit. Applied
   // from an effect rather than straight after `setBody`, because the textarea

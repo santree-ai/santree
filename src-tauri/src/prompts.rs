@@ -172,20 +172,32 @@ static PROMPT_DEFS: &[PromptDef] = &[
         ],
     },
     PromptDef {
-        name: "review-brief",
-        label: "Review brief",
-        description: "Generates the reading order, watch-outs and questions shown beside a pull request (headless). Must return JSON — edit the shape at your own risk.",
+        name: "pr-review",
+        label: "AI review",
+        description: "The agent's opening prompt for an AI review — the session that writes the brief and the draft comments through santree's own tools. Its hard-rules block is what keeps everything it produces inside santree until you publish it.",
         kind: PromptKind::Flow,
-        default: include_str!("../prompts/review-brief.njk"),
+        default: include_str!("../prompts/pr-review.njk"),
         variables: &[
             VarDoc { name: "pr_number", description: "The pull request number." },
             VarDoc { name: "pr_title", description: "The pull request title." },
             VarDoc { name: "pr_body", description: "The pull request description (markdown)." },
             VarDoc { name: "pr_author", description: "The author's GitHub login." },
-            VarDoc { name: "diff_stat", description: "One-line-per-file summary of the changed files." },
+            VarDoc { name: "base_ref", description: "The PR's base branch." },
+            VarDoc { name: "head_ref", description: "The PR's head branch." },
+            VarDoc { name: "head_sha", description: "The PR's head commit SHA." },
+            VarDoc { name: "diff_stat", description: "One-line summary of the changed files." },
             VarDoc { name: "diff", description: "The PR's full diff (capped; see `truncated`)." },
-            VarDoc { name: "truncated", description: "True when the diff was cut to fit the budget." },
+            VarDoc { name: "conversation", description: "The PR's existing comments and review threads." },
             VarDoc { name: "ticket_content", description: "The rendered Issue block for the PR's linked ticket. Empty when it has none." },
+            VarDoc {
+                name: "workspace",
+                description: "True when a checkout of the PR's head exists for the agent to read. False for a PR in a repo santree has no local clone of — the prompt then tells the agent it only has the diff.",
+            },
+            VarDoc { name: "truncated", description: "True when the diff was cut to fit the budget." },
+            VarDoc {
+                name: "existing_drafts",
+                description: "Drafts already saved for this PR (`path`, `line`, `body`), so a resumed review doesn't repeat itself.",
+            },
         ],
     },
     PromptDef {
@@ -807,6 +819,17 @@ pub async fn preview(
         commit_log => "abc1234 [AK-123] add login throttling",
         pr_template => "## Summary\n\n## Test plan",
         log_content => "FAILED test_login\n##[error]make test exited with code 1",
+        pr_number => 128,
+        pr_title => "Throttle failed logins",
+        pr_body => "Adds a per-account backoff after five failed attempts.",
+        pr_author => "octocat",
+        base_ref => "main",
+        head_ref => "santree/ak-123-login-throttling",
+        head_sha => "abc1234def5678",
+        conversation => "**octocat**:\nReady for another look.",
+        workspace => true,
+        truncated => false,
+        existing_drafts => Vec::<minijinja::Value>::new(),
         ..issue_context(&detail),
     };
 
@@ -997,6 +1020,41 @@ mod tests {
         )
         .unwrap();
         assert!(!out.contains("TICKET BODY THAT NO CALLER PASSES"));
+    }
+
+    #[test]
+    fn pr_review_names_its_tools_and_forbids_every_other_write() {
+        let out = render_default(
+            "pr-review",
+            context! {
+                pr_number => 7,
+                pr_title => "Add throttling",
+                diff => "@@ -1,2 +1,2 @@",
+                diff_stat => "src/auth.rs (modified, +8 -4)",
+                workspace => true,
+            },
+        )
+        .unwrap();
+        // The tools are the only output path, so the prompt has to name them.
+        assert!(out.contains("set_review_brief"));
+        assert!(out.contains("add_review_comment"));
+        assert!(out.contains("list_review_comments"));
+        // And the rule that makes the whole feature safe to leave running.
+        assert!(out.contains("Never write through any other tool"));
+        assert!(out.contains("<pull-request>"), "fences the untrusted diff");
+    }
+
+    #[test]
+    fn pr_review_says_when_there_is_no_checkout_to_read() {
+        // A PR in a repo santree has no clone of: the agent has the diff and
+        // nothing else, and guessing at the surrounding code is the failure mode.
+        let out = render_default(
+            "pr-review",
+            context! { pr_number => 7, pr_title => "x", workspace => false },
+        )
+        .unwrap();
+        assert!(out.contains("reason from the diff"), "{out}");
+        assert!(!out.contains("your working directory is a checkout"));
     }
 
     #[test]

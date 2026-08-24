@@ -46,6 +46,13 @@ export function agentSessionSeed(
      *  to wire up santree's session-state hooks. Applied on both fresh and
      *  resume launches so state is captured either way. */
     settingsFlag?: string;
+    /** Pre-quoted `--mcp-config '<path>'` registering santree's own MCP server for
+     *  this session (the AI review's draft-comment tools). Additive: the user's
+     *  own servers stay, so the session can still read a ticket or a design doc.
+     *  Applied on both fresh and resume launches, like `--settings` — a resumed
+     *  review that lost its tools would look like it was working and have nowhere
+     *  to put what it found. */
+    mcpFlag?: string;
     /** Launch with Claude's `--chrome` flag (browser control). A launch-time
      *  capability, so — like `--settings` — it's applied on both fresh and
      *  resume launches. */
@@ -78,14 +85,15 @@ export function agentSessionSeed(
   // ticket id, so the session is identifiable on the Remote Control web.
   const rc = opts.remoteControl ? `--remote-control ${shellQuote(opts.remoteControl)} ` : "";
   const settings = opts.settingsFlag ? `${opts.settingsFlag} ` : "";
+  const mcp = opts.mcpFlag ? `${opts.mcpFlag} ` : "";
   const chrome = opts.chrome ? "--chrome " : "";
   const perm = opts.permissionMode ? `--permission-mode ${shellQuote(opts.permissionMode)} ` : "";
   if (session.type === "resume") {
-    return `exec ${env}${bin} ${rc}${settings}${chrome}${perm}--resume ${shellQuote(session.sessionId)}`;
+    return `exec ${env}${bin} ${rc}${settings}${mcp}${chrome}${perm}--resume ${shellQuote(session.sessionId)}`;
   }
   const model = opts.modelFlag ? `${opts.modelFlag} ` : "";
   const effort = opts.effortFlag ? `${opts.effortFlag} ` : "";
   // No prompt (a manual Claude tab) ⇒ launch interactive and let the user type.
   const prompt = opts.prompt !== undefined ? ` ${shellQuote(opts.prompt)}` : "";
-  return `exec ${env}${bin} ${rc}${settings}${chrome}${perm}${model}${effort}--session-id ${shellQuote(session.sessionId)}${prompt}`;
+  return `exec ${env}${bin} ${rc}${settings}${mcp}${chrome}${perm}${model}${effort}--session-id ${shellQuote(session.sessionId)}${prompt}`;
 }

@@ -17,7 +17,7 @@
  *     user can't see isn't one they can rely on.
  */
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 
 import type { ReviewPr, ReviewTarget } from "../../bindings";
 import { ClaudeSparkIcon, TrashIcon, WarningIcon } from "../../components/icons";
@@ -37,10 +37,10 @@ import {
   useReviewWorkspace,
 } from "../../lib/queries";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
-import { useTerminals } from "../terminal/TerminalsContext";
-import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
 import { useReviewsModel } from "./model";
+import { ReviewTerminal } from "./ReviewTerminal";
 import { ticketIdFor } from "./ticket";
+import { useReviewSessionLatch } from "./useReviewSessionLatch";
 
 /** The terminal-registry key for a PR's review session. Parsed back out by the
  *  Agents panel (`registry.ts`), so the shape is a shared convention. */
@@ -64,30 +64,23 @@ export function reviewTargetFor(pr: ReviewPr): ReviewTarget {
   };
 }
 
-export function AiReviewPane({ pr }: { pr: ReviewPr }) {
+export function AiReviewPane({ pr, visible }: { pr: ReviewPr; visible: boolean }) {
   const { repo } = useReviewsModel();
   const termKey = reviewTermKey(pr);
 
-  // Only resolve a (re)launch when there's no live PTY to attach to; `liveSeen`
-  // latches (as state, so the exit re-renders) so quitting the agent doesn't
-  // immediately re-resume it into a loop — the resume pane shows instead.
-  const { tabs } = useTerminals();
-  const liveSession = tabs.some((t) => t.source === "review" && t.refId === termKey);
-  const [liveSeen, setLiveSeen] = useState(false);
-  const [resumeRequested, setResumeRequested] = useState(false);
-  useEffect(() => {
-    if (liveSession) {
-      setLiveSeen(true);
-      setResumeRequested(false);
-    }
-  }, [liveSession]);
+  // Only resolve a (re)launch when there's no live PTY to attach to, and never
+  // re-resume an agent the user just quit — the resume pane shows instead.
+  const {
+    ended,
+    needsSeed: freshOpen,
+    resumeRequested,
+    requestResume,
+  } = useReviewSessionLatch(termKey);
 
   // `headSha` is empty only if GitHub returned a PR with no commits — treat that
   // as "nothing to check out" rather than detaching at an empty ref.
   const target = useMemo(() => (pr.headSha ? reviewTargetFor(pr) : null), [pr]);
-
-  const ended = !liveSession && liveSeen && !resumeRequested;
-  const needsSeed = !!target && !liveSession && !liveSeen;
+  const needsSeed = !!target && freshOpen;
 
   // The checkout comes first: it's the session's cwd *and* what tells the prompt
   // whether the agent can read real code, so both the session resolve and the
@@ -122,18 +115,25 @@ export function AiReviewPane({ pr }: { pr: ReviewPr }) {
     chrome: startWithChrome.value,
   });
 
-  // Every launch input must have *resolved* before the PTY spawns — the seed is
+  // Every launch input must have resolved before the PTY spawns — the seed is
   // built once and applied at session creation, so a flag that arrives late is
-  // silently dropped. Gate on `isFetched`, never on the value: a boolean setting
-  // reads `false` both when it's off and when it hasn't loaded.
+  // silently dropped.
+  //
+  // The prompt and the deny-list file gate on **having resolved to something**,
+  // not on `isFetched`. An errored query is "fetched" too, and the settings command
+  // answers `null` when the hook binary can't be found — either way both flags fall
+  // back to `undefined`, which would spawn a session pointed at a PR with neither
+  // the guardrail prompt nor the rules that stop a `gh pr comment`. The plain
+  // settings gate on `isFetched`, since a boolean reads `false` both when it's off
+  // and when it hasn't loaded.
   const ready =
     !needsSeed ||
     (workspace.isFetched &&
       !session.isFetching &&
-      prompt.isFetched &&
+      !!prompt.data &&
+      !!hookSettings.data &&
       model.isFetched &&
       effort.isFetched &&
-      hookSettings.isFetched &&
       startWithChrome.isFetched);
 
   const qc = useQueryClient();
@@ -160,8 +160,7 @@ export function AiReviewPane({ pr }: { pr: ReviewPr }) {
         }
         onResume={() => {
           dropCachedSession();
-          setResumeRequested(true);
-          setLiveSeen(false);
+          requestResume();
         }}
       />
     );
@@ -176,6 +175,7 @@ export function AiReviewPane({ pr }: { pr: ReviewPr }) {
             title={`#${pr.number}`}
             cwd={cwd}
             seed={seed}
+            attach={visible}
             onExited={dropCachedSession}
           />
         ) : (
@@ -187,47 +187,45 @@ export function AiReviewPane({ pr }: { pr: ReviewPr }) {
           </div>
         )}
       </div>
-      <ReviewFooter pr={pr} hasWorkspace={!!cwd} />
+      <ReviewFooter
+        pr={pr}
+        hasWorkspace={!!cwd}
+        message={
+          <>
+            Reads this PR and answers questions. It never comments, approves, or pushes.{" "}
+            <span className="text-fg-3">you do that.</span>
+          </>
+        }
+      />
     </div>
   );
 }
 
-/** The embedded terminal host, split out so it fully unmounts when the pane swaps
- *  to the resume state — that tears the embed down cleanly rather than leaving it
- *  pointed at a detached node. */
-function ReviewTerminal({
-  termKey,
-  title,
-  cwd,
-  seed,
-  onExited,
+/** States the guarantee the pane is built around, and offers to reclaim the
+ *  checkout's disk. A promise the user can't see isn't one they can rely on.
+ *
+ *  Shared with the AI review, which makes a different promise (it writes drafts,
+ *  but only santree sees them) over the same checkout — hence `message` rather
+ *  than one hardcoded line. */
+export function ReviewFooter({
+  pr,
+  hasWorkspace,
+  message,
+  extra,
 }: {
-  termKey: string;
-  title: string;
-  cwd?: string;
-  seed?: string;
-  onExited: () => void;
+  pr: ReviewPr;
+  hasWorkspace: boolean;
+  message: React.ReactNode;
+  extra?: React.ReactNode;
 }) {
-  const { hostRef } = useEmbeddedTerminal({
-    spec: { title, cwd, source: "review", refId: termKey, seed },
-    onExited,
-  });
-  return <div ref={hostRef} className="h-full w-full" />;
-}
-
-/** States the guarantee the whole pane is built around, and offers to reclaim the
- *  checkout's disk. A promise the user can't see isn't one they can rely on. */
-function ReviewFooter({ pr, hasWorkspace }: { pr: ReviewPr; hasWorkspace: boolean }) {
   const { repo } = useReviewsModel();
   const { mutate: removeWorkspace, isPending } = useRemoveReviewWorkspace(repo);
 
   return (
     <div className="flex flex-none items-center gap-2 border-t border-hairline bg-raised px-3 py-1.5 text-[10.5px] text-muted-3">
       <ClaudeSparkIcon size={11} className="flex-none" />
-      <span className="min-w-0 flex-1 truncate">
-        Reads this PR and answers questions. It never comments, approves, or pushes.{" "}
-        <span className="text-fg-3">you do that.</span>
-      </span>
+      <span className="min-w-0 flex-1 truncate">{message}</span>
+      {extra}
       {!hasWorkspace && (
         <span
           className="flex flex-none items-center gap-1 text-status-amber"

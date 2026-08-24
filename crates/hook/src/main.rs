@@ -22,6 +22,9 @@ use serde_json::Value;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, Connection};
 
+mod mcp;
+mod review_tools;
+
 /// Map a Claude hook event (and, for `Notification`, its `notification_type`) to
 /// the agent state it implies. `None` = don't change the stored state.
 ///
@@ -71,30 +74,66 @@ fn session_id_changed(source: Option<&str>) -> bool {
     matches!(source, Some("clear") | Some("fork"))
 }
 
-fn main() {
-    install_exit_zero_panic_hook();
+/// What this invocation is. The trailing positional selects it: a hook event
+/// name, Claude's `statusline` command, or `mcp` — the AI-review tool server.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Hook(String),
+    Statusline,
+    Mcp(mcp::McpScope),
+}
 
-    // Args: santree-hook --db <path> <EventName>
+/// Parse `santree-hook --db <path> <Event>` / `… statusline` /
+/// `… mcp --pr <owner/name> --number <n> --head <sha> --diff <path>`.
+///
+/// `None` means "don't run": the caller then exits 0 silently, because a hook that
+/// complains about its own arguments would surface inside the user's session.
+fn parse_args(args: impl Iterator<Item = String>) -> Option<(String, Mode)> {
     let mut db_path: Option<String> = None;
-    let mut event: Option<String> = None;
-    let mut args = std::env::args().skip(1);
+    let mut positional: Option<String> = None;
+    let (mut pr, mut number, mut head, mut diff) = (None, None, None, None);
+
+    let mut args = args.peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--db" => db_path = args.next(),
-            other => event = Some(other.to_string()),
+            "--pr" => pr = args.next(),
+            "--number" => number = args.next(),
+            "--head" => head = args.next(),
+            "--diff" => diff = args.next(),
+            other => positional = Some(other.to_string()),
         }
     }
-    let (Some(db_path), Some(event)) = (db_path, event) else {
+
+    let (db_path, positional) = (db_path?, positional?);
+    let mode = match positional.as_str() {
+        "statusline" => Mode::Statusline,
+        "mcp" => Mode::Mcp(mcp::McpScope::new(pr?, number?, head?, diff?)?),
+        event => Mode::Hook(event.to_string()),
+    };
+    Some((db_path, mode))
+}
+
+fn main() {
+    install_exit_zero_panic_hook();
+
+    let Some((db_path, mode)) = parse_args(std::env::args().skip(1)) else {
         return; // exit 0
     };
-
-    // The `statusline` "event" is Claude's status-line command, not a hook: it
-    // reads the status-line JSON, prints the bar Claude renders, and captures the
-    // live usage. Handled entirely separately from the state-event path below.
-    if event == "statusline" {
-        handle_statusline(&db_path);
-        return;
-    }
+    let event = match mode {
+        // Claude's status-line command, not a hook: it reads the status-line JSON,
+        // prints the bar Claude renders, and captures the live usage.
+        Mode::Statusline => {
+            handle_statusline(&db_path);
+            return;
+        }
+        // The AI-review MCP server: a long-lived stdio session, not a one-shot.
+        Mode::Mcp(scope) => {
+            mcp::serve(&db_path, scope);
+            return;
+        }
+        Mode::Hook(event) => event,
+    };
 
     // Read the Claude hook JSON payload from stdin (always piped by Claude).
     let mut raw = String::new();
@@ -196,7 +235,7 @@ fn install_exit_zero_panic_hook() {
 /// Send a one-byte nudge over the app's signal socket (`<db_dir>/santree-signal.sock`).
 /// The tag byte tells the app which table changed (`u` = live usage, else state).
 /// Best-effort: a not-running app just fails to connect.
-fn ping_socket(db_path: &str, tag: u8) {
+pub(crate) fn ping_socket(db_path: &str, tag: u8) {
     if let Some(dir) = Path::new(db_path).parent() {
         if let Ok(mut stream) = UnixStream::connect(dir.join("santree-signal.sock")) {
             let _ = stream.write_all(&[tag]);
@@ -373,7 +412,7 @@ async fn record_usage(
     Ok(true)
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -487,6 +526,60 @@ async fn reconcile_terminal_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(args: &[&str]) -> Option<(String, Mode)> {
+        parse_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn parse_args_picks_the_mode_off_the_trailing_positional() {
+        assert_eq!(
+            parse(&["--db", "/d.db", "Stop"]),
+            Some(("/d.db".into(), Mode::Hook("Stop".into())))
+        );
+        assert_eq!(
+            parse(&["--db", "/d.db", "statusline"]),
+            Some(("/d.db".into(), Mode::Statusline))
+        );
+        let (db, mode) = parse(&[
+            "--db", "/d.db", "mcp", "--pr", "acme/web", "--number", "42", "--head", "abc1234",
+            "--diff", "/i.json",
+        ])
+        .unwrap();
+        assert_eq!(db, "/d.db");
+        assert_eq!(
+            mode,
+            Mode::Mcp(mcp::McpScope {
+                pr_repo: "acme/web".into(),
+                number: 42,
+                head_sha: "abc1234".into(),
+                diff_index: "/i.json".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_refuses_anything_it_cannot_run() {
+        // Each of these would otherwise start a server scoped to nothing, or a hook
+        // with no db. Refusing means exit 0 and silence, never a half-run.
+        for args in [
+            vec![],
+            vec!["--db"],
+            vec!["Stop"],
+            vec!["--db", "/d.db"],
+            vec!["--db", "/d.db", "mcp"],
+            vec!["--db", "/d.db", "mcp", "--pr", "acme/web", "--number", "42"],
+            vec![
+                "--db", "/d.db", "mcp", "--pr", "acme/web", "--number", "42", "--head", "abc1234",
+            ],
+            vec![
+                "--db", "/d.db", "mcp", "--pr", "acmeweb", "--number", "42", "--head", "abc1234",
+                "--diff", "/i.json",
+            ],
+        ] {
+            assert!(parse(&args).is_none(), "{args:?} should not run");
+        }
+    }
 
     #[test]
     fn maps_events_to_states() {

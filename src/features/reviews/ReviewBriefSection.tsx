@@ -7,10 +7,10 @@
  * spans the whole detail area, so the plan stays beside the diff on every tab.
  * Clicking any entry jumps the diff to that file (and line).
  *
- * Generated on demand and cached against the PR's head commit, so it costs nothing
- * on a PR you only glance at and goes stale honestly when the author pushes —
- * showing advice about code that has since changed would be worse than showing
- * none, because it reads as current.
+ * Written by the AI review session ({@link AiReviewSessionPane}) through santree's
+ * own tools, and cached against the PR's head commit — so it costs nothing on a PR
+ * you only glance at, and goes stale honestly when the author pushes. Advice about
+ * code that has since changed is worse than none, because it reads as current.
  */
 import { useState } from "react";
 
@@ -24,27 +24,29 @@ import {
 } from "../../components/icons";
 import { Button, Pill, RunningStatus } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
-import { useGenerateReviewBrief, usePrReviewBrief } from "../../lib/queries";
+import { usePrReviewBrief } from "../../lib/queries";
 import { toast } from "../../state/toast";
 import { alpha, palette, readingRoleMeta, watchOutMeta } from "../../theme/colors";
-import { reviewTargetFor } from "./AiReviewPane";
+import { aiReviewTermKey } from "./AiReviewSessionPane";
 import { useReviewsModel } from "./model";
+import { useReviewSessionLatch } from "./useReviewSessionLatch";
 
 export function ReviewBriefSection({ pr }: { pr: ReviewPr }) {
-  const { repo, focusFile } = useReviewsModel();
+  const { focusFile, openAiReview } = useReviewsModel();
   const { data: brief, isLoading } = usePrReviewBrief(pr.repo, pr.number);
-  const { mutate: generate, isPending } = useGenerateReviewBrief(repo);
-  const target = pr.headSha ? reviewTargetFor(pr) : null;
+  // A live session is the "it's being written right now" state: the brief arrives
+  // through the MCP, so there's no mutation here to be pending.
+  const { liveSession } = useReviewSessionLatch(aiReviewTermKey(pr));
 
-  // A brief generated against an older head describes code that no longer exists.
+  // A brief written against an older head describes code that no longer exists.
   const stale = !!brief && !!pr.headSha && brief.headSha !== pr.headSha;
 
   const run = () => {
-    if (!target) {
-      toast.error("This PR has no commits to build a brief from.");
+    if (!pr.headSha) {
+      toast.error("This PR has no commits to review.");
       return;
     }
-    generate(target);
+    openAiReview();
   };
 
   if (isLoading) return null;
@@ -61,45 +63,48 @@ export function ReviewBriefSection({ pr }: { pr: ReviewPr }) {
             size="sm"
             variant="ghost"
             className="ml-auto"
-            disabled={isPending}
             onClick={run}
-            title="Generate a fresh brief against the PR's current head commit"
+            title={
+              liveSession
+                ? "Show the AI review session"
+                : "Pick the review session back up and ask it to look again"
+            }
           >
-            <RefreshIcon size={10} />
-            {isPending ? "Reading…" : "Regenerate"}
+            {liveSession ? <ClaudeSparkIcon size={10} /> : <RefreshIcon size={10} />}
+            {liveSession ? "Open AI review" : "Review again"}
           </Button>
         )}
       </div>
 
-      {isPending && (
-        <div
-          className={`rounded-lg border border-line-2 bg-raised px-3 py-3 ${brief ? "mb-2.5" : ""}`}
-        >
+      {liveSession && !brief && (
+        <div className="rounded-lg border border-line-2 bg-raised px-3 py-3">
           <RunningStatus
             active
             label="Reading the pull request…"
             // A big diff on a capable model runs for minutes. Say so at the point
-            // the wait starts feeling wrong, instead of leaving the user to guess
-            // whether it died (it used to, silently, at 120s).
+            // the wait starts feeling wrong, instead of leaving the user to guess.
             slowLabel="Still reading. A large diff takes a few minutes."
           />
-        </div>
-      )}
-
-      {!brief && !isPending && (
-        <div className="rounded-lg border border-line-2 bg-raised px-3 py-3">
-          <p className="mb-2.5 text-[11.5px] leading-[1.6] text-muted-2">
-            Get a summary, a suggested reading order, and the spots worth a closer look, before you
-            open the diff.
-          </p>
-          <Button size="sm" variant="primary" onClick={run}>
-            <ClaudeSparkIcon size={11} />
-            Generate brief
+          <Button size="sm" variant="ghost" className="mt-2" onClick={run}>
+            Open AI review
           </Button>
         </div>
       )}
 
-      {brief && <BriefBody brief={brief} stale={stale} onJump={focusFile} pending={isPending} />}
+      {!brief && !liveSession && (
+        <div className="rounded-lg border border-line-2 bg-raised px-3 py-3">
+          <p className="mb-2.5 text-[11.5px] leading-[1.6] text-muted-2">
+            Claude reads the PR and writes a brief here, plus draft comments in the diff. You edit
+            them and decide which ones to send.
+          </p>
+          <Button size="sm" variant="primary" onClick={run}>
+            <ClaudeSparkIcon size={11} />
+            Review with AI
+          </Button>
+        </div>
+      )}
+
+      {brief && <BriefBody brief={brief} stale={stale} onJump={focusFile} />}
     </div>
   );
 }
@@ -107,23 +112,21 @@ export function ReviewBriefSection({ pr }: { pr: ReviewPr }) {
 function BriefBody({
   brief,
   stale,
-  pending,
   onJump,
 }: {
   brief: ReviewBrief;
   stale: boolean;
-  pending: boolean;
   onJump: (path: string, line?: number | null) => void;
 }) {
   return (
-    <div className={pending ? "opacity-50 transition-opacity" : undefined}>
+    <div>
       {stale && (
         <div
           className="mb-2.5 flex items-start gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] leading-[1.5]"
           style={{ color: palette.amber, borderColor: alpha(34, palette.amber) }}
         >
           <WarningIcon size={11} className="mt-[2px] flex-none" />
-          <span>New commits have landed since this brief. Regenerate to cover them.</span>
+          <span>New commits have landed since this brief. Review again to cover them.</span>
         </div>
       )}
       {brief.truncated && (
@@ -221,7 +224,7 @@ function BriefBody({
       )}
 
       <div className="mt-3 text-[10px] text-muted-4">
-        Generated <RelativeTime ms={brief.generatedAtMs} />. Suggestions only, nothing was posted.
+        Written <RelativeTime ms={brief.generatedAtMs} />. Suggestions only, nothing was posted.
       </div>
     </div>
   );

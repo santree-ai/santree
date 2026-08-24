@@ -41,6 +41,7 @@ vi.mock("../../lib/useEdgeResize", () => ({ useEdgeResize: () => ({}) }));
 vi.mock("../../lib/queries", () => ({
   usePrDetail: () => ({ data: { files: [], threads: [], comments: [], body: "" } }),
   useAddPrConversationComment: () => ({ mutate: vi.fn(), isPending: false }),
+  useReviewDrafts: () => ({ data: [] }),
 }));
 
 import { PrInfoPanel } from "./PrInfoPanel";

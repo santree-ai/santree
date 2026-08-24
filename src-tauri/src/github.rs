@@ -1325,18 +1325,97 @@ pub async fn add_review_comment(
     .await
 }
 
+/// The three facts a batch publish needs about a PR, straight from GitHub: which
+/// node to open a review against, which commit the lines are numbered in, and
+/// whether the viewer already has an unsubmitted review to add to.
+///
+/// A small query of its own rather than a slice of [`pr_detail`], which drags the
+/// whole conversation and up to 500 files along with it — this runs on a click,
+/// right before the comments go out.
+pub struct PrPublishAnchor {
+    pub pr_id: String,
+    pub head_sha: String,
+    pub pending_review_id: Option<String>,
+}
+
+pub async fn pr_publish_anchor(
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u32,
+) -> Result<PrPublishAnchor> {
+    let query = "query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $number) {
+            id
+            headRefOid
+            reviews(states: PENDING, first: 1) { nodes { id viewerDidAuthor } }
+          }
+        }
+      }";
+    #[derive(Deserialize)]
+    struct Data {
+        repository: Option<Repo>,
+    }
+    #[derive(Deserialize)]
+    struct Repo {
+        #[serde(rename = "pullRequest")]
+        pull_request: Option<Pr>,
+    }
+    #[derive(Deserialize)]
+    struct Pr {
+        id: String,
+        #[serde(rename = "headRefOid")]
+        head_ref_oid: String,
+        reviews: Connection<PendingReview>,
+    }
+    #[derive(Deserialize)]
+    struct PendingReview {
+        id: String,
+        #[serde(rename = "viewerDidAuthor")]
+        viewer_did_author: bool,
+    }
+
+    let data: Data = graphql(
+        token,
+        query,
+        serde_json::json!({ "owner": owner, "name": name, "number": number }),
+    )
+    .await?;
+    let pr = data
+        .repository
+        .and_then(|r| r.pull_request)
+        .ok_or_else(|| anyhow!("no pull request {owner}/{name}#{number}"))?;
+    Ok(PrPublishAnchor {
+        pr_id: pr.id,
+        head_sha: pr.head_ref_oid,
+        // A pending review that isn't the viewer's own can't be added to (and
+        // GitHub never shows someone else's), so it's treated as none.
+        pending_review_id: pr
+            .reviews
+            .nodes
+            .into_iter()
+            .find(|r| r.viewer_did_author)
+            .map(|r| r.id),
+    })
+}
+
 /// Open a *pending* review on the PR carrying this first draft comment — GitHub's
 /// "Start a review". Omitting `event` is what leaves it unsubmitted: the comment
 /// is invisible to everyone else until [`submit_review`] runs.
-pub async fn start_review(token: &str, c: &NewInlineComment) -> Result<()> {
+///
+/// Returns the new review's node id, which is what lets a batch keep going:
+/// everything after the first comment is an [`add_pending_review_comment`] against
+/// this id, rather than a second review.
+pub async fn start_review(token: &str, c: &NewInlineComment) -> Result<String> {
     let mutation = "mutation($pr: ID!, $oid: GitObjectID!, $path: String!, $line: Int!, $startLine: Int, $side: DiffSide!, $startSide: DiffSide, $body: String!) {
         addPullRequestReview(input: {
           pullRequestId: $pr,
           commitOID: $oid,
           threads: [{ path: $path, line: $line, startLine: $startLine, side: $side, startSide: $startSide, body: $body }]
-        }) { clientMutationId }
+        }) { pullRequestReview { id } }
       }";
-    let _: serde_json::Value = graphql(
+    let out: StartReviewOut = graphql(
         token,
         mutation,
         serde_json::json!({
@@ -1353,7 +1432,25 @@ pub async fn start_review(token: &str, c: &NewInlineComment) -> Result<()> {
         }),
     )
     .await?;
-    Ok(())
+    Ok(out.add_pull_request_review.pull_request_review.id)
+}
+
+/// The one field [`start_review`] needs back.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartReviewOut {
+    add_pull_request_review: StartedReview,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartedReview {
+    pull_request_review: ReviewId,
+}
+
+#[derive(Deserialize)]
+struct ReviewId {
+    id: String,
 }
 
 /// Add another draft comment to an already-open pending review.

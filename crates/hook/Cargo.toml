@@ -10,6 +10,9 @@ name = "santree-hook"
 path = "src/main.rs"
 
 [dependencies]
+# Already in the graph via santree-core; named here because the MCP tools
+# deserialize the model's arguments straight into the domain types.
+serde = { workspace = true }
 serde_json = { workspace = true }
 # For `AgentState` — the state vocabulary is defined once in the domain crate so
 # this binary (the producer) and the app (the consumer) can't drift apart.

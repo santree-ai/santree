@@ -34,6 +34,36 @@ pub struct SessionStateChanged {}
 #[derive(Clone, Serialize, Type, Event)]
 pub struct SessionUsageChanged {}
 
+/// "An AI-review session wrote something" — a draft review comment or a review
+/// brief, through the `santree-review` MCP server (which is the same binary, in
+/// `mcp` mode). The frontend refetches the drafts and the brief, so a comment the
+/// agent writes appears in the diff while the user is looking at it.
+///
+/// Empty like its siblings: the tables are small, and the signal's arrival is the
+/// whole message.
+#[derive(Clone, Serialize, Type, Event)]
+pub struct ReviewAiChanged {}
+
+/// Which table a nudge is about, from the tag byte the sender wrote first.
+///
+/// An unknown byte means session state: that was the original, untagged signal, so
+/// treating it as the default keeps an older `santree-hook` (one left in a stale
+/// bundle) working instead of silently doing nothing.
+#[derive(Debug, PartialEq, Eq)]
+enum Signal {
+    Usage,
+    ReviewAi,
+    State,
+}
+
+fn kind_for_tag(tag: Option<u8>) -> Signal {
+    match tag {
+        Some(b'u') => Signal::Usage,
+        Some(b'r') => Signal::ReviewAi,
+        _ => Signal::State,
+    }
+}
+
 /// A nudge is a single byte written straight after connecting, so a client that
 /// sends nothing is broken — give up on it rather than let it stall the loop
 /// (and with it every other session's live updates).
@@ -76,12 +106,33 @@ pub fn start(app: &AppHandle, socket_path: &Path) -> Result<()> {
             // table changed — `u` = live usage, anything else = session state.
             let mut buf = [0u8; 8];
             let n = stream.read(&mut buf).unwrap_or(0);
-            if n > 0 && buf[0] == b'u' {
-                let _ = SessionUsageChanged {}.emit(&app);
-            } else {
-                let _ = SessionStateChanged {}.emit(&app);
+            match kind_for_tag((n > 0).then(|| buf[0])) {
+                Signal::Usage => {
+                    let _ = SessionUsageChanged {}.emit(&app);
+                }
+                Signal::ReviewAi => {
+                    let _ = ReviewAiChanged {}.emit(&app);
+                }
+                Signal::State => {
+                    let _ = SessionStateChanged {}.emit(&app);
+                }
             }
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_tag_byte_picks_the_table() {
+        assert_eq!(kind_for_tag(Some(b'u')), Signal::Usage);
+        assert_eq!(kind_for_tag(Some(b'r')), Signal::ReviewAi);
+        assert_eq!(kind_for_tag(Some(b's')), Signal::State);
+        // An empty or unrecognised nudge is the original, untagged signal.
+        assert_eq!(kind_for_tag(None), Signal::State);
+        assert_eq!(kind_for_tag(Some(b'?')), Signal::State);
+    }
 }

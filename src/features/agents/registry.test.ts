@@ -109,6 +109,12 @@ describe("parseTermKey", () => {
       tabId: null,
       pr: "acme/web#4821",
     });
+    expect(parseTermKey("ai-review:acme/web#4821")).toEqual({
+      kind: "ai-review",
+      ticket: null,
+      tabId: null,
+      pr: "acme/web#4821",
+    });
     expect(parseTermKey("dev:/Users/me/repo")).toEqual({
       kind: "dev",
       ticket: null,
@@ -135,6 +141,14 @@ describe("terminalRefFor", () => {
       source: "issue",
       refId: "tree:AK-1",
     });
+  });
+
+  it("keeps the two review sessions apart under one source", () => {
+    // Ask AI and the AI review can both be open on the same PR, so they share the
+    // "review" source and are told apart by their own term keys.
+    for (const key of ["review:acme/web#7", "ai-review:acme/web#7"]) {
+      expect(terminalRefFor(key, parseTermKey(key))).toEqual({ source: "review", refId: key });
+    }
   });
 });
 

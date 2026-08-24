@@ -12,9 +12,10 @@
  * anywhere else, which is the same rule GitHub's UI enforces by only offering the
  * button there). `renderWidgetLine` then reports both ends of the range.
  *
- * Threads are placed on the new (right) side for added/context lines and the old
- * (left) side for removed lines. Outdated / unplaceable threads (no line) are the
- * caller's job — they're listed below the diff, not anchored here.
+ * Threads and the AI review's drafts are placed on the new (right) side for
+ * added/context lines and the old (left) side for removed lines. Outdated /
+ * unplaceable ones are the caller's job — they're listed below the diff, not
+ * anchored here.
  *
  * PR diffs carry only the patch hunk (no full file source), so — unlike the Trees
  * diff — there's no expand-unchanged-context. Memoized: `DiffView` re-lays-out on
@@ -24,14 +25,15 @@ import { DiffModeEnum, DiffViewWithMultiSelect } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { memo, useMemo, useRef } from "react";
 
-import type { PrThread } from "../../bindings";
+import type { PrThread, ReviewDraft } from "../../bindings";
 import { useResolvedTheme } from "../../theme/useResolvedTheme";
 import type { DiffMode } from "../trees/DiffViewer";
-import { bucketThreads } from "./bucketThreads";
+import { bucketAnnotations, type DiffAnnotation } from "./bucketThreads";
 import { type CommentTarget, isRightSide } from "./commentTarget";
 import { InlineCommentBox } from "./InlineCommentBox";
 import { PrThreadCard } from "./PrThreadCard";
 import { clampToHunk } from "./patchLines";
+import { ReviewDraftCard } from "./ReviewDraftCard";
 import { useGutterDrag } from "./useGutterDrag";
 
 /**
@@ -51,6 +53,7 @@ export const PrFileDiff = memo(function PrFileDiff({
   status,
   patch,
   threads,
+  drafts,
   target,
   oldText,
   newText,
@@ -63,6 +66,9 @@ export const PrFileDiff = memo(function PrFileDiff({
   patch: string;
   /** Review threads on this file — placed inline by line, or skipped if outdated. */
   threads: PrThread[];
+  /** The AI review's drafts for this file, already filtered to the ones that can
+   *  be pinned to the current diff — the caller lists the rest below it. */
+  drafts: ReviewDraft[];
   /** Where a new comment would go. The gutter `+` is offered only once this
    *  carries a head commit — until the detail loads there's no commit to anchor
    *  a comment to, and GitHub rejects one without it. */
@@ -92,26 +98,35 @@ export const PrFileDiff = memo(function PrFileDiff({
     [path, status, patch, oldText, newText],
   );
 
-  const extendData = useMemo(() => bucketThreads(threads), [threads]);
+  const extendData = useMemo(() => bucketAnnotations(threads, drafts), [threads, drafts]);
 
   if (!patch.trim()) return null;
 
   return (
     <div ref={rootRef} className="diff-viewer selectable min-w-0 text-[12.5px]">
-      <DiffViewWithMultiSelect<PrThread[]>
+      <DiffViewWithMultiSelect<DiffAnnotation[]>
         data={data}
         extendData={extendData}
         renderExtendLine={({ data }) => (
           <div className="border-y border-hairline">
-            {data.map((t, i) => (
-              <PrThreadCard
-                key={`${t.path}:${t.line}:${i}`}
-                thread={t}
-                prRepo={target.prRepo}
-                number={target.number}
-                patch={patch}
-              />
-            ))}
+            {data.map((item, i) =>
+              item.kind === "thread" ? (
+                <PrThreadCard
+                  key={`${item.thread.path}:${item.thread.line}:${i}`}
+                  thread={item.thread}
+                  prRepo={target.prRepo}
+                  number={target.number}
+                  patch={patch}
+                />
+              ) : (
+                <ReviewDraftCard
+                  key={item.draft.id}
+                  draft={item.draft}
+                  target={target}
+                  patch={patch}
+                />
+              ),
+            )}
           </div>
         )}
         // A range that crosses a hunk boundary is a comment GitHub refuses, so the

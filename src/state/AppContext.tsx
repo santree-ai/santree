@@ -29,6 +29,7 @@ import {
   DEV_GITHUB_LOGIN,
   useGithubStatus,
   useRepos,
+  useReviewAiWatcher,
   useSaveSettings,
   useSessionStates,
   useSessionStateWatcher,
@@ -272,6 +273,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // The Trees sidebar and the all-agents overview both render it.
   useSessionStateWatcher();
   useSessionUsageWatcher();
+
+  // The AI review writes its brief and drafts through santree's MCP server — a
+  // separate process — so the only way the UI hears about them is this nudge. A
+  // draft should appear in the diff while the user is reading it.
+  useReviewAiWatcher();
 
   // Keep the Settings → Usage panel live: the watcher invalidates the usage query
   // when a transcript grows. Mounted app-wide so the listener is always attached;

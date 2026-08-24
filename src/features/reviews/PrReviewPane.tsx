@@ -6,7 +6,9 @@
  *
  * Comments are written here too: every diff line carries GitHub's `+` button, and
  * anything left as a draft is held in the viewer's pending review until the
- * {@link ReviewSubmitBar} at the foot of the pane sends it.
+ * {@link ReviewSubmitBar} at the foot of the pane sends it. The AI review's own
+ * drafts sit inline beside them, in santree rather than on GitHub, until the
+ * {@link ReviewDraftsBar} adds the ones the user keeps to that same review.
  *
  * A marked file collapses and stays marked across sessions, but re-expands the
  * moment a new commit changes it — so you always re-review what actually changed.
@@ -18,12 +20,13 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { PrFile, PrThread, ReviewPr } from "../../bindings";
-import { ChevronDownIcon, EyeIcon, WarningIcon } from "../../components/icons";
+import type { PrFile, PrThread, ReviewDraft, ReviewPr } from "../../bindings";
+import { ChevronDownIcon, ClaudeSparkIcon, EyeIcon, WarningIcon } from "../../components/icons";
 import { EmptyState, Skeleton } from "../../components/primitives";
 import {
   usePrDetail,
   usePrFileSource,
+  useReviewDrafts,
   useReviewedFiles,
   useSetFileReviewed,
 } from "../../lib/queries";
@@ -33,6 +36,9 @@ import type { CommentTarget } from "./commentTarget";
 import type { FileFocus } from "./model";
 import { PrFileDiff } from "./PrFileDiff";
 import { PrThreadCard } from "./PrThreadCard";
+import { patchLineRange } from "./patchLines";
+import { ReviewDraftCard } from "./ReviewDraftCard";
+import { ReviewDraftsBar } from "./ReviewDraftsBar";
 import { draftCount, ReviewSubmitBar } from "./ReviewSubmitBar";
 
 /** GitHub's lowercase file-status strings → a status letter + tint. */
@@ -48,6 +54,7 @@ const STATUS_META: Record<string, { letter: string; color: string }> = {
 /** One shared empty array for thread-less files — a fresh `[]` literal per render
  *  would be a new reference and defeat {@link PrFileCard}'s memo. */
 const NO_THREADS: PrThread[] = [];
+const NO_DRAFTS: ReviewDraft[] = [];
 
 export function PrReviewPane({
   pr,
@@ -61,6 +68,7 @@ export function PrReviewPane({
   const [owner, name] = splitRepoSlug(pr.repo);
   const { data: detail, isLoading } = usePrDetail(owner, name, pr.number);
   const { data: marks } = useReviewedFiles(pr.repo, pr.number);
+  const { data: aiDrafts } = useReviewDrafts(pr.repo, pr.number);
   const { mutate: setReviewed } = useSetFileReviewed(pr.repo, pr.number, pr.id);
 
   // Which staleness rule applies depends on where the marks came from, so it can't
@@ -88,6 +96,16 @@ export function PrReviewPane({
     }
     return m;
   }, [detail?.threads]);
+
+  const draftsByPath = useMemo(() => {
+    const m = new Map<string, ReviewDraft[]>();
+    for (const d of aiDrafts ?? []) {
+      const arr = m.get(d.path);
+      if (arr) arr.push(d);
+      else m.set(d.path, [d]);
+    }
+    return m;
+  }, [aiDrafts]);
 
   const reviewedCount = files.filter(isViewed).length;
 
@@ -164,6 +182,7 @@ export function PrReviewPane({
                 head={detail?.headSha ?? ""}
                 file={f}
                 threads={threadsByPath.get(f.path) ?? NO_THREADS}
+                drafts={draftsByPath.get(f.path) ?? NO_DRAFTS}
                 target={target}
                 reviewed={isViewed(f)}
                 forceOpen={forcedOpen === f.path}
@@ -175,6 +194,7 @@ export function PrReviewPane({
           <EmptyState title="No file changes" />
         )}
       </div>
+      {!!aiDrafts?.length && <ReviewDraftsBar target={target} drafts={aiDrafts} />}
       {detail?.pendingReviewId && (
         <ReviewSubmitBar
           prRepo={pr.repo}
@@ -210,6 +230,7 @@ const PrFileCard = memo(function PrFileCard({
   head,
   file,
   threads,
+  drafts,
   target,
   reviewed,
   forceOpen,
@@ -221,6 +242,7 @@ const PrFileCard = memo(function PrFileCard({
   head: string;
   file: PrFile;
   threads: PrThread[];
+  drafts: ReviewDraft[];
   target: CommentTarget;
   reviewed: boolean;
   /** The review brief jumped here — open regardless of the viewed mark, since
@@ -250,6 +272,17 @@ const PrFileCard = memo(function PrFileCard({
 
   const meta = STATUS_META[file.status] ?? STATUS_META.modified;
   const outdated = threads.filter((t) => t.line == null || t.isOutdated);
+  // A draft anchors in the diff only if it was written against this head *and* its
+  // lines are still in a hunk. The rest go below it: hiding them would lose work
+  // the user hasn't read, and pinning them to a line that has since moved would be
+  // worse — the comment would look placed and point at the wrong code.
+  const placeable = drafts.filter(
+    (d) =>
+      d.headSha === head &&
+      !!file.patch &&
+      patchLineRange(file.patch, d.onRight, d.startLine ?? d.line, d.line) !== null,
+  );
+  const unplaceable = drafts.filter((d) => !placeable.includes(d));
 
   return (
     // `data-path` is the anchor the review brief's jumps scroll to.
@@ -279,6 +312,16 @@ const PrFileCard = memo(function PrFileCard({
         {threads.length > 0 && (
           <span className="flex-none font-mono text-[10px] text-muted-4">💬 {threads.length}</span>
         )}
+        {drafts.length > 0 && (
+          <span
+            className="flex flex-none items-center gap-0.5 font-mono text-[10px]"
+            style={{ color: palette.purple }}
+            title={`${drafts.length} AI draft${drafts.length === 1 ? "" : "s"} on this file`}
+          >
+            <ClaudeSparkIcon size={9} />
+            {drafts.length}
+          </span>
+        )}
         <span className="flex-none font-mono text-[10.5px]">
           <span className="text-status-green">+{file.additions}</span>{" "}
           <span className="text-status-red">−{file.deletions}</span>
@@ -307,6 +350,7 @@ const PrFileCard = memo(function PrFileCard({
               status={file.status}
               patch={file.patch}
               threads={threads}
+              drafts={placeable}
               target={target}
               oldText={source?.oldText}
               newText={source?.newText}
@@ -329,10 +373,37 @@ const PrFileCard = memo(function PrFileCard({
                 </div>
               </div>
             )}
+            {unplaceable.length > 0 && <UnplaceableDrafts drafts={unplaceable} target={target} />}
           </>
         ) : (
           <div className="px-3 py-3 text-[11.5px] text-muted-3">Binary file. No preview.</div>
         ))}
+      {collapsed && unplaceable.length > 0 && (
+        <UnplaceableDrafts drafts={unplaceable} target={target} />
+      )}
     </div>
   );
 });
+
+/** Drafts that can't be pinned: written against an earlier head, or aimed at a
+ *  line the current diff doesn't contain. Listed rather than dropped — the user
+ *  hasn't read them yet, and deciding they're worthless is their call. */
+function UnplaceableDrafts({ drafts, target }: { drafts: ReviewDraft[]; target: CommentTarget }) {
+  return (
+    <div className="border-t border-line-2 px-3 py-2">
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <span className="font-mono text-[9.5px] tracking-[.06em] text-muted-4 uppercase">
+          AI drafts on older code
+        </span>
+        <span className="text-[10px]" style={{ color: palette.amber }}>
+          Check the line before you send these.
+        </span>
+      </div>
+      <div className="overflow-hidden rounded-md border border-line-2">
+        {drafts.map((d) => (
+          <ReviewDraftCard key={d.id} draft={d} target={target} stale />
+        ))}
+      </div>
+    </div>
+  );
+}

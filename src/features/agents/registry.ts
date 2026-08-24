@@ -20,16 +20,23 @@ import type { TerminalTab } from "../terminal/orchestrator";
 export const BASE_TICKET = "__base__";
 
 /** Which surface a session belongs to, parsed from its `term_key`. */
-export type AgentOriginKind = "tree" | "tree-tab" | "triage" | "review" | "dev" | "unknown";
+export type AgentOriginKind =
+  | "tree"
+  | "tree-tab"
+  | "triage"
+  | "review"
+  | "ai-review"
+  | "dev"
+  | "unknown";
 
 export interface AgentOrigin {
   kind: AgentOriginKind;
   /** Ticket id for `tree`/`tree-tab`/`triage` ({@link BASE_TICKET} for the base
-   *  entry); `null` for `review`, `dev` and `unknown`. */
+   *  entry); `null` for the review kinds, `dev` and `unknown`. */
   ticket: string | null;
   /** The persisted extra tab's id, for `tree-tab` only. */
   tabId: string | null;
-  /** `owner/name#number` for `review` only — which PR the session is reading. */
+  /** `owner/name#number` for `review`/`ai-review` — which PR the session is on. */
   pr: string | null;
 }
 
@@ -39,14 +46,20 @@ const UNKNOWN_ORIGIN: AgentOrigin = { kind: "unknown", ticket: null, tabId: null
  * Parse a `terminal_sessions.term_key` into its owning surface. The conventions
  * are minted by the launch sites — `useAgentTab` (`tree:<id>`,
  * `tree:<id>:tab:<n>`), `InvestigatePane` (`triage:<id>`), `AiReviewPane`
- * (`review:<owner>/<name>#<number>`) and `DevView` (`dev:<path>`) — and mirrored
- * here rather than imported, so this panel doesn't take a dependency on the
- * features it reports on.
+ * (`review:<owner>/<name>#<number>`), `AiReviewSessionPane`
+ * (`ai-review:<owner>/<name>#<number>`) and `DevView` (`dev:<path>`) — and
+ * mirrored here rather than imported, so this panel doesn't take a dependency on
+ * the features it reports on.
  */
 export function parseTermKey(termKey: string | null | undefined): AgentOrigin {
   if (!termKey) return UNKNOWN_ORIGIN;
   if (termKey.startsWith("triage:")) {
     return { ...UNKNOWN_ORIGIN, kind: "triage", ticket: termKey.slice("triage:".length) };
+  }
+  // Before `review:`, since one prefix isn't a prefix of the other but the two
+  // read as siblings and belong together.
+  if (termKey.startsWith("ai-review:")) {
+    return { ...UNKNOWN_ORIGIN, kind: "ai-review", pr: termKey.slice("ai-review:".length) };
   }
   if (termKey.startsWith("review:")) {
     return { ...UNKNOWN_ORIGIN, kind: "review", pr: termKey.slice("review:".length) };
@@ -79,7 +92,11 @@ export function terminalRefFor(
 ): { source: string; refId: string } | null {
   if (!termKey) return null;
   if (origin.kind === "triage") return { source: "triage", refId: origin.ticket ?? "" };
-  if (origin.kind === "review") return { source: "review", refId: termKey };
+  // Both review sessions register under the `review` source, keyed by their own
+  // term key — so the two can be open on one PR at once.
+  if (origin.kind === "review" || origin.kind === "ai-review") {
+    return { source: "review", refId: termKey };
+  }
   return { source: "issue", refId: termKey };
 }
 
@@ -309,6 +326,10 @@ function label(
     }
     case "triage":
       return { title: origin.ticket ?? basename(cwd), subtitle: summary ?? "investigation" };
+    case "review":
+      return { title: origin.pr ?? basename(cwd), subtitle: "asking about a PR" };
+    case "ai-review":
+      return { title: origin.pr ?? basename(cwd), subtitle: "reviewing a PR" };
     case "dev":
       return { title: "Dev", subtitle: basename(cwd) };
     default:

@@ -19,6 +19,7 @@ vi.mock("../../lib/queries", () => ({
   usePrDetail: () => ({ data: detail, isLoading: false }),
   usePrFileSource: () => ({ data: undefined }),
   useReviewedFiles: () => ({ data: marks }),
+  useReviewDrafts: () => ({ data: [] }),
   useSetFileReviewed: () => ({ mutate: spies.mutate }),
 }));
 

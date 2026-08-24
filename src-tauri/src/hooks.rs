@@ -240,7 +240,7 @@ pub fn claude_settings(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
 /// empty string, so these subsume the plain prefix rules; those are kept anyway,
 /// since their semantics are the ones the CLI's own `/permissions` UI writes.
 pub fn claude_settings_no_git(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
-    deny_settings(app, "claude-hooks-fixci.json", &NO_GIT_RULES, tutor)
+    restricted_settings(app, "claude-hooks-fixci.json", &NO_GIT_RULES, &[], tutor)
 }
 
 /// The git-writing shapes both restricted variants block. Each verb appears in
@@ -278,6 +278,18 @@ const NO_GIT_RULES: [&str; 8] = [
 /// nothing here needs — the PR's content is already in the prompt) is a cheap price
 /// for not having to enumerate them.
 pub fn claude_settings_review(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
+    restricted_settings(
+        app,
+        "claude-hooks-review.json",
+        &review_deny_rules(),
+        &[],
+        tutor,
+    )
+}
+
+/// Everything [`claude_settings_no_git`] denies, plus every `gh` route that would
+/// speak on the user's behalf. Shared by the Ask AI session and the AI review.
+fn review_deny_rules() -> Vec<&'static str> {
     let gh: [&str; 16] = [
         "Bash(gh pr review:*)",
         "Bash(*gh pr review*)",
@@ -296,26 +308,184 @@ pub fn claude_settings_review(app: &AppHandle, tutor: Option<&str>) -> Option<St
         "Bash(gh api:*)",
         "Bash(*gh api*)",
     ];
-    let rules: Vec<&str> = NO_GIT_RULES.iter().copied().chain(gh).collect();
-    deny_settings(app, "claude-hooks-review.json", &rules, tutor)
+    NO_GIT_RULES.iter().copied().chain(gh).collect()
 }
 
-/// The base settings plus a `permissions.deny` block, written to its own file so
-/// one restricted variant can never affect another launch.
+/// The name the `santree-review` MCP server registers under, and the stem of its
+/// permission rule. Mirrored by `crates/hook`'s `mcp::SERVER_NAME` — Claude matches
+/// the two by string, so they have to agree.
+pub const MCP_SERVER_NAME: &str = "santree-review";
+
+/// The `--settings` file for an **AI review** session: the same deny list as the
+/// Ask AI session, plus a grant for santree's own review tools.
 ///
-/// The deny list is *merged* into whatever `permissions` the base already set (the
-/// English tutor's `Edit` allow), not written over it — replacing the object would
-/// silently drop the tutor's grant and stop every turn on a permission prompt.
-fn deny_settings(
+/// The deny list is what keeps the session from reviewing on the user's behalf; the
+/// grant is what lets it record findings *somewhere the user controls* instead. The
+/// two are the same idea from both ends: everything the agent produces lands in
+/// santree's database as a draft, and only a person can send it to GitHub.
+///
+/// The grant covers the whole server (`mcp__santree-review`), so adding a tool
+/// later doesn't strand a review mid-flow on a permission prompt. It reaches only
+/// the server santree launched, and that server can write nothing but this PR's
+/// drafts and brief.
+pub fn claude_settings_ai_review(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
+    let allow = format!("mcp__{MCP_SERVER_NAME}");
+    restricted_settings(
+        app,
+        "claude-hooks-ai-review.json",
+        &review_deny_rules(),
+        &[&allow],
+        tutor,
+    )
+}
+
+/// The base settings plus `permissions` rules, written to its own file so one
+/// restricted variant can never affect another launch.
+///
+/// Both lists are *merged* into whatever `permissions` the base already set (the
+/// English tutor's `Edit` allow), never written over it — replacing the object
+/// would silently drop the tutor's grant and stop every turn on a permission
+/// prompt. `allow` in particular is appended, since the base may already hold one.
+fn restricted_settings(
     app: &AppHandle,
     file: &str,
-    rules: &[&str],
+    deny: &[&str],
+    allow: &[&str],
     tutor: Option<&str>,
 ) -> Option<String> {
     let mut root = base_settings_map(app, tutor)?;
-    let perms = root.entry("permissions").or_insert_with(|| json!({}));
-    perms.as_object_mut()?.insert("deny".into(), json!(rules));
+    merge_permissions(&mut root, deny, allow)?;
     write_settings(app, file, root)
+}
+
+/// Fold `deny`/`allow` into a settings map's `permissions` object. Split out from
+/// [`restricted_settings`] so the merge — the part with a real failure mode — is
+/// testable without an `AppHandle`.
+/// `deny` replaces (the base never sets one, and a restricted variant owns its
+/// whole deny list); `allow` appends, because the base may already hold the
+/// English tutor's grant.
+fn merge_permissions(root: &mut Map<String, Value>, deny: &[&str], allow: &[&str]) -> Option<()> {
+    let perms = root
+        .entry("permissions")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()?;
+    if !deny.is_empty() {
+        perms.insert("deny".into(), json!(deny));
+    }
+    if !allow.is_empty() {
+        let mut merged: Vec<Value> = perms
+            .get("allow")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        merged.extend(allow.iter().map(|r| json!(r)));
+        perms.insert("allow".into(), Value::Array(merged));
+    }
+    Some(())
+}
+
+// ── The AI review's MCP server ───────────────────────────────────────────────
+
+/// Write the `--mcp-config` file that registers santree's review tools for one
+/// pull request, and return its path.
+///
+/// The whole scope lives in argv, written here: the server can only touch the PR
+/// named on its own command line, so nothing the model says can retarget it.
+///
+/// `Err`, not `None`, when the hook binary can't be found. The other settings
+/// builders degrade quietly because their contents are a nicety (a status bar, a
+/// state badge); here the tools *are* the feature, and a session that launches
+/// without them looks like it's working right up until it has nowhere to put what
+/// it found.
+pub fn mcp_config_ai_review(
+    app: &AppHandle,
+    owner: &str,
+    name: &str,
+    number: u32,
+    head_sha: &str,
+    diff_index: &Path,
+) -> Result<String> {
+    let bin = hook_bin(app).ok_or_else(|| {
+        anyhow::anyhow!(
+            "santree's helper binary is missing, so the review tools can't start. \
+             In a dev build, run `pnpm bundle:hook`."
+        )
+    })?;
+    let db =
+        db_path(app).ok_or_else(|| anyhow::anyhow!("santree's database path won't resolve"))?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| anyhow::anyhow!("no writable data directory: {e}"))?
+        .join("mcp");
+    let out = dir.join(mcp_stem(owner, name, number)?);
+
+    let config = mcp_config_json(&bin, &db, owner, name, number, head_sha, diff_index)?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&out, serde_json::to_string_pretty(&config)?)?;
+    out.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("the mcp config path isn't valid UTF-8"))
+}
+
+/// `<owner>-<name>-<number>.mcp.json`. Built from values we control, and still
+/// checked at the point it becomes a filename — that's the sink that would trust
+/// them.
+pub fn mcp_stem(owner: &str, name: &str, number: u32) -> Result<String> {
+    let stem = format!("{owner}-{name}-{number}");
+    if stem.contains(['/', '\\']) || stem.starts_with('.') || stem.is_empty() {
+        return Err(anyhow::anyhow!("refusing to write a file named '{stem}'"));
+    }
+    Ok(format!("{stem}.mcp.json"))
+}
+
+/// The config Claude reads. Pure, so the shape can be tested without a running app.
+///
+/// No shell quoting: Claude spawns an stdio server with `spawn(command, args)` and
+/// no shell, so a path with spaces in it (every macOS app data dir has one) is
+/// passed through intact. It *does* expand `${VAR}` in these strings, though, and
+/// this is the file that fixes the server's scope — a `${` anywhere in it could
+/// silently repoint the server at another PR or another binary. So every value is
+/// checked, not only the paths.
+fn mcp_config_json(
+    bin: &Path,
+    db: &Path,
+    owner: &str,
+    name: &str,
+    number: u32,
+    head_sha: &str,
+    diff_index: &Path,
+) -> Result<Value> {
+    let literal = |s: &str| -> Result<String> {
+        if s.contains("${") {
+            return Err(anyhow::anyhow!(
+                "'{s}' contains '${{', which Claude would expand as a variable"
+            ));
+        }
+        Ok(s.to_string())
+    };
+    let path_of = |p: &Path| -> Result<String> {
+        literal(
+            p.to_str()
+                .ok_or_else(|| anyhow::anyhow!("a path isn't valid UTF-8: {}", p.display()))?,
+        )
+    };
+    Ok(json!({
+        "mcpServers": {
+            MCP_SERVER_NAME: {
+                "type": "stdio",
+                "command": path_of(bin)?,
+                "args": [
+                    "--db", path_of(db)?,
+                    "mcp",
+                    "--pr", literal(&format!("{owner}/{name}"))?,
+                    "--number", number.to_string(),
+                    "--head", literal(head_sha)?,
+                    "--diff", path_of(diff_index)?,
+                ],
+            }
+        }
+    }))
 }
 
 /// Cap on the session rows a single read hands back. Ordered newest-first, so
@@ -652,6 +822,86 @@ fn reconcile_live_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mcp_config_names_the_server_and_scopes_it_to_one_pull_request() {
+        let cfg = mcp_config_json(
+            Path::new("/Applications/santree.app/Contents/Resources/santree-hook"),
+            Path::new("/Users/me/Library/Application Support/com.santree.desktop/santree.db"),
+            "acme",
+            "web",
+            42,
+            "abc1234",
+            Path::new("/data/mcp/acme-web-42.diff.json"),
+        )
+        .unwrap();
+        let server = &cfg["mcpServers"]["santree-review"];
+        assert_eq!(server["type"], "stdio");
+        let args: Vec<String> = server["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap().to_string())
+            .collect();
+        // The scope is argv and nothing else: this is what makes "the model can't
+        // retarget it" true rather than a hope.
+        assert!(args.windows(2).any(|w| w == ["--pr", "acme/web"]));
+        assert!(args.windows(2).any(|w| w == ["--number", "42"]));
+        assert!(args.windows(2).any(|w| w == ["--head", "abc1234"]));
+        // A path with a space survives: Claude spawns the server without a shell.
+        assert!(args.iter().any(|a| a.contains("Application Support")));
+    }
+
+    #[test]
+    fn anything_claude_would_expand_is_refused_rather_than_rewritten() {
+        // Not just the paths: this file is what fixes the server's scope, so a
+        // `${` in the slug could repoint it at another repository.
+        let ok = Path::new("/opt/santree-hook");
+        assert!(mcp_config_json(
+            Path::new("/opt/${HOME}/santree-hook"),
+            Path::new("/db.sqlite"),
+            "acme",
+            "web",
+            1,
+            "abc1234",
+            Path::new("/diff.json")
+        )
+        .is_err());
+        assert!(mcp_config_json(
+            ok,
+            Path::new("/db.sqlite"),
+            "acme${IFS}",
+            "web",
+            1,
+            "abc1234",
+            Path::new("/diff.json")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_config_filename_is_checked_where_it_becomes_a_path() {
+        assert_eq!(mcp_stem("acme", "web", 42).unwrap(), "acme-web-42.mcp.json");
+        assert!(mcp_stem("acme", "we/b", 42).is_err());
+        assert!(mcp_stem(".", "web", 42).is_err());
+    }
+
+    #[test]
+    fn the_ai_review_grant_is_added_without_dropping_the_tutors() {
+        // The tutor's Edit grant is what keeps its hook from stopping every turn on
+        // a permission prompt; overwriting `allow` instead of appending to it would
+        // break the tutor for anyone who has it on.
+        let mut root = Map::new();
+        root.insert("permissions".into(), json!({ "allow": ["Edit(/log.md)"] }));
+        merge_permissions(&mut root, &review_deny_rules(), &["mcp__santree-review"]).unwrap();
+        let allow = root["permissions"]["allow"].as_array().unwrap();
+        assert!(allow.iter().any(|r| r == "Edit(/log.md)"));
+        assert!(allow.iter().any(|r| r == "mcp__santree-review"));
+        // And the review session still can't speak for the user.
+        let deny = root["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.iter().any(|r| r == "Bash(gh pr review:*)"));
+        assert!(deny.iter().any(|r| r == "Bash(git push)"));
+    }
 
     // Write a throwaway transcript; the unique name per call avoids cross-test
     // collisions (no tempfile dep in src-tauri — mirrors the hook crate's tests).

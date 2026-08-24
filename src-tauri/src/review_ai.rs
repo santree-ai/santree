@@ -1,30 +1,32 @@
-//! The Reviews tab's AI surfaces: the opening prompt for an interactive review
-//! session, and the generated **review brief** (summary, reading order, watch-outs)
-//! shown beside a PR.
+//! The Reviews tab's AI surfaces: the opening prompts for the two review sessions,
+//! and the cached **review brief** (summary, reading order, watch-outs) shown
+//! beside a PR.
 //!
-//! Both are read-only by construction. Nothing in this module can post a comment,
-//! approve, or push — the brief is a `claude -p` call whose output is parsed as
-//! JSON and stored, and the session prompt is a file the terminal seeds. The
-//! agent's own restraint is enforced elsewhere (the `review` prompt's hard-rules
-//! block plus [`crate::hooks::claude_settings_review`]'s deny list); this module
-//! simply never offers it a write path.
+//! Two sessions, deliberately different. **Ask AI** (`review`) is a reading
+//! partner: it explains the PR and answers questions, and writes nothing anywhere.
+//! **AI review** (`pr-review`) is asked to produce something — a brief and draft
+//! comments — and gets santree's own MCP tools to put them in, which is the only
+//! write path it has ([`launch`] is what wires those up).
+//!
+//! Neither can post to GitHub. That isn't a promise about the model's behaviour: a
+//! review goes out under the user's name, so it goes out when the user sends it.
+//! The deny list ([`crate::hooks::claude_settings_review`] and its AI-review twin)
+//! blocks the `gh` routes, the prompts state the rule, and everything the AI review
+//! writes lands in `review_drafts` until a person publishes it.
 //!
 //! The PR body, its conversation and its diff are **untrusted** — anyone with repo
 //! access, and any bot whose output lands in a diff, can write into them. They're
-//! fenced in `<pull-request>` in both templates, and the headless call grants
-//! `Read` only inside the working directory (see [`generate_brief`]).
+//! fenced in `<pull-request>` in both templates.
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
-use santree_core::domain::{
-    PrDetail, ReadingRole, ReadingStep, ReviewBrief, ReviewTarget, WatchOut, WatchOutKind,
-};
-use serde::Deserialize;
+use anyhow::{anyhow, Result};
+use santree_core::diff_index::{hunk_spans, DiffFileIndex, DiffIndex};
+use santree_core::domain::{AiReviewLaunch, PrDetail, ReviewBrief, ReviewDraft, ReviewTarget};
+use tauri::{AppHandle, Manager};
 
 use crate::db::{now_ms, Db};
-use crate::{agent, github, prompts, reviews, settings};
+use crate::{github, hooks, prompts, review_drafts, reviews};
 
 /// Byte budget for the diff embedded in a prompt.
 ///
@@ -36,27 +38,6 @@ const DIFF_BUDGET: usize = 200_000;
 /// Per-file cap, so one generated lockfile can't eat the whole budget and starve
 /// the files that actually need reading.
 const PER_FILE_BUDGET: usize = 24_000;
-
-/// Settings key for the model the brief runs on (app or per-repo scope).
-pub const BRIEF_MODEL_KEY: &str = "review_brief_model";
-
-/// Ceiling on one brief.
-///
-/// The call reads up to [`DIFF_BUDGET`] of diff on a capable model and writes
-/// structured JSON — minutes of legitimate work, not a hung process. It ran on
-/// [`agent::SHORT_TIMEOUT`] until 2026-08-10, which meant every brief for a PR big
-/// enough to need one was killed mid-answer at 120s and surfaced as an empty
-/// result. Same bug the tutor analysis hit; the deadline is now an argument so a
-/// call site can't inherit one that isn't sized for it.
-const BRIEF_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// The brief's default model.
-///
-/// Deliberately *not* [`agent::HELPER_MODEL`]: unlike a commit message, deciding
-/// what a reviewer should read first and where the risk sits is the actual work,
-/// and the cheapest tier produces a plausible-looking order that isn't grounded in
-/// the diff — which is worse than no brief, because it's trusted.
-const DEFAULT_BRIEF_MODEL: &str = "sonnet";
 
 // ── Prompt context assembly ──────────────────────────────────────────────────
 
@@ -168,63 +149,127 @@ async fn ticket_content(
     prompts::render_ticket_from(sources, &detail).ok()
 }
 
-// ── The interactive review session's opening prompt ──────────────────────────
+// ── The review sessions' opening prompts ─────────────────────────────────────
 
-/// Render the `review` prompt for a PR and write it to a file, returning the
-/// **path** — the terminal seeds `Read <path> …` rather than the text itself,
-/// which is far too large for a shell seed (this is a whole PR diff).
+/// Everything both prompts are rendered from, gathered once.
 ///
-/// Whether a checkout exists is *derived*, not passed in: the template branches on
-/// it to tell the agent whether it can read real code, and a caller-supplied answer
-/// could disagree with the cwd the terminal actually opens in.
+/// Whether a checkout exists is *derived* here, not passed in: both templates
+/// branch on it to tell the agent whether it can read real code, and a
+/// caller-supplied answer could disagree with the cwd the terminal opens in.
+struct PromptInputs {
+    detail: PrDetail,
+    sources: Vec<(String, String)>,
+    ticket: Option<String>,
+    diff: String,
+    truncated: bool,
+    has_workspace: bool,
+}
+
+async fn prompt_inputs(db: &Db, repo: &str, target: &ReviewTarget) -> Result<PromptInputs> {
+    let workspace = reviews::existing_review_workspace(db, repo, target).await?;
+    let (owner, name) = github::split_slug(&target.pr_repo)?;
+    let detail = reviews::detail(owner, name, target.number).await?;
+    let sources = prompts::resolve_sources(db, Some(repo)).await?;
+    let ticket = ticket_content(db, repo, target.ticket_id.as_deref(), &sources).await;
+    let (diff, truncated) = render_diff(&detail);
+    Ok(PromptInputs {
+        detail,
+        sources,
+        ticket,
+        diff,
+        truncated,
+        has_workspace: workspace.is_some(),
+    })
+}
+
+/// The variables both templates share.
+fn shared_context(target: &ReviewTarget, i: &PromptInputs) -> minijinja::Value {
+    minijinja::context! {
+        pr_number => target.number,
+        pr_title => target.title,
+        pr_body => i.detail.body.trim(),
+        pr_author => target.author,
+        base_ref => target.base_ref,
+        head_ref => target.head_ref,
+        head_sha => i.detail.head_sha,
+        diff_stat => render_diff_stat(&i.detail),
+        diff => i.diff,
+        conversation => render_conversation(&i.detail),
+        ticket_content => i.ticket,
+        workspace => i.has_workspace,
+        truncated => i.truncated,
+    }
+}
+
+/// Render the **Ask AI** session's opening prompt and write it to a file, returning
+/// the **path** — the terminal seeds `Read <path> …` rather than the text itself,
+/// which is far too large for a shell seed (this is a whole PR diff).
 pub async fn review_prompt(
     db: &Db,
     repo: &str,
     prompts_root: &Path,
     target: &ReviewTarget,
 ) -> Result<String> {
-    let workspace = reviews::existing_review_workspace(db, repo, target).await?;
-    let (owner, name) = github::split_slug(&target.pr_repo)?;
-    let detail = reviews::detail(owner, name, target.number).await?;
-    let sources = prompts::resolve_sources(db, Some(repo)).await?;
-    let ticket = ticket_content(db, repo, target.ticket_id.as_deref(), &sources).await;
-    let (diff, _truncated) = render_diff(&detail);
+    let inputs = prompt_inputs(db, repo, target).await?;
+    let body = prompts::render_from(&inputs.sources, "review", shared_context(target, &inputs))?;
+    write_prompt(prompts_root, &target.pr_repo, target.number, "review", body).await
+}
 
+/// Render the **AI review** session's prompt — the one asked to produce a brief and
+/// draft comments through santree's tools. Returns the file's path alongside the
+/// PR detail it was built from, so the caller can index the same diff the agent is
+/// reading rather than fetching the PR twice.
+///
+/// `drafts` are what's already saved for this PR: a resumed session that can see
+/// them doesn't re-raise points it made an hour ago.
+async fn ai_review_prompt(
+    db: &Db,
+    repo: &str,
+    prompts_root: &Path,
+    target: &ReviewTarget,
+    drafts: &[ReviewDraft],
+) -> Result<(String, PrDetail)> {
+    let inputs = prompt_inputs(db, repo, target).await?;
+    let existing: Vec<minijinja::Value> = drafts
+        .iter()
+        .map(|d| {
+            minijinja::context! {
+                path => d.path,
+                line => d.line,
+                body => d.body,
+            }
+        })
+        .collect();
     let body = prompts::render_from(
-        &sources,
-        "review",
-        minijinja::context! {
-            pr_number => target.number,
-            pr_title => target.title,
-            pr_body => detail.body.trim(),
-            pr_author => target.author,
-            base_ref => target.base_ref,
-            head_ref => target.head_ref,
-            head_sha => detail.head_sha,
-            diff_stat => render_diff_stat(&detail),
-            diff => diff,
-            conversation => render_conversation(&detail),
-            ticket_content => ticket,
-            workspace => workspace.is_some(),
-        },
+        &inputs.sources,
+        "pr-review",
+        minijinja::context! { existing_drafts => existing, ..shared_context(target, &inputs) },
     )?;
-
-    write_prompt(prompts_root, &target.pr_repo, target.number, body).await
+    let path = write_prompt(
+        prompts_root,
+        &target.pr_repo,
+        target.number,
+        "ai-review",
+        body,
+    )
+    .await?;
+    Ok((path, inputs.detail))
 }
 
 /// Write a rendered review prompt under the app data dir (never inside a repo, so
 /// it can't surface in any `git status`).
 ///
-/// The filename is built from values we control — the repo slug's two components
-/// and a `u32` — but it's still checked for separators and dot-prefixes at the
-/// `join`, since that's the sink that would trust them.
+/// The filename is built from values we control — the repo slug's two components,
+/// a `u32`, and a literal — but it's still checked for separators and dot-prefixes
+/// at the `join`, since that's the sink that would trust them.
 async fn write_prompt(
     prompts_root: &Path,
     pr_repo: &str,
     number: u32,
+    kind: &str,
     body: String,
 ) -> Result<String> {
-    let stem = format!("{}-{number}.review.md", pr_repo.replace('/', "-"));
+    let stem = format!("{}-{number}.{kind}.md", pr_repo.replace('/', "-"));
     if stem.contains(['/', '\\']) || stem.starts_with('.') {
         return Err(anyhow!("refusing to write a prompt file named '{stem}'"));
     }
@@ -237,6 +282,101 @@ async fn write_prompt(
         Ok(path.to_string_lossy().into_owned())
     })
     .await?
+}
+
+// ── Launching an AI review ───────────────────────────────────────────────────
+
+/// Resolve everything an AI-review session launches with: its prompt, its
+/// `--settings` file, and the `--mcp-config` that gives it santree's review tools.
+///
+/// One call for all three because the terminal seed is built **once**, at PTY
+/// creation: a flag that resolves late is silently dropped, and the two ways that
+/// can go wrong aren't symmetrical — a session missing its MCP config looks like
+/// it's working until it has nowhere to put what it found, and one missing its
+/// settings has no deny list. Either is worse than not launching.
+///
+/// The diff index written here is what the MCP server validates anchors against.
+/// It's built from the *same* `PrDetail` the prompt embedded, so the lines the
+/// agent reads and the lines it's allowed to comment on can't disagree.
+pub async fn launch(
+    app: &AppHandle,
+    db: &Db,
+    repo: &str,
+    target: &ReviewTarget,
+    tutor: Option<&str>,
+) -> Result<AiReviewLaunch> {
+    let (owner, name) = github::split_slug(&target.pr_repo)?;
+    let prompts_root = crate::worktree::prompts_root(app)
+        .ok_or_else(|| anyhow!("no writable data directory for the prompt file"))?;
+    let drafts = review_drafts::list(db, &target.pr_repo, target.number).await?;
+    let (prompt_path, detail) = ai_review_prompt(db, repo, &prompts_root, target, &drafts).await?;
+
+    // The head the whole session is scoped to. It goes into argv, so it's checked
+    // like every other value that crosses that line.
+    let head_sha = detail.head_sha.clone();
+    if !(7..=64).contains(&head_sha.len()) || !head_sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "this pull request has no usable head commit to review"
+        ));
+    }
+    let head_sha = head_sha.to_ascii_lowercase();
+
+    let index = DiffIndex {
+        head_sha: head_sha.clone(),
+        files_truncated: detail.files_truncated,
+        files: detail
+            .files
+            .iter()
+            .map(|f| {
+                let (old, new) = f.patch.as_deref().map(hunk_spans).unwrap_or_default();
+                DiffFileIndex {
+                    path: f.path.clone(),
+                    old,
+                    new,
+                }
+            })
+            .collect(),
+    };
+
+    let (app2, owner, name) = (app.clone(), owner.to_string(), name.to_string());
+    let tutor = tutor.map(str::to_string);
+    let number = target.number;
+    tokio::task::spawn_blocking(move || -> Result<AiReviewLaunch> {
+        let index_path = write_diff_index(&app2, &owner, &name, number, &index)?;
+        let settings_path = hooks::claude_settings_ai_review(&app2, tutor.as_deref())
+            .ok_or_else(|| anyhow!("santree's Claude settings file couldn't be written"))?;
+        let mcp_config_path =
+            hooks::mcp_config_ai_review(&app2, &owner, &name, number, &head_sha, &index_path)?;
+        Ok(AiReviewLaunch {
+            prompt_path,
+            settings_path,
+            mcp_config_path,
+        })
+    })
+    .await?
+}
+
+/// Write the diff index beside the MCP config it belongs to, and return its path.
+/// Rewritten on every launch, so a resumed session validates against the PR as it
+/// is now rather than as it was when the session started.
+fn write_diff_index(
+    app: &AppHandle,
+    owner: &str,
+    name: &str,
+    number: u32,
+    index: &DiffIndex,
+) -> Result<std::path::PathBuf> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| anyhow!("no writable data directory: {e}"))?
+        .join("mcp");
+    // Same guard as the config's own name, at the same sink.
+    let stem = hooks::mcp_stem(owner, name, number)?.replace(".mcp.json", ".diff.json");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(stem);
+    std::fs::write(&path, serde_json::to_string(index)?)?;
+    Ok(path)
 }
 
 // ── The review brief ─────────────────────────────────────────────────────────
@@ -253,199 +393,6 @@ pub async fn cached_brief(db: &Db, pr_repo: &str, number: u32) -> Result<Option<
     // A row that no longer deserializes (an older shape) is treated as absent
     // rather than as an error — the panel just offers to generate a fresh one.
     Ok(row.and_then(|(json,)| serde_json::from_str(&json).ok()))
-}
-
-/// What the model is asked to return. Kept separate from the domain type so a
-/// missing list degrades to empty rather than failing the whole parse, and so the
-/// role/kind strings can be mapped leniently.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawBrief {
-    #[serde(default)]
-    summary: String,
-    #[serde(default)]
-    reading_order: Vec<RawStep>,
-    #[serde(default)]
-    watch_outs: Vec<RawWatchOut>,
-    #[serde(default)]
-    questions: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct RawStep {
-    path: String,
-    #[serde(default)]
-    role: String,
-    #[serde(default)]
-    why: String,
-}
-
-#[derive(Deserialize)]
-struct RawWatchOut {
-    path: String,
-    #[serde(default)]
-    line: Option<u32>,
-    #[serde(default)]
-    kind: String,
-    #[serde(default)]
-    note: String,
-}
-
-/// An unrecognised role reads as core logic — the bucket that gets *read*, so an
-/// unmapped value can only cost attention, never hide a file.
-fn parse_role(s: &str) -> ReadingRole {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "entrypoint" | "entry_point" | "entry point" => ReadingRole::EntryPoint,
-        "test" | "tests" => ReadingRole::Test,
-        "config" => ReadingRole::Config,
-        "generated" => ReadingRole::Generated,
-        "trivial" => ReadingRole::Trivial,
-        _ => ReadingRole::CoreLogic,
-    }
-}
-
-/// An unrecognised kind reads as a question, the weakest claim — an unmapped value
-/// must not be presented to the reviewer as a confirmed correctness bug.
-fn parse_kind(s: &str) -> WatchOutKind {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "correctness" | "bug" => WatchOutKind::Correctness,
-        "security" => WatchOutKind::Security,
-        "performance" | "perf" => WatchOutKind::Performance,
-        "testing" | "test" | "tests" => WatchOutKind::Testing,
-        "style" => WatchOutKind::Style,
-        _ => WatchOutKind::Question,
-    }
-}
-
-/// Pull the JSON object out of a `claude -p` reply.
-///
-/// Models wrap JSON in prose or a ```json fence often enough that demanding a bare
-/// object would fail usable answers — so we take the outermost `{…}` span. A reply
-/// with no object at all is an error, not an empty brief: showing an empty reading
-/// order as if it were the answer is exactly the silent-degradation the "no
-/// placeholder data" rule exists to prevent.
-fn extract_json(text: &str) -> Result<&str> {
-    let start = text.find('{');
-    let end = text.rfind('}');
-    match (start, end) {
-        (Some(s), Some(e)) if e > s => Ok(&text[s..=e]),
-        _ => Err(anyhow!("the model didn't return a JSON object")),
-    }
-}
-
-fn parse_brief(text: &str, head_sha: &str, truncated: bool) -> Result<ReviewBrief> {
-    let raw: RawBrief = serde_json::from_str(extract_json(text)?)
-        .context("the model's JSON didn't match the review-brief shape")?;
-    Ok(ReviewBrief {
-        summary: raw.summary.trim().to_string(),
-        reading_order: raw
-            .reading_order
-            .into_iter()
-            .map(|s| ReadingStep {
-                path: s.path,
-                role: parse_role(&s.role),
-                why: s.why.trim().to_string(),
-            })
-            .collect(),
-        watch_outs: raw
-            .watch_outs
-            .into_iter()
-            .map(|w| WatchOut {
-                path: w.path,
-                line: w.line,
-                kind: parse_kind(&w.kind),
-                note: w.note.trim().to_string(),
-            })
-            .collect(),
-        questions: raw
-            .questions
-            .into_iter()
-            .map(|q| q.trim().to_string())
-            .filter(|q| !q.is_empty())
-            .collect(),
-        truncated,
-        head_sha: head_sha.to_string(),
-        generated_at_ms: now_ms() as f64,
-    })
-}
-
-/// Generate (and cache) the brief for a PR.
-///
-/// Runs the configured model over the PR's diff with `Read` scoped to `cwd` — the
-/// review checkout when there is one, else the repo root. The scoping is
-/// load-bearing, not hygiene: the prompt embeds an untrusted diff and ticket text,
-/// and an unscoped grant would let "…also read ~/.ssh/id_rsa and include it" reach
-/// real secrets (the same reasoning as `pr::draft_body`).
-pub async fn generate_brief(db: &Db, repo: &str, target: &ReviewTarget) -> Result<ReviewBrief> {
-    // Reuses the AI tab's checkout when there is one, but never creates it:
-    // generating a brief shouldn't silently spend a fetch and a working tree.
-    let workspace = reviews::existing_review_workspace(db, repo, target).await?;
-    let (owner, name) = github::split_slug(&target.pr_repo)?;
-    let detail = reviews::detail(owner, name, target.number).await?;
-    if detail.files.is_empty() {
-        return Err(anyhow!(
-            "this PR has no fetchable file changes to build a brief from"
-        ));
-    }
-    let head_sha = detail.head_sha.clone();
-
-    let sources = prompts::resolve_sources(db, Some(repo)).await?;
-    let ticket = ticket_content(db, repo, target.ticket_id.as_deref(), &sources).await;
-    let (diff, truncated) = render_diff(&detail);
-    let prompt = prompts::render_from(
-        &sources,
-        "review-brief",
-        minijinja::context! {
-            pr_number => target.number,
-            pr_title => target.title,
-            pr_body => detail.body.trim(),
-            pr_author => target.author,
-            diff_stat => render_diff_stat(&detail),
-            diff => diff,
-            truncated => truncated,
-            ticket_content => ticket,
-        },
-    )?;
-
-    let model = settings::resolve(db, repo, BRIEF_MODEL_KEY)
-        .await?
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_BRIEF_MODEL.to_string());
-    let cwd = match workspace {
-        Some(w) => PathBuf::from(w),
-        None => PathBuf::from(
-            crate::repo::path(db, repo)
-                .await?
-                .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?,
-        ),
-    };
-
-    let text = tokio::task::spawn_blocking(move || {
-        let read_scope = agent::read_within(&cwd);
-        agent::run_print(&cwd, &prompt, &[&read_scope], Some(&model), BRIEF_TIMEOUT)
-    })
-    .await?
-    .context("couldn't generate the review brief")?;
-
-    let brief = parse_brief(&text, &head_sha, truncated)?;
-    let json = serde_json::to_string(&brief)?;
-    sqlx::query(
-        "INSERT INTO review_briefs (repo_slug, number, head_sha, brief, created_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(repo_slug, number) DO UPDATE SET
-             head_sha = excluded.head_sha,
-             brief = excluded.brief,
-             created_at = excluded.created_at",
-    )
-    .bind(&target.pr_repo)
-    .bind(target.number)
-    .bind(&head_sha)
-    .bind(&json)
-    .bind(now_ms())
-    .execute(db)
-    .await?;
-
-    Ok(brief)
 }
 
 /// Drop briefs older than 30 days at startup, so the table can't grow without
@@ -491,62 +438,5 @@ mod tests {
     fn truncate_at_line_handles_one_giant_unbroken_line() {
         // No newline to cut at — a hard cut beats returning nothing.
         assert_eq!(truncate_at_line("aaaaaaaa", 3), "aaa");
-    }
-
-    #[test]
-    fn extract_json_takes_the_object_out_of_a_fenced_reply() {
-        // Models wrap JSON often enough that demanding a bare object would fail
-        // answers that are perfectly usable.
-        let fenced = "Here you go:\n```json\n{\"summary\": \"hi\"}\n```\nHope that helps!";
-        assert_eq!(extract_json(fenced).unwrap(), r#"{"summary": "hi"}"#);
-    }
-
-    #[test]
-    fn extract_json_errors_rather_than_inventing_an_empty_brief() {
-        // An empty reading order shown as *the answer* is worse than a visible
-        // failure — the reviewer would trust it.
-        assert!(extract_json("I couldn't read the diff, sorry.").is_err());
-        assert!(extract_json("").is_err());
-    }
-
-    #[test]
-    fn parse_brief_maps_the_documented_shape() {
-        let json = r#"{
-            "summary": "  Adds retries.  ",
-            "readingOrder": [{"path": "src/a.rs", "role": "entryPoint", "why": "starts here"}],
-            "watchOuts": [{"path": "src/b.rs", "line": 12, "kind": "security", "note": "unvalidated"}],
-            "questions": ["Why 3 retries?", "   "]
-        }"#;
-        let brief = parse_brief(json, "abc123", false).unwrap();
-        assert_eq!(brief.summary, "Adds retries.");
-        assert_eq!(brief.reading_order[0].role, ReadingRole::EntryPoint);
-        assert_eq!(brief.watch_outs[0].kind, WatchOutKind::Security);
-        assert_eq!(brief.watch_outs[0].line, Some(12));
-        // Blank questions are dropped rather than rendered as empty rows.
-        assert_eq!(brief.questions, vec!["Why 3 retries?"]);
-        assert_eq!(brief.head_sha, "abc123");
-    }
-
-    #[test]
-    fn parse_brief_survives_missing_lists() {
-        // A clean PR legitimately has no watch-outs and no questions; a model that
-        // omits the keys entirely means the same thing.
-        let brief = parse_brief(r#"{"summary": "Small fix."}"#, "sha", false).unwrap();
-        assert!(brief.watch_outs.is_empty());
-        assert!(brief.reading_order.is_empty());
-    }
-
-    #[test]
-    fn unknown_labels_fall_to_the_safe_side() {
-        // An unmapped role must not hide a file from the reading order…
-        assert_eq!(parse_role("wibble"), ReadingRole::CoreLogic);
-        // …and an unmapped kind must not be shown as a confirmed bug.
-        assert_eq!(parse_kind("wibble"), WatchOutKind::Question);
-        assert_eq!(parse_kind("SECURITY"), WatchOutKind::Security);
-    }
-
-    #[test]
-    fn parse_brief_rejects_a_reply_of_the_wrong_shape() {
-        assert!(parse_brief(r#"{"readingOrder": "not a list"}"#, "sha", false).is_err());
     }
 }

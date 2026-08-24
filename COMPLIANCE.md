@@ -103,16 +103,29 @@ Exactly what it injects — the whole list, no more:
 - **A `statusLine`** (`<bin> --db <db> statusline`) — santree's own context-fill
   bar. It prints the bar Claude renders and records Claude's authoritative usage
   numbers into `session_usage_live`.
-- **A `permissions.deny` block**, in the *Fix CI* flow only
-  (`claude_settings_no_git`, written to a separate `claude-hooks-fixci.json`) —
-  eight rules, all denying the same two verbs: `Bash(git commit)`,
-  `Bash(git commit:*)`, `Bash(git push)`, `Bash(git push:*)`, plus
-  `Bash(*git commit*)` / `Bash(*git push*)` (an absolute path or wrapper before
-  `git`) and `Bash(*git * commit*)` / `Bash(*git * push*)` (an option between the
-  verb and the subcommand, e.g. `git -C <path> commit`). So that session can fix
-  and validate but leaves committing/pushing to the user. This is best-effort
-  defence-in-depth, not a hard gate — see `hooks.rs` for what it does and doesn't
-  catch.
+- **A `permissions.deny` block**, in the restricted flows only. Each is written to
+  its own settings file so one can never affect another launch, and all three are
+  best-effort defence-in-depth, not a hard gate — see `hooks.rs` for what they do
+  and don't catch:
+  - *Fix CI* (`claude_settings_no_git` → `claude-hooks-fixci.json`) — eight rules,
+    all denying the same two verbs: `Bash(git commit)`, `Bash(git commit:*)`,
+    `Bash(git push)`, `Bash(git push:*)`, plus `Bash(*git commit*)` /
+    `Bash(*git push*)` (an absolute path or wrapper before `git`) and
+    `Bash(*git * commit*)` / `Bash(*git * push*)` (an option between the verb and
+    the subcommand, e.g. `git -C <path> commit`). So that session can fix and
+    validate but leaves committing/pushing to the user.
+  - *Ask AI* (`claude_settings_review` → `claude-hooks-review.json`) — the same
+    eight, plus sixteen denying every `gh` route that would speak as the user on a
+    PR (`gh pr review/comment/merge/close/edit/ready`, `gh issue comment`, and
+    `gh api` wholesale), each in both the prefix and the wrapper form.
+  - *AI review* (`claude_settings_ai_review` → `claude-hooks-ai-review.json`) —
+    the same twenty-four, plus the one `permissions.allow` rule described below.
+- **In the AI-review flow only**, two more things (see "AI-review MCP server"):
+  one `permissions.allow` rule, `mcp__santree-review`, and one extra launch flag,
+  `--mcp-config <app_data_dir>/mcp/<owner>-<name>-<N>.mcp.json`, registering a
+  single additional stdio MCP server. The user's own MCP servers and settings are
+  untouched — there is no `--strict-mcp-config` — so that session can still read a
+  ticket or a design doc through whatever they have connected.
 
 The hook binary reads the event's JSON payload on stdin, maps it to an
 `AgentState`, and UPSERTs one row per session in `session_state`. It **prints
@@ -146,6 +159,44 @@ Reading the session transcript (`hooks.rs`'s reconciler, to tell a resolved prom
 from a live one) is bounded by these same conditions: it is read to *label* the
 session, never to decide what to send it.
 
+## AI-review MCP server — a scoped exception
+
+The **AI review** session launches with one santree-owned MCP server registered:
+the same bundled `santree-hook` binary in `mcp` mode (`crates/hook/src/mcp.rs`),
+scoped by argv to a single pull request. Its five tools are how that session
+records what it found — a review brief, and draft review comments — and they are
+the only write path it has.
+
+This is a **fourth named exception**, and it is the first one that *grants* a
+capability rather than restricting one. It stays inside the line because of the
+following, and any change here must preserve all of them:
+
+- **Nothing it writes leaves the machine.** The server has no network access, no
+  GitHub token, and no `git`. Its tools write two tables in santree's own SQLite
+  (`review_drafts`, `review_briefs`) for the PR named in its argv, and nothing
+  else. A draft becomes a real comment only when the user clicks Publish, which
+  runs the same code path as the diff's own `+` button (`review_drafts::publish`
+  → `reviews::add_inline_comment`) and puts it in *their* pending review, which
+  they then submit themselves. Two human decisions stand between an agent's
+  finding and anyone else seeing it.
+- **The scope is ours, not the model's.** The PR, its head commit, and the diff
+  index the tools validate line numbers against are all written by santree at
+  launch and passed on the command line. Every statement carries the PR, so
+  "comment on a different pull request" is not expressible.
+- **It cannot gate the CLI's decisions.** An MCP tool is one the model chooses to
+  call, not a channel santree sits in the middle of. Unlike a synchronous hook,
+  nothing here can approve, deny, or delay anything Claude does.
+- **No output-parsing influences input.** Tool results carry confirmations,
+  validation messages, and the model's own drafts back over the transport Claude
+  owns. Nothing santree derives from them is written to the PTY, and there is no
+  loop: a human opens the tab, and the server exits when Claude closes its stdin.
+- **The rest of the read-only posture is unchanged.** The deny list above still
+  blocks the `gh` and `git` write shapes, and the `pr-review` prompt states the
+  rule in prose: read through any tool, write only through santree's. Because the
+  user's own MCP servers stay available, that prompt is what stands between the
+  session and a write through one of *those* — it is not a hard gate, and it is
+  not claimed to be.
+
 ## Where this is enforced in code
 - `crates/pty` — spawns a real process behind a real PTY and streams **raw
   bytes**. No command interpretation, no output parsing. The only env it sets on
@@ -163,6 +214,16 @@ session, never to decide what to send it.
   and its output path ends at the UI: nothing it reads is ever written back to a
   PTY. `crates/hook` is the binary those hooks run; it records state and exits 0,
   emitting no hook decision.
+- `crates/hook/src/mcp.rs` + `review_tools.rs` — the AI review's tool server. It
+  speaks JSON-RPC on stdio and writes santree's own rows. It listens on nothing,
+  makes no network connection, and spawns no subprocess; after a write it nudges
+  santree's local signal socket with one byte, exactly as the hook path has always
+  done, so the UI refreshes. Anchors are checked against the diff
+  index santree wrote (`crates/core/src/diff_index.rs`) so a refusal tells the
+  model what would be valid instead of failing later under the user's name.
+- `src-tauri/src/review_drafts.rs` — the only path from a draft to GitHub, and it
+  runs on a click. It posts into the user's pending review, never on its own, and
+  refuses a draft written against a head the PR has moved past.
 
 If a change introduces output parsing that influences input, token handling, or an
 unattended loop, it violates these constraints and must not be merged.

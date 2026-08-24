@@ -693,6 +693,87 @@ pub struct ReviewBrief {
     pub generated_at_ms: f64,
 }
 
+/// One AI-written draft review comment — a "santree draft".
+///
+/// Written only by the `santree-review` MCP server an AI-review session runs
+/// with, and held in santree's own database: GitHub never sees it until the user
+/// adds it to their pending review, which deletes the row. The user can edit,
+/// re-anchor or delete it first, because the comment goes out under their name.
+///
+/// `line`/`start_line` follow [`NewInlineComment`]'s convention exactly (numbered
+/// within the side named by `on_right`), so publishing is a straight mapping.
+/// `PartialEq` but not `Eq` — the timestamps are `f64` (Specta forbids 64-bit
+/// ints), see [`ReviewBrief::generated_at_ms`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewDraft {
+    /// Opaque row key minted by the MCP server. Never a path or a URL component.
+    pub id: String,
+    /// "owner/name" — the PR's own repo.
+    pub pr_repo: String,
+    pub pr_number: u32,
+    /// The head the draft was written against. When it no longer matches the PR's
+    /// head, the UI flags the draft and publishing refuses it: the line numbers
+    /// describe code that has since moved.
+    pub head_sha: String,
+    pub path: String,
+    pub line: u32,
+    /// First line of a multi-line range; `line` is then its last. `None` for the
+    /// single-line case, which is just as normal a comment.
+    pub start_line: Option<u32>,
+    pub on_right: bool,
+    pub body: String,
+    /// The exact replacement for the covered lines, without a fence — stored apart
+    /// from `body` so the two can be edited independently. The ```suggestion block
+    /// is composed once, at publish time.
+    pub suggestion: Option<String>,
+    pub created_at_ms: f64,
+    pub updated_at_ms: f64,
+}
+
+/// What a batch publish actually did.
+///
+/// Publishing stops at the first failure and reports it: `published` is how many
+/// really reached GitHub, and every draft that didn't is still a draft. A count
+/// with a failure attached is the honest answer — "2 of 5 went" is actionable,
+/// where a bare error would leave the user guessing which half landed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewPublishOutcome {
+    pub published: u32,
+    /// The pending review the drafts landed in — the one that was already open, or
+    /// the one the first draft opened.
+    pub review_id: Option<String>,
+    pub failed: Option<ReviewPublishFailure>,
+}
+
+/// The draft a batch publish stopped on, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewPublishFailure {
+    pub draft_id: String,
+    pub error: String,
+}
+
+/// The three files an AI-review session launches with, resolved in one call so a
+/// launch can't race past any of them.
+///
+/// The seed is built once, at PTY creation: a flag that arrives late is silently
+/// dropped, and a session missing its MCP config can't write drafts while one
+/// missing its settings could post to GitHub. One command, all three, or none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AiReviewLaunch {
+    /// The rendered `pr-review` prompt, seeded as `Read <path> …` (a whole PR diff
+    /// is far too large to type into a shell).
+    pub prompt_path: String,
+    /// `--settings`: santree's hooks and status line, the review deny list, and the
+    /// grant for the santree-review tools.
+    pub settings_path: String,
+    /// `--mcp-config`: the santree-review server, scoped by argv to this PR.
+    pub mcp_config_path: String,
+}
+
 /// The handful of tracker fields the Reviews sidebar needs to group PRs by Linear
 /// project. Deliberately not a [`Task`]: these are *other people's* issues (the
 /// ones you review), which the viewer-assigned `list_issues` query never returns,

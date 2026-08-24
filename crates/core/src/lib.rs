@@ -5,6 +5,7 @@
 //! command layer (`src-tauri`) is a thin adapter that calls into here.
 
 pub mod config;
+pub mod diff_index;
 pub mod domain;
 pub mod layout;
 pub mod linear;

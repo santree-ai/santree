@@ -29,8 +29,9 @@ import type {
   PrDetail,
   PrLabel,
   PromptInfo,
-  ReviewBrief,
+  ReviewDraft,
   ReviewEvent,
+  ReviewPublishOutcome,
   ReviewTarget,
   ScriptInfo,
   SessionState,
@@ -285,6 +286,11 @@ export const queryKeys = {
   reviewPrompt: (repo: string, prRepo: string, number: number) =>
     ["review-prompt", repo, prRepo, number] as const,
   prReviewBrief: (prRepo: string, number: number) => ["pr-review-brief", prRepo, number] as const,
+  prReviewBriefPrefix: ["pr-review-brief"] as const,
+  aiReviewLaunch: (repo: string, prRepo: string, number: number) =>
+    ["ai-review-launch", repo, prRepo, number] as const,
+  reviewDrafts: (prRepo: string, number: number) => ["review-drafts", prRepo, number] as const,
+  reviewDraftsPrefix: ["review-drafts"] as const,
   mergeQueue: (repo: string) => ["merge-queue", repo] as const,
   prDetail: (owner: string, name: string, number: number) =>
     ["pr-detail", owner, name, number] as const,
@@ -364,13 +370,11 @@ export const INVESTIGATE_EFFORT_KEY = "investigate_effort";
  *  "verify vendor flags" gotcha). */
 export const INVESTIGATE_REMOTE_CONTROL_KEY = "investigate_remote_control";
 
-/** Setting keys for the Reviews tab's AI surfaces. `review_model`/`review_effort`
- *  drive the interactive review session; `review_brief_model` the headless brief
- *  (which defaults to a stronger tier than the other headless helpers — deciding a
- *  reading order is real reasoning, not a commit message). */
+/** Setting keys for the Reviews tab's AI sessions — both of them: Ask AI and the
+ *  AI review run on the same model and effort, since they read the same PR and
+ *  differ only in what they're asked to produce. */
 export const REVIEW_MODEL_KEY = "review_model";
 export const REVIEW_EFFORT_KEY = "review_effort";
-export const REVIEW_BRIEF_MODEL_KEY = "review_brief_model";
 
 /** Models for the two headless writing helpers, mirroring `worktree.rs`'s
  *  `COMMIT_MODEL_KEY` and `pr.rs`'s `BODY_MODEL_KEY`. Both default to the cheap
@@ -1466,20 +1470,120 @@ export const usePrReviewBrief = (prRepo: string, number: number) =>
     { enabled: !!prRepo && number > 0, staleTime: Number.POSITIVE_INFINITY },
   );
 
-/** Generate (or regenerate) a PR's review brief. Slow — a headless model call over
- *  the whole diff — so it's explicit rather than automatic, and its result is
- *  written straight into the cache the panel reads. */
-export const useGenerateReviewBrief = (repo: string) => {
-  const qc = useQueryClient();
-  return useActionMutation<ReviewTarget, ReviewBrief>({
-    mutationFn: (target) => unwrap(commands.generatePrReviewBrief(repo, target)),
-    // Seed the cache directly: the command already returns the brief the panel
-    // wants, so an invalidate would just re-read the row we just wrote.
-    invalidate: (target, data) => {
-      qc.setQueryData(queryKeys.prReviewBrief(target.prRepo, target.number), data);
-      return [];
-    },
+/** The three files an AI-review session launches with: its prompt, its `--settings`
+ *  file, and the `--mcp-config` that gives it santree's review tools.
+ *
+ *  One query for all three because the terminal seed is built once, at spawn: a
+ *  flag that resolves late is silently dropped, and the failure isn't symmetrical.
+ *  A session without its MCP config looks fine until it has nowhere to put what it
+ *  found; one without its settings has no deny list. `staleTime: 0` so each launch
+ *  re-renders against the PR as it is now — including its current head, which the
+ *  tools validate comment anchors against. */
+export const useAiReviewLaunch = (repo: string, target: ReviewTarget | null, enabled: boolean) =>
+  useUnwrappedQuery(
+    queryKeys.aiReviewLaunch(repo, target?.prRepo ?? "", target?.number ?? 0),
+    // biome-ignore lint/style/noNonNullAssertion: gated by `enabled` below.
+    () => commands.aiReviewLaunch(repo, target!),
+    { enabled: enabled && !!repo && !!target, staleTime: 0 },
+  );
+
+/** The AI review's draft comments for a PR: written by its MCP tools, held in
+ *  santree, and invisible to GitHub until the user publishes them. Refreshed live
+ *  by {@link useReviewAiWatcher} while a review session is writing. */
+export const useReviewDrafts = (prRepo: string, number: number) =>
+  useUnwrappedQuery(
+    queryKeys.reviewDrafts(prRepo, number),
+    () => commands.reviewDrafts(prRepo, number),
+    { enabled: !!prRepo && number > 0, staleTime: 30_000 },
+  );
+
+/** Save an edit to a draft. Optimistic: it's a local row, so the round-trip is
+ *  disk, and waiting on it would make editing feel like posting. */
+export const useUpdateReviewDraft = (prRepo: string, number: number) =>
+  useOptimisticMutation<{ id: string; body: string; suggestion: string | null }, ReviewDraft>({
+    mutationKey: ["update-review-draft", prRepo, number],
+    mutationFn: ({ id, body, suggestion }) =>
+      unwrap(commands.updateReviewDraft(id, body, suggestion)),
+    optimistic: (qc, { id, body, suggestion }) =>
+      patchDrafts(qc, prRepo, number, (drafts) =>
+        drafts.map((d) => (d.id === id ? { ...d, body, suggestion } : d)),
+      ),
+    invalidate: () => [queryKeys.reviewDrafts(prRepo, number)],
   });
+
+/** Drop a draft the user doesn't want to send. */
+export const useDeleteReviewDraft = (prRepo: string, number: number) =>
+  useOptimisticMutation<string, null>({
+    mutationKey: ["delete-review-draft", prRepo, number],
+    mutationFn: (id) => unwrap(commands.deleteReviewDraft(id)),
+    optimistic: (qc, id) =>
+      patchDrafts(qc, prRepo, number, (drafts) => drafts.filter((d) => d.id !== id)),
+    invalidate: () => [queryKeys.reviewDrafts(prRepo, number)],
+  });
+
+/** Patch the cached drafts and hand back the rollback. */
+function patchDrafts(
+  qc: QueryClient,
+  prRepo: string,
+  number: number,
+  next: (drafts: ReviewDraft[]) => ReviewDraft[],
+) {
+  const key = queryKeys.reviewDrafts(prRepo, number);
+  const before = qc.getQueryData<ReviewDraft[]>(key);
+  if (!before) return;
+  qc.setQueryData(key, next(before));
+  return () => qc.setQueryData(key, before);
+}
+
+/** Send drafts to GitHub as comments in the user's pending review. **The one step
+ *  in this flow that leaves the machine**, and it happens on a click.
+ *
+ *  Takes only draft ids: the commit they anchor to and the review they join are
+ *  read from GitHub inside the command, so a stale value on screen can't send a
+ *  comment to the wrong lines. Not optimistic either — a published draft is a real
+ *  comment under the user's name, and the outcome carries how many actually went
+ *  (it stops at the first failure). The PR detail is invalidated too, since the
+ *  first comment may have opened the pending review the submit bar renders from. */
+export const usePublishReviewDrafts = (
+  prRepo: string,
+  number: number,
+  opts?: { silent?: boolean },
+) => {
+  const [owner, name] = splitRepoSlug(prRepo);
+  return useActionMutation<string[], ReviewPublishOutcome>({
+    mutationFn: (ids) => unwrap(commands.publishReviewDrafts(prRepo, number, ids)),
+    invalidate: () => [
+      queryKeys.reviewDrafts(prRepo, number),
+      queryKeys.prDetail(owner, name, number),
+    ],
+    success: (outcome, ids) =>
+      outcome.failed
+        ? null
+        : ids.length === 1
+          ? "Added to your review."
+          : `Added ${outcome.published} comments to your review.`,
+    silent: opts?.silent,
+  });
+};
+
+/** Realtime refresh for the AI review's output: its MCP tools ping the signal
+ *  socket (tagged `r`) after each write, the Rust listener emits
+ *  `reviewAiChanged`, and we drop both caches it can touch. Mount once at the app
+ *  root — a draft should appear in the diff while the user is reading it.
+ *
+ *  Whole prefixes rather than one PR's keys: the event carries no payload (the
+ *  tables are tiny), and a review of another PR writing is a real case. */
+export const useReviewAiWatcher = () => {
+  const qc = useQueryClient();
+  useEffect(() => {
+    const unlisten = events.reviewAiChanged.listen(() => {
+      qc.invalidateQueries({ queryKey: queryKeys.reviewDraftsPrefix });
+      qc.invalidateQueries({ queryKey: queryKeys.prReviewBriefPrefix });
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [qc]);
 };
 
 /** Delete a PR's review checkout — the pane's "Remove checkout" action. */

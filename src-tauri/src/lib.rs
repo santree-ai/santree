@@ -26,6 +26,7 @@ mod pricing;
 mod prompts;
 mod repo;
 mod review_ai;
+mod review_drafts;
 mod reviewed;
 mod reviews;
 mod session;
@@ -61,6 +62,7 @@ fn specta_builder() -> AppBuilder {
     Builder::<tauri::Wry>::new()
         .events(collect_events![
             git_watch::WorktreeChanged,
+            session_signal::ReviewAiChanged,
             session_signal::SessionStateChanged,
             session_signal::SessionUsageChanged,
             usage::UsageChanged,
@@ -121,7 +123,12 @@ fn specta_builder() -> AppBuilder {
             commands::remove_review_workspace,
             commands::review_prompt,
             commands::pr_review_brief,
-            commands::generate_pr_review_brief,
+            commands::ai_review_launch,
+            commands::review_drafts,
+            commands::update_review_draft,
+            commands::delete_review_draft,
+            commands::clear_review_drafts,
+            commands::publish_review_drafts,
             commands::merge_queue,
             commands::pr_detail,
             commands::pr_repo_labels,
@@ -598,6 +605,11 @@ pub fn run() {
                     }
                     if let Err(e) = review_ai::gc(&db).await {
                         log::warn!("review-brief sweep failed: {e:#}");
+                    }
+                    match review_drafts::gc(&db).await {
+                        Ok(0) => {}
+                        Ok(n) => log::info!("dropped {n} AI review draft(s) from stale PRs"),
+                        Err(e) => log::warn!("review-draft sweep failed: {e:#}"),
                     }
                 });
             }

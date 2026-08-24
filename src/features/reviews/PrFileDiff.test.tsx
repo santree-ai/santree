@@ -1,7 +1,7 @@
 import { fireEvent, render, waitFor } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { PrThread } from "../../bindings";
+import type { PrThread, ReviewDraft } from "../../bindings";
 import type { CommentTarget } from "./commentTarget";
 import { PrFileDiff } from "./PrFileDiff";
 
@@ -12,6 +12,9 @@ vi.mock("../../lib/queries", () => ({
   useGithubViewerLogin: () => ({ data: "sam" }),
   useReplyToPrThread: () => ({ mutate: vi.fn(), isPending: false }),
   useSetPrThreadResolved: () => ({ mutate: vi.fn(), isPending: false }),
+  useDeleteReviewDraft: () => ({ mutate: vi.fn(), isPending: false }),
+  usePublishReviewDrafts: () => ({ mutate: vi.fn(), isPending: false }),
+  useUpdateReviewDraft: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 beforeAll(() => {
@@ -42,6 +45,7 @@ const TARGET: CommentTarget = {
 };
 
 const NO_THREADS: PrThread[] = [];
+const NO_DRAFTS: ReviewDraft[] = [];
 
 describe("PrFileDiff", () => {
   it("renders the patch through the multi-select viewer", () => {
@@ -54,6 +58,7 @@ describe("PrFileDiff", () => {
         status="modified"
         patch={PATCH}
         threads={NO_THREADS}
+        drafts={NO_DRAFTS}
         target={TARGET}
       />,
     );
@@ -69,10 +74,44 @@ describe("PrFileDiff", () => {
         status="modified"
         patch=""
         threads={NO_THREADS}
+        drafts={NO_DRAFTS}
         target={TARGET}
       />,
     );
     expect(container.firstChild).toBeNull();
+  });
+
+  it("pins an AI draft to its line, beside any thread there", () => {
+    const draft: ReviewDraft = {
+      id: "d1",
+      prRepo: "acme/api",
+      prNumber: 7,
+      headSha: "abc123",
+      path: "src/retry.ts",
+      line: 42,
+      startLine: null,
+      onRight: true,
+      body: "This retries forever.",
+      suggestion: null,
+      createdAtMs: 0,
+      updatedAtMs: 0,
+    };
+    const { container } = render(
+      <PrFileDiff
+        path="src/retry.ts"
+        status="modified"
+        patch={PATCH}
+        threads={NO_THREADS}
+        drafts={[draft]}
+        target={TARGET}
+      />,
+    );
+
+    // Under the row it anchors to, not floating somewhere below the diff: where a
+    // draft *sits* is the whole reason it's readable as a review comment.
+    const row = container.querySelector('span[data-line-new-num="42"]')?.closest("tr");
+    expect(row?.nextElementSibling?.textContent).toContain("This retries forever.");
+    expect(row?.nextElementSibling?.textContent).toContain("AI draft");
   });
 });
 
@@ -105,6 +144,7 @@ describe("commenting on a range", () => {
         status="modified"
         patch={RANGE}
         threads={NO_THREADS}
+        drafts={NO_DRAFTS}
         target={TARGET}
       />,
     );
@@ -133,6 +173,7 @@ describe("commenting on a range", () => {
         status="modified"
         patch={RANGE}
         threads={NO_THREADS}
+        drafts={NO_DRAFTS}
         target={TARGET}
       />,
     );
@@ -153,6 +194,7 @@ describe("commenting on a range", () => {
         status="modified"
         patch={RANGE}
         threads={NO_THREADS}
+        drafts={NO_DRAFTS}
         target={TARGET}
       />,
     );
@@ -170,6 +212,7 @@ describe("commenting on a range", () => {
         status="modified"
         patch={RANGE}
         threads={NO_THREADS}
+        drafts={NO_DRAFTS}
         target={TARGET}
       />,
     );
