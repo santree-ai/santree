@@ -9,12 +9,14 @@
  * all — a session told to review a PR, with the user's `gh` auth in reach.
  */
 import { render, screen } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ReviewPr } from "../../bindings";
 
 const spies = vi.hoisted(() => ({ terminal: vi.fn() }));
 const q = vi.hoisted(() => ({
+  drafts: [] as Array<{ id: string; agentKind: "Claude" | "Codex" }>,
   launch: { data: undefined, isSuccess: false, isError: false, isFetched: false } as {
     data: unknown;
     isSuccess: boolean;
@@ -41,7 +43,7 @@ vi.mock("./useReviewSessionLatch", () => ({
   }),
 }));
 vi.mock("./ReviewSessionShared", () => ({
-  ReviewFooter: () => <div />,
+  ReviewFooter: ({ extra }: { extra?: ReactNode }) => <div>{extra}</div>,
   reviewTargetFor: () => ({ prRepo: "acme/app", number: 7, headSha: "abc123" }),
 }));
 vi.mock("@tanstack/react-query", () => ({
@@ -70,7 +72,7 @@ vi.mock("../../lib/queries", () => ({
     data: key === "model" ? "opus" : key === "effort" ? "high" : "acceptEdits",
     isFetched: true,
   }),
-  useReviewDrafts: () => ({ data: [] }),
+  useReviewDrafts: () => ({ data: q.drafts }),
   useReviewWorkspace: () => ({ data: "/tmp/checkout", isFetched: true, isFetching: false }),
 }));
 
@@ -80,6 +82,7 @@ const pr = { id: "p1", number: 7, repo: "acme/app", headSha: "abc123" } as Revie
 
 beforeEach(() => {
   spies.terminal.mockClear();
+  q.drafts = [];
 });
 
 describe("AiReviewSessionPane", () => {
@@ -116,5 +119,16 @@ describe("AiReviewSessionPane", () => {
     // worse review, and read-only is the prompt's job, not a hard limit.
     expect(seed).not.toContain("--strict-mcp-config");
     expect(seed).toContain("/data/prompts/acme-app-7.ai-review.md");
+  });
+
+  it("shows only this provider's draft count in its footer", () => {
+    q.drafts = [
+      { id: "codex-1", agentKind: "Codex" },
+      { id: "claude-1", agentKind: "Claude" },
+      { id: "claude-2", agentKind: "Claude" },
+    ];
+    render(<AiReviewSessionPane pr={pr} agentKind="Codex" visible onShowDrafts={vi.fn()} />);
+    expect(screen.getByText("1 draft")).toBeInTheDocument();
+    expect(screen.queryByText("2 drafts")).toBeNull();
   });
 });

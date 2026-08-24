@@ -236,7 +236,7 @@ function AiReviewFooter({
   onShowDrafts: () => void;
 }) {
   const { data: drafts } = useReviewDrafts(pr.repo, pr.number);
-  const count = drafts?.length ?? 0;
+  const count = drafts?.filter((draft) => draft.agentKind === agentKind).length ?? 0;
   return (
     <ReviewFooter
       pr={pr}

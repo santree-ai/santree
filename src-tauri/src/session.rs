@@ -153,7 +153,7 @@ pub async fn resolve_codex(
         if kind != AgentKind::Codex {
             anyhow::bail!("stored provider does not match Codex session resolver");
         }
-        match runtime.resume_thread(executable, &thread_id) {
+        match runtime.resume_thread(executable, &thread_id, review_mcp_config) {
             Ok(()) => {
                 return Ok(AgentSession::Resume {
                     agent_kind: AgentKind::Codex,
@@ -169,7 +169,7 @@ pub async fn resolve_codex(
                 match runtime.set_thread_name(executable, &thread_id, &codex_thread_name(term_key))
                 {
                     Ok(()) => {
-                        runtime.resume_thread(executable, &thread_id)?;
+                        runtime.resume_thread(executable, &thread_id, review_mcp_config)?;
                         return Ok(AgentSession::Resume {
                             agent_kind: AgentKind::Codex,
                             executable: executable.to_string(),
@@ -251,7 +251,7 @@ pub async fn resolve_codex(
     .await?;
     tx.commit().await?;
     if persisted_id != thread_id {
-        runtime.resume_thread(executable, &persisted_id)?;
+        runtime.resume_thread(executable, &persisted_id, review_mcp_config)?;
     }
     Ok(AgentSession::Fresh {
         agent_kind: AgentKind::Codex,

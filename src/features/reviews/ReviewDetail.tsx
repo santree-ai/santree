@@ -132,14 +132,15 @@ function PrPane({ pr }: { pr: ReviewPr }) {
                 </span>
               ),
             },
-            ...providers.map((agent) => ({
-              value: agent as DetailTab,
-              label: agentProvider(agent).label,
-              icon: <AgentIcon kind={agent} size={11} />,
-              badge: drafts?.length ? (
-                <Badge color={palette.purple}>{drafts.length}</Badge>
-              ) : undefined,
-            })),
+            ...providers.map((agent) => {
+              const count = drafts?.filter((draft) => draft.agentKind === agent).length ?? 0;
+              return {
+                value: agent as DetailTab,
+                label: agentProvider(agent).label,
+                icon: <AgentIcon kind={agent} size={11} />,
+                badge: count ? <Badge color={palette.purple}>{count}</Badge> : undefined,
+              };
+            }),
           ]}
         />
         {providers.length < REVIEW_AGENTS.length && (

@@ -88,10 +88,15 @@ describe("ReviewDetail", () => {
     expect(screen.getByTestId("ai-review-pane")).toBeInTheDocument();
   });
 
-  it("counts the drafts on the tab, so they're visible from the diff", () => {
-    drafts = [{ id: "d1" }, { id: "d2" }];
-    storedProviders = ["Codex"];
+  it("counts only each provider's drafts on its tab", () => {
+    drafts = [
+      { id: "d1", agentKind: "Codex" },
+      { id: "d2", agentKind: "Claude" },
+      { id: "d3", agentKind: "Claude" },
+    ];
+    storedProviders = ["Codex", "Claude"];
     render(<ReviewDetail />);
-    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Codex1" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Claude Code2" })).toBeInTheDocument();
   });
 });

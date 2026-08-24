@@ -345,7 +345,10 @@ impl CodexRuntime {
         if matches!(profile, CodexProfile::Review) {
             let path = review_mcp_config
                 .ok_or_else(|| anyhow!("Codex review requires Santree's review MCP config"))?;
-            config.insert("mcp_servers".into(), review_mcp_servers(path)?);
+            // App Server treats this map like CLI `-c` overrides: nested settings
+            // use dotted keys. Replacing `mcp_servers` with an object is accepted
+            // by the loose JSON schema but does not add the server to the thread.
+            config.extend(review_thread_config(path)?);
         } else if review_mcp_config.is_some() {
             bail!("review MCP config is only valid for review threads");
         }
@@ -360,8 +363,17 @@ impl CodexRuntime {
             .ok_or_else(|| anyhow!("Codex thread/start returned no thread id"))
     }
 
-    pub fn resume_thread(&self, executable: &str, thread_id: &str) -> Result<()> {
-        self.request(executable, "thread/resume", json!({"threadId": thread_id}))?;
+    pub fn resume_thread(
+        &self,
+        executable: &str,
+        thread_id: &str,
+        review_mcp_config: Option<&Path>,
+    ) -> Result<()> {
+        let mut params = json!({"threadId": thread_id});
+        if let Some(path) = review_mcp_config {
+            params["config"] = Value::Object(review_thread_config(path)?);
+        }
+        self.request(executable, "thread/resume", params)?;
         Ok(())
     }
 
@@ -498,7 +510,7 @@ impl CodexRuntime {
 /// Convert Santree's app-owned Claude MCP file into Codex's thread-scoped config
 /// shape. Only the single review server is copied; ambient user servers remain
 /// disabled by the App Server's fail-closed base config.
-fn review_mcp_servers(path: &Path) -> Result<Value> {
+fn review_mcp_server(path: &Path) -> Result<Value> {
     let value: Value = serde_json::from_slice(&fs::read(path)?)?;
     let server = value
         .pointer("/mcpServers/santree-review")
@@ -519,12 +531,22 @@ fn review_mcp_servers(path: &Path) -> Result<Value> {
     args.push(json!("--agent-kind"));
     args.push(json!("Codex"));
     Ok(json!({
-        "santree-review": {
-            "command": command,
-            "args": args,
-            "enabled": true
-        }
+        "command": command,
+        "args": args,
+        "enabled": true,
+        // A review without its draft tools is unsafe and misleading. Codex makes
+        // required MCP startup failures reject thread/start instead of continuing.
+        "required": true
     }))
+}
+
+fn review_thread_config(path: &Path) -> Result<serde_json::Map<String, Value>> {
+    let mut config = serde_json::Map::new();
+    config.insert(
+        "mcp_servers.santree-review".into(),
+        review_mcp_server(path)?,
+    );
+    Ok(config)
 }
 
 fn short_runtime_dir(data_dir: &Path) -> PathBuf {
@@ -989,8 +1011,88 @@ mod tests {
         runtime
             .set_thread_name(&executable, &thread_id, "Santree attachability test")
             .unwrap();
-        runtime.resume_thread(&executable, &thread_id).unwrap();
+        runtime
+            .resume_thread(&executable, &thread_id, None)
+            .unwrap();
         runtime.delete_thread(&executable, &thread_id).unwrap();
+        drop(runtime);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    #[ignore = "requires SANTREE_CODEX_BIN and SANTREE_REVIEW_MCP_CONFIG"]
+    fn installed_codex_review_thread_loads_santree_mcp() {
+        let executable = std::env::var("SANTREE_CODEX_BIN").expect("set SANTREE_CODEX_BIN");
+        let mcp_config =
+            std::env::var("SANTREE_REVIEW_MCP_CONFIG").expect("set SANTREE_REVIEW_MCP_CONFIG");
+        let base = short_socket_test_dir("st-cdx-mcp");
+        fs::create_dir(&base).unwrap();
+        let runtime = CodexRuntime::new(&base);
+        let thread_id = runtime
+            .start_thread(
+                &executable,
+                Path::new(env!("CARGO_MANIFEST_DIR")),
+                None,
+                None,
+                CodexProfile::Review,
+                Some(Path::new(&mcp_config)),
+            )
+            .unwrap();
+        let status = runtime
+            .request(
+                &executable,
+                "mcpServerStatus/list",
+                json!({"threadId": thread_id, "detail": "toolsAndAuthOnly"}),
+            )
+            .unwrap();
+        assert!(status
+            .pointer("/data")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .any(|server| server.get("name").and_then(Value::as_str) == Some("santree-review")));
+        runtime.delete_thread(&executable, &thread_id).unwrap();
+
+        // A review thread created by an older Santree build has no MCP override.
+        // Resuming it must add the tools without replacing its durable history.
+        let existing_thread_id = runtime
+            .start_thread(
+                &executable,
+                Path::new(env!("CARGO_MANIFEST_DIR")),
+                None,
+                None,
+                CodexProfile::ReadOnly,
+                None,
+            )
+            .unwrap();
+        runtime
+            .set_thread_name(&executable, &existing_thread_id, "Santree MCP resume test")
+            .unwrap();
+        drop(runtime);
+        let runtime = CodexRuntime::new(&base);
+        runtime
+            .resume_thread(
+                &executable,
+                &existing_thread_id,
+                Some(Path::new(&mcp_config)),
+            )
+            .unwrap();
+        let resumed_status = runtime
+            .request(
+                &executable,
+                "mcpServerStatus/list",
+                json!({"threadId": existing_thread_id, "detail": "toolsAndAuthOnly"}),
+            )
+            .unwrap();
+        assert!(resumed_status
+            .pointer("/data")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .any(|server| server.get("name").and_then(Value::as_str) == Some("santree-review")));
+        runtime
+            .delete_thread(&executable, &existing_thread_id)
+            .unwrap();
         drop(runtime);
         let _ = fs::remove_dir_all(base);
     }
@@ -1077,14 +1179,18 @@ mod tests {
         )
         .unwrap();
 
-        let config = review_mcp_servers(&path).unwrap();
+        let config = review_thread_config(&path).unwrap();
+        let server = config
+            .get("mcp_servers.santree-review")
+            .and_then(Value::as_object)
+            .unwrap();
         assert_eq!(
-            config
-                .pointer("/santree-review/command")
-                .and_then(Value::as_str),
+            server.get("command").and_then(Value::as_str),
             Some("/app/santree-hook")
         );
-        assert!(config.get("ambient-user-server").is_none());
+        assert_eq!(server.get("required").and_then(Value::as_bool), Some(true));
+        assert!(config.get("mcp_servers").is_none());
+        assert!(!server.contains_key("ambient-user-server"));
         fs::remove_dir_all(base).unwrap();
     }
 }
