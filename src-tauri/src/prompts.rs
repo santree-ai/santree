@@ -1015,9 +1015,20 @@ mod tests {
         assert!(out.contains("set_review_brief"));
         assert!(out.contains("add_review_comment"));
         assert!(out.contains("list_review_comments"));
+        assert!(out.contains("Notion, Linear, whatever is connected"));
         // And the rule that makes the whole feature safe to leave running.
         assert!(out.contains("Never write through any other tool"));
         assert!(out.contains("<pull-request>"), "fences the untrusted diff");
+    }
+
+    #[test]
+    fn english_tutor_plain_text_is_not_json_shaped() {
+        let out = render_default(
+            "english-tutor",
+            context! { log_path => "/tmp/english-practice.md" },
+        )
+        .unwrap();
+        assert!(!out.starts_with(['[', '{']));
     }
 
     #[test]

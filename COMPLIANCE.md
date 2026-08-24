@@ -218,10 +218,16 @@ following, and any change here must preserve all of them:
   transport. Nothing santree derives from them is written to the PTY, and there
   is no loop: a human opens the tab, and the server exits when its provider closes
   the MCP transport.
-- **The rest of the read-only posture is unchanged.** Claude retains the scoped
-  deny-list posture documented above. Codex gets only santree's review MCP server
-  as thread-scoped config on top of the App Server's fail-closed base config;
-  ambient MCP servers, apps, plugins, hooks, web search, and network stay disabled.
+- **The write boundary is mechanical; reads remain useful.** Claude retains the
+  scoped deny-list posture documented above. Codex runs the checkout in its
+  read-only sandbox with shell network access disabled, while retaining the
+  user's configured MCP servers, apps, plugins, hooks, and read-only web/data
+  tools. The review thread uses `approvalPolicy = never`, so an ambient tool that
+  requires approval for a write is rejected instead of prompting. Santree adds
+  only its five PR-scoped draft tools as explicit auto-approved exceptions; a
+  name allowlist means a future tool is unavailable until reviewed and added.
+  The prompt independently says that external tools are for reading and that
+  Santree drafts are the review's only persistent output.
 
 ## Where this is enforced in code
 - `crates/pty` — spawns a real process behind a real PTY and streams **raw

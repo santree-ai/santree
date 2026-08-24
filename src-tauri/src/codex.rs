@@ -445,16 +445,6 @@ impl CodexRuntime {
                     "-c",
                     "sandbox_permissions=[]",
                     "-c",
-                    "mcp_servers={}",
-                    "-c",
-                    "apps={}",
-                    "-c",
-                    "plugins={}",
-                    "-c",
-                    "hooks={}",
-                    "-c",
-                    "web_search=\"disabled\"",
-                    "-c",
                     "sandbox_workspace_write.network_access=false",
                     "-c",
                     "sandbox_workspace_write.writable_roots=[]",
@@ -508,9 +498,17 @@ impl CodexRuntime {
 }
 
 /// Convert Santree's app-owned Claude MCP file into Codex's thread-scoped config
-/// shape. Only the single review server is copied; ambient user servers remain
-/// disabled by the App Server's fail-closed base config.
+/// shape. This adds the single review server without replacing the user's ambient
+/// read tools; the review's `never` approval policy rejects their writes.
 fn review_mcp_server(path: &Path) -> Result<Value> {
+    const REVIEW_TOOLS: [&str; 5] = [
+        "set_review_brief",
+        "add_review_comment",
+        "list_review_comments",
+        "update_review_comment",
+        "delete_review_comment",
+    ];
+
     let value: Value = serde_json::from_slice(&fs::read(path)?)?;
     let server = value
         .pointer("/mcpServers/santree-review")
@@ -530,10 +528,21 @@ fn review_mcp_server(path: &Path) -> Result<Value> {
     let mut args = args.clone();
     args.push(json!("--agent-kind"));
     args.push(json!("Codex"));
+    let tool_approvals = REVIEW_TOOLS
+        .iter()
+        .map(|name| ((*name).to_string(), json!({ "approval_mode": "approve" })))
+        .collect::<serde_json::Map<_, _>>();
     Ok(json!({
         "command": command,
         "args": args,
         "enabled": true,
+        // These tools can only mutate Santree's app-owned drafts for the PR fixed
+        // in argv. Explicitly approving each named tool lets a non-interactive,
+        // read-only review save its result without opening approval for ambient
+        // MCP servers or for tools added here in the future.
+        "enabled_tools": REVIEW_TOOLS,
+        "default_tools_approval_mode": "prompt",
+        "tools": tool_approvals,
         // A review without its draft tools is unsafe and misleading. Codex makes
         // required MCP startup failures reject thread/start instead of continuing.
         "required": true
@@ -1189,6 +1198,26 @@ mod tests {
             Some("/app/santree-hook")
         );
         assert_eq!(server.get("required").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            server.get("enabled_tools"),
+            Some(&json!([
+                "set_review_brief",
+                "add_review_comment",
+                "list_review_comments",
+                "update_review_comment",
+                "delete_review_comment"
+            ]))
+        );
+        assert_eq!(
+            server
+                .get("tools")
+                .and_then(|tools| tools.pointer("/add_review_comment/approval_mode")),
+            Some(&json!("approve"))
+        );
+        assert_eq!(
+            server.get("default_tools_approval_mode"),
+            Some(&json!("prompt"))
+        );
         assert!(config.get("mcp_servers").is_none());
         assert!(!server.contains_key("ambient-user-server"));
         fs::remove_dir_all(base).unwrap();
