@@ -6,12 +6,14 @@ import { useEffect, useRef, useState } from "react";
 
 import type { Reviewer } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
-import { CloseIcon } from "../../components/icons";
+import { AgentIcon, CloseIcon } from "../../components/icons";
 import { Button, Spinner, useModalA11y } from "../../components/primitives";
 import {
+  PR_BODY_AGENT_KEY,
   useCreatePr,
   usePrDraft,
   usePrReviewers,
+  useResolvedHelperAgent,
   useWorktreeHasTranscripts,
 } from "../../lib/queries";
 import { toast } from "../../state/toast";
@@ -46,6 +48,7 @@ export function CreatePrDialog() {
   const bodyTouched = useRef(false);
 
   const { mutate: draft, isPending: drafting } = usePrDraft(repo);
+  const draftAgent = useResolvedHelperAgent(repo, PR_BODY_AGENT_KEY);
   const { mutate: create, isPending: creating } = useCreatePr(repo);
   const { data: candidates = [] } = usePrReviewers(repo, id);
   const { data: hasTranscripts } = useWorktreeHasTranscripts(repo, id);
@@ -180,11 +183,7 @@ export function CreatePrDialog() {
               title="Draft title + description with AI (from the PR template & diff)"
               className="flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-2 hover:bg-hover hover:text-accent disabled:opacity-40"
             >
-              {aiDrafting ? (
-                <Spinner size={11} />
-              ) : (
-                <span className="text-[12px] leading-none">✨</span>
-              )}
+              {aiDrafting ? <Spinner size={11} /> : <AgentIcon kind={draftAgent} size={11} />}
               {aiDrafting ? "Drafting…" : "AI fill"}
             </button>
           </div>

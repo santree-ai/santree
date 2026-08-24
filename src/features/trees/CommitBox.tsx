@@ -5,9 +5,10 @@
  *  regenerate it with AI. Mount with `key={worktreeId}` for a per-worktree draft. */
 import { useEffect, useRef, useState } from "react";
 
-import { ClaudeSparkIcon } from "../../components/icons";
+import { AgentIcon } from "../../components/icons";
 import { Button, Spinner } from "../../components/primitives";
 import {
+  COMMIT_MESSAGE_AGENT_KEY,
   TREES_AUTO_PR_KEY,
   TREES_AUTO_PUSH_KEY,
   TREES_STAGE_ALL_KEY,
@@ -16,6 +17,7 @@ import {
   useCommitWorktree,
   usePushWorktree,
   useResolvedBoolSetting,
+  useResolvedHelperAgent,
   useSetCommitDraft,
 } from "../../lib/queries";
 import { BASE_ID, useTrees } from "./model";
@@ -35,6 +37,7 @@ export function CommitBox({
   const stageAll = useResolvedBoolSetting(repo, TREES_STAGE_ALL_KEY).value;
   const autoPr = useResolvedBoolSetting(repo, TREES_AUTO_PR_KEY).value;
   const autoPush = useResolvedBoolSetting(repo, TREES_AUTO_PUSH_KEY).value;
+  const draftAgent = useResolvedHelperAgent(repo, COMMIT_MESSAGE_AGENT_KEY);
 
   const { data: saved } = useCommitDraft(repo, activeId);
   const { mutate: saveDraft } = useSetCommitDraft(repo);
@@ -134,7 +137,7 @@ export function CommitBox({
           title="Draft a message with AI"
           className="absolute top-2 right-2 flex h-6 w-6 cursor-pointer items-center justify-center rounded-md text-muted-2 hover:bg-hover hover:text-accent disabled:opacity-40"
         >
-          {drafting ? <Spinner size={12} /> : <ClaudeSparkIcon size={12} />}
+          {drafting ? <Spinner size={12} /> : <AgentIcon kind={draftAgent} size={12} />}
         </button>
       </div>
       <Button variant="primary" onClick={onCommit} disabled={!canCommit} className="mt-2 w-full">

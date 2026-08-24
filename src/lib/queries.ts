@@ -2713,6 +2713,30 @@ export const useResolvedSetting = (repo: string, key: string) =>
     },
   );
 
+const AGENT_KINDS: readonly AgentKind[] = ["Claude", "Codex", "Cursor", "Opencode"];
+
+/** Match the backend's helper-provider fallback: a valid explicit helper
+ * assignment wins, then the Work provider, then the app's default provider. */
+export function resolveHelperAgent(
+  helper: string | null | undefined,
+  work: string | null | undefined,
+  defaultAgent: AgentKind | null | undefined,
+): AgentKind {
+  for (const candidate of [helper, work, defaultAgent]) {
+    if (AGENT_KINDS.includes(candidate as AgentKind)) return candidate as AgentKind;
+  }
+  return "Codex";
+}
+
+/** The provider that will execute a hidden Work helper (commit message or PR
+ * body), resolved identically to `agent::helper_config` in Rust. */
+export const useResolvedHelperAgent = (repo: string, helperKey: string): AgentKind => {
+  const helper = useResolvedSetting(repo, helperKey).data;
+  const work = useResolvedSetting(repo, WORK_AGENT_KEY).data;
+  const settings = useSettings().data;
+  return resolveHelperAgent(helper, work, settings?.defaultAgent);
+};
+
 /** Resolve one workflow profile for a provider. Provider-specific values win;
  * the old unsuffixed key is used only when this provider is still the workflow's
  * selected default, preserving existing installs without leaking (for example)

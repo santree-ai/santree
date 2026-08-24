@@ -40,6 +40,7 @@ import {
   patchSettingCache,
   promptPreviewKey,
   queryKeys,
+  resolveHelperAgent,
   useCommitWorktree,
   useOptimisticMutation,
   usePullRemoteWorktree,
@@ -48,6 +49,23 @@ import {
   useUpdateBaseBranch,
   useWorktreeWatcher,
 } from "./queries";
+
+describe("resolveHelperAgent", () => {
+  it("keeps helper assignments independent from the interactive Work provider", () => {
+    expect(resolveHelperAgent("Codex", "Claude", "Claude")).toBe("Codex");
+    expect(resolveHelperAgent("Claude", "Codex", "Codex")).toBe("Claude");
+  });
+
+  it("falls back through Work and the app default", () => {
+    expect(resolveHelperAgent(null, "Claude", "Codex")).toBe("Claude");
+    expect(resolveHelperAgent(null, null, "Claude")).toBe("Claude");
+    expect(resolveHelperAgent(null, null, null)).toBe("Codex");
+  });
+
+  it("does not render an unknown stored provider", () => {
+    expect(resolveHelperAgent("Unknown", "Claude", "Codex")).toBe("Claude");
+  });
+});
 
 function makeClient() {
   return new QueryClient({
