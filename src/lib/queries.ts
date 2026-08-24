@@ -235,6 +235,10 @@ export const queryKeys = {
   agents: ["agents"] as const,
   claudeModels: ["claude-models"] as const,
   agentAuth: (kind: AgentKind) => ["agent-auth", kind] as const,
+  codexHealth: ["codex-health"] as const,
+  codexAccount: ["codex-account"] as const,
+  codexModels: ["codex-models"] as const,
+  codexRateLimits: ["codex-rate-limits"] as const,
   githubStatus: ["github-status"] as const,
   binaryStatus: (name: string) => ["binary-status", name] as const,
   claudeHookSettings: ["claude-hook-settings"] as const,
@@ -777,6 +781,44 @@ export const useClaudeModels = () =>
 export const useAgentAuth = (kind: AgentKind) =>
   useQuery({ queryKey: queryKeys.agentAuth(kind), queryFn: () => commands.agentAuth(kind) });
 
+export const useCodexHealth = () =>
+  useUnwrappedQuery(queryKeys.codexHealth, () => commands.codexHealth(), { staleTime: 30_000 });
+
+export const useCodexAccount = () =>
+  useUnwrappedQuery(queryKeys.codexAccount, () => commands.codexAccount(), {
+    staleTime: 30_000,
+    refetchInterval: (query) => (query.state.data?.connected ? false : 3_000),
+  });
+
+export const useCodexModels = () =>
+  useUnwrappedQuery(queryKeys.codexModels, () => commands.codexModels(), {
+    staleTime: 5 * 60 * 1000,
+  });
+
+export const useCodexRateLimits = () =>
+  useUnwrappedQuery(queryKeys.codexRateLimits, () => commands.codexRateLimits(), {
+    staleTime: 60_000,
+  });
+
+export const useCodexLogin = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (deviceCode: boolean) => unwrap(commands.codexLoginStart(deviceCode)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.codexAccount }),
+  });
+};
+
+export const useCancelCodexLogin = () =>
+  useMutation({ mutationFn: (loginId: string) => unwrap(commands.codexLoginCancel(loginId)) });
+
+export const useCodexLogout = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => unwrap(commands.codexLogout()),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.codexAccount }),
+  });
+};
+
 /** The `gh` CLI integration status (installed? authenticated? which account?). */
 export const useGithubStatus = () =>
   useQuery({ queryKey: queryKeys.githubStatus, queryFn: () => commands.githubStatus() });
@@ -1305,8 +1347,8 @@ export const useInvestigatePrompt = (repo: string, id: string, enabled: boolean)
   );
 
 /**
- * Resolve how a terminal that auto-launches `claude` should (re)launch it —
- * resume an on-disk session, start fresh with a reserved id, or a plain shell
+ * Resolve how an agent terminal should (re)launch its persisted provider —
+ * resume a durable session, start fresh with a reserved id, or a plain shell
  * (see {@link agentSessionSeed}). `allowFresh` mints a new session when none is
  * resumable (set on an explicit launch; `false` on a passive reopen, which then
  * only resumes or stays a shell).
@@ -1321,11 +1363,12 @@ export const useAgentSession = (
   termKey: string,
   cwd: string,
   allowFresh: boolean,
+  agent: AgentKind,
   enabled: boolean,
 ) =>
   useUnwrappedQuery(
     queryKeys.agentSession(repo, termKey, allowFresh),
-    () => commands.agentSession(repo, termKey, cwd, allowFresh),
+    () => commands.agentSession(repo, termKey, cwd, allowFresh, agent),
     {
       enabled: enabled && !!repo && !!termKey && !!cwd,
       staleTime: allowFresh ? Number.POSITIVE_INFINITY : 0,
@@ -1358,7 +1401,9 @@ export const useWorktreeTabs = (repo: string) =>
 export const useAddWorktreeTab = (repo: string) =>
   useOptimisticMutation<WorktreeTab, null>({
     mutationFn: (tab) =>
-      unwrap(commands.addWorktreeTab(repo, tab.worktreeId, tab.id, tab.kind, tab.title)),
+      unwrap(
+        commands.addWorktreeTab(repo, tab.worktreeId, tab.id, tab.kind, tab.agentKind, tab.title),
+      ),
     optimistic: (qc, tab) => {
       const key = queryKeys.worktreeTabs(repo);
       const prev = qc.getQueryData<WorktreeTab[]>(key);

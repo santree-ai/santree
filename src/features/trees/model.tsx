@@ -21,6 +21,7 @@ import {
 } from "react";
 
 import type {
+  AgentKind,
   SessionState,
   TabKind,
   TaskStatus,
@@ -177,9 +178,9 @@ export const extraTab = (id: string): MainTab => `tab:${id}`;
  *  titles: "Claude", "Claude 2", … / "Terminal 2", "Terminal 3", … (the primary
  *  Terminal tab is #1 implicitly). Exported for testing — see model.test.ts. */
 export function defaultTabTitle(kind: TabKind, existing: WorktreeTab[]): string {
-  const base = kind === "claude" ? "Claude" : "Terminal";
+  const base = kind === "agent" ? "Codex" : kind === "fixCi" ? "Fix CI" : "Terminal";
   const titles = new Set(existing.map((t) => t.title));
-  let n = kind === "claude" ? 1 : 2;
+  let n = kind === "agent" || kind === "fixCi" ? 1 : 2;
   const candidate = () => (n === 1 ? base : `${base} ${n}`);
   while (titles.has(candidate())) n++;
   return candidate();
@@ -295,7 +296,7 @@ interface TreesModel {
   closeFileTab: () => void;
   /** Open (and persist) a new Claude or terminal tab for the active worktree
    *  and focus it. */
-  addTab: (kind: TabKind) => void;
+  addTab: (kind: TabKind, agentKind?: AgentKind) => void;
   /** Close a persisted extra tab (the caller tears down its PTY session). A
    *  Claude tab's stored session is forgotten with it. */
   closeTab: (id: string) => void;
@@ -654,7 +655,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     // Idempotent: only persist the row the first time (the effect can re-run
     // before the tabs query refetches the new row).
     if (!(tabsByWt.get(worktreeId) ?? []).some((t) => t.id === tabId)) {
-      addTabRow({ id: tabId, worktreeId, kind: "fixCi", title: "Fix CI" });
+      addTabRow({ id: tabId, worktreeId, kind: "fixCi", agentKind: "Codex", title: "Fix CI" });
     }
     select(worktreeId);
     setFileFor(worktreeId, null);
@@ -742,10 +743,16 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       },
       // The id is minted here (not by the backend) so the optimistic cache patch
       // is the exact row the DB will hold and the tab can be focused immediately.
-      addTab: (kind) => {
+      addTab: (kind, agentKind) => {
         if (!activeId) return;
         const id = crypto.randomUUID();
-        addTabRow({ id, worktreeId: activeId, kind, title: defaultTabTitle(kind, extraTabs) });
+        addTabRow({
+          id,
+          worktreeId: activeId,
+          kind,
+          agentKind: kind === "terminal" ? null : (agentKind ?? "Codex"),
+          title: defaultTabTitle(kind, extraTabs),
+        });
         setTabFor(activeId, extraTab(id));
       },
       closeTab: (id) => {

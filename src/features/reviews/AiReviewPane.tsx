@@ -36,6 +36,7 @@ import {
   useReviewPrompt,
   useReviewWorkspace,
 } from "../../lib/queries";
+import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useReviewsModel } from "./model";
 import { ReviewTerminal } from "./ReviewTerminal";
@@ -87,7 +88,14 @@ export function AiReviewPane({ pr, visible }: { pr: ReviewPr; visible: boolean }
   // prompt render wait on it.
   const workspace = useReviewWorkspace(repo, target, needsSeed || resumeRequested);
   const cwd = workspace.data ?? undefined;
-  const session = useAgentSession(repo, termKey, cwd ?? "", true, needsSeed && workspace.isFetched);
+  const session = useAgentSession(
+    repo,
+    termKey,
+    cwd ?? "",
+    true,
+    "Codex",
+    needsSeed && workspace.isFetched,
+  );
   // Rendered only after the checkout resolves: the prompt tells the agent whether
   // it can read real code, and the backend derives that from the checkout's
   // existence — so asking before it's made would render the diff-only variant.
@@ -97,8 +105,9 @@ export function AiReviewPane({ pr, visible }: { pr: ReviewPr; visible: boolean }
   const effort = useResolvedSetting(repo, REVIEW_EFFORT_KEY);
   const hookSettings = useClaudeHookSettingsReview();
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
-
-  const seed = agentSessionSeed(session.data, "claude", {
+  const resolvedAgent = sessionAgent(session.data, "Codex");
+  const provider = agentProvider(resolvedAgent);
+  const seed = agentSessionSeed(session.data, {
     repo,
     termKey,
     // Seed the short "read the file" instruction, not the prompt text: the
@@ -107,12 +116,21 @@ export function AiReviewPane({ pr, visible }: { pr: ReviewPr; visible: boolean }
     prompt: prompt.data
       ? `Read ${prompt.data} and follow the instructions inside.`
       : `Help me review pull request #${pr.number}.`,
-    modelFlag: model.data ? `--model ${shellQuote(model.data)}` : undefined,
-    effortFlag: effort.data ? `--effort ${shellQuote(effort.data)}` : undefined,
+    modelFlag:
+      provider.capabilities.cliLaunchOptions && model.data
+        ? `--model ${shellQuote(model.data)}`
+        : undefined,
+    effortFlag:
+      provider.capabilities.cliLaunchOptions && effort.data
+        ? `--effort ${shellQuote(effort.data)}`
+        : undefined,
     // Load-bearing, not hygiene: this is the deny-list that stops a `gh pr
     // comment`. Gated on `isFetched` below so a launch can't race past it.
-    settingsFlag: hookSettings.data ? `--settings ${shellQuote(hookSettings.data)}` : undefined,
-    chrome: startWithChrome.value,
+    settingsFlag:
+      provider.capabilities.cliLaunchOptions && hookSettings.data
+        ? `--settings ${shellQuote(hookSettings.data)}`
+        : undefined,
+    chrome: provider.capabilities.cliLaunchOptions && startWithChrome.value,
   });
 
   // Every launch input must have resolved before the PTY spawns — the seed is
@@ -131,7 +149,7 @@ export function AiReviewPane({ pr, visible }: { pr: ReviewPr; visible: boolean }
     (workspace.isFetched &&
       !session.isFetching &&
       !!prompt.data &&
-      !!hookSettings.data &&
+      (!provider.capabilities.cliLaunchOptions || !!hookSettings.data) &&
       model.isFetched &&
       effort.isFetched &&
       startWithChrome.isFetched);

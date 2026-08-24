@@ -23,7 +23,13 @@ import { type AgentTabOptions, useAgentTab } from "./useAgentTab";
  *  the hook must wait for *every* launch flag, so any one of them being unresolved
  *  has to hold the terminal. */
 const backend = vi.hoisted(() => ({
-  session: { type: "fresh", sessionId: "s-1" } as AgentSession | undefined,
+  session: {
+    type: "fresh",
+    agentKind: "Claude",
+    executable: "claude",
+    sessionId: "s-1",
+    remote: null,
+  } as AgentSession | undefined,
   sessionFetching: false,
   flagsFetched: true,
   model: "opus" as string | null,
@@ -48,6 +54,7 @@ vi.mock("../../lib/queries", () => ({
     _termKey: string,
     _cwd: string,
     allowFresh: boolean,
+    _agent: string,
     enabled: boolean,
   ) => {
     backend.sessionCalls.push({ allowFresh, enabled });
@@ -122,7 +129,13 @@ function mount(initial: AgentTabOptions = opts()) {
 }
 
 beforeEach(() => {
-  backend.session = { type: "fresh", sessionId: "s-1" };
+  backend.session = {
+    type: "fresh",
+    agentKind: "Claude",
+    executable: "claude",
+    sessionId: "s-1",
+    remote: null,
+  };
   backend.sessionFetching = false;
   backend.flagsFetched = true;
   backend.model = "opus";
@@ -249,6 +262,13 @@ describe("useAgentTab", () => {
 
     it("doesn't wait on Claude's flags for another agent", () => {
       backend.flagsFetched = false;
+      backend.session = {
+        type: "fresh",
+        agentKind: "Codex",
+        executable: "/opt/codex",
+        sessionId: "thread-1",
+        remote: "unix:///tmp/codex.sock",
+      };
       const t = mount(opts({ agent: "Codex" }));
 
       expect(t.tab().preparing).toBe(false);
@@ -297,10 +317,17 @@ describe("useAgentTab", () => {
 
     // Claude-only flags: another agent's CLI would just fail to launch on them.
     it("passes no Claude-only flags to another agent", () => {
+      backend.session = {
+        type: "fresh",
+        agentKind: "Codex",
+        executable: "/opt/codex",
+        sessionId: "s-1",
+        remote: "unix:///tmp/codex.sock",
+      };
       const t = mount(opts({ agent: "Codex", remoteControl: "AK-1" }));
       const seed = t.tab().seed ?? "";
 
-      expect(seed).toContain("--session-id 's-1'");
+      expect(seed).toContain("resume --remote 'unix:///tmp/codex.sock'");
       for (const flag of ["--model", "--effort", "--settings", "--chrome", "--permission-mode"]) {
         expect(seed).not.toContain(flag);
       }
@@ -308,7 +335,13 @@ describe("useAgentTab", () => {
     });
 
     it("resumes an on-disk session instead of minting a new one", () => {
-      backend.session = { type: "resume", sessionId: "s-old" };
+      backend.session = {
+        type: "resume",
+        agentKind: "Claude",
+        executable: "claude",
+        sessionId: "s-old",
+        remote: null,
+      };
       const t = mount();
 
       expect(t.tab().seed).toContain("--resume 's-old'");

@@ -10,11 +10,24 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use santree_core::domain::AgentSession;
+use santree_core::domain::{AgentKind, AgentSession};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::db::Db;
+
+/// The persisted provider is the authority for an existing logical terminal.
+/// Defaults only apply before the first session is created.
+pub async fn stored_agent_kind(db: &Db, repo: &str, term_key: &str) -> Result<Option<AgentKind>> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT agent_kind FROM terminal_sessions WHERE repo = ? AND term_key = ?")
+            .bind(repo)
+            .bind(term_key)
+            .fetch_optional(db)
+            .await?;
+    row.map(|(kind,)| kind.parse().map_err(anyhow::Error::from))
+        .transpose()
+}
 
 /// Claude stores each session's transcript at
 /// `~/.claude/projects/<escaped-cwd>/<session-id>.jsonl`, escaping the working
@@ -56,26 +69,41 @@ pub async fn resolve(
     term_key: &str,
     cwd: &str,
     home: Option<&Path>,
+    executable: &str,
     allow_fresh: bool,
 ) -> Result<AgentSession> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT session_id, cwd FROM terminal_sessions WHERE repo = ? AND term_key = ?",
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT session_id, cwd, agent_kind FROM terminal_sessions WHERE repo = ? AND term_key = ?",
     )
     .bind(repo)
     .bind(term_key)
     .fetch_optional(db)
     .await?;
 
-    if let Some((session_id, stored_cwd)) = row {
+    if let Some((session_id, stored_cwd, agent_kind)) = row {
+        let agent_kind: AgentKind = agent_kind.parse()?;
+        if agent_kind != AgentKind::Claude {
+            anyhow::bail!("stored provider does not match Claude session resolver");
+        }
         let resumable = match home {
             Some(h) => is_resumable(h, &stored_cwd, &session_id).await,
             None => false,
         };
         if resumable {
-            return Ok(AgentSession::Resume { session_id });
+            return Ok(AgentSession::Resume {
+                agent_kind: AgentKind::Claude,
+                executable: executable.to_string(),
+                session_id,
+                remote: None,
+            });
         }
         return Ok(if allow_fresh {
-            AgentSession::Fresh { session_id }
+            AgentSession::Fresh {
+                agent_kind: AgentKind::Claude,
+                executable: executable.to_string(),
+                session_id,
+                remote: None,
+            }
         } else {
             AgentSession::Shell
         });
@@ -86,7 +114,92 @@ pub async fn resolve(
     }
 
     Ok(AgentSession::Fresh {
+        agent_kind: AgentKind::Claude,
+        executable: executable.to_string(),
         session_id: mint(db, repo, term_key, cwd).await?,
+        remote: None,
+    })
+}
+
+/// Resolve a Codex thread. Unlike Claude, resumability is App-Server-owned, so
+/// the presence of the persisted thread id is authoritative; the runtime checks
+/// it with `thread/resume` before the TUI is launched.
+pub struct CodexSessionOpts<'a> {
+    pub executable: &'a str,
+    pub repo: &'a str,
+    pub term_key: &'a str,
+    pub cwd: &'a Path,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub profile: crate::codex::CodexProfile,
+    pub allow_fresh: bool,
+}
+
+pub async fn resolve_codex(
+    db: &Db,
+    runtime: &crate::codex::CodexRuntime,
+    opts: CodexSessionOpts<'_>,
+) -> Result<AgentSession> {
+    let CodexSessionOpts {
+        executable,
+        repo,
+        term_key,
+        cwd,
+        model,
+        effort,
+        profile,
+        allow_fresh,
+    } = opts;
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT session_id, agent_kind FROM terminal_sessions WHERE repo = ? AND term_key = ?",
+    )
+    .bind(repo)
+    .bind(term_key)
+    .fetch_optional(db)
+    .await?;
+    if let Some((thread_id, kind)) = row {
+        let kind: AgentKind = kind.parse()?;
+        if kind != AgentKind::Codex {
+            anyhow::bail!("stored provider does not match Codex session resolver");
+        }
+        runtime.resume_thread(executable, &thread_id)?;
+        return Ok(AgentSession::Resume {
+            agent_kind: AgentKind::Codex,
+            executable: executable.to_string(),
+            session_id: thread_id,
+            remote: Some(runtime.remote(executable)?),
+        });
+    }
+    if !allow_fresh {
+        return Ok(AgentSession::Shell);
+    }
+    let thread_id = runtime.start_thread(executable, cwd, model, effort, profile)?;
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+         VALUES (?, ?, ?, ?, 'Codex') ON CONFLICT (repo, term_key) DO NOTHING",
+    )
+    .bind(repo)
+    .bind(term_key)
+    .bind(cwd.to_string_lossy().as_ref())
+    .bind(&thread_id)
+    .execute(&mut *tx)
+    .await?;
+    let (persisted_id,): (String,) =
+        sqlx::query_as("SELECT session_id FROM terminal_sessions WHERE repo = ? AND term_key = ?")
+            .bind(repo)
+            .bind(term_key)
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    if persisted_id != thread_id {
+        runtime.resume_thread(executable, &persisted_id)?;
+    }
+    Ok(AgentSession::Fresh {
+        agent_kind: AgentKind::Codex,
+        executable: executable.to_string(),
+        session_id: persisted_id,
+        remote: Some(runtime.remote(executable)?),
     })
 }
 
@@ -96,7 +209,7 @@ pub async fn resolve(
 /// the loser adopts the winner's session instead of failing the primary key.
 async fn mint(db: &Db, repo: &str, term_key: &str, cwd: &str) -> Result<String> {
     sqlx::query(
-        "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)
+        "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind) VALUES (?, ?, ?, ?, 'Claude')
          ON CONFLICT (repo, term_key) DO NOTHING",
     )
     .bind(repo)
@@ -441,22 +554,22 @@ mod tests {
         let key = "tree:AK-1";
 
         // First, passive reopen with nothing stored → plain shell.
-        let r = resolve(&db, "repo", key, cwd, Some(&home), false)
+        let r = resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", false)
             .await
             .unwrap();
         assert_eq!(r, AgentSession::Shell);
 
         // Explicit launch mints + stores a fresh session id.
-        let fresh = resolve(&db, "repo", key, cwd, Some(&home), true)
+        let fresh = resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", true)
             .await
             .unwrap();
-        let AgentSession::Fresh { session_id } = fresh else {
+        let AgentSession::Fresh { session_id, .. } = fresh else {
             panic!("expected Fresh, got {fresh:?}");
         };
 
         // No transcript yet → a reopen still can't resume (stays a shell).
         assert_eq!(
-            resolve(&db, "repo", key, cwd, Some(&home), false)
+            resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", false)
                 .await
                 .unwrap(),
             AgentSession::Shell
@@ -467,20 +580,28 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{}").unwrap();
         assert_eq!(
-            resolve(&db, "repo", key, cwd, Some(&home), false)
+            resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", false)
                 .await
                 .unwrap(),
             AgentSession::Resume {
-                session_id: session_id.clone()
+                agent_kind: AgentKind::Claude,
+                executable: "/bin/claude".into(),
+                session_id: session_id.clone(),
+                remote: None,
             }
         );
 
         // A re-launch prefers resuming the live session over minting a new id.
         assert_eq!(
-            resolve(&db, "repo", key, cwd, Some(&home), true)
+            resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", true)
                 .await
                 .unwrap(),
-            AgentSession::Resume { session_id }
+            AgentSession::Resume {
+                agent_kind: AgentKind::Claude,
+                executable: "/bin/claude".into(),
+                session_id,
+                remote: None,
+            }
         );
 
         let _ = std::fs::remove_dir_all(&base);
@@ -513,10 +634,10 @@ mod tests {
         let cwd = "/Users/x/dev/my_repo";
         let key = "tree:AK-2";
 
-        let fresh = resolve(&db, "repo", key, cwd, Some(&home), true)
+        let fresh = resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", true)
             .await
             .unwrap();
-        let AgentSession::Fresh { session_id } = fresh else {
+        let AgentSession::Fresh { session_id, .. } = fresh else {
             panic!("expected Fresh, got {fresh:?}");
         };
 
@@ -526,10 +647,15 @@ mod tests {
         std::fs::write(&path, "{}").unwrap();
 
         assert_eq!(
-            resolve(&db, "repo", key, cwd, Some(&home), false)
+            resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", false)
                 .await
                 .unwrap(),
-            AgentSession::Resume { session_id }
+            AgentSession::Resume {
+                agent_kind: AgentKind::Claude,
+                executable: "/bin/claude".into(),
+                session_id,
+                remote: None,
+            }
         );
 
         let _ = std::fs::remove_dir_all(&base);
@@ -570,22 +696,62 @@ mod tests {
         // An explicit launch records a session for two triage tickets and a
         // worktree; a passive reopen for AK-9 records nothing.
         let cwd = "/tmp/santree/work";
-        resolve(&db, "repo", "triage:AK-1", cwd, Some(&home), true)
-            .await
-            .unwrap();
-        resolve(&db, "repo", "triage:AK-2", cwd, Some(&home), true)
-            .await
-            .unwrap();
-        resolve(&db, "repo", "tree:AK-3", cwd, Some(&home), true)
-            .await
-            .unwrap();
-        resolve(&db, "repo", "triage:AK-9", cwd, Some(&home), false)
-            .await
-            .unwrap();
+        resolve(
+            &db,
+            "repo",
+            "triage:AK-1",
+            cwd,
+            Some(&home),
+            "/bin/claude",
+            true,
+        )
+        .await
+        .unwrap();
+        resolve(
+            &db,
+            "repo",
+            "triage:AK-2",
+            cwd,
+            Some(&home),
+            "/bin/claude",
+            true,
+        )
+        .await
+        .unwrap();
+        resolve(
+            &db,
+            "repo",
+            "tree:AK-3",
+            cwd,
+            Some(&home),
+            "/bin/claude",
+            true,
+        )
+        .await
+        .unwrap();
+        resolve(
+            &db,
+            "repo",
+            "triage:AK-9",
+            cwd,
+            Some(&home),
+            "/bin/claude",
+            false,
+        )
+        .await
+        .unwrap();
         // A different repo's investigation must not leak in.
-        resolve(&db, "other", "triage:AK-8", cwd, Some(&home), true)
-            .await
-            .unwrap();
+        resolve(
+            &db,
+            "other",
+            "triage:AK-8",
+            cwd,
+            Some(&home),
+            "/bin/claude",
+            true,
+        )
+        .await
+        .unwrap();
 
         let mut got = started_investigations(&db, "repo").await.unwrap();
         got.sort();
@@ -643,29 +809,56 @@ mod tests {
 
         // Main work terminal + an extra tab for AK-1, plus an unrelated worktree
         // whose transcript must NOT leak into AK-1's PR context.
-        let main = resolve(&db, "repo", "tree:AK-1", cwd, Some(&home), true)
-            .await
-            .unwrap();
+        let main = resolve(
+            &db,
+            "repo",
+            "tree:AK-1",
+            cwd,
+            Some(&home),
+            "/bin/claude",
+            true,
+        )
+        .await
+        .unwrap();
         let AgentSession::Fresh {
             session_id: main_sid,
+            ..
         } = main
         else {
             panic!("expected Fresh");
         };
-        let tab = resolve(&db, "repo", "tree:AK-1:tab:t2", cwd, Some(&home), true)
-            .await
-            .unwrap();
+        let tab = resolve(
+            &db,
+            "repo",
+            "tree:AK-1:tab:t2",
+            cwd,
+            Some(&home),
+            "/bin/claude",
+            true,
+        )
+        .await
+        .unwrap();
         let AgentSession::Fresh {
             session_id: tab_sid,
+            ..
         } = tab
         else {
             panic!("expected Fresh");
         };
-        let other = resolve(&db, "repo", "tree:AK-2", cwd, Some(&home), true)
-            .await
-            .unwrap();
+        let other = resolve(
+            &db,
+            "repo",
+            "tree:AK-2",
+            cwd,
+            Some(&home),
+            "/bin/claude",
+            true,
+        )
+        .await
+        .unwrap();
         let AgentSession::Fresh {
             session_id: other_sid,
+            ..
         } = other
         else {
             panic!("expected Fresh");

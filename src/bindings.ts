@@ -13,6 +13,13 @@ export const commands = {
 	addRepo: (path: string) => typedError<Repo, CmdError>(__TAURI_INVOKE("add_repo", { path })),
 	/**  Available coding agents and their models. */
 	listAgents: () => __TAURI_INVOKE<AgentDef[]>("list_agents"),
+	codexHealth: () => typedError<CodexHealth, CmdError>(__TAURI_INVOKE("codex_health")),
+	codexAccount: () => typedError<CodexAccount, CmdError>(__TAURI_INVOKE("codex_account")),
+	codexModels: () => typedError<CodexModel[], CmdError>(__TAURI_INVOKE("codex_models")),
+	codexRateLimits: () => typedError<CodexRateLimits, CmdError>(__TAURI_INVOKE("codex_rate_limits")),
+	codexLoginStart: (deviceCode: boolean) => typedError<CodexLogin, CmdError>(__TAURI_INVOKE("codex_login_start", { deviceCode })),
+	codexLoginCancel: (loginId: string) => typedError<null, CmdError>(__TAURI_INVOKE("codex_login_cancel", { loginId })),
+	codexLogout: () => typedError<null, CmdError>(__TAURI_INVOKE("codex_logout")),
 	/**
 	 *  Aggregated Claude Code token usage across all local session transcripts
 	 *  (`~/.claude/projects/**\/*.jsonl`) — period/model/session totals + context fill.
@@ -232,13 +239,13 @@ export const commands = {
 	 */
 	createWorktreeForPr: (repo: string, issueId: string, title: string, branch: string, base: string | null, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree_for_pr", { repo, issueId, title, branch, base, agent })),
 	/**
-	 *  Decide how a terminal that auto-launches `claude` should (re)launch it: resume
-	 *  a still-on-disk session, start fresh with a reserved id, or a plain shell.
+	 *  Resolve an interactive provider session: resume its durable id, start fresh,
+	 *  or leave the terminal as a plain shell.
 	 *  `term_key` is the logical terminal id (e.g. `tree:AK-1`, `triage:AK-1`); `cwd`
-	 *  is where claude runs. `allow_fresh` mints a new session when none is resumable
+	 *  is where the provider runs. `allow_fresh` mints a session when none is resumable
 	 *  (set on an explicit launch; false on a passive reopen).
 	 */
-	agentSession: (repo: string, termKey: string, cwd: string, allowFresh: boolean) => typedError<AgentSession, CmdError>(__TAURI_INVOKE("agent_session", { repo, termKey, cwd, allowFresh })),
+	agentSession: (repo: string, termKey: string, cwd: string, allowFresh: boolean, agent: AgentKind) => typedError<AgentSession, CmdError>(__TAURI_INVOKE("agent_session", { repo, termKey, cwd, allowFresh, agent })),
 	/**
 	 *  Ticket ids of triage investigations that have a stored (resumable) session —
 	 *  i.e. an investigation was started for them at some point. Drives the Triage
@@ -254,7 +261,7 @@ export const commands = {
 	 *  Persist a new extra tab. The frontend mints `id` (a UUID) so it can patch
 	 *  its cache and focus the tab without waiting on the round-trip.
 	 */
-	addWorktreeTab: (repo: string, worktreeId: string, id: string, kind: TabKind, title: string) => typedError<null, CmdError>(__TAURI_INVOKE("add_worktree_tab", { repo, worktreeId, id, kind, title })),
+	addWorktreeTab: (repo: string, worktreeId: string, id: string, kind: TabKind, agentKind: "Claude" | "Codex" | "Cursor" | "Opencode" | null, title: string) => typedError<null, CmdError>(__TAURI_INVOKE("add_worktree_tab", { repo, worktreeId, id, kind, agentKind, title })),
 	/**  Rename an extra tab (blank titles are rejected). */
 	renameWorktreeTab: (repo: string, id: string, title: string) => typedError<null, CmdError>(__TAURI_INVOKE("rename_worktree_tab", { repo, id, title })),
 	/**  Remove an extra tab; a Claude tab's stored session is forgotten with it. */
@@ -932,16 +939,19 @@ export type AgentDef = {
 export type AgentKind = "Claude" | "Codex" | "Cursor" | "Opencode";
 
 /**
- *  How a terminal that auto-launches `claude` should (re)launch it, resolved
- *  against the persisted session registry + the on-disk transcript. The frontend
- *  turns this into the shell seed: `--resume <id>` to continue, `--session-id
- *  <id> '<prompt>'` to start fresh, or a plain shell.
+ *  How a terminal should (re)launch its provider, resolved against the persisted
+ *  session registry and that provider's durable-session source.
  */
 export type AgentSession = 
-/**  A still-on-disk session to continue: `claude --resume <sessionId>`. */
-{ type: "resume"; sessionId: string } | 
-/**  A reserved id to start fresh with: `claude --session-id <sessionId> '<prompt>'`. */
-{ type: "fresh"; sessionId: string } | 
+/**  A durable provider session to continue. */
+{ type: "resume"; agentKind: AgentKind; 
+/**
+ *  Exact backend-resolved executable used by both the control plane and
+ *  the terminal. This prevents PATH/config drift between the two.
+ */
+executable: string; sessionId: string; remote: string | null } | 
+/**  A provider session reserved for a fresh launch. */
+{ type: "fresh"; agentKind: AgentKind; executable: string; sessionId: string; remote: string | null } | 
 /**  No agent session — just a login shell. */
 { type: "shell" };
 
@@ -1156,6 +1166,66 @@ export type CheckStep = {
 };
 
 export type CmdError = string;
+
+/**  Account metadata returned by Codex. Credentials never cross this boundary. */
+export type CodexAccount = {
+	connected: boolean,
+	authType: string,
+	email: string | null,
+	plan: string | null,
+	requiresOpenaiAuth: boolean,
+};
+
+/**
+ *  Operational status of Santree's private Codex App Server. Transport details
+ *  deliberately stop here: the frontend only needs a remedy, never a socket or
+ *  raw protocol error.
+ */
+export type CodexHealth = {
+	available: boolean,
+	running: boolean,
+	version: string,
+	executable: string,
+	error: string | null,
+};
+
+export type CodexLogin = {
+	loginId: string,
+	authUrl: string,
+	userCode: string | null,
+};
+
+/**
+ *  One server-advertised model. Unknown/additive protocol fields remain in the
+ *  backend and can be adopted without changing this stable UI contract.
+ */
+export type CodexModel = {
+	id: string,
+	displayName: string,
+	description: string,
+	isDefault: boolean,
+	defaultReasoningEffort: string,
+	supportedReasoningEfforts: CodexReasoningEffort[],
+	inputModalities: string[],
+	supportsPersonality: boolean,
+};
+
+export type CodexRateLimitWindow = {
+	usedPercent: number | null,
+	windowMinutes: number | null,
+	resetsAt: number | null,
+};
+
+export type CodexRateLimits = {
+	plan: string | null,
+	primary: CodexRateLimitWindow | null,
+	secondary: CodexRateLimitWindow | null,
+};
+
+export type CodexReasoningEffort = {
+	effort: string,
+	description: string,
+};
 
 /**  Where a PR comment originated, so the UI can label/anchor it. */
 export type CommentKind = 
@@ -2126,6 +2196,7 @@ export type ScriptInfo = {
  *  Only `PartialEq` (not `Eq`) because of the `f64` timestamp below.
  */
 export type SessionState = {
+	agentKind: AgentKind,
 	/**  Claude session id (the one santree minted via `--session-id`). */
 	sessionId: string,
 	/**  Derived agent state. */
@@ -2224,6 +2295,7 @@ export type SessionUsageChanged = Record<string, never>;
  *  `usage.rs`. One current-value row per session id.
  */
 export type SessionUsageLive = {
+	agentKind: AgentKind,
 	/**  Claude session id (matches [`SessionState::session_id`]). */
 	sessionId: string,
 	/**
@@ -2270,16 +2342,11 @@ export type Settings = {
  */
 export type StreamEvent = { type: "chunk"; text: string } | { type: "done"; ok: boolean };
 
+/**  What an extra Trees main-area tab hosts: an agent session or a login shell. */
+export type TabKind = "agent" | "terminal" | 
 /**
- *  What an extra Trees main-area tab hosts: a Claude agent session (resumable
- *  across app restarts via its stored session id) or a plain login shell.
- */
-export type TabKind = "claude" | "terminal" | 
-/**
- *  A Claude session dedicated to fixing a PR's failing CI: seeded with the
- *  failed log + guardrails, launched with a commit/push-denying settings file.
- *  Persisted like a Claude tab (resumable), but its pane always applies the
- *  no-git guardrail — even on resume after a restart.
+ *  An agent session dedicated to fixing failing CI under the provider's
+ *  no-Git security profile.
  */
 "fixCi";
 
@@ -2727,6 +2794,7 @@ export type WorktreeTab = {
 	id: string,
 	worktreeId: string,
 	kind: TabKind,
+	agentKind: AgentKind | null,
 	title: string,
 };
 

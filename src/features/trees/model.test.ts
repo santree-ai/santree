@@ -76,6 +76,7 @@ describe("effectiveSessionState", () => {
   const running = (): Worktree => ({ ...worktree("AK-1"), activity: "Running" });
   const idle = (): Worktree => ({ ...worktree("AK-1"), activity: "Idle" });
   const hook = (state: SessionState["state"]): SessionState => ({
+    agentKind: "Claude",
     sessionId: "s1",
     state,
     event: "x",
@@ -325,13 +326,13 @@ describe("resolveActiveTab", () => {
 
 /** Minimal WorktreeTab fixture. */
 function extraTabRow(id: string, kind: TabKind, title: string): WorktreeTab {
-  return { id, worktreeId: "AK-1", kind, title };
+  return { id, worktreeId: "AK-1", kind, agentKind: kind === "terminal" ? null : "Codex", title };
 }
 
 describe("defaultTabTitle", () => {
-  it("names the first Claude tab plain 'Claude', then numbers from 2", () => {
-    expect(defaultTabTitle("claude", [])).toBe("Claude");
-    expect(defaultTabTitle("claude", [extraTabRow("a", "claude", "Claude")])).toBe("Claude 2");
+  it("names the first Codex tab plain 'Codex', then numbers from 2", () => {
+    expect(defaultTabTitle("agent", [])).toBe("Codex");
+    expect(defaultTabTitle("agent", [extraTabRow("a", "agent", "Codex")])).toBe("Codex 2");
   });
 
   it("numbers terminals from 2 — the primary Terminal tab is #1 implicitly", () => {
@@ -342,14 +343,14 @@ describe("defaultTabTitle", () => {
   });
 
   it("skips past renamed/deleted gaps to stay unique among existing titles", () => {
-    // "Claude" was renamed away → the base name is free again.
-    expect(defaultTabTitle("claude", [extraTabRow("a", "claude", "Debugging")])).toBe("Claude");
+    // "Codex" was renamed away → the base name is free again.
+    expect(defaultTabTitle("agent", [extraTabRow("a", "agent", "Debugging")])).toBe("Codex");
     // A middle title was taken back by a rename — pick the first free number.
-    const taken = [extraTabRow("a", "claude", "Claude"), extraTabRow("b", "claude", "Claude 3")];
-    expect(defaultTabTitle("claude", taken)).toBe("Claude 2");
+    const taken = [extraTabRow("a", "agent", "Codex"), extraTabRow("b", "agent", "Codex 3")];
+    expect(defaultTabTitle("agent", taken)).toBe("Codex 2");
   });
 
   it("ignores the other kind's titles", () => {
-    expect(defaultTabTitle("claude", [extraTabRow("a", "terminal", "Terminal 2")])).toBe("Claude");
+    expect(defaultTabTitle("agent", [extraTabRow("a", "terminal", "Terminal 2")])).toBe("Codex");
   });
 });

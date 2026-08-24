@@ -16,7 +16,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 
-import { commands, type TriageDetail, type TriageTicket } from "../../bindings";
+import { type AgentKind, commands, type TriageDetail, type TriageTicket } from "../../bindings";
 import {
   CLAUDE_START_WITH_CHROME_KEY,
   queryKeys,
@@ -25,6 +25,7 @@ import {
 } from "../../lib/queries";
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { toast } from "../../state/toast";
+import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
 
@@ -162,7 +163,7 @@ export function useBatchInvestigate(opts: {
   repo: string;
   /** The repo's local path (where the agent runs); no path ⇒ can't launch. */
   cwd: string | undefined;
-  agentExec: string;
+  agentKind: AgentKind;
   model: string | null;
   effort: string | null;
   remoteControl: boolean;
@@ -171,12 +172,11 @@ export function useBatchInvestigate(opts: {
   const qc = useQueryClient();
   const hookSettings = useClaudeHookSettings().data;
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
-  const { repo, cwd, agentExec, model, effort, remoteControl } = opts;
+  const { repo, cwd, agentKind, model, effort, remoteControl } = opts;
 
   return useCallback(
     async (ids: string[]) => {
       if (!cwd || ids.length === 0) return;
-      const exec = agentExec.trim() || "claude";
       const results = await Promise.allSettled(
         ids.map(async (id) => {
           // Render + write this ticket's triage prompt (screenshots extracted to
@@ -187,17 +187,24 @@ export function useBatchInvestigate(opts: {
             pr.status === "ok"
               ? `Read ${pr.data} and follow the instructions inside.`
               : `Investigate ${id}.`;
-          const r = await commands.agentSession(repo, `triage:${id}`, cwd, true);
+          const r = await commands.agentSession(repo, `triage:${id}`, cwd, true, agentKind);
           if (r.status === "error") throw new Error(r.error);
-          const seed = agentSessionSeed(r.data, exec, {
+          const resolvedAgent = sessionAgent(r.data, agentKind);
+          const provider = agentProvider(resolvedAgent);
+          const seed = agentSessionSeed(r.data, {
             repo,
             termKey: `triage:${id}`,
             prompt,
-            modelFlag: model ? `--model ${shellQuote(model)}` : undefined,
-            effortFlag: effort ? `--effort ${shellQuote(effort)}` : undefined,
-            remoteControl: remoteControl ? id : undefined,
-            settingsFlag: hookSettings ? `--settings ${shellQuote(hookSettings)}` : undefined,
-            chrome: startWithChrome,
+            modelFlag:
+              resolvedAgent === agentKind && model ? `--model ${shellQuote(model)}` : undefined,
+            effortFlag:
+              resolvedAgent === agentKind && effort ? `--effort ${shellQuote(effort)}` : undefined,
+            remoteControl: provider.capabilities.remoteControl && remoteControl ? id : undefined,
+            settingsFlag:
+              provider.capabilities.cliLaunchOptions && hookSettings
+                ? `--settings ${shellQuote(hookSettings)}`
+                : undefined,
+            chrome: provider.capabilities.cliLaunchOptions && startWithChrome,
           });
           ensure({ title: id, cwd, source: "triage", refId: id, seed });
         }),
@@ -212,7 +219,7 @@ export function useBatchInvestigate(opts: {
       if (failed > 0)
         toast.error(`Couldn't start ${failed} investigation${failed === 1 ? "" : "s"}.`);
     },
-    [repo, cwd, agentExec, model, effort, remoteControl, hookSettings, startWithChrome, ensure, qc],
+    [repo, cwd, agentKind, model, effort, remoteControl, hookSettings, startWithChrome, ensure, qc],
   );
 }
 

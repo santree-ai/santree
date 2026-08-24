@@ -544,6 +544,7 @@ pub async fn session_usage_live(db: &Db) -> Result<Vec<SessionUsageLive>> {
         .map(
             |(session_id, used_pct, input_tokens, context_size, model, cost_usd, updated_at_ms)| {
                 SessionUsageLive {
+                    agent_kind: santree_core::domain::AgentKind::Claude,
                     session_id,
                     used_pct,
                     input_tokens: input_tokens as f64,
@@ -643,6 +644,7 @@ fn reconcile_rows(rows: Vec<StateRow>, now_ms: i64) -> Vec<SessionState> {
                     state = live;
                 }
                 Some(SessionState {
+                    agent_kind: santree_core::domain::AgentKind::Claude,
                     session_id,
                     state,
                     event,

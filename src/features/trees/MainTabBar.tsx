@@ -9,14 +9,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import type { AgentKind, TabKind, WorktreeTab } from "../../bindings";
-import {
-  AgentIcon,
-  ClaudeSparkIcon,
-  CloseIcon,
-  GlobeIcon,
-  PlusIcon,
-  TerminalIcon,
-} from "../../components/icons";
+import { AgentIcon, CloseIcon, GlobeIcon, PlusIcon, TerminalIcon } from "../../components/icons";
 import {
   Dropdown,
   MENU_ITEM,
@@ -100,12 +93,10 @@ export function MainTabBar() {
           tab={extraTab(t.id)}
           label={t.title}
           icon={
-            // Claude + Fix-CI tabs both host a Claude session — mark them with the
-            // spark; only plain terminal tabs get the shell glyph.
             t.kind === "terminal" ? (
               <TerminalIcon size={11} className="text-muted-3" />
             ) : (
-              <ClaudeSparkIcon />
+              <AgentTabIcon kind={t.agentKind ?? "Claude"} />
             )
           }
           active={activeTab}
@@ -140,14 +131,13 @@ export function MainTabBar() {
 /** The agent's logomark for the main work tab — Claude gets its brand color so
  *  the spark reads as "Claude" at a glance; other agents use the text color. */
 function AgentTabIcon({ kind }: { kind: AgentKind }) {
-  if (kind === "Claude") return <ClaudeSparkIcon />;
   return <AgentIcon kind={kind} size={11} className="text-muted-3" />;
 }
 
 /** The trailing "+" tab: opens a new Claude session or terminal (or a browser,
  *  once that's built). ⌘T opens the menu while a worktree is active (this bar is
  *  on screen); then 1 selects Claude, 2 Terminal, and 3 would select Web (WIP). */
-function NewTabButton({ onAdd }: { onAdd: (kind: TabKind) => void }) {
+function NewTabButton({ onAdd }: { onAdd: (kind: TabKind, agentKind?: AgentKind) => void }) {
   const [open, setOpen] = useState(false);
 
   // ⌘T opens the menu. Scoped to this component's lifetime, which matches "a
@@ -191,26 +181,42 @@ function NewTabButton({ onAdd }: { onAdd: (kind: TabKind) => void }) {
 /** New-tab menu rows. Mounted only while the menu is open, so its digit-key
  *  listener (1 → Claude, 2 → Terminal, 3 → Web) is live exactly when the menu is
  *  visible. */
-function NewTabMenu({ onAdd, close }: { onAdd: (kind: TabKind) => void; close: () => void }) {
-  const add = (kind: TabKind) => {
-    onAdd(kind);
+function NewTabMenu({
+  onAdd,
+  close,
+}: {
+  onAdd: (kind: TabKind, agentKind?: AgentKind) => void;
+  close: () => void;
+}) {
+  const add = (kind: TabKind, agentKind?: AgentKind) => {
+    if (agentKind) onAdd(kind, agentKind);
+    else onAdd(kind);
     close();
   };
 
-  // 1 → Claude, 2 → Terminal, 3 → Web (WIP: it owns the key but does nothing yet).
-  useDigitShortcuts([() => add("claude"), () => add("terminal"), null]);
+  // Provider choice is explicit: 1 → Codex, 2 → Claude Code, 3 → Terminal.
+  useDigitShortcuts([
+    () => add("agent", "Codex"),
+    () => add("agent", "Claude"),
+    () => add("terminal"),
+  ]);
 
   return (
     <>
-      <button type="button" onClick={() => add("claude")} className={MENU_ITEM}>
-        <ClaudeSparkIcon size={13} />
-        Claude
+      <button type="button" onClick={() => add("agent", "Codex")} className={MENU_ITEM}>
+        <AgentIcon kind="Codex" size={13} />
+        Codex
         <span className="ml-auto text-[10px] text-muted-4">1</span>
+      </button>
+      <button type="button" onClick={() => add("agent", "Claude")} className={MENU_ITEM}>
+        <AgentIcon kind="Claude" size={13} />
+        Claude Code
+        <span className="ml-auto text-[10px] text-muted-4">2</span>
       </button>
       <button type="button" onClick={() => add("terminal")} className={MENU_ITEM}>
         <TerminalIcon />
         Terminal
-        <span className="ml-auto text-[10px] text-muted-4">2</span>
+        <span className="ml-auto text-[10px] text-muted-4">3</span>
       </button>
       <button type="button" disabled title="Coming soon" className={MENU_ITEM}>
         <GlobeIcon />

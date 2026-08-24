@@ -7,6 +7,22 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2-beta.6 — 2026-08-24
+
+- Codex is now the default agent for new work, investigations, Ask AI, Fix CI,
+  and manual agent tabs. Existing Claude sessions and tabs keep their provider
+  and continue to resume as before; AI Review keeps its existing Claude tools
+  in this beta.
+- Codex runs through its own App Server while the real Codex terminal remains
+  interactive. Settings now shows the detected CLI, account, models, reasoning
+  options, rate limits, and login controls.
+- Agent sessions now use one provider-neutral contract, so future providers can
+  plug into the same session, tab, workflow, and launch boundaries without
+  adding provider branches throughout the app.
+- Tightened agent-launch security around persisted provider identity, review
+  checkout paths, App Server sockets, executable resolution, and Codex sandbox
+  permissions.
+
 ## 0.1.2-beta.5 — 2026-08-23
 
 - New: AI review. In the Reviews tab, "Review with AI" opens a Claude session

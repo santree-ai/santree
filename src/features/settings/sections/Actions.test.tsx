@@ -28,6 +28,7 @@ vi.mock("../../../lib/queries", () => ({
   }),
   useBoolSetting: () => ({ value: false }),
   useClaudeModels: () => ({ data: ["opus"] }),
+  useCodexModels: () => ({ data: [] }),
   useResolvedSetting: () => ({ data: null }),
   useSetSetting: () => ({ mutate: vi.fn() }),
   useSetting: () => ({ data: null }),

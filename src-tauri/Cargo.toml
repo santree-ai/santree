@@ -47,9 +47,10 @@ tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 # io-std/etc, which "full" pulled in unused. Tauri and sqlx pull in whatever
 # additional tokio features they themselves need via Cargo's feature unification;
 # this list only has to cover what our own code names directly.
-tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 
 anyhow = { workspace = true }
+async-trait = "0.1"
 
 # Parse user-configured `.env` files into KEY=VALUE pairs (without mutating our
 # own process env) for the Environment settings — see `env.rs`.

@@ -11,6 +11,7 @@ import { SessionEndedPane } from "../../components/SessionEndedPane";
 import { CLAUDE_STATUS_LINE_KEY, useBoolSetting } from "../../lib/queries";
 import { useAgentRuns } from "../../state/AgentRuns";
 import { alpha } from "../../theme/colors";
+import { agentProvider } from "../terminal/agentProvider";
 import { BottomBar } from "./BottomBar";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { FilePickerPanel } from "./FilePickerPanel";
@@ -206,7 +207,7 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
               their own resumable agent session. */}
           {extraTabs.map((t) =>
             activeTab === extraTab(t.id) ? (
-              t.kind === "claude" || t.kind === "fixCi" ? (
+              t.kind === "agent" || t.kind === "fixCi" ? (
                 <AgentTabPane key={t.id} repo={repo} worktree={worktree} tab={t} />
               ) : (
                 <WorktreeTerminal
@@ -297,7 +298,7 @@ function AgentSurface({
   );
 }
 
-/** An extra agent tab: a persisted Claude session rooted in the worktree, or the
+/** An extra agent tab: a persisted provider session rooted in the worktree, or the
  *  "Fix CI with AI" variant of one.
  *
  *  Its conversation is keyed by `tree:<worktree>:tab:<tab id>` in the session
@@ -328,12 +329,11 @@ function AgentTabPane({
     repo,
     refId: `tree:${worktree.id}:tab:${tab.id}`,
     cwd: worktree.path,
-    // The pane is Claude-only by construction — both kinds run `claude`.
-    agent: "Claude",
+    agent: tab.agentKind ?? "Claude",
     // An agent tab exists to run the agent, so any (re)open is an explicit launch.
     allowFresh: true,
     noGit: fixCi,
-    // A plain Claude tab has no opening prompt (the user starts the conversation).
+    // A plain agent tab has no opening prompt (the user starts the conversation).
     // Fix-CI seeds the short "read the file" line — the CI log is far too large to
     // type into the PTY (same reason the work prompt seeds a path).
     prompt: !fixCi
@@ -351,14 +351,14 @@ function AgentTabPane({
       termId={`${worktree.id}:tab:${tab.id}`}
       branch={tab.title}
       preparing={preparing}
-      preparingTitle="Starting Claude…"
+      preparingTitle={`Starting ${agentProvider(tab.agentKind ?? "Claude").label}…`}
       preparingSubtitle={
         fixCi
           ? "Reading the CI failure. The terminal opens in a moment."
           : "The terminal opens in a moment."
       }
       ended={ended}
-      endedTitle={fixCi ? "Fix-CI session ended" : "Claude session ended"}
+      endedTitle={fixCi ? "Fix-CI session ended" : "Agent session ended"}
       endedSubtitle={
         fixCi ? (
           <>

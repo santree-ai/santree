@@ -51,6 +51,28 @@ inspects them to decide what to type next.
 Do not wrap, re-implement, or spoof any agent's control loop or SDK. We spawn the
 real binary and render its real output — nothing more.
 
+## Codex App Server control plane — a scoped exception
+
+Santree owns one local `codex app-server` process so the real Codex TUI can attach
+to a durable thread. This is a bounded control-plane exception, not a second agent
+loop. It may use Codex's typed protocol for account metadata (never credential
+material), login initiation/cancellation, model discovery, thread lifecycle,
+structured state/activity, and token usage. The TUI remains the real, unmodified
+Codex CLI and all conversation and TUI-originated approval interaction stays there.
+
+The transport is a private Unix socket under an app-owned `0700` directory. It is
+never exposed over TCP. Santree never parses terminal output to decide what to
+type, never auto-responds to App Server requests, never runs a keep-going loop,
+and never silently falls back to an unobserved Codex process. An unsupported
+server request is rejected and an unavailable/incompatible App Server disables
+new Codex launches visibly while Claude and plain terminals remain available.
+
+Codex owns its authentication storage and localhost callback. Santree may open
+the `authUrl` returned by `account/login/start` and display account email, plan,
+and rate-limit metadata, but it never receives, reads, logs, copies, or persists
+an access token or API key. Logout is explicitly confirmed because it changes the
+shared Codex CLI account.
+
 ## Headless helpers — a scoped exception
 Two call sites intentionally sit outside the terminal pane. They, and the
 session-state channel named in the next section, are the *only* sanctioned

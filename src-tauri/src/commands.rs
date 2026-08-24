@@ -18,16 +18,18 @@ use santree_core::{
     config,
     domain::{
         AgentAuth, AgentDef, AgentKind, AgentSession, AiReviewLaunch, AnalysisScope, BinaryStatus,
-        ChangedFile, CheckLog, EnglishAnalysis, EnglishLog, FileSource, GithubStatus,
-        LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr, Opener,
-        PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewBrief, ReviewDraft,
-        ReviewEvent, ReviewInbox, ReviewPublishOutcome, ReviewTarget, Reviewer, ScriptInfo,
-        SessionState, SessionUsageLive, Settings, TabKind, Task, TicketRef, TriageDetail,
-        TriageSchedule, TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreePr, WorktreeTab,
+        ChangedFile, CheckLog, CodexAccount, CodexHealth, CodexLogin, CodexModel, CodexRateLimits,
+        EnglishAnalysis, EnglishLog, FileSource, GithubStatus, LegacyCliMigration, LinearOrg,
+        LinearStatus, MergeQueue, NewInlineComment, NewPr, Opener, PrDetail, PrDraft, PrLabel,
+        PromptInfo, PromptPreview, Repo, ReviewBrief, ReviewDraft, ReviewEvent, ReviewInbox,
+        ReviewPublishOutcome, ReviewTarget, Reviewer, ScriptInfo, SessionState, SessionUsageLive,
+        Settings, TabKind, Task, TicketRef, TriageDetail, TriageSchedule, TriageTicket,
+        UsageReport, ViewedMarks, Worktree, WorktreePr, WorktreeTab,
     },
 };
 
 use crate::awake::{self, KeepAwake, KeepAwakeStatus};
+use crate::codex::CodexRuntime;
 use crate::commit_draft;
 use crate::db::Db;
 use crate::english_tutor;
@@ -39,6 +41,7 @@ use crate::notes;
 use crate::openers;
 use crate::pr;
 use crate::pricing;
+use crate::provider::{self, SessionRequest, SessionSurface};
 use crate::repo;
 use crate::review_ai;
 use crate::review_drafts;
@@ -69,6 +72,74 @@ pub async fn add_repo(path: String, db: State<'_, Db>) -> CmdResult<Repo> {
 #[specta::specta]
 pub fn list_agents() -> Vec<AgentDef> {
     config::agents()
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn codex_health(
+    db: State<'_, Db>,
+    runtime: State<'_, CodexRuntime>,
+) -> CmdResult<CodexHealth> {
+    Ok(runtime.health(settings::agent_executable(&db, AgentKind::Codex).await.ok()))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn codex_account(
+    db: State<'_, Db>,
+    runtime: State<'_, CodexRuntime>,
+) -> CmdResult<CodexAccount> {
+    let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
+    Ok(runtime.account(&executable)?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn codex_models(
+    db: State<'_, Db>,
+    runtime: State<'_, CodexRuntime>,
+) -> CmdResult<Vec<CodexModel>> {
+    let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
+    Ok(runtime.models(&executable)?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn codex_rate_limits(
+    db: State<'_, Db>,
+    runtime: State<'_, CodexRuntime>,
+) -> CmdResult<CodexRateLimits> {
+    let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
+    Ok(runtime.rate_limits(&executable)?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn codex_login_start(
+    device_code: bool,
+    db: State<'_, Db>,
+    runtime: State<'_, CodexRuntime>,
+) -> CmdResult<CodexLogin> {
+    let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
+    Ok(runtime.login(&executable, device_code)?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn codex_login_cancel(
+    login_id: String,
+    db: State<'_, Db>,
+    runtime: State<'_, CodexRuntime>,
+) -> CmdResult<()> {
+    let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
+    Ok(runtime.cancel_login(&executable, &login_id)?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn codex_logout(db: State<'_, Db>, runtime: State<'_, CodexRuntime>) -> CmdResult<()> {
+    let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
+    Ok(runtime.logout(&executable)?)
 }
 
 /// Aggregated Claude Code token usage across all local session transcripts
@@ -500,10 +571,10 @@ pub async fn investigate_prompt(
     Ok(worktree::investigate_prompt(&db, &repo, &issue_id, &prompts).await?)
 }
 
-/// Decide how a terminal that auto-launches `claude` should (re)launch it: resume
-/// a still-on-disk session, start fresh with a reserved id, or a plain shell.
+/// Resolve an interactive provider session: resume its durable id, start fresh,
+/// or leave the terminal as a plain shell.
 /// `term_key` is the logical terminal id (e.g. `tree:AK-1`, `triage:AK-1`); `cwd`
-/// is where claude runs. `allow_fresh` mints a new session when none is resumable
+/// is where the provider runs. `allow_fresh` mints a session when none is resumable
 /// (set on an explicit launch; false on a passive reopen).
 #[tauri::command]
 #[specta::specta]
@@ -512,10 +583,229 @@ pub async fn agent_session(
     term_key: String,
     cwd: String,
     allow_fresh: bool,
+    agent: AgentKind,
     db: State<'_, Db>,
+    runtime: State<'_, CodexRuntime>,
 ) -> CmdResult<AgentSession> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    Ok(session::resolve(&db, &repo, &term_key, &cwd, home.as_deref(), allow_fresh).await?)
+    if term_key.is_empty()
+        || term_key.len() > 240
+        || !term_key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '/' | '#' | '.'))
+    {
+        return Err("invalid terminal key".into());
+    }
+    let cwd_path = std::fs::canonicalize(&cwd)?;
+    let repo_db_path = repo::path(&db, &repo)
+        .await?
+        .ok_or("repository has no local path")?;
+    let repo_root = std::fs::canonicalize(&repo_db_path)?;
+    // Provider selection and id creation form one reservation. Serializing this
+    // small launch-only section prevents simultaneous first launches from
+    // adopting the other provider's id.
+    static RESOLVE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _resolve_guard = RESOLVE_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let context = session_context(&db, &repo, &repo_db_path, &term_key).await?;
+    validate_agent_cwd(&db, &term_key, &cwd_path, &repo_root, &repo_db_path).await?;
+    let stored_agent = session::stored_agent_kind(&db, &repo, &term_key).await?;
+    if let Some(authoritative) = context.agent {
+        if stored_agent.is_some_and(|stored| stored != authoritative) || agent != authoritative {
+            return Err("terminal provider does not match the persisted surface".into());
+        }
+    }
+    let agent = stored_agent.or(context.agent).unwrap_or(agent);
+    let surface = context.surface;
+    let (model_key, effort_key) = surface.setting_keys();
+    let resolved_model = settings::resolve(&db, &repo, model_key).await?;
+    let effort = settings::resolve(&db, &repo, effort_key).await?;
+    let app_settings = settings::get_settings(&db).await?;
+    let configured_model = app_settings
+        .agents
+        .iter()
+        .find(|setting| setting.key == agent)
+        .map(|setting| setting.model.as_str());
+    let model = resolved_model.as_deref().or(configured_model);
+    let executable = settings::agent_executable(&db, agent).await?;
+    let provider = provider::provider(agent, &runtime, executable)?;
+    debug_assert_eq!(provider.kind(), agent);
+    Ok(provider
+        .resolve_session(SessionRequest {
+            db: &db,
+            repo: &repo,
+            term_key: &term_key,
+            cwd: &cwd_path,
+            model,
+            effort: effort.as_deref(),
+            surface,
+            allow_fresh,
+        })
+        .await?)
+}
+
+struct SessionContext {
+    surface: SessionSurface,
+    agent: Option<AgentKind>,
+}
+
+async fn session_context(
+    db: &Db,
+    repo: &str,
+    repo_db_path: &str,
+    term_key: &str,
+) -> Result<SessionContext, String> {
+    if term_key.starts_with("triage:") {
+        return Ok(SessionContext {
+            surface: SessionSurface::Investigate,
+            agent: None,
+        });
+    }
+    if term_key.starts_with("review:") {
+        return Ok(SessionContext {
+            surface: SessionSurface::AskAi,
+            agent: None,
+        });
+    }
+    if term_key.starts_with("ai-review:") {
+        return Ok(SessionContext {
+            surface: SessionSurface::Review,
+            agent: None,
+        });
+    }
+    let tree = term_key
+        .strip_prefix("tree:")
+        .ok_or_else(|| "unknown terminal surface".to_string())?;
+    if let Some((worktree_id, tab_id)) = tree.split_once(":tab:") {
+        if worktree_id.is_empty() || tab_id.is_empty() || tab_id.contains(':') {
+            return Err("invalid worktree tab terminal key".into());
+        }
+        let row: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT kind, agent_kind FROM worktree_tabs
+             WHERE repo = ? AND worktree_id = ? AND id = ?",
+        )
+        .bind(repo)
+        .bind(worktree_id)
+        .bind(tab_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|error| error.to_string())?;
+        let (kind, agent) = row.ok_or_else(|| "worktree tab does not exist".to_string())?;
+        if kind == "terminal" {
+            return Err("plain terminal tabs cannot start an agent session".into());
+        }
+        let agent = agent
+            .ok_or_else(|| "agent tab has no persisted provider".to_string())?
+            .parse::<AgentKind>()
+            .map_err(|error| error.to_string())?;
+        return Ok(SessionContext {
+            surface: if kind == "fixci" {
+                SessionSurface::FixCi
+            } else {
+                SessionSurface::Work
+            },
+            agent: Some(agent),
+        });
+    }
+    if tree.is_empty() || tree.contains(':') {
+        return Err("invalid worktree terminal key".into());
+    }
+    let agent: Option<Option<String>> =
+        sqlx::query_scalar("SELECT agent FROM worktree_links WHERE repo_path = ? AND issue_id = ?")
+            .bind(repo_db_path)
+            .bind(tree)
+            .fetch_optional(db)
+            .await
+            .map_err(|error| error.to_string())?;
+    let agent = agent
+        .ok_or_else(|| "worktree does not exist".to_string())?
+        .map(|agent| {
+            agent
+                .parse::<AgentKind>()
+                .map_err(|error| error.to_string())
+        })
+        .transpose()?;
+    Ok(SessionContext {
+        surface: SessionSurface::Work,
+        agent,
+    })
+}
+
+async fn validate_agent_cwd(
+    db: &Db,
+    term_key: &str,
+    cwd: &std::path::Path,
+    repo_root: &std::path::Path,
+    repo_db_path: &str,
+) -> Result<(), String> {
+    if term_key.starts_with("triage:") {
+        return (cwd == repo_root)
+            .then_some(())
+            .ok_or_else(|| "triage sessions must use the registered repository root".into());
+    }
+    if term_key.starts_with("review:") || term_key.starts_with("ai-review:") {
+        let identity = term_key
+            .strip_prefix("review:")
+            .or_else(|| term_key.strip_prefix("ai-review:"))
+            .ok_or_else(|| "invalid review terminal key".to_string())?;
+        let (slug, number) = identity
+            .rsplit_once('#')
+            .ok_or_else(|| "invalid review terminal key".to_string())?;
+        let (owner, name) = slug
+            .split_once('/')
+            .ok_or_else(|| "invalid review repository identity".to_string())?;
+        if owner.is_empty()
+            || name.is_empty()
+            || number.parse::<u32>().is_err()
+            || owner.contains(['/', '\\'])
+            || name.contains(['/', '\\'])
+        {
+            return Err("invalid review repository identity".into());
+        }
+        let santree_dir = repo_root.join(".santree");
+        let reviews_dir = santree_dir.join("reviews");
+        let expected = reviews_dir.join(format!("{owner}-{name}-{number}"));
+        for path in [&santree_dir, &reviews_dir, &expected] {
+            let metadata = std::fs::symlink_metadata(path)
+                .map_err(|_| "review checkout is not available".to_string())?;
+            if metadata.file_type().is_symlink() {
+                return Err("review checkout path cannot contain symlinks".into());
+            }
+        }
+        let reviews_dir = std::fs::canonicalize(&reviews_dir)
+            .map_err(|_| "review checkout is not available".to_string())?;
+        if !reviews_dir.starts_with(repo_root) {
+            return Err("review checkout directory escapes the repository".into());
+        }
+        let expected = std::fs::canonicalize(&expected)
+            .map_err(|_| "review checkout is not available".to_string())?;
+        let git = expected.join(".git");
+        let git_is_file =
+            std::fs::symlink_metadata(&git).is_ok_and(|metadata| metadata.file_type().is_file());
+        return (expected.parent() == Some(reviews_dir.as_path())
+            && cwd == expected
+            && git_is_file)
+            .then_some(())
+            .ok_or_else(|| "review session cwd does not match the requested pull request".into());
+    }
+    let issue_id = term_key
+        .strip_prefix("tree:")
+        .and_then(|rest| rest.split(':').next())
+        .ok_or_else(|| "unknown terminal surface".to_string())?;
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT worktree_path FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
+    )
+    .bind(repo_db_path)
+    .bind(issue_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| error.to_string())?;
+    stored
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .is_some_and(|path| path == cwd)
+        .then_some(())
+        .ok_or_else(|| "terminal cwd is not the registered worktree".into())
 }
 
 /// Ticket ids of triage investigations that have a stored (resumable) session —
@@ -544,10 +834,11 @@ pub async fn add_worktree_tab(
     worktree_id: String,
     id: String,
     kind: TabKind,
+    agent_kind: Option<AgentKind>,
     title: String,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
-    Ok(tabs::add(&db, &repo, &worktree_id, &id, kind, &title).await?)
+    Ok(tabs::add(&db, &repo, &worktree_id, &id, kind, agent_kind, &title).await?)
 }
 
 /// Rename an extra tab (blank titles are rejected).
@@ -1557,4 +1848,68 @@ pub async fn check_for_update(
 #[specta::specta]
 pub async fn install_update(app: AppHandle) -> CmdResult<()> {
     Ok(crate::update::install(&app).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_db(label: &str) -> (std::path::PathBuf, Db) {
+        let base =
+            std::env::temp_dir().join(format!("santree-commands-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&base).unwrap();
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        (base, db)
+    }
+
+    #[tokio::test]
+    async fn session_context_scopes_tabs_and_uses_persisted_provider() {
+        let (base, db) = test_db("session-context").await;
+        sqlx::query(
+            "INSERT INTO worktree_tabs
+             (id, repo, worktree_id, kind, agent_kind, title, position)
+             VALUES ('shared', 'repo-a', 'AK-1', 'fixci', 'Codex', 'Fix', 0),
+                    ('other', 'repo-b', 'AK-1', 'agent', 'Claude', 'Agent', 0)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let context = session_context(&db, "repo-a", "/repo/a", "tree:AK-1:tab:shared")
+            .await
+            .unwrap();
+        assert_eq!(context.surface, SessionSurface::FixCi);
+        assert_eq!(context.agent, Some(AgentKind::Codex));
+        assert!(
+            session_context(&db, "repo-b", "/repo/b", "tree:AK-1:tab:shared")
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn review_cwd_rejects_a_symlinked_checkout() {
+        let (base, db) = test_db("review-symlink").await;
+        let repo = base.join("repo");
+        let reviews = repo.join(".santree/reviews");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&reviews).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join(".git"), "gitdir: elsewhere").unwrap();
+        std::os::unix::fs::symlink(&outside, reviews.join("acme-project-1")).unwrap();
+        let cwd = std::fs::canonicalize(&outside).unwrap();
+        let repo_root = std::fs::canonicalize(&repo).unwrap();
+
+        let result = validate_agent_cwd(
+            &db,
+            "review:acme/project#1",
+            &cwd,
+            &repo_root,
+            repo.to_str().unwrap(),
+        )
+        .await;
+        assert!(result.is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }

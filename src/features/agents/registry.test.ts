@@ -54,6 +54,7 @@ function session(over: Partial<SessionState> & { sessionId: string }): SessionSt
     repo: "canary",
     termKey: null,
     ...over,
+    agentKind: over.agentKind ?? "Claude",
   };
 }
 

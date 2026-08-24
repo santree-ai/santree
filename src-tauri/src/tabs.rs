@@ -6,7 +6,7 @@
 //! shell's history can't be restored).
 
 use anyhow::{bail, Result};
-use santree_core::domain::{TabKind, WorktreeTab};
+use santree_core::domain::{AgentKind, TabKind, WorktreeTab};
 
 use crate::db::Db;
 
@@ -19,8 +19,8 @@ pub fn term_key(worktree_id: &str, tab_id: &str) -> String {
 
 /// All extra tabs for the repo (every worktree), in open order.
 pub async fn list(db: &Db, repo: &str) -> Result<Vec<WorktreeTab>> {
-    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT id, worktree_id, kind, title FROM worktree_tabs
+    let rows: Vec<(String, String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id, worktree_id, kind, agent_kind, title FROM worktree_tabs
          WHERE repo = ? ORDER BY worktree_id, position",
     )
     .bind(repo)
@@ -28,10 +28,11 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<WorktreeTab>> {
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, worktree_id, kind, title)| WorktreeTab {
+        .map(|(id, worktree_id, kind, agent_kind, title)| WorktreeTab {
             id,
             worktree_id,
             kind: TabKind::from_db_str(&kind),
+            agent_kind: agent_kind.and_then(|kind| kind.parse().ok()),
             title,
         })
         .collect())
@@ -51,6 +52,7 @@ pub async fn add(
     worktree_id: &str,
     id: &str,
     kind: TabKind,
+    agent_kind: Option<AgentKind>,
     title: &str,
 ) -> Result<()> {
     let title = title.trim();
@@ -58,8 +60,8 @@ pub async fn add(
         bail!("tab title can't be empty");
     }
     sqlx::query(
-        "INSERT INTO worktree_tabs (id, repo, worktree_id, kind, title, position)
-         VALUES (?, ?, ?, ?, ?,
+        "INSERT INTO worktree_tabs (id, repo, worktree_id, kind, agent_kind, title, position)
+         VALUES (?, ?, ?, ?, ?, ?,
                  (SELECT COALESCE(MAX(position), 0) + 1 FROM worktree_tabs
                   WHERE repo = ? AND worktree_id = ?))",
     )
@@ -67,6 +69,7 @@ pub async fn add(
     .bind(repo)
     .bind(worktree_id)
     .bind(kind.as_db_str())
+    .bind(agent_kind.map(AgentKind::as_str))
     .bind(title)
     .bind(repo)
     .bind(worktree_id)
@@ -156,28 +159,46 @@ mod tests {
     async fn add_list_rename_remove_roundtrip() {
         let db = test_db("crud").await;
 
-        add(&db, "repo", "AK-1", "tab-a", TabKind::Claude, "Claude")
-            .await
-            .unwrap();
+        add(
+            &db,
+            "repo",
+            "AK-1",
+            "tab-a",
+            TabKind::Agent,
+            Some(AgentKind::Claude),
+            "Claude",
+        )
+        .await
+        .unwrap();
         add(
             &db,
             "repo",
             "AK-1",
             "tab-b",
             TabKind::Terminal,
+            None,
             "Terminal 2",
         )
         .await
         .unwrap();
-        add(&db, "repo", "AK-2", "tab-c", TabKind::Claude, "Claude")
-            .await
-            .unwrap();
+        add(
+            &db,
+            "repo",
+            "AK-2",
+            "tab-c",
+            TabKind::Agent,
+            Some(AgentKind::Claude),
+            "Claude",
+        )
+        .await
+        .unwrap();
 
         let tabs = list(&db, "repo").await.unwrap();
         assert_eq!(tabs.len(), 3);
         // Ordered by worktree then position (open order).
         assert_eq!(tabs[0].id, "tab-a");
-        assert_eq!(tabs[0].kind, TabKind::Claude);
+        assert_eq!(tabs[0].kind, TabKind::Agent);
+        assert_eq!(tabs[0].agent_kind, Some(AgentKind::Claude));
         assert_eq!(tabs[1].id, "tab-b");
         assert_eq!(tabs[1].kind, TabKind::Terminal);
         assert_eq!(tabs[2].worktree_id, "AK-2");
@@ -212,6 +233,7 @@ mod tests {
                     "AK-1",
                     &format!("tab-{i}"),
                     TabKind::Terminal,
+                    None,
                     "Terminal",
                 )
                 .await
@@ -241,9 +263,17 @@ mod tests {
         // Migration 0013 widened the kind CHECK to include 'fixci'; without it this
         // INSERT fails the constraint (the AK-84 "Fix CI with AI" bug).
         let db = test_db("fixci").await;
-        add(&db, "repo", "AK-1", "tab-fix", TabKind::FixCi, "Fix CI")
-            .await
-            .unwrap();
+        add(
+            &db,
+            "repo",
+            "AK-1",
+            "tab-fix",
+            TabKind::FixCi,
+            Some(AgentKind::Claude),
+            "Fix CI",
+        )
+        .await
+        .unwrap();
         let tabs = list(&db, "repo").await.unwrap();
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].kind, TabKind::FixCi);
@@ -253,9 +283,17 @@ mod tests {
     #[tokio::test]
     async fn removing_a_claude_tab_forgets_its_session() {
         let db = test_db("session").await;
-        add(&db, "repo", "AK-1", "tab-a", TabKind::Claude, "Claude")
-            .await
-            .unwrap();
+        add(
+            &db,
+            "repo",
+            "AK-1",
+            "tab-a",
+            TabKind::Agent,
+            Some(AgentKind::Claude),
+            "Claude",
+        )
+        .await
+        .unwrap();
         // Simulate the session the tab's first launch would have minted.
         sqlx::query(
             "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)",
@@ -281,12 +319,28 @@ mod tests {
     #[tokio::test]
     async fn remove_for_worktree_drops_only_that_worktrees_tabs_and_sessions() {
         let db = test_db("wt").await;
-        add(&db, "repo", "AK-1", "tab-a", TabKind::Claude, "Claude")
-            .await
-            .unwrap();
-        add(&db, "repo", "AK-2", "tab-b", TabKind::Claude, "Claude")
-            .await
-            .unwrap();
+        add(
+            &db,
+            "repo",
+            "AK-1",
+            "tab-a",
+            TabKind::Agent,
+            Some(AgentKind::Claude),
+            "Claude",
+        )
+        .await
+        .unwrap();
+        add(
+            &db,
+            "repo",
+            "AK-2",
+            "tab-b",
+            TabKind::Agent,
+            Some(AgentKind::Claude),
+            "Claude",
+        )
+        .await
+        .unwrap();
         for (wt, tab) in [("AK-1", "tab-a"), ("AK-2", "tab-b")] {
             sqlx::query(
                 "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)",

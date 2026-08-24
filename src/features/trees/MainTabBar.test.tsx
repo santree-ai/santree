@@ -7,7 +7,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { TabKind, WorktreeTab } from "../../bindings";
+import type { AgentKind, TabKind, WorktreeTab } from "../../bindings";
 import type { TerminalTabs } from "../terminal/orchestrator";
 import { TerminalsProvider, useTerminals } from "../terminal/TerminalsContext";
 import { MainTabBar } from "./MainTabBar";
@@ -23,7 +23,7 @@ const trees = vi.hoisted(() => ({
   setupFor: null as string | null,
   setActiveTab: vi.fn(),
   closeFileTab: vi.fn(),
-  addTab: vi.fn<(kind: TabKind) => void>(),
+  addTab: vi.fn<(kind: TabKind, agentKind?: AgentKind) => void>(),
   closeTab: vi.fn<(id: string) => void>(),
   renameTab: vi.fn(),
 }));
@@ -45,7 +45,8 @@ const tab = (id: string, kind: TabKind): WorktreeTab => ({
   id,
   worktreeId: trees.activeId,
   kind,
-  title: kind === "claude" ? "Claude" : "Terminal 2",
+  agentKind: kind === "terminal" ? null : "Codex",
+  title: kind === "agent" ? "Codex" : "Terminal 2",
 });
 
 const refIdOf = (id: string) => `tree:${trees.activeId}:tab:${id}`;
@@ -115,7 +116,7 @@ describe("MainTabBar", () => {
     // A Claude tab's session is meant to outlive its process: quitting claude shows
     // the resume pane, and the tab comes back after an app restart.
     it("keeps a Claude tab whose process exited (it's resumable)", () => {
-      trees.extraTabs = [tab("c1", "claude")];
+      trees.extraTabs = [tab("c1", "agent")];
       mount();
       spawn("c1");
 
@@ -160,16 +161,20 @@ describe("MainTabBar", () => {
         window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
       });
 
-    it("opens with ⌘T; 1 adds a Claude tab, 2 a terminal", () => {
+    it("opens with ⌘T; 1 adds Codex, 2 Claude, and 3 a terminal", () => {
       mount();
       openMenu();
-      expect(screen.getByRole("button", { name: /Claude/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Codex/ })).toBeInTheDocument();
 
       press("1");
-      expect(trees.addTab).toHaveBeenCalledWith("claude");
+      expect(trees.addTab).toHaveBeenCalledWith("agent", "Codex");
 
       openMenu();
       press("2");
+      expect(trees.addTab).toHaveBeenCalledWith("agent", "Claude");
+
+      openMenu();
+      press("3");
       expect(trees.addTab).toHaveBeenCalledWith("terminal");
     });
 
@@ -191,14 +196,14 @@ describe("MainTabBar", () => {
         );
       });
 
-      expect(screen.getByRole("button", { name: /Claude/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Codex/ })).toBeInTheDocument();
     });
 
-    it("swallows 3 (Web is WIP) instead of opening a tab", () => {
+    it("ignores digits outside the three available tab choices", () => {
       mount();
       openMenu();
 
-      press("3");
+      press("4");
 
       expect(trees.addTab).not.toHaveBeenCalled();
     });

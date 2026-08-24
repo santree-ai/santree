@@ -33,6 +33,7 @@ import {
   useReviewDrafts,
   useReviewWorkspace,
 } from "../../lib/queries";
+import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { ReviewFooter, reviewTargetFor } from "./AiReviewPane";
 import { useReviewsModel } from "./model";
@@ -72,14 +73,22 @@ export function AiReviewSessionPane({
   // branches on whether it exists.
   const workspace = useReviewWorkspace(repo, target, needsSeed || resumeRequested);
   const cwd = workspace.data ?? undefined;
-  const session = useAgentSession(repo, termKey, cwd ?? "", true, needsSeed && workspace.isFetched);
+  const session = useAgentSession(
+    repo,
+    termKey,
+    cwd ?? "",
+    true,
+    "Claude",
+    needsSeed && workspace.isFetched,
+  );
   const launch = useAiReviewLaunch(repo, target, needsSeed && workspace.isFetched);
 
   const model = useResolvedSetting(repo, REVIEW_MODEL_KEY);
   const effort = useResolvedSetting(repo, REVIEW_EFFORT_KEY);
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
-
-  const seed = agentSessionSeed(session.data, "claude", {
+  const resolvedAgent = sessionAgent(session.data, "Claude");
+  const provider = agentProvider(resolvedAgent);
+  const seed = agentSessionSeed(session.data, {
     repo,
     termKey,
     // The rendered prompt carries a whole PR diff, far past what can be typed into
@@ -87,11 +96,23 @@ export function AiReviewSessionPane({
     prompt: launch.data
       ? `Read ${launch.data.promptPath} and follow the instructions inside.`
       : `Review pull request #${pr.number}.`,
-    modelFlag: model.data ? `--model ${shellQuote(model.data)}` : undefined,
-    effortFlag: effort.data ? `--effort ${shellQuote(effort.data)}` : undefined,
-    settingsFlag: launch.data ? `--settings ${shellQuote(launch.data.settingsPath)}` : undefined,
-    mcpFlag: launch.data ? `--mcp-config ${shellQuote(launch.data.mcpConfigPath)}` : undefined,
-    chrome: startWithChrome.value,
+    modelFlag:
+      provider.capabilities.cliLaunchOptions && model.data
+        ? `--model ${shellQuote(model.data)}`
+        : undefined,
+    effortFlag:
+      provider.capabilities.cliLaunchOptions && effort.data
+        ? `--effort ${shellQuote(effort.data)}`
+        : undefined,
+    settingsFlag:
+      provider.capabilities.cliLaunchOptions && launch.data
+        ? `--settings ${shellQuote(launch.data.settingsPath)}`
+        : undefined,
+    mcpFlag:
+      provider.capabilities.cliLaunchOptions && launch.data
+        ? `--mcp-config ${shellQuote(launch.data.mcpConfigPath)}`
+        : undefined,
+    chrome: provider.capabilities.cliLaunchOptions && startWithChrome.value,
   });
 
   // Every launch input must have resolved before the PTY spawns: the seed is built

@@ -25,7 +25,7 @@ import {
   WORK_MODEL_KEY,
   WORK_PERMISSION_MODE_KEY,
 } from "../../lib/queries";
-import { useApp } from "../../state/AppContext";
+import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
 
@@ -79,7 +79,6 @@ export interface AgentTab {
 
 export function useAgentTab(opts: AgentTabOptions): AgentTab {
   const { repo, refId, cwd, agent, allowFresh, hold, shellOnly, noGit } = opts;
-  const { settings } = useApp();
   const qc = useQueryClient();
 
   // Whether a live PTY already exists for this session. We only resolve a (re)launch
@@ -94,12 +93,11 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   const ended = !shellOnly && liveSeen && !live;
 
   const needsSeed = !shellOnly && !hold && !live && !liveSeen;
-  const session = useAgentSession(repo, refId, cwd, allowFresh, needsSeed);
+  const session = useAgentSession(repo, refId, cwd, allowFresh, agent ?? "Claude", needsSeed);
 
-  const exec = settings?.agents?.find((a) => a.key === agent)?.exec?.trim() || "claude";
-  // The Claude-only flags. Gate on the agent so a future Codex/Cursor launch isn't
-  // handed `--model` / `--effort` / `--remote-control`.
-  const isClaude = agent === "Claude";
+  const requestedAgent = agent ?? "Claude";
+  const resolvedAgent = sessionAgent(session.data, requestedAgent);
+  const provider = agentProvider(resolvedAgent);
   const model = useResolvedSetting(repo, WORK_MODEL_KEY);
   const effort = useResolvedSetting(repo, WORK_EFFORT_KEY);
   const permissionMode = useResolvedSetting(repo, WORK_PERMISSION_MODE_KEY);
@@ -112,17 +110,27 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
 
   const chosenModel = opts.modelOverride || model.data;
-  const seed = agentSessionSeed(session.data, exec, {
+  const seed = agentSessionSeed(session.data, {
     repo,
     termKey: refId,
     prompt: opts.prompt,
-    remoteControl: isClaude ? opts.remoteControl : undefined,
-    modelFlag: isClaude && chosenModel ? `--model ${shellQuote(chosenModel)}` : undefined,
-    effortFlag: isClaude && effort.data ? `--effort ${shellQuote(effort.data)}` : undefined,
+    remoteControl: provider.capabilities.remoteControl ? opts.remoteControl : undefined,
+    modelFlag:
+      provider.capabilities.cliLaunchOptions && chosenModel
+        ? `--model ${shellQuote(chosenModel)}`
+        : undefined,
+    effortFlag:
+      provider.capabilities.cliLaunchOptions && effort.data
+        ? `--effort ${shellQuote(effort.data)}`
+        : undefined,
     settingsFlag:
-      isClaude && hookSettings.data ? `--settings ${shellQuote(hookSettings.data)}` : undefined,
-    chrome: isClaude && startWithChrome.value,
-    permissionMode: isClaude ? (permissionMode.data ?? undefined) : undefined,
+      provider.capabilities.cliLaunchOptions && hookSettings.data
+        ? `--settings ${shellQuote(hookSettings.data)}`
+        : undefined,
+    chrome: provider.capabilities.cliLaunchOptions && startWithChrome.value,
+    permissionMode: provider.capabilities.permissionMode
+      ? (permissionMode.data ?? undefined)
+      : undefined,
   });
 
   // Every launch flag must have *resolved* before the PTY spawns — not just the
@@ -134,7 +142,7 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   // loaded, so `startWithChrome !== undefined` was true from the first render and
   // gated nothing — a launch in that window quietly dropped `--chrome`.
   const flagsReady =
-    !isClaude ||
+    !provider.capabilities.cliLaunchOptions ||
     (model.isFetched &&
       effort.isFetched &&
       permissionMode.isFetched &&

@@ -30,7 +30,7 @@ pub fn agents() -> Vec<AgentDef> {
             "Codex",
             "Codex",
             &["gpt-5-codex", "gpt-5", "o4-mini"],
-            false,
+            true,
         ),
         def(
             AgentKind::Cursor,
@@ -192,7 +192,7 @@ pub fn default_settings() -> Settings {
         model: model.into(),
     };
     Settings {
-        default_agent: AgentKind::Claude,
+        default_agent: AgentKind::Codex,
         integrations: Integrations {
             linear: true,
             triage: true,
@@ -201,7 +201,7 @@ pub fn default_settings() -> Settings {
         // PATH, reported by `agent_auth`). Model is the per-agent default.
         agents: vec![
             agent(AgentKind::Claude, "", "sonnet"),
-            agent(AgentKind::Codex, "", "gpt-5-codex"),
+            agent(AgentKind::Codex, "", ""),
             agent(AgentKind::Cursor, "", "auto"),
             agent(AgentKind::Opencode, "", "claude-sonnet-4.5"),
         ],

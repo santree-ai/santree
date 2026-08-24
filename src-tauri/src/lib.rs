@@ -5,6 +5,7 @@
 
 mod agent;
 mod awake;
+mod codex;
 mod commands;
 mod commit_draft;
 mod db;
@@ -24,6 +25,7 @@ mod openers;
 mod pr;
 mod pricing;
 mod prompts;
+mod provider;
 mod repo;
 mod review_ai;
 mod review_drafts;
@@ -73,6 +75,13 @@ fn specta_builder() -> AppBuilder {
             commands::list_repos,
             commands::add_repo,
             commands::list_agents,
+            commands::codex_health,
+            commands::codex_account,
+            commands::codex_models,
+            commands::codex_rate_limits,
+            commands::codex_login_start,
+            commands::codex_login_cancel,
+            commands::codex_logout,
             commands::claude_usage,
             commands::agent_auth,
             commands::github_status,
@@ -573,6 +582,9 @@ pub fn run() {
                     ),
                 ),
             };
+            if let Err(e) = tauri::async_runtime::block_on(settings::migrate_codex_defaults(&db)) {
+                log::warn!("Codex default migration failed: {e:#}");
+            }
             // Mirror any user-set binary paths into the process before anything
             // resolves a CLI. Synchronous on purpose: `discover_binary` is sync and
             // reachable from the first frame, so an override loaded a tick late
@@ -624,6 +636,11 @@ pub fn run() {
             app.manage(keep_awake);
 
             app.manage(db);
+
+            // Lazily starts a private Unix-socket App Server on the first Codex
+            // action. Keeping the owner alive for the app lifetime also ensures
+            // both child processes are reaped on shutdown.
+            app.manage(codex::CodexRuntime::new(&data_dir));
 
             // Holds the `Update` handle a check produced, for the install that
             // follows it (see `update`).

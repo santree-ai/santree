@@ -4253,9 +4253,10 @@ dependencies = [
 
 [[package]]
 name = "santree"
-version = "0.1.2-beta.5"
+version = "0.1.2-beta.6"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "dotenvy",
@@ -4292,7 +4293,7 @@ dependencies = [
 
 [[package]]
 name = "santree-core"
-version = "0.1.2-beta.5"
+version = "0.1.2-beta.6"
 dependencies = [
  "serde",
  "specta",
@@ -4300,7 +4301,7 @@ dependencies = [
 
 [[package]]
 name = "santree-hook"
-version = "0.1.2-beta.5"
+version = "0.1.2-beta.6"
 dependencies = [
  "santree-core",
  "serde",
@@ -4311,7 +4312,7 @@ dependencies = [
 
 [[package]]
 name = "santree-pty"
-version = "0.1.2-beta.5"
+version = "0.1.2-beta.6"
 dependencies = [
  "anyhow",
  "log",

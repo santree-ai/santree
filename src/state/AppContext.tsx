@@ -54,6 +54,7 @@ interface AppData {
    *  settings cache. */
   settings: Settings | null;
   setAgentExec: (agent: AgentKind, exec: string) => void;
+  setAgentModel: (agent: AgentKind, model: string) => void;
   toggleIntegration: (key: "linear" | "triage") => void;
 
   /** Triage is available only when Linear is connected and triage is enabled. */
@@ -336,6 +337,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         applySettings((s) => ({
           ...s,
           agents: (s.agents ?? []).map((a) => (a.key === agent ? { ...a, exec } : a)),
+        })),
+      setAgentModel: (agent, model) =>
+        applySettings((s) => ({
+          ...s,
+          agents: (s.agents ?? []).map((a) => (a.key === agent ? { ...a, model } : a)),
         })),
       toggleIntegration: (key) =>
         applySettings((s) => {

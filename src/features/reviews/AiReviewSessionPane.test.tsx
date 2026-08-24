@@ -51,7 +51,13 @@ vi.mock("../../lib/queries", () => ({
   REVIEW_MODEL_KEY: "model",
   queryKeys: { agentSessionPrefix: () => ["s"] },
   useAgentSession: () => ({
-    data: { type: "fresh", sessionId: "sess-1" },
+    data: {
+      type: "fresh",
+      agentKind: "Claude",
+      executable: "claude",
+      sessionId: "sess-1",
+      remote: null,
+    },
     isFetching: false,
   }),
   useAiReviewLaunch: () => q.launch,

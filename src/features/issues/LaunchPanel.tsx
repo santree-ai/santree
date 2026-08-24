@@ -5,6 +5,7 @@ import { ChevronDownIcon } from "../../components/icons";
 import { Button, ChevronSelect } from "../../components/primitives";
 import { agentAvailable } from "../../lib/format";
 import { useAgents, useClaudeModels } from "../../lib/queries";
+import { agentProvider } from "../terminal/agentProvider";
 import { useIssues } from "./model";
 
 const SELECT_CLASS =
@@ -33,11 +34,14 @@ export function LaunchPanel() {
   // Nothing selected → no tray (the hint that used to live here was noise).
   if (count === 0) return null;
 
-  // Only offer agents that are actually wired up (just Claude today).
+  // Only offer providers whose runtime adapter is registered.
   const availableAgents = agents.filter((a) => agentAvailable(a));
-  // Claude's list is live (Claude Code's own picker cache); WIP agents use the catalog.
+  // Providers choose their model source through the shared contract.
   const catalogModels = agents.find((a) => a.key === launchAgent)?.models ?? [];
-  const models = launchAgent === "Claude" ? (claudeModels ?? catalogModels) : catalogModels;
+  const models =
+    agentProvider(launchAgent).capabilities.modelSource === "claude"
+      ? (claudeModels ?? catalogModels)
+      : catalogModels;
   const chainedCount = selectedEligible.filter((t) => !t.ready).length;
 
   // Whether the current model is the configured default (no per-launch override).

@@ -19,6 +19,7 @@ import {
   useAgents,
   useBoolSetting,
   useClaudeModels,
+  useCodexModels,
   useResolvedSetting,
   useSetSetting,
   useSetting,
@@ -30,6 +31,7 @@ import {
   WORK_QUEUE_KEY,
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
+import { agentProvider } from "../../terminal/agentProvider";
 import { Field, Heading, OverrideSelect, SELECT_CLASS, ToggleRow } from "../widgets";
 
 /** Describes one configurable agent action: which setting keys it stores. App vs
@@ -286,7 +288,9 @@ function ActionConfig({
   // hook order stays stable, and falls back to Claude (the only agent it runs).
   const agentKey = descriptor.agentKey ?? "__none_agent__";
   const hasAgent = descriptor.agentKey !== undefined;
-  const appAgent = (useSetting("app", agentKey).data as AgentKind | null) ?? "Claude";
+  const appAgent =
+    (useSetting("app", agentKey).data as AgentKind | null) ??
+    (hasAgent ? (settings?.defaultAgent ?? "Codex") : "Codex");
   const appModel = useSetting("app", descriptor.modelKey).data;
   const appEffort = useSetting("app", descriptor.effortKey).data;
   const appPerm = useSetting("app", permKey).data;
@@ -298,14 +302,18 @@ function ActionConfig({
   const scopePerm = useSetting(scope, permKey).data;
 
   const effectiveAgent = scopeAgent ?? appAgent;
+  const provider = agentProvider(effectiveAgent);
   const agentDef = agents.find((a) => a.key === effectiveAgent);
   // Claude's list is live (from Claude Code's own picker cache), so it isn't stuck
   // on the agent catalog's static tiers; other (WIP) agents keep their catalog list.
   const claudeModels = useClaudeModels().data;
+  const codexModels = useCodexModels().data;
   const models =
-    effectiveAgent === "Claude"
+    provider.capabilities.modelSource === "claude"
       ? (claudeModels ?? agentDef?.models ?? [])
-      : (agentDef?.models ?? []);
+      : provider.capabilities.modelSource === "codex"
+        ? (codexModels?.map((model) => model.id) ?? agentDef?.models ?? [])
+        : (agentDef?.models ?? []);
   const appAgentShort = agents.find((a) => a.key === appAgent)?.short ?? appAgent;
   // The concrete model an unset app-scope picker falls back to: the effective
   // agent's own default (Settings → Agents), else the first current model. We no
@@ -353,13 +361,13 @@ function ActionConfig({
         />
       </Field>
 
-      {effectiveAgent === "Claude" && (
+      {provider.capabilities.effort && (
         <Field
           label="Effort"
           hint={
             inherits
               ? undefined
-              : "How hard the agent thinks (Claude's --effort). Higher is more thorough but slower and pricier."
+              : "How hard the agent thinks. Higher is more thorough but slower and pricier."
           }
         >
           <EffortSelect
@@ -372,7 +380,7 @@ function ActionConfig({
         </Field>
       )}
 
-      {hasPerm && effectiveAgent === "Claude" && (
+      {hasPerm && provider.capabilities.permissionMode && (
         <Field
           label="Start mode"
           hint={

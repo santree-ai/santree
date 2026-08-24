@@ -627,6 +627,7 @@ describe("patchSettingCache", () => {
 
 describe("newestSessionByPath", () => {
   const at = (cwd: string, sessionId: string, updatedAtMs: number | null): SessionState => ({
+    agentKind: "Claude",
     sessionId,
     state: "active",
     event: "Stop",

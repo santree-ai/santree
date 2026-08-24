@@ -14,6 +14,7 @@ use crate::db::Db;
 
 /// The `settings` key under which the full [`Settings`] blob is persisted (scope `"app"`).
 const SETTINGS_KEY: &str = "settings";
+const CODEX_DEFAULT_MIGRATION_KEY: &str = "migration.codex_default_v1";
 
 /// Gate the *IPC* key-value surface (`get_setting` / `set_setting`), whose scope and
 /// key both arrive from the webview. Internal callers (`pricing`'s `price_cache`
@@ -169,6 +170,96 @@ pub async fn set_settings(db: &Db, settings: &Settings) -> Result<()> {
     // launches immediately and to the headless helpers only after a restart.
     refresh_binary_overrides(db).await
 }
+
+/// One-time adoption of Codex defaults. Historical/custom Claude choices are
+/// preserved: only the exact previously-shipped tuple (or an entirely unset
+/// action tuple) moves. The marker prevents a later user choice from ever being
+/// rewritten by another startup.
+pub async fn migrate_codex_defaults(db: &Db) -> Result<()> {
+    if sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM settings WHERE scope = 'app' AND key = ?")
+        .bind(CODEX_DEFAULT_MIGRATION_KEY)
+        .fetch_one(db)
+        .await?
+        > 0
+    {
+        return Ok(());
+    }
+    let mut tx = db.begin().await?;
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE scope = 'app' AND key = ?")
+            .bind(SETTINGS_KEY)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if let Some(raw) = stored {
+        if let Ok(mut settings) = serde_json::from_str::<Settings>(&raw) {
+            let claude_is_shipped = settings
+                .agents
+                .iter()
+                .find(|a| a.key == AgentKind::Claude)
+                .is_some_and(|a| a.model == "sonnet" && a.exec.is_empty());
+            let codex_is_shipped = settings
+                .agents
+                .iter()
+                .find(|a| a.key == AgentKind::Codex)
+                .is_some_and(|a| a.model == "gpt-5-codex" && a.exec.is_empty());
+            if settings.default_agent == AgentKind::Claude && claude_is_shipped && codex_is_shipped
+            {
+                settings.default_agent = AgentKind::Codex;
+                if let Some(codex) = settings
+                    .agents
+                    .iter_mut()
+                    .find(|a| a.key == AgentKind::Codex)
+                {
+                    codex.model.clear();
+                }
+                sqlx::query("UPDATE settings SET value = ? WHERE scope = 'app' AND key = ?")
+                    .bind(serde_json::to_string(&settings)?)
+                    .bind(SETTINGS_KEY)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+    }
+    for (agent_key, model_key, effort_key) in [
+        ("work_agent", "work_model", "work_effort"),
+        (
+            "investigate_agent",
+            "investigate_model",
+            "investigate_effort",
+        ),
+    ] {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT key, value FROM settings WHERE scope = 'app' AND key IN (?, ?, ?)",
+        )
+        .bind(agent_key)
+        .bind(model_key)
+        .bind(effort_key)
+        .fetch_all(&mut *tx)
+        .await?;
+        let value = |key: &str| rows.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+        let shipped_or_unset = value(agent_key).is_none_or(|v| v == "Claude")
+            && value(model_key).is_none_or(|v| v.is_empty() || v == "sonnet")
+            && value(effort_key).is_none_or(|v| v.is_empty());
+        if shipped_or_unset {
+            for (key, next) in [(agent_key, "Codex"), (model_key, ""), (effort_key, "")] {
+                sqlx::query(
+                    "INSERT INTO settings (scope, key, value) VALUES ('app', ?, ?)
+                     ON CONFLICT (scope, key) DO UPDATE SET value = excluded.value",
+                )
+                .bind(key)
+                .bind(next)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+    }
+    sqlx::query("INSERT INTO settings (scope, key, value) VALUES ('app', ?, 'done')")
+        .bind(CODEX_DEFAULT_MIGRATION_KEY)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
 /// The CLI binary name probed on PATH for each harness.
 fn agent_binary(kind: AgentKind) -> &'static str {
     match kind {
@@ -177,6 +268,40 @@ fn agent_binary(kind: AgentKind) -> &'static str {
         AgentKind::Cursor => "cursor-agent",
         AgentKind::Opencode => "opencode",
     }
+}
+
+/// Resolve the exact executable for an interactive provider launch. The same
+/// absolute path is returned to the terminal and used by any provider control
+/// process, so a configured bare name cannot resolve to two different CLIs.
+pub async fn agent_executable(db: &Db, kind: AgentKind) -> Result<String> {
+    // The dedicated binary-path setting is the highest-precedence, validated
+    // override. `refresh_binary_overrides` also places an absolute agent exec
+    // here when no dedicated override exists.
+    if let Some(path) = binary_override(agent_binary(kind)) {
+        return Ok(std::fs::canonicalize(path)?.to_string_lossy().into_owned());
+    }
+    let settings = get_settings(db).await?;
+    let configured = settings
+        .agents
+        .iter()
+        .find(|agent| agent.key == kind)
+        .map(|agent| agent.exec.trim())
+        .filter(|exec| !exec.is_empty());
+    let candidate = configured.unwrap_or_else(|| agent_binary(kind));
+    if Path::new(candidate).is_absolute() {
+        let resolved = std::fs::canonicalize(candidate).map_err(|_| {
+            anyhow::anyhow!("{} executable {candidate:?} was not found", kind.as_str())
+        })?;
+        if !is_executable_file(&resolved) {
+            anyhow::bail!(
+                "{} executable {candidate:?} is not executable",
+                kind.as_str()
+            );
+        }
+        return Ok(resolved.to_string_lossy().into_owned());
+    }
+    discover_binary(candidate)
+        .ok_or_else(|| anyhow::anyhow!("{} executable {candidate:?} was not found", kind.as_str()))
 }
 
 /// An agent harness's authentication / subscription status. For Claude this is
@@ -742,11 +867,23 @@ mod tests {
             .unwrap();
         refresh_binary_overrides(&db).await.unwrap();
         assert_eq!(binary_override("claude").as_deref(), Some("/bin/echo"));
+        assert_eq!(
+            agent_executable(&db, AgentKind::Claude).await.unwrap(),
+            std::fs::canonicalize("/bin/echo")
+                .unwrap()
+                .to_string_lossy()
+        );
 
         // Clearing it falls back to the agent exec rather than to nothing.
         set_binary_path(&db, "claude", None).await.unwrap();
         refresh_binary_overrides(&db).await.unwrap();
         assert_eq!(binary_override("claude").as_deref(), Some("/usr/bin/true"));
+        assert_eq!(
+            agent_executable(&db, AgentKind::Claude).await.unwrap(),
+            std::fs::canonicalize("/usr/bin/true")
+                .unwrap()
+                .to_string_lossy()
+        );
     }
 
     /// A bare command name is what discovery would look for anyway, so it must not
@@ -940,6 +1077,72 @@ mod tests {
         };
         set_settings(&db, &updated).await.unwrap();
         assert_eq!(get_settings(&db).await.unwrap(), updated);
+    }
+
+    #[tokio::test]
+    async fn codex_default_migration_moves_only_the_shipped_tuple_once() {
+        let db = test_db().await;
+        let mut old = config::default_settings();
+        old.default_agent = AgentKind::Claude;
+        old.agents
+            .iter_mut()
+            .find(|a| a.key == AgentKind::Codex)
+            .unwrap()
+            .model = "gpt-5-codex".into();
+        set_settings(&db, &old).await.unwrap();
+
+        migrate_codex_defaults(&db).await.unwrap();
+        let migrated = get_settings(&db).await.unwrap();
+        assert_eq!(migrated.default_agent, AgentKind::Codex);
+        assert_eq!(
+            migrated
+                .agents
+                .iter()
+                .find(|a| a.key == AgentKind::Codex)
+                .unwrap()
+                .model,
+            ""
+        );
+        assert_eq!(
+            get(&db, "app", "work_agent").await.unwrap().as_deref(),
+            Some("Codex")
+        );
+        assert_eq!(
+            get(&db, "app", "investigate_agent")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Codex")
+        );
+
+        let mut user_choice = migrated;
+        user_choice.default_agent = AgentKind::Claude;
+        set_settings(&db, &user_choice).await.unwrap();
+        migrate_codex_defaults(&db).await.unwrap();
+        assert_eq!(
+            get_settings(&db).await.unwrap().default_agent,
+            AgentKind::Claude
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_default_migration_preserves_custom_claude_actions() {
+        let db = test_db().await;
+        set(&db, "app", "work_agent", Some("Claude".into()))
+            .await
+            .unwrap();
+        set(&db, "app", "work_model", Some("opus".into()))
+            .await
+            .unwrap();
+        migrate_codex_defaults(&db).await.unwrap();
+        assert_eq!(
+            get(&db, "app", "work_agent").await.unwrap().as_deref(),
+            Some("Claude")
+        );
+        assert_eq!(
+            get(&db, "app", "work_model").await.unwrap().as_deref(),
+            Some("opus")
+        );
     }
 
     /// Simulates a settings blob stored before a field existed: `integrations`

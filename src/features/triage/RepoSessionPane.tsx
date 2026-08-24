@@ -1,5 +1,5 @@
 /**
- * The repo session: a Claude session on the base checkout that belongs to no
+ * The repo session: an agent session on the base checkout that belongs to no
  * ticket — for asking questions about the codebase, running a CLI command, or
  * anything the queue hasn't got a row for.
  *
@@ -17,6 +17,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 
+import type { AgentKind } from "../../bindings";
 import { Spinner } from "../../components/primitives";
 import { SessionEndedPane } from "../../components/SessionEndedPane";
 import {
@@ -25,6 +26,7 @@ import {
   useBoolSetting,
   useClaudeHookSettings,
 } from "../../lib/queries";
+import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
@@ -47,18 +49,17 @@ export function RepoSessionPane({
   repo,
   branch,
   cwd,
-  agentExec,
+  agentKind,
   model,
   effort,
 }: {
-  /** Active repo name — scopes the persisted Claude session. */
+  /** Active repo name — scopes the persisted provider session. */
   repo: string;
   /** The base branch it runs on, for the resume pane's copy. */
   branch: string;
   /** The repo root — the same checkout investigations run in. */
   cwd?: string;
-  /** The chosen agent's executable from settings; falls back to PATH when blank. */
-  agentExec: string;
+  agentKind: AgentKind;
   /** Model override for the run, or null to use the agent's default. */
   model: string | null;
   /** Effort level (Claude's --effort), or null for the CLI default. */
@@ -86,19 +87,24 @@ export function RepoSessionPane({
   // the same conversation continued rather than a fresh one each time.
   const ended = canLaunch && !liveSession && liveSeen && !resumeRequested;
   const needsSeed = canLaunch && !liveSession && (!liveSeen || resumeRequested);
-  const session = useAgentSession(repo, termKey, cwd ?? "", canLaunch, needsSeed);
+  const session = useAgentSession(repo, termKey, cwd ?? "", canLaunch, agentKind, needsSeed);
 
-  const exec = agentExec.trim() || "claude";
+  const resolvedAgent = sessionAgent(session.data, agentKind);
+  const provider = agentProvider(resolvedAgent);
   const hookSettings = useClaudeHookSettings().data;
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
-  const seed = agentSessionSeed(session.data, exec, {
+  const seed = agentSessionSeed(session.data, {
     repo,
     termKey,
     // No opening prompt: the whole point is that you bring the question.
-    modelFlag: model ? `--model ${shellQuote(model)}` : undefined,
-    effortFlag: effort ? `--effort ${shellQuote(effort)}` : undefined,
-    settingsFlag: hookSettings ? `--settings ${shellQuote(hookSettings)}` : undefined,
-    chrome: startWithChrome,
+    modelFlag: resolvedAgent === agentKind && model ? `--model ${shellQuote(model)}` : undefined,
+    effortFlag:
+      resolvedAgent === agentKind && effort ? `--effort ${shellQuote(effort)}` : undefined,
+    settingsFlag:
+      provider.capabilities.cliLaunchOptions && hookSettings
+        ? `--settings ${shellQuote(hookSettings)}`
+        : undefined,
+    chrome: provider.capabilities.cliLaunchOptions && startWithChrome,
   });
   // Hold the embed until the seed decision is fresh, so the new PTY carries the
   // right flags from its first frame.

@@ -188,7 +188,7 @@ function AllCaughtUp({
 }
 
 export function TriageView() {
-  const { triageEnabled, activeRepo, settings } = useApp();
+  const { triageEnabled, activeRepo } = useApp();
   const { triageFocus, consumeTriageFocus } = useAppUi();
   const navigate = useNavigate();
   const { data: schedules = [] } = useTriageSchedule(activeRepo);
@@ -218,9 +218,7 @@ export function TriageView() {
   const { data: investigateAgent } = useResolvedSetting(activeRepo, INVESTIGATE_AGENT_KEY);
   const { data: investigateModel } = useResolvedSetting(activeRepo, INVESTIGATE_MODEL_KEY);
   const { data: investigateEffort } = useResolvedSetting(activeRepo, INVESTIGATE_EFFORT_KEY);
-  // Resolve the chosen agent to its executable from Settings → Agents.
-  const agentKind = (investigateAgent as AgentKind | null) ?? "Claude";
-  const agentExec = settings?.agents?.find((a) => a.key === agentKind)?.exec ?? "";
+  const agentKind = (investigateAgent as AgentKind | null) ?? "Codex";
 
   const { tabs: terminalTabs } = useTerminals();
 
@@ -320,7 +318,7 @@ export function TriageView() {
   const batchInvestigate = useBatchInvestigate({
     repo: activeRepo,
     cwd: repoPath,
-    agentExec,
+    agentKind,
     model: investigateModel ?? null,
     effort: investigateEffort ?? null,
     remoteControl: remoteControlSetting !== "false",
@@ -481,7 +479,7 @@ export function TriageView() {
             repo={activeRepo}
             branch={baseWorktree.branch}
             cwd={repoPath}
-            agentExec={agentExec}
+            agentKind={agentKind}
             model={investigateModel ?? null}
             effort={investigateEffort ?? null}
           />
@@ -533,7 +531,7 @@ export function TriageView() {
                 repo={activeRepo}
                 ticketId={activeTicket.id}
                 cwd={repoPath}
-                agentExec={agentExec}
+                agentKind={agentKind}
                 model={investigateModel ?? null}
                 effort={investigateEffort ?? null}
                 hasStartedSession={activeHasStarted}

@@ -1,6 +1,6 @@
 /**
- * The Investigate tab: a real Claude session scoped to the repo, run over a
- * persisted `--session-id` (see COMPLIANCE.md — placement + seeding only). The
+ * The Investigate tab: a real provider session scoped to the repo and persisted
+ * through the shared session contract (see COMPLIANCE.md). The
  * terminal is a *global* session (so it also appears in the Terminal tab,
  * grouped under "Triage"); the inner {@link InvestigateTerminal} registers the
  * pane as the embed host and the persistent TerminalLayer positions the live
@@ -14,6 +14,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 
+import type { AgentKind } from "../../bindings";
 import { Spinner } from "../../components/primitives";
 import { SessionEndedPane } from "../../components/SessionEndedPane";
 import {
@@ -26,6 +27,7 @@ import {
   useInvestigatePrompt,
   useResolvedSetting,
 } from "../../lib/queries";
+import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
@@ -34,18 +36,17 @@ export function InvestigatePane({
   repo,
   ticketId,
   cwd,
-  agentExec,
+  agentKind,
   model,
   effort,
   hasStartedSession,
   onExited,
 }: {
-  /** Active repo name — scopes the persisted Claude session. */
+  /** Active repo name — scopes the persisted provider session. */
   repo: string;
   ticketId: string;
   cwd?: string;
-  /** The chosen agent's executable from settings; falls back to PATH when blank. */
-  agentExec: string;
+  agentKind: AgentKind;
   /** Model override for the run, or null to use the agent's default. */
   model: string | null;
   /** Effort level (Claude's --effort), or null for the CLI default. */
@@ -89,25 +90,28 @@ export function InvestigatePane({
   // Auto-launch only a genuinely fresh investigation (nothing to resume), or the
   // one the user just clicked Resume on.
   const needsSeed = canLaunch && !liveSession && !liveSeen && (resumeRequested || !resumable);
-  const session = useAgentSession(repo, termKey, cwd ?? "", canLaunch, needsSeed);
+  const session = useAgentSession(repo, termKey, cwd ?? "", canLaunch, agentKind, needsSeed);
   // The opening prompt is rendered backend-side from the live ticket (its
   // screenshots extracted to files the agent can Read) and written to a file;
   // fetch that file's PATH only for a fresh seed. The terminal waits on it (via
   // `ready`) so the file exists before the agent starts.
   const investigatePrompt = useInvestigatePrompt(repo, ticketId, needsSeed);
-  const exec = agentExec.trim() || "claude";
-  const modelFlag = model ? `--model ${shellQuote(model)}` : undefined;
-  const effortFlag = effort ? `--effort ${shellQuote(effort)}` : undefined;
+  const resolvedAgent = sessionAgent(session.data, agentKind);
+  const provider = agentProvider(resolvedAgent);
+  const modelFlag =
+    resolvedAgent === agentKind && model ? `--model ${shellQuote(model)}` : undefined;
+  const effortFlag =
+    resolvedAgent === agentKind && effort ? `--effort ${shellQuote(effort)}` : undefined;
   // `--remote-control` is opt-out (Settings → Investigation): some environments
   // run a `claude` build old enough to predate the flag, which would otherwise
   // fail every launch with no visible cause (see CLAUDE.md's "verify vendor
   // flags" gotcha) and no way to turn it off.
   const remoteControlSetting = useResolvedSetting(repo, INVESTIGATE_REMOTE_CONTROL_KEY);
   const remoteControlEnabled = remoteControlSetting.data !== "false";
-  // Investigate is Claude-only by design, so inject session-state hooks unconditionally.
+  // Claude keeps its hook-backed state pipeline; Codex state comes from App Server.
   const hookSettings = useClaudeHookSettings().data;
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
-  const seed = agentSessionSeed(session.data, exec, {
+  const seed = agentSessionSeed(session.data, {
     repo,
     termKey,
     // Seed the short "read the file" instruction rather than the prompt text: the
@@ -119,9 +123,13 @@ export function InvestigatePane({
       : `Investigate ${ticketId}.`,
     modelFlag,
     effortFlag,
-    remoteControl: remoteControlEnabled ? ticketId : undefined,
-    settingsFlag: hookSettings ? `--settings ${shellQuote(hookSettings)}` : undefined,
-    chrome: startWithChrome,
+    remoteControl:
+      provider.capabilities.remoteControl && remoteControlEnabled ? ticketId : undefined,
+    settingsFlag:
+      provider.capabilities.cliLaunchOptions && hookSettings
+        ? `--settings ${shellQuote(hookSettings)}`
+        : undefined,
+    chrome: provider.capabilities.cliLaunchOptions && startWithChrome,
   });
   // Hold the embed until the seed decision, the remote-control setting, and the
   // prompt file are all fresh, so the new PTY carries the right flags and reads a

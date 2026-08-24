@@ -109,6 +109,76 @@ pub struct AgentAuth {
     pub detected_exec: String,
 }
 
+/// Operational status of Santree's private Codex App Server. Transport details
+/// deliberately stop here: the frontend only needs a remedy, never a socket or
+/// raw protocol error.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexHealth {
+    pub available: bool,
+    pub running: bool,
+    pub version: String,
+    pub executable: String,
+    pub error: Option<String>,
+}
+
+/// Account metadata returned by Codex. Credentials never cross this boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAccount {
+    pub connected: bool,
+    pub auth_type: String,
+    pub email: Option<String>,
+    pub plan: Option<String>,
+    pub requires_openai_auth: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningEffort {
+    pub effort: String,
+    pub description: String,
+}
+
+/// One server-advertised model. Unknown/additive protocol fields remain in the
+/// backend and can be adopted without changing this stable UI contract.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModel {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub is_default: bool,
+    pub default_reasoning_effort: String,
+    pub supported_reasoning_efforts: Vec<CodexReasoningEffort>,
+    pub input_modalities: Vec<String>,
+    pub supports_personality: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRateLimitWindow {
+    pub used_percent: f64,
+    pub window_minutes: Option<f64>,
+    pub resets_at: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRateLimits {
+    pub plan: Option<String>,
+    pub primary: Option<CodexRateLimitWindow>,
+    pub secondary: Option<CodexRateLimitWindow>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexLogin {
+    pub login_id: String,
+    pub auth_url: String,
+    pub user_code: Option<String>,
+}
+
 /// The `gh` CLI integration status, shown in Settings → Integrations. GitHub
 /// powers PR creation and the Reviews dashboard and can't be turned off, so the
 /// UI surfaces whether the CLI is installed and authenticated (and as whom)
@@ -205,6 +275,7 @@ impl AgentState {
 #[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionState {
+    pub agent_kind: AgentKind,
     /// Claude session id (the one santree minted via `--session-id`).
     pub session_id: String,
     /// Derived agent state.
@@ -241,6 +312,7 @@ pub struct SessionState {
 #[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionUsageLive {
+    pub agent_kind: AgentKind,
     /// Claude session id (matches [`SessionState::session_id`]).
     pub session_id: String,
     /// Claude's pre-calculated context-window fill, 0..100 (raw — the 1.2x
@@ -343,10 +415,8 @@ pub struct Task {
     pub y: i32,
 }
 
-/// How a terminal that auto-launches `claude` should (re)launch it, resolved
-/// against the persisted session registry + the on-disk transcript. The frontend
-/// turns this into the shell seed: `--resume <id>` to continue, `--session-id
-/// <id> '<prompt>'` to start fresh, or a plain shell.
+/// How a terminal should (re)launch its provider, resolved against the persisted
+/// session registry and that provider's durable-session source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(
     rename_all = "camelCase",
@@ -354,25 +424,34 @@ pub struct Task {
     tag = "type"
 )]
 pub enum AgentSession {
-    /// A still-on-disk session to continue: `claude --resume <sessionId>`.
-    Resume { session_id: String },
-    /// A reserved id to start fresh with: `claude --session-id <sessionId> '<prompt>'`.
-    Fresh { session_id: String },
+    /// A durable provider session to continue.
+    Resume {
+        agent_kind: AgentKind,
+        /// Exact backend-resolved executable used by both the control plane and
+        /// the terminal. This prevents PATH/config drift between the two.
+        executable: String,
+        session_id: String,
+        remote: Option<String>,
+    },
+    /// A provider session reserved for a fresh launch.
+    Fresh {
+        agent_kind: AgentKind,
+        executable: String,
+        session_id: String,
+        remote: Option<String>,
+    },
     /// No agent session — just a login shell.
     Shell,
 }
 
-/// What an extra Trees main-area tab hosts: a Claude agent session (resumable
-/// across app restarts via its stored session id) or a plain login shell.
+/// What an extra Trees main-area tab hosts: an agent session or a login shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum TabKind {
-    Claude,
+    Agent,
     Terminal,
-    /// A Claude session dedicated to fixing a PR's failing CI: seeded with the
-    /// failed log + guardrails, launched with a commit/push-denying settings file.
-    /// Persisted like a Claude tab (resumable), but its pane always applies the
-    /// no-git guardrail — even on resume after a restart.
+    /// An agent session dedicated to fixing failing CI under the provider's
+    /// no-Git security profile.
     FixCi,
 }
 
@@ -380,7 +459,7 @@ impl TabKind {
     /// The value stored in the `worktree_tabs.kind` column.
     pub fn as_db_str(self) -> &'static str {
         match self {
-            TabKind::Claude => "claude",
+            TabKind::Agent => "agent",
             TabKind::Terminal => "terminal",
             TabKind::FixCi => "fixci",
         }
@@ -390,7 +469,7 @@ impl TabKind {
     /// `Terminal`, the safe default).
     pub fn from_db_str(s: &str) -> Self {
         match s {
-            "claude" => TabKind::Claude,
+            "agent" | "claude" => TabKind::Agent,
             "fixci" => TabKind::FixCi,
             _ => TabKind::Terminal,
         }
@@ -407,6 +486,7 @@ pub struct WorktreeTab {
     pub id: String,
     pub worktree_id: String,
     pub kind: TabKind,
+    pub agent_kind: Option<AgentKind>,
     pub title: String,
 }
 

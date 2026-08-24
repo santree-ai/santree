@@ -24,10 +24,18 @@ import {
   useAgentAuth,
   useAgents,
   useBoolSetting,
+  useCancelCodexLogin,
+  useCodexAccount,
+  useCodexHealth,
+  useCodexLogin,
+  useCodexLogout,
+  useCodexModels,
+  useCodexRateLimits,
   useSetSetting,
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
 import { alpha } from "../../../theme/colors";
+import { agentProvider } from "../../terminal/agentProvider";
 import { useEmbeddedTerminal } from "../../terminal/useEmbeddedTerminal";
 import { Block, Heading, KvRow, ToggleRow } from "../widgets";
 
@@ -81,6 +89,9 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
   const conf = settings.agents?.find((a) => a.key === kind);
   if (!def) return null;
 
+  const provider = agentProvider(kind);
+  if (provider.capabilities.settingsPanel === "codex") return <CodexPanel />;
+
   const savedExec = conf?.exec ?? "";
   const execValue = execDraft ?? savedExec;
   const commitExec = () => {
@@ -96,7 +107,7 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
         </div>
         <div className="text-[14px] font-semibold text-fg-2">{def.label} support is coming</div>
         <div className="max-w-[380px] text-[12px] text-muted-3">
-          This harness is a work in progress. For now, Claude Code is the only configurable agent.
+          This provider has no registered interactive-session adapter yet.
         </div>
         <Badge color="var(--color-muted-2)">WIP</Badge>
       </div>
@@ -210,7 +221,164 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
         </Block>
       )}
 
-      {kind === "Claude" && <ClaudeTerminalBlock />}
+      {provider.capabilities.terminalSettings === "claude" && <ClaudeTerminalBlock />}
+    </div>
+  );
+}
+
+function CodexPanel() {
+  const { settings, setAgentExec, setAgentModel } = useApp();
+  const health = useCodexHealth();
+  const account = useCodexAccount();
+  const models = useCodexModels();
+  const limits = useCodexRateLimits();
+  const login = useCodexLogin();
+  const cancelLogin = useCancelCodexLogin();
+  const logout = useCodexLogout();
+  const configured = settings?.agents?.find((agent) => agent.key === "Codex");
+  const [execDraft, setExecDraft] = useState<string | null>(null);
+  const activeLogin = login.data;
+  if (!settings) return null;
+  const savedExec = configured?.exec ?? "";
+  const exec = execDraft ?? savedExec;
+  const commitExec = () => {
+    if (execDraft !== null && execDraft !== savedExec) setAgentExec("Codex", execDraft);
+    setExecDraft(null);
+  };
+  const formatWindow = (
+    window: { usedPercent: number | null; windowMinutes: number | null } | null,
+  ) =>
+    window
+      ? `${Math.round(window.usedPercent ?? 0)}% used · ${window.windowMinutes ?? "?"} min window`
+      : "Unavailable";
+
+  return (
+    <div className="flex flex-col gap-5">
+      <Block title="App Server">
+        <div className="mb-3 flex items-center justify-between">
+          <Badge
+            color={health.data?.running ? "var(--color-status-green)" : "var(--color-status-amber)"}
+          >
+            {health.data?.running ? "Running" : health.data?.available ? "Ready" : "Unavailable"}
+          </Badge>
+          <button
+            type="button"
+            onClick={() => health.refetch()}
+            className="text-[11px] text-muted-2"
+          >
+            <RefreshIcon size={12} className={health.isFetching ? "animate-spin" : ""} />
+          </button>
+        </div>
+        <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
+          <KvRow label="Version" value={health.data?.version || "Not detected"} />
+          <KvRow label="Executable" value={health.data?.executable || "Not found"} />
+        </div>
+        {health.data?.error && (
+          <div className="mt-2 text-[11px] text-status-amber">{health.data.error}</div>
+        )}
+      </Block>
+
+      <Block
+        title="Authentication"
+        subtitle="Codex owns and stores all credentials. Santree never receives tokens or API keys."
+      >
+        <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
+          <KvRow label="Status" value={account.data?.connected ? "Connected" : "Not connected"} />
+          <KvRow label="Method" value={account.data?.authType || "—"} />
+          <KvRow label="Account" value={account.data?.email || "Managed by Codex CLI"} />
+          <KvRow label="Plan" value={account.data?.plan || "—"} />
+        </div>
+        <div className="mt-3 flex gap-2">
+          {!account.data?.connected && !activeLogin && (
+            <Button
+              onClick={() =>
+                login.mutate(false, {
+                  onSuccess: (result) => {
+                    if (result.authUrl) void openUrl(result.authUrl);
+                  },
+                })
+              }
+            >
+              Connect ChatGPT
+            </Button>
+          )}
+          {!account.data?.connected && !activeLogin && (
+            <Button
+              onClick={() =>
+                login.mutate(true, {
+                  onSuccess: (result) => {
+                    if (result.authUrl) void openUrl(result.authUrl);
+                  },
+                })
+              }
+            >
+              Device code
+            </Button>
+          )}
+          {activeLogin && (
+            <Button onClick={() => cancelLogin.mutate(activeLogin.loginId)}>Cancel login</Button>
+          )}
+          {account.data?.connected && (
+            <Button
+              onClick={() => {
+                if (window.confirm("Sign out of the shared Codex CLI account on this machine?"))
+                  logout.mutate();
+              }}
+            >
+              Sign out globally
+            </Button>
+          )}
+        </div>
+        {activeLogin?.userCode && (
+          <div className="mt-2 font-mono text-[12px] text-fg-2">
+            Device code: {activeLogin.userCode}
+          </div>
+        )}
+      </Block>
+
+      <Block title="Rate limits">
+        <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
+          <KvRow label="Primary" value={formatWindow(limits.data?.primary ?? null)} />
+          <KvRow label="Secondary" value={formatWindow(limits.data?.secondary ?? null)} />
+        </div>
+      </Block>
+
+      <Block
+        title="Model"
+        subtitle="Recommended follows the App Server default. Existing threads keep their original model and effort."
+      >
+        <select
+          className="w-full rounded-lg border border-line-3 bg-input px-3 py-2 text-[12px]"
+          value={configured?.model ?? ""}
+          onChange={(event) => setAgentModel("Codex", event.target.value)}
+        >
+          <option value="">Recommended</option>
+          {configured?.model && !models.data?.some((model) => model.id === configured.model) && (
+            <option value={configured.model}>{configured.model} (unavailable)</option>
+          )}
+          {(models.data ?? []).map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.displayName}
+              {model.isDefault ? " (default)" : ""}
+            </option>
+          ))}
+        </select>
+      </Block>
+
+      <Block
+        title="Codex executable path"
+        subtitle="Leave empty to use the executable found on PATH."
+      >
+        <input
+          type="text"
+          value={exec}
+          onChange={(event) => setExecDraft(event.target.value)}
+          onBlur={commitExec}
+          onKeyDown={(event) => event.key === "Enter" && event.currentTarget.blur()}
+          placeholder={health.data?.executable || "path to codex"}
+          className="w-full rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-[11.5px]"
+        />
+      </Block>
     </div>
   );
 }
