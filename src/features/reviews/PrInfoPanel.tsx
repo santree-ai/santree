@@ -1,12 +1,10 @@
 /**
  * The Reviews tab's full-height right rail — everything you consult *while*
- * reading a PR, in three tabs:
+ * reading a PR, in two tabs:
  *  - **Description** — the AI {@link ReviewBriefSection}, the PR's body and
  *    top-level conversation, plus any inline threads whose file isn't in the diff.
  *  - **Issue** — the linked Linear ticket, found from the PR title / branch (the
  *    same PR↔ticket convention the worktree flow uses).
- *  - **Ask AI** — a Claude session that has read the PR and can answer questions
- *    about it. Read-only: it never comments or approves (see {@link AiReviewPane}).
  *
  * The rail spans the whole detail area — header, tabs, and body — so whichever of
  * these you're consulting stays *beside* the diff instead of replacing it. That's
@@ -19,7 +17,6 @@
  */
 import type { PrComment, ReviewPr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
-import { ClaudeSparkIcon } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
 import { EdgeResizeHandle, Tabs } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
@@ -27,7 +24,6 @@ import { useAddPrConversationComment, usePrDetail, useReviewDrafts } from "../..
 import { isoMs } from "../../lib/relativeTime";
 import { splitRepoSlug } from "../../lib/repo";
 import { useEdgeResize } from "../../lib/useEdgeResize";
-import { AiReviewPane } from "./AiReviewPane";
 import { CommentComposer } from "./CommentComposer";
 import { useReviewsModel } from "./model";
 import { PrThreadCard } from "./PrThreadCard";
@@ -36,25 +32,20 @@ import { ReviewDraftCard } from "./ReviewDraftCard";
 import { ReviewIssuePane } from "./ReviewIssuePane";
 import { ticketIdFor } from "./ticket";
 
-export type PanelTab = "description" | "issue" | "ai";
+export type PanelTab = "description" | "issue";
 
 const DEFAULT_W = 400;
 const MIN_W = 300;
-// Roomier than the rail needs for prose: the Ask AI tab is a terminal, and a
-// session you actually converse with wants more than a description column.
-const MAX_W = 1000;
+const MAX_W = 720;
 
 export function PrInfoPanel({
   pr,
   tab,
   onTabChange,
-  aiOpened,
 }: {
   pr: ReviewPr;
   tab: PanelTab;
   onTabChange: (tab: PanelTab) => void;
-  /** Whether the AI session has ever been opened for this PR (see `ReviewDetail`). */
-  aiOpened: boolean;
 }) {
   const {
     infoCollapsed,
@@ -86,10 +77,6 @@ export function PrInfoPanel({
   const orphanDrafts = (drafts ?? []).filter((d) => !files.has(d.path));
 
   return (
-    // Hidden rather than unmounted when collapsed: the Ask AI tab owns a live PTY
-    // and a checkout, and returning null here would kill the session every time
-    // the rail was toggled (⌘L) — the same non-idempotent-effect rule that keeps
-    // the pane mounted across tab switches.
     <div
       className={`relative flex-none flex-col overflow-hidden border-l border-hairline bg-deep ${
         infoCollapsed ? "hidden" : "flex"
@@ -105,7 +92,6 @@ export function PrInfoPanel({
         tabs={[
           { value: "description", label: "Description" },
           { value: "issue", label: "Issue", dimmed: !ticketId },
-          { value: "ai", label: "Ask AI", badge: <ClaudeSparkIcon size={11} /> },
         ]}
       />
 
@@ -157,16 +143,6 @@ export function PrInfoPanel({
       {tab === "issue" && (
         <div className="flex min-h-0 flex-1 flex-col">
           <ReviewIssuePane repo={santreeRepo} ticketId={ticketId} />
-        </div>
-      )}
-
-      {aiOpened && (
-        <div className={tab === "ai" ? "flex min-h-0 flex-1" : "hidden"}>
-          {/* `visible` releases the inline terminal slot when this tab isn't the
-              one on screen. There's one slot app-wide and the AI review's pane is
-              a second claimant, so a hidden-but-mounted host holding it would
-              leave whichever is showing blank. */}
-          <AiReviewPane pr={pr} visible={tab === "ai" && !infoCollapsed} />
         </div>
       )}
     </div>

@@ -20,7 +20,8 @@ import {
   useBoolSetting,
   useClaudeHookSettings,
   useClaudeHookSettingsNoGit,
-  useResolvedSetting,
+  useResolvedProviderSetting,
+  WORK_AGENT_KEY,
   WORK_EFFORT_KEY,
   WORK_MODEL_KEY,
   WORK_PERMISSION_MODE_KEY,
@@ -98,9 +99,14 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   const requestedAgent = agent ?? "Claude";
   const resolvedAgent = sessionAgent(session.data, requestedAgent);
   const provider = agentProvider(resolvedAgent);
-  const model = useResolvedSetting(repo, WORK_MODEL_KEY);
-  const effort = useResolvedSetting(repo, WORK_EFFORT_KEY);
-  const permissionMode = useResolvedSetting(repo, WORK_PERMISSION_MODE_KEY);
+  const model = useResolvedProviderSetting(repo, WORK_MODEL_KEY, requestedAgent, WORK_AGENT_KEY);
+  const effort = useResolvedProviderSetting(repo, WORK_EFFORT_KEY, requestedAgent, WORK_AGENT_KEY);
+  const permissionMode = useResolvedProviderSetting(
+    repo,
+    WORK_PERMISSION_MODE_KEY,
+    requestedAgent,
+    WORK_AGENT_KEY,
+  );
   // Both variants are observed unconditionally (hooks can't be conditional, and both
   // are `staleTime: Infinity` writes of a small settings file) — the ternary just
   // picks which path this tab launches with.
@@ -156,8 +162,8 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   // stale decision — a `--session-id` for a session whose transcript now exists, or
   // a "fresh" verdict that `session::resolve` would now correctly resume.
   const dropSession = useCallback(() => {
-    qc.removeQueries({ queryKey: queryKeys.agentSessionPrefix(repo, refId) });
-  }, [qc, repo, refId]);
+    qc.removeQueries({ queryKey: queryKeys.agentSessionPrefix(repo, refId, requestedAgent) });
+  }, [qc, repo, refId, requestedAgent]);
 
   const resume = useCallback(() => {
     dropSession();

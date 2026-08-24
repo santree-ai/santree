@@ -4,19 +4,16 @@
  * right, over the reviewers and the editable label row. Shared by every detail tab
  * — it sits above the tab bar, not inside a tab.
  */
+
+import { useNavigate } from "@tanstack/react-router";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
-import type { Reviewer, ReviewPr } from "../../bindings";
+import type { AgentKind, Reviewer, ReviewPr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
-import {
-  AgentsIcon,
-  BranchIcon,
-  ClaudeSparkIcon,
-  CopyIcon,
-  GitHubLogo,
-  PanelIcon,
-} from "../../components/icons";
+import { AgentsIcon, BranchIcon, CopyIcon, GitHubLogo, PanelIcon } from "../../components/icons";
 import { Button, Pill } from "../../components/primitives";
+import { useCreateReviewWorktree, useResolvedSetting, WORK_AGENT_KEY } from "../../lib/queries";
+import { useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import {
   accentActiveStyle,
@@ -27,10 +24,35 @@ import {
 import { useReviewsModel } from "./model";
 import { PrLabels } from "./PrLabels";
 
-export function ReviewHeader({ pr, onAskAi }: { pr: ReviewPr; onAskAi: () => void }) {
+export function ReviewHeader({ pr }: { pr: ReviewPr }) {
   const { infoCollapsed, toggleInfo } = useReviewsModel();
+  const { repo } = useReviewsModel();
+  const { data: configuredAgent } = useResolvedSetting(repo, WORK_AGENT_KEY);
+  const agent = (configuredAgent as AgentKind | null) ?? "Codex";
+  const createTree = useCreateReviewWorktree(repo);
+  const { addPendingLaunches, removePendingLaunch, requestTreeFocus } = useAppUi();
+  const navigate = useNavigate();
   const decision = reviewDecisionMeta[pr.reviewDecision];
   const checks = checkRollupMeta[pr.checks];
+  const treeId = `review-${pr.repo}-${pr.number}`.replace(/[^A-Za-z0-9._-]+/g, "-");
+
+  const openAsTree = () => {
+    addPendingLaunches([{ id: treeId, title: pr.title, project: "Reviews", agent }]);
+    navigate({ to: "/trees" });
+    createTree.mutate(
+      {
+        id: treeId,
+        title: pr.title,
+        branch: pr.headRef,
+        base: pr.baseRef || null,
+        agent,
+      },
+      {
+        onSuccess: (worktree) => requestTreeFocus(worktree.id),
+        onError: () => removePendingLaunch(treeId),
+      },
+    );
+  };
 
   return (
     // Identity on the left, actions on the right; each row spans the full width
@@ -55,17 +77,14 @@ export function ReviewHeader({ pr, onAskAi }: { pr: ReviewPr; onAskAi: () => voi
             <span className="truncate">{pr.headRef}</span>
             <CopyIcon size={11} className="flex-none text-muted-3 group-hover:text-fg-2" />
           </button>
-          {/* The session itself lives in the rail (see PrInfoPanel) — this is the
-              way in from the diff, so asking a question never costs you the code
-              you're looking at. */}
           <Button
             size="sm"
-            onClick={onAskAi}
-            title="Ask Claude about this PR"
+            onClick={openAsTree}
+            title="Open this PR as a tree"
             className="flex-none"
           >
-            <ClaudeSparkIcon size={11} />
-            Ask AI
+            <BranchIcon size={11} />
+            Open as tree
           </Button>
           <Button
             size="sm"

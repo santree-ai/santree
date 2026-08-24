@@ -14,29 +14,35 @@
  */
 import { useState } from "react";
 
-import type { ReviewBrief, ReviewPr } from "../../bindings";
+import type { AgentKind, ReviewBrief, ReviewPr } from "../../bindings";
 import {
+  AgentIcon,
   ChevronDownIcon,
-  ClaudeSparkIcon,
   CopyIcon,
   RefreshIcon,
   WarningIcon,
 } from "../../components/icons";
 import { Button, Pill, RunningStatus } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
-import { usePrReviewBrief } from "../../lib/queries";
+import { REVIEW_AGENT_KEY, usePrReviewBrief, useResolvedSetting } from "../../lib/queries";
 import { toast } from "../../state/toast";
 import { alpha, palette, readingRoleMeta, watchOutMeta } from "../../theme/colors";
+import { useTerminals } from "../terminal/TerminalsContext";
 import { aiReviewTermKey } from "./AiReviewSessionPane";
 import { useReviewsModel } from "./model";
-import { useReviewSessionLatch } from "./useReviewSessionLatch";
 
 export function ReviewBriefSection({ pr }: { pr: ReviewPr }) {
-  const { focusFile, openAiReview } = useReviewsModel();
+  const { repo, focusFile, openAiReview } = useReviewsModel();
+  const { data: configuredAgent } = useResolvedSetting(repo, REVIEW_AGENT_KEY);
+  const defaultAgent = (configuredAgent as AgentKind | null) ?? "Codex";
   const { data: brief, isLoading } = usePrReviewBrief(pr.repo, pr.number);
   // A live session is the "it's being written right now" state: the brief arrives
   // through the MCP, so there's no mutation here to be pending.
-  const { liveSession } = useReviewSessionLatch(aiReviewTermKey(pr));
+  const { tabs } = useTerminals();
+  const liveSession = tabs.some(
+    (tab) => tab.source === "review" && tab.refId?.startsWith(`${aiReviewTermKey(pr)}::`),
+  );
+  const displayedAgent = brief?.agentKind ?? defaultAgent;
 
   // A brief written against an older head describes code that no longer exists.
   const stale = !!brief && !!pr.headSha && brief.headSha !== pr.headSha;
@@ -54,7 +60,7 @@ export function ReviewBriefSection({ pr }: { pr: ReviewPr }) {
   return (
     <div className="mb-6 border-b border-hairline pb-4">
       <div className="mb-2.5 flex items-center gap-1.5">
-        <ClaudeSparkIcon size={11} className="text-muted-3" />
+        <AgentIcon kind={displayedAgent} size={11} className="text-muted-3" />
         <span className="font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
           Review brief
         </span>
@@ -70,7 +76,11 @@ export function ReviewBriefSection({ pr }: { pr: ReviewPr }) {
                 : "Pick the review session back up and ask it to look again"
             }
           >
-            {liveSession ? <ClaudeSparkIcon size={10} /> : <RefreshIcon size={10} />}
+            {liveSession ? (
+              <AgentIcon kind={displayedAgent} size={10} />
+            ) : (
+              <RefreshIcon size={10} />
+            )}
             {liveSession ? "Open AI review" : "Review again"}
           </Button>
         )}
@@ -94,12 +104,12 @@ export function ReviewBriefSection({ pr }: { pr: ReviewPr }) {
       {!brief && !liveSession && (
         <div className="rounded-lg border border-line-2 bg-raised px-3 py-3">
           <p className="mb-2.5 text-[11.5px] leading-[1.6] text-muted-2">
-            Claude reads the PR and writes a brief here, plus draft comments in the diff. You edit
-            them and decide which ones to send.
+            {defaultAgent} reads the PR and writes a brief here, plus draft comments in the diff.
+            You edit them and decide which ones to send.
           </p>
           <Button size="sm" variant="primary" onClick={run}>
-            <ClaudeSparkIcon size={11} />
-            Review with AI
+            <AgentIcon kind={defaultAgent} size={11} />
+            Start AI review
           </Button>
         </div>
       )}

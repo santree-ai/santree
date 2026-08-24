@@ -20,13 +20,14 @@ import type { AgentKind, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
-import { BranchIcon, ClaudeSparkIcon } from "../../components/icons";
+import { AgentIcon, AgentsIcon } from "../../components/icons";
 import { Button, EmptyState, Segmented, Skeleton } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import {
   INVESTIGATE_AGENT_KEY,
   INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
+  INVESTIGATE_PERMISSION_MODE_KEY,
   INVESTIGATE_REMOTE_CONTROL_KEY,
   TRIAGE_GOOD_CITIZEN_KEY,
   useBaseWorktree,
@@ -34,6 +35,7 @@ import {
   usePrefetchOnHover,
   useRefreshTriage,
   useRepos,
+  useResolvedProviderSetting,
   useResolvedSetting,
   useSetSetting,
   useStartedInvestigations,
@@ -44,6 +46,7 @@ import {
 } from "../../lib/queries";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { accentActiveStyle, alpha } from "../../theme/colors";
+import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { DetailTabs } from "./DetailTabs";
 import {
@@ -56,26 +59,24 @@ import {
 } from "./hooks";
 import { InvestigatePane } from "./InvestigatePane";
 import { IssueHeader } from "./IssueHeader";
+import { orderedProviders, providersByRef, triageTerminalRef } from "./providerSessions";
 import { QueueRow } from "./QueueRow";
 import { RepoSessionPane } from "./RepoSessionPane";
 import { ScheduleSection } from "./ScheduleSection";
 
 /**
- * The repo-session row at the top of the rail — Triage's answer to the Trees
- * rail's `master` entry. Selecting it opens a Claude session on the base
- * checkout that isn't attached to any ticket.
+ * The repo-session row at the top of the rail. Selecting it opens a provider
+ * session on the base checkout that isn't attached to any ticket.
  *
- * Shaped like Trees' `BaseEntry` on purpose (branch icon, branch name, the row's
- * own action as a stretched button) so the two read as the same idea in two
- * views; the spark marks it as the one row here that opens an agent rather than
- * a ticket.
+ * The provider mark reflects the current default while the detail surface can
+ * retain simultaneous provider tabs.
  */
 function RepoSessionEntry({
-  branch,
+  agentKind,
   active,
   onSelect,
 }: {
-  branch: string;
+  agentKind: AgentKind;
   active: boolean;
   onSelect: () => void;
 }) {
@@ -90,13 +91,13 @@ function RepoSessionEntry({
       <button
         type="button"
         onClick={onSelect}
-        aria-label={`Ask Claude on ${branch}`}
-        title={`Ask Claude on ${branch}. This session isn't tied to a ticket.`}
+        aria-label={`Open Triage desk with ${agentProvider(agentKind).label}`}
+        title={`Open the Triage desk with ${agentProvider(agentKind).label}`}
         className="absolute inset-0 cursor-pointer rounded-[9px]"
       />
-      <BranchIcon size={13} className="flex-none" />
-      <span className="min-w-0 flex-1 truncate font-mono">{branch}</span>
-      <ClaudeSparkIcon size={12} className="relative flex-none" />
+      <AgentsIcon size={13} className="flex-none" />
+      <span className="min-w-0 flex-1 truncate">Triage desk</span>
+      <AgentIcon kind={agentKind} size={12} className="relative flex-none" />
     </div>
   );
 }
@@ -216,26 +217,55 @@ export function TriageView() {
   // the app default): which agent runs it, and which model/effort. The prompt
   // itself is the editable `triage` prompt (Settings → Prompts), not a skill.
   const { data: investigateAgent } = useResolvedSetting(activeRepo, INVESTIGATE_AGENT_KEY);
-  const { data: investigateModel } = useResolvedSetting(activeRepo, INVESTIGATE_MODEL_KEY);
-  const { data: investigateEffort } = useResolvedSetting(activeRepo, INVESTIGATE_EFFORT_KEY);
   const agentKind = (investigateAgent as AgentKind | null) ?? "Codex";
+  const { data: investigateModel } = useResolvedProviderSetting(
+    activeRepo,
+    INVESTIGATE_MODEL_KEY,
+    agentKind,
+    INVESTIGATE_AGENT_KEY,
+  );
+  const { data: investigateEffort } = useResolvedProviderSetting(
+    activeRepo,
+    INVESTIGATE_EFFORT_KEY,
+    agentKind,
+    INVESTIGATE_AGENT_KEY,
+  );
+  const { data: investigatePermissionMode } = useResolvedProviderSetting(
+    activeRepo,
+    INVESTIGATE_PERMISSION_MODE_KEY,
+    agentKind,
+    INVESTIGATE_AGENT_KEY,
+  );
 
   const { tabs: terminalTabs } = useTerminals();
 
-  // Tickets whose investigation terminal is live right now.
-  const liveInvestigations = useMemo(
-    () =>
-      new Set(
-        terminalTabs
-          .filter((t) => t.source === "triage" && t.refId !== undefined)
-          .map((t) => t.refId as string),
+  const hasLiveProvider = useCallback(
+    (refId: string, provider: AgentKind) =>
+      terminalTabs.some(
+        (tab) => tab.source === "triage" && tab.refId === triageTerminalRef(refId, provider),
       ),
     [terminalTabs],
   );
   // Tickets with a stored session from a past investigation (persists across app
   // restarts) — they get the tab + resume affordance even when not live.
-  const { data: startedIds = [] } = useStartedInvestigations(activeRepo);
-  const startedInvestigations = useMemo(() => new Set(startedIds), [startedIds]);
+  const { data: storedSessions = [] } = useStartedInvestigations(activeRepo);
+  const startedInvestigations = useMemo(() => providersByRef(storedSessions), [storedSessions]);
+  const providersFor = useCallback(
+    (refId: string) =>
+      orderedProviders(
+        new Set([
+          ...(startedInvestigations.get(refId) ?? []),
+          ...(["Codex", "Claude"] as AgentKind[]).filter((provider) =>
+            hasLiveProvider(refId, provider),
+          ),
+        ]),
+      ),
+    [startedInvestigations, hasLiveProvider],
+  );
+  const hasAnyLiveProvider = useCallback(
+    (refId: string) => providersFor(refId).some((provider) => hasLiveProvider(refId, provider)),
+    [providersFor, hasLiveProvider],
+  );
 
   // Investigations float above the backlog — a running agent first, then a
   // resumable one — because that's in-flight work you're likely to return to,
@@ -244,11 +274,11 @@ export function TriageView() {
   const rank = useCallback(
     (t: TriageTicket) => {
       if (t.snoozedUntilMs != null) return 3;
-      if (liveInvestigations.has(t.id)) return 0;
+      if (hasAnyLiveProvider(t.id)) return 0;
       if (startedInvestigations.has(t.id)) return 1;
       return 2;
     },
-    [liveInvestigations, startedInvestigations],
+    [hasAnyLiveProvider, startedInvestigations],
   );
   const ordered = useMemo(() => [...visible].sort((a, b) => rank(a) - rank(b)), [visible, rank]);
   // Group by team, preserving order. Only used when the queue spans >1 team.
@@ -271,6 +301,7 @@ export function TriageView() {
   // snaps any id that isn't in the visible queue back to the first ticket, so a
   // sentinel threaded through it could never stay selected.
   const [repoSessionOpen, setRepoSessionOpen] = useState(false);
+  const [repoSessionAgent, setRepoSessionAgent] = useState<AgentKind>(agentKind);
   const { data: baseWorktree } = useBaseWorktree(activeRepo);
   const selectTicket = useCallback(
     (id: string) => {
@@ -279,6 +310,10 @@ export function TriageView() {
     },
     [select],
   );
+  const openRepoSession = useCallback(() => {
+    setRepoSessionAgent(agentKind);
+    setRepoSessionOpen(true);
+  }, [agentKind]);
 
   // Header and body both key off `activeId`, so they switch together in one
   // render — never a new title over the previous ticket's content.
@@ -299,9 +334,9 @@ export function TriageView() {
   const eligibleIds = useMemo(
     () =>
       ordered
-        .filter((t) => t.snoozedUntilMs == null && !liveInvestigations.has(t.id))
+        .filter((t) => t.snoozedUntilMs == null && !hasLiveProvider(t.id, agentKind))
         .map((t) => t.id),
-    [ordered, liveInvestigations],
+    [ordered, hasLiveProvider, agentKind],
   );
   // Rows test membership on every render — a Set keeps that off the O(n²) path.
   const eligible = useMemo(() => new Set(eligibleIds), [eligibleIds]);
@@ -321,6 +356,7 @@ export function TriageView() {
     agentKind,
     model: investigateModel ?? null,
     effort: investigateEffort ?? null,
+    permissionMode: investigatePermissionMode ?? null,
     remoteControl: remoteControlSetting !== "false",
   });
   const investigateSelected = () => {
@@ -333,15 +369,19 @@ export function TriageView() {
   // investigation survives navigating away and back.
   const { tabFor, setTab } = useTabByTicket();
   const selectedTab = tabFor(activeId);
-  const hasInvestigation =
+  const activeProviders = activeTicket ? providersFor(activeTicket.id) : [];
+  const activeAgent = selectedTab === "discussion" ? null : selectedTab;
+  const activeHasStarted =
     !!activeTicket &&
-    terminalTabs.some((t) => t.source === "triage" && t.refId === activeTicket.id);
-  // The active ticket has a stored (resumable) session from a past investigation.
-  const activeHasStarted = !!activeTicket && startedInvestigations.has(activeTicket.id);
+    !!activeAgent &&
+    (startedInvestigations.get(activeTicket.id)?.has(activeAgent) ?? false);
   // Show the Investigation tab when it's live, has a resumable stored session, or
   // the user is actively on it — so past investigations surface a tab + resume.
-  const showInvestigation = hasInvestigation || activeHasStarted || selectedTab === "investigate";
-  const investigate = useCallback(() => setTab(activeId, "investigate"), [setTab, activeId]);
+  const shownProviders = orderedProviders(
+    new Set([...activeProviders, ...(activeAgent ? [activeAgent] : [])]),
+  );
+  const showInvestigation = shownProviders.length > 0;
+  const investigate = useCallback(() => setTab(activeId, agentKind), [setTab, activeId, agentKind]);
   // When the investigate terminal exits, fall back to this ticket's discussion.
   const backToDiscussion = useCallback(() => setTab(activeId, "discussion"), [setTab, activeId]);
 
@@ -355,9 +395,9 @@ export function TriageView() {
   useEffect(() => {
     if (!triageFocus) return;
     selectTicket(triageFocus);
-    setTab(triageFocus, "investigate");
+    setTab(triageFocus, agentKind);
     consumeTriageFocus();
-  }, [triageFocus, selectTicket, setTab, consumeTriageFocus]);
+  }, [triageFocus, selectTicket, setTab, consumeTriageFocus, agentKind]);
 
   // Vim-style queue navigation (j/k, ⌘I, ⌘O).
   // j/k must land you back on the queue, not scroll it behind an open session.
@@ -376,8 +416,9 @@ export function TriageView() {
       active={t.id === activeId}
       selectable={canInvestigate && eligible.has(t.id)}
       selected={!!selected[t.id]}
-      investigating={liveInvestigations.has(t.id)}
+      investigating={hasAnyLiveProvider(t.id)}
       started={startedInvestigations.has(t.id)}
+      agentKinds={providersFor(t.id)}
       onSelect={selectTicket}
       onToggleSelect={toggle}
       onHover={onHoverRow}
@@ -432,9 +473,9 @@ export function TriageView() {
                 that read rather than rendering a nameless row. */}
             {baseWorktree && (
               <RepoSessionEntry
-                branch={baseWorktree.branch}
+                agentKind={agentKind}
                 active={repoSessionOpen}
-                onSelect={() => setRepoSessionOpen(true)}
+                onSelect={openRepoSession}
               />
             )}
             {loading ? (
@@ -475,14 +516,25 @@ export function TriageView() {
           // the queue is still one click away in the rail. Runs the same agent
           // config the Investigation action uses, since it's the Triage view's
           // agent either way.
-          <RepoSessionPane
-            repo={activeRepo}
-            branch={baseWorktree.branch}
-            cwd={repoPath}
-            agentKind={agentKind}
-            model={investigateModel ?? null}
-            effort={investigateEffort ?? null}
-          />
+          <div className="flex min-h-0 flex-1 flex-col">
+            <DetailTabs
+              tab={repoSessionAgent}
+              includeDiscussion={false}
+              providers={orderedProviders(
+                new Set([...providersFor(`__repo__:${activeRepo}`), repoSessionAgent]),
+              )}
+              onTab={(tab) => {
+                if (tab !== "discussion") setRepoSessionAgent(tab);
+              }}
+            />
+            <RepoSessionPane
+              key={repoSessionAgent}
+              repo={activeRepo}
+              branch={baseWorktree.branch}
+              cwd={repoPath}
+              agentKind={repoSessionAgent}
+            />
+          </div>
         ) : loading ? (
           // The queue hasn't landed yet, so we don't know there's nothing to
           // triage — "All caught up" here would be a cheerful lie.
@@ -498,14 +550,19 @@ export function TriageView() {
               detail={detail?.id === activeTicket.id ? detail : undefined}
               onSetState={(stateId) => setState.mutate({ ticketId: activeTicket.id, stateId })}
               linearReadOnly={linearReadOnly}
-              investigating={selectedTab === "investigate"}
+              investigating={selectedTab !== "discussion"}
+              agentKind={agentKind}
               onInvestigate={investigate}
               onRefresh={refresh}
               refreshing={refreshing}
             />
             {/* The tab bar appears only once an investigation is started. */}
             {showInvestigation && (
-              <DetailTabs tab={selectedTab} onTab={(t) => setTab(activeId, t)} />
+              <DetailTabs
+                tab={selectedTab}
+                providers={shownProviders}
+                onTab={(t) => setTab(activeId, t)}
+              />
             )}
             {/* Kept discussion panes stay mounted (hidden) so revisiting a ticket
                 is instant; only the active one (on the Discussion tab) is shown. */}
@@ -525,15 +582,13 @@ export function TriageView() {
             {selectedTab === "discussion" && !keptPanes.includes(activeTicket.id) && (
               <DiscussionSkeleton />
             )}
-            {selectedTab === "investigate" && (
+            {activeAgent && (
               <InvestigatePane
-                key={activeTicket.id}
+                key={`${activeTicket.id}:${activeAgent}`}
                 repo={activeRepo}
                 ticketId={activeTicket.id}
                 cwd={repoPath}
-                agentKind={agentKind}
-                model={investigateModel ?? null}
-                effort={investigateEffort ?? null}
+                agentKind={activeAgent}
                 hasStartedSession={activeHasStarted}
                 onExited={backToDiscussion}
               />

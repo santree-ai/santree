@@ -14,7 +14,7 @@
 import { useState } from "react";
 
 import type { ReviewDraft } from "../../bindings";
-import { ClaudeSparkIcon } from "../../components/icons";
+import { AgentIcon } from "../../components/icons";
 import { Button, ConfirmDialog } from "../../components/primitives";
 import { usePublishReviewDrafts } from "../../lib/queries";
 import { alpha, palette } from "../../theme/colors";
@@ -56,7 +56,11 @@ export function ReviewDraftsBar({
       className="flex flex-none items-center gap-2.5 border-t px-3 py-2 text-[11.5px]"
       style={{ borderColor: alpha(34, palette.purple), background: alpha(10, palette.purple) }}
     >
-      <ClaudeSparkIcon size={12} className="flex-none" />
+      <span className="flex flex-none items-center -space-x-1">
+        {[...new Set(drafts.map((draft) => draft.agentKind))].map((agent) => (
+          <AgentIcon key={agent} kind={agent} size={12} />
+        ))}
+      </span>
       <span className="min-w-0 flex-1 truncate">
         <span className="font-medium">
           {drafts.length} AI draft{drafts.length === 1 ? "" : "s"}

@@ -20,7 +20,7 @@ use crate::repo;
 
 /// `(owner, name)` of the active repo's `origin` remote. Remote parsing shells out
 /// to git, so it runs off the async pool.
-async fn origin(db: &Db, repo: &str) -> Result<(String, String)> {
+pub(crate) async fn origin(db: &Db, repo: &str) -> Result<(String, String)> {
     let root = repo::path(db, repo)
         .await?
         .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
@@ -33,16 +33,31 @@ async fn origin(db: &Db, repo: &str) -> Result<(String, String)> {
 /// `WorktreeWatcher` watches that directory recursively, so a checkout created
 /// here would otherwise fire a storm of worktree-changed events and show up in the
 /// Trees sidebar as if it were one of the user's own tasks.
-const REVIEWS_DIR: &str = "reviews";
+pub(crate) const REVIEWS_DIR: &str = "reviews";
 
 /// How many review checkouts to keep per repo. Each is a full working tree, so
 /// they're pruned oldest-first rather than accumulating one per PR ever opened.
 const KEEP_REVIEW_CHECKOUTS: usize = 5;
 
-/// Directory name for one PR's checkout — `owner-name-number`, flat rather than
-/// nested so a single [`git::safe_path`]-equivalent component check covers it.
-fn review_dir_name(owner: &str, name: &str, number: u32) -> String {
-    format!("{owner}-{name}-{number}")
+/// Collision-free directory name for one PR's checkout. Length-prefixing keeps
+/// it flat while distinguishing slugs such as `a-b/c` and `a/b-c`.
+pub(crate) fn review_dir_name(owner: &str, name: &str, number: u32) -> Result<String> {
+    if !repo::valid_github_component(owner) || !repo::valid_github_component(name) {
+        return Err(anyhow!(
+            "refusing to derive a review checkout from '{owner}/{name}'"
+        ));
+    }
+    let dir = format!("{}-{owner}-{}-{name}-{number}", owner.len(), name.len());
+    let mut components = Path::new(&dir).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+        || dir.starts_with('.')
+    {
+        return Err(anyhow!(
+            "refusing to derive a review checkout from '{owner}/{name}'"
+        ));
+    }
+    Ok(dir)
 }
 
 /// Find-or-create the read-only checkout of a PR's head, for the AI review
@@ -74,13 +89,9 @@ pub async fn review_workspace(
     tokio::task::spawn_blocking(move || {
         let root = PathBuf::from(root);
         let reviews_root = root.join(".santree").join(REVIEWS_DIR);
-        // The name is derived from the *remote* we just parsed, not from anything
-        // the webview sent — but it still gets the single-component check, since
-        // it's what `join` is about to trust.
-        let dir = review_dir_name(&owner, &name, number);
-        if dir.contains(['/', '\\']) || dir.starts_with('.') {
-            return Err(anyhow!("refusing to build a review checkout named '{dir}'"));
-        }
+        // The name is derived from the remote, then validated again where `join`
+        // turns it into filesystem authority.
+        let dir = review_dir_name(&owner, &name, number)?;
         let path = reviews_root.join(&dir);
 
         prune_review_checkouts(&root, &reviews_root, &dir);
@@ -136,10 +147,11 @@ pub async fn existing_review_workspace(
     {
         return Ok(None);
     }
+    let dir = review_dir_name(&owner, &name, target.number)?;
     let path = PathBuf::from(root)
         .join(".santree")
         .join(REVIEWS_DIR)
-        .join(review_dir_name(&owner, &name, target.number));
+        .join(dir);
     let exists = tokio::task::spawn_blocking({
         let path = path.clone();
         move || path.is_dir()
@@ -154,12 +166,10 @@ pub async fn remove_review_workspace(db: &Db, repo: &str, number: u32) -> Result
         .await?
         .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
     let (owner, name) = origin(db, repo).await?;
+    let dir = review_dir_name(&owner, &name, number)?;
     tokio::task::spawn_blocking(move || {
         let root = PathBuf::from(root);
-        let path = root
-            .join(".santree")
-            .join(REVIEWS_DIR)
-            .join(review_dir_name(&owner, &name, number));
+        let path = root.join(".santree").join(REVIEWS_DIR).join(dir);
         git::remove_review_worktree(&root, &path);
     })
     .await?;
@@ -410,4 +420,59 @@ pub async fn file_source(
         });
     };
     github::pr_file_source(&token, owner, name, base, head, path).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_directory_is_one_normal_component() {
+        assert_ne!(
+            review_dir_name("a-b", "c", 7).unwrap(),
+            review_dir_name("a", "b-c", 7).unwrap()
+        );
+        assert!(review_dir_name("acme", "x/../../../victim", 7).is_err());
+        assert!(review_dir_name("..", "victim", 7).is_err());
+    }
+
+    #[tokio::test]
+    async fn malicious_origin_cannot_escape_review_deletion_root() {
+        let base = std::env::temp_dir().join(format!(
+            "santree-review-remove-origin-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo_root = base.join("repo");
+        let victim = repo_root.join(".santree/victim-7");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep"), "safe").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/x/../../victim",
+            ])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        sqlx::query("INSERT INTO repos (name, path) VALUES ('repo', ?)")
+            .bind(repo_root.to_str().unwrap())
+            .execute(&db)
+            .await
+            .unwrap();
+
+        assert!(remove_review_workspace(&db, "repo", 7).await.is_err());
+        assert!(victim.join("keep").is_file());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

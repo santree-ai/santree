@@ -91,7 +91,7 @@ pub(crate) enum Mode {
 fn parse_args(args: impl Iterator<Item = String>) -> Option<(String, Mode)> {
     let mut db_path: Option<String> = None;
     let mut positional: Option<String> = None;
-    let (mut pr, mut number, mut head, mut diff) = (None, None, None, None);
+    let (mut pr, mut number, mut head, mut diff, mut agent_kind) = (None, None, None, None, None);
 
     let mut args = args.peekable();
     while let Some(a) = args.next() {
@@ -101,6 +101,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<(String, Mode)> {
             "--number" => number = args.next(),
             "--head" => head = args.next(),
             "--diff" => diff = args.next(),
+            "--agent-kind" => agent_kind = args.next(),
             other => positional = Some(other.to_string()),
         }
     }
@@ -108,7 +109,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<(String, Mode)> {
     let (db_path, positional) = (db_path?, positional?);
     let mode = match positional.as_str() {
         "statusline" => Mode::Statusline,
-        "mcp" => Mode::Mcp(mcp::McpScope::new(pr?, number?, head?, diff?)?),
+        "mcp" => {
+            let scope = mcp::McpScope::new(pr?, number?, head?, diff?)?;
+            Mode::Mcp(match agent_kind {
+                Some(kind) => scope.with_agent_kind(&kind)?,
+                None => scope,
+            })
+        }
         event => Mode::Hook(event.to_string()),
     };
     Some((db_path, mode))
@@ -554,6 +561,7 @@ mod tests {
                 number: 42,
                 head_sha: "abc1234".into(),
                 diff_index: "/i.json".into(),
+                agent_kind: santree_core::domain::AgentKind::Claude,
             })
         );
     }

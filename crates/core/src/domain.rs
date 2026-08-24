@@ -68,6 +68,16 @@ impl std::str::FromStr for AgentKind {
     }
 }
 
+/// A persisted Triage terminal and the provider that owns its durable session.
+/// `ref_id` is normally a Linear ticket id; Triage's repo-wide scratch session
+/// uses its reserved frontend sentinel instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TriageSession {
+    pub ref_id: String,
+    pub agent_kind: AgentKind,
+}
+
 /// A selectable agent and the models it offers in the launch tray.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -755,6 +765,8 @@ pub struct WatchOut {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewBrief {
+    #[serde(default = "default_artifact_agent")]
+    pub agent_kind: AgentKind,
     pub summary: String,
     pub reading_order: Vec<ReadingStep>,
     /// Empty is a real answer, not a failure: a PR that reads clean *is* clean.
@@ -787,6 +799,7 @@ pub struct ReviewBrief {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewDraft {
+    pub agent_kind: AgentKind,
     /// Opaque row key minted by the MCP server. Never a path or a URL component.
     pub id: String,
     /// "owner/name" — the PR's own repo.
@@ -809,6 +822,10 @@ pub struct ReviewDraft {
     pub suggestion: Option<String>,
     pub created_at_ms: f64,
     pub updated_at_ms: f64,
+}
+
+fn default_artifact_agent() -> AgentKind {
+    AgentKind::Claude
 }
 
 /// What a batch publish actually did.

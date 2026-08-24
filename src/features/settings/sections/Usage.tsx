@@ -7,11 +7,22 @@
 
 import { type ReactNode, useMemo, useState } from "react";
 
-import type { ModelUsage, SessionUsage, UsageTotals } from "../../../bindings";
-import { ChevronRightIcon } from "../../../components/icons";
-import { EmptyState, Spinner } from "../../../components/primitives";
+import type {
+  AgentKind,
+  CodexRateLimitWindow,
+  ModelUsage,
+  SessionUsage,
+  UsageTotals,
+} from "../../../bindings";
+import { AgentIcon, ChevronRightIcon } from "../../../components/icons";
+import { EmptyState, Spinner, Tabs } from "../../../components/primitives";
 import { formatCompact, formatUsd } from "../../../lib/format";
-import { useClaudeUsage, useUsageProgress } from "../../../lib/queries";
+import {
+  useClaudeUsage,
+  useCodexAccount,
+  useCodexRateLimits,
+  useUsageProgress,
+} from "../../../lib/queries";
 import { formatRelativeTime, useLiveNow } from "../../../lib/relativeTime";
 import { splitRepoPath } from "../../../lib/repo";
 import { modelMeta, modelVersion } from "../../../theme/colors";
@@ -38,22 +49,44 @@ function workTokens(t: UsageTotals): number {
 }
 
 export function UsageSection() {
+  const [agent, setAgent] = useState<AgentKind>("Claude");
+
+  return (
+    <>
+      <Heading title="Usage" subtitle="Token activity and limits reported by each agent." />
+      <Tabs
+        tabs={[
+          {
+            value: "Claude" as const,
+            label: "Claude Code",
+            icon: <AgentIcon kind="Claude" size={13} />,
+          },
+          {
+            value: "Codex" as const,
+            label: "Codex",
+            icon: <AgentIcon kind="Codex" size={13} />,
+          },
+        ]}
+        value={agent}
+        onChange={setAgent}
+        className="mb-4"
+      />
+      {agent === "Claude" ? <ClaudeUsagePanel /> : <CodexUsagePanel />}
+    </>
+  );
+}
+
+function ClaudeUsagePanel() {
   const { data, isLoading, isError } = useClaudeUsage();
   const progress = useUsageProgress();
 
   if (isLoading) {
-    return (
-      <>
-        <Heading title="Usage" subtitle="Claude Code token consumption across all your sessions." />
-        <UsageLoading progress={progress} />
-      </>
-    );
+    return <UsageLoading progress={progress} />;
   }
 
   const empty = isError || !data || sumTokens(data.total) === 0;
   return (
-    <>
-      <Heading title="Usage" subtitle="Claude Code token consumption across all your sessions." />
+    <div>
       {empty ? (
         <EmptyState
           className="py-10"
@@ -75,7 +108,74 @@ export function UsageSection() {
           </p>
         </div>
       )}
-    </>
+    </div>
+  );
+}
+
+function formatCodexWindow(window: CodexRateLimitWindow | null): string {
+  if (!window) return "Unavailable";
+  const used = `${Math.round(window.usedPercent ?? 0)}% used`;
+  const duration = window.windowMinutes ? `${window.windowMinutes} min window` : null;
+  const resetMs = window.resetsAt
+    ? window.resetsAt < 10_000_000_000
+      ? window.resetsAt * 1_000
+      : window.resetsAt
+    : null;
+  const reset = resetMs
+    ? `resets ${new Date(resetMs).toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      })}`
+    : null;
+  return [used, duration, reset].filter(Boolean).join(" · ");
+}
+
+function CodexUsagePanel() {
+  const account = useCodexAccount();
+  const limits = useCodexRateLimits();
+
+  if (account.isLoading || limits.isLoading) {
+    return <EmptyState className="py-10" icon={<Spinner size={18} />} title="Reading usage…" />;
+  }
+  if (!account.data?.connected) {
+    return (
+      <EmptyState
+        className="py-10"
+        title="Codex isn't connected."
+        subtitle="Connect Codex in Settings → Agents → Codex to see its current usage limits."
+      />
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Card title="Account">
+        <div className="grid grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-[12px]">
+          <span className="text-muted-3">Account</span>
+          <span className="text-fg-2">{account.data.email || "Managed by Codex CLI"}</span>
+          <span className="text-muted-3">Plan</span>
+          <span className="text-fg-2">
+            {limits.data?.plan || account.data.plan || "Unavailable"}
+          </span>
+        </div>
+      </Card>
+      <Card title="Rate limits">
+        <div className="flex flex-col gap-2 text-[12px]">
+          <div className="grid grid-cols-[7rem_1fr] gap-x-4">
+            <span className="text-muted-3">Primary</span>
+            <span className="text-fg-2">{formatCodexWindow(limits.data?.primary ?? null)}</span>
+          </div>
+          <div className="grid grid-cols-[7rem_1fr] gap-x-4">
+            <span className="text-muted-3">Secondary</span>
+            <span className="text-fg-2">{formatCodexWindow(limits.data?.secondary ?? null)}</span>
+          </div>
+        </div>
+      </Card>
+      <p className="px-1 text-[11px] leading-[1.5] text-muted-4">
+        Codex reports current rate-limit windows and live thread token usage. Santree does not
+        currently receive a durable billing history, so it does not estimate historical cost.
+      </p>
+    </div>
   );
 }
 

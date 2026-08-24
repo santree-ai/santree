@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use santree_core::domain::{AgentState, SessionState, SessionUsageLive};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 use crate::db::Db;
@@ -258,37 +259,9 @@ const NO_GIT_RULES: [&str; 8] = [
     "Bash(*git * push*)",
 ];
 
-/// The `--settings` file for an **AI review** session: everything
-/// [`claude_settings_no_git`] denies, plus every `gh` route that would speak on the
-/// user's behalf.
-///
-/// The review assistant exists to read a PR and answer questions about it. Posting
-/// a comment, approving, or requesting changes is the *user's* act and must stay
-/// that way — an agent that reviews on your behalf is worse than no agent, because
-/// its output goes out under your name.
-///
-/// Same caveat as [`claude_settings_no_git`]: **best-effort defence-in-depth, not a
-/// security boundary.** These match command text, so a wrapper script, an alias, or
-/// a `curl` straight at the REST API sails past. The real control is the `review`
-/// prompt's hard-rules block, which states the constraint in prose; this catches
-/// the shapes a model actually reaches for when asked to "leave a comment".
-///
-/// `gh api` is denied wholesale rather than by method: it's the one `gh` surface
-/// that can reach *every* mutation endpoint, and losing its read uses (which
-/// nothing here needs — the PR's content is already in the prompt) is a cheap price
-/// for not having to enumerate them.
-pub fn claude_settings_review(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
-    restricted_settings(
-        app,
-        "claude-hooks-review.json",
-        &review_deny_rules(),
-        &[],
-        tutor,
-    )
-}
-
 /// Everything [`claude_settings_no_git`] denies, plus every `gh` route that would
-/// speak on the user's behalf. Shared by the Ask AI session and the AI review.
+/// speak on the user's behalf. `gh api` is denied wholesale because it can reach
+/// every mutation endpoint and the PR content is already in the prompt.
 fn review_deny_rules() -> Vec<&'static str> {
     let gh: [&str; 16] = [
         "Bash(gh pr review:*)",
@@ -316,8 +289,8 @@ fn review_deny_rules() -> Vec<&'static str> {
 /// the two by string, so they have to agree.
 pub const MCP_SERVER_NAME: &str = "santree-review";
 
-/// The `--settings` file for an **AI review** session: the same deny list as the
-/// Ask AI session, plus a grant for santree's own review tools.
+/// The `--settings` file for an **AI review** session: the no-git/no-GitHub-write
+/// deny list plus a grant for santree's own review tools.
 ///
 /// The deny list is what keeps the session from reviewing on the user's behalf; the
 /// grant is what lets it record findings *somewhere the user controls* instead. The
@@ -428,15 +401,23 @@ pub fn mcp_config_ai_review(
         .ok_or_else(|| anyhow::anyhow!("the mcp config path isn't valid UTF-8"))
 }
 
-/// `<owner>-<name>-<number>.mcp.json`. Built from values we control, and still
-/// checked at the point it becomes a filename — that's the sink that would trust
-/// them.
+/// Collision-free filename for one canonical `<owner>/<name>#<number>` identity.
+/// A delimiter-joined name is unsafe here: valid repos `a-b/c` and `a/b-c` would
+/// otherwise share a file and therefore share review-tool authority.
 pub fn mcp_stem(owner: &str, name: &str, number: u32) -> Result<String> {
-    let stem = format!("{owner}-{name}-{number}");
-    if stem.contains(['/', '\\']) || stem.starts_with('.') || stem.is_empty() {
-        return Err(anyhow::anyhow!("refusing to write a file named '{stem}'"));
+    if owner.is_empty()
+        || name.is_empty()
+        || owner.contains(['/', '\\'])
+        || name.contains(['/', '\\'])
+        || owner.starts_with('.')
+        || name.starts_with('.')
+    {
+        return Err(anyhow::anyhow!(
+            "refusing to derive a review file for '{owner}/{name}#{number}'"
+        ));
     }
-    Ok(format!("{stem}.mcp.json"))
+    let digest = Sha256::digest(format!("{owner}/{name}#{number}").as_bytes());
+    Ok(format!("review-{digest:x}.mcp.json"))
 }
 
 /// The config Claude reads. Pure, so the shape can be tested without a running app.
@@ -883,7 +864,11 @@ mod tests {
 
     #[test]
     fn the_config_filename_is_checked_where_it_becomes_a_path() {
-        assert_eq!(mcp_stem("acme", "web", 42).unwrap(), "acme-web-42.mcp.json");
+        assert!(mcp_stem("acme", "web", 42).unwrap().starts_with("review-"));
+        assert_ne!(
+            mcp_stem("a-b", "c", 7).unwrap(),
+            mcp_stem("a", "b-c", 7).unwrap()
+        );
         assert!(mcp_stem("acme", "we/b", 42).is_err());
         assert!(mcp_stem(".", "web", 42).is_err());
     }

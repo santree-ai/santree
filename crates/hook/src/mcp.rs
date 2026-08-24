@@ -17,6 +17,7 @@
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use santree_core::domain::AgentKind;
 use serde_json::{json, Map, Value};
 
 /// The server name Claude sees, and the prefix of its permission rules
@@ -39,6 +40,7 @@ pub(crate) struct McpScope {
     pub head_sha: String,
     /// The diff index santree wrote at launch — what makes a line "real".
     pub diff_index: PathBuf,
+    pub agent_kind: AgentKind,
 }
 
 impl McpScope {
@@ -62,7 +64,17 @@ impl McpScope {
             number,
             head_sha,
             diff_index: PathBuf::from(diff),
+            agent_kind: AgentKind::Claude,
         })
+    }
+
+    pub fn with_agent_kind(mut self, value: &str) -> Option<Self> {
+        let kind = value.parse().ok()?;
+        if !matches!(kind, AgentKind::Claude | AgentKind::Codex) {
+            return None;
+        }
+        self.agent_kind = kind;
+        Some(self)
     }
 }
 

@@ -1,42 +1,66 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ReviewActionSection, TriageActionSection } from "./Actions";
+import { ReviewActionSection, TriageActionSection, WorkActionConfig } from "./Actions";
 
 // Settings → Actions is a leaf view over the settings hooks: mock the data layer
 // (and AppContext) so the panel can render without a Tauri backend.
 let triageOn = false;
+let settingValues: Record<string, string | null> = {};
 
 vi.mock("../../../lib/queries", () => ({
+  COMMIT_MESSAGE_AGENT_KEY: "commit.agent",
+  COMMIT_MESSAGE_MODEL_KEY: "commit.model",
+  DEFAULT_HELPER_MODEL: "haiku",
   EFFORT_LEVELS: ["low", "high"],
   PERMISSION_MODES: [{ value: "acceptEdits", label: "Accept edits" }],
+  PR_BODY_AGENT_KEY: "pr.agent",
+  PR_BODY_MODEL_KEY: "pr.model",
   INVESTIGATE_AGENT_KEY: "investigate.agent",
   INVESTIGATE_EFFORT_KEY: "investigate.effort",
   INVESTIGATE_MODEL_KEY: "investigate.model",
+  INVESTIGATE_PERMISSION_MODE_KEY: "investigate.permissionMode",
   INVESTIGATE_REMOTE_CONTROL_KEY: "investigate.remoteControl",
   REVIEW_EFFORT_KEY: "review.effort",
+  REVIEW_AGENT_KEY: "review.agent",
   REVIEW_MODEL_KEY: "review.model",
+  REVIEW_PERMISSION_MODE_KEY: "review.permissionMode",
+  SYNC_VIEWED_KEY: "syncViewed",
   TRIAGE_GOOD_CITIZEN_KEY: "triage.goodCitizen",
   TRIAGE_SNOOZED_KEY: "triage.snoozed",
   WORK_AGENT_KEY: "work.agent",
+  WORK_ASK_BASE_KEY: "work.askBase",
   WORK_EFFORT_KEY: "work.effort",
   WORK_MODEL_KEY: "work.model",
   WORK_PERMISSION_MODE_KEY: "work.permissionMode",
   WORK_QUEUE_KEY: "work.queue",
+  providerSettingKey: (key: string, agent: string) => `${key}__${agent.toLowerCase()}`,
   useAgents: () => ({
-    data: [{ key: "Claude", label: "Claude", short: "Claude", available: true }],
+    data: [
+      { key: "Claude", label: "Claude Code", short: "Claude", available: true, models: ["opus"] },
+      { key: "Codex", label: "Codex", short: "Codex", available: true, models: ["gpt-5.6-sol"] },
+    ],
   }),
   useBoolSetting: () => ({ value: false }),
   useClaudeModels: () => ({ data: ["opus"] }),
-  useCodexModels: () => ({ data: [] }),
+  useCodexModels: () => ({ data: [{ id: "gpt-5.6-sol" }] }),
+  useGithubStatus: () => ({ data: { authenticated: false } }),
   useResolvedSetting: () => ({ data: null }),
   useSetSetting: () => ({ mutate: vi.fn() }),
-  useSetting: () => ({ data: null }),
+  useSetSyncViewed: () => ({ mutate: vi.fn() }),
+  useSetting: (_scope: string, key: string) => ({ data: settingValues[key] ?? null }),
 }));
 
 vi.mock("../../../state/AppContext", () => ({
   useApp: () => ({
-    settings: { integrations: { linear: true, triage: triageOn }, agents: [] },
+    settings: {
+      defaultAgent: "Codex",
+      integrations: { linear: true, triage: triageOn },
+      agents: [
+        { key: "Claude", model: "opus" },
+        { key: "Codex", model: "" },
+      ],
+    },
     toggleIntegration: vi.fn(),
   }),
 }));
@@ -44,6 +68,7 @@ vi.mock("../../../state/AppContext", () => ({
 describe("app-scope Triage settings", () => {
   beforeEach(() => {
     triageOn = false;
+    settingValues = {};
   });
 
   it("really disables every control in the panel while triage is off", () => {
@@ -70,20 +95,61 @@ describe("app-scope Triage settings", () => {
 });
 
 describe("app-scope Reviews settings", () => {
-  it("offers no agent picker, since the review session is Claude-only", () => {
-    // The read-only guarantee rests on a Claude `--settings` deny-list, so the
-    // launch path ignores any other agent — a picker here would be a control that
-    // silently does nothing.
-    render(<ReviewActionSection />);
-    expect(screen.queryByText("Agent")).not.toBeInTheDocument();
+  beforeEach(() => {
+    settingValues = {};
   });
 
-  it("configures one session, since both review sessions share it", () => {
-    // Ask AI and the AI review read the same PR and differ only in what they're
-    // asked to produce, so a second model picker would be two controls for one
-    // decision.
+  it("offers an agent picker for the default review provider", () => {
+    render(<ReviewActionSection />);
+    expect(screen.getByText("Default agent")).toBeInTheDocument();
+  });
+
+  it("configures the default provider's model and effort", () => {
     render(<ReviewActionSection />);
     expect(screen.getAllByText("Model")).toHaveLength(1);
     expect(screen.getAllByText("Effort")).toHaveLength(1);
+  });
+
+  it("switches to that provider's saved model instead of keeping a cross-provider model", () => {
+    settingValues = {
+      "review.agent": "Claude",
+      "review.model": "gpt-5.6-sol",
+    };
+    render(<ReviewActionSection />);
+
+    const agent = screen.getByLabelText("Default agent");
+    const model = screen.getByLabelText("Model");
+    expect(model).toHaveValue("opus");
+    expect(screen.queryByRole("option", { name: "gpt-5.6-sol" })).toBeNull();
+
+    fireEvent.change(agent, { target: { value: "Codex" } });
+    expect(screen.getByLabelText("Model")).toHaveValue("gpt-5.6-sol");
+  });
+});
+
+describe("app-scope Work settings", () => {
+  beforeEach(() => {
+    settingValues = {};
+  });
+
+  it("separates provider profiles from the three independent agent assignments", () => {
+    settingValues = {
+      "work.agent": "Claude",
+      "commit.agent": "Codex",
+      "pr.agent": "Claude",
+      "commit.model__codex": "gpt-5.6-sol",
+    };
+    render(<WorkActionConfig />);
+
+    expect(screen.queryByText("Default agent")).toBeNull();
+    expect(screen.getByLabelText("Work model")).toHaveValue("opus");
+    expect(screen.getByLabelText("Commit message model")).toHaveValue("haiku");
+    expect(screen.getByLabelText("Work agent")).toHaveValue("Claude");
+    expect(screen.getByLabelText("Commit message agent")).toHaveValue("Codex");
+    expect(screen.getByLabelText("PR description agent")).toHaveValue("Claude");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Codex" }));
+    expect(screen.getByLabelText("Work model")).toHaveValue("gpt-5.6-sol");
+    expect(screen.getByLabelText("Commit message model")).toHaveValue("gpt-5.6-sol");
   });
 });

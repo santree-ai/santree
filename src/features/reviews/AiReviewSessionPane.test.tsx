@@ -40,16 +40,20 @@ vi.mock("./useReviewSessionLatch", () => ({
     requestResume: vi.fn(),
   }),
 }));
-vi.mock("./AiReviewPane", () => ({
+vi.mock("./ReviewSessionShared", () => ({
   ReviewFooter: () => <div />,
   reviewTargetFor: () => ({ prRepo: "acme/app", number: 7, headSha: "abc123" }),
 }));
-vi.mock("@tanstack/react-query", () => ({ useQueryClient: () => ({ removeQueries: vi.fn() }) }));
+vi.mock("@tanstack/react-query", () => ({
+  useQueryClient: () => ({ removeQueries: vi.fn(), invalidateQueries: vi.fn() }),
+}));
 vi.mock("../../lib/queries", () => ({
   CLAUDE_START_WITH_CHROME_KEY: "chrome",
+  REVIEW_AGENT_KEY: "review_agent",
   REVIEW_EFFORT_KEY: "effort",
   REVIEW_MODEL_KEY: "model",
-  queryKeys: { agentSessionPrefix: () => ["s"] },
+  REVIEW_PERMISSION_MODE_KEY: "permission",
+  queryKeys: { agentSessionPrefix: () => ["s"], sessionProviders: () => ["providers"] },
   useAgentSession: () => ({
     data: {
       type: "fresh",
@@ -62,7 +66,10 @@ vi.mock("../../lib/queries", () => ({
   }),
   useAiReviewLaunch: () => q.launch,
   useBoolSetting: () => ({ value: false, isFetched: true }),
-  useResolvedSetting: () => ({ data: "opus", isFetched: true }),
+  useResolvedProviderSetting: (_repo: string, key: string) => ({
+    data: key === "model" ? "opus" : key === "effort" ? "high" : "acceptEdits",
+    isFetched: true,
+  }),
   useReviewDrafts: () => ({ data: [] }),
   useReviewWorkspace: () => ({ data: "/tmp/checkout", isFetched: true, isFetching: false }),
 }));
@@ -84,7 +91,7 @@ describe("AiReviewSessionPane", () => {
       isFetched: true,
       error: new Error("GitHub is unreachable"),
     };
-    render(<AiReviewSessionPane pr={pr} visible onShowDrafts={vi.fn()} />);
+    render(<AiReviewSessionPane pr={pr} agentKind="Claude" visible onShowDrafts={vi.fn()} />);
     expect(spies.terminal).not.toHaveBeenCalled();
     expect(screen.getByText("Couldn't start the AI review")).toBeInTheDocument();
     expect(screen.getByText("GitHub is unreachable")).toBeInTheDocument();
@@ -101,7 +108,7 @@ describe("AiReviewSessionPane", () => {
       isError: false,
       isFetched: true,
     };
-    render(<AiReviewSessionPane pr={pr} visible onShowDrafts={vi.fn()} />);
+    render(<AiReviewSessionPane pr={pr} agentKind="Claude" visible onShowDrafts={vi.fn()} />);
     const seed = spies.terminal.mock.calls[0][0] as string;
     expect(seed).toContain("--settings '/data/claude-hooks-ai-review.json'");
     expect(seed).toContain("--mcp-config '/data/mcp/acme-app-7.mcp.json'");

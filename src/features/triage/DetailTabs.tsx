@@ -1,27 +1,93 @@
-/** The Discussion / Investigation tab bar, shown once an investigation starts. */
-import { ClaudeSparkIcon } from "../../components/icons";
-import { type TabItem, Tabs } from "../../components/primitives";
+/** Discussion plus one durable tab per provider used on this ticket. */
+import type { AgentKind } from "../../bindings";
+import { AgentIcon, PlusIcon } from "../../components/icons";
+import { Dropdown, MENU_ITEM, type TabItem, Tabs } from "../../components/primitives";
+import { useAgentAuth, useCodexAccount, useCodexHealth } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
+import { agentProvider } from "../terminal/agentProvider";
 import type { DetailTab } from "./hooks";
+import { INTERACTIVE_AGENTS } from "./providerSessions";
 
-const DETAIL_TABS: TabItem<DetailTab>[] = [
-  // Discussion first; the Investigation tab only renders once a session is live.
-  { value: "discussion", label: "Discussion" },
-  // The spark marks it as the Claude session it hosts (like the Trees agent tabs).
-  { value: "investigate", label: "Investigation", icon: <ClaudeSparkIcon size={12} /> },
-];
-
-export function DetailTabs({ tab, onTab }: { tab: DetailTab; onTab: (t: DetailTab) => void }) {
+export function DetailTabs({
+  tab,
+  providers,
+  includeDiscussion = true,
+  onTab,
+}: {
+  tab: DetailTab;
+  providers: AgentKind[];
+  includeDiscussion?: boolean;
+  onTab: (t: DetailTab) => void;
+}) {
   const { accent } = useApp();
+  const claudeReady = !!useAgentAuth("Claude").data?.connected;
+  const codexHealth = useCodexHealth();
+  const codexAccount = useCodexAccount();
+  const codexReady = !!codexHealth.data?.available && !!codexAccount.data?.connected;
+  const tabs: TabItem<DetailTab>[] = [
+    ...(includeDiscussion
+      ? ([{ value: "discussion", label: "Discussion" }] as TabItem<DetailTab>[])
+      : []),
+    ...providers.map(
+      (agent): TabItem<DetailTab> => ({
+        value: agent,
+        label: agentProvider(agent).label,
+        icon: <AgentIcon kind={agent} size={12} />,
+      }),
+    ),
+  ];
+  const addable = INTERACTIVE_AGENTS.filter((agent) => !providers.includes(agent));
   return (
-    <Tabs
-      className="flex-none border-b border-hairline px-5"
-      tabs={DETAIL_TABS}
-      value={tab}
-      onChange={onTab}
-      variant="inset"
-      accent={accent}
-      tabClassName="py-2"
-    />
+    <div className="flex flex-none items-stretch border-b border-hairline px-5">
+      <Tabs
+        className="min-w-0 flex-1"
+        tabs={tabs}
+        value={tab}
+        onChange={onTab}
+        variant="inset"
+        accent={accent}
+        tabClassName="py-2"
+      />
+      {addable.length > 0 && (
+        <Dropdown
+          align="right"
+          menuClassName="w-40 overflow-hidden"
+          trigger={(toggle) => (
+            <button
+              type="button"
+              onClick={toggle}
+              title="Investigate with another agent"
+              aria-label="Investigate with another agent"
+              className="flex w-8 cursor-pointer items-center justify-center text-muted-3 hover:text-fg-2"
+            >
+              <PlusIcon size={12} />
+            </button>
+          )}
+        >
+          {(close) =>
+            addable.map((agent) => (
+              <button
+                key={agent}
+                type="button"
+                disabled={agent === "Codex" ? !codexReady : !claudeReady}
+                title={
+                  (agent === "Codex" ? codexReady : claudeReady)
+                    ? undefined
+                    : `Connect ${agentProvider(agent).label} in Settings first`
+                }
+                className={MENU_ITEM}
+                onClick={() => {
+                  onTab(agent);
+                  close();
+                }}
+              >
+                <AgentIcon kind={agent} size={13} />
+                {agentProvider(agent).label}
+              </button>
+            ))
+          }
+        </Dropdown>
+      )}
+    </div>
   );
 }

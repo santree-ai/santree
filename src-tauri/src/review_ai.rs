@@ -1,22 +1,16 @@
-//! The Reviews tab's AI surfaces: the opening prompts for the two review sessions,
-//! and the cached **review brief** (summary, reading order, watch-outs) shown
-//! beside a PR.
+//! The Reviews tab's AI-review session: its opening prompt and cached **review
+//! brief** (summary, reading order, watch-outs) shown beside a PR. The session
+//! writes briefs and draft comments only through santree's own MCP tools
+//! ([`launch`] is what wires those up).
 //!
-//! Two sessions, deliberately different. **Ask AI** (`review`) is a reading
-//! partner: it explains the PR and answers questions, and writes nothing anywhere.
-//! **AI review** (`pr-review`) is asked to produce something — a brief and draft
-//! comments — and gets santree's own MCP tools to put them in, which is the only
-//! write path it has ([`launch`] is what wires those up).
-//!
-//! Neither can post to GitHub. That isn't a promise about the model's behaviour: a
+//! It cannot post to GitHub. That isn't a promise about the model's behaviour: a
 //! review goes out under the user's name, so it goes out when the user sends it.
-//! The deny list ([`crate::hooks::claude_settings_review`] and its AI-review twin)
-//! blocks the `gh` routes, the prompts state the rule, and everything the AI review
-//! writes lands in `review_drafts` until a person publishes it.
+//! The deny list blocks the `gh` routes, the prompt states the rule, and everything
+//! the AI review writes lands in `review_drafts` until a person publishes it.
 //!
 //! The PR body, its conversation and its diff are **untrusted** — anyone with repo
 //! access, and any bot whose output lands in a diff, can write into them. They're
-//! fenced in `<pull-request>` in both templates.
+//! fenced in `<pull-request>` in the template.
 
 use std::path::Path;
 
@@ -199,20 +193,6 @@ fn shared_context(target: &ReviewTarget, i: &PromptInputs) -> minijinja::Value {
         workspace => i.has_workspace,
         truncated => i.truncated,
     }
-}
-
-/// Render the **Ask AI** session's opening prompt and write it to a file, returning
-/// the **path** — the terminal seeds `Read <path> …` rather than the text itself,
-/// which is far too large for a shell seed (this is a whole PR diff).
-pub async fn review_prompt(
-    db: &Db,
-    repo: &str,
-    prompts_root: &Path,
-    target: &ReviewTarget,
-) -> Result<String> {
-    let inputs = prompt_inputs(db, repo, target).await?;
-    let body = prompts::render_from(&inputs.sources, "review", shared_context(target, &inputs))?;
-    write_prompt(prompts_root, &target.pr_repo, target.number, "review", body).await
 }
 
 /// Render the **AI review** session's prompt — the one asked to produce a brief and

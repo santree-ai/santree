@@ -43,6 +43,7 @@ const backend = vi.hoisted(() => ({
 
 vi.mock("../../lib/queries", () => ({
   CLAUDE_START_WITH_CHROME_KEY: "claude_start_with_chrome",
+  WORK_AGENT_KEY: "work_agent",
   WORK_EFFORT_KEY: "work_effort",
   WORK_MODEL_KEY: "work_model",
   WORK_PERMISSION_MODE_KEY: "work_permission_mode",
@@ -65,7 +66,7 @@ vi.mock("../../lib/queries", () => ({
       isFetching: enabled && backend.sessionFetching,
     };
   },
-  useResolvedSetting: (_repo: string, key: string) => ({
+  useResolvedProviderSetting: (_repo: string, key: string) => ({
     data:
       key === "work_model"
         ? backend.model

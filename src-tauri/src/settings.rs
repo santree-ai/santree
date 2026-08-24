@@ -15,6 +15,7 @@ use crate::db::Db;
 /// The `settings` key under which the full [`Settings`] blob is persisted (scope `"app"`).
 const SETTINGS_KEY: &str = "settings";
 const CODEX_DEFAULT_MIGRATION_KEY: &str = "migration.codex_default_v1";
+const HELPER_AGENTS_MIGRATION_KEY: &str = "migration.helper_agents_v1";
 
 /// Gate the *IPC* key-value surface (`get_setting` / `set_setting`), whose scope and
 /// key both arrive from the webview. Internal callers (`pricing`'s `price_cache`
@@ -149,6 +150,44 @@ pub async fn resolve(db: &Db, repo: &str, key: &str) -> Result<Option<String>> {
     Ok(pick(&repo_scope).or_else(|| pick("app")))
 }
 
+pub fn provider_setting_key(key: &str, agent: santree_core::domain::AgentKind) -> String {
+    format!("{key}__{}", agent.as_str().to_ascii_lowercase())
+}
+
+pub(crate) fn legacy_value_matches_provider(key: &str, value: &str, agent: AgentKind) -> bool {
+    if !key.ends_with("_model") {
+        return true;
+    }
+    let claude_model = value.starts_with("claude-") || matches!(value, "opus" | "sonnet" | "haiku");
+    match agent {
+        AgentKind::Claude => claude_model,
+        AgentKind::Codex => !claude_model,
+        AgentKind::Cursor | AgentKind::Opencode => true,
+    }
+}
+
+/// Resolve a provider-specific workflow profile. Legacy unsuffixed settings are
+/// accepted only for the workflow's selected provider, so switching providers
+/// can never feed one vendor's model id to another vendor's CLI.
+pub async fn resolve_provider(
+    db: &Db,
+    repo: &str,
+    key: &str,
+    agent_key: &str,
+    agent: santree_core::domain::AgentKind,
+) -> Result<Option<String>> {
+    if let Some(value) = resolve(db, repo, &provider_setting_key(key, agent)).await? {
+        return Ok(Some(value));
+    }
+    let selected = resolve(db, repo, agent_key).await?;
+    if selected.as_deref() == Some(agent.as_str()) {
+        return Ok(resolve(db, repo, key)
+            .await?
+            .filter(|value| legacy_value_matches_provider(key, value, agent)));
+    }
+    Ok(None)
+}
+
 /// The user's settings: the persisted blob when present, else the seeded
 /// defaults. A corrupt blob falls back to defaults rather than erroring.
 pub async fn get_settings(db: &Db) -> Result<Settings> {
@@ -182,7 +221,7 @@ pub async fn migrate_codex_defaults(db: &Db) -> Result<()> {
         .await?
         > 0
     {
-        return Ok(());
+        return migrate_helper_agents(db).await;
     }
     let mut tx = db.begin().await?;
     let stored: Option<String> =
@@ -255,6 +294,35 @@ pub async fn migrate_codex_defaults(db: &Db) -> Result<()> {
     }
     sqlx::query("INSERT INTO settings (scope, key, value) VALUES ('app', ?, 'done')")
         .bind(CODEX_DEFAULT_MIGRATION_KEY)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    migrate_helper_agents(db).await
+}
+
+/// Materialize the two helper assignments once so they remain independent when
+/// Work's provider changes later. Existing explicit helper choices always win.
+async fn migrate_helper_agents(db: &Db) -> Result<()> {
+    if get(db, "app", HELPER_AGENTS_MIGRATION_KEY).await?.is_some() {
+        return Ok(());
+    }
+    let settings = get_settings(db).await?;
+    let fallback = get(db, "app", "work_agent")
+        .await?
+        .unwrap_or_else(|| settings.default_agent.as_str().to_string());
+    let mut tx = db.begin().await?;
+    for key in ["commit_message_agent", "pr_body_agent"] {
+        sqlx::query(
+            "INSERT INTO settings (scope, key, value) VALUES ('app', ?, ?)
+             ON CONFLICT (scope, key) DO NOTHING",
+        )
+        .bind(key)
+        .bind(&fallback)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query("INSERT INTO settings (scope, key, value) VALUES ('app', ?, 'done')")
+        .bind(HELPER_AGENTS_MIGRATION_KEY)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -1045,6 +1113,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_profiles_are_independent_and_reject_cross_provider_legacy_models() {
+        let db = test_db().await;
+        set(&db, "app", "work_agent", Some("Claude".into()))
+            .await
+            .unwrap();
+        set(&db, "app", "work_model", Some("gpt-5.6-sol".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolve_provider(&db, "repo", "work_model", "work_agent", AgentKind::Claude)
+                .await
+                .unwrap(),
+            None
+        );
+        set(
+            &db,
+            "app",
+            &provider_setting_key("work_model", AgentKind::Claude),
+            Some("claude-opus-5".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resolve_provider(&db, "repo", "work_model", "work_agent", AgentKind::Claude)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("claude-opus-5")
+        );
+        assert_eq!(
+            resolve_provider(&db, "repo", "work_model", "work_agent", AgentKind::Codex)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn get_settings_defaults_to_config_when_unset() {
         let db = test_db().await;
         assert_eq!(get_settings(&db).await.unwrap(), config::default_settings());
@@ -1142,6 +1249,39 @@ mod tests {
         assert_eq!(
             get(&db, "app", "work_model").await.unwrap().as_deref(),
             Some("opus")
+        );
+    }
+
+    #[tokio::test]
+    async fn helper_agent_migration_materializes_independent_choices_once() {
+        let db = test_db().await;
+        set(&db, "app", "work_agent", Some("Claude".into()))
+            .await
+            .unwrap();
+        set(&db, "app", "commit_message_agent", Some("Codex".into()))
+            .await
+            .unwrap();
+
+        migrate_helper_agents(&db).await.unwrap();
+        assert_eq!(
+            get(&db, "app", "commit_message_agent")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Codex")
+        );
+        assert_eq!(
+            get(&db, "app", "pr_body_agent").await.unwrap().as_deref(),
+            Some("Claude")
+        );
+
+        set(&db, "app", "work_agent", Some("Codex".into()))
+            .await
+            .unwrap();
+        migrate_helper_agents(&db).await.unwrap();
+        assert_eq!(
+            get(&db, "app", "pr_body_agent").await.unwrap().as_deref(),
+            Some("Claude")
         );
     }
 

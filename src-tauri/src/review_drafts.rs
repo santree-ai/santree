@@ -15,7 +15,7 @@
 use anyhow::{anyhow, Result};
 
 use santree_core::domain::{
-    NewInlineComment, ReviewDraft, ReviewPublishFailure, ReviewPublishOutcome,
+    AgentKind, NewInlineComment, ReviewDraft, ReviewPublishFailure, ReviewPublishOutcome,
 };
 
 use crate::db::{now_ms, Db};
@@ -40,10 +40,11 @@ type Row = (
     Option<String>,
     i64,
     i64,
+    String,
 );
 
 const COLUMNS: &str = "id, pr_repo, pr_number, head_sha, path, line, start_line, on_right, body, \
-                       suggestion, created_at, updated_at";
+                       suggestion, created_at, updated_at, agent_kind";
 
 fn to_draft(r: Row) -> ReviewDraft {
     ReviewDraft {
@@ -59,6 +60,7 @@ fn to_draft(r: Row) -> ReviewDraft {
         suggestion: r.9,
         created_at_ms: r.10 as f64,
         updated_at_ms: r.11 as f64,
+        agent_kind: r.12.parse().unwrap_or(AgentKind::Claude),
     }
 }
 

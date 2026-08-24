@@ -28,9 +28,10 @@ import { toast } from "../../state/toast";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
+import { triageTerminalRef } from "./providerSessions";
 
-/** Which detail tab a ticket is showing. */
-export type DetailTab = "discussion" | "investigate";
+/** Discussion, or the provider-specific investigation currently in front. */
+export type DetailTab = "discussion" | AgentKind;
 
 /**
  * The selected ticket. `selectedId` is the raw click target; `activeId` is the
@@ -52,7 +53,7 @@ export function useTriageSelection(ordered: TriageTicket[], visible: TriageTicke
 
 /**
  * Per-ticket detail-tab memory: each ticket remembers whichever tab it was on
- * (Discussion or Investigation) so switching tickets and coming back restores
+ * (Discussion or a provider session) so switching tickets and coming back restores
  * it. `tabFor(id)` defaults to Discussion until the ticket's investigation opens.
  */
 export function useTabByTicket() {
@@ -166,13 +167,14 @@ export function useBatchInvestigate(opts: {
   agentKind: AgentKind;
   model: string | null;
   effort: string | null;
+  permissionMode: string | null;
   remoteControl: boolean;
 }) {
   const { ensure } = useTerminals();
   const qc = useQueryClient();
   const hookSettings = useClaudeHookSettings().data;
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
-  const { repo, cwd, agentKind, model, effort, remoteControl } = opts;
+  const { repo, cwd, agentKind, model, effort, permissionMode, remoteControl } = opts;
 
   return useCallback(
     async (ids: string[]) => {
@@ -199,6 +201,9 @@ export function useBatchInvestigate(opts: {
               resolvedAgent === agentKind && model ? `--model ${shellQuote(model)}` : undefined,
             effortFlag:
               resolvedAgent === agentKind && effort ? `--effort ${shellQuote(effort)}` : undefined,
+            permissionMode: provider.capabilities.permissionMode
+              ? (permissionMode ?? undefined)
+              : undefined,
             remoteControl: provider.capabilities.remoteControl && remoteControl ? id : undefined,
             settingsFlag:
               provider.capabilities.cliLaunchOptions && hookSettings
@@ -206,7 +211,13 @@ export function useBatchInvestigate(opts: {
                 : undefined,
             chrome: provider.capabilities.cliLaunchOptions && startWithChrome,
           });
-          ensure({ title: id, cwd, source: "triage", refId: id, seed });
+          ensure({
+            title: `${id} · ${provider.label}`,
+            cwd,
+            source: "triage",
+            refId: triageTerminalRef(id, resolvedAgent),
+            seed,
+          });
         }),
       );
       // Each launch recorded a session — refresh the "started" set so the
@@ -219,7 +230,19 @@ export function useBatchInvestigate(opts: {
       if (failed > 0)
         toast.error(`Couldn't start ${failed} investigation${failed === 1 ? "" : "s"}.`);
     },
-    [repo, cwd, agentKind, model, effort, remoteControl, hookSettings, startWithChrome, ensure, qc],
+    [
+      repo,
+      cwd,
+      agentKind,
+      model,
+      effort,
+      permissionMode,
+      remoteControl,
+      hookSettings,
+      startWithChrome,
+      ensure,
+      qc,
+    ],
   );
 }
 

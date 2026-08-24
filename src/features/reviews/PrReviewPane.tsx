@@ -21,7 +21,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { PrFile, PrThread, ReviewDraft, ReviewPr } from "../../bindings";
-import { ChevronDownIcon, ClaudeSparkIcon, EyeIcon, WarningIcon } from "../../components/icons";
+import { AgentIcon, ChevronDownIcon, EyeIcon, WarningIcon } from "../../components/icons";
 import { EmptyState, Skeleton } from "../../components/primitives";
 import {
   usePrDetail,
@@ -318,7 +318,9 @@ const PrFileCard = memo(function PrFileCard({
             style={{ color: palette.purple }}
             title={`${drafts.length} AI draft${drafts.length === 1 ? "" : "s"} on this file`}
           >
-            <ClaudeSparkIcon size={9} />
+            {[...new Set(drafts.map((draft) => draft.agentKind))].map((agent) => (
+              <AgentIcon key={agent} kind={agent} size={9} />
+            ))}
             {drafts.length}
           </span>
         )}

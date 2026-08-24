@@ -238,20 +238,14 @@ export const commands = {
 	 *  "Fix CI with AI" flow. `base` is the PR's base branch (for the worktree's diff).
 	 */
 	createWorktreeForPr: (repo: string, issueId: string, title: string, branch: string, base: string | null, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree_for_pr", { repo, issueId, title, branch, base, agent })),
-	/**
-	 *  Resolve an interactive provider session: resume its durable id, start fresh,
-	 *  or leave the terminal as a plain shell.
-	 *  `term_key` is the logical terminal id (e.g. `tree:AK-1`, `triage:AK-1`); `cwd`
-	 *  is where the provider runs. `allow_fresh` mints a session when none is resumable
-	 *  (set on an explicit launch; false on a passive reopen).
-	 */
 	agentSession: (repo: string, termKey: string, cwd: string, allowFresh: boolean, agent: AgentKind) => typedError<AgentSession, CmdError>(__TAURI_INVOKE("agent_session", { repo, termKey, cwd, allowFresh, agent })),
 	/**
-	 *  Ticket ids of triage investigations that have a stored (resumable) session —
-	 *  i.e. an investigation was started for them at some point. Drives the Triage
-	 *  view's tab + resume affordance for past investigations (across app restarts).
+	 *  Stored Triage surfaces and their sticky providers. Drives resume affordances
+	 *  and provider-correct branding across app restarts.
 	 */
-	startedInvestigations: (repo: string) => typedError<string[], CmdError>(__TAURI_INVOKE("started_investigations", { repo })),
+	startedInvestigations: (repo: string) => typedError<TriageSession[], CmdError>(__TAURI_INVOKE("started_investigations", { repo })),
+	/**  Provider tabs persisted for one logical agent surface. */
+	sessionProviders: (repo: string, termKey: string) => typedError<AgentKind[], CmdError>(__TAURI_INVOKE("session_providers", { repo, termKey })),
 	/**
 	 *  All persisted extra tabs (Claude / terminal) for the repo's worktrees, in
 	 *  open order — loaded on Trees mount so tabs survive app restarts.
@@ -317,18 +311,12 @@ export const commands = {
 	/**  Delete a PR's review checkout. Idempotent. */
 	removeReviewWorkspace: (repo: string, number: number) => typedError<null, CmdError>(__TAURI_INVOKE("remove_review_workspace", { repo, number })),
 	/**
-	 *  Render the AI-review opening prompt for a PR (its description, conversation and
-	 *  diff around the `review` template), write it to a file, and return that file's
-	 *  **path** — the terminal seeds `Read <path> …` with it, since a whole PR diff is
-	 *  far too large for a shell seed. The Reviews analog of [`investigate_prompt`].
-	 */
-	reviewPrompt: (repo: string, target: ReviewTarget) => typedError<string, CmdError>(__TAURI_INVOKE("review_prompt", { repo, target })),
-	/**
 	 *  The cached AI review brief for a PR (summary, reading order, watch-outs), or
 	 *  `None` when none has been generated. A single row read — the panel renders its
 	 *  "generate" state off this without waiting on any model.
 	 */
 	prReviewBrief: (prRepo: string, number: number) => typedError<{
+	agentKind?: AgentKind,
 	summary: string,
 	readingOrder: ReadingStep[],
 	/**  Empty is a real answer, not a failure: a PR that reads clean *is* clean. */
@@ -547,13 +535,6 @@ export const commands = {
 	 *  Trees). `None` when the hook binary/db can't be resolved.
 	 */
 	claudeHookSettingsNoGit: () => __TAURI_INVOKE<string | null>("claude_hook_settings_no_git"),
-	/**
-	 *  The `--settings` file an **AI review** session launches with: everything
-	 *  [`claude_hook_settings_no_git`] denies, plus every `gh` route that could post a
-	 *  comment, approve, or otherwise speak as the user on a PR. `None` when the hook
-	 *  binary/db can't be resolved.
-	 */
-	claudeHookSettingsReview: () => __TAURI_INVOKE<string | null>("claude_hook_settings_review"),
 	/**
 	 *  The English tutor's practice log, read-only. Creates the file when it's missing,
 	 *  so a fresh install shows an empty log rather than an error.
@@ -1950,6 +1931,7 @@ export type ReviewAiChanged = Record<string, never>;
  *  `PartialEq` but not `Eq` — `generated_at_ms` is an `f64` (see its note).
  */
 export type ReviewBrief = {
+	agentKind?: AgentKind,
 	summary: string,
 	readingOrder: ReadingStep[],
 	/**  Empty is a real answer, not a failure: a PR that reads clean *is* clean. */
@@ -1995,6 +1977,7 @@ export type ReviewDecision = "Approved" | "ChangesRequested" |
  *  ints), see [`ReviewBrief::generated_at_ms`].
  */
 export type ReviewDraft = {
+	agentKind: AgentKind,
 	/**  Opaque row key minted by the MCP server. Never a path or a URL component. */
 	id: string,
 	/**  "owner/name" — the PR's own repo. */
@@ -2495,6 +2478,16 @@ export type TriageSchedule = {
 	/**  True when the signed-in viewer is the one currently on triage. */
 	currentIsMe: boolean,
 	shifts: TriageShift[],
+};
+
+/**
+ *  A persisted Triage terminal and the provider that owns its durable session.
+ *  `ref_id` is normally a Linear ticket id; Triage's repo-wide scratch session
+ *  uses its reserved frontend sentinel instead.
+ */
+export type TriageSession = {
+	refId: string,
+	agentKind: AgentKind,
 };
 
 /**  A single on-call slot in a triage rotation. */

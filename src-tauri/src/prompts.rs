@@ -71,9 +71,24 @@ const ISSUE_VARS: &[VarDoc] = &[
     },
 ];
 
-/// The built-in prompts, in editor display order (Flows first, then the built-in
-/// block). Add a prompt here and drop its default `.njk` in `prompts/` together.
+/// The built-in prompts, grouped in editor display order. Add a prompt here and
+/// drop its default `.njk` in `prompts/` together.
 static PROMPT_DEFS: &[PromptDef] = &[
+    PromptDef {
+        name: "triage",
+        label: "Triage investigation",
+        description: "The agent's opening prompt when you Investigate a Triage issue. Unlike the other flows, the ticket's screenshots are kept (saved as local files the agent can Read), not stripped.",
+        kind: PromptKind::Flow,
+        default: include_str!("../prompts/triage.njk"),
+        variables: &[
+            VarDoc { name: "ticket_id", description: "The issue id, e.g. \"AK-165\"." },
+            VarDoc { name: "title", description: "The issue title." },
+            VarDoc {
+                name: "ticket_content",
+                description: "The rendered Issue block (description + comment thread). Its screenshots are rewritten to local file paths the agent can Read.",
+            },
+        ],
+    },
     PromptDef {
         name: "work",
         label: "Work / start task",
@@ -121,57 +136,6 @@ static PROMPT_DEFS: &[PromptDef] = &[
         ],
     },
     PromptDef {
-        name: "fix-ci",
-        label: "Fix CI",
-        description: "The agent's prompt when fixing a failed CI check on a worktree.",
-        kind: PromptKind::Flow,
-        default: include_str!("../prompts/fix-ci.njk"),
-        variables: &[
-            VarDoc { name: "ticket_id", description: "The issue id, empty for the base worktree." },
-            VarDoc { name: "title", description: "The worktree/issue title." },
-            VarDoc { name: "log_content", description: "The failing CI job log (sliced to the failing step)." },
-        ],
-    },
-    PromptDef {
-        name: "triage",
-        label: "Triage investigation",
-        description: "The agent's opening prompt when you Investigate a Triage issue. Unlike the other flows, the ticket's screenshots are kept (saved as local files the agent can Read), not stripped.",
-        kind: PromptKind::Flow,
-        default: include_str!("../prompts/triage.njk"),
-        variables: &[
-            VarDoc { name: "ticket_id", description: "The issue id, e.g. \"AK-165\"." },
-            VarDoc { name: "title", description: "The issue title." },
-            VarDoc {
-                name: "ticket_content",
-                description: "The rendered Issue block (description + comment thread). Its screenshots are rewritten to local file paths the agent can Read.",
-            },
-        ],
-    },
-    PromptDef {
-        name: "review",
-        label: "Review with AI",
-        description: "The agent's opening prompt for an AI review session on a pull request. Read-only by design — its hard-rules block is what keeps the agent from ever commenting or approving on your behalf.",
-        kind: PromptKind::Flow,
-        default: include_str!("../prompts/review.njk"),
-        variables: &[
-            VarDoc { name: "pr_number", description: "The pull request number." },
-            VarDoc { name: "pr_title", description: "The pull request title." },
-            VarDoc { name: "pr_body", description: "The pull request description (markdown)." },
-            VarDoc { name: "pr_author", description: "The author's GitHub login." },
-            VarDoc { name: "base_ref", description: "The PR's base branch." },
-            VarDoc { name: "head_ref", description: "The PR's head branch." },
-            VarDoc { name: "head_sha", description: "The PR's head commit SHA." },
-            VarDoc { name: "diff_stat", description: "One-line summary of the changed files." },
-            VarDoc { name: "diff", description: "The PR's full diff (capped; see `truncated`)." },
-            VarDoc { name: "conversation", description: "The PR's existing comments and review threads." },
-            VarDoc { name: "ticket_content", description: "The rendered Issue block for the PR's linked ticket. Empty when it has none." },
-            VarDoc {
-                name: "workspace",
-                description: "True when a checkout of the PR's head exists for the agent to read. False for a PR in a repo santree has no local clone of — the prompt then tells the agent it only has the diff.",
-            },
-        ],
-    },
-    PromptDef {
         name: "pr-review",
         label: "AI review",
         description: "The agent's opening prompt for an AI review — the session that writes the brief and the draft comments through santree's own tools. Its hard-rules block is what keeps everything it produces inside santree until you publish it.",
@@ -198,6 +162,18 @@ static PROMPT_DEFS: &[PromptDef] = &[
                 name: "existing_drafts",
                 description: "Drafts already saved for this PR (`path`, `line`, `body`), so a resumed review doesn't repeat itself.",
             },
+        ],
+    },
+    PromptDef {
+        name: "fix-ci",
+        label: "Fix CI",
+        description: "The agent's prompt when fixing a failed CI check on a worktree.",
+        kind: PromptKind::Flow,
+        default: include_str!("../prompts/fix-ci.njk"),
+        variables: &[
+            VarDoc { name: "ticket_id", description: "The issue id, empty for the base worktree." },
+            VarDoc { name: "title", description: "The worktree/issue title." },
+            VarDoc { name: "log_content", description: "The failing CI job log (sliced to the failing step)." },
         ],
     },
     PromptDef {
@@ -1042,6 +1018,29 @@ mod tests {
         // And the rule that makes the whole feature safe to leave running.
         assert!(out.contains("Never write through any other tool"));
         assert!(out.contains("<pull-request>"), "fences the untrusted diff");
+    }
+
+    #[test]
+    fn builtins_have_one_review_prompt_and_follow_workflow_order() {
+        let names: Vec<_> = PROMPT_DEFS.iter().map(|prompt| prompt.name).collect();
+        assert_eq!(
+            names,
+            [
+                "triage",
+                "work",
+                "fill-commit",
+                "fill-pr",
+                "pr-review",
+                "fix-ci",
+                "english-tutor",
+                "english-analysis",
+                "issue",
+            ]
+        );
+        assert!(
+            !names.contains(&"review"),
+            "the retired Ask AI prompt stays deleted"
+        );
     }
 
     #[test]

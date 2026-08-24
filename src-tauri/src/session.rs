@@ -10,24 +10,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use santree_core::domain::{AgentKind, AgentSession};
+use santree_core::domain::{AgentKind, AgentSession, TriageSession};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::db::Db;
-
-/// The persisted provider is the authority for an existing logical terminal.
-/// Defaults only apply before the first session is created.
-pub async fn stored_agent_kind(db: &Db, repo: &str, term_key: &str) -> Result<Option<AgentKind>> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT agent_kind FROM terminal_sessions WHERE repo = ? AND term_key = ?")
-            .bind(repo)
-            .bind(term_key)
-            .fetch_optional(db)
-            .await?;
-    row.map(|(kind,)| kind.parse().map_err(anyhow::Error::from))
-        .transpose()
-}
 
 /// Claude stores each session's transcript at
 /// `~/.claude/projects/<escaped-cwd>/<session-id>.jsonl`, escaping the working
@@ -73,7 +60,8 @@ pub async fn resolve(
     allow_fresh: bool,
 ) -> Result<AgentSession> {
     let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT session_id, cwd, agent_kind FROM terminal_sessions WHERE repo = ? AND term_key = ?",
+        "SELECT session_id, cwd, agent_kind FROM terminal_sessions
+         WHERE repo = ? AND term_key = ? AND agent_kind = 'Claude'",
     )
     .bind(repo)
     .bind(term_key)
@@ -133,6 +121,7 @@ pub struct CodexSessionOpts<'a> {
     pub effort: Option<&'a str>,
     pub profile: crate::codex::CodexProfile,
     pub allow_fresh: bool,
+    pub review_mcp_config: Option<&'a Path>,
 }
 
 pub async fn resolve_codex(
@@ -149,9 +138,11 @@ pub async fn resolve_codex(
         effort,
         profile,
         allow_fresh,
+        review_mcp_config,
     } = opts;
     let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT session_id, agent_kind FROM terminal_sessions WHERE repo = ? AND term_key = ?",
+        "SELECT session_id, agent_kind FROM terminal_sessions
+         WHERE repo = ? AND term_key = ? AND agent_kind = 'Codex'",
     )
     .bind(repo)
     .bind(term_key)
@@ -173,11 +164,12 @@ pub async fn resolve_codex(
     if !allow_fresh {
         return Ok(AgentSession::Shell);
     }
-    let thread_id = runtime.start_thread(executable, cwd, model, effort, profile)?;
+    let thread_id =
+        runtime.start_thread(executable, cwd, model, effort, profile, review_mcp_config)?;
     let mut tx = db.begin().await?;
     sqlx::query(
         "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
-         VALUES (?, ?, ?, ?, 'Codex') ON CONFLICT (repo, term_key) DO NOTHING",
+         VALUES (?, ?, ?, ?, 'Codex') ON CONFLICT (repo, term_key, agent_kind) DO NOTHING",
     )
     .bind(repo)
     .bind(term_key)
@@ -185,12 +177,14 @@ pub async fn resolve_codex(
     .bind(&thread_id)
     .execute(&mut *tx)
     .await?;
-    let (persisted_id,): (String,) =
-        sqlx::query_as("SELECT session_id FROM terminal_sessions WHERE repo = ? AND term_key = ?")
-            .bind(repo)
-            .bind(term_key)
-            .fetch_one(&mut *tx)
-            .await?;
+    let (persisted_id,): (String,) = sqlx::query_as(
+        "SELECT session_id FROM terminal_sessions
+             WHERE repo = ? AND term_key = ? AND agent_kind = 'Codex'",
+    )
+    .bind(repo)
+    .bind(term_key)
+    .fetch_one(&mut *tx)
+    .await?;
     tx.commit().await?;
     if persisted_id != thread_id {
         runtime.resume_thread(executable, &persisted_id)?;
@@ -210,7 +204,7 @@ pub async fn resolve_codex(
 async fn mint(db: &Db, repo: &str, term_key: &str, cwd: &str) -> Result<String> {
     sqlx::query(
         "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind) VALUES (?, ?, ?, ?, 'Claude')
-         ON CONFLICT (repo, term_key) DO NOTHING",
+         ON CONFLICT (repo, term_key, agent_kind) DO NOTHING",
     )
     .bind(repo)
     .bind(term_key)
@@ -218,34 +212,60 @@ async fn mint(db: &Db, repo: &str, term_key: &str, cwd: &str) -> Result<String> 
     .bind(Uuid::new_v4().to_string())
     .execute(db)
     .await?;
-    let (session_id,): (String,) =
-        sqlx::query_as("SELECT session_id FROM terminal_sessions WHERE repo = ? AND term_key = ?")
-            .bind(repo)
-            .bind(term_key)
-            .fetch_one(db)
-            .await?;
+    let (session_id,): (String,) = sqlx::query_as(
+        "SELECT session_id FROM terminal_sessions
+             WHERE repo = ? AND term_key = ? AND agent_kind = 'Claude'",
+    )
+    .bind(repo)
+    .bind(term_key)
+    .fetch_one(db)
+    .await?;
     Ok(session_id)
 }
 
-/// The ticket ids of every triage investigation that has a *stored session* for
-/// `repo` — i.e. one was started for it at some point, so it can be resumed.
+/// Every Triage surface that has a *stored session* for `repo`, including the
+/// provider that owns it, so the frontend can preserve historical branding.
 ///
 /// Mirrors how a worktree row makes the Trees work terminal resumable: presence
 /// of the record — not the on-disk transcript — is what surfaces the tab +
 /// resume affordance. We intentionally don't stat the transcript here: even if
 /// Claude has pruned it, `resolve` (with `allow_fresh`) reuses the stored id to
 /// start fresh, so a stored session is always a valid resume target.
-pub async fn started_investigations(db: &Db, repo: &str) -> Result<Vec<String>> {
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT term_key FROM terminal_sessions WHERE repo = ? AND term_key LIKE 'triage:%'",
+pub async fn started_investigations(db: &Db, repo: &str) -> Result<Vec<TriageSession>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT term_key, agent_kind FROM terminal_sessions
+         WHERE repo = ? AND term_key LIKE 'triage:%'",
     )
     .bind(repo)
     .fetch_all(db)
     .await?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(key,)| key.strip_prefix("triage:").map(str::to_string))
-        .collect())
+    rows.into_iter()
+        .filter_map(|(key, kind)| {
+            key.strip_prefix("triage:")
+                .map(|ref_id| (ref_id.to_string(), kind))
+        })
+        .map(|(ref_id, kind)| {
+            Ok(TriageSession {
+                ref_id,
+                agent_kind: kind.parse()?,
+            })
+        })
+        .collect()
+}
+
+/// Providers with a durable conversation on one logical surface.
+pub async fn providers(db: &Db, repo: &str, term_key: &str) -> Result<Vec<AgentKind>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT agent_kind FROM terminal_sessions
+         WHERE repo = ? AND term_key = ? ORDER BY created_at, agent_kind",
+    )
+    .bind(repo)
+    .bind(term_key)
+    .fetch_all(db)
+    .await?;
+    rows.into_iter()
+        .map(|(agent,)| agent.parse().map_err(anyhow::Error::from))
+        .collect()
 }
 
 /// Max characters of mined transcript text fed to the PR-draft prompt. Generous
@@ -465,7 +485,8 @@ pub async fn reap_stale(db: &Db, home: Option<&Path>) -> Result<u64> {
     let Some(home) = home else { return Ok(0) };
     let rows: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT repo, term_key, cwd, session_id FROM terminal_sessions
-         WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
+         WHERE agent_kind = 'Claude'
+           AND created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
     )
     .bind(format!("-{STALE_SESSION_DAYS} days"))
     .fetch_all(db)
@@ -476,8 +497,20 @@ pub async fn reap_stale(db: &Db, home: Option<&Path>) -> Result<u64> {
         if is_resumable(home, &cwd, &session_id).await {
             continue;
         }
-        forget(db, &repo, &term_key).await?;
-        reaped += 1;
+        // A logical surface may also have a live Codex thread. Delete only the
+        // exact Claude row we inspected; matching the session id also makes a
+        // concurrent replacement win rather than being reaped as stale.
+        let deleted = sqlx::query(
+            "DELETE FROM terminal_sessions
+             WHERE repo = ? AND term_key = ? AND agent_kind = 'Claude' AND session_id = ?",
+        )
+        .bind(&repo)
+        .bind(&term_key)
+        .bind(&session_id)
+        .execute(db)
+        .await?
+        .rows_affected();
+        reaped += deleted;
     }
     Ok(reaped)
 }
@@ -494,8 +527,8 @@ mod tests {
         let db = crate::db::init(base.join("test.db")).await.unwrap();
         let cwd = "/tmp/santree/work";
 
-        // Three aged-out rows and one recent one. `keeps-transcript` still has its
-        // transcript on disk; `recent` is young enough to be out of scope entirely.
+        // Three aged-out Claude rows and one recent one. `keeps-transcript` still
+        // has its transcript on disk; `recent` is young enough to be out of scope.
         for (key, age) in [
             ("triage:AK-1", Some("-90 days")),
             ("triage:AK-2", Some("-31 days")),
@@ -520,21 +553,38 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // The same logical surface can hold a Codex thread. Claude GC must not
+        // erase it when its old sibling has no transcript.
+        sqlx::query(
+            "INSERT INTO terminal_sessions
+             (repo, term_key, cwd, session_id, created_at, agent_kind)
+             VALUES ('repo', 'triage:AK-1', ?, 'codex-live',
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days'), 'Codex')",
+        )
+        .bind(cwd)
+        .execute(&db)
+        .await
+        .unwrap();
         let live = transcript_path(&home, cwd, "sid-keeps-transcript");
         std::fs::create_dir_all(live.parent().unwrap()).unwrap();
         std::fs::write(&live, "{}").unwrap();
 
         assert_eq!(reap_stale(&db, Some(&home)).await.unwrap(), 2);
-        let mut left: Vec<String> =
-            sqlx::query_as("SELECT term_key FROM terminal_sessions WHERE repo = 'repo'")
-                .fetch_all(&db)
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|(k,): (String,)| k)
-                .collect();
+        let mut left: Vec<(String, String)> = sqlx::query_as(
+            "SELECT term_key, agent_kind FROM terminal_sessions WHERE repo = 'repo'",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
         left.sort();
-        assert_eq!(left, vec!["keeps-transcript", "recent"]);
+        assert_eq!(
+            left,
+            vec![
+                ("keeps-transcript".into(), "Claude".into()),
+                ("recent".into(), "Claude".into()),
+                ("triage:AK-1".into(), "Codex".into()),
+            ]
+        );
 
         // No home ⇒ transcripts are unlocatable, so nothing is reaped.
         assert_eq!(reap_stale(&db, None).await.unwrap(), 0);
@@ -707,6 +757,22 @@ mod tests {
         )
         .await
         .unwrap();
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', 'triage:AK-4', ?, 'codex-thread', 'Codex')",
+        )
+        .bind(cwd)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', 'triage:AK-1', ?, 'codex-thread-same-ticket', 'Codex')",
+        )
+        .bind(cwd)
+        .execute(&db)
+        .await
+        .unwrap();
         resolve(
             &db,
             "repo",
@@ -754,11 +820,33 @@ mod tests {
         .unwrap();
 
         let mut got = started_investigations(&db, "repo").await.unwrap();
-        got.sort();
-        // Only the two triage tickets with a stored row — not the worktree, the
+        got.sort_by(|a, b| {
+            (&a.ref_id, a.agent_kind.as_str()).cmp(&(&b.ref_id, b.agent_kind.as_str()))
+        });
+        // Only the triage tickets with a stored row — not the worktree, the
         // never-launched AK-9, or the other repo's ticket. Transcript existence
-        // is irrelevant (none were written on disk here).
-        assert_eq!(got, vec!["AK-1".to_string(), "AK-2".to_string()]);
+        // is irrelevant, and one ticket can retain both providers.
+        assert_eq!(
+            got,
+            vec![
+                TriageSession {
+                    ref_id: "AK-1".to_string(),
+                    agent_kind: AgentKind::Claude,
+                },
+                TriageSession {
+                    ref_id: "AK-1".to_string(),
+                    agent_kind: AgentKind::Codex,
+                },
+                TriageSession {
+                    ref_id: "AK-2".to_string(),
+                    agent_kind: AgentKind::Claude,
+                },
+                TriageSession {
+                    ref_id: "AK-4".to_string(),
+                    agent_kind: AgentKind::Codex,
+                },
+            ]
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

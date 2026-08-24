@@ -243,7 +243,6 @@ export const queryKeys = {
   binaryStatus: (name: string) => ["binary-status", name] as const,
   claudeHookSettings: ["claude-hook-settings"] as const,
   claudeHookSettingsNoGit: ["claude-hook-settings-no-git"] as const,
-  claudeHookSettingsReview: ["claude-hook-settings-review"] as const,
   englishLog: ["english-log"] as const,
   englishAnalysis: ["english-analysis"] as const,
   sessionStates: ["session-states"] as const,
@@ -268,12 +267,17 @@ export const queryKeys = {
     ["worktree-file-source", repo, id] as const,
   workPrompt: (repo: string, id: string) => ["work-prompt", repo, id] as const,
   investigatePrompt: (repo: string, id: string) => ["investigate-prompt", repo, id] as const,
-  agentSession: (repo: string, termKey: string, allowFresh: boolean) =>
-    ["agent-session", repo, termKey, allowFresh] as const,
+  agentSession: (repo: string, termKey: string, agent: AgentKind, allowFresh: boolean) =>
+    ["agent-session", repo, termKey, agent, allowFresh] as const,
   /** Both `allowFresh` variants of one terminal's session resolution — what a
    *  launch/exit drops, since either may hold a decision that's now stale. */
-  agentSessionPrefix: (repo: string, termKey: string) => ["agent-session", repo, termKey] as const,
+  agentSessionPrefix: (repo: string, termKey: string, agent?: AgentKind) =>
+    agent
+      ? (["agent-session", repo, termKey, agent] as const)
+      : (["agent-session", repo, termKey] as const),
   startedInvestigations: (repo: string) => ["started-investigations", repo] as const,
+  sessionProviders: (repo: string, termKey: string) =>
+    ["session-providers", repo, termKey] as const,
   worktreeTabs: (repo: string) => ["worktree-tabs", repo] as const,
   commitDraft: (repo: string, id: string) => ["commit-draft", repo, id] as const,
   worktreePrs: (repo: string) => ["worktree-prs", repo] as const,
@@ -287,8 +291,6 @@ export const queryKeys = {
    *  the one an agent already read. */
   reviewWorkspace: (repo: string, prRepo: string, number: number, headSha: string) =>
     ["review-workspace", repo, prRepo, number, headSha] as const,
-  reviewPrompt: (repo: string, prRepo: string, number: number) =>
-    ["review-prompt", repo, prRepo, number] as const,
   prReviewBrief: (prRepo: string, number: number) => ["pr-review-brief", prRepo, number] as const,
   prReviewBriefPrefix: ["pr-review-brief"] as const,
   aiReviewLaunch: (repo: string, prRepo: string, number: number) =>
@@ -367,6 +369,7 @@ export const queryKeys = {
 export const INVESTIGATE_AGENT_KEY = "investigate_agent";
 export const INVESTIGATE_MODEL_KEY = "investigate_model";
 export const INVESTIGATE_EFFORT_KEY = "investigate_effort";
+export const INVESTIGATE_PERMISSION_MODE_KEY = "investigate_permission_mode";
 /** Whether an Investigate launch passes Claude's `--remote-control` flag
  *  (names the session for Remote Control web). Defaults to on — missing/unset
  *  means enabled, only the literal `"false"` turns it off — so a build of
@@ -374,20 +377,22 @@ export const INVESTIGATE_EFFORT_KEY = "investigate_effort";
  *  "verify vendor flags" gotcha). */
 export const INVESTIGATE_REMOTE_CONTROL_KEY = "investigate_remote_control";
 
-/** Setting keys for the Reviews tab's AI sessions — both of them: Ask AI and the
- *  AI review run on the same model and effort, since they read the same PR and
- *  differ only in what they're asked to produce. */
+/** Setting keys for the Reviews tab's AI-review sessions. */
+export const REVIEW_AGENT_KEY = "review_agent";
 export const REVIEW_MODEL_KEY = "review_model";
 export const REVIEW_EFFORT_KEY = "review_effort";
+export const REVIEW_PERMISSION_MODE_KEY = "review_permission_mode";
 
 /** Models for the two headless writing helpers, mirroring `worktree.rs`'s
  *  `COMMIT_MODEL_KEY` and `pr.rs`'s `BODY_MODEL_KEY`. Both default to the cheap
  *  tier (a subject line from a capped diff really is a small text task), but a PR
  *  body drawn from session transcripts often isn't — hence the override. */
+export const COMMIT_MESSAGE_AGENT_KEY = "commit_message_agent";
 export const COMMIT_MESSAGE_MODEL_KEY = "commit_message_model";
+export const PR_BODY_AGENT_KEY = "pr_body_agent";
 export const PR_BODY_MODEL_KEY = "pr_body_model";
-/** Mirrors `agent.rs`'s `HELPER_MODEL` — shown as the pickers' value when nothing
- *  has been chosen, so the UI never implies "no model". */
+/** Claude's compatibility default for a helper profile that has never been set.
+ *  Codex instead follows its App Server recommended model. */
 export const DEFAULT_HELPER_MODEL = "haiku";
 
 /** Setting keys for the Issues "Work" action (agent · model · effort) used by the
@@ -399,6 +404,17 @@ export const WORK_EFFORT_KEY = "work_effort";
  *  `--permission-mode` (see {@link PERMISSION_MODES}). Empty leaves the flag off
  *  ("Default" — Claude's own normal mode). Applied on both start and restart. */
 export const WORK_PERMISSION_MODE_KEY = "work_permission_mode";
+
+/** Provider-specific workflow profiles. The unsuffixed keys remain a legacy
+ * fallback for the provider currently selected as that workflow's default. */
+export const providerSettingKey = (key: string, agent: AgentKind) =>
+  `${key}__${agent.toLowerCase()}`;
+
+const legacySettingMatchesProvider = (key: string, value: string, agent: AgentKind) => {
+  if (!key.endsWith("_model")) return true;
+  const claudeModel = value.startsWith("claude-") || ["opus", "sonnet", "haiku"].includes(value);
+  return agent === "Claude" ? claudeModel : agent === "Codex" ? !claudeModel : true;
+};
 
 /** The agent effort levels (Claude's `--effort`), in ascending order. Empty means
  *  "leave on the CLI default" — don't pass the flag. */
@@ -850,16 +866,6 @@ export const useClaudeHookSettingsNoGit = () =>
   useQuery({
     queryKey: queryKeys.claudeHookSettingsNoGit,
     queryFn: () => commands.claudeHookSettingsNoGit(),
-    staleTime: Infinity,
-  });
-
-/** The `--settings` path an AI *review* session launches with: the no-git denials
- *  plus every `gh` route that could comment, approve, or request changes as the
- *  user. Same caching rule as {@link useClaudeHookSettings}. */
-export const useClaudeHookSettingsReview = () =>
-  useQuery({
-    queryKey: queryKeys.claudeHookSettingsReview,
-    queryFn: () => commands.claudeHookSettingsReview(),
     staleTime: Infinity,
   });
 
@@ -1367,7 +1373,7 @@ export const useAgentSession = (
   enabled: boolean,
 ) =>
   useUnwrappedQuery(
-    queryKeys.agentSession(repo, termKey, allowFresh),
+    queryKeys.agentSession(repo, termKey, agent, allowFresh),
     () => commands.agentSession(repo, termKey, cwd, allowFresh, agent),
     {
       enabled: enabled && !!repo && !!termKey && !!cwd,
@@ -1375,16 +1381,22 @@ export const useAgentSession = (
     },
   );
 
-/** Ticket ids of triage investigations that have a stored (resumable) session —
- *  i.e. one was started for them at some point. Drives the Triage view's tab +
- *  resume affordance for past investigations (across restarts), mirroring how a
- *  worktree row makes the Trees work terminal resumable. Cached briefly; a new
- *  investigation invalidates it, and it refetches on Triage revisit / focus. */
+/** Stored Triage sessions and their sticky providers. Drives the tab, resume
+ *  affordance, and provider-correct branding across restarts. Cached briefly; a
+ *  new investigation invalidates it, and it refetches on Triage revisit/focus. */
 export const useStartedInvestigations = (repo: string) =>
   useUnwrappedQuery(
     queryKeys.startedInvestigations(repo),
     () => commands.startedInvestigations(repo),
     { enabled: !!repo, staleTime: 30_000 },
+  );
+
+/** Providers with a durable conversation on one logical surface. */
+export const useSessionProviders = (repo: string, termKey: string) =>
+  useUnwrappedQuery(
+    queryKeys.sessionProviders(repo, termKey),
+    () => commands.sessionProviders(repo, termKey),
+    { enabled: !!repo && !!termKey, staleTime: 30_000 },
   );
 
 /** Persisted extra main-area tabs (Claude / terminal) for the repo's worktrees,
@@ -1490,20 +1502,6 @@ export const useReviewWorkspace = (repo: string, target: ReviewTarget | null, en
     // biome-ignore lint/style/noNonNullAssertion: gated by `enabled` below.
     () => commands.reviewWorkspace(repo, target!),
     { enabled: enabled && !!repo && !!target?.headSha, staleTime: Number.POSITIVE_INFINITY },
-  );
-
-/** The PATH of the on-disk AI-review prompt for a PR (its description,
- *  conversation and diff around the `review` template). Like
- *  {@link useInvestigatePrompt}: the terminal seeds `Read <path> …`, since a whole
- *  PR diff is far too large for a shell seed. `staleTime: 0` so each fresh launch
- *  re-renders against the PR's current state — including whether a checkout now
- *  exists, which the backend derives rather than taking from here. */
-export const useReviewPrompt = (repo: string, target: ReviewTarget | null, enabled: boolean) =>
-  useUnwrappedQuery(
-    queryKeys.reviewPrompt(repo, target?.prRepo ?? "", target?.number ?? 0),
-    // biome-ignore lint/style/noNonNullAssertion: gated by `enabled` below.
-    () => commands.reviewPrompt(repo, target!),
-    { enabled: enabled && !!repo && !!target, staleTime: 0 },
   );
 
 /** The cached AI review brief for a PR, or `null` when none exists yet. One row
@@ -1983,6 +1981,24 @@ export const useCreateWorktree = (repo: string) =>
         : a.stackOn
           ? `Created worktree for ${wt.id}, stacked on ${a.stackOn.ticket}.`
           : `Created worktree for ${wt.id}.`,
+  });
+
+/** Check out a pull request as a normal writable tree. It intentionally does not
+ * launch an agent: Trees owns provider choice through its persisted `+` tabs. */
+export const useCreateReviewWorktree = (repo: string) =>
+  useActionMutation({
+    mutationFn: (args: {
+      id: string;
+      title: string;
+      branch: string;
+      base: string | null;
+      agent: AgentKind;
+    }) =>
+      unwrap(
+        commands.createWorktreeForPr(repo, args.id, args.title, args.branch, args.base, args.agent),
+      ),
+    invalidate: () => [queryKeys.worktrees(repo)],
+    success: (worktree) => `Opened ${worktree.branch} as a tree.`,
   });
 
 /**
@@ -2697,6 +2713,32 @@ export const useResolvedSetting = (repo: string, key: string) =>
     },
   );
 
+/** Resolve one workflow profile for a provider. Provider-specific values win;
+ * the old unsuffixed key is used only when this provider is still the workflow's
+ * selected default, preserving existing installs without leaking (for example)
+ * a Codex model into Claude. */
+export const useResolvedProviderSetting = (
+  repo: string,
+  key: string,
+  agent: AgentKind,
+  agentKey: string,
+) => {
+  const profile = useResolvedSetting(repo, providerSettingKey(key, agent));
+  const legacy = useResolvedSetting(repo, key);
+  const selected = useResolvedSetting(repo, agentKey);
+  return {
+    ...profile,
+    data:
+      profile.data ??
+      (selected.data === agent &&
+      legacy.data &&
+      legacySettingMatchesProvider(key, legacy.data, agent)
+        ? legacy.data
+        : null),
+    isFetched: profile.isFetched && legacy.isFetched && selected.isFetched,
+  };
+};
+
 /** Read a repo-resolved boolean setting: the repo's override, else the app
  *  value (defaults to false until loaded). Same false-while-loading caveat as
  *  {@link useBoolSetting} — gate side effects on `isFetched`. */
@@ -2803,11 +2845,7 @@ export const useSetSetting = () =>
       // which are otherwise cached forever. Refetch them here rather than at the
       // toggle's call site, so any future writer of this key gets it too.
       ...(a.key === ENGLISH_TUTOR_KEY
-        ? [
-            queryKeys.claudeHookSettings,
-            queryKeys.claudeHookSettingsNoGit,
-            queryKeys.claudeHookSettingsReview,
-          ]
+        ? [queryKeys.claudeHookSettings, queryKeys.claudeHookSettingsNoGit]
         : []),
       // Read-only mode is folded into what the backend reports as writable, so
       // the status has to be re-read for the write controls to gray out at once

@@ -1902,6 +1902,21 @@ fn is_rotation_team(t: &TeamNode) -> bool {
         .and_then(|r| r.time_schedule.as_ref())
         .is_some_and(|s| !s.entries.is_empty())
 }
+
+/// Team membership alone is not rotation membership. Linear keeps people on a
+/// team after they leave its triage schedule, so only a schedule that actually
+/// contains the viewer belongs in that viewer's Triage scope.
+fn viewer_participates(t: &TeamNode, viewer_id: &str) -> bool {
+    t.triage_responsibility
+        .as_ref()
+        .and_then(|r| r.time_schedule.as_ref())
+        .is_some_and(|schedule| {
+            schedule
+                .entries
+                .iter()
+                .any(|entry| entry.user_id.as_deref() == Some(viewer_id))
+        })
+}
 #[derive(Deserialize)]
 struct Membership {
     #[serde(default)]
@@ -1971,15 +1986,21 @@ fn scope_of(data: SchedQueryData) -> TeamScope {
             teams: Vec::new(),
         };
     };
+    let viewer_id = viewer.id;
     TeamScope {
-        viewer_id: viewer.id,
+        viewer_id: viewer_id.clone(),
         teams: viewer
             .team_memberships
             .map(|c| c.nodes)
             .unwrap_or_default()
             .into_iter()
             .filter_map(|m| m.team)
-            .filter(is_rotation_team)
+            .filter(|team| {
+                is_rotation_team(team)
+                    && viewer_id
+                        .as_deref()
+                        .is_some_and(|id| viewer_participates(team, id))
+            })
             .collect(),
     }
 }
@@ -2931,7 +2952,7 @@ mod tests {
     // ── Triage team scope ─────────────────────────────────────────────────
 
     /// The scope both Triage reads share is derived from the raw memberships payload:
-    /// the viewer's id, and *only* the teams that actually run a rotation.
+    /// the viewer's id, and only rotations the viewer actually participates in.
     #[test]
     fn the_scope_keeps_rotation_teams_and_drops_the_rest() {
         let data: SchedQueryData = serde_json::from_value(serde_json::json!({
@@ -2950,6 +2971,14 @@ mod tests {
                     { "team": { "key": "OPS", "name": "Ops", "triageResponsibility": {
                         "currentUser": null,
                         "timeSchedule": { "name": "unused", "entries": [] }
+                    } } },
+                    // A real rotation on a team the viewer belongs to, but the
+                    // viewer was removed from its schedule → out of their Triage.
+                    { "team": { "key": "MSG", "name": "Messaging", "triageResponsibility": {
+                        "currentUser": { "id": "u2" },
+                        "timeSchedule": { "name": "Messaging on-call", "entries": [
+                            { "startsAt": "2024-01-01T00:00:00Z", "endsAt": "2024-01-08T00:00:00Z", "userId": "u2" }
+                        ] }
                     } } },
                 ] }
             }

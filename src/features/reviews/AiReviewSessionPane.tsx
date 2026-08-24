@@ -1,70 +1,71 @@
 /**
- * The "AI review" tab: a Claude session that reads the pull request and writes its
+ * An AI review provider session that reads the pull request and writes its
  * findings back into santree as **drafts**.
  *
- * The difference from {@link AiReviewPane} ("Ask AI") is what the session is asked
- * to produce. This one launches with santree's own MCP server registered
+ * It launches with santree's own MCP server registered
  * (`--mcp-config`), so it has tools for a review brief and for draft comments —
  * and those tools are the only place it can write anything. The drafts land in
  * santree's database, appear inline in the diff, and reach GitHub only when the
  * user adds them to their own review. The same deny list still blocks every `gh`
  * route, so "it can't post" is not a promise about the model.
  *
- * Its user's own MCP servers stay available on purpose: a review that can read the
- * ticket, the design doc it links, and the related issues is worth several that
- * only see the diff. Read widely, write in one place.
+ * Claude keeps the existing scoped settings path. Codex receives only santree's
+ * review server as thread-scoped configuration; ambient extensions stay disabled.
  */
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
-import type { ReviewPr } from "../../bindings";
-import { ClaudeSparkIcon, WarningIcon } from "../../components/icons";
+import type { AgentKind, ReviewPr } from "../../bindings";
+import { AgentIcon, WarningIcon } from "../../components/icons";
 import { Button, Spinner } from "../../components/primitives";
 import { SessionEndedPane } from "../../components/SessionEndedPane";
 import {
   CLAUDE_START_WITH_CHROME_KEY,
   queryKeys,
+  REVIEW_AGENT_KEY,
   REVIEW_EFFORT_KEY,
   REVIEW_MODEL_KEY,
+  REVIEW_PERMISSION_MODE_KEY,
   useAgentSession,
   useAiReviewLaunch,
   useBoolSetting,
-  useResolvedSetting,
+  useResolvedProviderSetting,
   useReviewDrafts,
   useReviewWorkspace,
 } from "../../lib/queries";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
-import { ReviewFooter, reviewTargetFor } from "./AiReviewPane";
 import { useReviewsModel } from "./model";
+import { ReviewFooter, reviewTargetFor } from "./ReviewSessionShared";
 import { ReviewTerminal } from "./ReviewTerminal";
 import { useReviewSessionLatch } from "./useReviewSessionLatch";
 
-/** The terminal-registry key for a PR's AI review. Distinct from the Ask AI
- *  session's `review:` key so the two can be open at once — reading a PR and
- *  reviewing it are different jobs, often on the same PR. Parsed back out by the
- *  Agents panel (`registry.ts`), so the shape is a shared convention. */
+/** The provider-neutral terminal key for a PR's AI review. Parsed back out by the
+ * Agents panel (`registry.ts`), so the shape is a shared convention. */
 export function aiReviewTermKey(pr: ReviewPr): string {
   return `ai-review:${pr.repo}#${pr.number}`;
 }
 
 export function AiReviewSessionPane({
   pr,
+  agentKind,
   visible,
   onShowDrafts,
 }: {
   pr: ReviewPr;
+  agentKind: AgentKind;
   visible: boolean;
   onShowDrafts: () => void;
 }) {
   const { repo } = useReviewsModel();
   const termKey = aiReviewTermKey(pr);
+  const terminalRef = `${termKey}::${agentKind.toLowerCase()}`;
   const {
     ended,
     needsSeed: freshOpen,
     resumeRequested,
     requestResume,
-  } = useReviewSessionLatch(termKey);
+  } = useReviewSessionLatch(terminalRef);
 
   const target = useMemo(() => (pr.headSha ? reviewTargetFor(pr) : null), [pr]);
   const needsSeed = !!target && freshOpen;
@@ -73,20 +74,26 @@ export function AiReviewSessionPane({
   // branches on whether it exists.
   const workspace = useReviewWorkspace(repo, target, needsSeed || resumeRequested);
   const cwd = workspace.data ?? undefined;
+  const launch = useAiReviewLaunch(repo, target, needsSeed && workspace.isFetched);
   const session = useAgentSession(
     repo,
     termKey,
     cwd ?? "",
     true,
-    "Claude",
-    needsSeed && workspace.isFetched,
+    agentKind,
+    needsSeed && workspace.isFetched && !!launch.data,
   );
-  const launch = useAiReviewLaunch(repo, target, needsSeed && workspace.isFetched);
 
-  const model = useResolvedSetting(repo, REVIEW_MODEL_KEY);
-  const effort = useResolvedSetting(repo, REVIEW_EFFORT_KEY);
+  const model = useResolvedProviderSetting(repo, REVIEW_MODEL_KEY, agentKind, REVIEW_AGENT_KEY);
+  const effort = useResolvedProviderSetting(repo, REVIEW_EFFORT_KEY, agentKind, REVIEW_AGENT_KEY);
+  const permissionMode = useResolvedProviderSetting(
+    repo,
+    REVIEW_PERMISSION_MODE_KEY,
+    agentKind,
+    REVIEW_AGENT_KEY,
+  );
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
-  const resolvedAgent = sessionAgent(session.data, "Claude");
+  const resolvedAgent = sessionAgent(session.data, agentKind);
   const provider = agentProvider(resolvedAgent);
   const seed = agentSessionSeed(session.data, {
     repo,
@@ -104,6 +111,9 @@ export function AiReviewSessionPane({
       provider.capabilities.cliLaunchOptions && effort.data
         ? `--effort ${shellQuote(effort.data)}`
         : undefined,
+    permissionMode: provider.capabilities.permissionMode
+      ? (permissionMode.data ?? undefined)
+      : undefined,
     settingsFlag:
       provider.capabilities.cliLaunchOptions && launch.data
         ? `--settings ${shellQuote(launch.data.settingsPath)}`
@@ -133,15 +143,21 @@ export function AiReviewSessionPane({
       !!launch.data &&
       model.isFetched &&
       effort.isFetched &&
+      permissionMode.isFetched &&
       startWithChrome.isFetched);
 
   const qc = useQueryClient();
+  useEffect(() => {
+    if (session.data && session.data.type !== "shell") {
+      void qc.invalidateQueries({ queryKey: queryKeys.sessionProviders(repo, termKey) });
+    }
+  }, [session.data, qc, repo, termKey]);
   const dropCachedSession = useCallback(
     // The process can die while this pane is unmounted, so the cached resolution
     // may predate the exit — replaying it would hand the PTY a `--session-id` for
     // a session whose transcript now exists.
-    () => qc.removeQueries({ queryKey: queryKeys.agentSessionPrefix(repo, termKey) }),
-    [qc, repo, termKey],
+    () => qc.removeQueries({ queryKey: queryKeys.agentSessionPrefix(repo, termKey, agentKind) }),
+    [qc, repo, termKey, agentKind],
   );
 
   if (ended) {
@@ -171,7 +187,8 @@ export function AiReviewSessionPane({
         {ready ? (
           <ReviewTerminal
             termKey={termKey}
-            title={`Review #${pr.number}`}
+            terminalRef={terminalRef}
+            title={`Review #${pr.number} · ${provider.label}`}
             cwd={cwd}
             seed={seed}
             attach={visible}
@@ -197,17 +214,24 @@ export function AiReviewSessionPane({
           </div>
         )}
       </div>
-      <AiReviewFooter pr={pr} hasWorkspace={!!cwd} onShowDrafts={onShowDrafts} />
+      <AiReviewFooter
+        pr={pr}
+        agentKind={agentKind}
+        hasWorkspace={!!cwd}
+        onShowDrafts={onShowDrafts}
+      />
     </div>
   );
 }
 
 function AiReviewFooter({
   pr,
+  agentKind,
   hasWorkspace,
   onShowDrafts,
 }: {
   pr: ReviewPr;
+  agentKind: AgentKind;
   hasWorkspace: boolean;
   onShowDrafts: () => void;
 }) {
@@ -216,6 +240,7 @@ function AiReviewFooter({
   return (
     <ReviewFooter
       pr={pr}
+      agentKind={agentKind}
       hasWorkspace={hasWorkspace}
       message={
         <>
@@ -231,7 +256,7 @@ function AiReviewFooter({
             title="Show the drafts in the diff, where you can edit and send them"
             className="flex flex-none cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] text-muted-2 transition-colors hover:bg-hover hover:text-fg-2"
           >
-            <ClaudeSparkIcon size={10} />
+            <AgentIcon kind={agentKind} size={10} />
             {count} draft{count === 1 ? "" : "s"}
           </button>
         ) : null

@@ -1263,10 +1263,9 @@ pub async fn set_pr_labels(
 // ── Writing a review ─────────────────────────────────────────────────────────
 //
 // Everything below is driven by an explicit click by the *user*, never by an
-// agent: santree's AI review surfaces are read-only by construction (they get no
-// bridge command that posts, and their `claude` process launches under a deny
-// list — see `hooks::claude_settings_review`). Reviews go out under the user's
-// own name, so the user writes them.
+// agent: santree's AI review can only write local drafts through its scoped MCP
+// server, and its process launches under a GitHub-write deny list. Reviews go out
+// under the user's own name, so the user writes them.
 
 /// Which side of the diff a line lives on, in GitHub's spelling. RIGHT is the
 /// head/new file, LEFT the base/old one.

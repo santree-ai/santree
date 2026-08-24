@@ -14,7 +14,7 @@ import { Field, Heading, KvRow } from "../widgets";
 
 const mb = (bytes: number) => `${(bytes / 1_000_000).toFixed(1)} MB`;
 
-export function UpdatesSection() {
+export function UpdatesSection({ embedded = false }: { embedded?: boolean }) {
   const { data: version } = useAppVersion();
   const { data: rawChannel } = useSetting("app", UPDATE_CHANNEL_KEY);
   const channel = parseUpdateChannel(rawChannel);
@@ -32,7 +32,7 @@ export function UpdatesSection() {
 
   return (
     <>
-      <Heading title="Updates" subtitle="How santree updates itself." />
+      {!embedded && <Heading title="Updates" subtitle="How santree updates itself." />}
 
       <div className="mb-3.5 rounded-xl border border-line-2 bg-raised px-4 py-0.5">
         <Field

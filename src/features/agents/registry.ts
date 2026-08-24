@@ -10,7 +10,7 @@
  * and confuses a base-branch agent with a triage investigation, since both run
  * at the repo root.
  */
-import type { AgentState, SessionState, Task, Worktree } from "../../bindings";
+import type { AgentKind, AgentState, SessionState, Task, Worktree } from "../../bindings";
 import { palette, sessionStateMeta } from "../../theme/colors";
 import type { TerminalTab } from "../terminal/orchestrator";
 
@@ -45,8 +45,8 @@ const UNKNOWN_ORIGIN: AgentOrigin = { kind: "unknown", ticket: null, tabId: null
 /**
  * Parse a `terminal_sessions.term_key` into its owning surface. The conventions
  * are minted by the launch sites — `useAgentTab` (`tree:<id>`,
- * `tree:<id>:tab:<n>`), `InvestigatePane` (`triage:<id>`), `AiReviewPane`
- * (`review:<owner>/<name>#<number>`), `AiReviewSessionPane`
+ * `tree:<id>:tab:<n>`), `InvestigatePane` (`triage:<id>`), the retired read-only
+ * review pane (`review:<owner>/<name>#<number>`), `AiReviewSessionPane`
  * (`ai-review:<owner>/<name>#<number>`) and `DevView` (`dev:<path>`) — and
  * mirrored here rather than imported, so this panel doesn't take a dependency on
  * the features it reports on.
@@ -89,13 +89,23 @@ export function parseTermKey(termKey: string | null | undefined): AgentOrigin {
 export function terminalRefFor(
   termKey: string | null,
   origin: AgentOrigin,
+  agentKind?: AgentKind,
 ): { source: string; refId: string } | null {
   if (!termKey) return null;
-  if (origin.kind === "triage") return { source: "triage", refId: origin.ticket ?? "" };
+  if (origin.kind === "triage") {
+    const refId = origin.ticket ?? "";
+    return {
+      source: "triage",
+      refId: agentKind ? `${refId}::${agentKind.toLowerCase()}` : refId,
+    };
+  }
   // Both review sessions register under the `review` source, keyed by their own
   // term key — so the two can be open on one PR at once.
   if (origin.kind === "review" || origin.kind === "ai-review") {
-    return { source: "review", refId: termKey };
+    return {
+      source: "review",
+      refId: agentKind ? `${termKey}::${agentKind.toLowerCase()}` : termKey,
+    };
   }
   return { source: "issue", refId: termKey };
 }
@@ -222,7 +232,7 @@ function liveTabFor(
   origin: AgentOrigin,
   terminals: TerminalTab[],
 ): TerminalTab | undefined {
-  const ref = terminalRefFor(s.termKey, origin);
+  const ref = terminalRefFor(s.termKey, origin, s.agentKind);
   return ref ? terminals.find((t) => t.source === ref.source && t.refId === ref.refId) : undefined;
 }
 

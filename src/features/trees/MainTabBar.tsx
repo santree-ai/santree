@@ -16,6 +16,7 @@ import {
   onTabStripKeyDown,
   underlineTabStyle,
 } from "../../components/primitives";
+import { useAgentAuth, useCodexAccount, useCodexHealth } from "../../lib/queries";
 import { targetOwnsKey, useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { CHROME } from "../../state/AppContext";
 import { useTerminals } from "../terminal/TerminalsContext";
@@ -188,7 +189,14 @@ function NewTabMenu({
   onAdd: (kind: TabKind, agentKind?: AgentKind) => void;
   close: () => void;
 }) {
+  const claude = useAgentAuth("Claude").data;
+  const codexAccount = useCodexAccount().data;
+  const codexHealth = useCodexHealth().data;
+  const codexReady = !!codexHealth?.available && !!codexAccount?.connected;
+  const claudeReady = !!claude?.connected;
   const add = (kind: TabKind, agentKind?: AgentKind) => {
+    if (agentKind === "Codex" && !codexReady) return;
+    if (agentKind === "Claude" && !claudeReady) return;
     if (agentKind) onAdd(kind, agentKind);
     else onAdd(kind);
     close();
@@ -203,12 +211,24 @@ function NewTabMenu({
 
   return (
     <>
-      <button type="button" onClick={() => add("agent", "Codex")} className={MENU_ITEM}>
+      <button
+        type="button"
+        disabled={!codexReady}
+        title={codexReady ? undefined : "Connect Codex in Settings first"}
+        onClick={() => add("agent", "Codex")}
+        className={MENU_ITEM}
+      >
         <AgentIcon kind="Codex" size={13} />
         Codex
         <span className="ml-auto text-[10px] text-muted-4">1</span>
       </button>
-      <button type="button" onClick={() => add("agent", "Claude")} className={MENU_ITEM}>
+      <button
+        type="button"
+        disabled={!claudeReady}
+        title={claudeReady ? undefined : "Sign in to Claude Code first"}
+        onClick={() => add("agent", "Claude")}
+        className={MENU_ITEM}
+      >
         <AgentIcon kind="Claude" size={13} />
         Claude Code
         <span className="ml-auto text-[10px] text-muted-4">2</span>

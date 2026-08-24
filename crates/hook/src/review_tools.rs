@@ -364,6 +364,7 @@ impl ReviewTools {
             .to_string();
 
         let brief = ReviewBrief {
+            agent_kind: self.scope.agent_kind,
             summary,
             reading_order: parse_list::<ReadingStep>(args, "readingOrder")?,
             watch_outs: parse_list::<WatchOut>(args, "watchOuts")?,
@@ -385,18 +386,20 @@ impl ReviewTools {
 
         self.with_db(async |conn| {
             sqlx::query(
-                "INSERT INTO review_briefs (repo_slug, number, head_sha, brief, created_at) \
-                 VALUES (?, ?, ?, ?, ?) \
+                "INSERT INTO review_briefs (repo_slug, number, head_sha, brief, created_at, agent_kind) \
+                 VALUES (?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(repo_slug, number) DO UPDATE SET \
                    head_sha = excluded.head_sha, \
                    brief = excluded.brief, \
-                   created_at = excluded.created_at",
+                   created_at = excluded.created_at, \
+                   agent_kind = excluded.agent_kind",
             )
             .bind(&self.scope.pr_repo)
             .bind(self.scope.number)
             .bind(&self.scope.head_sha)
             .bind(&json)
             .bind(crate::now_ms())
+            .bind(self.scope.agent_kind.as_str())
             .execute(conn)
             .await
             .map_err(db_err)?;
@@ -445,8 +448,8 @@ impl ReviewTools {
             let (id,): (String,) = sqlx::query_as(
                 "INSERT INTO review_drafts \
                    (id, pr_repo, pr_number, head_sha, path, line, start_line, on_right, body, \
-                    suggestion, created_at, updated_at) \
-                 VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                    suggestion, created_at, updated_at, agent_kind) \
+                 VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  RETURNING id",
             )
             .bind(&self.scope.pr_repo)
@@ -460,6 +463,7 @@ impl ReviewTools {
             .bind(&suggestion)
             .bind(now)
             .bind(now)
+            .bind(self.scope.agent_kind.as_str())
             .fetch_one(conn)
             .await
             .map_err(db_err)?;
@@ -798,6 +802,7 @@ mod tests {
     #[test]
     fn a_brief_may_not_point_at_files_the_pr_does_not_touch() {
         let brief = ReviewBrief {
+            agent_kind: santree_core::domain::AgentKind::Claude,
             summary: "s".into(),
             reading_order: vec![ReadingStep {
                 path: "src/ghost.rs".into(),
@@ -865,12 +870,13 @@ mod tests {
             for ddl in [
                 "CREATE TABLE review_briefs (repo_slug TEXT NOT NULL, number INTEGER NOT NULL, \
                  head_sha TEXT NOT NULL, brief TEXT NOT NULL, created_at INTEGER NOT NULL, \
+                 agent_kind TEXT NOT NULL DEFAULT 'Claude', \
                  PRIMARY KEY (repo_slug, number))",
                 "CREATE TABLE review_drafts (id TEXT NOT NULL PRIMARY KEY, pr_repo TEXT NOT NULL, \
                  pr_number INTEGER NOT NULL, head_sha TEXT NOT NULL, path TEXT NOT NULL, \
                  line INTEGER NOT NULL, start_line INTEGER, on_right INTEGER NOT NULL DEFAULT 1, \
                  body TEXT NOT NULL, suggestion TEXT, created_at INTEGER NOT NULL, \
-                 updated_at INTEGER NOT NULL)",
+                 updated_at INTEGER NOT NULL, agent_kind TEXT NOT NULL DEFAULT 'Claude')",
             ] {
                 sqlx::query(ddl).execute(&mut c).await.unwrap();
             }

@@ -19,6 +19,7 @@ use santree_core::domain::{
     AgentKind, ChangedFile, FileSource, ScriptInfo, TriageComment, TriageDetail, Worktree,
 };
 
+use crate::codex::CodexRuntime;
 use crate::db::Db;
 use crate::git;
 use crate::repo;
@@ -30,10 +31,6 @@ use crate::stream::{self, StreamEvent};
 /// on, and the repo's default branch as its base — so the Trees view can offer a
 /// terminal / file browser / commit box for the base branch itself.
 pub const BASE_ID: &str = "__base__";
-
-/// Settings key for the model the AI commit message is drafted on (app or
-/// per-repo scope). Defaults to [`crate::agent::HELPER_MODEL`].
-pub const COMMIT_MODEL_KEY: &str = "commit_message_model";
 
 /// Reject an `issue_id` that isn't safe to `Path::join` onto the worktrees dir —
 /// mirrors `git.rs`'s `safe_path` guard. IPC-supplied, so a value like `".."` or
@@ -962,11 +959,15 @@ pub async fn commit(
     Ok(())
 }
 
-/// Draft a commit message from the worktree's staged diff using a headless,
-/// one-shot `claude -p` call (the same agent configured for the app). Uses the
-/// `fill-commit` prompt template. Falls back to a plain message when Claude isn't
-/// found, the diff is empty, or the call fails.
-pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
+/// Draft a commit message from the worktree's staged diff using its configured
+/// headless provider and the `fill-commit` prompt template. Falls back to a plain
+/// message when the provider isn't available, the diff is empty, or the call fails.
+pub async fn commit_message(
+    db: &Db,
+    codex_runtime: &CodexRuntime,
+    repo: &str,
+    issue_id: &str,
+) -> Result<String> {
     let root = repo_root(db, repo).await?;
     // The base sentinel commits the repo root on its own branch; per-issue
     // worktrees resolve their path + branch from the link row.
@@ -1014,26 +1015,21 @@ pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<Strin
     )
     .await?;
 
-    // Configurable per repo (Settings → Actions), defaulting to the cheap tier: a
-    // subject line from a capped diff is the one helper that genuinely is a
-    // small text task.
-    let model = crate::settings::resolve(db, repo, COMMIT_MODEL_KEY)
-        .await
-        .ok()
-        .flatten()
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| crate::agent::HELPER_MODEL.to_string());
+    let helper =
+        crate::agent::helper_config(db, repo, crate::agent::HelperKind::CommitMessage).await?;
 
-    // Claude can take 5–30s; run it off the async runtime's worker threads.
+    // Agent CLIs can take tens of seconds; run them off the async runtime's
+    // worker threads.
     let cwd = path.clone();
+    let codex_runtime = codex_runtime.clone();
     let drafted = tokio::task::spawn_blocking(move || {
-        // Best-effort: falls back to the generated subject below. `run_print` has
-        // already logged the reason.
-        crate::agent::run_print(
+        // Best-effort: falls back to the generated subject below.
+        crate::agent::run_helper(
+            &codex_runtime,
+            &helper,
             &cwd,
             &prompt,
             &[],
-            Some(&model),
             crate::agent::SHORT_TIMEOUT,
         )
         .ok()

@@ -10,7 +10,6 @@ import {
 } from "react";
 
 import { Button, ChevronSelect, Toggle } from "../../components/primitives";
-import { useClaudeModels, useSetSetting, useSetting } from "../../lib/queries";
 
 /** A section heading: a bold title over a muted one-line subtitle. */
 export function Heading({ title, subtitle }: { title: string; subtitle: string }) {
@@ -116,60 +115,6 @@ export function KvRow({ label, value }: { label: string; value: string }) {
  *  inside {@link ChevronSelect} (which adds the chevron + `appearance-none`). */
 export const SELECT_CLASS =
   "w-full rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] font-mono text-[12px] text-fg-3";
-
-/**
- * The model picker for a **headless** AI helper — one `claude -p` call with no
- * effort or start mode (the commit message, the PR body, the review brief).
- *
- * Its own widget rather than an {@link Field} each caller rebuilds, because all
- * three share the same shape: a per-scope value where empty means "inherit", and
- * a default that has to be *shown* (never an empty select, which reads as "no
- * model"). Interactive agent actions use `ActionConfig` instead — they have
- * effort and permission mode to configure too.
- */
-export function HeadlessModelField({
-  label,
-  hint,
-  settingKey,
-  defaultModel,
-  forRepo,
-}: {
-  label: string;
-  /** Shown at app scope only — a repo override doesn't re-explain the helper. */
-  hint?: string;
-  settingKey: string;
-  /** Mirrors the backend's default, so the picker shows what will actually run. */
-  defaultModel: string;
-  forRepo?: string;
-}) {
-  const inherits = forRepo !== undefined;
-  const scope = inherits ? `repo:${forRepo}` : "app";
-  const models = useClaudeModels().data ?? [];
-  const appModel = useSetting("app", settingKey).data;
-  const scopeModel = useSetting(scope, settingKey).data;
-  const { mutate: setSetting } = useSetSetting();
-  const value = inherits ? (scopeModel ?? "") : (scopeModel ?? defaultModel);
-  // A model the CLI no longer lists (renamed, or set on another machine) must
-  // still appear, or opening this picker would silently rewrite the setting.
-  const options = value && !models.includes(value) ? [value, ...models] : models;
-
-  return (
-    <Field label={label} hint={inherits ? undefined : hint}>
-      <ChevronSelect
-        value={value}
-        onChange={(v) => setSetting({ scope, key: settingKey, value: v || null })}
-        className={SELECT_CLASS}
-      >
-        {inherits && <option value="">{`Use app default (${appModel || defaultModel})`}</option>}
-        {options.map((m) => (
-          <option key={m} value={m} className="bg-input">
-            {m}
-          </option>
-        ))}
-      </ChevronSelect>
-    </Field>
-  );
-}
 
 /** A `<select>` whose empty option inherits the app default, with a Reset. */
 export function OverrideSelect({

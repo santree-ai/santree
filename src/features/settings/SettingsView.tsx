@@ -16,9 +16,8 @@ import {
   BackArrowIcon,
   BoltIcon,
   ChevronDownIcon,
-  ClaudeSparkIcon,
   ContrastIcon,
-  DownloadIcon,
+  DocsIcon,
   GearIcon,
   KeyIcon,
   LinearLogo,
@@ -41,7 +40,6 @@ import { GeneralSection } from "./sections/General";
 import { IntegrationsSection } from "./sections/Integrations";
 import { PromptsSection } from "./sections/Prompts";
 import { RepoLinearSection } from "./sections/RepoLinear";
-import { UpdatesSection } from "./sections/Updates";
 import { UsageSection } from "./sections/Usage";
 import { WorkSection } from "./sections/Work";
 
@@ -56,6 +54,8 @@ interface SectionDef {
   /** Render edge-to-edge, filling the content area (no centered max-width
    *  column) — for panes that own their own multi-column layout, like Prompts. */
   fullBleed?: boolean;
+  /** Visually separates shared infrastructure from the workflow group above it. */
+  separatorBefore?: boolean;
 }
 
 /** A labelled group of sections, rendered under a header in the sidebar. */
@@ -97,8 +97,9 @@ const reviewEntry = (forRepo: boolean): SectionDef => ({
 const promptsEntry = (forRepo: boolean): SectionDef => ({
   key: "prompts",
   label: "Prompts",
-  icon: <ClaudeSparkIcon size={ICON_SIZE} />,
+  icon: <DocsIcon size={ICON_SIZE} />,
   fullBleed: true,
+  separatorBefore: true,
   render: (repo) => <PromptsSection repo={repo} forRepo={forRepo} />,
 });
 
@@ -108,12 +109,6 @@ const APP_NAV: NavNode[] = [
     label: "General",
     icon: <GearIcon size={ICON_SIZE} />,
     render: () => <GeneralSection />,
-  },
-  {
-    key: "updates",
-    label: "Updates",
-    icon: <DownloadIcon size={ICON_SIZE} />,
-    render: () => <UpdatesSection />,
   },
   {
     key: "integrations",
@@ -153,8 +148,9 @@ const APP_NAV: NavNode[] = [
   },
   {
     group: "Actions",
-    sections: [triageEntry(false), workEntry(false), reviewEntry(false), promptsEntry(false)],
+    sections: [triageEntry(false), workEntry(false), reviewEntry(false)],
   },
+  promptsEntry(false),
 ];
 
 const REPO_NAV: NavNode[] = [
@@ -172,8 +168,9 @@ const REPO_NAV: NavNode[] = [
   },
   {
     group: "Actions",
-    sections: [triageEntry(true), workEntry(true), reviewEntry(true), promptsEntry(true)],
+    sections: [triageEntry(true), workEntry(true), reviewEntry(true)],
   },
+  promptsEntry(true),
 ];
 
 /** The default section key for a scope (the first one in its nav). */
@@ -184,7 +181,14 @@ const defaultSection = (nodes: NavNode[]): string => flatten(nodes)[0].key;
 function resolveSection(nodes: NavNode[], key: string | undefined): SectionDef {
   const sections = flatten(nodes);
   // Legacy deep-links: `actions` → Triage; the former `issues`/`trees` → Work.
-  const wanted = key === "actions" ? "triage" : key === "issues" || key === "trees" ? "work" : key;
+  const wanted =
+    key === "actions"
+      ? "triage"
+      : key === "issues" || key === "trees"
+        ? "work"
+        : key === "updates"
+          ? "general"
+          : key;
   return sections.find((s) => s.key === wanted) ?? sections[0];
 }
 
@@ -291,7 +295,12 @@ export function SettingsView() {
                 {node.sections.map(navButton)}
               </div>
             ) : (
-              navButton(node)
+              <div
+                key={node.key}
+                className={node.separatorBefore ? "mt-3 border-t border-line pt-3" : undefined}
+              >
+                {navButton(node)}
+              </div>
             ),
           )}
         </div>

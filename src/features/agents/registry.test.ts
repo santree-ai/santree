@@ -144,9 +144,9 @@ describe("terminalRefFor", () => {
     });
   });
 
-  it("keeps the two review sessions apart under one source", () => {
-    // Ask AI and the AI review can both be open on the same PR, so they share the
-    // "review" source and are told apart by their own term keys.
+  it("keeps historical and current review sessions under one source", () => {
+    // The retired read-only pane's records remain recognizable beside current AI
+    // reviews, preserving historical session provenance without reviving its UI.
     for (const key of ["review:acme/web#7", "ai-review:acme/web#7"]) {
       expect(terminalRefFor(key, parseTermKey(key))).toEqual({ source: "review", refId: key });
     }

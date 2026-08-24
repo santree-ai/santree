@@ -30,6 +30,7 @@ const ai = vi.hoisted(() => ({ mounts: 0 }));
 vi.mock("./AiReviewSessionPane", async () => {
   const { useEffect } = await import("react");
   return {
+    aiReviewTermKey: () => "review:acme/app#7",
     AiReviewSessionPane: () => {
       useEffect(() => {
         ai.mounts++;
@@ -44,22 +45,32 @@ vi.mock("./ChecksPane", () => ({ ChecksPane: () => <div data-testid="checks-pane
 vi.mock("./PrInfoPanel", () => ({ PrInfoPanel: () => <div /> }));
 vi.mock("./ReviewHeader", () => ({ ReviewHeader: () => <div /> }));
 vi.mock("./MergeQueuePane", () => ({ MergeQueuePane: () => <div /> }));
-vi.mock("../../lib/queries", () => ({ useReviewDrafts: () => ({ data: drafts }) }));
+vi.mock("../../lib/queries", () => ({
+  REVIEW_AGENT_KEY: "review.agent",
+  useAgentAuth: () => ({ data: { connected: true } }),
+  useCodexAccount: () => ({ data: { connected: true } }),
+  useCodexHealth: () => ({ data: { available: true } }),
+  useResolvedSetting: () => ({ data: "Codex" }),
+  useReviewDrafts: () => ({ data: drafts }),
+  useSessionProviders: () => ({ data: storedProviders }),
+}));
 
 import { ReviewDetail } from "./ReviewDetail";
 
 let drafts: unknown[] = [];
+let storedProviders: string[] = [];
 
 beforeEach(() => {
   ai.mounts = 0;
   drafts = [];
+  storedProviders = [];
   model.aiReviewRequest = 0;
 });
 
 describe("ReviewDetail", () => {
   it("doesn't launch the AI review just because a PR is open", () => {
     render(<ReviewDetail />);
-    expect(screen.getByText("AI review")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Review with another agent" })).toBeInTheDocument();
     expect(ai.mounts).toBe(0);
     expect(screen.queryByTestId("ai-review-pane")).toBeNull();
   });
@@ -79,6 +90,7 @@ describe("ReviewDetail", () => {
 
   it("counts the drafts on the tab, so they're visible from the diff", () => {
     drafts = [{ id: "d1" }, { id: "d2" }];
+    storedProviders = ["Codex"];
     render(<ReviewDetail />);
     expect(screen.getByText("2")).toBeInTheDocument();
   });

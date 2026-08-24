@@ -33,6 +33,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 pub enum CodexProfile {
     Work,
     ReadOnly,
+    Review,
     FixCi,
 }
 
@@ -138,11 +139,12 @@ impl Connection {
 
 /// Process owner and protocol facade. Calls lazily start the server so Claude
 /// and plain terminals remain usable even when Codex is missing or incompatible.
+#[derive(Clone)]
 pub struct CodexRuntime {
     runtime_dir: PathBuf,
     socket: PathBuf,
-    connection: Mutex<Option<Connection>>,
-    last_error: Mutex<Option<String>>,
+    connection: Arc<Mutex<Option<Connection>>>,
+    last_error: Arc<Mutex<Option<String>>>,
 }
 
 impl CodexRuntime {
@@ -152,8 +154,8 @@ impl CodexRuntime {
         Self {
             runtime_dir,
             socket,
-            connection: Mutex::new(None),
-            last_error: Mutex::new(None),
+            connection: Arc::new(Mutex::new(None)),
+            last_error: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -198,6 +200,13 @@ impl CodexRuntime {
     pub fn remote(&self, executable: &str) -> Result<String> {
         self.with_connection(executable, |_| Ok(()))?;
         Ok(format!("unix://{}", self.socket.display()))
+    }
+
+    /// Prove the installed CLI honored Santree's fail-closed permission layer.
+    /// Headless helpers call this before processing attacker-influenceable text;
+    /// an unsupported config shape must use their deterministic fallback instead.
+    pub fn ensure_restricted_config(&self, executable: &str) -> Result<()> {
+        self.with_connection(executable, |_| Ok(()))
     }
 
     pub fn account(&self, executable: &str) -> Result<CodexAccount> {
@@ -312,8 +321,9 @@ impl CodexRuntime {
         model: Option<&str>,
         effort: Option<&str>,
         profile: CodexProfile,
+        review_mcp_config: Option<&Path>,
     ) -> Result<String> {
-        let read_only = matches!(profile, CodexProfile::ReadOnly);
+        let read_only = matches!(profile, CodexProfile::ReadOnly | CodexProfile::Review);
         let approval_policy = if matches!(profile, CodexProfile::Work) {
             "on-request"
         } else {
@@ -328,8 +338,19 @@ impl CodexRuntime {
         if let Some(model) = model.filter(|m| !m.is_empty()) {
             params["model"] = json!(model);
         }
+        let mut config = serde_json::Map::new();
         if let Some(effort) = effort.filter(|e| !e.is_empty()) {
-            params["config"] = json!({"model_reasoning_effort": effort});
+            config.insert("model_reasoning_effort".into(), json!(effort));
+        }
+        if matches!(profile, CodexProfile::Review) {
+            let path = review_mcp_config
+                .ok_or_else(|| anyhow!("Codex review requires Santree's review MCP config"))?;
+            config.insert("mcp_servers".into(), review_mcp_servers(path)?);
+        } else if review_mcp_config.is_some() {
+            bail!("review MCP config is only valid for review threads");
+        }
+        if !config.is_empty() {
+            params["config"] = Value::Object(config);
         }
         let value = self.request(executable, "thread/start", params)?;
         value
@@ -454,6 +475,38 @@ impl CodexRuntime {
         verify_sandbox_permission_override(&config)?;
         Ok(connection)
     }
+}
+
+/// Convert Santree's app-owned Claude MCP file into Codex's thread-scoped config
+/// shape. Only the single review server is copied; ambient user servers remain
+/// disabled by the App Server's fail-closed base config.
+fn review_mcp_servers(path: &Path) -> Result<Value> {
+    let value: Value = serde_json::from_slice(&fs::read(path)?)?;
+    let server = value
+        .pointer("/mcpServers/santree-review")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("Santree review MCP config has no review server"))?;
+    let command = server
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Santree review MCP config has no command"))?;
+    let args = server
+        .get("args")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Santree review MCP config has no arguments"))?;
+    if !args.iter().all(|arg| arg.as_str().is_some()) {
+        bail!("Santree review MCP config has a non-string argument");
+    }
+    let mut args = args.clone();
+    args.push(json!("--agent-kind"));
+    args.push(json!("Codex"));
+    Ok(json!({
+        "santree-review": {
+            "command": command,
+            "args": args,
+            "enabled": true
+        }
+    }))
 }
 
 fn short_runtime_dir(data_dir: &Path) -> PathBuf {
@@ -949,6 +1002,35 @@ mod tests {
         fs::write(&socket, b"not a socket").unwrap();
         assert!(remove_stale_socket(&socket).is_err());
         assert!(socket.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn review_config_copies_only_santrees_server() {
+        let base =
+            std::env::temp_dir().join(format!("santree-codex-review-mcp-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&base).unwrap();
+        let path = base.join("review.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "mcpServers": {
+                    "santree-review": { "command": "/app/santree-hook", "args": ["mcp", "--number", "7"] },
+                    "ambient-user-server": { "command": "/tmp/nope", "args": [] }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let config = review_mcp_servers(&path).unwrap();
+        assert_eq!(
+            config
+                .pointer("/santree-review/command")
+                .and_then(Value::as_str),
+            Some("/app/santree-hook")
+        );
+        assert!(config.get("ambient-user-server").is_none());
         fs::remove_dir_all(base).unwrap();
     }
 }

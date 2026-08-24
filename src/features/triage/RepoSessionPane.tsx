@@ -3,8 +3,8 @@
  * ticket — for asking questions about the codebase, running a CLI command, or
  * anything the queue hasn't got a row for.
  *
- * The Trees rail has always had this (its `master` entry gives the repo root a
- * terminal); Triage only ever offered agents *attached to a ticket*, so wanting
+ * Trees has always exposed the repo root as a general terminal; Triage only ever
+ * offered agents *attached to a ticket*, so wanting
  * to ask one general question meant hijacking some unrelated investigation.
  *
  * Deliberately thinner than {@link InvestigatePane}: no rendered ticket prompt to
@@ -22,14 +22,21 @@ import { Spinner } from "../../components/primitives";
 import { SessionEndedPane } from "../../components/SessionEndedPane";
 import {
   CLAUDE_START_WITH_CHROME_KEY,
+  INVESTIGATE_AGENT_KEY,
+  INVESTIGATE_EFFORT_KEY,
+  INVESTIGATE_MODEL_KEY,
+  INVESTIGATE_PERMISSION_MODE_KEY,
+  queryKeys,
   useAgentSession,
   useBoolSetting,
   useClaudeHookSettings,
+  useResolvedProviderSetting,
 } from "../../lib/queries";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
+import { triageTerminalRef } from "./providerSessions";
 
 /**
  * Terminal `refId` for a repo's session — a sentinel, never a ticket id, so the
@@ -50,8 +57,6 @@ export function RepoSessionPane({
   branch,
   cwd,
   agentKind,
-  model,
-  effort,
 }: {
   /** Active repo name — scopes the persisted provider session. */
   repo: string;
@@ -60,14 +65,11 @@ export function RepoSessionPane({
   /** The repo root — the same checkout investigations run in. */
   cwd?: string;
   agentKind: AgentKind;
-  /** Model override for the run, or null to use the agent's default. */
-  model: string | null;
-  /** Effort level (Claude's --effort), or null for the CLI default. */
-  effort: string | null;
 }) {
   const refId = repoSessionRefId(repo);
+  const terminalRef = triageTerminalRef(refId, agentKind);
   const { tabs } = useTerminals();
-  const liveSession = tabs.some((t) => t.source === "triage" && t.refId === refId);
+  const liveSession = tabs.some((t) => t.source === "triage" && t.refId === terminalRef);
   // Latch that we've seen it live (as state, so the exit re-renders): without it,
   // quitting the agent would immediately re-seed and restart it.
   const [liveSeen, setLiveSeen] = useState(false);
@@ -81,6 +83,7 @@ export function RepoSessionPane({
 
   const termKey = `triage:${refId}`;
   const canLaunch = !!cwd;
+  const qc = useQueryClient();
   // Unlike an investigation, opening this launches straight away — it's a scratch
   // session you opened to ask something, not a saved piece of work to decide about
   // resuming. The backend still reuses the stored session id, so what you get is
@@ -88,18 +91,47 @@ export function RepoSessionPane({
   const ended = canLaunch && !liveSession && liveSeen && !resumeRequested;
   const needsSeed = canLaunch && !liveSession && (!liveSeen || resumeRequested);
   const session = useAgentSession(repo, termKey, cwd ?? "", canLaunch, agentKind, needsSeed);
+  useEffect(() => {
+    if (session.data && session.data.type !== "shell") {
+      void qc.invalidateQueries({ queryKey: queryKeys.startedInvestigations(repo) });
+    }
+  }, [session.data, qc, repo]);
 
   const resolvedAgent = sessionAgent(session.data, agentKind);
   const provider = agentProvider(resolvedAgent);
+  const model = useResolvedProviderSetting(
+    repo,
+    INVESTIGATE_MODEL_KEY,
+    agentKind,
+    INVESTIGATE_AGENT_KEY,
+  );
+  const effort = useResolvedProviderSetting(
+    repo,
+    INVESTIGATE_EFFORT_KEY,
+    agentKind,
+    INVESTIGATE_AGENT_KEY,
+  );
+  const permissionMode = useResolvedProviderSetting(
+    repo,
+    INVESTIGATE_PERMISSION_MODE_KEY,
+    agentKind,
+    INVESTIGATE_AGENT_KEY,
+  );
   const hookSettings = useClaudeHookSettings().data;
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
   const seed = agentSessionSeed(session.data, {
     repo,
     termKey,
     // No opening prompt: the whole point is that you bring the question.
-    modelFlag: resolvedAgent === agentKind && model ? `--model ${shellQuote(model)}` : undefined,
+    modelFlag:
+      resolvedAgent === agentKind && model.data ? `--model ${shellQuote(model.data)}` : undefined,
     effortFlag:
-      resolvedAgent === agentKind && effort ? `--effort ${shellQuote(effort)}` : undefined,
+      resolvedAgent === agentKind && effort.data
+        ? `--effort ${shellQuote(effort.data)}`
+        : undefined,
+    permissionMode: provider.capabilities.permissionMode
+      ? (permissionMode.data ?? undefined)
+      : undefined,
     settingsFlag:
       provider.capabilities.cliLaunchOptions && hookSettings
         ? `--settings ${shellQuote(hookSettings)}`
@@ -108,14 +140,15 @@ export function RepoSessionPane({
   });
   // Hold the embed until the seed decision is fresh, so the new PTY carries the
   // right flags from its first frame.
-  const ready = !needsSeed || !session.isFetching;
+  const ready =
+    !needsSeed ||
+    (!session.isFetching && model.isFetched && effort.isFetched && permissionMode.isFetched);
 
-  const qc = useQueryClient();
   const dropCachedSession = useCallback(
     // Drop the cached resolution so the next launch re-asks the backend instead of
     // replaying a stale "fresh" decision whose transcript now exists on disk.
-    () => qc.removeQueries({ queryKey: ["agent-session", repo, termKey] }),
-    [qc, repo, termKey],
+    () => qc.removeQueries({ queryKey: queryKeys.agentSessionPrefix(repo, termKey, agentKind) }),
+    [qc, repo, termKey, agentKind],
   );
 
   if (ended) {
@@ -141,7 +174,7 @@ export function RepoSessionPane({
     <div className="min-h-0 flex-1">
       {ready ? (
         <RepoSessionTerminal
-          refId={refId}
+          refId={terminalRef}
           branch={branch}
           cwd={cwd}
           seed={seed}

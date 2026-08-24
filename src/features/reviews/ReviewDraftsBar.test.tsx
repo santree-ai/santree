@@ -18,6 +18,7 @@ vi.mock("../../lib/queries", () => ({
 
 function draft(over: Partial<ReviewDraft> = {}): ReviewDraft {
   return {
+    agentKind: "Claude",
     id: "d1",
     prRepo: "acme/api",
     prNumber: 7,

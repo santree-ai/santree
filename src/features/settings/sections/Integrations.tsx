@@ -18,18 +18,16 @@ import {
   LINEAR_SCOPE_KEY,
   type LinearScope,
   parseLinearScope,
-  SYNC_VIEWED_KEY,
   useGithubStatus,
   useLinearConnect,
   useLinearOrgs,
   useSetSetting,
-  useSetSyncViewed,
   useSetting,
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
 import { LINEAR_BRAND } from "../../../theme/colors";
 import { BinaryPathField } from "../BinaryPathField";
-import { Heading, KvRow, ToggleRow } from "../widgets";
+import { Heading, KvRow } from "../widgets";
 
 /** Linear's real app-icon treatment — the official monochrome logomark, white on
  *  a near-black tile (theme-independent, like the GitHub mark beside it). */
@@ -127,46 +125,6 @@ export function IntegrationsSection() {
       </div>
 
       <LocalGitHubCard />
-      <ViewedMarksCard />
-    </>
-  );
-}
-
-/** Where the Reviews tab keeps its per-file "Viewed" marks.
- *
- *  Off (the default) they live in this machine's database, keyed to each file's blob
- *  SHA. On, they *are* GitHub's marks — the same checkbox as the github.com Files
- *  tab, so a half-finished review follows you to another machine or the browser.
- *  Syncing needs the gh CLI signed in, and the backend falls back to the local store
- *  without it, so the toggle reads OFF and locks rather than claiming a sync that
- *  isn't happening. */
-function ViewedMarksCard() {
-  const { data: gh } = useGithubStatus();
-  const { data } = useSetting("app", SYNC_VIEWED_KEY);
-  const { mutate: setSyncViewed } = useSetSyncViewed();
-  const authenticated = !!gh?.authenticated;
-
-  return (
-    <>
-      <div className="mt-5 mb-2.5 flex items-center gap-2">
-        <span className="text-[13px] font-semibold text-fg-bright">Reviews</span>
-        <span className="text-[11.5px] text-muted-3">
-          How the Reviews tab remembers which files you've looked at.
-        </span>
-      </div>
-      <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
-        <ToggleRow
-          label={`Sync "Viewed" files with GitHub`}
-          hint={
-            authenticated
-              ? "Marking a file viewed here marks it on github.com too, and marks made there show up here. Off, marks stay on this machine."
-              : "Sign in with the gh CLI to sync marks with GitHub. Until then they stay on this machine."
-          }
-          on={authenticated && data === "true"}
-          disabled={!authenticated}
-          onChange={setSyncViewed}
-        />
-      </div>
     </>
   );
 }

@@ -93,6 +93,7 @@ describe("PrFileDiff", () => {
       onRight: true,
       body: "This retries forever.",
       suggestion: null,
+      agentKind: "Claude",
       createdAtMs: 0,
       updatedAtMs: 0,
     };

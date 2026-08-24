@@ -15,7 +15,7 @@
 import { useState } from "react";
 
 import type { ReviewDraft } from "../../bindings";
-import { ClaudeSparkIcon, PencilIcon, TrashIcon } from "../../components/icons";
+import { AgentIcon, PencilIcon, TrashIcon } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
 import { Button, Pill } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
@@ -70,7 +70,7 @@ export function ReviewDraftCard({
   return (
     <div className="border-l-2 bg-app" style={{ borderColor: palette.purple }}>
       <div className="flex items-center gap-2 px-3 py-1.5">
-        <ClaudeSparkIcon size={11} className="flex-none text-muted-3" />
+        <AgentIcon kind={draft.agentKind} size={11} className="flex-none text-muted-3" />
         <span className="font-mono text-[10.5px] text-muted-3">
           {basename(draft.path)} · {anchor.toLowerCase()}
         </span>

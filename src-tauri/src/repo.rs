@@ -189,15 +189,39 @@ fn identity(remote: Option<&str>, top: &Path) -> (String, String) {
 /// Parse `owner/repo` out of a GitHub remote URL (ssh or https forms).
 pub(crate) fn github_slug(url: &str) -> Option<String> {
     let url = url.trim();
-    let rest = [
-        "git@github.com:",
-        "https://github.com/",
-        "ssh://git@github.com/",
-    ]
-    .iter()
-    .find_map(|p| url.strip_prefix(p))?;
-    let slug = rest.strip_suffix(".git").unwrap_or(rest).trim_matches('/');
-    slug.contains('/').then(|| slug.to_string())
+    let path = if let Some(rest) = url.strip_prefix("git@github.com:") {
+        rest.to_string()
+    } else {
+        let parsed = reqwest::Url::parse(url).ok()?;
+        if !matches!(parsed.scheme(), "https" | "ssh")
+            || parsed.host_str() != Some("github.com")
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return None;
+        }
+        parsed.path().to_string()
+    };
+    let slug = path.strip_suffix(".git").unwrap_or(&path).trim_matches('/');
+    let mut components = slug.split('/');
+    let owner = components.next()?;
+    let name = components.next()?;
+    if components.next().is_some()
+        || !valid_github_component(owner)
+        || !valid_github_component(name)
+    {
+        return None;
+    }
+    Some(format!("{owner}/{name}"))
+}
+
+pub(crate) fn valid_github_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 #[cfg(test)]
@@ -286,5 +310,15 @@ mod tests {
             Some("akamai/web-dashboard")
         );
         assert_eq!(github_slug("https://gitlab.com/akamai/agent.git"), None);
+        assert_eq!(
+            github_slug("https://github.com.evil.test/akamai/agent.git"),
+            None
+        );
+        assert_eq!(
+            github_slug("https://github.com/akamai/agent/../../../victim"),
+            None
+        );
+        assert_eq!(github_slug("git@github.com:akamai/agent/extra.git"), None);
+        assert_eq!(github_slug("https://github.com/akamai/.."), None);
     }
 }

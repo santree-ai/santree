@@ -1,15 +1,6 @@
-//! Headless agent invocation: a one-shot `claude -p` call used by the AI helpers
-//! (commit message, PR body). The prompt goes in on **stdin** — never argv, which
-//! is world-readable on Linux — and tool grants are path-scoped (see
-//! [`read_within`]). Runs in `--safe-mode --strict-mcp-config` so no
-//! hooks/plugins/MCP servers spin up on startup: these are latency-sensitive text
-//! tasks that need only the model.
-
-/// The model these background helpers run on. They're short, cheap, high-volume
-/// text tasks (commit messages, PR bodies), so we pin them to the cheapest tier
-/// rather than the (pricier) model the interactive agent uses. An alias, so the
-/// CLI resolves it to the latest Haiku without us pinning a dated id here.
-pub const HELPER_MODEL: &str = "haiku";
+//! Headless agent invocation for latency-sensitive AI helpers such as commit
+//! messages and PR bodies. Prompts go over stdin, never argv, and each provider
+//! runs with a fail-closed configuration that excludes ambient extensions.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -19,8 +10,71 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use santree_core::domain::AgentKind;
 
+use crate::codex::CodexRuntime;
 use crate::settings;
+
+pub struct HelperConfig {
+    pub agent: AgentKind,
+    pub executable: String,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HelperKind {
+    CommitMessage,
+    PrBody,
+}
+
+impl HelperKind {
+    fn setting_keys(self) -> (&'static str, &'static str) {
+        match self {
+            Self::CommitMessage => ("commit_message_agent", "commit_message_model"),
+            Self::PrBody => ("pr_body_agent", "pr_body_model"),
+        }
+    }
+}
+
+/// Resolve one hidden helper independently from the interactive Work session.
+/// Unset helper-agent keys inherit Work for compatibility; once selected, each
+/// helper keeps its own provider and per-provider model profile.
+pub async fn helper_config(
+    db: &crate::db::Db,
+    repo: &str,
+    kind: HelperKind,
+) -> Result<HelperConfig> {
+    let settings_value = settings::get_settings(db).await?;
+    let (agent_key, model_key) = kind.setting_keys();
+    let selected = settings::resolve(db, repo, agent_key).await?;
+    let agent = selected
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+        .or(settings::resolve(db, repo, "work_agent")
+            .await?
+            .and_then(|value| value.parse().ok()))
+        .unwrap_or(settings_value.default_agent);
+    let profile_key = settings::provider_setting_key(model_key, agent);
+    let profile = settings::resolve(db, repo, &profile_key)
+        .await?
+        .filter(|value| !value.trim().is_empty())
+        .or(settings::resolve(db, repo, model_key)
+            .await?
+            .filter(|value| settings::legacy_value_matches_provider(model_key, value, agent)));
+    let model = profile
+        .or_else(|| (agent == AgentKind::Claude).then(|| "haiku".to_string()))
+        .or_else(|| {
+            settings_value.agents.iter().find_map(|configured| {
+                (configured.key == agent && !configured.model.trim().is_empty())
+                    .then(|| configured.model.clone())
+            })
+        });
+    Ok(HelperConfig {
+        agent,
+        executable: settings::agent_executable(db, agent).await?,
+        model,
+    })
+}
 
 /// Ceiling for a **short** headless call — a prompt in, a line or two out (a
 /// commit message). Claude normally answers in 5–30s, so this only ever fires
@@ -138,6 +192,88 @@ pub fn run_print(
         return Err(warn(format!(
             "claude exited cleanly but produced no output; stderr: {stderr}"
         )));
+    }
+    Ok(text)
+}
+
+/// Run a fail-closed, ephemeral writing helper with the configured provider.
+/// Interactive-session provenance is deliberately irrelevant: this is a new
+/// one-shot action and follows the current default provider/model.
+pub fn run_helper(
+    codex_runtime: &CodexRuntime,
+    helper: &HelperConfig,
+    cwd: &Path,
+    prompt: &str,
+    allowed_tools: &[&str],
+    timeout: Duration,
+) -> Result<String> {
+    if helper.agent == AgentKind::Claude {
+        let mut cmd = Command::new(&helper.executable);
+        cmd.current_dir(cwd)
+            .args(build_args(allowed_tools, helper.model.as_deref()));
+        return finish_helper(cmd, prompt, timeout, "claude -p");
+    }
+    if helper.agent != AgentKind::Codex {
+        return Err(anyhow!(
+            "{} helpers are not supported",
+            helper.agent.as_str()
+        ));
+    }
+
+    // `sandbox_permissions` is intentionally outside the pinned strict schema.
+    // The App Server's config/read handshake is our proof that this installed
+    // CLI applied the empty permission layer instead of silently ignoring it.
+    codex_runtime.ensure_restricted_config(&helper.executable)?;
+    let args = build_codex_helper_args(cwd, helper.model.as_deref());
+    let mut cmd = Command::new(&helper.executable);
+    cmd.current_dir(cwd).args(args);
+    finish_helper(cmd, prompt, timeout, "codex exec")
+}
+
+fn build_codex_helper_args(cwd: &Path, model: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "exec".to_string(),
+        "--ephemeral".to_string(),
+        "--ignore-user-config".to_string(),
+        "--ignore-rules".to_string(),
+        "--strict-config".to_string(),
+        "--sandbox".to_string(),
+        "read-only".to_string(),
+        "-c".to_string(),
+        "sandbox_permissions=[]".to_string(),
+        "-c".to_string(),
+        "mcp_servers={}".to_string(),
+        "-c".to_string(),
+        "apps={}".to_string(),
+        "-c".to_string(),
+        "plugins={}".to_string(),
+        "-c".to_string(),
+        "hooks={}".to_string(),
+        "-c".to_string(),
+        "web_search=\"disabled\"".to_string(),
+        "-c".to_string(),
+        "sandbox_workspace_write.network_access=false".to_string(),
+        "--cd".to_string(),
+        cwd.to_string_lossy().into_owned(),
+    ];
+    if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+        args.extend(["--model".to_string(), model.to_string()]);
+    }
+    args.push("-".to_string());
+    args
+}
+
+fn finish_helper(cmd: Command, prompt: &str, timeout: Duration, label: &str) -> Result<String> {
+    let (status, stdout, stderr) = run_with_timeout(cmd, prompt, timeout)?;
+    let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+    if !status.success() {
+        return Err(anyhow!("{label} exited {status}: {stderr}"));
+    }
+    let text = String::from_utf8_lossy(&stdout).trim().to_string();
+    if text.is_empty() {
+        return Err(anyhow!(
+            "{label} exited cleanly but produced no output: {stderr}"
+        ));
     }
     Ok(text)
 }
@@ -263,13 +399,63 @@ fn run_with_timeout(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn helper_kinds_select_providers_and_models_independently() {
+        let base =
+            std::env::temp_dir().join(format!("santree-helper-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&base).unwrap();
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let mut app = santree_core::config::default_settings();
+        for configured in &mut app.agents {
+            if matches!(configured.key, AgentKind::Claude | AgentKind::Codex) {
+                configured.exec = "/bin/echo".into();
+            }
+        }
+        settings::set_settings(&db, &app).await.unwrap();
+        settings::set(&db, "app", "work_agent", Some("Claude".into()))
+            .await
+            .unwrap();
+        settings::set(&db, "app", "commit_message_agent", Some("Codex".into()))
+            .await
+            .unwrap();
+        settings::set(
+            &db,
+            "app",
+            &settings::provider_setting_key("commit_message_model", AgentKind::Codex),
+            Some("gpt-5.6-sol".into()),
+        )
+        .await
+        .unwrap();
+        settings::set(
+            &db,
+            "app",
+            &settings::provider_setting_key("pr_body_model", AgentKind::Claude),
+            Some("claude-opus-5".into()),
+        )
+        .await
+        .unwrap();
+
+        let commit = helper_config(&db, "repo", HelperKind::CommitMessage)
+            .await
+            .unwrap();
+        assert_eq!(commit.agent, AgentKind::Codex);
+        assert_eq!(commit.model.as_deref(), Some("gpt-5.6-sol"));
+
+        let pr = helper_config(&db, "repo", HelperKind::PrBody)
+            .await
+            .unwrap();
+        assert_eq!(pr.agent, AgentKind::Claude);
+        assert_eq!(pr.model.as_deref(), Some("claude-opus-5"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     /// Every headless call must run in `default` permission mode (never `auto`)
     /// and must always deny Bash/Write/Edit, regardless of the caller's
     /// `--allowedTools` — the fix for the prompt-injection finding.
     #[test]
     fn build_args_always_denies_tool_use_by_default() {
         // Commit-message call site: no allowlisted tools at all.
-        let args = build_args(&[], Some(HELPER_MODEL));
+        let args = build_args(&[], Some("haiku"));
         assert_eq!(
             &args[..2],
             &["--permission-mode".to_string(), "default".to_string()]
@@ -290,7 +476,7 @@ mod tests {
     #[test]
     fn build_args_keeps_disallowed_tools_alongside_an_allowlist() {
         let scoped = read_within(Path::new("/tmp/wt"));
-        let args = build_args(&[&scoped], Some(HELPER_MODEL));
+        let args = build_args(&[&scoped], Some("haiku"));
         assert!(args.windows(2).any(|w| w == ["--disallowedTools", "Bash"]));
         assert!(args
             .windows(2)
@@ -301,6 +487,31 @@ mod tests {
     fn build_args_omits_model_flag_when_none() {
         let args = build_args(&[], None);
         assert!(!args.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn codex_helpers_disable_ambient_extensions_and_writes() {
+        let args = build_codex_helper_args(Path::new("/tmp/wt"), Some("gpt-5.6-sol"));
+        for required in [
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--strict-config",
+            "read-only",
+            "mcp_servers={}",
+            "apps={}",
+            "plugins={}",
+            "hooks={}",
+            "web_search=\"disabled\"",
+            "sandbox_workspace_write.network_access=false",
+        ] {
+            assert!(args.iter().any(|arg| arg == required), "missing {required}");
+        }
+        assert!(args.windows(2).any(|pair| pair == ["--cd", "/tmp/wt"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--model", "gpt-5.6-sol"]));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
     }
 
     /// The prompt embeds the repo diff and ticket text; argv is world-readable on

@@ -2,18 +2,30 @@
  * Triage Investigation and Issues Work today (Plan / Review later). Per-scope —
  * app defaults or repo override. */
 
+import { useEffect, useState } from "react";
+
 import type { AgentKind } from "../../../bindings";
-import { ChevronSelect, Toggle } from "../../../components/primitives";
+import { AgentIcon } from "../../../components/icons";
+import { ChevronSelect, Tabs, Toggle } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
 import {
+  COMMIT_MESSAGE_AGENT_KEY,
+  COMMIT_MESSAGE_MODEL_KEY,
+  DEFAULT_HELPER_MODEL,
   EFFORT_LEVELS,
   INVESTIGATE_AGENT_KEY,
   INVESTIGATE_EFFORT_KEY,
   INVESTIGATE_MODEL_KEY,
+  INVESTIGATE_PERMISSION_MODE_KEY,
   INVESTIGATE_REMOTE_CONTROL_KEY,
   PERMISSION_MODES,
+  PR_BODY_AGENT_KEY,
+  PR_BODY_MODEL_KEY,
+  providerSettingKey,
+  REVIEW_AGENT_KEY,
   REVIEW_EFFORT_KEY,
   REVIEW_MODEL_KEY,
+  REVIEW_PERMISSION_MODE_KEY,
   TRIAGE_GOOD_CITIZEN_KEY,
   TRIAGE_SNOOZED_KEY,
   useAgents,
@@ -33,14 +45,11 @@ import {
 import { useApp } from "../../../state/AppContext";
 import { agentProvider } from "../../terminal/agentProvider";
 import { Field, Heading, OverrideSelect, SELECT_CLASS, ToggleRow } from "../widgets";
+import { ViewedMarksCard } from "./ViewedMarks";
 
-/** Describes one configurable agent action: which setting keys it stores. App vs
- * repo scope is expressed by the descriptor's keys plus the `inherits` flag the
- * body passes down. */
+/** Describes one configurable workflow: its default provider and each provider's
+ * independently persisted model, effort, and start-mode profile. */
 interface ActionDescriptor {
-  /** Absent for actions that are Claude-only by design (the AI review session).
-   *  No agent picker is rendered then — offering one that the launch path ignores
-   *  would be a control that lies. */
   agentKey?: string;
   modelKey: string;
   /** Claude's `--effort` for the run (low…max). */
@@ -49,10 +58,33 @@ interface ActionDescriptor {
   permissionModeKey?: string;
 }
 
+interface HeadlessProfile {
+  agentKey: string;
+  modelKey: string;
+  label: string;
+  hint: string;
+}
+
+const WORK_HELPERS: HeadlessProfile[] = [
+  {
+    agentKey: COMMIT_MESSAGE_AGENT_KEY,
+    modelKey: COMMIT_MESSAGE_MODEL_KEY,
+    label: "Commit message model",
+    hint: "Writes a subject line from the staged diff in a one-shot print command.",
+  },
+  {
+    agentKey: PR_BODY_AGENT_KEY,
+    modelKey: PR_BODY_MODEL_KEY,
+    label: "PR description model",
+    hint: "Drafts the PR body from the diff, ticket, and optional session history.",
+  },
+];
+
 const INVESTIGATE: ActionDescriptor = {
   agentKey: INVESTIGATE_AGENT_KEY,
   modelKey: INVESTIGATE_MODEL_KEY,
   effortKey: INVESTIGATE_EFFORT_KEY,
+  permissionModeKey: INVESTIGATE_PERMISSION_MODE_KEY,
 };
 const WORK: ActionDescriptor = {
   agentKey: WORK_AGENT_KEY,
@@ -60,32 +92,24 @@ const WORK: ActionDescriptor = {
   effortKey: WORK_EFFORT_KEY,
   permissionModeKey: WORK_PERMISSION_MODE_KEY,
 };
-/** No `agentKey`: the review session launches Claude specifically, because its
- *  read-only guarantee rests on a Claude `--settings` deny-list we can't express
- *  for another harness. */
 const REVIEW: ActionDescriptor = {
+  agentKey: REVIEW_AGENT_KEY,
   modelKey: REVIEW_MODEL_KEY,
   effortKey: REVIEW_EFFORT_KEY,
+  permissionModeKey: REVIEW_PERMISSION_MODE_KEY,
 };
 
-/**
- * The Reviews tab's two AI surfaces: the interactive "Ask AI" session, and the
- * headless review brief.
- *
- * They're configured separately because they're different jobs. The session is a
- * conversation you steer, so it follows the same model/effort convention as every
- * other action. The brief is one shot at deciding where your attention goes, which
- * is worth a stronger model than the app's other headless helpers (commit
- * messages, PR bodies) get.
- */
 export function ReviewActionSection({ repo }: { repo?: string }) {
   return (
     <>
       <Heading
         title="Reviews"
-        subtitle="How the Reviews tab's AI sessions run. Ask AI reads and explains; AI review also writes drafts you can edit. Neither can comment or approve: nothing reaches GitHub until you add it to your own review. Edit their prompts in Settings → Prompts."
+        subtitle="Choose the default agent for new AI reviews and keep separate settings for every provider. Existing review sessions keep their original agent. Reviews write only local drafts until you add them to your own GitHub review."
       />
-      <ActionConfig descriptor={REVIEW} repo={repo} />
+      <div className="space-y-3.5">
+        <ActionConfig descriptor={REVIEW} repo={repo} />
+        {!repo && <ViewedMarksCard />}
+      </div>
     </>
   );
 }
@@ -98,7 +122,7 @@ export function TriageActionSection({ repo }: { repo?: string }) {
     <>
       <Heading
         title="Triage"
-        subtitle="How the Triage investigation runs. Pick the agent and model, and edit its prompt in Settings → Prompts."
+        subtitle="Choose the default agent for new investigations and keep separate settings for every provider. Existing investigation sessions keep their original agent."
       />
       {repo ? (
         <div className="space-y-3.5">
@@ -147,7 +171,12 @@ export function WorkActionConfig({ repo }: { repo?: string }) {
   const setSetting = useSetSetting();
   return (
     <div className="space-y-3.5">
-      <ActionConfig descriptor={WORK} repo={repo} />
+      <ActionConfig
+        descriptor={WORK}
+        repo={repo}
+        showDefaultAgent={false}
+        headlessProfiles={WORK_HELPERS}
+      />
       {/* Both are global workflow choices (not per-repo agent/model overrides),
           so they only appear on the app-defaults scope. */}
       {!repo && (
@@ -251,26 +280,18 @@ function AppTriagePanel() {
   );
 }
 
-/**
- * The single body shared by all four action panels. Resolves the scope (`app`
- * or `repo:<repo>`), reads the effective agent (a repo override falls back to
- * the app value), and renders the agent / optional skill / model selects. The
- * `inherits` flag flips each select between a plain concrete picker (app scope)
- * and one with a leading "inherit the app value" option (repo scope).
- *
- * `disabled` really disables every control (not just the wrapper's
- * `pointer-events-none`) — it's set by the app-scope Triage panel while triage is
- * off. Only the app scope ever disables an action, so the `inherits`
- * (`OverrideSelect`) branches below don't carry it.
- */
 function ActionConfig({
   descriptor,
   repo,
   disabled,
+  showDefaultAgent = true,
+  headlessProfiles = [],
 }: {
   descriptor: ActionDescriptor;
   repo?: string;
   disabled?: boolean;
+  showDefaultAgent?: boolean;
+  headlessProfiles?: HeadlessProfile[];
 }) {
   const inherits = repo !== undefined;
   const scope = inherits ? `repo:${repo}` : "app";
@@ -278,34 +299,22 @@ function ActionConfig({
   const { data: agents = [] } = useAgents();
   const setSetting = useSetSetting();
   const set = (key: string, value: string | null) => setSetting.mutate({ scope, key, value });
-
-  // App defaults — the repo scope inherits these when its own value is unset.
-  // Read the permission-mode key unconditionally (harmless sentinel when the
-  // action has none) so hook order stays stable across renders.
   const permKey = descriptor.permissionModeKey ?? "__none_perm__";
   const hasPerm = descriptor.permissionModeKey !== undefined;
-  // Same sentinel trick as `permKey`: an agent-less action still reads the key so
-  // hook order stays stable, and falls back to Claude (the only agent it runs).
   const agentKey = descriptor.agentKey ?? "__none_agent__";
   const hasAgent = descriptor.agentKey !== undefined;
   const appAgent =
     (useSetting("app", agentKey).data as AgentKind | null) ??
     (hasAgent ? (settings?.defaultAgent ?? "Codex") : "Codex");
-  const appModel = useSetting("app", descriptor.modelKey).data;
-  const appEffort = useSetting("app", descriptor.effortKey).data;
-  const appPerm = useSetting("app", permKey).data;
-
-  // This scope's stored values (null/undefined for both app + an unset repo).
   const scopeAgent = useSetting(scope, agentKey).data as AgentKind | null;
-  const scopeModel = useSetting(scope, descriptor.modelKey).data;
-  const scopeEffort = useSetting(scope, descriptor.effortKey).data;
-  const scopePerm = useSetting(scope, permKey).data;
-
   const effectiveAgent = scopeAgent ?? appAgent;
-  const provider = agentProvider(effectiveAgent);
-  const agentDef = agents.find((a) => a.key === effectiveAgent);
-  // Claude's list is live (from Claude Code's own picker cache), so it isn't stuck
-  // on the agent catalog's static tiers; other (WIP) agents keep their catalog list.
+  const availableAgents = agents.filter(
+    (agent) => (agent.key === "Claude" || agent.key === "Codex") && agentAvailable(agent),
+  );
+  const [tab, setTab] = useState<AgentKind>(effectiveAgent);
+  useEffect(() => setTab(effectiveAgent), [effectiveAgent]);
+  const provider = agentProvider(tab);
+  const agentDef = agents.find((agent) => agent.key === tab);
   const claudeModels = useClaudeModels().data;
   const codexModels = useCodexModels().data;
   const models =
@@ -314,91 +323,286 @@ function ActionConfig({
       : provider.capabilities.modelSource === "codex"
         ? (codexModels?.map((model) => model.id) ?? agentDef?.models ?? [])
         : (agentDef?.models ?? []);
-  const appAgentShort = agents.find((a) => a.key === appAgent)?.short ?? appAgent;
-  // The concrete model an unset app-scope picker falls back to: the effective
-  // agent's own default (Settings → Agents), else the first current model. We no
-  // longer expose an "Agent default" (defer) option — the app model is always a
-  // concrete pick — so the picker must have a real value to show when nothing's
-  // been chosen yet.
+  const appAgentShort = agents.find((agent) => agent.key === appAgent)?.short ?? appAgent;
   const agentDefaultModel =
-    settings?.agents?.find((a) => a.key === effectiveAgent)?.model || models[0] || "";
+    settings?.agents?.find((agent) => agent.key === tab)?.model ||
+    codexModels?.find((model) => model.isDefault)?.id ||
+    models[0] ||
+    "";
+
+  const modelProfileKey = providerSettingKey(descriptor.modelKey, tab);
+  const effortProfileKey = providerSettingKey(descriptor.effortKey, tab);
+  const permProfileKey = providerSettingKey(permKey, tab);
+  const appModelProfile = useSetting("app", modelProfileKey).data;
+  const appEffortProfile = useSetting("app", effortProfileKey).data;
+  const appPermProfile = useSetting("app", permProfileKey).data;
+  const scopeModelProfile = useSetting(scope, modelProfileKey).data;
+  const scopeEffortProfile = useSetting(scope, effortProfileKey).data;
+  const scopePermProfile = useSetting(scope, permProfileKey).data;
+  const legacyAppModel = useSetting("app", descriptor.modelKey).data;
+  const legacyAppEffort = useSetting("app", descriptor.effortKey).data;
+  const legacyAppPerm = useSetting("app", permKey).data;
+
+  const compatibleLegacyModel =
+    appAgent === tab && legacyAppModel && models.includes(legacyAppModel) ? legacyAppModel : null;
+  const appModel = appModelProfile ?? compatibleLegacyModel ?? agentDefaultModel;
+  const appEffort = appEffortProfile ?? (appAgent === tab ? legacyAppEffort : null);
+  const appPerm = appPermProfile ?? (appAgent === tab ? legacyAppPerm : null);
+  const modelValue = inherits ? (scopeModelProfile ?? "") : (scopeModelProfile ?? appModel);
+  const effortValue = inherits
+    ? (scopeEffortProfile ?? "")
+    : (scopeEffortProfile ?? appEffort ?? "");
+  const permValue = inherits ? (scopePermProfile ?? "") : (scopePermProfile ?? appPerm ?? "");
 
   return (
-    <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
-      {hasAgent && (
-        <Field
-          label="Agent"
-          hint={
-            inherits
-              ? "Anything left on the default inherits the app setting."
-              : "Only one agent runs an action. More harnesses are coming."
-          }
-        >
-          <AgentSelect
-            agents={agents}
-            value={inherits ? (scopeAgent ?? "") : effectiveAgent}
-            onChange={(v) => set(agentKey, v)}
-            inherits={inherits}
-            disabled={disabled}
-            defaultLabel={`Use app default (${appAgentShort})`}
-          />
-        </Field>
-      )}
-
-      <Field
-        label="Model"
-        hint={
-          inherits ? undefined : "The model this action runs with; it's the launch tray's default."
-        }
-      >
-        <ModelSelect
-          models={models}
-          value={inherits ? (scopeModel ?? "") : (scopeModel ?? agentDefaultModel)}
-          onChange={(v) => set(descriptor.modelKey, v)}
-          inherits={inherits}
-          disabled={disabled}
-          defaultLabel={`Use app default${appModel ? ` (${appModel})` : ""}`}
+    <>
+      <div className="overflow-hidden rounded-xl border border-line-2 bg-raised">
+        {hasAgent && showDefaultAgent && (
+          <div className="px-4 pt-0.5">
+            <Field
+              label="Default agent"
+              hint={
+                inherits
+                  ? "New sessions inherit the app default unless this repo overrides it."
+                  : "The provider used for new sessions. Existing sessions keep their provider."
+              }
+            >
+              <AgentSelect
+                agents={availableAgents}
+                value={inherits ? (scopeAgent ?? "") : effectiveAgent}
+                onChange={(value) => {
+                  set(agentKey, value);
+                  setTab(value ? (value as AgentKind) : appAgent);
+                }}
+                inherits={inherits}
+                disabled={disabled}
+                defaultLabel={`Use app default (${appAgentShort})`}
+              />
+            </Field>
+          </div>
+        )}
+        <Tabs
+          tabs={availableAgents.map((agent) => ({
+            value: agent.key,
+            label: agent.label,
+            icon: <AgentIcon kind={agent.key} size={13} />,
+          }))}
+          value={tab}
+          onChange={setTab}
+          className={showDefaultAgent ? "border-y border-line px-4" : "border-b border-line px-4"}
         />
-      </Field>
-
-      {provider.capabilities.effort && (
-        <Field
-          label="Effort"
-          hint={
-            inherits
-              ? undefined
-              : "How hard the agent thinks. Higher is more thorough but slower and pricier."
-          }
-        >
-          <EffortSelect
-            value={scopeEffort ?? ""}
-            onChange={(v) => set(descriptor.effortKey, v)}
-            inherits={inherits}
+        <div className="px-4 py-0.5">
+          <Field
+            label={headlessProfiles.length > 0 ? "Work model" : "Model"}
+            hint={inherits ? undefined : `Saved for ${agentDef?.label ?? tab}.`}
+          >
+            <ModelSelect
+              models={models}
+              value={modelValue}
+              onChange={(value) => set(modelProfileKey, value)}
+              inherits={inherits}
+              disabled={disabled}
+              defaultLabel={`Use app default${appModel ? ` (${appModel})` : ""}`}
+            />
+          </Field>
+          {provider.capabilities.effort && (
+            <Field
+              label={headlessProfiles.length > 0 ? "Work effort" : "Effort"}
+              hint={
+                inherits
+                  ? undefined
+                  : "How hard the agent thinks. Higher is more thorough but slower and pricier."
+              }
+            >
+              <EffortSelect
+                value={effortValue}
+                onChange={(value) => set(effortProfileKey, value)}
+                inherits={inherits}
+                disabled={disabled}
+                defaultLabel={`Use app default${appEffort ? ` (${appEffort})` : ""}`}
+              />
+            </Field>
+          )}
+          {hasPerm && provider.capabilities.permissionMode && (
+            <Field
+              label={headlessProfiles.length > 0 ? "Work start mode" : "Start mode"}
+              hint={inherits ? undefined : "Applied whenever this provider starts or resumes."}
+            >
+              <PermissionModeSelect
+                value={permValue}
+                onChange={(value) => set(permProfileKey, value)}
+                inherits={inherits}
+                disabled={disabled}
+                defaultLabel={`Use app default (${permModeLabel(appPerm) ?? "Default"})`}
+              />
+            </Field>
+          )}
+          {headlessProfiles.map((profile) => (
+            <HeadlessProfileField
+              key={profile.modelKey}
+              profile={profile}
+              tab={tab}
+              repo={repo}
+              models={models}
+              defaultModel={tab === "Claude" ? DEFAULT_HELPER_MODEL : agentDefaultModel}
+              fallbackAgent={appAgent}
+              scopeFallbackAgent={effectiveAgent}
+              disabled={disabled}
+            />
+          ))}
+        </div>
+      </div>
+      {headlessProfiles.length > 0 && (
+        <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
+          <div className="pt-2.5 pb-3">
+            <div className="text-[13px] font-semibold text-fg-bright">Agent assignments</div>
+            <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+              Choose which configured provider performs each job.
+            </div>
+          </div>
+          <AgentAssignmentField
+            label="Work agent"
+            hint="Starts new interactive work sessions. Existing sessions keep their provider."
+            settingKey={agentKey}
+            repo={repo}
+            fallbackAgent={settings?.defaultAgent ?? "Codex"}
+            agents={availableAgents}
             disabled={disabled}
-            defaultLabel={`Use app default${appEffort ? ` (${appEffort})` : ""}`}
           />
-        </Field>
-      )}
-
-      {hasPerm && provider.capabilities.permissionMode && (
-        <Field
-          label="Start mode"
-          hint={
-            inherits
-              ? undefined
-              : "Claude's --permission-mode, applied when a worktree's agent starts and restarts. Default keeps Claude's normal mode."
-          }
-        >
-          <PermissionModeSelect
-            value={scopePerm ?? ""}
-            onChange={(v) => set(permKey, v)}
-            inherits={inherits}
+          <AgentAssignmentField
+            label="Commit message agent"
+            hint="Generates commit-message drafts independently of the interactive session."
+            settingKey={COMMIT_MESSAGE_AGENT_KEY}
+            repo={repo}
+            fallbackAgent={appAgent}
+            scopeFallbackAgent={effectiveAgent}
+            agents={availableAgents}
             disabled={disabled}
-            defaultLabel={`Use app default (${permModeLabel(appPerm) ?? "Default"})`}
           />
-        </Field>
+          <AgentAssignmentField
+            label="PR description agent"
+            hint="Generates PR-description drafts independently of the interactive session."
+            settingKey={PR_BODY_AGENT_KEY}
+            repo={repo}
+            fallbackAgent={appAgent}
+            scopeFallbackAgent={effectiveAgent}
+            agents={availableAgents}
+            disabled={disabled}
+          />
+        </div>
       )}
-    </div>
+    </>
+  );
+}
+
+function modelMatchesProvider(model: string, agent: AgentKind): boolean {
+  const claudeModel =
+    model.startsWith("claude-") || model === "opus" || model === "sonnet" || model === "haiku";
+  return agent === "Claude" ? claudeModel : agent === "Codex" ? !claudeModel : true;
+}
+
+function HeadlessProfileField({
+  profile,
+  tab,
+  repo,
+  models,
+  defaultModel,
+  fallbackAgent,
+  scopeFallbackAgent,
+  disabled,
+}: {
+  profile: HeadlessProfile;
+  tab: AgentKind;
+  repo?: string;
+  models: string[];
+  defaultModel: string;
+  fallbackAgent: AgentKind;
+  scopeFallbackAgent: AgentKind;
+  disabled?: boolean;
+}) {
+  const inherits = repo !== undefined;
+  const scope = inherits ? `repo:${repo}` : "app";
+  const appSelectedRaw = useSetting("app", profile.agentKey).data as AgentKind | null;
+  const scopeSelectedRaw = useSetting(scope, profile.agentKey).data as AgentKind | null;
+  const appSelected = appSelectedRaw ?? fallbackAgent;
+  const scopeSelected = scopeSelectedRaw ?? appSelectedRaw ?? scopeFallbackAgent;
+  const profileKey = providerSettingKey(profile.modelKey, tab);
+  const appProfile = useSetting("app", profileKey).data;
+  const scopeProfile = useSetting(scope, profileKey).data;
+  const legacyApp = useSetting("app", profile.modelKey).data;
+  const legacyScope = useSetting(scope, profile.modelKey).data;
+  const compatibleAppLegacy =
+    appSelected === tab && legacyApp && modelMatchesProvider(legacyApp, tab) ? legacyApp : null;
+  const compatibleScopeLegacy =
+    scopeSelected === tab && legacyScope && modelMatchesProvider(legacyScope, tab)
+      ? legacyScope
+      : null;
+  const appModel = appProfile ?? compatibleAppLegacy ?? defaultModel;
+  const value = inherits
+    ? (scopeProfile ?? compatibleScopeLegacy ?? "")
+    : (scopeProfile ?? compatibleScopeLegacy ?? appModel);
+  const { mutate: setSetting } = useSetSetting();
+
+  return (
+    <Field label={profile.label} hint={inherits ? undefined : profile.hint}>
+      <ModelSelect
+        models={models}
+        value={value}
+        onChange={(next) =>
+          setSetting({
+            scope,
+            key: profileKey,
+            value: next,
+          })
+        }
+        inherits={inherits}
+        disabled={disabled}
+        defaultLabel={`Use app default${appModel ? ` (${appModel})` : ""}`}
+      />
+    </Field>
+  );
+}
+
+function AgentAssignmentField({
+  label,
+  hint,
+  settingKey,
+  repo,
+  fallbackAgent,
+  scopeFallbackAgent = fallbackAgent,
+  agents,
+  disabled,
+}: {
+  label: string;
+  hint: string;
+  settingKey: string;
+  repo?: string;
+  fallbackAgent: AgentKind;
+  scopeFallbackAgent?: AgentKind;
+  agents: { key: AgentKind; label: string; short: string; available: boolean }[];
+  disabled?: boolean;
+}) {
+  const inherits = repo !== undefined;
+  const scope = inherits ? `repo:${repo}` : "app";
+  const appRaw = useSetting("app", settingKey).data as AgentKind | null;
+  const scopeRaw = useSetting(scope, settingKey).data as AgentKind | null;
+  const appAgent = appRaw ?? fallbackAgent;
+  const inheritedAgent = appRaw ?? scopeFallbackAgent;
+  const value = inherits ? (scopeRaw ?? "") : (scopeRaw ?? appAgent);
+  const short = agents.find((agent) => agent.key === inheritedAgent)?.short ?? inheritedAgent;
+  const { mutate: setSetting } = useSetSetting();
+
+  return (
+    <Field label={label} hint={inherits ? undefined : hint}>
+      <AgentSelect
+        agents={agents}
+        value={value}
+        onChange={(next) => setSetting({ scope, key: settingKey, value: next })}
+        inherits={inherits}
+        disabled={disabled}
+        defaultLabel={`Use inherited default (${short})`}
+      />
+    </Field>
   );
 }
 

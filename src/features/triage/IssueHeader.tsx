@@ -5,13 +5,14 @@
  */
 import { openUrl } from "@tauri-apps/plugin-opener";
 
-import type { TriageDetail, TriageTicket } from "../../bindings";
+import type { AgentKind, TriageDetail, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
-import { ClaudeSparkIcon, LinearLogo, RefreshIcon } from "../../components/icons";
+import { AgentIcon, LinearLogo, RefreshIcon } from "../../components/icons";
 import { Button, Skeleton } from "../../components/primitives";
 import { RelativeTime, SlaCountdown } from "../../components/RelativeTime";
 import { formatSnoozeLabel } from "../../lib/relativeTime";
 import { alpha } from "../../theme/colors";
+import { agentProvider } from "../terminal/agentProvider";
 import { PriorityPill } from "./PriorityPill";
 import { StatusPicker } from "./StatusPicker";
 
@@ -20,6 +21,7 @@ export function IssueHeader({
   detail,
   onSetState,
   investigating,
+  agentKind,
   onInvestigate,
   onRefresh,
   refreshing,
@@ -29,6 +31,7 @@ export function IssueHeader({
   detail?: TriageDetail;
   onSetState: (stateId: string) => void;
   investigating: boolean;
+  agentKind: AgentKind;
   onInvestigate: () => void;
   onRefresh: () => void;
   refreshing: boolean;
@@ -64,11 +67,11 @@ export function IssueHeader({
             variant="tinted"
             size="sm"
             onClick={onInvestigate}
-            title="Open a terminal to investigate this issue"
+            title={`Investigate with ${agentProvider(agentKind).label}`}
             style={investigating ? { borderColor: alpha(55), background: alpha(20) } : undefined}
           >
-            <ClaudeSparkIcon size={12} />
-            Investigate
+            <AgentIcon kind={agentKind} size={12} />
+            Investigate with {agentProvider(agentKind).label}
           </Button>
         </div>
       </div>

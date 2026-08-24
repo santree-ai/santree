@@ -473,6 +473,20 @@ pub fn add_review_worktree(
 /// to remove it is never worth failing a caller over. No branch to delete, unlike
 /// [`remove_worktree`].
 pub fn remove_review_worktree(repo: &Path, worktree_path: &Path) {
+    let reviews_root = repo.join(".santree").join("reviews");
+    let direct_child = worktree_path.parent() == Some(reviews_root.as_path())
+        && worktree_path.file_name().is_some_and(|name| {
+            let mut components = Path::new(name).components();
+            matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+        });
+    if !direct_child {
+        log::error!(
+            "refusing to remove review checkout outside {}: {}",
+            reviews_root.display(),
+            worktree_path.display()
+        );
+        return;
+    }
     let path = worktree_path.to_string_lossy().into_owned();
     let _ = git(repo, &["worktree", "remove", "--force", &path]);
     if worktree_path.exists() {
@@ -1371,6 +1385,23 @@ mod tests {
             safe_path(cwd, "sub/file.txt").unwrap(),
             cwd.join("sub/file.txt")
         );
+    }
+
+    #[test]
+    fn review_removal_refuses_paths_outside_its_checkout_root() {
+        let base = std::env::temp_dir().join(format!(
+            "santree-review-remove-boundary-{}",
+            std::process::id()
+        ));
+        let repo = base.join("repo");
+        let outside = base.join("victim");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "safe").unwrap();
+
+        remove_review_worktree(&repo, &outside);
+
+        assert!(outside.join("keep").is_file());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // ---- safe_real_path (symlink-resolving containment check) ----

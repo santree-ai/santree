@@ -28,7 +28,8 @@ impl SessionSurface {
     pub fn codex_profile(self) -> CodexProfile {
         match self {
             Self::Work => CodexProfile::Work,
-            Self::Investigate | Self::AskAi | Self::Review => CodexProfile::ReadOnly,
+            Self::Review => CodexProfile::Review,
+            Self::Investigate | Self::AskAi => CodexProfile::ReadOnly,
             Self::FixCi => CodexProfile::FixCi,
         }
     }
@@ -38,6 +39,14 @@ impl SessionSurface {
             Self::Investigate => ("investigate_model", "investigate_effort"),
             Self::AskAi | Self::Review => ("review_model", "review_effort"),
             Self::Work | Self::FixCi => ("work_model", "work_effort"),
+        }
+    }
+
+    pub fn agent_key(self) -> &'static str {
+        match self {
+            Self::Investigate => "investigate_agent",
+            Self::AskAi | Self::Review => "review_agent",
+            Self::Work | Self::FixCi => "work_agent",
         }
     }
 }
@@ -51,6 +60,7 @@ pub struct SessionRequest<'a> {
     pub effort: Option<&'a str>,
     pub surface: SessionSurface,
     pub allow_fresh: bool,
+    pub review_mcp_config: Option<&'a Path>,
 }
 
 #[async_trait]
@@ -109,6 +119,7 @@ impl AgentProvider for CodexProvider<'_> {
                 effort: request.effort,
                 profile: request.surface.codex_profile(),
                 allow_fresh: request.allow_fresh,
+                review_mcp_config: request.review_mcp_config,
             },
         )
         .await
@@ -143,6 +154,7 @@ mod tests {
     fn every_surface_has_an_explicit_security_profile_and_settings_family() {
         assert_eq!(SessionSurface::Work.codex_profile(), CodexProfile::Work);
         assert_eq!(SessionSurface::FixCi.codex_profile(), CodexProfile::FixCi);
+        assert_eq!(SessionSurface::Review.codex_profile(), CodexProfile::Review);
         assert_eq!(
             SessionSurface::Investigate.codex_profile(),
             CodexProfile::ReadOnly

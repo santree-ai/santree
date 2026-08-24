@@ -47,7 +47,8 @@ live data, and an unconnected view shows its honest empty state.
   task. Watch, interrupt, redirect; review the diff and open the PR without
   leaving.
 - **Reviews**: a PR inbox with the diff, inline comments, CI (and
-  "Fix CI with AI"), plus **Ask AI** to interrogate a PR beside the code.
+  "Fix CI with AI"), plus provider-aware AI reviews that write local briefs and
+  draft comments for you to edit and publish.
 - **Settings**: integrations, agents and models, env vars, appearance,
   updates. App-wide defaults, per-repo overrides.
 

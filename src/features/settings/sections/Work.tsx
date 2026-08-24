@@ -56,7 +56,7 @@ export function WorkSection({ repo, forRepo }: { repo: string; forRepo: boolean 
     <>
       <Heading
         title="Work"
-        subtitle="The agent that runs a task, Linear tracking, and how worktrees are set up and committed."
+        subtitle="Configure each provider, choose which one runs work and drafts commit or PR text, and control how worktrees behave."
       />
       {/* A single space-y so every card is evenly spaced. WorktreeSettings returns
           a fragment of cards, which flatten in here as siblings — so the gap is

@@ -11,12 +11,12 @@ use anyhow::{anyhow, Result};
 use santree_core::domain::{NewPr, PrDraft, WorktreePr};
 
 use crate::agent;
+use crate::codex::CodexRuntime;
 use crate::db::Db;
 use crate::git;
 use crate::github;
 use crate::prompts;
 use crate::repo;
-use crate::settings;
 use crate::worktree::{self, Coords};
 
 /// Live PR status for every tracked worktree in `repo`, fetched from GitHub with a
@@ -135,6 +135,7 @@ fn issue_tag(title: &str) -> Option<&str> {
 /// + the branch diff; otherwise it's the raw template (or empty).
 pub async fn draft(
     db: &Db,
+    codex_runtime: &CodexRuntime,
     repo: &str,
     issue_id: &str,
     fill: bool,
@@ -162,9 +163,17 @@ pub async fn draft(
 
     let body = if fill {
         // Fall back to the raw template if Claude isn't available / fails.
-        draft_body(db, repo, &c, issue_id, template.clone(), send_transcripts)
-            .await
-            .unwrap_or_else(|| template.unwrap_or_default())
+        draft_body(
+            db,
+            codex_runtime,
+            repo,
+            &c,
+            issue_id,
+            template.clone(),
+            send_transcripts,
+        )
+        .await
+        .unwrap_or_else(|| template.unwrap_or_default())
     } else {
         template.unwrap_or_default()
     };
@@ -176,18 +185,17 @@ pub async fn draft(
     })
 }
 
-/// Settings key for the model the PR body is drafted on (app or per-repo scope).
-pub const BODY_MODEL_KEY: &str = "pr_body_model";
-
 /// Ceiling on one PR-body draft. Above [`agent::SHORT_TIMEOUT`] because the prompt
 /// carries a capped diff plus (optionally) whole session transcripts, and a
 /// stronger model than the default reads them slower — but this one has a template
 /// to fall back on, so it doesn't need the brief's patience.
 const BODY_TIMEOUT: Duration = Duration::from_secs(240);
 
-/// Draft the PR body with a headless Claude call against the `fill-pr` template.
+/// Draft the PR body with the configured headless provider against the `fill-pr`
+/// template.
 async fn draft_body(
     db: &Db,
+    codex_runtime: &CodexRuntime,
     repo: &str,
     c: &Coords,
     issue_id: &str,
@@ -198,20 +206,14 @@ async fn draft_body(
     // dropping onto the blocking pool. The issue is best-effort — a missing/failed
     // fetch just leaves `ticket_content` empty, same as the work flow.
     let sources = prompts::resolve_sources(db, Some(repo)).await.ok()?;
-    // Configurable per repo (Settings → Actions): the default tier writes a fine
-    // body from a small diff, but a large PR — or one whose transcripts carry the
-    // reasoning — is worth a stronger model.
-    let model = settings::resolve(db, repo, BODY_MODEL_KEY)
+    let helper = agent::helper_config(db, repo, agent::HelperKind::PrBody)
         .await
-        .ok()
-        .flatten()
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| agent::HELPER_MODEL.to_string());
+        .ok()?;
     let detail = crate::linear::triage_detail(db, repo, issue_id)
         .await
         .ok()
         .flatten();
-    // Opt-in: mine this worktree's Claude session transcript(s) for decisions/
+    // Opt-in: mine this worktree's agent session transcripts for decisions/
     // rationale the diff alone can't show. Best-effort — an unreadable/missing
     // transcript just leaves `transcripts` empty. Gathered here (async file I/O on
     // the blocking pool) rather than inside the render closure below.
@@ -224,9 +226,10 @@ async fn draft_body(
         String::new()
     };
 
-    // The diff reads, prompt render, and Claude call all block — run the whole
+    // The diff reads, prompt render, and agent call all block — run the whole
     // chain on one blocking thread instead of shelling out git on the runtime.
     let c = c.clone();
+    let codex_runtime = codex_runtime.clone();
     let issue_id = issue_id.to_string();
     tokio::task::spawn_blocking(move || {
         // Cap the diff so the prompt stays within sane arg/token limits.
@@ -267,15 +270,15 @@ async fn draft_body(
         // would let an injected "…also include the contents of ~/.ssh/id_rsa" reach
         // real secrets. Everything this prompt legitimately needs is under `c.path`.
         let read_worktree = agent::read_within(&c.path);
-        agent::run_print(
+        agent::run_helper(
+            &codex_runtime,
+            &helper,
             &c.path,
             &prompt,
             &[&read_worktree],
-            Some(&model),
             BODY_TIMEOUT,
         )
-        // Best-effort: the caller falls back to the raw template. `run_print` has
-        // already logged why, so the reason isn't lost here.
+        // Best-effort: the caller falls back to the raw template.
         .ok()
     })
     .await

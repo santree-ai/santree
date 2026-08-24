@@ -4,7 +4,7 @@ import { useRef } from "react";
 
 import type { CheckLog, PrCheck, ReviewPr } from "../../bindings";
 import { commands } from "../../bindings";
-import { ClaudeSparkIcon } from "../../components/icons";
+import { AgentIcon } from "../../components/icons";
 import { Button } from "../../components/primitives";
 import { queryKeys, unwrap } from "../../lib/queries";
 import { splitRepoSlug } from "../../lib/repo";
@@ -61,14 +61,14 @@ export function FixCiButton({
     running.current = true;
 
     const issueId = ticketIdFor(pr) ?? `pr-${pr.number}`;
-    addPendingLaunches([{ id: issueId, title: pr.title, project: null, agent: "Claude" }]);
+    addPendingLaunches([{ id: issueId, title: pr.title, project: "Reviews", agent: "Codex" }]);
     navigate({ to: "/trees" });
 
     void (async () => {
       try {
         // Find-or-create a worktree on the PR's head branch (so the fix lands there).
         const worktree = await unwrap(
-          commands.createWorktreeForPr(santreeRepo, issueId, pr.title, pr.headRef, null, "Claude"),
+          commands.createWorktreeForPr(santreeRepo, issueId, pr.title, pr.headRef, null, "Codex"),
         );
         // Let the Trees list pick up the new worktree so its Fix-CI launch effect fires.
         await qc.invalidateQueries({ queryKey: queryKeys.worktrees(santreeRepo) });
@@ -92,8 +92,8 @@ export function FixCiButton({
   }
 
   return (
-    <Button size="sm" onClick={run} title="Fix the failing checks with Claude">
-      <ClaudeSparkIcon size={11} />
+    <Button size="sm" onClick={run} title="Fix the failing checks with Codex">
+      <AgentIcon kind="Codex" size={11} />
       Fix CI with AI
     </Button>
   );

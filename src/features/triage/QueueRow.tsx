@@ -1,8 +1,8 @@
 /** A single row in the triage queue (left rail). */
 import { type CSSProperties, memo } from "react";
 
-import type { TriageTicket } from "../../bindings";
-import { ClaudeSparkIcon } from "../../components/icons";
+import type { AgentKind, TriageTicket } from "../../bindings";
+import { AgentIcon } from "../../components/icons";
 import { RelativeTime, SlaCountdown } from "../../components/RelativeTime";
 import { formatSnoozeLabel } from "../../lib/relativeTime";
 import { alpha } from "../../theme/colors";
@@ -16,7 +16,7 @@ import { PriorityPill } from "./PriorityPill";
  * Like IssueRow, the row is a container with two click targets: the checkbox
  * queues the ticket for batch investigation, the card selects it. The checkbox
  * column is always present so rows align; a row whose investigation is already
- * live shows the Claude spark there instead, and a snoozed row a disabled box.
+ * live shows its provider icon there instead, and a snoozed row a disabled box.
  */
 export const QueueRow = memo(function QueueRow({
   ticket,
@@ -25,6 +25,7 @@ export const QueueRow = memo(function QueueRow({
   selected,
   investigating,
   started,
+  agentKinds,
   onSelect,
   onToggleSelect,
   onHover,
@@ -38,6 +39,8 @@ export const QueueRow = memo(function QueueRow({
   investigating: boolean;
   /** A past investigation left a stored (resumable) session — not live now. */
   started: boolean;
+  /** Providers with a live or durable investigation on this ticket. */
+  agentKinds: AgentKind[];
   onSelect: (id: string) => void;
   onToggleSelect: (id: string) => void;
   onHover: (id: string) => void;
@@ -87,7 +90,11 @@ export const QueueRow = memo(function QueueRow({
         }`}
       >
         {investigating ? (
-          <ClaudeSparkIcon size={12} />
+          <span className="flex items-center -space-x-1">
+            {agentKinds.map((agent) => (
+              <AgentIcon key={agent} kind={agent} size={12} />
+            ))}
+          </span>
         ) : (
           <span
             className={`flex h-3.5 w-3.5 items-center justify-center rounded text-[9px] font-bold text-[color:var(--on-accent)] transition-colors ${
@@ -107,14 +114,18 @@ export const QueueRow = memo(function QueueRow({
         <div className="mb-1.5 flex items-center gap-2">
           <span className="flex-none font-mono text-[10.5px] text-muted-2">{ticket.id}</span>
           {/* A past (not-live) investigation is resumable — mark it with a faint
-              spark; the checkbox stays so it can still be batch-resumed. A live
-              one already shows the bright spark in the checkbox column. */}
+              provider icon; the checkbox stays so it can still be batch-resumed.
+              A live one already shows the icon in the checkbox column. */}
           {started && !investigating && (
             <span
               title="Investigation started; resumable"
               className="flex flex-none items-center opacity-60"
             >
-              <ClaudeSparkIcon size={11} />
+              <span className="flex items-center -space-x-1">
+                {agentKinds.map((agent) => (
+                  <AgentIcon key={agent} kind={agent} size={11} />
+                ))}
+              </span>
             </span>
           )}
           <PriorityPill priority={ticket.priority} muted={snoozed} />

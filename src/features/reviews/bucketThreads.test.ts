@@ -22,6 +22,7 @@ function thread(over: Partial<PrThread> = {}): PrThread {
 
 function draft(over: Partial<ReviewDraft> = {}): ReviewDraft {
   return {
+    agentKind: "Claude",
     id: "d1",
     prRepo: "acme/web",
     prNumber: 42,

@@ -33,6 +33,12 @@ vi.mock("./model", async (importOriginal) => ({
   useTrees: () => trees,
 }));
 
+vi.mock("../../lib/queries", () => ({
+  useAgentAuth: () => ({ data: { connected: true } }),
+  useCodexAccount: () => ({ data: { connected: true } }),
+  useCodexHealth: () => ({ data: { available: true } }),
+}));
+
 /** Leaks the terminal registry so a test can spawn/kill the PTY sessions the bar
  *  watches (the real orchestrator — sessions are plain state). */
 let registry: TerminalTabs;

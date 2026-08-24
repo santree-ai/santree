@@ -77,8 +77,10 @@ shared Codex CLI account.
 Two call sites intentionally sit outside the terminal pane. They, and the
 session-state channel named in the next section, are the *only* sanctioned
 exceptions to the constraints above:
-- `src-tauri/src/agent.rs` (`run_print` / headless helpers) — one-shot `claude -p`
-  calls that draft a commit message or a PR title/description.
+- `src-tauri/src/agent.rs` (`run_print` / `run_helper`) — one-shot calls through
+  each helper's independently configured provider (initially inherited from Work)
+  that draft a commit message or PR description. Claude uses `claude -p`; Codex
+  uses `codex exec`.
 - `src-tauri/src/github.rs` (`token()`) — reads a token via `gh auth token`, GitHub's
   own documented token-lending interface for scripts/tools. This is distinct from
   santree reading, storing, or proxying an *agent CLI's* (Claude/Codex/…) auth —
@@ -87,18 +89,20 @@ exceptions to the constraints above:
 Both stay inside the spirit of this doc only because they are: the vendor's own
 documented print/non-interactive mode, invoked on the real unmodified binary;
 single-shot, with no loop and no retry; human-initiated by a button click, never
-automatic or background; bounded by a timeout (~120s); scoped with explicit
-`--allowedTools`/`--disallowedTools`; and their output lands in a commit message or
-PR body under human review — it never feeds back into an *automated* agent loop. This
-is a narrow, named exception, not a license for headless/background Claude usage
-generally. Any new headless call site must be justified against these same conditions
-before merging.
+automatic or background; bounded by a timeout; and their output lands in a commit
+message or PR body under human review — it never feeds back into an *automated*
+agent loop. Claude runs in default permission mode with explicit allowed/denied
+tools plus safe mode and an empty strict MCP configuration. Codex runs ephemeral,
+read-only, with user config/rules ignored and MCP servers, apps, plugins, hooks,
+web search, and network disabled under strict config. This is a narrow, named
+exception, not a license for headless/background agent usage generally. Any new
+headless call site must be justified against these same conditions before merging.
 
 One input to the PR-draft helper deserves an explicit call-out: with the opt-in "use
 transcripts" checkbox, the draft prompt is additionally fed the *interactive* Claude
 session's own on-disk transcript (`~/.claude/projects/**/<uuid>.jsonl`, via
-`session::worktree_transcripts`). That is one Claude session's output becoming another
-Claude invocation's input, so it sits in the gray zone of "no output-parsing that
+`session::worktree_transcripts`). That is one Claude session's output becoming a
+headless provider invocation's input, so it sits in the gray zone of "no output-parsing that
 drives new prompts" — but it stays inside the line for the same reasons: it is
 opt-in and user-triggered (a checkbox + button click, never automatic), single-shot,
 **text-only with tool calls/results stripped out** (no tool output is re-fed), and the
@@ -126,7 +130,7 @@ Exactly what it injects — the whole list, no more:
   bar. It prints the bar Claude renders and records Claude's authoritative usage
   numbers into `session_usage_live`.
 - **A `permissions.deny` block**, in the restricted flows only. Each is written to
-  its own settings file so one can never affect another launch, and all three are
+  its own settings file so one can never affect another launch, and both are
   best-effort defence-in-depth, not a hard gate — see `hooks.rs` for what they do
   and don't catch:
   - *Fix CI* (`claude_settings_no_git` → `claude-hooks-fixci.json`) — eight rules,
@@ -136,15 +140,14 @@ Exactly what it injects — the whole list, no more:
     `Bash(*git * commit*)` / `Bash(*git * push*)` (an option between the verb and
     the subcommand, e.g. `git -C <path> commit`). So that session can fix and
     validate but leaves committing/pushing to the user.
-  - *Ask AI* (`claude_settings_review` → `claude-hooks-review.json`) — the same
-    eight, plus sixteen denying every `gh` route that would speak as the user on a
-    PR (`gh pr review/comment/merge/close/edit/ready`, `gh issue comment`, and
-    `gh api` wholesale), each in both the prefix and the wrapper form.
   - *AI review* (`claude_settings_ai_review` → `claude-hooks-ai-review.json`) —
-    the same twenty-four, plus the one `permissions.allow` rule described below.
+    the Fix CI rules plus sixteen denying every `gh` route that would speak as the
+    user on a PR (`gh pr review/comment/merge/close/edit/ready`, `gh issue comment`,
+    and `gh api` wholesale), each in both the prefix and wrapper form, plus the one
+    `permissions.allow` rule described below.
 - **In the AI-review flow only**, two more things (see "AI-review MCP server"):
   one `permissions.allow` rule, `mcp__santree-review`, and one extra launch flag,
-  `--mcp-config <app_data_dir>/mcp/<owner>-<name>-<N>.mcp.json`, registering a
+  `--mcp-config <app_data_dir>/mcp/review-<identity-hash>.mcp.json`, registering a
   single additional stdio MCP server. The user's own MCP servers and settings are
   untouched — there is no `--strict-mcp-config` — so that session can still read a
   ticket or a design doc through whatever they have connected.
@@ -204,20 +207,21 @@ following, and any change here must preserve all of them:
 - **The scope is ours, not the model's.** The PR, its head commit, and the diff
   index the tools validate line numbers against are all written by santree at
   launch and passed on the command line. Every statement carries the PR, so
-  "comment on a different pull request" is not expressible.
+  "comment on a different pull request" is not expressible. Codex does not accept
+  an MCP path from IPC: Rust derives the one exact app-owned config filename from
+  the authoritative `ai-review:<owner>/<repo>#<number>` terminal key.
 - **It cannot gate the CLI's decisions.** An MCP tool is one the model chooses to
   call, not a channel santree sits in the middle of. Unlike a synchronous hook,
-  nothing here can approve, deny, or delay anything Claude does.
+  nothing here can approve, deny, or delay anything the provider does.
 - **No output-parsing influences input.** Tool results carry confirmations,
-  validation messages, and the model's own drafts back over the transport Claude
-  owns. Nothing santree derives from them is written to the PTY, and there is no
-  loop: a human opens the tab, and the server exits when Claude closes its stdin.
-- **The rest of the read-only posture is unchanged.** The deny list above still
-  blocks the `gh` and `git` write shapes, and the `pr-review` prompt states the
-  rule in prose: read through any tool, write only through santree's. Because the
-  user's own MCP servers stay available, that prompt is what stands between the
-  session and a write through one of *those* — it is not a hard gate, and it is
-  not claimed to be.
+  validation messages, and the model's own drafts back over the provider-owned
+  transport. Nothing santree derives from them is written to the PTY, and there
+  is no loop: a human opens the tab, and the server exits when its provider closes
+  the MCP transport.
+- **The rest of the read-only posture is unchanged.** Claude retains the scoped
+  deny-list posture documented above. Codex gets only santree's review MCP server
+  as thread-scoped config on top of the App Server's fail-closed base config;
+  ambient MCP servers, apps, plugins, hooks, web search, and network stay disabled.
 
 ## Where this is enforced in code
 - `crates/pty` — spawns a real process behind a real PTY and streams **raw

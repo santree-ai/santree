@@ -19,26 +19,30 @@ import { Spinner } from "../../components/primitives";
 import { SessionEndedPane } from "../../components/SessionEndedPane";
 import {
   CLAUDE_START_WITH_CHROME_KEY,
+  INVESTIGATE_AGENT_KEY,
+  INVESTIGATE_EFFORT_KEY,
+  INVESTIGATE_MODEL_KEY,
+  INVESTIGATE_PERMISSION_MODE_KEY,
   INVESTIGATE_REMOTE_CONTROL_KEY,
   queryKeys,
   useAgentSession,
   useBoolSetting,
   useClaudeHookSettings,
   useInvestigatePrompt,
+  useResolvedProviderSetting,
   useResolvedSetting,
 } from "../../lib/queries";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
+import { triageTerminalRef } from "./providerSessions";
 
 export function InvestigatePane({
   repo,
   ticketId,
   cwd,
   agentKind,
-  model,
-  effort,
   hasStartedSession,
   onExited,
 }: {
@@ -47,10 +51,6 @@ export function InvestigatePane({
   ticketId: string;
   cwd?: string;
   agentKind: AgentKind;
-  /** Model override for the run, or null to use the agent's default. */
-  model: string | null;
-  /** Effort level (Claude's --effort), or null for the CLI default. */
-  effort: string | null;
   /** This ticket has a stored session from a past investigation (across app
    *  restarts) — so land on the resume pane rather than auto-launching. */
   hasStartedSession: boolean;
@@ -64,7 +64,8 @@ export function InvestigatePane({
   // pane, and its Resume button clears the latch to re-seed. This pane is keyed
   // by ticket, so reopening the ticket resets the latch.
   const { tabs } = useTerminals();
-  const liveSession = tabs.some((t) => t.source === "triage" && t.refId === ticketId);
+  const terminalRef = triageTerminalRef(ticketId, agentKind);
+  const liveSession = tabs.some((t) => t.source === "triage" && t.refId === terminalRef);
   const [liveSeen, setLiveSeen] = useState(false);
   // A brand-new investigation (no stored session) auto-launches when opened; one
   // that already has a stored session waits behind the resume pane until the user
@@ -82,6 +83,7 @@ export function InvestigatePane({
 
   const termKey = `triage:${ticketId}`;
   const canLaunch = !!cwd;
+  const qc = useQueryClient();
   // Something to resume: it ran and exited in-place (liveSeen), or a past
   // investigation left a stored session. Show the resume pane instead of a dead
   // terminal — unless the user just asked to resume (then we launch).
@@ -91,6 +93,11 @@ export function InvestigatePane({
   // one the user just clicked Resume on.
   const needsSeed = canLaunch && !liveSession && !liveSeen && (resumeRequested || !resumable);
   const session = useAgentSession(repo, termKey, cwd ?? "", canLaunch, agentKind, needsSeed);
+  useEffect(() => {
+    if (session.data && session.data.type !== "shell") {
+      void qc.invalidateQueries({ queryKey: queryKeys.startedInvestigations(repo) });
+    }
+  }, [session.data, qc, repo]);
   // The opening prompt is rendered backend-side from the live ticket (its
   // screenshots extracted to files the agent can Read) and written to a file;
   // fetch that file's PATH only for a fresh seed. The terminal waits on it (via
@@ -98,10 +105,28 @@ export function InvestigatePane({
   const investigatePrompt = useInvestigatePrompt(repo, ticketId, needsSeed);
   const resolvedAgent = sessionAgent(session.data, agentKind);
   const provider = agentProvider(resolvedAgent);
+  const model = useResolvedProviderSetting(
+    repo,
+    INVESTIGATE_MODEL_KEY,
+    agentKind,
+    INVESTIGATE_AGENT_KEY,
+  );
+  const effort = useResolvedProviderSetting(
+    repo,
+    INVESTIGATE_EFFORT_KEY,
+    agentKind,
+    INVESTIGATE_AGENT_KEY,
+  );
+  const permissionMode = useResolvedProviderSetting(
+    repo,
+    INVESTIGATE_PERMISSION_MODE_KEY,
+    agentKind,
+    INVESTIGATE_AGENT_KEY,
+  );
   const modelFlag =
-    resolvedAgent === agentKind && model ? `--model ${shellQuote(model)}` : undefined;
+    resolvedAgent === agentKind && model.data ? `--model ${shellQuote(model.data)}` : undefined;
   const effortFlag =
-    resolvedAgent === agentKind && effort ? `--effort ${shellQuote(effort)}` : undefined;
+    resolvedAgent === agentKind && effort.data ? `--effort ${shellQuote(effort.data)}` : undefined;
   // `--remote-control` is opt-out (Settings → Investigation): some environments
   // run a `claude` build old enough to predate the flag, which would otherwise
   // fail every launch with no visible cause (see CLAUDE.md's "verify vendor
@@ -123,6 +148,9 @@ export function InvestigatePane({
       : `Investigate ${ticketId}.`,
     modelFlag,
     effortFlag,
+    permissionMode: provider.capabilities.permissionMode
+      ? (permissionMode.data ?? undefined)
+      : undefined,
     remoteControl:
       provider.capabilities.remoteControl && remoteControlEnabled ? ticketId : undefined,
     settingsFlag:
@@ -136,15 +164,19 @@ export function InvestigatePane({
   // file that already exists from the first frame.
   const ready =
     !needsSeed ||
-    (!session.isFetching && !remoteControlSetting.isLoading && investigatePrompt.isFetched);
+    (!session.isFetching &&
+      !remoteControlSetting.isLoading &&
+      investigatePrompt.isFetched &&
+      model.isFetched &&
+      effort.isFetched &&
+      permissionMode.isFetched);
 
-  const qc = useQueryClient();
   const dropCachedSession = useCallback(
     // Drop the cached session resolution so the next launch re-asks the backend
     // instead of replaying a stale "fresh" decision whose transcript now exists
     // on disk (which `session::resolve` would correctly resolve to Resume).
-    () => qc.removeQueries({ queryKey: ["agent-session", repo, termKey] }),
-    [qc, repo, termKey],
+    () => qc.removeQueries({ queryKey: queryKeys.agentSessionPrefix(repo, termKey, agentKind) }),
+    [qc, repo, termKey, agentKind],
   );
   const handleExited = useCallback(() => {
     dropCachedSession();
@@ -185,7 +217,13 @@ export function InvestigatePane({
   return (
     <div className="min-h-0 flex-1">
       {ready ? (
-        <InvestigateTerminal ticketId={ticketId} cwd={cwd} seed={seed} onExited={handleExited} />
+        <InvestigateTerminal
+          ticketId={ticketId}
+          terminalRef={terminalRef}
+          cwd={cwd}
+          seed={seed}
+          onExited={handleExited}
+        />
       ) : (
         <div className="flex h-full items-center justify-center">
           <Spinner size={16} />
@@ -200,17 +238,19 @@ export function InvestigatePane({
  *  instead of leaving it pointed at a detached node. */
 function InvestigateTerminal({
   ticketId,
+  terminalRef,
   cwd,
   seed,
   onExited,
 }: {
   ticketId: string;
+  terminalRef: string;
   cwd?: string;
   seed?: string;
   onExited: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
-    spec: { title: ticketId, cwd, source: "triage", refId: ticketId, seed },
+    spec: { title: ticketId, cwd, source: "triage", refId: terminalRef, seed },
     onExited,
   });
   // The TerminalLayer overlays this host with the ticket's live session.

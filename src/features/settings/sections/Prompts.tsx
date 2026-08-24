@@ -1,9 +1,9 @@
-/** Settings → Prompts: a full-pane composer for the AI prompts that drive the
- *  Work, Commit, PR, and Fix-CI flows.
+/** Settings → Prompts: a full-pane composer for the prompts shared by every
+ *  provider and workflow.
  *
- *  Left: a library rail split into Flows (the prompts that run) and Shared blocks
- *  (reusable partials — the built-in Issue context plus any you create). Right: a
- *  side-by-side editor + live preview. Prompts are minijinja templates — reference
+ *  Left: a workflow-grouped library rail plus Shared blocks (reusable partials —
+ *  the built-in Issue context plus any you create). Right: a side-by-side editor
+ *  + live preview. Prompts are minijinja templates — reference
  *  `{{ variables }}`, branch with `{% if %}`/`{% for %}`, and embed another prompt
  *  with `{% include "name" %}`. Overrides are per app (User scope) or per repo. */
 
@@ -46,6 +46,13 @@ const PREVIEW_MIN = 320;
 const PREVIEW_MAX = 900;
 const PREVIEW_DEFAULT = 480;
 
+const FLOW_GROUPS = [
+  { title: "Triage", names: ["triage"] },
+  { title: "Work", names: ["work", "fill-commit", "fill-pr"] },
+  { title: "Reviews", names: ["pr-review", "fix-ci"] },
+  { title: "English tutor", names: ["english-tutor", "english-analysis"] },
+] as const;
+
 /** Debounce a value so the preview doesn't refetch on every keystroke. */
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -71,21 +78,39 @@ export function PromptsSection({ repo, forRepo }: { repo: string; forRepo: boole
 
   const flows = prompts?.filter((p) => p.kind === "flow") ?? [];
   const blocks = prompts?.filter((p) => p.kind === "block") ?? [];
+  const groupedFlowNames = new Set<string>(FLOW_GROUPS.flatMap((group) => [...group.names]));
+  const otherFlows = flows.filter((prompt) => !groupedFlowNames.has(prompt.name));
   const current = prompts?.find((p) => p.name === selected);
 
   return (
     <div className="flex h-full min-h-0 w-full">
       <div className="flex w-[212px] flex-none flex-col gap-4 overflow-y-auto border-r border-line bg-raised/30 py-4">
-        <RailGroup
-          title="Flows"
-          items={flows}
-          selected={creating ? null : selected}
-          onSelect={(n) => {
-            setCreating(false);
-            setSelected(n);
-          }}
-        />
-        <div>
+        {FLOW_GROUPS.map((group) => (
+          <RailGroup
+            key={group.title}
+            title={group.title}
+            items={group.names
+              .map((name) => flows.find((prompt) => prompt.name === name))
+              .filter((prompt): prompt is PromptInfo => prompt !== undefined)}
+            selected={creating ? null : selected}
+            onSelect={(n) => {
+              setCreating(false);
+              setSelected(n);
+            }}
+          />
+        ))}
+        {otherFlows.length > 0 && (
+          <RailGroup
+            title="Other"
+            items={otherFlows}
+            selected={creating ? null : selected}
+            onSelect={(n) => {
+              setCreating(false);
+              setSelected(n);
+            }}
+          />
+        )}
+        <div className="border-t border-line pt-4">
           <RailGroup
             title="Shared blocks"
             items={blocks}

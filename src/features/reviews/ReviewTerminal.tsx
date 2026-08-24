@@ -12,6 +12,7 @@ import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
 
 export function ReviewTerminal({
   termKey,
+  terminalRef = termKey,
   title,
   cwd,
   seed,
@@ -19,6 +20,7 @@ export function ReviewTerminal({
   onExited,
 }: {
   termKey: string;
+  terminalRef?: string;
   title: string;
   cwd?: string;
   seed?: string;
@@ -26,7 +28,7 @@ export function ReviewTerminal({
   onExited: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
-    spec: { title, cwd, source: "review", refId: termKey, seed },
+    spec: { title, cwd, source: "review", refId: terminalRef, seed },
     attach,
     onExited,
   });
