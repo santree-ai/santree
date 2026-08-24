@@ -7,6 +7,14 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.2-beta.10 — 2026-08-24
+
+- AI review tabs now show only the draft comments created by that provider, so
+  Codex and Claude Code no longer share the same badge and footer count.
+- Codex AI reviews now load Santree's draft-comment and review-brief tools in
+  both new and resumed sessions. Missing review tools fail visibly instead of
+  silently starting a review that cannot save its findings.
+
 ## 0.1.2-beta.9 — 2026-08-24
 
 - Fixed new Codex terminals failing to attach with a request-rejected error.
