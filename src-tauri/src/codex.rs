@@ -365,6 +365,24 @@ impl CodexRuntime {
         Ok(())
     }
 
+    /// Give a newly-created thread a durable rollout before another App Server
+    /// connection (the remote TUI) attempts to resume it. `thread/start` alone
+    /// only creates an in-memory thread in Codex 0.149.0.
+    pub fn set_thread_name(&self, executable: &str, thread_id: &str, name: &str) -> Result<()> {
+        self.request(
+            executable,
+            "thread/name/set",
+            json!({"threadId": thread_id, "name": name}),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn delete_thread(&self, executable: &str, thread_id: &str) -> Result<()> {
+        self.request(executable, "thread/delete", json!({"threadId": thread_id}))?;
+        Ok(())
+    }
+
     fn request(&self, executable: &str, method: &str, params: Value) -> Result<Value> {
         self.with_connection(executable, |connection| connection.request(method, params))
     }
@@ -697,10 +715,20 @@ fn spawn_router(
                 if let Some(tx) = tx {
                     let result = if let Some(error) = message.get("error") {
                         let code = error.get("code").and_then(Value::as_i64);
-                        log::warn!("Codex protocol request rejected, code={code:?}");
-                        Err(match code {
-                            Some(code) => format!("request rejected (code {code})"),
-                            None => "request rejected".into(),
+                        let detail = error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .filter(|message| !message.is_empty());
+                        log::warn!(
+                            "Codex protocol request rejected, code={code:?}, message={detail:?}"
+                        );
+                        Err(match (code, detail) {
+                            (Some(code), Some(detail)) => {
+                                format!("request rejected (code {code}): {detail}")
+                            }
+                            (Some(code), None) => format!("request rejected (code {code})"),
+                            (None, Some(detail)) => format!("request rejected: {detail}"),
+                            (None, None) => "request rejected".into(),
                         })
                     } else {
                         Ok(message.get("result").cloned().unwrap_or(Value::Null))
@@ -937,6 +965,32 @@ mod tests {
         if account.connected {
             runtime.rate_limits(&executable).unwrap();
         }
+        drop(runtime);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    #[ignore = "requires SANTREE_CODEX_BIN pointing to an installed Codex CLI"]
+    fn installed_codex_fresh_thread_is_attachable() {
+        let executable = std::env::var("SANTREE_CODEX_BIN").expect("set SANTREE_CODEX_BIN");
+        let base = short_socket_test_dir("santree-codex-fresh-thread");
+        fs::create_dir(&base).unwrap();
+        let runtime = CodexRuntime::new(&base);
+        let thread_id = runtime
+            .start_thread(
+                &executable,
+                Path::new(env!("CARGO_MANIFEST_DIR")),
+                None,
+                None,
+                CodexProfile::ReadOnly,
+                None,
+            )
+            .unwrap();
+        runtime
+            .set_thread_name(&executable, &thread_id, "Santree attachability test")
+            .unwrap();
+        runtime.resume_thread(&executable, &thread_id).unwrap();
+        runtime.delete_thread(&executable, &thread_id).unwrap();
         drop(runtime);
         let _ = fs::remove_dir_all(base);
     }

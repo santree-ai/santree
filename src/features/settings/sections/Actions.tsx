@@ -4,7 +4,7 @@
 
 import { useEffect, useState } from "react";
 
-import type { AgentKind } from "../../../bindings";
+import type { AgentKind, CodexModel } from "../../../bindings";
 import { AgentIcon } from "../../../components/icons";
 import { ChevronSelect, Tabs, Toggle } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
@@ -353,6 +353,14 @@ function ActionConfig({
     ? (scopeEffortProfile ?? "")
     : (scopeEffortProfile ?? appEffort ?? "");
   const permValue = inherits ? (scopePermProfile ?? "") : (scopePermProfile ?? appPerm ?? "");
+  const effectiveModel = modelValue || appModel;
+  const codexModel =
+    tab === "Codex" ? codexModels?.find((model) => model.id === effectiveModel) : null;
+  const effortOptions = effortOptionsFor(tab, codexModel);
+  const effortDefault =
+    tab === "Codex" && codexModel?.defaultReasoningEffort
+      ? `CLI default (${codexModel.defaultReasoningEffort})`
+      : "CLI default";
 
   return (
     <>
@@ -417,9 +425,11 @@ function ActionConfig({
               <EffortSelect
                 value={effortValue}
                 onChange={(value) => set(effortProfileKey, value)}
+                options={effortOptions}
                 inherits={inherits}
                 disabled={disabled}
                 defaultLabel={`Use app default${appEffort ? ` (${appEffort})` : ""}`}
+                cliDefaultLabel={effortDefault}
               />
             </Field>
           )}
@@ -660,25 +670,45 @@ function PermissionModeSelect({
   );
 }
 
-/** The effort picker — a fixed low→max scale. "CLI default" leaves the flag off. */
+interface EffortOption {
+  value: string;
+  description?: string;
+}
+
+export function effortOptionsFor(agent: AgentKind, model?: CodexModel | null): EffortOption[] {
+  if (agent === "Codex") {
+    return (model?.supportedReasoningEfforts ?? []).map(({ effort, description }) => ({
+      value: effort,
+      description,
+    }));
+  }
+  return EFFORT_LEVELS.map((value) => ({ value }));
+}
+
+/** The effort picker uses the selected model's live Codex capabilities. Leaving
+ * it on "CLI default" omits the override entirely. */
 function EffortSelect({
   value,
   onChange,
+  options,
   inherits,
   disabled,
   defaultLabel,
+  cliDefaultLabel,
   "aria-labelledby": ariaLabelledBy,
 }: {
   value: string;
   onChange: (v: string | null) => void;
+  options: EffortOption[];
   inherits: boolean;
   disabled?: boolean;
   defaultLabel: string;
+  cliDefaultLabel: string;
   "aria-labelledby"?: string;
 }) {
-  const options = EFFORT_LEVELS.map((e) => (
-    <option key={e} value={e} className="bg-input">
-      {e}
+  const optionNodes = options.map(({ value: effort, description }) => (
+    <option key={effort} value={effort} title={description} className="bg-input">
+      {effort}
     </option>
   ));
   if (inherits) {
@@ -689,7 +719,7 @@ function EffortSelect({
         defaultLabel={defaultLabel}
         aria-labelledby={ariaLabelledBy}
       >
-        {options}
+        {optionNodes}
       </OverrideSelect>
     );
   }
@@ -701,8 +731,8 @@ function EffortSelect({
       className={SELECT_CLASS}
       aria-labelledby={ariaLabelledBy}
     >
-      <option value="">CLI default</option>
-      {options}
+      <option value="">{cliDefaultLabel}</option>
+      {optionNodes}
     </ChevronSelect>
   );
 }

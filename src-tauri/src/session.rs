@@ -153,19 +153,83 @@ pub async fn resolve_codex(
         if kind != AgentKind::Codex {
             anyhow::bail!("stored provider does not match Codex session resolver");
         }
-        runtime.resume_thread(executable, &thread_id)?;
-        return Ok(AgentSession::Resume {
-            agent_kind: AgentKind::Codex,
-            executable: executable.to_string(),
-            session_id: thread_id,
-            remote: Some(runtime.remote(executable)?),
-        });
+        match runtime.resume_thread(executable, &thread_id) {
+            Ok(()) => {
+                return Ok(AgentSession::Resume {
+                    agent_kind: AgentKind::Codex,
+                    executable: executable.to_string(),
+                    session_id: thread_id,
+                    remote: Some(runtime.remote(executable)?),
+                });
+            }
+            Err(error) if missing_codex_rollout(&error) => {
+                // beta.8 persisted `thread/start` ids before Codex wrote their
+                // rollout. If the same App Server still owns the in-memory
+                // thread, naming it repairs the row without losing the session.
+                match runtime.set_thread_name(executable, &thread_id, &codex_thread_name(term_key))
+                {
+                    Ok(()) => {
+                        runtime.resume_thread(executable, &thread_id)?;
+                        return Ok(AgentSession::Resume {
+                            agent_kind: AgentKind::Codex,
+                            executable: executable.to_string(),
+                            session_id: thread_id,
+                            remote: Some(runtime.remote(executable)?),
+                        });
+                    }
+                    Err(repair_error) if missing_codex_rollout(&repair_error) => {}
+                    Err(repair_error) => return Err(repair_error),
+                }
+                if !allow_fresh {
+                    return Ok(AgentSession::Shell);
+                }
+                let replacement = start_named_codex_thread(
+                    runtime,
+                    executable,
+                    term_key,
+                    CodexThreadStart {
+                        cwd,
+                        model,
+                        effort,
+                        profile,
+                        review_mcp_config,
+                    },
+                )?;
+                sqlx::query(
+                    "UPDATE terminal_sessions SET cwd = ?, session_id = ?
+                     WHERE repo = ? AND term_key = ? AND agent_kind = 'Codex'",
+                )
+                .bind(cwd.to_string_lossy().as_ref())
+                .bind(&replacement)
+                .bind(repo)
+                .bind(term_key)
+                .execute(db)
+                .await?;
+                return Ok(AgentSession::Fresh {
+                    agent_kind: AgentKind::Codex,
+                    executable: executable.to_string(),
+                    session_id: replacement,
+                    remote: Some(runtime.remote(executable)?),
+                });
+            }
+            Err(error) => return Err(error),
+        }
     }
     if !allow_fresh {
         return Ok(AgentSession::Shell);
     }
-    let thread_id =
-        runtime.start_thread(executable, cwd, model, effort, profile, review_mcp_config)?;
+    let thread_id = start_named_codex_thread(
+        runtime,
+        executable,
+        term_key,
+        CodexThreadStart {
+            cwd,
+            model,
+            effort,
+            profile,
+            review_mcp_config,
+        },
+    )?;
     let mut tx = db.begin().await?;
     sqlx::query(
         "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
@@ -195,6 +259,42 @@ pub async fn resolve_codex(
         session_id: persisted_id,
         remote: Some(runtime.remote(executable)?),
     })
+}
+
+struct CodexThreadStart<'a> {
+    cwd: &'a Path,
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
+    profile: crate::codex::CodexProfile,
+    review_mcp_config: Option<&'a Path>,
+}
+
+fn start_named_codex_thread(
+    runtime: &crate::codex::CodexRuntime,
+    executable: &str,
+    term_key: &str,
+    config: CodexThreadStart<'_>,
+) -> Result<String> {
+    let thread_id = runtime.start_thread(
+        executable,
+        config.cwd,
+        config.model,
+        config.effort,
+        config.profile,
+        config.review_mcp_config,
+    )?;
+    runtime.set_thread_name(executable, &thread_id, &codex_thread_name(term_key))?;
+    Ok(thread_id)
+}
+
+fn codex_thread_name(term_key: &str) -> String {
+    format!("Santree · {term_key}")
+}
+
+fn missing_codex_rollout(error: &anyhow::Error) -> bool {
+    // App Server currently reports this specific condition using the generic
+    // JSON-RPC invalid-request code, so the server message is the discriminator.
+    error.to_string().contains("no rollout found for thread id")
 }
 
 /// Store a new session id for the terminal and return the id it will actually

@@ -1,9 +1,8 @@
 /**
  * The "session ended — resume when ready" placeholder shown in place of a dead
- * terminal once its agent process has exited: the Trees main work terminal, a
- * Trees Claude tab, and the Triage investigation all use it. Resume re-seeds the
- * terminal, which the backend resolves to a `claude --resume <id>` against the
- * on-disk transcript (or a fresh session if the transcript is gone).
+ * terminal once its agent process has exited. Trees, Triage, and Reviews all use
+ * it; the provider-aware backend decides whether Resume attaches a Claude
+ * transcript, a Codex thread, or starts a replacement conversation.
  */
 import type { ReactNode } from "react";
 
@@ -20,7 +19,7 @@ export function SessionEndedPane({
   onResume: () => void;
 }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+    <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center">
       <TerminalIcon size={20} className="text-muted-3" />
       <div>
         <div className="text-[13px] font-medium text-fg-2">{title}</div>

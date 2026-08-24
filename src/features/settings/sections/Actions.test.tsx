@@ -1,7 +1,12 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ReviewActionSection, TriageActionSection, WorkActionConfig } from "./Actions";
+import {
+  effortOptionsFor,
+  ReviewActionSection,
+  TriageActionSection,
+  WorkActionConfig,
+} from "./Actions";
 
 // Settings → Actions is a leaf view over the settings hooks: mock the data layer
 // (and AppContext) so the panel can render without a Tauri backend.
@@ -43,7 +48,23 @@ vi.mock("../../../lib/queries", () => ({
   }),
   useBoolSetting: () => ({ value: false }),
   useClaudeModels: () => ({ data: ["opus"] }),
-  useCodexModels: () => ({ data: [{ id: "gpt-5.6-sol" }] }),
+  useCodexModels: () => ({
+    data: [
+      {
+        id: "gpt-5.6-sol",
+        displayName: "GPT-5.6 SOL",
+        description: "",
+        isDefault: true,
+        defaultReasoningEffort: "low",
+        supportedReasoningEfforts: [
+          { effort: "low", description: "Fast" },
+          { effort: "ultra", description: "Most thorough" },
+        ],
+        inputModalities: ["text"],
+        supportsPersonality: false,
+      },
+    ],
+  }),
   useGithubStatus: () => ({ data: { authenticated: false } }),
   useResolvedSetting: () => ({ data: null }),
   useSetSetting: () => ({ mutate: vi.fn() }),
@@ -108,6 +129,9 @@ describe("app-scope Reviews settings", () => {
     render(<ReviewActionSection />);
     expect(screen.getAllByText("Model")).toHaveLength(1);
     expect(screen.getAllByText("Effort")).toHaveLength(1);
+    expect(screen.getByRole("option", { name: "CLI default (low)" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "ultra" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "high" })).toBeNull();
   });
 
   it("switches to that provider's saved model instead of keeping a cross-provider model", () => {
@@ -124,6 +148,37 @@ describe("app-scope Reviews settings", () => {
 
     fireEvent.change(agent, { target: { value: "Codex" } });
     expect(screen.getByLabelText("Model")).toHaveValue("gpt-5.6-sol");
+  });
+});
+
+describe("provider effort capabilities", () => {
+  it("uses only efforts advertised by the selected Codex model", () => {
+    expect(
+      effortOptionsFor("Codex", {
+        id: "gpt-test",
+        displayName: "Test",
+        description: "",
+        isDefault: false,
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: [
+          { effort: "medium", description: "Balanced" },
+          { effort: "ultra", description: "Deep" },
+        ],
+        inputModalities: ["text"],
+        supportsPersonality: false,
+      }),
+    ).toEqual([
+      { value: "medium", description: "Balanced" },
+      { value: "ultra", description: "Deep" },
+    ]);
+  });
+
+  it("keeps Claude's CLI effort scale independent from Codex models", () => {
+    expect(effortOptionsFor("Claude").map(({ value }) => value)).toEqual(["low", "high"]);
+  });
+
+  it("does not guess Codex efforts before the model capabilities load", () => {
+    expect(effortOptionsFor("Codex")).toEqual([]);
   });
 });
 
