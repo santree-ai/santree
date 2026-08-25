@@ -12,6 +12,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { Avatar } from "../../components/Avatar";
+import { MarkdownTitle } from "../../components/Markdown";
 import { Pill } from "../../components/primitives";
 
 export interface BlockerRowProps {
@@ -83,11 +84,11 @@ export const BlockerRow = memo(function BlockerRow({
       >
         <span className="h-2 w-2 flex-none rounded-full" style={{ background: color }} />
         <span className="flex-none font-mono text-[10.5px] text-muted-2">{id}</span>
-        <span
+        <MarkdownTitle
           className={`min-w-0 flex-1 truncate text-[11.5px] ${grayed ? "text-muted-3" : "text-fg-3"}`}
         >
           {title || id}
-        </span>
+        </MarkdownTitle>
         {assignee && <Avatar name={assignee} src={assigneeAvatar} size={16} />}
         {foreignProject && (
           <span className="flex-none truncate rounded border border-cross/40 bg-cross/[0.08] px-[5px] py-px font-mono text-[8.5px] text-cross">
@@ -119,9 +120,9 @@ export const BlockerRow = memo(function BlockerRow({
               {grayed && <span className="text-[10px] text-muted-4">not yours</span>}
             </div>
 
-            <div className="text-[12.5px] leading-[1.35] font-medium text-fg-bright">
+            <MarkdownTitle className="block text-[12.5px] leading-[1.35] font-medium text-fg-bright">
               {title || id}
-            </div>
+            </MarkdownTitle>
 
             <div className="mt-3 flex items-center gap-2 border-t border-hairline pt-2.5">
               {assignee ? (

@@ -2622,6 +2622,30 @@ export const useTriageSetState = (repo: string) =>
     ],
   });
 
+/** Persist a drag reorder to Linear's shared manual rank. The cache receives the
+ * new fractional rank immediately; the queue's Manual comparator supplies the
+ * visual move while Linear reconciles in the background. */
+export const useTriageSetSortOrder = (repo: string) =>
+  useOptimisticMutation({
+    mutationKey: ["triage-set-sort-order", repo],
+    scope: { id: `triage-set-sort-order:${repo}` },
+    mutationFn: (args: { ticketId: string; sortOrder: number }) =>
+      unwrap(commands.triageSetSortOrder(repo, args.ticketId, args.sortOrder)),
+    optimistic: (qc, args) => {
+      const key = queryKeys.triageTickets(repo);
+      const previous = qc.getQueryData<TriageTicket[]>(key);
+      if (!previous) return;
+      qc.setQueryData<TriageTicket[]>(
+        key,
+        previous.map((ticket) =>
+          ticket.id === args.ticketId ? { ...ticket, sortOrder: args.sortOrder } : ticket,
+        ),
+      );
+      return () => qc.setQueryData(key, previous);
+    },
+    invalidate: () => [queryKeys.triageTickets(repo)],
+  });
+
 /**
  * Post a comment (or a reply, when `parentId` is set) on an issue. Optimistically
  * appends a pending comment to the cached detail so the thread updates instantly,

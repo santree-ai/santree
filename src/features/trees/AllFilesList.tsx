@@ -5,7 +5,6 @@ import { memo, useCallback, useMemo, useRef, useState } from "react";
 
 import { ListSkeleton } from "../../components/primitives";
 import { useWorktreeFiles, useWorktreeStatus } from "../../lib/queries";
-import { alpha } from "../../theme/colors";
 import { STATUS_META } from "./changeTree";
 import { fileIconUrl, folderIconUrl } from "./fileIcons";
 import { IndentGuides } from "./IndentGuides";
@@ -143,10 +142,10 @@ const TreeRow = memo(function TreeRow({
     <button
       type="button"
       onClick={() => onActivate(node.path, node.dir)}
-      className="flex w-full cursor-pointer items-center gap-1.5 py-[3px] pr-2 pl-1.5 text-[12px] hover:bg-hover"
+      data-active={selected}
+      className="selection-row flex w-full cursor-pointer items-center gap-1.5 py-[3px] pr-2 pl-1.5 text-[12px]"
       style={{
         color: tint ?? (node.dir ? "var(--color-fg-2)" : "var(--color-muted)"),
-        background: selected ? alpha(8) : undefined,
       }}
     >
       <IndentGuides depth={depth} />

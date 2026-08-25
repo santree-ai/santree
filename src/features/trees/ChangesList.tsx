@@ -14,7 +14,7 @@ import {
   useSetting,
   useStageAction,
 } from "../../lib/queries";
-import { accentActiveStyle, alpha } from "../../theme/colors";
+import { accentActiveStyle } from "../../theme/colors";
 import { CommitBox } from "./CommitBox";
 import { buildChangeTree, type ChangeTreeNode, filesUnder, STATUS_META } from "./changeTree";
 import { fileIconUrl, folderIconUrl } from "./fileIcons";
@@ -342,8 +342,8 @@ const ChangeRow = memo(function ChangeRow({
   const icon = fileIconUrl(name);
   return (
     <div
-      className="group flex items-center gap-2 py-[3px] pr-2.5 pl-1.5 hover:bg-hover"
-      style={{ background: selected ? alpha(8) : undefined }}
+      data-active={selected}
+      className="selection-row group flex items-center gap-2 py-[3px] pr-2.5 pl-1.5"
     >
       <IndentGuides depth={depth} />
       <input

@@ -8,6 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Avatar } from "../../components/Avatar";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
 import { LinearLogo } from "../../components/icons";
+import { MarkdownTitle } from "../../components/Markdown";
 import { Button, Dot, EmptyState } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
 import { useTriageDetail } from "../../lib/queries";
@@ -52,9 +53,9 @@ export function ReviewIssuePane({ repo, ticketId }: { repo: string; ticketId: st
             </Button>
           )}
         </div>
-        <div className="text-[15px] leading-[1.3] font-semibold text-fg-bright">
+        <MarkdownTitle className="block text-[15px] leading-[1.3] font-semibold text-fg-bright">
           {ready?.title ?? ticketId}
-        </div>
+        </MarkdownTitle>
         {ready && (
           <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[10.5px] text-muted-3">
             <span className="flex items-center gap-1.5">

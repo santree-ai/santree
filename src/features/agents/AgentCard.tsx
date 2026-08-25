@@ -11,11 +11,12 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import type { PrState } from "../../bindings";
 import { AgentIcon } from "../../components/icons";
+import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
 import { RelativeTime } from "../../components/RelativeTime";
 import { WorktreeStats } from "../../components/WorktreeStats";
 import { displayFill, fillColor } from "../../lib/contextFill";
-import { alpha, sessionStateMeta } from "../../theme/colors";
+import { sessionStateMeta } from "../../theme/colors";
 import { type AgentEntry, entryColor, repoLabel } from "./registry";
 
 type Pr = { number: number; url: string; state: PrState };
@@ -113,11 +114,8 @@ export function AgentCard({
         onOpen();
       }}
       aria-current={selected}
-      className="group flex w-full cursor-pointer items-start gap-3 px-3 py-2.5 text-left transition-colors hover:bg-hover focus-visible:relative focus-visible:z-10"
-      style={{
-        background: selected ? alpha(9, color) : "transparent",
-        boxShadow: selected ? `inset 2px 0 0 ${color}` : undefined,
-      }}
+      data-active={selected}
+      className="selection-row group flex w-full cursor-pointer items-start gap-3 px-3 py-2.5 text-left focus-visible:relative focus-visible:z-10"
     >
       <div className="flex h-7 flex-none items-center">
         <StateDot entry={entry} />
@@ -130,9 +128,9 @@ export function AgentCard({
 
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="min-w-0 truncate font-mono text-[12px] font-medium text-fg-2">
+          <MarkdownTitle className="min-w-0 truncate font-mono text-[12px] font-medium text-fg-2">
             {entry.title}
-          </span>
+          </MarkdownTitle>
           <span className="flex-none font-mono text-[9.5px] tracking-wide" style={{ color }}>
             {meta?.short ?? "—"}
           </span>
@@ -143,12 +141,12 @@ export function AgentCard({
         </div>
         <div className="mt-1 flex min-w-0 items-center gap-2 text-[11px] leading-[1.35]">
           {(entry.message || entry.subtitle) && (
-            <span
+            <MarkdownTitle
               className={`min-w-0 flex-1 truncate ${asking ? "text-fg-3" : "text-muted-3"}`}
               title={entry.message ?? entry.subtitle ?? undefined}
             >
-              {entry.message ?? entry.subtitle}
-            </span>
+              {entry.message ?? entry.subtitle ?? ""}
+            </MarkdownTitle>
           )}
           {!entry.message && !entry.subtitle && (
             <span

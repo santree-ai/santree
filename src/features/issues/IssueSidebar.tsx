@@ -6,12 +6,12 @@ import { useMemo, useState } from "react";
 import { ChevronDownIcon } from "../../components/icons";
 import { Button, Dot, ProjectGlyph } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
+import { ProjectDueDate } from "../../components/WorkSignals";
 import { usePrefetchOnHover } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import {
   accentActiveStyle,
   accentFillVar,
-  alpha,
   PROJECT_FALLBACK,
   statusColor,
   successColor,
@@ -24,6 +24,7 @@ interface Group {
   project: string;
   color: string;
   icon: string | null;
+  targetDate: string | null;
   rows: IssueRowVM[];
 }
 
@@ -42,7 +43,7 @@ export function IssueSidebar() {
     revealProject,
     selectReady,
   } = useIssues();
-  const { hoverId, setHover } = useIssueHover();
+  const { setHover } = useIssueHover();
   const { activeRepo } = useApp();
   const prefetchOnHover = usePrefetchOnHover(activeRepo);
 
@@ -82,30 +83,10 @@ export function IssueSidebar() {
           });
           const selectable = isEligible(t);
           const isFocused = focusId === t.id;
-          const isHover = hoverId === t.id;
           const dim = focusProject !== null && t.project !== focusProject;
 
-          // Three visually distinct states (both themes): queued for launch is the
-          // strongest (accent tint + accent border); the open/focused row is a
-          // persistent neutral "selected" surface; a plain hover is the faintest.
           const opacity = dim ? 0.4 : 1;
-          const rowStyle: CSSProperties = st.selected
-            ? {
-                background: alpha(isFocused || isHover ? 18 : 13),
-                border: `1px solid ${alpha(48)}`,
-                opacity,
-              }
-            : isFocused
-              ? {
-                  background: "var(--color-selected)",
-                  border: "1px solid var(--color-line-strong)",
-                  opacity,
-                }
-              : {
-                  background: isHover ? "var(--color-hover)" : "transparent",
-                  border: "1px solid transparent",
-                  opacity,
-                };
+          const rowStyle: CSSProperties = { opacity };
           const boxStyle: CSSProperties = {
             // Non-selectable rows still show a faint (disabled) box so every row
             // keeps the same checkbox column and alignment.
@@ -117,6 +98,9 @@ export function IssueSidebar() {
             id: t.id,
             title: t.title,
             statusColor: statusColor[t.status],
+            priority: t.priority,
+            estimate: t.estimate,
+            active: isFocused,
             selectable,
             selected: st.selected,
             showRdy: st.ready,
@@ -141,6 +125,7 @@ export function IssueSidebar() {
           project,
           color: meta?.color ?? PROJECT_FALLBACK,
           icon: meta?.icon ?? null,
+          targetDate: meta?.targetDate ?? null,
           rows: mapped,
         };
       })
@@ -151,7 +136,6 @@ export function IssueSidebar() {
     worktreeIds,
     selected,
     focusId,
-    hoverId,
     focusProject,
     baseFor,
     isEligible,
@@ -221,6 +205,7 @@ export function IssueSidebar() {
                     {g.project}
                   </span>
                   <span className="font-mono text-[9.5px] text-muted-4">{g.rows.length}</span>
+                  <ProjectDueDate date={g.targetDate} />
                 </button>
               </div>
               {!isCollapsed && g.rows.map((vm) => <IssueRow key={vm.id} vm={vm} />)}

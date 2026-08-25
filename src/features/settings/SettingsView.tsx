@@ -258,19 +258,16 @@ export function SettingsView() {
 
   const navButton = (s: SectionDef) => {
     const isActive = active.key === s.key;
-    const style: CSSProperties = isActive
-      ? {
-          background: alpha(15),
-          color: "var(--color-fg-bright)",
-          boxShadow: "inset 2px 0 0 var(--accent)",
-        }
-      : { background: "transparent", color: "var(--color-muted)" };
+    const style: CSSProperties = {
+      color: isActive ? "var(--color-fg-bright)" : "var(--color-muted)",
+    };
     return (
       <button
         type="button"
         key={s.key}
         onClick={() => setSection(s.key)}
-        className="mb-0.5 flex w-full cursor-pointer items-center gap-2.5 rounded-md px-3 py-[9px] text-left text-[12.5px] hover:bg-hover"
+        data-active={isActive}
+        className="selection-row mb-0.5 flex w-full cursor-pointer items-center gap-2.5 rounded-md px-3 py-[9px] text-left text-[12.5px]"
         style={style}
       >
         <span className="flex-none opacity-90">{s.icon}</span>

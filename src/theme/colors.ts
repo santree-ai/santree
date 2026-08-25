@@ -334,9 +334,9 @@ export function readableLabelColor(hex: string, theme: "light" | "dark"): string
  */
 export function accentActiveStyle(): CSSProperties {
   return {
-    background: alpha(13),
-    border: `1px solid ${alpha(40)}`,
-    color: accentVar,
+    background: "var(--selection-fill)",
+    border: "1px solid var(--selection-border)",
+    color: "var(--selection-text)",
   };
 }
 

@@ -14,14 +14,21 @@
  */
 
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { AgentKind, TriageTicket } from "../../bindings";
+import type { AgentKind, SessionState, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
 import { AgentIcon, TelescopeIcon } from "../../components/icons";
-import { Button, EmptyState, Segmented, Skeleton } from "../../components/primitives";
+import { MarkdownTitle } from "../../components/Markdown";
+import {
+  Button,
+  ChevronSelect,
+  EmptyState,
+  Segmented,
+  Skeleton,
+} from "../../components/primitives";
 import { SlaCountdown } from "../../components/RelativeTime";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import { PriorityBars } from "../../components/WorkSignals";
@@ -39,14 +46,18 @@ import {
   useRepos,
   useResolvedProviderSetting,
   useResolvedSetting,
+  useSessionStates,
   useSetSetting,
+  useSetting,
   useStartedInvestigations,
   useTriageDetail,
   useTriageQueue,
   useTriageSchedule,
+  useTriageSetSortOrder,
   useTriageSetState,
 } from "../../lib/queries";
 import { useApp, useAppUi } from "../../state/AppContext";
+import { toast } from "../../state/toast";
 import { accentActiveStyle, alpha } from "../../theme/colors";
 import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
@@ -61,10 +72,28 @@ import {
 } from "./hooks";
 import { InvestigatePane } from "./InvestigatePane";
 import { IssueHeader } from "./IssueHeader";
+import {
+  manualRankAt,
+  moveTicket,
+  parseTriageOrder,
+  TRIAGE_ORDER_KEY,
+  TRIAGE_ORDER_OPTIONS,
+  type TriageLanes,
+  triageLanes,
+} from "./order";
 import { orderedProviders, providersByRef, triageTerminalRef } from "./providerSessions";
 import { QueueRow } from "./QueueRow";
 import { RepoSessionPane } from "./RepoSessionPane";
 import { ScheduleSection } from "./ScheduleSection";
+
+function QueueLaneHeader({ label, count }: { label: string; count: number }) {
+  return (
+    <div className="flex items-center gap-1.5 px-2 pt-1 pb-1 font-mono text-[8.5px] tracking-[.08em] text-muted-5 uppercase">
+      <span>{label}</span>
+      <span>{count}</span>
+    </div>
+  );
+}
 
 /**
  * The repo-session row at the top of the rail. Selecting it opens a provider
@@ -101,7 +130,7 @@ function RepoSessionEntry({
         className="flex h-7 w-7 flex-none items-center justify-center rounded-[var(--radius-sm)] border border-line-2 bg-input text-[14px]"
         aria-hidden
       >
-        👋
+        <AgentIcon kind={agentKind} size={15} />
       </span>
       <span className="min-w-0 flex-1">
         <span className="block text-[11.5px] font-medium text-fg-2">Triage desk</span>
@@ -109,7 +138,6 @@ function RepoSessionEntry({
           permanent workspace
         </span>
       </span>
-      <AgentIcon kind={agentKind} size={12} className="relative flex-none" />
     </div>
   );
 }
@@ -257,9 +285,9 @@ function TriageHome({
                       />
                     )}
                   </span>
-                  <span className="mt-1.5 block line-clamp-2 text-[11.5px] leading-4 text-fg-2">
+                  <MarkdownTitle className="mt-1.5 block line-clamp-2 text-[11.5px] leading-4 text-fg-2">
                     {ticket.title}
-                  </span>
+                  </MarkdownTitle>
                   {ticket.team && (
                     <span className="mt-2 block font-mono text-[9px] text-muted-4">
                       {ticket.team}
@@ -341,6 +369,31 @@ export function TriageView() {
   );
 
   const { tabs: terminalTabs } = useTerminals();
+  const { data: sessionStates = [] } = useSessionStates();
+
+  // A logical triage terminal is stable across provider tabs. Keep the newest
+  // structured state available for each provider; QueueRow combines it with
+  // terminal liveness for providers whose CLI has no finer-grained state event.
+  const activityByTicket = useMemo(() => {
+    const result = new Map<string, SessionState[]>();
+    const newest = new Map<string, SessionState>();
+    for (const state of sessionStates) {
+      if (state.repo !== activeRepo || !state.termKey?.startsWith("triage:")) continue;
+      const ticketId = state.termKey.slice("triage:".length);
+      if (!ticketId) continue;
+      const key = `${ticketId}:${state.agentKind}`;
+      const seen = newest.get(key);
+      if (!seen || (state.updatedAtMs ?? 0) > (seen.updatedAtMs ?? 0)) newest.set(key, state);
+    }
+    for (const state of newest.values()) {
+      const ticketId = state.termKey?.slice("triage:".length);
+      if (!ticketId) continue;
+      const states = result.get(ticketId) ?? [];
+      states.push(state);
+      result.set(ticketId, states);
+    }
+    return result;
+  }, [activeRepo, sessionStates]);
 
   const hasLiveProvider = useCallback(
     (refId: string, provider: AgentKind) =>
@@ -370,32 +423,132 @@ export function TriageView() {
     [providersFor, hasLiveProvider],
   );
 
-  // Investigations float above the backlog — a running agent first, then a
-  // resumable one — because that's in-flight work you're likely to return to,
-  // regardless of where SLA puts it. Snoozed still sinks to the bottom (matching
-  // the CLI). `sort` is stable, so SLA order holds within each rank.
-  const rank = useCallback(
+  const { data: storedOrder } = useSetting("app", TRIAGE_ORDER_KEY);
+  const order = parseTriageOrder(storedOrder);
+  const setSortOrder = useTriageSetSortOrder(activeRepo);
+
+  // Activity is a lane, not an invisible sort override: running sessions and
+  // resumable investigations stay findable without making Due date or Manual
+  // claim an ordering the screen does not actually honor.
+  const activityRank = useCallback(
     (t: TriageTicket) => {
-      if (t.snoozedUntilMs != null) return 3;
       if (hasAnyLiveProvider(t.id)) return 0;
       if (startedInvestigations.has(t.id)) return 1;
       return 2;
     },
     [hasAnyLiveProvider, startedInvestigations],
   );
-  const ordered = useMemo(() => [...visible].sort((a, b) => rank(a) - rank(b)), [visible, rank]);
-  // Group by team, preserving order. Only used when the queue spans >1 team.
   const groups = useMemo(() => {
     const map = new Map<string, TriageTicket[]>();
-    for (const t of ordered) {
+    for (const t of visible) {
       const key = t.team ?? "Other";
       const list = map.get(key);
       if (list) list.push(t);
       else map.set(key, [t]);
     }
-    return [...map.entries()];
-  }, [ordered]);
+    return [...map.entries()].map(([team, tickets]) => ({
+      team,
+      lanes: triageLanes(tickets, order, activityRank),
+    }));
+  }, [visible, order, activityRank]);
   const grouped = groups.length > 1;
+
+  type DragState = { movedId: string; team: string; items: TriageTicket[]; startIndex: number };
+  const [dragState, setDragState] = useState<DragState | null>(null);
+  const dragStateRef = useRef<DragState | null>(null);
+  const setCurrentDrag = useCallback((next: DragState | null) => {
+    dragStateRef.current = next;
+    setDragState(next);
+  }, []);
+
+  const renderedGroups = useMemo(
+    () =>
+      groups.map((group) => {
+        if (!dragState || dragState.team !== group.team) return group;
+        return { ...group, lanes: { ...group.lanes, queue: dragState.items } };
+      }),
+    [groups, dragState],
+  );
+  const ordered = useMemo(
+    () =>
+      renderedGroups.flatMap(({ lanes }) => [
+        ...lanes.investigations,
+        ...lanes.queue,
+        ...lanes.snoozed,
+      ]),
+    [renderedGroups],
+  );
+
+  const startManualDrag = useCallback(
+    (ticketId: string) => {
+      const group = groups.find(({ lanes }) => lanes.queue.some(({ id }) => id === ticketId));
+      if (group) {
+        setCurrentDrag({
+          movedId: ticketId,
+          team: group.team,
+          items: group.lanes.queue,
+          startIndex: group.lanes.queue.findIndex(({ id }) => id === ticketId),
+        });
+      }
+    },
+    [groups, setCurrentDrag],
+  );
+  const dragManualOver = useCallback(
+    (overId: string) => {
+      const current = dragStateRef.current;
+      if (!current?.items.some(({ id }) => id === overId)) return;
+      const next = { ...current, items: moveTicket(current.items, current.movedId, overId) };
+      setCurrentDrag(next);
+    },
+    [setCurrentDrag],
+  );
+  const persistManualOrder = useCallback(
+    (items: TriageTicket[], movedId: string) => {
+      const index = items.findIndex(({ id }) => id === movedId);
+      const sortOrder = index >= 0 ? manualRankAt(items, index) : null;
+      if (sortOrder == null) {
+        toast.error("That position is too close to its neighbors. Refresh and try again.");
+        return;
+      }
+      const previousSortOrder = items[index]?.sortOrder;
+      setSortOrder.mutate(
+        { ticketId: movedId, sortOrder },
+        {
+          onSuccess: () =>
+            toast.success(`Moved ${movedId} in the manual order.`, {
+              action:
+                previousSortOrder == null
+                  ? undefined
+                  : {
+                      label: "Undo",
+                      onClick: () =>
+                        setSortOrder.mutate({ ticketId: movedId, sortOrder: previousSortOrder }),
+                    },
+            }),
+        },
+      );
+    },
+    [setSortOrder],
+  );
+  const finishManualDrag = useCallback(() => {
+    const current = dragStateRef.current;
+    if (!current) return;
+    setCurrentDrag(null);
+    if (current.items.findIndex(({ id }) => id === current.movedId) === current.startIndex) return;
+    persistManualOrder(current.items, current.movedId);
+  }, [persistManualOrder, setCurrentDrag]);
+  const moveManualWithKeyboard = useCallback(
+    (ticketId: string, direction: -1 | 1) => {
+      const group = groups.find(({ lanes }) => lanes.queue.some(({ id }) => id === ticketId));
+      if (!group) return;
+      const index = group.lanes.queue.findIndex(({ id }) => id === ticketId);
+      const target = group.lanes.queue[index + direction];
+      if (!target) return;
+      const items = moveTicket(group.lanes.queue, ticketId, target.id);
+      persistManualOrder(items, ticketId);
+    },
+    [groups, persistManualOrder],
+  );
 
   // The selected ticket, kept valid as the queue loads / changes.
   const { activeId, activeTicket, select } = useTriageSelection(visible);
@@ -508,7 +661,7 @@ export function TriageView() {
     onInvestigate: investigate,
   });
 
-  const renderRow = (t: TriageTicket) => (
+  const renderRow = (t: TriageTicket, manual = false) => (
     <QueueRow
       key={t.id}
       ticket={t}
@@ -516,12 +669,42 @@ export function TriageView() {
       selectable={canInvestigate && eligible.has(t.id)}
       selected={!!selected[t.id]}
       investigating={hasAnyLiveProvider(t.id)}
-      started={startedInvestigations.has(t.id)}
       agentKinds={providersFor(t.id)}
+      agentStates={activityByTicket.get(t.id) ?? []}
+      manual={manual}
+      manualDisabled={linearReadOnly || setSortOrder.isPending}
+      dragging={dragState?.movedId === t.id}
+      onManualDragStart={startManualDrag}
+      onManualDragOver={dragManualOver}
+      onManualDragEnd={finishManualDrag}
+      onManualMove={moveManualWithKeyboard}
       onSelect={selectTicket}
       onToggleSelect={toggle}
       onHover={onHoverRow}
     />
+  );
+
+  const renderLanes = (lanes: TriageLanes) => (
+    <>
+      {lanes.investigations.length > 0 && (
+        <div className="mb-2">
+          <QueueLaneHeader label="Investigations" count={lanes.investigations.length} />
+          {lanes.investigations.map((ticket) => renderRow(ticket))}
+        </div>
+      )}
+      {lanes.queue.length > 0 && (
+        <div className="mb-2">
+          <QueueLaneHeader label="Queue" count={lanes.queue.length} />
+          {lanes.queue.map((ticket) => renderRow(ticket, order === "manual"))}
+        </div>
+      )}
+      {lanes.snoozed.length > 0 && (
+        <div className="mb-2">
+          <QueueLaneHeader label="Snoozed" count={lanes.snoozed.length} />
+          {lanes.snoozed.map((ticket) => renderRow(ticket))}
+        </div>
+      )}
+    </>
   );
 
   return (
@@ -546,6 +729,26 @@ export function TriageView() {
                 onChange={(v) => setGoodCitizen(v === "all")}
                 className="h-[26px] flex-1"
               />
+              <ChevronSelect
+                value={order}
+                onChange={(value) =>
+                  setSetting.mutate({ scope: "app", key: TRIAGE_ORDER_KEY, value })
+                }
+                aria-label="Order triage queue"
+                title={
+                  order === "manual" && linearReadOnly
+                    ? "Manual ordering is locked because Linear is read-only"
+                    : "Order triage queue"
+                }
+                wrapperClassName="w-[124px] flex-none"
+                className="h-[26px] w-full rounded-[var(--radius-sm)] border border-line-2 bg-input px-2 pr-7 text-[10.5px] text-fg-3 focus-visible:ring-1 focus-visible:ring-accent"
+              >
+                {TRIAGE_ORDER_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </ChevronSelect>
               <Button
                 size="sm"
                 onClick={selectAll}
@@ -582,17 +785,19 @@ export function TriageView() {
             ) : ordered.length === 0 ? (
               <EmptyState className="py-8" title="Nothing in triage." />
             ) : grouped ? (
-              groups.map(([team, items]) => (
-                <div key={team} className="mb-2">
+              renderedGroups.map(({ team, lanes }) => (
+                <div key={team} className="mb-3">
                   <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-1 font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">
                     {team}
-                    <span className="text-muted-5">{items.length}</span>
+                    <span className="text-muted-5">
+                      {lanes.investigations.length + lanes.queue.length + lanes.snoozed.length}
+                    </span>
                   </div>
-                  {items.map(renderRow)}
+                  <div className="border-l border-hairline pl-1.5">{renderLanes(lanes)}</div>
                 </div>
               ))
             ) : (
-              ordered.map(renderRow)
+              renderedGroups[0] && renderLanes(renderedGroups[0].lanes)
             )}
           </div>
           {selectedIds.length > 0 && (

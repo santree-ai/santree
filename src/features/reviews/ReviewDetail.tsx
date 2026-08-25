@@ -16,6 +16,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import type { AgentKind, ReviewPr } from "../../bindings";
 import { AgentIcon, PlusIcon, PrIcon, SparklesIcon } from "../../components/icons";
+import { MarkdownTitle } from "../../components/Markdown";
 import { Badge, Dropdown, MENU_ITEM, Tabs } from "../../components/primitives";
 import { PriorityBars } from "../../components/WorkSignals";
 import {
@@ -125,9 +126,9 @@ function ReviewsHome() {
                         )}
                         <span className="ml-auto">{waitingLabel(waitingDays(pr))}</span>
                       </span>
-                      <span className="mt-1.5 block line-clamp-2 text-[11.5px] leading-4 text-fg-2">
+                      <MarkdownTitle className="mt-1.5 block line-clamp-2 text-[11.5px] leading-4 text-fg-2">
                         {pr.title}
-                      </span>
+                      </MarkdownTitle>
                       {pr.aiDraftCount > 0 && (
                         <span
                           className="mt-2 flex items-center gap-1 font-mono text-[9px]"

@@ -19,6 +19,7 @@ import {
   LinearLogo,
   PlusIcon,
 } from "../../components/icons";
+import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
 import { Button, Dot, EmptyState, Skeleton } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
@@ -188,7 +189,9 @@ export function IssuePanel() {
             </button>
           </div>
         </div>
-        <div className="text-[15px] leading-[1.3] font-semibold text-fg-bright">{focus.title}</div>
+        <MarkdownTitle className="block text-[15px] leading-[1.3] font-semibold text-fg-bright">
+          {focus.title}
+        </MarkdownTitle>
         {ready && (
           <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[10.5px] text-muted-3">
             <span className="flex items-center gap-1.5">

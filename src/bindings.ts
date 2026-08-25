@@ -508,6 +508,11 @@ export const commands = {
 	 */
 	triageSetState: (repo: string, ticketId: string, stateId: string) => typedError<null, CmdError>(__TAURI_INVOKE("triage_set_state", { repo, ticketId, stateId })),
 	/**
+	 *  Update a triage issue's canonical Linear manual rank. The sink verifies the
+	 *  issue still belongs to this repo's triage scope before sending the mutation.
+	 */
+	triageSetSortOrder: (repo: string, ticketId: string, sortOrder: number | null) => typedError<null, CmdError>(__TAURI_INVOKE("triage_set_sort_order", { repo, ticketId, sortOrder })),
+	/**
 	 *  Post a comment on an issue — a top-level comment, or a reply when `parent_id`
 	 *  is the id of the comment being replied to. `ticket_id`/`parent_id` are used
 	 *  only as GraphQL variables (never as a path or git arg). Requires a
@@ -2364,6 +2369,9 @@ export type TabKind = "agent" | "terminal" |
 export type Task = {
 	id: string,
 	title: string,
+	priority: Priority,
+	/**  Linear's issue estimate. `None` means the issue is not estimated. */
+	estimate: number | null,
 	project: string,
 	/**
 	 *  The project's color (hex) as configured in Linear, when it has one. Falls
@@ -2375,6 +2383,8 @@ export type Task = {
 	 *  (we don't ship that icon set, so it falls back to the colored dot).
 	 */
 	projectIcon: string | null,
+	/**  Linear project's target date (`YYYY-MM-DD`), when configured. */
+	projectTargetDate: string | null,
 	status: TaskStatus,
 	ready: boolean,
 	blockedBy: string[],
@@ -2545,6 +2555,26 @@ export type TriageTicket = {
 	id: string,
 	title: string,
 	priority: Priority,
+	/**
+	 *  Linear's issue estimate. `None` means the workspace did not estimate it;
+	 *  the UI must not turn that absence into a fake difficulty.
+	 */
+	estimate: number | null,
+	project: string | null,
+	projectColor: string | null,
+	projectIcon: string | null,
+	/**  Linear project's target date (`YYYY-MM-DD`), when the project has one. */
+	projectTargetDate: string | null,
+	/**
+	 *  The issue's own Linear due date (`YYYY-MM-DD`). This is distinct from the
+	 *  containing project's target date and drives the queue's Due date order.
+	 */
+	dueDate: string | null,
+	/**
+	 *  Linear's canonical manual rank. `None` means the API did not supply one;
+	 *  Santree must not invent a local rank that disagrees with Linear.
+	 */
+	sortOrder: number | null,
 	/**
 	 *  Epoch ms the issue was created. Raw, not a pre-formatted "5m ago" label —
 	 *  with triage's multi-minute query staleTime, a label baked in at fetch

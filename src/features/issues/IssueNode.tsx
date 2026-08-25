@@ -8,6 +8,7 @@ import { Handle, type NodeProps, Position } from "@xyflow/react";
 import type { CSSProperties } from "react";
 import { memo } from "react";
 
+import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
 import { Badge, Dot } from "../../components/primitives";
 import { accentVar as accent, alpha } from "../../theme/colors";
@@ -165,12 +166,12 @@ export const IssueNode = memo(
           </div>
         </div>
 
-        <div
+        <MarkdownTitle
           className="min-h-[33px] overflow-hidden text-[12.5px] leading-[1.32] font-normal text-fg-3"
           style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}
         >
           {data.title}
-        </div>
+        </MarkdownTitle>
 
         <div className="mt-[7px] flex min-h-[14px] items-center gap-[7px]">
           <span className="text-[10.5px] font-medium" style={{ color: data.statusColor }}>

@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import type { Worktree, WorktreeTab } from "../../bindings";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { AgentIcon, BranchIcon, CloseIcon, PrIcon, TreeIcon } from "../../components/icons";
+import { MarkdownTitle } from "../../components/Markdown";
 import { Button, EmptyState, TerminalActivity } from "../../components/primitives";
 import { SessionEndedPane } from "../../components/SessionEndedPane";
 import { CLAUDE_STATUS_LINE_KEY, useBoolSetting } from "../../lib/queries";
@@ -129,9 +130,9 @@ function WorkspaceLaunchSurface() {
                 <span className="block truncate font-mono text-[10.5px] text-fg-2">
                   {worktree.id}
                 </span>
-                <span className="mt-0.5 block truncate text-[11px] text-muted-3">
+                <MarkdownTitle className="mt-0.5 block line-clamp-2 text-[11px] text-muted-3">
                   {worktree.title}
-                </span>
+                </MarkdownTitle>
               </span>
             </button>
           ))}
@@ -165,8 +166,10 @@ function CreatingPane({ worktree }: { worktree: Worktree }) {
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 bg-app text-center">
       <TerminalActivity label="Creating workspace…" />
       <div>
-        <div className="text-[11.5px] text-muted-3">
-          {worktree.id} · {worktree.title}
+        <div className="flex items-baseline gap-1 text-[11.5px] text-muted-3">
+          <span className="font-mono">{worktree.id}</span>
+          <span>·</span>
+          <MarkdownTitle>{worktree.title}</MarkdownTitle>
         </div>
       </div>
     </div>

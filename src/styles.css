@@ -41,10 +41,6 @@
   /* Hover/well surfaces (formerly inline one-off shades). */
   --color-hover: #15161a;
   --color-hover-2: #1b1c20;
-  /* The persistent "selected" row surface (the issue open in the right panel) —
-     deliberately stronger than the transient --color-hover so a selected row is
-     distinguishable from one you're merely hovering. */
-  --color-selected: #22232c;
   --color-well: #0e0f12;
   --color-deep: #0b0c0f;
 
@@ -118,7 +114,20 @@
   /* Two border strengths only: structure and emphasis. */
   --border-subtle: var(--color-line-2);
   --border-defined: var(--color-line-strong);
+  /* Repeated cards need less ink than structural dividers. This is the subtle
+     border at rest, not a third semantic strength; hover restores the full
+     subtle edge and selected/attention states use the defined edge. */
+  --border-resting: color-mix(in srgb, var(--border-subtle) 48%, transparent);
   --accent: #2dd4a7;
+  /* Interaction states are intentionally separate from semantic status colors.
+     Accent means "this is the current destination" everywhere; green/amber/red
+     remain available for success, activity, urgency, and failure only. */
+  --interaction-hover: color-mix(in srgb, var(--color-hover) 72%, transparent);
+  --selection-fill: color-mix(in srgb, var(--accent) 7%, transparent);
+  --selection-fill-soft: color-mix(in srgb, var(--accent) 4%, transparent);
+  --selection-border: color-mix(in srgb, var(--accent) 48%, transparent);
+  --selection-border-soft: color-mix(in srgb, var(--accent) 30%, transparent);
+  --selection-text: var(--accent-text);
   /* A text-safe accent. Equal to the accent on dark surfaces; darkened on light
      ones (teal on white is otherwise too low-contrast to read). Tracks any
      runtime --accent override via color-mix. */
@@ -156,20 +165,41 @@
 /* Selectable entities own a boundary. Metadata and status use ledger rows with
    dividers instead, keeping nested boxes from turning panes into dashboards. */
 .entity-card {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-resting);
   border-radius: var(--radius-md);
   background: transparent;
   transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
 }
 
 .entity-card:hover {
-  border-color: var(--border-defined);
-  background: var(--color-hover);
+  border-color: var(--border-subtle);
+  background: var(--interaction-hover);
+}
+
+.entity-card[data-queued="true"]:not([data-active="true"]) {
+  border-color: var(--selection-border-soft);
+  background: var(--selection-fill-soft);
 }
 
 .entity-card[data-active="true"] {
-  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-color: var(--selection-border);
+  background: var(--selection-fill);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Borderless ledger/menu/file rows use the same state vocabulary as cards.
+   This avoids feature-specific gray, provider-colored, or ad-hoc accent fills. */
+.selection-row {
+  background: transparent;
+  transition: background-color 120ms ease, box-shadow 120ms ease, color 120ms ease;
+}
+
+.selection-row:hover {
+  background: var(--interaction-hover);
+}
+
+.selection-row[data-active="true"] {
+  background: var(--selection-fill);
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
@@ -228,7 +258,6 @@
   --color-popover: #ffffff;
   --color-hover: #f0f1f4;
   --color-hover-2: #e7e9ec;
-  --color-selected: #dde0e7;
   --color-well: #f3f4f6;
   --color-deep: #eaecef;
 

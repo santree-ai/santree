@@ -406,11 +406,14 @@ impl TaskStatus {
 }
 
 /// A ticket in the dependency graph. `x`/`y` are its canvas position.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     pub id: String,
     pub title: String,
+    pub priority: Priority,
+    /// Linear's issue estimate. `None` means the issue is not estimated.
+    pub estimate: Option<f64>,
     pub project: String,
     /// The project's color (hex) as configured in Linear, when it has one. Falls
     /// back to the frontend's per-name color map when absent.
@@ -418,6 +421,8 @@ pub struct Task {
     /// The project's icon — an emoji (rendered directly) or a Linear icon name
     /// (we don't ship that icon set, so it falls back to the colored dot).
     pub project_icon: Option<String>,
+    /// Linear project's target date (`YYYY-MM-DD`), when configured.
+    pub project_target_date: Option<String>,
     pub status: TaskStatus,
     pub ready: bool,
     pub blocked_by: Vec<String>,
@@ -1481,6 +1486,20 @@ pub struct TriageTicket {
     pub id: String,
     pub title: String,
     pub priority: Priority,
+    /// Linear's issue estimate. `None` means the workspace did not estimate it;
+    /// the UI must not turn that absence into a fake difficulty.
+    pub estimate: Option<f64>,
+    pub project: Option<String>,
+    pub project_color: Option<String>,
+    pub project_icon: Option<String>,
+    /// Linear project's target date (`YYYY-MM-DD`), when the project has one.
+    pub project_target_date: Option<String>,
+    /// The issue's own Linear due date (`YYYY-MM-DD`). This is distinct from the
+    /// containing project's target date and drives the queue's Due date order.
+    pub due_date: Option<String>,
+    /// Linear's canonical manual rank. `None` means the API did not supply one;
+    /// Santree must not invent a local rank that disagrees with Linear.
+    pub sort_order: Option<f64>,
     /// Epoch ms the issue was created. Raw, not a pre-formatted "5m ago" label —
     /// with triage's multi-minute query staleTime, a label baked in at fetch
     /// time would freeze between refetches. The frontend formats (and ticks)

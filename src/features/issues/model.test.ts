@@ -8,9 +8,12 @@ function task(overrides: Partial<Task> = {}): Task {
   return {
     id: "AK-1",
     title: "Task AK-1",
+    priority: "None",
+    estimate: null,
     project: "Core",
     projectColor: null,
     projectIcon: null,
+    projectTargetDate: null,
     status: "Todo",
     ready: true,
     blockedBy: [],

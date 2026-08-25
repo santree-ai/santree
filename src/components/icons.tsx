@@ -5,6 +5,26 @@ interface IconProps {
   className?: string;
 }
 
+export function GripIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+    >
+      <circle cx="8" cy="6" r="1.5" />
+      <circle cx="16" cy="6" r="1.5" />
+      <circle cx="8" cy="12" r="1.5" />
+      <circle cx="16" cy="12" r="1.5" />
+      <circle cx="8" cy="18" r="1.5" />
+      <circle cx="16" cy="18" r="1.5" />
+    </svg>
+  );
+}
+
 export function GearIcon({ size = 14, className }: IconProps) {
   return (
     <svg

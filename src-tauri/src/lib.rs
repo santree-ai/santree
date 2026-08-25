@@ -162,6 +162,7 @@ fn specta_builder() -> AppBuilder {
             commands::list_triage_tickets,
             commands::triage_detail,
             commands::triage_set_state,
+            commands::triage_set_sort_order,
             commands::triage_add_comment,
             commands::binary_status,
             commands::set_binary_path,

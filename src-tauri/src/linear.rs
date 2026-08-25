@@ -566,8 +566,10 @@ query AssignedIssues {
       nodes {
         identifier
         title
+        priority
+        estimate
         state { name type }
-        project { name color icon }
+        project { name color icon targetDate }
         assignee { name displayName avatarUrl }
         inverseRelations(first: 12) {
           nodes {
@@ -640,6 +642,10 @@ struct ProjectNode {
 struct IssueNode {
     identifier: String,
     title: String,
+    #[serde(default)]
+    priority: i64,
+    #[serde(default)]
+    estimate: Option<f64>,
     state: Option<StateNode>,
     project: Option<ProjectNode>,
     #[serde(default)]
@@ -717,14 +723,17 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
         }
     }
 
-    let (project, project_color, project_icon, _) = project_fields(node.project);
+    let (project, project_color, project_icon, project_target_date) = project_fields(node.project);
     let (assignee, assignee_avatar_url) = assignee_fields(node.assignee);
     let task = Task {
         id: node.identifier,
         title: node.title,
+        priority: core_linear::map_priority(node.priority),
+        estimate: node.estimate,
         project,
         project_color,
         project_icon,
+        project_target_date,
         status,
         // Ready only when all blockers are done *and* the work hasn't started
         // yet — an In Progress / In Review ticket is never "ready to start".
@@ -748,9 +757,12 @@ fn map_related(issue: RelatedIssue) -> Task {
     Task {
         id: issue.identifier,
         title: issue.title,
+        priority: core_linear::map_priority(0),
+        estimate: None,
         project,
         project_color,
         project_icon,
+        project_target_date: None,
         status: core_linear::map_status(&state.name, &state.type_),
         ready: false,
         blocked_by: vec![],
@@ -1144,7 +1156,9 @@ const TRIAGE_INBOX_QUERY: &str = r#"
 query TriageInbox($filter: IssueFilter, $after: String) {
   issues(filter: $filter, first: 100, after: $after) {
     nodes {
-      identifier title priority createdAt slaBreachesAt snoozedUntilAt
+      identifier title priority createdAt dueDate sortOrder slaBreachesAt snoozedUntilAt
+      estimate
+      project { name color icon targetDate }
       state { name type }
       team { key }
       assignee { id name displayName }
@@ -1166,6 +1180,14 @@ struct TriageRow {
     title: String,
     #[serde(default)]
     priority: i64,
+    #[serde(default)]
+    estimate: Option<f64>,
+    #[serde(default)]
+    project: Option<ProjectNode>,
+    #[serde(default)]
+    due_date: Option<String>,
+    #[serde(default)]
+    sort_order: Option<f64>,
     #[serde(default)]
     created_at: Option<String>,
     #[serde(default)]
@@ -1240,6 +1262,15 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
             let sla_ms = r.sla_breaches_at.as_deref().and_then(parse_ms);
             let labels: Vec<String> = r.labels.nodes.into_iter().map(|l| l.name).collect();
             let team = r.team.map(|t| t.key);
+            let (project, project_color, project_icon, project_target_date) = match r.project {
+                Some(project) => (
+                    project.name,
+                    project.color,
+                    project.icon,
+                    project.target_date,
+                ),
+                None => (None, None, None, None),
+            };
             let assignee_user = r.assignee;
             let mine = match (me, assignee_user.as_ref().and_then(|u| u.id.as_deref())) {
                 (Some(me), Some(a)) => me == a,
@@ -1259,6 +1290,13 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
                 id: r.identifier,
                 title: r.title,
                 priority: core_linear::map_priority(r.priority),
+                estimate: r.estimate,
+                project,
+                project_color,
+                project_icon,
+                project_target_date,
+                due_date: r.due_date,
+                sort_order: r.sort_order,
                 created_at_ms,
                 meta: triage_meta(assignee.as_deref(), &labels),
                 team,
@@ -1700,6 +1738,139 @@ async fn set_state(session: &Session<'_>, ticket_id: &str, state_id: &str) -> Re
         // problems land there), so reaching here means a bare `success: false`
         // with no error — don't guess a specific cause.
         bail!("Linear rejected the status change")
+    }
+}
+
+const SET_SORT_ORDER_MUTATION: &str = r#"
+mutation SetSortOrder($id: String!, $sortOrder: Float!) {
+  issueUpdate(id: $id, input: { sortOrder: $sortOrder }) {
+    success
+    issue { sortOrder }
+  }
+}
+"#;
+
+const SORT_ORDER_TARGET_QUERY: &str = r#"
+query SortOrderTarget($id: String!) {
+  issue(id: $id) {
+    identifier
+    state { type }
+    team { key }
+  }
+}
+"#;
+
+fn validate_sort_order_target(
+    requested_id: &str,
+    actual_id: &str,
+    state_type: &str,
+    team_key: &str,
+    allowed_team_keys: &HashSet<&str>,
+) -> Result<()> {
+    let Some((requested_team_key, _)) = split_identifier(requested_id) else {
+        bail!("invalid Linear issue identifier")
+    };
+    if requested_id != actual_id
+        || requested_team_key != team_key
+        || state_type != "triage"
+        || !allowed_team_keys.contains(team_key)
+    {
+        bail!("issue is not in this repository's triage queue")
+    }
+    Ok(())
+}
+
+/// Move an issue within Linear's canonical manual order. The caller computes a
+/// fractional rank between the visible neighbors; Linear stores that same rank
+/// for every client, so Santree never creates a second local source of truth.
+pub async fn set_issue_sort_order(
+    db: &Db,
+    repo: &str,
+    ticket_id: &str,
+    sort_order: f64,
+) -> Result<Option<()>> {
+    validate_sort_order(sort_order)?;
+    let Some((requested_team_key, _)) = split_identifier(ticket_id) else {
+        bail!("invalid Linear issue identifier")
+    };
+    let Some(session) = repo_write_session(db, repo).await? else {
+        return Ok(None);
+    };
+    let scope = team_scope(&session).await?;
+    let allowed_team_keys: HashSet<&str> =
+        scope.teams.iter().map(|team| team.key.as_str()).collect();
+    if !allowed_team_keys.contains(requested_team_key) {
+        bail!("issue is not in this repository's triage queue")
+    }
+
+    #[derive(Deserialize)]
+    struct SortOrderState {
+        #[serde(rename = "type")]
+        type_: String,
+    }
+    #[derive(Deserialize)]
+    struct SortOrderTeam {
+        key: String,
+    }
+    #[derive(Deserialize)]
+    struct SortOrderTarget {
+        identifier: String,
+        state: SortOrderState,
+        team: SortOrderTeam,
+    }
+    #[derive(Deserialize)]
+    struct SortOrderTargetData {
+        issue: Option<SortOrderTarget>,
+    }
+    let target: SortOrderTargetData = session
+        .query(
+            SORT_ORDER_TARGET_QUERY,
+            serde_json::json!({ "id": ticket_id }),
+        )
+        .await?;
+    let target = target
+        .issue
+        .ok_or_else(|| anyhow!("Linear issue {ticket_id} not found"))?;
+    validate_sort_order_target(
+        ticket_id,
+        &target.identifier,
+        &target.state.type_,
+        &target.team.key,
+        &allowed_team_keys,
+    )?;
+
+    #[derive(Deserialize)]
+    struct UpdResult {
+        #[serde(default)]
+        success: bool,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SetSortOrderData {
+        issue_update: Option<UpdResult>,
+    }
+    let data: SetSortOrderData = session
+        .query(
+            SET_SORT_ORDER_MUTATION,
+            serde_json::json!({ "id": ticket_id, "sortOrder": sort_order }),
+        )
+        .await?;
+    if data
+        .issue_update
+        .map(|update| update.success)
+        .unwrap_or(false)
+    {
+        Ok(Some(()))
+    } else {
+        bail!("Linear rejected the manual-order change")
+    }
+}
+
+fn validate_sort_order(value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        bail!("manual order must be a finite number")
     }
 }
 
@@ -2793,11 +2964,12 @@ mod tests {
         accept_code, cached_team_scope, decode_tokens, encode_tokens, image_spans, map_issue,
         migrate_tokens_to_keychain, parse_callback, parse_ms, refresh_lock, resolve_org_slug,
         resolved_org, scope_from_setting, scope_of, shift_range, splice_images, split_identifier,
-        triage_meta, usable_at, ImageCache, IssueNode, ProjectNode, RelatedIssue, RelationNode,
-        SchedQueryData, StateNode, TeamScope, Tokens, UserNode, IMAGE_HOST, REFRESH_SKEW_MS,
+        triage_meta, usable_at, validate_sort_order, validate_sort_order_target, ImageCache,
+        IssueNode, ProjectNode, RelatedIssue, RelationNode, SchedQueryData, StateNode, TeamScope,
+        Tokens, UserNode, IMAGE_HOST, REFRESH_SKEW_MS,
     };
     use crate::gql::{Connection, PageInfo};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -2808,6 +2980,23 @@ mod tests {
         assert_eq!(scope_from_setting(None), "read");
         assert_eq!(scope_from_setting(Some("")), "read");
         assert_eq!(scope_from_setting(Some("read,write")), "read");
+    }
+
+    #[test]
+    fn manual_sort_order_rejects_non_finite_values() {
+        assert!(validate_sort_order(12.5).is_ok());
+        assert!(validate_sort_order(f64::NAN).is_err());
+        assert!(validate_sort_order(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn manual_sort_order_is_limited_to_the_current_triage_scope() {
+        let allowed = HashSet::from(["AK", "MSG"]);
+        assert!(validate_sort_order_target("AK-12", "AK-12", "triage", "AK", &allowed).is_ok());
+        assert!(validate_sort_order_target("bad", "bad", "triage", "AK", &allowed).is_err());
+        assert!(validate_sort_order_target("AK-12", "AK-12", "started", "AK", &allowed).is_err());
+        assert!(validate_sort_order_target("OPS-12", "OPS-12", "triage", "OPS", &allowed).is_err());
+        assert!(validate_sort_order_target("AK-12", "AK-13", "triage", "AK", &allowed).is_err());
     }
 
     /// Both tokens share one keychain entry, so the blob is the only thing
@@ -3273,6 +3462,8 @@ mod tests {
         let node = IssueNode {
             identifier: "ENG-10".into(),
             title: "Do the thing".into(),
+            priority: 2,
+            estimate: Some(3.0),
             state: Some(state("Todo", "unstarted")),
             project: Some(ProjectNode {
                 name: Some("Roadmap".into()),
@@ -3309,7 +3500,10 @@ mod tests {
         let (task, blockers) = map_issue(node);
 
         assert_eq!(task.id, "ENG-10");
+        assert_eq!(task.priority, santree_core::domain::Priority::High);
+        assert_eq!(task.estimate, Some(3.0));
         assert_eq!(task.project, "Roadmap");
+        assert_eq!(task.project_target_date.as_deref(), Some("2026-09-30"));
         assert_eq!(task.assignee.as_deref(), Some("Ada Lovelace"));
         assert_eq!(
             task.assignee_avatar_url.as_deref(),
@@ -3330,6 +3524,8 @@ mod tests {
         let node = IssueNode {
             identifier: "ENG-11".into(),
             title: "Unblocked".into(),
+            priority: 0,
+            estimate: None,
             state: Some(state("Todo", "unstarted")),
             project: None,
             assignee: None,
@@ -3354,6 +3550,8 @@ mod tests {
         let node = IssueNode {
             identifier: "ENG-12".into(),
             title: "Already going".into(),
+            priority: 0,
+            estimate: None,
             state: Some(state("In Progress", "started")),
             project: None,
             assignee: None,
@@ -3368,6 +3566,8 @@ mod tests {
         let node = IssueNode {
             identifier: "ENG-13".into(),
             title: "No state on the wire".into(),
+            priority: 0,
+            estimate: None,
             state: None,
             project: None,
             assignee: None,

@@ -7,6 +7,23 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.3 — 2026-08-25
+
+- Triage queues can now be ordered by attention, due date, priority, creation
+  date, or a shared manual order. Manual mode supports drag and drop, keyboard
+  reordering, optimistic updates, and undo while respecting read-only access.
+- Triage now separates active investigations, waiting issues, and snoozed work
+  into clear lanes, and surfaces live agent activity, issue due dates, project
+  deadlines, priority, and estimates directly in the queue.
+- Issues, Trees, Triage, and Reviews now share a quieter, more consistent card
+  and selection system with richer work signals and clearer project grouping.
+- Ticket titles render their Markdown consistently across every workflow, with
+  improved wrapping for long inline-code titles and narrow side panels.
+- Reviews and Triage open on useful home surfaces with workload summaries,
+  suggested next items, and discoverable keyboard shortcuts.
+- AI review badges now count only current draft comments and update immediately
+  as drafts are created, removed, or published.
+
 ## 0.1.3-beta.1 — 2026-08-24
 
 - Reviews and Triage now open on useful, unselected home surfaces with clear

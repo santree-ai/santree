@@ -1,7 +1,7 @@
 import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { Markdown } from "./Markdown";
+import { Markdown, MarkdownTitle } from "./Markdown";
 
 describe("Markdown raw-HTML handling", () => {
   it("renders <details>/<summary> as a native collapsible, not literal text", () => {
@@ -33,5 +33,26 @@ describe("Markdown raw-HTML handling", () => {
     );
     expect(container.querySelector("script")).toBeNull();
     expect(container.querySelector("img")?.getAttribute("onerror")).toBeNull();
+  });
+});
+
+describe("MarkdownTitle", () => {
+  it("renders ticket-name emphasis and inline code", () => {
+    const { container } = render(
+      <MarkdownTitle>{"Drop `web_chat_button_title` from **Chat.Configuration**"}</MarkdownTitle>,
+    );
+
+    expect(container.querySelector("code")?.textContent).toBe("web_chat_button_title");
+    expect(container.querySelector("strong")?.textContent).toBe("Chat.Configuration");
+  });
+
+  it("cannot introduce block or interactive elements inside clickable cards", () => {
+    const { container } = render(
+      <MarkdownTitle>{"[link](https://example.com)\n- first\n- second"}</MarkdownTitle>,
+    );
+
+    expect(container.querySelector("a, ul, li")).toBeNull();
+    expect(container.textContent).toContain("link");
+    expect(container.textContent).toContain("first");
   });
 });

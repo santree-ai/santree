@@ -24,11 +24,18 @@ export interface Toast {
   message: string;
   /** Auto-dismiss after this many ms; `0` keeps it until dismissed. */
   duration: number;
+  action?: ToastAction;
 }
 
 export interface ToastOptions {
   title?: string;
   duration?: number;
+  action?: ToastAction;
+}
+
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
 }
 
 /** How long each variant lingers — errors stay longest since they need action. */
@@ -93,17 +100,27 @@ export function showToast(variant: ToastVariant, message: string, opts: ToastOpt
       t.variant === variant &&
       t.message === message &&
       t.title === opts.title &&
-      t.duration === duration,
+      t.duration === duration &&
+      t.action?.label === opts.action?.label,
   );
   if (existing) {
     const timer = timers.get(existing.id);
     if (timer) clearTimeout(timer);
+    // Refresh the callback as well as the timer. Two rapid reorders intentionally
+    // dedupe to one "Moved …" toast, but Undo must target the latest move.
+    toasts = toasts.map((item) =>
+      item.id === existing.id ? { ...item, action: opts.action } : item,
+    );
+    emit();
     scheduleDismiss(existing.id, duration);
     return existing.id;
   }
 
   const id = nextId++;
-  const next = [...toasts, { id, variant, message, title: opts.title, duration }];
+  const next = [
+    ...toasts,
+    { id, variant, message, title: opts.title, duration, action: opts.action },
+  ];
   while (next.length > MAX_VISIBLE) {
     // Drop the oldest *non-error* first so a transient success can't push an
     // unread error off-screen; only evict an error if nothing else is left.
@@ -150,6 +167,18 @@ function ToastCard({ toast: t }: { toast: Toast }) {
           {t.message}
         </div>
       </div>
+      {t.action && (
+        <button
+          type="button"
+          onClick={() => {
+            t.action?.onClick();
+            dismissToast(t.id);
+          }}
+          className="mt-0.5 flex-none cursor-pointer rounded-[var(--radius-sm)] border border-line-2 px-2 py-1 text-[10.5px] font-medium text-fg-2 transition-colors hover:bg-hover hover:text-fg-bright"
+        >
+          {t.action.label}
+        </button>
+      )}
       <button
         type="button"
         onClick={() => dismissToast(t.id)}

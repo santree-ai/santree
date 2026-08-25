@@ -6,6 +6,7 @@
 import { type ClipboardEvent, useCallback, useState } from "react";
 
 import type { DevTodo } from "../../bindings";
+import { Markdown } from "../../components/Markdown";
 import { Button, Skeleton } from "../../components/primitives";
 import {
   useAddDevTodo,
@@ -140,13 +141,11 @@ function TodoRow({ todo, onSend }: { todo: DevTodo; onSend: (id: string) => void
           className="mt-0.5 h-3 w-3 flex-none cursor-pointer accent-[var(--accent)]"
         />
         <div className="min-w-0 flex-1">
-          <div
-            className={`selectable whitespace-pre-wrap text-[12px] leading-[1.45] ${
-              todo.done ? "text-muted-4 line-through" : "text-fg-2"
-            }`}
+          <Markdown
+            className={`text-[12px] leading-[1.45] ${todo.done ? "text-muted-4 line-through" : "text-fg-2"}`}
           >
             {todo.body}
-          </div>
+          </Markdown>
           {todo.screenshots.length > 0 && (
             <div className="mt-1.5 flex flex-col gap-1.5">
               {todo.screenshots.map((p) => (

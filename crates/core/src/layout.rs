@@ -128,9 +128,12 @@ mod tests {
         Task {
             id: id.into(),
             title: id.into(),
+            priority: crate::domain::Priority::None,
+            estimate: None,
             project: project.into(),
             project_color: None,
             project_icon: None,
+            project_target_date: None,
             status: TaskStatus::Todo,
             ready: blocked_by.is_empty(),
             blocked_by: blocked_by.iter().map(|s| (*s).into()).collect(),

@@ -30,6 +30,7 @@ import {
   MessageSquareIcon,
   SparklesIcon,
 } from "../../components/icons";
+import { MarkdownTitle } from "../../components/Markdown";
 import {
   ChevronSelect,
   Dot,
@@ -647,12 +648,8 @@ function PrRow({
     <button
       type="button"
       onClick={() => onSelect(pr.id)}
-      className="mb-[5px] flex w-full cursor-pointer flex-col gap-[5px] rounded-[9px] px-[11px] py-2 text-left transition-colors hover:border-line-strong hover:bg-hover"
-      style={
-        active
-          ? accentActiveStyle()
-          : { border: "1px solid var(--color-line-2)", background: "var(--color-deep)" }
-      }
+      className="entity-card mb-[5px] flex w-full cursor-pointer flex-col gap-[5px] px-[11px] py-2 text-left transition-colors"
+      data-active={active}
     >
       <div className="flex items-center gap-1.5">
         <Dot color={decision.color} size={6} />
@@ -688,12 +685,12 @@ function PrRow({
           <CheckStateIcon state={pr.checks} />
         </span>
       </div>
-      <div
+      <MarkdownTitle
         className="overflow-hidden text-[12px] leading-[1.3] text-ellipsis whitespace-nowrap"
         style={{ color: active ? "var(--accent)" : "var(--color-fg-2)" }}
       >
         {pr.title}
-      </div>
+      </MarkdownTitle>
       <div className="flex items-center gap-2 font-mono text-[10px] text-muted-4">
         <span
           style={{ color: reviewAgeColor(days) }}

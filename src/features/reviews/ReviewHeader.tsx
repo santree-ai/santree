@@ -11,6 +11,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Reviewer, ReviewPr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { AgentsIcon, BranchIcon, CopyIcon, GitHubLogo, PanelIcon } from "../../components/icons";
+import { MarkdownTitle } from "../../components/Markdown";
 import { Button, Pill } from "../../components/primitives";
 import { useCreateReviewWorktree, useRepos, useWorktreePrs, useWorktrees } from "../../lib/queries";
 import { useApp, useAppUi } from "../../state/AppContext";
@@ -161,7 +162,9 @@ export function ReviewHeader({ pr }: { pr: ReviewPr }) {
           </button>
         </div>
       </div>
-      <h1 className="mb-2 text-[16px] leading-[1.3] font-semibold text-fg-bright">{pr.title}</h1>
+      <MarkdownTitle className="mb-2 block text-[16px] leading-[1.3] font-semibold text-fg-bright">
+        {pr.title}
+      </MarkdownTitle>
       <div className="flex flex-wrap items-center gap-2.5 text-[11px]">
         <span className="flex items-center gap-1.5 text-muted-2">
           <Avatar name={pr.author} src={pr.authorAvatarUrl} size={16} />

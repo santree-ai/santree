@@ -1442,6 +1442,22 @@ pub async fn triage_set_state(
     Ok(())
 }
 
+/// Update a triage issue's canonical Linear manual rank. The sink verifies the
+/// issue still belongs to this repo's triage scope before sending the mutation.
+#[tauri::command]
+#[specta::specta]
+pub async fn triage_set_sort_order(
+    repo: String,
+    ticket_id: String,
+    sort_order: f64,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    linear::set_issue_sort_order(&db, &repo, &ticket_id, sort_order)
+        .await?
+        .ok_or("no Linear org connected")?;
+    Ok(())
+}
+
 /// Post a comment on an issue — a top-level comment, or a reply when `parent_id`
 /// is the id of the comment being replied to. `ticket_id`/`parent_id` are used
 /// only as GraphQL variables (never as a path or git arg). Requires a

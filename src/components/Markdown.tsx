@@ -5,7 +5,7 @@
  * treatment; code is monospaced in a subtle well.
  */
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { memo } from "react";
+import { type CSSProperties, memo } from "react";
 import ReactMarkdown, { type Components, defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -262,9 +262,17 @@ export function normalizeLinearMarkdown(md: string): string {
 // single most expensive render in the app. Memoize on the source string so an
 // unrelated re-render (selection change, resize) never re-parses an already
 // rendered body — only a genuinely new string pays the cost.
-export const Markdown = memo(function Markdown({ children }: { children: string }) {
+export const Markdown = memo(function Markdown({
+  children,
+  className,
+}: {
+  children: string;
+  className?: string;
+}) {
   return (
-    <div className="selectable text-[12.5px] leading-[1.6] text-fg-2 [overflow-wrap:anywhere]">
+    <div
+      className={`selectable [overflow-wrap:anywhere] ${className ?? "text-[12.5px] leading-[1.6] text-fg-2"}`}
+    >
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks, literalizeUnknownHtml]}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
@@ -274,5 +282,49 @@ export const Markdown = memo(function Markdown({ children }: { children: string 
         {normalizeLinearMarkdown(children)}
       </ReactMarkdown>
     </div>
+  );
+});
+
+/**
+ * Compact markdown for entity names (Linear issues, worktrees and PRs). Titles
+ * are inline content, so deliberately support only emphasis, deletion and code:
+ * block structures would break card/button layout, and links would create nested
+ * interactive elements on the many surfaces where a title is itself clickable.
+ */
+const inlineComponents: Components = {
+  p: ({ children }) => <span>{children}</span>,
+  strong: ({ children }) => <strong className="font-semibold text-fg-bright">{children}</strong>,
+  em: ({ children }) => <em>{children}</em>,
+  del: ({ children }) => <del>{children}</del>,
+  code: ({ children }) => (
+    <code className="break-all rounded border border-line-2 bg-input px-1 py-px font-mono text-[.9em] text-fg-2 [box-decoration-break:clone]">
+      {children}
+    </code>
+  ),
+};
+
+export const MarkdownTitle = memo(function MarkdownTitle({
+  children,
+  className = "",
+  style,
+  title,
+}: {
+  children: string;
+  className?: string;
+  style?: CSSProperties;
+  title?: string;
+}) {
+  return (
+    <span className={`[overflow-wrap:anywhere] ${className}`} style={style} title={title}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, literalizeUnknownHtml]}
+        rehypePlugins={[[rehypeSanitize, sanitizeSchema]]}
+        allowedElements={["p", "strong", "em", "del", "code"]}
+        unwrapDisallowed
+        components={inlineComponents}
+      >
+        {normalizeLinearMarkdown(children)}
+      </ReactMarkdown>
+    </span>
   );
 });

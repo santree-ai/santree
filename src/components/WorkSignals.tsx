@@ -83,9 +83,46 @@ export function PriorityBars({ priority }: { priority: Exclude<Priority, "None">
   );
 }
 
+/** Linear's estimate is the best available pre-work difficulty signal. Workspaces
+ * may use Fibonacci points, so map the common 1/2/3/5/8 scale onto five bars
+ * instead of pretending the raw number is a universal duration. */
+export function EstimateBars({ estimate }: { estimate: number }) {
+  const level = estimate <= 1 ? 1 : estimate <= 2 ? 2 : estimate <= 3 ? 3 : estimate <= 5 ? 4 : 5;
+  const value = Number.isInteger(estimate) ? estimate.toFixed(0) : String(estimate);
+  const label = `${value} point estimate`;
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className="flex items-center gap-1 font-mono text-[9px] text-muted-3"
+    >
+      <span className="flex h-2 items-end gap-px">
+        {Array.from({ length: 5 }, (_, index) => (
+          <span
+            key={index}
+            className="w-[2px] rounded-[1px]"
+            style={{
+              height: 3 + index,
+              background: index < level ? "var(--accent)" : "var(--color-line-3)",
+            }}
+          />
+        ))}
+      </span>
+      <span>{value}</span>
+    </span>
+  );
+}
+
 /** A project's target date belongs beside the project heading, not repeated on
  * every task. Near and overdue dates gain urgency; distant dates stay quiet. */
-export function ProjectDueDate({ date }: { date: string | null | undefined }) {
+function DueDateSignal({
+  date,
+  noun,
+}: {
+  date: string | null | undefined;
+  noun: "Issue due date" | "Project target date";
+}) {
   if (!date) return null;
   const parsed = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00`) : new Date(date);
   if (Number.isNaN(parsed.getTime())) return null;
@@ -109,9 +146,17 @@ export function ProjectDueDate({ date }: { date: string | null | undefined }) {
     <span
       className="ml-auto flex-none font-mono text-[9px] normal-case tracking-normal"
       style={{ color }}
-      title={`Project target date: ${parsed.toLocaleDateString()}`}
+      title={`${noun}: ${parsed.toLocaleDateString()}`}
     >
       {days < 0 ? "overdue" : "due"} {label}
     </span>
   );
+}
+
+export function ProjectDueDate({ date }: { date: string | null | undefined }) {
+  return <DueDateSignal date={date} noun="Project target date" />;
+}
+
+export function IssueDueDate({ date }: { date: string | null | undefined }) {
+  return <DueDateSignal date={date} noun="Issue due date" />;
 }

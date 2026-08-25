@@ -5,6 +5,7 @@ import { useMemo } from "react";
 
 import type { AgentKind, Task, Worktree } from "../../bindings";
 import { PlusIcon } from "../../components/icons";
+import { MarkdownTitle } from "../../components/Markdown";
 import { Dropdown, Spinner } from "../../components/primitives";
 import { useCreateWorktree, useResolvedSetting, useTasks, WORK_AGENT_KEY } from "../../lib/queries";
 import { useApp, useAppUi } from "../../state/AppContext";
@@ -102,7 +103,9 @@ export function StartTaskButton() {
                 className="flex w-full cursor-pointer flex-col items-start gap-0.5 px-3 py-1.5 text-left hover:bg-hover"
               >
                 <span className="font-mono text-[10.5px] text-muted-2">{t.id}</span>
-                <span className="line-clamp-1 text-[12px] text-fg-3">{t.title}</span>
+                <MarkdownTitle className="block line-clamp-2 text-[12px] text-fg-3">
+                  {t.title}
+                </MarkdownTitle>
               </button>
             ))
           )}

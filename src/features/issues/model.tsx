@@ -177,7 +177,7 @@ interface IssuesModel {
   byId: Map<string, Task>;
   /** Per-project color + icon (live from Linear, else the per-name fallback),
    *  keyed by project name. The sidebar headers and graph bands read this. */
-  projectMeta: Map<string, { color: string; icon: string | null }>;
+  projectMeta: Map<string, { color: string; icon: string | null; targetDate: string | null }>;
   /** Ids that have a real worktree (used for chaining). */
   worktreeIds: Set<string>;
   /** Real worktrees keyed by issue id — for the right panel's status + PR. */
@@ -408,12 +408,16 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   // Resolve each project's color/icon once (first task wins). Live Linear values
   // take precedence; otherwise fall back to the per-name color map.
   const projectMeta = useMemo(() => {
-    const meta = new Map<string, { color: string; icon: string | null }>();
+    const meta = new Map<
+      string,
+      { color: string; icon: string | null; targetDate: string | null }
+    >();
     for (const t of tasks) {
       if (!meta.has(t.project)) {
         meta.set(t.project, {
           color: t.projectColor ?? PROJECT_FALLBACK,
           icon: t.projectIcon ?? null,
+          targetDate: t.projectTargetDate ?? null,
         });
       }
     }

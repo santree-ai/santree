@@ -7,9 +7,12 @@ function task(id: string, ready = true): Task {
   return {
     id,
     title: `Task ${id}`,
+    priority: "None",
+    estimate: null,
     project: "Core",
     projectColor: null,
     projectIcon: null,
+    projectTargetDate: null,
     status: "Todo",
     ready,
     blockedBy: [],

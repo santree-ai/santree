@@ -255,7 +255,8 @@ export function CommandPalette() {
                     type="button"
                     onMouseEnter={() => setActive(index)}
                     onClick={item.run}
-                    className={`flex w-full cursor-pointer items-center gap-3 rounded-[var(--radius-md)] px-2.5 py-2 text-left ${active === index ? "bg-selected" : "hover:bg-hover"}`}
+                    data-active={active === index}
+                    className="selection-row flex w-full cursor-pointer items-center gap-3 rounded-[var(--radius-md)] px-2.5 py-2 text-left"
                   >
                     <span className="flex h-7 w-7 flex-none items-center justify-center rounded-[var(--radius-sm)] border border-line-2 bg-input text-muted-2">
                       {item.icon}

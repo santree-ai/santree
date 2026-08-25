@@ -3,11 +3,11 @@
  *  its PR status (click → open on GitHub); merged worktrees are dimmed and can be
  *  bulk-selected ("Select merged") and deleted together. Within a project, a
  *  worktree branched off a sibling is indented under it (see `stackWorktrees`). */
-import type { CSSProperties } from "react";
 import { useMemo, useState } from "react";
 
 import type { SessionState, TicketRef, Worktree, WorktreePr } from "../../bindings";
 import { AgentIcon, BranchIcon, CheckIcon, DownloadIcon, TrashIcon } from "../../components/icons";
+import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
 import { Button, ConfirmDialog, Dot, Skeleton, Spinner } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
@@ -19,7 +19,7 @@ import {
   useUpdateBaseBranch,
   useWorktreeStatus,
 } from "../../lib/queries";
-import { accentActiveStyle, alpha, prStateMeta, sessionStateMeta } from "../../theme/colors";
+import { accentActiveStyle, prStateMeta, sessionStateMeta } from "../../theme/colors";
 import { BASE_ID, effectiveSessionState, projectOf, useTrees } from "./model";
 import { StartTaskButton } from "./StartTaskButton";
 
@@ -370,15 +370,6 @@ function WorktreeEntry({
   const { data: changedFiles } = useWorktreeStatus(repo, w.pending ? "" : w.id);
   // Dimmed only when fully merged (every PR) — a worktree with any open PR stays lit.
   const merged = prs.length > 0 && prs.every((p) => p.state === "Merged");
-  // Every card carries an edge, not just the active one. The stack connector's elbow
-  // has to *land* on something: against a borderless parent the spine appeared to
-  // start in mid-air, which is precisely the hierarchy the indent exists to show.
-  // Inactive cards use the same hairline as the connector (and as every other card
-  // in the app) so the rail reads as one system; active still wins with the accent.
-  const cardStyle: CSSProperties = {
-    border: `1px solid ${active ? alpha(40) : "var(--color-line-2)"}`,
-    background: active ? alpha(6) : "transparent",
-  };
   return (
     // Row = connector gutter + card. The indent lives in the gutter, never as a
     // margin on the card — a margined `w-full` card overflows the rail and clips
@@ -392,7 +383,6 @@ function WorktreeEntry({
       <div
         className="entity-card group relative flex min-w-0 flex-1 cursor-pointer gap-2 px-[11px] py-2.5 text-left"
         data-active={active}
-        style={cardStyle}
       >
         {/* The card's own action is a button stretched over it, not a `role="button"`
           wrapper: the select box and the PR chips are real buttons, and ARIA makes
@@ -429,9 +419,9 @@ function WorktreeEntry({
             // Optimistic placeholder while git creates the worktree — no branch/stats
             // yet, so show the title and a "creating" line instead.
             <>
-              <div className="mb-1.5 overflow-hidden text-[11.5px] leading-[1.3] text-ellipsis whitespace-nowrap text-fg-2">
+              <MarkdownTitle className="mb-1.5 block line-clamp-2 text-[11.5px] leading-[1.3] text-fg-2">
                 {w.title}
-              </div>
+              </MarkdownTitle>
               <div className="flex items-center gap-1.5 font-mono text-[10px] text-muted-3">
                 <Spinner size={9} />
                 Creating workspace…
@@ -453,9 +443,9 @@ function WorktreeEntry({
                   </span>
                 )}
               </div>
-              <div className="mb-1.5 overflow-hidden text-[11.5px] leading-[1.3] text-ellipsis whitespace-nowrap text-muted">
+              <MarkdownTitle className="mb-1.5 block line-clamp-2 text-[11.5px] leading-[1.3] text-muted">
                 {w.title}
-              </div>
+              </MarkdownTitle>
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] text-muted-4">
                 {changedFiles && (
                   <>

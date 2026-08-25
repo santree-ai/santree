@@ -39,7 +39,6 @@ import {
   useWorktreeStatus,
 } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
-import { accentActiveStyle } from "../../theme/colors";
 import { CodeView } from "../trees/CodeView";
 import { STATUS_META } from "../trees/changeTree";
 import { DiffViewer } from "../trees/DiffViewer";
@@ -161,10 +160,7 @@ function Row({
   // of their own, and nesting those inside one is invalid HTML (and unreachable
   // by keyboard).
   return (
-    <div
-      className="flex w-full items-center pr-1 hover:bg-hover"
-      style={selected ? accentActiveStyle() : undefined}
-    >
+    <div data-active={selected} className="selection-row flex w-full items-center pr-1">
       <button
         type="button"
         onClick={onSelect}

@@ -8,6 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type { AgentKind, TriageDetail, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { AgentIcon, LinearLogo, RefreshIcon } from "../../components/icons";
+import { MarkdownTitle } from "../../components/Markdown";
 import { Button, Skeleton } from "../../components/primitives";
 import { RelativeTime, SlaCountdown } from "../../components/RelativeTime";
 import { formatSnoozeLabel } from "../../lib/relativeTime";
@@ -75,9 +76,9 @@ export function IssueHeader({
           </Button>
         </div>
       </div>
-      <div className="mb-2 text-[17px] leading-[1.3] font-semibold text-fg-bright">
+      <MarkdownTitle className="mb-2 block text-[17px] leading-[1.3] font-semibold text-fg-bright">
         {ticket.title}
-      </div>
+      </MarkdownTitle>
       <div className="flex min-h-[17px] flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[11px] text-muted-3">
         {detail ? (
           <>

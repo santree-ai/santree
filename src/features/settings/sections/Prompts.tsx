@@ -193,10 +193,10 @@ function RailGroup({
             key={p.name}
             type="button"
             onClick={() => onSelect(p.name)}
-            className={`mx-2 flex w-[calc(100%-16px)] cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] text-left text-[12.5px] hover:bg-hover ${
-              active ? "bg-hover text-fg-bright" : "text-fg-3"
+            data-active={active}
+            className={`selection-row mx-2 flex w-[calc(100%-16px)] cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] text-left text-[12.5px] ${
+              active ? "text-fg-bright" : "text-fg-3"
             }`}
-            style={active ? { boxShadow: "inset 2px 0 0 var(--accent)" } : undefined}
           >
             <span className="min-w-0 flex-1 truncate">{p.label}</span>
             {p.overrideSource !== null && (

@@ -19,7 +19,7 @@ log = "0.4"
 
 [workspace.package]
 edition = "2021"
-version = "0.1.3-beta.1"
+version = "0.1.3"
 license = "MIT"
 
 # The shipped desktop binary (what actually goes in the DMG/AppImage): trade

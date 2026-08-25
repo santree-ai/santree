@@ -10,6 +10,7 @@
  */
 import { useState } from "react";
 import type { WorktreePr } from "../../bindings";
+import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
 import { Button } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
@@ -71,9 +72,9 @@ export function AgentPeek({
           className="flex-none rounded-full"
           style={{ width: 7, height: 7, background: color }}
         />
-        <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg-2">
+        <MarkdownTitle className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg-2">
           {entry.title}
-        </span>
+        </MarkdownTitle>
         <button
           type="button"
           onClick={onClose}
@@ -99,7 +100,11 @@ export function AgentPeek({
 
         <div className="flex flex-col gap-1.5">
           <Field label="state">{meta?.label ?? entry.state}</Field>
-          {entry.subtitle && <Field label="task">{entry.subtitle}</Field>}
+          {entry.subtitle && (
+            <Field label="task">
+              <MarkdownTitle>{entry.subtitle}</MarkdownTitle>
+            </Field>
+          )}
           {entry.repo && <Field label="repo">{entry.repo}</Field>}
           {entry.worktree && <Field label="branch">{entry.worktree.branch}</Field>}
           <Field label="updated">

@@ -3,12 +3,19 @@
 import type { CSSProperties } from "react";
 import { memo } from "react";
 
+import type { Priority } from "../../bindings";
+import { MarkdownTitle } from "../../components/Markdown";
 import { Badge, Dot } from "../../components/primitives";
+import { EstimateBars, PriorityBars } from "../../components/WorkSignals";
 
 export interface IssueRowVM {
   id: string;
   title: string;
   statusColor: string;
+  priority: Priority;
+  estimate: number | null;
+  /** This ticket is the current destination shown in the detail panel. */
+  active: boolean;
   selectable: boolean;
   selected: boolean;
   showRdy: boolean;
@@ -32,7 +39,10 @@ export interface IssueRowVM {
 // Compare by value instead — the callbacks are id-stable in behavior, so only the
 // rendered fields (incl. the derived style objects) matter. Mirrors IssueNode.
 const styleEq = (a: CSSProperties, b: CSSProperties) =>
-  a.background === b.background && a.border === b.border && a.opacity === b.opacity;
+  a.background === b.background &&
+  a.border === b.border &&
+  a.borderColor === b.borderColor &&
+  a.opacity === b.opacity;
 
 export const IssueRow = memo(
   function IssueRow({ vm }: { vm: IssueRowVM }) {
@@ -43,8 +53,10 @@ export const IssueRow = memo(
       // biome-ignore lint/a11y/noStaticElementInteractions: decorative hover only
       <div
         data-issue-id={vm.id}
+        data-active={vm.active}
+        data-queued={vm.selected}
         onMouseEnter={vm.onHover}
-        className="mb-0.5 flex w-full items-stretch rounded-md transition-colors"
+        className="entity-card mb-[5px] flex w-full items-stretch overflow-hidden transition-colors"
         style={vm.rowStyle}
       >
         {/* The checkbox column is always present (disabled + faint when the row
@@ -82,6 +94,8 @@ export const IssueRow = memo(
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span className="flex-none font-mono text-[10px] text-muted-2">{vm.id}</span>
+              {vm.priority !== "None" && <PriorityBars priority={vm.priority} />}
+              {vm.estimate != null && vm.estimate > 0 && <EstimateBars estimate={vm.estimate} />}
               <span className="ml-auto flex items-center gap-1">
                 {vm.showWorking && <Badge color="var(--color-status-amber)">In progress</Badge>}
                 {vm.showRdy && <Badge color="var(--color-status-green)">Ready</Badge>}
@@ -89,9 +103,9 @@ export const IssueRow = memo(
                 {vm.showBlocked && <Badge color="var(--color-muted-3)">Blocked</Badge>}
               </span>
             </div>
-            <div className="mt-0.5 overflow-hidden text-[11.5px] leading-[1.3] text-ellipsis whitespace-nowrap text-fg-3">
+            <MarkdownTitle className="mt-0.5 block max-h-[2.6em] line-clamp-2 overflow-hidden text-[11.5px] leading-[1.3] text-fg-3">
               {vm.title}
-            </div>
+            </MarkdownTitle>
           </div>
         </button>
       </div>
@@ -104,6 +118,9 @@ export const IssueRow = memo(
       x.id === y.id &&
       x.title === y.title &&
       x.statusColor === y.statusColor &&
+      x.priority === y.priority &&
+      x.estimate === y.estimate &&
+      x.active === y.active &&
       x.selectable === y.selectable &&
       x.selected === y.selected &&
       x.showRdy === y.showRdy &&
