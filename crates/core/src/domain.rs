@@ -650,10 +650,9 @@ pub struct ReviewPr {
     /// to the sidebar's review-effort size chip.
     pub changed_files: u32,
     pub comment_count: u32,
-    /// Durable AI-review conversations attached to this PR. One logical review
-    /// surface can have one conversation per provider, so this counts provider
-    /// review tabs rather than transient launches or draft comments.
-    pub ai_review_count: u32,
+    /// Local AI-authored review drafts currently waiting for the user. Published,
+    /// cleared, and deleted drafts are absent from this count.
+    pub ai_draft_count: u32,
     /// Reviewers requested on the PR (people and teams).
     pub reviewers: Vec<Reviewer>,
     /// ISO-8601 timestamp of the last update.

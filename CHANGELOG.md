@@ -7,6 +7,15 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.3-beta.1 — 2026-08-24
+
+- Reviews and Triage now open on useful, unselected home surfaces with clear
+  workload summaries, suggested next items, priority and SLA context, and
+  discoverable keyboard shortcuts.
+- AI review badges now count only the draft comments currently waiting for you,
+  update immediately when a draft is deleted, and stay synchronized as review
+  agents add or publish drafts.
+
 ## 0.1.2 — 2026-08-24
 
 - Codex is now a first-class agent throughout Santree, with its real interactive

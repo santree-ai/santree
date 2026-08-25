@@ -32,6 +32,7 @@ import type {
   ReviewDraft,
   ReviewEvent,
   ReviewInbox,
+  ReviewPr,
   ReviewPublishOutcome,
   ReviewTarget,
   ScriptInfo,
@@ -1571,9 +1572,17 @@ export const useDeleteReviewDraft = (prRepo: string, number: number) =>
   useOptimisticMutation<string, null>({
     mutationKey: ["delete-review-draft", prRepo, number],
     mutationFn: (id) => unwrap(commands.deleteReviewDraft(id)),
-    optimistic: (qc, id) =>
-      patchDrafts(qc, prRepo, number, (drafts) => drafts.filter((d) => d.id !== id)),
-    invalidate: () => [queryKeys.reviewDrafts(prRepo, number)],
+    optimistic: (qc, id) => {
+      const restoreDrafts = patchDrafts(qc, prRepo, number, (drafts) =>
+        drafts.filter((d) => d.id !== id),
+      );
+      const restoreInboxes = patchAiDraftCount(qc, prRepo, number, -1);
+      return () => {
+        restoreDrafts?.();
+        restoreInboxes();
+      };
+    },
+    invalidate: () => [queryKeys.reviewDrafts(prRepo, number), queryKeys.reviewsPrefix],
   });
 
 /** Patch the cached drafts and hand back the rollback. */
@@ -1588,6 +1597,28 @@ function patchDrafts(
   if (!before) return;
   qc.setQueryData(key, next(before));
   return () => qc.setQueryData(key, before);
+}
+
+/** Keep the inbox spark count in lockstep with an optimistic local deletion.
+ * Every category may carry the same PR, so patch all occurrences and all cached
+ * repo inboxes; the settled invalidation reconciles with SQLite afterward. */
+function patchAiDraftCount(qc: QueryClient, prRepo: string, number: number, delta: number) {
+  const before = qc.getQueriesData<ReviewInbox>({ queryKey: queryKeys.reviewsPrefix });
+  const patch = (pr: ReviewPr) =>
+    pr.repo === prRepo && pr.number === number
+      ? { ...pr, aiDraftCount: Math.max(0, pr.aiDraftCount + delta) }
+      : pr;
+  for (const [key, inbox] of before) {
+    if (!inbox) continue;
+    qc.setQueryData<ReviewInbox>(key, {
+      mine: inbox.mine.map(patch),
+      requested: inbox.requested.map(patch),
+      teams: inbox.teams.map((team) => ({ ...team, prs: team.prs.map(patch) })),
+    });
+  }
+  return () => {
+    for (const [key, inbox] of before) qc.setQueryData(key, inbox);
+  };
 }
 
 /** Send drafts to GitHub as comments in the user's pending review. **The one step
@@ -1610,6 +1641,7 @@ export const usePublishReviewDrafts = (
     invalidate: () => [
       queryKeys.reviewDrafts(prRepo, number),
       queryKeys.prDetail(owner, name, number),
+      queryKeys.reviewsPrefix,
     ],
     success: (outcome, ids) =>
       outcome.failed
@@ -1634,6 +1666,7 @@ export const useReviewAiWatcher = () => {
     const unlisten = events.reviewAiChanged.listen(() => {
       qc.invalidateQueries({ queryKey: queryKeys.reviewDraftsPrefix });
       qc.invalidateQueries({ queryKey: queryKeys.prReviewBriefPrefix });
+      qc.invalidateQueries({ queryKey: queryKeys.reviewsPrefix });
     });
     return () => {
       void unlisten.then((off) => off());

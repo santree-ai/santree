@@ -2092,11 +2092,10 @@ export type ReviewPr = {
 	changedFiles: number,
 	commentCount: number,
 	/**
-	 *  Durable AI-review conversations attached to this PR. One logical review
-	 *  surface can have one conversation per provider, so this counts provider
-	 *  review tabs rather than transient launches or draft comments.
+	 *  Local AI-authored review drafts currently waiting for the user. Published,
+	 *  cleared, and deleted drafts are absent from this count.
 	 */
-	aiReviewCount: number,
+	aiDraftCount: number,
 	/**  Reviewers requested on the PR (people and teams). */
 	reviewers: Reviewer[],
 	/**  ISO-8601 timestamp of the last update. */

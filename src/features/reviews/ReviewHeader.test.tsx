@@ -63,7 +63,7 @@ const pr = {
   deletions: 2,
   changedFiles: 1,
   commentCount: 0,
-  aiReviewCount: 0,
+  aiDraftCount: 0,
   reviewers: [],
   updatedAt: "2026-08-24T10:00:00Z",
   createdAt: "2026-08-23T10:00:00Z",

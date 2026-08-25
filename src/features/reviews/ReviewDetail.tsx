@@ -15,8 +15,9 @@
 import { useCallback, useEffect, useState } from "react";
 
 import type { AgentKind, ReviewPr } from "../../bindings";
-import { AgentIcon, PlusIcon } from "../../components/icons";
-import { Badge, Dropdown, EmptyState, MENU_ITEM, Tabs } from "../../components/primitives";
+import { AgentIcon, PlusIcon, PrIcon, SparklesIcon } from "../../components/icons";
+import { Badge, Dropdown, MENU_ITEM, Tabs } from "../../components/primitives";
+import { PriorityBars } from "../../components/WorkSignals";
 import {
   REVIEW_AGENT_KEY,
   useAgentAuth,
@@ -30,6 +31,7 @@ import { checkRollupMeta, palette } from "../../theme/colors";
 import { agentProvider } from "../terminal/agentProvider";
 import { AiReviewSessionPane, aiReviewTermKey } from "./AiReviewSessionPane";
 import { ChecksPane } from "./ChecksPane";
+import { splitByStance, waitingDays, waitingLabel } from "./grouping";
 import { MergeQueuePane } from "./MergeQueuePane";
 import { useReviewsModel } from "./model";
 import { type PanelTab, PrInfoPanel } from "./PrInfoPanel";
@@ -45,14 +47,132 @@ export function ReviewDetail() {
   if (showMergeQueue) return <MergeQueuePane />;
 
   if (!active) {
-    return (
-      <div className="flex min-w-0 flex-1 flex-col bg-app">
-        <EmptyState title="Select a pull request" subtitle="Pick one from the list on the left." />
-      </div>
-    );
+    return <ReviewsHome />;
   }
   // Keyed remount so per-PR query state, the active tabs, and scroll reset on switch.
   return <Detail key={active.id} pr={active} />;
+}
+
+/** Inbox landing surface. Selection stays deliberate while the largest pane
+ * answers the useful first question: what should I review next? */
+function ReviewsHome() {
+  const { inbox, loading, allPrs, ticketFor, setActive, openMergeQueue } = useReviewsModel();
+  const requested = [
+    ...new Map(
+      [...(inbox?.requested ?? []), ...(inbox?.teams.flatMap((t) => t.prs) ?? [])].map((pr) => [
+        pr.id,
+        pr,
+      ]),
+    ).values(),
+  ];
+  const waiting = splitByStance(requested).waiting;
+  const next = [...waiting].sort((a, b) => waitingDays(b) - waitingDays(a)).slice(0, 4);
+
+  return (
+    <div className="flex min-w-0 flex-1 flex-col bg-app">
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-10">
+        <div className="w-full max-w-[720px]">
+          <div className="mb-7 flex items-start gap-4">
+            <span className="flex h-11 w-11 flex-none items-center justify-center rounded-[var(--radius-lg)] border border-line-2 bg-raised text-accent">
+              <PrIcon size={19} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h1 className="text-[18px] font-semibold tracking-[-.01em] text-fg-bright">
+                Review inbox
+              </h1>
+              <p className="mt-1 max-w-[560px] text-[12.5px] leading-5 text-muted-3">
+                Pick up the oldest request, check your open work, or inspect the merge queue.
+              </p>
+            </div>
+          </div>
+
+          <div className="mb-5 grid grid-cols-3 divide-x divide-line overflow-hidden rounded-[var(--radius-md)] border border-line bg-raised">
+            <SummaryStat label="Needs review" value={waiting.length} />
+            <SummaryStat label="My PRs" value={inbox?.mine.length ?? 0} />
+            <button
+              type="button"
+              onClick={openMergeQueue}
+              className="cursor-pointer px-4 py-3 text-left hover:bg-hover"
+            >
+              <span className="block font-mono text-[15px] text-fg-bright">queue</span>
+              <span className="mt-0.5 block text-[10.5px] text-muted-4">merge status</span>
+            </button>
+          </div>
+
+          {loading ? (
+            <div className="py-8 text-center font-mono text-[11px] text-muted-4">
+              ······ loading
+            </div>
+          ) : next.length > 0 ? (
+            <div>
+              <div className="mb-2 font-mono text-[9px] tracking-[.08em] text-muted-4 uppercase">
+                Pick up next
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {next.map((pr) => {
+                  const ticket = ticketFor(pr);
+                  return (
+                    <button
+                      key={pr.id}
+                      type="button"
+                      onClick={() => setActive(pr.id)}
+                      className="entity-card cursor-pointer p-3 text-left"
+                    >
+                      <span className="flex items-center gap-2 font-mono text-[9.5px] text-muted-4">
+                        <span>#{pr.number}</span>
+                        {ticket?.priority !== undefined && ticket.priority !== "None" && (
+                          <PriorityBars priority={ticket.priority} />
+                        )}
+                        <span className="ml-auto">{waitingLabel(waitingDays(pr))}</span>
+                      </span>
+                      <span className="mt-1.5 block line-clamp-2 text-[11.5px] leading-4 text-fg-2">
+                        {pr.title}
+                      </span>
+                      {pr.aiDraftCount > 0 && (
+                        <span
+                          className="mt-2 flex items-center gap-1 font-mono text-[9px]"
+                          style={{ color: palette.purple }}
+                        >
+                          <SparklesIcon size={9} /> {pr.aiDraftCount} AI draft
+                          {pr.aiDraftCount === 1 ? "" : "s"}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-[var(--radius-md)] border border-line bg-raised px-4 py-5 text-[12px] text-muted-3">
+              No review requests are waiting. You can still open one of your {allPrs.length} visible
+              pull requests from the sidebar.
+            </div>
+          )}
+
+          <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line pt-4 font-mono text-[10px] text-muted-4">
+            <span>
+              <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">⌘K</kbd>
+              find anything
+            </span>
+            <span>
+              <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">⌘B</kbd>
+              sidebar
+            </span>
+            <span className="ml-auto">select a pull request to open its diff</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SummaryStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="px-4 py-3">
+      <span className="block font-mono text-[15px] text-fg-bright">{value}</span>
+      <span className="mt-0.5 block text-[10.5px] text-muted-4">{label}</span>
+    </div>
+  );
 }
 
 function Detail({ pr }: { pr: ReviewPr }) {

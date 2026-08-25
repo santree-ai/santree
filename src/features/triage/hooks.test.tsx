@@ -11,28 +11,26 @@ const ticket = (id: string) => ({ id }) as TriageTicket;
 const queue = (...ids: string[]) => ids.map(ticket);
 
 describe("useTriageSelection", () => {
-  it("falls back to the head of the queue when nothing is selected", () => {
+  it("starts without selecting a ticket", () => {
     const q = queue("AK-1", "AK-2");
-    const { result } = renderHook(() => useTriageSelection(q, q));
+    const { result } = renderHook(() => useTriageSelection(q));
 
-    expect(result.current.activeId).toBe("AK-1");
-    expect(result.current.activeTicket?.id).toBe("AK-1");
+    expect(result.current.activeId).toBeNull();
+    expect(result.current.activeTicket).toBeNull();
   });
 
   it("honors an explicit selection", () => {
     const q = queue("AK-1", "AK-2");
-    const { result } = renderHook(() => useTriageSelection(q, q));
+    const { result } = renderHook(() => useTriageSelection(q));
 
     act(() => result.current.select("AK-2"));
 
     expect(result.current.activeId).toBe("AK-2");
   });
 
-  // Triaging the selected ticket drops it out of `visible`; a stale id must not
-  // strand the detail pane on a blank.
-  it("falls back to the head when the selection drops out of the visible set", () => {
+  it("returns home when the selection drops out of the visible set", () => {
     const ordered = queue("AK-1", "AK-2");
-    const { result, rerender } = renderHook(({ visible }) => useTriageSelection(ordered, visible), {
+    const { result, rerender } = renderHook(({ visible }) => useTriageSelection(visible), {
       initialProps: { visible: ordered },
     });
     act(() => result.current.select("AK-2"));
@@ -40,23 +38,20 @@ describe("useTriageSelection", () => {
 
     rerender({ visible: queue("AK-1") });
 
-    expect(result.current.activeId).toBe("AK-1");
+    expect(result.current.activeId).toBeNull();
   });
 
   it("has no active ticket when the queue is empty", () => {
-    const { result } = renderHook(() => useTriageSelection([], []));
+    const { result } = renderHook(() => useTriageSelection([]));
 
     expect(result.current.activeId).toBeNull();
     expect(result.current.activeTicket).toBeNull();
   });
 
-  // `activeId` resolves against `ordered` but `activeTicket` is looked up in
-  // `visible` — a head-of-queue ticket that's filtered out yields an id with no
-  // ticket behind it. Pinned so a future refactor can't quietly change which list wins.
-  it("yields a null ticket when the head of the queue is not visible", () => {
-    const { result } = renderHook(() => useTriageSelection(queue("AK-1"), queue("AK-2")));
+  it("does not infer a selection from the visible queue", () => {
+    const { result } = renderHook(() => useTriageSelection(queue("AK-2")));
 
-    expect(result.current.activeId).toBe("AK-1");
+    expect(result.current.activeId).toBeNull();
     expect(result.current.activeTicket).toBeNull();
   });
 });

@@ -20,9 +20,11 @@ import type { AgentKind, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
-import { AgentIcon } from "../../components/icons";
+import { AgentIcon, TelescopeIcon } from "../../components/icons";
 import { Button, EmptyState, Segmented, Skeleton } from "../../components/primitives";
+import { SlaCountdown } from "../../components/RelativeTime";
 import { SidebarFooter } from "../../components/SidebarFooter";
+import { PriorityBars } from "../../components/WorkSignals";
 import {
   CLAUDE_REMOTE_CONTROL_KEY,
   INVESTIGATE_AGENT_KEY,
@@ -197,6 +199,98 @@ function AllCaughtUp({
   );
 }
 
+/** Deliberate no-selection state for a non-empty queue. It keeps the playful
+ * triage voice while turning the empty canvas into a concise pickup surface. */
+function TriageHome({
+  tickets,
+  onSelect,
+  onTriage,
+}: {
+  tickets: TriageTicket[];
+  onSelect: (id: string) => void;
+  onTriage: { name: string; avatarUrl: string | null } | null;
+}) {
+  const next = tickets.filter((ticket) => ticket.snoozedUntilMs == null).slice(0, 4);
+  const firstName = onTriage?.name.split(" ")[0];
+
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-10">
+      <div className="w-full max-w-[720px]">
+        <div className="mb-7 flex items-start gap-4">
+          <span className="relative flex h-11 w-11 flex-none items-center justify-center rounded-[var(--radius-lg)] border border-line-2 bg-raised text-accent">
+            <TelescopeIcon size={19} />
+            <span className="absolute -right-1.5 -bottom-1 text-[16px] leading-none">🌱</span>
+          </span>
+          <div className="min-w-0 flex-1">
+            <h1 className="text-[18px] font-semibold tracking-[-.01em] text-fg-bright">
+              Triage desk
+            </h1>
+            <p className="mt-1 max-w-[560px] text-[12.5px] leading-5 text-muted-3">
+              {tickets.length} {tickets.length === 1 ? "issue is" : "issues are"} waiting
+              {firstName ? ` while ${firstName} covers the rotation` : " in the queue"}. Pick one to
+              understand it before deciding where it belongs.
+            </p>
+          </div>
+          {onTriage && <Avatar name={onTriage.name} src={onTriage.avatarUrl} size={38} />}
+        </div>
+
+        {next.length > 0 && (
+          <div>
+            <div className="mb-2 font-mono text-[9px] tracking-[.08em] text-muted-4 uppercase">
+              Pick up next
+            </div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {next.map((ticket) => (
+                <button
+                  key={ticket.id}
+                  type="button"
+                  onClick={() => onSelect(ticket.id)}
+                  className="entity-card cursor-pointer p-3 text-left"
+                >
+                  <span className="flex items-center gap-2 font-mono text-[9.5px] text-muted-4">
+                    <span>{ticket.id}</span>
+                    {ticket.priority !== "None" && <PriorityBars priority={ticket.priority} />}
+                    {ticket.slaBreachMs != null && (
+                      <SlaCountdown
+                        breachMs={ticket.slaBreachMs}
+                        className="ml-auto font-mono text-[9.5px]"
+                      />
+                    )}
+                  </span>
+                  <span className="mt-1.5 block line-clamp-2 text-[11.5px] leading-4 text-fg-2">
+                    {ticket.title}
+                  </span>
+                  {ticket.team && (
+                    <span className="mt-2 block font-mono text-[9px] text-muted-4">
+                      {ticket.team}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line pt-4 font-mono text-[10px] text-muted-4">
+          <span>
+            <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">J</kbd>next
+            issue
+          </span>
+          <span>
+            <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">K</kbd>
+            previous issue
+          </span>
+          <span>
+            <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">⌘K</kbd>find
+            anything
+          </span>
+          <span className="ml-auto">investigations stay attached to their ticket</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function TriageView() {
   const { triageEnabled, activeRepo } = useApp();
   const { triageFocus, consumeTriageFocus } = useAppUi();
@@ -304,11 +398,10 @@ export function TriageView() {
   const grouped = groups.length > 1;
 
   // The selected ticket, kept valid as the queue loads / changes.
-  const { activeId, activeTicket, select } = useTriageSelection(ordered, visible);
+  const { activeId, activeTicket, select } = useTriageSelection(visible);
 
-  // The repo session is its own selection, not a ticket id: `useTriageSelection`
-  // snaps any id that isn't in the visible queue back to the first ticket, so a
-  // sentinel threaded through it could never stay selected.
+  // The repo session is its own selection, not a ticket id: threading a sentinel
+  // through ticket selection would make the two concepts share invalid state.
   const [repoSessionOpen, setRepoSessionOpen] = useState(false);
   const [repoSessionAgent, setRepoSessionAgent] = useState<AgentKind>(agentKind);
   const { data: baseWorktree } = useBaseWorktree(activeRepo);
@@ -545,8 +638,10 @@ export function TriageView() {
           // The queue hasn't landed yet, so we don't know there's nothing to
           // triage — "All caught up" here would be a cheerful lie.
           <DiscussionSkeleton />
-        ) : !activeTicket ? (
+        ) : ordered.length === 0 ? (
           <AllCaughtUp goodCitizen={goodCitizen} teamWaiting={teamWaiting} onTriage={onTriage} />
+        ) : !activeTicket ? (
+          <TriageHome tickets={ordered} onSelect={selectTicket} onTriage={onTriage} />
         ) : (
           <>
             {/* Header renders instantly from the queue row; richer fields

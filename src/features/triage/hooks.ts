@@ -35,15 +35,14 @@ export type DetailTab = "discussion" | AgentKind;
 
 /**
  * The selected ticket. `selectedId` is the raw click target; `activeId` is the
- * resolved selection — falling back to the head of the queue when nothing is
- * selected (or the selection has dropped out of `visible`, e.g. after a triage),
- * so a stale id never strands the pane on a blank.
+ * resolved selection. No selection is intentional: the main pane shows the
+ * triage home. A stale id resolves to null instead of silently opening a
+ * different ticket after the queue changes underneath the user.
  */
-export function useTriageSelection(ordered: TriageTicket[], visible: TriageTicket[]) {
+export function useTriageSelection(visible: TriageTicket[]) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const activeId =
-    selectedId && visible.some((t) => t.id === selectedId) ? selectedId : (ordered[0]?.id ?? null);
+  const activeId = selectedId && visible.some((t) => t.id === selectedId) ? selectedId : null;
   const activeTicket = visible.find((t) => t.id === activeId) ?? null;
 
   const select = useCallback((id: string) => setSelectedId(id), []);

@@ -17,7 +17,7 @@ use crate::db::Db;
 use crate::git;
 use crate::github;
 use crate::repo;
-use crate::session;
+use crate::review_drafts;
 
 /// `(owner, name)` of the active repo's `origin` remote. Remote parsing shells out
 /// to git, so it runs off the async pool.
@@ -231,13 +231,15 @@ pub async fn inbox(db: &Db, repo: &str) -> Result<ReviewInbox> {
     let (mut mine, mut requested) = personal?;
     let mut teams = teams;
 
-    // GitHub owns the inbox, but the AI-review conversations are durable local
-    // state. Join them here so every sidebar row gets one authoritative count
+    // GitHub owns the inbox, but AI review drafts are local state. Join them here
+    // so every sidebar row gets one authoritative count
     // without issuing a database query per visible PR.
-    let ai_counts = session::ai_review_counts(db, repo).await?;
+    let ai_counts = review_drafts::counts(db).await?;
     let attach_count = |pr: &mut santree_core::domain::ReviewPr| {
-        let key = format!("ai-review:{}#{}", pr.repo, pr.number);
-        pr.ai_review_count = ai_counts.get(&key).copied().unwrap_or(0);
+        pr.ai_draft_count = ai_counts
+            .get(&(pr.repo.clone(), pr.number))
+            .copied()
+            .unwrap_or(0);
     };
     mine.iter_mut().for_each(attach_count);
     requested.iter_mut().for_each(attach_count);

@@ -13,6 +13,7 @@
 //! existing "Finish review" bar sends it.
 
 use anyhow::{anyhow, Result};
+use std::collections::HashMap;
 
 use santree_core::domain::{
     AgentKind, NewInlineComment, ReviewDraft, ReviewPublishFailure, ReviewPublishOutcome,
@@ -77,6 +78,25 @@ pub async fn list(db: &Db, pr_repo: &str, number: u32) -> Result<Vec<ReviewDraft
     .fetch_all(db)
     .await?;
     Ok(rows.into_iter().map(to_draft).collect())
+}
+
+/// Current draft count per PR. Draft deletion and publishing physically remove
+/// rows, so this is also the authoritative count shown in the review inbox.
+pub async fn counts(db: &Db) -> Result<HashMap<(String, u32), u32>> {
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT pr_repo, pr_number, COUNT(*) FROM review_drafts GROUP BY pr_repo, pr_number",
+    )
+    .fetch_all(db)
+    .await?;
+    rows.into_iter()
+        .map(|(repo, number, count)| {
+            let number = u32::try_from(number)
+                .map_err(|_| anyhow!("invalid review draft PR number for {repo}"))?;
+            let count = u32::try_from(count)
+                .map_err(|_| anyhow!("invalid review draft count for {repo}#{number}"))?;
+            Ok(((repo, number), count))
+        })
+        .collect()
 }
 
 async fn get(db: &Db, id: &str) -> Result<ReviewDraft> {
@@ -452,6 +472,25 @@ mod tests {
             .map(|d| d.id)
             .collect();
         assert_eq!(left, vec!["d2".to_string(), "d3".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn counts_only_current_drafts() {
+        let db = db_with(
+            "counts",
+            &[
+                ("d1", "acme/web", 42, "abc1234", "src/a.rs"),
+                ("d2", "acme/web", 42, "abc1234", "src/b.rs"),
+                ("d3", "acme/web", 43, "abc1234", "src/c.rs"),
+            ],
+        )
+        .await;
+
+        delete(&db, "d2").await.unwrap();
+
+        let result = counts(&db).await.unwrap();
+        assert_eq!(result.get(&("acme/web".into(), 42)), Some(&1));
+        assert_eq!(result.get(&("acme/web".into(), 43)), Some(&1));
     }
 
     #[tokio::test]

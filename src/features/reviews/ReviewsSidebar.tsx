@@ -709,14 +709,14 @@ function PrRow({
             files={pr.changedFiles}
             noun="review"
           />
-          {pr.aiReviewCount > 0 && (
+          {pr.aiDraftCount > 0 && (
             <span
               className="flex items-center gap-1"
               style={{ color: palette.purple }}
-              title={`${pr.aiReviewCount} AI review session${pr.aiReviewCount === 1 ? "" : "s"}`}
+              title={`${pr.aiDraftCount} AI draft comment${pr.aiDraftCount === 1 ? "" : "s"}`}
             >
               <SparklesIcon size={10} />
-              <span className="tabular-nums">{pr.aiReviewCount}</span>
+              <span className="tabular-nums">{pr.aiDraftCount}</span>
             </span>
           )}
           {pr.commentCount > 0 && (

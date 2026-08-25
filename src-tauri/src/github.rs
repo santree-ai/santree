@@ -865,9 +865,9 @@ fn to_review_pr(n: PrNode, viewer: &ViewerCtx) -> ReviewPr {
         deletions: n.deletions,
         changed_files: n.changed_files,
         comment_count: n.comments.total_count,
-        // Santree enriches this from its durable review sessions after the
-        // GitHub inbox lands. GitHub has no concept of these local conversations.
-        ai_review_count: 0,
+        // Santree enriches this from its local review drafts after the GitHub
+        // inbox lands. GitHub has no concept of drafts that have not been sent.
+        ai_draft_count: 0,
         reviewers,
         updated_at: n.updated_at,
         created_at: n.created_at,

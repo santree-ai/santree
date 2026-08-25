@@ -185,13 +185,12 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
     setAiReviewRequest(0);
   }
 
-  // Select the first PR once the inbox loads, and re-select when the current
-  // selection falls out of the list — e.g. after switching the active repo (and
-  // thus the org), where the old activeId no longer exists and the detail pane
-  // would otherwise go blank.
+  // A missing selection is intentional: the home surface summarizes the inbox.
+  // Only clear an explicit selection that disappeared after a refresh or repo
+  // switch; never replace it with an unrelated PR.
   useEffect(() => {
-    if (allPrs.length > 0 && !allPrs.some((p) => p.id === activeId)) {
-      setActiveId(allPrs[0].id);
+    if (activeId && !allPrs.some((p) => p.id === activeId)) {
+      setActiveId(null);
     }
   }, [activeId, allPrs]);
 

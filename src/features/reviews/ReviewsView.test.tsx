@@ -30,7 +30,7 @@ function pr(
     deletions: 2,
     changedFiles: 2,
     commentCount: 0,
-    aiReviewCount: 0,
+    aiDraftCount: 0,
     isInMergeQueue: false,
     reviewers: [],
     updatedAt: "2026-06-29T12:00:00Z",
@@ -77,7 +77,7 @@ describe("ReviewsSidebarView", () => {
   });
 
   it("organizes category rows by project and exposes urgency, effort and comments", () => {
-    const mine = { ...inbox.mine[0], commentCount: 4, aiReviewCount: 2 };
+    const mine = { ...inbox.mine[0], commentCount: 4, aiDraftCount: 2 };
     const ticket: TicketRef = {
       identifier: "AK-483",
       title: "Booking webhook retries",
@@ -102,7 +102,7 @@ describe("ReviewsSidebarView", () => {
     expect(screen.getByRole("img", { name: "High priority" })).toBeInTheDocument();
     expect(screen.getAllByRole("img", { name: /Small review/ })).not.toHaveLength(0);
     expect(screen.getByTitle("4 comments")).toHaveTextContent("4");
-    expect(screen.getByTitle("2 AI review sessions")).toHaveTextContent("2");
+    expect(screen.getByTitle("2 AI draft comments")).toHaveTextContent("2");
     expect(screen.getByTitle(/Project target date/)).toHaveTextContent(/due/i);
   });
 
