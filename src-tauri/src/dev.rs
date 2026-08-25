@@ -28,6 +28,8 @@ use crate::error::CmdResult;
 use crate::git;
 use crate::stream::{self, StreamEvent};
 
+pub(crate) const DEV_REPO_PATH_KEY: &str = "dev_repo_path";
+
 /// One entry of the Dev tab's bug/task list. `screenshots` are absolute paths of
 /// pasted images written under the app data dir (render via `dev_screenshot_src`,
 /// hand to the agent as `Read <path>` lines).
@@ -85,7 +87,7 @@ pub async fn dev_normalize_repo(path: String) -> CmdResult<String> {
 /// The validated git toplevel of an IPC-supplied path. Every dev command that
 /// takes a repo path funnels through this before the path touches git or the
 /// filesystem — the Dev tab's path is user-picked, but it still crosses IPC.
-fn repo_root(path: &str) -> Result<String> {
+pub(crate) fn repo_root(path: &str) -> Result<String> {
     let dir = Path::new(path);
     if !dir.is_absolute() {
         bail!("repo path must be absolute: {path}");

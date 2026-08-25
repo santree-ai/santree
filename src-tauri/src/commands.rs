@@ -620,9 +620,7 @@ pub async fn agent_session(
 ) -> CmdResult<AgentSession> {
     validate_term_key(&term_key)?;
     let cwd_path = std::fs::canonicalize(&cwd)?;
-    let repo_db_path = repo::path(&db, &repo)
-        .await?
-        .ok_or("repository has no local path")?;
+    let repo_db_path = agent_repo_path(&db, &repo, &term_key, &cwd).await?;
     let repo_root = std::fs::canonicalize(&repo_db_path)?;
     // Provider selection and id creation form one reservation. Serializing this
     // small launch-only section prevents simultaneous first launches from
@@ -675,6 +673,42 @@ pub async fn agent_session(
             review_mcp_config: review_mcp_config.as_deref(),
         })
         .await?)
+}
+
+const DEV_SESSION_REPO: &str = "@dev";
+
+async fn agent_repo_path(db: &Db, repo: &str, term_key: &str, cwd: &str) -> Result<String, String> {
+    if repo == DEV_SESSION_REPO {
+        let keyed_path = term_key
+            .strip_prefix("dev:")
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| "invalid Dev terminal key".to_string())?;
+        let configured = settings::get(db, "app", crate::dev::DEV_REPO_PATH_KEY)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Dev repository is not configured".to_string())?;
+        let configured = crate::dev::repo_root(&configured).map_err(|error| error.to_string())?;
+        let configured = std::fs::canonicalize(configured)
+            .map_err(|_| "configured Dev repository is unavailable".to_string())?;
+        let keyed_path = std::fs::canonicalize(keyed_path)
+            .map_err(|_| "Dev terminal repository is unavailable".to_string())?;
+        let cwd = std::fs::canonicalize(cwd)
+            .map_err(|_| "Dev terminal repository is unavailable".to_string())?;
+        if keyed_path != configured || cwd != configured {
+            return Err("Dev terminal cwd does not match the configured repository".into());
+        }
+        return configured
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "configured Dev repository path is not valid UTF-8".into());
+    }
+    if term_key.starts_with("dev:") {
+        return Err("Dev terminals must use the Dev session repository".into());
+    }
+    repo::path(db, repo)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "repository has no local path".into())
 }
 
 fn validate_review_mcp_config(
@@ -739,6 +773,12 @@ async fn session_context(
     repo_db_path: &str,
     term_key: &str,
 ) -> Result<SessionContext, String> {
+    if repo == DEV_SESSION_REPO && term_key.starts_with("dev:") {
+        return Ok(SessionContext {
+            surface: SessionSurface::Work,
+            agent: Some(AgentKind::Claude),
+        });
+    }
     if term_key.starts_with("triage:") {
         return Ok(SessionContext {
             surface: SessionSurface::Investigate,
@@ -823,6 +863,18 @@ async fn validate_agent_cwd(
     repo_root: &std::path::Path,
     repo_db_path: &str,
 ) -> Result<(), String> {
+    if repo == DEV_SESSION_REPO {
+        let keyed_path = term_key
+            .strip_prefix("dev:")
+            .ok_or_else(|| "invalid Dev terminal key".to_string())?;
+        let keyed_path = std::fs::canonicalize(keyed_path)
+            .map_err(|_| "Dev terminal repository is unavailable".to_string())?;
+        return (keyed_path == cwd
+            && cwd == repo_root
+            && repo_root == std::path::Path::new(repo_db_path))
+        .then_some(())
+        .ok_or_else(|| "Dev terminal cwd is not its configured repository root".into());
+    }
     if term_key.starts_with("triage:") {
         return (cwd == repo_root)
             .then_some(())
@@ -2003,6 +2055,81 @@ mod tests {
                 .await
                 .is_err()
         );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dev_session_uses_its_git_root_and_stays_claude() {
+        let (base, db) = test_db("dev-session").await;
+        let repo = base.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let cwd = repo.to_str().unwrap();
+        let term_key = format!("dev:{cwd}");
+        settings::set(
+            &db,
+            "app",
+            crate::dev::DEV_REPO_PATH_KEY,
+            Some(cwd.to_string()),
+        )
+        .await
+        .unwrap();
+
+        let resolved = agent_repo_path(&db, DEV_SESSION_REPO, &term_key, cwd)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::canonicalize(resolved).unwrap(),
+            std::fs::canonicalize(cwd).unwrap()
+        );
+        let context = session_context(&db, DEV_SESSION_REPO, cwd, &term_key)
+            .await
+            .unwrap();
+        assert_eq!(context.surface, SessionSurface::Work);
+        assert_eq!(context.agent, Some(AgentKind::Claude));
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dev_session_rejects_an_unconfigured_git_root() {
+        let (base, db) = test_db("dev-session-mismatch").await;
+        let keyed = base.join("keyed");
+        let requested = base.join("requested");
+        std::fs::create_dir(&keyed).unwrap();
+        std::fs::create_dir(&requested).unwrap();
+        for path in [&keyed, &requested] {
+            let status = std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(path)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let term_key = format!("dev:{}", requested.display());
+        settings::set(
+            &db,
+            "app",
+            crate::dev::DEV_REPO_PATH_KEY,
+            Some(keyed.to_string_lossy().into_owned()),
+        )
+        .await
+        .unwrap();
+
+        assert!(agent_repo_path(
+            &db,
+            DEV_SESSION_REPO,
+            &term_key,
+            requested.to_str().unwrap()
+        )
+        .await
+        .is_err());
+
         std::fs::remove_dir_all(base).unwrap();
     }
 

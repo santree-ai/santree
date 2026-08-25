@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.4-beta.1 — 2026-08-25
+
+- Fixed the hidden Dev terminal so its persistent Claude session launches in the configured Santree checkout again, while rejecting unconfigured repository paths.
+
 ## 0.1.3 — 2026-08-25
 
 - Triage queues can now be ordered by attention, due date, priority, creation
