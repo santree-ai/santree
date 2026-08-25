@@ -21,7 +21,7 @@ const STEPS = [
   {
     n: "03",
     title: "Steer",
-    body: "A Claude agent works in an embedded terminal. Watch it. Interrupt it. Redirect it.",
+    body: "Codex or Claude Code works in an embedded terminal. Watch it. Interrupt it. Redirect it.",
     color: "#2dd4a7",
   },
   {

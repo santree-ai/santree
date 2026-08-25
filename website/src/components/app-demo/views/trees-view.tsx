@@ -1,3 +1,4 @@
+import { CodexLogo } from "~/components/icons";
 import { ViewShell } from "../chrome";
 import {
   BOTTOM_BAR,
@@ -10,7 +11,6 @@ import {
 import { TermLine, Typewriter } from "../typewriter";
 import {
   BranchGlyph,
-  ClaudeSpark,
   ContextBar,
   DiffStat,
   PanelGlyph,
@@ -22,7 +22,7 @@ import {
   StatusDot,
 } from "../widgets";
 
-/** The hero view: worktree sidebar + live Claude terminal, laid out like the
+/** The hero view: worktree sidebar + live Codex terminal, laid out like the
  * real TreesView — cards carry the select box, session dot + ticket + PR
  * chip, the title, then the state word + git stats. */
 
@@ -135,8 +135,8 @@ export function TreesView({ live }: { live: boolean }) {
               className="flex items-center gap-1.5 px-3 font-medium text-fg"
               style={{ boxShadow: "inset 0 -2px 0 var(--color-accent)" }}
             >
-              <ClaudeSpark size={10} className="text-accent" />
-              Terminal
+              <CodexLogo size={10} className="text-accent" />
+              Codex
             </span>
             <span className="flex items-center px-2.5 text-muted-4">
               <PlusGlyph size={11} />

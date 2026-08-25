@@ -6,9 +6,9 @@ import { useEffect, useRef, useState } from "react";
  * longest phrase locks the layout so nothing shifts while typing. */
 
 const PHRASES = [
-  "macOS · open source · bring your own Claude",
+  "macOS · open source · Codex + Claude Code",
   "triage → branch → steer → review → ship",
-  "5 worktrees · 5 agents · 1 repo",
+  "many agents · one calm workspace",
 ] as const;
 
 const FIRST = PHRASES[0];

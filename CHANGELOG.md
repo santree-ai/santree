@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.4-beta.2 — 2026-08-25
+
+- Updated Santree's website, interactive product demo, setup guide, and public metadata to present Codex and Claude Code as first-class providers.
+
 ## 0.1.4-beta.1 — 2026-08-25
 
 - Fixed the hidden Dev terminal so its persistent Claude session launches in the configured Santree checkout again, while rejecting unconfigured repository paths.

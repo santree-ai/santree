@@ -28,7 +28,7 @@ const CARDS = [
   },
   {
     title: "You log in, not santree",
-    body: "The terminal runs the real, unmodified Claude CLI. You log in yourself, and santree never reads, stores, or proxies an agent's credentials.",
+    body: "The terminal runs the real, unmodified Codex or Claude Code CLI. Each provider owns its login; santree never reads, stores, or proxies agent credentials.",
     icon: (
       <svg
         viewBox="0 0 20 20"

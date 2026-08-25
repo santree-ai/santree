@@ -38,7 +38,8 @@ const STRINGS = [
   "✓ regression test for concurrent refresh",
   "SAN-160 ship session hardening",
   "git rebase origin/main",
-  "claude · opus · 42% context",
+  "codex · gpt-5.6 · 42% context",
+  "claude code · opus · waiting on you",
 ] as const;
 
 interface Particle {

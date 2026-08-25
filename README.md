@@ -6,8 +6,8 @@
 
 **Your backlog, shipped in parallel.**
 
-santree is a desktop app that runs Claude agents across your repo's tickets.
-Each one gets an isolated git worktree you can watch, steer, and merge.
+santree is a desktop app that runs Codex and Claude Code across your repo's tickets.
+Each agent gets an isolated git worktree you can watch, steer, and merge.
 Triage in, PRs out.
 
 [![Latest release](https://img.shields.io/github/v/release/santree-ai/santree?color=2dd4a7&label=release)](https://github.com/santree-ai/santree/releases/latest)
@@ -16,7 +16,7 @@ Triage in, PRs out.
 
 [**Website**](https://santree.toscanini.me) · [**Docs**](https://santree.toscanini.me/docs) · [**Download for macOS**](https://github.com/santree-ai/santree/releases/latest/download/santree-macos.dmg) · [**Changelog**](CHANGELOG.md)
 
-<img src=".github/assets/trees.png" alt="The Trees view: a sidebar of git worktrees with live agent sessions, and a real terminal where a Claude agent is fixing a bug" width="920" />
+<img src=".github/assets/trees.png" alt="The Trees view: a sidebar of git worktrees with live agent sessions, and a real coding-agent terminal fixing a bug" width="920" />
 
 </div>
 
@@ -28,12 +28,13 @@ job (tickets in, reviewed PRs out) lives scattered across a tracker, a
 terminal multiplexer, and a browser.
 
 santree puts the whole loop in one window. Every task gets an **isolated git
-worktree** with a **real terminal** running the real Claude Code CLI — your
-login, your subscription, no API key. Around the terminals it builds the
-workflow: a triage inbox from Linear, a dependency graph of your tickets, live
-session states ("running", "waiting on you"), diff review with an AI
-companion, and a PR dashboard. Nothing is mocked — every view is backed by
-live data, and an unconnected view shows its honest empty state.
+worktree** with a **real terminal** running the real Codex or Claude Code CLI —
+your login, your subscription, no credentials handled by santree. Around the
+terminals it builds the workflow: a triage inbox from Linear, a dependency
+graph of your tickets, live session states ("running", "waiting on you"), diff
+review with an AI companion, and a PR dashboard. Nothing is mocked — every
+view is backed by live data, and an unconnected view shows its honest empty
+state.
 
 ## One loop, five views
 
@@ -64,7 +65,8 @@ in a few minutes.
 You'll also want:
 
 - **git** — worktrees, diffs, and branches are the real thing.
-- **[Claude Code](https://www.anthropic.com/claude-code)**, installed and
+- At least one coding agent: **[Codex](https://developers.openai.com/codex/cli/)**
+  or **[Claude Code](https://www.anthropic.com/claude-code)**, installed and
   logged in. santree drives the CLI you already have and never touches its
   credentials.
 - **[GitHub CLI](https://cli.github.com)** (`gh`), signed in — optional,

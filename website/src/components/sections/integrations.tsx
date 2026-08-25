@@ -1,4 +1,4 @@
-import { ClaudeLogo, GitHubLogo, LinearLogo } from "~/components/icons";
+import { ClaudeLogo, CodexLogo, GitHubLogo, LinearLogo } from "~/components/icons";
 import { FadeUpGroup, FadeUpItem } from "~/components/motion/fade-up";
 import { SectionHeading } from "~/components/ui/section-heading";
 import { SpotlightCard } from "~/components/ui/spotlight-card";
@@ -17,8 +17,14 @@ const INTEGRATIONS = [
     Icon: GitHubLogo,
   },
   {
-    name: "Claude",
-    line: "The hands on the keyboard, running on your own subscription.",
+    name: "Codex",
+    line: "The default agent for new work, using your existing Codex login.",
+    color: "#f2f2f4",
+    Icon: CodexLogo,
+  },
+  {
+    name: "Claude Code",
+    line: "Run alongside Codex, using your existing Claude subscription.",
     color: "#d97757",
     Icon: ClaudeLogo,
   },
@@ -29,7 +35,7 @@ export function Integrations() {
     <section className="py-32">
       <div className="mx-auto max-w-5xl px-6">
         <SectionHeading kicker="Integrations" title="The tools you already use" />
-        <FadeUpGroup className="mt-14 grid gap-3 sm:grid-cols-3">
+        <FadeUpGroup className="mt-14 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {INTEGRATIONS.map((it) => (
             <FadeUpItem key={it.name}>
               <SpotlightCard className="card group flex h-full flex-col items-center px-6 py-9 text-center">

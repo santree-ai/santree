@@ -19,7 +19,7 @@ export const DEMO_VIEWS: readonly DemoViewMeta[] = [
     id: "triage",
     label: "Triage",
     count: 5,
-    aria: "Preview of santree's Triage view: a Linear inbox with priority-ranked tickets, one being investigated by a Claude agent, and an Investigate button in the issue header.",
+    aria: "Preview of santree's Triage view: a Linear inbox with priority-ranked tickets, one being investigated by Claude Code, and an Investigate button in the issue header.",
   },
   {
     id: "issues",
@@ -31,7 +31,7 @@ export const DEMO_VIEWS: readonly DemoViewMeta[] = [
     id: "trees",
     label: "Trees",
     count: 5,
-    aria: "Preview of santree's Trees view: a sidebar of git worktrees with running Claude agents, and a live terminal where an agent fixes an OAuth refresh race.",
+    aria: "Preview of santree's Trees view: a sidebar of git worktrees with mixed agent sessions, and a live Codex terminal fixing an OAuth refresh race.",
   },
   {
     id: "reviews",
@@ -154,7 +154,7 @@ export const TERM_LIVE: readonly TermEvent[] = [
 ] as const;
 
 export const SESSION_STATUS = {
-  model: "Opus 4.8",
+  model: "GPT-5.6",
   contextPct: 42,
   cost: "$1.87",
 } as const;
@@ -377,8 +377,8 @@ export const GRAPH_EDGES: readonly GraphEdge[] = [
 
 /** The launch tray at the bottom of the Issues sidebar. */
 export const LAUNCH_TRAY = {
-  agent: "Claude",
-  model: "Opus 4.8",
+  agent: "Codex",
+  model: "GPT-5.6",
   count: 1,
 } as const;
 

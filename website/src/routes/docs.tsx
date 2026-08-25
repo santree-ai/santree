@@ -15,7 +15,7 @@ export const Route = createFileRoute("/docs")({
       {
         name: "description",
         content:
-          "How to install santree, connect Linear and GitHub, and run Claude agents across your backlog in parallel git worktrees.",
+          "How to install santree, connect Linear and GitHub, and run Codex and Claude Code across your backlog in parallel git worktrees.",
       },
     ],
   }),
@@ -189,9 +189,9 @@ function DocsPage() {
                 <B>git</B> — worktrees, diffs, and branches are real git.
               </li>
               <li>
-                <B>Claude Code</B> installed and logged in. santree drives the CLI you already have,
-                on your existing subscription. <B>No API key</B>, and santree never touches the
-                CLI&rsquo;s credentials.
+                At least one coding agent: <B>Codex</B> or <B>Claude Code</B>, installed and logged
+                in. santree drives the CLI you already have, on your existing subscription. It never
+                reads or stores either CLI&rsquo;s credentials.
               </li>
               <li>
                 <B>GitHub CLI</B> (<Code>gh</Code>), signed in. Optional; it powers Reviews and PR
@@ -222,9 +222,10 @@ function DocsPage() {
             </p>
             <H3>Agents</H3>
             <p>
-              <B>Settings → Agents</B> points santree at your Claude Code executable and sets the
-              default model. The launch tray and Investigate button read from here; both let you
-              override the model per launch.
+              <B>Settings → Agents</B> connects Codex and Claude Code independently. Workflow
+              settings choose the default provider, model, effort, and launch mode for Triage, Work,
+              and Reviews. Existing sessions keep their original provider, and a worktree can hold
+              sessions from both.
             </p>
             <H3>Environment</H3>
             <p>
@@ -289,9 +290,10 @@ function DocsPage() {
             </p>
             <p>
               The detail pane is a full review surface: the diff with inline comment threads, the
-              linked ticket, and <B>Ask AI</B>, which checks the PR out and opens a Claude session
-              beside the code instead of on top of it. The <B>Checks</B> tab shows CI with logs
-              inline, and <B>Fix CI with AI</B> hands a failing run straight to an agent.
+              linked ticket, and provider-aware <B>AI review</B> sessions beside the code instead of
+              on top of it. Codex and Claude Code reviews can coexist as separate tabs. The
+              <B>Checks</B> tab shows CI with logs inline, and <B>Fix CI with AI</B> hands a failing
+              run straight to an agent.
             </p>
           </Section>
 

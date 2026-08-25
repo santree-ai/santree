@@ -50,8 +50,8 @@ export function Hero() {
           <span className="text-gradient-emerald">shipped in parallel.</span>
         </h1>
         <p className="rise rise-1 mx-auto mt-7 max-w-xl text-pretty text-[17px] leading-relaxed text-[#c9cad2]">
-          santree runs Claude agents across your repo's tickets. Each one gets an isolated git
-          worktree you can watch, steer, and merge. Triage in, PRs out.
+          santree runs Codex and Claude Code across your repo's tickets. Each agent gets an isolated
+          git worktree you can watch, steer, and merge. Triage in, PRs out.
         </p>
         <div className="rise rise-2 mt-10 flex flex-wrap items-center justify-center gap-3">
           <DownloadButton size="lg" />

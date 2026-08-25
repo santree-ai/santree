@@ -1,3 +1,4 @@
+import { CodexLogo } from "~/components/icons";
 import { ViewShell } from "../chrome";
 import {
   AI_REVIEW,
@@ -11,7 +12,6 @@ import {
 import {
   BranchGlyph,
   CheckGlyph,
-  ClaudeSpark,
   CopyGlyph,
   DiffStat,
   Dot,
@@ -139,8 +139,8 @@ export function ReviewsView({ live: _live }: { live: boolean }) {
                   <CopyGlyph size={11} className="shrink-0 text-muted-4" />
                 </span>
                 <span className="flex items-center gap-1.5 rounded-md border border-line-2 bg-white/3 px-2.5 py-1 text-[11px] font-medium text-muted">
-                  <ClaudeSpark size={11} className="text-accent" />
-                  Ask AI
+                  <CodexLogo size={11} className="text-accent" />
+                  Codex review
                 </span>
                 <span className="flex items-center gap-1.5 rounded-md border border-line-2 bg-white/3 px-2.5 py-1 text-[11px] font-medium text-muted">
                   <GitHubMark size={11} />
@@ -205,9 +205,9 @@ export function ReviewsView({ live: _live }: { live: boolean }) {
             <div className="mt-3 max-w-[520px] rounded-lg border border-accent/30 bg-accent/4 px-3 py-2.5 font-sans">
               <div className="flex items-center gap-1.5">
                 <span className="text-accent">
-                  <ClaudeSpark size={10} />
+                  <CodexLogo size={10} />
                 </span>
-                <span className="text-[10px] font-medium text-fg">Claude</span>
+                <span className="text-[10px] font-medium text-fg">Codex</span>
                 <span
                   className="rounded px-1 py-px font-mono text-[8px] uppercase tracking-wide text-status-red"
                   style={{ background: "color-mix(in srgb, currentcolor 12%, transparent)" }}
