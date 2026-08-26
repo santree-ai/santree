@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.4-beta.5 — 2026-08-26
+
+- Fixed AI commit messages and PR descriptions when Codex is the configured helper: the Codex CLI rejected Santree's own sandbox arguments, so every draft silently fell back to "update". Helper failures are now also recorded in the app log instead of vanishing.
+
 ## 0.1.4-beta.4 — 2026-08-26
 
 - Removed the per-launch model picker from the Issues launch tray. Every launch now runs the model configured for its agent in Settings → Actions → Work; the tray shows which one that is. Previously, switching the tray's agent could launch with the other provider's model.
