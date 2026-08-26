@@ -160,11 +160,6 @@ export interface PendingLaunch {
   title: string;
   project: string | null;
   agent: AgentKind | null;
-  /** The per-launch model chosen in the Issues tray (empty ⇒ the settings default).
-   *  A transient hand-off to the Trees fresh-launch seed — not persisted; once the
-   *  session is created with `--model`, resuming carries it, so there's nothing to
-   *  store. */
-  model?: string;
   /** The branch this launch will stack on, when it's a chained one — the same base
    *  `createWorktree` is given. Carried so the sidebar can nest the "Creating
    *  workspace…" placeholder under its parent straight away: the stack is already

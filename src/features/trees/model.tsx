@@ -373,8 +373,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   } = useAppUi();
   // Setup runs and queued launches are owned by the app shell, not this route — a
   // run must survive navigating away from Trees (see AgentRuns).
-  const { beginRun, runSetup, isSettingUp, setLaunchModel, runSetupOnStart, setVisibleWorktree } =
-    useAgentRuns();
+  const { beginRun, runSetup, isSettingUp, runSetupOnStart, setVisibleWorktree } = useAgentRuns();
   const { data: realWorktrees = [], isLoading: worktreesLoading } = useWorktrees(activeRepo);
   const { data: baseWorktree = null } = useBaseWorktree(activeRepo);
   const { data: worktreePrs = [] } = useWorktreePrs(activeRepo);
@@ -610,10 +609,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       focusedLaunchRef.current = treeLaunch;
       select(treeLaunch);
     }
-    // Capture the tray's model now, while the pending launch is still around (it's
-    // dropped once the real worktree lands, before the seed is built). Idempotent.
-    const model = pendingLaunches.find((p) => p.id === treeLaunch)?.model;
-    if (model) setLaunchModel(treeLaunch, model);
     if (wt.pending) {
       // Pre-arm the main tab *before* the real worktree's pane can mount, so the
       // terminal never spawns a bare shell ahead of setup. The run itself only
@@ -632,7 +627,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     consumeTreeLaunch,
     startAgent,
     select,
-    setLaunchModel,
     setTabFor,
   ]);
 

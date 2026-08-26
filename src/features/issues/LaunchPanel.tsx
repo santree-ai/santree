@@ -4,8 +4,13 @@ import type { AgentKind } from "../../bindings";
 import { ChevronDownIcon } from "../../components/icons";
 import { Button, ChevronSelect } from "../../components/primitives";
 import { agentAvailable } from "../../lib/format";
-import { useAgents, useClaudeModels } from "../../lib/queries";
-import { agentProvider } from "../terminal/agentProvider";
+import {
+  useAgents,
+  useResolvedProviderSetting,
+  WORK_AGENT_KEY,
+  WORK_MODEL_KEY,
+} from "../../lib/queries";
+import { useApp } from "../../state/AppContext";
 import { useIssues } from "./model";
 
 const SELECT_CLASS =
@@ -13,20 +18,20 @@ const SELECT_CLASS =
 const LABEL_CLASS = "mb-[5px] font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase";
 
 export function LaunchPanel() {
-  const {
-    selectedEligible,
-    clearSelection,
-    launchAgent,
-    launchModel,
-    defaultModel,
-    setLaunchAgent,
-    setLaunchModel,
-    launch,
-  } = useIssues();
+  const { selectedEligible, clearSelection, launchAgent, setLaunchAgent, launch } = useIssues();
+  const { activeRepo } = useApp();
   const { data: agents = [] } = useAgents();
-  const claudeModels = useClaudeModels().data;
-  // Agent + model live under a collapsed "Advanced" section — most launches use the
-  // configured defaults, so they don't need to take up space every time.
+  // The model is not a launch-time choice: every launch runs the model configured
+  // for its agent in Settings → Actions → Work. It's resolved here through the same
+  // hook the Trees launch seed uses, so what the tray shows is what will run.
+  const { data: model } = useResolvedProviderSetting(
+    activeRepo,
+    WORK_MODEL_KEY,
+    launchAgent,
+    WORK_AGENT_KEY,
+  );
+  // The agent picker lives under a collapsed "Advanced" section — most launches use
+  // the configured default, so it doesn't need to take up space every time.
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const count = selectedEligible.length;
@@ -36,22 +41,7 @@ export function LaunchPanel() {
 
   // Only offer providers whose runtime adapter is registered.
   const availableAgents = agents.filter((a) => agentAvailable(a));
-  // Providers choose their model source through the shared contract.
-  const catalogModels = agents.find((a) => a.key === launchAgent)?.models ?? [];
-  const models =
-    agentProvider(launchAgent).capabilities.modelSource === "claude"
-      ? (claudeModels ?? catalogModels)
-      : catalogModels;
   const chainedCount = selectedEligible.filter((t) => !t.ready).length;
-
-  // Whether the current model is the configured default (no per-launch override).
-  const isDefaultModel = launchModel === defaultModel;
-  // Options: the live models, plus the configured default and any active override
-  // that aren't already listed (so a stale/pinned value stays selectable).
-  const withDefault =
-    defaultModel && !models.includes(defaultModel) ? [defaultModel, ...models] : models;
-  const modelOptions =
-    launchModel && !withDefault.includes(launchModel) ? [launchModel, ...withDefault] : withDefault;
 
   return (
     <div className="flex-none border-t border-line bg-well px-[13px] pt-3 pb-3.5">
@@ -74,9 +64,8 @@ export function LaunchPanel() {
         </div>
       )}
 
-      {/* Collapsed by default: the header still surfaces the effective model (with a
-          "(settings)" hint when it's the configured default) so you know what will
-          run without expanding. */}
+      {/* Collapsed by default: the header still surfaces what will run — the agent's
+          configured model, read from Settings — so you know without expanding. */}
       <button
         type="button"
         onClick={() => setAdvancedOpen((o) => !o)}
@@ -90,43 +79,27 @@ export function LaunchPanel() {
         <span className="font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">
           Advanced
         </span>
-        <span className="ml-auto min-w-0 truncate font-mono text-[10px] text-muted-3">
-          {launchModel}
-          {isDefaultModel && <span className="text-muted-4"> (settings)</span>}
+        <span
+          className="ml-auto min-w-0 truncate font-mono text-[10px] text-muted-3"
+          title="Configured in Settings → Actions → Work"
+        >
+          {model || "default model"}
+          <span className="text-muted-4"> (Settings)</span>
         </span>
       </button>
 
       {advancedOpen && (
-        <div className="mb-[2px]">
+        <div className="mb-[11px]">
           <div className={LABEL_CLASS}>Agent</div>
           <ChevronSelect
             value={launchAgent}
             onChange={(v) => setLaunchAgent(v as AgentKind)}
             className={SELECT_CLASS}
-            wrapperClassName="mb-[9px]"
             aria-label="Agent"
           >
             {availableAgents.map((a) => (
               <option key={a.key} value={a.key} className="bg-input">
                 {a.label}
-              </option>
-            ))}
-          </ChevronSelect>
-
-          <div className={LABEL_CLASS}>Model</div>
-          {/* A plain dropdown over the current models (see `useClaudeModels`) — no
-              free-text entry. The configured default is tagged "(settings)". */}
-          <ChevronSelect
-            value={launchModel}
-            onChange={setLaunchModel}
-            className={SELECT_CLASS}
-            wrapperClassName="mb-[11px]"
-            aria-label="Model"
-          >
-            {modelOptions.map((m) => (
-              <option key={m} value={m} className="bg-input">
-                {m}
-                {m === defaultModel ? " (settings)" : ""}
               </option>
             ))}
           </ChevronSelect>

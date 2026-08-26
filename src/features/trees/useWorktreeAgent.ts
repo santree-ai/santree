@@ -14,7 +14,7 @@ import { useAgentTab } from "./useAgentTab";
 
 export function useWorktreeAgent(worktree: Worktree) {
   const { activeRepo: repo } = useApp();
-  const { launchAgents, launchModels, isSettingUp, isInitialSetup } = useAgentRuns();
+  const { launchAgents, isSettingUp, isInitialSetup } = useAgentRuns();
   // The base-branch entry has no ticket — no agent launch, no setup, just a shell.
   const isBase = worktree.id === BASE_ID;
 
@@ -53,9 +53,6 @@ export function useWorktreeAgent(worktree: Worktree) {
       ? `Read ${workPrompt.data} and follow the instructions inside.`
       : `Work on ${worktree.id}: ${worktree.title}`,
     remoteControl: worktree.id,
-    // The tray's per-launch choice wins over the configured default; either applies
-    // only to a fresh launch (a resume carries the session's own model).
-    modelOverride: launchModels[worktree.id],
   });
 
   return { ...tab, isBase, launching, settingUp, initialSetup, refId: `tree:${worktree.id}` };

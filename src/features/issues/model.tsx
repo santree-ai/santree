@@ -29,7 +29,6 @@ import {
   parseBatchSetup,
   TREES_BATCH_SETUP_KEY,
   TREES_RUN_SETUP_KEY,
-  useAgents,
   useBaseWorktree,
   useBoolSetting,
   useCreateWorktree,
@@ -42,7 +41,6 @@ import {
   useWorktrees,
   WORK_AGENT_KEY,
   WORK_ASK_BASE_KEY,
-  WORK_MODEL_KEY,
   WORK_QUEUE_KEY,
 } from "../../lib/queries";
 import { useAgentRuns } from "../../state/AgentRuns";
@@ -188,9 +186,6 @@ interface IssuesModel {
   focusId: string;
   focusProject: string | null;
   launchAgent: AgentKind;
-  launchModel: string;
-  /** The configured default model (from Settings → Actions → Issues) for the launch agent. */
-  defaultModel: string;
 
   /** The chain base ticket for a blocked task (first dependency with a worktree), or null. */
   baseFor: (task: Task) => string | null;
@@ -223,7 +218,6 @@ interface IssuesModel {
    *  they're all already selected (toggle). */
   selectReady: () => void;
   setLaunchAgent: (agent: AgentKind) => void;
-  setLaunchModel: (model: string) => void;
   toggleProjectFocus: (project: string) => void;
   launch: () => void;
   /** Whether the multi-select launch queue is enabled (Settings → Actions → Work).
@@ -285,7 +279,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   // itself resolves the default branch backend-side from a null base.
   const { data: baseWorktree } = useBaseWorktree(activeRepo);
   const { data: worktreePrs = [] } = useWorktreePrs(activeRepo);
-  const { data: agents = [] } = useAgents();
   const { mutateAsync: createWorktree } = useCreateWorktree(activeRepo);
   const { planSetup } = useAgentRuns();
   // When off (default), the launch queue is bypassed: the panel shows a "Run"
@@ -383,27 +376,16 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     [focusTask, byId],
   );
 
-  // Launch agent/model: default from settings, with user overrides.
+  // Launch agent: the configured Work agent (Settings → Actions → Work, resolved
+  // through any per-repo override), with a per-launch override from the tray. The
+  // model is deliberately NOT chosen here — every launch runs the model configured
+  // for its agent in Settings, resolved at launch by the Trees seed (useAgentTab).
+  // A second, tray-side model source drifted from Settings once the agent was
+  // switched (a Codex launch showed Claude's model), so there isn't one.
   const [agentOverride, setAgentOverride] = useState<AgentKind | null>(null);
-  const [modelOverride, setModelOverride] = useState<string | null>(null);
-
-  const modelFor = useCallback(
-    (agent: AgentKind) =>
-      settings?.agents?.find((a) => a.key === agent)?.model ??
-      agents.find((a) => a.key === agent)?.models[0] ??
-      "",
-    [settings, agents],
-  );
-
-  // The configured Work action (Settings → Actions → Issues), resolved through
-  // any per-repo override, is the launch tray's default agent + model.
   const { data: workAgent } = useResolvedSetting(activeRepo, WORK_AGENT_KEY);
-  const { data: workModel } = useResolvedSetting(activeRepo, WORK_MODEL_KEY);
   const configuredAgent = (workAgent as AgentKind | null) ?? settings?.defaultAgent ?? "Claude";
-  const defaultModel = workModel || modelFor(configuredAgent);
-
   const launchAgent = agentOverride ?? configuredAgent;
-  const launchModel = modelOverride ?? defaultModel;
 
   // Resolve each project's color/icon once (first task wins). Live Linear values
   // take precedence; otherwise fall back to the per-name color map.
@@ -560,8 +542,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
           title: task.title,
           project: projectOf(task),
           agent: launchAgent,
-          // Carry the tray's per-launch model to the Trees fresh-launch seed.
-          model: launchModel,
           // Nest the placeholder under its blocker right away, rather than leaving a
           // sub-task looking like a root until the worktree finishes creating.
           baseBranch: baseOf(task)?.branch,
@@ -593,7 +573,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
     },
     [
       launchAgent,
-      launchModel,
       planSetup,
       createWorktree,
       stackOn,
@@ -624,7 +603,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
           title: task.title,
           project,
           agent: launchAgent,
-          model: launchModel,
           baseBranch: base?.branch,
         },
       ]);
@@ -645,7 +623,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       byId,
       isEligible,
       launchAgent,
-      launchModel,
       addPendingLaunches,
       removePendingLaunch,
       clearBackgroundLaunch,
@@ -737,14 +714,7 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       return next;
     });
   }, [tasks, isEligible]);
-  const setLaunchAgent = useCallback(
-    (agent: AgentKind) => {
-      setAgentOverride(agent);
-      setModelOverride(modelFor(agent));
-    },
-    [modelFor],
-  );
-  const setLaunchModel = useCallback((model: string) => setModelOverride(model), []);
+  const setLaunchAgent = useCallback((agent: AgentKind) => setAgentOverride(agent), []);
   const toggleProjectFocus = useCallback(
     (project: string) => setFocusProject((p) => (p === project ? null : project)),
     [],
@@ -762,8 +732,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       focusId,
       focusProject,
       launchAgent,
-      launchModel,
-      defaultModel,
       actionableOnly,
       reveal,
       projectReveal,
@@ -783,7 +751,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       clearSelection,
       selectReady,
       setLaunchAgent,
-      setLaunchModel,
       toggleProjectFocus,
       launch,
       queueEnabled,
@@ -801,8 +768,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       focusId,
       focusProject,
       launchAgent,
-      launchModel,
-      defaultModel,
       actionableOnly,
       reveal,
       projectReveal,
@@ -821,7 +786,6 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       clearSelection,
       selectReady,
       setLaunchAgent,
-      setLaunchModel,
       toggleProjectFocus,
       launch,
       queueEnabled,

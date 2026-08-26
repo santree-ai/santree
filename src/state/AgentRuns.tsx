@@ -55,11 +55,6 @@ interface AgentRuns {
    *  Set when a task is started (or resumed), cleared once a terminal has consumed
    *  the seed. Survives navigation — that's the point of this provider. */
   launchAgents: Set<string>;
-  /** Per-launch model overrides from the Issues tray, keyed by worktree id (absent
-   *  ⇒ the configured Work model). Read once by the fresh-launch seed, then dropped
-   *  with the launch flag. Never persisted: the created session carries `--model`
-   *  itself, so a resume needs nothing stored. */
-  launchModels: Record<string, string>;
   /** Whether starting a task runs `.santree/init.sh` first (the user's preference,
    *  resolved through any per-repo override). Presentational only — it tells Trees
    *  which tab to open a start on. The run itself never reads it: {@link beginRun}
@@ -89,7 +84,6 @@ interface AgentRuns {
   runSetup: (id: string) => void;
   requestAgentLaunch: (id: string) => void;
   clearAgentLaunch: (id: string) => void;
-  setLaunchModel: (id: string, model: string) => void;
 
   /** The worktree Trees currently has selected, or null when it isn't showing one
    *  (another tab, or the all-agents overview). The off-screen launcher skips it:
@@ -106,7 +100,6 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
 
   const [launchAgents, setLaunchAgents] = useState<Set<string>>(new Set());
-  const [launchModels, setLaunchModels] = useState<Record<string, string>>({});
   const [setupRuns, setSetupRuns] = useState<Record<string, SetupRun>>({});
   const [visibleWorktree, setVisibleWorktree] = useState<string | null>(null);
 
@@ -134,16 +127,6 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
       next.delete(id);
       return next;
     });
-    // The seed has been consumed — drop the one-shot model override with it.
-    setLaunchModels((m) => {
-      if (!(id in m)) return m;
-      const { [id]: _, ...rest } = m;
-      return rest;
-    });
-  }, []);
-
-  const setLaunchModel = useCallback((id: string, model: string) => {
-    setLaunchModels((m) => (m[id] === model ? m : { ...m, [id]: model }));
   }, []);
 
   // A run finished (the script exited, or the command itself failed). Hand off to
@@ -220,7 +203,6 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AgentRuns>(
     () => ({
       launchAgents,
-      launchModels,
       runSetupOnStart,
       isSettingUp: (id) => id in setupRuns,
       isInitialSetup: (id) => setupRuns[id]?.thenLaunch === true,
@@ -229,13 +211,11 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
       runSetup,
       requestAgentLaunch,
       clearAgentLaunch,
-      setLaunchModel,
       visibleWorktree,
       setVisibleWorktree,
     }),
     [
       launchAgents,
-      launchModels,
       runSetupOnStart,
       setupRuns,
       beginRun,
@@ -243,7 +223,6 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
       runSetup,
       requestAgentLaunch,
       clearAgentLaunch,
-      setLaunchModel,
       visibleWorktree,
     ],
   );

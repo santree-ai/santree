@@ -316,13 +316,6 @@ describe("useAgentTab", () => {
       expect(t.tab().seed).not.toContain("/hooks.json'");
     });
 
-    it("a per-launch model override wins over the configured Work model", () => {
-      const t = mount(opts({ modelOverride: "haiku" }));
-
-      expect(t.tab().seed).toContain("--model 'haiku'");
-      expect(t.tab().seed).not.toContain("opus");
-    });
-
     // Claude-only flags: another agent's CLI would just fail to launch on them.
     it("omits Remote Control when it is disabled in Claude settings", () => {
       backend.remoteControl = false;

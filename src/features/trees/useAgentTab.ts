@@ -53,8 +53,6 @@ export interface AgentTabOptions {
   prompt?: string;
   /** Name the session for Claude's Remote Control web (we pass the ticket id). */
   remoteControl?: string;
-  /** A per-launch model override; wins over the configured Work model. */
-  modelOverride?: string;
   /** Launch with the commit/push-denying settings file (the Fix-CI variant), so the
    *  agent fixes and validates but leaves committing to the user. */
   noGit?: boolean;
@@ -118,7 +116,9 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
   const remoteControl = useSetting("app", CLAUDE_REMOTE_CONTROL_KEY);
 
-  const chosenModel = opts.modelOverride || model.data;
+  // The model is never a launch-time choice: a fresh launch always runs the model
+  // configured for this agent in Settings → Actions → Work (a resume carries the
+  // session's own).
   const seed = agentSessionSeed(session.data, {
     repo,
     termKey: refId,
@@ -128,8 +128,8 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
         ? opts.remoteControl
         : undefined,
     modelFlag:
-      provider.capabilities.cliLaunchOptions && chosenModel
-        ? `--model ${shellQuote(chosenModel)}`
+      provider.capabilities.cliLaunchOptions && model.data
+        ? `--model ${shellQuote(model.data)}`
         : undefined,
     effortFlag:
       provider.capabilities.cliLaunchOptions && effort.data
