@@ -85,7 +85,7 @@ export function PrInfoPanel({
   return (
     <div
       ref={resizeTarget}
-      className={`relative flex-none flex-col overflow-hidden border-l border-hairline bg-deep max-[1500px]:absolute max-[1500px]:inset-y-0 max-[1500px]:right-0 max-[1500px]:z-20 max-[1500px]:max-w-[min(78vw,560px)] max-[1500px]:shadow-2xl ${
+      className={`relative flex-none flex-col overflow-hidden border-l border-hairline bg-deep ${
         infoCollapsed ? "hidden" : "flex"
       }`}
       style={

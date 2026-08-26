@@ -13,6 +13,7 @@ function task(id: string, ready = true): Task {
     projectColor: null,
     projectIcon: null,
     projectTargetDate: null,
+    projectMilestone: null,
     status: "Todo",
     ready,
     blockedBy: [],

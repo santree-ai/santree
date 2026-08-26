@@ -38,7 +38,12 @@ import {
   ProjectGlyph,
   Skeleton,
 } from "../../components/primitives";
-import { ChangeSizeBars, PriorityBars, ProjectDueDate } from "../../components/WorkSignals";
+import {
+  ChangeSizeBars,
+  MilestoneDueDate,
+  PriorityBars,
+  ProjectDueDate,
+} from "../../components/WorkSignals";
 import { useMergeQueue } from "../../lib/queries";
 import {
   accentActiveStyle,
@@ -53,10 +58,12 @@ import {
 import {
   type Grouping,
   groupPrs,
+  groupPrsByMilestone,
   repoName,
   type SortMode,
   sortPrs,
   splitByStance,
+  stackPrs,
   waitingDays,
   waitingLabel,
 } from "./grouping";
@@ -429,17 +436,24 @@ function FlatSections({
           }
           meta={grouping === "project" ? <ProjectDueDate date={group.targetDate} /> : undefined}
         >
-          {group.prs.map((pr) => (
-            <PrRow
-              key={pr.id}
-              pr={pr}
-              active={pr.id === activeId}
+          {grouping === "project" ? (
+            <MilestoneSections
+              prs={group.prs}
+              ticketFor={ticketFor}
+              activeId={activeId}
               onSelect={onSelect}
-              showRepo={grouping !== "repo"}
-              direct={directIds.has(pr.id)}
-              ticket={ticketFor(pr)}
+              showRepo
+              directIds={directIds}
             />
-          ))}
+          ) : (
+            <StackedRows
+              prs={group.prs}
+              ticketFor={ticketFor}
+              activeId={activeId}
+              onSelect={onSelect}
+              directIds={directIds}
+            />
+          )}
         </FoldingSection>
       ))}
     </>
@@ -559,17 +573,15 @@ function ProjectSections({
           <ProjectDueDate date={group.targetDate} />
           <span className="font-normal text-muted-4">{group.prs.length}</span>
         </button>
-        {open &&
-          group.prs.map((pr) => (
-            <PrRow
-              key={pr.id}
-              pr={pr}
-              active={pr.id === activeId}
-              onSelect={onSelect}
-              showRepo={showRepo}
-              ticket={ticketFor(pr)}
-            />
-          ))}
+        {open && (
+          <MilestoneSections
+            prs={group.prs}
+            ticketFor={ticketFor}
+            activeId={activeId}
+            onSelect={onSelect}
+            showRepo={showRepo}
+          />
+        )}
       </div>
     );
   });
@@ -620,6 +632,106 @@ function TeamSection({
       />
     </FoldingSection>
   );
+}
+
+const PR_STACK_INDENT = 12;
+
+function StackConnector({ depth }: { depth: number }) {
+  if (depth <= 0) return null;
+  return (
+    <span
+      aria-hidden
+      className="relative flex flex-none self-stretch"
+      style={{ width: depth * PR_STACK_INDENT }}
+    >
+      {Array.from({ length: depth }, (_, i) => {
+        const own = i === depth - 1;
+        return (
+          <span key={i} className="relative" style={{ width: PR_STACK_INDENT }}>
+            <span
+              className="absolute top-0 left-0 border-line-2 border-l"
+              style={{ height: own ? "50%" : "100%" }}
+            />
+            {own && (
+              <span
+                className="absolute top-1/2 left-0 border-line-2 border-t"
+                style={{ width: PR_STACK_INDENT }}
+              />
+            )}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+function MilestoneSections({
+  prs,
+  ticketFor,
+  activeId,
+  onSelect,
+  showRepo,
+  directIds,
+}: {
+  prs: ReviewPr[];
+  ticketFor: (pr: ReviewPr) => TicketRef | undefined;
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  showRepo: boolean;
+  directIds?: Set<string>;
+}) {
+  return groupPrsByMilestone(prs, ticketFor).map((milestone) => (
+    <div key={milestone.key} className="mb-2">
+      <div className="flex items-center gap-1.5 px-2 pt-0.5 pb-1 font-mono text-[9px] tracking-[.04em] text-muted-4 uppercase">
+        <span
+          aria-hidden
+          className="h-1.5 w-1.5 flex-none rotate-45 rounded-[1px] border border-current"
+        />
+        <span className="truncate">{milestone.label}</span>
+        <MilestoneDueDate date={milestone.targetDate} />
+      </div>
+      <StackedRows
+        prs={milestone.prs}
+        ticketFor={ticketFor}
+        activeId={activeId}
+        onSelect={onSelect}
+        showRepo={showRepo}
+        directIds={directIds}
+      />
+    </div>
+  ));
+}
+
+function StackedRows({
+  prs,
+  ticketFor,
+  activeId,
+  onSelect,
+  showRepo = false,
+  directIds,
+}: {
+  prs: ReviewPr[];
+  ticketFor: (pr: ReviewPr) => TicketRef | undefined;
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  showRepo?: boolean;
+  directIds?: Set<string>;
+}) {
+  return stackPrs(prs).map(({ pr, depth }) => (
+    <div key={pr.id} className="flex" data-pr-id={pr.id} data-stack-depth={depth}>
+      <StackConnector depth={depth} />
+      <div className="min-w-0 flex-1">
+        <PrRow
+          pr={pr}
+          active={pr.id === activeId}
+          onSelect={onSelect}
+          showRepo={showRepo}
+          direct={directIds?.has(pr.id)}
+          ticket={ticketFor(pr)}
+        />
+      </div>
+    </div>
+  ));
 }
 
 function PrRow({

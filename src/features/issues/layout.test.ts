@@ -14,6 +14,7 @@ function task(overrides: Partial<Task> = {}): Task {
     projectColor: null,
     projectIcon: null,
     projectTargetDate: null,
+    projectMilestone: null,
     status: "Todo",
     ready: true,
     blockedBy: [],

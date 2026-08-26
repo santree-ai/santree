@@ -50,7 +50,9 @@ const pr = {
   url: "https://github.com/acme/app/pull/42",
   repo: "acme/app",
   headRef: "feature/fix-the-thing",
+  headRefId: null,
   baseRef: "main",
+  baseRefId: null,
   headSha: "abc123",
   author: "someone",
   authorAvatarUrl: "",
@@ -87,6 +89,17 @@ beforeEach(() => {
 });
 
 describe("ReviewHeader tree action", () => {
+  it("wraps all header actions instead of clipping them behind the info rail", () => {
+    render(<ReviewHeader pr={pr} />);
+
+    const branchAction = screen.getByTitle(`Copy branch — ${pr.headRef}`);
+    expect(branchAction.parentElement).toHaveClass("flex-wrap");
+    expect(branchAction).toBeVisible();
+    expect(screen.getByRole("button", { name: "Open as tree" })).toBeVisible();
+    expect(screen.getByTitle("Open on GitHub")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Hide details (⌘L)" })).toBeVisible();
+  });
+
   it("does not offer Open as tree for the viewer's own PR", () => {
     state.mine = true;
     render(<ReviewHeader pr={pr} />);

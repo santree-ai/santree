@@ -88,12 +88,12 @@ export function ReviewHeader({ pr }: { pr: ReviewPr }) {
     // Identity on the left, actions on the right; each row spans the full width
     // rather than stacking everything on one side.
     <div className="flex-none border-b border-hairline px-5 pt-3.5 pb-2">
-      <div className="mb-2 flex items-center gap-2">
+      <div className="mb-2 flex flex-wrap items-start gap-x-2 gap-y-2">
         <span className="font-mono text-[12px] text-muted-3">{pr.repo}</span>
         <span className="font-mono text-[12px]" style={{ color: "var(--accent)" }}>
           #{pr.number}
         </span>
-        <div className="ml-auto flex min-w-0 items-center gap-2">
+        <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">
           <button
             type="button"
             onClick={() => {

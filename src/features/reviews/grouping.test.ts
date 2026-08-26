@@ -3,10 +3,13 @@ import { describe, expect, it } from "vitest";
 import type { ReviewPr, TicketRef } from "../../bindings";
 import {
   groupPrs,
+  groupPrsByMilestone,
+  NO_MILESTONE,
   NO_PROJECT,
   sizeOf,
   sortPrs,
   splitByStance,
+  stackPrs,
   stanceOf,
   waitingDays,
   waitingLabel,
@@ -20,7 +23,9 @@ function pr(over: Partial<ReviewPr> = {}): ReviewPr {
     url: "https://github.com/acme/web/pull/1",
     repo: "acme/web",
     headRef: "user/ak-1-thing",
+    headRefId: null,
     baseRef: "main",
+    baseRefId: null,
     headSha: "abc1234",
     author: "someone",
     authorAvatarUrl: "",
@@ -185,6 +190,7 @@ describe("groupPrs", () => {
     projectColor: null,
     projectIcon: null,
     projectTargetDate: null,
+    projectMilestone: null,
     ...over,
   });
 
@@ -250,5 +256,76 @@ describe("groupPrs", () => {
       () => undefined,
     );
     expect(groups[0].prs.map((p) => p.id)).toEqual(["old", "new"]);
+  });
+});
+
+describe("groupPrsByMilestone", () => {
+  const ticket = (id: string, name: string, sortOrder: number): TicketRef => ({
+    identifier: "AK-1",
+    title: "t",
+    priority: "None",
+    project: "Roadmap",
+    projectColor: null,
+    projectIcon: null,
+    projectTargetDate: null,
+    projectMilestone: { id, name, targetDate: null, sortOrder },
+  });
+
+  it("uses Linear's manual order and sinks unassigned PRs", () => {
+    const prs = [pr({ id: "none" }), pr({ id: "later" }), pr({ id: "first" })];
+    const groups = groupPrsByMilestone(prs, (item) => {
+      if (item.id === "first") return ticket("m1", "Alpha", 10);
+      if (item.id === "later") return ticket("m2", "Beta", 20);
+      return undefined;
+    });
+    expect(groups.map((group) => group.label)).toEqual(["Alpha", "Beta", NO_MILESTONE]);
+    expect(groups.at(-1)?.prs.map((item) => item.id)).toEqual(["none"]);
+  });
+
+  it("keys same-named milestones by id", () => {
+    const groups = groupPrsByMilestone([pr({ id: "a" }), pr({ id: "b" })], (item) =>
+      ticket(item.id === "a" ? "m1" : "m2", "Launch", item.id === "a" ? 1 : 2),
+    );
+    expect(groups.map((group) => group.key)).toEqual(["m1", "m2"]);
+  });
+});
+
+describe("stackPrs", () => {
+  it("places a child directly below the PR whose head ref it targets", () => {
+    const parent = pr({ id: "parent", headRefId: "REF-parent" });
+    const sibling = pr({ id: "sibling", headRefId: "REF-sibling" });
+    const child = pr({ id: "child", headRefId: "REF-child", baseRefId: "REF-parent" });
+    expect(
+      stackPrs([parent, sibling, child]).map(({ pr: item, depth }) => [item.id, depth]),
+    ).toEqual([
+      ["parent", 0],
+      ["child", 1],
+      ["sibling", 0],
+    ]);
+  });
+
+  it("does not connect same-named refs with different GitHub identities", () => {
+    const parent = pr({ id: "parent", headRef: "feature", headRefId: "REF-a" });
+    const child = pr({ id: "child", baseRef: "feature", baseRefId: "REF-b" });
+    expect(stackPrs([parent, child]).map(({ depth }) => depth)).toEqual([0, 0]);
+  });
+
+  it("caps deep indentation and never drops cycles", () => {
+    const chain = Array.from({ length: 6 }, (_, index) =>
+      pr({
+        id: `p${index}`,
+        headRefId: `REF-${index}`,
+        baseRefId: index === 0 ? null : `REF-${index - 1}`,
+      }),
+    );
+    expect(stackPrs(chain).map(({ depth }) => depth)).toEqual([0, 1, 2, 3, 3, 3]);
+
+    const a = pr({ id: "a", headRefId: "A", baseRefId: "B" });
+    const b = pr({ id: "b", headRefId: "B", baseRefId: "A" });
+    expect(
+      stackPrs([a, b])
+        .map(({ pr: item }) => item.id)
+        .sort(),
+    ).toEqual(["a", "b"]);
   });
 });

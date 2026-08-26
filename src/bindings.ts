@@ -1834,6 +1834,16 @@ export type Priority = "Urgent" | "High" | "Medium" | "Low" |
  */
 "None";
 
+/**  One Linear milestone assigned to an issue inside its project. */
+export type ProjectMilestoneRef = {
+	id: string,
+	name: string,
+	/**  Linear's target date (`YYYY-MM-DD`), when configured. */
+	targetDate: string | null,
+	/**  Linear's manual order within the project. */
+	sortOrder: number | null,
+};
+
 /**
  *  An editable AI prompt for the Settings → Prompts composer: its identity, the
  *  default source, the user's override for the queried scope (if any), the
@@ -2069,8 +2079,12 @@ export type ReviewPr = {
 	repo: string,
 	/**  The PR's head branch name (shown in the header, click-to-copy). */
 	headRef: string,
+	/**  Stable GitHub node id for the head ref. `None` after the branch is deleted. */
+	headRefId: string | null,
 	/**  The branch the PR merges into — context for the AI review session. */
 	baseRef: string,
+	/**  Stable GitHub node id for the base ref. Used to identify stacked PRs. */
+	baseRefId: string | null,
 	/**
 	 *  The PR's head commit. What the review checkout detaches at and what a
 	 *  cached review brief is keyed on, so both track the PR's current code.
@@ -2385,6 +2399,8 @@ export type Task = {
 	projectIcon: string | null,
 	/**  Linear project's target date (`YYYY-MM-DD`), when configured. */
 	projectTargetDate: string | null,
+	/**  The issue's milestone inside its project, when assigned. */
+	projectMilestone: ProjectMilestoneRef | null,
 	status: TaskStatus,
 	ready: boolean,
 	blockedBy: string[],
@@ -2461,6 +2477,8 @@ export type TicketRef = {
 	projectIcon: string | null,
 	/**  Linear project's target date (`YYYY-MM-DD`), when the project has one. */
 	projectTargetDate: string | null,
+	/**  The issue's milestone inside its project, when assigned. */
+	projectMilestone: ProjectMilestoneRef | null,
 };
 
 /**  A comment on a triage issue (markdown body), with threaded replies. */

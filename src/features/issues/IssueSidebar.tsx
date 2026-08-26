@@ -3,10 +3,16 @@
 import type { CSSProperties } from "react";
 import { useMemo, useState } from "react";
 
+import type { Task } from "../../bindings";
 import { ChevronDownIcon } from "../../components/icons";
 import { Button, Dot, ProjectGlyph } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
-import { ProjectDueDate } from "../../components/WorkSignals";
+import {
+  groupByMilestone,
+  MilestoneDueDate,
+  type MilestoneGroup,
+  ProjectDueDate,
+} from "../../components/WorkSignals";
 import { usePrefetchOnHover } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import {
@@ -25,7 +31,26 @@ interface Group {
   color: string;
   icon: string | null;
   targetDate: string | null;
-  rows: IssueRowVM[];
+  rowCount: number;
+  milestones: MilestoneGroup<IssueRowVM>[];
+}
+
+/** The Issues rail only contains the viewer's actionable queue. Projects retain
+ * their first-seen order; milestones are ordered independently inside each one. */
+export function groupTasksForSidebar(
+  tasks: Task[],
+): { project: string; milestones: MilestoneGroup<Task>[] }[] {
+  const projects = new Map<string, Task[]>();
+  for (const task of tasks) {
+    if (!task.actionable) continue;
+    const list = projects.get(task.project) ?? [];
+    list.push(task);
+    projects.set(task.project, list);
+  }
+  return [...projects.entries()].map(([project, projectTasks]) => ({
+    project,
+    milestones: groupByMilestone(projectTasks, (task) => task.projectMilestone),
+  }));
 }
 
 export function IssueSidebar() {
@@ -66,15 +91,10 @@ export function IssueSidebar() {
   const groups = useMemo<Group[]>(() => {
     // The sidebar is the viewer's own work queue — grayed context blockers live
     // only in the graph, never here.
-    const mine = tasks.filter((t) => t.actionable);
-    const order: string[] = [];
-    for (const t of mine) if (!order.includes(t.project)) order.push(t.project);
-
-    return order
-      .map((project) => {
-        const rows = mine.filter((t) => t.project === project);
-
-        const mapped = rows.map<IssueRowVM>((t) => {
+    return groupTasksForSidebar(tasks).map(({ project, milestones }) => {
+      const mappedMilestones = milestones.map((milestone) => ({
+        ...milestone,
+        items: milestone.items.map<IssueRowVM>((t) => {
           const hasWorktree = worktreeIds.has(t.id);
           const st = deriveIssueState(t, {
             selected: !!selected[t.id],
@@ -118,18 +138,19 @@ export function IssueSidebar() {
               prefetchOnHover(t.id);
             },
           };
-        });
+        }),
+      }));
 
-        const meta = projectMeta.get(project);
-        return {
-          project,
-          color: meta?.color ?? PROJECT_FALLBACK,
-          icon: meta?.icon ?? null,
-          targetDate: meta?.targetDate ?? null,
-          rows: mapped,
-        };
-      })
-      .filter((g) => g.rows.length > 0);
+      const meta = projectMeta.get(project);
+      return {
+        project,
+        color: meta?.color ?? PROJECT_FALLBACK,
+        icon: meta?.icon ?? null,
+        targetDate: meta?.targetDate ?? null,
+        rowCount: mappedMilestones.reduce((count, milestone) => count + milestone.items.length, 0),
+        milestones: mappedMilestones,
+      };
+    });
   }, [
     tasks,
     projectMeta,
@@ -204,11 +225,23 @@ export function IssueSidebar() {
                   >
                     {g.project}
                   </span>
-                  <span className="font-mono text-[9.5px] text-muted-4">{g.rows.length}</span>
+                  <span className="font-mono text-[9.5px] text-muted-4">{g.rowCount}</span>
                   <ProjectDueDate date={g.targetDate} />
                 </button>
               </div>
-              {!isCollapsed && g.rows.map((vm) => <IssueRow key={vm.id} vm={vm} />)}
+              {!isCollapsed &&
+                g.milestones.map((milestone) => (
+                  <div key={milestone.key}>
+                    <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-1 font-mono text-[9px] tracking-[.05em] text-muted-4 uppercase">
+                      <span className="truncate">{milestone.label}</span>
+                      <span>{milestone.items.length}</span>
+                      <MilestoneDueDate date={milestone.targetDate} />
+                    </div>
+                    {milestone.items.map((vm) => (
+                      <IssueRow key={vm.id} vm={vm} />
+                    ))}
+                  </div>
+                ))}
             </div>
           );
         })}

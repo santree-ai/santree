@@ -573,6 +573,8 @@ async fn graphql<T: DeserializeOwned>(
 // looking like it has waited *longer*, never shorter.
 const PR_FIELDS: &str = r"
     id number title url isDraft updatedAt createdAt headRefName baseRefName isInMergeQueue
+    headRef { id }
+    baseRef { id }
     repository { nameWithOwner }
     author { login avatarUrl }
     reviewDecision
@@ -620,6 +622,11 @@ struct TotalCount {
 struct RepoRef {
     #[serde(rename = "nameWithOwner")]
     name_with_owner: String,
+}
+
+#[derive(Deserialize)]
+struct NodeRef {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -709,8 +716,12 @@ struct PrNode {
     updated_at: String,
     #[serde(rename = "headRefName")]
     head_ref_name: String,
+    #[serde(rename = "headRef")]
+    head_ref: Option<NodeRef>,
     #[serde(rename = "baseRefName")]
     base_ref_name: String,
+    #[serde(rename = "baseRef")]
+    base_ref: Option<NodeRef>,
     #[serde(rename = "isInMergeQueue")]
     is_in_merge_queue: bool,
     repository: RepoRef,
@@ -851,7 +862,9 @@ fn to_review_pr(n: PrNode, viewer: &ViewerCtx) -> ReviewPr {
         url: n.url,
         repo: n.repository.name_with_owner,
         head_ref: n.head_ref_name,
+        head_ref_id: n.head_ref.map(|r| r.id),
         base_ref: n.base_ref_name,
+        base_ref_id: n.base_ref.map(|r| r.id),
         head_sha,
         author,
         author_avatar_url,

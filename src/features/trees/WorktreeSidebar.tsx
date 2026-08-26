@@ -11,7 +11,13 @@ import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
 import { Button, ConfirmDialog, Dot, Skeleton, Spinner } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
-import { ChangeSizeBars, PriorityBars, ProjectDueDate } from "../../components/WorkSignals";
+import {
+  ChangeSizeBars,
+  groupByMilestone,
+  MilestoneDueDate,
+  PriorityBars,
+  ProjectDueDate,
+} from "../../components/WorkSignals";
 import { WorktreeStats } from "../../components/WorktreeStats";
 import {
   usePrTickets,
@@ -175,6 +181,37 @@ export function stackWorktrees(list: Worktree[]): { worktree: Worktree; depth: n
   return out;
 }
 
+/** Group the rail by the ticket's live Linear project and milestone. Pending or
+ * unresolved tickets retain the project stored on the worktree. Stacking runs
+ * inside each milestone so a branch relationship never moves a row across its
+ * Linear planning boundary. */
+export function groupWorktreesForSidebar(
+  worktrees: Worktree[],
+  ticketsById: Map<string, TicketRef>,
+) {
+  const projects = new Map<string, Worktree[]>();
+  for (const worktree of worktrees) {
+    const project = ticketsById.get(worktree.id)?.project ?? projectOf(worktree);
+    const list = projects.get(project) ?? [];
+    list.push(worktree);
+    projects.set(project, list);
+  }
+  return [...projects.entries()].map(([project, list]) => ({
+    project,
+    targetDate:
+      list
+        .map((worktree) => ticketsById.get(worktree.id)?.projectTargetDate)
+        .find((date) => !!date) ?? null,
+    milestones: groupByMilestone(
+      list,
+      (worktree) => ticketsById.get(worktree.id)?.projectMilestone,
+    ).map((milestone) => ({
+      ...milestone,
+      items: stackWorktrees(milestone.items),
+    })),
+  }));
+}
+
 export function WorktreeSidebar() {
   const {
     repo,
@@ -223,24 +260,11 @@ export function WorktreeSidebar() {
   const allMergedSelected =
     mergedIds.length > 0 && mergedIds.every((id) => selectedWorktrees.has(id));
 
-  // Group worktrees by project, preserving first-seen order, then nest each
-  // group's stacked worktrees under the one they branched off.
-  const groups = useMemo(() => {
-    const map = new Map<string, Worktree[]>();
-    for (const w of worktrees) {
-      const key = projectOf(w);
-      const list = map.get(key) ?? [];
-      list.push(w);
-      map.set(key, list);
-    }
-    return [...map.entries()].map(([project, list]) => ({
-      project,
-      list: stackWorktrees(list),
-      targetDate: list
-        .map((worktree) => ticketsById.get(worktree.id)?.projectTargetDate)
-        .find((date) => !!date),
-    }));
-  }, [ticketsById, worktrees]);
+  // Preserve first-seen project order, then apply Linear's milestone order.
+  const groups = useMemo(
+    () => groupWorktreesForSidebar(worktrees, ticketsById),
+    [ticketsById, worktrees],
+  );
 
   const showActions = mergedIds.length > 0 || selectedWorktrees.size > 0;
 
@@ -260,25 +284,34 @@ export function WorktreeSidebar() {
 
         {loading && groups.length === 0 && <SidebarSkeleton />}
 
-        {groups.map(({ project, list, targetDate }) => (
+        {groups.map(({ project, milestones, targetDate }) => (
           <div key={project} className="mb-1.5">
             <div className="flex items-center gap-1.5 px-2 pt-1 pb-1 font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
               <span className="truncate">{project}</span>
               <ProjectDueDate date={targetDate} />
             </div>
-            {list.map(({ worktree: w, depth }) => (
-              <WorktreeEntry
-                key={w.id}
-                worktree={w}
-                depth={depth}
-                active={w.id === activeId}
-                prs={prsByWorktree.get(w.id) ?? []}
-                selected={selectedWorktrees.has(w.id)}
-                sessionState={sessionByPath.get(w.path)}
-                ticket={ticketsById.get(w.id)}
-                onOpen={() => setActive(w.id)}
-                onToggleSelect={() => toggleWorktreeSelected(w.id)}
-              />
+            {milestones.map((milestone) => (
+              <div key={milestone.key}>
+                <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-1 font-mono text-[9px] tracking-[.05em] text-muted-4 uppercase">
+                  <span className="truncate">{milestone.label}</span>
+                  <span>{milestone.items.length}</span>
+                  <MilestoneDueDate date={milestone.targetDate} />
+                </div>
+                {milestone.items.map(({ worktree: w, depth }) => (
+                  <WorktreeEntry
+                    key={w.id}
+                    worktree={w}
+                    depth={depth}
+                    active={w.id === activeId}
+                    prs={prsByWorktree.get(w.id) ?? []}
+                    selected={selectedWorktrees.has(w.id)}
+                    sessionState={sessionByPath.get(w.path)}
+                    ticket={ticketsById.get(w.id)}
+                    onOpen={() => setActive(w.id)}
+                    onToggleSelect={() => toggleWorktreeSelected(w.id)}
+                  />
+                ))}
+              </div>
             ))}
           </div>
         ))}

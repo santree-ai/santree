@@ -1,8 +1,51 @@
 /** Compact, reusable signals for work/review rows. They answer three different
  * scanning questions without adding label-heavy pills: urgency, effort, and a
  * project's delivery horizon. */
-import type { Priority } from "../bindings";
+import type { Priority, ProjectMilestoneRef } from "../bindings";
 import { priorityColor, prSizeColor } from "../theme/colors";
+
+export const NO_MILESTONE = "No milestone";
+
+export interface MilestoneGroup<T> {
+  key: string;
+  label: string;
+  targetDate: string | null;
+  sortOrder: number;
+  items: T[];
+}
+
+/** Group an already-ordered project list by Linear milestone. Linear's manual
+ * milestone order wins; names and ids make ties deterministic, and unassigned
+ * work always stays in one trailing bucket. Item order within a bucket is stable. */
+export function groupByMilestone<T>(
+  items: T[],
+  milestoneOf: (item: T) => ProjectMilestoneRef | null | undefined,
+): MilestoneGroup<T>[] {
+  const groups = new Map<string, MilestoneGroup<T>>();
+  for (const item of items) {
+    const milestone = milestoneOf(item);
+    const key = milestone?.id ?? NO_MILESTONE;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.items.push(item);
+      continue;
+    }
+    groups.set(key, {
+      key,
+      label: milestone?.name ?? NO_MILESTONE,
+      targetDate: milestone?.targetDate ?? null,
+      sortOrder: milestone?.sortOrder ?? Number.POSITIVE_INFINITY,
+      items: [item],
+    });
+  }
+  return [...groups.values()].sort((a, b) => {
+    if (a.key === NO_MILESTONE) return 1;
+    if (b.key === NO_MILESTONE) return -1;
+    return (
+      a.sortOrder - b.sortOrder || a.label.localeCompare(b.label) || a.key.localeCompare(b.key)
+    );
+  });
+}
 
 export type ChangeSize = "XS" | "S" | "M" | "L" | "XL";
 
@@ -121,7 +164,7 @@ function DueDateSignal({
   noun,
 }: {
   date: string | null | undefined;
-  noun: "Issue due date" | "Project target date";
+  noun: "Issue due date" | "Milestone target date" | "Project target date";
 }) {
   if (!date) return null;
   const parsed = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00`) : new Date(date);
@@ -155,6 +198,10 @@ function DueDateSignal({
 
 export function ProjectDueDate({ date }: { date: string | null | undefined }) {
   return <DueDateSignal date={date} noun="Project target date" />;
+}
+
+export function MilestoneDueDate({ date }: { date: string | null | undefined }) {
+  return <DueDateSignal date={date} noun="Milestone target date" />;
 }
 
 export function IssueDueDate({ date }: { date: string | null | undefined }) {

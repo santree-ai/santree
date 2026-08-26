@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use santree_core::domain::{
-    LinearOrg, LinearStatus, Task, TaskStatus, TicketRef, TriageComment, TriageDetail,
-    TriageSchedule, TriageShift, TriageTicket, WorkflowState,
+    LinearOrg, LinearStatus, ProjectMilestoneRef, Task, TaskStatus, TicketRef, TriageComment,
+    TriageDetail, TriageSchedule, TriageShift, TriageTicket, WorkflowState,
 };
 use santree_core::{layout, linear as core_linear};
 
@@ -570,6 +570,7 @@ query AssignedIssues {
         estimate
         state { name type }
         project { name color icon targetDate }
+        projectMilestone { id name targetDate sortOrder }
         assignee { name displayName avatarUrl }
         inverseRelations(first: 12) {
           nodes {
@@ -639,6 +640,16 @@ struct ProjectNode {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ProjectMilestoneNode {
+    id: String,
+    name: String,
+    #[serde(default)]
+    target_date: Option<String>,
+    sort_order: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct IssueNode {
     identifier: String,
     title: String,
@@ -648,6 +659,8 @@ struct IssueNode {
     estimate: Option<f64>,
     state: Option<StateNode>,
     project: Option<ProjectNode>,
+    #[serde(default)]
+    project_milestone: Option<ProjectMilestoneNode>,
     #[serde(default)]
     assignee: Option<UserNode>,
     #[serde(default)]
@@ -696,6 +709,15 @@ fn project_fields(
     }
 }
 
+fn project_milestone_ref(node: Option<ProjectMilestoneNode>) -> Option<ProjectMilestoneRef> {
+    node.map(|node| ProjectMilestoneRef {
+        id: node.id,
+        name: node.name,
+        target_date: node.target_date,
+        sort_order: node.sort_order,
+    })
+}
+
 /// Map an assigned issue to an actionable Task, returning its blocker issues so
 /// the caller can pull any that aren't themselves assigned into the graph as
 /// grayed context nodes.
@@ -724,6 +746,7 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
     }
 
     let (project, project_color, project_icon, project_target_date) = project_fields(node.project);
+    let project_milestone = project_milestone_ref(node.project_milestone);
     let (assignee, assignee_avatar_url) = assignee_fields(node.assignee);
     let task = Task {
         id: node.identifier,
@@ -734,6 +757,7 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
         project_color,
         project_icon,
         project_target_date,
+        project_milestone,
         status,
         // Ready only when all blockers are done *and* the work hasn't started
         // yet — an In Progress / In Review ticket is never "ready to start".
@@ -763,6 +787,7 @@ fn map_related(issue: RelatedIssue) -> Task {
         project_color,
         project_icon,
         project_target_date: None,
+        project_milestone: None,
         status: core_linear::map_status(&state.name, &state.type_),
         ready: false,
         blocked_by: vec![],
@@ -898,6 +923,8 @@ pub async fn tickets_by_identifier(
         priority: i64,
         #[serde(default)]
         project: Option<ProjectNode>,
+        #[serde(default)]
+        project_milestone: Option<ProjectMilestoneNode>,
     }
 
     // The filter goes over as one `IssueFilter` variable rather than as separate
@@ -906,7 +933,11 @@ pub async fn tickets_by_identifier(
     const QUERY: &str = r"
         query TicketRefs($filter: IssueFilter!, $first: Int!) {
           issues(filter: $filter, first: $first) {
-            nodes { identifier title priority project { name color icon targetDate } }
+            nodes {
+              identifier title priority
+              project { name color icon targetDate }
+              projectMilestone { id name targetDate sortOrder }
+            }
           }
         }
     ";
@@ -939,6 +970,7 @@ pub async fn tickets_by_identifier(
                     project_color,
                     project_icon,
                     project_target_date,
+                    project_milestone: project_milestone_ref(n.project_milestone),
                 }
             })
             .collect(),
@@ -2965,8 +2997,8 @@ mod tests {
         migrate_tokens_to_keychain, parse_callback, parse_ms, refresh_lock, resolve_org_slug,
         resolved_org, scope_from_setting, scope_of, shift_range, splice_images, split_identifier,
         triage_meta, usable_at, validate_sort_order, validate_sort_order_target, ImageCache,
-        IssueNode, ProjectNode, RelatedIssue, RelationNode, SchedQueryData, StateNode, TeamScope,
-        Tokens, UserNode, IMAGE_HOST, REFRESH_SKEW_MS,
+        IssueNode, ProjectMilestoneNode, ProjectNode, RelatedIssue, RelationNode, SchedQueryData,
+        StateNode, TeamScope, Tokens, UserNode, IMAGE_HOST, REFRESH_SKEW_MS,
     };
     use crate::gql::{Connection, PageInfo};
     use std::collections::{HashMap, HashSet};
@@ -3471,6 +3503,12 @@ mod tests {
                 icon: None,
                 target_date: Some("2026-09-30".into()),
             }),
+            project_milestone: Some(ProjectMilestoneNode {
+                id: "milestone-1".into(),
+                name: "Public beta".into(),
+                target_date: Some("2026-09-01".into()),
+                sort_order: 42.0,
+            }),
             assignee: Some(UserNode {
                 id: Some("u1".into()),
                 name: Some("Ada Lovelace".into()),
@@ -3504,6 +3542,11 @@ mod tests {
         assert_eq!(task.estimate, Some(3.0));
         assert_eq!(task.project, "Roadmap");
         assert_eq!(task.project_target_date.as_deref(), Some("2026-09-30"));
+        let milestone = task.project_milestone.as_ref().expect("milestone");
+        assert_eq!(milestone.id, "milestone-1");
+        assert_eq!(milestone.name, "Public beta");
+        assert_eq!(milestone.target_date.as_deref(), Some("2026-09-01"));
+        assert_eq!(milestone.sort_order, 42.0);
         assert_eq!(task.assignee.as_deref(), Some("Ada Lovelace"));
         assert_eq!(
             task.assignee_avatar_url.as_deref(),
@@ -3528,6 +3571,7 @@ mod tests {
             estimate: None,
             state: Some(state("Todo", "unstarted")),
             project: None,
+            project_milestone: None,
             assignee: None,
             inverse_relations: Connection {
                 nodes: vec![RelationNode {
@@ -3554,6 +3598,7 @@ mod tests {
             estimate: None,
             state: Some(state("In Progress", "started")),
             project: None,
+            project_milestone: None,
             assignee: None,
             inverse_relations: Connection::default(),
         };
@@ -3570,6 +3615,7 @@ mod tests {
             estimate: None,
             state: None,
             project: None,
+            project_milestone: None,
             assignee: None,
             inverse_relations: Connection::default(),
         };

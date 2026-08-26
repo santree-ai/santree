@@ -18,7 +18,9 @@ function pr(
     url: `https://github.com/${repo}/pull/${number}`,
     repo,
     headRef: `you/pr-${number}`,
+    headRefId: null,
     baseRef: "main",
+    baseRefId: null,
     headSha: `sha-${number}`,
     author: "you",
     authorAvatarUrl: "",
@@ -86,6 +88,7 @@ describe("ReviewsSidebarView", () => {
       projectColor: "#4493f8",
       projectIcon: null,
       projectTargetDate: "2026-09-30",
+      projectMilestone: null,
     };
     render(
       <ReviewsSidebarView
@@ -104,6 +107,70 @@ describe("ReviewsSidebarView", () => {
     expect(screen.getByTitle("4 comments")).toHaveTextContent("4");
     expect(screen.getByTitle("2 AI draft comments")).toHaveTextContent("2");
     expect(screen.getByTitle(/Project target date/)).toHaveTextContent(/due/i);
+  });
+
+  it("groups project PRs by milestone and nests stacked branches inside that milestone", () => {
+    const parent = pr("parent", 700, "Parent PR", "acme/platform", {
+      headRefId: "REF-parent",
+    });
+    const child = pr("child", 701, "Child PR", "acme/platform", {
+      headRefId: "REF-child",
+      baseRefId: "REF-parent",
+    });
+    const tickets = new Map<string, TicketRef>([
+      [
+        "parent",
+        {
+          identifier: "AK-700",
+          title: "Parent",
+          priority: "None",
+          project: "Platform",
+          projectColor: null,
+          projectIcon: null,
+          projectTargetDate: null,
+          projectMilestone: {
+            id: "milestone-beta",
+            name: "Beta",
+            targetDate: "2026-09-15",
+            sortOrder: 1,
+          },
+        },
+      ],
+      [
+        "child",
+        {
+          identifier: "AK-701",
+          title: "Child",
+          priority: "None",
+          project: "Platform",
+          projectColor: null,
+          projectIcon: null,
+          projectTargetDate: null,
+          projectMilestone: {
+            id: "milestone-beta",
+            name: "Beta",
+            targetDate: "2026-09-15",
+            sortOrder: 1,
+          },
+        },
+      ],
+    ]);
+    const { container } = render(
+      <ReviewsSidebarView
+        inbox={{ mine: [], requested: [parent, child], teams: [] }}
+        loading={false}
+        total={2}
+        activeId={null}
+        onSelect={vi.fn()}
+        ticketFor={(item) => tickets.get(item.id)}
+      />,
+    );
+
+    expect(screen.getByText("Beta")).toBeInTheDocument();
+    expect(screen.getByTitle(/Milestone target date/)).toHaveTextContent(/due/i);
+    const rows = [...container.querySelectorAll<HTMLElement>("[data-pr-id]")];
+    expect(rows.map((row) => row.dataset.prId)).toEqual(["parent", "child"]);
+    expect(rows.map((row) => row.dataset.stackDepth)).toEqual(["0", "1"]);
   });
 
   it("orders My PRs, direct requests, then every team", () => {
@@ -265,6 +332,7 @@ describe("ReviewsSidebarView", () => {
         projectColor: null,
         projectIcon: null,
         projectTargetDate: null,
+        projectMilestone: null,
       },
     };
     render(

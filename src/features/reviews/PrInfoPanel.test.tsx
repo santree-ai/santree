@@ -44,4 +44,14 @@ describe("PrInfoPanel", () => {
     render(<PrInfoPanel pr={pr} tab="issue" onTabChange={vi.fn()} activeReviewAgent={null} />);
     expect(screen.getByTestId("issue-pane")).toBeTruthy();
   });
+
+  it("stays in flex flow so resizing it also resizes the main pane", () => {
+    const { container } = render(
+      <PrInfoPanel pr={pr} tab="description" onTabChange={vi.fn()} activeReviewAgent={null} />,
+    );
+    const panel = container.firstElementChild;
+
+    expect(panel).toHaveClass("relative", "flex-none");
+    expect(panel?.className).not.toContain("absolute");
+  });
 });

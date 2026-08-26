@@ -405,6 +405,18 @@ impl TaskStatus {
     }
 }
 
+/// One Linear milestone assigned to an issue inside its project.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMilestoneRef {
+    pub id: String,
+    pub name: String,
+    /// Linear's target date (`YYYY-MM-DD`), when configured.
+    pub target_date: Option<String>,
+    /// Linear's manual order within the project.
+    pub sort_order: f64,
+}
+
 /// A ticket in the dependency graph. `x`/`y` are its canvas position.
 #[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -423,6 +435,8 @@ pub struct Task {
     pub project_icon: Option<String>,
     /// Linear project's target date (`YYYY-MM-DD`), when configured.
     pub project_target_date: Option<String>,
+    /// The issue's milestone inside its project, when assigned.
+    pub project_milestone: Option<ProjectMilestoneRef>,
     pub status: TaskStatus,
     pub ready: bool,
     pub blocked_by: Vec<String>,
@@ -634,8 +648,12 @@ pub struct ReviewPr {
     pub repo: String,
     /// The PR's head branch name (shown in the header, click-to-copy).
     pub head_ref: String,
+    /// Stable GitHub node id for the head ref. `None` after the branch is deleted.
+    pub head_ref_id: Option<String>,
     /// The branch the PR merges into — context for the AI review session.
     pub base_ref: String,
+    /// Stable GitHub node id for the base ref. Used to identify stacked PRs.
+    pub base_ref_id: Option<String>,
     /// The PR's head commit. What the review checkout detaches at and what a
     /// cached review brief is keyed on, so both track the PR's current code.
     pub head_sha: String,
@@ -893,7 +911,7 @@ pub struct AiReviewLaunch {
 /// project. Deliberately not a [`Task`]: these are *other people's* issues (the
 /// ones you review), which the viewer-assigned `list_issues` query never returns,
 /// and none of `Task`'s graph fields (position, blockers, actionable) apply.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TicketRef {
     /// e.g. "AK-165" — the key the frontend joins back to a PR.
@@ -908,6 +926,8 @@ pub struct TicketRef {
     pub project_icon: Option<String>,
     /// Linear project's target date (`YYYY-MM-DD`), when the project has one.
     pub project_target_date: Option<String>,
+    /// The issue's milestone inside its project, when assigned.
+    pub project_milestone: Option<ProjectMilestoneRef>,
 }
 
 /// A merge-queue entry's state (GitHub's `MergeQueueEntryState`). Drives the

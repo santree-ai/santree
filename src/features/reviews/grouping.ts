@@ -14,6 +14,10 @@
  *   3. **How big is it?** So a ten-minute gap can be spent on something finishable.
  */
 import type { ReviewPr, TicketRef } from "../../bindings";
+import {
+  groupByMilestone,
+  NO_MILESTONE as SHARED_NO_MILESTONE,
+} from "../../components/WorkSignals";
 
 /** How the sidebar's rows are bucketed into sections. */
 export type Grouping = "category" | "project" | "repo";
@@ -106,6 +110,19 @@ export interface PrGroup {
   targetDate?: string | null;
 }
 
+export interface PrMilestoneGroup {
+  key: string;
+  label: string;
+  targetDate: string | null;
+  sortOrder: number;
+  prs: ReviewPr[];
+}
+
+export interface StackedPr {
+  pr: ReviewPr;
+  depth: number;
+}
+
 /** Short "name" from an "owner/name" slug. */
 export function repoName(slug: string): string {
   return slug.split("/").pop() ?? slug;
@@ -158,3 +175,47 @@ export function groupPrs(
 
 /** Heading for PRs whose ticket carries no project (or that have no ticket). */
 export const NO_PROJECT = "No project";
+
+export const NO_MILESTONE = SHARED_NO_MILESTONE;
+
+/** Group one project's already-sorted PRs by their Linear milestone. Milestones
+ * follow Linear's manual order; rows keep the parent group's review-queue order. */
+export function groupPrsByMilestone(
+  prs: ReviewPr[],
+  ticketFor: (pr: ReviewPr) => TicketRef | undefined,
+): PrMilestoneGroup[] {
+  return groupByMilestone(prs, (pr) => ticketFor(pr)?.projectMilestone).map(
+    ({ items, ...group }) => ({ ...group, prs: items }),
+  );
+}
+
+/** Put a stacked PR immediately below the PR whose head ref is its base ref.
+ * Stable GitHub ref node ids avoid false links between same-named fork branches. */
+export function stackPrs(prs: ReviewPr[], maxDepth = 3): StackedPr[] {
+  const byHeadRef = new Map<string, ReviewPr>();
+  for (const pr of prs) if (pr.headRefId) byHeadRef.set(pr.headRefId, pr);
+
+  const children = new Map<string, ReviewPr[]>();
+  const roots: ReviewPr[] = [];
+  for (const pr of prs) {
+    const parent = pr.baseRefId ? byHeadRef.get(pr.baseRefId) : undefined;
+    if (!parent || parent.id === pr.id) {
+      roots.push(pr);
+      continue;
+    }
+    children.set(parent.id, [...(children.get(parent.id) ?? []), pr]);
+  }
+
+  const stacked: StackedPr[] = [];
+  const seen = new Set<string>();
+  const walk = (pr: ReviewPr, depth: number) => {
+    if (seen.has(pr.id)) return;
+    seen.add(pr.id);
+    stacked.push({ pr, depth: Math.min(depth, maxDepth) });
+    for (const child of children.get(pr.id) ?? []) walk(child, depth + 1);
+  };
+  for (const root of roots) walk(root, 0);
+  // Cycles or malformed duplicate identities must never make a PR disappear.
+  for (const pr of prs) if (!seen.has(pr.id)) stacked.push({ pr, depth: 0 });
+  return stacked;
+}

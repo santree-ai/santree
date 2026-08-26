@@ -7,6 +7,12 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.4-beta.6 — 2026-08-26
+
+- Linear milestones now organize work inside each project across Issues, Trees, and Reviews, following Linear's own milestone order and target dates.
+- Reviews now show stacked pull requests as parent and child branches, matching the dependency structure already visible in Trees.
+- Fixed the Reviews detail sidebar so resizing it reflows the diff instead of covering the main pane, while keeping branch, tree, GitHub, and panel actions visible at compact widths.
+
 ## 0.1.4-beta.5 — 2026-08-26
 
 - Fixed AI commit messages and PR descriptions when Codex is the configured helper: the Codex CLI rejected Santree's own sandbox arguments, so every draft silently fell back to "update". Helper failures are now also recorded in the app log instead of vanishing.
