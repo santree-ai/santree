@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.4-beta.4 — 2026-08-26
+
+- Removed the per-launch model picker from the Issues launch tray. Every launch now runs the model configured for its agent in Settings → Actions → Work; the tray shows which one that is. Previously, switching the tray's agent could launch with the other provider's model.
+
 ## 0.1.4-beta.3 — 2026-08-26
 
 - Fixed the Issues and Triage lists so only the ticket you are looking at is highlighted; queued tickets are marked by their checkbox instead of a second, near-identical tint.
