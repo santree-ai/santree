@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.4-beta.3 — 2026-08-26
+
+- Fixed the Issues and Triage lists so only the ticket you are looking at is highlighted; queued tickets are marked by their checkbox instead of a second, near-identical tint.
+
 ## 0.1.4-beta.2 — 2026-08-25
 
 - Updated Santree's website, interactive product demo, setup guide, and public metadata to present Codex and Claude Code as first-class providers.
