@@ -220,9 +220,13 @@ pub fn run_helper(
         ));
     }
 
-    // `sandbox_permissions` is intentionally outside the pinned strict schema.
-    // The App Server's config/read handshake is our proof that this installed
-    // CLI applied the empty permission layer instead of silently ignoring it.
+    // `sandbox_permissions` is outside 0.149's strict Config schema, so the
+    // helper must NOT run with `--strict-config`: `codex exec` then rejects the
+    // override outright ("unknown configuration field `sandbox_permissions`"),
+    // exits 1, and the caller's fallback quietly ships "update" as the message.
+    // The App Server's config/read handshake is instead our proof that this
+    // installed CLI applied the empty permission layer rather than ignoring it —
+    // the same arrangement the App Server launch itself uses (see codex.rs).
     codex_runtime.ensure_restricted_config(&helper.executable)?;
     let args = build_codex_helper_args(cwd, helper.model.as_deref());
     let mut cmd = Command::new(&helper.executable);
@@ -236,7 +240,6 @@ fn build_codex_helper_args(cwd: &Path, model: Option<&str>) -> Vec<String> {
         "--ephemeral".to_string(),
         "--ignore-user-config".to_string(),
         "--ignore-rules".to_string(),
-        "--strict-config".to_string(),
         "--sandbox".to_string(),
         "read-only".to_string(),
         "-c".to_string(),
@@ -266,14 +269,17 @@ fn build_codex_helper_args(cwd: &Path, model: Option<&str>) -> Vec<String> {
 fn finish_helper(cmd: Command, prompt: &str, timeout: Duration, label: &str) -> Result<String> {
     let (status, stdout, stderr) = run_with_timeout(cmd, prompt, timeout)?;
     let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+    // Through `warn`, not a bare `anyhow!`: the commit-message and PR-body
+    // callers swallow this error to fall back, so the log is the only place a
+    // rejected flag or a signed-out CLI can still be seen.
     if !status.success() {
-        return Err(anyhow!("{label} exited {status}: {stderr}"));
+        return Err(warn(format!("{label} exited {status}: {stderr}")));
     }
     let text = String::from_utf8_lossy(&stdout).trim().to_string();
     if text.is_empty() {
-        return Err(anyhow!(
+        return Err(warn(format!(
             "{label} exited cleanly but produced no output: {stderr}"
-        ));
+        )));
     }
     Ok(text)
 }
@@ -281,7 +287,7 @@ fn finish_helper(cmd: Command, prompt: &str, timeout: Duration, label: &str) -> 
 /// Log a headless failure and hand back the same message as an error, so the app
 /// log records it even when the caller swallows the error to fall back.
 fn warn(message: String) -> anyhow::Error {
-    log::warn!("claude -p: {message}");
+    log::warn!("headless agent: {message}");
     anyhow!(message)
 }
 
@@ -496,8 +502,8 @@ mod tests {
             "--ephemeral",
             "--ignore-user-config",
             "--ignore-rules",
-            "--strict-config",
             "read-only",
+            "sandbox_permissions=[]",
             "mcp_servers={}",
             "apps={}",
             "plugins={}",
@@ -512,6 +518,10 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--model", "gpt-5.6-sol"]));
         assert_eq!(args.last().map(String::as_str), Some("-"));
+        // `sandbox_permissions` is not in 0.149's strict schema: with
+        // `--strict-config` the CLI rejects the whole invocation and every
+        // helper silently falls back to its canned message.
+        assert!(!args.iter().any(|arg| arg == "--strict-config"));
     }
 
     /// The prompt embeds the repo diff and ticket text; argv is world-readable on
