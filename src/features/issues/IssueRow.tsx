@@ -54,7 +54,6 @@ export const IssueRow = memo(
       <div
         data-issue-id={vm.id}
         data-active={vm.active}
-        data-queued={vm.selected}
         onMouseEnter={vm.onHover}
         className="entity-card mb-[5px] flex w-full items-stretch overflow-hidden transition-colors"
         style={vm.rowStyle}

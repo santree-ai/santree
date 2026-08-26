@@ -124,9 +124,7 @@
      remain available for success, activity, urgency, and failure only. */
   --interaction-hover: color-mix(in srgb, var(--color-hover) 72%, transparent);
   --selection-fill: color-mix(in srgb, var(--accent) 7%, transparent);
-  --selection-fill-soft: color-mix(in srgb, var(--accent) 4%, transparent);
   --selection-border: color-mix(in srgb, var(--accent) 48%, transparent);
-  --selection-border-soft: color-mix(in srgb, var(--accent) 30%, transparent);
   --selection-text: var(--accent-text);
   /* A text-safe accent. Equal to the accent on dark surfaces; darkened on light
      ones (teal on white is otherwise too low-contrast to read). Tracks any
@@ -176,11 +174,12 @@
   background: var(--interaction-hover);
 }
 
-.entity-card[data-queued="true"]:not([data-active="true"]) {
-  border-color: var(--selection-border-soft);
-  background: var(--selection-fill-soft);
-}
-
+/* The current destination is the ONLY state that takes over a whole card.
+   Launch-queue membership is deliberately not a card state (the filled
+   checkbox carries it): a "soft" accent tint is indistinguishable from this one
+   once several rows are queued, so the focused-but-unqueued row read as a
+   seventh selection. Mirrors the graph, where queued nodes get a badge and only
+   the focused node gets the ring. */
 .entity-card[data-active="true"] {
   border-color: var(--selection-border);
   background: var(--selection-fill);

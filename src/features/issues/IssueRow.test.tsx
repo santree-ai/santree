@@ -37,10 +37,22 @@ describe("IssueRow", () => {
     expect(screen.getByText("content.metadata")).toBeInTheDocument();
   });
 
-  it("uses the shared accent contract for the current and queued states", () => {
-    const { container } = render(<IssueRow vm={row({ active: true, selected: true })} />);
+  it("only the current ticket takes the card highlight; queueing lives on the checkbox", () => {
+    const { container } = render(<IssueRow vm={row({ active: false, selected: true })} />);
+
+    // A queued row must not read as a selection: no card-level active state,
+    // only the pressed checkbox marks it.
+    expect(container.firstElementChild).toHaveAttribute("data-active", "false");
+    expect(container.firstElementChild).not.toHaveAttribute("data-queued");
+    expect(screen.getByRole("button", { name: "Remove from launch selection" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("marks the current ticket with the shared active state", () => {
+    const { container } = render(<IssueRow vm={row({ active: true })} />);
 
     expect(container.firstElementChild).toHaveAttribute("data-active", "true");
-    expect(container.firstElementChild).toHaveAttribute("data-queued", "true");
   });
 });

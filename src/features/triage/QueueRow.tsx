@@ -80,7 +80,6 @@ export const QueueRow = memo(function QueueRow({
     <div
       data-ticket-id={ticket.id}
       data-active={active}
-      data-queued={selected}
       onMouseEnter={() => onHover(ticket.id)}
       onDragEnter={() => onManualDragOver?.(ticket.id)}
       onDragOver={(event) => {
