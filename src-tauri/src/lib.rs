@@ -583,8 +583,8 @@ pub fn run() {
                     ),
                 ),
             };
-            if let Err(e) = tauri::async_runtime::block_on(settings::migrate_codex_defaults(&db)) {
-                log::warn!("Codex default migration failed: {e:#}");
+            if let Err(e) = tauri::async_runtime::block_on(settings::migrate_helper_agents(&db)) {
+                log::warn!("helper-agent migration failed: {e:#}");
             }
             // Mirror any user-set binary paths into the process before anything
             // resolves a CLI. Synchronous on purpose: `discover_binary` is sync and

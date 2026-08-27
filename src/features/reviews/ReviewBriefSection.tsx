@@ -41,7 +41,7 @@ export function ReviewBriefSection({
 }) {
   const { repo, focusFile, openAiReview } = useReviewsModel();
   const { data: configuredAgent } = useResolvedSetting(repo, REVIEW_AGENT_KEY);
-  const defaultAgent = (configuredAgent as AgentKind | null) ?? "Codex";
+  const defaultAgent = (configuredAgent as AgentKind | null) ?? "Claude";
   const { data: brief, isLoading } = usePrReviewBrief(pr.repo, pr.number);
   // A live session is the "it's being written right now" state: the brief arrives
   // through the MCP, so there's no mutation here to be pending.

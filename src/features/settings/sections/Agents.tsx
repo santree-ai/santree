@@ -47,7 +47,7 @@ export function AgentsSection() {
   return (
     <>
       <Heading
-        title="Provider setup"
+        title="Agents"
         subtitle="Connect and maintain each provider here. Which provider and model performs a job is configured separately under Workflow defaults."
       />
       <Tabs
@@ -232,8 +232,8 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
 function CodexPanel() {
   const { settings, setAgentExec } = useApp();
   const health = useCodexHealth();
-  const account = useCodexAccount();
-  const limits = useCodexRateLimits();
+  const account = useCodexAccount(health.data?.available === true);
+  const limits = useCodexRateLimits(account.data?.connected === true);
   const login = useCodexLogin();
   const cancelLogin = useCancelCodexLogin();
   const logout = useCodexLogout();
@@ -290,6 +290,9 @@ function CodexPanel() {
           <KvRow label="Account" value={account.data?.email || "Managed by Codex CLI"} />
           <KvRow label="Plan" value={account.data?.plan || "—"} />
         </div>
+        {account.error && (
+          <div className="mt-2 text-[11px] text-status-amber">{account.error.message}</div>
+        )}
         <div className="mt-3 flex gap-2">
           {!account.data?.connected && !activeLogin && (
             <Button
@@ -343,6 +346,9 @@ function CodexPanel() {
           <KvRow label="Primary" value={formatWindow(limits.data?.primary ?? null)} />
           <KvRow label="Secondary" value={formatWindow(limits.data?.secondary ?? null)} />
         </div>
+        {limits.error && (
+          <div className="mt-2 text-[11px] text-status-amber">{limits.error.message}</div>
+        )}
       </Block>
 
       <Block

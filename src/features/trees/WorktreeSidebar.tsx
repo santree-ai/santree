@@ -14,9 +14,10 @@ import { SidebarFooter } from "../../components/SidebarFooter";
 import {
   ChangeSizeBars,
   groupByMilestone,
-  MilestoneDueDate,
+  MilestoneHeading,
   PriorityBars,
   ProjectDueDate,
+  showMilestoneGroups,
 } from "../../components/WorkSignals";
 import { WorktreeStats } from "../../components/WorktreeStats";
 import {
@@ -228,6 +229,13 @@ export function WorktreeSidebar() {
   } = useTrees();
 
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [collapsedMilestones, setCollapsedMilestones] = useState<Set<string>>(new Set());
+  const toggleMilestone = (key: string) =>
+    setCollapsedMilestones((current) => {
+      const next = new Set(current);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
 
   // Live Claude session state per worktree, correlated by cwd (the worktree path
   // Claude ran in).
@@ -290,14 +298,38 @@ export function WorktreeSidebar() {
               <span className="truncate">{project}</span>
               <ProjectDueDate date={targetDate} />
             </div>
-            {milestones.map((milestone) => (
-              <div key={milestone.key}>
-                <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-1 font-mono text-[9px] tracking-[.05em] text-muted-4 uppercase">
-                  <span className="truncate">{milestone.label}</span>
-                  <span>{milestone.items.length}</span>
-                  <MilestoneDueDate date={milestone.targetDate} />
-                </div>
-                {milestone.items.map(({ worktree: w, depth }) => (
+            {showMilestoneGroups(milestones)
+              ? milestones.map((milestone) => {
+                  const key = `${project}:${milestone.key}`;
+                  const open = !collapsedMilestones.has(key);
+                  return (
+                    <div key={milestone.key}>
+                      <MilestoneHeading
+                        label={milestone.label}
+                        count={milestone.items.length}
+                        targetDate={milestone.targetDate}
+                        open={open}
+                        onToggle={() => toggleMilestone(key)}
+                      />
+                      {open &&
+                        milestone.items.map(({ worktree: w, depth }) => (
+                          <WorktreeEntry
+                            key={w.id}
+                            worktree={w}
+                            depth={depth}
+                            active={w.id === activeId}
+                            prs={prsByWorktree.get(w.id) ?? []}
+                            selected={selectedWorktrees.has(w.id)}
+                            sessionState={sessionByPath.get(w.path)}
+                            ticket={ticketsById.get(w.id)}
+                            onOpen={() => setActive(w.id)}
+                            onToggleSelect={() => toggleWorktreeSelected(w.id)}
+                          />
+                        ))}
+                    </div>
+                  );
+                })
+              : milestones[0]?.items.map(({ worktree: w, depth }) => (
                   <WorktreeEntry
                     key={w.id}
                     worktree={w}
@@ -311,8 +343,6 @@ export function WorktreeSidebar() {
                     onToggleSelect={() => toggleWorktreeSelected(w.id)}
                   />
                 ))}
-              </div>
-            ))}
           </div>
         ))}
       </div>

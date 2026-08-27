@@ -811,22 +811,31 @@ export const useAgentVersionStatus = (kind: AgentKind) =>
   });
 
 export const useCodexHealth = () =>
-  useUnwrappedQuery(queryKeys.codexHealth, () => commands.codexHealth(), { staleTime: 30_000 });
+  useUnwrappedQuery(queryKeys.codexHealth, () => commands.codexHealth(), {
+    staleTime: 30_000,
+    meta: { silent: true },
+  });
 
-export const useCodexAccount = () =>
+export const useCodexAccount = (enabled = true) =>
   useUnwrappedQuery(queryKeys.codexAccount, () => commands.codexAccount(), {
+    enabled,
     staleTime: 30_000,
     refetchInterval: (query) => (query.state.data?.connected ? false : 3_000),
+    meta: { silent: true },
   });
 
-export const useCodexModels = () =>
+export const useCodexModels = (enabled = true) =>
   useUnwrappedQuery(queryKeys.codexModels, () => commands.codexModels(), {
+    enabled,
     staleTime: 5 * 60 * 1000,
+    meta: { silent: true },
   });
 
-export const useCodexRateLimits = () =>
+export const useCodexRateLimits = (enabled = true) =>
   useUnwrappedQuery(queryKeys.codexRateLimits, () => commands.codexRateLimits(), {
+    enabled,
     staleTime: 60_000,
+    meta: { silent: true },
   });
 
 export const useCodexLogin = () => {
@@ -2812,7 +2821,7 @@ export function resolveHelperAgent(
   for (const candidate of [helper, work, defaultAgent]) {
     if (AGENT_KINDS.includes(candidate as AgentKind)) return candidate as AgentKind;
   }
-  return "Codex";
+  return "Claude";
 }
 
 /** The provider that will execute a hidden Work helper (commit message or PR

@@ -571,6 +571,7 @@ query AssignedIssues {
         state { name type }
         project { name color icon targetDate }
         projectMilestone { id name targetDate sortOrder }
+        parent { identifier }
         assignee { name displayName avatarUrl }
         inverseRelations(first: 12) {
           nodes {
@@ -649,6 +650,23 @@ struct ProjectMilestoneNode {
 }
 
 #[derive(Deserialize)]
+struct ParentIssueNode {
+    identifier: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TicketLookupNode {
+    identifier: String,
+    title: String,
+    priority: i64,
+    #[serde(default)]
+    project: Option<ProjectNode>,
+    #[serde(default)]
+    project_milestone: Option<ProjectMilestoneNode>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IssueNode {
     identifier: String,
@@ -661,6 +679,8 @@ struct IssueNode {
     project: Option<ProjectNode>,
     #[serde(default)]
     project_milestone: Option<ProjectMilestoneNode>,
+    #[serde(default)]
+    parent: Option<ParentIssueNode>,
     #[serde(default)]
     assignee: Option<UserNode>,
     #[serde(default)]
@@ -747,6 +767,7 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
 
     let (project, project_color, project_icon, project_target_date) = project_fields(node.project);
     let project_milestone = project_milestone_ref(node.project_milestone);
+    let parent_id = node.parent.map(|parent| parent.identifier);
     let (assignee, assignee_avatar_url) = assignee_fields(node.assignee);
     let task = Task {
         id: node.identifier,
@@ -758,6 +779,7 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
         project_icon,
         project_target_date,
         project_milestone,
+        parent_id,
         status,
         // Ready only when all blockers are done *and* the work hasn't started
         // yet — an In Progress / In Review ticket is never "ready to start".
@@ -788,6 +810,7 @@ fn map_related(issue: RelatedIssue) -> Task {
         project_icon,
         project_target_date: None,
         project_milestone: None,
+        parent_id: None,
         status: core_linear::map_status(&state.name, &state.type_),
         ready: false,
         blocked_by: vec![],
@@ -796,6 +819,43 @@ fn map_related(issue: RelatedIssue) -> Task {
         assignee_avatar_url,
         x: 0,
         y: 0,
+    }
+}
+
+/// Treat every known open subtask like a blocker of its parent. Linear's parent
+/// relation is structural rather than a `blocks` relation, but the work cannot be
+/// complete until its subtasks are. Keeping this in the domain result makes the
+/// graph, inspector and launch-readiness rules agree.
+fn apply_subtask_dependencies(tasks: &mut [Task]) {
+    let children: Vec<(String, String, bool)> = tasks
+        .iter()
+        .filter_map(|task| {
+            task.parent_id.as_ref().map(|parent| {
+                (
+                    parent.clone(),
+                    task.id.clone(),
+                    task.status == TaskStatus::Done,
+                )
+            })
+        })
+        .collect();
+    let by_id: std::collections::HashMap<String, usize> = tasks
+        .iter()
+        .enumerate()
+        .map(|(index, task)| (task.id.clone(), index))
+        .collect();
+
+    for (parent_id, child_id, child_done) in children {
+        let Some(&parent_index) = by_id.get(&parent_id) else {
+            continue;
+        };
+        let parent = &mut tasks[parent_index];
+        if !parent.blocked_by.contains(&child_id) {
+            parent.blocked_by.push(child_id);
+        }
+        if !child_done {
+            parent.ready = false;
+        }
     }
 }
 
@@ -846,6 +906,7 @@ pub async fn list_issues(db: &Db, repo: &str) -> Result<Option<Vec<Task>>> {
         tasks.push(map_related(issue));
     }
 
+    apply_subtask_dependencies(&mut tasks);
     layout::layout_tasks(&mut tasks);
     Ok(Some(tasks))
 }
@@ -914,17 +975,7 @@ pub async fn tickets_by_identifier(
 
     #[derive(Deserialize)]
     struct QueryData {
-        issues: Connection<TicketNode>,
-    }
-    #[derive(Deserialize)]
-    struct TicketNode {
-        identifier: String,
-        title: String,
-        priority: i64,
-        #[serde(default)]
-        project: Option<ProjectNode>,
-        #[serde(default)]
-        project_milestone: Option<ProjectMilestoneNode>,
+        issues: Connection<TicketLookupNode>,
     }
 
     // The filter goes over as one `IssueFilter` variable rather than as separate
@@ -2993,14 +3044,16 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        accept_code, cached_team_scope, decode_tokens, encode_tokens, image_spans, map_issue,
-        migrate_tokens_to_keychain, parse_callback, parse_ms, refresh_lock, resolve_org_slug,
-        resolved_org, scope_from_setting, scope_of, shift_range, splice_images, split_identifier,
-        triage_meta, usable_at, validate_sort_order, validate_sort_order_target, ImageCache,
-        IssueNode, ProjectMilestoneNode, ProjectNode, RelatedIssue, RelationNode, SchedQueryData,
-        StateNode, TeamScope, Tokens, UserNode, IMAGE_HOST, REFRESH_SKEW_MS,
+        accept_code, apply_subtask_dependencies, cached_team_scope, decode_tokens, encode_tokens,
+        image_spans, map_issue, migrate_tokens_to_keychain, parse_callback, parse_ms, refresh_lock,
+        resolve_org_slug, resolved_org, scope_from_setting, scope_of, shift_range, splice_images,
+        split_identifier, triage_meta, usable_at, validate_sort_order, validate_sort_order_target,
+        ImageCache, IssueNode, ParentIssueNode, ProjectMilestoneNode, ProjectNode, RelatedIssue,
+        RelationNode, SchedQueryData, StateNode, TeamScope, TicketLookupNode, Tokens, UserNode,
+        IMAGE_HOST, REFRESH_SKEW_MS,
     };
     use crate::gql::{Connection, PageInfo};
+    use santree_core::domain::{Task, TaskStatus};
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -3489,6 +3542,64 @@ mod tests {
         }
     }
 
+    fn task_for_subtask_test(id: &str, parent_id: Option<&str>, status: TaskStatus) -> Task {
+        Task {
+            id: id.into(),
+            title: id.into(),
+            priority: santree_core::domain::Priority::None,
+            estimate: None,
+            project: "Project".into(),
+            project_color: None,
+            project_icon: None,
+            project_target_date: None,
+            project_milestone: None,
+            parent_id: parent_id.map(str::to_owned),
+            status,
+            ready: true,
+            blocked_by: vec![],
+            actionable: true,
+            assignee: None,
+            assignee_avatar_url: None,
+            x: 0,
+            y: 0,
+        }
+    }
+
+    #[test]
+    fn subtasks_become_parent_dependencies_and_hold_readiness_until_done() {
+        let mut tasks = vec![
+            task_for_subtask_test("ENG-1", None, TaskStatus::Todo),
+            task_for_subtask_test("ENG-2", Some("ENG-1"), TaskStatus::Done),
+            task_for_subtask_test("ENG-3", Some("ENG-1"), TaskStatus::Todo),
+        ];
+
+        apply_subtask_dependencies(&mut tasks);
+
+        assert_eq!(tasks[0].blocked_by, ["ENG-2", "ENG-3"]);
+        assert!(!tasks[0].ready);
+    }
+
+    #[test]
+    fn ticket_lookup_deserializes_graphql_milestone_camel_case() {
+        let node: TicketLookupNode = serde_json::from_value(serde_json::json!({
+            "identifier": "ENG-1",
+            "title": "Grouped work",
+            "priority": 2,
+            "project": null,
+            "projectMilestone": {
+                "id": "milestone-1",
+                "name": "Beta",
+                "targetDate": "2026-09-01",
+                "sortOrder": 3.0
+            }
+        }))
+        .expect("ticket lookup response");
+
+        let milestone = node.project_milestone.expect("milestone");
+        assert_eq!(milestone.name, "Beta");
+        assert_eq!(milestone.target_date.as_deref(), Some("2026-09-01"));
+    }
+
     #[test]
     fn map_issue_maps_status_project_assignee_and_open_blockers() {
         let node = IssueNode {
@@ -3508,6 +3619,9 @@ mod tests {
                 name: "Public beta".into(),
                 target_date: Some("2026-09-01".into()),
                 sort_order: 42.0,
+            }),
+            parent: Some(ParentIssueNode {
+                identifier: "ENG-9".into(),
             }),
             assignee: Some(UserNode {
                 id: Some("u1".into()),
@@ -3541,6 +3655,7 @@ mod tests {
         assert_eq!(task.priority, santree_core::domain::Priority::High);
         assert_eq!(task.estimate, Some(3.0));
         assert_eq!(task.project, "Roadmap");
+        assert_eq!(task.parent_id.as_deref(), Some("ENG-9"));
         assert_eq!(task.project_target_date.as_deref(), Some("2026-09-30"));
         let milestone = task.project_milestone.as_ref().expect("milestone");
         assert_eq!(milestone.id, "milestone-1");
@@ -3572,6 +3687,7 @@ mod tests {
             state: Some(state("Todo", "unstarted")),
             project: None,
             project_milestone: None,
+            parent: None,
             assignee: None,
             inverse_relations: Connection {
                 nodes: vec![RelationNode {
@@ -3599,6 +3715,7 @@ mod tests {
             state: Some(state("In Progress", "started")),
             project: None,
             project_milestone: None,
+            parent: None,
             assignee: None,
             inverse_relations: Connection::default(),
         };
@@ -3616,6 +3733,7 @@ mod tests {
             state: None,
             project: None,
             project_milestone: None,
+            parent: None,
             assignee: None,
             inverse_relations: Connection::default(),
         };

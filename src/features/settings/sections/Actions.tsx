@@ -276,7 +276,7 @@ function ActionConfig({
   const hasAgent = descriptor.agentKey !== undefined;
   const appAgent =
     (useSetting("app", agentKey).data as AgentKind | null) ??
-    (hasAgent ? (settings?.defaultAgent ?? "Codex") : "Codex");
+    (hasAgent ? (settings?.defaultAgent ?? "Claude") : "Claude");
   const scopeAgent = useSetting(scope, agentKey).data as AgentKind | null;
   const effectiveAgent = scopeAgent ?? appAgent;
   const availableAgents = agents.filter(
@@ -287,7 +287,7 @@ function ActionConfig({
   const provider = agentProvider(tab);
   const agentDef = agents.find((agent) => agent.key === tab);
   const claudeModels = useClaudeModels().data;
-  const codexModels = useCodexModels().data;
+  const codexModels = useCodexModels(tab === "Codex").data;
   const models =
     provider.capabilities.modelSource === "claude"
       ? (claudeModels ?? agentDef?.models ?? [])
@@ -446,7 +446,7 @@ function ActionConfig({
             hint="Starts new interactive work sessions. Existing sessions keep their provider."
             settingKey={agentKey}
             repo={repo}
-            fallbackAgent={settings?.defaultAgent ?? "Codex"}
+            fallbackAgent={settings?.defaultAgent ?? "Claude"}
             agents={availableAgents}
             disabled={disabled}
           />

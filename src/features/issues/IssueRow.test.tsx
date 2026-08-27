@@ -10,6 +10,7 @@ function row(overrides: Partial<IssueRowVM> = {}): IssueRowVM {
     statusColor: "green",
     priority: "High",
     estimate: 3,
+    depth: 0,
     active: false,
     selectable: true,
     selected: false,
@@ -31,7 +32,7 @@ describe("IssueRow", () => {
   it("uses the shared entity card and shows real work signals", () => {
     const { container } = render(<IssueRow vm={row()} />);
 
-    expect(container.firstElementChild).toHaveClass("entity-card");
+    expect(container.querySelector(".entity-card")).toBeInTheDocument();
     expect(screen.getByTitle("High priority")).toBeInTheDocument();
     expect(screen.getByTitle("3 point estimate")).toBeInTheDocument();
     expect(screen.getByText("content.metadata")).toBeInTheDocument();
@@ -42,8 +43,9 @@ describe("IssueRow", () => {
 
     // A queued row must not read as a selection: no card-level active state,
     // only the pressed checkbox marks it.
-    expect(container.firstElementChild).toHaveAttribute("data-active", "false");
-    expect(container.firstElementChild).not.toHaveAttribute("data-queued");
+    const card = container.querySelector(".entity-card");
+    expect(card).toHaveAttribute("data-active", "false");
+    expect(card).not.toHaveAttribute("data-queued");
     expect(screen.getByRole("button", { name: "Remove from launch selection" })).toHaveAttribute(
       "aria-pressed",
       "true",
@@ -53,6 +55,11 @@ describe("IssueRow", () => {
   it("marks the current ticket with the shared active state", () => {
     const { container } = render(<IssueRow vm={row({ active: true })} />);
 
-    expect(container.firstElementChild).toHaveAttribute("data-active", "true");
+    expect(container.querySelector(".entity-card")).toHaveAttribute("data-active", "true");
+  });
+
+  it("draws a connector gutter for a nested subtask", () => {
+    const { container } = render(<IssueRow vm={row({ depth: 2 })} />);
+    expect(container.querySelector("[aria-hidden]")).toHaveStyle({ width: "28px" });
   });
 });

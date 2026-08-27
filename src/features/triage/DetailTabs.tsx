@@ -22,7 +22,7 @@ export function DetailTabs({
   const { accent } = useApp();
   const claudeReady = !!useAgentAuth("Claude").data?.connected;
   const codexHealth = useCodexHealth();
-  const codexAccount = useCodexAccount();
+  const codexAccount = useCodexAccount(codexHealth.data?.available === true);
   const codexReady = !!codexHealth.data?.available && !!codexAccount.data?.connected;
   const tabs: TabItem<DetailTab>[] = [
     ...(includeDiscussion

@@ -7,6 +7,14 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.4 — 2026-08-27
+
+- Linear milestones now organize work inside each project across Issues, Trees, and Reviews, with collapsible sections, target dates, and clean graph boundaries. Projects that do not use milestones stay uncluttered.
+- Linear subtasks now appear as nested rows in Issues and as dependencies of their parent task in the graph, readiness checks, and issue details.
+- Reviews now show stacked pull requests as parent and child branches, and the resizable detail sidebar keeps the main diff and all actions visible at compact widths.
+- Agent setup now treats Claude Code and Codex independently: either provider can be used on its own, installed providers report setup problems inline, and new installs default to Claude Code.
+- Fixed Codex helper drafts, per-workflow model selection, queued-ticket highlighting, the hidden Dev terminal launch path, and Trees milestone metadata loading.
+
 ## 0.1.4-beta.6 — 2026-08-26
 
 - Linear milestones now organize work inside each project across Issues, Trees, and Reviews, following Linear's own milestone order and target dates.

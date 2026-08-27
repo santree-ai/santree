@@ -216,9 +216,9 @@ function PrPane({
   const { data: configuredAgent } = useResolvedSetting(repo, REVIEW_AGENT_KEY);
   const claudeReady = !!useAgentAuth("Claude").data?.connected;
   const codexHealth = useCodexHealth();
-  const codexAccount = useCodexAccount();
+  const codexAccount = useCodexAccount(codexHealth.data?.available === true);
   const codexReady = !!codexHealth.data?.available && !!codexAccount.data?.connected;
-  const defaultAgent = (configuredAgent as AgentKind | null) ?? "Codex";
+  const defaultAgent = (configuredAgent as AgentKind | null) ?? "Claude";
   const termKey = aiReviewTermKey(pr);
   const { data: storedProviders = [] } = useSessionProviders(repo, termKey);
   const providers = REVIEW_AGENTS.filter(

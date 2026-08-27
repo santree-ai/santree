@@ -192,7 +192,7 @@ pub fn default_settings() -> Settings {
         model: model.into(),
     };
     Settings {
-        default_agent: AgentKind::Codex,
+        default_agent: AgentKind::Claude,
         integrations: Integrations {
             linear: true,
             triage: true,
@@ -211,6 +211,11 @@ pub fn default_settings() -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_installs_default_to_claude_code() {
+        assert_eq!(default_settings().default_agent, AgentKind::Claude);
+    }
 
     /// Resolve a model id exactly as `src-tauri`'s `PriceTable::lookup` does — the
     /// longest key that is a substring of the lowercased id wins. Mirrored here so

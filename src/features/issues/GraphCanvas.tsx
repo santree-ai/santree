@@ -28,13 +28,15 @@ import { useApp } from "../../state/AppContext";
 import { alpha, PROJECT_FALLBACK, palette, statusColor, statusLabel } from "../../theme/colors";
 import { IssueNode, type IssueNodeData } from "./IssueNode";
 import { layoutGraph } from "./layout";
+import { MilestoneNode, type MilestoneNodeData } from "./MilestoneNode";
 import { deriveIssueState, useIssueHover, useIssues } from "./model";
 import { ProjectNode, type ProjectNodeData } from "./ProjectNode";
 
-const nodeTypes = { issue: IssueNode, project: ProjectNode };
+const nodeTypes = { issue: IssueNode, project: ProjectNode, milestone: MilestoneNode };
 
 type IssueRFNode = Node<IssueNodeData, "issue">;
 type ProjectRFNode = Node<ProjectNodeData, "project">;
+type MilestoneRFNode = Node<MilestoneNodeData, "milestone">;
 
 function Flow() {
   const {
@@ -66,9 +68,9 @@ function Flow() {
   );
   const visibleIds = useMemo(() => new Set(visibleTasks.map((t) => t.id)), [visibleTasks]);
 
-  const { pos, boxes } = useMemo(() => layoutGraph(visibleTasks), [visibleTasks]);
+  const { pos, boxes, milestoneBoxes } = useMemo(() => layoutGraph(visibleTasks), [visibleTasks]);
 
-  const nodes = useMemo<(IssueRFNode | ProjectRFNode)[]>(() => {
+  const nodes = useMemo<(IssueRFNode | ProjectRFNode | MilestoneRFNode)[]>(() => {
     const projectNodes: ProjectRFNode[] = boxes.map((b) => {
       const meta = projectMeta.get(b.project);
       return {
@@ -92,6 +94,28 @@ function Flow() {
       };
     });
 
+    const milestoneNodes: MilestoneRFNode[] = milestoneBoxes.map((box) => {
+      const meta = projectMeta.get(box.project);
+      return {
+        id: `milestone:${box.project.length}:${box.project}:${box.key}`,
+        type: "milestone",
+        position: { x: box.x, y: box.y },
+        draggable: false,
+        selectable: false,
+        focusable: false,
+        zIndex: 1,
+        data: {
+          label: box.label,
+          targetDate: box.targetDate,
+          width: box.width,
+          height: box.height,
+          color: meta?.color ?? PROJECT_FALLBACK,
+          count: box.count,
+          dim: focusProject !== null && focusProject !== box.project,
+        },
+      };
+    });
+
     const issueNodes: IssueRFNode[] = visibleTasks.map((t) => {
       const grayed = !t.actionable;
       // NB: `hasWorktree` is intentionally NOT passed here — the graph reads
@@ -111,7 +135,7 @@ function Flow() {
         type: "issue",
         position: p,
         draggable: false,
-        zIndex: 1,
+        zIndex: 2,
         data: {
           title: t.title,
           statusColor: statusColor[t.status],
@@ -127,8 +151,8 @@ function Flow() {
       };
     });
 
-    return [...projectNodes, ...issueNodes];
-  }, [visibleTasks, boxes, projectMeta, pos, selected, focusProject, baseFor]);
+    return [...projectNodes, ...milestoneNodes, ...issueNodes];
+  }, [visibleTasks, boxes, milestoneBoxes, projectMeta, pos, selected, focusProject, baseFor]);
 
   const edges = useMemo<Edge[]>(() => {
     const list: Edge[] = [];
@@ -211,6 +235,8 @@ function Flow() {
     () => (e, node) => {
       if (node.type === "project") {
         toggleProjectFocus((node.data as ProjectNodeData).project);
+      } else if (node.type === "milestone") {
+        return;
       } else if (e.metaKey || e.ctrlKey) {
         // ⌘/Ctrl-click adds the ticket to the launch queue (same as the sidebar
         // checkbox / the pane's "Add to queue" button).
@@ -227,7 +253,7 @@ function Flow() {
   // the selected issue (the right panel) or pans the canvas.
   const onNodeMouseEnter = useMemo<NodeMouseHandler>(
     () => (_e, node) => {
-      if (node.type === "project") return;
+      if (node.type === "project" || node.type === "milestone") return;
       setHover(node.id);
       prefetchOnHover(node.id);
     },
@@ -299,7 +325,9 @@ function Flow() {
         nodeColor={(n) =>
           n.type === "project"
             ? alpha(14, (n.data as ProjectNodeData).color)
-            : (((n.data as IssueNodeData)?.statusColor as string) ?? "var(--color-line-3)")
+            : n.type === "milestone"
+              ? alpha(22, (n.data as MilestoneNodeData).color)
+              : (((n.data as IssueNodeData)?.statusColor as string) ?? "var(--color-line-3)")
         }
       />
     </ReactFlow>

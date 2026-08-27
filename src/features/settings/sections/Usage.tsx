@@ -20,6 +20,7 @@ import { formatCompact, formatUsd } from "../../../lib/format";
 import {
   useClaudeUsage,
   useCodexAccount,
+  useCodexHealth,
   useCodexRateLimits,
   useUsageProgress,
 } from "../../../lib/queries";
@@ -131,14 +132,26 @@ function formatCodexWindow(window: CodexRateLimitWindow | null): string {
 }
 
 function CodexUsagePanel() {
-  const account = useCodexAccount();
-  const limits = useCodexRateLimits();
+  const health = useCodexHealth();
+  const account = useCodexAccount(health.data?.available === true);
+  const limits = useCodexRateLimits(account.data?.connected === true);
 
-  if (account.isLoading || limits.isLoading) {
+  if (health.isLoading || account.isLoading || limits.isLoading) {
     return (
       <div className="flex justify-center py-12">
         <TerminalActivity label="Reading usage…" />
       </div>
+    );
+  }
+  if (!health.data?.available) {
+    return (
+      <EmptyState
+        className="py-10"
+        title="Codex isn't available."
+        subtitle={
+          health.data?.error || "Install Codex or set its executable path in Settings → Agents."
+        }
+      />
     );
   }
   if (!account.data?.connected) {
@@ -146,7 +159,10 @@ function CodexUsagePanel() {
       <EmptyState
         className="py-10"
         title="Codex isn't connected."
-        subtitle="Connect Codex in Settings → Agents → Codex to see its current usage limits."
+        subtitle={
+          account.error?.message ||
+          "Connect Codex in Settings → Agents → Codex to see its current usage limits."
+        }
       />
     );
   }

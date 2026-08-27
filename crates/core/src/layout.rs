@@ -135,6 +135,7 @@ mod tests {
             project_icon: None,
             project_target_date: None,
             project_milestone: None,
+            parent_id: None,
             status: TaskStatus::Todo,
             ready: blocked_by.is_empty(),
             blocked_by: blocked_by.iter().map(|s| (*s).into()).collect(),

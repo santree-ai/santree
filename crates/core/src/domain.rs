@@ -437,6 +437,8 @@ pub struct Task {
     pub project_target_date: Option<String>,
     /// The issue's milestone inside its project, when assigned.
     pub project_milestone: Option<ProjectMilestoneRef>,
+    /// Linear identifier of this issue's parent, when this is a subtask.
+    pub parent_id: Option<String>,
     pub status: TaskStatus,
     pub ready: bool,
     pub blocked_by: Vec<String>,

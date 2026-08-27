@@ -9,9 +9,10 @@ import { Button, Dot, ProjectGlyph } from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import {
   groupByMilestone,
-  MilestoneDueDate,
   type MilestoneGroup,
+  MilestoneHeading,
   ProjectDueDate,
+  showMilestoneGroups,
 } from "../../components/WorkSignals";
 import { usePrefetchOnHover } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
@@ -33,6 +34,35 @@ interface Group {
   targetDate: string | null;
   rowCount: number;
   milestones: MilestoneGroup<IssueRowVM>[];
+}
+
+const MAX_SUBTASK_DEPTH = 3;
+
+/** Keep each subtask immediately under its parent. Missing/cross-milestone
+ * parents render flat, and malformed cycles cannot hide or loop any task. */
+export function stackTasks(list: Task[]): { task: Task; depth: number }[] {
+  const ids = new Set(list.map((task) => task.id));
+  const children = new Map<string, Task[]>();
+  const roots: Task[] = [];
+  for (const task of list) {
+    if (task.parentId && task.parentId !== task.id && ids.has(task.parentId)) {
+      children.set(task.parentId, [...(children.get(task.parentId) ?? []), task]);
+    } else {
+      roots.push(task);
+    }
+  }
+
+  const result: { task: Task; depth: number }[] = [];
+  const seen = new Set<string>();
+  const walk = (task: Task, depth: number) => {
+    if (seen.has(task.id)) return;
+    seen.add(task.id);
+    result.push({ task, depth: Math.min(depth, MAX_SUBTASK_DEPTH) });
+    for (const child of children.get(task.id) ?? []) walk(child, depth + 1);
+  };
+  for (const root of roots) walk(root, 0);
+  for (const task of list) walk(task, 0);
+  return result;
 }
 
 /** The Issues rail only contains the viewer's actionable queue. Projects retain
@@ -76,6 +106,7 @@ export function IssueSidebar() {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const toggleCollapsed = (project: string) =>
     setCollapsed((c) => ({ ...c, [project]: !c[project] }));
+  const milestoneKey = (project: string, milestone: string) => `milestone:${project}:${milestone}`;
   // ⌘/Ctrl+click a chevron collapses or expands *every* project at once.
   const setAllCollapsed = (value: boolean) =>
     setCollapsed(Object.fromEntries(groups.map((g) => [g.project, value])));
@@ -94,7 +125,7 @@ export function IssueSidebar() {
     return groupTasksForSidebar(tasks).map(({ project, milestones }) => {
       const mappedMilestones = milestones.map((milestone) => ({
         ...milestone,
-        items: milestone.items.map<IssueRowVM>((t) => {
+        items: stackTasks(milestone.items).map<IssueRowVM>(({ task: t, depth }) => {
           const hasWorktree = worktreeIds.has(t.id);
           const st = deriveIssueState(t, {
             selected: !!selected[t.id],
@@ -120,6 +151,7 @@ export function IssueSidebar() {
             statusColor: statusColor[t.status],
             priority: t.priority,
             estimate: t.estimate,
+            depth,
             active: isFocused,
             selectable,
             selected: st.selected,
@@ -230,18 +262,24 @@ export function IssueSidebar() {
                 </button>
               </div>
               {!isCollapsed &&
-                g.milestones.map((milestone) => (
-                  <div key={milestone.key}>
-                    <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-1 font-mono text-[9px] tracking-[.05em] text-muted-4 uppercase">
-                      <span className="truncate">{milestone.label}</span>
-                      <span>{milestone.items.length}</span>
-                      <MilestoneDueDate date={milestone.targetDate} />
-                    </div>
-                    {milestone.items.map((vm) => (
-                      <IssueRow key={vm.id} vm={vm} />
-                    ))}
-                  </div>
-                ))}
+                (showMilestoneGroups(g.milestones)
+                  ? g.milestones.map((milestone) => {
+                      const key = milestoneKey(g.project, milestone.key);
+                      const open = !collapsed[key];
+                      return (
+                        <div key={milestone.key}>
+                          <MilestoneHeading
+                            label={milestone.label}
+                            count={milestone.items.length}
+                            targetDate={milestone.targetDate}
+                            open={open}
+                            onToggle={() => toggleCollapsed(key)}
+                          />
+                          {open && milestone.items.map((vm) => <IssueRow key={vm.id} vm={vm} />)}
+                        </div>
+                      );
+                    })
+                  : g.milestones[0]?.items.map((vm) => <IssueRow key={vm.id} vm={vm} />))}
             </div>
           );
         })}

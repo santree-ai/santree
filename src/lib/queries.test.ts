@@ -17,6 +17,7 @@ import type {
 const git = vi.hoisted(() => ({
   ok: vi.fn(async () => ({ status: "ok" as const, data: "main" })),
 }));
+const codex = vi.hoisted(() => ({ account: vi.fn() }));
 // Captures the worktreeChanged handler so watcher tests can fire events at it.
 const watcher = vi.hoisted(() => ({
   handler: undefined as ((e: { payload: { issueId: string } }) => void) | undefined,
@@ -27,6 +28,7 @@ vi.mock("../bindings", () => ({
     pushWorktree: git.ok,
     pullRemoteWorktree: git.ok,
     updateBaseBranch: git.ok,
+    codexAccount: codex.account,
     watchWorktrees: vi.fn(async () => ({ status: "ok" as const, data: null })),
   },
   events: {
@@ -50,6 +52,7 @@ import {
   queryKeys,
   resolveHelperAgent,
   reviewAwaitingCount,
+  useCodexAccount,
   useCommitWorktree,
   useOptimisticMutation,
   usePullRemoteWorktree,
@@ -96,11 +99,23 @@ describe("resolveHelperAgent", () => {
   it("falls back through Work and the app default", () => {
     expect(resolveHelperAgent(null, "Claude", "Codex")).toBe("Claude");
     expect(resolveHelperAgent(null, null, "Claude")).toBe("Claude");
-    expect(resolveHelperAgent(null, null, null)).toBe("Codex");
+    expect(resolveHelperAgent(null, null, null)).toBe("Claude");
   });
 
   it("does not render an unknown stored provider", () => {
     expect(resolveHelperAgent("Unknown", "Claude", "Codex")).toBe("Claude");
+  });
+});
+
+describe("optional provider discovery", () => {
+  it("does not query an unavailable Codex provider and keeps discovery errors inline", () => {
+    const qc = makeClient();
+    renderHook(() => useCodexAccount(false), { wrapper: wrapper(qc) });
+
+    expect(codex.account).not.toHaveBeenCalled();
+    expect(qc.getQueryCache().find({ queryKey: queryKeys.codexAccount })?.meta).toEqual({
+      silent: true,
+    });
   });
 });
 

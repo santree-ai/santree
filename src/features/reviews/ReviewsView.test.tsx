@@ -171,6 +171,16 @@ describe("ReviewsSidebarView", () => {
     const rows = [...container.querySelectorAll<HTMLElement>("[data-pr-id]")];
     expect(rows.map((row) => row.dataset.prId)).toEqual(["parent", "child"]);
     expect(rows.map((row) => row.dataset.stackDepth)).toEqual(["0", "1"]);
+
+    const milestoneHeading = screen.getByRole("button", { name: "Collapse milestone Beta" });
+    expect(milestoneHeading).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(milestoneHeading);
+    expect(screen.queryByText("Parent PR")).not.toBeInTheDocument();
+    expect(screen.queryByText("Child PR")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Expand milestone Beta" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
   });
 
   it("orders My PRs, direct requests, then every team", () => {

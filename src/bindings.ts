@@ -2401,6 +2401,8 @@ export type Task = {
 	projectTargetDate: string | null,
 	/**  The issue's milestone inside its project, when assigned. */
 	projectMilestone: ProjectMilestoneRef | null,
+	/**  Linear identifier of this issue's parent, when this is a subtask. */
+	parentId: string | null,
 	status: TaskStatus,
 	ready: boolean,
 	blockedBy: string[],

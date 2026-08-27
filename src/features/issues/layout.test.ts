@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import type { Task } from "../../bindings";
 import { layoutGraph, NODE_H, NODE_W } from "./layout";
 
+function milestone(id: string, sortOrder: number) {
+  return { id, name: `Milestone ${id}`, targetDate: null, sortOrder };
+}
+
 /** Minimal Task fixture — only the fields layoutGraph reads vary across cases. */
 function task(overrides: Partial<Task> = {}): Task {
   return {
@@ -15,6 +19,7 @@ function task(overrides: Partial<Task> = {}): Task {
     projectIcon: null,
     projectTargetDate: null,
     projectMilestone: null,
+    parentId: null,
     status: "Todo",
     ready: true,
     blockedBy: [],
@@ -34,9 +39,62 @@ function vSpan(box: { y: number; height: number }): [number, number] {
 
 describe("layoutGraph", () => {
   it("returns an empty layout for no tasks", () => {
-    const { pos, boxes } = layoutGraph([]);
+    const { pos, boxes, milestoneBoxes } = layoutGraph([]);
     expect(pos.size).toBe(0);
     expect(boxes).toEqual([]);
+    expect(milestoneBoxes).toEqual([]);
+  });
+
+  it("nests each task inside a non-overlapping milestone band", () => {
+    const tasks = [
+      task({ id: "A-1", project: "Alpha", projectMilestone: milestone("now", 0) }),
+      task({
+        id: "A-2",
+        project: "Alpha",
+        projectMilestone: milestone("now", 0),
+        blockedBy: ["A-1"],
+      }),
+      task({ id: "A-3", project: "Alpha", projectMilestone: milestone("next", 1) }),
+      task({ id: "A-4", project: "Alpha", projectMilestone: null }),
+    ];
+    const { pos, boxes, milestoneBoxes } = layoutGraph(tasks);
+
+    expect(milestoneBoxes.map((box) => box.key)).toEqual(["now", "next", "No milestone"]);
+    const projectBox = boxes[0];
+    for (const box of milestoneBoxes) {
+      expect(box.x).toBeGreaterThanOrEqual(projectBox.x);
+      expect(box.y).toBeGreaterThanOrEqual(projectBox.y);
+      expect(box.x + box.width).toBeLessThanOrEqual(projectBox.x + projectBox.width);
+      expect(box.y + box.height).toBeLessThanOrEqual(projectBox.y + projectBox.height);
+    }
+    for (let index = 0; index < milestoneBoxes.length - 1; index++) {
+      expect(milestoneBoxes[index + 1].y).toBeGreaterThan(
+        milestoneBoxes[index].y + milestoneBoxes[index].height,
+      );
+    }
+    for (const current of tasks) {
+      const box = milestoneBoxes.find(
+        (candidate) => candidate.key === (current.projectMilestone?.id ?? "No milestone"),
+      );
+      const point = pos.get(current.id);
+      expect(box).toBeDefined();
+      expect(point).toBeDefined();
+      if (!box || !point) continue;
+      expect(point.x).toBeGreaterThanOrEqual(box.x);
+      expect(point.y).toBeGreaterThanOrEqual(box.y);
+      expect(point.x + NODE_W).toBeLessThanOrEqual(box.x + box.width);
+      expect(point.y + NODE_H).toBeLessThanOrEqual(box.y + box.height);
+    }
+  });
+
+  it("keeps cross-milestone dependencies visible without merging their layouts", () => {
+    const tasks = [
+      task({ id: "A-1", projectMilestone: milestone("one", 0) }),
+      task({ id: "A-2", projectMilestone: milestone("two", 1), blockedBy: ["A-1"] }),
+    ];
+    const { milestoneBoxes, pos } = layoutGraph(tasks);
+    expect(milestoneBoxes.map((box) => box.key)).toEqual(["one", "two"]);
+    expect(pos.get("A-1")?.y).toBeLessThan(pos.get("A-2")?.y ?? 0);
   });
 
   it("positions every node inside its own project band's bounding box", () => {
@@ -66,6 +124,14 @@ describe("layoutGraph", () => {
       expect(p.x + NODE_W).toBeLessThanOrEqual(box.x + box.width);
       expect(p.y + NODE_H).toBeLessThanOrEqual(box.y + box.height);
     }
+  });
+
+  it("omits a milestone band when every task in a project is unassigned", () => {
+    const tasks = [task({ id: "A-1" }), task({ id: "A-2", blockedBy: ["A-1"] })];
+    const { boxes, milestoneBoxes, pos } = layoutGraph(tasks);
+    expect(boxes).toHaveLength(1);
+    expect(milestoneBoxes).toEqual([]);
+    expect(pos.get("A-1")?.x).toBeLessThan(pos.get("A-2")?.x ?? 0);
   });
 
   it("stacks project bands without vertical overlap", () => {
@@ -128,5 +194,6 @@ describe("layoutGraph", () => {
     const second = layoutGraph(tasks);
     expect(Array.from(first.pos.entries())).toEqual(Array.from(second.pos.entries()));
     expect(first.boxes).toEqual(second.boxes);
+    expect(first.milestoneBoxes).toEqual(second.milestoneBoxes);
   });
 });

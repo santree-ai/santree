@@ -3,6 +3,7 @@
  * project's delivery horizon. */
 import type { Priority, ProjectMilestoneRef } from "../bindings";
 import { priorityColor, prSizeColor } from "../theme/colors";
+import { ChevronDownIcon, ChevronRightIcon } from "./icons";
 
 export const NO_MILESTONE = "No milestone";
 
@@ -45,6 +46,12 @@ export function groupByMilestone<T>(
       a.sortOrder - b.sortOrder || a.label.localeCompare(b.label) || a.key.localeCompare(b.key)
     );
   });
+}
+
+/** A lone unassigned bucket conveys no structure. Keep it only when it contrasts
+ * with at least one real milestone in the same project. */
+export function showMilestoneGroups(groups: { key: string }[]): boolean {
+  return groups.length !== 1 || groups[0]?.key !== NO_MILESTONE;
 }
 
 export type ChangeSize = "XS" | "S" | "M" | "L" | "XL";
@@ -202,6 +209,37 @@ export function ProjectDueDate({ date }: { date: string | null | undefined }) {
 
 export function MilestoneDueDate({ date }: { date: string | null | undefined }) {
   return <DueDateSignal date={date} noun="Milestone target date" />;
+}
+
+/** Shared folding heading for the milestone level used by all three work rails. */
+export function MilestoneHeading({
+  label,
+  count,
+  targetDate,
+  open,
+  onToggle,
+}: {
+  label: string;
+  count: number;
+  targetDate: string | null | undefined;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const Chevron = open ? ChevronDownIcon : ChevronRightIcon;
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      aria-label={`${open ? "Collapse" : "Expand"} milestone ${label}`}
+      className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2 pt-1.5 pb-1 text-left font-mono text-[9px] tracking-[.05em] text-muted-4 uppercase transition-colors hover:bg-hover hover:text-fg-2 focus-visible:outline-2 focus-visible:outline-[color:var(--accent)]"
+    >
+      <Chevron size={9} className="flex-none" />
+      <span className="truncate">{label}</span>
+      <span>{count}</span>
+      <MilestoneDueDate date={targetDate} />
+    </button>
+  );
 }
 
 export function IssueDueDate({ date }: { date: string | null | undefined }) {

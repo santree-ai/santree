@@ -190,8 +190,8 @@ function NewTabMenu({
   close: () => void;
 }) {
   const claude = useAgentAuth("Claude").data;
-  const codexAccount = useCodexAccount().data;
   const codexHealth = useCodexHealth().data;
+  const codexAccount = useCodexAccount(codexHealth?.available === true).data;
   const codexReady = !!codexHealth?.available && !!codexAccount?.connected;
   const claudeReady = !!claude?.connected;
   const add = (kind: TabKind, agentKind?: AgentKind) => {

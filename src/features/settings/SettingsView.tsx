@@ -124,7 +124,7 @@ const APP_NAV: NavNode[] = [
   },
   {
     key: "agents",
-    label: "Provider setup",
+    label: "Agents",
     icon: <AgentsIcon size={ICON_SIZE} />,
     render: () => <AgentsSection />,
   },

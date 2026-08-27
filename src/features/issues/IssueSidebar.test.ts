@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ProjectMilestoneRef, Task } from "../../bindings";
-import { groupTasksForSidebar } from "./IssueSidebar";
+import { groupTasksForSidebar, stackTasks } from "./IssueSidebar";
 
 const milestone = (id: string, sortOrder: number): ProjectMilestoneRef => ({
   id,
@@ -23,6 +23,7 @@ function task(id: string, project: string, projectMilestone: ProjectMilestoneRef
     projectIcon: null,
     projectTargetDate: null,
     status: "Todo",
+    parentId: null,
     ready: true,
     blockedBy: [],
     assignee: null,
@@ -56,5 +57,26 @@ describe("groupTasksForSidebar", () => {
   it("omits non-actionable tasks without producing empty groups", () => {
     const hidden = { ...task("AK-2", "Hidden", null), actionable: false };
     expect(groupTasksForSidebar([task("AK-1", "Visible", null), hidden])).toHaveLength(1);
+  });
+
+  it("places subtasks immediately after their parent with bounded nesting", () => {
+    const parent = task("AK-1", "Project", null);
+    const child = { ...task("AK-2", "Project", null), parentId: "AK-1" };
+    const grandchild = { ...task("AK-3", "Project", null), parentId: "AK-2" };
+    const sibling = task("AK-4", "Project", null);
+
+    expect(
+      stackTasks([child, sibling, grandchild, parent]).map(({ task, depth }) => [task.id, depth]),
+    ).toEqual([
+      ["AK-4", 0],
+      ["AK-1", 0],
+      ["AK-2", 1],
+      ["AK-3", 2],
+    ]);
+  });
+
+  it("renders a subtask flat when its parent is outside the milestone", () => {
+    const child = { ...task("AK-2", "Project", null), parentId: "AK-1" };
+    expect(stackTasks([child])).toEqual([{ task: child, depth: 0 }]);
   });
 });

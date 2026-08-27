@@ -40,9 +40,10 @@ import {
 } from "../../components/primitives";
 import {
   ChangeSizeBars,
-  MilestoneDueDate,
+  MilestoneHeading,
   PriorityBars,
   ProjectDueDate,
+  showMilestoneGroups,
 } from "../../components/WorkSignals";
 import { useMergeQueue } from "../../lib/queries";
 import {
@@ -438,12 +439,15 @@ function FlatSections({
         >
           {grouping === "project" ? (
             <MilestoneSections
+              scope={`flat:project:${group.key}`}
               prs={group.prs}
               ticketFor={ticketFor}
               activeId={activeId}
               onSelect={onSelect}
               showRepo
               directIds={directIds}
+              collapsed={collapsed}
+              onToggle={onToggle}
             />
           ) : (
             <StackedRows
@@ -575,11 +579,14 @@ function ProjectSections({
         </button>
         {open && (
           <MilestoneSections
+            scope={key}
             prs={group.prs}
             ticketFor={ticketFor}
             activeId={activeId}
             onSelect={onSelect}
             showRepo={showRepo}
+            collapsed={collapsed}
+            onToggle={onToggle}
           />
         )}
       </div>
@@ -666,40 +673,64 @@ function StackConnector({ depth }: { depth: number }) {
 }
 
 function MilestoneSections({
+  scope,
   prs,
   ticketFor,
   activeId,
   onSelect,
   showRepo,
   directIds,
+  collapsed,
+  onToggle,
 }: {
+  scope: string;
   prs: ReviewPr[];
   ticketFor: (pr: ReviewPr) => TicketRef | undefined;
   activeId: string | null;
   onSelect: (id: string) => void;
   showRepo: boolean;
   directIds?: Set<string>;
+  collapsed: Set<string>;
+  onToggle: (key: string) => void;
 }) {
-  return groupPrsByMilestone(prs, ticketFor).map((milestone) => (
-    <div key={milestone.key} className="mb-2">
-      <div className="flex items-center gap-1.5 px-2 pt-0.5 pb-1 font-mono text-[9px] tracking-[.04em] text-muted-4 uppercase">
-        <span
-          aria-hidden
-          className="h-1.5 w-1.5 flex-none rotate-45 rounded-[1px] border border-current"
-        />
-        <span className="truncate">{milestone.label}</span>
-        <MilestoneDueDate date={milestone.targetDate} />
-      </div>
+  const milestones = groupPrsByMilestone(prs, ticketFor);
+  if (!showMilestoneGroups(milestones)) {
+    return (
       <StackedRows
-        prs={milestone.prs}
+        prs={milestones[0]?.prs ?? []}
         ticketFor={ticketFor}
         activeId={activeId}
         onSelect={onSelect}
         showRepo={showRepo}
         directIds={directIds}
       />
-    </div>
-  ));
+    );
+  }
+  return milestones.map((milestone) => {
+    const key = `milestone:${scope}:${milestone.key}`;
+    const open = !collapsed.has(key);
+    return (
+      <div key={milestone.key} className="mb-2">
+        <MilestoneHeading
+          label={milestone.label}
+          count={milestone.prs.length}
+          targetDate={milestone.targetDate}
+          open={open}
+          onToggle={() => onToggle(key)}
+        />
+        {open && (
+          <StackedRows
+            prs={milestone.prs}
+            ticketFor={ticketFor}
+            activeId={activeId}
+            onSelect={onSelect}
+            showRepo={showRepo}
+            directIds={directIds}
+          />
+        )}
+      </div>
+    );
+  });
 }
 
 function StackedRows({
