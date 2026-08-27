@@ -73,7 +73,7 @@ function TreesContent() {
  * while keeping recent work one click away instead of spending the largest pane
  * in the app on a generic empty message. */
 function WorkspaceLaunchSurface() {
-  const { worktrees, baseWorktree, setActive } = useTrees();
+  const { worktrees, baseWorktree, baseLoading, setActive } = useTrees();
   const recent = worktrees.filter((worktree) => !worktree.pending).slice(0, 4);
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-10">
@@ -95,7 +95,7 @@ function WorkspaceLaunchSurface() {
         </div>
 
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {baseWorktree && (
+          {baseWorktree ? (
             <button
               type="button"
               onClick={() => setActive(BASE_ID)}
@@ -111,7 +111,11 @@ function WorkspaceLaunchSurface() {
                 </span>
               </span>
             </button>
-          )}
+          ) : baseLoading ? (
+            <div className="entity-card flex min-h-14 items-center justify-center p-3">
+              <TerminalActivity label="Loading base workspace…" />
+            </div>
+          ) : null}
           {recent.map((worktree) => (
             <button
               key={worktree.id}
@@ -409,9 +413,10 @@ function AgentTabPane({
   worktree: Worktree;
   tab: WorktreeTab;
 }) {
-  const { fixCiPromptFor } = useTrees();
+  const { fixCiLaunchFor } = useTrees();
   const fixCi = tab.kind === "fixCi";
-  const promptPath = fixCiPromptFor(tab.id);
+  const launch = fixCiLaunchFor(tab.id);
+  const promptPath = launch?.promptPath;
 
   const { ended, preparing, seed, resume, onExited } = useAgentTab({
     repo,
@@ -421,6 +426,8 @@ function AgentTabPane({
     // An agent tab exists to run the agent, so any (re)open is an explicit launch.
     allowFresh: true,
     noGit: fixCi,
+    settingsPath: launch?.settingsPath,
+    mcpConfigPath: launch?.mcpConfigPath,
     // A plain agent tab has no opening prompt (the user starts the conversation).
     // Fix-CI seeds the short "read the file" line — the CI log is far too large to
     // type into the PTY (same reason the work prompt seeds a path).

@@ -13,6 +13,8 @@ import { ReviewDraftCard } from "./ReviewDraftCard";
 const spies = vi.hoisted(() => ({ update: vi.fn(), remove: vi.fn(), publish: vi.fn() }));
 
 vi.mock("../../lib/queries", () => ({
+  useReviewWorkItems: () => ({ data: [] }),
+  useAddReviewWorkItem: () => ({ mutate: vi.fn(), isPending: false }),
   useUpdateReviewDraft: () => ({ mutate: spies.update, isPending: false }),
   useDeleteReviewDraft: () => ({ mutate: spies.remove, isPending: false }),
   usePublishReviewDrafts: () => ({ mutate: spies.publish, isPending: false }),

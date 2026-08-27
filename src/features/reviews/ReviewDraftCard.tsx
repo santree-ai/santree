@@ -15,14 +15,16 @@
 import { useState } from "react";
 
 import type { ReviewDraft } from "../../bindings";
-import { AgentIcon, PencilIcon, TrashIcon } from "../../components/icons";
+import { AgentIcon, PencilIcon, PlusIcon, TrashIcon } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
 import { Button, Pill } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
 import { SuggestionOriginal } from "../../components/Suggestion";
 import {
+  useAddReviewWorkItem,
   useDeleteReviewDraft,
   usePublishReviewDrafts,
+  useReviewWorkItems,
   useUpdateReviewDraft,
 } from "../../lib/queries";
 import { palette } from "../../theme/colors";
@@ -55,6 +57,11 @@ export function ReviewDraftCard({
   const update = useUpdateReviewDraft(target.prRepo, target.number);
   const remove = useDeleteReviewDraft(target.prRepo, target.number);
   const publish = usePublishReviewDrafts(target.prRepo, target.number);
+  const { data: workItems } = useReviewWorkItems(target.prRepo, target.number);
+  const addWorkItem = useAddReviewWorkItem(target.prRepo, target.number);
+  const inWorklist = workItems?.some(
+    (item) => item.source === "aiDraft" && item.sourceId === draft.id,
+  );
 
   const original =
     patch != null
@@ -135,6 +142,26 @@ export function ReviewDraftCard({
               >
                 <TrashIcon size={10} />
                 Delete
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={inWorklist || addWorkItem.isPending}
+                onClick={() =>
+                  addWorkItem.mutate({
+                    id: crypto.randomUUID(),
+                    body: composeDraftBody(draft),
+                    source: "aiDraft",
+                    sourceId: draft.id,
+                    path: draft.path,
+                    line: draft.line,
+                    startLine: draft.startLine,
+                    onRight: draft.onRight,
+                  })
+                }
+              >
+                <PlusIcon size={10} />
+                {inWorklist ? "In worklist" : "Add to worklist"}
               </Button>
               <Button
                 size="sm"

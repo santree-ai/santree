@@ -56,6 +56,9 @@ export interface AgentTabOptions {
   /** Launch with the commit/push-denying settings file (the Fix-CI variant), so the
    *  agent fixes and validates but leaves committing to the user. */
   noGit?: boolean;
+  /** Explicit restricted settings and MCP config for a source-scoped guided tab. */
+  settingsPath?: string;
+  mcpConfigPath?: string;
 }
 
 export interface AgentTab {
@@ -136,8 +139,12 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
         ? `--effort ${shellQuote(effort.data)}`
         : undefined,
     settingsFlag:
-      provider.capabilities.cliLaunchOptions && hookSettings.data
-        ? `--settings ${shellQuote(hookSettings.data)}`
+      provider.capabilities.cliLaunchOptions && (opts.settingsPath ?? hookSettings.data)
+        ? `--settings ${shellQuote(opts.settingsPath ?? (hookSettings.data as string))}`
+        : undefined,
+    mcpFlag:
+      provider.capabilities.cliLaunchOptions && opts.mcpConfigPath
+        ? `--mcp-config ${shellQuote(opts.mcpConfigPath)}`
         : undefined,
     chrome: provider.capabilities.cliLaunchOptions && startWithChrome.value,
     permissionMode: provider.capabilities.permissionMode

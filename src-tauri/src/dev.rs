@@ -26,6 +26,7 @@ use uuid::Uuid;
 use crate::db::{now_ms, Db};
 use crate::error::CmdResult;
 use crate::git;
+use crate::settings;
 use crate::stream::{self, StreamEvent};
 
 pub(crate) const DEV_REPO_PATH_KEY: &str = "dev_repo_path";
@@ -75,13 +76,16 @@ pub struct DevInfo {
 
 // ── Repo path ──────────────────────────────────────────────────────────────
 
-/// Validate + normalize a picked folder to its git toplevel (the stored dev repo
-/// path). Mirrors `repo::add`'s validation: absolute dir → `git rev-parse
-/// --show-toplevel`, so a subdirectory pick still lands on the repo root.
+/// Validate a picked folder to its git toplevel and persist it as the Dev checkout.
+/// Mirrors `repo::add`'s validation: absolute dir → `git rev-parse --show-toplevel`,
+/// so a subdirectory pick still lands on the repo root. This owns the write because
+/// the generic settings IPC deliberately reserves [`DEV_REPO_PATH_KEY`].
 #[tauri::command]
 #[specta::specta]
-pub async fn dev_normalize_repo(path: String) -> CmdResult<String> {
-    Ok(tokio::task::spawn_blocking(move || repo_root(&path)).await??)
+pub async fn dev_normalize_repo(path: String, db: State<'_, Db>) -> CmdResult<String> {
+    let root = tokio::task::spawn_blocking(move || repo_root(&path)).await??;
+    settings::set(&db, "app", DEV_REPO_PATH_KEY, Some(root.clone())).await?;
+    Ok(root)
 }
 
 /// The validated git toplevel of an IPC-supplied path. Every dev command that

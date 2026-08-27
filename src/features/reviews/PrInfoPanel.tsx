@@ -32,6 +32,7 @@ import { PrThreadCard } from "./PrThreadCard";
 import { ReviewBriefSection } from "./ReviewBriefSection";
 import { ReviewDraftCard } from "./ReviewDraftCard";
 import { ReviewIssuePane } from "./ReviewIssuePane";
+import { ReviewWorklist } from "./ReviewWorklist";
 import { ticketIdFor } from "./ticket";
 
 export type PanelTab = "description" | "issue";
@@ -109,6 +110,7 @@ export function PrInfoPanel({
 
       {tab === "description" && (
         <div className="selectable min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          <ReviewWorklist pr={pr} detail={detail} drafts={drafts ?? []} santreeRepo={santreeRepo} />
           <ReviewBriefSection pr={pr} activeReviewAgent={activeReviewAgent} />
           <SidebarLabel>Description</SidebarLabel>
           <Markdown>{detail?.body?.trim() || "_No description._"}</Markdown>

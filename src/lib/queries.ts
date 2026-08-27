@@ -35,6 +35,8 @@ import type {
   ReviewPr,
   ReviewPublishOutcome,
   ReviewTarget,
+  ReviewWorkItem,
+  ReviewWorkItemSource,
   ScriptInfo,
   SessionState,
   Settings,
@@ -300,6 +302,9 @@ export const queryKeys = {
     ["ai-review-launch", repo, prRepo, number] as const,
   reviewDrafts: (prRepo: string, number: number) => ["review-drafts", prRepo, number] as const,
   reviewDraftsPrefix: ["review-drafts"] as const,
+  reviewWorkItems: (prRepo: string, number: number) =>
+    ["review-work-items", prRepo, number] as const,
+  reviewWorkItemsPrefix: ["review-work-items"] as const,
   mergeQueue: (repo: string) => ["merge-queue", repo] as const,
   prDetail: (owner: string, name: string, number: number) =>
     ["pr-detail", owner, name, number] as const,
@@ -1562,6 +1567,86 @@ export const useReviewDrafts = (prRepo: string, number: number) =>
     { enabled: !!prRepo && number > 0, staleTime: 30_000 },
   );
 
+export const useReviewWorkItems = (prRepo: string, number: number) =>
+  useUnwrappedQuery(
+    queryKeys.reviewWorkItems(prRepo, number),
+    () => commands.reviewWorkItems(prRepo, number),
+    { enabled: !!prRepo && number > 0, staleTime: Number.POSITIVE_INFINITY },
+  );
+
+export interface AddReviewWorkItem {
+  id: string;
+  body: string;
+  source: ReviewWorkItemSource;
+  sourceId: string | null;
+  path: string | null;
+  line: number | null;
+  startLine: number | null;
+  onRight: boolean | null;
+}
+
+export const useAddReviewWorkItem = (prRepo: string, number: number) =>
+  useOptimisticMutation<AddReviewWorkItem, ReviewWorkItem>({
+    mutationKey: ["add-review-work-item", prRepo, number],
+    mutationFn: (item) => unwrap(commands.addReviewWorkItem(prRepo, number, item)),
+    optimistic: (qc, item) =>
+      patchWorkItems(qc, prRepo, number, (items) => [
+        ...items.filter(
+          (candidate) =>
+            !(
+              item.sourceId &&
+              candidate.source === item.source &&
+              candidate.sourceId === item.sourceId
+            ),
+        ),
+        {
+          ...item,
+          prRepo,
+          prNumber: number,
+          done: false,
+          createdAtMs: Date.now(),
+          updatedAtMs: Date.now(),
+        },
+      ]),
+    invalidate: () => [queryKeys.reviewWorkItems(prRepo, number)],
+  });
+
+export const useUpdateReviewWorkItem = (prRepo: string, number: number) =>
+  useOptimisticMutation<{ id: string; body: string; done: boolean }, ReviewWorkItem>({
+    mutationKey: ["update-review-work-item", prRepo, number],
+    mutationFn: ({ id, body, done }) =>
+      unwrap(commands.updateReviewWorkItem(prRepo, number, id, body, done)),
+    optimistic: (qc, update) =>
+      patchWorkItems(qc, prRepo, number, (items) =>
+        items.map((item) =>
+          item.id === update.id ? { ...item, ...update, updatedAtMs: Date.now() } : item,
+        ),
+      ),
+    invalidate: () => [queryKeys.reviewWorkItems(prRepo, number)],
+  });
+
+export const useDeleteReviewWorkItem = (prRepo: string, number: number) =>
+  useOptimisticMutation<string, null>({
+    mutationKey: ["delete-review-work-item", prRepo, number],
+    mutationFn: (id) => unwrap(commands.deleteReviewWorkItem(prRepo, number, id)),
+    optimistic: (qc, id) =>
+      patchWorkItems(qc, prRepo, number, (items) => items.filter((item) => item.id !== id)),
+    invalidate: () => [queryKeys.reviewWorkItems(prRepo, number)],
+  });
+
+function patchWorkItems(
+  qc: QueryClient,
+  prRepo: string,
+  number: number,
+  next: (items: ReviewWorkItem[]) => ReviewWorkItem[],
+) {
+  const key = queryKeys.reviewWorkItems(prRepo, number);
+  const before = qc.getQueryData<ReviewWorkItem[]>(key);
+  if (!before) return;
+  qc.setQueryData(key, next(before));
+  return () => qc.setQueryData(key, before);
+}
+
 /** Save an edit to a draft. Optimistic: it's a local row, so the round-trip is
  *  disk, and waiting on it would make editing feel like posting. */
 export const useUpdateReviewDraft = (prRepo: string, number: number) =>
@@ -1676,6 +1761,7 @@ export const useReviewAiWatcher = () => {
       qc.invalidateQueries({ queryKey: queryKeys.reviewDraftsPrefix });
       qc.invalidateQueries({ queryKey: queryKeys.prReviewBriefPrefix });
       qc.invalidateQueries({ queryKey: queryKeys.reviewsPrefix });
+      qc.invalidateQueries({ queryKey: queryKeys.reviewWorkItemsPrefix });
     });
     return () => {
       void unlisten.then((off) => off());
@@ -3181,10 +3267,11 @@ export const DEV_REPO_PATH_KEY = "dev_repo_path";
 /** The Dev tab exists only for this GitHub login (the only developer for now). */
 export const DEV_GITHUB_LOGIN = "santiagotoscanini";
 
-/** Validate + normalize a picked folder to its git toplevel (errors toast). */
+/** Validate, normalize, and persist a picked folder as the Dev checkout. */
 export const useDevNormalizeRepo = () =>
   useActionMutation<string, string>({
     mutationFn: (path) => unwrap(commands.devNormalizeRepo(path)),
+    invalidate: () => [queryKeys.setting("app", DEV_REPO_PATH_KEY)],
   });
 
 /** Running-build vs checkout-HEAD vs newest-DMG status for the Dev header.

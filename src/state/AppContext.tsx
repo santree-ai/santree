@@ -176,6 +176,12 @@ export interface FixCiLaunch {
   worktreeId: string;
   tabId: string;
   promptPath: string;
+  /** Review-worklist launches use the same guarded tab hand-off but also carry
+   * the MCP authority that lets the agent complete items. */
+  settingsPath?: string;
+  mcpConfigPath?: string;
+  title?: string;
+  agentKind?: AgentKind;
 }
 
 /** Color theme preference. */

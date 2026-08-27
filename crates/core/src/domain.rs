@@ -862,6 +862,66 @@ pub struct ReviewDraft {
     pub updated_at_ms: f64,
 }
 
+/// Where a review work item came from. Source-backed items keep this identity so
+/// the UI and the fixing agent can resolve the latest version of the discussion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum ReviewWorkItemSource {
+    Manual,
+    GithubThread,
+    AiDraft,
+}
+
+impl ReviewWorkItemSource {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::GithubThread => "github_thread",
+            Self::AiDraft => "ai_draft",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Self {
+        match value {
+            "github_thread" => Self::GithubThread,
+            "ai_draft" => Self::AiDraft,
+            _ => Self::Manual,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewWorkItem {
+    pub id: String,
+    pub pr_repo: String,
+    pub pr_number: u32,
+    pub body: String,
+    pub done: bool,
+    pub source: ReviewWorkItemSource,
+    /// GitHub's root review-comment id, or a santree draft id. Absent for manual items.
+    pub source_id: Option<String>,
+    pub path: Option<String>,
+    pub line: Option<u32>,
+    pub start_line: Option<u32>,
+    pub on_right: Option<bool>,
+    pub created_at_ms: f64,
+    pub updated_at_ms: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct NewReviewWorkItem {
+    pub id: String,
+    pub body: String,
+    pub source: ReviewWorkItemSource,
+    pub source_id: Option<String>,
+    pub path: Option<String>,
+    pub line: Option<u32>,
+    pub start_line: Option<u32>,
+    pub on_right: Option<bool>,
+}
+
 fn default_artifact_agent() -> AgentKind {
     AgentKind::Claude
 }

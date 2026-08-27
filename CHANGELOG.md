@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.5-beta.1 — 2026-08-27
+
+- Reviews now includes an editable Improvements worklist for manual notes, GitHub review threads, and local AI comments, with visible source links and file-and-line navigation.
+- Open review improvements can be handed to a guarded Claude session in the PR's Work workspace, using the latest thread context; the agent can mark completed items through PR-scoped Santree tools while commits and pushes remain under user control.
+- Santree's own development checkout is excluded from Usage totals and recent sessions.
+- Work workspace loading now keeps its layout stable and uses a compact terminal-style braille spinner instead of flashing empty content.
+
 ## 0.1.4 — 2026-08-27
 
 - Linear milestones now organize work inside each project across Issues, Trees, and Reviews, with collapsible sections, target dates, and clean graph boundaries. Projects that do not use milestones stay uncluttered.

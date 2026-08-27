@@ -31,7 +31,6 @@ import {
   useDevInstall,
   useDevNormalizeRepo,
   useDevTodoPrompt,
-  useSetSetting,
   useSetting,
 } from "../../lib/queries";
 import { formatRelativeTime, useLiveNow } from "../../lib/relativeTime";
@@ -94,17 +93,15 @@ export function DevView() {
 /** Pick + validate the santree checkout; stores its git toplevel. */
 function useChooseRepo() {
   const normalize = useDevNormalizeRepo();
-  const setSetting = useSetSetting();
   return useCallback(async () => {
     const picked = await openDialog({ directory: true, title: "Choose your santree checkout" });
     if (typeof picked !== "string") return;
     try {
-      const root = await normalize.mutateAsync(picked);
-      setSetting.mutate({ scope: "app", key: DEV_REPO_PATH_KEY, value: root });
+      await normalize.mutateAsync(picked);
     } catch {
       // the mutation's global error toast already fired
     }
-  }, [normalize, setSetting]);
+  }, [normalize]);
 }
 
 /** Centered copy + an action, for panes that have nothing to show yet. */

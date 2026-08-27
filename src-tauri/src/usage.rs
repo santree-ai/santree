@@ -833,6 +833,7 @@ fn aggregate(
 pub fn report(
     table: &PriceTable,
     repos: &[Repo],
+    excluded_root: Option<&str>,
     on_progress: impl Fn(usize, usize),
 ) -> Result<UsageReport> {
     let now = chrono::Local::now().timestamp_millis();
@@ -840,8 +841,15 @@ pub fn report(
     for root in projects_roots() {
         collect_jsonl(&root, &mut paths);
     }
-    let files = load_cached(&paths, on_progress);
+    let mut files = load_cached(&paths, on_progress);
+    if let Some(root) = excluded_root.filter(|root| !root.is_empty()) {
+        files.retain(|file| !cwd_is_within(file.cwd.as_deref(), root));
+    }
     Ok(aggregate(&files, now, table, repos))
+}
+
+fn cwd_is_within(cwd: Option<&str>, root: &str) -> bool {
+    cwd.is_some_and(|cwd| Path::new(cwd).starts_with(Path::new(root)))
 }
 
 // ── Live-refresh watcher (mirrors git_watch.rs) ─────────────────────────────
@@ -1347,6 +1355,18 @@ mod tests {
             resolve_location(Some("/other/thing/.santree/worktrees/X-1"), "-slug", &[]),
             ("thing".into(), Some("X-1".into()))
         );
+    }
+
+    #[test]
+    fn dev_checkout_exclusion_uses_path_boundaries() {
+        let root = "/Users/me/dev/santree-app";
+        assert!(cwd_is_within(Some(root), root));
+        assert!(cwd_is_within(
+            Some("/Users/me/dev/santree-app/src-tauri"),
+            root
+        ));
+        assert!(!cwd_is_within(Some("/Users/me/dev/santree-app-copy"), root));
+        assert!(!cwd_is_within(None, root));
     }
 
     #[test]

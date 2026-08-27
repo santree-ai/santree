@@ -299,8 +299,8 @@ export function Spinner({ size = 11, color = "var(--accent)" }: { size?: number;
   );
 }
 
-/** Six-pixel terminal activity chase for pane-level work. Unlike the compact ring
- *  spinner used inside buttons, this reads as part of the IDE's own language. */
+/** Braille-dot spinner for pane-level work. Unlike the compact ring spinner used
+ * inside buttons, this reads like terminal-native progress. */
 export function TerminalActivity({
   label = "Working…",
   className = "",
@@ -314,11 +314,7 @@ export function TerminalActivity({
       aria-label={label}
       className={`inline-flex items-center gap-2 font-mono text-[10.5px] text-muted-3 ${className}`}
     >
-      <span className="terminal-activity" aria-hidden>
-        {Array.from({ length: 6 }, (_, index) => (
-          <span key={index} style={{ animationDelay: `${index * 110}ms` }} />
-        ))}
-      </span>
+      <span className="terminal-activity" aria-hidden />
       <span>{label}</span>
     </span>
   );

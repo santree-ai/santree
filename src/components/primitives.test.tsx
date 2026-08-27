@@ -5,11 +5,11 @@ import { describe, expect, it } from "vitest";
 import { Dropdown, Segmented, Tabs, TerminalActivity } from "./primitives";
 
 describe("TerminalActivity", () => {
-  it("announces the task and renders the six-dot activity chase", () => {
+  it("announces the task and renders the braille spinner", () => {
     const { container } = render(<TerminalActivity label="Loading diff…" />);
 
     expect(screen.getByRole("status", { name: "Loading diff…" })).toBeInTheDocument();
-    expect(container.querySelectorAll(".terminal-activity > span")).toHaveLength(6);
+    expect(container.querySelector(".terminal-activity")).toBeInTheDocument();
   });
 });
 

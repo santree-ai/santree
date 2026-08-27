@@ -14,6 +14,7 @@ vi.mock("./model", () => ({ useReviewsModel: () => model }));
 
 vi.mock("./ReviewBriefSection", () => ({ ReviewBriefSection: () => <div /> }));
 vi.mock("./ReviewIssuePane", () => ({ ReviewIssuePane: () => <div data-testid="issue-pane" /> }));
+vi.mock("./ReviewWorklist", () => ({ ReviewWorklist: () => <div /> }));
 vi.mock("./PrThreadCard", () => ({ PrThreadCard: () => <div /> }));
 vi.mock("./CommentComposer", () => ({ CommentComposer: () => <div /> }));
 vi.mock("../../components/Markdown", () => ({ Markdown: () => <div /> }));

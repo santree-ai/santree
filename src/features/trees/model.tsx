@@ -45,7 +45,7 @@ import {
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { usePersistedState } from "../../lib/usePersistedState";
 import { useAgentRuns } from "../../state/AgentRuns";
-import { type PendingLaunch, useApp, useAppUi } from "../../state/AppContext";
+import { type FixCiLaunch, type PendingLaunch, useApp, useAppUi } from "../../state/AppContext";
 import { agentLabel } from "../../theme/colors";
 import type { TerminalTab } from "../terminal/orchestrator";
 import { useTerminals } from "../terminal/TerminalsContext";
@@ -269,6 +269,8 @@ interface TreesModel {
   /** True while the first worktrees fetch is in flight (no cached data yet) — so
    *  the view can show a loading state instead of the "no worktrees" empty state. */
   loading: boolean;
+  /** True while the base checkout is loading independently of the worktree list. */
+  baseLoading: boolean;
   /** The base-branch entry (repo root on main/master), or null when the repo has
    *  no local path. Selected via `setActive(BASE_ID)`; not part of `worktrees`. */
   baseWorktree: Worktree | null;
@@ -319,7 +321,7 @@ interface TreesModel {
   /** The on-disk CI-fix prompt file for a Fix-CI tab (from the Reviews "Fix CI
    *  with AI" hand-off), read once by that tab's fresh-launch seed. Undefined once
    *  a session exists on disk (a resume needs no prompt). */
-  fixCiPromptFor: (tabId: string) => string | undefined;
+  fixCiLaunchFor: (tabId: string) => FixCiLaunch | undefined;
 
   /** The worktree the create-PR dialog is open for, or null when closed. */
   prDialogFor: string | null;
@@ -375,7 +377,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // run must survive navigating away from Trees (see AgentRuns).
   const { beginRun, runSetup, isSettingUp, runSetupOnStart, setVisibleWorktree } = useAgentRuns();
   const { data: realWorktrees = [], isLoading: worktreesLoading } = useWorktrees(activeRepo);
-  const { data: baseWorktree = null } = useBaseWorktree(activeRepo);
+  const { data: baseWorktree = null, isLoading: baseWorktreeLoading } = useBaseWorktree(activeRepo);
   const { data: worktreePrs = [] } = useWorktreePrs(activeRepo);
   // Owned here (a stable provider) so optimistic delete's rollback still fires
   // after the deleted worktree's pane/bottom-bar unmounts.
@@ -465,11 +467,9 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const [rightCollapsed, setRightCollapsed] = usePersistedState(RIGHT_COLLAPSED_KEY, false);
   const [rightWidth, setRightWidth] = usePersistedState(RIGHT_WIDTH_KEY, 320);
   const [fileTab, setFileTab] = usePersistedState<FileTab>(FILE_TAB_KEY, "changes");
-  // The on-disk CI-fix prompt file for a Fix-CI tab, keyed by tab id. A transient
-  // hand-off from the Reviews "Fix CI with AI" flow: read once by the Fix-CI tab's
-  // fresh-launch seed (`Read <path> …`). Not persisted — after a restart the tab's
-  // session already exists on disk, so it resumes (no seed needed).
-  const [fixCiPromptByTab, setFixCiPromptByTab] = useState<Record<string, string>>({});
+  // Capability-bearing settings/MCP paths live only in this in-memory hand-off.
+  // Browser storage is user-editable and must never choose files loaded by an agent.
+  const [fixCiLaunchByTab, setFixCiLaunchByTab] = useState<Record<string, FixCiLaunch>>({});
   // Per-worktree main tab + open file, so switching worktrees restores whichever
   // tab/file each one was last on instead of snapping every one back to its Issue
   // tab. A worktree with no entry defaults to Issue (Terminal for the base entry,
@@ -650,13 +650,19 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // Reviews before navigating here.
   useEffect(() => {
     if (!fixCiLaunch) return;
-    const { worktreeId, tabId, promptPath } = fixCiLaunch;
+    const { worktreeId, tabId } = fixCiLaunch;
     if (!worktrees.some((w) => w.id === worktreeId)) return; // wait for the worktree
-    setFixCiPromptByTab((m) => ({ ...m, [tabId]: promptPath }));
+    setFixCiLaunchByTab((m) => ({ ...m, [tabId]: fixCiLaunch }));
     // Idempotent: only persist the row the first time (the effect can re-run
     // before the tabs query refetches the new row).
     if (!(tabsByWt.get(worktreeId) ?? []).some((t) => t.id === tabId)) {
-      addTabRow({ id: tabId, worktreeId, kind: "fixCi", agentKind: "Codex", title: "Fix CI" });
+      addTabRow({
+        id: tabId,
+        worktreeId,
+        kind: "fixCi",
+        agentKind: fixCiLaunch.agentKind ?? "Codex",
+        title: fixCiLaunch.title ?? "Fix CI",
+      });
     }
     select(worktreeId);
     setFileFor(worktreeId, null);
@@ -711,6 +717,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       worktrees,
       prsByWorktree,
       loading: worktreesLoading,
+      baseLoading: baseWorktreeLoading,
       baseWorktree,
       activeId,
       active,
@@ -759,6 +766,12 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       },
       closeTab: (id) => {
         removeTabRow(id);
+        setFixCiLaunchByTab((current) => {
+          if (!(id in current)) return current;
+          const next = { ...current };
+          delete next[id];
+          return next;
+        });
         // If the closed tab was showing, fall back to the primary terminal.
         if (activeTab === extraTab(id)) setTabFor(activeId, "terminal");
       },
@@ -776,7 +789,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       // The on-disk CI-fix prompt file for a Fix-CI tab (from the Reviews hand-off),
       // read once by that tab's fresh-launch seed. Undefined after a restart — the
       // session then resumes instead of re-seeding.
-      fixCiPromptFor: (tabId: string) => fixCiPromptByTab[tabId],
+      fixCiLaunchFor: (tabId: string) => fixCiLaunchByTab[tabId],
       prDialogFor,
       // Opening the dialog supersedes the suggestion bar for that worktree.
       openPrDialog: (id) => {
@@ -837,6 +850,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     worktrees,
     prsByWorktree,
     worktreesLoading,
+    baseWorktreeLoading,
     baseWorktree,
     activeId,
     tabsByWt,
@@ -857,7 +871,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     select,
     startAgent,
     runSetup,
-    fixCiPromptByTab,
+    fixCiLaunchByTab,
     activeRepo,
     prDialogFor,
     prSuggestFor,

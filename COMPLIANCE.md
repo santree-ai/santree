@@ -145,7 +145,8 @@ Exactly what it injects — the whole list, no more:
     user on a PR (`gh pr review/comment/merge/close/edit/ready`, `gh issue comment`,
     and `gh api` wholesale), each in both the prefix and wrapper form, plus the one
     `permissions.allow` rule described below.
-- **In the AI-review flow only**, two more things (see "AI-review MCP server"):
+- **In AI-review and the human-started Address-review flow**, two more things (see
+  "Review MCP server"):
   one `permissions.allow` rule, `mcp__santree-review`, and one extra launch flag,
   `--mcp-config <app_data_dir>/mcp/review-<identity-hash>.mcp.json`, registering a
   single additional stdio MCP server. The user's own MCP servers and settings are
@@ -184,22 +185,25 @@ Reading the session transcript (`hooks.rs`'s reconciler, to tell a resolved prom
 from a live one) is bounded by these same conditions: it is read to *label* the
 session, never to decide what to send it.
 
-## AI-review MCP server — a scoped exception
+## Review MCP server — a scoped exception
 
-The **AI review** session launches with one santree-owned MCP server registered:
+The **AI review** and **Address review** sessions launch with one santree-owned MCP server registered:
 the same bundled `santree-hook` binary in `mcp` mode (`crates/hook/src/mcp.rs`),
-scoped by argv to a single pull request. Its five tools are how that session
-records what it found — a review brief, and draft review comments — and they are
-the only write path it has.
+scoped by argv to a single pull request. Its seven tools record a review brief,
+draft review comments, and completion of saved improvement items. Address review
+is started by the user from the Reviews worklist and runs in the PR worktree; it
+cannot commit or push, leaving those actions in the Work tab's human controls.
 
 This is a **fourth named exception**, and it is the first one that *grants* a
 capability rather than restricting one. It stays inside the line because of the
 following, and any change here must preserve all of them:
 
 - **Nothing it writes leaves the machine.** The server has no network access, no
-  GitHub token, and no `git`. Its tools write two tables in santree's own SQLite
-  (`review_drafts`, `review_briefs`) for the PR named in its argv, and nothing
-  else. A draft becomes a real comment only when the user clicks Publish, which
+  GitHub token, and no `git`. Its tools write three tables in santree's own SQLite
+  (`review_drafts`, `review_briefs`, `review_work_items`) for the PR named in its
+  argv, and nothing else. In `review_work_items`, they may only have an existing
+  PR-scoped item marked complete; the agent cannot add, rewrite, or delete items.
+  A draft becomes a real comment only when the user clicks Publish, which
   runs the same code path as the diff's own `+` button (`review_drafts::publish`
   → `reviews::add_inline_comment`) and puts it in *their* pending review, which
   they then submit themselves. Two human decisions stand between an agent's
@@ -209,7 +213,9 @@ following, and any change here must preserve all of them:
   launch and passed on the command line. Every statement carries the PR, so
   "comment on a different pull request" is not expressible. Codex does not accept
   an MCP path from IPC: Rust derives the one exact app-owned config filename from
-  the authoritative `ai-review:<owner>/<repo>#<number>` terminal key.
+  the authoritative `ai-review:<owner>/<repo>#<number>` terminal key. The Claude
+  Address-review hand-off receives Rust-derived paths only in memory; browser
+  storage never selects a settings, prompt, or MCP file.
 - **It cannot gate the CLI's decisions.** An MCP tool is one the model chooses to
   call, not a channel santree sits in the middle of. Unlike a synchronous hook,
   nothing here can approve, deny, or delay anything the provider does.
@@ -224,10 +230,10 @@ following, and any change here must preserve all of them:
   user's configured MCP servers, apps, plugins, hooks, and read-only web/data
   tools. The review thread uses `approvalPolicy = never`, so an ambient tool that
   requires approval for a write is rejected instead of prompting. Santree adds
-  only its five PR-scoped draft tools as explicit auto-approved exceptions; a
+  only its seven PR-scoped review/worklist tools as explicit auto-approved exceptions; a
   name allowlist means a future tool is unavailable until reviewed and added.
   The prompt independently says that external tools are for reading and that
-  Santree drafts are the review's only persistent output.
+  Santree drafts plus PR-scoped work-item completion are its only persistent output.
 
 ## Where this is enforced in code
 - `crates/pty` — spawns a real process behind a real PTY and streams **raw

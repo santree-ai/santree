@@ -20,12 +20,12 @@ use santree_core::{
         AgentAuth, AgentDef, AgentKind, AgentSession, AgentVersionStatus, AiReviewLaunch,
         AnalysisScope, BinaryStatus, ChangedFile, CheckLog, CodexAccount, CodexHealth, CodexLogin,
         CodexModel, CodexRateLimits, EnglishAnalysis, EnglishLog, FileSource, GithubStatus,
-        LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr, Opener,
-        PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo, ReviewBrief, ReviewDraft,
-        ReviewEvent, ReviewInbox, ReviewPublishOutcome, ReviewTarget, Reviewer, ScriptInfo,
-        SessionState, SessionUsageLive, Settings, TabKind, Task, TicketRef, TriageDetail,
-        TriageSchedule, TriageSession, TriageTicket, UsageReport, ViewedMarks, Worktree,
-        WorktreePr, WorktreeTab,
+        LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr,
+        NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo,
+        ReviewBrief, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPublishOutcome, ReviewTarget,
+        ReviewWorkItem, Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings, TabKind,
+        Task, TicketRef, TriageDetail, TriageSchedule, TriageSession, TriageTicket, UsageReport,
+        ViewedMarks, Worktree, WorktreePr, WorktreeTab,
     },
 };
 
@@ -36,6 +36,7 @@ use crate::db::Db;
 use crate::english_tutor;
 use crate::error::CmdResult;
 use crate::git_watch::WorktreeWatcher;
+use crate::github;
 use crate::legacy;
 use crate::linear;
 use crate::notes;
@@ -46,6 +47,7 @@ use crate::provider::{self, SessionRequest, SessionSurface};
 use crate::repo;
 use crate::review_ai;
 use crate::review_drafts;
+use crate::review_work_items;
 use crate::reviewed;
 use crate::reviews;
 use crate::session;
@@ -152,6 +154,11 @@ pub async fn codex_logout(db: State<'_, Db>, runtime: State<'_, CodexRuntime>) -
 #[specta::specta]
 pub async fn claude_usage(app: AppHandle, db: State<'_, Db>) -> CmdResult<UsageReport> {
     let table = pricing::ensure_fresh(&db).await;
+    // The hidden Dev tab runs Claude on santree itself. That dogfooding cost is
+    // implementation overhead, not usage the product should report to its user.
+    let excluded_root = settings::get(&db, "app", crate::dev::DEV_REPO_PATH_KEY)
+        .await
+        .unwrap_or_default();
     // Registered repos let a session's cwd resolve to its repo (and worktree),
     // so the panel can group sessions by repo folder.
     let repos: Vec<usage::Repo> = repo::list(&db)
@@ -168,7 +175,15 @@ pub async fn claude_usage(app: AppHandle, db: State<'_, Db>) -> CmdResult<UsageR
         }
         .emit(&app);
     };
-    Ok(tokio::task::spawn_blocking(move || usage::report(&table, &repos, on_progress)).await??)
+    Ok(tokio::task::spawn_blocking(move || {
+        // Revalidate at the sink as well: older builds allowed this setting through
+        // generic IPC, so a legacy value such as "/" may already be persisted.
+        let excluded_root = excluded_root
+            .as_deref()
+            .and_then(|path| crate::dev::repo_root(path).ok());
+        usage::report(&table, &repos, excluded_root.as_deref(), on_progress)
+    })
+    .await??)
 }
 
 // ── Real worktrees (Trees view) ────────────────────────────────────────────
@@ -1128,6 +1143,18 @@ pub async fn ai_review_launch(
     Ok(review_ai::launch(&app, &db, &repo, &target, tutor.as_deref()).await?)
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn review_fix_launch(
+    app: AppHandle,
+    repo: String,
+    target: ReviewTarget,
+    db: State<'_, Db>,
+) -> CmdResult<AiReviewLaunch> {
+    let tutor = tutor_instruction(&app).await;
+    Ok(review_ai::fix_launch(&app, &db, &repo, &target, tutor.as_deref()).await?)
+}
+
 /// The AI review's draft comments for a PR — written by its MCP tools, held in
 /// santree until the user publishes them. Empty until an AI review has run.
 #[tauri::command]
@@ -1138,6 +1165,113 @@ pub async fn review_drafts(
     db: State<'_, Db>,
 ) -> CmdResult<Vec<ReviewDraft>> {
     Ok(review_drafts::list(&db, &pr_repo, number).await?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn review_work_items(
+    pr_repo: String,
+    number: u32,
+    db: State<'_, Db>,
+) -> CmdResult<Vec<ReviewWorkItem>> {
+    Ok(review_work_items::list(&db, &pr_repo, number).await?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn add_review_work_item(
+    pr_repo: String,
+    number: u32,
+    mut item: NewReviewWorkItem,
+    db: State<'_, Db>,
+) -> CmdResult<ReviewWorkItem> {
+    match item.source {
+        santree_core::domain::ReviewWorkItemSource::Manual => {
+            item.source_id = None;
+            item.path = None;
+            item.line = None;
+            item.start_line = None;
+            item.on_right = None;
+        }
+        santree_core::domain::ReviewWorkItemSource::GithubThread => {
+            let source_id = item
+                .source_id
+                .as_deref()
+                .ok_or_else(|| "a GitHub work item needs a source thread".to_string())?;
+            let (owner, name) = github::split_slug(&pr_repo)?;
+            let detail = reviews::detail(owner, name, number).await?;
+            let thread = detail
+                .threads
+                .into_iter()
+                .find(|thread| thread.reply_to_id == source_id)
+                .ok_or_else(|| {
+                    "that GitHub thread does not belong to this pull request".to_string()
+                })?;
+            item.body = thread
+                .comments
+                .first()
+                .map(|comment| comment.body.clone())
+                .unwrap_or_else(|| format!("Review comment on {}", thread.path));
+            item.path = Some(thread.path);
+            item.line = thread.line;
+            item.start_line = thread.start_line;
+            item.on_right = Some(thread.on_right);
+        }
+        santree_core::domain::ReviewWorkItemSource::AiDraft => {
+            let source_id = item
+                .source_id
+                .as_deref()
+                .ok_or_else(|| "an AI work item needs a source draft".to_string())?;
+            let draft = review_drafts::list(&db, &pr_repo, number)
+                .await?
+                .into_iter()
+                .find(|draft| draft.id == source_id)
+                .ok_or_else(|| "that AI draft does not belong to this pull request".to_string())?;
+            item.body = review_drafts::compose_body(&draft.body, draft.suggestion.as_deref());
+            item.path = Some(draft.path);
+            item.line = Some(draft.line);
+            item.start_line = draft.start_line;
+            item.on_right = Some(draft.on_right);
+        }
+    }
+    Ok(review_work_items::add(
+        &db,
+        &pr_repo,
+        number,
+        &item.id,
+        &item.body,
+        item.source,
+        item.source_id.as_deref(),
+        item.path.as_deref(),
+        item.line,
+        item.start_line,
+        item.on_right,
+    )
+    .await?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_review_work_item(
+    pr_repo: String,
+    number: u32,
+    id: String,
+    body: String,
+    done: bool,
+    db: State<'_, Db>,
+) -> CmdResult<ReviewWorkItem> {
+    Ok(review_work_items::update(&db, &pr_repo, number, &id, &body, done).await?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_review_work_item(
+    pr_repo: String,
+    number: u32,
+    id: String,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(review_work_items::delete(&db, &pr_repo, number, &id).await?)
 }
 
 /// Rewrite a draft the user edited before sending it. Local only — nothing has

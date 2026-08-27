@@ -45,6 +45,12 @@ pub fn validate_user_scope(scope: &str, key: &str) -> Result<()> {
     if key.starts_with("binary_path.") {
         anyhow::bail!("binary paths must be written through set_binary_path");
     }
+    // This path controls filesystem/git operations in the Dev tab and now also
+    // bounds what the Usage report excludes. Its dedicated picker command validates
+    // and normalizes it to a git root before persisting it.
+    if key == crate::dev::DEV_REPO_PATH_KEY {
+        anyhow::bail!("the Dev repo path must be written through dev_normalize_repo");
+    }
     // The keep-awake hold is a live `caffeinate` child, not just a row: writing it
     // here would be remembered for the next launch without holding anything awake
     // now (and the toggle's icon would disagree with the machine). It has its own
@@ -749,6 +755,11 @@ mod tests {
         assert!(validate_user_scope("app", "binary_path.claude").is_err());
         // Neighbouring keys are unaffected.
         assert!(validate_user_scope("app", "binary_pathological").is_ok());
+    }
+
+    #[test]
+    fn dev_repo_path_cannot_be_written_through_the_generic_surface() {
+        assert!(validate_user_scope("app", crate::dev::DEV_REPO_PATH_KEY).is_err());
     }
 
     /// The backstop that fixes the Nix case: a binary on no shell's PATH is still

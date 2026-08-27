@@ -8,6 +8,8 @@ import { draftCount } from "./ReviewSubmitBar";
 const spies = vi.hoisted(() => ({ reply: vi.fn(), resolve: vi.fn() }));
 
 vi.mock("../../lib/queries", () => ({
+  useReviewWorkItems: () => ({ data: [] }),
+  useAddReviewWorkItem: () => ({ mutate: vi.fn(), isPending: false }),
   useReplyToPrThread: () => ({ mutate: spies.reply, isPending: false }),
   useSetPrThreadResolved: () => ({ mutate: spies.resolve, isPending: false }),
 }));

@@ -354,11 +354,16 @@ export const commands = {
 	 *  so a flag that resolves late is silently dropped (see [`review_ai::launch`]).
 	 */
 	aiReviewLaunch: (repo: string, target: ReviewTarget) => typedError<AiReviewLaunch, CmdError>(__TAURI_INVOKE("ai_review_launch", { repo, target })),
+	reviewFixLaunch: (repo: string, target: ReviewTarget) => typedError<AiReviewLaunch, CmdError>(__TAURI_INVOKE("review_fix_launch", { repo, target })),
 	/**
 	 *  The AI review's draft comments for a PR — written by its MCP tools, held in
 	 *  santree until the user publishes them. Empty until an AI review has run.
 	 */
 	reviewDrafts: (prRepo: string, number: number) => typedError<ReviewDraft[], CmdError>(__TAURI_INVOKE("review_drafts", { prRepo, number })),
+	reviewWorkItems: (prRepo: string, number: number) => typedError<ReviewWorkItem[], CmdError>(__TAURI_INVOKE("review_work_items", { prRepo, number })),
+	addReviewWorkItem: (prRepo: string, number: number, item: NewReviewWorkItem) => typedError<ReviewWorkItem, CmdError>(__TAURI_INVOKE("add_review_work_item", { prRepo, number, item })),
+	updateReviewWorkItem: (prRepo: string, number: number, id: string, body: string, done: boolean) => typedError<ReviewWorkItem, CmdError>(__TAURI_INVOKE("update_review_work_item", { prRepo, number, id, body, done })),
+	deleteReviewWorkItem: (prRepo: string, number: number, id: string) => typedError<null, CmdError>(__TAURI_INVOKE("delete_review_work_item", { prRepo, number, id })),
 	/**
 	 *  Rewrite a draft the user edited before sending it. Local only — nothing has
 	 *  reached GitHub at this point.
@@ -767,9 +772,10 @@ export const commands = {
 	 */
 	setKeepAwake: (on: boolean) => typedError<KeepAwakeStatus, CmdError>(__TAURI_INVOKE("set_keep_awake", { on })),
 	/**
-	 *  Validate + normalize a picked folder to its git toplevel (the stored dev repo
-	 *  path). Mirrors `repo::add`'s validation: absolute dir → `git rev-parse
-	 *  --show-toplevel`, so a subdirectory pick still lands on the repo root.
+	 *  Validate a picked folder to its git toplevel and persist it as the Dev checkout.
+	 *  Mirrors `repo::add`'s validation: absolute dir → `git rev-parse --show-toplevel`,
+	 *  so a subdirectory pick still lands on the repo root. This owns the write because
+	 *  the generic settings IPC deliberately reserves [`DEV_REPO_PATH_KEY`].
 	 */
 	devNormalizeRepo: (path: string) => typedError<string, CmdError>(__TAURI_INVOKE("dev_normalize_repo", { path })),
 	devInfo: (repoPath: string) => typedError<DevInfo, CmdError>(__TAURI_INVOKE("dev_info", { repoPath })),
@@ -1632,6 +1638,17 @@ export type NewPr = {
 	url: string,
 };
 
+export type NewReviewWorkItem = {
+	id: string,
+	body: string,
+	source: ReviewWorkItemSource,
+	sourceId: string | null,
+	path: string | null,
+	line: number | null,
+	startLine: number | null,
+	onRight: boolean | null,
+};
+
 /**  An external app/location a worktree can be opened in (Conductor-style menu). */
 export type Opener = {
 	/**  Stable key passed back to `open_in_app` (e.g. "finder", "cursor"). */
@@ -2184,6 +2201,29 @@ export type ReviewTarget = {
 	/**  The linked Linear ticket, when the PR names one. */
 	ticketId: string | null,
 };
+
+export type ReviewWorkItem = {
+	id: string,
+	prRepo: string,
+	prNumber: number,
+	body: string,
+	done: boolean,
+	source: ReviewWorkItemSource,
+	/**  GitHub's root review-comment id, or a santree draft id. Absent for manual items. */
+	sourceId: string | null,
+	path: string | null,
+	line: number | null,
+	startLine: number | null,
+	onRight: boolean | null,
+	createdAtMs: number | null,
+	updatedAtMs: number | null,
+};
+
+/**
+ *  Where a review work item came from. Source-backed items keep this identity so
+ *  the UI and the fixing agent can resolve the latest version of the discussion.
+ */
+export type ReviewWorkItemSource = "manual" | "githubThread" | "aiDraft";
 
 /**
  *  A file's persisted "Viewed" mark in the Reviews tab: the file path plus the

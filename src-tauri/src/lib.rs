@@ -29,6 +29,7 @@ mod provider;
 mod repo;
 mod review_ai;
 mod review_drafts;
+mod review_work_items;
 mod reviewed;
 mod reviews;
 mod session;
@@ -134,7 +135,12 @@ fn specta_builder() -> AppBuilder {
             commands::remove_review_workspace,
             commands::pr_review_brief,
             commands::ai_review_launch,
+            commands::review_fix_launch,
             commands::review_drafts,
+            commands::review_work_items,
+            commands::add_review_work_item,
+            commands::update_review_work_item,
+            commands::delete_review_work_item,
             commands::update_review_draft,
             commands::delete_review_draft,
             commands::clear_review_drafts,

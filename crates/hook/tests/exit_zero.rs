@@ -172,7 +172,9 @@ fn mcp_mode_speaks_only_json_and_reports_failures_to_the_model() {
             "add_review_comment",
             "list_review_comments",
             "update_review_comment",
-            "delete_review_comment"
+            "delete_review_comment",
+            "list_review_work_items",
+            "complete_review_work_item"
         ]
     );
     // A missing database and a bad anchor both come back as readable tool errors.

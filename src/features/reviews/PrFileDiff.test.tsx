@@ -8,6 +8,8 @@ import { PrFileDiff } from "./PrFileDiff";
 vi.mock("../../theme/useResolvedTheme", () => ({ useResolvedTheme: () => "dark" }));
 
 vi.mock("../../lib/queries", () => ({
+  useReviewWorkItems: () => ({ data: [] }),
+  useAddReviewWorkItem: () => ({ mutate: vi.fn(), isPending: false }),
   useAddPrInlineComment: () => ({ mutate: vi.fn(), isPending: false }),
   useGithubViewerLogin: () => ({ data: "sam" }),
   useReplyToPrThread: () => ({ mutate: vi.fn(), isPending: false }),

@@ -1,8 +1,9 @@
-//! The five tools an AI-review session gets, and everything they refuse.
+//! The review tools an AI-review or review-fix session gets, and everything they refuse.
 //!
-//! All they can do is write santree's own rows: a review brief, and draft review
-//! comments for the one pull request named in argv. No GitHub, no network, no
-//! `git`. A draft is invisible until the human publishes it from the app.
+//! All they can do is write santree's own rows: a review brief, draft review
+//! comments, and completion state for existing work items on the one pull request
+//! named in argv. No GitHub, no network, no `git`. A draft is invisible until the
+//! human publishes it from the app.
 //!
 //! Two rules shape the code here. **Scope comes from argv, never from the model**:
 //! every statement carries `pr_repo`/`pr_number`, so "edit a draft on another PR"
@@ -334,6 +335,23 @@ impl ToolHost for ReviewTools {
                     "properties": { "id": { "type": "string" } }
                 }
             }),
+            json!({
+                "name": "list_review_work_items",
+                "description": format!(
+                    "List the improvement tasks for {pr}. Source-linked items are snapshots; read the live PR discussion supplied in your prompt before changing code."
+                ),
+                "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+            }),
+            json!({
+                "name": "complete_review_work_item",
+                "description": "Mark one improvement task done after its requested change is implemented and verified. The id must come from list_review_work_items.",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["id"],
+                    "properties": { "id": { "type": "string" } }
+                }
+            }),
         ]
     }
 
@@ -345,12 +363,64 @@ impl ToolHost for ReviewTools {
             "list_review_comments" => self.list_comments(),
             "update_review_comment" => self.update_comment(&args),
             "delete_review_comment" => self.delete_comment(&args),
+            "list_review_work_items" => self.list_work_items(),
+            "complete_review_work_item" => self.complete_work_item(&args),
             _ => Err(ToolError::UnknownTool),
         }
     }
 }
 
 impl ReviewTools {
+    fn list_work_items(&self) -> Result<ToolReply, ToolError> {
+        let rows = self.with_db(async |conn| {
+            let rows: Vec<WorkItemRow> = sqlx::query_as(
+                "SELECT id, body, done, source_kind, source_id, path, line, start_line \
+                 FROM review_work_items WHERE pr_repo = ? AND pr_number = ? ORDER BY done, created_at",
+            )
+            .bind(&self.scope.pr_repo)
+            .bind(self.scope.number)
+            .fetch_all(conn)
+            .await
+            .map_err(db_err)?;
+            Ok(rows.into_iter().map(|(id, body, done, source, source_id, path, line, start_line)| json!({
+                "id": id, "body": body, "done": done, "source": source,
+                "sourceId": source_id, "path": path, "line": line, "startLine": start_line,
+            })).collect::<Vec<_>>())
+        })?;
+        Ok(ToolReply {
+            text: serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into()),
+        })
+    }
+
+    fn complete_work_item(
+        &self,
+        args: &serde_json::Map<String, Value>,
+    ) -> Result<ToolReply, ToolError> {
+        let id = required_id(args)?;
+        self.with_db(async |conn| {
+            let done = sqlx::query(
+                "UPDATE review_work_items SET done = 1, updated_at = ? \
+                 WHERE id = ? AND pr_repo = ? AND pr_number = ?",
+            )
+            .bind(crate::now_ms())
+            .bind(&id)
+            .bind(&self.scope.pr_repo)
+            .bind(self.scope.number)
+            .execute(conn)
+            .await
+            .map_err(db_err)?;
+            if done.rows_affected() == 0 {
+                return Err(ToolError::Failed(format!(
+                    "No work item {id} exists on this pull request."
+                )));
+            }
+            Ok(())
+        })?;
+        Ok(ToolReply {
+            text: format!("Work item {id} marked done in santree."),
+        })
+    }
+
     fn set_brief(&self, args: &serde_json::Map<String, Value>) -> Result<ToolReply, ToolError> {
         let index = self.index()?;
         let summary = args
@@ -642,6 +712,18 @@ fn no_such_draft(id: &str) -> String {
 /// One draft as `update_review_comment` needs it: the fields an edit can change.
 type EditableRow = (String, i64, Option<i64>, bool, String, Option<String>);
 
+/// One saved improvement as `list_review_work_items` reports it.
+type WorkItemRow = (
+    String,
+    String,
+    bool,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+);
+
 /// One draft as `list_review_comments` reports it.
 type DraftRow = (
     String,
@@ -877,6 +959,10 @@ mod tests {
                  line INTEGER NOT NULL, start_line INTEGER, on_right INTEGER NOT NULL DEFAULT 1, \
                  body TEXT NOT NULL, suggestion TEXT, created_at INTEGER NOT NULL, \
                  updated_at INTEGER NOT NULL, agent_kind TEXT NOT NULL DEFAULT 'Claude')",
+                "CREATE TABLE review_work_items (id TEXT NOT NULL PRIMARY KEY, pr_repo TEXT NOT NULL, \
+                 pr_number INTEGER NOT NULL, body TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, \
+                 source_kind TEXT NOT NULL, source_id TEXT, path TEXT, line INTEGER, start_line INTEGER, \
+                 on_right INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
             ] {
                 sqlx::query(ddl).execute(&mut c).await.unwrap();
             }
@@ -911,6 +997,42 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn work_item_completion_is_scoped_and_visible_to_the_list_tool() {
+        let (mut t, _base) = tools("work-items");
+        t.with_db(async |conn| {
+            sqlx::query(
+                "INSERT INTO review_work_items \
+                 (id, pr_repo, pr_number, body, source_kind, created_at, updated_at) \
+                 VALUES ('item-1', 'acme/web', 42, 'Fix the race', 'manual', 1, 1), \
+                        ('other-pr', 'acme/web', 43, 'Do not touch', 'manual', 1, 1)",
+            )
+            .execute(conn)
+            .await
+            .map_err(db_err)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let listed = call(&mut t, "list_review_work_items", json!({})).unwrap();
+        assert!(listed.contains("item-1"));
+        assert!(!listed.contains("other-pr"));
+        call(
+            &mut t,
+            "complete_review_work_item",
+            json!({ "id": "item-1" }),
+        )
+        .unwrap();
+        let listed = call(&mut t, "list_review_work_items", json!({})).unwrap();
+        assert!(listed.contains("\"done\": true"));
+        assert!(call(
+            &mut t,
+            "complete_review_work_item",
+            json!({ "id": "other-pr" })
+        )
+        .is_err());
     }
 
     #[test]

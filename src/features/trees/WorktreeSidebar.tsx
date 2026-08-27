@@ -9,7 +9,14 @@ import type { SessionState, TicketRef, Worktree, WorktreePr } from "../../bindin
 import { AgentIcon, BranchIcon, CheckIcon, DownloadIcon, TrashIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
-import { Button, ConfirmDialog, Dot, Skeleton, Spinner } from "../../components/primitives";
+import {
+  Button,
+  ConfirmDialog,
+  Dot,
+  Skeleton,
+  Spinner,
+  TerminalActivity,
+} from "../../components/primitives";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import {
   ChangeSizeBars,
@@ -219,6 +226,7 @@ export function WorktreeSidebar() {
     worktrees,
     prsByWorktree,
     loading,
+    baseLoading,
     baseWorktree,
     activeId,
     setActive,
@@ -288,7 +296,11 @@ export function WorktreeSidebar() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-2">
-        {baseWorktree && <BaseEntry worktree={baseWorktree} active={activeId === BASE_ID} />}
+        {baseWorktree ? (
+          <BaseEntry worktree={baseWorktree} active={activeId === BASE_ID} />
+        ) : (
+          baseLoading && <BaseEntrySkeleton />
+        )}
 
         {loading && groups.length === 0 && <SidebarSkeleton />}
 
@@ -562,6 +574,14 @@ function SidebarSkeleton() {
           <Skeleton className="h-2.5 w-24" />
         </div>
       ))}
+    </div>
+  );
+}
+
+function BaseEntrySkeleton() {
+  return (
+    <div className="entity-card mb-2 flex min-h-12 items-center justify-center px-[11px] py-2.5">
+      <TerminalActivity label="Loading base workspace…" />
     </div>
   );
 }
