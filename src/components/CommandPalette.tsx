@@ -65,7 +65,8 @@ export function CommandPalette() {
       {
         key: "nav-agents",
         group: "Navigate",
-        label: "Agents",
+        label: "All agents",
+        detail: "Every running agent, across projects",
         icon: <AgentsIcon />,
         run: closeAnd(() => navigate({ to: "/" })),
       },
@@ -83,14 +84,15 @@ export function CommandPalette() {
       {
         key: "nav-issues",
         group: "Navigate",
-        label: "Issues",
+        label: "Tickets",
         icon: <ListIcon />,
         run: closeAnd(() => navigate({ to: "/issues" })),
       },
       {
         key: "nav-trees",
         group: "Navigate",
-        label: "Trees",
+        label: "Workspace",
+        detail: "The worktree you last opened",
         icon: <TreeIcon />,
         run: closeAnd(() => navigate({ to: "/trees" })),
       },

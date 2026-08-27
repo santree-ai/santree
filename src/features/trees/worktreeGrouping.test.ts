@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { ProjectMilestoneRef, TicketRef, Worktree } from "../../bindings";
-import { groupWorktreesForSidebar, stackWorktrees } from "./WorktreeSidebar";
+import type { Worktree } from "../../bindings";
+import { stackWorktrees } from "./worktreeGrouping";
 
 /** Minimal fixture — only id/branch/baseBranch matter to the nesting. */
 function worktree(id: string, baseBranch = "master", branch = `santree/${id.toLowerCase()}`) {
@@ -28,31 +28,9 @@ function worktree(id: string, baseBranch = "master", branch = `santree/${id.toLo
   } as Worktree;
 }
 
-/** `[id, depth]` pairs — the shape the sidebar actually renders. */
+/** `[id, depth]` pairs — the shape the rows are actually rendered in. */
 const shape = (list: Worktree[]) =>
   stackWorktrees(list).map(({ worktree: w, depth }) => [w.id, depth]);
-
-const milestone = (id: string, sortOrder: number): ProjectMilestoneRef => ({
-  id,
-  name: id,
-  sortOrder,
-  targetDate: null,
-});
-
-const ticket = (
-  identifier: string,
-  project: string,
-  projectMilestone: ProjectMilestoneRef | null,
-): TicketRef => ({
-  identifier,
-  title: identifier,
-  priority: "None",
-  project,
-  projectColor: null,
-  projectIcon: null,
-  projectTargetDate: null,
-  projectMilestone,
-});
 
 describe("stackWorktrees", () => {
   it("leaves worktrees cut from the default branch flat, in their original order", () => {
@@ -96,7 +74,7 @@ describe("stackWorktrees", () => {
   });
 
   // A long chain keeps its nesting order but stops stepping in, so the cards at the
-  // bottom don't get squeezed against the edge of the rail.
+  // bottom don't get squeezed against the edge of the sidebar.
   it("caps the indent depth without reordering the chain", () => {
     const a = worktree("AK-1");
     const b = worktree("AK-2", a.branch);
@@ -112,8 +90,8 @@ describe("stackWorktrees", () => {
     ]);
   });
 
-  // Nesting is computed per project group, so a parent in another band is simply
-  // absent here — the child renders flat rather than being dragged out of its group.
+  // Nesting is computed per group, so a parent in another band is simply absent
+  // here — the child renders flat rather than being dragged out of its own group.
   it("renders a child flat when its parent isn't in the same group", () => {
     expect(shape([worktree("AK-275", "santree/ak-274-elsewhere")])).toEqual([["AK-275", 0]]);
   });
@@ -149,52 +127,12 @@ describe("stackWorktrees", () => {
   });
 
   // Can't happen through the app (a base always exists before the branch that uses
-  // it), but a cycle must not recurse forever or silently drop rows from the rail.
+  // it), but a cycle must not recurse forever or silently drop rows from the list.
   it("still renders every worktree if the bases somehow form a cycle", () => {
     const a = worktree("AK-1", "santree/ak-2");
     const b = worktree("AK-2", "santree/ak-1");
     const out = shape([a, b]);
     expect(out).toHaveLength(2);
     expect(out.map(([id]) => id).sort()).toEqual(["AK-1", "AK-2"]);
-  });
-});
-
-describe("groupWorktreesForSidebar", () => {
-  it("uses a resolved ticket project and the stored fallback for unresolved worktrees", () => {
-    const resolved = worktree("AK-1");
-    const pending = { ...worktree("AK-2"), project: "Stored", pending: true } as Worktree;
-    const tickets = new Map([[resolved.id, ticket(resolved.id, "Live Linear", null)]]);
-
-    expect(
-      groupWorktreesForSidebar([resolved, pending], tickets).map((group) => group.project),
-    ).toEqual(["Live Linear", "Stored"]);
-  });
-
-  it("sorts milestones but preserves row order and never stacks across milestones", () => {
-    const parent = worktree("AK-1");
-    const child = worktree("AK-2", parent.branch);
-    const sibling = worktree("AK-3");
-    const tickets = new Map([
-      [parent.id, ticket(parent.id, "Core", milestone("later", 2))],
-      [child.id, ticket(child.id, "Core", milestone("sooner", 1))],
-      [sibling.id, ticket(sibling.id, "Core", milestone("later", 2))],
-    ]);
-
-    const groups = groupWorktreesForSidebar([parent, child, sibling], tickets);
-    expect(
-      groups[0]?.milestones.map((group) => [
-        group.key,
-        group.items.map(({ worktree: item, depth }) => [item.id, depth]),
-      ]),
-    ).toEqual([
-      ["sooner", [["AK-2", 0]]],
-      [
-        "later",
-        [
-          ["AK-1", 0],
-          ["AK-3", 0],
-        ],
-      ],
-    ]);
   });
 });

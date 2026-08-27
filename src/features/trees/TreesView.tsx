@@ -1,10 +1,12 @@
-/** The Trees tab: worktrees grouped by project (sidebar) · a main area that holds
- *  the always-on terminal (or a picked file's diff/contents) with a bottom status
- *  bar · a collapsible file-picker right panel · the all-agents overview. */
+/** The Trees view: the selected worktree's workspace. A header naming the
+ *  worktree (title · branch · diff shape) and its actions · the sub-tab strip ·
+ *  the always-on terminal (or a picked file's diff/contents) with the session
+ *  status line and bottom status bar under it · a collapsible file-picker right
+ *  panel. Which worktree is selected comes from the app shell's project tree;
+ *  with nothing selected the view shows its launch surface. */
 import type { ReactNode } from "react";
 
 import type { Worktree, WorktreeTab } from "../../bindings";
-import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { AgentIcon, BranchIcon, CloseIcon, PrIcon, TreeIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import { Button, EmptyState, TerminalActivity } from "../../components/primitives";
@@ -24,8 +26,8 @@ import { SetupLogsView } from "./SetupLogsView";
 import { StartTaskButton } from "./StartTaskButton";
 import { sessionIdOf, useAgentTab } from "./useAgentTab";
 import { useWorktreeAgent } from "./useWorktreeAgent";
+import { WorktreeHeader } from "./WorktreeHeader";
 import { WorktreeIssuePane } from "./WorktreeIssuePane";
-import { WorktreeSidebar } from "./WorktreeSidebar";
 import { WorktreeTerminal } from "./WorktreeTerminal";
 
 function TreesContent() {
@@ -34,10 +36,10 @@ function TreesContent() {
   // Nothing selected and no worktrees yet: show a loading state while the first
   // fetch is in flight (otherwise the empty state flashes as if nothing exists),
   // then the real empty state. The base entry, if any, is still selectable from
-  // the sidebar; selecting it makes `active` truthy below.
+  // the shell's project tree; selecting it makes `active` truthy below.
   if (!active && worktrees.length === 0) {
     return (
-      <div className="flex min-w-0 flex-1 flex-col bg-app">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
         {loading ? (
           <div className="flex flex-1 items-center justify-center">
             <TerminalActivity label="Loading worktrees…" />
@@ -50,7 +52,7 @@ function TreesContent() {
   }
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col bg-app">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
       {active ? (
         active.pending ? (
           <CreatingPane worktree={active} />
@@ -182,7 +184,7 @@ function CreatingPane({ worktree }: { worktree: Worktree }) {
 
 /** The "create a PR?" suggestion strip, shown above the bottom bar after a
  *  commit+push when the branch has commits and no PR yet. A gentle nudge — Create
- *  PR opens the dialog, Dismiss hides it — instead of relying on the bottom-bar
+ *  PR opens the dialog, Dismiss hides it — instead of relying on the header's
  *  button. Hidden once a PR exists, the dialog is open, or it's been dismissed. */
 function PrSuggestionBar({ worktree }: { worktree: Worktree }) {
   const { prSuggestFor, prDialogFor, prsByWorktree, openPrDialog, dismissPrSuggestion } =
@@ -244,6 +246,7 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
   return (
     <div className="flex min-h-0 flex-1">
       <div className="flex min-w-0 flex-1 flex-col">
+        <WorktreeHeader worktree={worktree} />
         <MainTabBar />
         {/* The terminal host is mounted ONLY while the Terminal tab is active (like
             the triage Investigate pane). The live xterm + PTY live in the global
@@ -477,9 +480,9 @@ function AgentTabPane({
 export function TreesView() {
   return (
     <TreesProvider>
-      <ViewChrome sidebar={<WorktreeSidebar />}>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <TreesContent />
-      </ViewChrome>
+      </div>
       <PrDialogHost />
     </TreesProvider>
   );

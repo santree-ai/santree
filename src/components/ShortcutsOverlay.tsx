@@ -22,16 +22,14 @@ interface Section {
   items: Shortcut[];
 }
 
-/** Build the section list; tab numbers follow NavTabs order — the repo-independent
- *  views first (Agents, then Dev when enabled), then the repo-scoped ones. */
+/** Build the section list; the numbers follow the sidebar's destinations, top to
+ *  bottom, so they match what's on screen (see `SidebarNav`). */
 function buildSections(triageEnabled: boolean, devEnabled: boolean): Section[] {
   const tabLabels = [
-    "Agents",
-    ...(devEnabled ? ["Dev"] : []),
     ...(triageEnabled ? ["Triage"] : []),
-    "Issues",
-    "Trees",
+    "Tickets",
     "Reviews",
+    ...(devEnabled ? ["Dev"] : []),
   ];
   return [
     {

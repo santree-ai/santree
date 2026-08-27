@@ -5,14 +5,13 @@
  * in**, grouped by what it wants from you. This is the landing view, so it
  * answers one question on open: *where do I act?*
  *
- * It has no sidebar on purpose. Nothing here is a navigable tree — the groups
- * are the structure — so the width goes to the cards instead, and the only
- * chrome above them is the repo picker and a filter box.
+ * Nothing here is a navigable tree — the groups are the structure — so the whole
+ * width goes to the cards, and the only chrome the view owns is its header row:
+ * the multi-repo picker, a filter box and the agent counts.
  */
 import { useMemo, useState } from "react";
 
 import type { WorktreePr } from "../../bindings";
-import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { AgentsIcon, CheckIcon, ChevronDownIcon, SearchIcon } from "../../components/icons";
 import {
   Dropdown,
@@ -22,7 +21,6 @@ import {
   ProjectGlyph,
 } from "../../components/primitives";
 import { useSessionUsageLive, useWorktreePrsByRepo } from "../../lib/queries";
-import { CHROME } from "../../state/AppContext";
 import { PROJECT_FALLBACK, palette, sessionStateMeta } from "../../theme/colors";
 import { AgentCard } from "./AgentCard";
 import { AgentPeek } from "./AgentPeek";
@@ -136,109 +134,107 @@ export function AgentsView() {
   const blocked = all.filter((e) => e.bucket === "attention").length;
 
   return (
-    <ViewChrome showRepoSelector={false}>
-      <div className="flex min-w-0 flex-1 flex-col bg-app">
-        <div
-          className={`flex ${CHROME.subBar} flex-none items-center gap-2.5 border-b border-line px-3`}
-        >
-          <RepoPicker filter={filter} />
-          <label className="flex min-w-0 flex-1 items-center gap-1.5">
-            <SearchIcon size={13} className="flex-none text-muted-4" />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Filter agents…"
-              aria-label="Filter agents"
-              className="min-w-0 flex-1 bg-transparent text-[12px] text-fg-2 outline-none placeholder:text-muted-4"
-            />
-          </label>
-          <span className="flex-none font-mono text-[10.5px] text-muted-4">
-            {all.length} {all.length === 1 ? "agent" : "agents"}
-            {blocked > 0 && (
-              <>
-                {" · "}
-                <span style={{ color: sessionStateMeta.waiting.color }}>{blocked} need you</span>
-              </>
-            )}
-          </span>
-        </div>
-
-        <div className="flex min-h-0 flex-1">
-          {/* Loading is not emptiness: until the first read lands, show the shape
-              of a list rather than asserting there are no agents. */}
-          {entries === undefined ? (
-            <ListSkeleton rows={5} className="flex-1 p-3" />
-          ) : groups.length === 0 ? (
-            <EmptyState
-              icon={<AgentsIcon className="text-muted-4" />}
-              title={all.length === 0 ? "No agents running" : "Nothing matches that filter"}
-              subtitle={
-                all.length === 0
-                  ? "Start a task in Trees, or investigate a ticket in Triage. Every session shows up here."
-                  : undefined
-              }
-            />
-          ) : (
-            <div data-agent-list className="flex min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-3">
-              {groups.map((group) => (
-                <section key={group.bucket} className="flex flex-col gap-2.5">
-                  <h2 className="flex items-baseline gap-2 px-1 font-mono text-[10px] tracking-wide text-muted-3">
-                    <span
-                      aria-hidden
-                      className="h-[3px] w-[3px] self-center rounded-full"
-                      style={{ background: BUCKET_COLOR[group.bucket] }}
-                    />
-                    {BUCKET_LABEL[group.bucket]}
-                    <span className="text-muted-4">{group.entries.length}</span>
-                    {BUCKET_HINT[group.bucket] && (
-                      <span className="truncate font-sans text-[10.5px] text-muted-4">
-                        {BUCKET_HINT[group.bucket]}
-                      </span>
-                    )}
-                  </h2>
-                  {groupAgentsByProject(group.entries).map((project) => (
-                    <div key={project.project} className="flex flex-col gap-1.5">
-                      <div className="flex items-center gap-1.5 px-1 font-mono text-[9.5px] tracking-[.05em] text-muted-4 uppercase">
-                        <ProjectGlyph
-                          color={project.color ?? PROJECT_FALLBACK}
-                          icon={project.icon}
-                          size={5}
-                        />
-                        <span className="truncate">{project.project}</span>
-                        <span className="text-muted-5">{project.entries.length}</span>
-                      </div>
-                      <div className="overflow-hidden rounded-[9px] border border-line-2 bg-deep divide-y divide-line">
-                        {project.entries.map((entry) => (
-                          <AgentCard
-                            key={entry.sessionId}
-                            entry={entry}
-                            selected={entry.sessionId === selectedId}
-                            usedPct={usedPctBySession.get(entry.sessionId) ?? null}
-                            prs={prsFor(entry.repo, entry.ticket)}
-                            onSelect={() => setSelectedId(entry.sessionId)}
-                            onOpen={() => entry.openable && openAgent(entry)}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </section>
-              ))}
-            </div>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
+      {/* The view's own 44px header — the app shell owns the window chrome. */}
+      <div className="flex h-11 flex-none items-center gap-2.5 border-b border-line px-3">
+        <span className="flex-none text-[12.5px] font-semibold text-fg-2">Agents</span>
+        <RepoPicker filter={filter} />
+        <label className="flex min-w-0 flex-1 items-center gap-1.5">
+          <SearchIcon size={13} className="flex-none text-muted-4" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Filter agents…"
+            aria-label="Filter agents"
+            className="min-w-0 flex-1 bg-transparent text-[12px] text-fg-2 outline-none placeholder:text-muted-4"
+          />
+        </label>
+        <span className="flex-none font-mono text-[10.5px] text-muted-4">
+          {all.length} {all.length === 1 ? "agent" : "agents"}
+          {blocked > 0 && (
+            <>
+              {" · "}
+              <span style={{ color: sessionStateMeta.waiting.color }}>{blocked} need you</span>
+            </>
           )}
-
-          {selected && (
-            <AgentPeek
-              // Remount per session so the reply box resets with the selection.
-              key={selected.sessionId}
-              entry={selected}
-              prs={prsFor(selected.repo, selected.ticket)}
-              onOpen={() => openAgent(selected)}
-              onClose={() => setSelectedId(null)}
-            />
-          )}
-        </div>
+        </span>
       </div>
-    </ViewChrome>
+
+      <div className="flex min-h-0 flex-1">
+        {/* Loading is not emptiness: until the first read lands, show the shape
+              of a list rather than asserting there are no agents. */}
+        {entries === undefined ? (
+          <ListSkeleton rows={5} className="flex-1 p-3" />
+        ) : groups.length === 0 ? (
+          <EmptyState
+            icon={<AgentsIcon className="text-muted-4" />}
+            title={all.length === 0 ? "No agents running" : "Nothing matches that filter"}
+            subtitle={
+              all.length === 0
+                ? "Start a task in Trees, or investigate a ticket in Triage. Every session shows up here."
+                : undefined
+            }
+          />
+        ) : (
+          <div data-agent-list className="flex min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-3">
+            {groups.map((group) => (
+              <section key={group.bucket} className="flex flex-col gap-2.5">
+                <h2 className="flex items-baseline gap-2 px-1 font-mono text-[10px] tracking-wide text-muted-3">
+                  <span
+                    aria-hidden
+                    className="h-[3px] w-[3px] self-center rounded-full"
+                    style={{ background: BUCKET_COLOR[group.bucket] }}
+                  />
+                  {BUCKET_LABEL[group.bucket]}
+                  <span className="text-muted-4">{group.entries.length}</span>
+                  {BUCKET_HINT[group.bucket] && (
+                    <span className="truncate font-sans text-[10.5px] text-muted-4">
+                      {BUCKET_HINT[group.bucket]}
+                    </span>
+                  )}
+                </h2>
+                {groupAgentsByProject(group.entries).map((project) => (
+                  <div key={project.project} className="flex flex-col gap-1.5">
+                    <div className="flex items-center gap-1.5 px-1 font-mono text-[9.5px] tracking-[.05em] text-muted-4 uppercase">
+                      <ProjectGlyph
+                        color={project.color ?? PROJECT_FALLBACK}
+                        icon={project.icon}
+                        size={5}
+                      />
+                      <span className="truncate">{project.project}</span>
+                      <span className="text-muted-5">{project.entries.length}</span>
+                    </div>
+                    <div className="overflow-hidden rounded-[9px] border border-line-2 bg-deep divide-y divide-line">
+                      {project.entries.map((entry) => (
+                        <AgentCard
+                          key={entry.sessionId}
+                          entry={entry}
+                          selected={entry.sessionId === selectedId}
+                          usedPct={usedPctBySession.get(entry.sessionId) ?? null}
+                          prs={prsFor(entry.repo, entry.ticket)}
+                          onSelect={() => setSelectedId(entry.sessionId)}
+                          onOpen={() => entry.openable && openAgent(entry)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </section>
+            ))}
+          </div>
+        )}
+
+        {selected && (
+          <AgentPeek
+            // Remount per session so the reply box resets with the selection.
+            key={selected.sessionId}
+            entry={selected}
+            prs={prsFor(selected.repo, selected.ticket)}
+            onOpen={() => openAgent(selected)}
+            onClose={() => setSelectedId(null)}
+          />
+        )}
+      </div>
+    </div>
   );
 }

@@ -162,17 +162,17 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      // ⌘1…⌘N map to the tabs in the same left-to-right order NavTabs renders
-      // them: the repo-independent views lead (Agents, then Dev when enabled),
-      // then the repo-scoped ones — Triage when enabled, Issues, Trees, Reviews.
-      // Keep this in sync with NavTabs so the numbers match what's on screen.
+      // ⌘1…⌘N map to the sidebar's destinations, top to bottom: Triage when
+      // enabled, Tickets, Reviews, then Dev when enabled. Keep this in sync with
+      // `SidebarNav` so the numbers match what's on screen. Two views are
+      // deliberately unnumbered: the workspace (`/trees`), reached by picking a
+      // worktree, and the agents overview, reached from the status bar — ⌘0 is
+      // already the zoom reset.
       const paths = [
-        "/", // Agents
-        ...(devEnabled ? ["/dev"] : []),
         ...(triageEnabled ? ["/triage"] : []),
         "/issues",
-        "/trees",
         "/reviews",
+        ...(devEnabled ? ["/dev"] : []),
       ];
       const idx = Number(e.key) - 1;
       const to = Number.isInteger(idx) && idx >= 0 ? paths[idx] : undefined;

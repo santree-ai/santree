@@ -20,7 +20,6 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { commands, type DevInfo, type StreamEvent } from "../../bindings";
-import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { OutputPane } from "../../components/OutputPane";
 import { Button, ConfirmDialog, EmptyState, Tabs } from "../../components/primitives";
 import {
@@ -65,6 +64,10 @@ const devBuildKey = (repoPath: string) => `dev-build:${repoPath}`;
 
 type Pane = "claude" | "files" | "release" | "build" | "log";
 
+/** Width of the TODO column. Fixed: the resizable app sidebar belongs to the
+ *  shell, and this is a fixed-shape panel rather than a navigable tree. */
+const TODO_WIDTH = 300;
+
 export function DevView() {
   const { enabled, fetched } = useDevEnabled();
   const navigate = useNavigate();
@@ -75,19 +78,24 @@ export function DevView() {
 
   const repoPath = useSetting("app", DEV_REPO_PATH_KEY);
 
-  // `DevContent` mounts its own chrome rather than being wrapped here: the bug
-  // list is the view's left column, and it goes through `ViewChrome`'s `sidebar`
-  // (so the top bar's divider lines up with it) — which needs the send handler
-  // that lives inside `DevContent`.
-  if (!enabled || !repoPath.isFetched) return <ViewChrome>{null}</ViewChrome>;
+  // `DevContent` owns the two-column body rather than it being assembled here:
+  // the bug list is the view's own left column and needs the send handler that
+  // lives inside `DevContent`.
+  if (!enabled || !repoPath.isFetched) return <DevShell>{null}</DevShell>;
   if (!repoPath.data) {
     return (
-      <ViewChrome>
+      <DevShell>
         <PickRepo />
-      </ViewChrome>
+      </DevShell>
     );
   }
   return <DevContent repoPath={repoPath.data} />;
+}
+
+/** The view's outer box: fills the shell's center area. Every Dev state (the
+ *  gate, the repo picker, the real content) sits inside one of these. */
+function DevShell({ children }: { children: ReactNode }) {
+  return <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">{children}</div>;
 }
 
 /** Pick + validate the santree checkout; stores its git toplevel. */
@@ -205,43 +213,49 @@ function DevContent({ repoPath }: { repoPath: string }) {
   );
 
   return (
-    // The bug list is a plain panel, not a navigable tree, so the repo switcher
-    // stays in the top bar rather than becoming a header above it — but the
-    // column itself is ViewChrome's, which is what puts its right edge under the
-    // top bar's divider (and gets it the shared width, resizer and collapse).
-    <ViewChrome repoInTopBar sidebar={<TodoPanel onSend={sendTodo} />}>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <DevBar
-          repoPath={repoPath}
-          info={info.data}
-          pane={pane}
-          onPane={setPane}
-          onBuild={startBuild}
-        />
-        <div className="relative min-h-0 flex-1">
-          {/* Conditional mounts are safe here: each pane's PTY lives in the
-              global TerminalLayer keyed by refId, so remounting a host just
-              re-attaches the overlay (the TreesView pattern). */}
-          {pane === "claude" && (
-            <DevClaudePane
-              repoPath={repoPath}
-              prompt={pendingPrompt}
-              onPromptConsumed={() => setPendingPrompt(undefined)}
-            />
-          )}
-          {pane === "files" && (
-            <DevFilesPane repoPath={repoPath} repoName={info.data?.repoName ?? null} />
-          )}
-          {pane === "release" && <DevReleasePane repoPath={repoPath} />}
-          {pane === "build" && (
-            <DevBuildPane repoPath={repoPath} runKey={buildKey} onStart={startBuild} />
-          )}
-          {pane === "log" && (
-            <DevLogPane logPath={info.data?.logPath ?? null} existingRefId={liveLogRefId} />
-          )}
+    <DevShell>
+      <div className="flex min-h-0 flex-1">
+        {/* The bug list is a plain panel, not a navigable tree, so it's a fixed
+            column of the view rather than part of the app's navigation. */}
+        <div
+          className="flex flex-none flex-col border-r border-line bg-panel"
+          style={{ width: TODO_WIDTH }}
+        >
+          <TodoPanel onSend={sendTodo} />
+        </div>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <DevBar
+            repoPath={repoPath}
+            info={info.data}
+            pane={pane}
+            onPane={setPane}
+            onBuild={startBuild}
+          />
+          <div className="relative min-h-0 flex-1">
+            {/* Conditional mounts are safe here: each pane's PTY lives in the
+                global TerminalLayer keyed by refId, so remounting a host just
+                re-attaches the overlay (the TreesView pattern). */}
+            {pane === "claude" && (
+              <DevClaudePane
+                repoPath={repoPath}
+                prompt={pendingPrompt}
+                onPromptConsumed={() => setPendingPrompt(undefined)}
+              />
+            )}
+            {pane === "files" && (
+              <DevFilesPane repoPath={repoPath} repoName={info.data?.repoName ?? null} />
+            )}
+            {pane === "release" && <DevReleasePane repoPath={repoPath} />}
+            {pane === "build" && (
+              <DevBuildPane repoPath={repoPath} runKey={buildKey} onStart={startBuild} />
+            )}
+            {pane === "log" && (
+              <DevLogPane logPath={info.data?.logPath ?? null} existingRefId={liveLogRefId} />
+            )}
+          </div>
         </div>
       </div>
-    </ViewChrome>
+    </DevShell>
   );
 }
 

@@ -147,16 +147,14 @@ describe("targetOwnsKey", () => {
 });
 
 describe("useKeyboardShortcuts", () => {
-  it("maps ⌘1…⌘N to the tabs in NavTabs order, Triage leading the repo-scoped ones", () => {
+  it("maps ⌘1…⌘N to the sidebar's destinations, top to bottom", () => {
     app.triageEnabled = true;
     renderHook(() => useKeyboardShortcuts());
 
     for (const [key, to] of [
-      ["1", "/"],
-      ["2", "/triage"],
-      ["3", "/issues"],
-      ["4", "/trees"],
-      ["5", "/reviews"],
+      ["1", "/triage"],
+      ["2", "/issues"],
+      ["3", "/reviews"],
     ]) {
       router.navigate.mockClear();
       press(key, { metaKey: true });
@@ -164,18 +162,16 @@ describe("useKeyboardShortcuts", () => {
     }
   });
 
-  it("puts Dev second, beside Agents, since neither is repo-scoped", () => {
+  it("puts Dev last, below the destinations everyone has", () => {
     app.triageEnabled = true;
     app.devEnabled = true;
     renderHook(() => useKeyboardShortcuts());
 
     for (const [key, to] of [
-      ["1", "/"],
-      ["2", "/dev"],
-      ["3", "/triage"],
-      ["4", "/issues"],
-      ["5", "/trees"],
-      ["6", "/reviews"],
+      ["1", "/triage"],
+      ["2", "/issues"],
+      ["3", "/reviews"],
+      ["4", "/dev"],
     ]) {
       router.navigate.mockClear();
       press(key, { metaKey: true });
@@ -183,16 +179,16 @@ describe("useKeyboardShortcuts", () => {
     }
   });
 
-  it("shifts the numbers up when Triage is disabled (no gap, no dead ⌘5)", () => {
+  it("shifts the numbers up when Triage is disabled (no gap, no dead number)", () => {
     renderHook(() => useKeyboardShortcuts());
 
     press("1", { metaKey: true });
-    expect(router.navigate).toHaveBeenCalledWith({ to: "/" });
-    press("4", { metaKey: true });
+    expect(router.navigate).toHaveBeenCalledWith({ to: "/issues" });
+    press("2", { metaKey: true });
     expect(router.navigate).toHaveBeenCalledWith({ to: "/reviews" });
 
     router.navigate.mockClear();
-    press("5", { metaKey: true });
+    press("3", { metaKey: true });
     expect(router.navigate).not.toHaveBeenCalled();
   });
 
@@ -200,22 +196,31 @@ describe("useKeyboardShortcuts", () => {
     app.devEnabled = true;
     const { unmount } = renderHook(() => useKeyboardShortcuts());
 
-    press("2", { metaKey: true });
+    press("3", { metaKey: true });
     expect(router.navigate).toHaveBeenCalledWith({ to: "/dev" });
     unmount();
 
     app.devEnabled = false;
     router.navigate.mockClear();
     renderHook(() => useKeyboardShortcuts());
-    press("2", { metaKey: true });
-    expect(router.navigate).toHaveBeenCalledWith({ to: "/issues" });
-
-    router.navigate.mockClear();
-    press("5", { metaKey: true });
+    press("3", { metaKey: true });
     expect(router.navigate).not.toHaveBeenCalled();
   });
 
-  it("ignores ⌘0 now that there is no terminal page", () => {
+  it("leaves the workspace and the agents overview unnumbered", () => {
+    app.triageEnabled = true;
+    app.devEnabled = true;
+    renderHook(() => useKeyboardShortcuts());
+
+    for (const key of ["1", "2", "3", "4"]) {
+      router.navigate.mockClear();
+      press(key, { metaKey: true });
+      expect(router.navigate).not.toHaveBeenCalledWith({ to: "/trees" });
+      expect(router.navigate).not.toHaveBeenCalledWith({ to: "/" });
+    }
+  });
+
+  it("ignores ⌘0, which belongs to the text-size reset", () => {
     renderHook(() => useKeyboardShortcuts());
 
     press("0", { metaKey: true });

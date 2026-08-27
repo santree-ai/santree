@@ -100,9 +100,13 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
 src-tauri/migrations/  0001_init … (SQLite schema; applied on startup)
 src/
   main.tsx         QueryClient (+ global mutation→toast) · providers · router
-  routes/          one file per tab → renders a feature view
+  routes/          one file per destination → renders a feature view's CONTENT
+                   (window chrome belongs to the shell, never to a view)
+  components/shell/  the one permanent frame: sidebar (search · destinations ·
+                   projects → worktrees → agents) · status bar · AppShell
   features/<view>/ each owns a model.tsx (context) + presentational components
   lib/queries.ts   ALL data hooks (useUnwrappedQuery, useOptimisticMutation, …)
+  lib/attention.ts what needs a human: level ladder, seen-gating, tree ordering
   state/           AppContext (repo, theme, settings) · toast.tsx (notifications)
   components/       shared chrome + primitives.tsx (Badge, EmptyState, ChevronSelect…)
   theme/colors.ts  enum → color/label maps
@@ -110,6 +114,14 @@ src/
 
 ## Key patterns (reuse these)
 
+- **Layout:** there is ONE window frame (`components/shell/AppShell`) — a permanent
+  sidebar and status bar around a swapping content area. A view renders content only:
+  no navigation, no repo switcher, no window chrome of its own. Anything that must
+  outlive a navigation (terminal layer, background agent runs, palette) is mounted by
+  `routes/__root.tsx` outside the content slot, or it dies on the next click.
+- **Attention:** a status dot, an ordering, or a "needs you" count comes from
+  `lib/attention.ts` (`levelOf` · `highest` · `compareAttention` · `useSeenAgents`) on
+  top of the agent registry's buckets — never from a second classification.
 - **Data:** every read is a hook in `lib/queries.ts`. Result-typed commands go through
   `useUnwrappedQuery`; raw-value commands use plain `useQuery`. Writes use
   `useOptimisticMutation` (cancel → patch → rollback-on-error → invalidate-on-settle).

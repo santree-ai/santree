@@ -193,9 +193,6 @@ export function defaultTabTitle(
   return candidate();
 }
 
-/** The project a worktree belongs to (its Linear project, or the catch-all). */
-export const projectOf = (w: Worktree): string => w.project ?? NO_PROJECT;
-
 /** Resolve the active worktree's remembered main tab, falling back to a safe
  *  default when the remembered tab is no longer available: the File tab needs
  *  an open file, the Setup tab needs setup still running for THIS worktree
@@ -636,7 +633,10 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // avoids opening into a stale tab that renders nothing.
   useEffect(() => {
     if (!treeFocus) return;
-    if (!worktrees.some((w) => w.id === treeFocus)) return;
+    // The base checkout is selectable but deliberately absent from `worktrees`,
+    // so it has to clear the existence gate on its own — otherwise picking it in
+    // the sidebar switches repo and then lands on whatever was open before.
+    if (treeFocus !== BASE_ID && !worktrees.some((w) => w.id === treeFocus)) return;
     select(treeFocus);
     setFileFor(treeFocus, null);
     setTabFor(treeFocus, "issue");

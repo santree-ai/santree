@@ -1,7 +1,11 @@
 /** The worktree's bottom status bar (VS Code-style): git state, a base-branch menu
- *  (divergence + pull-into-worktree + update-base-from-origin), and the per-worktree
- *  actions (open in editor, run setup, delete) plus the file-picker toggle. Lives at
- *  the bottom of the main content so it stays put regardless of the side panels. */
+ *  (divergence + pull-into-worktree + update-base-from-origin), push/pull, run
+ *  setup, delete, and the file-picker toggle. Lives at the bottom of the main
+ *  content so it stays put regardless of the side panels.
+ *
+ *  The two actions you reach for while *looking at* the worktree — Create PR and
+ *  Open in… — ride in the worktree header instead, next to the title they act on;
+ *  both are exported from here so the two bars can't drift apart. */
 import { Fragment, useEffect, useRef, useState } from "react";
 
 import type { Worktree } from "../../bindings";
@@ -59,13 +63,10 @@ export function BottomBar({ worktree }: { worktree: Worktree }) {
 
         <div className="min-w-2 flex-1" />
 
-        <OpenInMenu path={worktree.path} />
-        <Divider />
         <PullRemoteButton worktree={worktree} />
         <PushButton worktree={worktree} />
         {!isBase && (
           <>
-            <PrButton worktree={worktree} />
             <SetupButton worktree={worktree} />
             <DeleteButton worktree={worktree} />
             <Divider />
@@ -183,8 +184,9 @@ function PushButton({ worktree }: { worktree: Worktree }) {
 }
 
 /** "Create PR" — shown only when the branch is ahead of base and has no PR yet.
- *  Opens the create-PR dialog (push + GitHub API happen there). */
-function PrButton({ worktree }: { worktree: Worktree }) {
+ *  Opens the create-PR dialog (push + GitHub API happen there). Rendered by the
+ *  worktree header. */
+export function PrButton({ worktree }: { worktree: Worktree }) {
   const { openPrDialog, prsByWorktree } = useTrees();
   const hasPr = (prsByWorktree.get(worktree.id) ?? []).length > 0;
   if (worktree.ahead === 0 || hasPr) return null;
@@ -201,7 +203,7 @@ function PrButton({ worktree }: { worktree: Worktree }) {
   );
 }
 
-const ITEM =
+export const ITEM =
   "flex h-[22px] flex-none cursor-pointer items-center gap-1.5 rounded px-2 whitespace-nowrap hover:bg-hover hover:text-fg-2";
 
 function GitState({ worktree }: { worktree: Worktree }) {
@@ -304,7 +306,14 @@ function DeleteButton({ worktree }: { worktree: Worktree }) {
 
 // ── Open in… split button ────────────────────────────────────────────────────
 
-function OpenInMenu({ path }: { path: string }) {
+export function OpenInMenu({
+  path,
+  placement = "up",
+}: {
+  path: string;
+  /** Which way the menu opens — "down" when the button rides in a header. */
+  placement?: "up" | "down";
+}) {
   const { repo } = useTrees();
   const { data: openers = [] } = useOpeners();
   const { mutate: openIn } = useOpenInApp();
@@ -341,7 +350,7 @@ function OpenInMenu({ path }: { path: string }) {
 
   return (
     <Dropdown
-      placement="up"
+      placement={placement}
       align="right"
       trigger={(toggle) => (
         <div className="flex flex-none items-stretch">

@@ -171,7 +171,7 @@ of them:
   config the CLI enforces itself — the same mechanism as a user's own
   `settings.json` — not santree reacting to the session.
 - **The captured state is display-only.** It reaches the UI as a status badge and
-  a usage bar (`session_states` / `session_usage_live` → `WorktreeSidebar`,
+  a usage bar (`session_states` / `session_usage_live` → `AgentRow`,
   `AllAgentsView`) and stops there.
 - **No output-parsing influences input.** Nothing derived from the hook payloads,
   the transcript reconciliation, or the status line is ever written back to the

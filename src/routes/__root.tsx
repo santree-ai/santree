@@ -1,6 +1,7 @@
 import { createRootRoute, Outlet } from "@tanstack/react-router";
 import { CommandPalette } from "../components/CommandPalette";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
+import { AppShell } from "../components/shell/AppShell";
 import { WelcomeScreen } from "../components/WelcomeScreen";
 import { TerminalLayer } from "../features/terminal/TerminalLayer";
 import { AgentRunHost } from "../features/trees/AgentRunHost";
@@ -10,22 +11,25 @@ import { AgentRunsProvider } from "../state/AgentRuns";
 import { LegacyMigrationProvider } from "../state/LegacyMigration";
 
 export const Route = createRootRoute({
-  component: AppShell,
+  component: RootLayout,
 });
 
 /**
- * The application frame. Each route renders its own window chrome via
- * `ViewChrome` (split top bar: repo switcher beside the native traffic lights on
- * the left, navigation tabs on the right). The shell just provides the
- * full-height container; the help popover is anchored in each sidebar's
- * `SidebarFooter` instead (see `HelpMenu`).
+ * The application frame. One {@link AppShell} owns the whole window — the
+ * sidebar (search, destinations, every project's worktrees and their agents) and
+ * the status bar — and the routed view fills only the area between them. Views
+ * therefore render content, never window chrome.
  *
- * First run (no repositories registered) swaps the routed views for the
+ * The residents below sit *outside* the shell's content slot on purpose: a live
+ * terminal or a queued background launch parented to a view would be torn down
+ * the moment the user navigated away.
+ *
+ * First run (no repositories registered) swaps the shell for the
  * `WelcomeScreen`. Gated on the list having *loaded* — rendering nothing for
  * the first frames — so neither the welcome screen nor the normal chrome
  * flashes for the wrong state on startup.
  */
-function AppShell() {
+function RootLayout() {
   useKeyboardShortcuts();
   useUpdateWatcher();
   const { data: repos } = useRepos();
@@ -34,14 +38,20 @@ function AppShell() {
       <LegacyMigrationProvider>
         <div className="relative flex h-screen flex-col overflow-hidden bg-surface text-fg">
           <div className="min-h-0 flex-1">
-            {repos === undefined ? null : repos.length === 0 ? <WelcomeScreen /> : <Outlet />}
+            {repos === undefined ? null : repos.length === 0 ? (
+              <WelcomeScreen />
+            ) : (
+              <AppShell>
+                <Outlet />
+              </AppShell>
+            )}
           </div>
-          {/* Always mounted so terminal sessions persist across tab switches. */}
+          {/* Always mounted so terminal sessions persist across view switches. */}
           <TerminalLayer />
-          {/* Always mounted so an agent launch — a "Run in background" from Issues, or
-              one queued behind a setup run the user navigated away from — actually
-              runs. It used to live under the Trees route, which meant it only ran if
-              you happened to be looking at it. */}
+          {/* Always mounted so an agent launch — a "Run in background" from the
+              ticket list, or one queued behind a setup run the user navigated away
+              from — actually runs. It used to live under the Trees route, which
+              meant it only ran if you happened to be looking at it. */}
           <AgentRunHost />
           <CommandPalette />
           <ShortcutsOverlay />

@@ -1,16 +1,16 @@
-/** The Settings tab: app-wide defaults and per-repo overrides.
+/** The Settings view: app-wide defaults and per-repo overrides.
  *
- * This file is just the shell — scope (app/repo) + section state, the sidebar
- * nav (flat items plus grouped sections like "Actions"), and a data-driven
- * dispatch to one section pane. Each pane lives in `sections/`; shared widgets
- * in `widgets.tsx`. */
+ * This file is just the frame — its own header (Back + the app/repo scope
+ * switch), scope + section state, the section nav column (flat items plus
+ * grouped sections like "Actions"), and a data-driven dispatch to one section
+ * pane. Each pane lives in `sections/`; shared widgets in `widgets.tsx`. The
+ * window chrome and app navigation belong to the app shell. */
 
 import { useCanGoBack, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useState } from "react";
 import type { Repo } from "../../bindings";
 import { RepoAvatar } from "../../components/chrome/RepoAvatar";
-import { ViewChrome } from "../../components/chrome/ViewChrome";
 import {
   AgentsIcon,
   BackArrowIcon,
@@ -72,6 +72,10 @@ const flatten = (nodes: NavNode[]): SectionDef[] =>
   nodes.flatMap((n) => (isGroup(n) ? n.sections : [n]));
 
 const ICON_SIZE = 15;
+
+/** Width of the section-nav column. Fixed: the resizable app sidebar belongs to
+ *  the shell, and this nav is a short list of fixed-length labels. */
+const NAV_WIDTH = 240;
 
 // The "Actions" group entries, shared between scopes. App scope passes no repo
 // (so each pane shows its app-level defaults); repo scope passes the repo (so
@@ -222,21 +226,19 @@ export function SettingsView() {
   const nav = scope === "app" ? APP_NAV : REPO_NAV;
   const active = resolveSection(nav, section);
 
-  const backCell = (
-    <div className="flex items-center pl-1">
-      <button
-        type="button"
-        onClick={goBack}
-        className="flex cursor-pointer items-center gap-2 rounded-md py-1 pr-2.5 pl-1.5 text-muted-2 transition-colors hover:bg-hover hover:text-fg-2"
-      >
-        <BackArrowIcon size={17} />
-        <span className="text-[13px] font-semibold">Settings</span>
-      </button>
-    </div>
+  const back = (
+    <button
+      type="button"
+      onClick={goBack}
+      className="flex cursor-pointer items-center gap-2 rounded-md py-1 pr-2.5 pl-1.5 text-muted-2 transition-colors hover:bg-hover hover:text-fg-2"
+    >
+      <BackArrowIcon size={17} />
+      <span className="text-[13px] font-semibold">Settings</span>
+    </button>
   );
 
   const scopeTabs = (
-    <div className="flex h-full items-center gap-2.5">
+    <div className="flex h-full items-center gap-2.5 py-1.5">
       <Tabs<Scope>
         variant="inset"
         className="h-full gap-0.5"
@@ -277,42 +279,52 @@ export function SettingsView() {
   };
 
   return (
-    <ViewChrome
-      leftCell={backCell}
-      rightCell={scopeTabs}
-      showRepoSelector={false}
-      sidebar={
-        <div className="p-2">
-          {nav.map((node) =>
-            isGroup(node) ? (
-              <div key={node.group} className="mt-3 first:mt-0">
-                <div className="mb-1 px-3 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
-                  {node.group}
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* The view's own 44px header: Back on the left (where ViewChrome's left
+          cell used to be), the app/repo scope switch on the right. */}
+      <div className="flex h-11 flex-none items-center gap-2.5 border-b border-line bg-surface pr-3 pl-2">
+        {back}
+        <div className="flex-1" />
+        {scopeTabs}
+      </div>
+
+      <div className="flex min-h-0 flex-1">
+        <div
+          className="flex flex-none flex-col overflow-y-auto border-r border-line bg-panel"
+          style={{ width: NAV_WIDTH }}
+        >
+          <div className="p-2">
+            {nav.map((node) =>
+              isGroup(node) ? (
+                <div key={node.group} className="mt-3 first:mt-0">
+                  <div className="mb-1 px-3 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
+                    {node.group}
+                  </div>
+                  {node.sections.map(navButton)}
                 </div>
-                {node.sections.map(navButton)}
-              </div>
-            ) : (
-              <div
-                key={node.key}
-                className={node.separatorBefore ? "mt-3 border-t border-line pt-3" : undefined}
-              >
-                {navButton(node)}
-              </div>
-            ),
-          )}
-        </div>
-      }
-    >
-      {active.fullBleed ? (
-        <div className="flex min-h-0 flex-1 bg-app">{active.render(settingsRepo)}</div>
-      ) : (
-        <div className="flex-1 overflow-y-auto bg-app">
-          <div className="settings-pane mx-auto w-full max-w-[720px] px-5 pt-6 pb-11 sm:px-[30px]">
-            {active.render(settingsRepo)}
+              ) : (
+                <div
+                  key={node.key}
+                  className={node.separatorBefore ? "mt-3 border-t border-line pt-3" : undefined}
+                >
+                  {navButton(node)}
+                </div>
+              ),
+            )}
           </div>
         </div>
-      )}
-    </ViewChrome>
+
+        {active.fullBleed ? (
+          <div className="flex min-h-0 min-w-0 flex-1 bg-app">{active.render(settingsRepo)}</div>
+        ) : (
+          <div className="min-w-0 flex-1 overflow-y-auto bg-app">
+            <div className="settings-pane mx-auto w-full max-w-[720px] px-5 pt-6 pb-11 sm:px-[30px]">
+              {active.render(settingsRepo)}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

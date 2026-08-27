@@ -1,9 +1,10 @@
 /**
- * The Triage tab. The left rail is the untriaged queue (snoozed issues greyed
- * and sunk to the bottom) plus the team on-call schedule. The main pane renders
- * the selected Linear issue: its description (markdown + images) and comment
- * thread. "Investigate" opens a real terminal in the repo for now (an
- * auto-invoked investigate skill comes later).
+ * The Triage view. Its own left column is the untriaged queue (snoozed issues
+ * greyed and sunk to the bottom) plus the team on-call schedule; the pane to its
+ * right renders the selected Linear issue: its description (markdown + images)
+ * and comment thread. "Investigate" opens a real terminal in the repo for now (an
+ * auto-invoked investigate skill comes later). Window chrome and app navigation
+ * are the app shell's — this view renders only its two columns.
  *
  * This is a thin orchestrator: data hooks + the extracted triage hooks (see
  * `hooks.ts`) + the JSX (queue list + detail pane). The detail bodies are
@@ -18,7 +19,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AgentKind, SessionState, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
-import { ViewChrome } from "../../components/chrome/ViewChrome";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
 import { AgentIcon, TelescopeIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
@@ -85,6 +85,10 @@ import { orderedProviders, providersByRef, triageTerminalRef } from "./providerS
 import { QueueRow } from "./QueueRow";
 import { RepoSessionPane } from "./RepoSessionPane";
 import { ScheduleSection } from "./ScheduleSection";
+
+/** Width of the queue column. Fixed: the resizable app sidebar belongs to the
+ *  shell, and the queue is a list of uniform rows rather than a nested tree. */
+const QUEUE_WIDTH = 300;
 
 function QueueLaneHeader({ label, count }: { label: string; count: number }) {
   return (
@@ -708,9 +712,12 @@ export function TriageView() {
   );
 
   return (
-    <ViewChrome
-      sidebar={
-        <>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1">
+        <div
+          className="flex flex-none flex-col border-r border-line bg-panel"
+          style={{ width: QUEUE_WIDTH }}
+        >
           {/* Header (scope toggle + count + Select all). Shown whenever there's a
               queue OR team issues to widen to, so the Mine/All toggle is reachable
               even when your own queue is empty. */}
@@ -811,97 +818,97 @@ export function TriageView() {
             </div>
           )}
           <SidebarFooter />
-        </>
-      }
-    >
-      <div className="flex min-w-0 flex-1 flex-col bg-app">
-        {repoSessionOpen && baseWorktree ? (
-          // Takes the whole detail area — there's no ticket to head it with, and
-          // the queue is still one click away in the rail. Runs the same agent
-          // config the Investigation action uses, since it's the Triage view's
-          // agent either way.
-          <div className="flex min-h-0 flex-1 flex-col">
-            <DetailTabs
-              tab={repoSessionAgent}
-              includeDiscussion={false}
-              providers={orderedProviders(
-                new Set([...providersFor(`__repo__:${activeRepo}`), repoSessionAgent]),
-              )}
-              onTab={(tab) => {
-                if (tab !== "discussion") setRepoSessionAgent(tab);
-              }}
-            />
-            <RepoSessionPane
-              key={repoSessionAgent}
-              repo={activeRepo}
-              branch={baseWorktree.branch}
-              cwd={repoPath}
-              agentKind={repoSessionAgent}
-            />
-          </div>
-        ) : loading ? (
-          // The queue hasn't landed yet, so we don't know there's nothing to
-          // triage — "All caught up" here would be a cheerful lie.
-          <DiscussionSkeleton />
-        ) : ordered.length === 0 ? (
-          <AllCaughtUp goodCitizen={goodCitizen} teamWaiting={teamWaiting} onTriage={onTriage} />
-        ) : !activeTicket ? (
-          <TriageHome tickets={ordered} onSelect={selectTicket} onTriage={onTriage} />
-        ) : (
-          <>
-            {/* Header renders instantly from the queue row; richer fields
-                (author, labels, status) fill in when the detail loads. */}
-            <IssueHeader
-              ticket={activeTicket}
-              detail={detail?.id === activeTicket.id ? detail : undefined}
-              onSetState={(stateId) => setState.mutate({ ticketId: activeTicket.id, stateId })}
-              linearReadOnly={linearReadOnly}
-              investigating={selectedTab !== "discussion"}
-              agentKind={agentKind}
-              onInvestigate={investigate}
-              onRefresh={refresh}
-              refreshing={refreshing}
-            />
-            {/* The tab bar appears only once an investigation is started. */}
-            {showInvestigation && (
+        </div>
+
+        <div className="flex min-w-0 flex-1 flex-col bg-app">
+          {repoSessionOpen && baseWorktree ? (
+            // Takes the whole detail area — there's no ticket to head it with, and
+            // the queue is still one click away in the rail. Runs the same agent
+            // config the Investigation action uses, since it's the Triage view's
+            // agent either way.
+            <div className="flex min-h-0 flex-1 flex-col">
               <DetailTabs
-                tab={selectedTab}
-                providers={shownProviders}
-                onTab={(t) => setTab(activeId, t)}
+                tab={repoSessionAgent}
+                includeDiscussion={false}
+                providers={orderedProviders(
+                  new Set([...providersFor(`__repo__:${activeRepo}`), repoSessionAgent]),
+                )}
+                onTab={(tab) => {
+                  if (tab !== "discussion") setRepoSessionAgent(tab);
+                }}
               />
-            )}
-            {/* Kept discussion panes stay mounted (hidden) so revisiting a ticket
+              <RepoSessionPane
+                key={repoSessionAgent}
+                repo={activeRepo}
+                branch={baseWorktree.branch}
+                cwd={repoPath}
+                agentKind={repoSessionAgent}
+              />
+            </div>
+          ) : loading ? (
+            // The queue hasn't landed yet, so we don't know there's nothing to
+            // triage — "All caught up" here would be a cheerful lie.
+            <DiscussionSkeleton />
+          ) : ordered.length === 0 ? (
+            <AllCaughtUp goodCitizen={goodCitizen} teamWaiting={teamWaiting} onTriage={onTriage} />
+          ) : !activeTicket ? (
+            <TriageHome tickets={ordered} onSelect={selectTicket} onTriage={onTriage} />
+          ) : (
+            <>
+              {/* Header renders instantly from the queue row; richer fields
+                (author, labels, status) fill in when the detail loads. */}
+              <IssueHeader
+                ticket={activeTicket}
+                detail={detail?.id === activeTicket.id ? detail : undefined}
+                onSetState={(stateId) => setState.mutate({ ticketId: activeTicket.id, stateId })}
+                linearReadOnly={linearReadOnly}
+                investigating={selectedTab !== "discussion"}
+                agentKind={agentKind}
+                onInvestigate={investigate}
+                onRefresh={refresh}
+                refreshing={refreshing}
+              />
+              {/* The tab bar appears only once an investigation is started. */}
+              {showInvestigation && (
+                <DetailTabs
+                  tab={selectedTab}
+                  providers={shownProviders}
+                  onTab={(t) => setTab(activeId, t)}
+                />
+              )}
+              {/* Kept discussion panes stay mounted (hidden) so revisiting a ticket
                 is instant; only the active one (on the Discussion tab) is shown. */}
-            {keptPanes.map((id) => {
-              const d = id === activeId ? detail : detailFor(id);
-              if (!d) return null;
-              const shown = id === activeId && selectedTab === "discussion";
-              return (
-                <div key={id} className={shown ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-                  <DiscussionPane detail={d} repo={activeRepo} />
-                </div>
-              );
-            })}
-            {/* Skeleton only on a first load — until the active ticket's pane is
+              {keptPanes.map((id) => {
+                const d = id === activeId ? detail : detailFor(id);
+                if (!d) return null;
+                const shown = id === activeId && selectedTab === "discussion";
+                return (
+                  <div key={id} className={shown ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+                    <DiscussionPane detail={d} repo={activeRepo} />
+                  </div>
+                );
+              })}
+              {/* Skeleton only on a first load — until the active ticket's pane is
                 mounted into the kept-panes cache (which happens under a
                 transition, so its heavy paint never blocks the click). */}
-            {selectedTab === "discussion" && !keptPanes.includes(activeTicket.id) && (
-              <DiscussionSkeleton />
-            )}
-            {activeAgent && (
-              <InvestigatePane
-                key={`${activeTicket.id}:${activeAgent}`}
-                repo={activeRepo}
-                ticketId={activeTicket.id}
-                cwd={repoPath}
-                agentKind={activeAgent}
-                hasStartedSession={activeHasStarted}
-                onExited={backToDiscussion}
-              />
-            )}
-          </>
-        )}
+              {selectedTab === "discussion" && !keptPanes.includes(activeTicket.id) && (
+                <DiscussionSkeleton />
+              )}
+              {activeAgent && (
+                <InvestigatePane
+                  key={`${activeTicket.id}:${activeAgent}`}
+                  repo={activeRepo}
+                  ticketId={activeTicket.id}
+                  cwd={repoPath}
+                  agentKind={activeAgent}
+                  hasStartedSession={activeHasStarted}
+                  onExited={backToDiscussion}
+                />
+              )}
+            </>
+          )}
+        </div>
       </div>
-    </ViewChrome>
+    </div>
   );
 }
