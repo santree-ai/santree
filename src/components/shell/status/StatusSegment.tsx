@@ -31,7 +31,10 @@ export function StatusButton({
   return (
     <button
       type="button"
-      className={`${STATUS_SEGMENT} cursor-pointer rounded-sm px-1 transition-colors focus-visible:ring-1 focus-visible:ring-[color:var(--accent)] focus-visible:outline-none ${
+      // No local focus ring: the app's one ring lives in `styles.css` and is
+      // gated on input modality, and a `ring-*` box-shadow here would sit
+      // outside that gate — leaving an accent box on the bar after a click.
+      className={`${STATUS_SEGMENT} cursor-pointer rounded-sm px-1 transition-colors ${
         active ? "text-fg-2" : "text-muted-4 hover:text-fg-2"
       } ${className ?? ""}`}
       {...rest}

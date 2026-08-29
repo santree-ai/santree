@@ -126,6 +126,12 @@
   --selection-fill: color-mix(in srgb, var(--accent) 7%, transparent);
   --selection-border: color-mix(in srgb, var(--accent) 48%, transparent);
   --selection-text: var(--accent-text);
+  /* The sidebar tree's two steps (see `.tree-card`). Mixed from the foreground
+     so one pair works in both themes — it lightens on dark surfaces and darkens
+     on light ones — and translucent so nested rows composite instead of
+     replacing the card beneath them. */
+  --tree-hover: color-mix(in srgb, var(--color-fg) 5%, transparent);
+  --tree-selected: color-mix(in srgb, var(--color-fg) 10%, transparent);
   /* A text-safe accent. Equal to the accent on dark surfaces; darkened on light
      ones (teal on white is otherwise too low-contrast to read). Tracks any
      runtime --accent override via color-mix. */
@@ -151,8 +157,8 @@
   /* Claude's brand terracotta — the `ClaudeSparkIcon` logomark tint on tabs
      that host a Claude session. Reads on both themes. */
   --claude-brand: #d97757;
-  /* Live sidebar width. Updated directly during a resize drag (no React
-     re-render) and committed to state on pointer-up — see ViewChrome. */
+  /* Live sidebar width. The shell's `Sidebar` writes it directly during a
+     resize drag (no React re-render) and commits it to state on pointer-up. */
   --sidebar-width: 264px;
   /* Declaring both lets the webview's prefers-color-scheme reflect the OS so
      the "Auto" theme works; the concrete scheme is pinned per data-theme below
@@ -202,6 +208,33 @@
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+/* The sidebar tree's own state vocabulary — neutral, rounded, inset.
+   Deliberately NOT `.selection-row`, and the difference is about permanence:
+   an accent fill means "this is the current destination", which reads right in
+   a list you opened for a moment (the palette, the settings nav) and wrong in a
+   rail that is on screen all day with exactly one row always lit. Hue in this
+   tree is reserved for state (see `AttentionDot`), so selection has to be
+   built from value instead.
+
+   Both fills are translucent, not opaque surfaces, so they COMPOSITE: an agent
+   row hovered inside an already-selected card lands at hover-over-selected and
+   stays visible, where two opaque grays of the same value would cancel out. */
+.tree-card,
+.tree-row {
+  border-radius: var(--radius-md);
+  transition: background-color 120ms ease;
+}
+
+.tree-card:hover,
+.tree-row:hover {
+  background: var(--tree-hover);
+}
+
+.tree-card[data-active="true"],
+.tree-row[data-active="true"] {
+  background: var(--tree-selected);
+}
+
 .ledger-row {
   display: flex;
   align-items: center;
@@ -211,11 +244,6 @@
 
 .ledger-row:first-child {
   border-top: 0;
-}
-
-:where(button, input, textarea, select, [role="button"]):focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 68%, transparent);
-  outline-offset: 2px;
 }
 
 /* The palette's focused field already has a caret and an accent search icon.
@@ -306,11 +334,21 @@ body,
   overscroll-behavior: none;
 }
 
-/* Scroll panes shouldn't chain their overscroll up to the window. */
+/* Scroll panes shouldn't chain their overscroll up to the window — but only on
+   an axis they can actually scroll. A code fence, a wide table or a mermaid
+   wrapper is `overflow-x-auto` and nothing else: containing its *vertical*
+   overscroll swallowed every wheel event the cursor happened to be over, so the
+   panel behind it stopped scrolling at the block. Contain each axis on the
+   utility that opts into it, and a vertical wheel chains out of a horizontal
+   scroller the way it does on any web page. */
 .overflow-auto,
-.overflow-y-auto,
+.overflow-y-auto {
+  overscroll-behavior-y: contain;
+}
+
+.overflow-auto,
 .overflow-x-auto {
-  overscroll-behavior: contain;
+  overscroll-behavior-x: contain;
 }
 
 * {
@@ -364,12 +402,30 @@ button:focus:not(:focus-visible) {
   outline: none;
 }
 
+/* THE focus ring. One rule, one mechanism — an `outline`, never a `ring-*`
+   box-shadow: the pointer gate below can only take back what it can see, and a
+   component that rolls its own ring escapes it and leaves an accent box behind
+   on a plain click. Add roles here rather than styling focus in a component. */
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
-button:focus-visible {
+button:focus-visible,
+[role="button"]:focus-visible,
+[role="tab"]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* While the user is driving with a pointer, no focus ring — see
+   `lib/focusModality.ts`. Script-moved focus (a menu focusing its first item on
+   open, and handing focus back to the trigger on close) counts as `:focus-visible`
+   to the engine, so without this a *click* leaves an accent ring behind on both.
+   The mark is cleared by the first navigation key, so keyboard focus always rings.
+   Text fields keep theirs: a caret is not a focus indicator on an empty input;
+   a `<select>` has no caret, so it follows the buttons it is styled to look like. */
+:root[data-pointer-nav]
+  :where(button, select, [role="button"], [role="tab"]):focus-visible {
+  outline: none;
 }
 
 /* The code editors (react-simple-code-editor) lay a transparent textarea over the

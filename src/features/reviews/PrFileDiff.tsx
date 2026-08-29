@@ -103,6 +103,7 @@ export const PrFileDiff = memo(function PrFileDiff({
   oldText,
   newText,
   mode = "unified",
+  draftMode = "publish",
 }: {
   path: string;
   /** Base-side path for a rename/copy. */
@@ -126,6 +127,10 @@ export const PrFileDiff = memo(function PrFileDiff({
   /** Full head-side file content — the other half of context expansion. */
   newText?: string;
   mode?: DiffMode;
+  /** What a draft card's primary action does, and what the line composer offers:
+   *  `publish` puts comments into a pending review (someone else's PR), `queue`
+   *  turns them into work items (your own). */
+  draftMode?: "publish" | "queue";
 }) {
   const theme = useResolvedTheme();
   // The gutter `+` is press-and-drag, like github.com's — see useGutterDrag for
@@ -179,6 +184,7 @@ export const PrFileDiff = memo(function PrFileDiff({
                   draft={item.draft}
                   target={target}
                   patch={patch}
+                  mode={draftMode}
                 />
               ),
             )}
@@ -215,6 +221,7 @@ export const PrFileDiff = memo(function PrFileDiff({
             startLine={fromLineNumber}
             onRight={isRightSide(side)}
             onClose={onClose}
+            mode={draftMode}
           />
         )}
         diffViewMode={mode === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified}

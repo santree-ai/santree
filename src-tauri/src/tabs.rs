@@ -6,9 +6,23 @@
 //! shell's history can't be restored).
 
 use anyhow::{bail, Result};
-use santree_core::domain::{AgentKind, TabKind, WorktreeTab};
+use santree_core::domain::{AgentKind, TabKind, TabPr, WorktreeTab};
 
 use crate::db::Db;
+
+/// A tab on its way into the table. Grouped rather than passed as eight positional
+/// arguments because `kind`, `agent_kind` and `pr` are interdependent — see the
+/// validation in [`add`].
+pub struct NewTab<'a> {
+    pub worktree_id: &'a str,
+    pub id: &'a str,
+    pub kind: TabKind,
+    pub agent_kind: Option<AgentKind>,
+    pub title: &'a str,
+    /// The pull request a review tab relaunches from. Required for (and only for)
+    /// the review kinds.
+    pub pr: Option<TabPr>,
+}
 
 /// The session-registry key for a Claude tab — the same key the frontend uses
 /// as the PTY `refId`, so the two sides always name one logical terminal the
@@ -17,35 +31,64 @@ pub fn term_key(worktree_id: &str, tab_id: &str) -> String {
     format!("tree:{worktree_id}:tab:{tab_id}")
 }
 
+/// The columns every read selects, in the order [`row_to_tab`] destructures them.
+const COLUMNS: &str = "id, worktree_id, kind, agent_kind, title, pr_repo, pr_number";
+
+type Row = (
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<u32>,
+);
+
+fn row_to_tab(row: Row) -> Result<WorktreeTab> {
+    let (id, worktree_id, raw_kind, raw_agent, title, pr_repo, pr_number) = row;
+    let kind = TabKind::from_db_str(&raw_kind);
+    let agent_kind = match kind {
+        TabKind::Terminal => None,
+        TabKind::Agent | TabKind::FixCi | TabKind::AiReview => Some(
+            raw_agent
+                .ok_or_else(|| anyhow::anyhow!("agent tab {id:?} has no provider"))?
+                .parse()?,
+        ),
+    };
+    Ok(WorktreeTab {
+        id,
+        worktree_id,
+        kind,
+        agent_kind,
+        title,
+        // The column pair is written and checked together, so `zip` can only drop a
+        // half that the schema forbids from existing.
+        pr: pr_repo
+            .zip(pr_number)
+            .map(|(repo, number)| TabPr { repo, number }),
+    })
+}
+
 /// All extra tabs for the repo (every worktree), in open order.
 pub async fn list(db: &Db, repo: &str) -> Result<Vec<WorktreeTab>> {
-    let rows: Vec<(String, String, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT id, worktree_id, kind, agent_kind, title FROM worktree_tabs
-         WHERE repo = ? ORDER BY worktree_id, position",
-    )
-    .bind(repo)
-    .fetch_all(db)
-    .await?;
-    rows.into_iter()
-        .map(|(id, worktree_id, raw_kind, raw_agent, title)| {
-            let kind = TabKind::from_db_str(&raw_kind);
-            let agent_kind = match kind {
-                TabKind::Terminal => None,
-                TabKind::Agent | TabKind::FixCi => Some(
-                    raw_agent
-                        .ok_or_else(|| anyhow::anyhow!("agent tab {id:?} has no provider"))?
-                        .parse()?,
-                ),
-            };
-            Ok(WorktreeTab {
-                id,
-                worktree_id,
-                kind,
-                agent_kind,
-                title,
-            })
-        })
-        .collect()
+    let sql = format!(
+        "SELECT {COLUMNS} FROM worktree_tabs WHERE repo = ? ORDER BY worktree_id, position"
+    );
+    let rows: Vec<Row> = sqlx::query_as(&sql).bind(repo).fetch_all(db).await?;
+    rows.into_iter().map(row_to_tab).collect()
+}
+
+/// One tab by id, or `None` when it's gone (a tab closed in another window, a row
+/// this repo never had). Used by the resume path, which needs the persisted `kind`
+/// and PR to re-derive what the tab launches with.
+pub async fn get(db: &Db, repo: &str, id: &str) -> Result<Option<WorktreeTab>> {
+    let sql = format!("SELECT {COLUMNS} FROM worktree_tabs WHERE repo = ? AND id = ?");
+    let row: Option<Row> = sqlx::query_as(&sql)
+        .bind(repo)
+        .bind(id)
+        .fetch_optional(db)
+        .await?;
+    row.map(row_to_tab).transpose()
 }
 
 /// Persist a new tab. The frontend mints the id (so it can patch its cache and
@@ -56,27 +99,43 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<WorktreeTab>> {
 /// statement, so the `MAX(position)` read happens under it and concurrent adds
 /// serialize onto distinct positions. Split into two statements and they'd race
 /// (see `concurrent_adds_get_distinct_positions`).
-pub async fn add(
-    db: &Db,
-    repo: &str,
-    worktree_id: &str,
-    id: &str,
-    kind: TabKind,
-    agent_kind: Option<AgentKind>,
-    title: &str,
-) -> Result<()> {
+pub async fn add(db: &Db, repo: &str, tab: NewTab<'_>) -> Result<()> {
+    let NewTab {
+        worktree_id,
+        id,
+        kind,
+        agent_kind,
+        title,
+        pr,
+    } = tab;
     let title = title.trim();
     if title.is_empty() {
         bail!("tab title can't be empty");
     }
     match (kind, agent_kind) {
         (TabKind::Terminal, Some(_)) => bail!("terminal tabs cannot have an agent provider"),
-        (TabKind::Agent | TabKind::FixCi, None) => bail!("agent tabs require a provider"),
+        (TabKind::Agent | TabKind::FixCi | TabKind::AiReview, None) => {
+            bail!("agent tabs require a provider")
+        }
         _ => {}
     }
+    // A review tab's `--settings` and `--mcp-config` are re-derived from this pair
+    // every time it opens, so a row without it would silently resume under the plain
+    // no-git profile — no `gh` deny rules, no review tools. Storing one on a tab that
+    // derives nothing from it is equally wrong: it would be an unread claim about
+    // which PR the tab belongs to.
+    if kind.is_review() != pr.is_some() {
+        bail!("a review tab is stored with its pull request, and only a review tab is");
+    }
+    // The slug becomes a filename (`hooks::mcp_stem`) and is checked again there,
+    // but a malformed one has no business reaching the table in the first place.
+    if let Some(pr) = &pr {
+        crate::github::split_slug(&pr.repo)?;
+    }
     sqlx::query(
-        "INSERT INTO worktree_tabs (id, repo, worktree_id, kind, agent_kind, title, position)
-         VALUES (?, ?, ?, ?, ?, ?,
+        "INSERT INTO worktree_tabs
+             (id, repo, worktree_id, kind, agent_kind, title, pr_repo, pr_number, position)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?,
                  (SELECT COALESCE(MAX(position), 0) + 1 FROM worktree_tabs
                   WHERE repo = ? AND worktree_id = ?))",
     )
@@ -86,6 +145,8 @@ pub async fn add(
     .bind(kind.as_db_str())
     .bind(agent_kind.map(AgentKind::as_str))
     .bind(title)
+    .bind(pr.as_ref().map(|p| p.repo.as_str()))
+    .bind(pr.as_ref().map(|p| p.number))
     .bind(repo)
     .bind(worktree_id)
     .execute(db)
@@ -170,43 +231,56 @@ mod tests {
         crate::db::init(base.join("test.db")).await.unwrap()
     }
 
+    /// A plain agent tab — the shape most of these tests only need to exist.
+    fn agent<'a>(worktree_id: &'a str, id: &'a str, title: &'a str) -> NewTab<'a> {
+        NewTab {
+            worktree_id,
+            id,
+            kind: TabKind::Agent,
+            agent_kind: Some(AgentKind::Claude),
+            title,
+            pr: None,
+        }
+    }
+
+    fn review<'a>(worktree_id: &'a str, id: &'a str, kind: TabKind, title: &'a str) -> NewTab<'a> {
+        NewTab {
+            worktree_id,
+            id,
+            kind,
+            agent_kind: Some(AgentKind::Claude),
+            title,
+            pr: Some(TabPr {
+                repo: "acme/app".into(),
+                number: 42,
+            }),
+        }
+    }
+
     #[tokio::test]
     async fn add_list_rename_remove_roundtrip() {
         let db = test_db("crud").await;
 
+        add(&db, "repo", agent("AK-1", "tab-a", "Claude"))
+            .await
+            .unwrap();
         add(
             &db,
             "repo",
-            "AK-1",
-            "tab-a",
-            TabKind::Agent,
-            Some(AgentKind::Claude),
-            "Claude",
+            NewTab {
+                worktree_id: "AK-1",
+                id: "tab-b",
+                kind: TabKind::Terminal,
+                agent_kind: None,
+                title: "Terminal 2",
+                pr: None,
+            },
         )
         .await
         .unwrap();
-        add(
-            &db,
-            "repo",
-            "AK-1",
-            "tab-b",
-            TabKind::Terminal,
-            None,
-            "Terminal 2",
-        )
-        .await
-        .unwrap();
-        add(
-            &db,
-            "repo",
-            "AK-2",
-            "tab-c",
-            TabKind::Agent,
-            Some(AgentKind::Claude),
-            "Claude",
-        )
-        .await
-        .unwrap();
+        add(&db, "repo", agent("AK-2", "tab-c", "Claude"))
+            .await
+            .unwrap();
 
         let tabs = list(&db, "repo").await.unwrap();
         assert_eq!(tabs.len(), 3);
@@ -242,14 +316,18 @@ mod tests {
         let adds = (0..8).map(|i| {
             let db = db.clone();
             async move {
+                let id = format!("tab-{i}");
                 add(
                     &db,
                     "repo",
-                    "AK-1",
-                    &format!("tab-{i}"),
-                    TabKind::Terminal,
-                    None,
-                    "Terminal",
+                    NewTab {
+                        worktree_id: "AK-1",
+                        id: &id,
+                        kind: TabKind::Terminal,
+                        agent_kind: None,
+                        title: "Terminal",
+                        pr: None,
+                    },
                 )
                 .await
                 .unwrap();
@@ -273,26 +351,58 @@ mod tests {
         );
     }
 
+    /// Migration 0013 widened the kind CHECK to include 'fixci' (the AK-84 bug) and
+    /// 0030 added 'ai_review'; without either the INSERT fails the constraint.
     #[tokio::test]
-    async fn accepts_fix_ci_kind() {
-        // Migration 0013 widened the kind CHECK to include 'fixci'; without it this
-        // INSERT fails the constraint (the AK-84 "Fix CI with AI" bug).
-        let db = test_db("fixci").await;
+    async fn accepts_both_review_kinds() {
+        let db = test_db("review-kinds").await;
         add(
             &db,
             "repo",
-            "AK-1",
-            "tab-fix",
-            TabKind::FixCi,
-            Some(AgentKind::Claude),
-            "Fix CI",
+            review("AK-1", "tab-fix", TabKind::FixCi, "Address review"),
+        )
+        .await
+        .unwrap();
+        add(
+            &db,
+            "repo",
+            review("AK-1", "tab-ai", TabKind::AiReview, "AI review"),
         )
         .await
         .unwrap();
         let tabs = list(&db, "repo").await.unwrap();
-        assert_eq!(tabs.len(), 1);
-        assert_eq!(tabs[0].kind, TabKind::FixCi);
-        assert_eq!(tabs[0].title, "Fix CI");
+        assert_eq!(
+            tabs.iter().map(|t| t.kind).collect::<Vec<_>>(),
+            [TabKind::FixCi, TabKind::AiReview]
+        );
+        assert_eq!(tabs[1].title, "AI review");
+    }
+
+    /// The H2 fix: the PR identity is what a resumed review tab re-derives its
+    /// `--settings` and `--mcp-config` from, so it has to survive the round trip.
+    #[tokio::test]
+    async fn a_review_tab_round_trips_its_pull_request() {
+        let db = test_db("review-pr").await;
+        add(
+            &db,
+            "repo",
+            review("AK-1", "tab-ai", TabKind::AiReview, "AI review"),
+        )
+        .await
+        .unwrap();
+
+        let tab = get(&db, "repo", "tab-ai").await.unwrap().unwrap();
+        assert_eq!(
+            tab.pr,
+            Some(TabPr {
+                repo: "acme/app".into(),
+                number: 42
+            })
+        );
+        assert!(tab.kind.is_review());
+        assert_eq!(get(&db, "repo", "nope").await.unwrap(), None);
+        // Another repo's row is not this repo's tab, even by the same id.
+        assert_eq!(get(&db, "other", "tab-ai").await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -301,41 +411,104 @@ mod tests {
         assert!(add(
             &db,
             "repo",
-            "AK-1",
-            "agent-without-provider",
-            TabKind::Agent,
-            None,
-            "Agent",
+            NewTab {
+                agent_kind: None,
+                ..agent("AK-1", "agent-without-provider", "Agent")
+            },
         )
         .await
         .is_err());
         assert!(add(
             &db,
             "repo",
-            "AK-1",
-            "terminal-with-provider",
-            TabKind::Terminal,
-            Some(AgentKind::Claude),
-            "Terminal",
+            NewTab {
+                kind: TabKind::Terminal,
+                ..agent("AK-1", "terminal-with-provider", "Terminal")
+            },
         )
         .await
         .is_err());
     }
 
+    /// The launch configuration is derived from the PR, so a review tab without one
+    /// resumes under the wrong settings — and a PR on a tab that derives nothing
+    /// from it is an unread claim about which PR the tab belongs to.
+    #[tokio::test]
+    async fn a_pull_request_is_stored_exactly_on_the_review_kinds() {
+        let db = test_db("pr-invariant").await;
+        assert!(add(
+            &db,
+            "repo",
+            NewTab {
+                kind: TabKind::AiReview,
+                ..agent("AK-1", "ai-review-without-pr", "AI review")
+            },
+        )
+        .await
+        .is_err());
+        assert!(add(
+            &db,
+            "repo",
+            NewTab {
+                kind: TabKind::Agent,
+                ..review("AK-1", "agent-with-pr", TabKind::Agent, "Claude")
+            },
+        )
+        .await
+        .is_err());
+        // A slug that can't name a repo can't name the MCP config file either.
+        assert!(add(
+            &db,
+            "repo",
+            NewTab {
+                pr: Some(TabPr {
+                    repo: "not-a-slug".into(),
+                    number: 42
+                }),
+                ..review("AK-1", "bad-slug", TabKind::AiReview, "AI review")
+            },
+        )
+        .await
+        .is_err());
+    }
+
+    /// 0030 rebuilt the table, and `DROP TABLE` takes a table's indexes with it.
+    /// The rebuild has to put every one back by hand (0029 paid for this once
+    /// already, where a missing partial UNIQUE index broke `ON CONFLICT`).
+    #[tokio::test]
+    async fn the_table_rebuild_kept_every_index() {
+        let db = test_db("indexes").await;
+        let indexes: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'worktree_tabs'
+             ORDER BY name",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        let named: Vec<&str> = indexes
+            .iter()
+            .filter(|(_, sql)| sql.is_some()) // skip the implicit PRIMARY KEY index
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(named, ["idx_worktree_tabs_repo"]);
+        assert!(indexes.iter().any(|(_, sql)| sql
+            .as_deref()
+            .is_some_and(|s| s.contains("(repo, worktree_id, position)"))));
+        // And no stale rebuild artefact was left behind.
+        let leftovers: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM sqlite_master WHERE name LIKE 'worktree_tabs_new%'")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert!(leftovers.is_empty(), "0030 left {leftovers:?} behind");
+    }
+
     #[tokio::test]
     async fn removing_a_claude_tab_forgets_its_session() {
         let db = test_db("session").await;
-        add(
-            &db,
-            "repo",
-            "AK-1",
-            "tab-a",
-            TabKind::Agent,
-            Some(AgentKind::Claude),
-            "Claude",
-        )
-        .await
-        .unwrap();
+        add(&db, "repo", agent("AK-1", "tab-a", "Claude"))
+            .await
+            .unwrap();
         // Simulate the session the tab's first launch would have minted.
         sqlx::query(
             "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)",
@@ -361,28 +534,12 @@ mod tests {
     #[tokio::test]
     async fn remove_for_worktree_drops_only_that_worktrees_tabs_and_sessions() {
         let db = test_db("wt").await;
-        add(
-            &db,
-            "repo",
-            "AK-1",
-            "tab-a",
-            TabKind::Agent,
-            Some(AgentKind::Claude),
-            "Claude",
-        )
-        .await
-        .unwrap();
-        add(
-            &db,
-            "repo",
-            "AK-2",
-            "tab-b",
-            TabKind::Agent,
-            Some(AgentKind::Claude),
-            "Claude",
-        )
-        .await
-        .unwrap();
+        add(&db, "repo", agent("AK-1", "tab-a", "Claude"))
+            .await
+            .unwrap();
+        add(&db, "repo", agent("AK-2", "tab-b", "Claude"))
+            .await
+            .unwrap();
         for (wt, tab) in [("AK-1", "tab-a"), ("AK-2", "tab-b")] {
             sqlx::query(
                 "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)",

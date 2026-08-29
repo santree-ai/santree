@@ -1,16 +1,31 @@
 import { act, render, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+import { resetSessionTitles, sessionTitles } from "./sessionTitles";
 import { TerminalView } from "./TerminalView";
-import type { OpenOpts, SessionId, TerminalBackend, TerminalRenderer } from "./types";
+import type {
+  Anchor,
+  Attached,
+  OpenOpts,
+  OutputHandlers,
+  SessionId,
+  TerminalBackend,
+  TerminalRenderer,
+} from "./types";
 
 class FakeRenderer implements TerminalRenderer {
   mounted = false;
   disposed = false;
   written: (Uint8Array | string)[] = [];
   inputCb?: (data: string) => void;
+  /** How the tests play a program setting its OSC window title. */
+  titleCb?: (title: string) => void;
   /** Mutable so a test can simulate the host being re-laid-out. */
   size = { cols: 100, rows: 30 };
+  /** How many times the grid was re-fitted to the element (see the resize tests:
+   *  fitting is immediate, only the PTY resize waits for the size to settle). */
+  fits = 0;
   mount() {
     this.mounted = true;
   }
@@ -20,11 +35,15 @@ class FakeRenderer implements TerminalRenderer {
   onInput(cb: (data: string) => void) {
     this.inputCb = cb;
   }
+  onTitle(cb: (title: string) => void) {
+    this.titleCb = cb;
+  }
   reset() {
     this.written = [];
   }
   resize() {}
   fit() {
+    this.fits += 1;
     return this.size;
   }
   focus() {}
@@ -52,25 +71,29 @@ class FakeResizeObserver {
 
 class FakeBackend implements TerminalBackend {
   opened?: OpenOpts;
-  outputCb?: (bytes: Uint8Array) => void;
+  handlers?: OutputHandlers;
   writes: Array<[SessionId, string]> = [];
   closed: SessionId[] = [];
-  async open(opts: OpenOpts) {
+  detached: SessionId[] = [];
+  attaches: Array<[SessionId, Anchor]> = [];
+  attachResult: Attached = { epoch: "e1", seq: 12, mode: "tail" };
+  opens = 0;
+  async open(opts: OpenOpts, handlers: OutputHandlers) {
     this.opened = opts;
+    this.handlers = handlers;
+    this.opens += 1;
     return 7 as SessionId;
   }
-  onOutput(_id: SessionId, cb: (bytes: Uint8Array) => void) {
-    this.outputCb = cb;
-    return () => {
-      this.outputCb = undefined;
-    };
+  async attach(id: SessionId, anchor: Anchor, handlers: OutputHandlers) {
+    this.attaches.push([id, anchor]);
+    this.handlers = handlers;
+    return this.attachResult;
   }
-  exitCb?: () => void;
-  onExit(_id: SessionId, cb: () => void) {
-    this.exitCb = cb;
-    return () => {
-      this.exitCb = undefined;
-    };
+  detach(id: SessionId) {
+    this.detached.push(id);
+  }
+  async adopt() {
+    return new Map<string, SessionId>();
   }
   write(id: SessionId, data: string) {
     this.writes.push([id, data]);
@@ -92,6 +115,7 @@ test("TerminalView wires the renderer to the backend and cleans up", async () =>
     <TerminalView
       cwd="/tmp"
       command=""
+      label="tree:a"
       seed="echo hi"
       backend={backend}
       createRenderer={() => renderer}
@@ -107,17 +131,162 @@ test("TerminalView wires the renderer to the backend and cleans up", async () =>
   await waitFor(() => expect(backend.writes).toContainEqual([7, "echo hi\r"]));
 
   // PTY output → renderer.
-  backend.outputCb?.(new Uint8Array([104, 105]));
+  backend.handlers?.onOutput(new Uint8Array([104, 105]));
   expect(renderer.written.length).toBeGreaterThan(0);
 
   // Keystrokes → PTY.
   renderer.inputCb?.("x");
   expect(backend.writes).toContainEqual([7, "x"]);
 
-  // Unmount tears the session and renderer down.
+  // Unmount releases the pane but NOT the session: a pane going away says
+  // nothing about whether the work in it should stop.
   unmount();
-  expect(backend.closed).toContain(7);
+  expect(backend.detached).toContain(7);
+  expect(backend.closed).toEqual([]);
   expect(renderer.disposed).toBe(true);
+});
+
+describe("terminal title", () => {
+  /** The OSC title is a read-only status signal: a coding CLI animates it while
+   *  it works, and the sidebar falls back to it when hook events go quiet. It
+   *  never travels the other way — see `agentTitle.ts`. */
+  test("files a pane's title under its label, and clears it when the pane goes", async () => {
+    resetSessionTitles();
+    const renderer = new FakeRenderer();
+    const backend = new FakeBackend();
+
+    const { unmount } = render(
+      <TerminalView
+        cwd="/tmp"
+        command="claude"
+        label="tree:AK-1"
+        backend={backend}
+        createRenderer={() => renderer}
+      />,
+    );
+
+    await waitFor(() => expect(backend.opened).toBeTruthy());
+    act(() => renderer.titleCb?.("\u25d0 Fix the flaky suite"));
+    expect(sessionTitles().get("tree:AK-1")).toBe("\u25d0 Fix the flaky suite");
+
+    // Nothing is left pointing at a process that has gone: a title that outlived
+    // its PTY would report "working" with nothing able to correct it.
+    unmount();
+    expect(sessionTitles().has("tree:AK-1")).toBe(false);
+  });
+});
+
+describe("adoption", () => {
+  /** A session inherited from the previous page load is already running the
+   *  thing its command names — re-running it would spawn a second agent. */
+  test("attaches to an inherited session instead of spawning, and skips the seed", async () => {
+    const renderer = new FakeRenderer();
+    const backend = new FakeBackend();
+
+    render(
+      <TerminalView
+        cwd="/tmp"
+        command="claude"
+        label="tree:a"
+        adoptId={42}
+        seed="echo hi"
+        backend={backend}
+        createRenderer={() => renderer}
+      />,
+    );
+
+    await waitFor(() => expect(backend.attaches.length).toBe(1));
+    expect(backend.opened).toBeUndefined();
+    // `fresh`, not `unknown`: this xterm was just built, so a full replay
+    // cannot duplicate anything already on it.
+    expect(backend.attaches[0]).toEqual([42, { kind: "fresh" }]);
+    expect(backend.writes).toEqual([]);
+  });
+
+  /** Keystrokes and output have to reach the adopted session, not a phantom. */
+  test("wires input and output to the adopted session's id", async () => {
+    const renderer = new FakeRenderer();
+    const backend = new FakeBackend();
+
+    render(
+      <TerminalView
+        label="tree:a"
+        adoptId={42}
+        backend={backend}
+        createRenderer={() => renderer}
+      />,
+    );
+    await waitFor(() => expect(backend.attaches.length).toBe(1));
+
+    backend.handlers?.onOutput(new Uint8Array([104]));
+    expect(renderer.written.length).toBeGreaterThan(0);
+
+    renderer.inputCb?.("x");
+    expect(backend.writes).toContainEqual([42, "x"]);
+  });
+
+  /** React re-runs an effect without unmounting — StrictMode does it on every
+   *  mount in development. Since cleanup only detaches, a second run that opened
+   *  again would strand the first session with nothing pointing at it: a live
+   *  shell, invisible, for the life of the app. */
+  test("an effect that re-runs re-attaches instead of opening a second session", async () => {
+    const backend = new FakeBackend();
+    const renderers = [new FakeRenderer(), new FakeRenderer()];
+    let made = 0;
+
+    const view = (
+      <TerminalView
+        label="tree:a"
+        command=""
+        seed="echo hi"
+        backend={backend}
+        createRenderer={() => renderers[made++] ?? new FakeRenderer()}
+      />
+    );
+    const { rerender } = render(<StrictMode>{view}</StrictMode>);
+    await waitFor(() => expect(backend.attaches.length).toBe(1));
+
+    // One process, opened once, then re-attached by the second run. (Whether
+    // the first run also got as far as detaching depends on whether `open` had
+    // resolved by then; either way the attach replaces the sink, so what
+    // matters is that no second session exists and none was killed.)
+    expect(backend.opens).toBe(1);
+    expect(backend.closed).toEqual([]);
+    // ...and the seed ran exactly once, not once per effect run.
+    expect(backend.writes.filter(([, d]) => d === "echo hi\r")).toHaveLength(1);
+
+    rerender(<StrictMode>{view}</StrictMode>);
+    expect(backend.opens).toBe(1);
+  });
+
+  /** An adopted session outlives a pane that gave up on it — closing one on the
+   *  way out would kill work this page never started. */
+  test("a pane that unmounts mid-attach does not close what it adopted", async () => {
+    const renderer = new FakeRenderer();
+    const backend = new FakeBackend();
+    let settle: (a: Attached) => void = () => {};
+    backend.attach = (_id, _anchor, handlers) => {
+      backend.handlers = handlers;
+      return new Promise<Attached>((resolve) => {
+        settle = resolve;
+      });
+    };
+
+    const { unmount } = render(
+      <TerminalView
+        label="tree:a"
+        adoptId={42}
+        backend={backend}
+        createRenderer={() => renderer}
+      />,
+    );
+    unmount();
+    await act(async () => {
+      settle({ epoch: "e1", seq: 0, mode: "tail" });
+    });
+
+    expect(backend.closed).toEqual([]);
+  });
 });
 
 describe("resize", () => {
@@ -137,7 +306,12 @@ describe("resize", () => {
     const backend = new FakeBackend();
 
     const { rerender } = render(
-      <TerminalView active={false} backend={backend} createRenderer={() => renderer} />,
+      <TerminalView
+        active={false}
+        label="tree:a"
+        backend={backend}
+        createRenderer={() => renderer}
+      />,
     );
     await waitFor(() => expect(backend.opened).toBeTruthy());
     vi.useFakeTimers();
@@ -151,12 +325,51 @@ describe("resize", () => {
     expect(backend.resized).toEqual([]);
 
     // Same event, but this pane is the one on screen.
-    rerender(<TerminalView active backend={backend} createRenderer={() => renderer} />);
+    rerender(
+      <TerminalView active label="tree:a" backend={backend} createRenderer={() => renderer} />,
+    );
     act(() => {
       FakeResizeObserver.fireAll();
       vi.advanceTimersByTime(200);
     });
     expect(backend.resized).toEqual([[80, 24]]);
+  });
+
+  // The bug: dragging the sidebar fast painted the terminal over the pane beside
+  // it. xterm sizes its screen element and canvases from the GRID, and nothing in
+  // its stylesheet clips them, so while the grid lagged the shrinking box the
+  // canvas drew outside the pane. The debounce was what made it lag: a fast drag
+  // is a continuous burst, so the timer never fired until the drag paused.
+  // The renderer must therefore refit on every tick; only the SIGWINCH waits.
+  test("refits the renderer on every tick, and sends one PTY resize once the burst settles", async () => {
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+    const renderer = new FakeRenderer();
+    const backend = new FakeBackend();
+
+    render(
+      <TerminalView active label="tree:a" backend={backend} createRenderer={() => renderer} />,
+    );
+    await waitFor(() => expect(backend.opened).toBeTruthy());
+    vi.useFakeTimers();
+    const before = renderer.fits;
+
+    // A drag: several observer ticks, none of them separated by a settle window.
+    act(() => {
+      for (const cols of [96, 92, 88]) {
+        renderer.size = { cols, rows: 30 };
+        FakeResizeObserver.fireAll();
+        vi.advanceTimersByTime(16);
+      }
+    });
+    // Every tick refit — the canvas never trails the box, at any drag speed.
+    expect(renderer.fits - before).toBe(3);
+    // ...and not one of them woke the shell up.
+    expect(backend.resized).toEqual([]);
+
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(backend.resized).toEqual([[88, 30]]);
   });
 });
 
@@ -172,7 +385,9 @@ test("an open that fails after the pane closed does not write to the disposed re
       fail = reject;
     });
 
-  const { unmount } = render(<TerminalView backend={backend} createRenderer={() => renderer} />);
+  const { unmount } = render(
+    <TerminalView label="tree:a" backend={backend} createRenderer={() => renderer} />,
+  );
   unmount();
   expect(renderer.disposed).toBe(true);
 

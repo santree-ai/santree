@@ -17,12 +17,13 @@ use tauri::ipc::Channel;
 
 use santree_core::domain::{
     AgentKind, ChangedFile, FileSource, ScriptInfo, TriageComment, TriageDetail, Worktree,
+    WorktreeSession,
 };
 
-use crate::codex::CodexRuntime;
 use crate::db::Db;
 use crate::git;
 use crate::repo;
+use crate::session;
 use crate::stream::{self, StreamEvent};
 
 /// Sentinel worktree id for the repo root itself — the checkout the per-issue
@@ -217,7 +218,12 @@ pub async fn base_worktree(db: &Db, repo: &str) -> Result<Option<Worktree>> {
             add_lines: 0,
             del_lines: 0,
             dirty: stats.dirty,
-            ahead: 0,
+            // A root checked out on a feature branch is ahead of the default
+            // branch by that branch's own commits (`stats.ahead` measures HEAD
+            // against `origin/<default>`, the same ref every worktree uses). On
+            // the default branch itself that number would be the unpushed count
+            // wearing the wrong label, so it stays 0 there.
+            ahead: if branch == base { 0 } else { stats.ahead },
             behind: stats.behind,
             unpushed: stats.unpushed,
             // The base's remote-sync is the "Update base from origin" action, so
@@ -934,6 +940,41 @@ pub async fn file_source(db: &Db, repo: &str, issue_id: &str, path: &str) -> Res
     with_worktree(db, repo, issue_id, move |p| git::file_source(p, &path)).await
 }
 
+/// [`with_worktree`] for the git ops that need the branch's base as well as its
+/// directory: resolve the worktree's [`Coords`] and run `f` on the blocking pool.
+async fn with_coords<T, F>(db: &Db, repo: &str, issue_id: &str, f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&Coords) -> Result<T> + Send + 'static,
+{
+    let c = coords(db, repo, issue_id).await?;
+    tokio::task::spawn_blocking(move || f(&c)).await?
+}
+
+/// The files the branch has committed relative to its base (the right panel's
+/// "changes on this branch" list).
+pub async fn branch_changes(db: &Db, repo: &str, issue_id: &str) -> Result<Vec<ChangedFile>> {
+    with_coords(db, repo, issue_id, |c| {
+        git::branch_changes(&c.path, &c.base_branch)
+    })
+    .await
+}
+
+/// One file's committed diff on the branch — what a [`branch_changes`] row opens.
+pub async fn branch_file_diff(db: &Db, repo: &str, issue_id: &str, path: &str) -> Result<String> {
+    let path = path.to_string();
+    with_coords(db, repo, issue_id, move |c| {
+        git::branch_file_diff(&c.path, &c.base_branch, &path)
+    })
+    .await
+}
+
+/// The agent sessions that have run in the worktree, newest first.
+pub async fn sessions(db: &Db, repo: &str, issue_id: &str) -> Result<Vec<WorktreeSession>> {
+    let path = worktree_path(db, repo, issue_id).await?;
+    session::history(db, repo, issue_id, &path).await
+}
+
 pub async fn files(db: &Db, repo: &str, issue_id: &str) -> Result<Vec<String>> {
     with_worktree(db, repo, issue_id, git::list_files).await
 }
@@ -999,12 +1040,7 @@ pub async fn commit(
 /// Draft a commit message from the worktree's staged diff using its configured
 /// headless provider and the `fill-commit` prompt template. Falls back to a plain
 /// message when the provider isn't available, the diff is empty, or the call fails.
-pub async fn commit_message(
-    db: &Db,
-    codex_runtime: &CodexRuntime,
-    repo: &str,
-    issue_id: &str,
-) -> Result<String> {
+pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
     let root = repo_root(db, repo).await?;
     // The base sentinel commits the repo root on its own branch; per-issue
     // worktrees resolve their path + branch from the link row.
@@ -1058,18 +1094,9 @@ pub async fn commit_message(
     // Agent CLIs can take tens of seconds; run them off the async runtime's
     // worker threads.
     let cwd = path.clone();
-    let codex_runtime = codex_runtime.clone();
     let drafted = tokio::task::spawn_blocking(move || {
         // Best-effort: falls back to the generated subject below.
-        crate::agent::run_helper(
-            &codex_runtime,
-            &helper,
-            &cwd,
-            &prompt,
-            &[],
-            crate::agent::SHORT_TIMEOUT,
-        )
-        .ok()
+        crate::agent::run_helper(&helper, &cwd, &prompt, &[], crate::agent::SHORT_TIMEOUT).ok()
     })
     .await
     .ok()
@@ -1128,16 +1155,6 @@ fn prompt_file_path(prompts_root: &Path, repo_root: &str, issue_id: &str) -> Res
     prompt_path(prompts_root, repo_root, issue_id, ".md")
 }
 
-/// Path of a worktree's CI-fix prompt (a distinct file so it never clobbers the
-/// normal work prompt).
-fn fix_ci_prompt_file_path(
-    prompts_root: &Path,
-    repo_root: &str,
-    issue_id: &str,
-) -> Result<PathBuf> {
-    prompt_path(prompts_root, repo_root, issue_id, ".fixci.md")
-}
-
 /// Path of a ticket's Triage-investigation prompt (a distinct suffix so it never
 /// clobbers the work / CI-fix prompts).
 fn investigate_prompt_file_path(
@@ -1176,6 +1193,19 @@ async fn write_prompt_file(path: PathBuf, body: String) -> Result<String> {
 pub fn prompts_root(app: &tauri::AppHandle) -> Option<PathBuf> {
     use tauri::Manager;
     app.path().app_data_dir().ok().map(|d| d.join("prompts"))
+}
+
+/// Path of a worktree's CI-fix prompt.
+///
+/// Nothing writes one any more — fixing a red check goes through the PR's work
+/// queue now. This stays so that deleting a worktree still cleans up the files
+/// the old flow left in the app data dir on machines that ran it.
+fn fix_ci_prompt_file_path(
+    prompts_root: &Path,
+    repo_root: &str,
+    issue_id: &str,
+) -> Result<PathBuf> {
+    prompt_path(prompts_root, repo_root, issue_id, ".fixci.md")
 }
 
 /// Best-effort delete of a worktree's on-disk prompt files — the work, CI-fix and
@@ -1267,45 +1297,6 @@ pub async fn work_prompt(
     // which pulled the live ticket above) is what keeps the file current: every
     // fresh launch re-renders from the latest Linear state and overwrites.
     let path = prompt_file_path(prompts_root, &root, issue_id)?;
-    write_prompt_file(path, rendered).await
-}
-
-/// Render the CI-fix opening prompt — the failed check log plus the guardrails
-/// (diagnose, fix, validate locally, and **never** commit/push) — to a stable
-/// per-worktree file and return its **path**. Mirrors [`work_prompt`]: the log is
-/// large, so the terminal seeds `Read <path> …` rather than typing it into the
-/// PTY. Rewritten on every launch so it reflects the latest failing run.
-pub async fn fix_ci_prompt(
-    db: &Db,
-    repo: &str,
-    issue_id: &str,
-    prompts_root: &Path,
-    log: &str,
-) -> Result<String> {
-    validate_issue_id(issue_id)?;
-    let root = repo_root(db, repo).await?;
-    let title: Option<String> =
-        sqlx::query_scalar("SELECT title FROM worktree_links WHERE repo_path = ? AND issue_id = ?")
-            .bind(&root)
-            .bind(issue_id)
-            .fetch_optional(db)
-            .await?;
-
-    let rendered = crate::prompts::render(
-        db,
-        Some(repo),
-        "fix-ci",
-        minijinja::context! {
-            ticket_id => issue_id,
-            title => title.unwrap_or_default(),
-            log_content => log,
-        },
-    )
-    .await?
-    .trim()
-    .to_string();
-
-    let path = fix_ci_prompt_file_path(prompts_root, &root, issue_id)?;
     write_prompt_file(path, rendered).await
 }
 
@@ -1747,6 +1738,7 @@ mod tests {
     /// Terminal gets — or it behaves differently in the Setup tab than run by hand.
     #[tokio::test]
     async fn setup_runs_once_and_inherits_the_project_env() {
+        let _serial = crate::stream::pty_guard().await;
         let (base, repo_dir, db) = test_repo("setup-once").await;
         crate::settings::set(
             &db,
@@ -1801,6 +1793,7 @@ mod tests {
     /// and outlive the worktree headless.
     #[tokio::test]
     async fn remove_cancels_a_running_setup() {
+        let _serial = crate::stream::pty_guard().await;
         let (base, repo_dir, db) = test_repo("setup-cancel").await;
         spawn_worktree(&db, "AK-1").await;
         // Far longer than the test can take: if the removal doesn't kill it, the run
@@ -1850,6 +1843,7 @@ mod tests {
     /// offering to run setup again on the next refresh.
     #[tokio::test]
     async fn a_successful_setup_streams_its_output_and_is_recorded() {
+        let _serial = crate::stream::pty_guard().await;
         let (base, repo_dir, db) = test_repo("setup-success").await;
         spawn_worktree(&db, "AK-1").await;
         assert!(!get(&db, "test", "AK-1").await.unwrap().unwrap().setup_ran);
@@ -1886,6 +1880,7 @@ mod tests {
     /// hide that from the Trees tab forever.
     #[tokio::test]
     async fn a_failing_setup_script_is_not_recorded_as_run() {
+        let _serial = crate::stream::pty_guard().await;
         let (base, repo_dir, db) = test_repo("setup-failure").await;
         spawn_worktree(&db, "AK-1").await;
         let gate = base.join("gate");
@@ -1910,6 +1905,7 @@ mod tests {
     /// not an error, and not something to record as "setup ran".
     #[tokio::test]
     async fn setup_without_an_executable_script_is_a_clean_no_op() {
+        let _serial = crate::stream::pty_guard().await;
         let (base, repo_dir, db) = test_repo("setup-no-script").await;
         spawn_worktree(&db, "AK-1").await;
 
@@ -1942,6 +1938,7 @@ mod tests {
     /// teardown path. With nothing running, it reports that plainly rather than erroring.
     #[tokio::test]
     async fn cancel_setup_stops_the_running_script() {
+        let _serial = crate::stream::pty_guard().await;
         let (base, repo_dir, db) = test_repo("setup-stop").await;
         spawn_worktree(&db, "AK-1").await;
         // Far longer than the test can take: if Stop doesn't kill it, the run below

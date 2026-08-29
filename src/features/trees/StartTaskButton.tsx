@@ -1,6 +1,11 @@
 /** "Start a task": create a worktree for one of the repo's startable issues
- *  (running setup per the Trees preference). The minimal start-task entry point
- *  in the Trees sidebar. */
+ *  (running setup per the Trees preference), picked from the tickets Linear says
+ *  are ready.
+ *
+ *  The picker is the component; how it is summoned is the caller's. It renders a
+ *  bare "+" by default and takes a `trigger` where the action needs a name — the
+ *  welcome surface, where it is one of two things to do. */
+import type { ReactNode } from "react";
 import { useMemo } from "react";
 
 import type { AgentKind, Task, Worktree } from "../../bindings";
@@ -25,7 +30,12 @@ export function startCandidates(
   return tasks.filter((t) => t.ready && !taken.has(t.id) && !pendingDeletes.has(t.id));
 }
 
-export function StartTaskButton() {
+export function StartTaskButton({
+  trigger,
+}: {
+  /** Render the opener. Handed the toggle and whether a create is in flight. */
+  trigger?: (toggle: () => void, busy: boolean) => ReactNode;
+} = {}) {
   const { repo, worktrees, startAgent } = useTrees();
   const { settings } = useApp();
   const { addPendingLaunches, removePendingLaunch, pendingDeletes } = useAppUi();
@@ -70,17 +80,19 @@ export function StartTaskButton() {
   return (
     <Dropdown
       menuClassName="w-72 max-h-80 overflow-y-auto"
-      trigger={(toggle) => (
-        <button
-          type="button"
-          onClick={toggle}
-          disabled={isPending}
-          title="Start a task in a new worktree"
-          className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-md border border-line-2 bg-input text-muted-2 hover:border-line-strong hover:text-fg-2 disabled:opacity-50"
-        >
-          {isPending ? <Spinner size={12} /> : <PlusIcon size={13} />}
-        </button>
-      )}
+      trigger={(toggle) =>
+        trigger?.(toggle, isPending) ?? (
+          <button
+            type="button"
+            onClick={toggle}
+            disabled={isPending}
+            title="Start a task in a new worktree"
+            className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-md border border-line-2 bg-input text-muted-2 hover:border-line-strong hover:text-fg-2 disabled:opacity-50"
+          >
+            {isPending ? <Spinner size={12} /> : <PlusIcon size={13} />}
+          </button>
+        )
+      }
     >
       {(close) => (
         <>

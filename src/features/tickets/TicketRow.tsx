@@ -10,23 +10,15 @@ import { memo } from "react";
 
 import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
-import { Dot, Pill } from "../../components/primitives";
+import { Dot, Dropdown, Pill } from "../../components/primitives";
+import { attentionMeta } from "../../components/shell/AttentionDot";
 import { EstimateBars, PriorityBars } from "../../components/WorkSignals";
-import type { AttentionLevel } from "../../lib/attention";
-import { palette, sessionStateMeta, statusColor, statusLabel } from "../../theme/colors";
+import { shortRepoName } from "../../lib/repoName";
+import { statusColor, statusLabel } from "../../theme/colors";
 import { isStartable, type TicketRow as Row } from "./useTickets";
 
 /** 10px labels in 16px pills — the row's third tier, under title and key. */
 const TAG_CLASS = "h-4 gap-1 px-[5px] font-mono text-[10px] leading-none";
-
-/** What the live-agent chip speaks in: red asks for you, green is running, amber
- *  just finished, muted is at rest. Mirrors the Agents panel's bucket colors. */
-const ATTENTION_COLOR: Record<AttentionLevel, string> = {
-  "needs-you": sessionStateMeta.waiting.color,
-  working: sessionStateMeta.active.color,
-  done: sessionStateMeta.idle.color,
-  idle: palette.muted,
-};
 
 /** The chip's second half: who is on it, or how many are. */
 function agentLabelOf(row: Row): string | null {
@@ -35,26 +27,100 @@ function agentLabelOf(row: Row): string | null {
   return kind ?? null;
 }
 
+/** What the started-work chip says: "worktree", where it lives when that isn't
+ *  obvious (the ticket could have been started in more than one repo), and who
+ *  is on it. */
+function worktreeLabelOf(row: Row): string {
+  const parts = ["worktree"];
+  if (row.repos.length > 1) parts.push(shortRepoName(row.repo));
+  const agent = agentLabelOf(row);
+  if (agent) parts.push(agent);
+  return parts.join(" · ");
+}
+
+const START_CLASS =
+  "cursor-pointer rounded px-1.5 py-0.5 font-mono text-[10px] text-muted-2 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-hover hover:text-fg-2 focus-visible:opacity-100";
+
+/** The trailing action. A ticket that only one repo can run starts on click; one
+ *  that several repos carry asks which — the repo is the one thing a ticket
+ *  doesn't know about itself. ⌘-click (on the item, for the menu) runs it in the
+ *  background either way. */
+function StartAction({
+  row,
+  onStart,
+}: {
+  row: Row;
+  onStart: (row: Row, background: boolean, repo: string) => void;
+}) {
+  if (row.repos.length === 1) {
+    return (
+      <button
+        type="button"
+        onClick={(e) => onStart(row, e.metaKey || e.ctrlKey, row.repo)}
+        title="Start in a new worktree (⌘-click to run in the background)"
+        className={START_CLASS}
+      >
+        Start ▸
+      </button>
+    );
+  }
+  return (
+    <Dropdown
+      align="right"
+      trigger={(toggle) => (
+        <button
+          type="button"
+          onClick={toggle}
+          title="Start in a new worktree — pick the repo (⌘-click a repo to run in the background)"
+          className={START_CLASS}
+        >
+          Start ▸
+        </button>
+      )}
+    >
+      {(close) =>
+        row.repos.map((repo) => (
+          <button
+            key={repo}
+            type="button"
+            role="menuitem"
+            onClick={(e) => {
+              close();
+              onStart(row, e.metaKey || e.ctrlKey, repo);
+            }}
+            title={repo}
+            className="flex h-7 w-full cursor-pointer items-center rounded px-2 text-left text-[12px] whitespace-nowrap text-fg-2 hover:bg-hover"
+          >
+            {shortRepoName(repo)}
+          </button>
+        ))
+      }
+    </Dropdown>
+  );
+}
+
 export const TicketRow = memo(function TicketRow({
   row,
+  active = false,
   onOpen,
   onStart,
 }: {
   row: Row;
-  /** Open the ticket: its worktree in Trees, or the ticket in the graph. */
+  /** This is the ticket the inspector is showing. */
+  active?: boolean;
+  /** Open the ticket in the inspector. */
   onOpen: (row: Row) => void;
-  /** Start it in a new worktree; `background` is the ⌘-click path. */
-  onStart: (row: Row, background: boolean) => void;
+  /** Start it in a new worktree in `repo`; `background` is the ⌘-click path. */
+  onStart: (row: Row, background: boolean, repo: string) => void;
 }) {
   const { task } = row;
   const startable = isStartable(row);
-  const agent = agentLabelOf(row);
 
   return (
     // A row-wide hover surface holding two click targets: the row itself opens
     // the ticket, the trailing action starts it — so the action can't be a nested
     // button inside the row's own.
-    <div className="selection-row group flex h-8 items-center rounded-md">
+    <div className="selection-row group flex h-8 items-center rounded-md" data-active={active}>
       <button
         type="button"
         onClick={() => onOpen(row)}
@@ -81,11 +147,14 @@ export const TicketRow = memo(function TicketRow({
         <PrChips prs={row.prs} interactive={false} />
         {row.worktree && (
           <Pill
-            color={ATTENTION_COLOR[row.attention.level]}
+            // The sidebar's dot and this chip answer the same question, so they
+            // read from the one attention vocabulary rather than each picking a
+            // hue for "done".
+            color={attentionMeta[row.attention.level].color}
             className={TAG_CLASS}
             title="Already being worked on — open it in Trees"
           >
-            worktree{agent ? ` · ${agent}` : ""}
+            {worktreeLabelOf(row)}
           </Pill>
         )}
         <span className="ml-auto flex flex-none items-center gap-2 pl-2">
@@ -96,16 +165,7 @@ export const TicketRow = memo(function TicketRow({
       {/* The slot is always reserved: revealing the action on hover must not
           reflow the signals it sits next to. */}
       <span className="flex w-[54px] flex-none justify-end pr-1.5">
-        {startable && (
-          <button
-            type="button"
-            onClick={(e) => onStart(row, e.metaKey || e.ctrlKey)}
-            title="Start in a new worktree (⌘-click to run in the background)"
-            className="cursor-pointer rounded px-1.5 py-0.5 font-mono text-[10px] text-muted-2 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-hover hover:text-fg-2 focus-visible:opacity-100"
-          >
-            Start ▸
-          </button>
-        )}
+        {startable && <StartAction row={row} onStart={onStart} />}
       </span>
     </div>
   );

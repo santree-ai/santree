@@ -18,14 +18,17 @@ backed by real data. **There is no mock/sample data anywhere**; when a backend i
 connected (no Linear org, no `gh` auth, no repo path) commands return real-but-empty
 results and the view shows its empty state.
 
-There is also a hidden **Dev** tab (dogfooding: build/install santree from inside
-santree, browse/diff/commit the checkout, cut a release, bug TODO list, its own
-Claude session), gated to the developer's GitHub login. Deliberately
-self-contained — `src/features/dev/`, `src-tauri/src/dev.rs`, migration `0017`,
-and a delimited block in `lib/queries.ts` — so it can be deleted cleanly before a
-public release. Its Files pane is the one place it leans on the rest: it reads
-the checkout through the shared `worktree_*` commands as the repo root
-(`BASE_ID`), so the checkout has to be a registered repo.
+**Trees is the workspace; Reviews is the inbox.** A PR *you* opened is worked on in
+Trees, beside its worktree and its agents (the right panel's PR and AI-work panes).
+Reviews carries the PRs waiting on *your* review — other people's. That split is
+load-bearing for where new PR work goes; see "Key patterns".
+
+The hidden **Dev** tab (dogfooding: build/install santree from inside santree, cut
+a release, bug TODO list) was **removed** before the public release, along with the
+cross-repo Agents landing view it sat beside. `/` now redirects to `/trees`, whose
+empty state is the welcome surface. Its migration (`0017_dev_todos`) is still in
+the directory on purpose — sqlx fails to start against a DB that recorded an
+applied version the resolved set no longer has — and `0028` drops the table.
 
 ## Goal & priorities (in order)
 
@@ -46,7 +49,9 @@ the checkout through the shared `worktree_*` commands as the repo root
   reqwest, serde, anyhow, `log` + tauri-plugin-log (file logging — Rust + JS console
   to `~/Library/Logs/com.santree.desktop/santree.log`).
 - **Frontend:** React 19, Vite 8, TanStack Router + Query v5, Tailwind v4 (CSS-first,
-  no `tailwind.config`), xterm.js, react-markdown. Biome for lint+format. Vitest.
+  no `tailwind.config`), xterm.js, react-markdown, refractor (Prism) for syntax
+  highlighting, mermaid (dynamic-imported — never in the startup bundle). Biome
+  for lint+format. Vitest.
 - **Cargo workspace:** `src-tauri` (thin Tauri adapter) + `crates/core` (pure domain
   + static config, no Tauri dep) + `crates/pty` (PTY manager, Tauri-agnostic) +
   `crates/hook` (the bundled `santree-hook`: Claude hooks, status line, MCP server).
@@ -77,11 +82,15 @@ React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
 ## Repo structure
 
 ```
+docs/terminals.md  how terminal emulation works, end to end — the source of
+                   truth for crates/pty, terminal.rs and features/terminal
 crates/core/src/   domain.rs (types) · config.rs (static config/defaults) · linear.rs
                    (mapping) · layout.rs (dagre-free graph helpers) · diff_index.rs
                    (a PR's commentable hunk spans; written by the app, read by the
                    AI review's MCP server) · lib.rs
 crates/pty/src/    lib.rs — PtyManager: spawn real process behind a PTY, stream bytes
+                   · ring.rs (a session's recent output + the attach protocol, so
+                   a reload costs the view and not the work)
 crates/hook/src/   main.rs — the bundled `santree-hook`: Claude's session-state
                    hooks + statusLine, and `mcp` mode (mcp.rs · review_tools.rs),
                    the AI review's draft-comment tools
@@ -105,6 +114,14 @@ src/
   components/shell/  the one permanent frame: sidebar (search · destinations ·
                    projects → worktrees → agents) · status bar · AppShell
   features/<view>/ each owns a model.tsx (context) + presentational components
+  features/trees/  the worktree workspace. Right panel = 6 panes (Issue · Files ·
+                   Changes · History · PR · AI work queue; the last two only when
+                   the branch has one). The AI-work pane is the queue AND the AI's
+                   brief, in that order — one destination, not two tabs. Main area
+                   = terminal · agent tabs · a picked file's diff · setup logs · a
+                   check's raw job log
+  features/reviews/  OTHER PEOPLE's PRs (the inbox) + the PR components both
+                   hosts share — checks, brief, queue list, file body, cards
   lib/queries.ts   ALL data hooks (useUnwrappedQuery, useOptimisticMutation, …)
   lib/attention.ts what needs a human: level ladder, seen-gating, tree ordering
   state/           AppContext (repo, theme, settings) · toast.tsx (notifications)
@@ -122,6 +139,25 @@ src/
 - **Attention:** a status dot, an ordering, or a "needs you" count comes from
   `lib/attention.ts` (`levelOf` · `highest` · `compareAttention` · `useSeenAgents`) on
   top of the agent registry's buckets — never from a second classification.
+- **Your own PR lives in Trees, not Reviews.** The right panel's `pr` and `aiWork`
+  panes (`features/trees/WorktreePrPane` · `WorktreeAiWorkPane`) are the whole
+  own-PR surface: state, checks, conversation, AI brief, and the work queue that a
+  failing check, a review comment, an AI draft or a highlighted diff line all feed.
+  One "Start work" agent drains it, in the same main panel as every other agent.
+  Everything that *fills* the queue goes through `reviews/QueueAction` — one
+  control, one spark glyph, one minted id — so the buttons and the tab read as one
+  concept.
+  **Reviews is now only other people's PRs** — the inbox of what's waiting on you.
+  The components are shared, not duplicated: `ChecksPane`, `ReviewBriefSection`,
+  `ReviewWorklist`, `PrFileBody` and the draft/thread cards take their host's
+  callbacks as props (see `useStartWork.ts` for the one thing the two hosts really
+  differ on — whether the PR's worktree has to be created first).
+- **One place renders a diff.** `features/trees/DiffPane` picks the source with
+  `prDiffModeFor`: GitHub's own patch when the file is in the PR (its line numbers
+  are what the comments anchor to), the local branch-vs-base diff otherwise, and
+  the local diff *with a notice* when the branch has unpushed commits. Never
+  overlay PR comments on a locally recomputed diff — that is how a comment lands
+  on the wrong line.
 - **Data:** every read is a hook in `lib/queries.ts`. Result-typed commands go through
   `useUnwrappedQuery`; raw-value commands use plain `useQuery`. Writes use
   `useOptimisticMutation` (cancel → patch → rollback-on-error → invalidate-on-settle).
@@ -196,14 +232,6 @@ three versions match it, and fails a *stable* tag without its changelog entry
 it for users, in plain bullets (the app renders it as text). Betas without an
 entry fall back to a commit-compare link.
 
-The **Dev tab's Release pane** does all of that from inside the app — it writes
-the four files, inserts the changelog section, commits *only those paths* (work
-in progress stays put), tags and pushes. It refuses before writing anything if
-the declared versions disagree, a stable release has no notes, the tag is taken,
-or the version isn't newer than the latest tag; and re-running after a failed
-push finishes the job instead of refusing. The tag is annotated with a message —
-a bare `git tag` fails outright under `tag.gpgsign`.
-
 **The tag picks the channel.** `v0.2.0` = stable — GitHub's `releases/latest`
 pointer, which is also what the website's download button resolves through.
 `v0.2.0-beta.N` = beta, published as a pre-release so that pointer skips it.
@@ -269,6 +297,11 @@ version.
   hand; Biome ignores them.
 - Tailwind v4 is CSS-first (`@theme` in `src/styles.css`, which Biome is configured to
   skip). IDE "unknown at-rule" warnings are handled by `.vscode/settings.json`.
+- **Terminals survive a reload, so a pane unmounting must never `close` a
+  session** — it detaches, and the session is caught up from its ring on the way
+  back. Only `close(key)` on a tab ends a process. Read
+  `docs/terminals.md` before touching `crates/pty`,
+  `terminal.rs`, or `src/features/terminal/`.
 - **Terminal compliance:** the PTY runs the real, unmodified CLI — no credential
   handling, no output-parsing-drives-input, no unattended loops. See `COMPLIANCE.md`;
   these constraints are load-bearing.

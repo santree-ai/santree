@@ -1,8 +1,9 @@
 /**
- * The main-area tab bar's two pieces of real logic: pruning a dead terminal tab
- * (and only a *dead* one — a mis-prune closes a tab the user is still using, or
- * strands one that isn't), and closing a tab tearing its PTY session down with it.
- * Plus the new-tab menu's digit shortcuts, which mount and unmount with the menu.
+ * The main-area tab bar's real logic: naming the main work tab after the agent
+ * actually running in it, pruning a dead terminal tab (and only a *dead* one —
+ * a mis-prune closes a tab the user is still using, or strands one that isn't),
+ * and closing a tab tearing its PTY session down with it. Plus the new-tab
+ * menu's digit shortcuts, which mount and unmount with the menu.
  */
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -225,5 +226,31 @@ describe("MainTabBar", () => {
 
       expect(trees.addTab).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("the main work tab's name", () => {
+  /** It used to read "Terminal" whatever was running in it, which on a Codex
+   *  worktree put the word "Terminal" next to the Codex logomark on a tab whose
+   *  content was the Codex TUI. The tab was lying about itself. */
+  it("names the tab after the agent running in it", () => {
+    trees.active = { agent: "Codex" };
+    mount();
+    expect(screen.getByRole("tab", { name: "Codex" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Terminal" })).toBeNull();
+  });
+
+  it("uses the agent's full display name", () => {
+    trees.active = { agent: "Claude" };
+    mount();
+    expect(screen.getByRole("tab", { name: "Claude Code" })).toBeTruthy();
+  });
+
+  /** The base checkout runs a plain login shell and a fresh worktree has not
+   *  launched anything yet — neither has an agent to be named after. */
+  it("stays 'Terminal' when no agent has been launched", () => {
+    trees.active = { agent: null } as unknown as typeof trees.active;
+    mount();
+    expect(screen.getByRole("tab", { name: "Terminal" })).toBeTruthy();
   });
 });

@@ -15,10 +15,17 @@
  * finished, then what is still running, then everything at rest. Within a level
  * the most recent event wins, so a fresh prompt outranks one that has been
  * blocked (or running) for an hour.
+ *
+ * It is also where the **three signals about an agent are arbitrated into one
+ * level** — see {@link levelOf}. That has to happen here and nowhere else: a
+ * status dot, an ordering and a "needs you" count all read this module, so a
+ * second place that decided "is this agent working" would be free to disagree
+ * with the dot sitting next to it.
  */
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-import type { AgentEntry } from "../features/agents/registry";
+import type { AgentBucket, AgentEntry } from "../features/agents/registry";
+import { classifyAgentTitle } from "../features/terminal/agentTitle";
 import { usePersistedState } from "./usePersistedState";
 
 /** Attention levels, most urgent first (see {@link ATTENTION_RANK}). */
@@ -32,14 +39,37 @@ export const ATTENTION_RANK: Record<AttentionLevel, number> = {
   idle: 3,
 };
 
+/** Which signal decided a level (see {@link levelOf}). Never rendered — it is
+ *  what makes "why does this row say idle" answerable in a debugger. */
+export type AttentionSource = "hook" | "title" | "none";
+
 /** A row's resolved attention: its level and the moment that set it. */
 export interface Attention {
   level: AttentionLevel;
   /** Epoch ms of the event behind `level`; 0 when unknown (sorts last). */
   at: number;
+  /** Which tier produced `level`. Optional because the aggregates below hand
+   *  back attentions no single tier produced. */
+  source?: AttentionSource;
 }
 
-export const IDLE: Attention = { level: "idle", at: 0 };
+export const IDLE: Attention = { level: "idle", at: 0, source: "none" };
+
+/**
+ * How long a hook event is believed.
+ *
+ * santree's agent state is hook-driven end to end: a `session_state` row says
+ * whatever `santree-hook` last wrote, and holds it forever. That is right until
+ * an event goes missing — a dropped `UserPromptSubmit`, a provider whose hook
+ * coverage has a gap — at which point a row asserts "working" (or "waiting on
+ * you") indefinitely with nothing behind it. Half an hour is the window past
+ * which a *non-terminal* claim stops being evidence.
+ *
+ * The decay is a **rendering** decision and nothing else. The stored row is the
+ * record of what the hook actually said and is never rewritten to match what
+ * the tree draws; ask again a millisecond earlier and it resolves the old way.
+ */
+export const HOOK_STALE_AFTER_MS = 30 * 60 * 1000;
 
 /** Acknowledgement timestamps, keyed by the agent's stable identity. */
 export type SeenMap = Record<string, number>;
@@ -66,26 +96,118 @@ export function isUnseen(entry: AgentEntry, seen: SeenMap): boolean {
   return at > (seen[seenKeyOf(entry)] ?? 0);
 }
 
-/**
- * One agent's attention level.
- *
- * `attention` (blocked on permission or input) is deliberately not seen-gated —
- * looking at a question does not answer it. A finished agent, by contrast, is
- * only "done" while unseen; afterwards it recedes to idle so a tree full of
- * yesterday's completions doesn't outrank today's work.
- */
-export function levelOf(entry: AgentEntry, seen: SeenMap): Attention {
-  const at = entry.updatedAtMs ?? 0;
-  switch (entry.bucket) {
+/** The level a hook-written bucket asserts, taken at face value. */
+function levelOfBucket(bucket: AgentBucket): AttentionLevel {
+  switch (bucket) {
     case "attention":
-      return { level: "needs-you", at };
+      return "needs-you";
     case "working":
-      return { level: "working", at };
-    case "done":
-      return isUnseen(entry, seen) ? { level: "done", at } : { level: "idle", at };
+      return "working";
     default:
-      return { level: "idle", at };
+      // `idle` and `detached` both mean "not asking for anything". `done` never
+      // reaches here — it is seen-gated by the caller.
+      return "idle";
   }
+}
+
+/**
+ * One agent's attention level, arbitrated from every signal santree has.
+ *
+ * Three tiers, in strict order, and the order is the design:
+ *
+ *  1. **A fresh hook event is authoritative.** `santree-hook` sits inside the
+ *     agent's own lifecycle, so while its last event is recent nothing may
+ *     contradict it — not even a terminal title that disagrees. A finished
+ *     session is terminal and never expires: its process is gone, so no later
+ *     evidence can exist.
+ *  2. **The terminal title, as a fallback, and only with a live PTY.** Past
+ *     {@link HOOK_STALE_AFTER_MS} the row has stopped being evidence, and the
+ *     spinner a coding CLI animates into its OSC title is the one live signal
+ *     left. Gated on the PTY because a title from a dead process is a ghost —
+ *     it would say "working" forever. See `agentTitle.ts`, including why this
+ *     is display-only and must stay that way.
+ *  3. **Nothing.** No fresh event, no title: the row renders at rest rather
+ *     than holding an hours-old claim it can no longer support.
+ *
+ * Seen-gating rides on top, unchanged: `attention` (blocked on permission or
+ * input) is never seen-gated — looking at a question does not answer it — while
+ * a finished agent is "done" only while unseen, so a tree full of yesterday's
+ * completions doesn't outrank today's work.
+ *
+ * `nowMs` defaults to the clock for callers that re-render often enough not to
+ * care exactly when a row decays; the sidebar passes {@link useDecayClock}
+ * instead, which fires at the precise instant one does.
+ */
+export function levelOf(entry: AgentEntry, seen: SeenMap, nowMs: number = Date.now()): Attention {
+  const at = entry.updatedAtMs ?? 0;
+
+  // Terminal: the process exited, and that is the last thing that can be true
+  // of it. Exempt from the freshness window for the same reason.
+  if (entry.bucket === "done") {
+    return { level: isUnseen(entry, seen) ? "done" : "idle", at, source: "hook" };
+  }
+  if (nowMs - at <= HOOK_STALE_AFTER_MS) {
+    return { level: levelOfBucket(entry.bucket), at, source: "hook" };
+  }
+
+  const fromTitle = entry.live ? classifyAgentTitle(entry.terminalTitle) : null;
+  if (fromTitle !== null) return { level: fromTitle, at, source: "title" };
+
+  return { level: "idle", at, source: "none" };
+}
+
+/**
+ * When `entry` stops being fresh — the one future instant at which its
+ * rendering can change without any new data arriving.
+ *
+ * `null` when it can't decay: a finished session is terminal, and a row with no
+ * timestamp is already past every window.
+ */
+export function decayDeadline(entry: AgentEntry): number | null {
+  if (entry.bucket === "done" || entry.updatedAtMs === null) return null;
+  return entry.updatedAtMs + HOOK_STALE_AFTER_MS;
+}
+
+/**
+ * The earliest deadline still ahead of `nowMs`, or `null` when none is.
+ *
+ * One instant for the whole tree, not one timer per row: with thirty agents
+ * open, twenty-nine of those timers would fire while the twenty-ninth-earliest
+ * deadline was still hours away.
+ */
+export function nextDecayAt(entries: Iterable<AgentEntry>, nowMs: number): number | null {
+  let soonest: number | null = null;
+  for (const entry of entries) {
+    const at = decayDeadline(entry);
+    if (at === null || at <= nowMs) continue;
+    if (soonest === null || at < soonest) soonest = at;
+  }
+  return soonest;
+}
+
+/**
+ * A clock that ticks only when it has to: once, at the next moment some row's
+ * hook event goes stale.
+ *
+ * An interval would be the obvious way to make a time-based rendering settle,
+ * and it is the wrong one — a poll that runs all day to catch an event that
+ * happens twice costs a wakeup per tick, forever, on an app that sits open. A
+ * deadline is exact and free: nothing between two expiries can change what any
+ * row renders, so there is nothing to re-check until the next one.
+ */
+export function useDecayClock(entries: readonly AgentEntry[]): number {
+  const [now, setNow] = useState(() => Date.now());
+  // Computed every render (cheap, linear) but armed only when the answer moves,
+  // so a re-render for unrelated reasons doesn't restart the timer.
+  const next = nextDecayAt(entries, now);
+
+  useEffect(() => {
+    if (next === null) return;
+    const timer = setTimeout(() => setNow(Date.now()), Math.max(0, next - Date.now()));
+    return () => clearTimeout(timer);
+  }, [next]);
+
+  return now;
 }
 
 /**

@@ -42,7 +42,12 @@ fn item(row: Row) -> ReviewWorkItem {
 }
 
 fn validate_scope(repo: &str, number: u32) -> Result<()> {
-    github::split_slug(repo)?;
+    // Strict component check, not just `split_slug`: that one accepts ".." as an
+    // owner, and this scope keys rows that the fixing agent's prompt is built from.
+    let (owner, name) = github::split_slug(repo)?;
+    if !crate::repo::valid_github_component(owner) || !crate::repo::valid_github_component(name) {
+        bail!("invalid repository identity: {repo:?}");
+    }
     if number == 0 {
         bail!("pull request number must be greater than zero");
     }
@@ -67,6 +72,20 @@ pub async fn list(db: &Db, repo: &str, number: u32) -> Result<Vec<ReviewWorkItem
     Ok(rows.into_iter().map(item).collect())
 }
 
+/// Upper bound on a check's name, which is what identifies a check-sourced item.
+/// GitHub caps check-run names well below this; the bound is here so an absurd or
+/// hostile name can't bloat the row or the fixing agent's prompt.
+const MAX_CHECK_NAME: usize = 255;
+
+/// Upper bound on a work item's text.
+///
+/// An item's body is not always something the user typed: queueing a PR comment
+/// files whoever wrote it — often a bot — as the item's description, and a CI
+/// summary comment can run to hundreds of kilobytes. Without a bound that lands
+/// whole in SQLite *and* in the fixing agent's prompt file. Generous enough for a
+/// real review comment, which is what an item legitimately holds.
+const MAX_BODY: usize = 8_000;
+
 #[allow(clippy::too_many_arguments)]
 pub async fn add(
     db: &Db,
@@ -87,6 +106,12 @@ pub async fn add(
     if body.is_empty() {
         bail!("a work item needs a description");
     }
+    if body.len() > MAX_BODY {
+        bail!(
+            "that work item's description is too long ({} bytes)",
+            body.len()
+        );
+    }
     match (source, source_id) {
         (ReviewWorkItemSource::Manual, None) => {}
         (ReviewWorkItemSource::Manual, Some(_)) => bail!("manual items cannot have a source id"),
@@ -96,6 +121,11 @@ pub async fn add(
             bail!("a GitHub thread source id must be a decimal comment id")
         }
         (ReviewWorkItemSource::AiDraft, Some(value)) if !value.trim().is_empty() => {}
+        (ReviewWorkItemSource::Check, Some(value))
+            if !value.trim().is_empty() && value.len() <= MAX_CHECK_NAME => {}
+        (ReviewWorkItemSource::Check, _) => {
+            bail!("a check source id must be the check's name")
+        }
         _ => bail!("source-backed items need a source id"),
     }
     if source == ReviewWorkItemSource::AiDraft {
@@ -155,6 +185,12 @@ pub async fn update(
     let body = body.trim();
     if body.is_empty() {
         bail!("a work item needs a description");
+    }
+    if body.len() > MAX_BODY {
+        bail!(
+            "that work item's description is too long ({} bytes)",
+            body.len()
+        );
     }
     let row: Option<Row> = sqlx::query_as(&format!(
         "UPDATE review_work_items SET body = ?, done = ?, updated_at = ? \
@@ -245,5 +281,129 @@ mod tests {
             .is_err());
         delete(&db, "acme/api", 7, &first.id).await.unwrap();
         assert!(list(&db, "acme/api", 7).await.unwrap().is_empty());
+    }
+
+    /// Proves three things at once, against a real migrated database: 0029's
+    /// widened CHECK applied, the partial UNIQUE index **survived the table
+    /// rebuild** (without it this upsert errors outright — a partial conflict
+    /// target requires its index to exist), and re-queueing a check that is still
+    /// red updates in place instead of stacking duplicates.
+    #[tokio::test]
+    async fn check_items_are_accepted_and_deduplicated_by_name() {
+        let db = db().await;
+        let first = add(
+            &db,
+            "acme/api",
+            7,
+            &uuid::Uuid::new_v4().to_string(),
+            "Fix failing check: test (ubuntu-latest)",
+            ReviewWorkItemSource::Check,
+            Some("test (ubuntu-latest)"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let again = add(
+            &db,
+            "acme/api",
+            7,
+            &uuid::Uuid::new_v4().to_string(),
+            "Fix failing check: test (ubuntu-latest) (GitHub Actions)",
+            ReviewWorkItemSource::Check,
+            Some("test (ubuntu-latest)"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.id, first.id, "the same red check is one queue row");
+        assert_eq!(
+            again.body,
+            "Fix failing check: test (ubuntu-latest) (GitHub Actions)"
+        );
+        let items = list(&db, "acme/api", 7).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source, ReviewWorkItemSource::Check);
+    }
+
+    #[tokio::test]
+    async fn a_check_item_needs_a_real_name() {
+        let db = db().await;
+        for source_id in [None, Some(""), Some("   ")] {
+            assert!(add(
+                &db,
+                "acme/api",
+                7,
+                &uuid::Uuid::new_v4().to_string(),
+                "Fix it",
+                ReviewWorkItemSource::Check,
+                source_id,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .is_err());
+        }
+        let too_long = "x".repeat(MAX_CHECK_NAME + 1);
+        assert!(add(
+            &db,
+            "acme/api",
+            7,
+            &uuid::Uuid::new_v4().to_string(),
+            "Fix it",
+            ReviewWorkItemSource::Check,
+            Some(&too_long),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .is_err());
+    }
+
+    /// The dedupe key is the `(kind, id)` pair, not the id alone — a check named
+    /// "1234" must not collide with review thread 1234 on the same PR.
+    #[tokio::test]
+    async fn check_and_thread_source_ids_do_not_collide() {
+        let db = db().await;
+        add(
+            &db,
+            "acme/api",
+            7,
+            &uuid::Uuid::new_v4().to_string(),
+            "Fix failing check: 1234",
+            ReviewWorkItemSource::Check,
+            Some("1234"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        add(
+            &db,
+            "acme/api",
+            7,
+            &uuid::Uuid::new_v4().to_string(),
+            "Address the review comment",
+            ReviewWorkItemSource::GithubThread,
+            Some("1234"),
+            Some("src/api.rs"),
+            Some(42),
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(list(&db, "acme/api", 7).await.unwrap().len(), 2);
     }
 }

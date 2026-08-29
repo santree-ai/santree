@@ -1,33 +1,34 @@
-/** The Trees view: the selected worktree's workspace. A header naming the
- *  worktree (title · branch · diff shape) and its actions · the sub-tab strip ·
- *  the always-on terminal (or a picked file's diff/contents) with the session
- *  status line and bottom status bar under it · a collapsible file-picker right
- *  panel. Which worktree is selected comes from the app shell's project tree;
- *  with nothing selected the view shows its launch surface. */
+/** The Trees view: the selected worktree's workspace. The tab strip · the
+ *  always-on terminal (or a picked file's diff/contents) with the session status
+ *  line and bottom status bar under it · a collapsible right panel (the ticket,
+ *  files, changes, session history).
+ *
+ *  There is deliberately no header naming the worktree: the sidebar row that
+ *  selected it already names it and is always on screen, and the actions a header
+ *  would carry act on the checkout as a place on disk — they live on that row's
+ *  right-click menu. Which worktree is selected comes from the app shell's project
+ *  tree; with nothing selected the view shows its launch surface. */
 import type { ReactNode } from "react";
 
 import type { Worktree, WorktreeTab } from "../../bindings";
-import { AgentIcon, BranchIcon, CloseIcon, PrIcon, TreeIcon } from "../../components/icons";
+import { CloseIcon, PrIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import { Button, EmptyState, TerminalActivity } from "../../components/primitives";
 import { SessionEndedPane } from "../../components/SessionEndedPane";
-import { CLAUDE_STATUS_LINE_KEY, useBoolSetting } from "../../lib/queries";
+import { useWorktreeTabLaunch } from "../../lib/queries";
 import { useAgentRuns } from "../../state/AgentRuns";
 import { alpha } from "../../theme/colors";
 import { agentProvider } from "../terminal/agentProvider";
-import { BottomBar } from "./BottomBar";
+import { CheckLogView } from "./CheckLogView";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { FilePickerPanel } from "./FilePickerPanel";
 import { FileViewer } from "./FileViewer";
 import { MainTabBar } from "./MainTabBar";
 import { BASE_ID, extraTab, TreesProvider, useTrees } from "./model";
-import { SessionStatusLine } from "./SessionStatusLine";
 import { SetupLogsView } from "./SetupLogsView";
-import { StartTaskButton } from "./StartTaskButton";
-import { sessionIdOf, useAgentTab } from "./useAgentTab";
+import { useAgentTab } from "./useAgentTab";
 import { useWorktreeAgent } from "./useWorktreeAgent";
-import { WorktreeHeader } from "./WorktreeHeader";
-import { WorktreeIssuePane } from "./WorktreeIssuePane";
+import { WelcomeSurface } from "./WelcomeSurface";
 import { WorktreeTerminal } from "./WorktreeTerminal";
 
 function TreesContent() {
@@ -45,7 +46,7 @@ function TreesContent() {
             <TerminalActivity label="Loading worktrees…" />
           </div>
         ) : (
-          <WorkspaceLaunchSurface />
+          <WelcomeSurface />
         )}
       </div>
     );
@@ -65,101 +66,8 @@ function TreesContent() {
         // The cross-surface overview moved out of Trees into the Agents section —
         // it was never a worktree view, and half of what it should show (triage
         // investigations, Dev) never had a worktree to hang off.
-        <WorkspaceLaunchSurface />
+        <WelcomeSurface />
       )}
-    </div>
-  );
-}
-
-/** Useful home for Trees when no worktree is selected. It teaches the surface
- * while keeping recent work one click away instead of spending the largest pane
- * in the app on a generic empty message. */
-function WorkspaceLaunchSurface() {
-  const { worktrees, baseWorktree, baseLoading, setActive } = useTrees();
-  const recent = worktrees.filter((worktree) => !worktree.pending).slice(0, 4);
-  return (
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-10">
-      <div className="w-full max-w-[720px]">
-        <div className="mb-7 flex items-start gap-4">
-          <span className="flex h-11 w-11 flex-none items-center justify-center rounded-[var(--radius-lg)] border border-line-2 bg-raised text-accent">
-            <TreeIcon size={19} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <h1 className="text-[18px] font-semibold tracking-[-.01em] text-fg-bright">
-              Choose a workspace
-            </h1>
-            <p className="mt-1 max-w-[560px] text-[12.5px] leading-5 text-muted-3">
-              Return to recent work, open the repository base, or create a focused workspace from an
-              issue.
-            </p>
-          </div>
-          <StartTaskButton />
-        </div>
-
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {baseWorktree ? (
-            <button
-              type="button"
-              onClick={() => setActive(BASE_ID)}
-              className="entity-card flex cursor-pointer items-center gap-3 p-3 text-left"
-            >
-              <span className="flex h-8 w-8 flex-none items-center justify-center rounded-[var(--radius-sm)] border border-line-2 bg-input text-muted-2">
-                <BranchIcon />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block text-[12px] font-medium text-fg-2">Base workspace</span>
-                <span className="mt-0.5 block truncate font-mono text-[9.5px] text-muted-4">
-                  {baseWorktree.branch}
-                </span>
-              </span>
-            </button>
-          ) : baseLoading ? (
-            <div className="entity-card flex min-h-14 items-center justify-center p-3">
-              <TerminalActivity label="Loading base workspace…" />
-            </div>
-          ) : null}
-          {recent.map((worktree) => (
-            <button
-              key={worktree.id}
-              type="button"
-              onClick={() => setActive(worktree.id)}
-              className="entity-card flex cursor-pointer items-center gap-3 p-3 text-left"
-            >
-              <span className="flex h-8 w-8 flex-none items-center justify-center rounded-[var(--radius-sm)] border border-line-2 bg-input text-muted-2">
-                {worktree.agent ? (
-                  <AgentIcon kind={worktree.agent} size={13} />
-                ) : (
-                  <TreeIcon size={13} />
-                )}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate font-mono text-[10.5px] text-fg-2">
-                  {worktree.id}
-                </span>
-                <MarkdownTitle className="mt-0.5 block line-clamp-2 text-[11px] text-muted-3">
-                  {worktree.title}
-                </MarkdownTitle>
-              </span>
-            </button>
-          ))}
-        </div>
-
-        <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line pt-4 font-mono text-[10px] text-muted-4">
-          <span>
-            <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">⌘K</kbd>{" "}
-            find anything
-          </span>
-          <span>
-            <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">⌘B</kbd>{" "}
-            sidebar
-          </span>
-          <span>
-            <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">⌘L</kbd>{" "}
-            files
-          </span>
-          <span className="ml-auto">workspaces stay isolated · sessions restore automatically</span>
-        </div>
-      </div>
     </div>
   );
 }
@@ -234,25 +142,21 @@ function PrSuggestionBar({ worktree }: { worktree: Worktree }) {
 }
 
 function WorktreePane({ worktree }: { worktree: Worktree }) {
-  const { repo, selectedFile, activeTab, extraTabs, setupFor } = useTrees();
+  const { repo, selectedFile, activeTab, extraTabs, setupFor, openCheckLog } = useTrees();
   const { requestAgentLaunch, clearAgentLaunch } = useAgentRuns();
-  // Display-only gate for the inline usage bar; usage is captured regardless, so
-  // this reflects instantly on already-running tabs (no relaunch needed).
-  const showUsageBar = useBoolSetting("app", CLAUDE_STATUS_LINE_KEY).value;
 
-  const { isBase, launching, initialSetup, ended, session, seed, preparing, resume, onExited } =
+  const { launching, initialSetup, ended, seed, preparing, resume, onExited } =
     useWorktreeAgent(worktree);
 
   return (
     <div className="flex min-h-0 flex-1">
       <div className="flex min-w-0 flex-1 flex-col">
-        <WorktreeHeader worktree={worktree} />
         <MainTabBar />
         {/* The terminal host is mounted ONLY while the Terminal tab is active (like
             the triage Investigate pane). The live xterm + PTY live in the global
             TerminalLayer (keyed `tree:<id>`), so unmounting the host just detaches
             the overlay; the session + scrollback persist and re-attach on return.
-            The Issue / File / Setup views stay mounted (hidden when inactive). */}
+            The File / Setup views stay mounted (hidden when inactive). */}
         <div className="relative min-h-0 flex-1">
           {/* Don't spawn the terminal during the FIRST setup — the PTY's shell
               would capture pre-setup env, and the agent seed only applies on
@@ -298,11 +202,11 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
             ))}
           {/* Extra tabs (opened via the "+" tab): each its own PTY, mounted only
               while showing — the session persists in the global TerminalLayer.
-              Terminal tabs are plain login shells; Claude and Fix-CI tabs carry
+              Terminal tabs are plain login shells; agent and review tabs carry
               their own resumable agent session. */}
           {extraTabs.map((t) =>
             activeTab === extraTab(t.id) ? (
-              t.kind === "agent" || t.kind === "fixCi" ? (
+              t.kind !== "terminal" ? (
                 <AgentTabPane key={t.id} repo={repo} worktree={worktree} tab={t} />
               ) : (
                 <WorktreeTerminal
@@ -314,11 +218,6 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
               )
             ) : null,
           )}
-          {!isBase && (
-            <div className={`absolute inset-0 z-30 ${activeTab === "issue" ? "" : "hidden"}`}>
-              <WorktreeIssuePane key={worktree.id} repo={repo} worktree={worktree} />
-            </div>
-          )}
           {selectedFile !== null && (
             <div className={`absolute inset-0 z-40 ${activeTab === "file" ? "" : "hidden"}`}>
               <FileViewer />
@@ -329,14 +228,16 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
               <SetupLogsView repo={repo} worktreeId={worktree.id} />
             </div>
           )}
+          {/* Mounted-and-hidden like its neighbours. The log fetch is idempotent
+              so `cond && <C/>` would be safe here, but a long log's scroll
+              position surviving a tab switch is the whole reason it's a tab. */}
+          {openCheckLog !== null && (
+            <div className={`absolute inset-0 z-40 ${activeTab === "checkLog" ? "" : "hidden"}`}>
+              <CheckLogView log={openCheckLog} />
+            </div>
+          )}
         </div>
-        {/* santree-native statusline for this worktree's main session, from the
-            live usage the injected statusLine captures — the exact numbers the
-            in-terminal bar shows. Gated on the display setting only (capture is
-            always on), so toggling it updates running tabs instantly. */}
-        {!isBase && showUsageBar && <SessionStatusLine sessionId={sessionIdOf(session.data)} />}
         <PrSuggestionBar worktree={worktree} />
-        <BottomBar worktree={worktree} />
       </div>
       <FilePickerPanel />
     </div>
@@ -393,8 +294,8 @@ function AgentSurface({
   );
 }
 
-/** An extra agent tab: a persisted provider session rooted in the worktree, or the
- *  "Fix CI with AI" variant of one.
+/** An extra agent tab: a persisted provider session rooted in the worktree, or one
+ *  of the two PR-scoped review sessions.
  *
  *  Its conversation is keyed by `tree:<worktree>:tab:<tab id>` in the session
  *  registry, so opening the tab — first ever, after quitting claude, or after an
@@ -402,11 +303,12 @@ function AgentSurface({
  *  same conversation. Unlike the main work tab, quitting claude doesn't close the
  *  tab; it shows the resume state instead.
  *
- *  A Fix-CI tab differs in exactly two ways: it launches with the commit/push-
- *  denying settings file (so the agent fixes and validates but leaves committing to
- *  the user), and it opens by reading the CI-fix prompt written when the Reviews
- *  button kicked it off. Both are seeded on the first (fresh) launch only — a resume
- *  after restart just continues the conversation, with the settings still applied. */
+ *  A review tab differs in exactly two ways: it launches with the review deny list
+ *  and santree's review MCP server, and it opens by reading the prompt written when
+ *  the Reviews button kicked it off. The prompt is seeded on the first (fresh)
+ *  launch only; the capability paths apply to every launch, resume included — which
+ *  is why they come from the persisted row (`useWorktreeTabLaunch`) once the
+ *  in-memory hand-off is gone, and never from the plain no-git fallback. */
 function AgentTabPane({
   repo,
   worktree,
@@ -417,9 +319,13 @@ function AgentTabPane({
   tab: WorktreeTab;
 }) {
   const { fixCiLaunchFor } = useTrees();
-  const fixCi = tab.kind === "fixCi";
-  const launch = fixCiLaunchFor(tab.id);
-  const promptPath = launch?.promptPath;
+  const review = tab.kind === "fixCi" || tab.kind === "aiReview";
+  const handoff = fixCiLaunchFor(tab.id);
+  const promptPath = handoff?.promptPath;
+  // Only after a restart (or a reload) is the hand-off missing; re-derive from the
+  // row then, and hold the launch until it lands.
+  const persisted = useWorktreeTabLaunch(repo, tab.id, review && !handoff);
+  const launch = handoff ?? persisted.data ?? undefined;
 
   const { ended, preparing, seed, resume, onExited } = useAgentTab({
     repo,
@@ -428,17 +334,20 @@ function AgentTabPane({
     agent: tab.agentKind ?? "Claude",
     // An agent tab exists to run the agent, so any (re)open is an explicit launch.
     allowFresh: true,
-    noGit: fixCi,
+    // A review session without its own settings would run with the *standard* ones —
+    // no deny list at all — so it waits instead. Resolving them is local work: a
+    // settings write and a path derivation, no network.
+    hold: review && !launch,
     settingsPath: launch?.settingsPath,
-    mcpConfigPath: launch?.mcpConfigPath,
+    mcpConfigPath: launch?.mcpConfigPath ?? undefined,
     // A plain agent tab has no opening prompt (the user starts the conversation).
-    // Fix-CI seeds the short "read the file" line — the CI log is far too large to
-    // type into the PTY (same reason the work prompt seeds a path).
-    prompt: !fixCi
+    // A review tab seeds the short "read the file" line — the rendered prompt carries
+    // a whole PR diff, far past what can be typed into a shell.
+    prompt: !review
       ? undefined
       : promptPath
         ? `Read ${promptPath} and follow the instructions inside.`
-        : "Fix the failing CI for this branch. Do not commit or push.",
+        : "Continue the review of this branch. Do not commit or push.",
     // No `--remote-control`: it would collide with the worktree's main work session
     // (same worktree id), which already claims that Remote Control name.
   });
@@ -451,17 +360,17 @@ function AgentTabPane({
       preparing={preparing}
       preparingTitle={`Starting ${agentProvider(tab.agentKind ?? "Claude").label}…`}
       preparingSubtitle={
-        fixCi
-          ? "Reading the CI failure. The terminal opens in a moment."
+        review
+          ? "Reading the pull request. The terminal opens in a moment."
           : "The terminal opens in a moment."
       }
       ended={ended}
-      endedTitle={fixCi ? "Fix-CI session ended" : "Agent session ended"}
+      endedTitle={review ? "Review session ended" : "Agent session ended"}
       endedSubtitle={
-        fixCi ? (
+        review ? (
           <>
             <span className="font-mono text-fg-3">{tab.title}</span> keeps its conversation. Resume
-            it to keep working, or close the tab. Commit &amp; push your fix from the bottom bar.
+            it to keep working, or close the tab. Commit &amp; push from the Changes pane.
           </>
         ) : (
           <>

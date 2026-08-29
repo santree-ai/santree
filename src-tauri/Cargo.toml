@@ -33,7 +33,10 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `preserve_order` is already on via tauri, but global_capture.rs rewrites the
+# user's own `~/.claude/settings.json` in place and relies on key order surviving
+# the round trip — so it's named here rather than inherited by accident.
+serde_json = { workspace = true, features = ["preserve_order"] }
 
 # Typed Rust <-> TS bridge. specta describes the types; tauri-specta wires them
 # into a Builder and emits `src/bindings.ts`.

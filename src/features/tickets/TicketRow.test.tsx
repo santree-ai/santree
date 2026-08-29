@@ -52,6 +52,7 @@ const worktree: Worktree = {
 function row(overrides: Partial<Row> = {}): Row {
   return {
     repo: "acme/app",
+    repos: ["acme/app"],
     task,
     worktree: null,
     prs: [],

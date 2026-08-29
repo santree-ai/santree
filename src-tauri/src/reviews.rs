@@ -10,7 +10,7 @@ use anyhow::{anyhow, Result};
 
 use santree_core::domain::{
     CheckLog, FileSource, MergeQueue, NewInlineComment, PrDetail, PrLabel, ReviewEvent,
-    ReviewInbox, ReviewTarget,
+    ReviewInbox, ReviewPr, ReviewTarget,
 };
 
 use crate::db::Db;
@@ -284,6 +284,31 @@ pub async fn detail(owner: &str, name: &str, number: u32) -> Result<PrDetail> {
         });
     };
     github::pr_detail(&token, owner, name, number).await
+}
+
+/// The inbox's view of one PR, by number — what the Trees right panel renders for
+/// a worktree's own pull request. `None` when `gh` isn't authenticated or the PR
+/// doesn't exist, which the panel shows as its empty state.
+///
+/// The AI-draft count is joined here for the same reason [`inbox`] joins it:
+/// GitHub has no concept of a draft that hasn't been sent, so a bare `0` from the
+/// mapping would be a hardcoded value the UI presents as live data. Scoped
+/// `review_drafts::list` rather than the whole-table `counts` — one PR doesn't
+/// warrant the scan.
+pub async fn pull_request(
+    db: &Db,
+    owner: &str,
+    name: &str,
+    number: u32,
+) -> Result<Option<ReviewPr>> {
+    let Some(token) = github::token().await else {
+        return Ok(None);
+    };
+    let Some(mut pr) = github::pull_request(&token, owner, name, number).await? else {
+        return Ok(None);
+    };
+    pr.ai_draft_count = review_drafts::list(db, &pr.repo, pr.number).await?.len() as u32;
+    Ok(Some(pr))
 }
 
 /// The token every write path needs. Unlike the reads, "not signed in" can't

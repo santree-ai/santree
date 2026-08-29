@@ -1,17 +1,11 @@
 /** Global command palette for navigation and the entities people jump between. */
 import { useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { parseTermKey } from "../features/agents/registry";
+import { useOpenAgent } from "../features/agents/useOpenAgent";
 import { useReviews, useSessionStates, useTasks, useWorktrees } from "../lib/queries";
 import { useApp, useAppUi } from "../state/AppContext";
-import {
-  AgentsIcon,
-  ListIcon,
-  PrIcon,
-  SearchIcon,
-  TelescopeIcon,
-  TerminalIcon,
-  TreeIcon,
-} from "./icons";
+import { ListIcon, PrIcon, SearchIcon, TelescopeIcon, TerminalIcon, TreeIcon } from "./icons";
 import { useModalA11y } from "./primitives";
 
 interface PaletteItem {
@@ -38,6 +32,7 @@ export function CommandPalette() {
   const { data: worktrees = [] } = useWorktrees(activeRepo);
   const { data: inbox } = useReviews(activeRepo);
   const { data: sessions = [] } = useSessionStates();
+  const openAgent = useOpenAgent();
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -62,14 +57,6 @@ export function CommandPalette() {
       fn();
     };
     const navigation: PaletteItem[] = [
-      {
-        key: "nav-agents",
-        group: "Navigate",
-        label: "All agents",
-        detail: "Every running agent, across projects",
-        icon: <AgentsIcon />,
-        run: closeAnd(() => navigate({ to: "/" })),
-      },
       ...(triageEnabled
         ? [
             {
@@ -162,15 +149,18 @@ export function CommandPalette() {
       key: `session-${session.sessionId}`,
       group: "Sessions",
       label: session.termKey ?? session.sessionId,
-      detail: `${session.agentKind} · ${session.state}`,
+      detail: session.agentKind ? `${session.agentKind} · ${session.state}` : session.state,
       icon: <TerminalIcon />,
       keywords: `${session.repo ?? ""} ${session.cwd}`,
-      run: closeAnd(() => navigate({ to: "/" })),
+      // Opens the surface that owns the session, the same way the sidebar's
+      // agent rows do — a palette hit that lands on a generic list is a dead end.
+      run: closeAnd(() => openAgent({ repo: session.repo, origin: parseTermKey(session.termKey) })),
     }));
     return [...navigation, ...ticketItems, ...treeItems, ...reviewItems, ...sessionItems];
   }, [
     inbox,
     navigate,
+    openAgent,
     requestIssueFocus,
     requestReviewFocus,
     requestTreeFocus,

@@ -44,6 +44,15 @@ pub struct SessionUsageChanged {}
 #[derive(Clone, Serialize, Type, Event)]
 pub struct ReviewAiChanged {}
 
+/// "Claude's account rate-limit windows changed" — the frontend invalidates its
+/// claude-rate-limits query. Written by the same status-line render as
+/// [`SessionUsageChanged`], but the limits move far less often than a session's
+/// context fill (the hook only nudges when a window actually changed), and they
+/// are account-wide rather than per session — so a separate event, not a rider
+/// on the usage one.
+#[derive(Clone, Serialize, Type, Event)]
+pub struct ClaudeRateLimitsChanged {}
+
 /// Which table a nudge is about, from the tag byte the sender wrote first.
 ///
 /// An unknown byte means session state: that was the original, untagged signal, so
@@ -53,6 +62,7 @@ pub struct ReviewAiChanged {}
 enum Signal {
     Usage,
     ReviewAi,
+    RateLimits,
     State,
 }
 
@@ -60,6 +70,7 @@ fn kind_for_tag(tag: Option<u8>) -> Signal {
     match tag {
         Some(b'u') => Signal::Usage,
         Some(b'r') => Signal::ReviewAi,
+        Some(b'l') => Signal::RateLimits,
         _ => Signal::State,
     }
 }
@@ -103,7 +114,8 @@ pub fn start(app: &AppHandle, socket_path: &Path) -> Result<()> {
             };
             let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
             // The nudge's arrival is the whole signal; its first byte tags which
-            // table changed — `u` = live usage, anything else = session state.
+            // table changed — `u` = live usage, `r` = review drafts, `l` = rate
+            // limits, anything else = session state.
             let mut buf = [0u8; 8];
             let n = stream.read(&mut buf).unwrap_or(0);
             match kind_for_tag((n > 0).then(|| buf[0])) {
@@ -112,6 +124,9 @@ pub fn start(app: &AppHandle, socket_path: &Path) -> Result<()> {
                 }
                 Signal::ReviewAi => {
                     let _ = ReviewAiChanged {}.emit(&app);
+                }
+                Signal::RateLimits => {
+                    let _ = ClaudeRateLimitsChanged {}.emit(&app);
                 }
                 Signal::State => {
                     let _ = SessionStateChanged {}.emit(&app);
@@ -130,6 +145,7 @@ mod tests {
     fn the_tag_byte_picks_the_table() {
         assert_eq!(kind_for_tag(Some(b'u')), Signal::Usage);
         assert_eq!(kind_for_tag(Some(b'r')), Signal::ReviewAi);
+        assert_eq!(kind_for_tag(Some(b'l')), Signal::RateLimits);
         assert_eq!(kind_for_tag(Some(b's')), Signal::State);
         // An empty or unrecognised nudge is the original, untagged signal.
         assert_eq!(kind_for_tag(None), Signal::State);

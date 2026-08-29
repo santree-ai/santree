@@ -295,11 +295,11 @@ function ActionConfig({
         ? (codexModels?.map((model) => model.id) ?? agentDef?.models ?? [])
         : (agentDef?.models ?? []);
   const appAgentShort = agents.find((agent) => agent.key === appAgent)?.short ?? appAgent;
+  // `codex debug models` publishes no default flag, only its own priority order,
+  // so the head of the list is the closest honest answer — never a synthesized
+  // "isDefault".
   const agentDefaultModel =
-    settings?.agents?.find((agent) => agent.key === tab)?.model ||
-    codexModels?.find((model) => model.isDefault)?.id ||
-    models[0] ||
-    "";
+    settings?.agents?.find((agent) => agent.key === tab)?.model || models[0] || "";
 
   const modelProfileKey = providerSettingKey(descriptor.modelKey, tab);
   const effortProfileKey = providerSettingKey(descriptor.effortKey, tab);

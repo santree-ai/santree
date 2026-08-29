@@ -59,13 +59,14 @@ function fold(overrides: Partial<TicketFoldInput> = {}) {
     prs: new Map(),
     agents: [],
     seen: {},
+    nowMs: Date.now(),
     actionableOnly: true,
     ...overrides,
   });
 }
 
 describe("buildTicketGroups", () => {
-  it("keeps repo registration order and each repo's first-seen project order", () => {
+  it("keeps first-seen project order across repos, and ticket order within one", () => {
     const { groups } = fold({
       repos: ["one", "two"],
       tasks: new Map([
@@ -74,20 +75,59 @@ describe("buildTicketGroups", () => {
       ]),
     });
 
-    expect(groups.map((g) => g.key)).toEqual(["one Beta", "one Alpha", "two Alpha"]);
+    expect(groups.map((g) => g.key)).toEqual(["Beta", "Alpha"]);
     expect(groups[0].count).toBe(2);
+    expect(groups[1].milestones[0].items.map((r) => r.task.id)).toEqual(["A-1", "B-1"]);
   });
 
-  it("counts a project shared by two repos once", () => {
-    const { summary } = fold({
+  it("lists a ticket carried by several repos once, remembering where it can run", () => {
+    const { groups, summary } = fold({
       repos: ["one", "two"],
       tasks: new Map([
         ["one", [task("A-1", "Alpha")]],
-        ["two", [task("B-1", "Alpha")]],
+        ["two", [task("A-1", "Alpha")]],
       ]),
     });
 
-    expect(summary).toMatchObject({ total: 2, projects: 1, ready: 2, blocked: 0 });
+    const rows = groups.flatMap((g) => g.milestones.flatMap((m) => m.items));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].repos).toEqual(["one", "two"]);
+    expect(rows[0].repo).toBe("one");
+    expect(summary).toMatchObject({ total: 1, projects: 1, ready: 1 });
+  });
+
+  it("makes the repo holding the worktree the ticket's home, whichever came first", () => {
+    const { groups, summary } = fold({
+      repos: ["one", "two"],
+      tasks: new Map([
+        ["one", [task("A-1", "Alpha")]],
+        ["two", [task("A-1", "Alpha")]],
+      ]),
+      worktrees: new Map([["two", [worktree("A-1")]]]),
+    });
+
+    const [row] = groups[0].milestones[0].items;
+    expect(row.repo).toBe("two");
+    expect(row.worktree).not.toBeNull();
+    // Started work is no longer on offer.
+    expect(summary.ready).toBe(0);
+  });
+
+  it("keeps the same identifier apart when it belongs to two orgs", () => {
+    const { groups, summary } = fold({
+      repos: ["one", "two"],
+      orgOf: new Map([
+        ["one", "Linear · Acme"],
+        ["two", "Linear · Globex"],
+      ]),
+      tasks: new Map([
+        ["one", [task("A-1", "Alpha")]],
+        ["two", [task("A-1", "Alpha")]],
+      ]),
+    });
+
+    expect(groups.map((g) => g.key)).toEqual(["Linear · Acme Alpha", "Linear · Globex Alpha"]);
+    expect(summary).toMatchObject({ total: 2, projects: 1 });
   });
 
   it("omits a repo whose tasks have not arrived instead of grouping it empty", () => {
@@ -96,26 +136,8 @@ describe("buildTicketGroups", () => {
       tasks: new Map([["one", [task("A-1", "Alpha")]]]),
     });
 
-    expect(groups.map((g) => g.repo)).toEqual(["one"]);
-  });
-
-  it("joins worktrees per repo, so a shared ticket id can't leak across them", () => {
-    const { groups, summary } = fold({
-      repos: ["one", "two"],
-      tasks: new Map([
-        ["one", [task("A-1", "Alpha")]],
-        ["two", [task("A-1", "Alpha")]],
-      ]),
-      worktrees: new Map([["one", [worktree("A-1")]]]),
-    });
-
     const rows = groups.flatMap((g) => g.milestones.flatMap((m) => m.items));
-    expect(rows.map((r) => [r.repo, r.worktree !== null])).toEqual([
-      ["one", true],
-      ["two", false],
-    ]);
-    // Only the untouched one is still on offer.
-    expect(summary.ready).toBe(1);
+    expect(rows.map((r) => r.repos)).toEqual([["one"]]);
   });
 
   it("names a blocker it holds, and counts the ticket as blocked", () => {

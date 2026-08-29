@@ -18,6 +18,7 @@ vi.mock("./model", async (importOriginal) => ({
     repo: "/repo",
     activeId: "AK-1",
     selectedFile: null,
+    selectedFileScope: "working",
     selectFile: vi.fn(),
   }),
 }));
@@ -30,8 +31,6 @@ vi.mock("../../lib/queries", () => ({
   useSetSetting: () => ({ mutate: vi.fn() }),
   useStageAction: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
 }));
-
-vi.mock("./CommitBox", () => ({ CommitBox: () => null }));
 
 const file = (path: string, staged: boolean): ChangedFile => ({
   path,
@@ -50,8 +49,8 @@ describe("ChangesList loading state", () => {
     expect(document.querySelector(".animate-pulse")).toBeInTheDocument();
   });
 
-  it("shows the empty state once the status is known to be empty", () => {
-    render(<ChangesList files={[]} />);
+  it("shows the empty state once the status and the branch are both known to be empty", () => {
+    render(<ChangesList files={[]} committed={[]} />);
     expect(screen.getByText("No changes.")).toBeInTheDocument();
     expect(document.querySelector(".animate-pulse")).not.toBeInTheDocument();
   });
@@ -63,8 +62,16 @@ describe("ChangesList loading state", () => {
     expect(screen.queryByText(/staged/)).not.toBeInTheDocument();
   });
 
+  /** The branch list loads on its own; an empty working tree must not claim "No
+   *  changes." while the committed files are still unknown. */
+  it("keeps a skeleton for the branch list while only the status has landed", () => {
+    render(<ChangesList files={[]} committed={undefined} />);
+    expect(screen.queryByText("No changes.")).not.toBeInTheDocument();
+    expect(document.querySelector(".animate-pulse")).toBeInTheDocument();
+  });
+
   it("renders the rows and the counter once files arrive", () => {
-    render(<ChangesList files={[file("a.ts", true), file("b.ts", false)]} />);
+    render(<ChangesList files={[file("a.ts", true), file("b.ts", false)]} committed={[]} />);
     expect(screen.getByText("a.ts")).toBeInTheDocument();
     expect(screen.getByText("b.ts")).toBeInTheDocument();
     expect(screen.getByText("1/2 staged")).toBeInTheDocument();

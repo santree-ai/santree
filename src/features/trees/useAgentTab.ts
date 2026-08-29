@@ -19,8 +19,6 @@ import {
   queryKeys,
   useAgentSession,
   useBoolSetting,
-  useClaudeHookSettings,
-  useClaudeHookSettingsNoGit,
   useResolvedProviderSetting,
   useSetting,
   WORK_AGENT_KEY,
@@ -31,6 +29,7 @@ import {
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
+import { useHookInjection } from "../terminal/useHookInjection";
 
 export interface AgentTabOptions {
   repo: string;
@@ -110,18 +109,21 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
     requestedAgent,
     WORK_AGENT_KEY,
   );
-  // Both variants are observed unconditionally (hooks can't be conditional, and both
-  // are `staleTime: Infinity` writes of a small settings file) — the ternary just
-  // picks which path this tab launches with.
-  const stdSettings = useClaudeHookSettings();
-  const noGitSettings = useClaudeHookSettingsNoGit();
-  const hookSettings = noGit ? noGitSettings : stdSettings;
+  // Whatever this provider's hooks ride in on — a `--settings` file, `-c` config
+  // overrides — lands in `settingsFlag`, because to the seed builder they are the
+  // same thing: the flag that makes this launch report its session back.
+  const hooks = useHookInjection({ noGit, settingsPath: opts.settingsPath });
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
   const remoteControl = useSetting("app", CLAUDE_REMOTE_CONTROL_KEY);
 
   // The model is never a launch-time choice: a fresh launch always runs the model
   // configured for this agent in Settings → Actions → Work (a resume carries the
   // session's own).
+  //
+  // Everything below is Claude's launch line. Codex's — sandbox, approval policy,
+  // model, effort, and a review's MCP tool server — is resolved backend-side from
+  // the same settings and rides on `session.data.launchFlags`, so it cannot be
+  // dropped by a call site that forgot to pass it. See `codex_config.rs`.
   const seed = agentSessionSeed(session.data, {
     repo,
     termKey: refId,
@@ -138,10 +140,7 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
       provider.capabilities.cliLaunchOptions && effort.data
         ? `--effort ${shellQuote(effort.data)}`
         : undefined,
-    settingsFlag:
-      provider.capabilities.cliLaunchOptions && (opts.settingsPath ?? hookSettings.data)
-        ? `--settings ${shellQuote(opts.settingsPath ?? (hookSettings.data as string))}`
-        : undefined,
+    settingsFlag: hooks.flagFor(resolvedAgent),
     mcpFlag:
       provider.capabilities.cliLaunchOptions && opts.mcpConfigPath
         ? `--mcp-config ${shellQuote(opts.mcpConfigPath)}`
@@ -160,14 +159,20 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   // value: a boolean setting reads `false` both when it's off and when it hasn't
   // loaded, so `startWithChrome !== undefined` was true from the first render and
   // gated nothing — a launch in that window quietly dropped `--chrome`.
+  // A Codex launch that beats its hook flags reports no session id at all — the
+  // session is then unresumable and never reaches the registry — so the gate
+  // covers that provider even though it takes none of the Claude-only flags.
+  // Its sandbox, approval policy and review tools need no gate of their own:
+  // they arrive *with* the session, and `session.isFetching` already holds the
+  // terminal until it does.
   const flagsReady =
-    !provider.capabilities.cliLaunchOptions ||
-    (model.isFetched &&
-      effort.isFetched &&
-      permissionMode.isFetched &&
-      hookSettings.isFetched &&
-      startWithChrome.isFetched &&
-      remoteControl.isFetched);
+    hooks.readyFor(resolvedAgent) &&
+    (!provider.capabilities.cliLaunchOptions ||
+      (model.isFetched &&
+        effort.isFetched &&
+        permissionMode.isFetched &&
+        startWithChrome.isFetched &&
+        remoteControl.isFetched));
   const preparing =
     !shellOnly && (hold === true || (needsSeed && (session.isFetching || !flagsReady)));
 

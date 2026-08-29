@@ -1,65 +1,18 @@
-/** Data hooks for the Agents panel. The panel is cross-repo, so these read every
- *  *shown* repo rather than the app's single active one. */
-import { useCallback, useMemo } from "react";
+/** Data hooks for the agent registry. Every consumer is cross-repo — the sidebar
+ *  tree, the Tickets fold, a worktree's session history — so these read a caller-
+ *  supplied repo list rather than the app's single active one. */
+import { useMemo } from "react";
 
 import {
   useBaseWorktreesByRepo,
-  useRepos,
   useSessionStates,
   useTasksByRepo,
   useWorktreesByRepo,
 } from "../../lib/queries";
 import { useLiveNow } from "../../lib/relativeTime";
-import { usePersistedState } from "../../lib/usePersistedState";
+import { useSessionTitles } from "../terminal/sessionTitles";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { type AgentEntry, buildAgentEntries, countAttention, type RepoData } from "./registry";
-
-/** Repos the user has hidden from the panel. Stored as the *exclusions* rather
- *  than the selection, so a newly registered repo shows up on its own — the
- *  default for a control panel is "everything I'm working on". */
-const HIDDEN_REPOS_KEY = "santree.agents.hiddenRepos";
-
-export interface RepoFilter {
-  /** Every registered repo, in registration order. */
-  all: string[];
-  /** The repos currently rendered. */
-  shown: string[];
-  isShown: (repo: string) => boolean;
-  toggle: (repo: string) => void;
-  showAll: () => void;
-  /** True when nothing is hidden — lets the trigger read "All repos". */
-  allShown: boolean;
-}
-
-export function useRepoFilter(): RepoFilter {
-  const { data: repos } = useRepos();
-  const [hidden, setHidden] = usePersistedState<string[]>(HIDDEN_REPOS_KEY, []);
-
-  const all = useMemo(() => (repos ?? []).map((r) => r.name), [repos]);
-  const hiddenSet = useMemo(() => new Set(hidden), [hidden]);
-  // Hiding every repo would leave a panel that can only ever be empty, with the
-  // control that caused it collapsed into a dropdown. Treat "all hidden" as
-  // "none hidden" instead of rendering a dead end.
-  const effective = useMemo(() => {
-    const kept = all.filter((r) => !hiddenSet.has(r));
-    return kept.length > 0 ? kept : all;
-  }, [all, hiddenSet]);
-
-  const toggle = useCallback(
-    (repo: string) =>
-      setHidden((prev) => (prev.includes(repo) ? prev.filter((r) => r !== repo) : [...prev, repo])),
-    [setHidden],
-  );
-
-  return {
-    all,
-    shown: effective,
-    isShown: (repo) => effective.includes(repo),
-    toggle,
-    showAll: useCallback(() => setHidden([]), [setHidden]),
-    allShown: effective.length === all.length,
-  };
-}
 
 /**
  * Every live agent across the shown repos, folded into display entries.
@@ -74,6 +27,9 @@ export function useAgentEntries(
 ): AgentEntry[] | undefined {
   const { data: sessions } = useSessionStates();
   const { tabs: terminals } = useTerminals();
+  // Only moves when a title's *meaning* does, not once per spinner frame — see
+  // `sessionTitles`.
+  const titles = useSessionTitles();
   const worktrees = useWorktreesByRepo(shownRepos);
   const tasks = useTasksByRepo(shownRepos);
   const bases = useBaseWorktreesByRepo(shownRepos);
@@ -94,8 +50,8 @@ export function useAgentEntries(
 
   return useMemo(() => {
     if (!sessions) return undefined;
-    return buildAgentEntries({ sessions, terminals, repos, allRepos, nowMs });
-  }, [sessions, terminals, repos, allRepos, nowMs]);
+    return buildAgentEntries({ sessions, terminals, repos, allRepos, titles, nowMs });
+  }, [sessions, terminals, repos, allRepos, titles, nowMs]);
 }
 
 /**
@@ -112,5 +68,13 @@ export function useAgentEntries(
 export function useAttentionCount(): number {
   const { data: sessions } = useSessionStates();
   const { tabs: terminals } = useTerminals();
-  return useMemo(() => countAttention(sessions ?? [], terminals), [sessions, terminals]);
+  // The count has to settle on its own: the failure this guards against is a
+  // session whose row STOPS changing, so nothing in the data will ever re-run
+  // this. The shared 30s clock does, which is a fine resolution for a badge
+  // whose freshness window is half an hour.
+  const nowMs = useLiveNow();
+  return useMemo(
+    () => countAttention(sessions ?? [], terminals, nowMs),
+    [sessions, terminals, nowMs],
+  );
 }

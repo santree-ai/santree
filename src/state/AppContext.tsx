@@ -23,11 +23,10 @@ import {
   useState,
 } from "react";
 
-import type { AgentKind, Settings } from "../bindings";
+import type { AgentKind, Settings, TabKind, TabPr } from "../bindings";
 import { preloadRepoAvatars } from "../components/chrome/RepoAvatar";
 import {
-  DEV_GITHUB_LOGIN,
-  useGithubStatus,
+  useClaudeRateLimitsWatcher,
   useRepos,
   useReviewAiWatcher,
   useSaveSettings,
@@ -59,10 +58,6 @@ interface AppData {
 
   /** Triage is available only when Linear is connected and triage is enabled. */
   triageEnabled: boolean;
-
-  /** The hidden Dev (dogfooding) tab — only for the app developer's GitHub
-   *  login (see features/dev; deleted with it). */
-  devEnabled: boolean;
 
   /** Color theme preference; "auto" follows the OS setting. */
   theme: Theme;
@@ -109,10 +104,31 @@ interface AppUi {
   addPendingDeletes: (ids: string[]) => void;
   removePendingDelete: (id: string) => void;
 
+  /** The worktree the Trees view currently has open, with its repo — published by
+   *  `TreesProvider` so the sidebar's project tree can mark the row the content
+   *  area is showing (the tree is permanent; that provider is route-scoped, so it
+   *  can't be read from there). Deliberately not cleared when Trees unmounts:
+   *  "which workspace am I in" stays true while you glance at Reviews. */
+  openWorktree: OpenWorktree | null;
+  setOpenWorktree: (open: OpenWorktree | null) => void;
+
+  /** The agent session the main area is actually showing — published by
+   *  `TreesProvider` so the status bar's session meter can scope itself to the
+   *  tab under the user's eyes instead of to the worktree's main terminal.
+   *
+   *  **Transient by design**, unlike {@link openWorktree} directly above: that
+   *  one deliberately outlives a navigation, this one must not. "Which agent am
+   *  I watching" stops being true the moment Trees is off screen or the tab on
+   *  screen is a diff, so `TreesProvider` clears it on unmount and the meter
+   *  goes with it. Don't "fix" it to match its neighbour. */
+  focusedAgent: FocusedAgent | null;
+  setFocusedAgent: (agent: FocusedAgent | null) => void;
+
   /** A worktree the Trees tab should just open (select) without starting an agent
-   *  — set by the Issues "Open in Trees" action for an existing worktree. */
-  treeFocus: string | null;
-  requestTreeFocus: (id: string) => void;
+   *  — set by the Issues "Open in Trees" action for an existing worktree, and by
+   *  the sidebar's Linear/GitHub marks, which also say which pane to land on. */
+  treeFocus: TreeFocus | null;
+  requestTreeFocus: (id: string, focus?: Omit<TreeFocus, "id">) => void;
   consumeTreeFocus: () => void;
 
   /** Worktrees the Trees tab should launch an agent in *in the background* —
@@ -154,6 +170,52 @@ interface AppUi {
   setSidebarWidth: (width: number) => void;
 }
 
+/** Which worktree, in which repo, the workspace view has open. */
+export interface OpenWorktree {
+  repo: string;
+  id: string;
+}
+
+/** Which agent session the workspace view has *on screen*.
+ *
+ *  `termKey` is the logical terminal that owns the session (`tree:<id>`,
+ *  `tree:<id>:tab:<uuid>`) — the same key `SessionState.termKey` carries, and the
+ *  only thing this field is for: it is *compared*, never sent. Passing it to a
+ *  command would make it an IPC-borne path/id and hand it the `safe_path`
+ *  obligation, which nothing here is set up to meet. */
+export interface FocusedAgent {
+  repo: string;
+  termKey: string;
+  agentKind: AgentKind;
+}
+
+/** Which right-panel pane a cross-view focus should land on.
+ *
+ *  Spelled as a literal union rather than importing the Trees feature's `FileTab`:
+ *  this is app-level state, and a state→feature import is the wrong direction.
+ *  The strings match `FileTab`'s members, and the Trees model is where they're
+ *  read back — `resolveFileTab` drops any pane the worktree doesn't have, so a
+ *  request for the PR pane on a worktree with no PR degrades rather than
+ *  stranding the user on an invisible tab. */
+export type TreeFocusPane = "issue" | "pr";
+
+/** A request for the Trees tab to open one worktree.
+ *
+ *  Every field past `id` is optional and `undefined` means **leave it alone**.
+ *  That is the whole point: this used to be a blunt "reset this worktree's view"
+ *  instruction — it forced the main area back to the first tab and the right
+ *  panel to the ticket, whatever the caller actually wanted — so opening an
+ *  agent landed you on tab one, and a click in the History pane threw away the
+ *  pane you were reading. A request now moves only what it names. */
+export interface TreeFocus {
+  id: string;
+  /** Right-panel pane to show; `undefined` leaves the panel where it is. */
+  pane?: TreeFocusPane;
+  /** Main-area tab to show: an extra tab's id, `null` for the main work
+   *  terminal, `undefined` to keep the worktree's last-used tab. */
+  tab?: string | null;
+}
+
 /** A task whose worktree is mid-creation, enough to render a placeholder. */
 export interface PendingLaunch {
   id: string;
@@ -169,13 +231,19 @@ export interface PendingLaunch {
   baseBranch?: string;
 }
 
-/** A Reviews→Trees "Fix CI with AI" hand-off: which worktree + freshly-minted
- *  Fix-CI tab to open, and the on-disk prompt file (failed log + guardrails) the
- *  tab's Claude session should read on launch. */
+/** A Reviews→Trees review hand-off: which worktree + freshly-minted review tab to
+ *  open, and the on-disk prompt file the tab's Claude session should read on
+ *  launch. */
 export interface FixCiLaunch {
   worktreeId: string;
   tabId: string;
   promptPath: string;
+  /** Which review session this is. Persisted with the tab, so a resume after a
+   * restart re-derives the same launch configuration instead of guessing. */
+  kind: Extract<TabKind, "fixCi" | "aiReview">;
+  /** The PR the session is scoped to — persisted alongside `kind` for the same
+   * reason, and the only thing that names its MCP config file. */
+  pr: TabPr;
   /** Review-worklist launches use the same guarded tab hand-off but also carry
    * the MCP authority that lets the agent complete items. */
   settingsPath?: string;
@@ -198,8 +266,10 @@ export const SIDEBAR = { default: 264, min: 200, max: 460, collapseAt: 170 } as 
 /**
  * Shared chrome bar heights (Tailwind height classes) so the sidebar column's
  * horizontal dividers line up with the content column's across the app:
- *  - `subBar`: the row under the top bar — repo selector (sidebar) ↔ tab bar (content).
- *  - `statusBar`: the bottom bar — sidebar footer ↔ work-panel bottom bar.
+ *  - `subBar`: the row under the top bar — the workspace tab strip and the right
+ *    panel's own tab strip, which sit side by side and must share a baseline.
+ *  - `statusBar`: the sidebar's footer row (settings/help), which ends the rail at
+ *    the same height the window's status bar begins.
  * Both columns share the viewport's top/bottom edges, so equal heights ⇒ aligned dividers.
  */
 export const CHROME = { subBar: "h-9", statusBar: "h-9" } as const;
@@ -214,12 +284,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const { data: settings = null } = useSettings();
   const { data: repos } = useRepos();
   const { mutate: saveSettings } = useSaveSettings();
-  // The hidden Dev tab's gate, derived once here (like triageEnabled) so the
-  // nav chrome and the shortcut map agree. A plain boolean dep below, so status
-  // refetches don't rebuild the memo unless the answer actually changes.
-  const { data: github } = useGithubStatus();
-  const devEnabled = github?.account === DEV_GITHUB_LOGIN;
-
   const [activeRepo, setActiveRepo] = useState(() => localStorage.getItem(REPO_KEY) ?? "");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -232,7 +296,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   });
   const [treeLaunch, setTreeLaunch] = useState<string | null>(null);
   const [issueFocus, setIssueFocus] = useState<string | null>(null);
-  const [treeFocus, setTreeFocus] = useState<string | null>(null);
+  const [treeFocus, setTreeFocus] = useState<TreeFocus | null>(null);
+  const [openWorktree, setOpenWorktree] = useState<OpenWorktree | null>(null);
+  const [focusedAgent, setFocusedAgentState] = useState<FocusedAgent | null>(null);
   const [bgLaunches, setBgLaunches] = useState<string[]>([]);
   const [reviewFocus, setReviewFocus] = useState<string | null>(null);
   const [triageFocus, setTriageFocus] = useState<string | null>(null);
@@ -287,6 +353,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // The Trees sidebar and the all-agents overview both render it.
   useSessionStateWatcher();
   useSessionUsageWatcher();
+  useClaudeRateLimitsWatcher();
 
   // The AI review writes its brief and drafts through santree's MCP server — a
   // separate process — so the only way the UI hears about them is this nudge. A
@@ -366,14 +433,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
           return { ...s, integrations: { ...integrations, [key]: !integrations[key] } };
         }),
       triageEnabled: !!settings?.integrations?.linear && !!settings?.integrations?.triage,
-      devEnabled,
       theme,
       setTheme: (next: Theme) => {
         localStorage.setItem(THEME_KEY, next);
         setThemeState(next);
       },
     }),
-    [activeRepo, settings, applySettings, theme, devEnabled],
+    [activeRepo, settings, applySettings, theme],
   );
 
   // Handlers are stabilized with `useCallback` (all use functional setState, so
@@ -386,10 +452,34 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const consumeIssueFocus = useCallback(() => setIssueFocus(null), []);
   const consumeTreeLaunch = useCallback(() => setTreeLaunch(null), []);
   const consumeTreeFocus = useCallback(() => setTreeFocus(null), []);
+  // Defaults to the ticket, which is what "just open this worktree" has always
+  // meant; a caller that means something more specific — this pane, this tab —
+  // says so, and everything it doesn't name is left as the user had it.
+  const requestTreeFocus = useCallback(
+    (id: string, focus: Omit<TreeFocus, "id"> = { pane: "issue" }) =>
+      setTreeFocus({ id, ...focus }),
+    [],
+  );
   const consumeReviewFocus = useCallback(() => setReviewFocus(null), []);
   const consumeTriageFocus = useCallback(() => setTriageFocus(null), []);
   const consumeFixCiLaunch = useCallback(() => setFixCiLaunch(null), []);
   const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), []);
+  // Republished by an effect that re-runs on every Trees state change, so an
+  // unchanged focus must not mint a new object: this value is read from the
+  // permanent status bar, and a fresh identity per keystroke in the terminal
+  // would re-render it for nothing.
+  const setFocusedAgent = useCallback((next: FocusedAgent | null) => {
+    setFocusedAgentState((prev) => {
+      const same =
+        prev === next ||
+        (prev !== null &&
+          next !== null &&
+          prev.repo === next.repo &&
+          prev.termKey === next.termKey &&
+          prev.agentKind === next.agentKind);
+      return same ? prev : next;
+    });
+  }, []);
   const addPendingLaunches = useCallback((items: PendingLaunch[]) => {
     setPendingLaunches((prev) => [
       ...prev,
@@ -435,8 +525,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       treeLaunch,
       requestTreeLaunch: setTreeLaunch,
       consumeTreeLaunch,
+      openWorktree,
+      setOpenWorktree,
+      focusedAgent,
+      setFocusedAgent,
       treeFocus,
-      requestTreeFocus: setTreeFocus,
+      requestTreeFocus,
       consumeTreeFocus,
       bgLaunches,
       requestBackgroundLaunch,
@@ -468,6 +562,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       shortcutsOpen,
       treeLaunch,
       treeFocus,
+      openWorktree,
+      focusedAgent,
+      setFocusedAgent,
       bgLaunches,
       requestBackgroundLaunch,
       clearBackgroundLaunch,
@@ -483,6 +580,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       consumeIssueFocus,
       consumeTreeLaunch,
       consumeTreeFocus,
+      requestTreeFocus,
       consumeReviewFocus,
       consumeTriageFocus,
       consumeFixCiLaunch,

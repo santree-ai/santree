@@ -8,9 +8,12 @@
  * repo; Graph mode keeps the dependency view for the one question that *is*
  * repo-shaped — what unblocks what.
  *
- * The page owns the two things both modes share: the "Actionable only" filter
- * (its state can't live in the graph's model, which isn't mounted in List mode)
- * and the summary that says how much work is in play.
+ * The two modes are two renderings of the same selection. One `IssuesProvider`
+ * is mounted for the page, so the focused ticket, the inspector on the right and
+ * the launch queue all survive a mode switch — clicking a ticket in either mode
+ * opens it in the inspector, and the segmented control only changes how the
+ * tickets are laid out. The page also owns the "Actionable only" filter, which
+ * both modes and their chords share.
  */
 import { useCallback, useMemo } from "react";
 
@@ -18,6 +21,8 @@ import { BranchIcon, ListIcon } from "../../components/icons";
 import { Dot, Segmented } from "../../components/primitives";
 import { usePersistedState } from "../../lib/usePersistedState";
 import { accentActiveStyle, successColor } from "../../theme/colors";
+import { IssuesProvider, useIssues } from "../issues/model";
+import { RightPanel } from "../issues/RightPanel";
 import { useIssuesShortcuts } from "../issues/shortcuts";
 import { TicketsGraph } from "./TicketsGraph";
 import { TicketsList } from "./TicketsList";
@@ -59,13 +64,20 @@ function ActionableChip({ on, onToggle }: { on: boolean; onToggle: () => void })
   );
 }
 
+/** The page's chords — ⌘⇧. for the filter, ⌘L for the inspector — bound once,
+ *  inside the provider, so they work the same in both modes. */
+function TicketsShortcuts({ onToggleActionable }: { onToggleActionable: () => void }) {
+  const { toggleRightPanel } = useIssues();
+  useIssuesShortcuts({ onToggleActionable, onToggleRightPanel: toggleRightPanel });
+  return null;
+}
+
 export function TicketsView() {
   const [mode, setMode] = usePersistedState<Mode>(MODE_KEY, "list");
   const [actionableOnly, setActionableOnly] = usePersistedState(ACTIONABLE_KEY, true);
   const { groups, summary, loading } = useTickets(actionableOnly);
 
   const toggleActionable = useCallback(() => setActionableOnly((v) => !v), [setActionableOnly]);
-  useIssuesShortcuts({ onToggleActionable: toggleActionable });
 
   // Handed to the graph's model, which reads and writes the same filter from its
   // own in-canvas toggle — one state, two controls.
@@ -73,24 +85,30 @@ export function TicketsView() {
     () => ({ value: actionableOnly, set: setActionableOnly }),
     [actionableOnly, setActionableOnly],
   );
-  const showGraph = useCallback(() => setMode("graph"), [setMode]);
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
-      <div className="flex h-11 flex-none items-center gap-2.5 border-b border-line px-3">
-        <span className="flex-none text-[13px] font-semibold text-fg">Tickets</span>
-        <span className="min-w-0 truncate text-[11px] text-muted-4">{summaryLine(summary)}</span>
-        <div className="ml-auto flex flex-none items-center gap-2">
-          <ActionableChip on={actionableOnly} onToggle={toggleActionable} />
-          <Segmented options={MODE_OPTIONS} value={mode} onChange={setMode} className="w-[146px]" />
+    <IssuesProvider actionable={actionable}>
+      <TicketsShortcuts onToggleActionable={toggleActionable} />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
+        <div className="flex h-11 flex-none items-center gap-2.5 border-b border-line px-3">
+          <span className="flex-none text-[13px] font-semibold text-fg">Tickets</span>
+          <span className="min-w-0 truncate text-[11px] text-muted-4">{summaryLine(summary)}</span>
+          <div className="ml-auto flex flex-none items-center gap-2">
+            <ActionableChip on={actionableOnly} onToggle={toggleActionable} />
+            <Segmented
+              options={MODE_OPTIONS}
+              value={mode}
+              onChange={setMode}
+              className="w-[146px]"
+            />
+          </div>
+        </div>
+
+        <div className="relative flex min-h-0 min-w-0 flex-1">
+          {mode === "list" ? <TicketsList groups={groups} loading={loading} /> : <TicketsGraph />}
+          <RightPanel />
         </div>
       </div>
-
-      {mode === "list" ? (
-        <TicketsList groups={groups} loading={loading} onShowGraph={showGraph} />
-      ) : (
-        <TicketsGraph actionable={actionable} />
-      )}
-    </div>
+    </IssuesProvider>
   );
 }

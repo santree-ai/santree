@@ -34,10 +34,8 @@ import { splitRepoSlug } from "../../lib/repo";
 import { palette } from "../../theme/colors";
 import type { CommentTarget } from "./commentTarget";
 import type { FileFocus } from "./model";
-import { PrFileDiff } from "./PrFileDiff";
-import { PrThreadCard } from "./PrThreadCard";
-import { patchLineRange } from "./patchLines";
-import { ReviewDraftCard } from "./ReviewDraftCard";
+import { PrFileBody, UnplaceableDrafts } from "./PrFileBody";
+import { splitDrafts } from "./prFilePlacement";
 import { ReviewDraftsBar } from "./ReviewDraftsBar";
 import { draftCount, ReviewSubmitBar } from "./ReviewSubmitBar";
 
@@ -58,9 +56,12 @@ const NO_DRAFTS: ReviewDraft[] = [];
 
 export function PrReviewPane({
   pr,
+  santreeRepo,
   fileFocus = null,
 }: {
   pr: ReviewPr;
+  /** The santree repo, for the submit bar's cache invalidation. */
+  santreeRepo: string;
   /** A jump request from the review brief. Passed in rather than read from the
    *  model so this pane stays renderable on its own (as its tests do). */
   fileFocus?: FileFocus | null;
@@ -214,6 +215,7 @@ export function PrReviewPane({
           number={pr.number}
           reviewId={detail.pendingReviewId}
           drafts={drafts}
+          santreeRepo={santreeRepo}
         />
       )}
     </div>
@@ -285,18 +287,9 @@ const PrFileCard = memo(function PrFileCard({
   );
 
   const meta = STATUS_META[file.status] ?? STATUS_META.modified;
-  const outdated = threads.filter((t) => t.line == null || t.isOutdated);
-  // A draft anchors in the diff only if it was written against this head *and* its
-  // lines are still in a hunk. The rest go below it: hiding them would lose work
-  // the user hasn't read, and pinning them to a line that has since moved would be
-  // worse — the comment would look placed and point at the wrong code.
-  const placeable = drafts.filter(
-    (d) =>
-      d.headSha === head &&
-      !!file.patch &&
-      patchLineRange(file.patch, d.onRight, d.startLine ?? d.line, d.line) !== null,
-  );
-  const unplaceable = drafts.filter((d) => !placeable.includes(d));
+  // Only needed for the collapsed case below — the expanded body splits them
+  // itself (see PrFileBody, which owns the placement rule for both hosts).
+  const { unplaceable } = splitDrafts(drafts, head, file.patch);
 
   return (
     // `data-path` is the anchor the review brief's jumps scroll to.
@@ -363,69 +356,21 @@ const PrFileCard = memo(function PrFileCard({
         </label>
       </div>
 
-      {!collapsed &&
-        (file.patch ? (
-          <>
-            <PrFileDiff
-              path={file.path}
-              previousPath={file.previousPath}
-              status={file.status}
-              patch={file.patch}
-              threads={threads}
-              drafts={placeable}
-              target={target}
-              oldText={source?.oldText}
-              newText={source?.newText}
-              mode="unified"
-            />
-            {outdated.length > 0 && (
-              <div className="border-t border-line-2 px-3 py-2">
-                <div className="mb-1.5 font-mono text-[9.5px] tracking-[.06em] text-muted-4 uppercase">
-                  Outdated comments
-                </div>
-                <div className="overflow-hidden rounded-md border border-line-2">
-                  {outdated.map((t, i) => (
-                    <PrThreadCard
-                      key={`${t.path}:${t.line}:${i}`}
-                      thread={t}
-                      prRepo={target.prRepo}
-                      number={target.number}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-            {unplaceable.length > 0 && <UnplaceableDrafts drafts={unplaceable} target={target} />}
-          </>
-        ) : (
-          <div className="px-3 py-3 text-[11.5px] text-muted-3">Binary file. No preview.</div>
-        ))}
+      {!collapsed && (
+        <PrFileBody
+          file={file}
+          threads={threads}
+          drafts={drafts}
+          target={target}
+          oldText={source?.oldText}
+          newText={source?.newText}
+        />
+      )}
+      {/* A collapsed card still surfaces what couldn't be pinned: those drafts
+          have never been read, and collapsing a file is not a decision about them. */}
       {collapsed && unplaceable.length > 0 && (
         <UnplaceableDrafts drafts={unplaceable} target={target} />
       )}
     </div>
   );
 });
-
-/** Drafts that can't be pinned: written against an earlier head, or aimed at a
- *  line the current diff doesn't contain. Listed rather than dropped — the user
- *  hasn't read them yet, and deciding they're worthless is their call. */
-function UnplaceableDrafts({ drafts, target }: { drafts: ReviewDraft[]; target: CommentTarget }) {
-  return (
-    <div className="border-t border-line-2 px-3 py-2">
-      <div className="mb-1.5 flex items-center gap-1.5">
-        <span className="font-mono text-[9.5px] tracking-[.06em] text-muted-4 uppercase">
-          AI drafts on older code
-        </span>
-        <span className="text-[10px]" style={{ color: palette.amber }}>
-          Check the line before you send these.
-        </span>
-      </div>
-      <div className="overflow-hidden rounded-md border border-line-2">
-        {drafts.map((d) => (
-          <ReviewDraftCard key={d.id} draft={d} target={target} stale />
-        ))}
-      </div>
-    </div>
-  );
-}

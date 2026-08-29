@@ -18,7 +18,6 @@ export function SidebarFooter() {
     <div
       className={`flex ${CHROME.statusBar} flex-none items-center gap-1.5 border-t border-line px-2.5`}
     >
-      <HelpMenu />
       <button
         type="button"
         onClick={() => navigate({ to: "/settings" })}
@@ -28,6 +27,7 @@ export function SidebarFooter() {
       >
         <GearIcon />
       </button>
+      <HelpMenu />
       <div className="flex-1" />
       <span className="font-mono text-[9px] text-muted-5">{version ? `v${version}` : ""}</span>
     </div>

@@ -5,17 +5,24 @@
 
 mod agent;
 mod awake;
-mod codex;
+mod claude_usage;
+mod codex_cli;
+mod codex_config;
+mod codex_rollouts;
 mod commands;
 mod commit_draft;
+// COMPLIANCE.md's rules, as tests. Nothing ships from it — it only reads the
+// tree and asserts over what it finds.
+#[cfg(test)]
+mod compliance;
 mod db;
-mod dev;
 mod english_tutor;
 mod env;
 mod error;
 mod git;
 mod git_watch;
 mod github;
+mod global_capture;
 mod gql;
 mod hooks;
 mod legacy;
@@ -27,6 +34,7 @@ mod pricing;
 mod prompts;
 mod provider;
 mod repo;
+mod resources;
 mod review_ai;
 mod review_drafts;
 mod review_work_items;
@@ -65,6 +73,7 @@ fn specta_builder() -> AppBuilder {
     Builder::<tauri::Wry>::new()
         .events(collect_events![
             git_watch::WorktreeChanged,
+            session_signal::ClaudeRateLimitsChanged,
             session_signal::ReviewAiChanged,
             session_signal::SessionStateChanged,
             session_signal::SessionUsageChanged,
@@ -80,13 +89,12 @@ fn specta_builder() -> AppBuilder {
             commands::codex_account,
             commands::codex_models,
             commands::codex_rate_limits,
-            commands::codex_login_start,
-            commands::codex_login_cancel,
             commands::codex_logout,
             commands::claude_usage,
             commands::agent_auth,
             commands::agent_version_status,
             commands::github_status,
+            commands::github_api_budget,
             commands::worktrees,
             commands::base_worktree,
             commands::create_worktree,
@@ -102,6 +110,9 @@ fn specta_builder() -> AppBuilder {
             commands::worktree_file_diff,
             commands::worktree_file_source,
             commands::worktree_files,
+            commands::worktree_branch_changes,
+            commands::worktree_branch_file_diff,
+            commands::worktree_sessions,
             commands::watch_worktrees,
             commands::stage_path,
             commands::unstage_path,
@@ -115,7 +126,6 @@ fn specta_builder() -> AppBuilder {
             commands::set_worktree_title,
             commands::work_prompt,
             commands::investigate_prompt,
-            commands::fix_ci_prompt,
             commands::create_worktree_for_pr,
             commands::agent_session,
             commands::started_investigations,
@@ -124,6 +134,7 @@ fn specta_builder() -> AppBuilder {
             commands::add_worktree_tab,
             commands::rename_worktree_tab,
             commands::remove_worktree_tab,
+            commands::worktree_tab_launch,
             commands::pr_draft,
             commands::worktree_has_transcripts,
             commands::create_pull_request,
@@ -147,6 +158,7 @@ fn specta_builder() -> AppBuilder {
             commands::publish_review_drafts,
             commands::merge_queue,
             commands::pr_detail,
+            commands::pr_summary,
             commands::pr_repo_labels,
             commands::set_pr_labels,
             commands::add_pr_inline_comment,
@@ -173,12 +185,18 @@ fn specta_builder() -> AppBuilder {
             commands::binary_status,
             commands::set_binary_path,
             commands::claude_hook_settings,
+            commands::codex_hook_flags,
             commands::claude_hook_settings_no_git,
             commands::english_log,
             commands::english_analysis,
             commands::run_english_analysis,
             commands::session_states,
             commands::session_usage_live,
+            commands::claude_rate_limits,
+            commands::claude_fetch_usage,
+            commands::claude_global_capture_status,
+            commands::set_claude_global_capture,
+            commands::resource_usage,
             commands::triage_schedule,
             commands::get_settings,
             commands::set_settings,
@@ -197,8 +215,10 @@ fn specta_builder() -> AppBuilder {
             commands::env_file_vars,
             commands::linear_auth_status,
             commands::linear_orgs,
+            commands::linear_api_budget,
             commands::set_repo_linear_org,
             commands::linear_list_issues,
+            commands::linear_invalidate_caches,
             commands::linear_connect,
             commands::legacy_cli_probe,
             commands::legacy_cli_migrate,
@@ -206,25 +226,14 @@ fn specta_builder() -> AppBuilder {
             commands::install_update,
             commands::keep_awake_status,
             commands::set_keep_awake,
-            dev::dev_normalize_repo,
-            dev::dev_info,
-            dev::dev_version,
-            dev::dev_release,
-            dev::dev_todos,
-            dev::dev_add_todo,
-            dev::dev_set_todo_done,
-            dev::dev_delete_todo,
-            dev::dev_todo_prompt,
-            dev::dev_screenshot_src,
-            dev::dev_build,
-            dev::dev_cancel_build,
-            dev::dev_resize_build,
-            dev::dev_install,
-            dev::dev_eject,
             terminal::terminal_open,
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_close,
+            terminal::terminal_attach,
+            terminal::terminal_detach,
+            terminal::terminal_adopt,
+            terminal::terminal_sessions,
         ])
 }
 
@@ -643,11 +652,6 @@ pub fn run() {
             app.manage(keep_awake);
 
             app.manage(db);
-
-            // Lazily starts a private Unix-socket App Server on the first Codex
-            // action. Keeping the owner alive for the app lifetime also ensures
-            // both child processes are reaped on shutdown.
-            app.manage(codex::CodexRuntime::new(&data_dir));
 
             // Holds the `Update` handle a check produced, for the install that
             // follows it (see `update`).

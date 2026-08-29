@@ -31,7 +31,17 @@ export function preloadRepoAvatars(repos: { name: string }[]): void {
   }
 }
 
-export function RepoAvatar({ repo, size = 17 }: { repo: string; size?: number }) {
+export function RepoAvatar({
+  repo,
+  size = 17,
+  bordered = true,
+}: {
+  repo: string;
+  size?: number;
+  /** Off where the mark sits in a list of text rows (the project tree): a ruled
+   *  tile beside plain labels reads as a control, not an identity. */
+  bordered?: boolean;
+}) {
   const owner = ownerOf(repo);
   // Track which owner's avatar failed, so changing repos retries without an
   // effect (and an owner that already failed keeps its fallback).
@@ -39,7 +49,9 @@ export function RepoAvatar({ repo, size = 17 }: { repo: string; size?: number })
 
   return (
     <span
-      className="flex flex-none items-center justify-center overflow-hidden rounded border border-line-strong bg-input-alt text-fg-2"
+      className={`flex flex-none items-center justify-center overflow-hidden rounded bg-input-alt text-fg-2 ${
+        bordered ? "border border-line-strong" : ""
+      }`}
       style={{ width: size, height: size }}
     >
       {owner && owner !== failedOwner ? (

@@ -31,7 +31,65 @@ use tauri::ipc::Channel;
 /// A backstop against a command that will *never* finish (waiting on stdin nobody
 /// can answer, a wedged network mount) — not a performance budget. Stop is the
 /// normal way out. Generous: a cold `cargo build --release` is genuinely slow.
+///
+/// It is also, unavoidably, how long a *wedged* run looks like a hang: an hour
+/// reads as "forever" to anyone watching. See [`pty_guard`] for the test-side
+/// consequence.
+#[cfg(not(test))]
 const DEADLINE: Duration = Duration::from_secs(60 * 60);
+
+/// Under test the backstop is seconds, not an hour.
+///
+/// A test run has no `cargo build --release` to wait for, and inheriting the
+/// production hour is what turned one contended PTY into a **3604-second suite**:
+/// the wedged run sat until the deadline holding [`pty_guard`], and every later
+/// PTY test queued behind it — then failed on its own 20s timeout, an hour after
+/// anyone could have connected the two. Serializing these tests is what makes the
+/// backstop load-bearing, so the two constants belong together: a wedge now costs
+/// half a minute and names itself.
+#[cfg(test)]
+const DEADLINE: Duration = Duration::from_secs(30);
+
+/// Serializes every test in this crate that allocates a real PTY.
+///
+/// The pty table is a small, machine-wide resource (`kern.tty.ptmx_max` is 511 on
+/// macOS) and cargo runs tests on one thread per core, so a suite that forks a
+/// shell per test contends with itself *and* with everything else on the box — a
+/// dev app with terminals open, other agents' builds, a stray pool of CLI
+/// processes. `crates/pty` hit exactly this and took the same fix; these tests are
+/// the second population of PTY allocators in the workspace and had no guard.
+///
+/// The symptom is load-dependent and does not reproduce on an idle machine, which
+/// is what makes it expensive to diagnose twice: under contention a setup run can
+/// park in its read loop, and nothing frees it until [`DEADLINE`] — an hour later.
+/// So this bounds how many of these can be in flight at once. The hang it prevents
+/// is contention, not a deadlock — but the guard could introduce a real one, which
+/// is why it is async:
+///
+/// A `tokio::sync::Mutex`, not a `std` one: every holder awaits the PTY run it is
+/// serializing, and a `std` guard held across an `await` can park the runtime
+/// thread with the lock still held — the deadlock this guard exists to avoid,
+/// reintroduced by the guard itself. It also drops `std`'s poisoning, which is
+/// what we want here anyway: one panicking test must not cascade into every later
+/// test reporting the same unrelated failure.
+#[cfg(test)]
+pub(crate) async fn pty_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().await
+}
+
+/// The one lock behind both guards. Two statics would serialize each population
+/// against itself and neither against the other, which is no guard at all.
+#[cfg(test)]
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// [`pty_guard`] for the plain `#[test]` fns in this module, which allocate the
+/// same PTYs from no runtime at all. `blocking_lock` panics if called *inside* a
+/// runtime, which is precisely the misuse it should catch: an async test reaching
+/// for this instead of awaiting the guard above.
+#[cfg(test)]
+pub(crate) fn pty_guard_blocking() -> tokio::sync::MutexGuard<'static, ()> {
+    SERIAL.blocking_lock()
+}
 
 /// The grid a run *starts* on, before any pane has reported its width — a run can be
 /// kicked off with its pane hidden or not yet mounted, so there's nothing to measure
@@ -236,6 +294,41 @@ pub struct Spec<'a> {
     pub env: Vec<(String, String)>,
 }
 
+/// The command a run spawns behind its PTY.
+///
+/// This is santree's *second* PTY spawn site — `crates/pty` owns the first — and
+/// so it carries the same obligation: `CommandBuilder::new` copies santree's own
+/// ambient environment, which includes whatever agent session launched santree.
+/// [`santree_pty::strip_inherited_session_markers`] drops those markers here for
+/// exactly the reason it drops them there (see COMPLIANCE.md, "Inherited
+/// nested-session markers"): a setup script or build that inherits
+/// `CLAUDE_CODE_CHILD_SESSION` runs as somebody's nested session, and the two
+/// messaging markers are a live IPC socket and its bearer token. The list is
+/// imported, never copied — a local copy is how the two sites drift.
+///
+/// The strip goes before `spec.env`, so a caller that deliberately sets one of
+/// those names still wins, the same ordering `crates/pty` uses for the user's
+/// own Settings → Environment.
+fn build_command(spec: &Spec<'_>) -> CommandBuilder {
+    // `-l` so the command sees the login shell's PATH (nvm/rustup/nix shims), which
+    // a bare non-interactive shell doesn't get — `pnpm: command not found` otherwise.
+    let mut cmd = CommandBuilder::new("/bin/bash");
+    cmd.args(["-lc", &spec.command]);
+    cmd.cwd(spec.cwd);
+    santree_pty::strip_inherited_session_markers(&mut cmd);
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
+    // Claim a colour-capable terminal — this is why we bothered with a PTY.
+    cmd.env("TERM", "xterm-256color");
+    // Deliberately *not* setting COLUMNS: it's a snapshot taken at spawn, and a
+    // `SIGWINCH` can't update it. A tool that prefers the env var over the tty's own
+    // size would stay pinned to the starting grid for the whole run, which is exactly
+    // the behaviour [`Runs::resize`] exists to remove. With a real PTY on stdout,
+    // cargo/vite/tsc all ask the kernel instead, and get the live answer.
+    cmd
+}
+
 /// Run `spec` under a PTY, streaming its output to `ev`, and report whether it
 /// exited successfully. Blocking — call it from `spawn_blocking`. The slot must
 /// already be claimed (see [`Runs::reserve`]); it's released when this returns.
@@ -253,21 +346,7 @@ pub fn run(spec: Spec<'_>, slot: Slot<'_>, ev: &Channel<StreamEvent>) -> bool {
         }
     };
 
-    // `-l` so the command sees the login shell's PATH (nvm/rustup/nix shims), which
-    // a bare non-interactive shell doesn't get — `pnpm: command not found` otherwise.
-    let mut cmd = CommandBuilder::new("/bin/bash");
-    cmd.args(["-lc", &spec.command]);
-    cmd.cwd(spec.cwd);
-    for (k, v) in &spec.env {
-        cmd.env(k, v);
-    }
-    // Claim a colour-capable terminal — this is why we bothered with a PTY.
-    cmd.env("TERM", "xterm-256color");
-    // Deliberately *not* setting COLUMNS: it's a snapshot taken at spawn, and a
-    // `SIGWINCH` can't update it. A tool that prefers the env var over the tty's own
-    // size would stay pinned to the starting grid for the whole run, which is exactly
-    // the behaviour [`Runs::resize`] exists to remove. With a real PTY on stdout,
-    // cargo/vite/tsc all ask the kernel instead, and get the live answer.
+    let cmd = build_command(&spec);
 
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
@@ -285,6 +364,12 @@ pub fn run(spec: Spec<'_>, slot: Slot<'_>, ev: &Channel<StreamEvent>) -> bool {
         Err(e) => {
             send_text(ev, &format!("failed to read output: {e}\r\n"));
             let _ = child.kill();
+            // Reap it too. `kill` only signals; without the `wait` the child stays
+            // a zombie holding a process-table slot for the life of the app, and
+            // this path fires exactly when the machine is already short of the
+            // resources that would cause it. The sibling failure path below
+            // (`attach`) already does both — this one had drifted.
+            let _ = child.wait();
             return false;
         }
     };
@@ -412,6 +497,66 @@ mod tests {
         }
     }
 
+    /// COMPLIANCE.md, "Inherited nested-session markers", at the spawn site that
+    /// is *not* `crates/pty`.
+    ///
+    /// A background run is a real process behind a real PTY, and it inherits
+    /// santree's ambient environment exactly the way a session does — including
+    /// the launching Claude session's id and, worse, its messaging socket and
+    /// bearer token. This site had the leak for as long as it existed: the strip
+    /// lived only in `crates/pty::build_command`, which a setup script or a build
+    /// never goes through.
+    ///
+    /// Asserted against the shared `INHERITED_SESSION_MARKERS` rather than a
+    /// local list, so a marker added to the canonical one is covered here the day
+    /// it lands instead of the day someone remembers this file.
+    #[test]
+    fn a_background_run_does_not_inherit_the_launching_sessions_markers() {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Stand in for a santree launched from inside an agent session.
+        let restore: Vec<(&str, Option<String>)> = santree_pty::INHERITED_SESSION_MARKERS
+            .iter()
+            .map(|name| (*name, std::env::var(name).ok()))
+            .collect();
+        for name in santree_pty::INHERITED_SESSION_MARKERS {
+            std::env::set_var(name, "inherited-from-our-launcher");
+        }
+
+        let cmd = build_command(&Spec {
+            command: "pnpm build".into(),
+            cwd: Path::new("/"),
+            // A caller that deliberately sets one of those names still wins, the
+            // same ordering `crates/pty` gives the user's own environment.
+            env: vec![("CLAUDECODE".into(), "caller-said-so".into())],
+        });
+
+        for name in santree_pty::INHERITED_SESSION_MARKERS {
+            if *name == "CLAUDECODE" {
+                continue;
+            }
+            assert_eq!(
+                cmd.get_env(name),
+                None,
+                "{name} reached a background run; it must be stripped here too"
+            );
+        }
+        assert_eq!(
+            cmd.get_env("CLAUDECODE"),
+            Some(std::ffi::OsStr::new("caller-said-so"))
+        );
+        // The strip is surgical: a run still needs the login environment.
+        assert!(cmd.get_env("PATH").is_some(), "PATH is still inherited");
+
+        for (name, value) in restore {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
     #[test]
     fn take_utf8_holds_a_split_multibyte_char_until_it_completes() {
         // "é" is 0xC3 0xA9 — arriving across two reads.
@@ -493,6 +638,7 @@ mod tests {
     /// tools turn colour off before we ever get the chance to keep it.
     #[test]
     fn a_real_run_streams_colour_and_reports_success() {
+        let _serial = pty_guard_blocking();
         let runs = Runs::default();
         let slot = runs.reserve("colour").unwrap();
         let log: std::sync::Arc<Mutex<Vec<String>>> = Default::default();
@@ -523,6 +669,8 @@ mod tests {
 
     /// A real PTY master for the registry to hold. Cheap (a pair of fds) and the
     /// genuine type, so these tests exercise the same storage the spawner uses.
+    ///
+    /// Callers must hold [`pty_guard`] — this allocates from the same finite table.
     fn test_master() -> Box<dyn MasterPty + Send> {
         native_pty_system()
             .openpty(PtySize {
@@ -540,6 +688,7 @@ mod tests {
     /// be an ordinary "no", not an error the view has to special-case.
     #[test]
     fn resize_reaches_a_live_run_and_ignores_a_finished_one() {
+        let _serial = pty_guard_blocking();
         let runs = Runs::default();
         assert!(!runs.resize("k", 200, 50), "no run under the key yet");
 
@@ -560,6 +709,7 @@ mod tests {
     /// nothing else holds a handle on it.
     #[test]
     fn a_slot_cancelled_before_the_spawn_refuses_the_killer() {
+        let _serial = pty_guard_blocking();
         let runs = Runs::default();
         let slot = runs.reserve("k").unwrap();
         assert!(runs.cancel("k"), "stopped while still spawning");

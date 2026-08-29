@@ -5,13 +5,11 @@
  * same subtle lifecycle, so it lives here once:
  *
  *  1. `ensure(...)` an (idempotent) session for the spec's `refId`, then point
- *     the persistent {@link TerminalLayer} at our host via `attachEmbed`. The
- *     host rect is captured *synchronously* inside a `useLayoutEffect` and handed
- *     to `attachEmbed`, so the layer is correctly sized on the very first paint —
- *     the ResizeObserver only re-measures afterward. Without this the PTY opens at
- *     the full content-area size for a frame and reflows (documented sizing
- *     race). The layout effect (not a passive effect) also tears the embed down
- *     synchronously with the DOM commit, so the overlay never lingers over other
+ *     the persistent {@link TerminalLayer} at our host via `attachEmbed`. A
+ *     layout effect, not a passive one, on both edges: the claim is flushed
+ *     inside the same commit, so the layer measures and places itself over this
+ *     host before the first paint (no frame at the wrong size), and the release
+ *     is synchronous with the DOM commit, so the overlay never lingers over other
  *     content behind a deferred re-render.
  *
  *  2. A "seen latch": when the hosted process exits, the orchestrator removes
@@ -79,14 +77,7 @@ export function useEmbeddedTerminal(opts: {
     seenRef.current = false;
     const host = hostRef.current;
     if (!attach || !host) return;
-    // Capture the host's current rect synchronously so the layer is sized right
-    // on first paint (opens at the correct size, not the full content area).
-    const r = host.getBoundingClientRect();
-    return attachEmbed({
-      host,
-      key,
-      rect: { top: r.top, left: r.left, width: r.width, height: r.height },
-    });
+    return attachEmbed({ host, key });
   }, [title, cwd, command, seed, source, refId, argsKey, attach, ensure, attachEmbed]);
 
   // Seen-latch exit detection (see the file header).

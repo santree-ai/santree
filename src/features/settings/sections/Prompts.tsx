@@ -55,7 +55,7 @@ const PREVIEW_DEFAULT = 480;
 const FLOW_GROUPS = [
   { title: "Triage", names: ["triage"] },
   { title: "Work", names: ["work", "fill-commit", "fill-pr"] },
-  { title: "Reviews", names: ["pr-review", "fix-ci"] },
+  { title: "Reviews", names: ["pr-review"] },
   { title: "English tutor", names: ["english-tutor", "english-analysis"] },
 ] as const;
 

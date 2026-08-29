@@ -215,25 +215,34 @@ export const DiscussionContent = memo(function DiscussionContent({
   );
 });
 
+/** The pane's own gutter. `dense` is for the workspace's right panel, which can be
+ *  as narrow as 240px — a reading gutter sized for Triage's wide column eats a
+ *  seventh of the line there. */
+const DISCUSSION_GUTTER = { normal: "px-5 py-[18px]", dense: "px-3 py-3.5" } as const;
+
 /** The issue body + comment thread. Scrolls within its own pane. */
 export const DiscussionPane = memo(function DiscussionPane({
   detail,
   repo,
+  dense = false,
 }: {
   detail: TriageDetail;
   repo: string;
+  dense?: boolean;
 }) {
   return (
-    <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-5 py-[18px]">
+    <div
+      className={`min-w-0 flex-1 overflow-x-hidden overflow-y-auto ${DISCUSSION_GUTTER[dense ? "dense" : "normal"]}`}
+    >
       <DiscussionContent detail={detail} repo={repo} />
     </div>
   );
 });
 
 /** Placeholder shown while a freshly-selected issue's detail loads. */
-export function DiscussionSkeleton() {
+export function DiscussionSkeleton({ dense = false }: { dense?: boolean }) {
   return (
-    <div className="flex-1 overflow-y-auto px-5 py-[18px]">
+    <div className={`flex-1 overflow-y-auto ${DISCUSSION_GUTTER[dense ? "dense" : "normal"]}`}>
       <div className="space-y-2.5">
         <Skeleton className="h-3.5 w-1/3" />
         <Skeleton className="h-3 w-full" />

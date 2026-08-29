@@ -4,10 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { CommentTarget } from "./commentTarget";
 import { anchorLabel, InlineCommentBox } from "./InlineCommentBox";
 
-const spies = vi.hoisted(() => ({ add: vi.fn() }));
+const spies = vi.hoisted(() => ({ add: vi.fn(), queue: vi.fn() }));
 
 vi.mock("../../lib/queries", () => ({
   useAddPrInlineComment: () => ({ mutate: spies.add, isPending: false }),
+  useAddReviewWorkItem: () => ({ mutate: spies.queue, isPending: false }),
   useGithubViewerLogin: () => ({ data: "sam" }),
 }));
 
@@ -100,5 +101,51 @@ describe("InlineCommentBox", () => {
     // that omits a line it replaces deletes it.
     const { queryByText } = box(14, 13);
     expect(queryByText("Suggestion")).toBeNull();
+  });
+
+  describe("on your own PR", () => {
+    const ownBox = (line: number, startLine: number) =>
+      render(
+        <InlineCommentBox
+          target={TARGET}
+          path="src/retry.ts"
+          patch={PATCH}
+          line={line}
+          startLine={startLine}
+          onRight
+          onClose={() => {}}
+          mode="queue"
+        />,
+      );
+
+    // There is nothing to batch and nothing to approve on your own PR, so the
+    // pending-review flow would be a button that leads nowhere useful.
+    it("leads with the queue instead of starting a review", () => {
+      const { getByText, queryByText } = ownBox(11, 11);
+      expect(getByText("Add to queue")).toBeInTheDocument();
+      expect(queryByText("Start a review")).toBeNull();
+      // Saying something on GitHub is still one of the two useful outcomes.
+      expect(getByText("Comment")).toBeInTheDocument();
+    });
+
+    it("queues the selected range as the item's anchor", () => {
+      const { getByText, getByPlaceholderText } = ownBox(12, 10);
+      fireEvent.change(getByPlaceholderText("Leave a comment"), {
+        target: { value: "tidy this up" },
+      });
+      fireEvent.click(getByText("Add to queue"));
+
+      expect(spies.queue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: "tidy this up",
+          source: "manual",
+          path: "src/retry.ts",
+          line: 12,
+          startLine: 10,
+          onRight: true,
+        }),
+        expect.anything(),
+      );
+    });
   });
 });

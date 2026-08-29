@@ -1,4 +1,4 @@
-import { createRootRoute, Outlet } from "@tanstack/react-router";
+import { createRootRoute, Outlet, useRouterState } from "@tanstack/react-router";
 import { CommandPalette } from "../components/CommandPalette";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import { AppShell } from "../components/shell/AppShell";
@@ -33,6 +33,9 @@ function RootLayout() {
   useKeyboardShortcuts();
   useUpdateWatcher();
   const { data: repos } = useRepos();
+  // Settings is a page, not a view: it takes the whole window and brings its
+  // own way back, so the shell (sidebar, status bar) steps aside for it.
+  const fullPage = useRouterState({ select: (s) => s.location.pathname.startsWith("/settings") });
   return (
     <AgentRunsProvider>
       <LegacyMigrationProvider>
@@ -40,6 +43,8 @@ function RootLayout() {
           <div className="min-h-0 flex-1">
             {repos === undefined ? null : repos.length === 0 ? (
               <WelcomeScreen />
+            ) : fullPage ? (
+              <Outlet />
             ) : (
               <AppShell>
                 <Outlet />

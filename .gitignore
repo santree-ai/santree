@@ -20,6 +20,11 @@ sourcemaps
 # TanStack Router plugin cache
 .tanstack
 
+# santree's own worktrees. The app creates `<repo>/.santree/worktrees/<id>` in
+# every repo it manages, this one included when dogfooding — a nested checkout is
+# not content of the parent checkout.
+.santree/
+
 # Claude Code: session/worktree state stays local, but shared project config
 # (settings, hooks, skills, agents, commands) is versioned so every clone and
 # every santree-managed worktree inherits it.

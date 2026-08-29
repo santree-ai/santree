@@ -1,16 +1,30 @@
-//! Resumable Claude sessions for terminals that auto-launch `claude`.
+//! Resumable agent sessions for terminals that auto-launch a CLI.
 //!
 //! When a terminal auto-launches the agent (Trees "work", Triage "investigate")
-//! we give it a stable session UUID and remember it in `terminal_sessions`, so
-//! reopening the tab later — after the app restarted or the agent was quit —
-//! resumes the *same* conversation (`claude --resume <id>`) instead of dropping
-//! to a bare shell or starting over. A session is "resumable" only while its
-//! transcript still exists on disk; once Claude prunes/deletes it we start fresh.
+//! we remember its session in `terminal_sessions`, so reopening the tab later —
+//! after the app restarted or the agent was quit — resumes the *same*
+//! conversation instead of dropping to a bare shell or starting over. A session
+//! is "resumable" only while its own on-disk record survives; once the CLI
+//! prunes it we start fresh.
+//!
+//! The two providers differ in **who mints the id**, and everything else follows
+//! from that:
+//!
+//! * **Claude** takes one at launch (`--session-id`), so [`resolve`] mints and
+//!   stores the UUID itself, and the record to stat is the transcript at
+//!   `~/.claude/projects/<escaped-cwd>/<id>.jsonl`.
+//! * **Codex** has no such flag: it mints its own id and reports it through the
+//!   `SessionStart` hook, which is what writes the row (see `santree-hook`). So
+//!   [`resolve_codex`] persists nothing, a fresh launch carries no id at all, and
+//!   the record to look for is the rollout under `$CODEX_HOME/sessions`.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use santree_core::domain::{AgentKind, AgentSession, TriageSession};
+use santree_core::domain::{
+    AgentKind, AgentSession, LastMessageFrom, TriageSession, WorktreeSession,
+};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -23,13 +37,17 @@ use crate::db::Db;
 /// `…-canary--santree-worktrees-AK-1`, and `…/dev/my_repo` becomes
 /// `…-dev-my-repo`).
 fn transcript_path(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
-    let escaped: String = cwd
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
     home.join(".claude/projects")
-        .join(escaped)
+        .join(project_slug(cwd))
         .join(format!("{session_id}.jsonl"))
+}
+
+/// The `projects/` directory name Claude derives from a working directory (see
+/// [`transcript_path`] for the escaping, verified against real transcripts).
+pub(crate) fn project_slug(cwd: &str) -> String {
+    cwd.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// Whether `session_id` can still be resumed for a claude run in `cwd`. The stat
@@ -82,15 +100,15 @@ pub async fn resolve(
                 agent_kind: AgentKind::Claude,
                 executable: executable.to_string(),
                 session_id,
-                remote: None,
+                launch_flags: String::new(),
             });
         }
         return Ok(if allow_fresh {
             AgentSession::Fresh {
                 agent_kind: AgentKind::Claude,
                 executable: executable.to_string(),
-                session_id,
-                remote: None,
+                session_id: Some(session_id),
+                launch_flags: String::new(),
             }
         } else {
             AgentSession::Shell
@@ -104,197 +122,89 @@ pub async fn resolve(
     Ok(AgentSession::Fresh {
         agent_kind: AgentKind::Claude,
         executable: executable.to_string(),
-        session_id: mint(db, repo, term_key, cwd).await?,
-        remote: None,
+        session_id: Some(mint(db, repo, term_key, cwd).await?),
+        launch_flags: String::new(),
     })
 }
 
-/// Resolve a Codex thread. Unlike Claude, resumability is App-Server-owned, so
-/// the presence of the persisted thread id is authoritative; the runtime checks
-/// it with `thread/resume` before the TUI is launched.
+/// What [`resolve_codex`] needs. `sessions_root` is Codex's rollout directory
+/// (`$CODEX_HOME/sessions`), resolved once by the caller and passed in — the
+/// mirror of `resolve`'s `home`, so tests can point at a fixture without
+/// mutating process-global env. `None` means "no rollouts are findable", which
+/// resolves the same way a pruned one does: start fresh.
 pub struct CodexSessionOpts<'a> {
     pub executable: &'a str,
     pub repo: &'a str,
     pub term_key: &'a str,
-    pub cwd: &'a Path,
-    pub model: Option<&'a str>,
-    pub effort: Option<&'a str>,
-    pub profile: crate::codex::CodexProfile,
     pub allow_fresh: bool,
-    pub review_mcp_config: Option<&'a Path>,
+    pub sessions_root: Option<&'a Path>,
 }
 
-pub async fn resolve_codex(
-    db: &Db,
-    runtime: &crate::codex::CodexRuntime,
-    opts: CodexSessionOpts<'_>,
-) -> Result<AgentSession> {
+/// Resolve how to (re)launch `codex` for the logical terminal `term_key` in
+/// `repo`.
+///
+/// Unlike Claude, santree cannot choose the id: `codex` has no launch-time
+/// `--session-id`, so a fresh run mints its own and reports it back through the
+/// `SessionStart` hook, which is what writes the `terminal_sessions` row (see
+/// `santree-hook`). That is why a fresh launch resolves to *no* id — inventing
+/// one here would name a thread `codex resume` will never find — and why this
+/// function writes nothing: there is no id to persist yet.
+pub async fn resolve_codex(db: &Db, opts: CodexSessionOpts<'_>) -> Result<AgentSession> {
     let CodexSessionOpts {
         executable,
         repo,
         term_key,
-        cwd,
-        model,
-        effort,
-        profile,
         allow_fresh,
-        review_mcp_config,
+        sessions_root,
     } = opts;
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT session_id, agent_kind FROM terminal_sessions
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT session_id FROM terminal_sessions
          WHERE repo = ? AND term_key = ? AND agent_kind = 'Codex'",
     )
     .bind(repo)
     .bind(term_key)
     .fetch_optional(db)
     .await?;
-    if let Some((thread_id, kind)) = row {
-        let kind: AgentKind = kind.parse()?;
-        if kind != AgentKind::Codex {
-            anyhow::bail!("stored provider does not match Codex session resolver");
-        }
-        match runtime.resume_thread(executable, &thread_id, review_mcp_config) {
-            Ok(()) => {
-                return Ok(AgentSession::Resume {
-                    agent_kind: AgentKind::Codex,
-                    executable: executable.to_string(),
-                    session_id: thread_id,
-                    remote: Some(runtime.remote(executable)?),
-                });
-            }
-            Err(error) if missing_codex_rollout(&error) => {
-                // beta.8 persisted `thread/start` ids before Codex wrote their
-                // rollout. If the same App Server still owns the in-memory
-                // thread, naming it repairs the row without losing the session.
-                match runtime.set_thread_name(executable, &thread_id, &codex_thread_name(term_key))
-                {
-                    Ok(()) => {
-                        runtime.resume_thread(executable, &thread_id, review_mcp_config)?;
-                        return Ok(AgentSession::Resume {
-                            agent_kind: AgentKind::Codex,
-                            executable: executable.to_string(),
-                            session_id: thread_id,
-                            remote: Some(runtime.remote(executable)?),
-                        });
-                    }
-                    Err(repair_error) if missing_codex_rollout(&repair_error) => {}
-                    Err(repair_error) => return Err(repair_error),
-                }
-                if !allow_fresh {
-                    return Ok(AgentSession::Shell);
-                }
-                let replacement = start_named_codex_thread(
-                    runtime,
-                    executable,
-                    term_key,
-                    CodexThreadStart {
-                        cwd,
-                        model,
-                        effort,
-                        profile,
-                        review_mcp_config,
-                    },
-                )?;
-                sqlx::query(
-                    "UPDATE terminal_sessions SET cwd = ?, session_id = ?
-                     WHERE repo = ? AND term_key = ? AND agent_kind = 'Codex'",
-                )
-                .bind(cwd.to_string_lossy().as_ref())
-                .bind(&replacement)
-                .bind(repo)
-                .bind(term_key)
-                .execute(db)
-                .await?;
-                return Ok(AgentSession::Fresh {
-                    agent_kind: AgentKind::Codex,
-                    executable: executable.to_string(),
-                    session_id: replacement,
-                    remote: Some(runtime.remote(executable)?),
-                });
-            }
-            Err(error) => return Err(error),
+
+    if let Some((thread_id,)) = row {
+        // `codex resume <id>` errors out in the user's face when the rollout is
+        // gone (Codex pruned it, or `CODEX_HOME` moved), so the stored id is only
+        // a resume target while its rollout is on disk. A stale row is left in
+        // place rather than deleted: the fresh run's `SessionStart` repoints it.
+        if codex_rollout_exists(sessions_root, &thread_id).await? {
+            return Ok(AgentSession::Resume {
+                agent_kind: AgentKind::Codex,
+                executable: executable.to_string(),
+                session_id: thread_id,
+                // Filled in by `CodexProvider`, which owns what a Codex session
+                // runs under; the resolver only decides which thread it is.
+                launch_flags: String::new(),
+            });
         }
     }
+
     if !allow_fresh {
         return Ok(AgentSession::Shell);
-    }
-    let thread_id = start_named_codex_thread(
-        runtime,
-        executable,
-        term_key,
-        CodexThreadStart {
-            cwd,
-            model,
-            effort,
-            profile,
-            review_mcp_config,
-        },
-    )?;
-    let mut tx = db.begin().await?;
-    sqlx::query(
-        "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
-         VALUES (?, ?, ?, ?, 'Codex') ON CONFLICT (repo, term_key, agent_kind) DO NOTHING",
-    )
-    .bind(repo)
-    .bind(term_key)
-    .bind(cwd.to_string_lossy().as_ref())
-    .bind(&thread_id)
-    .execute(&mut *tx)
-    .await?;
-    let (persisted_id,): (String,) = sqlx::query_as(
-        "SELECT session_id FROM terminal_sessions
-             WHERE repo = ? AND term_key = ? AND agent_kind = 'Codex'",
-    )
-    .bind(repo)
-    .bind(term_key)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    if persisted_id != thread_id {
-        runtime.resume_thread(executable, &persisted_id, review_mcp_config)?;
     }
     Ok(AgentSession::Fresh {
         agent_kind: AgentKind::Codex,
         executable: executable.to_string(),
-        session_id: persisted_id,
-        remote: Some(runtime.remote(executable)?),
+        session_id: None,
+        launch_flags: String::new(),
     })
 }
 
-struct CodexThreadStart<'a> {
-    cwd: &'a Path,
-    model: Option<&'a str>,
-    effort: Option<&'a str>,
-    profile: crate::codex::CodexProfile,
-    review_mcp_config: Option<&'a Path>,
-}
-
-fn start_named_codex_thread(
-    runtime: &crate::codex::CodexRuntime,
-    executable: &str,
-    term_key: &str,
-    config: CodexThreadStart<'_>,
-) -> Result<String> {
-    let thread_id = runtime.start_thread(
-        executable,
-        config.cwd,
-        config.model,
-        config.effort,
-        config.profile,
-        config.review_mcp_config,
-    )?;
-    runtime.set_thread_name(executable, &thread_id, &codex_thread_name(term_key))?;
-    Ok(thread_id)
-}
-
-fn codex_thread_name(term_key: &str) -> String {
-    format!("Santree · {term_key}")
-}
-
-fn missing_codex_rollout(error: &anyhow::Error) -> bool {
-    // App Server currently reports this specific condition using the generic
-    // JSON-RPC invalid-request code, so the server message is the discriminator.
-    error.to_string().contains("no rollout found for thread id")
+/// [`crate::codex_rollouts::rollout_exists_in`] off the async runtime — the
+/// rollout directory is a real directory walk, and every caller here is on it.
+async fn codex_rollout_exists(sessions_root: Option<&Path>, thread_id: &str) -> Result<bool> {
+    let Some(root) = sessions_root.map(Path::to_path_buf) else {
+        return Ok(false);
+    };
+    let thread_id = thread_id.to_string();
+    Ok(tokio::task::spawn_blocking(move || {
+        crate::codex_rollouts::rollout_exists_in(&root, &thread_id)
+    })
+    .await?)
 }
 
 /// Store a new session id for the terminal and return the id it will actually
@@ -385,8 +295,7 @@ async fn worktree_session_rows(
     repo: &str,
     issue_id: &str,
 ) -> Result<Vec<(String, String, String)>> {
-    let exact = format!("tree:{issue_id}");
-    let prefix = format!("tree:{}:%", escape_like(issue_id));
+    let (exact, prefix) = worktree_key_patterns(issue_id);
     let rows = sqlx::query_as(
         "SELECT session_id, cwd, term_key FROM terminal_sessions
          WHERE repo = ? AND (term_key = ? OR term_key LIKE ? ESCAPE '\\')
@@ -398,6 +307,155 @@ async fn worktree_session_rows(
     .fetch_all(db)
     .await?;
     Ok(rows)
+}
+
+/// The `term_key` match for a worktree's terminals: `(exact, like-prefix)` — its
+/// main terminal `tree:<id>` and, under `ESCAPE '\'`, every `tree:<id>:…` tab.
+fn worktree_key_patterns(issue_id: &str) -> (String, String) {
+    (
+        format!("tree:{issue_id}"),
+        format!("tree:{}:%", escape_like(issue_id)),
+    )
+}
+
+/// What a session's on-disk record (a Claude transcript, a Codex rollout) says
+/// about it, in the shape the Trees history shows. Filled by `usage.rs` and
+/// `codex_rollouts.rs`; timestamps stay integral here and convert at the wire.
+pub(crate) struct SessionSummary {
+    pub title: Option<String>,
+    pub last_message: Option<String>,
+    pub last_message_from: Option<LastMessageFrom>,
+    pub message_count: u32,
+    pub subagent_count: u32,
+    pub model: Option<String>,
+    pub started_at_ms: Option<i64>,
+    pub last_activity_ms: Option<i64>,
+}
+
+/// A worktree's registered session with the hook-tracked state joined on:
+/// `(session_id, agent_kind, term_key, cwd, created_at, updated_at_ms)`.
+type HistoryRow = (String, String, String, String, String, Option<i64>);
+
+/// The agent sessions that have run in a worktree, newest first: every session
+/// the terminal registry attributes to it (its main terminal and tabs), plus the
+/// Claude transcripts and Codex rollouts on disk for that directory with no
+/// registry row (launched by hand, or a row since forgotten). Both providers are
+/// summarised from their own record — a Claude session from its transcript, a
+/// Codex one from its rollout. Empty when nothing ran.
+pub async fn history(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    worktree: &Path,
+) -> Result<Vec<WorktreeSession>> {
+    let (exact, prefix) = worktree_key_patterns(issue_id);
+    // Every provider's rows. LEFT JOIN: `session_state` is written by Claude's
+    // hooks, so a Codex row (or a Claude one from before the hooks) has none — it
+    // still counts as a session.
+    let rows: Vec<HistoryRow> = sqlx::query_as(
+        "SELECT t.session_id, t.agent_kind, t.term_key, t.cwd, t.created_at, s.updated_at_ms
+         FROM terminal_sessions t
+         LEFT JOIN session_state s ON s.session_id = t.session_id
+         WHERE t.repo = ? AND (t.term_key = ? OR t.term_key LIKE ? ESCAPE '\\')
+         ORDER BY t.created_at",
+    )
+    .bind(repo)
+    .bind(exact)
+    .bind(prefix)
+    .fetch_all(db)
+    .await?;
+
+    // Claude transcripts are located by `(cwd, session_id)`; Codex rollouts by
+    // thread id alone (the registry's `session_id` for a Codex row *is* the
+    // thread id — what `session_meta.id` carries).
+    let known_claude: Vec<(String, String)> = rows
+        .iter()
+        .filter(|r| r.1 == AgentKind::Claude.as_str())
+        .map(|r| (r.3.clone(), r.0.clone()))
+        .collect();
+    let known_codex: Vec<String> = rows
+        .iter()
+        .filter(|r| r.1 == AgentKind::Codex.as_str())
+        .map(|r| r.0.clone())
+        .collect();
+    let dir = worktree.to_path_buf();
+    let mut summaries: HashMap<String, (AgentKind, SessionSummary)> =
+        tokio::task::spawn_blocking(move || {
+            let claude = crate::usage::worktree_summaries(&dir, &known_claude)
+                .into_iter()
+                .map(|(id, s)| (id, (AgentKind::Claude, s)));
+            let codex = crate::codex_rollouts::worktree_summaries(&dir, &known_codex)
+                .into_iter()
+                .map(|(id, s)| (id, (AgentKind::Codex, s)));
+            claude.chain(codex).collect()
+        })
+        .await?;
+
+    // Each session paired with its sort key (epoch ms, kept integral here — the
+    // wire type is `f64` because specta refuses `i64`), newest first.
+    let mut out: Vec<(Option<i64>, WorktreeSession)> =
+        Vec::with_capacity(rows.len() + summaries.len());
+    let mut seen = HashSet::new();
+    for (session_id, agent_kind, term_key, _cwd, created_at, updated_at_ms) in rows {
+        // A stale hook binary can't write an unknown kind here (the column is
+        // CHECKed), but a future variant this build lacks would — skip, don't guess.
+        let Ok(agent_kind) = agent_kind.parse::<AgentKind>() else {
+            continue;
+        };
+        if !seen.insert(session_id.clone()) {
+            continue;
+        }
+        let created_ms = chrono::DateTime::parse_from_rfc3339(&created_at)
+            .ok()
+            .map(|dt| dt.timestamp_millis());
+        // The row's provider is authoritative over whichever record matched the id.
+        let s = summaries.remove(&session_id).map(|(_, s)| s);
+        let started = s.as_ref().and_then(|s| s.started_at_ms).or(created_ms);
+        let last = s
+            .as_ref()
+            .and_then(|s| s.last_activity_ms)
+            .max(updated_at_ms);
+        out.push((
+            last.or(started),
+            WorktreeSession {
+                session_id,
+                agent_kind,
+                term_key: Some(term_key),
+                title: s.as_ref().and_then(|s| s.title.clone()),
+                last_message: s.as_ref().and_then(|s| s.last_message.clone()),
+                last_message_from: s.as_ref().and_then(|s| s.last_message_from),
+                message_count: s.as_ref().map_or(0, |s| s.message_count),
+                subagent_count: s.as_ref().map_or(0, |s| s.subagent_count),
+                model: s.as_ref().and_then(|s| s.model.clone()),
+                started_at_ms: started.map(|ms| ms as f64),
+                last_activity_ms: last.map(|ms| ms as f64),
+            },
+        ));
+    }
+    for (session_id, (agent_kind, s)) in summaries {
+        if !seen.insert(session_id.clone()) {
+            continue;
+        }
+        out.push((
+            s.last_activity_ms.or(s.started_at_ms),
+            WorktreeSession {
+                session_id,
+                agent_kind,
+                term_key: None,
+                title: s.title,
+                last_message: s.last_message,
+                last_message_from: s.last_message_from,
+                message_count: s.message_count,
+                subagent_count: s.subagent_count,
+                model: s.model,
+                started_at_ms: s.started_at_ms.map(|ms| ms as f64),
+                last_activity_ms: s.last_activity_ms.map(|ms| ms as f64),
+            },
+        ));
+    }
+    // Newest first; a session with no timestamp at all sinks to the bottom.
+    out.sort_by_key(|(when, _)| std::cmp::Reverse(*when));
+    Ok(out.into_iter().map(|(_, s)| s).collect())
 }
 
 /// Escape the three SQL `LIKE` metacharacters (`\`, `%`, `_`) so a value can be
@@ -713,8 +771,12 @@ mod tests {
         let fresh = resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", true)
             .await
             .unwrap();
-        let AgentSession::Fresh { session_id, .. } = fresh else {
-            panic!("expected Fresh, got {fresh:?}");
+        let AgentSession::Fresh {
+            session_id: Some(session_id),
+            ..
+        } = fresh
+        else {
+            panic!("expected Fresh with a santree-minted id, got {fresh:?}");
         };
 
         // No transcript yet → a reopen still can't resume (stays a shell).
@@ -737,7 +799,7 @@ mod tests {
                 agent_kind: AgentKind::Claude,
                 executable: "/bin/claude".into(),
                 session_id: session_id.clone(),
-                remote: None,
+                launch_flags: String::new(),
             }
         );
 
@@ -750,7 +812,7 @@ mod tests {
                 agent_kind: AgentKind::Claude,
                 executable: "/bin/claude".into(),
                 session_id,
-                remote: None,
+                launch_flags: String::new(),
             }
         );
 
@@ -787,8 +849,12 @@ mod tests {
         let fresh = resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", true)
             .await
             .unwrap();
-        let AgentSession::Fresh { session_id, .. } = fresh else {
-            panic!("expected Fresh, got {fresh:?}");
+        let AgentSession::Fresh {
+            session_id: Some(session_id),
+            ..
+        } = fresh
+        else {
+            panic!("expected Fresh with a santree-minted id, got {fresh:?}");
         };
 
         // Write the transcript at the path Claude Code would actually use.
@@ -804,7 +870,7 @@ mod tests {
                 agent_kind: AgentKind::Claude,
                 executable: "/bin/claude".into(),
                 session_id,
-                remote: None,
+                launch_flags: String::new(),
             }
         );
 
@@ -951,6 +1017,147 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Write the rollout Codex would leave for `thread_id`, in the
+    /// `YYYY/MM/DD` partition it uses. Only the `session_meta` first line
+    /// matters here — that is what carries the thread id.
+    fn write_rollout(sessions: &Path, thread_id: &str) {
+        let day = sessions.join("2026").join("08").join("28");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            day.join(format!("rollout-2026-08-28T10-00-00-{thread_id}.jsonl")),
+            format!(
+                r#"{{"timestamp":"2026-08-28T10:00:00.000Z","type":"session_meta","payload":{{"id":"{thread_id}","timestamp":"2026-08-28T10:00:00.000Z","cwd":"/tmp/santree/work","thread_source":"cli"}}}}"#
+            ) + "\n",
+        )
+        .unwrap();
+    }
+
+    async fn codex_rows(db: &Db) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT session_id, cwd FROM terminal_sessions WHERE agent_kind = 'Codex'")
+            .fetch_all(db)
+            .await
+            .unwrap()
+    }
+
+    /// Codex mints its own id, so santree has none to offer at launch: a fresh
+    /// resolve must resolve to *no* id (and persist nothing — the `SessionStart`
+    /// hook writes the row once Codex reports what it minted). Inventing an id
+    /// here would name a thread `codex resume` can never find.
+    #[tokio::test]
+    async fn resolve_codex_starts_fresh_with_no_id_and_writes_nothing() {
+        let base = std::env::temp_dir().join(format!("santree-codex-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let sessions = base.join("sessions");
+        let opts = |allow_fresh| CodexSessionOpts {
+            executable: "/bin/codex",
+            repo: "repo",
+            term_key: "tree:AK-1",
+            allow_fresh,
+            sessions_root: Some(sessions.as_path()),
+        };
+
+        // A passive reopen with nothing stored is still just a shell.
+        assert_eq!(
+            resolve_codex(&db, opts(false)).await.unwrap(),
+            AgentSession::Shell
+        );
+
+        assert_eq!(
+            resolve_codex(&db, opts(true)).await.unwrap(),
+            AgentSession::Fresh {
+                agent_kind: AgentKind::Codex,
+                executable: "/bin/codex".into(),
+                session_id: None,
+                launch_flags: String::new(),
+            }
+        );
+        assert!(
+            codex_rows(&db).await.is_empty(),
+            "the id is the hook's to record, not the resolver's"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A stored thread is only a resume target while Codex still has its rollout:
+    /// `codex resume <id>` fails outright otherwise, in the user's terminal. The
+    /// stale row is deliberately left in place — the fresh run's `SessionStart`
+    /// repoints it.
+    #[tokio::test]
+    async fn resolve_codex_resumes_only_a_thread_whose_rollout_survives() {
+        let base =
+            std::env::temp_dir().join(format!("santree-codex-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let sessions = base.join("sessions");
+        write_rollout(&sessions, "thread-live");
+
+        for (term_key, thread_id) in [("tree:AK-1", "thread-live"), ("tree:AK-2", "thread-pruned")]
+        {
+            sqlx::query(
+                "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+                 VALUES ('repo', ?, '/tmp/santree/work', ?, 'Codex')",
+            )
+            .bind(term_key)
+            .bind(thread_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        let opts = |term_key, sessions_root| CodexSessionOpts {
+            executable: "/bin/codex",
+            repo: "repo",
+            term_key,
+            allow_fresh: true,
+            sessions_root,
+        };
+        let root = Some(sessions.as_path());
+
+        assert_eq!(
+            resolve_codex(&db, opts("tree:AK-1", root)).await.unwrap(),
+            AgentSession::Resume {
+                agent_kind: AgentKind::Codex,
+                executable: "/bin/codex".into(),
+                session_id: "thread-live".into(),
+                launch_flags: String::new(),
+            }
+        );
+        // Codex pruned this one: resuming it would just error at the user.
+        assert_eq!(
+            resolve_codex(&db, opts("tree:AK-2", root)).await.unwrap(),
+            AgentSession::Fresh {
+                agent_kind: AgentKind::Codex,
+                executable: "/bin/codex".into(),
+                session_id: None,
+                launch_flags: String::new(),
+            }
+        );
+        // No rollout directory at all (no `CODEX_HOME`, nothing written yet)
+        // resolves the same way, never into an unopenable resume.
+        assert_eq!(
+            resolve_codex(&db, opts("tree:AK-1", None)).await.unwrap(),
+            AgentSession::Fresh {
+                agent_kind: AgentKind::Codex,
+                executable: "/bin/codex".into(),
+                session_id: None,
+                launch_flags: String::new(),
+            }
+        );
+        // Both rows survive untouched — repointing is the hook's job.
+        let mut rows = codex_rows(&db).await;
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                ("thread-live".to_string(), "/tmp/santree/work".to_string()),
+                ("thread-pruned".to_string(), "/tmp/santree/work".to_string()),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn escape_like_escapes_only_like_metacharacters() {
         assert_eq!(escape_like("AK-170"), "AK-170");
@@ -1009,7 +1216,7 @@ mod tests {
         .await
         .unwrap();
         let AgentSession::Fresh {
-            session_id: main_sid,
+            session_id: Some(main_sid),
             ..
         } = main
         else {
@@ -1027,7 +1234,7 @@ mod tests {
         .await
         .unwrap();
         let AgentSession::Fresh {
-            session_id: tab_sid,
+            session_id: Some(tab_sid),
             ..
         } = tab
         else {
@@ -1045,7 +1252,7 @@ mod tests {
         .await
         .unwrap();
         let AgentSession::Fresh {
-            session_id: other_sid,
+            session_id: Some(other_sid),
             ..
         } = other
         else {

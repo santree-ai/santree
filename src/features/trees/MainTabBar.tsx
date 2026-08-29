@@ -1,15 +1,29 @@
-/** The main-area tab bar. "Terminal" is always present and can't be closed;
- *  "Issue" (the ticket, like Triage) is present for per-issue worktrees but not
- *  the base-branch entry (it has no ticket). A shared "File" tab (whatever file
- *  you click) and a temporary "Setup" tab (while the setup script runs) appear on
- *  demand, and the persisted extra tabs opened via the trailing "+" tab (Claude
- *  sessions / terminals) are closable and renameable (double-click the label).
- *  All tabs share the same shape — an optional leading icon + label with an
- *  optional trailing affordance (a close × or a status dot) in a fixed slot. */
+/** The main-area tab bar: the places you *work*, and — at its trailing edge —
+ *  the two controls that act on the pane as a whole.
+ *
+ *  "Terminal" is always present and can't be closed. A shared "File" tab
+ *  (whatever file you click) and a temporary "Setup" tab (while the setup script
+ *  runs) appear on demand, and the persisted extra tabs opened via the "+" tab
+ *  (agent sessions / terminals) are closable and renameable (double-click the
+ *  label). All tabs share the same shape — an optional leading icon + label with
+ *  an optional trailing affordance (a close × or a status dot) in a fixed slot.
+ *
+ *  The trailing cluster is not part of the tablist: the worktree's setup script
+ *  (the one command this pane runs) and the right panel's expand control, which
+ *  lives here only while the panel is hidden — collapsing it from its own header
+ *  and reopening it somewhere else is how a toggle goes missing. */
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import type { AgentKind, TabKind, WorktreeTab } from "../../bindings";
-import { AgentIcon, CloseIcon, GlobeIcon, PlusIcon, TerminalIcon } from "../../components/icons";
+import {
+  AgentIcon,
+  CloseIcon,
+  GitHubLogo,
+  GlobeIcon,
+  PlayIcon,
+  PlusIcon,
+  TerminalIcon,
+} from "../../components/icons";
 import {
   Dropdown,
   MENU_ITEM,
@@ -19,7 +33,9 @@ import {
 import { useAgentAuth, useCodexAccount, useCodexHealth } from "../../lib/queries";
 import { targetOwnsKey, useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { CHROME } from "../../state/AppContext";
+import { agentLabel } from "../../theme/colors";
 import { useTerminals } from "../terminal/TerminalsContext";
+import { PanelToggle } from "./FilePickerPanel";
 import { BASE_ID, extraTab, type MainTab, useTrees } from "./model";
 
 export function MainTabBar() {
@@ -31,10 +47,14 @@ export function MainTabBar() {
     activeTab,
     setActiveTab,
     closeFileTab,
+    openCheckLog,
+    closeCheckLog,
     extraTabs,
     addTab,
     closeTab,
     renameTab,
+    runSetup,
+    rightCollapsed,
   } = useTrees();
   const { tabs, close } = useTerminals();
   const isBase = activeId === BASE_ID;
@@ -72,59 +92,97 @@ export function MainTabBar() {
   }, [tabs, extraTabs, activeId, closeTab]);
 
   return (
+    // The bar doubles as the window's drag region for this column: with the
+    // shell collapsed into one window, the sidebar's title strip was the only
+    // draggable chrome, so grabbing the window anywhere over the work area was
+    // impossible. `data-tauri-drag-region` only applies to the element under
+    // the pointer, so the tabs and buttons inside keep their own clicks — the
+    // gaps between them move the window, exactly like a native tab bar.
     <div
-      role="tablist"
-      onKeyDown={onTabStripKeyDown}
+      data-tauri-drag-region
       className={`flex ${CHROME.subBar} flex-none items-stretch border-b border-line bg-deep`}
     >
-      {!isBase && <Tab tab="issue" label="Issue" active={activeTab} onSelect={setActiveTab} />}
-      {/* The main work terminal hosts the worktree's agent session — mark it with
-          the agent's logo once one has been launched (the base entry is a plain
-          shell, and a worktree with no agent yet has nothing to mark). */}
-      <Tab
-        tab="terminal"
-        label="Terminal"
-        icon={!isBase && active?.agent ? <AgentTabIcon kind={active.agent} /> : undefined}
-        active={activeTab}
-        onSelect={setActiveTab}
-      />
-      {extraTabs.map((t) => (
+      <div role="tablist" onKeyDown={onTabStripKeyDown} className="flex min-w-0 items-stretch">
+        {/* The main work terminal hosts the worktree's agent session, so it is
+          named after that agent — not after the pane. "Terminal" beside the
+          Codex mark, on a tab running Codex, is the tab lying about itself; an
+          extra tab has said `agentLabel(kind)` since it was born (see
+          `defaultTabTitle`), and this one had no `worktree_tabs` row to carry a
+          title, which is the only reason it ever said otherwise. The base entry
+          is a plain shell and a worktree with no agent yet has nothing to name,
+          so both keep the literal. */}
         <Tab
-          key={t.id}
-          tab={extraTab(t.id)}
-          label={t.title}
-          icon={
-            t.kind === "terminal" ? (
-              <TerminalIcon size={11} className="text-muted-3" />
-            ) : (
-              <AgentTabIcon kind={t.agentKind ?? "Claude"} />
-            )
-          }
+          tab="terminal"
+          label={!isBase && active?.agent ? agentLabel(active.agent) : "Terminal"}
+          icon={!isBase && active?.agent ? <AgentTabIcon kind={active.agent} /> : undefined}
           active={activeTab}
           onSelect={setActiveTab}
-          onClose={() => closeExtra(t)}
-          onRename={(title) => renameTab(t.id, title)}
         />
-      ))}
-      {hasFile && (
-        <Tab
-          tab="file"
-          label="File"
-          active={activeTab}
-          onSelect={setActiveTab}
-          onClose={closeFileTab}
-        />
-      )}
-      {hasSetup && (
-        <Tab
-          tab="setup"
-          label="Setup"
-          active={activeTab}
-          onSelect={setActiveTab}
-          trailing={<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-amber" />}
-        />
-      )}
-      <NewTabButton onAdd={addTab} />
+        {extraTabs.map((t) => (
+          <Tab
+            key={t.id}
+            tab={extraTab(t.id)}
+            label={t.title}
+            icon={
+              t.kind === "terminal" ? (
+                <TerminalIcon size={11} className="text-muted-3" />
+              ) : (
+                <AgentTabIcon kind={t.agentKind ?? "Claude"} />
+              )
+            }
+            active={activeTab}
+            onSelect={setActiveTab}
+            onClose={() => closeExtra(t)}
+            onRename={(title) => renameTab(t.id, title)}
+          />
+        ))}
+        {hasFile && (
+          <Tab
+            tab="file"
+            label="File"
+            active={activeTab}
+            onSelect={setActiveTab}
+            onClose={closeFileTab}
+          />
+        )}
+        {hasSetup && (
+          <Tab
+            tab="setup"
+            label="Setup"
+            active={activeTab}
+            onSelect={setActiveTab}
+            trailing={<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-amber" />}
+          />
+        )}
+        {openCheckLog && (
+          <Tab
+            tab="checkLog"
+            label={openCheckLog.name}
+            icon={<GitHubLogo size={11} className="text-muted-3" />}
+            active={activeTab}
+            onSelect={setActiveTab}
+            onClose={closeCheckLog}
+          />
+        )}
+        <NewTabButton onAdd={addTab} />
+      </div>
+
+      <div data-tauri-drag-region className="min-w-2 flex-1" />
+
+      <div data-tauri-drag-region className="flex flex-none items-center gap-0.5 pr-2 pl-2">
+        {!isBase && active && (
+          <button
+            type="button"
+            onClick={() => runSetup(active.id)}
+            title="Run .santree/init.sh and watch its logs"
+            className="flex h-[22px] cursor-pointer items-center gap-1.5 rounded px-2 text-[11px] whitespace-nowrap text-muted-2 hover:bg-hover hover:text-fg-2"
+          >
+            <PlayIcon size={10} />
+            {active.setupRan ? "Re-run setup" : "Run setup"}
+          </button>
+        )}
+        {rightCollapsed && <PanelToggle />}
+      </div>
     </div>
   );
 }

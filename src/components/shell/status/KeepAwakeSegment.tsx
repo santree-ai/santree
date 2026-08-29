@@ -4,9 +4,10 @@
  * A long agent run is worthless if the Mac sleeps and locks halfway through, and
  * the hold that prevents it (`caffeinate`, tied to this app's pid) is invisible
  * once set — so it belongs in the bar that says what is currently true, not in a
- * menu. It reads as a plain toggle: dimmed when off, lit and labelled when on,
- * because "the machine will not sleep" is a state you want to be able to
- * disprove at a glance. Renders nothing off-macOS, where there is no hold to take.
+ * menu. It reads as a plain toggle that always states which way it is set: an
+ * icon alone would leave "off" and "on" to be told apart by brightness, and
+ * "the machine will not sleep" is a claim you want to be able to disprove at a
+ * glance. Renders nothing off-macOS, where there is no hold to take.
  */
 import { useKeepAwake } from "../../../lib/queries";
 import { CoffeeIcon } from "../../icons";
@@ -30,7 +31,7 @@ export function KeepAwakeSegment() {
       }
     >
       <CoffeeIcon size={11} />
-      {active && <span>awake</span>}
+      <span>{active ? "on" : "off"}</span>
     </StatusButton>
   );
 }

@@ -2,12 +2,13 @@
  * Graph mode: the existing dependency graph, embedded unchanged.
  *
  * The graph is repo-scoped by construction — dagre lays out one repo's blocker
- * edges into project bands — so it stays on the active repo while the list beside
- * it spans every repo. Nothing here reimplements it: the model, canvas and
- * inspector are the Issues ones, and the only thing this file supplies is the
- * frame the per-view chrome used to. The launch tray floats over the canvas
- * for the same reason: it belonged to a rail this page no longer has, and losing
- * it would mean losing multi-ticket launching with it.
+ * edges into project bands — so it stays on the active repo while the list it
+ * alternates with spans every repo. Nothing here reimplements it: the canvas is
+ * the Issues one, reading the `IssuesProvider` the page mounts around both
+ * modes (so the focused ticket and the inspector beside it are shared). The
+ * launch tray floats over the canvas for the same reason: it belonged to a rail
+ * this page no longer has, and losing it would mean losing multi-ticket
+ * launching with it.
  */
 import { useMemo } from "react";
 
@@ -15,17 +16,7 @@ import { Button, Dot } from "../../components/primitives";
 import { accentActiveStyle, successColor } from "../../theme/colors";
 import { GraphCanvas } from "../issues/GraphCanvas";
 import { LaunchPanel } from "../issues/LaunchPanel";
-import { type ActionableControl, IssuesProvider, useIssues } from "../issues/model";
-import { RightPanel } from "../issues/RightPanel";
-import { useIssuesShortcuts } from "../issues/shortcuts";
-
-/** ⌘L for the inspector. ⌘⇧. belongs to the page header, which owns the filter
- *  in both modes — binding it here too would give the chord two owners. */
-function GraphShortcuts() {
-  const { toggleRightPanel } = useIssues();
-  useIssuesShortcuts({ onToggleRightPanel: toggleRightPanel });
-  return null;
-}
+import { useIssues } from "../issues/model";
 
 /** The queue's two controls — fill it with everything ready, then launch it. */
 function LaunchTray() {
@@ -57,17 +48,11 @@ function LaunchTray() {
   );
 }
 
-export function TicketsGraph({ actionable }: { actionable: ActionableControl }) {
+export function TicketsGraph() {
   return (
-    <IssuesProvider actionable={actionable}>
-      <GraphShortcuts />
-      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-app">
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-          <GraphCanvas />
-          <LaunchTray />
-        </div>
-        <RightPanel />
-      </div>
-    </IssuesProvider>
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-app">
+      <GraphCanvas />
+      <LaunchTray />
+    </div>
   );
 }

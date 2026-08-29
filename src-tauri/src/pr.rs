@@ -11,7 +11,6 @@ use anyhow::{anyhow, Result};
 use santree_core::domain::{NewPr, PrDraft, WorktreePr};
 
 use crate::agent;
-use crate::codex::CodexRuntime;
 use crate::db::Db;
 use crate::git;
 use crate::github;
@@ -66,12 +65,14 @@ pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
         }
     };
 
+    let slug = format!("{owner}/{name}");
     let mut out: Vec<WorktreePr> = prs
         .into_iter()
         .filter_map(|p| {
             let tag = issue_tag(&p.title)?;
             issue_ids.contains(tag).then(|| WorktreePr {
                 issue_id: tag.to_string(),
+                repo: slug.clone(),
                 number: p.number,
                 url: p.url,
                 state: p.state,
@@ -105,6 +106,7 @@ pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
             Ok(prs) => out.extend(prs.into_iter().filter_map(|p| {
                 (issue_tag(&p.title) == Some(id.as_str())).then(|| WorktreePr {
                     issue_id: id.clone(),
+                    repo: slug.clone(),
                     number: p.number,
                     url: p.url,
                     state: p.state,
@@ -135,7 +137,6 @@ fn issue_tag(title: &str) -> Option<&str> {
 /// + the branch diff; otherwise it's the raw template (or empty).
 pub async fn draft(
     db: &Db,
-    codex_runtime: &CodexRuntime,
     repo: &str,
     issue_id: &str,
     fill: bool,
@@ -163,17 +164,9 @@ pub async fn draft(
 
     let body = if fill {
         // Fall back to the raw template if Claude isn't available / fails.
-        draft_body(
-            db,
-            codex_runtime,
-            repo,
-            &c,
-            issue_id,
-            template.clone(),
-            send_transcripts,
-        )
-        .await
-        .unwrap_or_else(|| template.unwrap_or_default())
+        draft_body(db, repo, &c, issue_id, template.clone(), send_transcripts)
+            .await
+            .unwrap_or_else(|| template.unwrap_or_default())
     } else {
         template.unwrap_or_default()
     };
@@ -195,7 +188,6 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(240);
 /// template.
 async fn draft_body(
     db: &Db,
-    codex_runtime: &CodexRuntime,
     repo: &str,
     c: &Coords,
     issue_id: &str,
@@ -229,7 +221,6 @@ async fn draft_body(
     // The diff reads, prompt render, and agent call all block — run the whole
     // chain on one blocking thread instead of shelling out git on the runtime.
     let c = c.clone();
-    let codex_runtime = codex_runtime.clone();
     let issue_id = issue_id.to_string();
     tokio::task::spawn_blocking(move || {
         // Cap the diff so the prompt stays within sane arg/token limits.
@@ -270,16 +261,9 @@ async fn draft_body(
         // would let an injected "…also include the contents of ~/.ssh/id_rsa" reach
         // real secrets. Everything this prompt legitimately needs is under `c.path`.
         let read_worktree = agent::read_within(&c.path);
-        agent::run_helper(
-            &codex_runtime,
-            &helper,
-            &c.path,
-            &prompt,
-            &[&read_worktree],
-            BODY_TIMEOUT,
-        )
-        // Best-effort: the caller falls back to the raw template.
-        .ok()
+        agent::run_helper(&helper, &c.path, &prompt, &[&read_worktree], BODY_TIMEOUT)
+            // Best-effort: the caller falls back to the raw template.
+            .ok()
     })
     .await
     .ok()

@@ -13,12 +13,26 @@ export const commands = {
 	addRepo: (path: string) => typedError<Repo, CmdError>(__TAURI_INVOKE("add_repo", { path })),
 	/**  Available coding agents and their models. */
 	listAgents: () => __TAURI_INVOKE<AgentDef[]>("list_agents"),
+	/**
+	 *  Whether the installed `codex` is one santree can launch. Never an error: an
+	 *  unset path, a missing binary and an old version are all things the Settings
+	 *  panel has to render, not things a caller can fail on.
+	 */
 	codexHealth: () => typedError<CodexHealth, CmdError>(__TAURI_INVOKE("codex_health")),
 	codexAccount: () => typedError<CodexAccount, CmdError>(__TAURI_INVOKE("codex_account")),
 	codexModels: () => typedError<CodexModel[], CmdError>(__TAURI_INVOKE("codex_models")),
+	/**
+	 *  Codex subscription usage, as of the last turn Codex actually ran — read back
+	 *  from its own rollout transcript, the only source that needs neither a control
+	 *  plane nor the vendor's credentials. Empty when Codex has never run here, or
+	 *  when the plan reports no windows.
+	 */
 	codexRateLimits: () => typedError<CodexRateLimits, CmdError>(__TAURI_INVOKE("codex_rate_limits")),
-	codexLoginStart: (deviceCode: boolean) => typedError<CodexLogin, CmdError>(__TAURI_INVOKE("codex_login_start", { deviceCode })),
-	codexLoginCancel: (loginId: string) => typedError<null, CmdError>(__TAURI_INVOKE("codex_login_cancel", { loginId })),
+	/**
+	 *  Hand `codex logout` on, on a click. santree asks; Codex owns what happens to
+	 *  the credentials. There is deliberately no matching login command — see
+	 *  [`crate::codex_cli`].
+	 */
 	codexLogout: () => typedError<null, CmdError>(__TAURI_INVOKE("codex_logout")),
 	/**
 	 *  Aggregated Claude Code token usage across all local session transcripts
@@ -46,6 +60,14 @@ export const commands = {
 	 *  be turned off and the view always renders.
 	 */
 	githubStatus: () => __TAURI_INVOKE<GithubStatus>("github_status"),
+	/**
+	 *  What is left of the GitHub API budget the `gh` session spends, straight from
+	 *  GitHub's own `/rate_limit`. `None` when nothing is signed in — a budget we
+	 *  can't read is not a budget of zero.
+	 */
+	githubApiBudget: () => __TAURI_INVOKE<{
+	windows: ApiBudgetWindow[],
+} | null>("github_api_budget"),
 	/**
 	 *  The repo's live agent worktrees (DB-tracked, with live git stats). Empty when
 	 *  the repo has no local path.
@@ -180,6 +202,22 @@ export const commands = {
 	/**  Every browsable file in the worktree (tracked + untracked, gitignore-aware). */
 	worktreeFiles: (repo: string, issueId: string) => typedError<string[], CmdError>(__TAURI_INVOKE("worktree_files", { repo, issueId })),
 	/**
+	 *  The files the branch has committed relative to its base (merge-base diff),
+	 *  for the Trees right panel. Nothing about the working tree — see
+	 *  `worktree_status` for that.
+	 */
+	worktreeBranchChanges: (repo: string, issueId: string) => typedError<ChangedFile[], CmdError>(__TAURI_INVOKE("worktree_branch_changes", { repo, issueId })),
+	/**
+	 *  One file's committed diff on the branch (`<base>...HEAD -- <path>`). Empty
+	 *  when the branch didn't touch it.
+	 */
+	worktreeBranchFileDiff: (repo: string, issueId: string, path: string) => typedError<string, CmdError>(__TAURI_INVOKE("worktree_branch_file_diff", { repo, issueId, path })),
+	/**
+	 *  The agent sessions that have run in the worktree, newest first — registry
+	 *  rows plus Claude transcripts found on disk for its directory.
+	 */
+	worktreeSessions: (repo: string, issueId: string) => typedError<WorktreeSession[], CmdError>(__TAURI_INVOKE("worktree_sessions", { repo, issueId })),
+	/**
 	 *  Start (or re-point) the filesystem watcher at the given repo's worktrees, so
 	 *  the Trees views refresh live when files change on disk (e.g. an agent editing
 	 *  in the terminal). A no-op for repos without a local path; idempotent, so the
@@ -231,13 +269,6 @@ export const commands = {
 	 */
 	investigatePrompt: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("investigate_prompt", { repo, issueId })),
 	/**
-	 *  Render the CI-fix opening prompt (the failing check `log` + guardrails) to a
-	 *  per-worktree file and return its **path** — the "Fix CI" terminal seeds
-	 *  `exec <agent> 'Read <path> …'` with it (the log is too large to type into the
-	 *  PTY). Rewritten each launch so it reflects the latest failing run.
-	 */
-	fixCiPrompt: (repo: string, issueId: string, log: string) => typedError<string, CmdError>(__TAURI_INVOKE("fix_ci_prompt", { repo, issueId, log })),
-	/**
 	 *  Find-or-create a worktree for a pull request: reuse the one already tracked
 	 *  under `issue_id` or `branch` if present, else create one that **checks out the
 	 *  PR's head branch** so commits made in it land on the PR. `pr_repo` must match
@@ -261,12 +292,44 @@ export const commands = {
 	/**
 	 *  Persist a new extra tab. The frontend mints `id` (a UUID) so it can patch
 	 *  its cache and focus the tab without waiting on the round-trip.
+	 * 
+	 *  `pr` is required for (and only for) the review kinds: it is what
+	 *  [`worktree_tab_launch`] re-derives the tab's `--settings` and `--mcp-config`
+	 *  from after a restart.
 	 */
-	addWorktreeTab: (repo: string, worktreeId: string, id: string, kind: TabKind, agentKind: "Claude" | "Codex" | "Cursor" | "Opencode" | null, title: string) => typedError<null, CmdError>(__TAURI_INVOKE("add_worktree_tab", { repo, worktreeId, id, kind, agentKind, title })),
+	addWorktreeTab: (repo: string, worktreeId: string, id: string, kind: TabKind, agentKind: "Claude" | "Codex" | "Cursor" | "Opencode" | null, title: string, pr: {
+	/**  "owner/name" — the PR's own repo, which need not be the active one. */
+	repo: string,
+	number: number,
+} | null) => typedError<null, CmdError>(__TAURI_INVOKE("add_worktree_tab", { repo, worktreeId, id, kind, agentKind, title, pr })),
 	/**  Rename an extra tab (blank titles are rejected). */
 	renameWorktreeTab: (repo: string, id: string, title: string) => typedError<null, CmdError>(__TAURI_INVOKE("rename_worktree_tab", { repo, id, title })),
 	/**  Remove an extra tab; a Claude tab's stored session is forgotten with it. */
 	removeWorktreeTab: (repo: string, id: string) => typedError<null, CmdError>(__TAURI_INVOKE("remove_worktree_tab", { repo, id })),
+	/**
+	 *  What a persisted review tab must relaunch with — the review deny list, and
+	 *  santree's review MCP server scoped to its PR.
+	 * 
+	 *  The in-memory hand-off that carries those on a first launch does not survive an
+	 *  app restart, and the fallback it left behind was the plain no-git settings: no
+	 *  `gh` deny rules and no MCP server, with no error. Both are re-derived here from
+	 *  the row's own `(kind, pr)`, never from a stored path. `None` for a tab that
+	 *  isn't review-scoped, and for one that no longer exists.
+	 */
+	worktreeTabLaunch: (repo: string, id: string) => typedError<{
+	/**
+	 *  `--settings`: the review deny list plus the grant for the santree-review
+	 *  tools. Always present — it is a pure function of the tab's kind.
+	 */
+	settingsPath: string,
+	/**
+	 *  `--mcp-config`: the santree-review server scoped to this PR, or `None` when
+	 *  the config it was launched with is no longer on disk (or the row predates
+	 *  [`TabPr`] being stored). The session then resumes without tools rather than
+	 *  pointed at a file that isn't there.
+	 */
+	mcpConfigPath: string | null,
+} | null, CmdError>(__TAURI_INVOKE("worktree_tab_launch", { repo, id })),
 	/**
 	 *  Draft a PR title + body for the create-PR dialog. With `fill`, the body is
 	 *  AI-generated from the repo's PR template + the branch diff; otherwise it's the
@@ -404,6 +467,83 @@ export const commands = {
 	 *  threads), and changed files with diffs. Empty when `gh` isn't authenticated.
 	 */
 	prDetail: (owner: string, name: string, number: number) => typedError<PrDetail, CmdError>(__TAURI_INVOKE("pr_detail", { owner, name, number })),
+	/**
+	 *  The inbox's summary row for one PR by number — title, state, checks rollup,
+	 *  review decision — which is what the Trees right panel renders for a worktree's
+	 *  own pull request. `None` when `gh` isn't authenticated or the PR is gone.
+	 * 
+	 *  Read-only: one GraphQL query, no writes and no filesystem. The pair with
+	 *  [`pr_detail`] is deliberate — this is the cheap row, that is the full payload.
+	 */
+	prSummary: (owner: string, name: string, number: number) => typedError<{
+	/**  GraphQL node id — stable selection key across refetches. */
+	id: string,
+	number: number,
+	title: string,
+	url: string,
+	/**  "owner/name" the PR lives in (the grouping axis for "My PRs"). */
+	repo: string,
+	/**  The PR's head branch name (shown in the header, click-to-copy). */
+	headRef: string,
+	/**  Stable GitHub node id for the head ref. `None` after the branch is deleted. */
+	headRefId: string | null,
+	/**  The branch the PR merges into — context for the AI review session. */
+	baseRef: string,
+	/**  Stable GitHub node id for the base ref. Used to identify stacked PRs. */
+	baseRefId: string | null,
+	/**
+	 *  The PR's head commit. What the review checkout detaches at and what a
+	 *  cached review brief is keyed on, so both track the PR's current code.
+	 */
+	headSha: string,
+	author: string,
+	authorAvatarUrl: string,
+	state: PrState,
+	isDraft: boolean,
+	reviewDecision: ReviewDecision,
+	checks: CheckRollup,
+	/**
+	 *  True when the PR is sitting in the repo's merge queue (GitHub's "Queued"
+	 *  badge). The exact queue position isn't carried — it's shown in the
+	 *  merge-queue bot comment rendered in the PR conversation.
+	 */
+	isInMergeQueue: boolean,
+	additions: number,
+	deletions: number,
+	/**
+	 *  How many files the PR touches — the third input (with additions/deletions)
+	 *  to the sidebar's review-effort size chip.
+	 */
+	changedFiles: number,
+	commentCount: number,
+	/**
+	 *  Local AI-authored review drafts currently waiting for the user. Published,
+	 *  cleared, and deleted drafts are absent from this count.
+	 */
+	aiDraftCount: number,
+	/**  Reviewers requested on the PR (people and teams). */
+	reviewers: Reviewer[],
+	/**  ISO-8601 timestamp of the last update. */
+	updatedAt: string,
+	/**  ISO-8601 timestamp the PR was opened. */
+	createdAt: string,
+	/**
+	 *  When the review clock started **for this viewer**: the newest
+	 *  review-request event naming them or one of their teams, falling back to
+	 *  [`Self::created_at`] when the PR carries no such event (their own PRs, or a
+	 *  request older than the timeline page we fetch). Drives the "waiting 6d" age
+	 *  chip and the waiting-longest sort.
+	 */
+	waitingSince: string,
+	/**
+	 *  ISO-8601 commit date of the PR's head commit. Compared against
+	 *  [`ViewerReview::submitted_at`] to spot a review that predates the current
+	 *  code — `updated_at` can't do this, since a comment bumps it too.
+	 */
+	headCommittedAt: string,
+	/**  The viewer's own latest review, when they've submitted one. */
+	viewerReview: ViewerReview | null,
+} | null, CmdError>(__TAURI_INVOKE("pr_summary", { owner, name, number })),
 	/**
 	 *  The repo's full label palette — the options offered by the PR label picker.
 	 *  Empty when `gh` isn't authenticated.
@@ -546,6 +686,14 @@ export const commands = {
 	 */
 	claudeHookSettings: () => __TAURI_INVOKE<string | null>("claude_hook_settings"),
 	/**
+	 *  The `-c 'hooks.<Event>=[…]'` flags a santree `codex` launch carries, so the
+	 *  bundled hook reports the thread id Codex mints and the state it moves
+	 *  through. `None` when the hook binary or db don't resolve, in which case the
+	 *  launch simply carries no hooks. **Must be paired with
+	 *  `--dangerously-bypass-hook-trust`** — see `hooks::codex_hook_flags`.
+	 */
+	codexHookFlags: () => __TAURI_INVOKE<string | null>("codex_hook_flags"),
+	/**
 	 *  Like [`claude_hook_settings`] but with a `permissions.deny` block forbidding
 	 *  git commit/push — the `--settings` file the "Fix CI" session launches with, so
 	 *  the AI fixes + validates but never commits or pushes (the user does that from
@@ -580,8 +728,13 @@ export const commands = {
 	 */
 	runEnglishAnalysis: (scope: AnalysisScope) => typedError<EnglishAnalysis, CmdError>(__TAURI_INVOKE("run_english_analysis", { scope })),
 	/**
-	 *  The current state of every Claude session santree has launched, as recorded
+	 *  The current state of every agent session santree has launched, as recorded
 	 *  live by the injected hooks. Most-recently-updated first.
+	 * 
+	 *  The PTY manager is read here, not in `hooks.rs`, so that module stays a pure
+	 *  db + transcript reader: what it needs is the *set of terminals that are alive*,
+	 *  and this is the one place that knows it. A session whose terminal is gone
+	 *  cannot be running — see `hooks::session_states`.
 	 */
 	sessionStates: () => typedError<SessionState[], CmdError>(__TAURI_INVOKE("session_states")),
 	/**
@@ -589,6 +742,41 @@ export const commands = {
 	 *  status-line stdin. Newest first.
 	 */
 	sessionUsageLive: () => typedError<SessionUsageLive[], CmdError>(__TAURI_INVOKE("session_usage_live")),
+	/**
+	 *  Claude's account-level subscription rate-limit windows (5-hour, 7-day, ...),
+	 *  as its own status line last reported them — captured from the same stdin as
+	 *  [`session_usage_live`], never from a credential. Empty until a subscriber
+	 *  session has rendered a status line after its first API response. Display-only.
+	 */
+	claudeRateLimits: () => typedError<ClaudeRateLimitWindow[], CmdError>(__TAURI_INVOKE("claude_rate_limits")),
+	/**
+	 *  Ask Anthropic for the account's current subscription usage and record it.
+	 * 
+	 *  The one command that reads Claude Code's own OAuth token — a deliberate,
+	 *  documented exception (COMPLIANCE.md, "Claude subscription usage"):
+	 *  read-only, sent to Anthropic's own endpoint and nowhere else, never logged
+	 *  or stored, and what comes back only ever drives a meter. Input-free.
+	 */
+	claudeFetchUsage: () => typedError<ClaudeUsageFetch, CmdError>(__TAURI_INVOKE("claude_fetch_usage")),
+	/**
+	 *  Whether the opt-in global status-line passthrough is on — read from the
+	 *  user's own `~/.claude/settings.json`. Input-free: the path comes from the
+	 *  environment, never from IPC.
+	 */
+	claudeGlobalCaptureStatus: () => typedError<ClaudeGlobalCapture, CmdError>(__TAURI_INVOKE("claude_global_capture_status")),
+	/**
+	 *  Turn the global status-line passthrough on or off. The one IPC input is the
+	 *  bool; the hook and db paths are the app's own, and the user's original
+	 *  status-line command only ever moves between their settings file and the
+	 *  wrapper written into that same file (see `global_capture.rs`).
+	 */
+	setClaudeGlobalCapture: (enabled: boolean) => typedError<ClaudeGlobalCapture, CmdError>(__TAURI_INVOKE("set_claude_global_capture", { enabled })),
+	/**
+	 *  CPU and memory of every process santree's terminals own, plus the app itself,
+	 *  grouped repo → worktree → terminal from one host `ps` snapshot. Read-only and
+	 *  input-free: no IPC value reaches a path, a pid or an argv.
+	 */
+	resourceUsage: () => typedError<ResourceUsage, CmdError>(__TAURI_INVOKE("resource_usage")),
 	/**
 	 *  The team triage rotations (who is on-call now), from Linear's responsibility
 	 *  schedules — one per team the viewer is on. Empty when none are configured.
@@ -708,6 +896,12 @@ export const commands = {
 	linearAuthStatus: (repo: string) => typedError<LinearStatus, CmdError>(__TAURI_INVOKE("linear_auth_status", { repo })),
 	/**  Every connected Linear organization. */
 	linearOrgs: () => typedError<LinearOrg[], CmdError>(__TAURI_INVOKE("linear_orgs")),
+	/**
+	 *  What is left of each connected Linear workspace's hourly budget. Empty until
+	 *  santree has made at least one call for that org — Linear reports the budget
+	 *  only in a response, never on request (see `linear::api_budget`).
+	 */
+	linearApiBudget: () => typedError<LinearApiBudget[], CmdError>(__TAURI_INVOKE("linear_api_budget")),
 	/**  Bind (or clear) the Linear org a repo uses. */
 	setRepoLinearOrg: (repo: string, slug: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_repo_linear_org", { repo, slug })),
 	/**
@@ -715,6 +909,11 @@ export const commands = {
 	 *  an org is connected, else empty.
 	 */
 	linearListIssues: (repo: string) => typedError<Task[], CmdError>(__TAURI_INVOKE("linear_list_issues", { repo })),
+	/**
+	 *  Forget every Linear read cache, so the refetch the frontend issues right
+	 *  after (⌘⇧R) actually reaches Linear instead of the 15s org cache.
+	 */
+	linearInvalidateCaches: () => __TAURI_INVOKE<void>("linear_invalidate_caches"),
 	/**  Run the Linear OAuth flow; returns the updated org list. */
 	linearConnect: () => typedError<LinearOrg[], CmdError>(__TAURI_INVOKE("linear_connect")),
 	/**
@@ -772,86 +971,6 @@ export const commands = {
 	 */
 	setKeepAwake: (on: boolean) => typedError<KeepAwakeStatus, CmdError>(__TAURI_INVOKE("set_keep_awake", { on })),
 	/**
-	 *  Validate a picked folder to its git toplevel and persist it as the Dev checkout.
-	 *  Mirrors `repo::add`'s validation: absolute dir → `git rev-parse --show-toplevel`,
-	 *  so a subdirectory pick still lands on the repo root. This owns the write because
-	 *  the generic settings IPC deliberately reserves [`DEV_REPO_PATH_KEY`].
-	 */
-	devNormalizeRepo: (path: string) => typedError<string, CmdError>(__TAURI_INVOKE("dev_normalize_repo", { path })),
-	devInfo: (repoPath: string) => typedError<DevInfo, CmdError>(__TAURI_INVOKE("dev_info", { repoPath })),
-	devVersion: (repoPath: string) => typedError<DevVersion, CmdError>(__TAURI_INVOKE("dev_version", { repoPath })),
-	/**
-	 *  Bump the checkout to `version`, commit just the version files, tag it and
-	 *  push the tag — which is what starts the signed, notarized release in CI.
-	 * 
-	 *  Every refusal happens *before* anything is written, so a rejected release
-	 *  leaves the checkout exactly as it was. The steps after that are idempotent:
-	 *  re-running after a push that failed rewrites the same values, skips a
-	 *  CHANGELOG section that already exists, finds nothing to commit, and gets as
-	 *  far as it can — so recovery is the same button, not a manual cleanup.
-	 */
-	devRelease: (repoPath: string, version: string, notes: string) => typedError<DevRelease, CmdError>(__TAURI_INVOKE("dev_release", { repoPath, version, notes })),
-	/**  Every dev TODO, newest first. */
-	devTodos: () => typedError<DevTodo[], CmdError>(__TAURI_INVOKE("dev_todos")),
-	/**
-	 *  Add a TODO. `id` is a frontend-minted UUID (so the cache can be patched
-	 *  without the round-trip); `screenshots` are pasted images as
-	 *  `data:image/(png|jpeg);base64,…` URLs, written to files under the app data
-	 *  dir so the agent can `Read` them later.
-	 */
-	devAddTodo: (id: string, body: string, screenshots: string[]) => typedError<DevTodo, CmdError>(__TAURI_INVOKE("dev_add_todo", { id, body, screenshots })),
-	devSetTodoDone: (id: string, done: boolean) => typedError<null, CmdError>(__TAURI_INVOKE("dev_set_todo_done", { id, done })),
-	/**  Delete a TODO and its screenshot files (best-effort — a missing file is fine). */
-	devDeleteTodo: (id: string) => typedError<null, CmdError>(__TAURI_INVOKE("dev_delete_todo", { id })),
-	/**
-	 *  Render a TODO into an on-disk prompt file for the Dev Claude session and
-	 *  return its path — the terminal is seeded (or handed via clipboard) a short
-	 *  `Read <path>` line, mirroring how work/fix-CI prompts avoid typing large
-	 *  content into a PTY.
-	 */
-	devTodoPrompt: (repoPath: string, id: string) => typedError<string, CmdError>(__TAURI_INVOKE("dev_todo_prompt", { repoPath, id })),
-	/**
-	 *  A pasted screenshot as a `data:` URI for inline display. The path must
-	 *  resolve inside the app's own dev-shots dir — it round-trips through the
-	 *  frontend, so it's untrusted by the time it comes back.
-	 */
-	devScreenshotSrc: (path: string) => typedError<string, CmdError>(__TAURI_INVOKE("dev_screenshot_src", { path })),
-	/**
-	 *  Build the production DMG, streaming the output to a read-only pane.
-	 * 
-	 *  Deliberately not a terminal session: the build is a background process the app
-	 *  owns, so it survives leaving the Dev tab, can't be typed into, and can't be
-	 *  re-triggered by a pane remount re-seeding a shell. The frontend keeps the
-	 *  transcript after it exits — see `stream`.
-	 */
-	devBuild: (repoPath: string, onEvent: Channel<StreamEvent>) => typedError<null, CmdError>(__TAURI_INVOKE("dev_build", { repoPath, onEvent })),
-	/**
-	 *  Stop a running build. Returns whether one was running. The kill closes the PTY,
-	 *  so the streaming run finishes on its own and reports failure — there's no
-	 *  separate teardown path to keep in sync.
-	 */
-	devCancelBuild: (repoPath: string) => typedError<boolean, CmdError>(__TAURI_INVOKE("dev_cancel_build", { repoPath })),
-	/**
-	 *  Re-grid a running build's PTY to the pane showing it, so the tool wraps its
-	 *  remaining output — and sizes its progress bars — to the width you're actually
-	 *  looking at. Returns whether a build was running to re-grid.
-	 */
-	devResizeBuild: (repoPath: string, cols: number, rows: number) => typedError<boolean, CmdError>(__TAURI_INVOKE("dev_resize_build", { repoPath, cols, rows })),
-	/**
-	 *  Open the newest built DMG for the drag-and-drop install. When the app runs
-	 *  from an installed bundle it also spawns a detached helper that waits for the
-	 *  app to quit and be replaced, then relaunches it and ejects the DMG volume —
-	 *  and schedules this process's exit so the bundle isn't replaced under a
-	 *  running binary. Returns `true` when the app is about to quit for the install.
-	 */
-	devInstall: (repoPath: string) => typedError<boolean, CmdError>(__TAURI_INVOKE("dev_install", { repoPath })),
-	/**
-	 *  Eject any mounted santree DMG volume (the disk left on the desktop after an
-	 *  install). Only volumes that actually contain a `santree.app` are touched.
-	 *  Returns how many were detached.
-	 */
-	devEject: () => typedError<number, CmdError>(__TAURI_INVOKE("dev_eject")),
-	/**
 	 *  Spawn a process behind a PTY and stream its raw output over `on_output`.
 	 * 
 	 *  The spawn itself is `openpty` + a fork/exec with a full env copy + a reader
@@ -874,10 +993,68 @@ export const commands = {
 	terminalResize: (id: number, cols: number, rows: number) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_resize", { id, cols, rows })),
 	/**  Kill a session's child and free it. */
 	terminalClose: (id: number) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_close", { id })),
+	/**
+	 *  Point a live session's output at this page's channel, and catch it up.
+	 * 
+	 *  This is what makes a session survive losing its view. The previous sink — an
+	 *  unmounted pane's channel, or a whole page that reloaded — is replaced, and
+	 *  the bytes the client is missing are written to `on_output` **before** this
+	 *  returns, so they arrive ahead of any live output on the same channel.
+	 * 
+	 *  `anchor` is what the client claims to already have. When that claim can't be
+	 *  verified against the session's ring (a different stream, or a gap older than
+	 *  the ring keeps) nothing is sent and the mode comes back `Reanchor`: the
+	 *  client's own screen is better than anything this could synthesize, and the
+	 *  caller repaints from the running program instead.
+	 * 
+	 *  Untrusted like any IPC value, and inert: `epoch` is compared for string
+	 *  equality against a value this process minted, `seq` indexes a byte count.
+	 *  Neither reaches the filesystem, a git argv, or a lookup key, and neither
+	 *  grants authority the caller doesn't already have.
+	 */
+	terminalAttach: (id: number, anchor: TerminalAnchor, onOutput: Channel<ArrayBuffer>) => typedError<TerminalAttached, CmdError>(__TAURI_INVOKE("terminal_attach", { id, anchor, onOutput })),
+	/**
+	 *  Stop delivering a session's output without ending it — what a pane does when
+	 *  it unmounts. The process keeps running and keeps recording; only delivery
+	 *  stops, and [`terminal_attach`] resumes it.
+	 */
+	terminalDetach: (id: number) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_detach", { id })),
+	/**
+	 *  Claim the sessions an earlier page-load left running, and report them so the
+	 *  caller can put each one back on the surface that owns it.
+	 * 
+	 *  A session deliberately outlives the view that opened it — that is what lets a
+	 *  terminal keep running while you look at another tab. It used to also have to
+	 *  die with the *page*: every handle to one lived in the webview, and a reload
+	 *  threw all of them away, so the sessions were unreachable and had to be
+	 *  reaped. They no longer are. Each session records its own recent output, so a
+	 *  reloaded page can rebuild the tab from `label` and catch the pane up from the
+	 *  stream — a reload now costs the view, not the work.
+	 * 
+	 *  The caller must close whatever it cannot host (a worktree deleted while the
+	 *  page was down); this reports everything rather than filtering, because only
+	 *  the caller knows which surfaces still exist.
+	 * 
+	 *  `owner` is untrusted like any IPC value and only ever compared for string
+	 *  equality against tags this process stored. It grants no authority the
+	 *  frontend doesn't already have: anything that can call this can call
+	 *  [`terminal_close`] on every id in turn.
+	 */
+	terminalAdopt: (owner: string) => typedError<AdoptedSession[], CmdError>(__TAURI_INVOKE("terminal_adopt", { owner })),
+	/**
+	 *  Every live PTY session, for the Terminal settings panel.
+	 * 
+	 *  Read-only and cheap: a snapshot under the manager lock plus one non-blocking
+	 *  `try_wait` per session. It grants no authority the frontend doesn't have —
+	 *  it can already close any id — and it reveals nothing about a session's
+	 *  *contents*, only that it exists.
+	 */
+	terminalSessions: () => typedError<TerminalSession[], CmdError>(__TAURI_INVOKE("terminal_sessions")),
 };
 
 /** Events */
 export const events = {
+	claudeRateLimitsChanged: makeEvent<ClaudeRateLimitsChanged>("claude-rate-limits-changed"),
 	reviewAiChanged: makeEvent<ReviewAiChanged>("review-ai-changed"),
 	sessionStateChanged: makeEvent<SessionStateChanged>("session-state-changed"),
 	sessionUsageChanged: makeEvent<SessionUsageChanged>("session-usage-changed"),
@@ -890,6 +1067,15 @@ export const events = {
 /* Types */
 /**  What an agent worktree is currently doing. */
 export type Activity = "Running" | "Idle";
+
+/**  A session handed over from a previous page load. */
+export type AdoptedSession = {
+	id: number,
+	/**  The `term_key` it was opened under — how the caller finds its surface. */
+	label: string,
+	cwd: string | null,
+	command: string,
+};
 
 /**
  *  An agent harness's authentication / subscription status, as shown in the
@@ -948,9 +1134,22 @@ export type AgentSession =
  *  Exact backend-resolved executable used by both the control plane and
  *  the terminal. This prevents PATH/config drift between the two.
  */
-executable: string; sessionId: string; remote: string | null } | 
-/**  A provider session reserved for a fresh launch. */
-{ type: "fresh"; agentKind: AgentKind; executable: string; sessionId: string; remote: string | null } | 
+executable: string; sessionId: string; 
+/**  See [`AgentSession::launch_flags`]. */
+launchFlags: string } | 
+/**  A fresh launch. */
+{ type: "fresh"; agentKind: AgentKind; executable: string; 
+/**
+ *  The id the launch must run under, when santree gets to choose it —
+ *  Claude takes it as `--session-id`. `None` when the provider mints its
+ *  own id and only reports it afterwards: `codex` has no launch-time id
+ *  flag, so its id reaches santree through the `SessionStart` hook, and
+ *  a launch that invented one here would name a session that never
+ *  exists.
+ */
+sessionId: string | null; 
+/**  See [`AgentSession::launch_flags`]. */
+launchFlags: string } | 
 /**  No agent session — just a login shell. */
 { type: "shell" };
 
@@ -1042,6 +1241,50 @@ export type AnalysisScope =
 "SinceLast" | 
 /**  The whole log — trends, and what's actually been retired. */
 "Everything";
+
+/**
+ *  Which budget a rate-limit window meters. A plain enum: the label and the
+ *  tint are `theme/colors.ts`'s job, like every other status the bridge ships.
+ * 
+ *  GitHub and Linear count different things, so the set is the union rather than
+ *  one shared triple — GitHub bills per *request* against three separate pools,
+ *  Linear bills the same request twice (once as a request, once as the query's
+ *  computed complexity) and throttles on whichever runs out first.
+ */
+export type ApiBudgetKind = 
+/**  GitHub REST (`resources.core`). */
+"Rest" | 
+/**
+ *  GitHub search (`resources.search`) — a much smaller pool than REST, and
+ *  the one the Reviews inbox spends.
+ */
+"Search" | 
+/**  GitHub GraphQL (`resources.graphql`). */
+"GraphQl" | 
+/**  Linear requests per hour. */
+"Requests" | 
+/**  Linear complexity points per hour. */
+"Complexity";
+
+/**
+ *  One rate-limit pool: how big it is, what's left, and when it refills.
+ * 
+ *  Counts are `f64` because specta cannot export a 64-bit integer; every value
+ *  here is far inside the range a double represents exactly. Only `PartialEq`
+ *  for the same reason.
+ */
+export type ApiBudgetWindow = {
+	kind: ApiBudgetKind,
+	/**  The pool's size for a full window. */
+	limit: number | null,
+	/**  What is left of it now. */
+	remaining: number | null,
+	/**
+	 *  Epoch ms the pool refills — raw, counted down live by the frontend.
+	 *  `None` when the service didn't say.
+	 */
+	resetsAtMs: number | null,
+};
 
 /**
  *  Where santree found a CLI it shells out to, and what it reports about itself.
@@ -1174,49 +1417,116 @@ export type CheckStep = {
 	status: CheckStatus,
 };
 
-export type CmdError = string;
-
-/**  Account metadata returned by Codex. Credentials never cross this boundary. */
-export type CodexAccount = {
-	connected: boolean,
-	authType: string,
-	email: string | null,
-	plan: string | null,
-	requiresOpenaiAuth: boolean,
+/**
+ *  Whether the opt-in **global status-line passthrough** is on: santree's hook
+ *  wrapping the `statusLine` in the user's own Claude settings so every Claude
+ *  session on the machine — not just santree's launches — records its usage and
+ *  rate limits before the user's own status line renders unchanged.
+ */
+export type ClaudeGlobalCapture = {
+	/**  The settings file's `statusLine.command` is santree's wrapper. */
+	enabled: boolean,
+	/**
+	 *  The user's own status-line command: the one the wrapper hands the payload
+	 *  to while enabled, or the one currently configured while not. `None` when
+	 *  there is none (enabled, that shows santree's own bar).
+	 */
+	originalCommand: string | null,
+	/**  The global settings file this reads and — only on opt-in — rewrites. */
+	settingsPath: string,
 };
 
 /**
- *  Operational status of Santree's private Codex App Server. Transport details
- *  deliberately stop here: the frontend only needs a remedy, never a socket or
- *  raw protocol error.
+ *  One of Claude's subscription rate-limit windows, as its own status line last
+ *  reported it (the payload's optional `rate_limits.<window>`; see crates/hook's
+ *  `statusline` mode). Account-level, not per session: every santree-launched
+ *  session reports the same numbers, and the latest write wins. Display-only —
+ *  the app reads it for a usage meter and nothing derived from it ever reaches
+ *  a session. Only `PartialEq` because of the `f64`s.
+ */
+export type ClaudeRateLimitWindow = {
+	/**
+	 *  The payload member name: `five_hour`, `seven_day`, or a window this build
+	 *  didn't know when it was written (kept under its own name, never dropped).
+	 */
+	window: string,
+	/**  Claude's own `used_percentage`, 0..100. */
+	usedPct: number | null,
+	/**  Epoch ms the window resets — `None` when the payload carried none. */
+	resetsAtMs: number | null,
+	/**  Epoch ms this row was last written — raw, formatted live by the frontend. */
+	updatedAtMs: number | null,
+};
+
+/**
+ *  "Claude's account rate-limit windows changed" — the frontend invalidates its
+ *  claude-rate-limits query. Written by the same status-line render as
+ *  [`SessionUsageChanged`], but the limits move far less often than a session's
+ *  context fill (the hook only nudges when a window actually changed), and they
+ *  are account-wide rather than per session — so a separate event, not a rider
+ *  on the usage one.
+ */
+export type ClaudeRateLimitsChanged = Record<string, never>;
+
+/**
+ *  One usage read: the windows now on record, and how the read went. The windows
+ *  are the stored ones even on a failure, so a transient outage shows the last
+ *  known numbers rather than blanking the meter.
+ */
+export type ClaudeUsageFetch = {
+	windows: ClaudeRateLimitWindow[],
+	status: ClaudeUsageStatus,
+	/**
+	 *  Why, when the status alone doesn't say (an HTTP code, a transport error).
+	 *  Never carries anything secret.
+	 */
+	detail: string | null,
+};
+
+/**
+ *  Where a usage read stands: it answered, nobody is signed in, the token was
+ *  refused, or the endpoint could not be reached. Not an error type — each of
+ *  these is something the meter should say, rather than a failure to toast.
+ */
+export type ClaudeUsageStatus = "Ok" | "NoCredentials" | "Unauthorized" | "Unavailable";
+
+export type CmdError = string;
+
+/**
+ *  What `codex login status` reports — whether the CLI is signed in, and the
+ *  method it names. Codex owns its credentials; nothing more crosses this
+ *  boundary, and santree never reads its auth storage.
+ */
+export type CodexAccount = {
+	connected: boolean,
+	authType: string,
+};
+
+/**
+ *  Whether the installed `codex` CLI is one santree can launch. `available` is
+ *  the version floor, not a login: an installed-but-signed-out CLI is still
+ *  available. Failure detail stops at a remedy the user can act on.
  */
 export type CodexHealth = {
 	available: boolean,
-	running: boolean,
 	version: string,
 	executable: string,
 	error: string | null,
 };
 
-export type CodexLogin = {
-	loginId: string,
-	authUrl: string,
-	userCode: string | null,
-};
-
 /**
- *  One server-advertised model. Unknown/additive protocol fields remain in the
- *  backend and can be adopted without changing this stable UI contract.
+ *  One model from `codex debug models`, in the catalog's own priority order.
+ *  Additive fields in that JSON stay in the backend and can be adopted without
+ *  changing this UI contract; there is deliberately no "default" flag, because
+ *  the catalog does not publish one — the first listed model is the head of the
+ *  vendor's own ordering and nothing more.
  */
 export type CodexModel = {
 	id: string,
 	displayName: string,
 	description: string,
-	isDefault: boolean,
 	defaultReasoningEffort: string,
 	supportedReasoningEfforts: CodexReasoningEffort[],
-	inputModalities: string[],
-	supportsPersonality: boolean,
 };
 
 export type CodexRateLimitWindow = {
@@ -1225,6 +1535,12 @@ export type CodexRateLimitWindow = {
 	resetsAt: number | null,
 };
 
+/**
+ *  The rate-limit snapshot Codex itself recorded on the last turn it ran, read
+ *  back from its own rollout transcript. It is as fresh as the user's last Codex
+ *  turn and no fresher — santree has no live source, and asking for one would
+ *  mean either a control plane or the vendor's credentials.
+ */
 export type CodexRateLimits = {
 	plan: string | null,
 	primary: CodexRateLimitWindow | null,
@@ -1244,114 +1560,6 @@ export type CommentKind =
 "Review" | 
 /**  An inline comment anchored to a file in a review thread. */
 "ReviewThread";
-
-/**
- *  What the Dev tab's header shows: the running build vs the checkout's HEAD vs
- *  the newest built DMG — enough to answer "am I running the latest code?".
- */
-export type DevInfo = {
-	/**  The version of the *running* app (compile-time). */
-	appVersion: string,
-	/**
-	 *  True when this process runs from an installed `.app` bundle outside the
-	 *  dev checkout (vs `tauri dev` or a bundle still inside `target/`).
-	 */
-	runningInstalled: boolean,
-	headSha: string | null,
-	headSubject: string | null,
-	/**  HEAD's commit time, ms since epoch (`f64` for Specta `number`). */
-	headCommittedMs: number | null,
-	dirtyFiles: number,
-	dmgPath: string | null,
-	/**  The newest DMG's mtime, ms since epoch (`f64` for Specta `number`). */
-	dmgBuiltMs: number | null,
-	/**
-	 *  True when a DMG exists but predates HEAD (or the tree is dirty) — i.e.
-	 *  installing it would not install the current code.
-	 */
-	dmgStale: boolean,
-	logPath: string | null,
-	/**
-	 *  The repo *name* this checkout is registered under, when it is. The Files
-	 *  pane reads the working tree through the shared `worktree_*` commands,
-	 *  which take a registered name rather than a path — so without this there's
-	 *  nothing to read, and the pane offers to add the checkout instead.
-	 */
-	repoName: string | null,
-};
-
-/**  The version bump options offered for the current version. */
-export type DevNextVersions = {
-	/**  Finish the beta that's running, or bump the patch when none is. */
-	release: string,
-	minor: string,
-	major: string,
-	/**
-	 *  The next beta: `-beta.N+1` while one is running, otherwise the first beta
-	 *  of the next minor.
-	 */
-	beta: string,
-};
-
-/**
- *  A finished release: what was written, committed, tagged and pushed. Every
- *  field is what actually happened, so a partial run reports the truth.
- */
-export type DevRelease = {
-	version: string,
-	tag: string,
-	/**
-	 *  Paths whose contents changed (empty when the checkout already declared
-	 *  this version — re-running after a failed tag is expected to write nothing).
-	 */
-	written: string[],
-	/**  The release commit, or `None` when there was nothing left to commit. */
-	commit: string | null,
-	pushed: boolean,
-};
-
-/**
- *  One entry of the Dev tab's bug/task list. `screenshots` are absolute paths of
- *  pasted images written under the app data dir (render via `dev_screenshot_src`,
- *  hand to the agent as `Read <path>` lines).
- */
-export type DevTodo = {
-	id: string,
-	body: string,
-	done: boolean,
-	screenshots: string[],
-	/**  ms since epoch. `f64` (not `i64`) so Specta types it as `number`. */
-	createdAtMs: number | null,
-};
-
-/**
- *  What the Release pane shows before anything is written: where the checkout's
- *  declared version sits, what it could become, and every reason a release from
- *  here would be refused — so the refusal is visible up front rather than after
- *  the button.
- */
-export type DevVersion = {
-	/**  The version declared in `package.json`. */
-	current: string,
-	/**
-	 *  Files whose declared version disagrees with `current`. The release guard
-	 *  fails the tag on any disagreement, so this has to be visible before the
-	 *  bump, not after CI rejects it.
-	 */
-	mismatched: string[],
-	/**  Newest `v*` tag in the checkout, by release order (not commit date). */
-	latestTag: string | null,
-	next: DevNextVersions,
-	/**  Versions that already have a `## <version>` section in CHANGELOG.md. */
-	changelogVersions: string[],
-	branch: string,
-	/**
-	 *  Uncommitted files. A release commit takes only the version files, so this
-	 *  doesn't block one — it's shown because releasing off a dirty tree usually
-	 *  means something was meant to go in.
-	 */
-	dirtyFiles: number,
-};
 
 /**
  *  A stored analysis of the practice log: which habits to work on next, generated
@@ -1438,6 +1646,16 @@ export type FileSource = {
 export type FileStatus = "Added" | "Modified" | "Deleted" | "Renamed" | "Untracked";
 
 /**
+ *  GitHub's own rate-limit report, read from `/rate_limit`.
+ * 
+ *  That endpoint is free — GitHub documents it as not counting against any
+ *  budget — so polling it never changes the number it reports.
+ */
+export type GithubApiBudget = {
+	windows: ApiBudgetWindow[],
+};
+
+/**
  *  The `gh` CLI integration status, shown in Settings → Integrations. GitHub
  *  powers PR creation and the Reviews dashboard and can't be turned off, so the
  *  UI surfaces whether the CLI is installed and authenticated (and as whom)
@@ -1480,6 +1698,12 @@ export type KeepAwakeStatus = {
 };
 
 /**
+ *  Who wrote a session's latest prose — the "You:" / "Agent:" prefix the history
+ *  row puts in front of [`WorktreeSession::last_message`].
+ */
+export type LastMessageFrom = "You" | "Agent";
+
+/**
  *  santree-CLI configuration (`.santree/metadata.json` + the CLI's global auth
  *  store) detected in a just-opened repo, offered for adoption. Only built when
  *  something is actionable: the CLI's workspace is either already connected
@@ -1495,6 +1719,24 @@ export type LegacyCliMigration = {
 	 *  import needed, just the repo link.
 	 */
 	alreadyConnected: boolean,
+};
+
+/**
+ *  One connected Linear workspace's remaining budget.
+ * 
+ *  Linear has no queryable equivalent of GitHub's `/rate_limit`: it reports the
+ *  budget only in the response headers of a request that already spent some of
+ *  it. So this is an *observation* — the numbers as of the last call santree
+ *  made for this org — and `observed_at_ms` is part of the reading, not
+ *  decoration. Limits are per user per OAuth app, so each connected workspace
+ *  has its own.
+ */
+export type LinearApiBudget = {
+	slug: string,
+	name: string,
+	windows: ApiBudgetWindow[],
+	/**  Epoch ms these numbers came back from Linear. */
+	observedAtMs: number | null,
 };
 
 /**  A connected Linear organization. */
@@ -1680,6 +1922,20 @@ export type PrCheck = {
 	 *  `f64` because Specta forbids 64-bit ints; job ids are exact in an `f64`.
 	 */
 	jobId: number | null,
+	/**
+	 *  The Actions *workflow run* id, from the same `detailsUrl`. Shown beside
+	 *  [`Self::job_id`] when a check is expanded: the pair is what identifies a
+	 *  run to anyone cross-referencing it against GitHub or `gh run view`.
+	 */
+	runId: number | null,
+	/**
+	 *  ISO-8601 timestamp the check started, when GitHub reports one. `None` for
+	 *  a status context (which has no run) and for a queued check that hasn't
+	 *  begun — the UI omits the row rather than showing an invented time.
+	 */
+	startedAt: string | null,
+	/**  ISO-8601 timestamp the check finished. `None` while it is still running. */
+	completedAt: string | null,
 };
 
 /**  One comment in a PR's conversation (issue comment, review, or inline thread). */
@@ -1697,6 +1953,18 @@ export type PrComment = {
 	 *  until the review is submitted, so the UI must label them as drafts.
 	 */
 	isPending: boolean,
+	/**
+	 *  True when GitHub itself classifies the author as a `Bot` actor — a GitHub
+	 *  App posting through the integration (Actions, Dependabot, coverage and
+	 *  codegen bots), not a person.
+	 * 
+	 *  Read from the GraphQL `Actor` interface's `__typename`, never inferred
+	 *  from a `[bot]`-suffixed login: the suffix is a rendering convention
+	 *  applied *because* the actor is a bot, so matching it is strictly weaker
+	 *  than asking what the actor is. Drives the conversation's Humans/Bots
+	 *  split, which is otherwise a classification the UI would have to invent.
+	 */
+	isBot: boolean,
 };
 
 /**  The detail panel payload for a selected PR: body, conversation, diff, checks. */
@@ -1966,6 +2234,58 @@ export type Repo = {
 };
 
 /**
+ *  Every terminal under one registered repo, plus one entry for santree itself
+ *  (`repo` "santree": the app process and its helpers, minus the terminals it
+ *  hosts, so the total is honest) and one per directory that isn't a registered
+ *  repo (`repo` is then that directory).
+ */
+export type RepoUsage = {
+	repo: string,
+	cpuPct: number | null,
+	rssBytes: number | null,
+	/**  Heaviest first. */
+	worktrees: WorktreeUsage[],
+};
+
+/**
+ *  CPU and memory of every process santree's terminals own, plus the app's own,
+ *  in one host snapshot — the Resource Manager's tree, grouped repo → worktree →
+ *  terminal. Every number is summed over a process *subtree* (the terminal's
+ *  shell and everything it spawned), read from one `ps` listing, so the figures
+ *  are consistent with each other and with `total_*`. Byte counts and
+ *  timestamps are `f64` for the same reason as every other exported number
+ *  (specta refuses `i64`/`u64`). Only `PartialEq` because of them.
+ * 
+ *  Two caveats the frontend is expected to disclose rather than hide, because
+ *  neither has a cheap fix and an unqualified number is the worse failure:
+ * 
+ *  * **`cpu_pct` carries no denominator.** It is `ps`'s percent of *one* core,
+ *    so a sum across a busy tree runs into the hundreds and reads as nonsense
+ *    until it is divided by [`ResourceUsage::core_count`].
+ *  * **`rss_bytes` sums resident set sizes**, and a page mapped by two
+ *    processes (a shared library, a forked child's copy-on-write heap) is
+ *    resident in both, so a wide tree overstates.
+ */
+export type ResourceUsage = {
+	/**  Epoch ms the process table was read. */
+	sampledAtMs: number | null,
+	/**
+	 *  Logical cores on this machine — the denominator that turns `cpu_pct`
+	 *  into a share of the whole machine. Never zero.
+	 */
+	coreCount: number,
+	/**  Sum over `repos` — resident memory in bytes. */
+	totalRssBytes: number | null,
+	/**
+	 *  Sum over `repos` — CPU as `ps` reports it: percent of one core, so a
+	 *  busy multi-threaded process can exceed 100.
+	 */
+	totalCpuPct: number | null,
+	/**  Heaviest first (by resident memory). */
+	repos: RepoUsage[],
+};
+
+/**
  *  "An AI-review session wrote something" — a draft review comment or a review
  *  brief, through the `santree-review` MCP server (which is the same binary, in
  *  `mcp` mode). The frontend refetches the drafts and the brief, so a comment the
@@ -2223,7 +2543,15 @@ export type ReviewWorkItem = {
  *  Where a review work item came from. Source-backed items keep this identity so
  *  the UI and the fixing agent can resolve the latest version of the discussion.
  */
-export type ReviewWorkItemSource = "manual" | "githubThread" | "aiDraft";
+export type ReviewWorkItemSource = "manual" | "githubThread" | "aiDraft" | 
+/**
+ *  A failing CI check on the PR's head commit.
+ * 
+ *  Identified by the check's **name**, which is what survives a re-run and a
+ *  force-push — the run id, node id and details URL are all per-run, so any of
+ *  them would let the same red job be queued again on every retry.
+ */
+"check";
 
 /**
  *  A file's persisted "Viewed" mark in the Reviews tab: the file path plus the
@@ -2258,14 +2586,22 @@ export type ScriptInfo = {
 };
 
 /**
- *  The current state of one Claude session, captured live via the hooks santree
- *  injects into its `claude` launches. One per session id (a current-state row,
- *  not an event log). The frontend correlates a session back to a worktree later
- *  via `cwd` / the `terminal_sessions` mapping.
+ *  The current state of one agent session, captured live via the hooks santree
+ *  injects into its `claude` / `codex` launches. One per session id (a
+ *  current-state row, not an event log). The frontend correlates a session back
+ *  to a worktree later via `cwd` / the `terminal_sessions` mapping.
  *  Only `PartialEq` (not `Eq`) because of the `f64` timestamp below.
  */
 export type SessionState = {
-	agentKind: AgentKind,
+	/**
+	 *  The provider that owns the session, read off the owning terminal's
+	 *  registry row. `None` when there's no row to read it from — a terminal
+	 *  keeps one row per logical surface, so the moment it mints a *second*
+	 *  session the first one loses its join. Unknown, not Claude: guessing a
+	 *  provider paints the previous session with the wrong logomark, and a
+	 *  wrong mark is worse than no mark.
+	 */
+	agentKind: AgentKind | null,
 	/**  Claude session id (the one santree minted via `--session-id`). */
 	sessionId: string,
 	/**  Derived agent state. */
@@ -2291,7 +2627,7 @@ export type SessionState = {
 	repo: string | null,
 	/**
 	 *  The logical terminal that owns this session (`tree:<id>`, `triage:<id>`,
-	 *  `dev:<path>`, …), joined from `terminal_sessions`. This — not `cwd` — is
+	 *  `review:<pr>`, …), joined from `terminal_sessions`. This — not `cwd` — is
 	 *  what identifies *which surface* an agent belongs to: several sessions can
 	 *  share one `cwd` (a worktree's extra tabs; a base agent and a triage
 	 *  investigation both running at the repo root), so a cwd-keyed correlation
@@ -2414,10 +2750,44 @@ export type StreamEvent = { type: "chunk"; text: string } | { type: "done"; ok: 
 /**  What an extra Trees main-area tab hosts: an agent session or a login shell. */
 export type TabKind = "agent" | "terminal" | 
 /**
- *  An agent session dedicated to fixing failing CI under the provider's
- *  no-Git security profile.
+ *  The guarded "Address review" session that works a PR's saved improvement
+ *  queue. Keeps its `fixci` name (and db value) from the retired one-click
+ *  "Fix CI with AI" flow whose tab it inherited.
  */
-"fixCi";
+"fixCi" | 
+/**  The AI review of your own PR, run in its worktree. */
+"aiReview";
+
+/**  What a persisted review tab relaunches with, re-derived from its row. */
+export type TabLaunch = {
+	/**
+	 *  `--settings`: the review deny list plus the grant for the santree-review
+	 *  tools. Always present — it is a pure function of the tab's kind.
+	 */
+	settingsPath: string,
+	/**
+	 *  `--mcp-config`: the santree-review server scoped to this PR, or `None` when
+	 *  the config it was launched with is no longer on disk (or the row predates
+	 *  [`TabPr`] being stored). The session then resumes without tools rather than
+	 *  pointed at a file that isn't there.
+	 */
+	mcpConfigPath: string | null,
+};
+
+/**
+ *  The pull request a review-scoped tab belongs to, persisted beside the tab row.
+ * 
+ *  The *identity* is stored, never the launch's file paths: a path is
+ *  environment-dependent and a stale one is its own bug, while `(kind, pr)`
+ *  re-derives the same `--settings` and `--mcp-config` on every open. That is what
+ *  keeps a session resumed after a restart under the deny list and the review tools
+ *  it started with, instead of silently falling back to the plain no-git profile.
+ */
+export type TabPr = {
+	/**  "owner/name" — the PR's own repo, which need not be the active one. */
+	repo: string,
+	number: number,
+};
 
 /**  A ticket in the dependency graph. `x`/`y` are its canvas position. */
 export type Task = {
@@ -2487,6 +2857,46 @@ export type TeamReviews = {
 };
 
 /**
+ *  Where a reattaching client is in a session's output stream.
+ * 
+ *  Mirrors [`santree_pty::Anchor`] at the IPC boundary rather than deriving
+ *  `Type` on it, so the pty crate stays free of a specta dependency.
+ */
+export type TerminalAnchor = 
+/**
+ *  "I have every byte of `epoch` through `seq`."
+ * 
+ *  `f64` rather than `u64` because specta forbids exporting BigInt-style
+ *  types across the bridge. Harmless here: a double represents every integer
+ *  up to 2^53, which is nine petabytes of terminal output on one session.
+ */
+{ kind: "at"; epoch: string; seq: number | null } | 
+/**  A brand-new terminal with nothing on it. */
+{ kind: "fresh" } | 
+/**
+ *  Bytes on screen, position unknown or untrustworthy. Answered by sending
+ *  nothing — see [`terminal_attach`].
+ */
+{ kind: "unknown" };
+
+/**  What the client should believe after an attach. */
+export type TerminalAttached = {
+	/**  The stream's identity. Pair it with `seq` to form the next anchor. */
+	epoch: string,
+	/**
+	 *  The position the client is at once it has written everything the channel
+	 *  delivered before this call returned. See [`TerminalAnchor::At`] on why
+	 *  this is a double.
+	 */
+	seq: number | null,
+	/**
+	 *  How the gap was closed. `Reanchor` means no catch-up was possible and the
+	 *  pane keeps whatever it already had; the caller repaints from the program.
+	 */
+	mode: TerminalReplayMode,
+};
+
+/**
  *  How the frontend asks for a new terminal. An empty `command` means the user's
  *  login shell.
  */
@@ -2496,6 +2906,75 @@ export type TerminalOpenOpts = {
 	args: string[],
 	cols: number,
 	rows: number,
+	/**
+	 *  The webview page-load this session belongs to — see [`terminal_adopt`].
+	 *  Opaque: never a path, an id we look anything up by, or an argv value.
+	 */
+	owner: string,
+	/**
+	 *  What the frontend calls this session (its `term_key`). Handed back by
+	 *  [`terminal_adopt`] so a reloaded page can match a live session to the
+	 *  surface that owns it. Opaque, exactly like `owner`.
+	 */
+	label: string,
+};
+
+export type TerminalReplayMode = "exact" | "tail" | "reanchor";
+
+/**
+ *  One live PTY session, for the Terminal settings panel.
+ * 
+ *  Deliberately a different shape from `TerminalUsage` (`resources.rs`), which
+ *  answers "what is this costing" by joining the process table. This answers
+ *  "what is running, and can I still reach it" — the lifecycle question, which
+ *  is the one a reload made possible to get wrong.
+ */
+export type TerminalSession = {
+	id: number,
+	/**  The `term_key` it was opened under — how the UI names it. */
+	label: string,
+	cwd: string | null,
+	command: string,
+	/**  The root process's pid, or `None` when the platform didn't report one. */
+	pid: number | null,
+	cols: number,
+	rows: number,
+	/**
+	 *  Whether a pane is currently receiving this session's output. `false` is
+	 *  ordinary — a closed pane, or work inherited from a reload and not yet
+	 *  reopened — but it is otherwise invisible, which is why it is here.
+	 */
+	attached: boolean,
+	/**  Whether the root process still exists. */
+	alive: boolean,
+};
+
+/**
+ *  One PTY session's process subtree. The frontend owns the mapping from
+ *  `session_id` to the tab it opened (the orchestrator's `refId`), so it can
+ *  label a terminal by its tab; `label` is the backend's process-level view.
+ */
+export type TerminalUsage = {
+	/**
+	 *  The PTY session id `terminal_open` returned — `None` only for the
+	 *  santree entry, which is the app process rather than a terminal.
+	 */
+	sessionId: number | null,
+	/**
+	 *  The name of the heaviest process in the subtree (what the terminal is
+	 *  actually running: `claude`, `node`, `zsh`, ...).
+	 */
+	label: string,
+	/**  The subtree's root: the shell or command spawned on the pty. */
+	pid: number,
+	cpuPct: number | null,
+	rssBytes: number | null,
+	/**
+	 *  Whether the root process still exists (and isn't a zombie). A terminal
+	 *  whose process exited but whose pane is still open reports `false` and
+	 *  zeros.
+	 */
+	live: boolean,
 };
 
 /**
@@ -2896,9 +3375,58 @@ export type WorktreeChanged = {
 export type WorktreePr = {
 	/**  The worktree this PR belongs to (its issue id). */
 	issueId: string,
+	/**
+	 *  "owner/name" the PR lives in — the repo the worktree's origin points at.
+	 *  Carried rather than re-derived on the frontend: it is what addresses the
+	 *  PR's detail, checks and comments, and parsing it back out of [`Self::url`]
+	 *  would be a second, weaker answer to a question the backend already knows.
+	 */
+	repo: string,
 	number: number,
 	url: string,
 	state: PrState,
+};
+
+/**
+ *  One agent session that ran in a worktree — the Trees right panel's session
+ *  history. Both providers are summarised from their own record on disk: a
+ *  Claude session from its `~/.claude/projects` transcript, a Codex one from its
+ *  `~/.codex/sessions` rollout (title, last message, counts, model, timestamps;
+ *  a subagent's own rollout is folded into its parent's `subagent_count`, never
+ *  listed). A session the registry knows but whose record is gone keeps its
+ *  identity with the text fields empty.
+ *  Only `PartialEq` (not `Eq`) because of the `f64` timestamps below.
+ */
+export type WorktreeSession = {
+	sessionId: string,
+	agentKind: AgentKind,
+	/**
+	 *  The logical terminal that owned it (`tree:<id>`, `tree:<id>:tab:<tab>`),
+	 *  when santree registered one. `None` for a transcript found on disk with
+	 *  no registry row.
+	 */
+	termKey: string | null,
+	/**  The first user prompt, trimmed to one line of at most 120 chars. */
+	title: string | null,
+	/**
+	 *  The latest prose from either side — the final assistant text, or the
+	 *  user's own final prompt when the session ended on it — trimmed likewise.
+	 */
+	lastMessage: string | null,
+	/**  Who wrote `last_message`; `None` exactly when it is. */
+	lastMessageFrom: LastMessageFrom | null,
+	/**  User + assistant messages carrying prose (tool calls/results excluded). */
+	messageCount: number,
+	/**  Subagent transcripts under `<session>/subagents/`. */
+	subagentCount: number,
+	/**  The model that did most of the session's work. */
+	model: string | null,
+	/**
+	 *  Epoch ms — `f64` like every other exported timestamp, since specta
+	 *  refuses `i64` (see [`SessionState::updated_at_ms`]).
+	 */
+	startedAtMs: number | null,
+	lastActivityMs: number | null,
 };
 
 /**
@@ -2913,6 +3441,27 @@ export type WorktreeTab = {
 	kind: TabKind,
 	agentKind: AgentKind | null,
 	title: string,
+	/**
+	 *  Set exactly on the review kinds ([`TabKind::is_review`]), which re-derive
+	 *  their launch configuration from it. `None` on a review tab means the row
+	 *  predates the column.
+	 */
+	pr: TabPr | null,
+};
+
+/**
+ *  The terminals running in one directory: a linked worktree (`id` is its issue
+ *  id), the repo root (`id` is the base sentinel), or any other directory under
+ *  the repo — a review checkout, say — keyed by its path relative to the root.
+ */
+export type WorktreeUsage = {
+	id: string,
+	/**  The worktree's ticket title, the root's folder name, or the directory. */
+	label: string,
+	cpuPct: number | null,
+	rssBytes: number | null,
+	/**  Heaviest first. */
+	terminals: TerminalUsage[],
 };
 
 /* Tauri Specta runtime */

@@ -59,30 +59,46 @@ const inbox: ReviewInbox = {
 describe("ReviewsSidebarView", () => {
   beforeEach(() => localStorage.clear());
 
-  it("renders the three categories with their PRs", () => {
+  it("renders the review-request categories with their PRs", () => {
     render(
       <ReviewsSidebarView
         inbox={inbox}
         loading={false}
-        total={3}
-        activeId="m1"
+        total={2}
+        activeId="r1"
         onSelect={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("My PRs")).toBeInTheDocument();
     expect(screen.getByText("Needs your review")).toBeInTheDocument();
     expect(screen.getByText("Team · Engineering")).toBeInTheDocument();
-    expect(screen.getByText("Booking webhook retries")).toBeInTheDocument();
     expect(screen.getByText("Tighten rate limiter")).toBeInTheDocument();
     expect(screen.getByText("Migrate billing jobs")).toBeInTheDocument();
   });
 
+  /** Your own PRs live in the Trees panel now, beside their worktree. The inbox
+   *  still *carries* them (the deep-link and "is this mine" lookups need them),
+   *  so the rail not rendering them is a real thing to assert, not a tautology. */
+  it("leaves the viewer's own PRs out of the rail entirely", () => {
+    render(
+      <ReviewsSidebarView
+        inbox={inbox}
+        loading={false}
+        total={2}
+        activeId={null}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("My PRs")).not.toBeInTheDocument();
+    expect(screen.queryByText("Booking webhook retries")).not.toBeInTheDocument();
+  });
+
   it("organizes category rows by project and exposes urgency, effort and comments", () => {
-    const mine = { ...inbox.mine[0], commentCount: 4, aiDraftCount: 2 };
+    const requested = { ...inbox.requested[0], commentCount: 4, aiDraftCount: 2 };
     const ticket: TicketRef = {
-      identifier: "AK-483",
-      title: "Booking webhook retries",
+      identifier: "AK-512",
+      title: "Tighten rate limiter",
       priority: "High",
       project: "Booking Platform",
       projectColor: "#4493f8",
@@ -92,12 +108,12 @@ describe("ReviewsSidebarView", () => {
     };
     render(
       <ReviewsSidebarView
-        inbox={{ ...inbox, mine: [mine] }}
+        inbox={{ ...inbox, requested: [requested] }}
         loading={false}
-        total={3}
+        total={2}
         activeId={null}
         onSelect={vi.fn()}
-        ticketFor={(pr) => (pr.id === mine.id ? ticket : undefined)}
+        ticketFor={(pr) => (pr.id === requested.id ? ticket : undefined)}
       />,
     );
 
@@ -183,7 +199,7 @@ describe("ReviewsSidebarView", () => {
     );
   });
 
-  it("orders My PRs, direct requests, then every team", () => {
+  it("orders direct requests before every team", () => {
     const twoTeams = {
       ...inbox,
       teams: [
@@ -205,12 +221,12 @@ describe("ReviewsSidebarView", () => {
       />,
     );
     const headings = screen
-      .getAllByText(/Needs your review|Team · Engineering|Team · Voice|My PRs/)
+      .getAllByText(/Needs your review|Team · Engineering|Team · Voice/)
       .map((el) => el.textContent);
-    expect(headings).toEqual(["My PRs", "Needs your review", "Team · Engineering", "Team · Voice"]);
+    expect(headings).toEqual(["Needs your review", "Team · Engineering", "Team · Voice"]);
   });
 
-  it("collapses My PRs and direct requests independently and remembers them", () => {
+  it("collapses direct requests independently of the team blocks, and remembers it", () => {
     const { unmount } = render(
       <ReviewsSidebarView
         inbox={inbox}
@@ -221,9 +237,7 @@ describe("ReviewsSidebarView", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /My PRs/ }));
     fireEvent.click(screen.getByRole("button", { name: /Needs your review/ }));
-    expect(screen.queryByText("Booking webhook retries")).not.toBeInTheDocument();
     expect(screen.queryByText("Tighten rate limiter")).not.toBeInTheDocument();
     expect(screen.getByText("Migrate billing jobs")).toBeInTheDocument();
 
@@ -236,10 +250,6 @@ describe("ReviewsSidebarView", () => {
         activeId={null}
         onSelect={vi.fn()}
       />,
-    );
-    expect(screen.getByRole("button", { name: /My PRs/ })).toHaveAttribute(
-      "aria-expanded",
-      "false",
     );
     expect(screen.getByRole("button", { name: /Needs your review/ })).toHaveAttribute(
       "aria-expanded",
@@ -349,7 +359,7 @@ describe("ReviewsSidebarView", () => {
       <ReviewsSidebarView
         inbox={inbox}
         loading={false}
-        total={3}
+        total={2}
         activeId={null}
         onSelect={vi.fn()}
         grouping="project"
@@ -361,10 +371,12 @@ describe("ReviewsSidebarView", () => {
 
     expect(screen.getByText("Voice")).toBeInTheDocument();
     expect(screen.getByText("No project")).toBeInTheDocument();
-    // Nothing is dropped by the regroup — all three PRs are still listed.
+    // Re-cutting the rail must not change *which* PRs it shows, or one would be
+    // visible under one grouping and invisible under another.
     expect(screen.getByText("Tighten rate limiter")).toBeInTheDocument();
-    expect(screen.getByText("Booking webhook retries")).toBeInTheDocument();
     expect(screen.getByText("Migrate billing jobs")).toBeInTheDocument();
+    // ...and the viewer's own PR stays out of every cut, not just the default one.
+    expect(screen.queryByText("Booking webhook retries")).not.toBeInTheDocument();
     // The category signal survives the regroup on the one direct request.
     expect(screen.getAllByText("@you")).toHaveLength(1);
 

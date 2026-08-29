@@ -7,8 +7,7 @@
  * shape (and the same helpers) the graph's bands and the Trees rail use, so a
  * project reads the same wherever it appears.
  */
-import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 
 import { ChevronDownIcon } from "../../components/icons";
 import { EmptyState, ProjectGlyph, Skeleton } from "../../components/primitives";
@@ -18,6 +17,7 @@ import {
   showMilestoneGroups,
 } from "../../components/WorkSignals";
 import { useApp, useAppUi } from "../../state/AppContext";
+import { useIssues } from "../issues/model";
 import { TicketRow } from "./TicketRow";
 import { useStartTicket } from "./useStartTicket";
 import type { TicketRow as Row, TicketProjectGroup } from "./useTickets";
@@ -40,13 +40,10 @@ function TicketSkeleton() {
 
 function ProjectHeading({
   group,
-  showRepo,
   open,
   onToggle,
 }: {
   group: TicketProjectGroup;
-  /** Repos are only worth naming once more than one contributes tickets. */
-  showRepo: boolean;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -64,9 +61,6 @@ function ProjectHeading({
       <ProjectGlyph color={group.color} icon={group.icon} size={7} />
       <span className="truncate text-[12px] font-semibold text-fg-2">{group.project}</span>
       <span className="font-mono text-[10px] text-muted-4">{group.count}</span>
-      {showRepo && (
-        <span className="truncate font-mono text-[10px] text-muted-5">{group.repo}</span>
-      )}
       <ProjectDueDate date={group.targetDate} />
     </button>
   );
@@ -75,16 +69,13 @@ function ProjectHeading({
 export function TicketsList({
   groups,
   loading,
-  /** Flip the page to Graph mode — where a ticket with no worktree opens. */
-  onShowGraph,
 }: {
   groups: TicketProjectGroup[];
   loading: boolean;
-  onShowGraph: () => void;
 }) {
-  const { setActiveRepo } = useApp();
-  const { requestTreeFocus, requestIssueFocus } = useAppUi();
-  const navigate = useNavigate();
+  const { activeRepo, setActiveRepo } = useApp();
+  const { requestIssueFocus } = useAppUi();
+  const { focusId, setFocus, rightCollapsed, toggleRightPanel } = useIssues();
   const startTicket = useStartTicket();
 
   // Folded groups, keyed by the group key (and `${key}:${milestone}` below).
@@ -94,28 +85,32 @@ export function TicketsList({
     [],
   );
 
-  const showRepo = useMemo(() => new Set(groups.map((g) => g.repo)).size > 1, [groups]);
-
-  // Opening is repo-scoped on the other side: Trees and the graph both show one
-  // repo, so a ticket from elsewhere makes its repo active on the way over.
+  // A click opens the ticket in the inspector beside the list. The inspector's
+  // model is scoped to the active repo, and a ticket isn't — so the repo it is
+  // read under is its home when it has one (its worktree lives there), else the
+  // active repo when that carries it, else the first that does. A different repo
+  // switches the app and hands the id over as a focus request, which the model
+  // commits once that repo's tasks have landed; the same repo focuses at once.
+  // The panel is expanded if it was collapsed — a click that selects something
+  // the user can't see would read as a click that did nothing.
   const onOpen = useCallback(
     (row: Row) => {
-      setActiveRepo(row.repo);
-      if (row.worktree) {
-        requestTreeFocus(row.task.id);
-        navigate({ to: "/trees" });
-        return;
+      const repo = row.worktree || !row.repos.includes(activeRepo) ? row.repo : activeRepo;
+      if (repo === activeRepo) {
+        setFocus(row.task.id);
+      } else {
+        setActiveRepo(repo);
+        requestIssueFocus(row.task.id);
       }
-      requestIssueFocus(row.task.id);
-      onShowGraph();
+      if (rightCollapsed) toggleRightPanel();
     },
-    [setActiveRepo, requestTreeFocus, requestIssueFocus, navigate, onShowGraph],
+    [activeRepo, setActiveRepo, setFocus, requestIssueFocus, rightCollapsed, toggleRightPanel],
   );
 
   const onStart = useCallback(
-    (row: Row, background: boolean) =>
+    (row: Row, background: boolean, repo: string) =>
       startTicket(
-        { repo: row.repo, id: row.task.id, title: row.task.title, project: row.task.project },
+        { repo, id: row.task.id, title: row.task.title, project: row.task.project },
         { background },
       ),
     [startTicket],
@@ -138,12 +133,7 @@ export function TicketsList({
         const open = !collapsed[group.key];
         return (
           <div key={group.key}>
-            <ProjectHeading
-              group={group}
-              showRepo={showRepo}
-              open={open}
-              onToggle={() => toggleCollapsed(group.key)}
-            />
+            <ProjectHeading group={group} open={open} onToggle={() => toggleCollapsed(group.key)} />
             {open &&
               (showMilestoneGroups(group.milestones)
                 ? group.milestones.map((milestone) => {
@@ -163,6 +153,7 @@ export function TicketsList({
                             <TicketRow
                               key={row.task.id}
                               row={row}
+                              active={row.repos.includes(activeRepo) && row.task.id === focusId}
                               onOpen={onOpen}
                               onStart={onStart}
                             />
@@ -171,7 +162,13 @@ export function TicketsList({
                     );
                   })
                 : group.milestones[0]?.items.map((row) => (
-                    <TicketRow key={row.task.id} row={row} onOpen={onOpen} onStart={onStart} />
+                    <TicketRow
+                      key={row.task.id}
+                      row={row}
+                      active={row.repos.includes(activeRepo) && row.task.id === focusId}
+                      onOpen={onOpen}
+                      onStart={onStart}
+                    />
                   )))}
           </div>
         );

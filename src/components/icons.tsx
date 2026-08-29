@@ -564,6 +564,25 @@ export function RefreshIcon(props: IconProps) {
   );
 }
 
+/** Three dots — Lucide `more-horizontal`, the overflow-menu trigger. Filled
+ *  rather than stroked: at 13px three stroked circles render as grey mush. */
+export function MoreIcon({ size = 16, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+    >
+      <circle cx="5" cy="12" r="1.75" />
+      <circle cx="12" cy="12" r="1.75" />
+      <circle cx="19" cy="12" r="1.75" />
+    </svg>
+  );
+}
+
 /** A left-pointing arrow — the Settings "back" affordance. */
 export function BackArrowIcon({ size = 17, className }: IconProps) {
   return (
@@ -655,6 +674,44 @@ export function PlayIcon({ size = 11, className }: IconProps) {
     >
       <path d="M8 5v14l11-7z" />
     </svg>
+  );
+}
+
+/** A curving arrow back — revert / discard, the gesture not the refresh. */
+export function UndoIcon({ size = 13, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={1.8}>
+      <path d="M9 14 4 9l5-5" />
+      <path d="M4 9h9a6 6 0 0 1 0 12h-3" />
+    </Stroke>
+  );
+}
+
+/** A minus — the opposite of {@link PlusIcon}, for taking something back out. */
+export function MinusIcon({ size = 14, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <path d="M5 12h14" />
+    </Stroke>
+  );
+}
+
+/** A folder with a plus — registering a repository. */
+export function FolderPlusIcon({ size = 14, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={1.8}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <path d="M12 11v5M9.5 13.5h5" />
+    </Stroke>
+  );
+}
+
+/** A star outline — the GitHub gesture, not a status. */
+export function StarIcon({ size = 13, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={1.8}>
+      <path d="m12 3.5 2.6 5.3 5.9.9-4.25 4.15 1 5.85L12 16.95 6.75 19.7l1-5.85L3.5 9.7l5.9-.9z" />
+    </Stroke>
   );
 }
 
@@ -937,6 +994,39 @@ export function MessageSquareIcon({ size = 12, className }: IconProps) {
 }
 
 /** Clock face for a running/pending state. */
+/** A memory chip — the resource manager. */
+export function MemoryIcon({ size = 12, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={1.8}>
+      <rect x="5" y="5" width="14" height="14" rx="2" />
+      <rect x="9" y="9" width="6" height="6" rx="1" />
+      <path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" />
+    </Stroke>
+  );
+}
+
+/** Arrow out of a box — "opens in the browser". */
+export function ExternalLinkIcon({ size = 12, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={1.8}>
+      <path d="M14 4h6v6" />
+      <path d="M20 4 10 14" />
+      <path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" />
+    </Stroke>
+  );
+}
+
+/** Two stacked documents — the file browser. */
+export function FilesIcon({ size = 12, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={1.8}>
+      <path d="M8 3h6l4 4v9a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" />
+      <path d="M14 3v4h4" />
+      <path d="M5 7v11a1 1 0 0 0 1 1h9" />
+    </Stroke>
+  );
+}
+
 export function ClockIcon({ size = 12, className }: IconProps) {
   return (
     <Stroke size={size} className={className} width={1.8}>
@@ -991,6 +1081,41 @@ export function CoffeeIcon({ size = 14, className }: IconProps) {
       <line x1="6" y1="1" x2="6" y2="4" />
       <line x1="10" y1="1" x2="10" y2="4" />
       <line x1="14" y1="1" x2="14" y2="4" />
+    </svg>
+  );
+}
+
+/** Angle brackets — "show me the source", the code half of the file viewer's
+ *  Code/Preview toggle. */
+export function CodeIcon({ size = 12, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={2}>
+      <path d="m9 17-5-5 5-5" />
+      <path d="m15 7 5 5-5 5" />
+    </Stroke>
+  );
+}
+
+/** The Markdown mark (CommonMark's rounded rectangle with an M and a down
+ *  arrow) — the rendered half of the file viewer's Code/Preview toggle. Drawn
+ *  rather than stroked as a glyph so it stays legible at 12px. */
+export function MarkdownIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <rect x="2" y="5" width="20" height="14" rx="2.5" />
+      <path d="M6 15.5v-7l3 3.5 3-3.5v7" />
+      <path d="M17 8.5v7m0 0 2-2.2m-2 2.2-2-2.2" />
     </svg>
   );
 }

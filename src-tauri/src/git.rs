@@ -984,7 +984,7 @@ fn parse_numstat_line(line: &str) -> Option<(String, u32, u32, bool)> {
 /// status path, so they'd show (0, 0). A map (not a Vec + linear scan) keeps the
 /// per-file lookup in [`status`] O(1) instead of O(files²).
 fn numstat(cwd: &Path, diff_base: &str) -> Result<HashMap<String, (u32, u32, bool)>> {
-    let raw = git_output(cwd, &["diff", diff_base, "--numstat", "-z"])?;
+    let raw = git_output(cwd, &["diff", diff_base, "--numstat", "-z", "--"])?;
     let mut map = HashMap::new();
     // With `-z`, each record is `add\tdel\tpath\0`; for a rename the path field is
     // empty and the old then new paths follow as two extra NUL-separated fields.
@@ -1222,30 +1222,6 @@ pub fn commit(cwd: &Path, message: &str, stage_all: bool) -> Result<()> {
     .map(|_| ())
 }
 
-/// Commit **only** `paths`, taking their working-tree contents — whatever else is
-/// staged or modified stays exactly where it is. `Ok(None)` when none of them
-/// differ from HEAD.
-///
-/// A pathspec commit is what lets a release bump go in on its own from a tree
-/// that has work in progress in it. Whether there's anything to commit is asked
-/// separately rather than read off a failed `git commit`: that call also fails
-/// for reasons that must not be mistaken for "nothing to do" (a rejecting
-/// pre-commit hook, no configured identity). Both steps share one index lock, so
-/// a staging click can't land between them and ride along.
-pub fn commit_paths(cwd: &Path, message: &str, paths: &[&str]) -> Result<Option<String>> {
-    with_index_lock(cwd, || {
-        let mut diff = vec!["diff", "--name-only", "HEAD", "--"];
-        diff.extend_from_slice(paths);
-        if git_output(cwd, &diff)?.trim().is_empty() {
-            return Ok(None);
-        }
-        let mut args = vec!["commit", "-m", message, "--"];
-        args.extend_from_slice(paths);
-        git(cwd, &args)?;
-        Ok(Some(git(cwd, &["rev-parse", "--short", "HEAD"])?))
-    })
-}
-
 /// The full staged diff, for AI commit-message generation.
 pub fn staged_diff(cwd: &Path) -> String {
     git_output(cwd, &["diff", "--cached"]).unwrap_or_default()
@@ -1291,6 +1267,81 @@ pub fn diff_range(cwd: &Path, base: &str) -> String {
     let base = compare_base(cwd, base);
     let range = format!("{base}...HEAD");
     git_output(cwd, &["diff", &range]).unwrap_or_default()
+}
+
+/// The files a branch has committed relative to its base — `git diff
+/// <base>...HEAD` as a `--name-status` list with `--numstat` line counts folded
+/// in. Three-dot (merge-base), like [`diff_stat`], so an upstream `base` that
+/// advanced past the fork point contributes nothing. `staged` is always false:
+/// these are commits, not index state. Sorted by path.
+///
+/// Rename detection is left to git's default (`diff.renames`) on both calls, the
+/// same setting [`status`]'s porcelain follows, so the two listings agree.
+pub fn branch_changes(cwd: &Path, base: &str) -> Result<Vec<ChangedFile>> {
+    let base = compare_base(cwd, base);
+    let range = format!("{base}...HEAD");
+    // `--` after the range: a file named like `main...HEAD` must stay a path.
+    let raw = git_output(cwd, &["diff", &range, "--name-status", "-z", "--"])?;
+    let counts = numstat(cwd, &range)?;
+
+    let mut files = Vec::new();
+    // With `-z`, each record is `<status>\0<path>\0`; a rename/copy carries a
+    // similarity score on the status (`R100`) and the old then new paths.
+    let mut fields = raw.split('\0');
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let Some(first) = fields.next() else {
+            break;
+        };
+        let letter = record.chars().next().unwrap_or('M');
+        let (status, old_path, path) = match letter {
+            'R' | 'C' => {
+                let Some(new) = fields.next() else {
+                    break;
+                };
+                let status = if letter == 'R' {
+                    FileStatus::Renamed
+                } else {
+                    FileStatus::Added
+                };
+                (status, Some(first.to_string()), new.to_string())
+            }
+            'A' => (FileStatus::Added, None, first.to_string()),
+            'D' => (FileStatus::Deleted, None, first.to_string()),
+            _ => (FileStatus::Modified, None, first.to_string()),
+        };
+        let (add_lines, del_lines, binary) = counts.get(&path).copied().unwrap_or((0, 0, false));
+        files.push(ChangedFile {
+            path,
+            old_path,
+            status,
+            staged: false,
+            add_lines,
+            del_lines,
+            binary,
+        });
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+/// A unified diff of one file's committed changes on the branch — `git diff
+/// <base>...HEAD -- <path>` (the diff a [`branch_changes`] row opens). Empty
+/// when the branch didn't touch the file.
+pub fn branch_file_diff(cwd: &Path, base: &str, path: &str) -> Result<String> {
+    safe_path(cwd, path)?;
+    // A leading `:` is pathspec magic (`:/`, `:(glob)`, `:!`), never a file the
+    // panel listed; and the path is passed as a literal so `*`/`?` in a real
+    // filename can't widen the diff to whatever they'd match.
+    if path.starts_with(':') {
+        bail!("path '{path}' must not start with ':'");
+    }
+    let base = compare_base(cwd, base);
+    let range = format!("{base}...HEAD");
+    let literal = format!(":(literal){path}");
+    git_output(cwd, &["diff", &range, "--", &literal])
 }
 
 /// Every file in the worktree the user would browse — tracked plus untracked,
@@ -1513,6 +1564,116 @@ mod tests {
         assert_eq!(modified.old_path, None);
         assert_eq!(modified.add_lines, 1);
         assert_eq!(modified.del_lines, 0);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- branch_changes() / branch_file_diff() (committed diff vs the base) ----
+
+    /// A repo on `main` with a `feature` branch that adds, modifies, deletes,
+    /// renames and adds-a-binary in one commit — then `main` moves on, so the
+    /// three-dot semantics (upstream commits past the fork point are not the
+    /// branch's) are exercised too.
+    fn branch_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let base = scratch_dir(name);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "gone\n").unwrap();
+        std::fs::write(repo.join("d.txt"), "x\ny\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        run_git(&repo, &["checkout", "-b", "feature"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::remove_file(repo.join("c.txt")).unwrap();
+        run_git(&repo, &["mv", "d.txt", "d-renamed.txt"]);
+        std::fs::write(repo.join("new.txt"), "n1\nn2\n").unwrap();
+        std::fs::write(repo.join("bin.dat"), b"\x00\x01\x02binary\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "feature work"]);
+
+        // Upstream advances after the fork point: not part of the branch's diff.
+        run_git(&repo, &["checkout", "main"]);
+        std::fs::write(repo.join("upstream.txt"), "later\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "upstream"]);
+        run_git(&repo, &["checkout", "feature"]);
+        (base, repo)
+    }
+
+    #[test]
+    fn branch_changes_lists_committed_files_with_statuses_and_counts() {
+        let (base, repo) = branch_fixture("branch-changes");
+
+        let files = branch_changes(&repo, "main").unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["a.txt", "bin.dat", "c.txt", "d-renamed.txt", "new.txt"],
+            "path-sorted, and main's later commit is not the branch's"
+        );
+        assert!(
+            files.iter().all(|f| !f.staged),
+            "commits are never 'staged'"
+        );
+
+        let by = |p: &str| files.iter().find(|f| f.path == p).unwrap();
+        let a = by("a.txt");
+        assert_eq!(a.status, FileStatus::Modified);
+        assert_eq!((a.add_lines, a.del_lines, a.binary), (1, 0, false));
+        assert_eq!(a.old_path, None);
+
+        let bin = by("bin.dat");
+        assert_eq!(bin.status, FileStatus::Added);
+        assert!(bin.binary, "numstat's `-` marks it binary");
+        assert_eq!((bin.add_lines, bin.del_lines), (0, 0));
+
+        let c = by("c.txt");
+        assert_eq!(c.status, FileStatus::Deleted);
+        assert_eq!((c.add_lines, c.del_lines), (0, 1));
+
+        let d = by("d-renamed.txt");
+        assert_eq!(d.status, FileStatus::Renamed);
+        assert_eq!(d.old_path.as_deref(), Some("d.txt"));
+        assert_eq!((d.add_lines, d.del_lines), (0, 0));
+
+        let n = by("new.txt");
+        assert_eq!(n.status, FileStatus::Added);
+        assert_eq!((n.add_lines, n.del_lines), (2, 0));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn branch_file_diff_shows_one_files_committed_hunks_and_guards_the_path() {
+        let (base, repo) = branch_fixture("branch-file-diff");
+
+        let diff = branch_file_diff(&repo, "main", "a.txt").unwrap();
+        assert!(diff.contains("+three"), "the branch's own change: {diff}");
+        assert!(
+            !diff.contains("upstream"),
+            "main's later commit is excluded"
+        );
+        assert_eq!(
+            branch_file_diff(&repo, "main", "upstream.txt").unwrap(),
+            "",
+            "a file the branch never touched diffs to nothing"
+        );
+        assert!(branch_file_diff(&repo, "main", "../a.txt").is_err());
+        assert!(branch_file_diff(&repo, "main", "/etc/passwd").is_err());
+        assert!(
+            branch_file_diff(&repo, "main", ":/a.txt").is_err(),
+            "pathspec magic is refused"
+        );
+        assert_eq!(
+            branch_file_diff(&repo, "main", "*.txt").unwrap(),
+            "",
+            "a glob is a literal filename, not a pattern"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

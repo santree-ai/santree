@@ -29,13 +29,13 @@ import {
   queryKeys,
   useAgentSession,
   useBoolSetting,
-  useClaudeHookSettings,
   useResolvedProviderSetting,
 } from "../../lib/queries";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
+import { useHookInjection } from "../terminal/useHookInjection";
 import { triageTerminalRef } from "./providerSessions";
 
 /**
@@ -117,7 +117,9 @@ export function RepoSessionPane({
     agentKind,
     INVESTIGATE_AGENT_KEY,
   );
-  const hookSettings = useClaudeHookSettings().data;
+  // Whichever way this provider takes santree's session hooks. Without them the
+  // session is unresumable and never reaches the registry.
+  const hooks = useHookInjection();
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
   const seed = agentSessionSeed(session.data, {
     repo,
@@ -132,17 +134,18 @@ export function RepoSessionPane({
     permissionMode: provider.capabilities.permissionMode
       ? (permissionMode.data ?? undefined)
       : undefined,
-    settingsFlag:
-      provider.capabilities.cliLaunchOptions && hookSettings
-        ? `--settings ${shellQuote(hookSettings)}`
-        : undefined,
+    settingsFlag: hooks.flagFor(resolvedAgent),
     chrome: provider.capabilities.cliLaunchOptions && startWithChrome,
   });
   // Hold the embed until the seed decision is fresh, so the new PTY carries the
   // right flags from its first frame.
   const ready =
     !needsSeed ||
-    (!session.isFetching && model.isFetched && effort.isFetched && permissionMode.isFetched);
+    (!session.isFetching &&
+      hooks.readyFor(resolvedAgent) &&
+      model.isFetched &&
+      effort.isFetched &&
+      permissionMode.isFetched);
 
   const dropCachedSession = useCallback(
     // Drop the cached resolution so the next launch re-asks the backend instead of

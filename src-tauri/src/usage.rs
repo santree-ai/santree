@@ -30,9 +30,10 @@ use specta::Type;
 use tauri::AppHandle;
 use tauri_specta::Event;
 
-use santree_core::domain::{ModelUsage, SessionUsage, UsageReport, UsageTotals};
+use santree_core::domain::{LastMessageFrom, ModelUsage, SessionUsage, UsageReport, UsageTotals};
 
 use crate::pricing::PriceTable;
+use crate::session::SessionSummary;
 
 /// Fallback context-window limits, used only for a model absent from the price
 /// table: default to 200K, or 1M once the observed context has exceeded 200K
@@ -103,6 +104,10 @@ struct Line {
     /// The session's working directory — the same on every line; the lossless
     /// source for the display project name (better than de-slugging the path).
     cwd: Option<String>,
+    /// Claude's own bookkeeping written as a `user` line (the local-command
+    /// caveat, injected context) — not something the user typed.
+    #[serde(rename = "isMeta", default)]
+    is_meta: bool,
     message: Option<Msg>,
 }
 
@@ -111,6 +116,197 @@ struct Msg {
     id: Option<String>,
     model: Option<String>,
     usage: Option<Usage>,
+    content: Option<Blocks>,
+}
+
+/// The prose of a message's `content`, one entry per text block: a bare string
+/// is one block; an array contributes its `text` / `input_text` / `output_text`
+/// blocks (Claude's and Codex's names) and nothing from `tool_use` /
+/// `tool_result` / `thinking` ones.
+///
+/// Deserialized by hand rather than through `serde_json::Value` or an untagged
+/// enum: both would buffer the whole value, and a tool result's payload can be
+/// megabytes on a line whose only text is one sentence. This visitor allocates
+/// for the text blocks alone and lets serde skip the rest.
+pub(crate) struct Blocks(pub Vec<String>);
+
+impl<'de> Deserialize<'de> for Blocks {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{IgnoredAny, SeqAccess, Visitor};
+
+        /// One content element. Anything that isn't a `{type, text}` object — a
+        /// bare string, a number, an object whose `text` isn't a string — is
+        /// consumed as no prose rather than failing the line: a malformed element
+        /// must not cost the line its usage event.
+        struct Block {
+            kind: Option<String>,
+            text: Option<String>,
+        }
+
+        impl<'de> Deserialize<'de> for Block {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                #[derive(Deserialize)]
+                #[serde(field_identifier, rename_all = "lowercase")]
+                enum Field {
+                    Type,
+                    Text,
+                    #[serde(other)]
+                    Other,
+                }
+
+                struct BV;
+                impl<'de> Visitor<'de> for BV {
+                    type Value = Block;
+
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("a content block")
+                    }
+
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<Block, A::Error> {
+                        let mut block = Block {
+                            kind: None,
+                            text: None,
+                        };
+                        while let Some(key) = map.next_key::<Field>()? {
+                            match key {
+                                Field::Type => {
+                                    block.kind = map
+                                        .next_value::<serde_json::Value>()?
+                                        .as_str()
+                                        .map(str::to_string)
+                                }
+                                Field::Text => {
+                                    block.text = map
+                                        .next_value::<serde_json::Value>()?
+                                        .as_str()
+                                        .map(str::to_string)
+                                }
+                                Field::Other => {
+                                    map.next_value::<IgnoredAny>()?;
+                                }
+                            }
+                        }
+                        Ok(block)
+                    }
+
+                    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Block, A::Error> {
+                        while seq.next_element::<IgnoredAny>()?.is_some() {}
+                        Ok(Block {
+                            kind: None,
+                            text: None,
+                        })
+                    }
+
+                    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Block, E> {
+                        Ok(Block {
+                            kind: None,
+                            text: None,
+                        })
+                    }
+
+                    fn visit_unit<E: serde::de::Error>(self) -> Result<Block, E> {
+                        Ok(Block {
+                            kind: None,
+                            text: None,
+                        })
+                    }
+
+                    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Block, E> {
+                        Ok(Block {
+                            kind: None,
+                            text: None,
+                        })
+                    }
+
+                    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Block, E> {
+                        Ok(Block {
+                            kind: None,
+                            text: None,
+                        })
+                    }
+
+                    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Block, E> {
+                        Ok(Block {
+                            kind: None,
+                            text: None,
+                        })
+                    }
+
+                    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Block, E> {
+                        Ok(Block {
+                            kind: None,
+                            text: None,
+                        })
+                    }
+                }
+                d.deserialize_any(BV)
+            }
+        }
+
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Blocks;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a string or an array of content blocks")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Blocks, E> {
+                Ok(Blocks(vec![s.to_string()]))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, s: String) -> Result<Blocks, E> {
+                Ok(Blocks(vec![s]))
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Blocks, A::Error> {
+                let mut out = Vec::new();
+                while let Some(block) = seq.next_element::<Block>()? {
+                    let (Some("text" | "input_text" | "output_text"), Some(text)) =
+                        (block.kind.as_deref(), block.text)
+                    else {
+                        continue;
+                    };
+                    out.push(text);
+                }
+                Ok(Blocks(out))
+            }
+
+            // Any other shape carries no prose — consume it rather than fail the
+            // line, which would also drop its usage.
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Blocks, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(Blocks(Vec::new()))
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Blocks, E> {
+                Ok(Blocks(Vec::new()))
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Blocks, E> {
+                Ok(Blocks(Vec::new()))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Blocks, E> {
+                Ok(Blocks(Vec::new()))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Blocks, E> {
+                Ok(Blocks(Vec::new()))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Blocks, E> {
+                Ok(Blocks(Vec::new()))
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 #[derive(Deserialize)]
@@ -175,6 +371,22 @@ struct Ctx {
     model: String,
 }
 
+/// The conversation's shape, for the Trees session history — folded in by the
+/// same incremental parse as the usage events, so it costs no second read.
+#[derive(Clone, Default)]
+struct Summary {
+    /// The first user prompt (one line, capped — see [`one_line`]).
+    title: Option<String>,
+    /// The latest prose from either side, trimmed likewise, and whose it is.
+    last_message: Option<String>,
+    last_from: Option<LastMessageFrom>,
+    /// User + assistant lines carrying prose.
+    message_count: u32,
+    /// Timestamps of the first and last user/assistant lines.
+    first_ts_ms: Option<i64>,
+    last_ts_ms: Option<i64>,
+}
+
 /// Everything we need from one transcript file, cached keyed by byte length.
 struct FileData {
     /// The cwd-slug directory the transcript lives under (the grouping key).
@@ -188,6 +400,29 @@ struct FileData {
     events: Vec<Ev>,
     /// Present only for a main transcript: its last turn's context fill.
     context: Option<Ctx>,
+    summary: Summary,
+}
+
+/// Cap on the summary's title / last message.
+const SUMMARY_CHARS: usize = 120;
+
+/// A message's prose as one display line: its first non-empty line, capped at
+/// [`SUMMARY_CHARS`] chars (an ellipsis marks the cut — taken by `char`, so a
+/// multi-byte boundary can't be split). `None` for text with no prose, and for
+/// the slash-command echoes Claude writes as user lines (`<command-name>…`,
+/// `<local-command-stdout>…`) — those aren't a prompt anyone typed.
+pub(crate) fn one_line(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    if line.starts_with("<command-") || line.starts_with("<local-command-") {
+        return None;
+    }
+    let mut chars = line.chars();
+    let mut out: String = chars.by_ref().take(SUMMARY_CHARS).collect();
+    if chars.next().is_some() {
+        out.pop();
+        out.push('…');
+    }
+    Some(out)
 }
 
 /// Classify a transcript path into `(project-slug, owning-session-id, is_main)`,
@@ -267,9 +502,14 @@ fn parse_from(path: &Path, from: u64, base: Option<&FileData>) -> Option<Parsed>
     let consumed = from + complete as u64;
     let text = String::from_utf8_lossy(&buf[..complete]);
 
-    let (mut events, mut context, mut cwd) = match base {
-        Some(b) => (b.events.clone(), b.context.clone(), b.cwd.clone()),
-        None => (Vec::new(), None, None),
+    let (mut events, mut context, mut cwd, mut summary) = match base {
+        Some(b) => (
+            b.events.clone(),
+            b.context.clone(),
+            b.cwd.clone(),
+            b.summary.clone(),
+        ),
+        None => (Vec::new(), None, None, Summary::default()),
     };
     for line in text.lines() {
         let Ok(l) = serde_json::from_str::<Line>(line) else {
@@ -278,7 +518,34 @@ fn parse_from(path: &Path, from: u64, base: Option<&FileData>) -> Option<Parsed>
         if cwd.is_none() {
             cwd = l.cwd;
         }
-        if l.kind.as_deref() != Some("assistant") {
+        let is_user = l.kind.as_deref() == Some("user");
+        let is_assistant = l.kind.as_deref() == Some("assistant");
+        if is_user || is_assistant {
+            if let Some(ts) = l.timestamp.as_deref().map(parse_ts).filter(|t| *t > 0) {
+                summary.first_ts_ms.get_or_insert(ts);
+                summary.last_ts_ms = Some(summary.last_ts_ms.map_or(ts, |cur| cur.max(ts)));
+            }
+            let prose = l
+                .message
+                .as_ref()
+                .and_then(|m| m.content.as_ref())
+                .filter(|_| !l.is_meta)
+                .and_then(|c| c.0.iter().find_map(|b| one_line(b)));
+            if let Some(prose) = prose {
+                summary.message_count += 1;
+                if is_user {
+                    summary.title.get_or_insert(prose.clone());
+                }
+                // Lines are chronological: the latest prose wins, whoever's.
+                summary.last_from = Some(if is_user {
+                    LastMessageFrom::You
+                } else {
+                    LastMessageFrom::Agent
+                });
+                summary.last_message = Some(prose);
+            }
+        }
+        if !is_assistant {
             continue;
         }
         let Some(msg) = l.message else { continue };
@@ -330,6 +597,7 @@ fn parse_from(path: &Path, from: u64, base: Option<&FileData>) -> Option<Parsed>
             session_id,
             events,
             context,
+            summary,
         },
         consumed,
     })
@@ -354,7 +622,12 @@ fn approx_bytes(fd: &FileData) -> usize {
         .iter()
         .map(|e| std::mem::size_of::<Ev>() + opt(&e.id) + opt(&e.request_id) + e.model.len())
         .sum();
-    events + fd.project.len() + opt(&fd.cwd) + fd.session_id.len()
+    events
+        + fd.project.len()
+        + opt(&fd.cwd)
+        + fd.session_id.len()
+        + opt(&fd.summary.title)
+        + opt(&fd.summary.last_message)
 }
 
 struct Entry {
@@ -481,7 +754,26 @@ fn store(path: &Path, len: u64, parsed: Option<Parsed>, out: &mut Vec<Arc<FileDa
     out.push(arc);
 }
 
+/// Parse every transcript in `paths` through the cache, then drop cache entries
+/// for files that are no longer on disk. For a *full* scan only — `paths` must
+/// be every transcript there is, or the prune evicts the rest. A targeted read
+/// of a few files goes through [`load_files`].
 fn load_cached(paths: &[PathBuf], on_progress: impl Fn(usize, usize)) -> Vec<Arc<FileData>> {
+    let out = load_files(paths, on_progress);
+    // `paths` is a fresh scan of every transcript on disk, so anything else still
+    // in the cache is a file Claude has since pruned.
+    let live: HashSet<&PathBuf> = paths.iter().collect();
+    CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain_existing(&live);
+    out
+}
+
+/// Parse the transcripts in `paths`, serving unchanged ones from the cache and
+/// extending a grown one from its previous parse. Leaves the rest of the cache
+/// alone.
+fn load_files(paths: &[PathBuf], on_progress: impl Fn(usize, usize)) -> Vec<Arc<FileData>> {
     let total = paths.len();
     // Emit at most ~40 updates so a cold parse of many files doesn't flood events.
     let step = (total / 40).max(1);
@@ -516,13 +808,6 @@ fn load_cached(paths: &[PathBuf], on_progress: impl Fn(usize, usize)) -> Vec<Arc
             on_progress(done, total);
         }
     }
-    // `paths` is a fresh scan of every transcript on disk, so anything else still
-    // in the cache is a file Claude has since pruned.
-    let live: HashSet<&PathBuf> = paths.iter().collect();
-    CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .retain_existing(&live);
     out
 }
 
@@ -833,7 +1118,6 @@ fn aggregate(
 pub fn report(
     table: &PriceTable,
     repos: &[Repo],
-    excluded_root: Option<&str>,
     on_progress: impl Fn(usize, usize),
 ) -> Result<UsageReport> {
     let now = chrono::Local::now().timestamp_millis();
@@ -841,15 +1125,187 @@ pub fn report(
     for root in projects_roots() {
         collect_jsonl(&root, &mut paths);
     }
-    let mut files = load_cached(&paths, on_progress);
-    if let Some(root) = excluded_root.filter(|root| !root.is_empty()) {
-        files.retain(|file| !cwd_is_within(file.cwd.as_deref(), root));
-    }
+    let files = load_cached(&paths, on_progress);
     Ok(aggregate(&files, now, table, repos))
 }
 
-fn cwd_is_within(cwd: Option<&str>, root: &str) -> bool {
-    cwd.is_some_and(|cwd| Path::new(cwd).starts_with(Path::new(root)))
+// ── Per-worktree session history ────────────────────────────────────────────
+
+/// Whether a session's `cwd` belongs to the worktree at `root`: that directory
+/// or one beneath it — except another santree worktree nested under it. The
+/// repo root holds `.santree/worktrees/*`, and those sessions are their own
+/// worktrees', not the base checkout's.
+pub(crate) fn cwd_belongs_to(cwd: &str, root: &Path) -> bool {
+    let Ok(rest) = Path::new(cwd).strip_prefix(root) else {
+        return false;
+    };
+    // Lexical, so the remainder must be plain descent: a `..` in a recorded cwd
+    // would otherwise "belong" here while pointing anywhere.
+    rest.components()
+        .all(|c| matches!(c, std::path::Component::Normal(name) if name != ".santree"))
+}
+
+/// Bytes of a transcript's head read to learn its `cwd` before committing to a
+/// full parse. The first lines are the session's opening bookkeeping and prompt,
+/// which carry it; a transcript whose head is one oversized line falls through to
+/// the full parse (see [`worktree_summaries`]).
+const PEEK_BYTES: u64 = 256 * 1024;
+
+/// The `cwd` on the first line of the transcript that has one, from its head only.
+fn peek_cwd(path: &Path) -> Option<String> {
+    use std::io::Read;
+
+    #[derive(Deserialize)]
+    struct CwdLine {
+        cwd: Option<String>,
+    }
+
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(PEEK_BYTES)
+        .read_to_end(&mut buf)
+        .ok()?;
+    let complete = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    String::from_utf8_lossy(&buf[..complete])
+        .lines()
+        .filter_map(|l| serde_json::from_str::<CwdLine>(l).ok())
+        .find_map(|l| l.cwd)
+}
+
+/// The model that did most of a session's work — by tokens, the same "primary"
+/// the Usage panel badges — so the two surfaces never disagree.
+fn primary_model(events: &[Ev]) -> Option<String> {
+    let mut by_model: HashMap<&str, f64> = HashMap::new();
+    for e in events.iter().filter(|e| !e.model.is_empty()) {
+        let t = &e.toks;
+        *by_model.entry(&e.model).or_default() +=
+            t.input + t.output + t.cache_read + t.cache_write();
+    }
+    by_model
+        .into_iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(m, _)| m.to_string())
+}
+
+/// How many subagent transcripts a main transcript has: the `*.jsonl` files under
+/// `<dir>/<session-id>/subagents/`, the tree `classify` folds into the session.
+fn subagent_count(main: &Path) -> u32 {
+    let Some(dir) = main
+        .parent()
+        .zip(main.file_stem())
+        .map(|(dir, stem)| dir.join(stem).join("subagents"))
+    else {
+        return 0;
+    };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        .count() as u32
+}
+
+/// Summaries of the Claude sessions that ran in `worktree`, keyed by session id:
+/// the `known` ones from the terminal registry (`(cwd, session_id)`, read from
+/// wherever their `cwd` says they ran) plus every transcript on disk whose `cwd`
+/// is the worktree or a directory under it. Blocking (disk + parse) — call from
+/// `spawn_blocking`.
+///
+/// Only the project dirs whose slug is the worktree's, or extends it (a subdir
+/// cwd), are looked at — never the whole transcript tree — and each candidate is
+/// confirmed by its `cwd` before parsing, so a sibling checkout whose name merely
+/// extends this one's isn't read. The parses go through the shared transcript
+/// cache, so a session the Usage panel already read isn't parsed again.
+pub(crate) fn worktree_summaries(
+    worktree: &Path,
+    known: &[(String, String)],
+) -> HashMap<String, SessionSummary> {
+    summaries_in(&projects_roots(), worktree, known)
+}
+
+/// [`worktree_summaries`] over explicit `projects` roots (tests pin them).
+fn summaries_in(
+    roots: &[PathBuf],
+    worktree: &Path,
+    known: &[(String, String)],
+) -> HashMap<String, SessionSummary> {
+    let slug = crate::session::project_slug(&worktree.to_string_lossy());
+    let subdir_prefix = format!("{slug}-");
+    let mut paths: Vec<PathBuf> = Vec::new();
+    // Registry sessions: listed on the registry's word, wherever they ran.
+    let mut registered: HashSet<PathBuf> = HashSet::new();
+    for root in roots {
+        for (cwd, session_id) in known {
+            let p = root
+                .join(crate::session::project_slug(cwd))
+                .join(format!("{session_id}.jsonl"));
+            if p.is_file() && registered.insert(p.clone()) {
+                paths.push(p);
+            }
+        }
+        let Ok(dirs) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for dir in dirs.flatten() {
+            let name = dir.file_name();
+            let name = name.to_string_lossy();
+            // A real directory only (no symlinks), as `collect_jsonl` walks.
+            if (name != slug && !name.starts_with(&subdir_prefix))
+                || !dir.file_type().is_ok_and(|t| t.is_dir())
+            {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(dir.path()) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                let is_main = f.file_type().is_ok_and(|t| t.is_file())
+                    && p.extension().and_then(|x| x.to_str()) == Some("jsonl");
+                if !is_main || registered.contains(&p) || paths.contains(&p) {
+                    continue;
+                }
+                // A head with no `cwd` still gets parsed: the parse's own `cwd`
+                // decides below.
+                if peek_cwd(&p).is_some_and(|cwd| !cwd_belongs_to(&cwd, worktree)) {
+                    continue;
+                }
+                paths.push(p);
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for p in &paths {
+        // One file at a time: `load_files` skips what it can't parse, so a batch
+        // result wouldn't line up with `paths`.
+        let Some(fd) = load_files(std::slice::from_ref(p), |_, _| {}).pop() else {
+            continue;
+        };
+        let belongs = registered.contains(p)
+            || fd
+                .cwd
+                .as_deref()
+                .is_some_and(|cwd| cwd_belongs_to(cwd, worktree));
+        if !belongs {
+            continue;
+        }
+        let s = &fd.summary;
+        out.insert(
+            fd.session_id.clone(),
+            SessionSummary {
+                title: s.title.clone(),
+                last_message: s.last_message.clone(),
+                last_message_from: s.last_from,
+                message_count: s.message_count,
+                subagent_count: subagent_count(p),
+                model: primary_model(&fd.events),
+                started_at_ms: s.first_ts_ms,
+                last_activity_ms: s.last_ts_ms,
+            },
+        );
+    }
+    out
 }
 
 // ── Live-refresh watcher (mirrors git_watch.rs) ─────────────────────────────
@@ -954,6 +1410,7 @@ mod tests {
             session_id: sid.into(),
             events,
             context,
+            summary: Summary::default(),
         })
     }
 
@@ -1358,18 +1815,6 @@ mod tests {
     }
 
     #[test]
-    fn dev_checkout_exclusion_uses_path_boundaries() {
-        let root = "/Users/me/dev/santree-app";
-        assert!(cwd_is_within(Some(root), root));
-        assert!(cwd_is_within(
-            Some("/Users/me/dev/santree-app/src-tauri"),
-            root
-        ));
-        assert!(!cwd_is_within(Some("/Users/me/dev/santree-app-copy"), root));
-        assert!(!cwd_is_within(None, root));
-    }
-
-    #[test]
     fn parse_file_reads_usage_cwd_and_splits_cache() {
         let dir = std::env::temp_dir().join(format!("santree-usage-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1399,6 +1844,209 @@ mod tests {
         );
         // context = input + cache_read + (5m + 1h)
         assert_eq!(fd.context.as_ref().unwrap().tokens, 5.0 + 11.0 + 2.0 + 7.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- the conversation summary (Trees session history) ----
+
+    #[test]
+    fn parse_file_summarises_the_conversation() {
+        let dir =
+            std::env::temp_dir().join(format!("santree-usage-summary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let proj = dir.join("projects").join("-repo");
+        std::fs::create_dir_all(&proj).unwrap();
+        let file_path = proj.join("sess.jsonl");
+        let long = "x".repeat(200);
+        let content = [
+            // Claude's own bookkeeping: never the title, never counted.
+            r#"{"type":"user","isMeta":true,"timestamp":"2026-07-05T09:59:00.000Z","cwd":"/repo","message":{"role":"user","content":"<local-command-caveat>Caveat: generated</local-command-caveat>"}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-07-05T09:59:30.000Z","cwd":"/repo","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-message>clear</command-message>"}}"#.to_string(),
+            // The real first prompt: multi-line, so the title is its first line.
+            r#"{"type":"user","timestamp":"2026-07-05T10:00:00.000Z","cwd":"/repo","message":{"role":"user","content":"  Fix the flaky test  \nmore context here"}}"#.to_string(),
+            // Assistant text + tool call in one line: only the text counts.
+            r#"{"type":"assistant","timestamp":"2026-07-05T10:00:10.000Z","requestId":"r1","cwd":"/repo","message":{"id":"m1","model":"claude-opus-4-8","usage":{"input_tokens":5,"output_tokens":7},"content":[{"type":"text","text":"Looking at it."},{"type":"tool_use","id":"t1","name":"Read","input":{"path":"big"}}]}}"#.to_string(),
+            // A tool result: a user line with no prose — not a message.
+            r#"{"type":"user","timestamp":"2026-07-05T10:00:11.000Z","cwd":"/repo","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"lots of output"}]}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-07-05T10:01:00.000Z","cwd":"/repo","message":{"role":"user","content":[{"type":"text","text":"thanks, now push"}]}}"#.to_string(),
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-07-05T10:02:00.000Z","requestId":"r2","cwd":"/repo","message":{{"id":"m2","model":"claude-sonnet-5","usage":{{"input_tokens":500,"output_tokens":1}},"content":[{{"type":"text","text":"{long}"}}]}}}}"#
+            ),
+            "not json at all".to_string(),
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(&file_path, content).unwrap();
+
+        let fd = parse_file(&file_path).unwrap().data;
+        let s = &fd.summary;
+        assert_eq!(s.title.as_deref(), Some("Fix the flaky test"));
+        let last = s.last_message.as_deref().unwrap();
+        assert_eq!(last.chars().count(), SUMMARY_CHARS, "capped by char");
+        assert!(last.ends_with('…'), "the cut is marked");
+        assert_eq!(s.last_from, Some(LastMessageFrom::Agent));
+        assert_eq!(
+            s.message_count, 4,
+            "two prompts + two replies; meta, command echo and tool result excluded"
+        );
+        assert_eq!(s.first_ts_ms, Some(parse_ts("2026-07-05T09:59:00.000Z")));
+        assert_eq!(s.last_ts_ms, Some(parse_ts("2026-07-05T10:02:00.000Z")));
+        assert_eq!(
+            primary_model(&fd.events).as_deref(),
+            Some("claude-sonnet-5"),
+            "most tokens wins, not the first turn"
+        );
+        // The usage side is untouched by the summary parse.
+        assert_eq!(fd.events.len(), 2);
+        assert_eq!(fd.cwd.as_deref(), Some("/repo"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn summary_ends_on_the_users_prompt_when_it_is_last() {
+        let dir =
+            std::env::temp_dir().join(format!("santree-usage-summary-you-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let proj = dir.join("projects").join("-repo");
+        std::fs::create_dir_all(&proj).unwrap();
+        let file_path = proj.join("sess.jsonl");
+        let content = [
+            r#"{"type":"user","timestamp":"2026-07-05T10:00:00.000Z","cwd":"/repo","message":{"role":"user","content":"Fix the flaky test"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-07-05T10:00:10.000Z","cwd":"/repo","message":{"id":"m1","model":"claude-opus-4-8","usage":{"input_tokens":5,"output_tokens":7},"content":[{"type":"text","text":"Done."}]}}"#,
+            // The user got the last word — the session is waiting on the agent.
+            r#"{"type":"user","timestamp":"2026-07-05T10:01:00.000Z","cwd":"/repo","message":{"role":"user","content":"also update the docs"}}"#,
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(&file_path, content).unwrap();
+
+        let s = parse_file(&file_path).unwrap().data.summary;
+        assert_eq!(s.title.as_deref(), Some("Fix the flaky test"));
+        assert_eq!(s.last_message.as_deref(), Some("also update the docs"));
+        assert_eq!(s.last_from, Some(LastMessageFrom::You));
+        assert_eq!(s.message_count, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_line_keeps_the_first_prose_line_and_cuts_on_a_char_boundary() {
+        assert_eq!(one_line("  \n\n hello \nworld"), Some("hello".into()));
+        assert_eq!(one_line("   "), None);
+        assert_eq!(one_line("<command-name>/clear</command-name>"), None);
+        assert_eq!(
+            one_line("<local-command-stdout>ok</local-command-stdout>"),
+            None
+        );
+        // Multi-byte chars: the cap counts chars, and the ellipsis keeps it ≤ cap.
+        let emoji = "é".repeat(SUMMARY_CHARS + 5);
+        let cut = one_line(&emoji).unwrap();
+        assert_eq!(cut.chars().count(), SUMMARY_CHARS);
+        assert!(cut.ends_with('…'));
+        let exact = "a".repeat(SUMMARY_CHARS);
+        assert_eq!(
+            one_line(&exact).as_deref(),
+            Some(exact.as_str()),
+            "no cut at the cap"
+        );
+    }
+
+    #[test]
+    fn cwd_belongs_to_excludes_nested_worktrees_from_the_base() {
+        let root = Path::new("/Users/me/dev/repo");
+        assert!(cwd_belongs_to("/Users/me/dev/repo", root));
+        assert!(cwd_belongs_to("/Users/me/dev/repo/backend", root));
+        assert!(!cwd_belongs_to("/Users/me/dev/repo-old", root));
+        assert!(
+            !cwd_belongs_to("/Users/me/dev/repo/.santree/worktrees/AK-1", root),
+            "a worktree's sessions are its own, not the base checkout's"
+        );
+        let wt = Path::new("/Users/me/dev/repo/.santree/worktrees/AK-1");
+        assert!(cwd_belongs_to(
+            "/Users/me/dev/repo/.santree/worktrees/AK-1/sub",
+            wt
+        ));
+        assert!(!cwd_belongs_to(
+            "/Users/me/dev/repo/.santree/worktrees/AK-10",
+            wt
+        ));
+        assert!(
+            !cwd_belongs_to(
+                "/Users/me/dev/repo/.santree/worktrees/AK-1/../../../../other",
+                wt
+            ),
+            "a `..` below the root is not descent"
+        );
+        assert!(!cwd_belongs_to(
+            "/Users/me/dev/repo/.santree/worktrees/AK-1/./x/..",
+            wt
+        ));
+    }
+
+    #[test]
+    fn worktree_summaries_finds_registry_and_on_disk_sessions_for_the_worktree() {
+        let dir =
+            std::env::temp_dir().join(format!("santree-usage-wt-summaries-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let projects = dir.join("projects");
+        let wt = dir
+            .join("repo")
+            .join(".santree")
+            .join("worktrees")
+            .join("AK-1");
+        let wt_str = wt.to_string_lossy().into_owned();
+        let slug = crate::session::project_slug(&wt_str);
+        let line = |cwd: &str, text: &str| {
+            format!(
+                r#"{{"type":"user","timestamp":"2026-07-05T10:00:00.000Z","cwd":"{cwd}","message":{{"role":"user","content":"{text}"}}}}"#
+            )
+        };
+        // The main terminal's session (registry), one launched by hand in a
+        // subdir (no registry row), and a sibling checkout `AK-1-old` — whose
+        // slug extends this one's exactly like a subdir's does, so only its
+        // `cwd` can tell it apart.
+        let main_dir = projects.join(&slug);
+        let sub_dir = projects.join(format!("{slug}-backend"));
+        let sibling_dir = projects.join(format!("{slug}-old"));
+        for d in [&main_dir, &sub_dir, &sibling_dir] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(
+            main_dir.join("reg.jsonl"),
+            line(&wt_str, "registered") + "\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(main_dir.join("reg").join("subagents")).unwrap();
+        std::fs::write(
+            main_dir.join("reg").join("subagents").join("a.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sub_dir.join("hand.jsonl"),
+            line(&format!("{wt_str}/backend"), "by hand") + "\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sibling_dir.join("other.jsonl"),
+            line(&format!("{wt_str}-old"), "sibling") + "\n",
+        )
+        .unwrap();
+
+        let got = summaries_in(&[projects], &wt, &[(wt_str.clone(), "reg".into())]);
+
+        let mut ids: Vec<&str> = got.keys().map(String::as_str).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            ["hand", "reg"],
+            "the sibling checkout's session is not ours"
+        );
+        assert_eq!(got["reg"].title.as_deref(), Some("registered"));
+        assert_eq!(got["reg"].subagent_count, 1);
+        assert_eq!(got["hand"].title.as_deref(), Some("by hand"));
+        assert_eq!(got["hand"].subagent_count, 0);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

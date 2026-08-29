@@ -1,7 +1,10 @@
 /**
- * The Trees "Issue" tab: the Linear issue a worktree is for, rendered like the
- * Triage detail — id · status · title · author/labels, then the description and
- * comment thread. Read-only context for the work happening in the worktree.
+ * The workspace right panel's Issue pane: the Linear issue a worktree is for,
+ * rendered like the Triage detail — id · status · title · author/labels, then the
+ * description and comment thread. Reference for the work happening beside it.
+ *
+ * Laid out for a side panel, not a full pane: the shared discussion runs at its
+ * `dense` gutter, and the header trades Triage's breathing room for line length.
  */
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef } from "react";
@@ -36,7 +39,7 @@ export function WorktreeIssuePane({ repo, worktree }: { repo: string; worktree: 
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-app">
-      <div className="flex-none border-b border-hairline px-5 pt-4 pb-3.5">
+      <div className="flex-none border-b border-hairline px-3 pt-3 pb-3">
         <div className="mb-1.5 flex items-center gap-2">
           <span className="font-mono text-[11px] text-muted-2">{worktree.id}</span>
           {/* No status when the ticket isn't in the current tasks fetch — the
@@ -59,7 +62,7 @@ export function WorktreeIssuePane({ repo, worktree }: { repo: string; worktree: 
             </Button>
           )}
         </div>
-        <MarkdownTitle className="block text-[15px] leading-[1.3] font-semibold text-fg-bright">
+        <MarkdownTitle className="block text-[13.5px] leading-[1.35] font-semibold text-fg-bright">
           {ready?.title ?? worktree.title}
         </MarkdownTitle>
         {ready && (
@@ -81,7 +84,7 @@ export function WorktreeIssuePane({ repo, worktree }: { repo: string; worktree: 
           </div>
         )}
       </div>
-      {ready ? <DiscussionPane detail={ready} repo={repo} /> : <DiscussionSkeleton />}
+      {ready ? <DiscussionPane detail={ready} repo={repo} dense /> : <DiscussionSkeleton dense />}
     </div>
   );
 }

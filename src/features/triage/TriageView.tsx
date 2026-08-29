@@ -30,7 +30,6 @@ import {
   Skeleton,
 } from "../../components/primitives";
 import { SlaCountdown } from "../../components/RelativeTime";
-import { SidebarFooter } from "../../components/SidebarFooter";
 import { PriorityBars } from "../../components/WorkSignals";
 import {
   CLAUDE_REMOTE_CONTROL_KEY,
@@ -641,12 +640,13 @@ export function TriageView() {
   // When the investigate terminal exits, fall back to this ticket's discussion.
   const backToDiscussion = useCallback(() => setTab(activeId, "discussion"), [setTab, activeId]);
 
-  // Redirect away if triage gets disabled while open.
+  // Redirect away if triage gets disabled while open. Tickets, not the workspace:
+  // the tickets you were triaging are all still there.
   useEffect(() => {
-    if (!triageEnabled) navigate({ to: "/" });
+    if (!triageEnabled) navigate({ to: "/issues" });
   }, [triageEnabled, navigate]);
 
-  // A ticket handed over from the Agents panel ("open this investigation"):
+  // A ticket handed over from elsewhere ("open this investigation"):
   // select it once and drop the request, so a later manual selection sticks.
   useEffect(() => {
     if (!triageFocus) return;
@@ -748,7 +748,7 @@ export function TriageView() {
                     : "Order triage queue"
                 }
                 wrapperClassName="w-[124px] flex-none"
-                className="h-[26px] w-full rounded-[var(--radius-sm)] border border-line-2 bg-input px-2 pr-7 text-[10.5px] text-fg-3 focus-visible:ring-1 focus-visible:ring-accent"
+                className="h-[26px] w-full rounded-[var(--radius-sm)] border border-line-2 bg-input px-2 pr-7 text-[10.5px] text-fg-3"
               >
                 {TRIAGE_ORDER_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -817,7 +817,6 @@ export function TriageView() {
               </Button>
             </div>
           )}
-          <SidebarFooter />
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col bg-app">

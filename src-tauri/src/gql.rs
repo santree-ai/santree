@@ -108,10 +108,27 @@ struct Envelope<T> {
 /// backend for the error messages (e.g. "Linear", "GitHub"). The caller builds
 /// the request (URL, auth, headers, JSON body) so each client keeps its wiring.
 pub async fn post<T: DeserializeOwned>(req: reqwest::RequestBuilder, service: &str) -> Result<T> {
+    post_observed(req, service, |_| {}).await
+}
+
+/// [`post`], with a look at the response headers before the body is decoded.
+///
+/// Linear reports the remaining rate-limit budget only in the headers of a
+/// request that already spent some of it — there is no queryable equivalent of
+/// GitHub's `/rate_limit` — so reading it means observing calls the app was
+/// making anyway. `observe` runs on the rejections too, since a 429 is when the
+/// numbers matter most, and it must not fail: it is a side-channel on the way
+/// past, never a reason a query fails.
+pub async fn post_observed<T: DeserializeOwned>(
+    req: reqwest::RequestBuilder,
+    service: &str,
+    observe: impl FnOnce(&reqwest::header::HeaderMap),
+) -> Result<T> {
     let res = req
         .send()
         .await
         .with_context(|| format!("{service} GraphQL request"))?;
+    observe(res.headers());
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();

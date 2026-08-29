@@ -1,18 +1,18 @@
 /**
  * How many agents are running, and how many of them are blocked on you.
  *
- * With the top tabs gone this is the only door left to the cross-repo agents
- * overview, so it is always rendered — including while the session read is still
- * in flight, where it shows a dash rather than the "0 agents" that would read as
- * an answer. The count of agents needing you is the one number in the bar that
- * earns a color: it is the only thing here that goes stale by being ignored.
+ * A readout, not a door: the sidebar's project tree lists every one of these
+ * rows, so a click here would only lead somewhere already on screen. Always
+ * rendered — including while the session read is in flight, where it shows a
+ * dash rather than the "0 agents" that would read as an answer. The count of
+ * agents needing you is the one number in the bar that earns a color: it is the
+ * only thing here that goes stale by being ignored.
  *
- * Liveness is decided the way the overview decides it — a session's PTY is a
- * child of this app, so no live terminal means the process is gone whatever its
- * last recorded state says — using the registry's own helpers, so the bar can
- * never claim a running agent the panel it points at doesn't list.
+ * Liveness is decided the way the tree decides it — a session's PTY is a child of
+ * this app, so no live terminal means the process is gone whatever its last
+ * recorded state says — through the registry's own helpers, so the bar can never
+ * claim a running agent the tree doesn't list.
  */
-import { useNavigate } from "@tanstack/react-router";
 import { useMemo } from "react";
 
 import type { SessionState } from "../../../bindings";
@@ -23,7 +23,7 @@ import { useTerminals } from "../../../features/terminal/TerminalsContext";
 import { useSessionStates } from "../../../lib/queries";
 import { sessionStateMeta } from "../../../theme/colors";
 import { AgentsIcon } from "../../icons";
-import { StatusButton } from "./StatusSegment";
+import { STATUS_SEGMENT } from "./StatusSegment";
 
 /** Sessions with a live PTY in this app that haven't exited — the agents that
  *  are actually running right now, as opposed to rows the table still holds. */
@@ -37,23 +37,21 @@ function countLive(sessions: SessionState[], terminals: TerminalTab[]): number {
   return n;
 }
 
-/** The agents count, and the only entry point to the cross-repo overview. */
+/** The cross-repo agent count. */
 export function AgentsSegment() {
-  const navigate = useNavigate();
   const { data: sessions } = useSessionStates();
   const { tabs } = useTerminals();
   const needsYou = useAttentionCount();
   const running = useMemo(() => (sessions ? countLive(sessions, tabs) : null), [sessions, tabs]);
 
-  const label = running === null ? "Agents" : `${running} agents, ${needsYou} needing you`;
+  // No `aria-label`: the two counts below are already the reading, and a plain
+  // span can't carry one anyway.
   return (
-    <StatusButton
-      onClick={() => navigate({ to: "/" })}
-      title="Every agent, across repos"
-      aria-label={label}
-    >
+    <span className={`${STATUS_SEGMENT} text-muted-4`} title="Every agent, across repos">
       <AgentsIcon size={11} />
-      <span className="tabular-nums">{running === null ? "—" : running} agents</span>
+      <span className="tabular-nums">
+        {running === null ? "—" : running} {running === 1 ? "agent" : "agents"}
+      </span>
       <span className="text-muted-5">·</span>
       <span
         className="tabular-nums"
@@ -61,6 +59,6 @@ export function AgentsSegment() {
       >
         {needsYou} needs you
       </span>
-    </StatusButton>
+    </span>
   );
 }

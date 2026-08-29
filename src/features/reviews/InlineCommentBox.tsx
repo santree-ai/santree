@@ -19,7 +19,12 @@
  * was dragged across several lines.
  */
 import { Avatar } from "../../components/Avatar";
-import { useAddPrInlineComment, useGithubViewerLogin } from "../../lib/queries";
+import { SparklesIcon } from "../../components/icons";
+import {
+  useAddPrInlineComment,
+  useAddReviewWorkItem,
+  useGithubViewerLogin,
+} from "../../lib/queries";
 import { CommentComposer } from "./CommentComposer";
 import type { CommentTarget } from "./commentTarget";
 import { patchLineRange } from "./patchLines";
@@ -41,6 +46,7 @@ export function InlineCommentBox({
   startLine,
   onRight,
   onClose,
+  mode = "publish",
 }: {
   target: CommentTarget;
   path: string;
@@ -54,8 +60,18 @@ export function InlineCommentBox({
   startLine: number;
   onRight: boolean;
   onClose: () => void;
+  /**
+   * What this line's composer is for.
+   *
+   * `publish` is reviewing someone else's PR, where batching into one review is
+   * the whole etiquette — so "Start a review" leads. `queue` is your own PR: there
+   * is nothing to batch and nothing to approve, and the two useful outcomes are
+   * "say this on GitHub" and "fix this myself", so the queue leads instead.
+   */
+  mode?: "publish" | "queue";
 }) {
   const { mutate, isPending } = useAddPrInlineComment(target.prRepo, target.number);
+  const addWorkItem = useAddReviewWorkItem(target.prRepo, target.number);
   const { data: viewer } = useGithubViewerLogin();
   const inReview = !!target.pendingReviewId;
   // A one-line "range" is just a comment on that line; sending a start GitHub
@@ -64,6 +80,29 @@ export function InlineCommentBox({
   // No prefill unless the patch carries every line of the range — a suggestion
   // silently missing one of them would delete it.
   const suggestion = patchLineRange(patch, onRight, from ?? line, line) ?? undefined;
+
+  // Queued with the anchor the user selected, so the item is clickable and the
+  // fixing agent knows where to look. Manual-sourced: there is no GitHub object
+  // behind it — the user is the source.
+  const queue = (body: string, done: () => void) =>
+    addWorkItem.mutate(
+      {
+        id: crypto.randomUUID(),
+        body,
+        source: "manual",
+        sourceId: null,
+        path,
+        line,
+        startLine: from,
+        onRight,
+      },
+      {
+        onSuccess: () => {
+          done();
+          onClose();
+        },
+      },
+    );
 
   const post = (pending: boolean) => (body: string, done: () => void) =>
     mutate(
@@ -108,18 +147,31 @@ export function InlineCommentBox({
           <CommentComposer
             autoFocus
             rows={3}
-            pending={isPending}
+            pending={isPending || addWorkItem.isPending}
             placeholder="Leave a comment"
             suggestion={suggestion}
             onCancel={onClose}
-            primary={{
-              label: inReview ? "Add to review" : "Start a review",
-              busyLabel: "Saving…",
-              title: inReview
-                ? "Add this to your pending review. Nobody sees it until you submit"
-                : "Begin a batched review; nothing is posted until you submit it",
-              onSubmit: post(true),
-            }}
+            primary={
+              mode === "queue"
+                ? {
+                    label: "Add to queue",
+                    busyLabel: "Adding…",
+                    title: "Add this to the work queue. It never reaches GitHub",
+                    // The spark every other queue action wears — this one can't
+                    // use QueueAction (its label is the composer's primary
+                    // action), so it borrows the glyph instead.
+                    icon: <SparklesIcon size={11} />,
+                    onSubmit: queue,
+                  }
+                : {
+                    label: inReview ? "Add to review" : "Start a review",
+                    busyLabel: "Saving…",
+                    title: inReview
+                      ? "Add this to your pending review. Nobody sees it until you submit"
+                      : "Begin a batched review; nothing is posted until you submit it",
+                    onSubmit: post(true),
+                  }
+            }
             secondary={{
               label: "Comment",
               busyLabel: "Posting…",

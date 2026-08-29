@@ -1,21 +1,37 @@
 import { describe, expect, it } from "vitest";
 
-import type { SessionState, TabKind, TaskStatus, Worktree, WorktreeTab } from "../../bindings";
+import type {
+  AgentKind,
+  SessionState,
+  TabKind,
+  TaskStatus,
+  Worktree,
+  WorktreeTab,
+} from "../../bindings";
 import type { PendingLaunch } from "../../state/AppContext";
+import { palette } from "../../theme/colors";
 import type { TerminalTab } from "../terminal/orchestrator";
+import { aiWorkDot } from "./FilePickerPanel";
 import {
+  availableFileTabs,
+  BASE_ID,
   defaultTabTitle,
   effectiveSessionState,
   finishedSetups,
+  focusedAgentFor,
   isTreeLaunchDead,
+  type MainTab,
   mergeWorktrees,
+  type OpenCheckLog,
   pendingWorktree,
+  prDiffModeFor,
   resolveActiveTab,
+  resolveFileTab,
   shouldHoldTerminal,
   startTabFor,
-  tabsToCloseForWorktree,
   withLiveWorktreeStatus,
 } from "./model";
+import { tabsToCloseForWorktree } from "./useWorktreeDeletion";
 
 /** Minimal Worktree as the backend ships it: no invented status/activity. */
 function worktree(id: string): Worktree {
@@ -284,43 +300,203 @@ describe("shouldHoldTerminal", () => {
 
 describe("resolveActiveTab", () => {
   const base = {
-    isBaseActive: false,
     selectedFile: null as string | null,
     setupFor: null as string | null,
     activeId: "AK-1",
     extraTabIds: [] as string[],
+    checkLog: null as OpenCheckLog | null,
   };
 
-  it("defaults a never-visited worktree to the Issue tab", () => {
-    expect(resolveActiveTab(undefined, base)).toBe("issue");
-  });
-
-  it("defaults the base entry (no ticket) to the Terminal tab", () => {
-    expect(resolveActiveTab(undefined, { ...base, isBaseActive: true })).toBe("terminal");
+  it("defaults a never-visited worktree to the Terminal tab", () => {
+    expect(resolveActiveTab(undefined, base)).toBe("terminal");
   });
 
   it("keeps a remembered Terminal tab as-is", () => {
     expect(resolveActiveTab("terminal", base)).toBe("terminal");
   });
 
-  it("falls back off a remembered Issue tab for the base entry — it has no ticket", () => {
-    expect(resolveActiveTab("issue", { ...base, isBaseActive: true })).toBe("terminal");
-  });
-
   it("keeps the File tab only while a file is actually open", () => {
     expect(resolveActiveTab("file", { ...base, selectedFile: "src/main.rs" })).toBe("file");
-    expect(resolveActiveTab("file", base)).toBe("issue");
+    expect(resolveActiveTab("file", base)).toBe("terminal");
   });
 
   it("keeps the Setup tab only while setup is running for THIS worktree", () => {
     expect(resolveActiveTab("setup", { ...base, setupFor: "AK-1" })).toBe("setup");
     // A different worktree's setup superseded the single setupFor slot.
-    expect(resolveActiveTab("setup", { ...base, setupFor: "AK-2" })).toBe("issue");
+    expect(resolveActiveTab("setup", { ...base, setupFor: "AK-2" })).toBe("terminal");
   });
 
   it("keeps a remembered extra tab only while that tab still exists", () => {
     expect(resolveActiveTab("tab:a1", { ...base, extraTabIds: ["a1", "b2"] })).toBe("tab:a1");
-    expect(resolveActiveTab("tab:a1", { ...base, extraTabIds: ["b2"] })).toBe("issue");
+    expect(resolveActiveTab("tab:a1", { ...base, extraTabIds: ["b2"] })).toBe("terminal");
+  });
+
+  // The log itself is deliberately not persisted, so a remembered "checkLog" tab
+  // routinely comes back with an empty slot — after a reload, or on a worktree
+  // whose log was closed elsewhere.
+  it("keeps the check-log tab only while a log is actually open", () => {
+    const checkLog: OpenCheckLog = {
+      jobId: 42,
+      name: "test (ubuntu-latest)",
+      url: null,
+      prRepo: "acme/api",
+    };
+    expect(resolveActiveTab("checkLog", { ...base, checkLog })).toBe("checkLog");
+    expect(resolveActiveTab("checkLog", base)).toBe("terminal");
+  });
+});
+
+describe("focusedAgentFor", () => {
+  const base = {
+    activeTab: "terminal" as MainTab,
+    activeId: "AK-1",
+    extraTabs: [] as WorktreeTab[],
+    worktreeAgent: "Claude" as AgentKind | null,
+  };
+
+  it("points at the worktree's work session on the Terminal tab", () => {
+    expect(focusedAgentFor(base)).toEqual({ termKey: "tree:AK-1", agentKind: "Claude" });
+  });
+
+  // The base entry is the repo root on the default branch: its terminal is a
+  // plain shell, and a shell has no context window to meter.
+  it("has nothing to point at on the base worktree", () => {
+    expect(focusedAgentFor({ ...base, activeId: BASE_ID })).toBeNull();
+  });
+
+  it("has nothing to point at with no worktree open, or none launched yet", () => {
+    expect(focusedAgentFor({ ...base, activeId: "" })).toBeNull();
+    expect(focusedAgentFor({ ...base, worktreeAgent: null })).toBeNull();
+  });
+
+  it("points at an extra agent tab's own session, with that tab's provider", () => {
+    const tabs = [extraTabRow("a1", "agent", "Codex"), extraTabRow("b2", "agent", "Codex 2")];
+    expect(focusedAgentFor({ ...base, activeTab: "tab:b2", extraTabs: tabs })).toEqual({
+      termKey: "tree:AK-1:tab:b2",
+      agentKind: "Codex",
+    });
+  });
+
+  // A "+ Terminal" tab runs a shell in the worktree, not an agent — the meter
+  // must not fall back to the worktree's work session beside it.
+  it("has nothing to point at on a plain Terminal tab", () => {
+    const tabs = [extraTabRow("t1", "terminal", "Terminal 2")];
+    expect(focusedAgentFor({ ...base, activeTab: "tab:t1", extraTabs: tabs })).toBeNull();
+  });
+
+  it("has nothing to point at for a tab that no longer exists", () => {
+    expect(focusedAgentFor({ ...base, activeTab: "tab:gone" })).toBeNull();
+  });
+
+  // A diff, a setup log and a job log are all things you read *about* the work,
+  // not the work running — the meter belongs to a session on screen.
+  it("has nothing to point at while the main area shows a file, setup or a job log", () => {
+    for (const tab of ["file", "setup", "checkLog"] as const) {
+      expect(focusedAgentFor({ ...base, activeTab: tab })).toBeNull();
+    }
+  });
+});
+
+describe("prDiffModeFor", () => {
+  it("shows GitHub's patch when the file is in the PR and the branch is pushed", () => {
+    expect(prDiffModeFor({ inPr: true, unpushed: 0 })).toBe("pr");
+  });
+
+  // The PR's file list is capped and a binary file has no patch, so "in the PR"
+  // is genuinely false for real files on a big PR — it degrades to the local
+  // diff rather than to nothing.
+  it("falls back to the local diff for a file the PR doesn't carry", () => {
+    expect(prDiffModeFor({ inPr: false, unpushed: 0 })).toBe("local");
+    expect(prDiffModeFor({ inPr: false, unpushed: 3 })).toBe("local");
+  });
+
+  // The dangerous case: GitHub's patch describes the pushed head, so on a branch
+  // that has moved it would show older code and anchor comments to lines the user
+  // isn't looking at. Never silently.
+  it("refuses to silently show the PR's version when the branch is ahead", () => {
+    expect(prDiffModeFor({ inPr: true, unpushed: 1 })).toBe("localAhead");
+  });
+});
+
+describe("availableFileTabs", () => {
+  it("offers the PR and its AI work queue only once the branch has one", () => {
+    expect(availableFileTabs({ isBase: false, hasPr: false })).toEqual([
+      "issue",
+      "files",
+      "changes",
+      "history",
+    ]);
+    expect(availableFileTabs({ isBase: false, hasPr: true })).toEqual([
+      "issue",
+      "files",
+      "changes",
+      "history",
+      "pr",
+      "aiWork",
+    ]);
+  });
+
+  // The queue is what you do about the PR, so it sits against the PR's own tab
+  // rather than at the end of the strip.
+  it("puts the AI work queue directly after the PR", () => {
+    const tabs = availableFileTabs({ isBase: false, hasPr: true });
+    expect(tabs[tabs.indexOf("pr") + 1]).toBe("aiWork");
+  });
+
+  it("drops the Issue pane on the base entry — it has no ticket", () => {
+    expect(availableFileTabs({ isBase: true, hasPr: false })).not.toContain("issue");
+  });
+});
+
+/** One dot, two signals. The strip has room for exactly one per tab, so which
+ *  one wins is a real decision — see {@link aiWorkDot}. */
+describe("aiWorkDot", () => {
+  it("takes the accent while the queue has open items", () => {
+    expect(aiWorkDot(false, 3)).toBe("var(--accent)");
+  });
+
+  it("says nothing on an empty, current queue", () => {
+    expect(aiWorkDot(false, 0)).toBeNull();
+  });
+
+  // A count is "there is work here"; a stale brief is "what you are reading may
+  // no longer be true". The second is the one you need to see, so it wins even
+  // when there are open items to report.
+  it("lets a stale brief beat the count", () => {
+    expect(aiWorkDot(true, 0)).toBe(palette.amber);
+    expect(aiWorkDot(true, 3)).toBe(palette.amber);
+  });
+});
+
+describe("resolveFileTab", () => {
+  const task = { isBase: false, hasPr: true };
+
+  it("keeps every pane the worktree actually has", () => {
+    for (const tab of availableFileTabs(task)) {
+      expect(resolveFileTab(tab, task)).toBe(tab);
+    }
+  });
+
+  it("falls back off the Issue pane for the base entry — it has no ticket", () => {
+    expect(resolveFileTab("issue", { isBase: true, hasPr: false })).toBe("changes");
+  });
+
+  // The strip hides these when there's no PR, so a remembered one would leave the
+  // user on a pane with no tab to get back to.
+  it("falls back off the PR panes when the branch has no pull request", () => {
+    expect(resolveFileTab("pr", { isBase: false, hasPr: false })).toBe("changes");
+    expect(resolveFileTab("aiWork", { isBase: false, hasPr: false })).toBe("changes");
+  });
+
+  // The base checkout can still carry a PR (a branch pushed from the repo root),
+  // so the AI work pane survives there even though the ticket pane doesn't.
+  it("keeps the AI work pane on the base entry when it has a pull request", () => {
+    expect(resolveFileTab("aiWork", { isBase: true, hasPr: true })).toBe("aiWork");
+  });
+
+  it("leaves the other panes alone on the base entry", () => {
+    expect(resolveFileTab("files", { isBase: true, hasPr: false })).toBe("files");
+    expect(resolveFileTab("history", { isBase: true, hasPr: false })).toBe("history");
   });
 });
 

@@ -25,12 +25,12 @@ import {
   useAgents,
   useAgentVersionStatus,
   useBoolSetting,
-  useCancelCodexLogin,
+  useClaudeGlobalCapture,
   useCodexAccount,
   useCodexHealth,
-  useCodexLogin,
   useCodexLogout,
   useCodexRateLimits,
+  useSetClaudeGlobalCapture,
   useSetSetting,
   useSetting,
 } from "../../../lib/queries";
@@ -234,12 +234,9 @@ function CodexPanel() {
   const health = useCodexHealth();
   const account = useCodexAccount(health.data?.available === true);
   const limits = useCodexRateLimits(account.data?.connected === true);
-  const login = useCodexLogin();
-  const cancelLogin = useCancelCodexLogin();
   const logout = useCodexLogout();
   const configured = settings?.agents?.find((agent) => agent.key === "Codex");
   const [execDraft, setExecDraft] = useState<string | null>(null);
-  const activeLogin = login.data;
   if (!settings) return null;
   const savedExec = configured?.exec ?? "";
   const exec = execDraft ?? savedExec;
@@ -256,17 +253,23 @@ function CodexPanel() {
 
   return (
     <div className="flex flex-col gap-5">
-      <Block title="App Server">
+      <Block
+        title="Codex CLI"
+        subtitle="Santree launches the real `codex` binary in a terminal. There is no santree-owned Codex service."
+      >
         <div className="mb-3 flex items-center justify-between">
           <Badge
-            color={health.data?.running ? "var(--color-status-green)" : "var(--color-status-amber)"}
+            color={
+              health.data?.available ? "var(--color-status-green)" : "var(--color-status-amber)"
+            }
           >
-            {health.data?.running ? "Running" : health.data?.available ? "Ready" : "Unavailable"}
+            {health.data?.available ? "Ready" : "Unavailable"}
           </Badge>
           <button
             type="button"
             onClick={() => health.refetch()}
-            className="text-[11px] text-muted-2"
+            aria-label="Refresh Codex CLI status"
+            className="cursor-pointer text-[11px] text-muted-2 hover:text-fg-2"
           >
             <RefreshIcon size={12} className={health.isFetching ? "animate-spin" : ""} />
           </button>
@@ -282,48 +285,23 @@ function CodexPanel() {
 
       <Block
         title="Authentication"
-        subtitle="Codex owns and stores all credentials. Santree never receives tokens or API keys."
+        subtitle="Codex owns and stores all credentials. Santree never receives tokens or API keys — it asks `codex login status`."
       >
         <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
-          <KvRow label="Status" value={account.data?.connected ? "Connected" : "Not connected"} />
+          <KvRow label="Status" value={account.data?.connected ? "Signed in" : "Not signed in"} />
           <KvRow label="Method" value={account.data?.authType || "—"} />
-          <KvRow label="Account" value={account.data?.email || "Managed by Codex CLI"} />
-          <KvRow label="Plan" value={account.data?.plan || "—"} />
         </div>
         {account.error && (
           <div className="mt-2 text-[11px] text-status-amber">{account.error.message}</div>
         )}
-        <div className="mt-3 flex gap-2">
-          {!account.data?.connected && !activeLogin && (
-            <Button
-              onClick={() =>
-                login.mutate(false, {
-                  onSuccess: (result) => {
-                    if (result.authUrl) void openUrl(result.authUrl);
-                  },
-                })
-              }
-            >
-              Connect ChatGPT
-            </Button>
-          )}
-          {!account.data?.connected && !activeLogin && (
-            <Button
-              onClick={() =>
-                login.mutate(true, {
-                  onSuccess: (result) => {
-                    if (result.authUrl) void openUrl(result.authUrl);
-                  },
-                })
-              }
-            >
-              Device code
-            </Button>
-          )}
-          {activeLogin && (
-            <Button onClick={() => cancelLogin.mutate(activeLogin.loginId)}>Cancel login</Button>
-          )}
-          {account.data?.connected && (
+        {!account.data?.connected && (
+          <div className="mt-2 text-[11px] leading-[1.55] text-muted-3">
+            Sign in with <code className="font-mono text-fg-2">codex login</code> in a terminal. It
+            opens a browser and finishes in the CLI; Santree watches for it and updates here.
+          </div>
+        )}
+        {account.data?.connected && (
+          <div className="mt-3 flex gap-2">
             <Button
               onClick={() => {
                 if (window.confirm("Sign out of the shared Codex CLI account on this machine?"))
@@ -332,17 +310,16 @@ function CodexPanel() {
             >
               Sign out globally
             </Button>
-          )}
-        </div>
-        {activeLogin?.userCode && (
-          <div className="mt-2 font-mono text-[12px] text-fg-2">
-            Device code: {activeLogin.userCode}
           </div>
         )}
       </Block>
 
-      <Block title="Rate limits">
+      <Block
+        title="Rate limits"
+        subtitle="From Codex's own record of its last turn — it does not update until you run Codex again."
+      >
         <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
+          <KvRow label="Plan" value={limits.data?.plan || "—"} />
           <KvRow label="Primary" value={formatWindow(limits.data?.primary ?? null)} />
           <KvRow label="Secondary" value={formatWindow(limits.data?.secondary ?? null)} />
         </div>
@@ -410,11 +387,13 @@ function ClaudeVersionBlock() {
  *  control), and show santree's inline context-usage bar. santree always injects
  *  its own status line into the sessions it launches (leaving the user's own
  *  `~/.claude/settings.json` untouched), so usage is always captured; the toggle
- *  only gates the in-app bar. */
+ *  only gates the status bar's own segment (see `SessionSegment`). */
 function ClaudeTerminalBlock() {
   const remoteControl = useSetting("app", CLAUDE_REMOTE_CONTROL_KEY);
   const { value: startWithChrome } = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
   const { value: santreeStatusLine } = useBoolSetting("app", CLAUDE_STATUS_LINE_KEY);
+  const capture = useClaudeGlobalCapture();
+  const setCapture = useSetClaudeGlobalCapture();
   const { mutate: setSetting } = useSetSetting();
   const set = (key: string, next: boolean) =>
     setSetting({ scope: "app", key, value: next ? "true" : "false" });
@@ -462,9 +441,29 @@ function ClaudeTerminalBlock() {
         />
         <ToggleRow
           label="Show inline context usage"
-          hint="Display each Claude session's live context-fill bar inside santree, in sync with the terminal's status line. Usage is always captured from santree's own status line; this only toggles the in-app bar, so it reflects instantly on sessions that are already running."
+          hint="Show the open workspace's live context-fill bar in the status bar, in sync with the terminal's own status line. Usage is always captured from santree's status line; this only toggles the in-app bar, so it reflects instantly on sessions that are already running."
           on={santreeStatusLine}
           onChange={(next) => set(CLAUDE_STATUS_LINE_KEY, next)}
+        />
+        <ToggleRow
+          label="Capture usage from all Claude sessions"
+          hint={
+            <>
+              Feed the usage meters from every Claude Code session on this Mac, not only the ones
+              santree starts. santree wraps the status line in{" "}
+              <span className="font-mono">
+                {capture.data?.settingsPath ?? "~/.claude/settings.json"}
+              </span>
+              {capture.data?.originalCommand
+                ? " so it records the usage windows and then runs your own status line unchanged"
+                : " with its own status line"}
+              . Reversible from here; a backup of the file is kept. If santree is removed while this
+              is on, turn it off first or restore the backup, or Claude's status line will error.
+            </>
+          }
+          on={capture.data?.enabled === true}
+          disabled={capture.data === undefined || setCapture.isPending}
+          onChange={(next) => setCapture.mutate(next)}
         />
       </div>
     </Block>

@@ -46,6 +46,32 @@ export function groupChecks(checks: PrCheck[]): CheckSection[] {
   return sections;
 }
 
+/** The counts a checks summary row reads out ("✓ 12 passing ✕ 1 failing"). */
+export interface CheckTally {
+  passing: number;
+  failing: number;
+  running: number;
+  /** Skipped + neutral — everything that finished without a pass/fail verdict. */
+  other: number;
+}
+
+/**
+ * Tally a PR's checks by outcome, for the one-line summary above the list.
+ *
+ * Here rather than in the component so the summary and {@link groupChecks} can
+ * never disagree about what counts as failing — they are the same classification
+ * asked two different ways.
+ */
+export function tallyChecks(checks: PrCheck[]): CheckTally {
+  const count = (s: CheckStatus) => checks.filter((c) => c.status === s).length;
+  return {
+    passing: count("Success"),
+    failing: count("Failure"),
+    running: count("Pending"),
+    other: count("Skipped") + count("Neutral"),
+  };
+}
+
 /**
  * Next collapsed-section set after clicking a section header. With `all`
  * (⌘/Ctrl-click), the clicked section's *resulting* state is mirrored onto every

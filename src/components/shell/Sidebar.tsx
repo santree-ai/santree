@@ -16,6 +16,7 @@ import { SIDEBAR, useAppUi } from "../../state/AppContext";
 import { ChevronLeftIcon, PlusIcon } from "../icons";
 import { EdgeResizeHandle, Spinner } from "../primitives";
 import { SidebarFooter } from "../SidebarFooter";
+import { AddProjectPrompt } from "./AddProjectPrompt";
 import { ProjectTree } from "./ProjectTree";
 import { SidebarNav } from "./SidebarNav";
 import { useAddProject } from "./useAddProject";
@@ -26,41 +27,24 @@ export const TRAFFIC_LIGHTS_INSET = 78;
 
 /** Section label + the add-project action, above the tree. */
 function ProjectsHeader() {
-  const { addProject, isPending, pendingRepo, orgs, chooseOrg, error } = useAddProject();
+  const flow = useAddProject();
 
   return (
     <div className="flex-none">
-      <div className="flex h-7 items-center gap-1.5 px-4 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-5">
+      <div className="mt-2 flex h-8 items-center gap-1.5 px-4 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-5">
         Projects
         <button
           type="button"
-          onClick={addProject}
-          disabled={isPending}
+          onClick={flow.addProject}
+          disabled={flow.isPending}
           aria-label="Add project"
           title="Add project"
           className="ml-auto flex h-5 w-5 cursor-pointer items-center justify-center rounded text-muted-4 transition-colors hover:bg-hover hover:text-fg-2 disabled:cursor-default"
         >
-          {isPending ? <Spinner size={11} /> : <PlusIcon size={12} />}
+          {flow.isPending ? <Spinner size={11} /> : <PlusIcon size={12} />}
         </button>
       </div>
-      {error && <p className="px-4 pb-1 text-[11px] text-[var(--color-status-red)]">{error}</p>}
-      {/* Asked only when several Linear workspaces are connected and the repo's
-          own CLI config didn't already answer it. */}
-      {pendingRepo && (
-        <div className="mx-2.5 mb-1.5 rounded-md border border-line bg-surface p-2">
-          <p className="pb-1 text-[11px] text-muted-4">Linear workspace for {pendingRepo}</p>
-          {orgs.map((org) => (
-            <button
-              key={org.slug}
-              type="button"
-              onClick={() => chooseOrg(org.slug)}
-              className="flex h-6 w-full cursor-pointer items-center rounded px-1.5 text-[12px] text-fg-2 transition-colors hover:bg-hover"
-            >
-              {org.name}
-            </button>
-          ))}
-        </div>
-      )}
+      <AddProjectPrompt flow={flow} className="mx-2.5 mb-1.5" />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AgentState, SessionState, Worktree } from "../../bindings";
+import { HOOK_STALE_AFTER_MS } from "../../lib/attention";
 import type { TerminalTab } from "../terminal/orchestrator";
 import {
   attentionCount,
@@ -9,12 +10,8 @@ import {
   buildAgentEntries,
   countAttention,
   DONE_WINDOW_MS,
-  filterAgents,
-  groupAgents,
-  groupAgentsByProject,
   parseTermKey,
   type RepoData,
-  repoLabel,
   terminalRefFor,
 } from "./registry";
 
@@ -116,12 +113,6 @@ describe("parseTermKey", () => {
       ticket: null,
       tabId: null,
       pr: "acme/web#4821",
-    });
-    expect(parseTermKey("dev:/Users/me/repo")).toEqual({
-      kind: "dev",
-      ticket: null,
-      tabId: null,
-      pr: null,
     });
   });
 
@@ -237,7 +228,6 @@ describe("buildAgentEntries", () => {
           session({ sessionId: "work", termKey: "tree:AK-1" }),
           session({ sessionId: "desk", termKey: "triage:__repo__:canary" }),
           session({ sessionId: "review", termKey: "ai-review:acme/app#7" }),
-          session({ sessionId: "dev", termKey: "dev:/repo" }),
         ],
       }),
     );
@@ -248,7 +238,6 @@ describe("buildAgentEntries", () => {
       { project: "Knowledge Base", purpose: "Worktree", title: "AK-1" },
       { project: "Workspace", purpose: "Triage desk", title: "Triage desk" },
       { project: "Reviews", purpose: "AI review", title: "acme/app#7" },
-      { project: "Santree", purpose: "Dev workspace", title: "Dev" },
     ]);
   });
 
@@ -266,17 +255,17 @@ describe("buildAgentEntries", () => {
   });
 
   it("keeps sessions scoped to something that was never a repo", () => {
-    // The Dev tab keys its session by `@dev`, which has no checkbox in the repo
-    // picker — filtering it out would hide it with no way to bring it back.
+    // Filtering is "known but not selected", not "not selected": a session whose
+    // repo was never registered has no checkbox to turn back on, so dropping it
+    // would hide it permanently.
     const entries = buildAgentEntries(
       build({
         repos: [repoData({ repo: "canary" })],
         allRepos: ["canary", "other"],
-        sessions: [session({ sessionId: "dev", termKey: "dev:/x", repo: "@dev" })],
+        sessions: [session({ sessionId: "stray", termKey: "tree:AK-9", repo: "unregistered" })],
       }),
     );
-    expect(entries.map((e) => e.sessionId)).toEqual(["dev"]);
-    expect(entries[0].title).toBe("Dev");
+    expect(entries.map((e) => e.sessionId)).toEqual(["stray"]);
   });
 
   it("never borrows one repo's worktree for another repo's ticket", () => {
@@ -388,46 +377,42 @@ describe("buildAgentEntries", () => {
   });
 });
 
-describe("groupAgents", () => {
-  it("orders buckets by urgency and drops empty ones", () => {
+describe("terminal titles", () => {
+  /** The title of the pane running a session, joined through the live tab —
+   *  which is also the live-PTY gate, since only open panes have an entry. */
+  it("joins a live pane's title onto the session it hosts", () => {
     const entries = buildAgentEntries(
       build({
-        terminals: liveTabs("tree:AK-1", "tree:AK-2", "tree:AK-3"),
-        sessions: [
-          session({ sessionId: "i", state: "idle", termKey: "tree:AK-3" }),
-          session({ sessionId: "w", state: "permission", termKey: "tree:AK-1" }),
-          session({ sessionId: "r", state: "active", termKey: "tree:AK-2" }),
-        ],
+        sessions: [session({ sessionId: "a", termKey: "tree:AK-1" })],
+        terminals: liveTabs("tree:AK-1"),
+        titles: new Map([["tree:AK-1", "\u25d0 Fix the flaky suite"]]),
       }),
     );
-    expect(groupAgents(entries).map((g) => g.bucket)).toEqual(["attention", "working", "idle"]);
+    expect(entries[0].terminalTitle).toBe("\u25d0 Fix the flaky suite");
   });
 
-  it("sorts the blocked agents oldest-first and everything else newest-first", () => {
+  it("takes no title for a session with no live PTY", () => {
+    // A title left over from a process that has gone is a ghost: it would keep
+    // saying "working" with nothing running that could ever correct it.
     const entries = buildAgentEntries(
       build({
-        terminals: liveTabs("tree:a", "tree:b", "tree:c", "tree:d"),
-        sessions: [
-          session({ sessionId: "new-ask", state: "waiting", termKey: "tree:a", updatedAtMs: NOW }),
-          session({
-            sessionId: "old-ask",
-            state: "waiting",
-            termKey: "tree:b",
-            updatedAtMs: NOW - 60_000,
-          }),
-          session({
-            sessionId: "old-run",
-            state: "active",
-            termKey: "tree:c",
-            updatedAtMs: NOW - 60_000,
-          }),
-          session({ sessionId: "new-run", state: "active", termKey: "tree:d", updatedAtMs: NOW }),
-        ],
+        sessions: [session({ sessionId: "a", termKey: "tree:AK-1" })],
+        terminals: [],
+        titles: new Map([["tree:AK-1", "\u25d0 Fix the flaky suite"]]),
       }),
     );
-    const groups = groupAgents(entries);
-    expect(groups[0].entries.map((e) => e.sessionId)).toEqual(["old-ask", "new-ask"]);
-    expect(groups[1].entries.map((e) => e.sessionId)).toEqual(["new-run", "old-run"]);
+    expect(entries[0].live).toBe(false);
+    expect(entries[0].terminalTitle).toBeNull();
+  });
+
+  it("gives a session whose pane has set no title nothing to read", () => {
+    const entries = buildAgentEntries(
+      build({
+        sessions: [session({ sessionId: "a", termKey: "tree:AK-1" })],
+        terminals: liveTabs("tree:AK-1"),
+      }),
+    );
+    expect(entries[0].terminalTitle).toBeNull();
   });
 });
 
@@ -443,68 +428,26 @@ describe("attention counting", () => {
 
   it("counts only live agents that are blocked on the user", () => {
     const entries = buildAgentEntries(build({ sessions, terminals }));
-    expect(attentionCount(entries)).toBe(2);
+    expect(attentionCount(entries, NOW)).toBe(2);
   });
 
   it("agrees with the badge's own shortcut over the raw reads", () => {
     // The badge must never claim an alert the panel doesn't show.
     const entries = buildAgentEntries(build({ sessions, terminals }));
-    expect(countAttention(sessions, terminals)).toBe(attentionCount(entries));
-  });
-});
-
-describe("repoLabel", () => {
-  it("renders the Dev tab's pseudo-repo as a name, not a raw key", () => {
-    expect(repoLabel("@dev")).toBe("Dev");
-    expect(repoLabel("canary-technologies-corp/canary")).toBe("canary-technologies-corp/canary");
-  });
-});
-
-describe("filterAgents", () => {
-  const entries = buildAgentEntries(
-    build({
-      repos: [repoData({ worktrees: [worktree("AK-1")] })],
-      sessions: [
-        session({ sessionId: "a", termKey: "tree:AK-1" }),
-        session({
-          sessionId: "b",
-          termKey: "tree:AK-2",
-          state: "permission",
-          message: "Bash(rm -rf build)",
-        }),
-      ],
-    }),
-  );
-
-  it("matches the ticket, the title and the pending question", () => {
-    expect(filterAgents(entries, "ak-1").map((e) => e.sessionId)).toEqual(["a"]);
-    expect(filterAgents(entries, "Task AK").map((e) => e.sessionId)).toEqual(["a"]);
-    expect(filterAgents(entries, "rm -rf").map((e) => e.sessionId)).toEqual(["b"]);
+    expect(countAttention(sessions, terminals, NOW)).toBe(attentionCount(entries, NOW));
   });
 
-  it("returns everything for an empty query", () => {
-    expect(filterAgents(entries, "  ")).toHaveLength(2);
-  });
-});
-
-describe("groupAgentsByProject", () => {
-  it("keeps first-seen project order and sessions together", () => {
-    const entries = buildAgentEntries(
-      build({
-        repos: [repoData({ worktrees: [worktree("AK-1"), worktree("AK-2")] })],
-        sessions: [
-          session({ sessionId: "a", termKey: "tree:AK-1" }),
-          session({ sessionId: "b", termKey: "ai-review:acme/app#7" }),
-          session({ sessionId: "c", termKey: "tree:AK-2" }),
-        ],
-      }),
-    );
-    entries[0].project = "Voice";
-    entries[2].project = "Voice";
-
-    expect(groupAgentsByProject(entries).map((g) => [g.project, g.entries.length])).toEqual([
-      ["Voice", 2],
-      ["Reviews", 1],
-    ]);
+  it("stops counting a block whose hook event has gone stale, in both", () => {
+    // A prompt nobody answered for half an hour is a ghost, not an alarm — and
+    // the tree stops drawing it at exactly this moment, so the badge must too.
+    const old = NOW - HOOK_STALE_AFTER_MS - 1;
+    const stale = [
+      session({ sessionId: "a", state: "waiting", termKey: "tree:AK-1", updatedAtMs: old }),
+    ];
+    const live = liveTabs("tree:AK-1");
+    expect(countAttention(stale, live, NOW)).toBe(0);
+    expect(
+      attentionCount(buildAgentEntries(build({ sessions: stale, terminals: live })), NOW),
+    ).toBe(0);
   });
 });

@@ -6,6 +6,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ErrorScreen } from "./components/ErrorScreen";
 import { QuitGuard } from "./components/QuitGuard";
 import { TerminalsProvider } from "./features/terminal/TerminalsContext";
+import { initFocusModality } from "./lib/focusModality";
 import { forwardConsoleToLog } from "./lib/logging";
 import { applyZoom, loadZoom } from "./lib/zoom";
 import { routeTree } from "./routeTree.gen";
@@ -20,6 +21,9 @@ forwardConsoleToLog();
 // run every launch — and before first paint, or the app renders at normal size
 // and visibly jumps.
 applyZoom(loadZoom());
+
+// Track pointer vs keyboard so focus rings only show for keyboard navigation.
+initFocusModality();
 
 // Backend data rarely changes within a session; cache it generously.
 const queryClient = new QueryClient({

@@ -27,7 +27,6 @@ import {
   queryKeys,
   useAgentSession,
   useBoolSetting,
-  useClaudeHookSettings,
   useInvestigatePrompt,
   useResolvedProviderSetting,
   useResolvedSetting,
@@ -36,6 +35,7 @@ import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
+import { useHookInjection } from "../terminal/useHookInjection";
 import { triageTerminalRef } from "./providerSessions";
 
 export function InvestigatePane({
@@ -133,8 +133,9 @@ export function InvestigatePane({
   // flags" gotcha) and no way to turn it off.
   const remoteControlSetting = useResolvedSetting(repo, CLAUDE_REMOTE_CONTROL_KEY);
   const remoteControlEnabled = remoteControlSetting.data !== "false";
-  // Claude keeps its hook-backed state pipeline; Codex state comes from App Server.
-  const hookSettings = useClaudeHookSettings().data;
+  // Whichever way this provider takes santree's session hooks. Without them the
+  // investigation is unresumable and never reaches the registry.
+  const hooks = useHookInjection();
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
   const seed = agentSessionSeed(session.data, {
     repo,
@@ -153,10 +154,7 @@ export function InvestigatePane({
       : undefined,
     remoteControl:
       provider.capabilities.remoteControl && remoteControlEnabled ? ticketId : undefined,
-    settingsFlag:
-      provider.capabilities.cliLaunchOptions && hookSettings
-        ? `--settings ${shellQuote(hookSettings)}`
-        : undefined,
+    settingsFlag: hooks.flagFor(resolvedAgent),
     chrome: provider.capabilities.cliLaunchOptions && startWithChrome,
   });
   // Hold the embed until the seed decision, the remote-control setting, and the
@@ -165,6 +163,7 @@ export function InvestigatePane({
   const ready =
     !needsSeed ||
     (!session.isFetching &&
+      hooks.readyFor(resolvedAgent) &&
       !remoteControlSetting.isLoading &&
       investigatePrompt.isFetched &&
       model.isFetched &&

@@ -205,6 +205,10 @@ export class XtermRenderer implements TerminalRenderer {
     this.term.onData(cb);
   }
 
+  onTitle(cb: (title: string) => void) {
+    this.term.onTitleChange(cb);
+  }
+
   resize(cols: number, rows: number) {
     this.term.resize(cols, rows);
   }

@@ -9,8 +9,14 @@ const model = vi.hoisted(() => ({
   toggleInfo: vi.fn(),
   setInfoWidth: vi.fn(),
   repo: "acme/app",
+  focusFile: vi.fn(),
+  openAiReview: vi.fn(),
 }));
 vi.mock("./model", () => ({ useReviewsModel: () => model }));
+
+// Reaches the router and the query client to create the PR's worktree; the panel
+// only needs the callback to exist.
+vi.mock("./useStartWork", () => ({ useStartWorkFromReviews: () => vi.fn() }));
 
 vi.mock("./ReviewBriefSection", () => ({ ReviewBriefSection: () => <div /> }));
 vi.mock("./ReviewIssuePane", () => ({ ReviewIssuePane: () => <div data-testid="issue-pane" /> }));

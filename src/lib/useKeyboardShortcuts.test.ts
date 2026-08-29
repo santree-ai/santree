@@ -16,7 +16,6 @@ vi.mock("@tanstack/react-router", () => ({
 
 const app = vi.hoisted(() => ({
   triageEnabled: false,
-  devEnabled: false,
   toggleSidebar: vi.fn(),
   toggleShortcuts: vi.fn(),
   toggleCommandPalette: vi.fn(),
@@ -36,7 +35,7 @@ vi.mock("./queries", () => ({
 }));
 
 vi.mock("../state/AppContext", () => ({
-  useAppOptional: () => ({ triageEnabled: app.triageEnabled, devEnabled: app.devEnabled }),
+  useAppOptional: () => ({ triageEnabled: app.triageEnabled }),
   useAppUiOptional: () => ({
     toggleSidebar: app.toggleSidebar,
     toggleShortcuts: app.toggleShortcuts,
@@ -90,7 +89,6 @@ beforeEach(() => {
   router.pathname = "/";
   router.navigate.mockClear();
   app.triageEnabled = false;
-  app.devEnabled = false;
   app.toggleSidebar.mockClear();
   app.toggleShortcuts.mockClear();
   document.body.innerHTML = "";
@@ -162,23 +160,6 @@ describe("useKeyboardShortcuts", () => {
     }
   });
 
-  it("puts Dev last, below the destinations everyone has", () => {
-    app.triageEnabled = true;
-    app.devEnabled = true;
-    renderHook(() => useKeyboardShortcuts());
-
-    for (const [key, to] of [
-      ["1", "/triage"],
-      ["2", "/issues"],
-      ["3", "/reviews"],
-      ["4", "/dev"],
-    ]) {
-      router.navigate.mockClear();
-      press(key, { metaKey: true });
-      expect(router.navigate).toHaveBeenCalledWith({ to });
-    }
-  });
-
   it("shifts the numbers up when Triage is disabled (no gap, no dead number)", () => {
     renderHook(() => useKeyboardShortcuts());
 
@@ -192,31 +173,14 @@ describe("useKeyboardShortcuts", () => {
     expect(router.navigate).not.toHaveBeenCalled();
   });
 
-  it("takes Dev's slot away — and shifts the rest back — once it's disabled", () => {
-    app.devEnabled = true;
-    const { unmount } = renderHook(() => useKeyboardShortcuts());
-
-    press("3", { metaKey: true });
-    expect(router.navigate).toHaveBeenCalledWith({ to: "/dev" });
-    unmount();
-
-    app.devEnabled = false;
-    router.navigate.mockClear();
-    renderHook(() => useKeyboardShortcuts());
-    press("3", { metaKey: true });
-    expect(router.navigate).not.toHaveBeenCalled();
-  });
-
-  it("leaves the workspace and the agents overview unnumbered", () => {
+  it("leaves the workspace unnumbered — it is reached by picking a worktree", () => {
     app.triageEnabled = true;
-    app.devEnabled = true;
     renderHook(() => useKeyboardShortcuts());
 
     for (const key of ["1", "2", "3", "4"]) {
       router.navigate.mockClear();
       press(key, { metaKey: true });
       expect(router.navigate).not.toHaveBeenCalledWith({ to: "/trees" });
-      expect(router.navigate).not.toHaveBeenCalledWith({ to: "/" });
     }
   });
 

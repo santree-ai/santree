@@ -15,13 +15,12 @@
 import { useState } from "react";
 
 import type { ReviewDraft } from "../../bindings";
-import { AgentIcon, PencilIcon, PlusIcon, TrashIcon } from "../../components/icons";
+import { AgentIcon, PencilIcon, TrashIcon } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
 import { Button, Pill } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
 import { SuggestionOriginal } from "../../components/Suggestion";
 import {
-  useAddReviewWorkItem,
   useDeleteReviewDraft,
   usePublishReviewDrafts,
   useReviewWorkItems,
@@ -33,6 +32,7 @@ import type { CommentTarget } from "./commentTarget";
 import { composeDraftBody, splitDraftBody } from "./draftBody";
 import { anchorLabel } from "./InlineCommentBox";
 import { patchLineRange } from "./patchLines";
+import { QueueAction } from "./QueueAction";
 
 function basename(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
@@ -43,6 +43,7 @@ export function ReviewDraftCard({
   target,
   patch,
   stale = false,
+  mode = "publish",
 }: {
   draft: ReviewDraft;
   target: CommentTarget;
@@ -52,14 +53,23 @@ export function ReviewDraftCard({
   /** Written against a head the PR has moved past: its line numbers describe code
    *  that isn't there any more, so publishing is refused. */
   stale?: boolean;
+  /**
+   * What the card's primary action does with the draft.
+   *
+   * `publish` is reviewing someone else's PR: the draft's destination is their
+   * conversation, so it goes into your pending review. `queue` is your own PR,
+   * where posting a comment at yourself achieves nothing — the useful destination
+   * is the work queue, and the draft becomes something to fix. Editing and
+   * deleting are the same either way.
+   */
+  mode?: "publish" | "queue";
 }) {
   const [editing, setEditing] = useState(false);
   const update = useUpdateReviewDraft(target.prRepo, target.number);
   const remove = useDeleteReviewDraft(target.prRepo, target.number);
   const publish = usePublishReviewDrafts(target.prRepo, target.number);
   const { data: workItems } = useReviewWorkItems(target.prRepo, target.number);
-  const addWorkItem = useAddReviewWorkItem(target.prRepo, target.number);
-  const inWorklist = workItems?.some(
+  const inQueue = workItems?.some(
     (item) => item.source === "aiDraft" && item.sourceId === draft.id,
   );
 
@@ -143,40 +153,39 @@ export function ReviewDraftCard({
                 <TrashIcon size={10} />
                 Delete
               </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={inWorklist || addWorkItem.isPending}
-                onClick={() =>
-                  addWorkItem.mutate({
-                    id: crypto.randomUUID(),
-                    body: composeDraftBody(draft),
-                    source: "aiDraft",
-                    sourceId: draft.id,
-                    path: draft.path,
-                    line: draft.line,
-                    startLine: draft.startLine,
-                    onRight: draft.onRight,
-                  })
-                }
-              >
-                <PlusIcon size={10} />
-                {inWorklist ? "In worklist" : "Add to worklist"}
-              </Button>
-              <Button
-                size="sm"
-                variant="primary"
-                className="ml-auto"
-                disabled={publish.isPending || stale || !target.headSha}
-                title={
-                  stale
-                    ? "This draft was written against an earlier commit, so its lines may not match the code any more. Ask the AI review to look again, or delete it."
-                    : "Add this comment to your pending review. Nobody else sees it until you finish the review."
-                }
-                onClick={() => publish.mutate([draft.id])}
-              >
-                {publish.isPending ? "Adding…" : addLabel}
-              </Button>
+              {/* The AI work queue's own spark — see {@link QueueAction}. */}
+              <QueueAction
+                prRepo={target.prRepo}
+                number={target.number}
+                queued={!!inQueue}
+                buttonVariant={mode === "queue" ? "primary" : "ghost"}
+                className={mode === "queue" ? "ml-auto" : undefined}
+                item={{
+                  body: composeDraftBody(draft),
+                  source: "aiDraft",
+                  sourceId: draft.id,
+                  path: draft.path,
+                  line: draft.line,
+                  startLine: draft.startLine,
+                  onRight: draft.onRight,
+                }}
+              />
+              {mode === "publish" && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  className="ml-auto"
+                  disabled={publish.isPending || stale || !target.headSha}
+                  title={
+                    stale
+                      ? "This draft was written against an earlier commit, so its lines may not match the code any more. Ask the AI review to look again, or delete it."
+                      : "Add this comment to your pending review. Nobody else sees it until you finish the review."
+                  }
+                  onClick={() => publish.mutate([draft.id])}
+                >
+                  {publish.isPending ? "Adding…" : addLabel}
+                </Button>
+              )}
             </div>
           </>
         )}

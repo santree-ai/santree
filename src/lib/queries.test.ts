@@ -30,6 +30,8 @@ vi.mock("../bindings", () => ({
     updateBaseBranch: git.ok,
     codexAccount: codex.account,
     watchWorktrees: vi.fn(async () => ({ status: "ok" as const, data: null })),
+    // The manual refresh clears the backend's Linear caches before refetching.
+    linearInvalidateCaches: vi.fn(async () => null),
   },
   events: {
     worktreeChanged: {
@@ -472,6 +474,28 @@ describe("applyStage", () => {
     const result = applyStage(files, { action: "unstageAll" });
     expect(result.every((f) => !f.staged)).toBe(true);
   });
+
+  it("stage: a directory path moves everything beneath it", () => {
+    const files = [file("src/a.ts", false), file("src/deep/b.ts", false), file("lib/c.ts", false)];
+    const result = applyStage(files, { action: "stage", path: "src" });
+    expect(result.filter((f) => f.staged).map((f) => f.path)).toEqual([
+      "src/a.ts",
+      "src/deep/b.ts",
+    ]);
+  });
+
+  it("stage: a directory never captures a sibling that merely shares its prefix", () => {
+    const files = [file("src/a.ts", false), file("src2/b.ts", false)];
+    const result = applyStage(files, { action: "stage", path: "src" });
+    expect(result.find((f) => f.path === "src2/b.ts")?.staged).toBe(false);
+  });
+
+  it("unstage: a directory path unstages everything beneath it", () => {
+    const files = [file("src/a.ts", true), file("lib/b.ts", true)];
+    const result = applyStage(files, { action: "unstage", path: "src" });
+    expect(result.find((f) => f.path === "src/a.ts")?.staged).toBe(false);
+    expect(result.find((f) => f.path === "lib/b.ts")?.staged).toBe(true);
+  });
 });
 
 describe("git mutations: what they refresh", () => {
@@ -888,7 +912,7 @@ describe("useRefreshExternal", () => {
   // Nothing polls Linear/GitHub and window-focus refetching is off, so this hook
   // is the *only* way a just-created ticket or PR reaches the UI before the view
   // remounts past its stale window. A key missing here is silently unrefreshable.
-  it("invalidates every external-service read", () => {
+  it("invalidates every external-service read", async () => {
     const keys = refreshed();
     for (const prefix of [
       queryKeys.tasksPrefix,
@@ -903,6 +927,11 @@ describe("useRefreshExternal", () => {
     ]) {
       expect(keys).toContain(key(prefix));
     }
+
+    // The org-keyed backend cache must be dropped too, or a refresh inside its
+    // TTL is served the very list the user is refreshing to get past.
+    const { commands } = await import("../bindings");
+    expect(commands.linearInvalidateCaches).toHaveBeenCalled();
   });
 
   // Local git state has a filesystem watcher; re-pulling it here would duplicate

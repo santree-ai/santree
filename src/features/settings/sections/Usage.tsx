@@ -158,10 +158,10 @@ function CodexUsagePanel() {
     return (
       <EmptyState
         className="py-10"
-        title="Codex isn't connected."
+        title="Codex isn't signed in."
         subtitle={
           account.error?.message ||
-          "Connect Codex in Settings → Agents → Codex to see its current usage limits."
+          "Run `codex login` in a terminal. Santree watches for it and picks up the usage from your next Codex turn."
         }
       />
     );
@@ -171,12 +171,10 @@ function CodexUsagePanel() {
     <div className="flex flex-col gap-4">
       <Card title="Account">
         <div className="grid grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-[12px]">
-          <span className="text-muted-3">Account</span>
-          <span className="text-fg-2">{account.data.email || "Managed by Codex CLI"}</span>
+          <span className="text-muted-3">Signed in with</span>
+          <span className="text-fg-2">{account.data.authType || "Codex CLI"}</span>
           <span className="text-muted-3">Plan</span>
-          <span className="text-fg-2">
-            {limits.data?.plan || account.data.plan || "Unavailable"}
-          </span>
+          <span className="text-fg-2">{limits.data?.plan || "Unavailable"}</span>
         </div>
       </Card>
       <Card title="Rate limits">
@@ -192,8 +190,10 @@ function CodexUsagePanel() {
         </div>
       </Card>
       <p className="px-1 text-[11px] leading-[1.5] text-muted-4">
-        Codex reports current rate-limit windows and live thread token usage. Santree does not
-        currently receive a durable billing history, so it does not estimate historical cost.
+        These are the windows Codex recorded on its last turn, read back from its own session
+        history — they don't move until you run Codex again. Codex exposes no live usage source that
+        doesn't require its credentials, and Santree never handles those. There is no durable
+        billing history either, so Santree doesn't estimate historical cost.
       </p>
     </div>
   );

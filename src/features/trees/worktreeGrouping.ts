@@ -4,9 +4,11 @@
  *  worktrees can share the same nesting. */
 import type { Worktree } from "../../bindings";
 
-/** Deepest level that still indents. A long chain keeps its order but stops
- *  stepping in, so it can't squeeze the cards at the bottom of a stack. */
-const MAX_DEPTH = 3;
+/** Deepest level that still indents. A longer chain keeps its order but stops
+ *  stepping in, so a tall stack can't starve the text column of the rows at the
+ *  bottom of it — which is what a sidebar only a few hundred pixels wide would
+ *  otherwise do. Shared with the surfaces that render the nesting. */
+export const MAX_DEPTH = 3;
 
 /**
  * Order one project's worktrees so a stacked one sits directly under the worktree

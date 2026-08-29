@@ -1,10 +1,10 @@
-/** The Settings view: app-wide defaults and per-repo overrides.
+/** The Settings page: app-wide defaults and per-repo overrides.
  *
- * This file is just the frame — its own header (Back + the app/repo scope
- * switch), scope + section state, the section nav column (flat items plus
- * grouped sections like "Actions"), and a data-driven dispatch to one section
- * pane. Each pane lives in `sections/`; shared widgets in `widgets.tsx`. The
- * window chrome and app navigation belong to the app shell. */
+ * Settings takes the whole window — the route root swaps the app shell out for
+ * it — so it draws its own frame: a left column with the way back to the app,
+ * the app/repo scope switch and the section nav (flat items plus grouped
+ * sections like "Actions"), and a content column with the one section pane.
+ * Each pane lives in `sections/`; shared widgets in `widgets.tsx`. */
 
 import { useCanGoBack, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
@@ -26,8 +26,10 @@ import {
   PlugIcon,
   PrIcon,
   TelescopeIcon,
+  TerminalIcon,
 } from "../../components/icons";
 import { Dropdown, Tabs } from "../../components/primitives";
+import { TRAFFIC_LIGHTS_INSET } from "../../components/shell/Sidebar";
 import { useRepos } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
@@ -40,6 +42,7 @@ import { GeneralSection } from "./sections/General";
 import { IntegrationsSection } from "./sections/Integrations";
 import { PromptsSection } from "./sections/Prompts";
 import { RepoLinearSection } from "./sections/RepoLinear";
+import { TerminalSection } from "./sections/Terminal";
 import { UsageSection } from "./sections/Usage";
 import { WorkSection } from "./sections/Work";
 
@@ -73,9 +76,9 @@ const flatten = (nodes: NavNode[]): SectionDef[] =>
 
 const ICON_SIZE = 15;
 
-/** Width of the section-nav column. Fixed: the resizable app sidebar belongs to
- *  the shell, and this nav is a short list of fixed-length labels. */
-const NAV_WIDTH = 240;
+/** Width of the page's left column. Fixed: this nav is a short list of
+ *  fixed-length labels. */
+const NAV_WIDTH = 264;
 
 // The "Actions" group entries, shared between scopes. App scope passes no repo
 // (so each pane shows its app-level defaults); repo scope passes the repo (so
@@ -143,6 +146,12 @@ const APP_NAV: NavNode[] = [
     label: "Environment",
     icon: <KeyIcon size={ICON_SIZE} />,
     render: () => <EnvironmentSection />,
+  },
+  {
+    key: "terminal",
+    label: "Terminal",
+    icon: <TerminalIcon size={ICON_SIZE} />,
+    render: () => <TerminalSection />,
   },
   {
     key: "usage",
@@ -230,15 +239,15 @@ export function SettingsView() {
     <button
       type="button"
       onClick={goBack}
-      className="flex cursor-pointer items-center gap-2 rounded-md py-1 pr-2.5 pl-1.5 text-muted-2 transition-colors hover:bg-hover hover:text-fg-2"
+      className="flex h-7 cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] font-medium text-muted-2 transition-colors hover:bg-hover hover:text-fg-2"
     >
-      <BackArrowIcon size={17} />
-      <span className="text-[13px] font-semibold">Settings</span>
+      <BackArrowIcon size={15} />
+      Back to app
     </button>
   );
 
   const scopeTabs = (
-    <div className="flex h-full items-center gap-2.5 py-1.5">
+    <div className="flex h-8 items-center gap-2.5">
       <Tabs<Scope>
         variant="inset"
         className="h-full gap-0.5"
@@ -279,20 +288,23 @@ export function SettingsView() {
   };
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      {/* The view's own 44px header: Back on the left (where ViewChrome's left
-          cell used to be), the app/repo scope switch on the right. */}
-      <div className="flex h-11 flex-none items-center gap-2.5 border-b border-line bg-surface pr-3 pl-2">
-        {back}
-        <div className="flex-1" />
-        {scopeTabs}
-      </div>
-
-      <div className="flex min-h-0 flex-1">
+    <div className="flex h-full min-h-0 min-w-0 flex-1">
+      {/* Left column. Its top strip is the window's drag region and reserves
+          the traffic-light inset, the same way the shell's sidebar does. */}
+      <div
+        className="flex flex-none flex-col border-r border-line bg-panel"
+        style={{ width: NAV_WIDTH }}
+      >
         <div
-          className="flex flex-none flex-col overflow-y-auto border-r border-line bg-panel"
-          style={{ width: NAV_WIDTH }}
-        >
+          data-tauri-drag-region
+          className="flex h-[38px] flex-none items-center pr-2"
+          style={{ paddingLeft: TRAFFIC_LIGHTS_INSET }}
+        />
+        <div className="flex flex-none flex-col gap-2 border-b border-line px-2.5 pb-3">
+          {back}
+          {scopeTabs}
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="p-2">
             {nav.map((node) =>
               isGroup(node) ? (
@@ -313,12 +325,17 @@ export function SettingsView() {
             )}
           </div>
         </div>
+      </div>
 
+      {/* Content column: a drag strip at the top keeps the window draggable
+          across its whole width, then the one section pane. */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
+        <div data-tauri-drag-region className="h-[38px] flex-none" />
         {active.fullBleed ? (
-          <div className="flex min-h-0 min-w-0 flex-1 bg-app">{active.render(settingsRepo)}</div>
+          <div className="flex min-h-0 min-w-0 flex-1">{active.render(settingsRepo)}</div>
         ) : (
-          <div className="min-w-0 flex-1 overflow-y-auto bg-app">
-            <div className="settings-pane mx-auto w-full max-w-[720px] px-5 pt-6 pb-11 sm:px-[30px]">
+          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+            <div className="settings-pane mx-auto w-full max-w-[720px] px-5 pt-2 pb-11 sm:px-[30px]">
               {active.render(settingsRepo)}
             </div>
           </div>

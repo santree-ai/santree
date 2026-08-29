@@ -23,12 +23,13 @@ import { type AgentTabOptions, useAgentTab } from "./useAgentTab";
  *  the hook must wait for *every* launch flag, so any one of them being unresolved
  *  has to hold the terminal. */
 const backend = vi.hoisted(() => ({
+  codexHooks: "-c 'hooks.SessionStart=[]'" as string | null,
+  codexHooksFetched: true,
   session: {
     type: "fresh",
     agentKind: "Claude",
     executable: "claude",
     sessionId: "s-1",
-    remote: null,
   } as AgentSession | undefined,
   sessionFetching: false,
   flagsFetched: true,
@@ -87,6 +88,10 @@ vi.mock("../../lib/queries", () => ({
     data: "/hooks-no-git.json",
     isFetched: backend.flagsFetched,
   }),
+  useCodexHookFlags: () => ({
+    data: backend.codexHooks,
+    isFetched: backend.codexHooksFetched,
+  }),
 }));
 
 vi.mock("../../state/AppContext", () => ({
@@ -141,7 +146,6 @@ beforeEach(() => {
     agentKind: "Claude",
     executable: "claude",
     sessionId: "s-1",
-    remote: null,
   };
   backend.sessionFetching = false;
   backend.flagsFetched = true;
@@ -275,7 +279,6 @@ describe("useAgentTab", () => {
         agentKind: "Codex",
         executable: "/opt/codex",
         sessionId: "thread-1",
-        remote: "unix:///tmp/codex.sock",
       };
       const t = mount(opts({ agent: "Codex" }));
 
@@ -326,20 +329,21 @@ describe("useAgentTab", () => {
 
     it("passes no Claude-only flags to another agent", () => {
       backend.session = {
-        type: "fresh",
+        type: "resume",
         agentKind: "Codex",
         executable: "/opt/codex",
         sessionId: "s-1",
-        remote: "unix:///tmp/codex.sock",
       };
       const t = mount(opts({ agent: "Codex", remoteControl: "AK-1" }));
       const seed = t.tab().seed ?? "";
 
-      expect(seed).toContain("resume --remote 'unix:///tmp/codex.sock'");
+      expect(seed).toContain("resume 's-1'");
       for (const flag of ["--model", "--effort", "--settings", "--chrome", "--permission-mode"]) {
         expect(seed).not.toContain(flag);
       }
       expect(seed).not.toContain("--remote-control");
+      // The App Server attachment is gone, not merely unused here.
+      expect(seed).not.toContain("--remote ");
     });
 
     it("resumes an on-disk session instead of minting a new one", () => {
@@ -348,12 +352,50 @@ describe("useAgentTab", () => {
         agentKind: "Claude",
         executable: "claude",
         sessionId: "s-old",
-        remote: null,
       };
       const t = mount();
 
       expect(t.tab().seed).toContain("--resume 's-old'");
       expect(t.tab().seed).not.toContain("--session-id");
     });
+  });
+});
+
+describe("Codex hook injection", () => {
+  /** Codex has no launch-time id flag: it mints its own and reports it through
+   *  the `SessionStart` hook. A launch that beats those flags therefore produces
+   *  a session santree can never resume and never sees in the registry — the
+   *  same class of silent drop the Claude flag gate exists for. */
+  it("holds the launch until Codex's hook flags have resolved", () => {
+    backend.session = {
+      type: "resume",
+      agentKind: "Codex",
+      executable: "/opt/codex",
+      sessionId: "s-1",
+    };
+    backend.codexHooksFetched = false;
+    expect(mount(opts({ agent: "Codex" })).tab().preparing).toBe(true);
+
+    backend.codexHooksFetched = true;
+    const seed = mount(opts({ agent: "Codex" })).tab().seed ?? "";
+    expect(seed).toContain("--dangerously-bypass-hook-trust");
+    expect(seed).toContain("hooks.SessionStart");
+  });
+
+  /** A dev build with no hook binary resolves to no flags. That must launch a
+   *  plain Codex rather than stall forever, and must not pass a trust bypass
+   *  with nothing to inject. */
+  it("launches without hooks when none resolve, and without the bypass", () => {
+    backend.session = {
+      type: "resume",
+      agentKind: "Codex",
+      executable: "/opt/codex",
+      sessionId: "s-1",
+    };
+    backend.codexHooks = null;
+    backend.codexHooksFetched = true;
+    const t = mount(opts({ agent: "Codex" }));
+    expect(t.tab().preparing).toBe(false);
+    expect(t.tab().seed ?? "").not.toContain("--dangerously-bypass-hook-trust");
   });
 });

@@ -20,7 +20,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { formatElapsed, useElapsed } from "../lib/useElapsed";
-import { accentActiveStyle, alpha } from "../theme/colors";
+import { alpha } from "../theme/colors";
 import { ChevronDownIcon } from "./icons";
 
 /** The visual tiers a labeled action button can have. One filled style per
@@ -485,7 +485,15 @@ export function Segmented<T extends string>({
   onChange,
   className,
 }: {
-  options: { value: T; label: string; icon?: React.ReactNode }[];
+  options: {
+    value: T;
+    label: string;
+    icon?: React.ReactNode;
+    /** A tally shown after the label ("Bots 3"). Dimmed when the option isn't
+     *  selected and muted at zero, so an empty bucket reads as available rather
+     *  than as something to go looking in. */
+    count?: number;
+  }[];
   value: T;
   onChange: (value: T) => void;
   className?: string;
@@ -507,8 +515,16 @@ export function Segmented<T extends string>({
     >
       {options.map((opt, i) => {
         const active = opt.value === value;
+        // The checked option is *raised*, not tinted. A segmented control picks
+        // how one thing is filtered or drawn — Mine/All, List/Graph — which is a
+        // smaller claim than the accent's "this is the current destination", and
+        // an accent pill inside a toolbar competes with the content it describes.
         const style: CSSProperties = active
-          ? accentActiveStyle()
+          ? {
+              background: "var(--color-raised-2)",
+              border: "1px solid var(--color-line-2)",
+              color: "var(--color-fg)",
+            }
           : { border: "1px solid transparent", color: "var(--color-muted-2)" };
         return (
           // biome-ignore lint/a11y/useSemanticElements: custom-styled segmented control, not a native radio input.
@@ -531,6 +547,11 @@ export function Segmented<T extends string>({
           >
             {opt.icon}
             {opt.label}
+            {opt.count !== undefined && (
+              <span className={`tabular-nums ${opt.count === 0 ? "text-muted-4" : "opacity-70"}`}>
+                {opt.count}
+              </span>
+            )}
           </button>
         );
       })}
@@ -558,8 +579,9 @@ export interface TabItem<T extends string> {
  * Underline style for {@link Tabs}:
  *  - `border` (default): a 2px bottom-border underline sitting on a `border-b`
  *    rail — the original look, used by content/detail tab bars.
- *  - `inset`: an `inset 0 -2px 0` box-shadow underline with no rail — used by
- *    the top {@link NavTabs} chrome where the tabs fill the header height.
+ *  - `inset`: an `inset 0 -2px 0` box-shadow underline with no rail — used
+ *    where the strip *is* the pane's header and the tabs fill its full height,
+ *    so a second rule under them would double the header's bottom edge.
  */
 export type TabsVariant = "border" | "inset";
 
@@ -735,6 +757,53 @@ const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
+ * Close an open menu on Escape, or on a pointer press anywhere outside it.
+ *
+ * Capture phase so the press is still seen when an overlay (xterm) stops
+ * propagation in its own `pointerdown` handler — which used to swallow the
+ * close. `insideRefs` is read through a ref so callers can pass a fresh array
+ * each render without re-registering the listeners.
+ */
+function useDismiss(open: boolean, close: () => void, insideRefs: RefObject<HTMLElement | null>[]) {
+  const inside = useRef(insideRefs);
+  inside.current = insideRefs;
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (inside.current.some((r) => r.current?.contains(target))) return;
+      close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, close]);
+}
+
+/** Up/Down/Home/End roving between a menu's rows — the keyboard half of a menu,
+ *  shared by {@link Dropdown} and {@link ContextMenu}. */
+function roveMenu(e: ReactKeyboardEvent<HTMLDivElement>, menu: HTMLDivElement | null) {
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+  const items = Array.from(menu?.querySelectorAll<HTMLElement>(MENU_ITEM_SELECTOR) ?? []);
+  if (items.length === 0) return;
+  e.preventDefault();
+  const current = items.indexOf(document.activeElement as HTMLElement);
+  let next: number;
+  if (e.key === "Home") next = 0;
+  else if (e.key === "End") next = items.length - 1;
+  else if (current === -1) next = e.key === "ArrowDown" ? 0 : items.length - 1;
+  else if (e.key === "ArrowDown") next = (current + 1) % items.length;
+  else next = (current - 1 + items.length) % items.length;
+  items[next]?.focus();
+}
+
+/**
  * A click-away dropdown: `trigger` renders the opener (it's handed a `toggle`),
  * `children` renders the menu (handed a `close`). The single source for the menus
  * the bottom bar and the start-task button each hand-rolled.
@@ -825,28 +894,10 @@ export function Dropdown({
     };
   }, [open, placement, align]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: PointerEvent) => {
-      const target = e.target as Node;
-      // The menu is portaled out of `ref`, so check it separately — otherwise a
-      // click inside the menu reads as "outside" and closes it before the item
-      // handler runs.
-      if (ref.current?.contains(target) || menuRef.current?.contains(target)) return;
-      close();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    // Capture phase so we still see the click even if an overlay (xterm) stops
-    // propagation on its own pointerdown handler.
-    document.addEventListener("pointerdown", onDown, true);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("pointerdown", onDown, true);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open, close]);
+  // The menu is portaled out of `ref`, so it counts as "inside" separately —
+  // otherwise a click on a menu row reads as outside and closes before the item
+  // handler runs.
+  useDismiss(open, close, [ref, menuRef]);
 
   // Move focus into the menu when it opens — covers both click-opened and
   // controlled/shortcut-opened dropdowns (both flow through `open`) — and hand it
@@ -872,22 +923,7 @@ export function Dropdown({
     };
   }, [menuMounted]);
 
-  const onMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
-    const items = Array.from(
-      menuRef.current?.querySelectorAll<HTMLElement>(MENU_ITEM_SELECTOR) ?? [],
-    );
-    if (items.length === 0) return;
-    e.preventDefault();
-    const current = items.indexOf(document.activeElement as HTMLElement);
-    let next: number;
-    if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = items.length - 1;
-    else if (current === -1) next = e.key === "ArrowDown" ? 0 : items.length - 1;
-    else if (e.key === "ArrowDown") next = (current + 1) % items.length;
-    else next = (current - 1 + items.length) % items.length;
-    items[next]?.focus();
-  };
+  const onMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => roveMenu(e, menuRef.current);
 
   // `trigger` is caller-controlled and in every current usage returns a single
   // <button> — clone it to add the menu-button aria pair without every call
@@ -922,6 +958,161 @@ export function Dropdown({
 /** Shared row class for items inside a `Dropdown` menu. */
 export const MENU_ITEM =
   "flex w-full cursor-pointer items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-fg-3 hover:bg-hover disabled:cursor-default disabled:text-muted-4 disabled:hover:bg-transparent";
+
+/** One row of a {@link ContextMenu}: an action, a section heading, or a rule. */
+export type ContextMenuItem =
+  | {
+      kind: "action";
+      key: string;
+      label: string;
+      icon?: ReactNode;
+      /** Destructive — rendered in the danger color. */
+      danger?: boolean;
+      disabled?: boolean;
+      title?: string;
+      run: () => void;
+    }
+  | { kind: "heading"; key: string; label: string }
+  | { kind: "rule"; key: string };
+
+/**
+ * A right-click menu on a region of the UI, opened at the pointer.
+ *
+ * Same surface and rows as {@link Dropdown} — the difference is only where it is
+ * anchored and what summons it. Rows are declarative rather than a render prop
+ * because a context menu is a fixed list of actions on one object; giving each
+ * call site the menu's chrome to re-render is how two menus drift apart.
+ *
+ * The menu is portaled to `document.body`, above the terminal overlay's stacking
+ * context, and pulled back inside the viewport once its real size is known — a
+ * row near the bottom edge would otherwise open a menu running off-screen.
+ */
+export function ContextMenu({
+  items,
+  children,
+  className,
+  menuClassName = "w-52",
+}: {
+  items: ContextMenuItem[];
+  /** The region that owns the menu. */
+  children: ReactNode;
+  className?: string;
+  menuClassName?: string;
+}) {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const restoreTo = useRef<HTMLElement | null>(null);
+  const close = useCallback(() => setAt(null), []);
+
+  useDismiss(at !== null, close, [menuRef]);
+
+  // Measure, then clamp. Runs before paint, so the menu never shows at the
+  // unclamped position first.
+  useLayoutEffect(() => {
+    if (!at) {
+      setPos(null);
+      return;
+    }
+    const el = menuRef.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    const margin = 8;
+    setPos({
+      left: Math.max(margin, Math.min(at.x, window.innerWidth - width - margin)),
+      top: Math.max(margin, Math.min(at.y, window.innerHeight - height - margin)),
+    });
+  }, [at]);
+
+  // Focus the first row on open and hand focus back on close, so a keyboard user
+  // isn't stranded on <body> — but only if the close didn't already move focus
+  // somewhere real.
+  const placed = at !== null && pos !== null;
+  useEffect(() => {
+    if (!placed) return;
+    menuRef.current?.querySelector<HTMLElement>(MENU_ITEM_SELECTOR)?.focus();
+    return () => {
+      const active = document.activeElement;
+      const stranded = !active || active === document.body || !!menuRef.current?.contains(active);
+      if (stranded) restoreTo.current?.focus();
+    };
+  }, [placed]);
+
+  const openAt = (x: number, y: number) => {
+    restoreTo.current = document.activeElement as HTMLElement | null;
+    setAt({ x, y });
+  };
+
+  return (
+    /* A presentational wrapper, not a control — the row inside it is the button. Its two
+       handlers are the two ways a platform summons a context menu on a *region*: the
+       pointer's secondary click, and the keyboard's ContextMenu / Shift-F10 on whatever is
+       focused inside. Giving the wrapper a role would put a second, meaningless node in the
+       accessibility tree in front of that button. */
+    // biome-ignore lint/a11y/noStaticElementInteractions: see above — presentational wrapper
+    <div
+      className={className}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        openAt(e.clientX, e.clientY);
+      }}
+      onKeyDown={(e) => {
+        if (e.key !== "ContextMenu" && !(e.key === "F10" && e.shiftKey)) return;
+        e.preventDefault();
+        // Anchor to the focused row, not the pointer — there isn't one.
+        const r = (e.target as HTMLElement).getBoundingClientRect();
+        openAt(r.left + 12, r.bottom);
+      }}
+    >
+      {children}
+      {at &&
+        createPortal(
+          <div
+            ref={menuRef}
+            role="menu"
+            onKeyDown={(e) => roveMenu(e, menuRef.current)}
+            style={{
+              position: "fixed",
+              left: pos?.left ?? at.x,
+              top: pos?.top ?? at.y,
+              visibility: pos ? undefined : "hidden",
+            }}
+            className={`z-[200] rounded-lg border border-line-3 bg-raised py-1 shadow-lg ${menuClassName}`}
+          >
+            {items.map((item) =>
+              item.kind === "rule" ? (
+                <div key={item.key} className="my-1 border-t border-line" />
+              ) : item.kind === "heading" ? (
+                <div
+                  key={item.key}
+                  className="px-3 pt-1 pb-0.5 text-[10px] font-medium tracking-wide text-muted-4"
+                >
+                  {item.label}
+                </div>
+              ) : (
+                <button
+                  key={item.key}
+                  type="button"
+                  role="menuitem"
+                  disabled={item.disabled}
+                  title={item.title}
+                  onClick={() => {
+                    close();
+                    item.run();
+                  }}
+                  className={`${MENU_ITEM} ${item.danger ? "!text-status-red" : ""}`}
+                >
+                  {item.icon && <span className="flex-none text-muted-2">{item.icon}</span>}
+                  {item.label}
+                </button>
+              ),
+            )}
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}
 
 /** Active/inactive style for an "inset underline" tab (a `bg-app` fill with an
  *  `inset 0 -2px 0` accent rule) — shared by the main-area and file-picker tab

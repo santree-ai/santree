@@ -19,7 +19,6 @@ import { CheckIcon, WarningIcon } from "../../components/icons";
 import { Button, ConfirmDialog, Segmented } from "../../components/primitives";
 import { useDiscardPrReview, useSubmitPrReview } from "../../lib/queries";
 import { alpha, palette } from "../../theme/colors";
-import { useReviewsModel } from "./model";
 
 /** How many draft comments the viewer is holding — a thread can hold a draft
  *  reply under posted comments, so this counts comments, not threads. */
@@ -51,14 +50,16 @@ export function ReviewSubmitBar({
   number,
   reviewId,
   drafts,
+  santreeRepo: repo,
 }: {
   prRepo: string;
   number: number;
   /** The viewer's pending review — the bar only renders when there is one. */
   reviewId: string;
   drafts: number;
+  /** The santree repo, which the submit mutation invalidates alongside the PR. */
+  santreeRepo: string;
 }) {
-  const { repo } = useReviewsModel();
   const [submitting, setSubmitting] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const [event, setEvent] = useState<ReviewEvent>("Comment");

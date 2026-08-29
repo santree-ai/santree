@@ -17,17 +17,13 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 
 import { type AgentKind, commands, type TriageDetail, type TriageTicket } from "../../bindings";
-import {
-  CLAUDE_START_WITH_CHROME_KEY,
-  queryKeys,
-  useBoolSetting,
-  useClaudeHookSettings,
-} from "../../lib/queries";
+import { CLAUDE_START_WITH_CHROME_KEY, queryKeys, useBoolSetting } from "../../lib/queries";
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { toast } from "../../state/toast";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
+import { useHookInjection } from "../terminal/useHookInjection";
 import { triageTerminalRef } from "./providerSessions";
 
 /** Discussion, or the provider-specific investigation currently in front. */
@@ -171,7 +167,9 @@ export function useBatchInvestigate(opts: {
 }) {
   const { ensure } = useTerminals();
   const qc = useQueryClient();
-  const hookSettings = useClaudeHookSettings().data;
+  // Whichever way each ticket's provider takes santree's session hooks — resolved
+  // per ticket below, since a ticket with a persisted session carries its own.
+  const { flagFor } = useHookInjection();
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
   const { repo, cwd, agentKind, model, effort, permissionMode, remoteControl } = opts;
 
@@ -204,10 +202,7 @@ export function useBatchInvestigate(opts: {
               ? (permissionMode ?? undefined)
               : undefined,
             remoteControl: provider.capabilities.remoteControl && remoteControl ? id : undefined,
-            settingsFlag:
-              provider.capabilities.cliLaunchOptions && hookSettings
-                ? `--settings ${shellQuote(hookSettings)}`
-                : undefined,
+            settingsFlag: flagFor(resolvedAgent),
             chrome: provider.capabilities.cliLaunchOptions && startWithChrome,
           });
           ensure({
@@ -237,7 +232,7 @@ export function useBatchInvestigate(opts: {
       effort,
       permissionMode,
       remoteControl,
-      hookSettings,
+      flagFor,
       startWithChrome,
       ensure,
       qc,

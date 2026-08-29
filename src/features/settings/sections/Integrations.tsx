@@ -18,7 +18,9 @@ import {
   LINEAR_SCOPE_KEY,
   type LinearScope,
   parseLinearScope,
+  useGithubApiBudget,
   useGithubStatus,
+  useLinearApiBudget,
   useLinearConnect,
   useLinearOrgs,
   useSetSetting,
@@ -26,6 +28,7 @@ import {
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
 import { LINEAR_BRAND } from "../../../theme/colors";
+import { ApiBudgetMeters } from "../ApiBudget";
 import { BinaryPathField } from "../BinaryPathField";
 import { Heading, KvRow } from "../widgets";
 
@@ -123,10 +126,53 @@ export function IntegrationsSection() {
             ))}
           </div>
         )}
+
+        {connected && <LinearBudget />}
       </div>
 
       <LocalGitHubCard />
     </>
+  );
+}
+
+/** Each connected workspace's remaining Linear budget.
+ *
+ *  One block per org because the limits are per user per OAuth app, so two
+ *  workspaces genuinely have two budgets. The "as of" line is not decoration:
+ *  Linear reports the budget only in the headers of a call that already spent
+ *  some of it, so this is the last reading santree took, not a live meter. */
+function LinearBudget() {
+  const { data: budgets = [], isFetching } = useLinearApiBudget();
+  if (budgets.length === 0) return null;
+
+  return (
+    <div className="border-t border-line px-4 py-3.5">
+      <div className="mb-2.5 flex items-baseline gap-2">
+        <span className="text-[12.5px] font-medium text-fg-3">API budget</span>
+        <span className="text-[11.5px] text-muted-3">
+          Per workspace, per hour. Throttling stops on whichever pool runs out first.
+        </span>
+      </div>
+      <div className="flex flex-col gap-2.5">
+        {budgets.map((budget) => (
+          <div key={budget.slug}>
+            {budgets.length > 1 && (
+              <div className="mb-1.5 text-[11.5px] text-muted-2">{budget.name}</div>
+            )}
+            <ApiBudgetMeters
+              windows={budget.windows}
+              caption={
+                isFetching
+                  ? "Reading…"
+                  : `As reported by Linear on santree's last call, ${new Date(
+                      budget.observedAtMs ?? 0,
+                    ).toLocaleTimeString()}. Linear only reports this in a response, so there is nothing to poll.`
+              }
+            />
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -224,6 +270,8 @@ function LocalGitHubCard() {
               <BinaryPathField name="gh" hint="only needed if santree can't find it itself" />
             </div>
 
+            {gh?.authenticated && <GithubBudget />}
+
             {gh?.installed && (
               <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
                 {gh.authenticated && <KvRow label="Account" value={gh.account} />}
@@ -254,5 +302,22 @@ function LocalGitHubCard() {
         )}
       </div>
     </>
+  );
+}
+
+/** What is left of the GitHub budget the `gh` session spends.
+ *
+ *  The budget belongs to the token, not to santree — anything else signed in as
+ *  the same `gh` account draws on the same pools, which is why the number has to
+ *  come from GitHub's `/rate_limit` rather than from a local tally. That
+ *  endpoint is free, so refreshing it never moves what it reports. */
+function GithubBudget() {
+  const { data: budget } = useGithubApiBudget();
+  if (!budget) return null;
+  return (
+    <ApiBudgetMeters
+      windows={budget.windows}
+      caption="GitHub's own /rate_limit for this gh session. Shared with everything else signed in as the same account."
+    />
   );
 }

@@ -1,13 +1,14 @@
-/** The All-files tab of the file picker: the full worktree file tree (not just
+/** The Files pane of the right panel: the full worktree file tree (not just
  *  changes), using Material file icons and tinting changed files by their git
  *  status (VS Code-style). Directories collapse by default (large repos). */
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 
+import { ChevronDownIcon, ChevronRightIcon } from "../../components/icons";
 import { ListSkeleton } from "../../components/primitives";
 import { useWorktreeFiles, useWorktreeStatus } from "../../lib/queries";
 import { STATUS_META } from "./changeTree";
 import { fileIconUrl, folderIconUrl } from "./fileIcons";
-import { IndentGuides } from "./IndentGuides";
+import { IndentGuides, ROW_MIN_H, TREE_GROUP } from "./IndentGuides";
 import { useTrees } from "./model";
 
 export interface TreeNode {
@@ -102,7 +103,7 @@ export function AllFilesList() {
   }, [tree, expanded]);
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto py-1">
+    <div className={`${TREE_GROUP} min-h-0 flex-1 overflow-y-auto py-1`}>
       {files === undefined && <ListSkeleton rows={10} />}
       {files !== undefined && rows.length === 0 && (
         <div className="px-3 py-6 text-center text-[11.5px] text-muted-3">No files.</div>
@@ -138,29 +139,33 @@ const TreeRow = memo(function TreeRow({
   onActivate: (path: string, dir: boolean) => void;
 }) {
   const icon = node.dir ? folderIconUrl(node.name, isOpen) : fileIconUrl(node.name);
+  // No `gap` on the row: the guides have to sit flush against the arrow slot, or
+  // every line lands beside the arrow it belongs under (see IndentGuides).
   return (
     <button
       type="button"
       onClick={() => onActivate(node.path, node.dir)}
       data-active={selected}
-      className="selection-row flex w-full cursor-pointer items-center gap-1.5 py-[3px] pr-2 pl-1.5 text-[12px]"
+      className={`selection-row flex w-full cursor-pointer items-center ${ROW_MIN_H} pr-2 pl-1.5 text-[12px]`}
       style={{
         color: tint ?? (node.dir ? "var(--color-fg-2)" : "var(--color-muted)"),
       }}
     >
       <IndentGuides depth={depth} />
+      {/* The real chevron, not a "▾" character — the guide lines run down the
+          centre of this slot, and a text glyph sits wherever its font puts it. */}
       <span
-        className="flex flex-none items-center justify-center text-[11px] text-muted-2"
+        className="flex flex-none items-center justify-center text-muted-2"
         style={{ width: 14 }}
       >
-        {node.dir ? (isOpen ? "▾" : "▸") : ""}
+        {node.dir ? isOpen ? <ChevronDownIcon size={10} /> : <ChevronRightIcon size={10} /> : null}
       </span>
       {icon ? (
-        <img src={icon} alt="" className="h-4 w-4 flex-none" draggable={false} />
+        <img src={icon} alt="" className="ml-0.5 h-4 w-4 flex-none" draggable={false} />
       ) : (
-        <span className="h-4 w-4 flex-none" />
+        <span className="ml-0.5 h-4 w-4 flex-none" />
       )}
-      <span className="truncate">{node.name}</span>
+      <span className="ml-1.5 truncate">{node.name}</span>
     </button>
   );
 });

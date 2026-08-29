@@ -9,7 +9,7 @@
  * you typed to a 422 is far worse than watching a button say "Posting…". The
  * parent signals success by calling the `done` callback it's handed.
  */
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { SuggestionIcon } from "../../components/icons";
 import { Button } from "../../components/primitives";
@@ -20,6 +20,10 @@ export interface ComposerAction {
   label: string;
   busyLabel: string;
   title?: string;
+  /** A glyph before the label. The queue actions carry the spark that marks the
+   *  AI work queue everywhere else, so this composer's "Add to queue" is the same
+   *  button as the one on a check or a draft. */
+  icon?: ReactNode;
   onSubmit: (body: string, done: () => void) => void;
 }
 
@@ -168,6 +172,7 @@ export function CommentComposer({
           disabled={!trimmed || pending}
           className="min-w-0"
         >
+          {primary.icon}
           <span className="truncate">{pending ? primary.busyLabel : primary.label}</span>
         </Button>
       </div>
