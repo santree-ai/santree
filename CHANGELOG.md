@@ -7,6 +7,23 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.5-beta.3 — 2026-08-30
+
+- Santree is black and white. The green accent is gone; emphasis now comes from contrast and weight instead of colour, and green is kept only where it means something, like a passing check or an added line.
+- Light mode works properly for the first time. It had been overridden at startup, which left some text nearly unreadable against a light background.
+- Opening a Claude or Codex tab on a project's main checkout starts the agent instead of dropping you into a plain shell.
+- Santree opens on its welcome screen again instead of reopening whatever worktree you last had selected. Reloading the window still returns you to where you were.
+- Session history is clickable. Pick a past session to resume that conversation in a new tab, or expand it to see how it opened, its last few messages, the subagents it spawned and what it cost.
+- A running agent in Triage or an AI review no longer shows as finished, and quitting a Codex review no longer marks the Claude review of the same pull request as exited.
+- The agent count in the status bar now includes agents you started yourself in a terminal, not only ones Santree launched.
+- Dragging across several lines of your own pull request's diff leaves one comment on the whole range again.
+- Session titles and summaries no longer show Santree's own internal messages as if you had typed them.
+- Project and milestone rows in the sidebar no longer look clickable. They group work; they do not open anything.
+- A ticket that appears because it blocks another one now shows its milestone and its project's due date, so the same project looks the same in every repository.
+- The permanent Triage workspace is gone. The project's main branch in the sidebar does the same job.
+- The Triage switch can no longer be turned on with the keyboard while Linear is disconnected.
+- Santree no longer starts a fresh session when it cannot read your saved conversations; it says so and leaves them alone.
+
 ## 0.1.5-beta.2 — 2026-08-29
 
 - Codex sessions now appear in the sidebar as soon as a tab opens. Codex only reports a session once its first prompt is sent, so Santree also recognises the running agent from the process itself.
