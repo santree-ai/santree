@@ -23,6 +23,7 @@ function comment(over: Partial<PrComment> = {}): PrComment {
     kind: "ReviewThread",
     path: "src/retry.ts",
     isPending: false,
+    isBot: false,
     ...over,
   };
 }

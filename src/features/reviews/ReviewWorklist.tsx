@@ -1,91 +1,39 @@
-import { useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useRef, useState } from "react";
+import { useState } from "react";
 
-import {
-  commands,
-  type PrDetail,
-  type ReviewDraft,
-  type ReviewPr,
-  type ReviewWorkItem,
-} from "../../bindings";
-import { CheckIcon, GitHubLogo, PencilIcon, PlusIcon, TrashIcon } from "../../components/icons";
+import type { PrDetail, ReviewDraft, ReviewPr, ReviewWorkItem } from "../../bindings";
+import { CheckIcon, GitHubLogo, PencilIcon, SparklesIcon, TrashIcon } from "../../components/icons";
 import { Button } from "../../components/primitives";
 import {
-  queryKeys,
-  unwrap,
   useAddReviewWorkItem,
   useDeleteReviewWorkItem,
   useReviewWorkItems,
   useUpdateReviewWorkItem,
 } from "../../lib/queries";
-import { useAppUi } from "../../state/AppContext";
-import { toast } from "../../state/toast";
-import { useReviewsModel } from "./model";
-import { reviewTargetFor } from "./ReviewSessionShared";
-import { ticketIdFor } from "./ticket";
 
 export function ReviewWorklist({
   pr,
   detail,
   drafts,
-  santreeRepo,
+  onFocusFile,
+  onStartWork,
 }: {
   pr: ReviewPr;
   detail: PrDetail | undefined;
   drafts: ReviewDraft[];
-  santreeRepo: string;
+  /** Show a queued item's source file — each host jumps its own way. */
+  onFocusFile: (path: string, line?: number | null) => void;
+  /** Hand the open items to an agent (see {@link useStartWorkInWorktree} and
+   *  {@link useStartWorkFromReviews} — the hosts differ on whether the PR's
+   *  worktree has to be created first). */
+  onStartWork: () => void;
 }) {
   const { data: items = [] } = useReviewWorkItems(pr.repo, pr.number);
-  const { focusFile } = useReviewsModel();
   const add = useAddReviewWorkItem(pr.repo, pr.number);
   const update = useUpdateReviewWorkItem(pr.repo, pr.number);
   const remove = useDeleteReviewWorkItem(pr.repo, pr.number);
   const [body, setBody] = useState("");
-  const navigate = useNavigate();
-  const qc = useQueryClient();
-  const running = useRef(false);
-  const { requestFixCiLaunch, addPendingLaunches, removePendingLaunch } = useAppUi();
   const openCount = items.filter((item) => !item.done).length;
-
-  function fixOpenItems() {
-    if (running.current || openCount === 0) return;
-    running.current = true;
-    const issueId = ticketIdFor(pr) ?? `pr-${pr.number}`;
-    addPendingLaunches([{ id: issueId, title: pr.title, project: "Reviews", agent: "Claude" }]);
-    navigate({ to: "/trees" });
-    void (async () => {
-      try {
-        const worktree = await unwrap(
-          commands.createWorktreeForPr(
-            santreeRepo,
-            pr.repo,
-            issueId,
-            pr.title,
-            pr.headRef,
-            null,
-            "Claude",
-          ),
-        );
-        await qc.invalidateQueries({ queryKey: queryKeys.worktrees(santreeRepo) });
-        const launch = await unwrap(commands.reviewFixLaunch(santreeRepo, reviewTargetFor(pr)));
-        requestFixCiLaunch({
-          worktreeId: worktree.id,
-          tabId: crypto.randomUUID(),
-          promptPath: launch.promptPath,
-          settingsPath: launch.settingsPath,
-          mcpConfigPath: launch.mcpConfigPath,
-          title: "Address review",
-          agentKind: "Claude",
-        });
-      } catch (error) {
-        running.current = false;
-        removePendingLaunch(issueId);
-        toast.error(error instanceof Error ? error.message : "Couldn't start the review fixes.");
-      }
-    })();
-  }
 
   function addManual() {
     if (!body.trim()) return;
@@ -105,15 +53,16 @@ export function ReviewWorklist({
   return (
     <section className="mb-6 border-b border-hairline pb-5">
       <div className="mb-2.5 flex items-center gap-2">
-        <div className="font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
-          Improvements
-        </div>
+        <div className="font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">Queue</div>
         {items.length > 0 && (
           <span className="ml-auto text-[10px] text-muted-4">{openCount} open</span>
         )}
+        {/* Wrapped, not passed straight through: the Trees launcher takes an
+            optional agent override, and handing it to onClick would pass the
+            click event as that agent. */}
         {openCount > 0 && (
-          <Button size="sm" variant="primary" onClick={fixOpenItems}>
-            Fix open items
+          <Button size="sm" variant="primary" onClick={() => onStartWork()}>
+            Start work
           </Button>
         )}
       </div>
@@ -129,14 +78,17 @@ export function ReviewWorklist({
           aria-label="New review improvement"
           className="min-w-0 flex-1 rounded-md border border-line-2 bg-input px-2.5 py-1.5 text-[12px] text-fg outline-none focus:border-accent"
         />
+        {/* The same spark every other queue action wears — see {@link QueueAction}.
+            This one keeps its own Button because the body comes from the input
+            beside it, not from a fixed source. */}
         <Button size="sm" onClick={addManual} disabled={!body.trim() || add.isPending}>
-          <PlusIcon size={10} /> Add
+          <SparklesIcon size={11} /> Add
         </Button>
       </div>
 
       {items.length === 0 ? (
         <p className="text-[11px] leading-relaxed text-muted-4">
-          Add notes here, or use “Add to worklist” on a GitHub thread or AI draft.
+          Add notes here, or use “Add to queue” on a check, a comment or an AI draft.
         </p>
       ) : (
         <div className="flex flex-col gap-1.5">
@@ -147,7 +99,7 @@ export function ReviewWorklist({
               pr={pr}
               detail={detail}
               draft={drafts.find((draft) => draft.id === item.sourceId)}
-              onFocusFile={focusFile}
+              onFocusFile={onFocusFile}
               onUpdate={(next) => update.mutate(next)}
               onDelete={() => remove.mutate(item.id)}
             />
@@ -196,7 +148,7 @@ function WorkItem({
           type="button"
           aria-label={item.done ? "Mark improvement open" : "Mark improvement done"}
           onClick={() => onUpdate({ id: item.id, body: item.body, done: !item.done })}
-          className={`mt-0.5 grid size-4 flex-none place-items-center rounded border focus-visible:ring-2 focus-visible:ring-accent ${item.done ? "border-status-green bg-status-green text-black" : "border-line-3"}`}
+          className={`mt-0.5 grid size-4 flex-none place-items-center rounded border ${item.done ? "border-status-green bg-status-green text-black" : "border-line-3"}`}
         >
           {item.done && <CheckIcon size={10} />}
         </button>
@@ -257,7 +209,7 @@ function WorkItem({
           type="button"
           onClick={() => setEditing(true)}
           aria-label="Edit improvement"
-          className="text-muted-4 hover:text-fg-2 focus-visible:ring-2 focus-visible:ring-accent"
+          className="text-muted-4 hover:text-fg-2"
         >
           <PencilIcon size={11} />
         </button>
@@ -265,7 +217,7 @@ function WorkItem({
           type="button"
           onClick={onDelete}
           aria-label="Delete improvement"
-          className="text-muted-4 hover:text-danger focus-visible:ring-2 focus-visible:ring-accent"
+          className="text-muted-4 hover:text-danger"
         >
           <TrashIcon size={11} />
         </button>

@@ -4,44 +4,56 @@
  * in `terminal.rs`), not `emit` — the right primitive for high-frequency terminal
  * output. This is local in-process plumbing carrying the PTY byte stream, exactly
  * like VS Code's renderer↔pty-host split.
+ *
+ * A session is not owned by the channel it is currently streaming to. `attach`
+ * swaps in a new one and the backend catches this client up from what it kept,
+ * which is what lets a pane unmount — or the whole page reload — without ending
+ * the process. See `docs/terminals.md`.
  */
 import { Channel } from "@tauri-apps/api/core";
 
-import { commands } from "../../bindings";
-import type { OpenOpts, SessionId, TerminalBackend, Unsubscribe } from "./types";
+import { commands, type TerminalAnchor } from "../../bindings";
+import { PAGE_OWNER } from "./pageOwner";
+import type {
+  Anchor,
+  Attached,
+  OpenOpts,
+  OutputHandlers,
+  SessionId,
+  TerminalBackend,
+} from "./types";
 
-interface Sink {
-  cb?: (bytes: Uint8Array) => void;
-  /** Bytes that arrived before a subscriber attached, replayed on subscribe. */
-  buffer: Uint8Array[];
-  /** Exit-sentinel handler + whether the process has already exited. */
-  exitCb?: () => void;
-  exited: boolean;
+/** Bridge one output channel to a pane's handlers.
+ *
+ *  An empty chunk is the PTY exit sentinel; real output chunks are never empty,
+ *  so empty is unambiguous. `exited` latches because the sentinel is the last
+ *  thing a session ever sends and a pane must not be torn down twice. */
+function channelFor(handlers: OutputHandlers): Channel<ArrayBuffer> {
+  const channel = new Channel<ArrayBuffer>();
+  let exited = false;
+  channel.onmessage = (chunk) => {
+    if (chunk.byteLength === 0) {
+      if (exited) return;
+      exited = true;
+      handlers.onExit();
+      return;
+    }
+    handlers.onOutput(new Uint8Array(chunk));
+  };
+  return channel;
 }
 
-export class TauriBackend implements TerminalBackend {
-  private sinks = new Map<SessionId, Sink>();
+const toBinding = (anchor: Anchor): TerminalAnchor =>
+  anchor.kind === "at"
+    ? { kind: "at", epoch: anchor.epoch, seq: anchor.seq }
+    : { kind: anchor.kind };
 
-  async open(opts: OpenOpts): Promise<SessionId> {
-    const sink: Sink = { buffer: [], exited: false };
+export class TauriBackend implements TerminalBackend {
+  async open(opts: OpenOpts, handlers: OutputHandlers): Promise<SessionId> {
     // The backend sends raw bytes (`InvokeResponseBody::Raw`, not JSON), so Tauri
     // delivers each chunk here as an `ArrayBuffer` rather than a JSON array of
     // decimal integers — avoids JSON-parsing megabytes of terminal output on
     // high-throughput streams (verbose builds, `cat` of a large file).
-    const channel = new Channel<ArrayBuffer>();
-    channel.onmessage = (chunk) => {
-      // An empty chunk is the PTY exit sentinel (the process ended). Real output
-      // chunks are never empty.
-      if (chunk.byteLength === 0) {
-        sink.exited = true;
-        sink.exitCb?.();
-        return;
-      }
-      const bytes = new Uint8Array(chunk);
-      if (sink.cb) sink.cb(bytes);
-      else sink.buffer.push(bytes);
-    };
-
     const result = await commands.terminalOpen(
       {
         cwd: opts.cwd ?? null,
@@ -49,40 +61,43 @@ export class TauriBackend implements TerminalBackend {
         args: opts.args,
         cols: opts.cols,
         rows: opts.rows,
+        // Tags the session with this page load, so the next one can adopt it
+        // rather than start over (see PAGE_OWNER).
+        owner: PAGE_OWNER,
+        label: opts.label,
       },
-      channel,
+      channelFor(handlers),
     );
     if (result.status === "error") throw new Error(result.error);
-    this.sinks.set(result.data, sink);
     return result.data;
   }
 
-  onOutput(id: SessionId, cb: (bytes: Uint8Array) => void): Unsubscribe {
-    const sink = this.sinks.get(id);
-    if (!sink) return () => {};
-    sink.cb = cb;
-    for (const chunk of sink.buffer) cb(chunk);
-    sink.buffer = [];
-    return () => {
-      if (sink.cb === cb) sink.cb = undefined;
-    };
+  async attach(id: SessionId, anchor: Anchor, handlers: OutputHandlers): Promise<Attached> {
+    const result = await commands.terminalAttach(id, toBinding(anchor), channelFor(handlers));
+    if (result.status === "error") throw new Error(result.error);
+    return result.data;
   }
 
-  onExit(id: SessionId, cb: () => void): Unsubscribe {
-    const sink = this.sinks.get(id);
-    if (!sink) return () => {};
-    if (sink.exited) {
-      cb();
-      return () => {};
-    }
-    sink.exitCb = cb;
-    return () => {
-      if (sink.exitCb === cb) sink.exitCb = undefined;
-    };
+  detach(id: SessionId) {
+    void commands.terminalDetach(id);
+  }
+
+  async adopt(owner: string): Promise<Map<string, SessionId>> {
+    const result = await commands.terminalAdopt(owner);
+    if (result.status === "error") throw new Error(result.error);
+    // Keyed by label — the surface's `term_key` — because that is what a pane
+    // coming up knows about itself. A session whose label nothing claims stays
+    // alive and unattached; it costs a ring and a shell until the app exits,
+    // which is strictly better than killing work the user can still get back to.
+    return new Map(result.data.map((s) => [s.label, s.id]));
   }
 
   write(id: SessionId, data: string) {
     void commands.terminalWrite(id, data);
+  }
+
+  seed(id: SessionId, seed: string) {
+    void commands.terminalSeed(id, seed);
   }
 
   resize(id: SessionId, cols: number, rows: number) {
@@ -90,7 +105,6 @@ export class TauriBackend implements TerminalBackend {
   }
 
   close(id: SessionId) {
-    this.sinks.delete(id);
     void commands.terminalClose(id);
   }
 }

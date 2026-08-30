@@ -19,12 +19,19 @@ export function ReviewIssuePane({ repo, ticketId }: { repo: string; ticketId: st
   // Guard against flashing the previous ticket's body while a new one loads.
   const ready = ticketId && detail?.id === ticketId ? detail : undefined;
 
-  if (!ticketId) {
+  // Two ways to have no ticket, one thing to say: the PR's title carried no id, or
+  // it carried one Linear has no issue for (`detail === null`) — a branch named
+  // like a ticket, a ticket since deleted. Neither is a failure to report.
+  if (!ticketId || detail === null) {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-app">
         <EmptyState
           title="No linked ticket"
-          subtitle="This PR's title has no ticket id (e.g. [AK-123])."
+          subtitle={
+            ticketId
+              ? `Linear has no issue ${ticketId}.`
+              : "This PR's title has no ticket id (e.g. [AK-123])."
+          }
         />
       </div>
     );

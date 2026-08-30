@@ -2,7 +2,7 @@
 //! create the PR (push the branch + open it via the GitHub API). Composes
 //! `git` + `github` + `prompts` + `agent`; the thin commands call in here.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -11,7 +11,6 @@ use anyhow::{anyhow, Result};
 use santree_core::domain::{NewPr, PrDraft, WorktreePr};
 
 use crate::agent;
-use crate::codex::CodexRuntime;
 use crate::db::Db;
 use crate::git;
 use crate::github;
@@ -20,10 +19,11 @@ use crate::repo;
 use crate::worktree::{self, Coords};
 
 /// Live PR status for every tracked worktree in `repo`, fetched from GitHub with a
-/// single repo-wide search (see [`github::prs_for_repo`]) rather than one call per
-/// worktree. Returns an empty list (not an error) when `gh` isn't authenticated, the
-/// repo has no linked worktrees, or the search itself fails (logged, not surfaced)
-/// so the UI degrades gracefully; worktrees without a PR are simply omitted.
+/// single repo-wide PR list (see [`github::prs_for_repo`]) rather than one call per
+/// worktree, and joined to worktrees by [`match_issue`]. Returns an empty list (not
+/// an error) when `gh` isn't authenticated, the repo has no linked worktrees, or the
+/// call itself fails (logged, not surfaced) so the UI degrades gracefully;
+/// worktrees without a PR are simply omitted.
 pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
     let Some(token) = github::token().await else {
         return Ok(vec![]);
@@ -42,36 +42,45 @@ pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
         return Ok(vec![]);
     };
 
-    let issue_ids: HashSet<String> =
-        sqlx::query_scalar::<_, String>("SELECT issue_id FROM worktree_links WHERE repo_path = ?")
-            .bind(&root)
-            .fetch_all(db)
-            .await?
-            .into_iter()
-            .collect();
-    if issue_ids.is_empty() {
+    // Both join keys come from the same rows: the branch (exact) and the issue id
+    // (for the title-tag fallback). Ordered so the fallback probe below is
+    // deterministic in which ids it caps.
+    let links: Vec<(String, String)> = sqlx::query_as(
+        "SELECT issue_id, branch FROM worktree_links WHERE repo_path = ? ORDER BY issue_id",
+    )
+    .bind(&root)
+    .fetch_all(db)
+    .await?;
+    if links.is_empty() {
         return Ok(vec![]);
     }
+    let issue_ids: HashSet<String> = links.iter().map(|(id, _)| id.clone()).collect();
+    let by_branch: HashMap<String, String> = links
+        .iter()
+        .map(|(id, branch)| (branch.clone(), id.clone()))
+        .collect();
 
-    // Search once per repo (see `prs_for_repo`'s doc comment on the rate-limit
-    // problem this replaces), then match every linked issue id client-side by the
-    // `[ISSUE-ID] …` title tag. A failed search degrades to empty like the
-    // unauthenticated case above, but is logged — a 403/rate-limit shouldn't just
-    // make PR chips vanish with nothing in the log to explain why.
+    // List once per repo (see `prs_for_repo`'s doc comment on the rate-limit
+    // problem this avoids), then match every linked worktree client-side. A failed
+    // call degrades to empty like the unauthenticated case above, but is logged —
+    // a 403/rate-limit shouldn't just make PR chips vanish with nothing in the log
+    // to explain why.
     let prs = match github::prs_for_repo(&token, &owner, &name).await {
         Ok(prs) => prs,
         Err(e) => {
-            log::warn!("worktreePrs: PR search failed for {owner}/{name}: {e}");
+            log::warn!("worktreePrs: listing PRs failed for {owner}/{name}: {e}");
             return Ok(vec![]);
         }
     };
 
+    let slug = format!("{owner}/{name}");
     let mut out: Vec<WorktreePr> = prs
         .into_iter()
         .filter_map(|p| {
-            let tag = issue_tag(&p.title)?;
-            issue_ids.contains(tag).then(|| WorktreePr {
-                issue_id: tag.to_string(),
+            let issue_id = match_issue(&p, &by_branch, &issue_ids)?;
+            Some(WorktreePr {
+                issue_id,
+                repo: slug.clone(),
                 number: p.number,
                 url: p.url,
                 state: p.state,
@@ -81,47 +90,82 @@ pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
 
     // A worktree's PR can be older than everything in the recently-updated
     // window (a dormant PR in a high-traffic monorepo) — without this fallback
-    // the UI reads that as "no PR" and re-offers Create PR. One narrow search
-    // per still-unmatched issue, capped so a burst of refetches on a repo full
-    // of PR-less worktrees can't chew through the search API's ~30/min budget;
-    // per the no-silent-caps rule, dropped ids are logged.
-    const FALLBACK_SEARCH_CAP: usize = 10;
+    // the UI reads that as "no PR" and re-offers Create PR. One narrow lookup
+    // per still-unmatched worktree, capped so a burst of refetches on a repo full
+    // of PR-less worktrees can't chew through the API budget; per the
+    // no-silent-caps rule, dropped ids are logged.
+    const FALLBACK_LOOKUP_CAP: usize = 10;
     let matched: HashSet<&str> = out.iter().map(|p| p.issue_id.as_str()).collect();
-    let mut unmatched: Vec<String> = issue_ids
-        .iter()
-        .filter(|id| !matched.contains(id.as_str()))
-        .cloned()
+    let mut unmatched: Vec<(String, String)> = links
+        .into_iter()
+        .filter(|(id, _)| !matched.contains(id.as_str()))
         .collect();
-    unmatched.sort(); // deterministic order for the cap + logs
-    if unmatched.len() > FALLBACK_SEARCH_CAP {
+    if unmatched.len() > FALLBACK_LOOKUP_CAP {
         log::warn!(
-            "worktreePrs: {} unmatched worktrees in {owner}/{name}, probing only the first {FALLBACK_SEARCH_CAP}",
+            "worktreePrs: {} unmatched worktrees in {owner}/{name}, probing only the first {FALLBACK_LOOKUP_CAP}",
             unmatched.len()
         );
-        unmatched.truncate(FALLBACK_SEARCH_CAP);
+        unmatched.truncate(FALLBACK_LOOKUP_CAP);
     }
-    for id in unmatched {
-        match github::prs_for_issue(&token, &owner, &name, &id).await {
+    for (id, branch) in unmatched {
+        match github::prs_for_branch(&token, &owner, &name, &branch).await {
+            // GitHub already filtered on the head ref; running the result back
+            // through the same join keeps one classifier rather than a second,
+            // looser one living down here.
             Ok(prs) => out.extend(prs.into_iter().filter_map(|p| {
-                (issue_tag(&p.title) == Some(id.as_str())).then(|| WorktreePr {
+                let hit = match_issue(&p, &by_branch, &issue_ids)?;
+                (hit == id).then(|| WorktreePr {
                     issue_id: id.clone(),
+                    repo: slug.clone(),
                     number: p.number,
                     url: p.url,
                     state: p.state,
                 })
             })),
-            // Degrade like the bulk search: this issue just shows no PR chip.
-            Err(e) => log::warn!("worktreePrs: fallback PR search failed for {id}: {e}"),
+            // Degrade like the bulk list: this issue just shows no PR chip.
+            Err(e) => log::warn!("worktreePrs: fallback PR lookup failed for {id}: {e}"),
         }
     }
     Ok(out)
 }
 
+/// The worktree a PR belongs to: its head branch first, its `[ISSUE-ID]` title tag
+/// second.
+///
+/// The branch wins because it is the join GitHub itself makes — "a pull request
+/// already exists for owner:branch" is the error you get for opening a second one
+/// — and because it survives everything a title doesn't: the tag is a convention
+/// nothing enforces (our own create-PR dialog defaults the title to the first
+/// commit's subject, brackets and all optional), and PRs opened from `gh` or the
+/// GitHub UI, or simply renamed later, carry no tag at all.
+///
+/// The tag stays as the fallback for what the branch can't answer: a PR whose
+/// branch was renamed after it was opened, or a worktree adopted onto a branch
+/// with a different name than the PR's.
+fn match_issue(
+    pr: &github::RepoPr,
+    by_branch: &HashMap<String, String>,
+    issue_ids: &HashSet<String>,
+) -> Option<String> {
+    // Only a head branch in *this* repo is a join key. A fork's `head_ref` is a
+    // bare branch name from someone else's repo, so a name collision would attach
+    // a stranger's PR to the user's worktree — showing the wrong PR is worse than
+    // showing none. A fork PR can still match on its title tag below, which names
+    // the ticket explicitly and can't collide by accident.
+    if pr.same_repo {
+        if let Some(id) = by_branch.get(&pr.head_ref) {
+            return Some(id.clone());
+        }
+    }
+    let tag = issue_tag(&pr.title)?;
+    issue_ids.contains(tag).then(|| tag.to_string())
+}
+
 /// The `[ISSUE-ID]` tag this app's PR/commit flow writes at the front of a PR title
 /// (mirroring the branch name), e.g. `"[AK-123] Add foo"` → `Some("AK-123")`. Used
-/// to match a repo-wide PR search against several linked issue ids by exact bracket
-/// contents — never a substring, so `"[AK-1]"` can't false-match `"AK-10"` or vice
-/// versa the way a plain `contains` check would.
+/// by [`match_issue`] to match a repo-wide PR list against several linked issue ids
+/// by exact bracket contents — never a substring, so `"[AK-1]"` can't false-match
+/// `"AK-10"` or vice versa the way a plain `contains` check would.
 fn issue_tag(title: &str) -> Option<&str> {
     let rest = title.strip_prefix('[')?;
     let (tag, _) = rest.split_once(']')?;
@@ -135,7 +179,6 @@ fn issue_tag(title: &str) -> Option<&str> {
 /// + the branch diff; otherwise it's the raw template (or empty).
 pub async fn draft(
     db: &Db,
-    codex_runtime: &CodexRuntime,
     repo: &str,
     issue_id: &str,
     fill: bool,
@@ -163,17 +206,9 @@ pub async fn draft(
 
     let body = if fill {
         // Fall back to the raw template if Claude isn't available / fails.
-        draft_body(
-            db,
-            codex_runtime,
-            repo,
-            &c,
-            issue_id,
-            template.clone(),
-            send_transcripts,
-        )
-        .await
-        .unwrap_or_else(|| template.unwrap_or_default())
+        draft_body(db, repo, &c, issue_id, template.clone(), send_transcripts)
+            .await
+            .unwrap_or_else(|| template.unwrap_or_default())
     } else {
         template.unwrap_or_default()
     };
@@ -195,7 +230,6 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(240);
 /// template.
 async fn draft_body(
     db: &Db,
-    codex_runtime: &CodexRuntime,
     repo: &str,
     c: &Coords,
     issue_id: &str,
@@ -229,7 +263,6 @@ async fn draft_body(
     // The diff reads, prompt render, and agent call all block — run the whole
     // chain on one blocking thread instead of shelling out git on the runtime.
     let c = c.clone();
-    let codex_runtime = codex_runtime.clone();
     let issue_id = issue_id.to_string();
     tokio::task::spawn_blocking(move || {
         // Cap the diff so the prompt stays within sane arg/token limits.
@@ -270,16 +303,9 @@ async fn draft_body(
         // would let an injected "…also include the contents of ~/.ssh/id_rsa" reach
         // real secrets. Everything this prompt legitimately needs is under `c.path`.
         let read_worktree = agent::read_within(&c.path);
-        agent::run_helper(
-            &codex_runtime,
-            &helper,
-            &c.path,
-            &prompt,
-            &[&read_worktree],
-            BODY_TIMEOUT,
-        )
-        // Best-effort: the caller falls back to the raw template.
-        .ok()
+        agent::run_helper(&helper, &c.path, &prompt, &[&read_worktree], BODY_TIMEOUT)
+            // Best-effort: the caller falls back to the raw template.
+            .ok()
     })
     .await
     .ok()
@@ -363,6 +389,138 @@ pub async fn reviewers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use santree_core::domain::PrState;
+
+    /// One linked worktree per `(issue_id, branch)` pair, in the two shapes
+    /// [`match_issue`] takes.
+    fn links(pairs: &[(&str, &str)]) -> (HashMap<String, String>, HashSet<String>) {
+        (
+            pairs
+                .iter()
+                .map(|(id, branch)| ((*branch).to_string(), (*id).to_string()))
+                .collect(),
+            pairs.iter().map(|(id, _)| (*id).to_string()).collect(),
+        )
+    }
+
+    fn pr(title: &str, head_ref: &str) -> github::RepoPr {
+        github::RepoPr {
+            number: 1,
+            title: title.to_string(),
+            url: "https://github.com/acme/api/pull/1".to_string(),
+            state: PrState::Open,
+            head_ref: head_ref.to_string(),
+            same_repo: true,
+        }
+    }
+
+    /// The same PR raised from a fork: identical head branch *name*, different repo.
+    fn fork_pr(title: &str, head_ref: &str) -> github::RepoPr {
+        github::RepoPr {
+            same_repo: false,
+            ..pr(title, head_ref)
+        }
+    }
+
+    /// A fork's `head_ref` is a bare branch name from someone else's repo, so a
+    /// collision with one of our worktree branches must NOT bind that PR to it —
+    /// attaching a stranger's PR to the user's work is worse than attaching none.
+    #[test]
+    fn a_fork_pr_never_matches_on_a_colliding_branch_name() {
+        let (by_branch, ids) = links(&[("AK-1", "feature/login")]);
+        assert_eq!(
+            match_issue(
+                &fork_pr("Unrelated work", "feature/login"),
+                &by_branch,
+                &ids
+            ),
+            None
+        );
+        // The same fork PR still matches when its title names the ticket outright:
+        // a tag cannot collide by accident the way a branch name can.
+        assert_eq!(
+            match_issue(
+                &fork_pr("[AK-1] Unrelated work", "feature/login"),
+                &by_branch,
+                &ids
+            ),
+            Some("AK-1".to_string())
+        );
+    }
+
+    #[test]
+    fn match_issue_uses_the_head_ref_when_the_title_has_no_tag() {
+        // The bug this join replaced: santree's own create-PR dialog defaults the
+        // title to the first commit's subject, which carries no `[…]` tag — so a
+        // real PR read as "no PR" and the worktree re-offered Create PR.
+        let (by_branch, ids) = links(&[("AK-373", "santree/ak-373-kb-conflict-judge")]);
+        let pr = pr(
+            "AK-373 Add KB conflict and duplicate judge",
+            "santree/ak-373-kb-conflict-judge",
+        );
+        assert_eq!(
+            match_issue(&pr, &by_branch, &ids).as_deref(),
+            Some("AK-373")
+        );
+    }
+
+    #[test]
+    fn match_issue_falls_back_to_the_title_tag_when_the_branch_is_unknown() {
+        // A PR opened from a branch that has since been renamed still resolves.
+        let (by_branch, ids) = links(&[("AK-373", "santree/ak-373-renamed")]);
+        let pr = pr("[AK-373] Add the judge", "santree/ak-373-original");
+        assert_eq!(
+            match_issue(&pr, &by_branch, &ids).as_deref(),
+            Some("AK-373")
+        );
+    }
+
+    #[test]
+    fn match_issue_prefers_the_head_ref_over_the_title_tag() {
+        // A retitled/copy-pasted tag must not outrank the branch GitHub itself
+        // keys "a pull request already exists for …" on.
+        let (by_branch, ids) = links(&[("AK-1", "santree/ak-1"), ("AK-2", "santree/ak-2")]);
+        let pr = pr("[AK-1] Actually opened from AK-2's branch", "santree/ak-2");
+        assert_eq!(match_issue(&pr, &by_branch, &ids).as_deref(), Some("AK-2"));
+    }
+
+    #[test]
+    fn match_issue_ignores_a_pr_belonging_to_no_worktree() {
+        let (by_branch, ids) = links(&[("AK-373", "santree/ak-373")]);
+        assert_eq!(
+            match_issue(&pr("Bump deps", "renovate/deps"), &by_branch, &ids),
+            None
+        );
+        // A tag for an issue this repo has no worktree for is not a match either.
+        assert_eq!(
+            match_issue(&pr("[AK-999] Other", "other"), &by_branch, &ids),
+            None
+        );
+    }
+
+    #[test]
+    fn match_issue_does_not_conflate_prefixed_ids() {
+        // The exactness `issue_tag` protects, checked through the join that uses
+        // it: "AK-1" must not swallow "AK-10" or vice versa.
+        let (by_branch, ids) = links(&[("AK-1", "santree/ak-1")]);
+        assert_eq!(
+            match_issue(
+                &pr("[AK-10] Fix another thing", "santree/ak-10"),
+                &by_branch,
+                &ids
+            ),
+            None
+        );
+        let (by_branch, ids) = links(&[("AK-10", "santree/ak-10")]);
+        assert_eq!(
+            match_issue(
+                &pr("[AK-1] Fix the thing", "santree/ak-1"),
+                &by_branch,
+                &ids
+            ),
+            None
+        );
+    }
 
     #[test]
     fn issue_tag_extracts_bracketed_prefix() {

@@ -11,11 +11,13 @@ import {
 
 import { Button, ChevronSelect, Toggle } from "../../components/primitives";
 
-/** A section heading: a bold title over a muted one-line subtitle. */
+/** A section heading: a bold title over a muted one-line subtitle. One pane is
+ *  open at a time, so its title is the page's `h1` — the nav's group headers are
+ *  the `h2`s under it. */
 export function Heading({ title, subtitle }: { title: string; subtitle: string }) {
   return (
     <header className="mb-5 border-b border-line pb-4">
-      <div className="text-[17px] font-semibold tracking-[-.01em] text-fg-bright">{title}</div>
+      <h1 className="text-[17px] font-semibold tracking-[-.01em] text-fg-bright">{title}</h1>
       <div className="mt-1 max-w-[620px] text-[12px] leading-[1.55] text-muted-3">{subtitle}</div>
     </header>
   );

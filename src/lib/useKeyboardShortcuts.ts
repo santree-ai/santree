@@ -1,11 +1,11 @@
 /**
  * Global keyboard shortcuts, mounted once in the app shell.
  *
- * ⌘; / ⌘, → Settings · ⌘1…⌘N → tabs in NavTabs order (Triage when enabled,
- * then Issues/Trees/Reviews/Terminal) · ⌘B → sidebar · ⌘⇧R → re-pull Linear and
- * GitHub · Esc → back to the view Settings was opened from. Tab navigation
- * routes are guarded by the views themselves, so an unavailable target (e.g.
- * Triage while disabled) simply redirects back.
+ * ⌘; / ⌘, → Settings · ⌘1…⌘N → the sidebar's destinations in `SidebarNav` order
+ * (Triage when enabled, then Tickets and Reviews) · ⌘B → sidebar · ⌘⇧R → re-pull
+ * Linear and GitHub · Esc → back to the view Settings was opened from. The
+ * destination routes are guarded by the views themselves, so an unavailable
+ * target (e.g. Triage while disabled) simply redirects back.
  *
  * Also home to {@link targetOwnsKey}, the guard the view-local shortcut
  * listeners share so they all treat text fields and terminals the same way.
@@ -83,7 +83,6 @@ export function useKeyboardShortcuts() {
   const app = useAppOptional();
   const ui = useAppUiOptional();
   const triageEnabled = app?.triageEnabled ?? false;
-  const devEnabled = app?.devEnabled ?? false;
   const toggleSidebar = ui?.toggleSidebar;
   const toggleShortcuts = ui?.toggleShortcuts;
   const toggleCommandPalette = ui?.toggleCommandPalette;
@@ -162,18 +161,12 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      // ⌘1…⌘N map to the tabs in the same left-to-right order NavTabs renders
-      // them: the repo-independent views lead (Agents, then Dev when enabled),
-      // then the repo-scoped ones — Triage when enabled, Issues, Trees, Reviews.
-      // Keep this in sync with NavTabs so the numbers match what's on screen.
-      const paths = [
-        "/", // Agents
-        ...(devEnabled ? ["/dev"] : []),
-        ...(triageEnabled ? ["/triage"] : []),
-        "/issues",
-        "/trees",
-        "/reviews",
-      ];
+      // ⌘1…⌘N map to the sidebar's destinations, top to bottom: Triage when
+      // enabled, Tickets, then Reviews. Keep this in sync with `SidebarNav` so
+      // the numbers match what's on screen. The workspace (`/trees`) is
+      // deliberately unnumbered — it is reached by picking a worktree — and ⌘0 is
+      // already the zoom reset.
+      const paths = [...(triageEnabled ? ["/triage"] : []), "/issues", "/reviews"];
       const idx = Number(e.key) - 1;
       const to = Number.isInteger(idx) && idx >= 0 ? paths[idx] : undefined;
       if (to) {
@@ -188,7 +181,6 @@ export function useKeyboardShortcuts() {
     navigate,
     pathname,
     triageEnabled,
-    devEnabled,
     toggleSidebar,
     toggleShortcuts,
     toggleCommandPalette,

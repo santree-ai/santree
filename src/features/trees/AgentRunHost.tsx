@@ -81,7 +81,7 @@ function QueuedLaunches() {
  *  nowhere. `attach={false}` is what keeps it off the layer's inline slot. */
 function DetachedLaunch({ worktree }: { worktree: Worktree }) {
   const { clearAgentLaunch } = useAgentRuns();
-  const { launching, initialSetup, preparing, seed, onExited } = useWorktreeAgent(worktree);
+  const { launching, initialSetup, preparing, seed, onExited, agent } = useWorktreeAgent(worktree);
 
   // The same gate the visible pane uses: don't spawn the PTY until every seed input
   // has resolved. Mounting early spawns a bare shell and drops the agent launch.
@@ -93,6 +93,7 @@ function DetachedLaunch({ worktree }: { worktree: Worktree }) {
       branch={worktree.branch}
       cwd={worktree.path}
       seed={seed}
+      agent={agent}
       attach={false}
       onLaunched={() => clearAgentLaunch(worktree.id)}
       onExited={onExited}

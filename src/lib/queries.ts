@@ -22,8 +22,7 @@ import type {
   AgentKind,
   AnalysisScope,
   ChangedFile,
-  DevRelease,
-  DevTodo,
+  ClaudeGlobalCapture,
   KeepAwakeStatus,
   NewInlineComment,
   PrDetail,
@@ -45,6 +44,7 @@ import type {
   TriageTicket,
   UpdateProgress,
   ViewedMarks,
+  WorktreeBranchSource,
   WorktreeTab,
 } from "../bindings";
 import { commands, events } from "../bindings";
@@ -245,12 +245,20 @@ export const queryKeys = {
   codexModels: ["codex-models"] as const,
   codexRateLimits: ["codex-rate-limits"] as const,
   githubStatus: ["github-status"] as const,
+  githubApiBudget: ["github-api-budget"] as const,
   binaryStatus: (name: string) => ["binary-status", name] as const,
   claudeHookSettings: ["claude-hook-settings"] as const,
+  codexHookFlags: ["codex-hook-flags"] as const,
   claudeHookSettingsNoGit: ["claude-hook-settings-no-git"] as const,
   englishLog: ["english-log"] as const,
   englishAnalysis: ["english-analysis"] as const,
   sessionStates: ["session-states"] as const,
+  agentProcesses: ["agent-processes"] as const,
+  claudeRateLimits: ["claude-rate-limits"] as const,
+  claudeAccountUsage: ["claude-account-usage"] as const,
+  claudeGlobalCapture: ["claude-global-capture"] as const,
+  resourceUsage: ["resource-usage"] as const,
+  terminalSessions: ["terminal-sessions"] as const,
   sessionUsageLive: ["session-usage-live"] as const,
   /** Prefix for every repo's task graph — invalidate this (not `tasks(repo)`)
    *  when a change (e.g. a fresh Linear connection) should refetch all repos'
@@ -258,6 +266,7 @@ export const queryKeys = {
   tasksPrefix: ["tasks"] as const,
   tasks: (repo: string) => ["tasks", repo] as const,
   worktrees: (repo: string) => ["worktrees", repo] as const,
+  repoBranches: (repo: string) => ["repo-branches", repo] as const,
   baseWorktree: (repo: string) => ["base-worktree", repo] as const,
   worktreeStatus: (repo: string, id: string) => ["worktree-status", repo, id] as const,
   worktreeFiles: (repo: string, id: string) => ["worktree-files", repo, id] as const,
@@ -265,6 +274,13 @@ export const queryKeys = {
     ["worktree-file-diff", repo, id, path] as const,
   /** Prefix for every cached per-file diff of one worktree. */
   worktreeFileDiffPrefix: (repo: string, id: string) => ["worktree-file-diff", repo, id] as const,
+  worktreeBranchChanges: (repo: string, id: string) =>
+    ["worktree-branch-changes", repo, id] as const,
+  worktreeBranchFileDiff: (repo: string, id: string, path: string) =>
+    ["worktree-branch-file-diff", repo, id, path] as const,
+  worktreeBranchFileDiffPrefix: (repo: string, id: string) =>
+    ["worktree-branch-file-diff", repo, id] as const,
+  worktreeSessions: (repo: string, id: string) => ["worktree-sessions", repo, id] as const,
   worktreeFileSource: (repo: string, id: string, path: string) =>
     ["worktree-file-source", repo, id, path] as const,
   /** Prefix for every cached full-file source of one worktree. */
@@ -284,6 +300,8 @@ export const queryKeys = {
   sessionProviders: (repo: string, termKey: string) =>
     ["session-providers", repo, termKey] as const,
   worktreeTabs: (repo: string) => ["worktree-tabs", repo] as const,
+  worktreeTabLaunch: (repo: string, id: string) => ["worktree-tab-launch", repo, id] as const,
+  worktreeTabLaunchPrefix: ["worktree-tab-launch"] as const,
   commitDraft: (repo: string, id: string) => ["commit-draft", repo, id] as const,
   worktreePrs: (repo: string) => ["worktree-prs", repo] as const,
   prReviewers: (repo: string, id: string) => ["pr-reviewers", repo, id] as const,
@@ -308,6 +326,7 @@ export const queryKeys = {
   mergeQueue: (repo: string) => ["merge-queue", repo] as const,
   prDetail: (owner: string, name: string, number: number) =>
     ["pr-detail", owner, name, number] as const,
+  prSummary: (prRepo: string, number: number) => ["pr-summary", prRepo, number] as const,
   /** Prefixes for the reads that come from an external service (Linear, GitHub)
    *  rather than local disk — the set {@link useRefreshExternal} re-pulls. They
    *  can't be scoped by repo from one place (`pr-detail` is keyed by owner/name/
@@ -317,6 +336,7 @@ export const queryKeys = {
   worktreePrsPrefix: ["worktree-prs"] as const,
   mergeQueuePrefix: ["merge-queue"] as const,
   prDetailPrefix: ["pr-detail"] as const,
+  prSummaryPrefix: ["pr-summary"] as const,
   prTicketsPrefix: ["pr-tickets"] as const,
   prRepoLabels: (owner: string, name: string) => ["pr-repo-labels", owner, name] as const,
   reviewedFiles: (prRepo: string, number: number) => ["reviewed-files", prRepo, number] as const,
@@ -369,12 +389,8 @@ export const queryKeys = {
   linearStatusPrefix: ["linear-status"] as const,
   linearStatus: (repo: string) => ["linear-status", repo] as const,
   linearOrgs: ["linear-orgs"] as const,
+  linearApiBudget: ["linear-api-budget"] as const,
   claudeUsage: ["claude-usage"] as const,
-  // Dev tab (dogfooding — see features/dev; delete with it).
-  devTodos: ["dev-todos"] as const,
-  devInfo: (repoPath: string) => ["dev-info", repoPath] as const,
-  devScreenshot: (path: string) => ["dev-screenshot", path] as const,
-  devVersion: (repoPath: string) => ["dev-version", repoPath] as const,
 };
 
 /** Setting keys for the Triage Investigation action (agent · model · effort).
@@ -404,7 +420,8 @@ export const COMMIT_MESSAGE_MODEL_KEY = "commit_message_model";
 export const PR_BODY_AGENT_KEY = "pr_body_agent";
 export const PR_BODY_MODEL_KEY = "pr_body_model";
 /** Claude's compatibility default for a helper profile that has never been set.
- *  Codex instead follows its App Server recommended model. */
+ *  Codex has no equivalent: its catalog publishes no default, so an unset Codex
+ *  helper simply omits `--model` and takes the CLI's own. */
 export const DEFAULT_HELPER_MODEL = "haiku";
 
 /** Setting keys for the Issues "Work" action (agent · model · effort) used by the
@@ -476,6 +493,27 @@ export const TRIAGE_SNOOZED_KEY = "triage_show_snoozed";
  * Mirrors Linear's own "Display names" preference. App-scoped, defaults to full.
  */
 export const DISPLAY_NAMES_KEY = "display_names";
+
+/**
+ * How the sidebar nests a repo's work: not at all, by Linear project, by
+ * milestone, or project → milestone. App-scoped, because the sidebar is
+ * cross-repo and one tree can only have one shape.
+ *
+ * One selector rather than two toggles: "project" and "milestone" are levels of
+ * the same nesting, and independent switches would let you ask for a milestone
+ * inside a project you had turned off.
+ */
+export const LINEAR_GROUP_BY_KEY = "linear_group_by";
+
+/** The nestings the sidebar tree knows how to build. */
+export type LinearGroupBy = "none" | "project" | "milestone" | "project_milestone";
+
+/** The stored `linear_group_by` value, or "milestone" for anything unset or
+ *  unknown. Milestone is the default because it is the shape the tree has always
+ *  had: an install that never opens Settings sees exactly the sidebar it had
+ *  before this setting existed. Exported for testing. */
+export const parseLinearGroupBy = (raw: string | null | undefined): LinearGroupBy =>
+  raw === "none" || raw === "project" || raw === "project_milestone" ? raw : "milestone";
 
 /** Whether to confirm before quitting the app. App-scoped; defaults to ON (a
  *  missing value means confirm), so read it as `data !== "false"`. */
@@ -821,11 +859,14 @@ export const useCodexHealth = () =>
     meta: { silent: true },
   });
 
+/** Whether the `codex` CLI is signed in, from `codex login status`. Polled while
+ *  it is not: signing in happens in the user's own terminal (`codex login`), and
+ *  this is how the app notices they came back. */
 export const useCodexAccount = (enabled = true) =>
   useUnwrappedQuery(queryKeys.codexAccount, () => commands.codexAccount(), {
     enabled,
     staleTime: 30_000,
-    refetchInterval: (query) => (query.state.data?.connected ? false : 3_000),
+    refetchInterval: (query) => (query.state.data?.connected ? false : 10_000),
     meta: { silent: true },
   });
 
@@ -836,6 +877,9 @@ export const useCodexModels = (enabled = true) =>
     meta: { silent: true },
   });
 
+/** Codex's own rate-limit snapshot from its last turn, read back from its rollout
+ *  transcript — there is no live source that doesn't need Codex's credentials, so
+ *  this is as fresh as the user's last Codex turn. */
 export const useCodexRateLimits = (enabled = true) =>
   useUnwrappedQuery(queryKeys.codexRateLimits, () => commands.codexRateLimits(), {
     enabled,
@@ -843,17 +887,9 @@ export const useCodexRateLimits = (enabled = true) =>
     meta: { silent: true },
   });
 
-export const useCodexLogin = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (deviceCode: boolean) => unwrap(commands.codexLoginStart(deviceCode)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.codexAccount }),
-  });
-};
-
-export const useCancelCodexLogin = () =>
-  useMutation({ mutationFn: (loginId: string) => unwrap(commands.codexLoginCancel(loginId)) });
-
+/** Signing *in* is not here: it was an App Server call, and the CLI's own
+ *  `codex login` owns a browser round trip and a local callback. Settings points
+ *  the user at their terminal instead of offering a button that can't finish. */
 export const useCodexLogout = () => {
   const qc = useQueryClient();
   return useMutation({
@@ -865,6 +901,32 @@ export const useCodexLogout = () => {
 /** The `gh` CLI integration status (installed? authenticated? which account?). */
 export const useGithubStatus = () =>
   useQuery({ queryKey: queryKeys.githubStatus, queryFn: () => commands.githubStatus() });
+
+/** What is left of the GitHub API budget the `gh` session spends. `null` when
+ *  nothing is signed in. Only fetched while `enabled` — this is a settings-screen
+ *  read, and there is no reason to ask about a budget nobody is looking at.
+ *
+ *  A one-minute `staleTime` rather than a poll: GitHub's `/rate_limit` is free,
+ *  but the numbers only move when *something else* spends them, so a countdown
+ *  the user can refresh by hand beats a meter that ticks on its own. */
+export const useGithubApiBudget = (enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.githubApiBudget,
+    queryFn: () => commands.githubApiBudget(),
+    enabled,
+    staleTime: 60_000,
+  });
+
+/** What is left of each connected Linear workspace's hourly budget.
+ *
+ *  Unlike GitHub's, reading this can cost one request (Linear only reports the
+ *  budget in a response — see `linear::api_budget`), so it is gated on `enabled`
+ *  and never polls: it refreshes when the screen mounts and when the user asks. */
+export const useLinearApiBudget = (enabled = true) =>
+  useUnwrappedQuery(queryKeys.linearApiBudget, () => commands.linearApiBudget(), {
+    enabled,
+    staleTime: 60_000,
+  });
 
 /**
  * Path to the settings file to pass as `claude --settings <path>` — carries the
@@ -883,6 +945,22 @@ export const useClaudeHookSettings = () =>
   useQuery({
     queryKey: queryKeys.claudeHookSettings,
     queryFn: () => commands.claudeHookSettings(),
+    staleTime: Infinity,
+  });
+
+/**
+ * The `-c 'hooks.<Event>=[…]'` flags a santree `codex` launch carries. This is
+ * how a Codex session reports the thread id it minted — Codex has no
+ * launch-time id flag, so without these the session is unresumable and never
+ * reaches the agent registry.
+ *
+ * `staleTime: Infinity` like Claude's: the content is two resolved paths, and
+ * neither moves while the app is running.
+ */
+export const useCodexHookFlags = () =>
+  useQuery({
+    queryKey: queryKeys.codexHookFlags,
+    queryFn: () => commands.codexHookFlags(),
     staleTime: Infinity,
   });
 
@@ -940,6 +1018,34 @@ export const useSessionByPath = (): Map<string, SessionState> => {
 };
 
 /**
+ * Which coding agent the process table says is in each pane's foreground —
+ * observation, where `useSessionStates` and the launch record are memory.
+ *
+ * It is what makes an unprompted Codex tab visible (Codex fires `SessionStart`
+ * on its first turn, so nothing hook-fed knows the tab exists) and what catches
+ * an agent the user started by typing `codex` in a santree shell.
+ *
+ * **Identity only.** A result never carries a status: the attention ladder still
+ * comes from the hook rows, then the terminal title. And an absent pane is *no
+ * information*, never "no agent" — `ps` can fail, and the backend answers an
+ * unreadable process table with an empty list rather than an error.
+ *
+ * Two triggers, no fast poller. The bind is event-driven, as Orca's is:
+ * {@link useAgentEntries} invalidates this whenever the set of open panes
+ * changes, so a new tab is scanned immediately. The interval only has to catch
+ * an agent that starts *inside* an existing pane, so it rides the same 10s
+ * cadence `useSessionStates` uses, and stops entirely when no pane is open. One
+ * `ps` per burst regardless: the backend caches the listing for 500ms and the
+ * resource panel reads the same snapshot.
+ */
+export const useAgentProcesses = (panes: number) =>
+  useUnwrappedQuery(queryKeys.agentProcesses, () => commands.agentProcesses(), {
+    refetchInterval: panes > 0 ? 10_000 : false,
+    staleTime: 2_000,
+    meta: { silent: true },
+  });
+
+/**
  * Keep `useSessionStates` fresh in realtime. The `santree-hook` binary bumps a
  * tick file after each write; the Rust watcher (started at app setup) emits
  * `sessionStateChanged`, and we invalidate the query so it refetches — no
@@ -977,6 +1083,97 @@ export const useSessionUsageWatcher = () => {
     };
   }, [qc]);
 };
+
+/** Claude's account rate-limit windows (the 5h session window, the 7d weekly
+ *  one, any other the CLI reports), as captured display-only from the
+ *  statusline payload by the hook — see COMPLIANCE.md. Empty until a Claude
+ *  session has reported once. */
+export const useClaudeRateLimits = () =>
+  useUnwrappedQuery(queryKeys.claudeRateLimits, () => commands.claudeRateLimits(), {
+    staleTime: 60_000,
+    meta: { silent: true },
+  });
+
+/** The account's usage straight from Anthropic, read with Claude Code's own
+ *  credential (see COMPLIANCE.md, "Claude subscription usage"). Unlike the
+ *  status-line capture this needs no session to have run, so it is what fills
+ *  the meters on a cold start; it also records what it reads, so the two
+ *  sources share one store. Polled slowly — the windows move in minutes, and
+ *  each read is a request on the user's behalf.
+ *
+ *  `silent` stays because this POLLS: Anthropic rate-limits the endpoint, and a
+ *  toast every five minutes would nag about something the user cannot act on.
+ *  That is only safe because the panel renders the failure itself — the reason
+ *  reaches the Claude row as `ClaudeUsageFetch.detail`. If that ever stops being
+ *  true, this needs a surface again, not a quieter failure. */
+export const useClaudeAccountUsage = () =>
+  useUnwrappedQuery(queryKeys.claudeAccountUsage, () => commands.claudeFetchUsage(), {
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
+    meta: { silent: true },
+  });
+
+/** Whether the user's global Claude status line is wrapped by santree's
+ *  passthrough, so every Claude session — not just the ones santree launches —
+ *  feeds the usage meters. Reads `~/.claude/settings.json`. */
+export const useClaudeGlobalCapture = () =>
+  useUnwrappedQuery(queryKeys.claudeGlobalCapture, () => commands.claudeGlobalCaptureStatus(), {
+    staleTime: 60_000,
+    meta: { silent: true },
+  });
+
+/** Turn the passthrough on (wrap the user's status line, keeping the original
+ *  inside the wrapper) or off (restore it). Touches the user's global Claude
+ *  settings, so it is only ever called from the explicit toggle. */
+export const useSetClaudeGlobalCapture = () =>
+  useActionMutation<boolean, ClaudeGlobalCapture>({
+    mutationFn: (enabled) => unwrap(commands.setClaudeGlobalCapture(enabled)),
+    invalidate: () => [queryKeys.claudeGlobalCapture],
+    success: (data) =>
+      data.enabled
+        ? "Capturing usage from every Claude session. It fills in on the next status-line redraw."
+        : "Your Claude status line is back to its original command.",
+  });
+
+/** Realtime refresh for {@link useClaudeRateLimits}: the hook pings the signal
+ *  socket (tagged `l`), the Rust listener emits `claudeRateLimitsChanged`, and
+ *  we invalidate. Mount once at the app root, beside the usage watcher. */
+export const useClaudeRateLimitsWatcher = () => {
+  const qc = useQueryClient();
+  useEffect(() => {
+    const unlisten = events.claudeRateLimitsChanged.listen(() => {
+      qc.invalidateQueries({ queryKey: queryKeys.claudeRateLimits });
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [qc]);
+};
+
+/** CPU and memory of every process santree's terminals own, grouped repo →
+ *  worktree → terminal. One `ps` sweep per read: sampled slowly at rest, so
+ *  the bar's total is never a blank, and every few seconds while the resource
+ *  manager is open (`watching`). */
+export const useResourceUsage = (watching: boolean) =>
+  useUnwrappedQuery(queryKeys.resourceUsage, () => commands.resourceUsage(), {
+    staleTime: 2_000,
+    refetchInterval: watching ? 4_000 : 30_000,
+    meta: { silent: true },
+  });
+
+/**
+ * Every live PTY session (Settings → Terminal).
+ *
+ * Polls only while the panel is open — `watching` — because the two facts that
+ * make it worth showing, whether a pane is attached and whether the child is
+ * still alive, both change without anything invalidating a cache key.
+ */
+export const useTerminalSessions = (watching: boolean) =>
+  useUnwrappedQuery(queryKeys.terminalSessions, () => commands.terminalSessions(), {
+    staleTime: 1_000,
+    refetchInterval: watching ? 2_000 : false,
+    meta: { silent: true },
+  });
 
 /**
  * Aggregated Claude token usage across all local session transcripts (Settings →
@@ -1246,6 +1443,33 @@ export const useWorktreeFileDiff = (
     { enabled: enabled && !!repo && !!id && !!path, staleTime: WORKTREE_STALE_TIME },
   );
 
+/** The files the branch has committed relative to its base (merge-base diff),
+ *  for the git panel's "Committed on branch" section. */
+export const useWorktreeBranchChanges = (repo: string, id: string) =>
+  useUnwrappedQuery(
+    queryKeys.worktreeBranchChanges(repo, id),
+    () => commands.worktreeBranchChanges(repo, id),
+    { enabled: !!repo && !!id, staleTime: WORKTREE_STALE_TIME },
+  );
+
+/** One committed file's diff against the branch's base. */
+export const useWorktreeBranchFileDiff = (repo: string, id: string, path: string) =>
+  useUnwrappedQuery(
+    queryKeys.worktreeBranchFileDiff(repo, id, path),
+    () => commands.worktreeBranchFileDiff(repo, id, path),
+    { enabled: !!repo && !!id && !!path, staleTime: WORKTREE_STALE_TIME },
+  );
+
+/** The agent sessions that have run in a worktree, newest first. Sessions end
+ *  and transcripts grow without an event we listen for, so this refetches on a
+ *  slow interval while the panel is mounted. */
+export const useWorktreeSessions = (repo: string, id: string) =>
+  useUnwrappedQuery(
+    queryKeys.worktreeSessions(repo, id),
+    () => commands.worktreeSessions(repo, id),
+    { enabled: !!repo && !!id, staleTime: 15_000, refetchInterval: 30_000 },
+  );
+
 /** The old/new full file contents, for the diff viewer's context expansion.
  *  Cached like the diff (watcher-invalidated) so revisiting a file is instant. */
 export const useWorktreeFileSource = (repo: string, id: string, path: string) =>
@@ -1441,7 +1665,15 @@ export const useAddWorktreeTab = (repo: string) =>
   useOptimisticMutation<WorktreeTab, null>({
     mutationFn: (tab) =>
       unwrap(
-        commands.addWorktreeTab(repo, tab.worktreeId, tab.id, tab.kind, tab.agentKind, tab.title),
+        commands.addWorktreeTab(
+          repo,
+          tab.worktreeId,
+          tab.id,
+          tab.kind,
+          tab.agentKind,
+          tab.title,
+          tab.pr,
+        ),
       ),
     optimistic: (qc, tab) => {
       const key = queryKeys.worktreeTabs(repo);
@@ -1451,6 +1683,22 @@ export const useAddWorktreeTab = (repo: string) =>
     },
     invalidate: () => [queryKeys.worktreeTabs(repo)],
   });
+
+/** What a persisted review tab relaunches with — its `--settings` (the review deny
+ *  list) and its `--mcp-config` (santree's review tools, scoped to the tab's PR),
+ *  re-derived by the backend from the stored row.
+ *
+ *  The in-memory hand-off that carries these on a first launch dies with the app,
+ *  so without this a tab resumed after a restart fell back to the plain no-git
+ *  settings — losing the `gh` deny list and the review tools with no error. Cached
+ *  indefinitely: the answer is a function of the row, which only changes when the
+ *  tab is replaced. */
+export const useWorktreeTabLaunch = (repo: string, id: string, enabled: boolean) =>
+  useUnwrappedQuery(
+    queryKeys.worktreeTabLaunch(repo, id),
+    () => commands.worktreeTabLaunch(repo, id),
+    { enabled: enabled && !!repo && !!id, staleTime: Number.POSITIVE_INFINITY },
+  );
 
 /** Rename an extra tab (optimistic — the tab bar re-labels instantly). */
 export const useRenameWorktreeTab = (repo: string) =>
@@ -1488,6 +1736,24 @@ export const useWorktreePrs = (repo: string) =>
     enabled: !!repo,
     staleTime: 60_000,
   });
+
+/** One PR's summary row — the same shape the Reviews inbox ships, fetched by
+ *  number. This is what the Trees right panel renders for a worktree's own PR:
+ *  `useWorktreePrs` carries only number/url/state, and the panel needs the title,
+ *  the checks rollup, the review decision and the node id a comment is written
+ *  against. `null` when `gh` isn't authenticated or the PR is gone.
+ *
+ *  Same one-minute staleTime as `useReviews`, for the same reason — PR state
+ *  changes server-side, and ⌘⇧R re-pulls it with the other external reads. */
+export const usePrSummary = (prRepo: string | null, number: number) =>
+  useUnwrappedQuery(
+    queryKeys.prSummary(prRepo ?? "", number),
+    () => {
+      const [owner, name] = splitRepoSlug(prRepo ?? "");
+      return commands.prSummary(owner, name, number);
+    },
+    { enabled: !!prRepo && number > 0, staleTime: 60_000 },
+  );
 
 /** The Reviews dashboard inbox (my PRs / review requests / per-team), scoped to
  *  the org of the active repo. Empty when `gh` isn't authenticated. Cached a
@@ -2124,6 +2390,63 @@ export const useCreateWorktree = (repo: string) =>
           : `Created worktree for ${wt.id}.`,
   });
 
+/**
+ * The repo's branches, for the Create-worktree dialog's Branch source. Each row
+ * says whether the branch is already checked out, which is what lets the picker
+ * disable it rather than let the user click into git's "already used by
+ * worktree" error.
+ *
+ * Read only while the dialog is open (`enabled`), and kept briefly: branches
+ * move under us (a fetch, a push from a terminal), so a long stale window would
+ * offer a branch that has since been taken.
+ */
+export const useRepoBranches = (repo: string, enabled = true) =>
+  useUnwrappedQuery(queryKeys.repoBranches(repo), () => commands.repoBranches(repo), {
+    enabled: enabled && repo.length > 0,
+    staleTime: 15_000,
+  });
+
+/**
+ * Create a worktree from the sidebar's "Create worktree" dialog.
+ *
+ * Unlike {@link useCreateWorktree} this one may have no Linear ticket behind it
+ * at all: `source` says whether the branch is derived from the id, checked out
+ * from one that exists, or created under a name the user typed.
+ *
+ * `silent` because the dialog shows the failure inline and stays open on it —
+ * a name git refuses is fixed where it was typed, not read off a toast after
+ * the form has closed.
+ */
+export const useCreateManualWorktree = (repo: string) =>
+  useActionMutation({
+    mutationFn: (a: {
+      issueId: string;
+      title: string;
+      project: string | null;
+      source: WorktreeBranchSource;
+      /** The parent worktree's branch — a *stacked* worktree — or null for the
+       *  repo's default branch. */
+      base: string | null;
+      agent: AgentKind;
+    }) =>
+      unwrap(
+        commands.createManualWorktree(
+          repo,
+          a.issueId,
+          a.title,
+          a.project,
+          a.source,
+          a.base,
+          a.agent,
+        ),
+      ),
+    silent: true,
+    // The branch list too: the new worktree has taken its branch, so a reopened
+    // dialog must show it as unavailable.
+    invalidate: () => [queryKeys.worktrees(repo), queryKeys.repoBranches(repo)],
+    success: (wt) => `Created worktree ${wt.id} on ${wt.branch}.`,
+  });
+
 /** Check out a pull request as a normal writable tree. It intentionally does not
  * launch an agent: Trees owns provider choice through its persisted `+` tabs. */
 export const useCreateReviewWorktree = (repo: string) =>
@@ -2295,6 +2618,8 @@ export const useCommitWorktree = (repo: string, id: string) =>
       queryKeys.worktreeStatus(repo, id),
       queryKeys.worktreeFileDiffPrefix(repo, id),
       queryKeys.worktreeFileSourcePrefix(repo, id),
+      queryKeys.worktreeBranchChanges(repo, id),
+      queryKeys.worktreeBranchFileDiffPrefix(repo, id),
       queryKeys.worktrees(repo),
       queryKeys.baseWorktree(repo),
     ],
@@ -2401,12 +2726,20 @@ interface StageVars {
 
 /** Apply a staging action to the cached file list so the checkbox/row updates
  *  before the git round-trip lands: flip `staged`, or drop a discarded file. */
+/** Whether a staging target covers a file: the file itself, or a directory it
+ *  sits under. Folder rows stage with the directory path — `git add <dir>` — so
+ *  the optimistic patch has to move every file beneath it, not just an exact
+ *  match, or a folder's whole subtree sits unchanged until the refetch lands.
+ *  Matched on the path boundary so `src` never captures `src2/…`. */
+const stageTargets = (path: string, target: string | undefined) =>
+  target !== undefined && (path === target || path.startsWith(`${target}/`));
+
 export function applyStage(files: ChangedFile[], a: StageVars): ChangedFile[] {
   switch (a.action) {
     case "stage":
-      return files.map((f) => (f.path === a.path ? { ...f, staged: true } : f));
+      return files.map((f) => (stageTargets(f.path, a.path) ? { ...f, staged: true } : f));
     case "unstage":
-      return files.map((f) => (f.path === a.path ? { ...f, staged: false } : f));
+      return files.map((f) => (stageTargets(f.path, a.path) ? { ...f, staged: false } : f));
     case "discard":
       return files.filter((f) => f.path !== a.path);
     case "stageAll":
@@ -2569,6 +2902,7 @@ const EXTERNAL_PREFIXES = [
   queryKeys.worktreePrsPrefix,
   queryKeys.mergeQueuePrefix,
   queryKeys.prDetailPrefix,
+  queryKeys.prSummaryPrefix,
   queryKeys.prTicketsPrefix,
 ] as const;
 
@@ -2590,6 +2924,10 @@ const EXTERNAL_PREFIXES = [
 export const useRefreshExternal = () => {
   const qc = useQueryClient();
   const refresh = useCallback(() => {
+    // Drop the backend's org caches first, or a refresh inside their TTL would
+    // be served the very list the user is refreshing to get past. Fire and
+    // forget: the invalidations below refetch either way.
+    void commands.linearInvalidateCaches();
     for (const queryKey of EXTERNAL_PREFIXES) qc.invalidateQueries({ queryKey });
   }, [qc]);
   // Spin whenever external data is in flight, whoever asked for it. Note this
@@ -2619,7 +2957,13 @@ export const useTriageTickets = (repo: string) =>
     gcTime: TRIAGE_GC_TIME,
   });
 
-/** The full triage issue (description + comments) for the discussion pane. */
+/** The full triage issue (description + comments) for the discussion pane.
+ *
+ *  Three states, not two: `undefined` while it loads, `null` once Linear has said
+ *  this id names no issue (a worktree cut from a plain branch is keyed by a branch
+ *  slug, not a ticket) and the detail otherwise. `null` is a *successful* answer —
+ *  the surfaces that read it hide their ticket UI rather than raising a toast, which
+ *  a rejected query would. Anything Linear couldn't answer still rejects. */
 export const useTriageDetail = (repo: string, id: string | null) =>
   useUnwrappedQuery(
     queryKeys.triageDetail(repo, id ?? ""),
@@ -2681,7 +3025,7 @@ export const useTriageSetState = (repo: string) =>
     optimistic: (qc, args) => {
       const detailKey = queryKeys.triageDetail(repo, args.ticketId);
       const queueKey = queryKeys.triageTickets(repo);
-      const prevDetail = qc.getQueryData<TriageDetail>(detailKey);
+      const prevDetail = qc.getQueryData<TriageDetail | null>(detailKey);
       const prevQueue = qc.getQueryData<TriageTicket[]>(queueKey);
 
       // The target state's category (triage | backlog | …) comes from the
@@ -2754,7 +3098,7 @@ export const useAddComment = (repo: string) =>
       unwrap(commands.triageAddComment(repo, args.ticketId, args.parentId, args.body)),
     optimistic: (qc, args) => {
       const detailKey = queryKeys.triageDetail(repo, args.ticketId);
-      const prev = qc.getQueryData<TriageDetail>(detailKey);
+      const prev = qc.getQueryData<TriageDetail | null>(detailKey);
       if (!prev) return;
 
       // Author is unknown client-side (no viewer-identity query); "You" is a
@@ -3051,7 +3395,14 @@ export const useSetSetting = () =>
       // which are otherwise cached forever. Refetch them here rather than at the
       // toggle's call site, so any future writer of this key gets it too.
       ...(a.key === ENGLISH_TUTOR_KEY
-        ? [queryKeys.claudeHookSettings, queryKeys.claudeHookSettingsNoGit]
+        ? [
+            queryKeys.claudeHookSettings,
+            queryKeys.claudeHookSettingsNoGit,
+            // A review tab's settings file is written by the same builder, so its
+            // resolved launch is cached forever too — invalidate the whole prefix
+            // (the key is per tab) so the next resume rewrites the file.
+            queryKeys.worktreeTabLaunchPrefix,
+          ]
         : []),
       // Read-only mode is folded into what the backend reports as writable, so
       // the status has to be re-read for the write controls to gray out at once
@@ -3257,133 +3608,3 @@ export const useDisplayNames = () => {
   });
   return { value, setValue: mutate };
 };
-
-// ── Dev tab (dogfooding — everything below serves features/dev only and is
-//    deleted with it) ───────────────────────────────────────────────────────
-
-/** App-scoped setting: the santree checkout the Dev tab builds/works in. */
-export const DEV_REPO_PATH_KEY = "dev_repo_path";
-
-/** The Dev tab exists only for this GitHub login (the only developer for now). */
-export const DEV_GITHUB_LOGIN = "santiagotoscanini";
-
-/** Validate, normalize, and persist a picked folder as the Dev checkout. */
-export const useDevNormalizeRepo = () =>
-  useActionMutation<string, string>({
-    mutationFn: (path) => unwrap(commands.devNormalizeRepo(path)),
-    invalidate: () => [queryKeys.setting("app", DEV_REPO_PATH_KEY)],
-  });
-
-/** Running-build vs checkout-HEAD vs newest-DMG status for the Dev header.
- *  Polled while mounted: a `pnpm tauri build` finishing in the Build pane has no
- *  event of its own, and the reads are local git/fs calls. */
-export const useDevInfo = (repoPath: string) =>
-  useUnwrappedQuery(queryKeys.devInfo(repoPath), () => commands.devInfo(repoPath), {
-    enabled: !!repoPath,
-    staleTime: 10_000,
-    refetchInterval: 15_000,
-  });
-
-/** The Dev TODO list, newest first. Changes only through the mutations below. */
-export const useDevTodos = () =>
-  useUnwrappedQuery(queryKeys.devTodos, () => commands.devTodos(), {
-    staleTime: SETTING_STALE_TIME,
-  });
-
-/** Add a TODO (id minted by the caller; screenshots as data URLs). Optimistic —
- *  the row appears instantly; screenshot paths reconcile on settle. */
-export const useAddDevTodo = () =>
-  useOptimisticMutation<{ id: string; body: string; screenshots: string[] }, DevTodo>({
-    mutationFn: ({ id, body, screenshots }) => unwrap(commands.devAddTodo(id, body, screenshots)),
-    optimistic: (qc, { id, body }) => {
-      const prev = qc.getQueryData<DevTodo[]>(queryKeys.devTodos);
-      qc.setQueryData<DevTodo[]>(queryKeys.devTodos, (cur = []) => [
-        { id, body, done: false, screenshots: [], createdAtMs: Date.now() },
-        ...cur,
-      ]);
-      return () => qc.setQueryData(queryKeys.devTodos, prev);
-    },
-    invalidate: () => [queryKeys.devTodos],
-  });
-
-export const useSetDevTodoDone = () =>
-  useOptimisticMutation<{ id: string; done: boolean }, null>({
-    mutationFn: ({ id, done }) => unwrap(commands.devSetTodoDone(id, done)),
-    optimistic: (qc, { id, done }) => {
-      const prev = qc.getQueryData<DevTodo[]>(queryKeys.devTodos);
-      qc.setQueryData<DevTodo[]>(queryKeys.devTodos, (cur = []) =>
-        cur.map((t) => (t.id === id ? { ...t, done } : t)),
-      );
-      return () => qc.setQueryData(queryKeys.devTodos, prev);
-    },
-    invalidate: () => [queryKeys.devTodos],
-  });
-
-export const useDeleteDevTodo = () =>
-  useOptimisticMutation<string, null>({
-    mutationFn: (id) => unwrap(commands.devDeleteTodo(id)),
-    optimistic: (qc, id) => {
-      const prev = qc.getQueryData<DevTodo[]>(queryKeys.devTodos);
-      qc.setQueryData<DevTodo[]>(queryKeys.devTodos, (cur = []) => cur.filter((t) => t.id !== id));
-      return () => qc.setQueryData(queryKeys.devTodos, prev);
-    },
-    invalidate: () => [queryKeys.devTodos],
-  });
-
-/** Render a TODO into an on-disk prompt file; resolves to the file's path. */
-export const useDevTodoPrompt = () =>
-  useActionMutation<{ repoPath: string; id: string }, string>({
-    mutationFn: ({ repoPath, id }) => unwrap(commands.devTodoPrompt(repoPath, id)),
-  });
-
-/** A pasted screenshot as a data URI for inline display. Immutable once written. */
-export const useDevScreenshot = (path: string) =>
-  useUnwrappedQuery(queryKeys.devScreenshot(path), () => commands.devScreenshotSrc(path), {
-    enabled: !!path,
-    staleTime: SETTING_STALE_TIME,
-    gcTime: 5 * 60_000,
-  });
-
-/** Open the newest DMG (and, when running installed, quit for the drag-and-drop
- *  install). Silent — the confirm dialog renders the error inline. */
-export const useDevInstall = () =>
-  useActionMutation<string, boolean>({
-    mutationFn: (repoPath) => unwrap(commands.devInstall(repoPath)),
-    silent: true,
-  });
-
-/** Where the checkout's declared version sits, what it could become, and the
- *  reasons a release from here would be refused. Cheap local git/fs reads, but
- *  a bump changes all of it — so it's invalidated by {@link useDevRelease}. */
-export const useDevVersion = (repoPath: string) =>
-  useUnwrappedQuery(queryKeys.devVersion(repoPath), () => commands.devVersion(repoPath), {
-    enabled: !!repoPath,
-    staleTime: 10_000,
-  });
-
-/** Bump the version files, commit them, tag and push — which starts the signed
- *  release in CI. Not optimistic and not silent: this one reports exactly what
- *  it did, because a half-finished release is a thing you have to know about.
- *  The dialog confirms before it ever gets here. */
-export const useDevRelease = (repoPath: string) =>
-  useActionMutation<{ version: string; notes: string }, DevRelease>({
-    mutationFn: ({ version, notes }) => unwrap(commands.devRelease(repoPath, version, notes)),
-    // The release commit moves the working tree the Files pane is showing. Its
-    // queries are keyed by repo *name*, which this hook doesn't have — the
-    // prefixes cover every repo, and re-reading a clean status is cheap.
-    invalidate: () => [
-      queryKeys.devVersion(repoPath),
-      queryKeys.devInfo(repoPath),
-      ["worktree-status"],
-      ["worktree-file-diff"],
-    ],
-    success: (r) => `${r.tag} pushed. CI is building the release.`,
-  });
-
-/** Eject any mounted santree DMG volume left on the desktop. */
-export const useDevEject = () =>
-  useActionMutation<void, number>({
-    mutationFn: () => unwrap(commands.devEject()),
-    success: (n) =>
-      n > 0 ? `Ejected ${n} volume${n === 1 ? "" : "s"}.` : "No santree DMG volumes are mounted.",
-  });

@@ -35,6 +35,7 @@ import {
 } from "../../lib/queries";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
+import { useHookInjection } from "../terminal/useHookInjection";
 import { useReviewsModel } from "./model";
 import { ReviewFooter, reviewTargetFor } from "./ReviewSessionShared";
 import { ReviewTerminal } from "./ReviewTerminal";
@@ -95,6 +96,11 @@ export function AiReviewSessionPane({
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
   const resolvedAgent = sessionAgent(session.data, agentKind);
   const provider = agentProvider(resolvedAgent);
+  // The review's own restricted settings file, not the standard one — and never a
+  // fallback to it: `ready` below holds the launch until `launch.data` resolves.
+  // A provider that takes its hooks another way (Codex's `-c` overrides) still
+  // gets them, so its session is registered and resumable like any other.
+  const hooks = useHookInjection({ settingsPath: launch.data?.settingsPath });
   const seed = agentSessionSeed(session.data, {
     repo,
     termKey,
@@ -114,10 +120,7 @@ export function AiReviewSessionPane({
     permissionMode: provider.capabilities.permissionMode
       ? (permissionMode.data ?? undefined)
       : undefined,
-    settingsFlag:
-      provider.capabilities.cliLaunchOptions && launch.data
-        ? `--settings ${shellQuote(launch.data.settingsPath)}`
-        : undefined,
+    settingsFlag: hooks.flagFor(resolvedAgent),
     mcpFlag:
       provider.capabilities.cliLaunchOptions && launch.data
         ? `--mcp-config ${shellQuote(launch.data.mcpConfigPath)}`
@@ -141,6 +144,7 @@ export function AiReviewSessionPane({
     (workspace.isFetched &&
       !session.isFetching &&
       !!launch.data &&
+      hooks.readyFor(resolvedAgent) &&
       model.isFetched &&
       effort.isFetched &&
       permissionMode.isFetched &&
@@ -191,6 +195,7 @@ export function AiReviewSessionPane({
             title={`Review #${pr.number} · ${provider.label}`}
             cwd={cwd}
             seed={seed}
+            agent={{ kind: resolvedAgent, repo, termKey }}
             attach={visible}
             onExited={dropCachedSession}
           />

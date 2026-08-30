@@ -9,5 +9,6 @@ pub mod diff_index;
 pub mod domain;
 pub mod layout;
 pub mod linear;
+pub mod review_tools;
 
 pub use domain::*;

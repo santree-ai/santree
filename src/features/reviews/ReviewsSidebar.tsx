@@ -2,13 +2,16 @@
  * Left rail of the Reviews tab: the org-scoped PR inbox, ordered by what you
  * should pick up next rather than by who owns it.
  *
- * The default (`category`) grouping keeps ownership clear:
+ * This rail is about **other people's** pull requests. Your own live beside their
+ * worktree, in the Trees panel, where the work on them happens — so what's left
+ * here is the one question this view answers: whose review is waiting on you.
  *
- *  1. **My PRs** — your own open PRs, sub-grouped by repository.
- *  2. **Needs your review** — direct requests still awaiting your verdict.
- *  3. one block **per team** you're on with open requests — lower-signal than a
+ * The default (`category`) grouping keeps that ordering clear:
+ *
+ *  1. **Needs your review** — direct requests still awaiting your verdict.
+ *  2. one block **per team** you're on with open requests — lower-signal than a
  *     direct request, so each folds (persisted).
- *  4. **Reviewed, waiting on author** — completed direct requests, kept last.
+ *  3. **Reviewed, waiting on author** — completed direct requests, kept last.
  *
  * Two selects in the header re-cut the same list by Linear project or by repo,
  * and re-order it by wait / recency / size. Under those cuts the category signal
@@ -72,7 +75,6 @@ import { useReviewsModel } from "./model";
 
 /** Which sidebar sections the user has collapsed, persisted across restarts. */
 const COLLAPSED_KEY = "santree-reviews-collapsed-teams";
-const MINE_KEY = "category:mine";
 const REQUESTED_KEY = "category:requested";
 
 /** Section key for the "you've already reviewed these" block, sharing the same
@@ -94,7 +96,6 @@ export function ReviewsSidebar() {
     repo,
     inbox,
     loading,
-    allPrs,
     activeId,
     setActive,
     showMergeQueue,
@@ -106,11 +107,17 @@ export function ReviewsSidebar() {
     ticketFor,
   } = useReviewsModel();
   const { data: queue } = useMergeQueue(repo);
+  // What this rail actually renders — not `allPrs`, which still carries the
+  // viewer's own PRs for the deep-link and "is this mine" lookups elsewhere. A
+  // header count larger than the list under it is just a wrong number.
+  const shown = new Set(
+    [...(inbox?.requested ?? []), ...(inbox?.teams.flatMap((t) => t.prs) ?? [])].map((pr) => pr.id),
+  );
   return (
     <ReviewsSidebarView
       inbox={inbox}
       loading={loading}
-      total={allPrs.length}
+      total={shown.size}
       activeId={showMergeQueue ? null : activeId}
       onSelect={setActive}
       grouping={grouping}
@@ -314,26 +321,6 @@ function CategorySections({
 
   return (
     <>
-      {inbox.mine.length > 0 && (
-        <FoldingSection
-          title="My PRs"
-          count={inbox.mine.length}
-          open={!collapsed.has(MINE_KEY)}
-          onToggle={() => onToggle(MINE_KEY)}
-        >
-          <ProjectSections
-            scope="mine"
-            prs={inbox.mine}
-            sort={sort}
-            ticketFor={ticketFor}
-            activeId={activeId}
-            onSelect={onSelect}
-            collapsed={collapsed}
-            onToggle={onToggle}
-          />
-        </FoldingSection>
-      )}
-
       {waiting.length > 0 && (
         <FoldingSection
           title="Needs your review"
@@ -392,8 +379,9 @@ function CategorySections({
   );
 }
 
-/** The project / repo cuts: one flat list, re-bucketed. Your own PRs are folded in
- *  too — under these groupings "mine" isn't the axis, the project or repo is. */
+/** The project / repo cuts: one flat list, re-bucketed. Same PRs as the category
+ *  view — re-cutting the rail must not change *which* pull requests it shows, or
+ *  a PR would appear only under one grouping and be invisible under another. */
 function FlatSections({
   inbox,
   grouping,
@@ -415,7 +403,7 @@ function FlatSections({
   collapsed: Set<string>;
   onToggle: (key: string) => void;
 }) {
-  const all = [...inbox.requested, ...inbox.teams.flatMap((t) => t.prs), ...inbox.mine];
+  const all = [...inbox.requested, ...inbox.teams.flatMap((t) => t.prs)];
   // One PR can be both a team request and a direct one; keep the first sighting so
   // it doesn't render twice under the same heading.
   const seen = new Set<string>();
@@ -483,7 +471,7 @@ function RailSelect({
       title={title}
       aria-label={title}
       wrapperClassName="min-w-0 flex-1"
-      className="w-full rounded-[6px] border border-line-2 bg-input py-1 pr-6 pl-2 text-[11px] text-fg-2 hover:border-line-strong focus-visible:outline-2 focus-visible:outline-[color:var(--accent)]"
+      className="w-full rounded-[6px] border border-line-2 bg-input py-1 pr-6 pl-2 text-[11px] text-fg-2 hover:border-line-strong"
     >
       {children}
     </ChevronSelect>

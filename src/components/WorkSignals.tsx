@@ -54,6 +54,70 @@ export function showMilestoneGroups(groups: { key: string }[]): boolean {
   return groups.length !== 1 || groups[0]?.key !== NO_MILESTONE;
 }
 
+/** Heading for work whose issue carries no Linear project. Deliberately the same
+ * words the backend already gives such an issue (`linear.rs` `project_fields`),
+ * so a row with no ticket at all and a ticket with no project land in one band
+ * instead of two that mean the same thing. */
+export const NO_PROJECT = "No Project";
+
+/** The Linear project fields a heading needs, however the row supplies them. */
+export interface ProjectRef {
+  name: string;
+  color: string | null;
+  icon: string | null;
+  targetDate: string | null;
+}
+
+export interface ProjectGroup<T> {
+  key: string;
+  label: string;
+  color: string | null;
+  icon: string | null;
+  targetDate: string | null;
+  items: T[];
+}
+
+/** Group an already-ordered list by Linear project. Linear gives a project no
+ * manual order, so a band keeps the position its first item had — the caller has
+ * already ranked the items (by attention, in the sidebar), and the band holding
+ * the most urgent one leads. Unassigned work stays in one trailing bucket, as it
+ * does for milestones, and item order within a band is stable. */
+export function groupByProject<T>(
+  items: T[],
+  projectOf: (item: T) => ProjectRef | null | undefined,
+): ProjectGroup<T>[] {
+  const groups = new Map<string, ProjectGroup<T>>();
+  for (const item of items) {
+    const project = projectOf(item);
+    const key = project?.name || NO_PROJECT;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.items.push(item);
+      continue;
+    }
+    groups.set(key, {
+      key,
+      label: key,
+      color: project?.color ?? null,
+      icon: project?.icon ?? null,
+      targetDate: project?.targetDate ?? null,
+      items: [item],
+    });
+  }
+  // Stable sort, so everything but the trailing catch-all keeps insertion order.
+  return [...groups.values()].sort(
+    (a, b) => Number(a.key === NO_PROJECT) - Number(b.key === NO_PROJECT),
+  );
+}
+
+/** Stricter than {@link showMilestoneGroups}, and on purpose: a milestone name
+ * and target date state a delivery horizon its section header does not, but a
+ * lone project heading only restates the section it sits inside. Keep project
+ * headings once there are two bands to tell apart. */
+export function showProjectGroups(groups: { key: string }[]): boolean {
+  return groups.length > 1;
+}
+
 export type ChangeSize = "XS" | "S" | "M" | "L" | "XL";
 
 const SIZE_LEVEL: Record<ChangeSize, number> = { XS: 1, S: 2, M: 3, L: 4, XL: 5 };
@@ -232,7 +296,7 @@ export function MilestoneHeading({
       onClick={onToggle}
       aria-expanded={open}
       aria-label={`${open ? "Collapse" : "Expand"} milestone ${label}`}
-      className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2 pt-1.5 pb-1 text-left font-mono text-[9px] tracking-[.05em] text-muted-4 uppercase transition-colors hover:bg-hover hover:text-fg-2 focus-visible:outline-2 focus-visible:outline-[color:var(--accent)]"
+      className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2 pt-2.5 pb-1.5 text-left font-mono text-[10px] tracking-[.05em] text-muted-4 uppercase transition-colors hover:bg-hover hover:text-fg-2"
     >
       <Chevron size={9} className="flex-none" />
       <span className="truncate">{label}</span>

@@ -90,26 +90,36 @@ function pr(overrides: Partial<ReviewPr> = {}): ReviewPr {
   };
 }
 
+/** The santree repo the PR's checkout belongs to. Local repos are registered
+ *  under their `owner/name` slug (see ReviewHeader's repo match), so for this PR
+ *  that is its own repo. Only the submit bar reads it, to invalidate that repo's
+ *  caches. */
+const SANTREE_REPO = "acme/booking-agent";
+
+const pane = (overrides: Partial<ReviewPr> = {}) => (
+  <PrReviewPane pr={pr(overrides)} santreeRepo={SANTREE_REPO} />
+);
+
 describe("PrReviewPane", () => {
   it("keeps the file cards memoized across an unrelated re-render", () => {
     marks = local();
-    const { rerender } = render(<PrReviewPane pr={pr()} />);
+    const { rerender } = render(pane());
     expect(spies.renderDiff).toHaveBeenCalledTimes(2);
     spies.renderDiff.mockClear();
 
     // What the 30s check-poll does: a fresh ReviewPr object whose files/threads are
     // unchanged. Every prop the cards receive must still be reference-stable.
-    rerender(<PrReviewPane pr={pr({ checks: "Pending", commentCount: 4 })} />);
+    rerender(pane({ checks: "Pending", commentCount: 4 }));
     expect(spies.renderDiff).not.toHaveBeenCalled();
   });
 
   it("re-renders only the file whose Viewed mark changed", () => {
     marks = local();
-    const { rerender } = render(<PrReviewPane pr={pr()} />);
+    const { rerender } = render(pane());
     spies.renderDiff.mockClear();
 
     marks = local({ path: "a.ts", sha: "sha-a.ts" });
-    rerender(<PrReviewPane pr={pr()} />);
+    rerender(pane());
 
     // a.ts re-renders (then collapses); b.ts's memo must hold — no re-layout of a
     // diff the user didn't touch.
@@ -118,7 +128,7 @@ describe("PrReviewPane", () => {
 
   it("expires a local mark once the file's blob SHA moves on", () => {
     marks = local({ path: "a.ts", sha: "sha-from-an-older-commit" });
-    const { getAllByRole } = render(<PrReviewPane pr={pr()} />);
+    const { getAllByRole } = render(pane());
 
     // The whole point of storing the SHA: a new commit touching a.ts must drop the
     // mark, so the file re-opens instead of staying signed off at stale content.
@@ -133,7 +143,7 @@ describe("PrReviewPane", () => {
     // a changed file as DISMISSED, which never reaches `paths`. Applying the local
     // SHA rule here would clear every synced mark, since none can ever match.
     marks = { source: "synced", paths: ["a.ts"] };
-    const { getAllByRole } = render(<PrReviewPane pr={pr()} />);
+    const { getAllByRole } = render(pane());
 
     expect(getAllByRole("checkbox").map((c) => (c as HTMLInputElement).checked)).toEqual([
       true,

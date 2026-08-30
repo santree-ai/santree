@@ -1,7 +1,7 @@
 {
   "name": "santree-app",
   "private": true,
-  "version": "0.1.5-beta.1",
+  "version": "0.1.5-beta.2",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.0.6",
@@ -43,6 +43,7 @@
     "@xterm/xterm": "^6.0.0",
     "@xyflow/react": "^12.11.1",
     "material-icon-theme": "^5.36.1",
+    "mermaid": "^11.17.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",

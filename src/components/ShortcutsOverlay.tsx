@@ -22,17 +22,10 @@ interface Section {
   items: Shortcut[];
 }
 
-/** Build the section list; tab numbers follow NavTabs order — the repo-independent
- *  views first (Agents, then Dev when enabled), then the repo-scoped ones. */
-function buildSections(triageEnabled: boolean, devEnabled: boolean): Section[] {
-  const tabLabels = [
-    "Agents",
-    ...(devEnabled ? ["Dev"] : []),
-    ...(triageEnabled ? ["Triage"] : []),
-    "Issues",
-    "Trees",
-    "Reviews",
-  ];
+/** Build the section list; the numbers follow the sidebar's destinations, top to
+ *  bottom, so they match what's on screen (see `SidebarNav`). */
+function buildSections(triageEnabled: boolean): Section[] {
+  const tabLabels = [...(triageEnabled ? ["Triage"] : []), "Tickets", "Reviews"];
   return [
     {
       title: "General",
@@ -65,7 +58,7 @@ function buildSections(triageEnabled: boolean, devEnabled: boolean): Section[] {
     },
     {
       title: "Trees",
-      items: [{ label: "Toggle files panel", keys: ["⌘", "L"] }],
+      items: [{ label: "Toggle the side panel", keys: ["⌘", "L"] }],
     },
     {
       title: "Reviews",
@@ -83,7 +76,9 @@ function buildSections(triageEnabled: boolean, devEnabled: boolean): Section[] {
   ];
 }
 
-function Kbd({ token }: { token: string }) {
+/** One key cap. Exported so the welcome surface's shortcut list wears the same
+ *  chrome as the overlay it is teaching. */
+export function Kbd({ token }: { token: string }) {
   return (
     <span className="flex h-[22px] min-w-[22px] items-center justify-center rounded-[5px] border border-line-2 bg-input px-1.5 font-mono text-[11px] text-fg-2">
       {token}
@@ -92,7 +87,7 @@ function Kbd({ token }: { token: string }) {
 }
 
 export function ShortcutsOverlay() {
-  const { triageEnabled, devEnabled } = useApp();
+  const { triageEnabled } = useApp();
   const { shortcutsOpen, setShortcutsOpen } = useAppUi();
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -114,13 +109,13 @@ export function ShortcutsOverlay() {
   });
 
   const sections = useMemo(() => {
-    const all = buildSections(triageEnabled, devEnabled);
+    const all = buildSections(triageEnabled);
     const q = query.trim().toLowerCase();
     if (!q) return all;
     return all
       .map((s) => ({ ...s, items: s.items.filter((i) => i.label.toLowerCase().includes(q)) }))
       .filter((s) => s.items.length > 0);
-  }, [triageEnabled, devEnabled, query]);
+  }, [triageEnabled, query]);
 
   if (!shortcutsOpen) return null;
 

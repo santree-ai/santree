@@ -799,6 +799,47 @@ fn parse_list<T: serde::de::DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
+    /// The server, its advertised tool list, and the allowlist `src-tauri` hands
+    /// Codex must all name the same set.
+    ///
+    /// Codex's review thread runs `approvalPolicy = never`, so a tool the
+    /// allowlist omits is *rejected* when the model reaches for it, with nothing
+    /// user-visible to explain the gap. That is exactly what happened to the two
+    /// work-item tools: added here, never added there, and the Codex review
+    /// silently could not complete a task its own prompt instructed it to.
+    #[test]
+    fn every_advertised_tool_is_dispatchable_and_named_in_the_shared_list() {
+        use santree_core::review_tools::REVIEW_TOOL_NAMES;
+
+        let (mut server, _dir) = tools("acme/api#7");
+        let advertised: Vec<String> = server
+            .list()
+            .iter()
+            .map(|t| t["name"].as_str().expect("tool name").to_string())
+            .collect();
+
+        let mut shared: Vec<&str> = REVIEW_TOOL_NAMES.to_vec();
+        let mut listed: Vec<&str> = advertised.iter().map(String::as_str).collect();
+        shared.sort_unstable();
+        listed.sort_unstable();
+        assert_eq!(
+            listed, shared,
+            "the advertised tools and santree_core::review_tools must match"
+        );
+
+        // Advertising a tool the dispatch doesn't handle is the same failure seen
+        // from the other side: the model calls it and gets an error it can't act on.
+        for name in REVIEW_TOOL_NAMES {
+            assert!(
+                !matches!(
+                    server.call(name, &serde_json::json!({})),
+                    Err(ToolError::UnknownTool)
+                ),
+                "{name} is advertised but not dispatchable"
+            );
+        }
+    }
+
     use super::*;
     use santree_core::diff_index::{DiffFileIndex, DiffIndex};
 

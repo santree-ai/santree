@@ -87,9 +87,8 @@ function ReviewsHome() {
             </div>
           </div>
 
-          <div className="mb-5 grid grid-cols-3 divide-x divide-line overflow-hidden rounded-[var(--radius-md)] border border-line bg-raised">
+          <div className="mb-5 grid grid-cols-2 divide-x divide-line overflow-hidden rounded-[var(--radius-md)] border border-line bg-raised">
             <SummaryStat label="Needs review" value={waiting.length} />
-            <SummaryStat label="My PRs" value={inbox?.mine.length ?? 0} />
             <button
               type="button"
               onClick={openMergeQueue}
@@ -322,7 +321,7 @@ function PrPane({
         )}
       </div>
 
-      {tab === "pr" && <PrReviewPane pr={pr} fileFocus={fileFocus} />}
+      {tab === "pr" && <PrReviewPane pr={pr} santreeRepo={repo} fileFocus={fileFocus} />}
       {tab === "checks" && <ChecksPane pr={pr} />}
       {mountedProviders.map((agent) => (
         <div key={agent} className={tab === agent ? "flex min-h-0 flex-1" : "hidden"}>

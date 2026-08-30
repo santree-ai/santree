@@ -4,7 +4,7 @@
 //! metadata and the repo↔org links live in the app database; pure mapping and
 //! layout live in `santree_core`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use santree_core::domain::{
-    LinearOrg, LinearStatus, ProjectMilestoneRef, Task, TaskStatus, TicketRef, TriageComment,
-    TriageDetail, TriageSchedule, TriageShift, TriageTicket, WorkflowState,
+    ApiBudgetKind, ApiBudgetWindow, LinearApiBudget, LinearOrg, LinearStatus, ProjectMilestoneRef,
+    Task, TaskStatus, TicketRef, TriageComment, TriageDetail, TriageSchedule, TriageShift,
+    TriageTicket, WorkflowState,
 };
 use santree_core::{layout, linear as core_linear};
 
@@ -339,6 +340,7 @@ pub(crate) async fn import_cli_credential(
         },
     )
     .await?;
+    invalidate_org_caches(&slug);
     log::info!("imported the Linear credential for org {slug} from the santree CLI auth store");
     Ok(LinearOrg {
         can_write: scopes_allow_write(&scopes),
@@ -859,13 +861,148 @@ fn apply_subtask_dependencies(tasks: &mut [Task]) {
     }
 }
 
-/// Fetch the assigned issues for `repo`'s org and lay them out as a graph, or
-/// `None` when no org is connected. Returning `None` instead of erroring lets a
-/// not-yet-connected repo show an empty graph rather than an error state.
+// ── Read caches ────────────────────────────────────────────────────────────
+
+/// One key's cache slot: the fetch time and the value, behind a lock that is held
+/// for the whole fetch so concurrent readers of the key wait on one result.
+type Slot<T> = std::sync::Arc<tokio::sync::Mutex<Option<(Instant, std::sync::Arc<T>)>>>;
+
+/// A per-key, TTL-bounded, single-flight cache for one kind of Linear read.
+///
+/// Each key owns a [`Slot`] whose `tokio::sync::Mutex` is held *across* the fetch, so
+/// callers that arrive mid-flight wait on the first one's result rather than each
+/// issuing the same query. [`TtlCache::invalidate`] drops the slot outright: a fetch
+/// already in flight completes into the orphaned slot and is simply never served, so
+/// a write never waits on a read to land.
+struct TtlCache<T> {
+    ttl: Duration,
+    slots: std::sync::Mutex<HashMap<String, Slot<T>>>,
+}
+
+impl<T> TtlCache<T> {
+    fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            slots: Default::default(),
+        }
+    }
+
+    fn slot(&self, key: &str) -> Slot<T> {
+        // Poison-tolerant, like `refresh_lock`: the map holds only Arcs, so a thread
+        // that panicked mid-access left it structurally sound.
+        self.slots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// The value for `key` — served from the cache while younger than the TTL, else
+    /// fetched exactly once however many callers arrive mid-flight. The flag reports
+    /// which happened, so the caller can log a hit differently from a fetch. A failed
+    /// fetch is not cached: the next caller tries again.
+    async fn get_or_fetch<F, Fut>(&self, key: &str, fetch: F) -> Result<(std::sync::Arc<T>, bool)>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let slot = self.slot(key);
+        let mut entry = slot.lock().await;
+        if let Some((at, value)) = entry.as_ref() {
+            if at.elapsed() < self.ttl {
+                return Ok((value.clone(), true));
+            }
+        }
+        let value = std::sync::Arc::new(fetch().await?);
+        *entry = Some((Instant::now(), value.clone()));
+        Ok((value, false))
+    }
+
+    /// Forget `key` so the next read fetches. Never waits on an in-flight fetch.
+    fn invalidate(&self, key: &str) {
+        self.slots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key);
+    }
+
+    /// Forget every key — the manual refresh, which promises a real fetch.
+    fn clear(&self) {
+        self.slots.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+/// How long an org's assigned-issue list is reused. Every registered repo linked to
+/// the same org asks for it — the sidebar and the Tickets page fan out per repo by
+/// design — and those calls land within the same second, so the window only has to
+/// outlive that burst. Writes invalidate it explicitly (see [`issues_changed`]), so
+/// nothing the user just did reads back stale.
+const ASSIGNED_ISSUES_TTL: Duration = Duration::from_secs(15);
+
+/// Per-org assigned-issue cache, keyed by org slug alone. That is the whole identity
+/// of the result: [`ASSIGNED_ISSUES_QUERY`] takes no variables and reads nothing per
+/// repo, and an org has exactly one keychain credential, so the slug already pins
+/// the viewer. The one event that can change the viewer behind a slug — a reconnect
+/// — drops the entry via [`invalidate_org_caches`]. No token ever enters the key.
+static ASSIGNED_ISSUES: std::sync::LazyLock<TtlCache<Vec<Task>>> =
+    std::sync::LazyLock::new(|| TtlCache::new(ASSIGNED_ISSUES_TTL));
+
+/// Drop the org's cached issue list after a write. Every mutation calls this once
+/// the request has been *sent* — success or not, because a failure reply doesn't
+/// prove the change didn't land — so the frontend's settle-time refetch fetches.
+fn issues_changed(slug: &str) {
+    ASSIGNED_ISSUES.invalidate(slug);
+}
+
+/// Drop everything cached for an org whose credential was just (re)issued — the
+/// viewer behind the slug may be a different user now.
+fn invalidate_org_caches(slug: &str) {
+    ASSIGNED_ISSUES.invalidate(slug);
+    TEAM_SCOPES.invalidate(slug);
+}
+
+/// Drop every org's caches. The manual refresh (⌘⇧R) calls this before it
+/// refetches: a refresh that lands inside the TTL would otherwise be served
+/// the very list the user is refreshing to get past.
+pub fn invalidate_all_caches() {
+    ASSIGNED_ISSUES.clear();
+    TEAM_SCOPES.clear();
+}
+
+/// The assigned issues for `repo`'s org laid out as a graph, or `None` when no org is
+/// connected. Returning `None` instead of erroring lets a not-yet-connected repo show
+/// an empty graph rather than an error state.
+///
+/// Served from [`ASSIGNED_ISSUES`] when the org was fetched within the TTL: the
+/// cross-repo views ask once per registered repo, and three repos on one org used to
+/// cost three identical round-trips. A hit skips the keychain read as well as the
+/// network — only a miss builds a session.
 pub async fn list_issues(db: &Db, repo: &str) -> Result<Option<Vec<Task>>> {
-    let Some(session) = repo_session(db, repo).await? else {
+    let Some(slug) = resolve_org_slug(db, repo).await? else {
         return Ok(None);
     };
+    let (tasks, from_cache) = ASSIGNED_ISSUES
+        .get_or_fetch(&slug, || fetch_assigned_issues(db, slug.clone(), repo))
+        .await?;
+    if from_cache {
+        log::debug!(
+            "served {} Linear issues for {repo} from the {slug} org cache",
+            tasks.len()
+        );
+    } else {
+        log::info!(
+            "fetched {} Linear issues for {repo} (org {slug})",
+            tasks.len()
+        );
+    }
+    Ok(Some(tasks.as_ref().clone()))
+}
+
+/// The uncached half of [`list_issues`]: one [`ASSIGNED_ISSUES_QUERY`] round-trip for
+/// `slug`, mapped and laid out. `repo` is only for the truncation warning.
+async fn fetch_assigned_issues(db: &Db, slug: String, repo: &str) -> Result<Vec<Task>> {
+    let session = org_session(db, slug).await?;
     let data: QueryData = session
         .query(ASSIGNED_ISSUES_QUERY, serde_json::json!({}))
         .await?;
@@ -908,7 +1045,7 @@ pub async fn list_issues(db: &Db, repo: &str) -> Result<Option<Vec<Task>>> {
 
     apply_subtask_dependencies(&mut tasks);
     layout::layout_tasks(&mut tasks);
-    Ok(Some(tasks))
+    Ok(tasks)
 }
 
 /// Split a Linear identifier into its team key and issue number — `"AK-165"` →
@@ -1080,7 +1217,7 @@ impl Session<'_> {
         variables: serde_json::Value,
     ) -> Result<T> {
         let spent = self.token().await;
-        let err = match graphql(&spent, query, &variables).await {
+        let err = match graphql_for(Some(&self.slug), &spent, query, &variables).await {
             Ok(data) => return Ok(data),
             Err(e) => e,
         };
@@ -1094,7 +1231,7 @@ impl Session<'_> {
         );
         let fresh = force_refresh(self.db, &self.slug, &spent).await?;
         *self.token.write().await = fresh.clone();
-        graphql(&fresh, query, &variables).await
+        graphql_for(Some(&self.slug), &fresh, query, &variables).await
     }
 }
 
@@ -1105,12 +1242,17 @@ async fn repo_session<'a>(db: &'a Db, repo: &str) -> Result<Option<Session<'a>>>
     let Some(slug) = resolve_org_slug(db, repo).await? else {
         return Ok(None);
     };
+    org_session(db, slug).await.map(Some)
+}
+
+/// A session for a connected org, with a currently-valid token (reads the keychain).
+async fn org_session(db: &Db, slug: String) -> Result<Session<'_>> {
     let token = valid_token(db, &slug).await?;
-    Ok(Some(Session {
+    Ok(Session {
         db,
         slug,
         token: tokio::sync::RwLock::new(token),
-    }))
+    })
 }
 
 /// [`repo_session`], refused up front when the workspace granted read-only.
@@ -1138,6 +1280,120 @@ async fn repo_write_session<'a>(db: &'a Db, repo: &str) -> Result<Option<Session
     Ok(Some(session))
 }
 
+// ── Rate-limit budget ───────────────────────────────────────────────────────
+
+/// The last budget Linear reported, per org.
+///
+/// Linear has no `/rate_limit` to ask; it answers only in the headers of a
+/// request that already spent some of the budget. So every call the app makes
+/// leaves its reading here and the settings screen reads the freshest one,
+/// instead of spending budget to measure budget. In-memory on purpose — a
+/// reading is only true for the hour it was taken in, and Linear refills the
+/// pools on its own clock whether santree is running or not.
+static BUDGETS: std::sync::LazyLock<std::sync::RwLock<HashMap<String, LinearApiBudget>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// How stale an observation may be before [`api_budget`] spends one request to
+/// take a fresh one. Every ordinary Linear call also refreshes it, so on a
+/// working session the probe almost never fires.
+const BUDGET_TTL_MS: f64 = 60_000.0;
+
+/// A numeric header, or `None` when absent or unparseable.
+fn header_num(headers: &reqwest::header::HeaderMap, name: &str) -> Option<f64> {
+    headers.get(name)?.to_str().ok()?.trim().parse().ok()
+}
+
+/// One pool from its `limit`/`remaining`/`reset` header triple. Requires the two
+/// counts — a window with no numbers in it is not a reading, and rendering it as
+/// zero-remaining would be a lie in the alarming direction. `reset` is optional
+/// and already epoch **milliseconds** (unlike GitHub's seconds).
+fn header_window(
+    headers: &reqwest::header::HeaderMap,
+    kind: ApiBudgetKind,
+    prefix: &str,
+) -> Option<ApiBudgetWindow> {
+    Some(ApiBudgetWindow {
+        kind,
+        limit: header_num(headers, &format!("{prefix}-Limit"))?,
+        remaining: header_num(headers, &format!("{prefix}-Remaining"))?,
+        resets_at_ms: header_num(headers, &format!("{prefix}-Reset")),
+    })
+}
+
+/// File a response's rate-limit headers under the org that paid for it.
+///
+/// Never fails and never blocks the caller: a response carrying no rate-limit
+/// headers (a proxy stripped them, Linear changed the contract) leaves the last
+/// good reading in place rather than replacing it with an empty one.
+fn record_budget(slug: &str, headers: &reqwest::header::HeaderMap) {
+    let windows: Vec<_> = [
+        header_window(headers, ApiBudgetKind::Requests, "X-RateLimit-Requests"),
+        header_window(headers, ApiBudgetKind::Complexity, "X-RateLimit-Complexity"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if windows.is_empty() {
+        return;
+    }
+    let mut map = BUDGETS.write().unwrap_or_else(|e| e.into_inner());
+    let entry = map
+        .entry(slug.to_string())
+        .or_insert_with(|| LinearApiBudget {
+            slug: slug.to_string(),
+            name: String::new(),
+            windows: Vec::new(),
+            observed_at_ms: 0.0,
+        });
+    entry.windows = windows;
+    entry.observed_at_ms = now_ms() as f64;
+}
+
+/// What is left of each connected workspace's Linear budget.
+///
+/// Returns an entry per connected org, freshest reading first-hand: an org whose
+/// last observation has gone stale is probed with the cheapest query Linear
+/// accepts (`viewer { id }`), which costs one request out of the hour's
+/// thousands and is the only way to learn the number. An org that can't be
+/// reached keeps whatever reading it had, and one that has never been reached at
+/// all is simply absent — an unknown budget is not an empty one.
+pub async fn api_budget(db: &Db) -> Result<Vec<LinearApiBudget>> {
+    let orgs = list_orgs(db).await?;
+    let now = now_ms() as f64;
+    for org in &orgs {
+        let fresh = BUDGETS
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&org.slug)
+            .is_some_and(|b| now - b.observed_at_ms < BUDGET_TTL_MS);
+        if fresh {
+            continue;
+        }
+        let probe = async {
+            let session = org_session(db, org.slug.clone()).await?;
+            session
+                .query::<serde_json::Value>("query { viewer { id } }", serde_json::json!({}))
+                .await
+        };
+        if let Err(e) = probe.await {
+            log::warn!("probing the Linear rate limit for {}: {e:#}", org.slug);
+        }
+    }
+
+    let map = BUDGETS.read().unwrap_or_else(|e| e.into_inner());
+    Ok(orgs
+        .into_iter()
+        .filter_map(|org| {
+            map.get(&org.slug).map(|budget| LinearApiBudget {
+                // The org's display name lives in the database, not in a header —
+                // stamp it on the way out so the snapshot stays a pure reading.
+                name: org.name,
+                ..budget.clone()
+            })
+        })
+        .collect())
+}
+
 /// POST a GraphQL query with a given token and return the typed `data` payload. Callers
 /// inside a command go through [`Session::query`] (which can re-mint the token); this is
 /// the raw call, for the OAuth flow's first request — where there's no org yet.
@@ -1146,11 +1402,29 @@ async fn graphql<T: DeserializeOwned>(
     query: &str,
     variables: &serde_json::Value,
 ) -> Result<T> {
+    graphql_for(None, token, query, variables).await
+}
+
+/// [`graphql`], attributing the call to the org whose token paid for it so the
+/// response's rate-limit headers land in that org's budget snapshot. `slug` is
+/// `None` only for the connect flow, which runs before an org exists to file it
+/// under.
+async fn graphql_for<T: DeserializeOwned>(
+    slug: Option<&str>,
+    token: &str,
+    query: &str,
+    variables: &serde_json::Value,
+) -> Result<T> {
     let req = gql::client()
         .post(GRAPHQL_URL)
         .bearer_auth(token)
         .json(&serde_json::json!({ "query": query, "variables": variables }));
-    crate::gql::post(req, "Linear").await
+    crate::gql::post_observed(req, "Linear", |headers| {
+        if let Some(slug) = slug {
+            record_budget(slug, headers);
+        }
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1668,18 +1942,65 @@ async fn map_comment(
     }
 }
 
+/// Whether a failed Linear query failed *because the id names nothing* — Linear's
+/// answer to `issue(id: "not-a-ticket")`, which it reports as HTTP 200 with an
+/// `errors` array rather than an empty `data`.
+///
+/// This is the seam between "there is no such ticket" (a state: a worktree cut from
+/// a plain branch, a PR title with no ticket id) and "Linear could not answer" (a
+/// failure: an expired token, a rate limit, a dead network, a complexity overflow).
+/// Only the first may be swallowed, so the test is deliberately narrow:
+///
+/// - the failure has to be a GraphQL `errors` array at all — every transport failure
+///   and every non-2xx status is a [`gql::HttpError`] or a reqwest error instead,
+///   and none of those reach here;
+/// - **every** entry has to be an entity-not-found, so a response that also carries a
+///   permission or rate-limit error still surfaces;
+/// - an entry counts by Linear's own `extensions.code` when it sends one, and
+///   otherwise by its canonical message ("Entity not found: Issue — Could not find
+///   referenced Issue."), which is what the API returns today.
+fn entity_not_found(err: &anyhow::Error) -> bool {
+    let Some(errors) = gql::graphql_errors(err) else {
+        return false;
+    };
+    !errors.errors.is_empty()
+        && errors.errors.iter().all(|e| {
+            e.extensions
+                .code
+                .as_deref()
+                .is_some_and(|c| c.eq_ignore_ascii_case("ENTITY_NOT_FOUND"))
+                || e.message
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("entity not found")
+        })
+}
+
 /// The full triage issue (description + comments) for the discussion pane, with
 /// inline Linear-CDN images downloaded and embedded as data URIs.
+///
+/// `None` means *there is no ticket to show*: either no Linear org is connected, or
+/// Linear answered definitively that this id names no issue — santree's worktrees are
+/// keyed by a ticket id, but a worktree cut from a plain branch carries a branch slug
+/// there instead, and a missing ticket is that worktree's normal state, not a fault.
+/// Everything Linear *couldn't* answer still errors; see [`entity_not_found`].
 pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Option<TriageDetail>> {
     let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
-    let data: IssueDetailData = session
+    let data: IssueDetailData = match session
         .query(ISSUE_DETAIL_QUERY, serde_json::json!({ "id": ticket_id }))
-        .await?;
-    let mut issue = data
-        .issue
-        .ok_or_else(|| anyhow!("issue {ticket_id} not found"))?;
+        .await
+    {
+        Ok(data) => data,
+        Err(err) if entity_not_found(&err) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    // Linear reports a missing issue through the `errors` array above rather than a
+    // null field, but a null one says the same thing — no issue, not a failure.
+    let Some(mut issue) = data.issue else {
+        return Ok(None);
+    };
 
     // A long-running thread can exceed one page of comments — pull the rest via
     // cursor. Comments are cheap relative to the complexity budget (unlike
@@ -1808,12 +2129,14 @@ async fn set_state(session: &Session<'_>, ticket_id: &str, state_id: &str) -> Re
     struct SetStateData {
         issue_update: Option<UpdResult>,
     }
-    let data: SetStateData = session
-        .query(
+    let sent = session
+        .query::<SetStateData>(
             SET_STATE_MUTATION,
             serde_json::json!({ "id": ticket_id, "stateId": state_id }),
         )
-        .await?;
+        .await;
+    issues_changed(&session.slug);
+    let data = sent?;
     if data.issue_update.map(|u| u.success).unwrap_or(false) {
         Ok(())
     } else {
@@ -1932,12 +2255,14 @@ pub async fn set_issue_sort_order(
     struct SetSortOrderData {
         issue_update: Option<UpdResult>,
     }
-    let data: SetSortOrderData = session
-        .query(
+    let sent = session
+        .query::<SetSortOrderData>(
             SET_SORT_ORDER_MUTATION,
             serde_json::json!({ "id": ticket_id, "sortOrder": sort_order }),
         )
-        .await?;
+        .await;
+    issues_changed(&session.slug);
+    let data = sent?;
     if data
         .issue_update
         .map(|update| update.success)
@@ -2011,12 +2336,14 @@ pub async fn create_comment(
     struct CreateCommentData {
         comment_create: Option<CreateResult>,
     }
-    let data: CreateCommentData = session
-        .query(
+    let sent = session
+        .query::<CreateCommentData>(
             CREATE_COMMENT_MUTATION,
             serde_json::json!({ "issueId": issue_uuid, "parentId": parent_id, "body": body }),
         )
-        .await?;
+        .await;
+    issues_changed(&session.slug);
+    let data = sent?;
     if data.comment_create.map(|c| c.success).unwrap_or(false) {
         Ok(Some(()))
     } else {
@@ -2278,32 +2605,11 @@ fn scope_of(data: SchedQueryData) -> TeamScope {
 /// frontend's own triage cache is minutes long, so nothing observable goes stale.
 const TEAM_SCOPE_TTL: Duration = Duration::from_secs(60);
 
-/// Per-org [`TeamScope`] cache. The mutex is held *across* the fetch, so the second of
-/// the two concurrent Triage loads waits on the first's result instead of issuing its own
-/// copy of the same query.
-#[allow(clippy::type_complexity)]
-static TEAM_SCOPES: std::sync::LazyLock<
-    std::sync::Mutex<
-        std::collections::HashMap<
-            String,
-            std::sync::Arc<tokio::sync::Mutex<Option<(Instant, std::sync::Arc<TeamScope>)>>>,
-        >,
-    >,
-> = std::sync::LazyLock::new(Default::default);
-
-#[allow(clippy::type_complexity)]
-fn team_scope_slot(
-    slug: &str,
-) -> std::sync::Arc<tokio::sync::Mutex<Option<(Instant, std::sync::Arc<TeamScope>)>>> {
-    // Poison-tolerant, like `refresh_lock`: the map holds only Arcs, so a thread that
-    // panicked mid-access left it structurally sound.
-    TEAM_SCOPES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(slug.to_string())
-        .or_default()
-        .clone()
-}
+/// Per-org [`TeamScope`] cache — a [`TtlCache`], so the second of the two concurrent
+/// Triage loads waits on the first's result instead of issuing its own copy of the
+/// same query.
+static TEAM_SCOPES: std::sync::LazyLock<TtlCache<TeamScope>> =
+    std::sync::LazyLock::new(|| TtlCache::new(TEAM_SCOPE_TTL));
 
 /// The org's [`TeamScope`], fetched at most once per [`TEAM_SCOPE_TTL`] — and exactly
 /// once when both Triage commands ask at the same time. `fetch` is a parameter so the
@@ -2313,16 +2619,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<TeamScope>>,
 {
-    let slot = team_scope_slot(slug);
-    let mut entry = slot.lock().await;
-    if let Some((at, scope)) = entry.as_ref() {
-        if at.elapsed() < TEAM_SCOPE_TTL {
-            return Ok(scope.clone());
-        }
-    }
-    let scope = std::sync::Arc::new(fetch().await?);
-    *entry = Some((Instant::now(), scope.clone()));
-    Ok(scope)
+    Ok(TEAM_SCOPES.get_or_fetch(slug, fetch).await?.0)
 }
 
 /// The [`TeamScope`] for this session's org.
@@ -2768,20 +3065,22 @@ pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
         exchange_code(&code, &redirect_uri, &verifier).await?;
     let (slug, name) = fetch_viewer_org(&access_token).await?;
 
+    let org = OrgRow {
+        slug,
+        name,
+        expires_at,
+        scopes,
+    };
     upsert_org(
         db,
-        &OrgRow {
-            slug,
-            name,
-            expires_at,
-            scopes,
-        },
+        &org,
         Tokens {
             access: access_token,
             refresh: refresh_token,
         },
     )
     .await?;
+    invalidate_org_caches(&org.slug);
     list_orgs(db).await
 }
 
@@ -3045,18 +3344,73 @@ fn urlencode(s: &str) -> String {
 mod tests {
     use super::{
         accept_code, apply_subtask_dependencies, cached_team_scope, decode_tokens, encode_tokens,
-        image_spans, map_issue, migrate_tokens_to_keychain, parse_callback, parse_ms, refresh_lock,
-        resolve_org_slug, resolved_org, scope_from_setting, scope_of, shift_range, splice_images,
-        split_identifier, triage_meta, usable_at, validate_sort_order, validate_sort_order_target,
-        ImageCache, IssueNode, ParentIssueNode, ProjectMilestoneNode, ProjectNode, RelatedIssue,
-        RelationNode, SchedQueryData, StateNode, TeamScope, TicketLookupNode, Tokens, UserNode,
-        IMAGE_HOST, REFRESH_SKEW_MS,
+        entity_not_found, header_window, image_spans, map_issue, migrate_tokens_to_keychain,
+        parse_callback, parse_ms, record_budget, refresh_lock, resolve_org_slug, resolved_org,
+        scope_from_setting, scope_of, shift_range, splice_images, split_identifier, triage_meta,
+        usable_at, validate_sort_order, validate_sort_order_target, ImageCache, IssueNode,
+        ParentIssueNode, ProjectMilestoneNode, ProjectNode, RelatedIssue, RelationNode,
+        SchedQueryData, StateNode, TeamScope, TicketLookupNode, Tokens, TtlCache, UserNode,
+        BUDGETS, IMAGE_HOST, REFRESH_SKEW_MS,
     };
-    use crate::gql::{Connection, PageInfo};
-    use santree_core::domain::{Task, TaskStatus};
+    use crate::gql::{Connection, GqlError, GraphQlErrors, PageInfo};
+    use anyhow::anyhow;
+    use santree_core::domain::{ApiBudgetKind, Task, TaskStatus};
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    /// Build the failure `gql::post` raises for an HTTP 200 + `errors` response,
+    /// decoding the array exactly as the wire path does.
+    fn gql_failure(errors_json: serde_json::Value) -> anyhow::Error {
+        let errors: Vec<GqlError> = serde_json::from_value(errors_json).unwrap();
+        anyhow::Error::new(GraphQlErrors::new("Linear", errors))
+    }
+
+    /// The whole point of the classifier: a worktree whose id is a branch slug, not a
+    /// ticket, must resolve to "no ticket" instead of a red toast.
+    #[test]
+    fn a_missing_issue_is_recognised_as_not_found() {
+        assert!(entity_not_found(&gql_failure(serde_json::json!([{
+            "message": "Entity not found: Issue - Could not find referenced Issue.",
+            "path": ["issue"],
+            "extensions": { "type": "invalid_input", "userError": true }
+        }]))));
+        // Same answer via Linear's machine-readable code, whatever the wording.
+        assert!(entity_not_found(&gql_failure(serde_json::json!([{
+            "message": "no such thing",
+            "extensions": { "code": "ENTITY_NOT_FOUND" }
+        }]))));
+    }
+
+    /// The other half, and the one that matters more: a Linear that *couldn't answer*
+    /// must keep failing loudly. Collapsing these to "no ticket" would present an
+    /// expired token or a throttled org as a worktree with nothing linked to it.
+    #[test]
+    fn a_real_linear_failure_is_not_mistaken_for_a_missing_issue() {
+        for errors in [
+            serde_json::json!([{ "message": "Authentication required" }]),
+            serde_json::json!([{ "message": "Ratelimit exceeded",
+                                 "extensions": { "code": "RATELIMITED" } }]),
+            serde_json::json!([{ "message": "Query too complex" }]),
+            // A mixed response: the issue is missing *and* something else broke. The
+            // second error is the one the user needs, so nothing gets swallowed.
+            serde_json::json!([
+                { "message": "Entity not found: Issue" },
+                { "message": "Ratelimit exceeded" },
+            ]),
+            serde_json::json!([]),
+        ] {
+            assert!(!entity_not_found(&gql_failure(errors.clone())), "{errors}");
+        }
+
+        // And a failure that never carried a GraphQL `errors` array at all — every
+        // transport error, timeout and non-2xx status (a 401, a 429) arrives this
+        // way, carrying the wording but never the structure the classifier reads.
+        assert!(!entity_not_found(&anyhow!("connection reset")));
+        assert!(!entity_not_found(&anyhow!(
+            "Linear: Entity not found: Issue"
+        )));
+    }
 
     #[test]
     fn linear_scope_requires_an_explicit_write_choice() {
@@ -3373,6 +3727,124 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
+    }
+
+    // ── TtlCache (the assigned-issues cache) ──────────────────────────────
+
+    /// The log line that motivated the cache: three repos on one org each asked for
+    /// the same assigned-issue list within a second. Concurrent reads of one key must
+    /// cost one fetch, and every waiter must be told it was served from cache.
+    #[tokio::test]
+    async fn concurrent_reads_of_one_key_share_one_fetch() {
+        let cache = TtlCache::<u32>::new(Duration::from_secs(15));
+        let fetches = AtomicUsize::new(0);
+        let fetch = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            // Long enough that the other callers are guaranteed to arrive mid-flight.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(7)
+        };
+        let (a, b, c) = tokio::join!(
+            cache.get_or_fetch("acme", fetch),
+            cache.get_or_fetch("acme", fetch),
+            cache.get_or_fetch("acme", fetch),
+        );
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+        let (a, a_hit) = a.unwrap();
+        let (b, b_hit) = b.unwrap();
+        let (c, c_hit) = c.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a, &b) && std::sync::Arc::ptr_eq(&b, &c));
+        // Exactly one of them did the fetch; the rest waited for it.
+        assert_eq!([a_hit, b_hit, c_hit].iter().filter(|hit| !**hit).count(), 1);
+    }
+
+    /// A read inside the TTL is a hit; one past it fetches again.
+    #[tokio::test]
+    async fn an_entry_expires_after_the_ttl() {
+        let cache = TtlCache::<u32>::new(Duration::from_millis(20));
+        let fetches = AtomicUsize::new(0);
+        let fetch = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            Ok(1)
+        };
+        assert!(!cache.get_or_fetch("acme", fetch).await.unwrap().1);
+        assert!(cache.get_or_fetch("acme", fetch).await.unwrap().1);
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(!cache.get_or_fetch("acme", fetch).await.unwrap().1);
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    }
+
+    /// A write invalidates its own org and nothing else: the next read of that key
+    /// fetches even though the TTL hasn't lapsed, while another org's entry stays.
+    #[tokio::test]
+    async fn invalidating_a_key_forces_its_next_read_to_fetch() {
+        let cache = TtlCache::<u32>::new(Duration::from_secs(15));
+        let fetches = AtomicUsize::new(0);
+        let fetch = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            Ok(1)
+        };
+        cache.get_or_fetch("acme", fetch).await.unwrap();
+        cache.get_or_fetch("globex", fetch).await.unwrap();
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+
+        cache.invalidate("acme");
+        assert!(!cache.get_or_fetch("acme", fetch).await.unwrap().1);
+        assert!(cache.get_or_fetch("globex", fetch).await.unwrap().1);
+        assert_eq!(fetches.load(Ordering::SeqCst), 3);
+    }
+
+    /// Invalidating a key that is mid-fetch must not wait on that fetch (a write would
+    /// otherwise stall behind a read), and the read that started before the write
+    /// must not be what a read *after* the write sees.
+    #[tokio::test]
+    async fn invalidation_never_waits_on_an_in_flight_fetch() {
+        let cache = std::sync::Arc::new(TtlCache::<&'static str>::new(Duration::from_secs(15)));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let stale = {
+            let cache = cache.clone();
+            tokio::spawn(async move {
+                cache
+                    .get_or_fetch("acme", || async {
+                        release_rx.await.unwrap();
+                        Ok("before the write")
+                    })
+                    .await
+                    .unwrap()
+                    .0
+            })
+        };
+        // Give the spawned read time to take the slot lock and block in its fetch.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Must return immediately even though the fetch above is still blocked.
+        tokio::time::timeout(Duration::from_millis(100), async {
+            cache.invalidate("acme")
+        })
+        .await
+        .expect("invalidate blocked on an in-flight fetch");
+
+        let (fresh, hit) = cache
+            .get_or_fetch("acme", || async { Ok("after the write") })
+            .await
+            .unwrap();
+        assert!(!hit);
+        assert_eq!(*fresh, "after the write");
+
+        release_tx.send(()).unwrap();
+        assert_eq!(*stale.await.unwrap(), "before the write");
+        // …and the orphaned pre-write result is never what the key serves now.
+        assert_eq!(
+            *cache
+                .get_or_fetch("acme", || async { Ok("unreachable") })
+                .await
+                .unwrap()
+                .0,
+            "after the write"
+        );
     }
 
     // ── refresh_lock ──────────────────────────────────────────────────────
@@ -3916,5 +4388,90 @@ mod tests {
         assert_eq!(split_identifier("AK-1.5"), None);
         assert_eq!(split_identifier("AK165"), None);
         assert_eq!(split_identifier("AK--1"), None);
+    }
+
+    /// Linear's rate-limit headers, verbatim.
+    ///
+    /// The names are the whole contract — nothing else in the codebase mentions
+    /// them, and a typo produces no error anywhere: the meter just stays empty
+    /// and reads as "no budget information" forever. This asserts the exact
+    /// spellings from Linear's own docs, and that the reset time is passed
+    /// through as the epoch **milliseconds** Linear sends (GitHub's equivalent
+    /// is seconds, and the two meet in one frontend component).
+    #[test]
+    fn a_response_records_linears_own_rate_limit_header_names() {
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("X-RateLimit-Requests-Limit", "5000"),
+            ("X-RateLimit-Requests-Remaining", "4812"),
+            ("X-RateLimit-Requests-Reset", "1787938231000"),
+            ("X-RateLimit-Complexity-Limit", "2000000"),
+            ("X-RateLimit-Complexity-Remaining", "1904221"),
+            ("X-RateLimit-Complexity-Reset", "1787938231000"),
+        ] {
+            headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_static(value),
+            );
+        }
+        record_budget("header-names-org", &headers);
+
+        let map = BUDGETS.read().unwrap();
+        let budget = map.get("header-names-org").expect("a recorded reading");
+        assert_eq!(
+            budget.windows.iter().map(|w| w.kind).collect::<Vec<_>>(),
+            vec![ApiBudgetKind::Requests, ApiBudgetKind::Complexity]
+        );
+        assert_eq!(budget.windows[0].remaining, 4812.0);
+        assert_eq!(budget.windows[0].limit, 5000.0);
+        assert_eq!(
+            budget.windows[0].resets_at_ms,
+            Some(1_787_938_231_000.0),
+            "Linear already sends epoch milliseconds — do not scale it"
+        );
+        assert_eq!(budget.windows[1].limit, 2_000_000.0);
+        assert!(budget.observed_at_ms > 0.0, "the reading is stamped");
+    }
+
+    /// A response with no rate-limit headers leaves the last good reading alone.
+    /// Overwriting it with an empty one would render as "0 of 0 left", which is
+    /// a claim we never had grounds to make.
+    #[test]
+    fn a_response_without_the_headers_keeps_the_last_reading() {
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("X-RateLimit-Requests-Limit", "5000"),
+            ("X-RateLimit-Requests-Remaining", "4000"),
+        ] {
+            headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_static(value),
+            );
+        }
+        record_budget("silent-org", &headers);
+        record_budget("silent-org", &HeaderMap::new());
+
+        let map = BUDGETS.read().unwrap();
+        let budget = map.get("silent-org").expect("the earlier reading survives");
+        assert_eq!(budget.windows.len(), 1);
+        assert_eq!(budget.windows[0].remaining, 4000.0);
+    }
+
+    /// A half-reported pool is dropped rather than defaulted. `limit` without
+    /// `remaining` would meter as fully spent.
+    #[test]
+    fn a_pool_missing_one_of_its_counts_is_not_recorded() {
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_bytes(b"X-RateLimit-Requests-Limit").unwrap(),
+            HeaderValue::from_static("5000"),
+        );
+        assert!(header_window(&headers, ApiBudgetKind::Requests, "X-RateLimit-Requests").is_none());
     }
 }

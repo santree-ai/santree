@@ -1,7 +1,14 @@
 import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { Markdown, MarkdownTitle } from "./Markdown";
+import { Markdown, MarkdownDocument, MarkdownTitle } from "./Markdown";
+
+// Stand in for the real diagram renderer: mermaid is a ~1MB dynamic import that
+// these tests have no reason to load. What's under test is the routing — which
+// renderer a ```mermaid fence reaches — not mermaid's own output.
+vi.mock("./MermaidDiagram", () => ({
+  MermaidDiagram: ({ code }: { code: string }) => <div data-testid="mermaid">{code}</div>,
+}));
 
 describe("Markdown raw-HTML handling", () => {
   it("renders <details>/<summary> as a native collapsible, not literal text", () => {
@@ -54,5 +61,40 @@ describe("MarkdownTitle", () => {
     expect(container.querySelector("a, ul, li")).toBeNull();
     expect(container.textContent).toContain("link");
     expect(container.textContent).toContain("first");
+  });
+});
+
+describe("MarkdownDocument", () => {
+  const DIAGRAM = "```mermaid\ngraph TD; A-->B;\n```";
+
+  it("renders a mermaid fence as a diagram", () => {
+    const { getByTestId } = render(<MarkdownDocument>{DIAGRAM}</MarkdownDocument>);
+    expect(getByTestId("mermaid").textContent).toContain("graph TD; A-->B;");
+  });
+
+  /** The boundary this split exists for. A comment body is written by anyone
+   *  with access to the repo or the Linear workspace, and a diagram engine is a
+   *  much larger surface than a `<pre>`. A file in your own worktree is
+   *  something you opened on purpose; a PR comment is not. */
+  it("does not let a comment body reach the diagram renderer", () => {
+    const { container, queryByTestId } = render(<Markdown>{DIAGRAM}</Markdown>);
+    expect(queryByTestId("mermaid")).toBeNull();
+    expect(container.querySelector("pre")?.textContent).toContain("graph TD");
+  });
+
+  it("highlights a fenced code block by its info string", () => {
+    const { container } = render(<MarkdownDocument>{"```ts\nconst x = 1;\n```"}</MarkdownDocument>);
+    expect(container.querySelector("pre .token.keyword")?.textContent).toBe("const");
+  });
+
+  /** A README is hard-wrapped prose. `remarkBreaks` — which the comment renderer
+   *  needs, because a newline in a comment box was meant as one — would put a
+   *  `<br>` inside every paragraph of it. */
+  it("does not break hard-wrapped paragraphs, where a comment body would", () => {
+    const wrapped = "One line of prose\ncontinued on the next.";
+    expect(
+      render(<MarkdownDocument>{wrapped}</MarkdownDocument>).container.querySelector("br"),
+    ).toBeNull();
+    expect(render(<Markdown>{wrapped}</Markdown>).container.querySelector("br")).not.toBeNull();
   });
 });

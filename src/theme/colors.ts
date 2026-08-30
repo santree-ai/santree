@@ -11,6 +11,8 @@ import type { CSSProperties } from "react";
 import type {
   Activity,
   AgentKind,
+  ApiBudgetKind,
+  CheckLogLevel,
   CheckRollup,
   CheckStatus,
   MergeQueueState,
@@ -61,6 +63,15 @@ export const successColor = palette.green;
  *  in integration surfaces. */
 export const LINEAR_BRAND = "var(--linear-brand)";
 
+/** The colour a provider's mark wears where it identifies a session (the
+ *  history list, the usage meters): Claude's terracotta, and the foreground
+ *  for Codex, whose mark is black-on-white by design. Anything else is muted. */
+export function agentBrandColor(kind: string): string {
+  if (kind === "Claude") return "var(--claude-brand)";
+  if (kind === "Codex") return "var(--color-fg)";
+  return "var(--color-muted-3)";
+}
+
 export const statusColor: Record<TaskStatus, string> = {
   InReview: palette.green,
   InProgress: palette.amber,
@@ -91,6 +102,36 @@ export function modelVersion(model: string): string {
   if (key === model) return model; // unknown family → raw id
   const m = model.toLowerCase().match(/(?:opus|sonnet|haiku|fable)-(\d+(?:-\d+)?)/);
   return m ? `${label} ${m[1].replace("-", ".")}` : label;
+}
+
+/** Label + one-line explanation for an API rate-limit pool.
+ *
+ *  The two services meter different things and the difference is the whole
+ *  reason a number is worth showing: GitHub's search pool is 30 a minute while
+ *  its REST pool is 5,000 an hour, and Linear can throttle you on complexity
+ *  with thousands of requests still unspent. A bare "4,982 left" hides that. */
+export const apiBudgetMeta: Record<ApiBudgetKind, { label: string; hint: string }> = {
+  Rest: { label: "REST", hint: "Pull requests, checks, comments and file reads." },
+  Search: {
+    label: "Search",
+    hint: "The smallest pool by far — the Reviews inbox is what spends it.",
+  },
+  GraphQl: { label: "GraphQL", hint: "The Reviews inbox and PR detail queries." },
+  Requests: { label: "Requests", hint: "Calls per hour, counted per workspace." },
+  Complexity: {
+    label: "Complexity",
+    hint: "Points per hour — a big query costs more than a small one.",
+  },
+};
+
+/** How much of a budget has to be gone before its meter stops being neutral.
+ *  Quiet until it matters: chrome that is always amber teaches you to ignore it. */
+export function apiBudgetColor(remaining: number, limit: number): string {
+  if (limit <= 0) return palette.slate;
+  const left = remaining / limit;
+  if (left <= 0.1) return palette.red;
+  if (left <= 0.25) return palette.amber;
+  return palette.slate;
 }
 
 /** Color + label for a pull request's state on its chip. Uses GitHub Primer's
@@ -197,6 +238,17 @@ export const checkStatusMeta: Record<CheckStatus, { color: string; glyph: string
     Skipped: { color: palette.slate, glyph: "↷", label: "skipped" },
     Neutral: { color: palette.slate, glyph: "–", label: "neutral" },
   };
+
+/** Tint for one raw job-log line, by the runner marker parsed off it. Shares the
+ *  status palette so an error in the log reads the same as a failed check glyph.
+ *  Lives here rather than beside the log renderer because two surfaces show it —
+ *  the Reviews Checks tab and the Trees main-area log view. */
+export const checkLogLevelColor: Record<CheckLogLevel, string> = {
+  Error: "var(--color-status-red)",
+  Warning: "var(--color-status-amber)",
+  Command: "var(--color-muted-3)",
+  Normal: "var(--color-muted-2)",
+};
 
 export const statusLabel: Record<TaskStatus, string> = {
   InReview: "In Review",

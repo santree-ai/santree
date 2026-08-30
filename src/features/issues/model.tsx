@@ -260,7 +260,27 @@ interface IssueNodeContextValue {
 
 const IssueNodeDataContext = createContext<IssueNodeContextValue | null>(null);
 
-export function IssuesProvider({ children }: { children: ReactNode }) {
+/**
+ * External ownership of the "Actionable only" filter.
+ *
+ * The Tickets page renders the toggle in its own header, where it also has to
+ * describe the List mode this provider isn't mounted for — so the state lives up
+ * there and is handed down, rather than being mirrored (a mirror drifts the
+ * moment the graph's own in-canvas toggle moves it). Left out, the provider owns
+ * the filter itself, which is what the standalone Issues view does.
+ */
+export interface ActionableControl {
+  value: boolean;
+  set: (on: boolean) => void;
+}
+
+export function IssuesProvider({
+  children,
+  actionable,
+}: {
+  children: ReactNode;
+  actionable?: ActionableControl;
+}) {
   const { settings, activeRepo } = useApp();
   const {
     requestTreeLaunch,
@@ -314,7 +334,12 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
   const [focusId, setFocusId] = useState("");
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [focusProject, setFocusProject] = useState<string | null>(null);
-  const [actionableOnly, setActionableOnly] = useState(true);
+  const [ownActionableOnly, setOwnActionableOnly] = useState(true);
+  const actionableOnly = actionable?.value ?? ownActionableOnly;
+  const setActionableOnly = useCallback(
+    (on: boolean) => (actionable ? actionable.set(on) : setOwnActionableOnly(on)),
+    [actionable],
+  );
   const [reveal, setReveal] = useState<{ id: string; nonce: number } | null>(null);
   const [projectReveal, setProjectReveal] = useState<{ project: string; nonce: number } | null>(
     null,
@@ -373,7 +398,7 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
       if (t && !t.actionable) setActionableOnly(false);
       setReveal((r) => ({ id, nonce: (r?.nonce ?? 0) + 1 }));
     },
-    [focusTask, byId],
+    [focusTask, byId, setActionableOnly],
   );
 
   // Launch agent: the configured Work agent (Settings → Actions → Work, resolved
@@ -699,7 +724,10 @@ export function IssuesProvider({ children }: { children: ReactNode }) {
 
   // Trivial setter handlers — stable across renders so the context value below
   // doesn't churn (kept symmetric with the useCallback'd handlers above).
-  const toggleActionableOnly = useCallback(() => setActionableOnly((v) => !v), []);
+  const toggleActionableOnly = useCallback(
+    () => setActionableOnly(!actionableOnly),
+    [setActionableOnly, actionableOnly],
+  );
   const toggleRightPanel = useCallback(() => setRightCollapsed((v) => !v), []);
   const clearSelection = useCallback(() => setSelected({}), []);
   // Select every ready (launchable) ticket; if they're all already selected,

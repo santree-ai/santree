@@ -6,9 +6,33 @@
  */
 import { useCallback, useMemo, useRef, useState } from "react";
 
+import type { AgentKind } from "../../bindings";
+
 /** Where a terminal was opened from. Pairs with `refId` to identify a session:
  *  the Agents panel maps a stored `term_key` back to its live PTY through it. */
 export type TerminalSource = "shell" | "triage" | "issue" | "review";
+
+/**
+ * What santree knows about an agent it launched *before the agent says anything*.
+ *
+ * This is the app's own record of a launch, not a report from the CLI: santree
+ * chose the surface, the repo and the provider, so all three are known the
+ * instant the PTY is spawned. It exists because a provider's own announcement is
+ * not guaranteed to be prompt — Codex creates its thread on the first submitted
+ * turn and only fires `SessionStart` there, so a tab opened and left at the
+ * prompt reports nothing at all (see `agentProvider.ts`). Without this the agent
+ * registry, and therefore the sidebar, had nothing to show for it.
+ *
+ * All three fields together or none: a tab carrying a partial identity could be
+ * filed under the wrong worktree, which is worse than not being filed at all.
+ */
+export interface AgentTabIdentity {
+  kind: AgentKind;
+  repo: string;
+  /** The logical terminal's `term_key` — the same string the launch exports as
+   *  `SANTREE_TERM_KEY` and the hook writes into `terminal_sessions`. */
+  termKey: string;
+}
 
 /** A terminal to open: a cwd + command (empty ⇒ login shell), optional seed. */
 export interface TerminalSpec {
@@ -23,6 +47,9 @@ export interface TerminalSpec {
   source?: TerminalSource;
   /** When opened for a ticket/issue, its id — lets callers find/reuse the session. */
   refId?: string;
+  /** Set when this tab hosts an agent santree launched; absent for a plain shell.
+   *  See {@link AgentTabIdentity}. */
+  agent?: AgentTabIdentity;
 }
 
 export interface TerminalTab extends TerminalSpec {
@@ -38,22 +65,25 @@ const withKey = (spec: TerminalSpec): TerminalTab => ({
   key: `term-${seq++}`,
 });
 
-/** A viewport rectangle (subset of DOMRect) the embed layer positions over. */
-export interface EmbedRect {
-  top: number;
-  left: number;
-  width: number;
-  height: number;
-}
-
-/** A session displayed inline somewhere other than the Terminal tab. */
+/** A session displayed inline somewhere other than the Terminal tab.
+ *
+ *  Just the host element: the layer measures it itself, in a layout effect that
+ *  runs in the same commit as the claim and before the first paint, so there is
+ *  no window in which a pre-captured rect would be the better answer. */
 export interface TerminalEmbed {
   host: HTMLElement;
   key: string;
-  /** Host rect measured at embed time, so the layer is sized correctly on the
-   * first render (before the live ResizeObserver re-measures) — this prevents the
-   * terminal from briefly opening at the wrong size. */
-  rect?: EmbedRect;
+}
+
+/** A live pane's imperative surface, registered by the render layer.
+ *
+ *  `write` is how a session is typed into from outside its own pane (the Agents
+ *  panel's reply box); `end` is how its process is stopped. Both are held here
+ *  rather than in the view so a caller that only has a tab key — a closing tab
+ *  bar, a worktree being deleted — can reach the session behind it. */
+export interface PaneHandle {
+  write: (data: string) => void;
+  end: () => void;
 }
 
 /** One claim on the inline slot, tagged with an identity so releasing it can't
@@ -73,7 +103,11 @@ export interface TerminalTabs {
   open: (spec: TerminalSpec) => string;
   /** Open a session for `refId` if one doesn't exist yet; returns its key. */
   ensure: (spec: TerminalSpec & { refId: string }) => string;
-  /** Close a tab (the view tears its session down on unmount). */
+  /** Close a tab and end its session.
+   *
+   *  This is the only thing that kills a process. A pane unmounting merely
+   *  detaches — see `TerminalView` — so closing has to be said explicitly here,
+   *  and it happens before the tab goes away while the handle still exists. */
   close: (key: string) => void;
   /** The session currently embedded inline (e.g. the triage Investigate tab) —
    *  the newest live claim. */
@@ -87,10 +121,9 @@ export interface TerminalTabs {
   /** Drop every claim on a session — its process died, so nothing should stay
    *  pointed at it. */
   detachEmbeds: (key: string) => void;
-  /** Register a live session's input channel, so it can be typed into from
-   *  outside its pane. Called by the render layer once the PTY is open; returns
-   *  an unregister fn. */
-  registerInput: (key: string, write: (data: string) => void) => () => void;
+  /** Register a live pane's imperative handle. Called by the render layer once
+   *  the PTY is open; returns an unregister fn. */
+  registerPane: (key: string, handle: PaneHandle) => () => void;
   /** Type `data` into a live session as if the user typed it there — used by the
    *  Agents panel's reply box. Returns false when the session has no live PTY.
    *
@@ -137,30 +170,34 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
     const prev = tabsRef.current;
     const idx = prev.findIndex((t) => t.key === key);
     if (idx === -1) return;
+    // End the process before dropping the tab: removing it unmounts the pane,
+    // and an unmounting pane only detaches. Ordered this way the handle is
+    // still registered; the other way round nothing would be left to call.
+    panes.current.get(key)?.end();
     const next = prev.filter((t) => t.key !== key);
     tabsRef.current = next;
     setTabs(next);
     setActiveKey((cur) => (cur === key ? (next[Math.max(0, idx - 1)]?.key ?? null) : cur));
   }, []);
 
-  // Input channels of the live panes, keyed by tab. A ref, not state: this is a
-  // side-channel for imperative writes and re-rendering on registration would
+  // Handles of the live panes, keyed by tab. A ref, not state: this is a
+  // side-channel for imperative calls and re-rendering on registration would
   // churn every consumer of the context for no visual change.
-  const inputs = useRef(new Map<string, (data: string) => void>());
+  const panes = useRef(new Map<string, PaneHandle>());
 
-  const registerInput = useCallback((key: string, write: (data: string) => void) => {
-    inputs.current.set(key, write);
+  const registerPane = useCallback((key: string, handle: PaneHandle) => {
+    panes.current.set(key, handle);
     return () => {
       // Only drop our own registration — a remounting pane can register the next
-      // writer before the previous one's cleanup runs.
-      if (inputs.current.get(key) === write) inputs.current.delete(key);
+      // handle before the previous one's cleanup runs.
+      if (panes.current.get(key) === handle) panes.current.delete(key);
     };
   }, []);
 
   const send = useCallback((key: string, data: string) => {
-    const write = inputs.current.get(key);
-    if (!write) return false;
-    write(data);
+    const pane = panes.current.get(key);
+    if (!pane) return false;
+    pane.write(data);
     return true;
   }, []);
 
@@ -187,9 +224,9 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
       embed,
       attachEmbed,
       detachEmbeds,
-      registerInput,
+      registerPane,
       send,
     }),
-    [tabs, activeKey, open, ensure, close, embed, attachEmbed, detachEmbeds, registerInput, send],
+    [tabs, activeKey, open, ensure, close, embed, attachEmbed, detachEmbeds, registerPane, send],
   );
 }

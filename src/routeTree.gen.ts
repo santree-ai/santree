@@ -14,7 +14,6 @@ import { Route as TreesRouteImport } from './routes/trees'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ReviewsRouteImport } from './routes/reviews'
 import { Route as IssuesRouteImport } from './routes/issues'
-import { Route as DevRouteImport } from './routes/dev'
 import { Route as IndexRouteImport } from './routes/index'
 
 const TriageRoute = TriageRouteImport.update({
@@ -42,11 +41,6 @@ const IssuesRoute = IssuesRouteImport.update({
   path: '/issues',
   getParentRoute: () => rootRouteImport,
 } as any)
-const DevRoute = DevRouteImport.update({
-  id: '/dev',
-  path: '/dev',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -55,7 +49,6 @@ const IndexRoute = IndexRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/dev': typeof DevRoute
   '/issues': typeof IssuesRoute
   '/reviews': typeof ReviewsRoute
   '/settings': typeof SettingsRoute
@@ -64,7 +57,6 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/dev': typeof DevRoute
   '/issues': typeof IssuesRoute
   '/reviews': typeof ReviewsRoute
   '/settings': typeof SettingsRoute
@@ -74,7 +66,6 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/dev': typeof DevRoute
   '/issues': typeof IssuesRoute
   '/reviews': typeof ReviewsRoute
   '/settings': typeof SettingsRoute
@@ -83,20 +74,12 @@ export interface FileRoutesById {
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths:
-    | '/'
-    | '/dev'
-    | '/issues'
-    | '/reviews'
-    | '/settings'
-    | '/trees'
-    | '/triage'
+  fullPaths: '/' | '/issues' | '/reviews' | '/settings' | '/trees' | '/triage'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/dev' | '/issues' | '/reviews' | '/settings' | '/trees' | '/triage'
+  to: '/' | '/issues' | '/reviews' | '/settings' | '/trees' | '/triage'
   id:
     | '__root__'
     | '/'
-    | '/dev'
     | '/issues'
     | '/reviews'
     | '/settings'
@@ -106,7 +89,6 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  DevRoute: typeof DevRoute
   IssuesRoute: typeof IssuesRoute
   ReviewsRoute: typeof ReviewsRoute
   SettingsRoute: typeof SettingsRoute
@@ -151,13 +133,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IssuesRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/dev': {
-      id: '/dev'
-      path: '/dev'
-      fullPath: '/dev'
-      preLoaderRoute: typeof DevRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/': {
       id: '/'
       path: '/'
@@ -170,7 +145,6 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  DevRoute: DevRoute,
   IssuesRoute: IssuesRoute,
   ReviewsRoute: ReviewsRoute,
   SettingsRoute: SettingsRoute,

@@ -1,267 +1,323 @@
 # Compliance constraints — terminals
 
-santree runs **real, unmodified CLI binaries in a real terminal**. The user is a
-human driving their own session, exactly as in iTerm or VS Code's integrated
-terminal. The terminal feature is a local terminal emulator: a kernel PTY hosts a
-real process, and we stream raw bytes to and from it (xterm.js in the webview ↔
-`portable-pty` in Rust, over local Tauri IPC). It is **not** a "terminal server",
-an agent harness, or an automation driver.
+santree runs **real, unmodified CLI binaries in a real terminal**. A kernel PTY
+hosts the vendor's own process and we stream raw bytes to and from it. The user
+is a human driving their own session, as in iTerm or VS Code's integrated
+terminal. santree is **not** a terminal server, an agent harness, or an
+automation driver.
 
-## Why this matters
+Each agent CLI has its own terms of service. Staying a plain terminal emulator
+keeps us clearly on the right side of them. The moment the app handles tokens,
+parses output to decide what to type, or runs unattended, it stops being a
+terminal and becomes a harness — a different product, with riskier obligations,
+and the user's vendor account carries the consequence.
 
-Each agent CLI (Claude Code, Codex, …) has its own terms of service. Staying a plain
-terminal emulator — we spawn the vendor's binary and render its output, nothing more —
-keeps santree clearly on the right side of those terms and avoids re-implementing or
-spoofing any vendor's control loop. The moment the app handles tokens, parses output to
-decide what to type, or runs unattended, it stops being a terminal and becomes a
-harness — a different product with different (and riskier) obligations. These
-constraints keep that line bright.
+> **If a change introduces output parsing that influences input, token handling,
+> or an unattended loop, it violates these constraints and must not be merged.**
 
-These constraints are **load-bearing** for the product and must survive future
-changes. Do not add any of the following, even if they seem helpful:
+Most of this file is now executable. `src-tauri/src/compliance.rs` and
+`src/features/terminal/compliance.test.ts` hold the tests named below; each was
+verified to fail on a real violation, not merely to pass. What stays in prose is
+what a test cannot judge.
 
-## No credential handling
-The app never reads, stores, proxies, injects, or intercepts **an agent CLI's own
-auth/OAuth tokens**. The user runs `claude login` (or any vendor's equivalent)
-**themselves, inside the terminal**; auth lives wherever the CLI puts it. santree
-is agnostic to and untouched by it. santree never reads or captures a CLI's token
-from disk/keychain/env to forward it anywhere.
+---
 
-### User-configured project environment — a scoped exception
-The PTY inherits the ambient process environment (so PATH/HOME resolve) **plus the
-variables the user configures under Settings → Environment** (`env.rs`,
-`OpenOpts.env`). This is the user's *own* project environment — a `DATABASE_URL`,
-a service key their code-under-test needs — exactly what an IDE's integrated
-terminal provides, and identical to the user `export`-ing it in their shell rc.
-It is entered by the user in santree's own UI and stored in santree's own settings;
-santree does not synthesize it, read it from a CLI's config, or capture it from
-anywhere. This is **not** a hole in "No credential handling" above: santree still
-never touches an agent CLI's *own* auth token. The distinction is load-bearing —
-forwarding the user's project env is fine; reading/storing/proxying Claude's (or
-any vendor's) login credential remains strictly forbidden.
+## The rules
 
-## No automated control loop
-No auto-responders, no output-parsing that feeds new prompts back in, no
-retry/"keep going" loops, no always-on or unattended drivers. Orchestration stops
-at: **choose a cwd, place the pane, send one human-initiated seed prompt.** After
-that it is the human and the real CLI. The backend streams bytes; it never
-inspects them to decide what to type next.
+**No output-parsing influences input.** Nothing derived from hook payloads,
+transcript reconciliation, or the status line is ever written back to a PTY.
+**The only bytes santree writes to a terminal are the user's keystrokes and the
+single human-initiated seed prompt.** Orchestration stops at: choose a cwd,
+place the pane, send one seed.
+→ `only_the_terminal_adapter_writes_bytes_into_a_pty`, and four frontend tests
+that no PTY output is decoded and fed back.
 
-## No harness behavior
-Do not wrap, re-implement, or spoof any agent's control loop or SDK. We spawn the
-real binary and render its real output — nothing more.
+**No unattended loop.** No auto-responders, no retry or "keep going" loops, no
+always-on drivers. santree never starts, resumes, retries, or continues a
+session on the user's behalf. A `--resume` seed is built only when a human opens
+the tab.
 
-## Codex App Server control plane — a scoped exception
+**No harness behavior.** Do not wrap, re-implement, or spoof any agent's control
+loop or SDK. No outbound request may claim to be a vendor CLI.
+→ `no_outbound_request_claims_to_be_a_vendor_cli`
 
-Santree owns one local `codex app-server` process so the real Codex TUI can attach
-to a durable thread. This is a bounded control-plane exception, not a second agent
-loop. It may use Codex's typed protocol for account metadata (never credential
-material), login initiation/cancellation, model discovery, thread lifecycle,
-structured state/activity, and token usage. The TUI remains the real, unmodified
-Codex CLI and all conversation and TUI-originated approval interaction stays there.
+**No credential handling.** santree never stores, proxies, injects, or
+intercepts an agent CLI's auth tokens, and never reads one **to forward it
+anywhere**. The user runs `claude login` themselves, inside the terminal. The
+one bounded read is below. App-owned secrets never land in plaintext SQLite.
+→ `a_vendor_credential_is_read_in_one_module_and_reachable_through_one_command`,
+`no_migration_stores_a_secret_in_plaintext`
 
-The transport is a private Unix socket under an app-owned `0700` directory. It is
-never exposed over TCP. Santree never parses terminal output to decide what to
-type, never auto-responds to App Server requests, never runs a keep-going loop,
-and never silently falls back to an unobserved Codex process. An unsupported
-server request is rejected and an unavailable/incompatible App Server disables
-new Codex launches visibly while Claude and plain terminals remain available.
+**Untrusted content must not be able to trigger tool use.** Text reaching a
+model prompt from a diff, a PR, a Linear ticket, or a transcript is
+attacker-influenceable — a malicious diff hunk, a comment any org member can
+write. Headless helpers run with tool use denied by default for exactly this
+reason, prompts go over stdin rather than argv (argv is world-readable on
+Linux), and untrusted spans are fenced.
+→ `the_fix_prompt_boundary_survives_hostile_check_output`,
+`a_suggestion_is_fenced_past_any_backticks_inside_it`
 
-Codex owns its authentication storage and localhost callback. Santree may open
-the `authUrl` returned by `account/login/start` and display account email, plan,
-and rate-limit metadata, but it never receives, reads, logs, copies, or persists
-an access token or API key. Logout is explicitly confirmed because it changes the
-shared Codex CLI account.
+**Still forbidden, specifically:** storing or proxying a vendor credential;
+using one to run an agent turn; driving a hidden `claude` session (`/usage` in a
+PTY, which is how other tools scrape this); reading the credential of a vendor
+santree isn't displaying usage for.
 
-## Headless helpers — a scoped exception
-Two call sites intentionally sit outside the terminal pane. They, and the
-session-state channel named in the next section, are the *only* sanctioned
-exceptions to the constraints above:
-- `src-tauri/src/agent.rs` (`run_print` / `run_helper`) — one-shot calls through
-  each helper's independently configured provider (initially inherited from Work)
-  that draft a commit message or PR description. Claude uses `claude -p`; Codex
-  uses `codex exec`.
-- `src-tauri/src/github.rs` (`token()`) — reads a token via `gh auth token`, GitHub's
-  own documented token-lending interface for scripts/tools. This is distinct from
-  santree reading, storing, or proxying an *agent CLI's* (Claude/Codex/…) auth —
-  that remains strictly forbidden per "No credential handling" above.
+---
 
-Both stay inside the spirit of this doc only because they are: the vendor's own
-documented print/non-interactive mode, invoked on the real unmodified binary;
-single-shot, with no loop and no retry; human-initiated by a button click, never
-automatic or background; bounded by a timeout; and their output lands in a commit
-message or PR body under human review — it never feeds back into an *automated*
-agent loop. Claude runs in default permission mode with explicit allowed/denied
-tools plus safe mode and an empty strict MCP configuration. Codex runs ephemeral,
-read-only, with user config/rules ignored and MCP servers, apps, plugins, hooks,
-web search, and network disabled under strict config. This is a narrow, named
-exception, not a license for headless/background agent usage generally. Any new
-headless call site must be justified against these same conditions before merging.
+## Exceptions
 
-One input to the PR-draft helper deserves an explicit call-out: with the opt-in "use
-transcripts" checkbox, the draft prompt is additionally fed the *interactive* Claude
-session's own on-disk transcript (`~/.claude/projects/**/<uuid>.jsonl`, via
-`session::worktree_transcripts`). That is one Claude session's output becoming a
-headless provider invocation's input, so it sits in the gray zone of "no output-parsing that
-drives new prompts" — but it stays inside the line for the same reasons: it is
-opt-in and user-triggered (a checkbox + button click, never automatic), single-shot,
-**text-only with tool calls/results stripped out** (no tool output is re-fed), and the
-result is a PR body the user reviews before pushing. It is *not* an automated control
-loop reacting to agent output; it is a human asking the drafter to read the
-conversation for context.
+Each is bounded. The bound is the point — a change that widens one past what is
+written here needs the same scrutiny as a new exception.
 
-## Session-state hooks + status line — a scoped exception
-Every santree `claude` launch layers a generated settings file over the user's own
-(`claude --settings <path>`; built in `src-tauri/src/hooks.rs`, written to
-`<app_data_dir>/claude-hooks.json`). `--settings` is a key-level override, so the
-keys below win for santree's launches and the user's other keys are untouched.
-This is a **third named exception** to "nothing more" above; it exists so the app
-can badge each worktree with what its agent is doing (running / needs-you / idle)
-and render the same context-usage bar the terminal shows.
+**User-configured project environment.** The PTY inherits the ambient env —
+minus the nested-session markers santree itself inherited (below) — plus the
+user's own Settings → Environment variables, and `TERM`. santree does not
+synthesize those values, read them from a CLI's config, or capture them from
+anywhere. Launches also carry `SANTREE_REPO` / `SANTREE_TERM_KEY` so the hook
+binary knows which row to update, and pass through the `--permission-mode` and
+`--remote-control` flags the user configured. **santree never selects a
+permissive permission mode or defaults to one** — the prompt Claude shows is
+Claude's, under the mode the user chose.
 
-Exactly what it injects — the whole list, no more:
-- **Six session-state `hooks`**, each running the bundled `santree-hook` binary
-  (`crates/hook`) as `<bin> --db <db> <Event>`: `SessionStart`, `UserPromptSubmit`,
-  `Notification`, `PermissionRequest`, `Stop`, `SessionEnd`. Five are registered
-  `async: true` (timeout 10s); `SessionEnd` is the only synchronous one (timeout
-  5s) so "exited" lands before teardown. The per-tool events (`PreToolUse`,
-  `PostToolUse`, `PermissionDenied`) are deliberately **not** injected.
-- **A `statusLine`** (`<bin> --db <db> statusline`) — santree's own context-fill
-  bar. It prints the bar Claude renders and records Claude's authoritative usage
-  numbers into `session_usage_live`.
-- **A `permissions.deny` block**, in the restricted flows only. Each is written to
-  its own settings file so one can never affect another launch, and both are
-  best-effort defence-in-depth, not a hard gate — see `hooks.rs` for what they do
-  and don't catch:
-  - *Fix CI* (`claude_settings_no_git` → `claude-hooks-fixci.json`) — eight rules,
-    all denying the same two verbs: `Bash(git commit)`, `Bash(git commit:*)`,
-    `Bash(git push)`, `Bash(git push:*)`, plus `Bash(*git commit*)` /
-    `Bash(*git push*)` (an absolute path or wrapper before `git`) and
-    `Bash(*git * commit*)` / `Bash(*git * push*)` (an option between the verb and
-    the subcommand, e.g. `git -C <path> commit`). So that session can fix and
-    validate but leaves committing/pushing to the user.
-  - *AI review* (`claude_settings_ai_review` → `claude-hooks-ai-review.json`) —
-    the Fix CI rules plus sixteen denying every `gh` route that would speak as the
-    user on a PR (`gh pr review/comment/merge/close/edit/ready`, `gh issue comment`,
-    and `gh api` wholesale), each in both the prefix and wrapper form, plus the one
-    `permissions.allow` rule described below.
-- **In AI-review and the human-started Address-review flow**, two more things (see
-  "Review MCP server"):
-  one `permissions.allow` rule, `mcp__santree-review`, and one extra launch flag,
-  `--mcp-config <app_data_dir>/mcp/review-<identity-hash>.mcp.json`, registering a
-  single additional stdio MCP server. The user's own MCP servers and settings are
-  untouched — there is no `--strict-mcp-config` — so that session can still read a
-  ticket or a design doc through whatever they have connected.
+**Inherited nested-session markers are dropped.** santree is often launched from
+inside an agent session, and an agent CLI stamps its children with markers saying
+"you are a nested session of mine". Passing those on is a lie about the process
+tree with real consequences: Claude Code reads an inherited
+`CLAUDE_CODE_CHILD_SESSION` as proof it is nested and **turns transcript saving
+off**, so the session becomes unresumable and invisible to Session History. Two
+of the markers are worse than misleading — `CLAUDE_CODE_MESSAGING_SOCKET` and
+`CLAUDE_CODE_MESSAGING_TOKEN` are the launching session's IPC channel and its
+bearer token, which santree was forwarding into every agent PTY it spawned.
+`crates/pty`'s `INHERITED_SESSION_MARKERS` removes them from the inherited env
+before a session is built. The list is narrow by design — only what a parent
+agent process writes into a child's env, never a knob a user sets for themselves
+(`CLAUDE_CODE_SKIP_PROMPT_HISTORY` also suppresses transcripts and is
+deliberately left alone) — and the removal happens *before* the user's own
+variables are applied, so an explicit Settings → Environment value of the same
+name still wins. Removal is the fix: santree does not set
+`CLAUDE_CODE_FORCE_SESSION_PERSISTENCE` or any other force flag to override a
+marker it could simply decline to pass on. Codex has no equivalent: it writes
+`CODEX_SESSION_ID` / `CODEX_THREAD_ID` but never reads them back, so nothing is
+stripped for it.
+The strip belongs to *spawning*, not to one module: santree runs a process
+behind a PTY in two places, and background runs (setup scripts, builds) go
+through the second one. Both call the same exported helper with the same list —
+a copied list is a list that drifts.
+→ `inherited_session_markers_are_stripped_but_a_user_set_value_wins`,
+`a_spawned_process_does_not_inherit_the_nested_session_marker`,
+`a_users_own_persistence_setting_is_not_stripped`,
+`a_background_run_does_not_inherit_the_launching_sessions_markers`,
+`every_pty_spawn_site_strips_the_inherited_session_markers`
 
-The hook binary reads the event's JSON payload on stdin, maps it to an
-`AgentState`, and UPSERTs one row per session in `session_state`. It **prints
-nothing on the hook path and always exits 0**, on every failure path.
+**Claude subscription usage.** `claude_usage.rs` reads Claude Code's own OAuth
+token — from the keychain, else its credentials file, via a fixed argv with the
+account taken from our own process, never from IPC. One GET to
+`api.anthropic.com`, host matched by parse. Read-only: never written, refreshed,
+or re-stored; expiry is Anthropic's call. Never logged or persisted; only
+percentages and reset times reach SQLite. Identified honestly as
+`santree/<version>`. This account only, never forwarded onward. It is the only
+module that does this and `claude_fetch_usage` the only command.
+→ `the_usage_credential_is_never_logged_serialized_or_stored`,
+`every_host_allowlist_is_matched_by_a_parsed_host_not_a_string_prefix`
 
-This stays inside the line — in particular inside "No automated control loop" —
-only because of the following, and any change to this channel must preserve all
-of them:
-- **It cannot gate the CLI's decisions.** Every hook Claude treats as a decision
-  channel (`PermissionRequest`, `Notification`, `UserPromptSubmit`) is registered
-  `async: true`: Claude does not wait for it and ignores whatever it emits, so the
-  hook structurally **cannot approve or deny anything**. Claude still shows the
-  user its own permission prompt; we only observe that one appeared. The single
-  synchronous hook, `SessionEnd`, fires at teardown, has no decision output to
-  give, and emits none.
-- **`permissions.deny` can only restrict, never approve.** It is declarative
-  config the CLI enforces itself — the same mechanism as a user's own
-  `settings.json` — not santree reacting to the session.
-- **The captured state is display-only.** It reaches the UI as a status badge and
-  a usage bar (`session_states` / `session_usage_live` → `WorktreeSidebar`,
-  `AllAgentsView`) and stops there.
-- **No output-parsing influences input.** Nothing derived from the hook payloads,
-  the transcript reconciliation, or the status line is ever written back to the
-  PTY. The only bytes santree writes to a terminal are the user's keystrokes and
-  the single human-initiated seed prompt.
-- **No unattended loop.** The hooks fire only while a human is driving a real
-  session; santree never starts, resumes, retries, or continues one on their
-  behalf.
+**GitHub token.** `github.rs::token()` borrows a token from `gh auth token` —
+GitHub's own documented lending interface, not an agent CLI's auth — and holds
+it in memory for a TTL. It is never written to disk.
 
-Reading the session transcript (`hooks.rs`'s reconciler, to tell a resolved prompt
-from a live one) is bounded by these same conditions: it is read to *label* the
-session, never to decide what to send it.
+**Headless helpers.** `agent.rs` makes one-shot `claude -p` / `codex exec` calls
+to draft a commit message, a PR body, or an English-tutor analysis. Five
+conditions, all of which must hold: the vendor's own documented non-interactive
+mode on the real binary; single-shot with no loop or retry; human-initiated by a
+button, never in the background; bounded by a timeout; output lands under human
+review. The Claude helper runs default permission mode with an explicit
+allow/deny list and an empty strict MCP config; the Codex helper is ephemeral
+and read-only with ambient extensions off, and runs **`--strict-config`**, which
+makes the CLI reject an override it does not recognise instead of ignoring it —
+so a renamed key fails the helper loudly rather than quietly running it with
+ambient MCP servers, plugins, hooks and web search still on. That guarantee used
+to come from the App Server's `config/read` handshake. **Any new headless call
+site must be justified against these same conditions before merging.**
+→ `codex_helpers_disable_ambient_extensions_and_writes`
 
-## Review MCP server — a scoped exception
+**Transcript reads.** Three readers. `usage.rs` and `codex_rollouts.rs` are
+display-only — a summary is shown, never fed to a session. The third is opt-in:
+with the transcripts checkbox on, a single-shot PR-body draft receives the
+session text with tool calls and results stripped, and the user reviews what
+comes back.
 
-The **AI review** and **Address review** sessions launch with one santree-owned MCP server registered:
-the same bundled `santree-hook` binary in `mcp` mode (`crates/hook/src/mcp.rs`),
-scoped by argv to a single pull request. Its seven tools record a review brief,
-draft review comments, and completion of saved improvement items. Address review
-is started by the user from the Reviews worklist and runs in the PR worktree; it
-cannot commit or push, leaving those actions in the Work tab's human controls.
+**Session-state hooks + status line.** Every santree `claude` launch layers a
+`--settings` file, which is a key-level override — the user's other keys are
+untouched. It injects eight events, each running the bundled hook binary, which
+prints nothing on the hook path and always exits 0. (A write it could not perform
+appends one line to `<db_dir>/santree-hook-errors.log`, santree's own directory —
+never to a stream the CLI can see, so the "silent to the agent" property is
+unchanged; the file exists because a failure that leaves no trace anywhere is
+indistinguishable from a hook that never ran.) The decision-capable ones are
+`async: true` — the CLI's own schema defines that as "hook runs in background
+without blocking" — so they structurally cannot approve or deny; `SessionEnd` is
+synchronous only because it fires at teardown.
 
-This is a **fourth named exception**, and it is the first one that *grants* a
-capability rather than restricting one. It stays inside the line because of the
-following, and any change here must preserve all of them:
+Most of the injected events are decision-capable and always were: Claude
+documents `decision: "block"` for `Stop`, `UserPromptSubmit` **and**
+`PostToolUse`, and `PermissionRequest` is a permission channel outright. `async`
+is the whole of what makes any of them safe, which is why it — not a list of
+event names — is the invariant under test. Two events stay out on their own
+merits: **`PreToolUse`**, the only one that can authorize or rewrite a tool call
+(`permissionDecision: allow|deny|ask`, `updatedInput`), and `PermissionDenied`.
+Captured state is display-only. `permissions.deny` appears in restricted flows
+and is **best-effort defence-in-depth, not a hard gate** — never build on it as a
+security boundary.
+→ `no_injected_hook_can_gate_claude_and_pretooluse_is_never_injected`
 
-- **Nothing it writes leaves the machine.** The server has no network access, no
-  GitHub token, and no `git`. Its tools write three tables in santree's own SQLite
-  (`review_drafts`, `review_briefs`, `review_work_items`) for the PR named in its
-  argv, and nothing else. In `review_work_items`, they may only have an existing
-  PR-scoped item marked complete; the agent cannot add, rewrite, or delete items.
-  A draft becomes a real comment only when the user clicks Publish, which
-  runs the same code path as the diff's own `+` button (`review_drafts::publish`
-  → `reviews::add_inline_comment`) and puts it in *their* pending review, which
-  they then submit themselves. Two human decisions stand between an agent's
-  finding and anyone else seeing it.
-- **The scope is ours, not the model's.** The PR, its head commit, and the diff
-  index the tools validate line numbers against are all written by santree at
-  launch and passed on the command line. Every statement carries the PR, so
-  "comment on a different pull request" is not expressible. Codex does not accept
-  an MCP path from IPC: Rust derives the one exact app-owned config filename from
-  the authoritative `ai-review:<owner>/<repo>#<number>` terminal key. The Claude
-  Address-review hand-off receives Rust-derived paths only in memory; browser
-  storage never selects a settings, prompt, or MCP file.
-- **It cannot gate the CLI's decisions.** An MCP tool is one the model chooses to
-  call, not a channel santree sits in the middle of. Unlike a synchronous hook,
-  nothing here can approve, deny, or delay anything the provider does.
-- **No output-parsing influences input.** Tool results carry confirmations,
-  validation messages, and the model's own drafts back over the provider-owned
-  transport. Nothing santree derives from them is written to the PTY, and there
-  is no loop: a human opens the tab, and the server exits when its provider closes
-  the MCP transport.
-- **The write boundary is mechanical; reads remain useful.** Claude retains the
-  scoped deny-list posture documented above. Codex runs the checkout in its
-  read-only sandbox with shell network access disabled, while retaining the
-  user's configured MCP servers, apps, plugins, hooks, and read-only web/data
-  tools. The review thread uses `approvalPolicy = never`, so an ambient tool that
-  requires approval for a write is rejected instead of prompting. Santree adds
-  only its seven PR-scoped review/worklist tools as explicit auto-approved exceptions; a
-  name allowlist means a future tool is unavailable until reviewed and added.
-  The prompt independently says that external tools are for reading and that
-  Santree drafts plus PR-scoped work-item completion are its only persistent output.
+**The status-line passthrough** is opt-in, rewrites one key, backs the file up
+once, and is reversible. It forwards the same stdin bytes, stdout, stderr and
+exit code, kills a hung command at 5s, and **never interprets the user's
+command** — it is handed on as a single argument.
+→ `the_status_line_passthrough_hands_the_users_command_on_as_one_argument`
 
-## Where this is enforced in code
-- `crates/pty` — spawns a real process behind a real PTY and streams **raw
-  bytes**. No command interpretation, no output parsing. The only env it sets on
-  top of the inherited ambient env is `TERM` plus the user's own configured
-  variables (`OpenOpts.env`, resolved by `src-tauri/src/env.rs` from Settings →
-  Environment) — never an agent CLI's auth token.
-- `src-tauri/src/terminal.rs` — thin Tauri adapter (open/write/resize/close). The
-  output channel forwards bytes verbatim.
-- `src/features/terminal/orchestrator.ts` — the app's only terminal API. It does
-  placement + a single optional **seed** (`terminal_write` of bytes, identical to
-  human typing). It does not read output or drive the session.
-- `src-tauri/src/hooks.rs` — builds the `--settings` file described under
-  "Session-state hooks + status line" and reads back what the hooks recorded. It
-  registers every decision-capable hook `async: true` (so none can gate Claude),
-  and its output path ends at the UI: nothing it reads is ever written back to a
-  PTY. `crates/hook` is the binary those hooks run; it records state and exits 0,
-  emitting no hook decision.
-- `crates/hook/src/mcp.rs` + `review_tools.rs` — the AI review's tool server. It
-  speaks JSON-RPC on stdio and writes santree's own rows. It listens on nothing,
-  makes no network connection, and spawns no subprocess; after a write it nudges
-  santree's local signal socket with one byte, exactly as the hook path has always
-  done, so the UI refreshes. Anchors are checked against the diff
-  index santree wrote (`crates/core/src/diff_index.rs`) so a refusal tells the
-  model what would be valid instead of failing later under the user's name.
-- `src-tauri/src/review_drafts.rs` — the only path from a draft to GitHub, and it
-  runs on a click. It posts into the user's pending review, never on its own, and
-  refuses a draft written against a head the PR has moved past.
+**The English tutor** is the one feature that injects text into the model's
+context on every turn, and it is off by default. When on, it adds a *second,
+synchronous* `UserPromptSubmit` hook — synchronous precisely so its stdout
+reaches the model, which an async hook discards — plus a `permissions.allow` for
+`Edit` on the practice log. Its bound: the text is the user's own instruction
+file, never derived from the agent's output, and it grants nothing beyond that
+one file.
 
-If a change introduces output parsing that influences input, token handling, or an
-unattended loop, it violates these constraints and must not be merged.
+**Codex has no control plane.** santree once owned a local `codex app-server` —
+a JSON-RPC service on a private Unix socket — and every Codex surface went
+through it. It is gone. A Codex session is now the unmodified `codex` binary in
+a PTY, exactly like a Claude one, and the surfaces that used the protocol ask
+the CLI instead: `codex login status` for whether it is signed in, `codex debug
+models` for the catalog, `codex logout` on a click. Each is one short-lived,
+non-interactive invocation with stdin closed, bounded by a timeout and an output
+cap. There is deliberately **no login command**: starting a ChatGPT login was a
+protocol call, the CLI's own is an interactive browser flow, and santree points
+the user at `codex login` in a terminal rather than reimplementing it.
+
+Removing it removed a real cost as well as a rule to keep: the server outlived
+the app that started it (87 orphans on one developer machine, the oldest four
+days old), and it held Codex's per-thread writer lock, which is what made a
+resumed thread fail with "already has an active writer".
+
+**Never credential material**, before or after: Codex owns its auth storage, and
+santree does not read `~/.codex/auth.json` or any other credential file. Nothing
+is left that could — there is no code path from santree to a Codex token.
+→ `santree_owns_no_codex_control_plane`, `nothing_reads_codexs_auth_storage`
+
+**Codex subscription usage** has no live source that santree may use. The
+account API needs Codex's credentials and the protocol that exposed it is gone,
+so the number comes from Codex's own rollout transcript: it writes a
+`token_count` record after every turn carrying the rate-limit windows the API
+returned, and `codex_rollouts.rs` reads back the most recent one. It is a
+display-only transcript read like the two beside it, and it is **as fresh as the
+user's last Codex turn and no fresher** — the UI must not imply otherwise. When
+Codex has never run, or the plan reports no windows, the answer is empty.
+→ `nothing_reads_codexs_auth_storage`
+
+**Review MCP server.** The AI review and Address review launch one santree-owned
+server — the bundled hook binary in `mcp` mode, scoped by argv to a single PR.
+It has no network access, no GitHub token, no `git`, and spawns no subprocess.
+It writes three of santree's own tables, and in the work-item table the agent may
+only mark an existing PR-scoped item complete — never add, rewrite, or delete.
+Neither session can commit or push. Under Claude the grant covers the whole
+server, so a tool added to it is reachable the moment it is served; the shared
+list is what keeps the server's tools and the grant the same set.
+
+Under Codex the same server is now launch configuration rather than an App
+Server call: `codex_config.rs` emits
+`-c 'mcp_servers.santree-review={command=…,args=[…],required=true,enabled_tools=[…]}'`,
+one named server added beside the user's own rather than replacing the map. Two
+things make it **fail closed**, and both were measured against codex-cli 0.150.1
+in an isolated `CODEX_HOME`. `required = true` makes Codex refuse to create the
+session when the server cannot start ("required MCP servers failed to
+initialize") instead of quietly continuing as an ordinary agent with nowhere to
+put what it found. And because the CLI *silently ignores* a `-c` key it does not
+recognise — the trap that let a decorative `-c sandbox_permissions=[]` ship for
+months — santree proves the override landed before it launches, with
+`codex exec --strict-config --ephemeral --ignore-user-config` over its own
+overrides only. `--strict-config` cannot ride on the interactive launch itself:
+it would validate the user's `~/.codex/config.toml` too, so one unrecognised key
+of theirs would block a launch that works today. The review's approval policy is
+`never`, which makes the `enabled_tools` allowlist a hard gate rather than a
+prompt — a tool missing from it is rejected with no explanation, which is why
+both ends read the one shared list.
+→ `the_review_tool_server_can_reach_neither_github_nor_the_network`,
+`the_review_tools_write_only_santrees_own_three_tables`,
+`the_review_agent_may_only_complete_a_work_item_never_create_or_delete_one`,
+`every_advertised_tool_is_dispatchable_and_named_in_the_shared_list`,
+`a_review_without_its_tools_refuses_to_launch`,
+`the_review_server_carries_every_shared_tool_and_fails_closed`
+
+**santree only tightens a Codex sandbox.** A Codex session's sandbox and approval
+policy are the user's, set in their own `~/.codex/config.toml`; santree has no UI
+for either. So it names them only where naming them restricts: the read-only
+surfaces (triage investigation, "ask AI", the AI review) launch
+`--sandbox read-only --ask-for-approval never`, and Address review takes the
+approval policy without the sandbox. The work session gets neither — pinning
+`workspace-write` there would override a user who chose `read-only`, which is
+"santree never selects a permissive permission mode" in Codex's vocabulary. The
+App Server did pin it; this is the one place the CLI mapping deliberately differs
+from what it replaced. **`--dangerously-bypass-approvals-and-sandbox` is never
+passed.** Other launchers default to it. A bypassed sandbox is the first step to
+not needing `review_drafts::publish`, which is the decision the review feature
+exists to preserve.
+→ `no_surface_can_produce_the_bypass_flag`,
+`the_work_surface_does_not_override_the_users_own_sandbox`,
+`nothing_asks_codex_to_bypass_its_sandbox`
+
+**A draft becomes a comment only on a click.** `review_drafts::publish` is the
+only path from an agent's finding to GitHub, it runs on a user action into their
+pending review, and it refuses a draft written against a head the PR has moved
+past. **Two human decisions stand between an agent's finding and anyone else
+seeing it.**
+→ `the_only_path_from_an_agents_draft_to_github_is_the_users_pending_review`
+
+**santree derives its own paths.** The settings, prompt, and MCP file a session
+launches with are derived in Rust from the tab's own row. Browser storage never
+selects one, and a webview may supply a PR identity but never a path.
+
+**Reading the OS process table is observation, not a loop.** santree asks the
+kernel which process owns each pane's foreground process group, so it knows
+*which agent* is in a pane rather than only which one it launched
+(`proc_table.rs`, `agent_procs.rs`). Terminal output is untouched by this; it is
+the same passive class as reading a pane's OSC title. It answers **identity,
+never status** — the state ladder is still the hooks, then the title — and
+nothing derived from it is written back into a PTY, gates a launch, chooses a
+prompt, or becomes an argument to a command. It reaches the sidebar as a provider
+mark and stops. The `ps` argv is a constant, so no IPC value reaches it. The
+inability to write is structural rather than a promise: `agent_procs.rs` may not
+name a `PtyManager` at all, so it holds no handle on a terminal.
+
+The listing selects `ps`'s `command` column, so the read *transits* every host
+process's full argv — which on any machine can carry a secret somebody put on a
+command line. **Only `argv[0]`'s basename is retained**, at the parse
+(`proc_table.rs`), before anything else sees a row: the rest is dropped and never
+logged, persisted, or sent across IPC. `ucomm` would avoid the transit but is
+unusable — it reported `claude.exe` for a running `claude` *and* for a `ugrep`
+that Claude spawned — and no cross-platform column yields `argv[0]` alone. The
+narrow retention is what makes the wider read acceptable; widening it is a change
+to this paragraph, not just to a parser.
+→ `only_the_terminal_adapter_writes_bytes_into_a_pty` (its allowlist is what
+keeps that module away from the PTY)
+
+**Terminal reattach.** A session survives a webview reload: the PTY lives in the
+Rust process and keeps a bounded ring of its recent output
+(`docs/terminals.md`). The ring is written by the reader
+thread and read only by the attach path; nothing inspects it, and its only
+consumer is an xterm that would have received the same bytes live.
+
+> **If a mode mirror is ever built** — parsing output to restore terminal modes
+> on reattach, as Phase 5 of that document proposes — it must extract a fixed,
+> enumerated set of modes and nothing else, must never emit a reply toward the
+> PTY, and must answer no query sequence: the webview's xterm is the single
+> query-reply authority. It does not exist today, and this paragraph grants
+> nothing until it does.
+
+---
+
+## What a test cannot judge
+
+Kept in prose because they are judgment calls, not patterns: that captured state
+stays display-only; that a helper is genuinely human-initiated; that a new
+`Command::new` site is legitimate (the tree has 30+ that are); that we have not
+re-implemented a vendor's control loop. These are what code review is for.

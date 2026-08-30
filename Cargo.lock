@@ -4259,7 +4259,7 @@ dependencies = [
 
 [[package]]
 name = "santree"
-version = "0.1.5-beta.1"
+version = "0.1.5-beta.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4301,7 +4301,7 @@ dependencies = [
 
 [[package]]
 name = "santree-core"
-version = "0.1.5-beta.1"
+version = "0.1.5-beta.2"
 dependencies = [
  "serde",
  "specta",
@@ -4309,7 +4309,7 @@ dependencies = [
 
 [[package]]
 name = "santree-hook"
-version = "0.1.5-beta.1"
+version = "0.1.5-beta.2"
 dependencies = [
  "santree-core",
  "serde",
@@ -4320,7 +4320,7 @@ dependencies = [
 
 [[package]]
 name = "santree-pty"
-version = "0.1.5-beta.1"
+version = "0.1.5-beta.2"
 dependencies = [
  "anyhow",
  "log",
@@ -4529,6 +4529,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap 2.14.0",
  "itoa",
  "memchr",
  "serde",

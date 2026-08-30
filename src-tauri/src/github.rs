@@ -228,6 +228,75 @@ pub async fn status() -> santree_core::domain::GithubStatus {
     status
 }
 
+/// What is left of the GitHub API budget the `gh` session is spending, from
+/// GitHub's own `/rate_limit`. `None` when nothing is signed in.
+///
+/// Three of the fifteen pools GitHub reports, because they are the three santree
+/// actually draws on: REST (`core`), the search pool the Reviews inbox spends,
+/// and GraphQL. `/rate_limit` is documented as not counting against any of them,
+/// so refreshing this never moves the numbers it reports.
+///
+/// The budget belongs to the *token*, not to santree — every other tool sharing
+/// this `gh` login draws on the same pools, which is exactly why a number worth
+/// showing has to come from GitHub rather than from a local tally.
+pub async fn api_budget() -> Option<santree_core::domain::GithubApiBudget> {
+    let token = token().await?;
+    let limits = get_json::<RateLimitResponse>("https://api.github.com/rate_limit", &[], &token)
+        .await
+        .map_err(|e| log::warn!("reading the GitHub rate limit: {e:#}"))
+        .ok()?;
+    Some(limits.into_budget())
+}
+
+/// The three pools of `/rate_limit`'s `resources` object santree draws on. The
+/// other twelve GitHub reports (SCIM, audit log, dependency snapshots…) are
+/// deliberately not deserialized — a pool nothing spends is noise on a meter.
+#[derive(Deserialize)]
+struct RateLimitResponse {
+    resources: RateLimitResources,
+}
+
+#[derive(Deserialize)]
+struct RateLimitResources {
+    core: Option<RateLimitPool>,
+    search: Option<RateLimitPool>,
+    graphql: Option<RateLimitPool>,
+}
+
+#[derive(Deserialize)]
+struct RateLimitPool {
+    limit: f64,
+    remaining: f64,
+    /// Unix **seconds** — Linear's equivalent header is milliseconds, and the
+    /// two meet in the same frontend component.
+    reset: f64,
+}
+
+impl RateLimitResponse {
+    fn into_budget(self) -> santree_core::domain::GithubApiBudget {
+        use santree_core::domain::{ApiBudgetKind, ApiBudgetWindow, GithubApiBudget};
+
+        let window = |kind: ApiBudgetKind, pool: Option<RateLimitPool>| {
+            pool.map(|p| ApiBudgetWindow {
+                kind,
+                limit: p.limit,
+                remaining: p.remaining,
+                resets_at_ms: Some(p.reset * 1000.0),
+            })
+        };
+        GithubApiBudget {
+            windows: [
+                window(ApiBudgetKind::Rest, self.resources.core),
+                window(ApiBudgetKind::Search, self.resources.search),
+                window(ApiBudgetKind::GraphQl, self.resources.graphql),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        }
+    }
+}
+
 /// `(owner, repo)` parsed from the worktree's `origin` remote, or an error when
 /// it isn't a recognizable GitHub remote.
 pub fn owner_repo(cwd: &Path) -> Result<(String, String)> {
@@ -264,95 +333,129 @@ struct CreatedPr {
 }
 
 #[derive(Deserialize)]
-struct SearchResp {
-    items: Vec<SearchItem>,
-}
-
-#[derive(Deserialize)]
-struct SearchItem {
+struct PullItem {
     number: u32,
     title: String,
     html_url: String,
     state: String,
-    pull_request: Option<PrRef>,
+    merged_at: Option<String>,
+    head: PullRef,
 }
 
 #[derive(Deserialize)]
-struct PrRef {
-    merged_at: Option<String>,
+struct PullRef {
+    #[serde(rename = "ref")]
+    name: String,
+    /// The repo the head branch lives in. `None` once a fork is deleted, which is
+    /// why [`RepoPr::same_repo`] treats absence as "not ours" rather than assuming.
+    repo: Option<PullRepo>,
 }
 
-/// One PR from a repo-wide search — title included so [`crate::pr::statuses`] can
-/// match it against several linked issue ids without a search call per issue.
+#[derive(Deserialize)]
+struct PullRepo {
+    full_name: String,
+}
+
+/// One PR from the repo's PR list. Carries both join keys [`crate::pr::statuses`]
+/// uses to attach it to a worktree — its head branch and its title — so a whole
+/// repo's PRs can be matched against every linked worktree client-side, with no
+/// API call per worktree.
 pub struct RepoPr {
     pub number: u32,
     pub title: String,
     pub url: String,
     pub state: PrState,
+    /// The PR's head branch. GitHub deletes the *branch* on merge but keeps this
+    /// field on the PR record, so it stays a valid join key for merged PRs too.
+    pub head_ref: String,
+    /// Whether that head branch lives in **this** repo rather than a fork.
+    ///
+    /// `head_ref` is a bare branch name with no owner in it, so a PR raised from a
+    /// fork whose branch happens to share a name with one of our worktree branches
+    /// would otherwise bind a stranger's PR to the user's work — a false positive,
+    /// which is worse than showing no PR at all. False when GitHub reports no head
+    /// repo (a deleted fork): unconfirmed is not the same as ours.
+    pub same_repo: bool,
 }
 
-/// The 100 most-recently-**updated** PRs in `owner/repo` — one GitHub API call
-/// regardless of how many worktrees/issues the caller wants to match against.
+/// The 100 most-recently-**updated** PRs in `owner/repo`, any state — one GitHub
+/// API call regardless of how many worktrees the caller wants to match against.
 ///
-/// Replaces the old "one search per issue id" approach: GitHub's search API
-/// has a secondary rate limit of ~30 requests/minute, and `worktreePrs` is
-/// refetched on a 60s staleTime *and* after every worktree mutation — a repo
-/// with a modest number of active worktrees could blow through that budget in
-/// one refetch, silently dropping PR chips. Callers match titles against the
-/// `[ISSUE-ID] …` tag our commit/PR flow writes (see `pr::issue_tag`) rather
-/// than the branch, which GitHub deletes on merge (so merged PRs would vanish
-/// from a branch-based lookup).
+/// Deliberately the `/pulls` list endpoint rather than a PR search: it is the
+/// only one of the two that returns each PR's head branch (`head.ref`), which is
+/// the exact key [`crate::pr::statuses`] joins on, it reads live data instead of
+/// the search index (a just-opened PR shows up immediately), and it spends the
+/// 5000/hour REST budget instead of search's ~30/minute secondary limit —
+/// `worktreePrs` is refetched on a 60s staleTime *and* after every worktree
+/// mutation, which is close enough to that ceiling to matter.
 ///
 /// Ordered by update (not creation) time: in a busy monorepo, hundreds of PRs
 /// can be *created* after a worktree's PR while it's still being actively
 /// worked — pushes/comments keep it in the recently-updated window. A PR
-/// outside even this window is caught by the caller's per-issue fallback
-/// ([`prs_for_issue`]). Network errors bubble up.
+/// outside even this window is caught by the caller's per-branch fallback
+/// ([`prs_for_branch`]). Network errors bubble up.
 pub async fn prs_for_repo(token: &str, owner: &str, repo: &str) -> Result<Vec<RepoPr>> {
-    let q = format!("repo:{owner}/{repo} type:pr");
-    let body: SearchResp = get_json(
-        "https://api.github.com/search/issues",
-        &[
-            ("q", q.as_str()),
-            ("per_page", "100"),
-            ("sort", "updated"),
-            ("order", "desc"),
-        ],
+    list_pulls(
         token,
+        owner,
+        repo,
+        &[
+            ("state", "all"),
+            ("sort", "updated"),
+            ("direction", "desc"),
+            ("per_page", "100"),
+        ],
     )
-    .await?;
-    Ok(body.items.into_iter().map(to_repo_pr).collect())
+    .await
 }
 
-/// Newest PRs whose title mentions `issue_id` — the narrow fallback for a
-/// worktree whose PR fell outside [`prs_for_repo`]'s recently-updated window
-/// (e.g. a dormant PR in a high-traffic repo). The caller still verifies the
-/// exact `[ISSUE-ID]` tag on each result; the search is just the candidate
-/// filter (GitHub's tokenizer ignores the brackets).
-pub async fn prs_for_issue(
+/// The PRs opened from `branch` — the narrow fallback for a worktree whose PR
+/// fell outside [`prs_for_repo`]'s recently-updated window (e.g. a dormant PR in
+/// a high-traffic repo). GitHub filters on the head ref recorded on the PR, so
+/// this still finds a merged PR whose branch has since been deleted.
+///
+/// `head` is qualified with the repo owner, which is where santree pushes its
+/// worktree branches; a PR raised from someone's fork is left to the bulk list.
+pub async fn prs_for_branch(
     token: &str,
     owner: &str,
     repo: &str,
-    issue_id: &str,
+    branch: &str,
 ) -> Result<Vec<RepoPr>> {
-    let q = format!("repo:{owner}/{repo} type:pr in:title \"{issue_id}\"");
-    let body: SearchResp = get_json(
-        "https://api.github.com/search/issues",
-        &[
-            ("q", q.as_str()),
-            ("per_page", "10"),
-            ("sort", "created"),
-            ("order", "desc"),
-        ],
+    let head = format!("{owner}:{branch}");
+    list_pulls(
         token,
+        owner,
+        repo,
+        &[
+            ("state", "all"),
+            ("sort", "updated"),
+            ("direction", "desc"),
+            ("per_page", "10"),
+            ("head", head.as_str()),
+        ],
     )
-    .await?;
-    Ok(body.items.into_iter().map(to_repo_pr).collect())
+    .await
 }
 
-fn to_repo_pr(p: SearchItem) -> RepoPr {
-    let merged = p.pull_request.and_then(|r| r.merged_at).is_some();
-    let state = if merged {
+/// `GET /repos/{owner}/{repo}/pulls` with the caller's filters, mapped to
+/// [`RepoPr`]. Owner/repo are parsed from the `origin` remote and the branch
+/// comes from the DB, so the path is built by [`api_url`] and the filters go
+/// through reqwest's query encoder — never `format!`ed into the URL.
+async fn list_pulls(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    query: &[(&str, &str)],
+) -> Result<Vec<RepoPr>> {
+    let url = api_url(&["repos", owner, repo, "pulls"])?;
+    let items: Vec<PullItem> = get_json(url, query, token).await?;
+    let slug = format!("{owner}/{repo}");
+    Ok(items.into_iter().map(|p| to_repo_pr(p, &slug)).collect())
+}
+
+fn to_repo_pr(p: PullItem, base_slug: &str) -> RepoPr {
+    let state = if p.merged_at.is_some() {
         PrState::Merged
     } else if p.state == "closed" {
         PrState::Closed
@@ -364,6 +467,8 @@ fn to_repo_pr(p: SearchItem) -> RepoPr {
         title: p.title,
         url: p.html_url,
         state,
+        head_ref: p.head.name,
+        same_repo: p.head.repo.is_some_and(|r| r.full_name == base_slug),
     }
 }
 
@@ -572,7 +677,7 @@ async fn graphql<T: DeserializeOwned>(
 // than 30 review-request events falls back to `createdAt`, which errs toward
 // looking like it has waited *longer*, never shorter.
 const PR_FIELDS: &str = r"
-    id number title url isDraft updatedAt createdAt headRefName baseRefName isInMergeQueue
+    id number title url state isDraft updatedAt createdAt headRefName baseRefName isInMergeQueue
     headRef { id }
     baseRef { id }
     repository { nameWithOwner }
@@ -607,9 +712,32 @@ const PR_FIELDS: &str = r"
 
 #[derive(Deserialize)]
 struct Actor {
+    /// The `Actor` interface's concrete type — `Bot` for a GitHub App, `User` for
+    /// a person, `Mannequin`/`Organization` for the rest.
+    ///
+    /// `#[serde(default)]` is load-bearing, not tidiness: [`PR_FIELDS`] decodes
+    /// into this same struct and deliberately does *not* select `__typename`, so a
+    /// required field here would fail every Reviews inbox search to deserialize.
+    #[serde(rename = "__typename", default)]
+    typename: String,
     login: String,
     #[serde(rename = "avatarUrl")]
     avatar_url: String,
+}
+
+impl Actor {
+    /// Only `Bot` is a bot. `Mannequin` is an import placeholder standing in for a
+    /// real person, and `Organization`/`EnterpriseUserAccount` are neither.
+    ///
+    /// Read from GitHub's own type rather than inferred from a `[bot]`-suffixed
+    /// login: the suffix is a *rendering* convention applied to bot actors (and
+    /// GraphQL's `Bot.login` often omits it), so matching on it is strictly weaker
+    /// than asking what the actor is. It would also still miss the case a
+    /// heuristic gets reached for — a machine **user** account a team runs CI as —
+    /// which GitHub itself draws no line around, so neither do we.
+    fn is_bot(&self) -> bool {
+        self.typename == "Bot"
+    }
 }
 
 #[derive(Deserialize)]
@@ -710,6 +838,7 @@ struct PrNode {
     number: u32,
     title: String,
     url: String,
+    state: String,
     #[serde(rename = "isDraft")]
     is_draft: bool,
     #[serde(rename = "updatedAt")]
@@ -791,7 +920,20 @@ fn viewer_requested_at(events: &[ReviewRequestedEvent], viewer: &ViewerCtx) -> O
         .map(str::to_owned)
 }
 
-/// Map one PR search node into the domain type, from `viewer`'s point of view.
+/// GitHub's `PullRequestState` → the domain enum.
+///
+/// An unrecognised value maps to `Open`: the GraphQL enum has been three-valued
+/// for a decade, and a PR santree can't classify is better shown as live than
+/// silently reported as merged.
+fn pr_state(raw: &str) -> PrState {
+    match raw {
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        _ => PrState::Open,
+    }
+}
+
+/// Map one PR node into the domain type, from `viewer`'s point of view.
 ///
 /// Not a `From` impl: two of the fields (`waiting_since`, and the meaning of
 /// `viewer_review`) only exist relative to who is asking.
@@ -868,8 +1010,7 @@ fn to_review_pr(n: PrNode, viewer: &ViewerCtx) -> ReviewPr {
         head_sha,
         author,
         author_avatar_url,
-        // The dashboard only ever queries `is:open`, so these are open PRs.
-        state: PrState::Open,
+        state: pr_state(&n.state),
         is_draft: n.is_draft,
         review_decision,
         checks,
@@ -919,6 +1060,75 @@ async fn search_prs(token: &str, q: &str, viewer: &ViewerCtx) -> Result<Vec<Revi
         .into_iter()
         .map(|n| to_review_pr(n, viewer))
         .collect())
+}
+
+/// One PR by number, mapped into the same [`ReviewPr`] the inbox ships — so every
+/// component written against an inbox row renders a worktree's own PR unchanged.
+///
+/// `Ok(None)`, not an error, when the number doesn't resolve: a deleted PR, or a
+/// worktree whose recorded number has gone stale. A *repository* that doesn't
+/// resolve is an error — GitHub answers that with `NOT_FOUND` in the `errors`
+/// array, and "you can't see acme/api" is worth telling the user about.
+///
+/// The viewer's login is selected in the **same document** as the PR. A separate
+/// `viewer { login }` round-trip would double the latency of a panel that opens on
+/// every worktree click, for a field GraphQL hands back alongside the PR for free.
+///
+/// `team_slugs` is left empty, and that is a deliberate, bounded inaccuracy:
+/// resolving them needs the login this very query is what fetches. The only
+/// consequence is that a PR routed to the viewer through a *team* dates its
+/// `waiting_since` from `created_at` rather than from the team request — erring
+/// toward looking like it has waited longer, never shorter, the same direction
+/// [`PR_FIELDS`]' 30-event timeline cap already errs in. This path serves the
+/// viewer's own PR, where no request names them at all.
+pub async fn pull_request(
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u32,
+) -> Result<Option<ReviewPr>> {
+    #[derive(Deserialize)]
+    struct Data {
+        viewer: Login,
+        repository: Option<Repo>,
+    }
+    #[derive(Deserialize)]
+    struct Login {
+        login: String,
+    }
+    #[derive(Deserialize)]
+    struct Repo {
+        #[serde(rename = "pullRequest")]
+        pull_request: Option<PrNode>,
+    }
+    let data: Data = graphql(
+        token,
+        &single_pr_query(),
+        serde_json::json!({ "owner": owner, "name": name, "number": number }),
+    )
+    .await?;
+    let viewer = ViewerCtx {
+        login: data.viewer.login,
+        team_slugs: Vec::new(),
+    };
+    Ok(data
+        .repository
+        .and_then(|r| r.pull_request)
+        .map(|n| to_review_pr(n, &viewer)))
+}
+
+/// The by-number PR query. The identity travels as GraphQL **variables** — never
+/// interpolated — and the viewer's login rides along in the same document (see
+/// [`pull_request`]). A free function so both of those stay pinned by a test.
+fn single_pr_query() -> String {
+    format!(
+        "query($owner: String!, $name: String!, $number: Int!) {{
+           viewer {{ login }}
+           repository(owner: $owner, name: $name) {{
+             pullRequest(number: $number) {{ {PR_FIELDS} }}
+           }}
+         }}"
+    )
 }
 
 /// `(owner, name)` from an "owner/name" slug. The slug crosses IPC, so a malformed
@@ -1658,19 +1868,20 @@ fn check_run_status(status: &str, conclusion: Option<&str>) -> CheckStatus {
 /// queries must request the same shape as the PR query's first page or a later page
 /// would decode into a different struct (`pr_conversation_selects_the_shared_fields`
 /// pins the two together).
-const COMMENT_FIELDS: &str = "author { login avatarUrl } body createdAt";
+const COMMENT_FIELDS: &str = "author { __typename login avatarUrl } body createdAt";
 
 /// The same, for a *review* node. Beyond the shared comment shape it carries the
 /// three fields that identify the viewer's own unsubmitted review, which is what
 /// further draft comments attach to (and what must be kept out of the displayed
 /// conversation — a pending review's body is not something anyone has posted yet).
-const REVIEW_FIELDS: &str = "id state viewerDidAuthor author { login avatarUrl } body createdAt";
+const REVIEW_FIELDS: &str =
+    "id state viewerDidAuthor author { __typename login avatarUrl } body createdAt";
 
 /// The same, for a comment *inside* a review thread. `fullDatabaseId` is the id
 /// GitHub's REST reply endpoint takes (`databaseId` is a 32-bit `Int` and review
 /// comment ids have outgrown it); `state` marks the viewer's own drafts.
 const THREAD_COMMENT_FIELDS: &str =
-    "fullDatabaseId state author { login avatarUrl } body createdAt";
+    "fullDatabaseId state author { __typename login avatarUrl } body createdAt";
 
 /// A GraphQL connection's maximum page size.
 const GRAPHQL_PAGE: usize = 100;
@@ -1686,12 +1897,12 @@ const PR_CONVERSATION_QUERY: &str = r"
           baseRefOid
           headRefOid
           labels(first: 30) { nodes { name color description } }
-          comments(first: 100) { nodes { author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
-          reviews(first: 100) { nodes { id state viewerDidAuthor author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
+          comments(first: 100) { nodes { author { __typename login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
+          reviews(first: 100) { nodes { id state viewerDidAuthor author { __typename login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
           reviewThreads(first: 100) {
             nodes {
               id path line startLine diffSide isResolved isOutdated viewerCanResolve viewerCanUnresolve
-              comments(first: 100) { nodes { fullDatabaseId state author { login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
+              comments(first: 100) { nodes { fullDatabaseId state author { __typename login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
             }
             pageInfo { hasNextPage endCursor }
           }
@@ -1699,7 +1910,7 @@ const PR_CONVERSATION_QUERY: &str = r"
             nodes {
               __typename
               ... on CheckRun {
-                name status conclusion detailsUrl checkSuite { app { name } }
+                name status conclusion detailsUrl startedAt completedAt checkSuite { app { name } }
                 steps(first: 50) { nodes { number name status conclusion } }
                 annotations(first: 50) { nodes { annotationLevel message path title rawDetails location { start { line } } } }
               }
@@ -1913,6 +2124,10 @@ async fn pr_conversation(
             status: String,
             #[serde(rename = "detailsUrl")]
             details_url: Option<String>,
+            #[serde(rename = "startedAt")]
+            started_at: Option<String>,
+            #[serde(rename = "completedAt")]
+            completed_at: Option<String>,
             #[serde(rename = "checkSuite")]
             check_suite: Option<CheckSuite>,
             steps: Option<Connection<StepNode>>,
@@ -2028,7 +2243,7 @@ async fn pr_conversation(
                 nodes {
                   __typename
                   ... on CheckRun {
-                    name status conclusion detailsUrl checkSuite { app { name } }
+                    name status conclusion detailsUrl startedAt completedAt checkSuite { app { name } }
                     steps(first: 50) { nodes { number name status conclusion } }
                     annotations(first: 50) { nodes { annotationLevel message path title rawDetails location { start { line } } } }
                   }
@@ -2083,10 +2298,19 @@ async fn pr_conversation(
         drain_thread_comments(token, &thread.id, &mut thread.comments).await?;
     }
 
-    let actor = |a: Option<Actor>| a.map(|a| (a.login, a.avatar_url)).unwrap_or_default();
+    // A deleted author decodes to `None`, and the `unwrap_or_default` reads that as
+    // "not a bot" — which is right: an account GitHub has erased was a person often
+    // enough that guessing otherwise would be the wrong way to be wrong.
+    let actor = |a: Option<Actor>| {
+        a.map(|a| {
+            let is_bot = a.is_bot();
+            (a.login, a.avatar_url, is_bot)
+        })
+        .unwrap_or_default()
+    };
     let mut comments: Vec<PrComment> = Vec::new();
     for c in pr.comments.nodes {
-        let (author, author_avatar_url) = actor(c.author);
+        let (author, author_avatar_url, is_bot) = actor(c.author);
         comments.push(PrComment {
             author,
             author_avatar_url,
@@ -2095,6 +2319,7 @@ async fn pr_conversation(
             kind: CommentKind::Issue,
             path: None,
             is_pending: false,
+            is_bot,
         });
     }
     // GitHub allows one unsubmitted review per user, and shows nobody else's — so
@@ -2113,7 +2338,7 @@ async fn pr_conversation(
         if r.body.trim().is_empty() {
             continue;
         }
-        let (author, author_avatar_url) = actor(r.author);
+        let (author, author_avatar_url, is_bot) = actor(r.author);
         comments.push(PrComment {
             author,
             author_avatar_url,
@@ -2122,6 +2347,7 @@ async fn pr_conversation(
             kind: CommentKind::Review,
             path: None,
             is_pending: false,
+            is_bot,
         });
     }
     comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -2141,7 +2367,7 @@ async fn pr_conversation(
             .unwrap_or_default();
         let mut thread_comments: Vec<PrComment> = Vec::new();
         for c in t.comments.nodes {
-            let (author, author_avatar_url) = actor(c.author);
+            let (author, author_avatar_url, is_bot) = actor(c.author);
             thread_comments.push(PrComment {
                 author,
                 author_avatar_url,
@@ -2150,6 +2376,7 @@ async fn pr_conversation(
                 kind: CommentKind::ReviewThread,
                 path: Some(t.path.clone()),
                 is_pending: c.state.as_deref() == Some("PENDING"),
+                is_bot,
             });
         }
         if thread_comments.is_empty() {
@@ -2218,12 +2445,15 @@ async fn pr_conversation(
                 conclusion,
                 status,
                 details_url,
+                started_at,
+                completed_at,
                 check_suite,
                 steps,
                 annotations,
             } => {
                 let st = check_run_status(&status, conclusion.as_deref());
                 let job_id = details_url.as_deref().and_then(job_id_from_url);
+                let run_id = details_url.as_deref().and_then(run_id_from_url);
                 // Only failed checks carry their step/annotation detail — that's
                 // the only place the UI expands it, and it keeps the payload lean.
                 let (steps, annotations) = if st == CheckStatus::Failure {
@@ -2262,6 +2492,9 @@ async fn pr_conversation(
                     steps,
                     annotations,
                     job_id,
+                    run_id,
+                    started_at,
+                    completed_at,
                 });
             }
             Ctx::StatusContext {
@@ -2282,10 +2515,14 @@ async fn pr_conversation(
                     description,
                     url: target_url,
                     // Status contexts (legacy commit statuses) have no steps,
-                    // annotations, or job log — only GitHub Actions check runs do.
+                    // annotations, job log, or run timings — only GitHub Actions
+                    // check runs do.
                     steps: Vec::new(),
                     annotations: Vec::new(),
                     job_id: None,
+                    run_id: None,
+                    started_at: None,
+                    completed_at: None,
                 });
             }
             Ctx::Other => {}
@@ -2331,9 +2568,21 @@ fn bigint_to_string(v: &serde_json::Value) -> String {
 /// (`…/actions/runs/<run>/job/<job_id>`). `None` for non-Actions URLs (e.g. a
 /// third-party check's own site), which have no fetchable runner log.
 fn job_id_from_url(url: &str) -> Option<f64> {
-    let tail = url.rsplit_once("/job/")?.1;
+    id_after(url, "/job/")
+}
+
+/// The Actions **workflow run** id from the same `detailsUrl`
+/// (`…/actions/runs/<run>/job/<job>`). Shown beside the job id when a check is
+/// expanded — the pair is how a run is identified anywhere outside santree.
+fn run_id_from_url(url: &str) -> Option<f64> {
+    id_after(url, "/runs/")
+}
+
+/// The decimal id immediately following `marker` in a details URL. Ids exceed
+/// `u32` but are exact in an `f64` (Specta forbids exporting 64-bit ints).
+fn id_after(url: &str, marker: &str) -> Option<f64> {
+    let tail = url.rsplit_once(marker)?.1;
     let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
-    // Job ids exceed u32 but are exact in an f64; parse as u64 then widen.
     digits.parse::<u64>().ok().map(|n| n as f64)
 }
 
@@ -2971,6 +3220,13 @@ mod tests {
                 PR_CONVERSATION_QUERY.contains(fields),
                 "PR_CONVERSATION_QUERY must select `{fields}`"
             );
+            // The bot flag is read from the `Actor` interface's concrete type. All
+            // four selections carry it or none usefully do — a comment whose page
+            // dropped it would silently come back "not a bot".
+            assert!(
+                fields.contains("author { __typename"),
+                "`{fields}` must ask for the author's __typename"
+            );
         }
         for field in ["comments", "reviews", "reviewThreads"] {
             assert!(
@@ -2985,6 +3241,67 @@ mod tests {
             5,
             "comments, reviews, reviewThreads, thread comments and check contexts all page"
         );
+    }
+
+    /// `PR_FIELDS` is a bare string, so dropping `state` from it would compile
+    /// happily and silently resurrect the always-`Open` placeholder the mapping
+    /// used to ship. Word-boundary comparison: a naive `contains("state")` would
+    /// be satisfied by `reviewDecision`'s neighbours and prove nothing.
+    #[test]
+    fn pr_fields_selects_the_state_the_mapping_reads() {
+        assert!(
+            PR_FIELDS.split_whitespace().any(|field| field == "state"),
+            "PR_FIELDS must select `state`, which to_review_pr maps"
+        );
+    }
+
+    #[test]
+    fn pr_state_maps_every_github_value() {
+        assert_eq!(pr_state("OPEN"), PrState::Open);
+        assert_eq!(pr_state("MERGED"), PrState::Merged);
+        assert_eq!(pr_state("CLOSED"), PrState::Closed);
+        // Chosen, not stumbled into: an unclassifiable PR reads as live rather
+        // than being reported as merged.
+        assert_eq!(pr_state("SOMETHING_NEW"), PrState::Open);
+    }
+
+    #[test]
+    fn single_pr_query_reuses_the_inbox_field_set() {
+        let q = single_pr_query();
+        assert!(q.contains(PR_FIELDS), "a PR row must be the inbox's shape");
+        // Merging the viewer lookup into this document is the design (one
+        // round-trip on a panel that opens on every worktree click), not an
+        // accident of how it was written.
+        assert!(q.contains("viewer { login }"));
+        // The identity travels as variables. If this ever becomes a `format!` of
+        // owner/name into the query body, that is an injection sink.
+        for var in ["$owner: String!", "$name: String!", "$number: Int!"] {
+            assert!(q.contains(var), "the query must declare `{var}`");
+        }
+        assert!(q.contains("pullRequest(number: $number)"));
+    }
+
+    /// The bot flag comes from GitHub's own actor type. This pins that it is not
+    /// a login-name heuristic, and that the field stays optional — `PR_FIELDS`
+    /// decodes into the same `Actor` without selecting `__typename`, so a
+    /// required field here would fail the whole Reviews inbox to deserialize.
+    #[test]
+    fn actor_reads_bot_from_typename_not_the_login() {
+        let parse = |json: &str| serde_json::from_str::<Actor>(json).expect("Actor decodes");
+
+        let bot = parse(r#"{"__typename":"Bot","login":"github-actions","avatarUrl":""}"#);
+        assert!(bot.is_bot());
+
+        // A person whose login merely looks automated is still a person.
+        let human = parse(r#"{"__typename":"User","login":"renovate[bot]","avatarUrl":""}"#);
+        assert!(!human.is_bot());
+
+        // A mannequin stands in for a real person during an import.
+        let mannequin = parse(r#"{"__typename":"Mannequin","login":"someone","avatarUrl":""}"#);
+        assert!(!mannequin.is_bot());
+
+        let no_typename = parse(r#"{"login":"someone","avatarUrl":""}"#);
+        assert!(!no_typename.is_bot());
     }
 
     /// OSC sequences (a `##[group]`-heavy CI step often sets the window title)
@@ -3036,6 +3353,15 @@ mod tests {
         );
         // Non-Actions check URLs have no job segment.
         assert_eq!(job_id_from_url("https://circleci.com/build/123"), None);
+    }
+
+    /// The expanded check row shows the pair — `check #<job>` beside
+    /// `workflow #<run>` — so both have to come out of the one details URL.
+    #[test]
+    fn run_id_parses_from_the_same_actions_url() {
+        let url = "https://github.com/o/r/actions/runs/28027969704/job/82960623951";
+        assert_eq!(run_id_from_url(url), Some(28027969704.0));
+        assert_eq!(run_id_from_url("https://circleci.com/build/123"), None);
     }
 
     /// The failing step is sliced from its `##[group]Run …` start to the next
@@ -3121,5 +3447,69 @@ mod tests {
         };
         assert!(has("boom"));
         assert!(!has("line 0"));
+    }
+
+    /// The `/rate_limit` mapping, against a real (trimmed) payload from
+    /// `gh api rate_limit`.
+    ///
+    /// Two things this pins that nothing else would catch: GitHub's `reset` is
+    /// unix **seconds** while Linear's equivalent is milliseconds, and the two
+    /// land in the same frontend meter — off by 1000× the countdown reads
+    /// "resets in 0m" forever. And only the three pools santree spends are
+    /// mapped, so a future GitHub adding a sixteenth resource can't silently
+    /// grow the meter.
+    #[test]
+    fn the_github_rate_limit_maps_three_pools_and_converts_seconds_to_millis() {
+        let payload = r#"{
+            "resources": {
+                "core":    {"limit":5000,"used":18,"remaining":4982,"reset":1787938231},
+                "search":  {"limit":30,"used":2,"remaining":28,"reset":1787934691},
+                "graphql": {"limit":5000,"used":40,"remaining":4960,"reset":1787938231},
+                "scim":    {"limit":15000,"used":0,"remaining":15000,"reset":1787938231}
+            },
+            "rate": {"limit":5000,"used":18,"remaining":4982,"reset":1787938231}
+        }"#;
+        let budget = serde_json::from_str::<RateLimitResponse>(payload)
+            .expect("the real payload shape")
+            .into_budget();
+
+        let kinds: Vec<_> = budget.windows.iter().map(|w| w.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                santree_core::domain::ApiBudgetKind::Rest,
+                santree_core::domain::ApiBudgetKind::Search,
+                santree_core::domain::ApiBudgetKind::GraphQl,
+            ],
+            "only the pools santree spends, in meter order"
+        );
+        let rest = &budget.windows[0];
+        assert_eq!(rest.remaining, 4982.0);
+        assert_eq!(rest.limit, 5000.0);
+        assert_eq!(
+            rest.resets_at_ms,
+            Some(1_787_938_231_000.0),
+            "seconds → milliseconds"
+        );
+        assert_eq!(
+            budget.windows[1].limit, 30.0,
+            "search is its own small pool"
+        );
+    }
+
+    /// A pool GitHub omits is absent, not zero. A zero-remaining row reads as
+    /// "you are out of budget", which is the opposite of "we didn't hear".
+    #[test]
+    fn a_missing_pool_is_left_out_rather_than_reported_as_empty() {
+        let budget = serde_json::from_str::<RateLimitResponse>(
+            r#"{"resources":{"core":{"limit":5000,"used":0,"remaining":5000,"reset":1}}}"#,
+        )
+        .expect("a payload with one pool")
+        .into_budget();
+        assert_eq!(budget.windows.len(), 1);
+        assert_eq!(
+            budget.windows[0].kind,
+            santree_core::domain::ApiBudgetKind::Rest
+        );
     }
 }

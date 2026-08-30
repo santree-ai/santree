@@ -129,28 +129,26 @@ pub struct AgentVersionStatus {
     pub update_available: bool,
 }
 
-/// Operational status of Santree's private Codex App Server. Transport details
-/// deliberately stop here: the frontend only needs a remedy, never a socket or
-/// raw protocol error.
+/// Whether the installed `codex` CLI is one santree can launch. `available` is
+/// the version floor, not a login: an installed-but-signed-out CLI is still
+/// available. Failure detail stops at a remedy the user can act on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexHealth {
     pub available: bool,
-    pub running: bool,
     pub version: String,
     pub executable: String,
     pub error: Option<String>,
 }
 
-/// Account metadata returned by Codex. Credentials never cross this boundary.
+/// What `codex login status` reports — whether the CLI is signed in, and the
+/// method it names. Codex owns its credentials; nothing more crosses this
+/// boundary, and santree never reads its auth storage.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexAccount {
     pub connected: bool,
     pub auth_type: String,
-    pub email: Option<String>,
-    pub plan: Option<String>,
-    pub requires_openai_auth: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
@@ -160,19 +158,19 @@ pub struct CodexReasoningEffort {
     pub description: String,
 }
 
-/// One server-advertised model. Unknown/additive protocol fields remain in the
-/// backend and can be adopted without changing this stable UI contract.
+/// One model from `codex debug models`, in the catalog's own priority order.
+/// Additive fields in that JSON stay in the backend and can be adopted without
+/// changing this UI contract; there is deliberately no "default" flag, because
+/// the catalog does not publish one — the first listed model is the head of the
+/// vendor's own ordering and nothing more.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexModel {
     pub id: String,
     pub display_name: String,
     pub description: String,
-    pub is_default: bool,
     pub default_reasoning_effort: String,
     pub supported_reasoning_efforts: Vec<CodexReasoningEffort>,
-    pub input_modalities: Vec<String>,
-    pub supports_personality: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Type)]
@@ -183,20 +181,16 @@ pub struct CodexRateLimitWindow {
     pub resets_at: Option<f64>,
 }
 
+/// The rate-limit snapshot Codex itself recorded on the last turn it ran, read
+/// back from its own rollout transcript. It is as fresh as the user's last Codex
+/// turn and no fresher — santree has no live source, and asking for one would
+/// mean either a control plane or the vendor's credentials.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexRateLimits {
     pub plan: Option<String>,
     pub primary: Option<CodexRateLimitWindow>,
     pub secondary: Option<CodexRateLimitWindow>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct CodexLogin {
-    pub login_id: String,
-    pub auth_url: String,
-    pub user_code: Option<String>,
 }
 
 /// The `gh` CLI integration status, shown in Settings → Integrations. GitHub
@@ -222,6 +216,74 @@ pub struct GithubStatus {
     pub name: String,
     /// The host the session authenticates against, e.g. "github.com".
     pub host: String,
+}
+
+/// Which budget a rate-limit window meters. A plain enum: the label and the
+/// tint are `theme/colors.ts`'s job, like every other status the bridge ships.
+///
+/// GitHub and Linear count different things, so the set is the union rather than
+/// one shared triple — GitHub bills per *request* against three separate pools,
+/// Linear bills the same request twice (once as a request, once as the query's
+/// computed complexity) and throttles on whichever runs out first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum ApiBudgetKind {
+    /// GitHub REST (`resources.core`).
+    Rest,
+    /// GitHub search (`resources.search`) — a much smaller pool than REST, and
+    /// the one the Reviews inbox spends.
+    Search,
+    /// GitHub GraphQL (`resources.graphql`).
+    GraphQl,
+    /// Linear requests per hour.
+    Requests,
+    /// Linear complexity points per hour.
+    Complexity,
+}
+
+/// One rate-limit pool: how big it is, what's left, and when it refills.
+///
+/// Counts are `f64` because specta cannot export a 64-bit integer; every value
+/// here is far inside the range a double represents exactly. Only `PartialEq`
+/// for the same reason.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiBudgetWindow {
+    pub kind: ApiBudgetKind,
+    /// The pool's size for a full window.
+    pub limit: f64,
+    /// What is left of it now.
+    pub remaining: f64,
+    /// Epoch ms the pool refills — raw, counted down live by the frontend.
+    /// `None` when the service didn't say.
+    pub resets_at_ms: Option<f64>,
+}
+
+/// GitHub's own rate-limit report, read from `/rate_limit`.
+///
+/// That endpoint is free — GitHub documents it as not counting against any
+/// budget — so polling it never changes the number it reports.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubApiBudget {
+    pub windows: Vec<ApiBudgetWindow>,
+}
+
+/// One connected Linear workspace's remaining budget.
+///
+/// Linear has no queryable equivalent of GitHub's `/rate_limit`: it reports the
+/// budget only in the response headers of a request that already spent some of
+/// it. So this is an *observation* — the numbers as of the last call santree
+/// made for this org — and `observed_at_ms` is part of the reading, not
+/// decoration. Limits are per user per OAuth app, so each connected workspace
+/// has its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearApiBudget {
+    pub slug: String,
+    pub name: String,
+    pub windows: Vec<ApiBudgetWindow>,
+    /// Epoch ms these numbers came back from Linear.
+    pub observed_at_ms: f64,
 }
 
 /// What a Claude session is doing right now, derived from its hook events by
@@ -287,15 +349,21 @@ impl AgentState {
     }
 }
 
-/// The current state of one Claude session, captured live via the hooks santree
-/// injects into its `claude` launches. One per session id (a current-state row,
-/// not an event log). The frontend correlates a session back to a worktree later
-/// via `cwd` / the `terminal_sessions` mapping.
+/// The current state of one agent session, captured live via the hooks santree
+/// injects into its `claude` / `codex` launches. One per session id (a
+/// current-state row, not an event log). The frontend correlates a session back
+/// to a worktree later via `cwd` / the `terminal_sessions` mapping.
 /// Only `PartialEq` (not `Eq`) because of the `f64` timestamp below.
 #[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionState {
-    pub agent_kind: AgentKind,
+    /// The provider that owns the session, read off the owning terminal's
+    /// registry row. `None` when there's no row to read it from — a terminal
+    /// keeps one row per logical surface, so the moment it mints a *second*
+    /// session the first one loses its join. Unknown, not Claude: guessing a
+    /// provider paints the previous session with the wrong logomark, and a
+    /// wrong mark is worse than no mark.
+    pub agent_kind: Option<AgentKind>,
     /// Claude session id (the one santree minted via `--session-id`).
     pub session_id: String,
     /// Derived agent state.
@@ -316,7 +384,7 @@ pub struct SessionState {
     /// `None` for a session santree didn't register a logical terminal for.
     pub repo: Option<String>,
     /// The logical terminal that owns this session (`tree:<id>`, `triage:<id>`,
-    /// `dev:<path>`, …), joined from `terminal_sessions`. This — not `cwd` — is
+    /// `review:<pr>`, …), joined from `terminal_sessions`. This — not `cwd` — is
     /// what identifies *which surface* an agent belongs to: several sessions can
     /// share one `cwd` (a worktree's extra tabs; a base agent and a triage
     /// investigation both running at the repo root), so a cwd-keyed correlation
@@ -348,6 +416,67 @@ pub struct SessionUsageLive {
     pub cost_usd: f64,
     /// Epoch ms this row was last written — raw, formatted live by the frontend.
     pub updated_at_ms: f64,
+}
+
+/// One of Claude's subscription rate-limit windows, as its own status line last
+/// reported it (the payload's optional `rate_limits.<window>`; see crates/hook's
+/// `statusline` mode). Account-level, not per session: every santree-launched
+/// session reports the same numbers, and the latest write wins. Display-only —
+/// the app reads it for a usage meter and nothing derived from it ever reaches
+/// a session. Only `PartialEq` because of the `f64`s.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeRateLimitWindow {
+    /// The payload member name: `five_hour`, `seven_day`, or a window this build
+    /// didn't know when it was written (kept under its own name, never dropped).
+    pub window: String,
+    /// Claude's own `used_percentage`, 0..100.
+    pub used_pct: f64,
+    /// Epoch ms the window resets — `None` when the payload carried none.
+    pub resets_at_ms: Option<f64>,
+    /// Epoch ms this row was last written — raw, formatted live by the frontend.
+    pub updated_at_ms: f64,
+}
+
+/// Where a usage read stands: it answered, nobody is signed in, the token was
+/// refused, or the endpoint could not be reached. Not an error type — each of
+/// these is something the meter should say, rather than a failure to toast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum ClaudeUsageStatus {
+    Ok,
+    NoCredentials,
+    Unauthorized,
+    Unavailable,
+}
+
+/// One usage read: the windows now on record, and how the read went. The windows
+/// are the stored ones even on a failure, so a transient outage shows the last
+/// known numbers rather than blanking the meter.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeUsageFetch {
+    pub windows: Vec<ClaudeRateLimitWindow>,
+    pub status: ClaudeUsageStatus,
+    /// Why, when the status alone doesn't say (an HTTP code, a transport error).
+    /// Never carries anything secret.
+    pub detail: Option<String>,
+}
+
+/// Whether the opt-in **global status-line passthrough** is on: santree's hook
+/// wrapping the `statusLine` in the user's own Claude settings so every Claude
+/// session on the machine — not just santree's launches — records its usage and
+/// rate limits before the user's own status line renders unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeGlobalCapture {
+    /// The settings file's `statusLine.command` is santree's wrapper.
+    pub enabled: bool,
+    /// The user's own status-line command: the one the wrapper hands the payload
+    /// to while enabled, or the one currently configured while not. `None` when
+    /// there is none (enabled, that shows santree's own bar).
+    pub original_command: Option<String>,
+    /// The global settings file this reads and — only on opt-in — rewrites.
+    pub settings_path: String,
 }
 
 /// A connected repository / task-tracker pairing.
@@ -472,17 +601,59 @@ pub enum AgentSession {
         /// the terminal. This prevents PATH/config drift between the two.
         executable: String,
         session_id: String,
-        remote: Option<String>,
+        /// See [`AgentSession::launch_flags`].
+        launch_flags: String,
     },
-    /// A provider session reserved for a fresh launch.
+    /// A fresh launch.
     Fresh {
         agent_kind: AgentKind,
         executable: String,
-        session_id: String,
-        remote: Option<String>,
+        /// The id the launch must run under, when santree gets to choose it —
+        /// Claude takes it as `--session-id`. `None` when the provider mints its
+        /// own id and only reports it afterwards: `codex` has no launch-time id
+        /// flag, so its id reaches santree through the `SessionStart` hook, and
+        /// a launch that invented one here would name a session that never
+        /// exists.
+        session_id: Option<String>,
+        /// See [`AgentSession::launch_flags`].
+        launch_flags: String,
     },
     /// No agent session — just a login shell.
     Shell,
+}
+
+impl AgentSession {
+    /// The provider-owned launch flags this session must run under, already
+    /// shell-quoted and ready to splice into the seed command line. Empty when
+    /// the provider assembles its own launch line in the frontend (Claude), or
+    /// for a plain shell.
+    ///
+    /// It rides on the session rather than being assembled per call site
+    /// **because a call site that forgets it is a session running with less
+    /// than it was supposed to** — an AI review with no draft tools, an
+    /// investigation with no read-only sandbox — and nothing says so. There are
+    /// five launch sites and each resolves a session; only one of them has to
+    /// remember this, and it is this type.
+    pub fn launch_flags(&self) -> &str {
+        match self {
+            Self::Resume { launch_flags, .. } | Self::Fresh { launch_flags, .. } => launch_flags,
+            Self::Shell => "",
+        }
+    }
+
+    /// Attach the flags a provider resolved for this session. Separate from
+    /// construction so the resolver (which decides *which* session) and the
+    /// launch configuration (which decides *how* it runs) stay two steps a
+    /// provider composes, not one branch every resolver has to carry.
+    pub fn with_launch_flags(mut self, flags: String) -> Self {
+        match &mut self {
+            Self::Resume { launch_flags, .. } | Self::Fresh { launch_flags, .. } => {
+                *launch_flags = flags;
+            }
+            Self::Shell => {}
+        }
+        self
+    }
 }
 
 /// What an extra Trees main-area tab hosts: an agent session or a login shell.
@@ -491,9 +662,12 @@ pub enum AgentSession {
 pub enum TabKind {
     Agent,
     Terminal,
-    /// An agent session dedicated to fixing failing CI under the provider's
-    /// no-Git security profile.
+    /// The guarded "Address review" session that works a PR's saved improvement
+    /// queue. Keeps its `fixci` name (and db value) from the retired one-click
+    /// "Fix CI with AI" flow whose tab it inherited.
     FixCi,
+    /// The AI review of your own PR, run in its worktree.
+    AiReview,
 }
 
 impl TabKind {
@@ -503,6 +677,7 @@ impl TabKind {
             TabKind::Agent => "agent",
             TabKind::Terminal => "terminal",
             TabKind::FixCi => "fixci",
+            TabKind::AiReview => "ai_review",
         }
     }
 
@@ -512,9 +687,46 @@ impl TabKind {
         match s {
             "agent" | "claude" => TabKind::Agent,
             "fixci" => TabKind::FixCi,
+            "ai_review" => TabKind::AiReview,
             _ => TabKind::Terminal,
         }
     }
+
+    /// Whether this tab hosts one of the two PR-scoped review sessions — the ones
+    /// that launch with the review deny list and santree's review MCP server.
+    /// Both re-derive that configuration from [`WorktreeTab::pr`] on every open.
+    pub fn is_review(self) -> bool {
+        matches!(self, TabKind::FixCi | TabKind::AiReview)
+    }
+}
+
+/// The pull request a review-scoped tab belongs to, persisted beside the tab row.
+///
+/// The *identity* is stored, never the launch's file paths: a path is
+/// environment-dependent and a stale one is its own bug, while `(kind, pr)`
+/// re-derives the same `--settings` and `--mcp-config` on every open. That is what
+/// keeps a session resumed after a restart under the deny list and the review tools
+/// it started with, instead of silently falling back to the plain no-git profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TabPr {
+    /// "owner/name" — the PR's own repo, which need not be the active one.
+    pub repo: String,
+    pub number: u32,
+}
+
+/// What a persisted review tab relaunches with, re-derived from its row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TabLaunch {
+    /// `--settings`: the review deny list plus the grant for the santree-review
+    /// tools. Always present — it is a pure function of the tab's kind.
+    pub settings_path: String,
+    /// `--mcp-config`: the santree-review server scoped to this PR, or `None` when
+    /// the config it was launched with is no longer on disk (or the row predates
+    /// [`TabPr`] being stored). The session then resumes without tools rather than
+    /// pointed at a file that isn't there.
+    pub mcp_config_path: Option<String>,
 }
 
 /// An extra main-area tab in Trees (opened via the "+" menu), persisted so it
@@ -529,6 +741,10 @@ pub struct WorktreeTab {
     pub kind: TabKind,
     pub agent_kind: Option<AgentKind>,
     pub title: String,
+    /// Set exactly on the review kinds ([`TabKind::is_review`]), which re-derive
+    /// their launch configuration from it. `None` on a review tab means the row
+    /// predates the column.
+    pub pr: Option<TabPr>,
 }
 
 /// A proposed PR (title + body) for the create-PR dialog, before it's opened.
@@ -564,6 +780,11 @@ pub enum PrState {
 pub struct WorktreePr {
     /// The worktree this PR belongs to (its issue id).
     pub issue_id: String,
+    /// "owner/name" the PR lives in — the repo the worktree's origin points at.
+    /// Carried rather than re-derived on the frontend: it is what addresses the
+    /// PR's detail, checks and comments, and parsing it back out of [`Self::url`]
+    /// would be a second, weaker answer to a question the backend already knows.
+    pub repo: String,
     pub number: u32,
     pub url: String,
     pub state: PrState,
@@ -870,6 +1091,12 @@ pub enum ReviewWorkItemSource {
     Manual,
     GithubThread,
     AiDraft,
+    /// A failing CI check on the PR's head commit.
+    ///
+    /// Identified by the check's **name**, which is what survives a re-run and a
+    /// force-push — the run id, node id and details URL are all per-run, so any of
+    /// them would let the same red job be queued again on every retry.
+    Check,
 }
 
 impl ReviewWorkItemSource {
@@ -878,6 +1105,7 @@ impl ReviewWorkItemSource {
             Self::Manual => "manual",
             Self::GithubThread => "github_thread",
             Self::AiDraft => "ai_draft",
+            Self::Check => "check",
         }
     }
 
@@ -885,6 +1113,7 @@ impl ReviewWorkItemSource {
         match value {
             "github_thread" => Self::GithubThread,
             "ai_draft" => Self::AiDraft,
+            "check" => Self::Check,
             _ => Self::Manual,
         }
     }
@@ -1066,6 +1295,16 @@ pub struct PrComment {
     /// the author can see these, and they stay invisible to the PR's author
     /// until the review is submitted, so the UI must label them as drafts.
     pub is_pending: bool,
+    /// True when GitHub itself classifies the author as a `Bot` actor — a GitHub
+    /// App posting through the integration (Actions, Dependabot, coverage and
+    /// codegen bots), not a person.
+    ///
+    /// Read from the GraphQL `Actor` interface's `__typename`, never inferred
+    /// from a `[bot]`-suffixed login: the suffix is a rendering convention
+    /// applied *because* the actor is a bot, so matching it is strictly weaker
+    /// than asking what the actor is. Drives the conversation's Humans/Bots
+    /// split, which is otherwise a classification the UI would have to invent.
+    pub is_bot: bool,
 }
 
 /// One changed file in a PR, with its unified diff hunk (from the REST files API).
@@ -1192,6 +1431,16 @@ pub struct PrCheck {
     /// `None` for status contexts / any check whose URL isn't an Actions job.
     /// `f64` because Specta forbids 64-bit ints; job ids are exact in an `f64`.
     pub job_id: Option<f64>,
+    /// The Actions *workflow run* id, from the same `detailsUrl`. Shown beside
+    /// [`Self::job_id`] when a check is expanded: the pair is what identifies a
+    /// run to anyone cross-referencing it against GitHub or `gh run view`.
+    pub run_id: Option<f64>,
+    /// ISO-8601 timestamp the check started, when GitHub reports one. `None` for
+    /// a status context (which has no run) and for a queued check that hasn't
+    /// begun — the UI omits the row rather than showing an invented time.
+    pub started_at: Option<String>,
+    /// ISO-8601 timestamp the check finished. `None` while it is still running.
+    pub completed_at: Option<String>,
 }
 
 /// How one raw-log line is classified — drives its tint and whether it stays
@@ -1428,6 +1677,51 @@ pub struct Worktree {
     pub pending: bool,
 }
 
+/// One of the repo's branches, as offered by the "Create worktree" dialog's
+/// Branch source.
+///
+/// `has_worktree` is read from git's own worktree list rather than from
+/// santree's `worktree_links`: git allows exactly one checkout of a branch, so a
+/// branch held by *any* worktree (santree's, a hand-made one, the repo's own
+/// checkout) is one `worktree add` would refuse. The picker disables those rows
+/// instead of letting the user click into that error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoBranch {
+    /// Short name (`main`, `feature/x`) — never the `origin/` qualified form,
+    /// which is what `worktree add --track -b` reconstructs for a remote-only one.
+    pub name: String,
+    /// Already checked out somewhere; a second worktree for it is impossible.
+    pub has_worktree: bool,
+    /// Exists only on `origin`. Checking it out creates a local branch tracking it.
+    pub remote_only: bool,
+    /// Committer date of the branch tip (ISO-8601), newest first in the list.
+    pub updated_at: String,
+}
+
+/// Which branch a newly created worktree lands on.
+///
+/// The three cases are genuinely different git operations — derive a name and
+/// branch it off the base, check out a branch that already exists, or create one
+/// under a name the user typed — and they used to be an `Option<String>` plus a
+/// convention. Naming them keeps the "check out" and "create" paths from being
+/// one boolean apart at the sink.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Type)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
+pub enum WorktreeBranchSource {
+    /// Name the branch after the work (`santree/<id>-<slug>`) and branch it off
+    /// the base — how a ticket's worktree has always been created.
+    Derived,
+    /// Check out a branch that already exists, locally or on `origin`.
+    Existing { branch: String },
+    /// Create a branch under exactly this name, off the base.
+    New { branch: String },
+}
+
 /// Whether a changed file was added, modified, deleted, renamed, or is untracked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 pub enum FileStatus {
@@ -1463,6 +1757,50 @@ pub struct ChangedFile {
 pub struct FileSource {
     pub old_text: String,
     pub new_text: String,
+}
+
+/// Who wrote a session's latest prose — the "You:" / "Agent:" prefix the history
+/// row puts in front of [`WorktreeSession::last_message`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum LastMessageFrom {
+    You,
+    Agent,
+}
+
+/// One agent session that ran in a worktree — the Trees right panel's session
+/// history. Both providers are summarised from their own record on disk: a
+/// Claude session from its `~/.claude/projects` transcript, a Codex one from its
+/// `~/.codex/sessions` rollout (title, last message, counts, model, timestamps;
+/// a subagent's own rollout is folded into its parent's `subagent_count`, never
+/// listed). A session the registry knows but whose record is gone keeps its
+/// identity with the text fields empty.
+/// Only `PartialEq` (not `Eq`) because of the `f64` timestamps below.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeSession {
+    pub session_id: String,
+    pub agent_kind: AgentKind,
+    /// The logical terminal that owned it (`tree:<id>`, `tree:<id>:tab:<tab>`),
+    /// when santree registered one. `None` for a transcript found on disk with
+    /// no registry row.
+    pub term_key: Option<String>,
+    /// The first user prompt, trimmed to one line of at most 120 chars.
+    pub title: Option<String>,
+    /// The latest prose from either side — the final assistant text, or the
+    /// user's own final prompt when the session ended on it — trimmed likewise.
+    pub last_message: Option<String>,
+    /// Who wrote `last_message`; `None` exactly when it is.
+    pub last_message_from: Option<LastMessageFrom>,
+    /// User + assistant messages carrying prose (tool calls/results excluded).
+    pub message_count: u32,
+    /// Subagent transcripts under `<session>/subagents/`.
+    pub subagent_count: u32,
+    /// The model that did most of the session's work.
+    pub model: Option<String>,
+    /// Epoch ms — `f64` like every other exported timestamp, since specta
+    /// refuses `i64` (see [`SessionState::updated_at_ms`]).
+    pub started_at_ms: Option<f64>,
+    pub last_activity_ms: Option<f64>,
 }
 
 /// The repo's `.santree/init.sh` setup script, surfaced to the Settings editor.
@@ -1965,6 +2303,112 @@ pub struct EnglishAnalysis {
     pub created_at_ms: f64,
 }
 
+/// CPU and memory of every process santree's terminals own, plus the app's own,
+/// in one host snapshot — the Resource Manager's tree, grouped repo → worktree →
+/// terminal. Every number is summed over a process *subtree* (the terminal's
+/// shell and everything it spawned), read from one `ps` listing, so the figures
+/// are consistent with each other and with `total_*`. Byte counts and
+/// timestamps are `f64` for the same reason as every other exported number
+/// (specta refuses `i64`/`u64`). Only `PartialEq` because of them.
+///
+/// Two caveats the frontend is expected to disclose rather than hide, because
+/// neither has a cheap fix and an unqualified number is the worse failure:
+///
+/// * **`cpu_pct` carries no denominator.** It is `ps`'s percent of *one* core,
+///   so a sum across a busy tree runs into the hundreds and reads as nonsense
+///   until it is divided by [`ResourceUsage::core_count`].
+/// * **`rss_bytes` sums resident set sizes**, and a page mapped by two
+///   processes (a shared library, a forked child's copy-on-write heap) is
+///   resident in both, so a wide tree overstates.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceUsage {
+    /// Epoch ms the process table was read.
+    pub sampled_at_ms: f64,
+    /// Logical cores on this machine — the denominator that turns `cpu_pct`
+    /// into a share of the whole machine. Never zero.
+    pub core_count: u32,
+    /// Sum over `repos` — resident memory in bytes.
+    pub total_rss_bytes: f64,
+    /// Sum over `repos` — CPU as `ps` reports it: percent of one core, so a
+    /// busy multi-threaded process can exceed 100.
+    pub total_cpu_pct: f64,
+    /// Heaviest first (by resident memory).
+    pub repos: Vec<RepoUsage>,
+}
+
+/// Every terminal under one registered repo, plus one entry for santree itself
+/// (`repo` "santree": the app process and its helpers, minus the terminals it
+/// hosts, so the total is honest) and one per directory that isn't a registered
+/// repo (`repo` is then that directory).
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoUsage {
+    pub repo: String,
+    pub cpu_pct: f64,
+    pub rss_bytes: f64,
+    /// Heaviest first.
+    pub worktrees: Vec<WorktreeUsage>,
+}
+
+/// The terminals running in one directory: a linked worktree (`id` is its issue
+/// id), the repo root (`id` is the base sentinel), or any other directory under
+/// the repo — a review checkout, say — keyed by its path relative to the root.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeUsage {
+    pub id: String,
+    /// The worktree's ticket title, the root's folder name, or the directory.
+    pub label: String,
+    pub cpu_pct: f64,
+    pub rss_bytes: f64,
+    /// Heaviest first.
+    pub terminals: Vec<TerminalUsage>,
+}
+
+/// One PTY session's process subtree. The frontend owns the mapping from
+/// `session_id` to the tab it opened (the orchestrator's `refId`), so it can
+/// label a terminal by its tab; `label` is the backend's process-level view.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalUsage {
+    /// The PTY session id `terminal_open` returned — `None` only for the
+    /// santree entry, which is the app process rather than a terminal.
+    pub session_id: Option<u32>,
+    /// The name of the heaviest process in the subtree (what the terminal is
+    /// actually running: `claude`, `node`, `zsh`, ...).
+    pub label: String,
+    /// The subtree's root: the shell or command spawned on the pty.
+    pub pid: u32,
+    pub cpu_pct: f64,
+    pub rss_bytes: f64,
+    /// Whether the root process still exists (and isn't a zombie). A terminal
+    /// whose process exited but whose pane is still open reports `false` and
+    /// zeros.
+    pub live: bool,
+}
+
+/// Which coding agent the host process table says is running in one terminal
+/// pane, keyed by the pane's `term_key`. Read by walking the pane's process
+/// subtree for whoever owns its foreground process group (see
+/// `src-tauri/src/agent_procs.rs`).
+///
+/// **Identity, never status.** This says *which* agent is there, not what it is
+/// doing: `src/lib/attention.ts` remains the one state vocabulary, fed by the
+/// hook rows and then the terminal title.
+///
+/// **A missing pane is no information, not "no agent".** `ps` can fail or be
+/// slow, and a CLI launched through an interpreter is not recognisable by
+/// `argv[0]`. Nothing may read an absent entry as a claim that a pane is a plain
+/// shell, and nothing may substitute a default provider for one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProcess {
+    /// The `term_key` the pane's PTY was opened under.
+    pub term_key: String,
+    pub agent_kind: AgentKind,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1981,6 +2425,24 @@ mod tests {
             AgentKind::Opencode,
         ] {
             assert_eq!(AgentKind::from_str(kind.as_str()), Ok(kind));
+        }
+    }
+
+    /// `from_db_str` falls back to `Manual` for anything it doesn't recognise, so
+    /// a typo in `as_db_str` wouldn't fail anywhere — it would quietly downgrade
+    /// every item of that kind to a manual note, losing its source link.
+    #[test]
+    fn review_work_item_sources_round_trip_through_their_persisted_form() {
+        for source in [
+            ReviewWorkItemSource::Manual,
+            ReviewWorkItemSource::GithubThread,
+            ReviewWorkItemSource::AiDraft,
+            ReviewWorkItemSource::Check,
+        ] {
+            assert_eq!(
+                ReviewWorkItemSource::from_db_str(source.as_db_str()),
+                source
+            );
         }
     }
 

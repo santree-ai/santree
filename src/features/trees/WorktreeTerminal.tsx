@@ -11,6 +11,7 @@
  */
 import { useEffect, useRef } from "react";
 
+import type { AgentTabIdentity } from "../terminal/orchestrator";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
 
 export function WorktreeTerminal({
@@ -18,6 +19,7 @@ export function WorktreeTerminal({
   branch,
   cwd,
   seed,
+  agent,
   attach = true,
   onLaunched,
   onExited,
@@ -25,6 +27,8 @@ export function WorktreeTerminal({
   id: string;
   branch: string;
   cwd: string;
+  /** Who this terminal runs, when it runs an agent — see {@link AgentTabIdentity}. */
+  agent?: AgentTabIdentity;
   /** Command to launch the agent (e.g. `exec claude '…'`), or undefined for a shell. */
   seed?: string;
   /** False for the background launcher: spawn and seed the session, but don't
@@ -36,7 +40,7 @@ export function WorktreeTerminal({
   onExited?: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
-    spec: { title: branch, cwd, source: "issue", refId: `tree:${id}`, seed },
+    spec: { title: branch, cwd, source: "issue", refId: `tree:${id}`, seed, agent },
     onExited,
     attach,
   });

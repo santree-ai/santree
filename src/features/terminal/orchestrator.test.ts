@@ -284,4 +284,89 @@ describe("useTerminalTabs", () => {
       expect(result.current.embed?.key).toBe("b");
     });
   });
+
+  /** Since a pane only detaches on unmount, ending the process has to be said
+   *  explicitly — and said while the handle is still registered. Getting this
+   *  wrong leaks a shell on every closed tab. */
+  describe("closing a tab ends its session", () => {
+    const handle = () => {
+      const calls = { writes: [] as string[], ended: 0 };
+      return {
+        calls,
+        pane: {
+          write: (d: string) => calls.writes.push(d),
+          end: () => {
+            calls.ended += 1;
+          },
+        },
+      };
+    };
+
+    it("ends the pane's session before dropping the tab", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      const { calls, pane } = handle();
+      let key = "";
+      act(() => {
+        key = result.current.open({ title: "one" });
+      });
+      act(() => {
+        result.current.registerPane(key, pane);
+      });
+
+      act(() => result.current.close(key));
+
+      expect(calls.ended).toBe(1);
+      expect(result.current.tabs).toEqual([]);
+    });
+
+    it("closing a tab with no live pane is still just a removal", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      let key = "";
+      act(() => {
+        key = result.current.open({ title: "one" });
+      });
+
+      act(() => result.current.close(key));
+
+      expect(result.current.tabs).toEqual([]);
+    });
+
+    it("routes typed input to the registered pane", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      const { calls, pane } = handle();
+      let key = "";
+      act(() => {
+        key = result.current.open({ title: "one" });
+      });
+      act(() => {
+        result.current.registerPane(key, pane);
+      });
+
+      expect(result.current.send(key, "hi")).toBe(true);
+      expect(calls.writes).toEqual(["hi"]);
+      expect(result.current.send("nope", "hi")).toBe(false);
+    });
+
+    /** A remounting pane registers its next handle before the previous one's
+     *  cleanup runs, so an unregister must only drop its own. */
+    it("an unregister only drops its own handle", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      const first = handle();
+      const second = handle();
+      let key = "";
+      let releaseFirst = () => {};
+      act(() => {
+        key = result.current.open({ title: "one" });
+      });
+      act(() => {
+        releaseFirst = result.current.registerPane(key, first.pane);
+        result.current.registerPane(key, second.pane);
+      });
+
+      act(() => releaseFirst());
+
+      expect(result.current.send(key, "hi")).toBe(true);
+      expect(second.calls.writes).toEqual(["hi"]);
+    });
+  });
 });

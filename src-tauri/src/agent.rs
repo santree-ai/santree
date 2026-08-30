@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use santree_core::domain::AgentKind;
 
-use crate::codex::CodexRuntime;
 use crate::settings;
 
 pub struct HelperConfig {
@@ -200,7 +199,6 @@ pub fn run_print(
 /// Interactive-session provenance is deliberately irrelevant: this is a new
 /// one-shot action and follows the current default provider/model.
 pub fn run_helper(
-    codex_runtime: &CodexRuntime,
     helper: &HelperConfig,
     cwd: &Path,
     prompt: &str,
@@ -220,30 +218,36 @@ pub fn run_helper(
         ));
     }
 
-    // `sandbox_permissions` is outside 0.149's strict Config schema, so the
-    // helper must NOT run with `--strict-config`: `codex exec` then rejects the
-    // override outright ("unknown configuration field `sandbox_permissions`"),
-    // exits 1, and the caller's fallback quietly ships "update" as the message.
-    // The App Server's config/read handshake is instead our proof that this
-    // installed CLI applied the empty permission layer rather than ignoring it —
-    // the same arrangement the App Server launch itself uses (see codex.rs).
-    codex_runtime.ensure_restricted_config(&helper.executable)?;
     let args = build_codex_helper_args(cwd, helper.model.as_deref());
     let mut cmd = Command::new(&helper.executable);
     cmd.current_dir(cwd).args(args);
     finish_helper(cmd, prompt, timeout, "codex exec")
 }
 
+/// The fail-closed configuration a Codex helper runs under.
+///
+/// `--strict-config` is the load-bearing one and it is new: it makes `codex exec`
+/// **reject** an override this CLI does not recognise instead of ignoring it, so
+/// a Codex release that renames one of these keys fails the helper loudly rather
+/// than quietly running it with ambient MCP servers, plugins, hooks and web
+/// search still on. That guarantee used to come from santree's own App Server —
+/// a `config/read` handshake that read back the applied layers — which is a
+/// control plane's worth of machinery for something the vendor's CLI offers as a
+/// flag. `sandbox_permissions=[]` went with it: it is not in the CLI's strict
+/// schema (verified against `codex exec --strict-config` on 0.150.1, which
+/// answers "unknown configuration field `sandbox_permissions`"), so it could
+/// only ever have been passed unvalidated. `--ignore-user-config` is what now
+/// keeps the user's own config from widening the sandbox, and `--sandbox
+/// read-only` is what bounds it.
 fn build_codex_helper_args(cwd: &Path, model: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "exec".to_string(),
+        "--strict-config".to_string(),
         "--ephemeral".to_string(),
         "--ignore-user-config".to_string(),
         "--ignore-rules".to_string(),
         "--sandbox".to_string(),
         "read-only".to_string(),
-        "-c".to_string(),
-        "sandbox_permissions=[]".to_string(),
         "-c".to_string(),
         "mcp_servers={}".to_string(),
         "-c".to_string(),
@@ -499,11 +503,11 @@ mod tests {
     fn codex_helpers_disable_ambient_extensions_and_writes() {
         let args = build_codex_helper_args(Path::new("/tmp/wt"), Some("gpt-5.6-sol"));
         for required in [
+            "--strict-config",
             "--ephemeral",
             "--ignore-user-config",
             "--ignore-rules",
             "read-only",
-            "sandbox_permissions=[]",
             "mcp_servers={}",
             "apps={}",
             "plugins={}",
@@ -518,10 +522,11 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--model", "gpt-5.6-sol"]));
         assert_eq!(args.last().map(String::as_str), Some("-"));
-        // `sandbox_permissions` is not in 0.149's strict schema: with
-        // `--strict-config` the CLI rejects the whole invocation and every
-        // helper silently falls back to its canned message.
-        assert!(!args.iter().any(|arg| arg == "--strict-config"));
+        // The counterpart, and the reason `--strict-config` can be there at all:
+        // `sandbox_permissions` is outside the CLI's strict Config schema, so
+        // passing both rejects the whole invocation and every helper silently
+        // falls back to its canned message ("update" as a commit subject).
+        assert!(!args.iter().any(|arg| arg.contains("sandbox_permissions")));
     }
 
     /// The prompt embeds the repo diff and ticket text; argv is world-readable on

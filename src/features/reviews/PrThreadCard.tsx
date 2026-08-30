@@ -15,21 +15,17 @@ import { useState } from "react";
 
 import type { PrThread } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
-import { CheckIcon, ChevronDownIcon, PlusIcon } from "../../components/icons";
+import { CheckIcon, ChevronDownIcon } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
 import { Button, Pill } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
 import { SuggestionOriginal } from "../../components/Suggestion";
-import {
-  useAddReviewWorkItem,
-  useReplyToPrThread,
-  useReviewWorkItems,
-  useSetPrThreadResolved,
-} from "../../lib/queries";
+import { useReplyToPrThread, useReviewWorkItems, useSetPrThreadResolved } from "../../lib/queries";
 import { isoMs } from "../../lib/relativeTime";
 import { palette, successColor } from "../../theme/colors";
 import { CommentComposer } from "./CommentComposer";
 import { patchLineRange } from "./patchLines";
+import { QueueAction } from "./QueueAction";
 
 function basename(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
@@ -69,8 +65,7 @@ export function PrThreadCard({
   const reply = useReplyToPrThread(prRepo, number);
   const { mutate: setResolved } = useSetPrThreadResolved(prRepo, number);
   const { data: workItems } = useReviewWorkItems(prRepo, number);
-  const addWorkItem = useAddReviewWorkItem(prRepo, number);
-  const inWorklist = workItems?.some(
+  const inQueue = workItems?.some(
     (item) => item.source === "githubThread" && item.sourceId === thread.replyToId,
   );
 
@@ -173,26 +168,23 @@ export function PrThreadCard({
             ) : (
               <div className="flex items-center gap-2">
                 {!!thread.replyToId && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={inWorklist || addWorkItem.isPending}
-                    onClick={() =>
-                      addWorkItem.mutate({
-                        id: crypto.randomUUID(),
-                        body: thread.comments[0]?.body ?? `Review comment on ${thread.path}`,
-                        source: "githubThread",
-                        sourceId: thread.replyToId,
-                        path: thread.path,
-                        line: thread.line,
-                        startLine: thread.startLine,
-                        onRight: thread.onRight,
-                      })
-                    }
-                  >
-                    <PlusIcon size={10} />
-                    {inWorklist ? "In worklist" : "Add to worklist"}
-                  </Button>
+                  // The AI work queue's own spark, and its own word: the
+                  // destination is the "Queue" section either host renders, so
+                  // the button that fills it says the same thing.
+                  <QueueAction
+                    prRepo={prRepo}
+                    number={number}
+                    queued={!!inQueue}
+                    item={{
+                      body: thread.comments[0]?.body ?? `Review comment on ${thread.path}`,
+                      source: "githubThread",
+                      sourceId: thread.replyToId,
+                      path: thread.path,
+                      line: thread.line,
+                      startLine: thread.startLine,
+                      onRight: thread.onRight,
+                    }}
+                  />
                 )}
                 {/* No root comment id means GitHub gave us nothing to reply under
                     — offering the button would only produce an error on click. */}

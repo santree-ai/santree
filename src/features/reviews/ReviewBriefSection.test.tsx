@@ -8,14 +8,6 @@ const review = vi.hoisted(() => ({
   tabs: [] as { source: string; refId: string }[],
 }));
 
-vi.mock("./model", () => ({
-  useReviewsModel: () => ({
-    repo: "acme/app",
-    focusFile: vi.fn(),
-    openAiReview: review.open,
-  }),
-}));
-
 vi.mock("../../lib/queries", () => ({
   REVIEW_AGENT_KEY: "review_agent",
   usePrReviewBrief: () => ({ data: undefined, isLoading: false }),
@@ -39,9 +31,34 @@ describe("ReviewBriefSection", () => {
   it("brands the open action with the active review provider", () => {
     review.tabs = [{ source: "review", refId: "ai-review:acme/app#7::codex" }];
 
-    render(<ReviewBriefSection pr={pr} activeReviewAgent="Codex" />);
+    render(
+      <ReviewBriefSection
+        pr={pr}
+        activeReviewAgent="Codex"
+        santreeRepo="acme/app"
+        onJump={vi.fn()}
+        onStartReview={review.open}
+      />,
+    );
 
     expect(screen.getByRole("button", { name: "Open Codex review" })).toBeInTheDocument();
     expect(screen.queryByText(/Open AI review/i)).toBeNull();
+  });
+
+  /** The Trees host renders the brief beside a PR it can't start a session for
+   *  from this pane, and a button that does nothing is worse than no button. */
+  it("renders read-only when the host can't start a review", () => {
+    review.tabs = [{ source: "review", refId: "ai-review:acme/app#7::codex" }];
+
+    render(
+      <ReviewBriefSection
+        pr={pr}
+        activeReviewAgent="Codex"
+        santreeRepo="acme/app"
+        onJump={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /review/i })).toBeNull();
   });
 });

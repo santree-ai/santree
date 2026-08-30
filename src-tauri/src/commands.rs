@@ -17,20 +17,23 @@ use tauri_specta::Event;
 use santree_core::{
     config,
     domain::{
-        AgentAuth, AgentDef, AgentKind, AgentSession, AgentVersionStatus, AiReviewLaunch,
-        AnalysisScope, BinaryStatus, ChangedFile, CheckLog, CodexAccount, CodexHealth, CodexLogin,
-        CodexModel, CodexRateLimits, EnglishAnalysis, EnglishLog, FileSource, GithubStatus,
-        LegacyCliMigration, LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr,
+        AgentAuth, AgentDef, AgentKind, AgentProcess, AgentSession, AgentVersionStatus,
+        AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
+        ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
+        EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget, GithubStatus, LegacyCliMigration,
+        LinearApiBudget, LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr,
         NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo,
-        ReviewBrief, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPublishOutcome, ReviewTarget,
-        ReviewWorkItem, Reviewer, ScriptInfo, SessionState, SessionUsageLive, Settings, TabKind,
-        Task, TicketRef, TriageDetail, TriageSchedule, TriageSession, TriageTicket, UsageReport,
-        ViewedMarks, Worktree, WorktreePr, WorktreeTab,
+        RepoBranch, ResourceUsage, ReviewBrief, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
+        ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionState,
+        SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail,
+        TriageSchedule, TriageSession, TriageTicket, UsageReport, ViewedMarks, Worktree,
+        WorktreeBranchSource, WorktreePr, WorktreeSession, WorktreeTab,
     },
 };
 
 use crate::awake::{self, KeepAwake, KeepAwakeStatus};
-use crate::codex::CodexRuntime;
+use crate::codex_cli;
+use crate::codex_rollouts;
 use crate::commit_draft;
 use crate::db::Db;
 use crate::english_tutor;
@@ -55,6 +58,7 @@ use crate::settings;
 use crate::tabs;
 use crate::usage;
 use crate::worktree;
+use santree_pty::PtyManager;
 
 /// Connected repositories.
 #[tauri::command]
@@ -77,72 +81,47 @@ pub fn list_agents() -> Vec<AgentDef> {
     config::agents()
 }
 
+/// Whether the installed `codex` is one santree can launch. Never an error: an
+/// unset path, a missing binary and an old version are all things the Settings
+/// panel has to render, not things a caller can fail on.
 #[tauri::command]
 #[specta::specta]
-pub async fn codex_health(
-    db: State<'_, Db>,
-    runtime: State<'_, CodexRuntime>,
-) -> CmdResult<CodexHealth> {
-    Ok(runtime.health(settings::agent_executable(&db, AgentKind::Codex).await.ok()))
+pub async fn codex_health(db: State<'_, Db>) -> CmdResult<CodexHealth> {
+    Ok(codex_cli::health(settings::agent_executable(&db, AgentKind::Codex).await.ok()).await)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn codex_account(
-    db: State<'_, Db>,
-    runtime: State<'_, CodexRuntime>,
-) -> CmdResult<CodexAccount> {
+pub async fn codex_account(db: State<'_, Db>) -> CmdResult<CodexAccount> {
     let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
-    Ok(runtime.account(&executable)?)
+    Ok(codex_cli::account(&executable).await?)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn codex_models(
-    db: State<'_, Db>,
-    runtime: State<'_, CodexRuntime>,
-) -> CmdResult<Vec<CodexModel>> {
+pub async fn codex_models(db: State<'_, Db>) -> CmdResult<Vec<CodexModel>> {
     let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
-    Ok(runtime.models(&executable)?)
+    Ok(codex_cli::models(&executable).await?)
 }
 
+/// Codex subscription usage, as of the last turn Codex actually ran — read back
+/// from its own rollout transcript, the only source that needs neither a control
+/// plane nor the vendor's credentials. Empty when Codex has never run here, or
+/// when the plan reports no windows.
 #[tauri::command]
 #[specta::specta]
-pub async fn codex_rate_limits(
-    db: State<'_, Db>,
-    runtime: State<'_, CodexRuntime>,
-) -> CmdResult<CodexRateLimits> {
-    let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
-    Ok(runtime.rate_limits(&executable)?)
+pub async fn codex_rate_limits() -> CmdResult<CodexRateLimits> {
+    Ok(tokio::task::spawn_blocking(codex_rollouts::latest_rate_limits).await?)
 }
 
+/// Hand `codex logout` on, on a click. santree asks; Codex owns what happens to
+/// the credentials. There is deliberately no matching login command — see
+/// [`crate::codex_cli`].
 #[tauri::command]
 #[specta::specta]
-pub async fn codex_login_start(
-    device_code: bool,
-    db: State<'_, Db>,
-    runtime: State<'_, CodexRuntime>,
-) -> CmdResult<CodexLogin> {
+pub async fn codex_logout(db: State<'_, Db>) -> CmdResult<()> {
     let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
-    Ok(runtime.login(&executable, device_code)?)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn codex_login_cancel(
-    login_id: String,
-    db: State<'_, Db>,
-    runtime: State<'_, CodexRuntime>,
-) -> CmdResult<()> {
-    let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
-    Ok(runtime.cancel_login(&executable, &login_id)?)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn codex_logout(db: State<'_, Db>, runtime: State<'_, CodexRuntime>) -> CmdResult<()> {
-    let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
-    Ok(runtime.logout(&executable)?)
+    Ok(codex_cli::logout(&executable).await?)
 }
 
 /// Aggregated Claude Code token usage across all local session transcripts
@@ -154,11 +133,6 @@ pub async fn codex_logout(db: State<'_, Db>, runtime: State<'_, CodexRuntime>) -
 #[specta::specta]
 pub async fn claude_usage(app: AppHandle, db: State<'_, Db>) -> CmdResult<UsageReport> {
     let table = pricing::ensure_fresh(&db).await;
-    // The hidden Dev tab runs Claude on santree itself. That dogfooding cost is
-    // implementation overhead, not usage the product should report to its user.
-    let excluded_root = settings::get(&db, "app", crate::dev::DEV_REPO_PATH_KEY)
-        .await
-        .unwrap_or_default();
     // Registered repos let a session's cwd resolve to its repo (and worktree),
     // so the panel can group sessions by repo folder.
     let repos: Vec<usage::Repo> = repo::list(&db)
@@ -175,15 +149,7 @@ pub async fn claude_usage(app: AppHandle, db: State<'_, Db>) -> CmdResult<UsageR
         }
         .emit(&app);
     };
-    Ok(tokio::task::spawn_blocking(move || {
-        // Revalidate at the sink as well: older builds allowed this setting through
-        // generic IPC, so a legacy value such as "/" may already be persisted.
-        let excluded_root = excluded_root
-            .as_deref()
-            .and_then(|path| crate::dev::repo_root(path).ok());
-        usage::report(&table, &repos, excluded_root.as_deref(), on_progress)
-    })
-    .await??)
+    Ok(tokio::task::spawn_blocking(move || usage::report(&table, &repos, on_progress)).await??)
 }
 
 // ── Real worktrees (Trees view) ────────────────────────────────────────────
@@ -226,7 +192,55 @@ pub async fn create_worktree(
         project.as_deref(),
         base.as_deref(),
         Some(agent),
-        None,
+        worktree::BranchPlan::Derived,
+    )
+    .await?)
+}
+
+/// The repo's branches (local, plus `origin`-only ones), each flagged with
+/// whether it is already checked out somewhere — the Create-worktree dialog's
+/// Branch source. Empty when the repo has no local path.
+#[tauri::command]
+#[specta::specta]
+pub async fn repo_branches(repo: String, db: State<'_, Db>) -> CmdResult<Vec<RepoBranch>> {
+    Ok(worktree::branches(&db, &repo).await?)
+}
+
+/// Create a worktree from the sidebar's "Create worktree" dialog, which — unlike
+/// [`create_worktree`] — may have no Linear ticket behind it at all: `source`
+/// says whether the branch is derived from the id, checked out from one that
+/// exists, or created under a name the user typed. `base` is the parent
+/// worktree's branch when one was picked (a *stacked* worktree), else `None` for
+/// the repo's default branch.
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)] // Typed IPC fields stay explicit at this security boundary.
+pub async fn create_manual_worktree(
+    repo: String,
+    issue_id: String,
+    title: String,
+    project: Option<String>,
+    source: WorktreeBranchSource,
+    base: Option<String>,
+    agent: AgentKind,
+    db: State<'_, Db>,
+) -> CmdResult<Worktree> {
+    // Every branch name below is re-validated inside `worktree::create`
+    // (`git::safe_branch`) before it can reach a `git` argv.
+    let plan = match &source {
+        WorktreeBranchSource::Derived => worktree::BranchPlan::Derived,
+        WorktreeBranchSource::Existing { branch } => worktree::BranchPlan::Existing(branch),
+        WorktreeBranchSource::New { branch } => worktree::BranchPlan::New(branch),
+    };
+    Ok(worktree::create(
+        &db,
+        &repo,
+        &issue_id,
+        &title,
+        project.as_deref(),
+        base.as_deref(),
+        Some(agent),
+        plan,
     )
     .await?)
 }
@@ -259,7 +273,7 @@ pub async fn create_worktree_for_pr(
         Some("Reviews"),
         base.as_deref(),
         agent,
-        Some(&branch),
+        worktree::BranchPlan::Existing(&branch),
     )
     .await?)
 }
@@ -272,23 +286,6 @@ fn validate_pr_repo(pr_repo: &str, local_owner: &str, local_name: &str) -> anyho
     anyhow::bail!(
         "pull request repo {pr_repo:?} does not match local repo {local_owner}/{local_name}"
     )
-}
-
-/// Render the CI-fix opening prompt (the failing check `log` + guardrails) to a
-/// per-worktree file and return its **path** — the "Fix CI" terminal seeds
-/// `exec <agent> 'Read <path> …'` with it (the log is too large to type into the
-/// PTY). Rewritten each launch so it reflects the latest failing run.
-#[tauri::command]
-#[specta::specta]
-pub async fn fix_ci_prompt(
-    app: AppHandle,
-    repo: String,
-    issue_id: String,
-    log: String,
-    db: State<'_, Db>,
-) -> CmdResult<String> {
-    let prompts = worktree::prompts_root(&app).ok_or("no writable data dir for prompt file")?;
-    Ok(worktree::fix_ci_prompt(&db, &repo, &issue_id, &prompts, &log).await?)
 }
 
 /// Remove a worktree (and its branch), drop the issue link, and delete its
@@ -443,6 +440,44 @@ pub async fn worktree_file_source(
     Ok(worktree::file_source(&db, &repo, &issue_id, &path).await?)
 }
 
+/// The files the branch has committed relative to its base (merge-base diff),
+/// for the Trees right panel. Nothing about the working tree — see
+/// `worktree_status` for that.
+#[tauri::command]
+#[specta::specta]
+pub async fn worktree_branch_changes(
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<Vec<ChangedFile>> {
+    Ok(worktree::branch_changes(&db, &repo, &issue_id).await?)
+}
+
+/// One file's committed diff on the branch (`<base>...HEAD -- <path>`). Empty
+/// when the branch didn't touch it.
+#[tauri::command]
+#[specta::specta]
+pub async fn worktree_branch_file_diff(
+    repo: String,
+    issue_id: String,
+    path: String,
+    db: State<'_, Db>,
+) -> CmdResult<String> {
+    Ok(worktree::branch_file_diff(&db, &repo, &issue_id, &path).await?)
+}
+
+/// The agent sessions that have run in the worktree, newest first — registry
+/// rows plus Claude transcripts found on disk for its directory.
+#[tauri::command]
+#[specta::specta]
+pub async fn worktree_sessions(
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<Vec<WorktreeSession>> {
+    Ok(worktree::sessions(&db, &repo, &issue_id).await?)
+}
+
 /// Every browsable file in the worktree (tracked + untracked, gitignore-aware).
 #[tauri::command]
 #[specta::specta]
@@ -525,9 +560,8 @@ pub async fn commit_message(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
-    codex_runtime: State<'_, CodexRuntime>,
 ) -> CmdResult<String> {
-    Ok(worktree::commit_message(&db, &codex_runtime, &repo, &issue_id).await?)
+    Ok(worktree::commit_message(&db, &repo, &issue_id).await?)
 }
 
 /// Refresh a worktree's stored Linear title (the Issue tab calls this when the
@@ -631,11 +665,10 @@ pub async fn agent_session(
     allow_fresh: bool,
     agent: AgentKind,
     db: State<'_, Db>,
-    runtime: State<'_, CodexRuntime>,
 ) -> CmdResult<AgentSession> {
     validate_term_key(&term_key)?;
     let cwd_path = std::fs::canonicalize(&cwd)?;
-    let repo_db_path = agent_repo_path(&db, &repo, &term_key, &cwd).await?;
+    let repo_db_path = agent_repo_path(&db, &repo).await?;
     let repo_root = std::fs::canonicalize(&repo_db_path)?;
     // Provider selection and id creation form one reservation. Serializing this
     // small launch-only section prevents simultaneous first launches from
@@ -654,10 +687,12 @@ pub async fn agent_session(
     }
     let agent = context.agent.unwrap_or(agent);
     let surface = context.surface;
-    let review_mcp_config = match (surface, agent) {
-        (SessionSurface::Review, AgentKind::Codex) => {
-            Some(validate_review_mcp_config(&app, &term_key)?)
-        }
+    // Codex takes santree's review tools as launch configuration, so the path is
+    // resolved here — from the session's own row, never from IPC (COMPLIANCE.md,
+    // "santree derives its own paths"). Claude's frontend still passes
+    // `--mcp-config` from the launch hand-off, so this is Codex-only.
+    let review_mcp_config = match (agent, &context.review_pr) {
+        (AgentKind::Codex, Some(pr)) => Some(review_mcp_config(&app, pr)?),
         _ => None,
     };
     let (model_key, effort_key) = surface.setting_keys();
@@ -673,7 +708,7 @@ pub async fn agent_session(
         .map(|setting| setting.model.as_str());
     let model = resolved_model.as_deref().or(configured_model);
     let executable = settings::agent_executable(&db, agent).await?;
-    let provider = provider::provider(agent, &runtime, executable)?;
+    let provider = provider::provider(agent, executable)?;
     debug_assert_eq!(provider.kind(), agent);
     Ok(provider
         .resolve_session(SessionRequest {
@@ -690,67 +725,53 @@ pub async fn agent_session(
         .await?)
 }
 
-const DEV_SESSION_REPO: &str = "@dev";
-
-async fn agent_repo_path(db: &Db, repo: &str, term_key: &str, cwd: &str) -> Result<String, String> {
-    if repo == DEV_SESSION_REPO {
-        let keyed_path = term_key
-            .strip_prefix("dev:")
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| "invalid Dev terminal key".to_string())?;
-        let configured = settings::get(db, "app", crate::dev::DEV_REPO_PATH_KEY)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "Dev repository is not configured".to_string())?;
-        let configured = crate::dev::repo_root(&configured).map_err(|error| error.to_string())?;
-        let configured = std::fs::canonicalize(configured)
-            .map_err(|_| "configured Dev repository is unavailable".to_string())?;
-        let keyed_path = std::fs::canonicalize(keyed_path)
-            .map_err(|_| "Dev terminal repository is unavailable".to_string())?;
-        let cwd = std::fs::canonicalize(cwd)
-            .map_err(|_| "Dev terminal repository is unavailable".to_string())?;
-        if keyed_path != configured || cwd != configured {
-            return Err("Dev terminal cwd does not match the configured repository".into());
-        }
-        return configured
-            .to_str()
-            .map(str::to_owned)
-            .ok_or_else(|| "configured Dev repository path is not valid UTF-8".into());
-    }
-    if term_key.starts_with("dev:") {
-        return Err("Dev terminals must use the Dev session repository".into());
-    }
-    repo::path(db, repo)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "repository has no local path".into())
-}
-
-fn validate_review_mcp_config(
+/// Where this session's review tools are described, re-derived from the PR its
+/// own row names and proved to be an app-owned regular file inside santree's
+/// `mcp` directory.
+///
+/// A path never crosses IPC for this: the webview may say *which* PR a review
+/// belongs to, and `session_context` checks that claim against the registered
+/// origin or the persisted tab, but the file is santree's answer to it. An `Err`
+/// stops the launch — a Codex review runs `--ask-for-approval never`, so a tool
+/// it cannot reach is rejected silently rather than prompted for, and a review
+/// with no way to record a finding must fail loudly instead.
+fn review_mcp_config(
     app: &AppHandle,
-    term_key: &str,
+    (owner, name, number): &(String, String, u32),
 ) -> Result<std::path::PathBuf, String> {
-    let (owner, name, number) = review_identity(term_key)?;
-    let stem = crate::hooks::mcp_stem(owner, name, number).map_err(|error| error.to_string())?;
+    let stem = crate::hooks::mcp_stem(owner, name, *number).map_err(|error| error.to_string())?;
     let expected_dir = app
         .path()
         .app_data_dir()
         .map_err(|_| "app data directory is unavailable".to_string())?
         .join("mcp");
     let path = expected_dir.join(stem);
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|_| "review configuration is unavailable".to_string())?;
+    let missing = || {
+        format!(
+            "santree's review tools for {owner}/{name}#{number} are no longer on disk. \
+             Start the review again from the pull request."
+        )
+    };
+    let metadata = std::fs::symlink_metadata(&path).map_err(|_| missing())?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err("review configuration must be an app-owned file".into());
     }
-    let expected_dir = std::fs::canonicalize(expected_dir)
-        .map_err(|_| "review configuration directory is unavailable".to_string())?;
-    let actual = std::fs::canonicalize(path)
-        .map_err(|_| "review configuration is unavailable".to_string())?;
+    let expected_dir = std::fs::canonicalize(expected_dir).map_err(|_| missing())?;
+    let actual = std::fs::canonicalize(path).map_err(|_| missing())?;
     if actual.parent() != Some(expected_dir.as_path()) {
-        return Err("review configuration is outside Santree's app data".into());
+        return Err("review configuration is outside santree's app data".into());
     }
     Ok(actual)
+}
+
+/// The registered local path of the repo a session is being launched for. Every
+/// later check (`validate_agent_cwd`, the review/triage guards) measures against
+/// this, so a repo with no path on disk has to fail here rather than downstream.
+async fn agent_repo_path(db: &Db, repo: &str) -> Result<String, String> {
+    repo::path(db, repo)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "repository has no local path".into())
 }
 
 fn review_identity(term_key: &str) -> Result<(&str, &str, u32), String> {
@@ -780,6 +801,22 @@ fn review_identity(term_key: &str) -> Result<(&str, &str, u32), String> {
 struct SessionContext {
     surface: SessionSurface,
     agent: Option<AgentKind>,
+    /// The pull request whose review tools this session launches with, as
+    /// `(owner, name, number)`. Only the two review-scoped surfaces have one, and
+    /// it comes from the terminal key (checked against the registered origin by
+    /// [`validate_agent_cwd`]) or from the tab's own persisted row — never from a
+    /// path the webview supplied.
+    review_pr: Option<(String, String, u32)>,
+}
+
+impl SessionContext {
+    fn new(surface: SessionSurface, agent: Option<AgentKind>) -> Self {
+        Self {
+            surface,
+            agent,
+            review_pr: None,
+        }
+    }
 }
 
 async fn session_context(
@@ -788,28 +825,17 @@ async fn session_context(
     repo_db_path: &str,
     term_key: &str,
 ) -> Result<SessionContext, String> {
-    if repo == DEV_SESSION_REPO && term_key.starts_with("dev:") {
-        return Ok(SessionContext {
-            surface: SessionSurface::Work,
-            agent: Some(AgentKind::Claude),
-        });
-    }
     if term_key.starts_with("triage:") {
-        return Ok(SessionContext {
-            surface: SessionSurface::Investigate,
-            agent: None,
-        });
+        return Ok(SessionContext::new(SessionSurface::Investigate, None));
     }
     if term_key.starts_with("review:") {
-        return Ok(SessionContext {
-            surface: SessionSurface::AskAi,
-            agent: None,
-        });
+        return Ok(SessionContext::new(SessionSurface::AskAi, None));
     }
     if term_key.starts_with("ai-review:") {
+        let (owner, name, number) = review_identity(term_key)?;
         return Ok(SessionContext {
-            surface: SessionSurface::Review,
-            agent: None,
+            review_pr: Some((owner.to_string(), name.to_string(), number)),
+            ..SessionContext::new(SessionSurface::Review, None)
         });
     }
     let tree = term_key
@@ -819,8 +845,12 @@ async fn session_context(
         if worktree_id.is_empty() || tab_id.is_empty() || tab_id.contains(':') {
             return Err("invalid worktree tab terminal key".into());
         }
-        let row: Option<(String, Option<String>)> = sqlx::query_as(
-            "SELECT kind, agent_kind FROM worktree_tabs
+        /// `(kind, agent_kind, pr_repo, pr_number)` as `worktree_tabs` stores it —
+        /// every column but `kind` is nullable, because a plain terminal tab has
+        /// no agent and only a review tab carries a PR.
+        type TabRow = (String, Option<String>, Option<String>, Option<u32>);
+        let row: Option<TabRow> = sqlx::query_as(
+            "SELECT kind, agent_kind, pr_repo, pr_number FROM worktree_tabs
              WHERE repo = ? AND worktree_id = ? AND id = ?",
         )
         .bind(repo)
@@ -829,7 +859,8 @@ async fn session_context(
         .fetch_optional(db)
         .await
         .map_err(|error| error.to_string())?;
-        let (kind, agent) = row.ok_or_else(|| "worktree tab does not exist".to_string())?;
+        let (kind, agent, pr_repo, pr_number) =
+            row.ok_or_else(|| "worktree tab does not exist".to_string())?;
         if kind == "terminal" {
             return Err("plain terminal tabs cannot start an agent session".into());
         }
@@ -837,13 +868,29 @@ async fn session_context(
             .ok_or_else(|| "agent tab has no persisted provider".to_string())?
             .parse::<AgentKind>()
             .map_err(|error| error.to_string())?;
+        // The two review kinds are the ones that launch with the review deny list
+        // and santree's review tools, and `TabKind` is where that is decided —
+        // reading the column through it keeps this from drifting the way it did
+        // when `ai_review` was added and only `fixci` was matched here.
+        let kind = TabKind::from_db_str(&kind);
+        let review_pr = kind
+            .is_review()
+            .then(|| pr_repo.zip(pr_number))
+            .flatten()
+            .map(|(slug, number)| {
+                crate::github::split_slug(&slug)
+                    .map(|(owner, name)| (owner.to_string(), name.to_string(), number))
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()?;
         return Ok(SessionContext {
-            surface: if kind == "fixci" {
-                SessionSurface::FixCi
-            } else {
-                SessionSurface::Work
+            surface: match kind {
+                TabKind::FixCi => SessionSurface::FixCi,
+                TabKind::AiReview => SessionSurface::Review,
+                TabKind::Agent | TabKind::Terminal => SessionSurface::Work,
             },
             agent: Some(agent),
+            review_pr,
         });
     }
     if tree.is_empty() || tree.contains(':') {
@@ -864,10 +911,7 @@ async fn session_context(
                 .map_err(|error| error.to_string())
         })
         .transpose()?;
-    Ok(SessionContext {
-        surface: SessionSurface::Work,
-        agent,
-    })
+    Ok(SessionContext::new(SessionSurface::Work, agent))
 }
 
 async fn validate_agent_cwd(
@@ -878,18 +922,6 @@ async fn validate_agent_cwd(
     repo_root: &std::path::Path,
     repo_db_path: &str,
 ) -> Result<(), String> {
-    if repo == DEV_SESSION_REPO {
-        let keyed_path = term_key
-            .strip_prefix("dev:")
-            .ok_or_else(|| "invalid Dev terminal key".to_string())?;
-        let keyed_path = std::fs::canonicalize(keyed_path)
-            .map_err(|_| "Dev terminal repository is unavailable".to_string())?;
-        return (keyed_path == cwd
-            && cwd == repo_root
-            && repo_root == std::path::Path::new(repo_db_path))
-        .then_some(())
-        .ok_or_else(|| "Dev terminal cwd is not its configured repository root".into());
-    }
     if term_key.starts_with("triage:") {
         return (cwd == repo_root)
             .then_some(())
@@ -985,8 +1017,13 @@ pub async fn list_worktree_tabs(repo: String, db: State<'_, Db>) -> CmdResult<Ve
 
 /// Persist a new extra tab. The frontend mints `id` (a UUID) so it can patch
 /// its cache and focus the tab without waiting on the round-trip.
+///
+/// `pr` is required for (and only for) the review kinds: it is what
+/// [`worktree_tab_launch`] re-derives the tab's `--settings` and `--mcp-config`
+/// from after a restart.
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)] // Typed IPC fields stay explicit at this security boundary.
 pub async fn add_worktree_tab(
     repo: String,
     worktree_id: String,
@@ -994,9 +1031,51 @@ pub async fn add_worktree_tab(
     kind: TabKind,
     agent_kind: Option<AgentKind>,
     title: String,
+    pr: Option<TabPr>,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
-    Ok(tabs::add(&db, &repo, &worktree_id, &id, kind, agent_kind, &title).await?)
+    Ok(tabs::add(
+        &db,
+        &repo,
+        tabs::NewTab {
+            worktree_id: &worktree_id,
+            id: &id,
+            kind,
+            agent_kind,
+            title: &title,
+            pr,
+        },
+    )
+    .await?)
+}
+
+/// What a persisted review tab must relaunch with — the review deny list, and
+/// santree's review MCP server scoped to its PR.
+///
+/// The in-memory hand-off that carries those on a first launch does not survive an
+/// app restart, and the fallback it left behind was the plain no-git settings: no
+/// `gh` deny rules and no MCP server, with no error. Both are re-derived here from
+/// the row's own `(kind, pr)`, never from a stored path. `None` for a tab that
+/// isn't review-scoped, and for one that no longer exists.
+#[tauri::command]
+#[specta::specta]
+pub async fn worktree_tab_launch(
+    app: AppHandle,
+    repo: String,
+    id: String,
+    db: State<'_, Db>,
+) -> CmdResult<Option<TabLaunch>> {
+    let Some(tab) = tabs::get(&db, &repo, &id).await? else {
+        return Ok(None);
+    };
+    let tutor = tutor_instruction(&app).await;
+    // Writes the settings file and stats the MCP config — filesystem work, so it
+    // stays off the thread the UI runs on.
+    Ok(
+        tokio::task::spawn_blocking(move || review_ai::tab_launch(&app, &tab, tutor.as_deref()))
+            .await
+            .map_err(|e| anyhow::anyhow!("resolving the review tab's launch panicked: {e}"))??,
+    )
 }
 
 /// Rename an extra tab (blank titles are rejected).
@@ -1031,17 +1110,8 @@ pub async fn pr_draft(
     fill: bool,
     send_transcripts: bool,
     db: State<'_, Db>,
-    codex_runtime: State<'_, CodexRuntime>,
 ) -> CmdResult<PrDraft> {
-    Ok(pr::draft(
-        &db,
-        &codex_runtime,
-        &repo,
-        &issue_id,
-        fill,
-        send_transcripts,
-    )
-    .await?)
+    Ok(pr::draft(&db, &repo, &issue_id, fill, send_transcripts).await?)
 }
 
 /// Whether the worktree has any Claude session transcript on disk — gates the PR
@@ -1188,10 +1258,28 @@ pub async fn add_review_work_item(
     match item.source {
         santree_core::domain::ReviewWorkItemSource::Manual => {
             item.source_id = None;
-            item.path = None;
-            item.line = None;
-            item.start_line = None;
-            item.on_right = None;
+            // A manual item may carry the diff anchor the user selected when they
+            // queued it from a line, which is what makes it clickable and tells
+            // the fixing agent where to look. Unlike the source-backed kinds there
+            // is no GitHub object to derive it from, so the anchor is kept as the
+            // caller sent it, guarded only against a shape that could not be a
+            // repo-relative file. That guard is sufficient because the value never
+            // reaches a filesystem call or a git argv: santree renders it as text
+            // and hands it to the agent inside the untrusted-data fence.
+            //
+            // Note the body is *not* necessarily the user's own words — queueing a
+            // PR comment files whoever wrote it, bots included. It is bounded in
+            // `review_work_items::add` for that reason, and it reaches the agent
+            // through the same fence as every other source.
+            if let Some(path) = item.path.as_deref() {
+                if !is_repo_relative_path(path) {
+                    return Err("a work item's file must be a repo-relative path".into());
+                }
+            } else {
+                item.line = None;
+                item.start_line = None;
+                item.on_right = None;
+            }
         }
         santree_core::domain::ReviewWorkItemSource::GithubThread => {
             let source_id = item
@@ -1232,6 +1320,30 @@ pub async fn add_review_work_item(
             item.line = Some(draft.line);
             item.start_line = draft.start_line;
             item.on_right = Some(draft.on_right);
+        }
+        santree_core::domain::ReviewWorkItemSource::Check => {
+            let source_id = item
+                .source_id
+                .as_deref()
+                .ok_or_else(|| "a check work item needs a check name".to_string())?;
+            let (owner, name) = github::split_slug(&pr_repo)?;
+            let detail = reviews::detail(owner, name, number).await?;
+            let check = detail
+                .checks
+                .into_iter()
+                .find(|check| check.name == source_id)
+                .ok_or_else(|| "that check is not on this pull request".to_string())?;
+            // Server-authored, like the other source-backed kinds: the caller
+            // names *which* check, never what the queue row says about it.
+            item.body = check_work_item_body(&check);
+            // A check is a job on the head commit, not a line in a file. Leaving
+            // these empty keeps the queue from claiming an anchor GitHub never
+            // gave; the failing steps and annotations reach the fixing agent live
+            // from `review_ai::fix_launch` instead of being frozen here.
+            item.path = None;
+            item.line = None;
+            item.start_line = None;
+            item.on_right = None;
         }
     }
     Ok(review_work_items::add(
@@ -1339,7 +1451,75 @@ pub async fn merge_queue(repo: String, db: State<'_, Db>) -> CmdResult<Option<Me
 #[tauri::command]
 #[specta::specta]
 pub async fn pr_detail(owner: String, name: String, number: u32) -> CmdResult<PrDetail> {
+    validate_pr_identity(&owner, &name, number)?;
     Ok(reviews::detail(&owner, &name, number).await?)
+}
+
+/// The inbox's summary row for one PR by number — title, state, checks rollup,
+/// review decision — which is what the Trees right panel renders for a worktree's
+/// own pull request. `None` when `gh` isn't authenticated or the PR is gone.
+///
+/// Read-only: one GraphQL query, no writes and no filesystem. The pair with
+/// [`pr_detail`] is deliberate — this is the cheap row, that is the full payload.
+#[tauri::command]
+#[specta::specta]
+pub async fn pr_summary(
+    owner: String,
+    name: String,
+    number: u32,
+    db: State<'_, Db>,
+) -> CmdResult<Option<ReviewPr>> {
+    validate_pr_identity(&owner, &name, number)?;
+    Ok(reviews::pull_request(&db, &owner, &name, number).await?)
+}
+
+/// Whether a string could be a repo-relative file path: not absolute, no `..`,
+/// no empty or current-dir components. Deliberately lexical — it guards the
+/// *shape* of a display anchor, and is not a substitute for `git.rs`'s
+/// `safe_path` at any call that actually touches the filesystem.
+fn is_repo_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with('\\')
+        // A Windows drive prefix ("C:…") is absolute too, and `Path` on unix
+        // would read it as a plain relative name.
+        && !path.contains(':')
+        && path
+            .split(['/', '\\'])
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+/// The queue row's text for a failing check. Short and stable — the dedupe upsert
+/// rewrites it on every re-add — because the actionable detail (failing steps,
+/// annotations, the job log) is resolved live at fix time rather than frozen here,
+/// where it would go stale the moment CI runs again.
+fn check_work_item_body(check: &santree_core::domain::PrCheck) -> String {
+    match check
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|app| !app.is_empty())
+    {
+        Some(app) => format!("Fix failing check: {} ({app})", check.name),
+        None => format!("Fix failing check: {}", check.name),
+    }
+}
+
+/// A PR identity arriving over IPC.
+///
+/// On these paths the three values only ever become GraphQL *variables* — never
+/// interpolated into a query, never a path, never a git argv — so this is not the
+/// guard that stops an injection. It is here so a malformed identity fails in
+/// santree instead of costing a round-trip, and so the shape stays the one
+/// `reviews::review_dir_name` will accept if the PR later becomes a review target.
+fn validate_pr_identity(owner: &str, name: &str, number: u32) -> anyhow::Result<()> {
+    if !repo::valid_github_component(owner) || !repo::valid_github_component(name) {
+        anyhow::bail!("invalid repository identity: {owner:?}/{name:?}");
+    }
+    if number == 0 {
+        anyhow::bail!("pull request number must be greater than zero");
+    }
+    Ok(())
 }
 
 /// The repo's full label palette — the options offered by the PR label picker.
@@ -1347,6 +1527,7 @@ pub async fn pr_detail(owner: String, name: String, number: u32) -> CmdResult<Pr
 #[tauri::command]
 #[specta::specta]
 pub async fn pr_repo_labels(owner: String, name: String) -> CmdResult<Vec<PrLabel>> {
+    validate_pr_identity(&owner, &name, 1)?;
     Ok(reviews::repo_labels(&owner, &name).await?)
 }
 
@@ -1360,6 +1541,7 @@ pub async fn set_pr_labels(
     number: u32,
     labels: Vec<String>,
 ) -> CmdResult<Vec<PrLabel>> {
+    validate_pr_identity(&owner, &name, number)?;
     Ok(reviews::set_pr_labels(&owner, &name, number, labels).await?)
 }
 
@@ -1451,6 +1633,7 @@ pub async fn pr_check_log(owner: String, name: String, job_id: f64) -> CmdResult
     if !job_id.is_finite() || job_id < 0.0 || job_id.fract() != 0.0 {
         return Err(anyhow::anyhow!("invalid job id {job_id}").into());
     }
+    validate_pr_identity(&owner, &name, 1)?;
     Ok(reviews::check_log(&owner, &name, job_id as u64).await?)
 }
 
@@ -1468,6 +1651,7 @@ pub async fn pr_file_source(
     old_path: String,
     new_path: String,
 ) -> CmdResult<FileSource> {
+    validate_pr_identity(&owner, &name, 1)?;
     Ok(reviews::file_source(&owner, &name, &base, &head, &old_path, &new_path).await?)
 }
 
@@ -1585,20 +1769,21 @@ pub async fn list_triage_tickets(repo: String, db: State<'_, Db>) -> CmdResult<V
         .unwrap_or_default())
 }
 
-/// The full triage issue (description + comments) for the discussion pane. `None`
-/// means no Linear org is connected — an issue that genuinely doesn't exist errors
-/// out of `linear::triage_detail` itself, so reporting this as "not found" would
-/// have misdescribed exactly the failure the user needs to diagnose.
+/// The full triage issue (description + comments) for the discussion pane.
+///
+/// `null` means there is no ticket to show — no Linear org is connected, or Linear
+/// answered that this id names no issue (a worktree cut from a plain branch carries a
+/// branch slug where a ticket id would be). That is a state the UI renders, not a
+/// failure: it hides the Issue pane rather than raising a toast. Anything Linear
+/// *couldn't* answer — an expired token, a rate limit, a dead network — still errors.
 #[tauri::command]
 #[specta::specta]
 pub async fn triage_detail(
     repo: String,
     ticket_id: String,
     db: State<'_, Db>,
-) -> CmdResult<TriageDetail> {
-    Ok(linear::triage_detail(&db, &repo, &ticket_id)
-        .await?
-        .ok_or("no Linear org connected")?)
+) -> CmdResult<Option<TriageDetail>> {
+    Ok(linear::triage_detail(&db, &repo, &ticket_id).await?)
 }
 
 /// The team triage rotations (who is on-call now), from Linear's responsibility
@@ -1753,6 +1938,24 @@ pub async fn github_status() -> GithubStatus {
     crate::github::status().await
 }
 
+/// What is left of the GitHub API budget the `gh` session spends, straight from
+/// GitHub's own `/rate_limit`. `None` when nothing is signed in — a budget we
+/// can't read is not a budget of zero.
+#[tauri::command]
+#[specta::specta]
+pub async fn github_api_budget() -> Option<GithubApiBudget> {
+    crate::github::api_budget().await
+}
+
+/// What is left of each connected Linear workspace's hourly budget. Empty until
+/// santree has made at least one call for that org — Linear reports the budget
+/// only in a response, never on request (see `linear::api_budget`).
+#[tauri::command]
+#[specta::specta]
+pub async fn linear_api_budget(db: State<'_, Db>) -> CmdResult<Vec<LinearApiBudget>> {
+    Ok(linear::api_budget(&db).await?)
+}
+
 /// Where santree resolves `name` to, plus any user-set override and the binary's
 /// own `--version`. Drives the "not found" panels and the manual-path field.
 #[tauri::command]
@@ -1795,6 +1998,22 @@ pub async fn claude_hook_settings(app: AppHandle) -> Option<String> {
     // where a slow disk stalls the whole UI — everything else in this file that
     // touches the filesystem goes through spawn_blocking for exactly this reason.
     tokio::task::spawn_blocking(move || crate::hooks::claude_settings(&app, tutor.as_deref()))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The `-c 'hooks.<Event>=[…]'` flags a santree `codex` launch carries, so the
+/// bundled hook reports the thread id Codex mints and the state it moves
+/// through. `None` when the hook binary or db don't resolve, in which case the
+/// launch simply carries no hooks. **Must be paired with
+/// `--dangerously-bypass-hook-trust`** — see `hooks::codex_hook_flags`.
+#[tauri::command]
+#[specta::specta]
+pub async fn codex_hook_flags(app: AppHandle) -> Option<String> {
+    // Resolves a resource path and the data dir; off the main thread for the
+    // same reason `claude_hook_settings` is.
+    tokio::task::spawn_blocking(move || crate::hooks::codex_hook_flags(&app))
         .await
         .ok()
         .flatten()
@@ -1870,12 +2089,99 @@ pub async fn session_usage_live(db: State<'_, Db>) -> CmdResult<Vec<SessionUsage
     Ok(crate::hooks::session_usage_live(&db).await?)
 }
 
-/// The current state of every Claude session santree has launched, as recorded
-/// live by the injected hooks. Most-recently-updated first.
+/// Claude's account-level subscription rate-limit windows (5-hour, 7-day, ...),
+/// as its own status line last reported them — captured from the same stdin as
+/// [`session_usage_live`], never from a credential. Empty until a subscriber
+/// session has rendered a status line after its first API response. Display-only.
 #[tauri::command]
 #[specta::specta]
-pub async fn session_states(db: State<'_, Db>) -> CmdResult<Vec<SessionState>> {
-    Ok(crate::hooks::session_states(&db).await?)
+pub async fn claude_rate_limits(db: State<'_, Db>) -> CmdResult<Vec<ClaudeRateLimitWindow>> {
+    Ok(crate::hooks::claude_rate_limits(&db).await?)
+}
+
+/// Ask Anthropic for the account's current subscription usage and record it.
+///
+/// The one command that reads Claude Code's own OAuth token — a deliberate,
+/// documented exception (COMPLIANCE.md, "Claude subscription usage"):
+/// read-only, sent to Anthropic's own endpoint and nowhere else, never logged
+/// or stored, and what comes back only ever drives a meter. Input-free.
+#[tauri::command]
+#[specta::specta]
+pub async fn claude_fetch_usage(
+    app: AppHandle,
+    db: State<'_, Db>,
+) -> CmdResult<santree_core::domain::ClaudeUsageFetch> {
+    let fetched = crate::claude_usage::fetch(&db).await?;
+    // The same event the status-line capture raises, so every usage reader
+    // refreshes from one signal however the numbers arrived.
+    let _ = crate::session_signal::ClaudeRateLimitsChanged {}.emit(&app);
+    Ok(fetched)
+}
+
+/// Whether the opt-in global status-line passthrough is on — read from the
+/// user's own `~/.claude/settings.json`. Input-free: the path comes from the
+/// environment, never from IPC.
+#[tauri::command]
+#[specta::specta]
+pub async fn claude_global_capture_status() -> CmdResult<ClaudeGlobalCapture> {
+    Ok(crate::global_capture::status()?)
+}
+
+/// Turn the global status-line passthrough on or off. The one IPC input is the
+/// bool; the hook and db paths are the app's own, and the user's original
+/// status-line command only ever moves between their settings file and the
+/// wrapper written into that same file (see `global_capture.rs`).
+#[tauri::command]
+#[specta::specta]
+pub async fn set_claude_global_capture(
+    app: AppHandle,
+    enabled: bool,
+) -> CmdResult<ClaudeGlobalCapture> {
+    Ok(crate::global_capture::set(&app, enabled)?)
+}
+
+/// CPU and memory of every process santree's terminals own, plus the app itself,
+/// grouped repo → worktree → terminal from one host `ps` snapshot. Read-only and
+/// input-free: no IPC value reaches a path, a pid or an argv.
+#[tauri::command]
+#[specta::specta]
+pub async fn resource_usage(
+    db: State<'_, Db>,
+    manager: State<'_, santree_pty::PtyManager>,
+) -> CmdResult<ResourceUsage> {
+    Ok(crate::resources::resource_usage(&db, &manager).await?)
+}
+
+/// Which coding agent is running in each terminal pane right now, observed in
+/// the host process table instead of remembered from the launch.
+///
+/// Identity only — the attention ladder is untouched by this (see
+/// `agent_procs`). Read-only and input-free: no IPC value reaches the `ps` argv,
+/// and a process table that cannot be read yields an empty list ("we don't
+/// know") rather than an error, because a `ps` that is slow or killed must never
+/// take a render down with it.
+#[tauri::command]
+#[specta::specta]
+pub async fn agent_processes(
+    manager: State<'_, santree_pty::PtyManager>,
+) -> CmdResult<Vec<AgentProcess>> {
+    Ok(crate::agent_procs::detect(&crate::terminal::pane_roots(&manager)).await)
+}
+
+/// The current state of every agent session santree has launched, as recorded
+/// live by the injected hooks. Most-recently-updated first.
+///
+/// The PTY manager is read here, not in `hooks.rs`, so that module stays a pure
+/// db + transcript reader: what it needs is the *set of terminals that are alive*,
+/// and this is the one place that knows it. A session whose terminal is gone
+/// cannot be running — see `hooks::session_states`.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_states(
+    db: State<'_, Db>,
+    manager: State<'_, PtyManager>,
+) -> CmdResult<Vec<SessionState>> {
+    Ok(crate::hooks::session_states(&db, crate::terminal::live_terminals(&manager)).await?)
 }
 
 /// The user's local note for a task — extra context stored only on this machine
@@ -2092,16 +2398,21 @@ pub async fn set_repo_linear_org(
 #[specta::specta]
 pub async fn linear_list_issues(repo: String, db: State<'_, Db>) -> CmdResult<Vec<Task>> {
     match linear::list_issues(&db, &repo).await {
-        Ok(Some(tasks)) => {
-            log::info!("fetched {} Linear issues for {repo}", tasks.len());
-            Ok(tasks)
-        }
+        Ok(Some(tasks)) => Ok(tasks),
         Ok(None) => Ok(vec![]),
         Err(e) => {
             log::warn!("Linear issue fetch failed for {repo}: {e}");
             Err(e.into())
         }
     }
+}
+
+/// Forget every Linear read cache, so the refetch the frontend issues right
+/// after (⌘⇧R) actually reaches Linear instead of the 15s org cache.
+#[tauri::command]
+#[specta::specta]
+pub fn linear_invalidate_caches() {
+    linear::invalidate_all_caches();
 }
 
 /// Run the Linear OAuth flow; returns the updated org list.
@@ -2192,77 +2503,79 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    /// The AI review tab is a *review* surface, and the PR it belongs to is what
+    /// its review tools are scoped by.
+    ///
+    /// Both halves were wrong when `ai_review` was added as a tab kind and only
+    /// `fixci` was matched here: the tab resolved the Work model and Work agent
+    /// setting, and under Codex it would have launched unsandboxed with no tools
+    /// at all — which looks exactly like a review that simply found nothing.
     #[tokio::test]
-    async fn dev_session_uses_its_git_root_and_stays_claude() {
-        let (base, db) = test_db("dev-session").await;
-        let repo = base.join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        let status = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(&repo)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let cwd = repo.to_str().unwrap();
-        let term_key = format!("dev:{cwd}");
-        settings::set(
-            &db,
-            "app",
-            crate::dev::DEV_REPO_PATH_KEY,
-            Some(cwd.to_string()),
+    async fn an_ai_review_tab_is_a_review_surface_scoped_to_its_pull_request() {
+        let (base, db) = test_db("session-context-review").await;
+        sqlx::query(
+            "INSERT INTO worktree_tabs
+             (id, repo, worktree_id, kind, agent_kind, title, pr_repo, pr_number, position)
+             VALUES ('rev', 'repo-a', 'AK-1', 'ai_review', 'Codex', 'AI review', 'acme/web', 42, 0),
+                    ('fix', 'repo-a', 'AK-1', 'fixci', 'Codex', 'Address', 'acme/web', 42, 1),
+                    ('plain', 'repo-a', 'AK-1', 'agent', 'Codex', 'Agent', NULL, NULL, 2)",
         )
+        .execute(&db)
         .await
         .unwrap();
 
-        let resolved = agent_repo_path(&db, DEV_SESSION_REPO, &term_key, cwd)
+        let review = session_context(&db, "repo-a", "/repo/a", "tree:AK-1:tab:rev")
             .await
             .unwrap();
+        assert_eq!(review.surface, SessionSurface::Review);
         assert_eq!(
-            std::fs::canonicalize(resolved).unwrap(),
-            std::fs::canonicalize(cwd).unwrap()
+            review.review_pr,
+            Some(("acme".into(), "web".into(), 42)),
+            "a review's tools are scoped by the PR on its own row"
         );
-        let context = session_context(&db, DEV_SESSION_REPO, cwd, &term_key)
+
+        let fix = session_context(&db, "repo-a", "/repo/a", "tree:AK-1:tab:fix")
             .await
             .unwrap();
-        assert_eq!(context.surface, SessionSurface::Work);
-        assert_eq!(context.agent, Some(AgentKind::Claude));
+        assert_eq!(fix.surface, SessionSurface::FixCi);
+        assert_eq!(fix.review_pr, Some(("acme".into(), "web".into(), 42)));
+
+        // An ordinary agent tab has no review tools, and must not be given any.
+        let plain = session_context(&db, "repo-a", "/repo/a", "tree:AK-1:tab:plain")
+            .await
+            .unwrap();
+        assert_eq!(plain.surface, SessionSurface::Work);
+        assert_eq!(plain.review_pr, None);
 
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    /// The other end of the same scoping: an `ai-review:` terminal names its PR
+    /// in the key, and `validate_agent_cwd` is what checks that claim against the
+    /// registered origin before it is used to find a config file.
     #[tokio::test]
-    async fn dev_session_rejects_an_unconfigured_git_root() {
-        let (base, db) = test_db("dev-session-mismatch").await;
-        let keyed = base.join("keyed");
-        let requested = base.join("requested");
-        std::fs::create_dir(&keyed).unwrap();
-        std::fs::create_dir(&requested).unwrap();
-        for path in [&keyed, &requested] {
-            let status = std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(path)
-                .status()
-                .unwrap();
-            assert!(status.success());
-        }
-        let term_key = format!("dev:{}", requested.display());
-        settings::set(
-            &db,
-            "app",
-            crate::dev::DEV_REPO_PATH_KEY,
-            Some(keyed.to_string_lossy().into_owned()),
-        )
-        .await
-        .unwrap();
+    async fn a_review_terminal_key_scopes_the_tools_to_the_pr_it_names() {
+        let (base, db) = test_db("session-context-key").await;
 
-        assert!(agent_repo_path(
-            &db,
-            DEV_SESSION_REPO,
-            &term_key,
-            requested.to_str().unwrap()
-        )
-        .await
-        .is_err());
+        let review = session_context(&db, "repo-a", "/repo/a", "ai-review:acme/web#42")
+            .await
+            .unwrap();
+        assert_eq!(review.surface, SessionSurface::Review);
+        assert_eq!(review.review_pr, Some(("acme".into(), "web".into(), 42)));
+
+        // "Ask AI" is read-only and writes no drafts, so it gets no tools.
+        let ask = session_context(&db, "repo-a", "/repo/a", "review:acme/web#42")
+            .await
+            .unwrap();
+        assert_eq!(ask.surface, SessionSurface::AskAi);
+        assert_eq!(ask.review_pr, None);
+
+        // A malformed identity fails here rather than becoming a filename.
+        assert!(
+            session_context(&db, "repo-a", "/repo/a", "ai-review:acme/web/nested#42")
+                .await
+                .is_err()
+        );
 
         std::fs::remove_dir_all(base).unwrap();
     }
@@ -2353,5 +2666,60 @@ mod tests {
         assert!(validate_pr_repo("Acme/Project", "acme", "project").is_ok());
         assert!(validate_pr_repo("acme/other", "acme", "project").is_err());
         assert!(validate_pr_repo("acme/project/extra", "acme", "project").is_err());
+    }
+
+    #[test]
+    fn pr_reads_reject_a_malformed_identity() {
+        assert!(validate_pr_identity("acme", "project", 1).is_ok());
+        assert!(validate_pr_identity("acme", "pro/ject", 1).is_err());
+        assert!(validate_pr_identity("..", "project", 1).is_err());
+        assert!(validate_pr_identity("acme", "", 1).is_err());
+        assert!(validate_pr_identity("acme", "project", 0).is_err());
+    }
+
+    /// The anchor a queued diff selection carries is user-authored, so it is
+    /// guarded on shape alone — but that guard has to actually exclude the shapes
+    /// that aren't a repo-relative file.
+    #[test]
+    fn a_queued_anchor_must_look_like_a_repo_relative_file() {
+        assert!(is_repo_relative_path("src/api.rs"));
+        assert!(is_repo_relative_path("a/b/c/d.tsx"));
+        assert!(!is_repo_relative_path(""));
+        assert!(!is_repo_relative_path("/etc/passwd"));
+        assert!(!is_repo_relative_path("../outside.rs"));
+        assert!(!is_repo_relative_path("src/../../outside.rs"));
+        assert!(!is_repo_relative_path("./src/api.rs"));
+        assert!(!is_repo_relative_path("src//api.rs"));
+        assert!(!is_repo_relative_path("C:\\windows\\system32"));
+        assert!(!is_repo_relative_path("..\\outside.rs"));
+    }
+
+    #[test]
+    fn check_work_item_body_names_the_check_and_its_app() {
+        let check = |description: Option<&str>| santree_core::domain::PrCheck {
+            name: "test (ubuntu-latest)".into(),
+            status: santree_core::domain::CheckStatus::Failure,
+            description: description.map(str::to_string),
+            url: None,
+            steps: vec![],
+            annotations: vec![],
+            job_id: None,
+            run_id: None,
+            started_at: None,
+            completed_at: None,
+        };
+        assert_eq!(
+            check_work_item_body(&check(None)),
+            "Fix failing check: test (ubuntu-latest)"
+        );
+        assert_eq!(
+            check_work_item_body(&check(Some("GitHub Actions"))),
+            "Fix failing check: test (ubuntu-latest) (GitHub Actions)"
+        );
+        // A whitespace-only app name must not produce a dangling "()".
+        assert_eq!(
+            check_work_item_body(&check(Some("   "))),
+            "Fix failing check: test (ubuntu-latest)"
+        );
     }
 }

@@ -2,21 +2,24 @@
  * The "Checks" tab: the PR's individual CI checks (the head commit's check runs +
  * status contexts), grouped by outcome ({@link groupChecks}) into collapsible
  * sections. A failed check expands inline to its failing steps, its annotations,
- * and — on demand — the raw GitHub Actions job log, with a "Fix CI with AI" button
- * above the sections.
+ * and — on demand — the raw GitHub Actions job log.
+ *
+ * Fixing a red check is not offered here. It happens on the PR's own worktree, in
+ * the Trees panel, where a failing check joins the work queue alongside the review
+ * comments and one agent session works through all of them — rather than a second
+ * launch path that only ever knew about CI.
  */
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 
-import type { CheckLogLevel, CheckLogLine, PrCheck, ReviewPr } from "../../bindings";
+import type { PrCheck, ReviewPr } from "../../bindings";
 import { ChevronDownIcon, GitHubLogo } from "../../components/icons";
 import { EmptyState, Skeleton, TerminalActivity } from "../../components/primitives";
 import { usePrCheckLog, usePrDetail } from "../../lib/queries";
 import { splitRepoSlug } from "../../lib/repo";
 import { checkStatusMeta } from "../../theme/colors";
+import { CheckLogBody } from "./CheckLog";
 import { groupChecks, SKIPPED_KEY, toggleCollapsed } from "./checks";
-import { FixCiButton } from "./FixCiButton";
-import { useReviewsModel } from "./model";
 
 // GitHub annotation levels → tint. `notice` is informational; error/warning
 // map to the shared status palette so they read the same as check glyphs.
@@ -28,18 +31,8 @@ const annotationLevelColor: Record<string, string> = {
   notice: "var(--color-muted-3)",
 };
 
-// GitHub Actions runner-marker levels → the same status palette the check glyphs
-// use, so a log error reads identically to a failed-step glyph.
-const logLevelColor: Record<CheckLogLevel, string> = {
-  Error: "var(--color-status-red)",
-  Warning: "var(--color-status-amber)",
-  Command: "var(--color-muted-3)",
-  Normal: "var(--color-muted-2)",
-};
-
 export function ChecksPane({ pr }: { pr: ReviewPr }) {
   const [owner, name] = splitRepoSlug(pr.repo);
-  const { repo: santreeRepo } = useReviewsModel();
   const { data: detail, isLoading } = usePrDetail(owner, name, pr.number);
   // Section keys that are collapsed. The skipped/neutral group starts collapsed.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set([SKIPPED_KEY]));
@@ -66,15 +59,8 @@ export function ChecksPane({ pr }: { pr: ReviewPr }) {
   const toggle = (key: string, all: boolean) =>
     setCollapsed((prev) => toggleCollapsed(prev, key, allKeys, all));
 
-  const failed = checks.filter((c) => c.status === "Failure");
-
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-      {failed.length > 0 && (
-        <div className="mb-4 flex items-center justify-end">
-          <FixCiButton pr={pr} santreeRepo={santreeRepo} failed={failed} />
-        </div>
-      )}
       {groups.map((g) => {
         const isCollapsed = collapsed.has(g.key);
         return (
@@ -287,74 +273,13 @@ function CheckLogSection({
             <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-muted-3">
               <TerminalActivity label="Loading log…" />
             </div>
-          ) : !log || log.blocks.length === 0 ? (
+          ) : !log ? (
             <div className="px-3 py-2 text-[11px] text-muted-3">No log output.</div>
           ) : (
-            <div className="max-h-[440px] overflow-auto py-1 font-mono text-[11px] leading-[1.55]">
-              {log.truncated && (
-                <div className="px-3 pb-1 text-[10px] text-muted-4">
-                  Earlier lines omitted.{" "}
-                  {url ? (
-                    <button
-                      type="button"
-                      onClick={() => openUrl(url)}
-                      className="cursor-pointer underline hover:text-fg-2"
-                    >
-                      Open the full log on GitHub
-                    </button>
-                  ) : (
-                    "See the full log on GitHub."
-                  )}
-                </div>
-              )}
-              {log.blocks.map((b, i) =>
-                b.kind === "line" ? (
-                  <LogLine key={i} text={b.text} level={b.level} />
-                ) : (
-                  <LogGroup key={i} title={b.title} lines={b.lines} />
-                ),
-              )}
-            </div>
+            <CheckLogBody log={log} url={url} />
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-/** A `##[group]` section — collapsed behind its title by default, like GitHub. */
-function LogGroup({ title, lines }: { title: string; lines: CheckLogLine[] }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full cursor-pointer items-center gap-1.5 px-3 text-left text-muted-3 hover:text-fg-2"
-      >
-        <ChevronDownIcon
-          size={10}
-          className={`flex-none transition-transform ${open ? "" : "-rotate-90"}`}
-        />
-        <span className="min-w-0 truncate">{title}</span>
-      </button>
-      {open && (
-        <div className="pl-3.5">
-          {lines.map((l, i) => (
-            <LogLine key={i} text={l.text} level={l.level} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** One raw-log line, tinted by level. Empty lines keep their height so blank
- *  runs in the log read the way they do on GitHub. */
-function LogLine({ text, level }: { text: string; level: CheckLogLevel }) {
-  return (
-    <div className="px-3 break-words whitespace-pre-wrap" style={{ color: logLevelColor[level] }}>
-      {text || " "}
     </div>
   );
 }

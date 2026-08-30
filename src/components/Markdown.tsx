@@ -5,13 +5,15 @@
  * treatment; code is monospaced in a subtle well.
  */
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { type CSSProperties, memo } from "react";
+import { type CSSProperties, memo, type ReactNode } from "react";
 import ReactMarkdown, { type Components, defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 
+import { highlightToHtml, langForFence } from "../lib/highlight";
+import { MermaidDiagram } from "./MermaidDiagram";
 import { SuggestedChange } from "./Suggestion";
 
 // GitHub-flavored content embeds raw HTML — most visibly Linear's linkback, which
@@ -40,6 +42,61 @@ const sanitizeSchema = {
 // while keeping the default safety checks for everything else.
 const urlTransform = (url: string) =>
   url.startsWith("data:image/") ? url : defaultUrlTransform(url);
+
+/** A hast node, structurally — enough to walk a `<pre>` without pulling in the
+ *  full hast types for two fields. */
+interface HastLike {
+  type: string;
+  value?: string;
+  tagName?: string;
+  properties?: Record<string, unknown>;
+  children?: HastLike[];
+}
+
+/** Every text descendant, concatenated. A fence's `<code>` is usually one text
+ *  node, but rehype-raw can split it. */
+function textOf(node: HastLike | undefined): string {
+  if (!node) return "";
+  if (node.type === "text") return node.value ?? "";
+  return (node.children ?? []).map(textOf).join("");
+}
+
+interface Fence {
+  /** The fence's info string (`ts`, `mermaid`, `suggestion`), or `""`. */
+  lang: string;
+  text: string;
+}
+
+/** The info string + raw source of a fenced code block, from the `<pre>`'s own
+ *  node. `null` when the `<pre>` isn't a fence — raw HTML can produce one, and
+ *  it has no `<code>` to read a language off. The `language-*` class survives
+ *  rehype-sanitize, whose default schema allows it on `code`. */
+function codeFence(node: unknown): Fence | null {
+  const pre = node as HastLike | undefined;
+  const code = pre?.children?.find((c) => c.type === "element" && c.tagName === "code");
+  if (!code) return null;
+  const cls = code.properties?.className;
+  const classes = Array.isArray(cls) ? cls.map(String) : String(cls ?? "").split(/\s+/);
+  const lang = classes.find((c) => c.startsWith("language-"))?.slice("language-".length) ?? "";
+  return { lang, text: textOf(code) };
+}
+
+const FENCE_CLASS =
+  "mb-2.5 overflow-x-auto rounded-lg border border-line-2 bg-input p-3 font-mono text-[11.5px] leading-[1.55] whitespace-pre text-fg-3";
+
+/** A fenced code block, tokenized when its info string names a language we know.
+ *  Falls back to react-markdown's own children for a `<pre>` that isn't a fence,
+ *  so raw HTML keeps rendering as it did. */
+function CodeFence({ fence, children }: { fence: Fence | null; children?: ReactNode }) {
+  if (!fence) return <pre className={FENCE_CLASS}>{children}</pre>;
+  return (
+    <pre
+      className={`code-hl ${FENCE_CLASS}`}
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: serialized from our own escaped Prism tokens (see lib/highlight.ts).
+      dangerouslySetInnerHTML={{ __html: highlightToHtml(fence.text, langForFence(fence.lang)) }}
+    />
+  );
+}
 
 const components: Components = {
   p: ({ children }) => <p className="mb-2.5 last:mb-0">{children}</p>,
@@ -104,21 +161,13 @@ const components: Components = {
   },
   // A ```suggestion fence is a review suggestion, not code — GitHub renders it as
   // the diff it describes. Intercepted on the `pre` (not the `code`) because the
-  // panel replaces the whole block, chrome included. The language class survives
-  // rehype-sanitize, whose default schema allows `language-*` on `code`.
+  // panel replaces the whole block, chrome included. Everything else is
+  // tokenized by its info string; an unlabelled or unknown fence renders as
+  // plain escaped text, which is what it was before.
   pre: ({ children, node }) => {
-    const code = node?.children?.[0];
-    const cls = code?.type === "element" ? code.properties?.className : undefined;
-    const lang = Array.isArray(cls) ? cls.join(" ") : String(cls ?? "");
-    if (lang.split(/\s+/).includes("language-suggestion")) {
-      const text = code?.type === "element" ? code.children[0] : undefined;
-      return <SuggestedChange text={text?.type === "text" ? text.value : ""} />;
-    }
-    return (
-      <pre className="mb-2.5 overflow-x-auto rounded-lg border border-line-2 bg-input p-3 font-mono text-[11.5px] leading-[1.55] whitespace-pre text-fg-3">
-        {children}
-      </pre>
-    );
+    const fence = codeFence(node);
+    if (fence?.lang === "suggestion") return <SuggestedChange text={fence.text} />;
+    return <CodeFence fence={fence}>{children}</CodeFence>;
   },
   blockquote: ({ children }) => (
     <blockquote className="my-2 border-l-2 border-line-strong pl-3 text-muted-2 italic">
@@ -270,8 +319,12 @@ export const Markdown = memo(function Markdown({
   className?: string;
 }) {
   return (
+    // The trailing-margin reset is why a comment card doesn't end in a band of
+    // dead space: paragraphs carry `last:mb-0` themselves, but a body ending in a
+    // code block, list, table or `<details>` — which is most bot output — left its
+    // block margin sitting inside the card's own padding.
     <div
-      className={`selectable [overflow-wrap:anywhere] ${className ?? "text-[12.5px] leading-[1.6] text-fg-2"}`}
+      className={`selectable [overflow-wrap:anywhere] [&>*:last-child]:mb-0 ${className ?? "text-[12.5px] leading-[1.6] text-fg-2"}`}
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks, literalizeUnknownHtml]}
@@ -279,7 +332,78 @@ export const Markdown = memo(function Markdown({
         components={components}
         urlTransform={urlTransform}
       >
-        {normalizeLinearMarkdown(children)}
+        {/* Trimmed: `remarkBreaks` turns a trailing blank line into a real `<br>`,
+            and GitHub comment bodies routinely end with one or two. Untrimmed,
+            every bot comment ends in a band of dead space inside its card. */}
+        {normalizeLinearMarkdown(children.trim())}
+      </ReactMarkdown>
+    </div>
+  );
+});
+
+/**
+ * A markdown *file*, rendered — the preview half of the file viewer's
+ * Code/Preview toggle.
+ *
+ * Three deliberate differences from {@link Markdown}, which exists for issue and
+ * PR comments:
+ *
+ *  - **No `remarkBreaks`.** A comment box treats every newline as a line break
+ *    because that is how the person typing it meant it. A README is hard-wrapped
+ *    prose, and breaking on every newline would shred every paragraph in it.
+ *  - **No Linear normalization.** The source is the author's file, not Linear's
+ *    editor output, so "fixing" its bold delimiters would be rewriting it.
+ *  - **Diagrams render.** A ```mermaid fence becomes a diagram here and nowhere
+ *    else; see `MermaidDiagram` for why that line is drawn at files.
+ *
+ * Headings step up a size too: a document is read at document scale, where a
+ * comment card is glanced at inside a list.
+ */
+const documentComponents: Components = {
+  ...components,
+  h1: ({ children }) => (
+    <h1 className="mt-5 mb-2.5 border-b border-line pb-1.5 text-[19px] font-semibold tracking-[-.01em] text-fg-bright first:mt-0">
+      {children}
+    </h1>
+  ),
+  h2: ({ children }) => (
+    <h2 className="mt-5 mb-2 border-b border-line pb-1.5 text-[15.5px] font-semibold text-fg-bright first:mt-0">
+      {children}
+    </h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className="mt-4 mb-1.5 text-[13.5px] font-semibold text-fg-2">{children}</h3>
+  ),
+  h4: ({ children }) => (
+    <h4 className="mt-3.5 mb-1 text-[12.5px] font-semibold text-fg-2">{children}</h4>
+  ),
+  hr: () => <hr className="my-4 border-t border-line" />,
+  pre: ({ children, node }) => {
+    const fence = codeFence(node);
+    if (fence?.lang === "mermaid") return <MermaidDiagram code={fence.text} />;
+    if (fence?.lang === "suggestion") return <SuggestedChange text={fence.text} />;
+    return <CodeFence fence={fence}>{children}</CodeFence>;
+  },
+};
+
+export const MarkdownDocument = memo(function MarkdownDocument({
+  children,
+  className,
+}: {
+  children: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`selectable [overflow-wrap:anywhere] [&>*:last-child]:mb-0 ${className ?? "text-[13px] leading-[1.65] text-fg-2"}`}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, literalizeUnknownHtml]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
+        components={documentComponents}
+        urlTransform={urlTransform}
+      >
+        {children}
       </ReactMarkdown>
     </div>
   );

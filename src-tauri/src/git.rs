@@ -5,7 +5,7 @@
 //! higher-level orchestration (DB links, setup scripts, agent launch) lives in
 //! [`crate::worktree`]. Ported from the CLI's `source/lib/git.ts`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 
-use santree_core::domain::{ChangedFile, FileSource, FileStatus};
+use santree_core::domain::{ChangedFile, FileSource, FileStatus, RepoBranch};
 
 /// Resolve a frontend-supplied *relative* path against the worktree, refusing
 /// anything that escapes it (absolute paths or `..` traversal). These paths
@@ -400,6 +400,54 @@ pub fn add_worktree_for_branch(repo: &Path, worktree_path: &Path, branch: &str) 
     bail!("branch '{branch}' not found locally or on origin (a fork PR?)");
 }
 
+/// Reject anything that isn't a legal branch name before it reaches a `git` argv.
+///
+/// Two separate hazards, one gate:
+///
+/// * **Flag injection.** Branch names are passed positionally (`worktree add -b
+///   <branch>`, `fetch origin <branch>`), so a leading `-` would be read as an
+///   option — `--upload-pack=<cmd>` is remote code execution on a fetch. Rejected
+///   outright, exactly as [`safe_sha`] does for object ids.
+/// * **Validity.** The Create-worktree dialog lets the user *type* a new branch
+///   name, which is untrusted input that git itself would reject halfway through
+///   the operation. These are `git check-ref-format`'s documented rules for
+///   `refs/heads/<name>`, applied up front so the UI can disable the button
+///   instead of letting the user click into a git error.
+///
+/// Every real branch satisfies this — git applied the same rules when it was
+/// created — so it is also safe on names that came back from `git for-each-ref`.
+pub fn safe_branch(name: &str) -> Result<&str> {
+    let invalid = |why: &str| anyhow!("'{name}' is not a valid branch name ({why})");
+    if name.is_empty() {
+        return Err(invalid("empty"));
+    }
+    // Ours, not git's: a positional argument starting with a dash is a flag.
+    if name.starts_with('-') {
+        return Err(invalid("starts with '-'"));
+    }
+    if name.contains("..") || name.contains("@{") || name == "@" {
+        return Err(invalid("reserved sequence"));
+    }
+    if name.chars().any(|c| {
+        c.is_ascii_control()
+            || matches!(c, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\' | '\u{7f}')
+    }) {
+        return Err(invalid("illegal character"));
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.contains("//") {
+        return Err(invalid("empty path component"));
+    }
+    if name.ends_with('.') {
+        return Err(invalid("ends with '.'"));
+    }
+    for component in name.split('/') {
+        if component.starts_with('.') || component.ends_with(".lock") {
+            return Err(invalid("illegal path component"));
+        }
+    }
+    Ok(name)
+}
+
 /// Reject anything that isn't a plain git object id before it reaches a `git`
 /// argv.
 ///
@@ -541,6 +589,89 @@ pub fn worktree_branch(repo: &Path, worktree_path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Every branch already checked out in one of the repo's worktrees — the main
+/// checkout included.
+///
+/// Git allows exactly one checkout per branch, so this is precisely the set
+/// `worktree add` would refuse. Read from git rather than from santree's own
+/// `worktree_links` so a worktree the app didn't create still counts.
+fn checked_out_branches(repo: &Path) -> HashSet<String> {
+    let Ok(out) = git_output(repo, &["worktree", "list", "--porcelain"]) else {
+        return HashSet::new();
+    };
+    out.lines()
+        .filter_map(|l| l.strip_prefix("branch refs/heads/"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The repo's branches — every local one, plus the `origin/` branches that have
+/// no local counterpart — newest commit first.
+///
+/// Remote-only branches are included because [`add_worktree_for_branch`] can
+/// check one out (it creates a local tracking branch), which is what makes "the
+/// branch a teammate pushed" reachable from the Create-worktree dialog without a
+/// manual `git fetch` first.
+pub fn branches(repo: &Path) -> Result<Vec<RepoBranch>> {
+    let checked_out = checked_out_branches(repo);
+    // One process for both namespaces. `%09` is a tab: a branch name can contain
+    // almost anything except a control character, so it can't appear in the name
+    // and the split is unambiguous.
+    let out = git_output(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%09%(committerdate:iso-strict)",
+            "refs/heads",
+            "refs/remotes/origin",
+        ],
+    )?;
+
+    let mut locals: Vec<RepoBranch> = Vec::new();
+    let mut remotes: Vec<RepoBranch> = Vec::new();
+    for line in out.lines() {
+        let (name, updated_at) = line.split_once('\t').unwrap_or((line, ""));
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match name.strip_prefix("origin/") {
+            // `origin/HEAD` is a symbolic alias for the default branch, not a
+            // branch of its own — offering it would create a worktree on a ref
+            // whose name means something else tomorrow.
+            Some("HEAD") => continue,
+            Some(short) => remotes.push(RepoBranch {
+                name: short.to_string(),
+                has_worktree: checked_out.contains(short),
+                remote_only: true,
+                updated_at: updated_at.to_string(),
+            }),
+            None => locals.push(RepoBranch {
+                name: name.to_string(),
+                has_worktree: checked_out.contains(name),
+                remote_only: false,
+                updated_at: updated_at.to_string(),
+            }),
+        }
+    }
+
+    let local_names: HashSet<&str> = locals.iter().map(|b| b.name.as_str()).collect();
+    let mut all: Vec<RepoBranch> = remotes
+        .iter()
+        .filter(|b| !local_names.contains(b.name.as_str()))
+        .cloned()
+        .collect();
+    all.extend(locals);
+    // Newest first: a branch picker is nearly always reaching for recent work.
+    // Name as the tiebreak so refs sharing a commit date keep a stable order.
+    all.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(all)
 }
 
 /// The ref to log/diff a worktree branch against for PR-style "what this branch
@@ -984,7 +1115,7 @@ fn parse_numstat_line(line: &str) -> Option<(String, u32, u32, bool)> {
 /// status path, so they'd show (0, 0). A map (not a Vec + linear scan) keeps the
 /// per-file lookup in [`status`] O(1) instead of O(files²).
 fn numstat(cwd: &Path, diff_base: &str) -> Result<HashMap<String, (u32, u32, bool)>> {
-    let raw = git_output(cwd, &["diff", diff_base, "--numstat", "-z"])?;
+    let raw = git_output(cwd, &["diff", diff_base, "--numstat", "-z", "--"])?;
     let mut map = HashMap::new();
     // With `-z`, each record is `add\tdel\tpath\0`; for a rename the path field is
     // empty and the old then new paths follow as two extra NUL-separated fields.
@@ -1222,30 +1353,6 @@ pub fn commit(cwd: &Path, message: &str, stage_all: bool) -> Result<()> {
     .map(|_| ())
 }
 
-/// Commit **only** `paths`, taking their working-tree contents — whatever else is
-/// staged or modified stays exactly where it is. `Ok(None)` when none of them
-/// differ from HEAD.
-///
-/// A pathspec commit is what lets a release bump go in on its own from a tree
-/// that has work in progress in it. Whether there's anything to commit is asked
-/// separately rather than read off a failed `git commit`: that call also fails
-/// for reasons that must not be mistaken for "nothing to do" (a rejecting
-/// pre-commit hook, no configured identity). Both steps share one index lock, so
-/// a staging click can't land between them and ride along.
-pub fn commit_paths(cwd: &Path, message: &str, paths: &[&str]) -> Result<Option<String>> {
-    with_index_lock(cwd, || {
-        let mut diff = vec!["diff", "--name-only", "HEAD", "--"];
-        diff.extend_from_slice(paths);
-        if git_output(cwd, &diff)?.trim().is_empty() {
-            return Ok(None);
-        }
-        let mut args = vec!["commit", "-m", message, "--"];
-        args.extend_from_slice(paths);
-        git(cwd, &args)?;
-        Ok(Some(git(cwd, &["rev-parse", "--short", "HEAD"])?))
-    })
-}
-
 /// The full staged diff, for AI commit-message generation.
 pub fn staged_diff(cwd: &Path) -> String {
     git_output(cwd, &["diff", "--cached"]).unwrap_or_default()
@@ -1291,6 +1398,81 @@ pub fn diff_range(cwd: &Path, base: &str) -> String {
     let base = compare_base(cwd, base);
     let range = format!("{base}...HEAD");
     git_output(cwd, &["diff", &range]).unwrap_or_default()
+}
+
+/// The files a branch has committed relative to its base — `git diff
+/// <base>...HEAD` as a `--name-status` list with `--numstat` line counts folded
+/// in. Three-dot (merge-base), like [`diff_stat`], so an upstream `base` that
+/// advanced past the fork point contributes nothing. `staged` is always false:
+/// these are commits, not index state. Sorted by path.
+///
+/// Rename detection is left to git's default (`diff.renames`) on both calls, the
+/// same setting [`status`]'s porcelain follows, so the two listings agree.
+pub fn branch_changes(cwd: &Path, base: &str) -> Result<Vec<ChangedFile>> {
+    let base = compare_base(cwd, base);
+    let range = format!("{base}...HEAD");
+    // `--` after the range: a file named like `main...HEAD` must stay a path.
+    let raw = git_output(cwd, &["diff", &range, "--name-status", "-z", "--"])?;
+    let counts = numstat(cwd, &range)?;
+
+    let mut files = Vec::new();
+    // With `-z`, each record is `<status>\0<path>\0`; a rename/copy carries a
+    // similarity score on the status (`R100`) and the old then new paths.
+    let mut fields = raw.split('\0');
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let Some(first) = fields.next() else {
+            break;
+        };
+        let letter = record.chars().next().unwrap_or('M');
+        let (status, old_path, path) = match letter {
+            'R' | 'C' => {
+                let Some(new) = fields.next() else {
+                    break;
+                };
+                let status = if letter == 'R' {
+                    FileStatus::Renamed
+                } else {
+                    FileStatus::Added
+                };
+                (status, Some(first.to_string()), new.to_string())
+            }
+            'A' => (FileStatus::Added, None, first.to_string()),
+            'D' => (FileStatus::Deleted, None, first.to_string()),
+            _ => (FileStatus::Modified, None, first.to_string()),
+        };
+        let (add_lines, del_lines, binary) = counts.get(&path).copied().unwrap_or((0, 0, false));
+        files.push(ChangedFile {
+            path,
+            old_path,
+            status,
+            staged: false,
+            add_lines,
+            del_lines,
+            binary,
+        });
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+/// A unified diff of one file's committed changes on the branch — `git diff
+/// <base>...HEAD -- <path>` (the diff a [`branch_changes`] row opens). Empty
+/// when the branch didn't touch the file.
+pub fn branch_file_diff(cwd: &Path, base: &str, path: &str) -> Result<String> {
+    safe_path(cwd, path)?;
+    // A leading `:` is pathspec magic (`:/`, `:(glob)`, `:!`), never a file the
+    // panel listed; and the path is passed as a literal so `*`/`?` in a real
+    // filename can't widen the diff to whatever they'd match.
+    if path.starts_with(':') {
+        bail!("path '{path}' must not start with ':'");
+    }
+    let base = compare_base(cwd, base);
+    let range = format!("{base}...HEAD");
+    let literal = format!(":(literal){path}");
+    git_output(cwd, &["diff", &range, "--", &literal])
 }
 
 /// Every file in the worktree the user would browse — tracked plus untracked,
@@ -1361,6 +1543,97 @@ mod tests {
             .unwrap()
             .success();
         assert!(ok, "git {args:?} failed");
+    }
+
+    // ---- safe_branch (flag injection + git's own ref rules) ----
+
+    #[test]
+    fn safe_branch_accepts_real_branch_names() {
+        for name in [
+            "main",
+            "feature/AK-1-do-a-thing",
+            "santree/ak-165-fix",
+            "release-2.0",
+            "user@host",
+            "a.b.c",
+        ] {
+            assert!(safe_branch(name).is_ok(), "{name} should be valid");
+        }
+    }
+
+    #[test]
+    fn safe_branch_rejects_flag_injection() {
+        // The branch is passed positionally to `worktree add -b`/`fetch origin`,
+        // so a leading dash is an option, not a ref — `--upload-pack=<cmd>` on a
+        // fetch is remote code execution.
+        assert!(safe_branch("--upload-pack=/bin/sh").is_err());
+        assert!(safe_branch("-b").is_err());
+        assert!(safe_branch("-").is_err());
+    }
+
+    #[test]
+    fn safe_branch_rejects_what_check_ref_format_rejects() {
+        for name in [
+            "",     // empty
+            "a..b", // double dot
+            "a b",  // space
+            "a~b",  // ~ ^ : ? * [ \\ are all reserved
+            "a^b",
+            "a:b",
+            "a?b",
+            "a*b",
+            "a[b",
+            "a\\b",
+            "feat/@{now}", // @{ sequence
+            "@",           // the single-character @
+            ".hidden",     // component starting with a dot
+            "feat/.hidden",
+            "feat.lock", // component ending in .lock
+            "feat/x.lock",
+            "/leading",
+            "trailing/",
+            "double//slash",
+            "ends.with.dot.",
+            "new\nline", // control character
+        ] {
+            assert!(safe_branch(name).is_err(), "{name:?} should be rejected");
+        }
+    }
+
+    /// The invariant the picker depends on: a branch git already holds in a
+    /// worktree is flagged, because `worktree add` would refuse a second one.
+    #[test]
+    fn branches_flag_the_ones_already_checked_out() {
+        let base = scratch_dir("branches");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        run_git(&repo, &["branch", "spare"]);
+        run_git(&repo, &["branch", "taken"]);
+        let wt = base.join("wt");
+        run_git(
+            &repo,
+            &["worktree", "add", wt.to_string_lossy().as_ref(), "taken"],
+        );
+
+        let listed = branches(&repo).unwrap();
+        let by_name = |n: &str| listed.iter().find(|b| b.name == n).cloned();
+
+        // `main` is the repo's own checkout — also a worktree, also unavailable.
+        assert!(by_name("main").unwrap().has_worktree);
+        assert!(by_name("taken").unwrap().has_worktree);
+        assert!(!by_name("spare").unwrap().has_worktree);
+        assert!(!by_name("spare").unwrap().remote_only);
+        assert!(
+            listed.iter().all(|b| !b.updated_at.is_empty()),
+            "every row carries a real committer date"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // ---- safe_path (lexical traversal guard) ----
@@ -1513,6 +1786,116 @@ mod tests {
         assert_eq!(modified.old_path, None);
         assert_eq!(modified.add_lines, 1);
         assert_eq!(modified.del_lines, 0);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- branch_changes() / branch_file_diff() (committed diff vs the base) ----
+
+    /// A repo on `main` with a `feature` branch that adds, modifies, deletes,
+    /// renames and adds-a-binary in one commit — then `main` moves on, so the
+    /// three-dot semantics (upstream commits past the fork point are not the
+    /// branch's) are exercised too.
+    fn branch_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let base = scratch_dir(name);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "gone\n").unwrap();
+        std::fs::write(repo.join("d.txt"), "x\ny\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        run_git(&repo, &["checkout", "-b", "feature"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::remove_file(repo.join("c.txt")).unwrap();
+        run_git(&repo, &["mv", "d.txt", "d-renamed.txt"]);
+        std::fs::write(repo.join("new.txt"), "n1\nn2\n").unwrap();
+        std::fs::write(repo.join("bin.dat"), b"\x00\x01\x02binary\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "feature work"]);
+
+        // Upstream advances after the fork point: not part of the branch's diff.
+        run_git(&repo, &["checkout", "main"]);
+        std::fs::write(repo.join("upstream.txt"), "later\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "upstream"]);
+        run_git(&repo, &["checkout", "feature"]);
+        (base, repo)
+    }
+
+    #[test]
+    fn branch_changes_lists_committed_files_with_statuses_and_counts() {
+        let (base, repo) = branch_fixture("branch-changes");
+
+        let files = branch_changes(&repo, "main").unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["a.txt", "bin.dat", "c.txt", "d-renamed.txt", "new.txt"],
+            "path-sorted, and main's later commit is not the branch's"
+        );
+        assert!(
+            files.iter().all(|f| !f.staged),
+            "commits are never 'staged'"
+        );
+
+        let by = |p: &str| files.iter().find(|f| f.path == p).unwrap();
+        let a = by("a.txt");
+        assert_eq!(a.status, FileStatus::Modified);
+        assert_eq!((a.add_lines, a.del_lines, a.binary), (1, 0, false));
+        assert_eq!(a.old_path, None);
+
+        let bin = by("bin.dat");
+        assert_eq!(bin.status, FileStatus::Added);
+        assert!(bin.binary, "numstat's `-` marks it binary");
+        assert_eq!((bin.add_lines, bin.del_lines), (0, 0));
+
+        let c = by("c.txt");
+        assert_eq!(c.status, FileStatus::Deleted);
+        assert_eq!((c.add_lines, c.del_lines), (0, 1));
+
+        let d = by("d-renamed.txt");
+        assert_eq!(d.status, FileStatus::Renamed);
+        assert_eq!(d.old_path.as_deref(), Some("d.txt"));
+        assert_eq!((d.add_lines, d.del_lines), (0, 0));
+
+        let n = by("new.txt");
+        assert_eq!(n.status, FileStatus::Added);
+        assert_eq!((n.add_lines, n.del_lines), (2, 0));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn branch_file_diff_shows_one_files_committed_hunks_and_guards_the_path() {
+        let (base, repo) = branch_fixture("branch-file-diff");
+
+        let diff = branch_file_diff(&repo, "main", "a.txt").unwrap();
+        assert!(diff.contains("+three"), "the branch's own change: {diff}");
+        assert!(
+            !diff.contains("upstream"),
+            "main's later commit is excluded"
+        );
+        assert_eq!(
+            branch_file_diff(&repo, "main", "upstream.txt").unwrap(),
+            "",
+            "a file the branch never touched diffs to nothing"
+        );
+        assert!(branch_file_diff(&repo, "main", "../a.txt").is_err());
+        assert!(branch_file_diff(&repo, "main", "/etc/passwd").is_err());
+        assert!(
+            branch_file_diff(&repo, "main", ":/a.txt").is_err(),
+            "pathspec magic is refused"
+        );
+        assert_eq!(
+            branch_file_diff(&repo, "main", "*.txt").unwrap(),
+            "",
+            "a glob is a literal filename, not a pattern"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

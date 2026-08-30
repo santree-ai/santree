@@ -55,7 +55,7 @@ const PREVIEW_DEFAULT = 480;
 const FLOW_GROUPS = [
   { title: "Triage", names: ["triage"] },
   { title: "Work", names: ["work", "fill-commit", "fill-pr"] },
-  { title: "Reviews", names: ["pr-review", "fix-ci"] },
+  { title: "Reviews", names: ["pr-review"] },
   { title: "English tutor", names: ["english-tutor", "english-analysis"] },
 ] as const;
 
@@ -489,7 +489,9 @@ function PreviewPane({
     debounced,
     repo,
     issueId || undefined,
-    issueId ? detail : undefined,
+    // `null` is Linear's "no such issue" — the preview treats it like an
+    // unresolved one and renders against the sample ticket instead.
+    issueId ? (detail ?? undefined) : undefined,
   );
   const { data: tasks = [] } = useTasks(repo);
   const error = data?.error ?? null;
