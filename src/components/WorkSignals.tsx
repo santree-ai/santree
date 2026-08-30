@@ -296,7 +296,7 @@ export function MilestoneHeading({
       onClick={onToggle}
       aria-expanded={open}
       aria-label={`${open ? "Collapse" : "Expand"} milestone ${label}`}
-      className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2 pt-2.5 pb-1.5 text-left font-mono text-[10px] tracking-[.05em] text-muted-4 uppercase transition-colors hover:bg-hover hover:text-fg-2"
+      className="tree-band flex w-full cursor-pointer items-center gap-1.5 px-2 pt-2.5 pb-1.5 text-left font-mono text-[10px] tracking-[.05em] text-muted-4 uppercase hover:text-fg-2"
     >
       <Chevron size={9} className="flex-none" />
       <span className="truncate">{label}</span>

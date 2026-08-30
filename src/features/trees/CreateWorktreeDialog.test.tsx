@@ -22,16 +22,11 @@ vi.mock("../../state/AppContext", () => ({
 
 vi.mock("../../lib/queries", () => ({
   WORK_AGENT_KEY: "work_agent",
+  // Only the fields the dialog reads. This used to also carry `state` and
+  // `stateType`, which exist on no domain type — an untyped `vi.mock` factory
+  // is exactly where an invented field survives, so keep this to what is real.
   useTasks: () => ({
-    data: [
-      {
-        id: "AK-1",
-        title: "Tighten the rate limiter",
-        project: "Platform",
-        state: "Todo",
-        stateType: "unstarted",
-      },
-    ],
+    data: [{ id: "AK-1", title: "Tighten the rate limiter", project: "Platform" }],
     isLoading: false,
   }),
   useRepoBranches: () => ({ data: [], isLoading: false }),
@@ -50,7 +45,7 @@ vi.mock("../../lib/queries", () => ({
     ],
   }),
   useResolvedSetting: () => ({ data: null }),
-  useCreateManualWorktree: () => ({ mutate: vi.fn(), isPending: false }),
+  useCreateWorktree: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 import { CreateWorktreeDialog } from "./CreateWorktreeDialog";

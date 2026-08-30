@@ -52,7 +52,12 @@ vi.mock("../../lib/queries", () => ({
   WORK_MODEL_KEY: "work_model",
   WORK_PERMISSION_MODE_KEY: "work_permission_mode",
   queryKeys: {
-    agentSessionPrefix: (repo: string, termKey: string) => ["agent-session", repo, termKey],
+    // Mirrors the real builder's arity (lib/queries.ts `agentSessionPrefix`).
+    // Dropping the agent argument here made both assertions below check a
+    // three-part key that production never emits — so a resume that dropped the
+    // wrong provider's cached resolution would still have passed.
+    agentSessionPrefix: (repo: string, termKey: string, agent?: string) =>
+      agent ? ["agent-session", repo, termKey, agent] : ["agent-session", repo, termKey],
   },
   useAgentSession: (
     _repo: string,
@@ -126,9 +131,14 @@ function mount(initial: AgentTabOptions = opts()) {
     },
   );
 
-  const spawn = () =>
+  const spawn = (kind?: "Claude" | "Codex") =>
     act(() => {
-      view.result.current.terminals.open({ title: REF, source: "issue", refId: REF });
+      view.result.current.terminals.open({
+        title: REF,
+        source: "issue",
+        refId: REF,
+        agent: kind ? { kind, repo: "acme/app", termKey: REF } : undefined,
+      });
     });
   const kill = () =>
     act(() => {
@@ -179,6 +189,23 @@ describe("useAgentTab", () => {
       expect(t.resolving()).toBe(false);
     });
 
+    /** A pane's identity is `(surface, provider)`, and `ensure` reuses a pane by
+     *  it — so the provider a *live* worktree terminal reports has to be the one
+     *  actually running in it. Re-pointing it at the worktree's newly configured
+     *  agent would make the running pane look like a different one and spawn a
+     *  second PTY on the same worktree, silently, beside the first. The setting
+     *  takes effect at the next launch, as it always has. */
+    it("keeps a live pane's provider even when the worktree's agent is changed", () => {
+      const t = mount();
+      t.spawn("Claude");
+
+      t.rerender({ o: opts({ agent: "Codex" }) });
+
+      expect(t.tab().live).toBe(true);
+      expect(t.tab().agent?.kind).toBe("Claude");
+      expect(t.result.current.terminals.tabs).toHaveLength(1);
+    });
+
     // Quitting the agent kills the PTY, so the session vanishes from the registry.
     // Without the latch the tab reads "no live session ⇒ resolve a launch" again,
     // re-seeds, and the agent the user just quit comes straight back — the restart
@@ -208,7 +235,7 @@ describe("useAgentTab", () => {
       expect(t.tab().ended).toBe(false);
       expect(t.resolving()).toBe(true);
       expect(t.removeQueries).toHaveBeenCalledWith({
-        queryKey: ["agent-session", "acme/app", REF],
+        queryKey: ["agent-session", "acme/app", REF, "Claude"],
       });
     });
 
@@ -221,7 +248,19 @@ describe("useAgentTab", () => {
       act(() => t.tab().onExited());
 
       expect(t.removeQueries).toHaveBeenCalledWith({
-        queryKey: ["agent-session", "acme/app", REF],
+        queryKey: ["agent-session", "acme/app", REF, "Claude"],
+      });
+    });
+
+    /** The drop is scoped to the provider that exited: the same surface can hold
+     *  a Codex resolution the Claude tab has no business evicting. */
+    it("drops only the exiting provider's cached resolution", () => {
+      const t = mount(opts({ agent: "Codex" }));
+
+      act(() => t.tab().onExited());
+
+      expect(t.removeQueries).toHaveBeenCalledWith({
+        queryKey: ["agent-session", "acme/app", REF, "Codex"],
       });
     });
 

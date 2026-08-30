@@ -7,6 +7,8 @@
   "packageManager": "pnpm@11.0.6",
   "scripts": {
     "dev": "tauri dev",
+    "dev:alt": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "dev:alt:seed": "node scripts/seed-dev-appdata.mjs",
     "dev:vite": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",

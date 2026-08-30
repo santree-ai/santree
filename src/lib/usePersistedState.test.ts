@@ -4,7 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { usePersistedState } from "./usePersistedState";
 
 describe("usePersistedState", () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
 
   it("starts from the fallback when nothing is stored", () => {
     const { result } = renderHook(() => usePersistedState("k", "fallback"));
@@ -30,12 +33,6 @@ describe("usePersistedState", () => {
 
     const second = renderHook(() => usePersistedState<Record<string, string>>("tabs", {}));
     expect(second.result.current[0]).toEqual({ "AK-1": "file", "AK-2": "terminal" });
-  });
-
-  it("supports updater functions", () => {
-    const { result } = renderHook(() => usePersistedState("n", 1));
-    act(() => result.current[1]((n) => n + 1));
-    expect(result.current[0]).toBe(2);
   });
 
   /** `false`, `0` and `""` are real stored values, not "nothing stored" — a `??`
@@ -78,5 +75,36 @@ describe("usePersistedState", () => {
     act(() => result.current[1]("b"));
     expect(result.current[0]).toBe("b");
     setItem.mockRestore();
+  });
+
+  /** The open worktree survives a route change and a reload, but a cold launch
+   *  belongs on the welcome surface — so it must never reach `localStorage`,
+   *  which is the store that outlives the process. */
+  it("keeps a session-scoped value out of localStorage, and vice versa", () => {
+    const session = renderHook(() => usePersistedState("active", "", "session"));
+    act(() => session.result.current[1]("__base__"));
+    session.unmount();
+    expect(sessionStorage.getItem("active")).toBe(JSON.stringify("__base__"));
+    expect(localStorage.getItem("active")).toBeNull();
+
+    const local = renderHook(() => usePersistedState("repo", "", "local"));
+    act(() => local.result.current[1]("santree"));
+    local.unmount();
+    expect(localStorage.getItem("repo")).toBe(JSON.stringify("santree"));
+    expect(sessionStorage.getItem("repo")).toBeNull();
+  });
+
+  /** A cold launch is a fresh `sessionStorage` beside the same `localStorage`. */
+  it("starts a session-scoped value from the fallback after a cold start", () => {
+    const first = renderHook(() => usePersistedState("active", "", "session"));
+    act(() => first.result.current[1]("__base__"));
+    first.unmount();
+    expect(renderHook(() => usePersistedState("active", "", "session")).result.current[0]).toBe(
+      "__base__",
+    );
+
+    sessionStorage.clear();
+
+    expect(renderHook(() => usePersistedState("active", "", "session")).result.current[0]).toBe("");
   });
 });

@@ -9,6 +9,7 @@ import type {
   WorktreeTab,
 } from "../../bindings";
 import type { PendingLaunch } from "../../state/AppContext";
+import { worktree as fxWorktree } from "../../test/fixtures";
 import { palette } from "../../theme/colors";
 import type { TerminalTab } from "../terminal/orchestrator";
 import { aiWorkDot } from "./FilePickerPanel";
@@ -33,30 +34,16 @@ import {
 } from "./model";
 import { tabsToCloseForWorktree } from "./useWorktreeDeletion";
 
-/** Minimal Worktree as the backend ships it: no invented status/activity. */
-function worktree(id: string): Worktree {
-  return {
-    id,
-    title: `Task ${id}`,
-    status: null,
-    addLines: 0,
-    delLines: 0,
-    dirty: false,
-    ahead: 0,
-    behind: 0,
-    unpushed: 0,
-    remoteBehind: 0,
-    pullConflict: false,
-    agent: "Claude",
-    activity: null,
-    branch: `santree/${id.toLowerCase()}`,
-    path: "/tmp/x",
-    project: null,
-    baseBranch: "main",
-    setupRan: true,
-    pending: false,
-  };
-}
+/** Minimal Worktree as the backend ships it: no invented status/activity.
+ *
+ *  The overrides parameter is not decoration. Without it `unpushed` was pinned
+ *  at 0 here, and `unpushed > 0` — a branch with commits GitHub has not seen —
+ *  is the whole input to `prDiffModeFor`'s `localAhead` answer, the one that
+ *  makes DiffPane show the local diff *with* a notice instead of the PR's
+ *  patch. See `src/test/fixtures.ts` on why a pinned default is a closed
+ *  branch. */
+const worktree = (id: string, over: Partial<Worktree> = {}) =>
+  fxWorktree(id, { path: "/tmp/x", ...over });
 
 describe("withLiveWorktreeStatus", () => {
   it("overrides status with the linked Linear task's real workflow state", () => {

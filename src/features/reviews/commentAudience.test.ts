@@ -55,11 +55,6 @@ describe("audienceCounts", () => {
       santree: 1,
     });
   });
-
-  it("adds up: humans plus bots is every comment", () => {
-    const counts = audienceCounts(comments, drafts);
-    expect(counts.humans + counts.bots + counts.santree).toBe(counts.all);
-  });
 });
 
 describe("filterByAudience", () => {

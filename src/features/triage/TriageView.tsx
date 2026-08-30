@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentKind, SessionState, TriageTicket } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { DiscussionPane, DiscussionSkeleton } from "../../components/IssueDiscussion";
-import { AgentIcon, TelescopeIcon } from "../../components/icons";
+import { TelescopeIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import {
   Button,
@@ -38,7 +38,6 @@ import {
   INVESTIGATE_MODEL_KEY,
   INVESTIGATE_PERMISSION_MODE_KEY,
   TRIAGE_GOOD_CITIZEN_KEY,
-  useBaseWorktree,
   useLinearReadOnly,
   usePrefetchOnHover,
   useRefreshTriage,
@@ -58,7 +57,6 @@ import {
 import { useApp, useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import { accentActiveStyle, alpha } from "../../theme/colors";
-import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { DetailTabs } from "./DetailTabs";
 import {
@@ -80,9 +78,8 @@ import {
   type TriageLanes,
   triageLanes,
 } from "./order";
-import { orderedProviders, providersByRef, triageTerminalRef } from "./providerSessions";
+import { orderedProviders, providersByRef, triageTermKey } from "./providerSessions";
 import { QueueRow } from "./QueueRow";
-import { RepoSessionPane } from "./RepoSessionPane";
 import { ScheduleSection } from "./ScheduleSection";
 
 /** Width of the queue column. Fixed: the resizable app sidebar belongs to the
@@ -94,53 +91,6 @@ function QueueLaneHeader({ label, count }: { label: string; count: number }) {
     <div className="flex items-center gap-1.5 px-2 pt-1 pb-1 font-mono text-[8.5px] tracking-[.08em] text-muted-5 uppercase">
       <span>{label}</span>
       <span>{count}</span>
-    </div>
-  );
-}
-
-/**
- * The repo-session row at the top of the rail. Selecting it opens a provider
- * session on the base checkout that isn't attached to any ticket.
- *
- * The provider mark reflects the current default while the detail surface can
- * retain simultaneous provider tabs.
- */
-function RepoSessionEntry({
-  agentKind,
-  active,
-  onSelect,
-}: {
-  agentKind: AgentKind;
-  active: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <div
-      className="entity-card relative mb-2 flex items-center gap-2.5 px-[11px] py-2.5 text-[12px]"
-      data-active={active}
-      style={{
-        color: active ? "var(--accent)" : "var(--color-muted-2)",
-      }}
-    >
-      <button
-        type="button"
-        onClick={onSelect}
-        aria-label={`Open Triage desk with ${agentProvider(agentKind).label}`}
-        title={`Open the Triage desk with ${agentProvider(agentKind).label}`}
-        className="absolute inset-0 cursor-pointer rounded-[9px]"
-      />
-      <span
-        className="flex h-7 w-7 flex-none items-center justify-center rounded-[var(--radius-sm)] border border-line-2 bg-input text-[14px]"
-        aria-hidden
-      >
-        <AgentIcon kind={agentKind} size={15} />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block text-[11.5px] font-medium text-fg-2">Triage desk</span>
-        <span className="mt-0.5 block truncate font-mono text-[9.5px] text-muted-4">
-          permanent workspace
-        </span>
-      </span>
     </div>
   );
 }
@@ -398,10 +348,15 @@ export function TriageView() {
     return result;
   }, [activeRepo, sessionStates]);
 
+  // A ticket can have one live investigation per provider, so a pane is found by
+  // the pair: the surface's `term_key` and the agent running in it.
   const hasLiveProvider = useCallback(
     (refId: string, provider: AgentKind) =>
       terminalTabs.some(
-        (tab) => tab.source === "triage" && tab.refId === triageTerminalRef(refId, provider),
+        (tab) =>
+          tab.source === "triage" &&
+          tab.refId === triageTermKey(refId) &&
+          tab.agent?.kind === provider,
       ),
     [terminalTabs],
   );
@@ -556,23 +511,6 @@ export function TriageView() {
   // The selected ticket, kept valid as the queue loads / changes.
   const { activeId, activeTicket, select } = useTriageSelection(visible);
 
-  // The repo session is its own selection, not a ticket id: threading a sentinel
-  // through ticket selection would make the two concepts share invalid state.
-  const [repoSessionOpen, setRepoSessionOpen] = useState(false);
-  const [repoSessionAgent, setRepoSessionAgent] = useState<AgentKind>(agentKind);
-  const { data: baseWorktree } = useBaseWorktree(activeRepo);
-  const selectTicket = useCallback(
-    (id: string) => {
-      setRepoSessionOpen(false);
-      select(id);
-    },
-    [select],
-  );
-  const openRepoSession = useCallback(() => {
-    setRepoSessionAgent(agentKind);
-    setRepoSessionOpen(true);
-  }, [agentKind]);
-
   // Header and body both key off `activeId`, so they switch together in one
   // render — never a new title over the previous ticket's content.
   // Every id here came out of Linear's own queue, so "no such issue" isn't a state
@@ -654,10 +592,10 @@ export function TriageView() {
   // select it once and drop the request, so a later manual selection sticks.
   useEffect(() => {
     if (!triageFocus) return;
-    selectTicket(triageFocus);
+    select(triageFocus);
     setTab(triageFocus, agentKind);
     consumeTriageFocus();
-  }, [triageFocus, selectTicket, setTab, consumeTriageFocus, agentKind]);
+  }, [triageFocus, select, setTab, consumeTriageFocus, agentKind]);
 
   // Vim-style queue navigation (j/k, ⌘I, ⌘O).
   // j/k must land you back on the queue, not scroll it behind an open session.
@@ -665,7 +603,7 @@ export function TriageView() {
     ordered,
     activeId,
     detail,
-    onSelect: selectTicket,
+    onSelect: select,
     onInvestigate: investigate,
   });
 
@@ -686,7 +624,7 @@ export function TriageView() {
       onManualDragOver={dragManualOver}
       onManualDragEnd={finishManualDrag}
       onManualMove={moveManualWithKeyboard}
-      onSelect={selectTicket}
+      onSelect={select}
       onToggleSelect={toggle}
       onHover={onHoverRow}
     />
@@ -781,16 +719,6 @@ export function TriageView() {
           )}
           <ScheduleSection schedules={schedules} />
           <div className="flex-1 overflow-y-auto p-2">
-            {/* Above the queue, like Trees' base entry: the one row here that
-                isn't a ticket. Needs the base branch's name, so it waits for
-                that read rather than rendering a nameless row. */}
-            {baseWorktree && (
-              <RepoSessionEntry
-                agentKind={agentKind}
-                active={repoSessionOpen}
-                onSelect={openRepoSession}
-              />
-            )}
             {loading ? (
               <QueueSkeleton />
             ) : ordered.length === 0 ? (
@@ -824,38 +752,14 @@ export function TriageView() {
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col bg-app">
-          {repoSessionOpen && baseWorktree ? (
-            // Takes the whole detail area — there's no ticket to head it with, and
-            // the queue is still one click away in the rail. Runs the same agent
-            // config the Investigation action uses, since it's the Triage view's
-            // agent either way.
-            <div className="flex min-h-0 flex-1 flex-col">
-              <DetailTabs
-                tab={repoSessionAgent}
-                includeDiscussion={false}
-                providers={orderedProviders(
-                  new Set([...providersFor(`__repo__:${activeRepo}`), repoSessionAgent]),
-                )}
-                onTab={(tab) => {
-                  if (tab !== "discussion") setRepoSessionAgent(tab);
-                }}
-              />
-              <RepoSessionPane
-                key={repoSessionAgent}
-                repo={activeRepo}
-                branch={baseWorktree.branch}
-                cwd={repoPath}
-                agentKind={repoSessionAgent}
-              />
-            </div>
-          ) : loading ? (
+          {loading ? (
             // The queue hasn't landed yet, so we don't know there's nothing to
             // triage — "All caught up" here would be a cheerful lie.
             <DiscussionSkeleton />
           ) : ordered.length === 0 ? (
             <AllCaughtUp goodCitizen={goodCitizen} teamWaiting={teamWaiting} onTriage={onTriage} />
           ) : !activeTicket ? (
-            <TriageHome tickets={ordered} onSelect={selectTicket} onTriage={onTriage} />
+            <TriageHome tickets={ordered} onSelect={select} onTriage={onTriage} />
           ) : (
             <>
               {/* Header renders instantly from the queue row; richer fields

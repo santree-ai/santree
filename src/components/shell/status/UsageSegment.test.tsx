@@ -162,8 +162,17 @@ describe("UsageSegment — services", () => {
 
 const WEEK = 7 * 24 * HOUR;
 
-function window(name: string, usedPct: number, resetsInMs: number): ClaudeRateLimitWindow {
-  return { window: name, usedPct, resetsAtMs: Date.now() + resetsInMs, updatedAtMs: Date.now() };
+/** `resetsInMs` is nullable because `ClaudeRateLimitWindow.resetsAtMs` is: the
+ *  binding documents `None` as "the payload carried none", and both the bar and
+ *  the panel row have a distinct arm for it. Pinning it non-null closed that arm
+ *  for the whole file. */
+function window(name: string, usedPct: number, resetsInMs: number | null): ClaudeRateLimitWindow {
+  return {
+    window: name,
+    usedPct,
+    resetsAtMs: resetsInMs === null ? null : Date.now() + resetsInMs,
+    updatedAtMs: Date.now(),
+  };
 }
 
 /** The statusline rows a busy account has: the 5h window, the weekly one, and
@@ -255,6 +264,21 @@ describe("UsageSegment — Claude windows", () => {
     expect(resetCount(row)).toBe(1);
     expect(row.textContent).toContain("5 hours");
     expect(row.textContent).not.toContain("Weekly");
+  });
+
+  /** Claude does not always say when a window refills. The bar then shows the
+   *  percentage on its own rather than a countdown to a time nobody reported —
+   *  a "resets in 0m" would be a fact santree invented. */
+  it("shows a window with no reported reset as a bare percentage", () => {
+    stored = [window("five_hour", 31, null)];
+    render(<UsageSegment />);
+    const trigger = screen.getByRole("button", { name: /Usage/ });
+    expect(trigger.textContent).toContain("31% used");
+    // Nothing trails the percentage: not a duration, and not the "now" a
+    // `formatUntil` against a missing reset time would produce.
+    expect(trigger.textContent).not.toMatch(/31% used \S/);
+    // ...and the panel's own row drops its countdown line for the same reason.
+    expect(resetCount(claudeRow(openPanel()))).toBe(0);
   });
 
   it("prefers Anthropic's own answer over the stored rows when it has one", () => {

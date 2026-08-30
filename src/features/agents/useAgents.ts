@@ -15,6 +15,7 @@ import {
 } from "../../lib/queries";
 import { useLiveNow } from "../../lib/relativeTime";
 import type { TerminalTab } from "../terminal/orchestrator";
+import { paneAddress } from "../terminal/paneAddress";
 import { useSessionTitles } from "../terminal/sessionTitles";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { type AgentEntry, buildAgentEntries, countAttention, type RepoData } from "./registry";
@@ -61,9 +62,11 @@ export function useAgentEntries(
 }
 
 /**
- * Which agent the process table sees in each open pane, by the pane's
- * `term_key` — santree's own answer to "which CLI is actually running here",
- * independent of what it launched or what a hook said (see `agent_procs.rs`).
+ * Which agent the process table sees in each open pane, by the pane's address —
+ * its `term_key` and the provider santree launched in it — santree's own answer
+ * to "which CLI is actually running here", independent of what it launched or
+ * what a hook said (see `agent_procs.rs`). Keyed by the pair because a surface
+ * can hold a pane per provider, and the scan answers per pane.
  *
  * The scan is bound to the panes rather than to a clock: opening or closing one
  * invalidates the read immediately, which is what makes a freshly opened Codex
@@ -72,12 +75,19 @@ export function useAgentEntries(
  * existing pane. Orca triggers the same scan on pane bind and on the shell's
  * OSC 133 command start/finish; santree has no shell integration to hook, so
  * the tab set is the bind signal it does have.
+ *
+ * Exported because the status bar's live count needs the same tier-2 signal the
+ * fold does — it is one of the arbiter's three inputs (`lib/paneAgentOwner.ts`),
+ * and a consumer that skipped it would be back to counting santree's launch
+ * record alone. Two mounted callers cost one query and one `ps`: they share the
+ * cache key, and the two invalidations land in the same tick, where the second
+ * rides the first's in-flight fetch.
  */
-function useDetectedAgents(terminals: TerminalTab[]): ReadonlyMap<string, AgentKind> {
+export function useDetectedAgents(terminals: TerminalTab[]): ReadonlyMap<string, AgentKind> {
   const qc = useQueryClient();
   // The pane keys, as one string, so the effect fires when the *set* changes and
   // not on every re-render that hands back a new array.
-  const panes = terminals.map((t) => t.refId ?? t.key).join("\u0000");
+  const panes = terminals.map((t) => paneAddress(t.refId ?? t.key, t.agent?.kind)).join("\u001f");
   useEffect(() => {
     // Nothing open is nothing to scan, and the query is idle in that state
     // anyway — so the last pane closing costs no `ps`.
@@ -86,7 +96,10 @@ function useDetectedAgents(terminals: TerminalTab[]): ReadonlyMap<string, AgentK
   }, [qc, panes]);
 
   const { data } = useAgentProcesses(terminals.length);
-  return useMemo(() => new Map((data ?? []).map((p) => [p.termKey, p.agentKind])), [data]);
+  return useMemo(
+    () => new Map((data ?? []).map((p) => [paneAddress(p.termKey, p.paneAgentKind), p.agentKind])),
+    [data],
+  );
 }
 
 /**

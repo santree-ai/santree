@@ -61,3 +61,8 @@ sourcemaps
 # rule above.
 website/src/routeTree.gen.ts
 *.tsbuildinfo
+
+# pnpm writes a store here when it refreshes deps non-interactively (which a
+# version bump triggers). Build cache from a validation run, never product code
+# — ignored so a broad `git add` during a release cut can't sweep it in.
+.pnpm-store/

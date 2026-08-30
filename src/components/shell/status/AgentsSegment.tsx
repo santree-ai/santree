@@ -11,15 +11,19 @@
  * Liveness is decided the way the tree decides it — a session's PTY is a child of
  * this app, so no live terminal means the process is gone whatever its last
  * recorded state says — through the registry's own helpers, so the bar can never
- * claim a running agent the tree doesn't list.
+ * claim a running agent the tree doesn't list. Ownership is decided the same
+ * way, through `lib/paneAgentOwner.ts`, so it can never *miss* one either: that
+ * is the drift `AgentsSegment.test.tsx` now pins.
  */
 import { useMemo } from "react";
 
-import type { SessionState } from "../../../bindings";
-import { bucketOf, parseTermKey, terminalRefFor } from "../../../features/agents/registry";
-import { useAttentionCount } from "../../../features/agents/useAgents";
+import type { AgentKind, SessionState } from "../../../bindings";
+import { bucketOf, liveTabFor } from "../../../features/agents/registry";
+import { useAttentionCount, useDetectedAgents } from "../../../features/agents/useAgents";
 import type { TerminalTab } from "../../../features/terminal/orchestrator";
+import { paneAddress } from "../../../features/terminal/paneAddress";
 import { useTerminals } from "../../../features/terminal/TerminalsContext";
+import { resolvePaneAgentOwner } from "../../../lib/paneAgentOwner";
 import { useSessionStates } from "../../../lib/queries";
 import { sessionStateMeta } from "../../../theme/colors";
 import { AgentsIcon } from "../../icons";
@@ -27,22 +31,37 @@ import { STATUS_SEGMENT } from "./StatusSegment";
 
 /** Sessions with a live PTY in this app that haven't exited — the agents that
  *  are actually running right now, as opposed to rows the table still holds —
- *  plus the ones santree has launched that no row speaks for yet.
+ *  plus every pane running an agent that no row speaks for yet.
  *
- *  That second group is not a rounding error: Codex fires `SessionStart` on its
- *  first submitted turn, so a tab opened and left at the prompt has a running
- *  agent and no row (see `registry.ts`). The tree counts it; so must this. */
-function countLive(sessions: SessionState[], terminals: TerminalTab[]): number {
+ *  That second group is not a rounding error, and it is not just santree's own
+ *  launches: Codex fires `SessionStart` on its first submitted turn, so a tab
+ *  opened and left at the prompt has a running agent and no row, and a user can
+ *  start a CLI by hand in a pane santree opened as a plain shell. Which agent —
+ *  if any — owns such a pane is `resolvePaneAgentOwner`'s question, asked here
+ *  with exactly the signals `buildAgentEntries` asks it with. Reading the launch
+ *  record directly is what this used to do, and it undercounted the tree by
+ *  every hand-started agent. */
+function countLive(
+  sessions: SessionState[],
+  terminals: TerminalTab[],
+  detected: ReadonlyMap<string, AgentKind>,
+): number {
   const announced = new Set<string>();
   let n = 0;
   for (const s of sessions) {
-    const ref = terminalRefFor(s.termKey, parseTermKey(s.termKey), s.agentKind);
-    const tab = ref && terminals.find((t) => t.source === ref.source && t.refId === ref.refId);
+    const tab = liveTabFor(s.termKey, s.agentKind, terminals);
     if (!tab) continue;
     announced.add(tab.key);
     if (bucketOf(s.state, true) !== "done") n++;
   }
-  for (const t of terminals) if (t.agent && !announced.has(t.key)) n++;
+  for (const t of terminals) {
+    if (announced.has(t.key)) continue;
+    const owner = resolvePaneAgentOwner({
+      detectedAgent: detected.get(paneAddress(t.refId ?? t.key, t.agent?.kind)),
+      launchAgent: t.agent?.kind,
+    });
+    if (owner) n++;
+  }
   return n;
 }
 
@@ -51,7 +70,11 @@ export function AgentsSegment() {
   const { data: sessions } = useSessionStates();
   const { tabs } = useTerminals();
   const needsYou = useAttentionCount();
-  const running = useMemo(() => (sessions ? countLive(sessions, tabs) : null), [sessions, tabs]);
+  const detected = useDetectedAgents(tabs);
+  const running = useMemo(
+    () => (sessions ? countLive(sessions, tabs, detected) : null),
+    [sessions, tabs, detected],
+  );
 
   // No `aria-label`: the two counts below are already the reading, and a plain
   // span can't carry one anyway.

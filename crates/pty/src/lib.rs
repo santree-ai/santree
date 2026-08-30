@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use santree_core::domain::AgentKind;
 
 mod ring;
 use ring::Ring;
@@ -48,7 +49,20 @@ pub struct OpenOpts {
     /// What the caller calls this session (santree's `term_key`). Opaque here —
     /// stored and handed back on adoption so a reloaded page can match a live
     /// session to the surface that owns it. Never a path or a lookup key.
+    ///
+    /// **Half of an identity, not all of it.** A surface hosts one session per
+    /// provider, so this is only unique when paired with [`OpenOpts::agent_kind`]
+    /// — see that field.
     pub label: String,
+    /// Which agent santree launched in this session, or `None` for a plain shell.
+    ///
+    /// The second half of the session's identity, kept as its own field rather
+    /// than folded into `label`: the label is santree's `term_key`, and
+    /// `terminal_sessions` keys the same surface by a separate provider column,
+    /// so a label carrying `::<provider>` matched nothing on the way back and a
+    /// live agent read as exited. Two providers on one surface are therefore two
+    /// sessions here, distinguishable by this field alone.
+    pub agent_kind: Option<AgentKind>,
 }
 
 /// Where a session's output goes right now. `None` while detached — the pump
@@ -101,6 +115,9 @@ pub struct SessionInfo {
     pub owner: String,
     /// The [`OpenOpts::label`] this session was opened under.
     pub label: String,
+    /// The [`OpenOpts::agent_kind`] this session was opened under — the other
+    /// half of its identity, since one label can host one session per provider.
+    pub agent_kind: Option<AgentKind>,
     /// The grid the pty was last resized to.
     pub cols: u16,
     pub rows: u16,
@@ -162,6 +179,7 @@ impl PtyManager {
 
         let owner = opts.owner.clone();
         let label = opts.label.clone();
+        let agent_kind = opts.agent_kind;
         let cmd = build_command(&opts);
         let cwd = cmd.get_cwd().map(|cwd| cwd.to_string_lossy().into_owned());
         let program = cmd
@@ -225,6 +243,7 @@ impl PtyManager {
                         command: program,
                         owner,
                         label,
+                        agent_kind,
                         cols: size.cols,
                         rows: size.rows,
                         // Set live by `sessions()`; the stored value is only a
@@ -250,9 +269,10 @@ impl PtyManager {
         }
 
         log::info!(
-            "opened pty session {id} (command: {}, label: {})",
+            "opened pty session {id} (command: {}, label: {}, agent: {})",
             opts.command,
-            opts.label
+            opts.label,
+            opts.agent_kind.map(AgentKind::as_str).unwrap_or("-")
         );
         Ok(id)
     }
@@ -385,7 +405,8 @@ impl PtyManager {
     /// die with the *page*, because every handle to it — the tab list, the byte
     /// channel, the xterm — was thrown away by a reload and nothing on the new
     /// page could reach it again. The ring removes that constraint: a reloaded
-    /// page can re-derive all three from `label` and catch up from the stream.
+    /// page can re-derive all three from `(label, agent_kind)` and catch up from
+    /// the stream.
     /// So the tag stops being a kill list and becomes a hand-over.
     ///
     /// Sessions are re-tagged here, not by the caller, so that a second reload
@@ -412,32 +433,37 @@ impl PtyManager {
         };
         adopted.sort_by_key(|info| info.id);
 
-        // A label names one surface, and a surface hosts one session, so two
-        // live sessions under the same label means an earlier page opened a
-        // duplicate. Only one of them can ever be reached again — the caller
-        // looks sessions up by label — so keep the newest (highest id, the one
-        // whose output is current) and end the rest here rather than hand back
-        // a list with unreachable entries in it.
-        let mut newest: HashMap<&str, SessionId> = HashMap::new();
+        // A label names one surface, and a surface hosts one session *per
+        // provider*, so two live sessions under the same (label, agent_kind)
+        // means an earlier page opened a duplicate. Only one of them can ever be
+        // reached again — the caller looks sessions up by that pair — so keep
+        // the newest (highest id, the one whose output is current) and end the
+        // rest here rather than hand back a list with unreachable entries in it.
+        //
+        // The pair, never the label alone: a Claude and a Codex session on one
+        // surface (an AI review of the same PR under both) are two panes the
+        // caller can host at once, and deduping by label would kill one of them.
+        let mut newest: HashMap<(&str, Option<AgentKind>), SessionId> = HashMap::new();
         for info in &adopted {
             if info.label.is_empty() {
                 continue;
             }
             newest
-                .entry(&info.label)
+                .entry((&info.label, info.agent_kind))
                 .and_modify(|id| *id = (*id).max(info.id))
                 .or_insert(info.id);
         }
         let superseded: Vec<SessionId> = adopted
             .iter()
             .filter(|info| {
-                !info.label.is_empty() && newest.get(info.label.as_str()) != Some(&info.id)
+                !info.label.is_empty()
+                    && newest.get(&(info.label.as_str(), info.agent_kind)) != Some(&info.id)
             })
             .map(|info| info.id)
             .collect();
         if !superseded.is_empty() {
             log::info!(
-                "closing {} superseded pty session(s) sharing a label with a newer one",
+                "closing {} superseded pty session(s) sharing a label and provider with a newer one",
                 superseded.len()
             );
             for id in &superseded {
@@ -983,6 +1009,61 @@ mod tests {
         assert!(!mgr.sessions().iter().any(|s| s.id == stale));
 
         for id in [newest, other] {
+            mgr.close(id).expect("close");
+        }
+    }
+
+    /// A surface hosts one session *per provider* — the real database holds a
+    /// Claude and a Codex review of the same PR — so two sessions sharing a label
+    /// are a duplicate only when they share the provider too. Deduping by label
+    /// alone would end one of two panes the caller can host at once, and the user
+    /// would watch half their review disappear on a reload.
+    #[test]
+    fn adopt_others_supersedes_within_a_provider_and_never_across_two() {
+        let _serial = pty_guard();
+        let mgr = PtyManager::new();
+        let open = |owner: &str, label: &str, agent_kind: Option<AgentKind>| {
+            mgr.open(
+                OpenOpts {
+                    command: "sh".into(),
+                    cols: 80,
+                    rows: 24,
+                    owner: owner.into(),
+                    label: label.into(),
+                    agent_kind,
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .expect("open session")
+        };
+        let surface = "ai-review:acme/web#7";
+        let stale_codex = open("page-1", surface, Some(AgentKind::Codex));
+        let codex = open("page-2", surface, Some(AgentKind::Codex));
+        let claude = open("page-2", surface, Some(AgentKind::Claude));
+
+        let adopted = mgr.adopt_others("page-3");
+
+        assert_eq!(
+            adopted.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![codex, claude],
+            "only the older session of the SAME provider is superseded"
+        );
+        assert!(!mgr.sessions().iter().any(|s| s.id == stale_codex));
+        // Both survivors are reachable, and each carries the other half of its
+        // identity — which is what `live_terminals` joins the durable rows on.
+        assert_eq!(
+            mgr.sessions()
+                .iter()
+                .map(|s| (s.label.as_str(), s.agent_kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (surface, Some(AgentKind::Codex)),
+                (surface, Some(AgentKind::Claude)),
+            ]
+        );
+
+        for id in [codex, claude] {
             mgr.close(id).expect("close");
         }
     }

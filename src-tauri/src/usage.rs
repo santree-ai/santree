@@ -30,7 +30,10 @@ use specta::Type;
 use tauri::AppHandle;
 use tauri_specta::Event;
 
-use santree_core::domain::{LastMessageFrom, ModelUsage, SessionUsage, UsageReport, UsageTotals};
+use santree_core::domain::{
+    LastMessageFrom, ModelUsage, SessionDetail, SessionModelSpend, SessionSpend, SessionSubagent,
+    SessionTurn, SessionUsage, SubagentStatus, UsageReport, UsageTotals,
+};
 
 use crate::pricing::PriceTable;
 use crate::session::SessionSummary;
@@ -109,6 +112,104 @@ struct Line {
     #[serde(rename = "isMeta", default)]
     is_meta: bool,
     message: Option<Msg>,
+    /// A tool's structured result. Only a Task's is read, and only its
+    /// `{agentId, status}` — see [`AgentResult`].
+    #[serde(rename = "toolUseResult")]
+    tool_use_result: Option<AgentResult>,
+}
+
+/// A `toolUseResult`'s subagent fields, when it has any.
+///
+/// Hand-deserialized for the same reason [`Blocks`] is: this key holds *every*
+/// tool's result, and a Bash or Read result can be megabytes on a line whose
+/// only interesting content is two short strings. It is also not always an
+/// object (a bare string, an array), and a derived struct would fail the whole
+/// line on those — costing that line its usage event. Every other shape is
+/// consumed as "no agent fields".
+#[derive(Default)]
+struct AgentResult {
+    agent_id: Option<String>,
+    status: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for AgentResult {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+
+        #[derive(Deserialize)]
+        #[serde(field_identifier)]
+        enum Field {
+            #[serde(rename = "agentId")]
+            AgentId,
+            #[serde(rename = "status")]
+            Status,
+            #[serde(other)]
+            Other,
+        }
+
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = AgentResult;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a tool result")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<AgentResult, A::Error> {
+                let mut out = AgentResult::default();
+                while let Some(key) = map.next_key::<Field>()? {
+                    match key {
+                        Field::AgentId => {
+                            out.agent_id = map
+                                .next_value::<serde_json::Value>()?
+                                .as_str()
+                                .map(str::to_string)
+                        }
+                        Field::Status => {
+                            out.status = map
+                                .next_value::<serde_json::Value>()?
+                                .as_str()
+                                .map(str::to_string)
+                        }
+                        Field::Other => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(out)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<AgentResult, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(AgentResult::default())
+            }
+
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<AgentResult, E> {
+                Ok(AgentResult::default())
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<AgentResult, E> {
+                Ok(AgentResult::default())
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<AgentResult, E> {
+                Ok(AgentResult::default())
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<AgentResult, E> {
+                Ok(AgentResult::default())
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<AgentResult, E> {
+                Ok(AgentResult::default())
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<AgentResult, E> {
+                Ok(AgentResult::default())
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 #[derive(Deserialize)]
@@ -350,6 +451,18 @@ impl Toks {
     fn cache_write(&self) -> f64 {
         self.cache_5m + self.cache_1h
     }
+
+    /// Field-wise max — how the rows sharing one dedup key are folded together
+    /// (see [`aggregate`]).
+    fn max_of(self, other: &Toks) -> Toks {
+        Toks {
+            input: self.input.max(other.input),
+            output: self.output.max(other.output),
+            cache_read: self.cache_read.max(other.cache_read),
+            cache_5m: self.cache_5m.max(other.cache_5m),
+            cache_1h: self.cache_1h.max(other.cache_1h),
+        }
+    }
 }
 
 /// One billable turn (an `assistant` line with a `usage`).
@@ -361,6 +474,19 @@ struct Ev {
     model: String,
     ts_ms: i64,
     toks: Toks,
+}
+
+/// What identifies one billable turn across every file it appears in: its
+/// `message.id`, plus the `requestId` (possibly absent) so genuinely distinct
+/// turns sharing an id stay separate. `None` for a turn without an id — a
+/// resumed session copies prior turns into a new file, and only an id lets those
+/// be recognised as the same turn.
+fn dedup_key(e: &Ev) -> Option<String> {
+    let id = e.id.as_ref()?;
+    Some(format!(
+        "{id}\u{0}{}",
+        e.request_id.as_deref().unwrap_or("")
+    ))
 }
 
 /// The most recent turn's context size (only meaningful for a *main* transcript).
@@ -377,9 +503,17 @@ struct Ctx {
 struct Summary {
     /// The first user prompt (one line, capped — see [`one_line`]).
     title: Option<String>,
+    /// That same prompt in full, capped at [`FULL_PROMPT_CHARS`] — what the
+    /// expanded row shows. Captured here rather than by a second read: the line
+    /// it comes from is already in hand when `title` is set.
+    first_prompt: Option<String>,
+    /// Whether [`Self::first_prompt`] was cut at the cap.
+    first_prompt_truncated: bool,
     /// The latest prose from either side, trimmed likewise, and whose it is.
     last_message: Option<String>,
     last_from: Option<LastMessageFrom>,
+    /// The last [`RECENT_TURNS`] display lines with their authors, oldest first.
+    recent: VecDeque<(LastMessageFrom, String)>,
     /// User + assistant lines carrying prose.
     message_count: u32,
     /// Timestamps of the first and last user/assistant lines.
@@ -401,19 +535,118 @@ struct FileData {
     /// Present only for a main transcript: its last turn's context fill.
     context: Option<Ctx>,
     summary: Summary,
+    /// The last status this transcript reported for each Task subagent it
+    /// spawned, keyed by agent id — a subagent's own transcript never records
+    /// how it ended, only its parent does. Raw CLI vocabulary; mapped at the
+    /// edge by [`SubagentStatus::from_report`]. Empty for a subagent transcript.
+    agent_status: HashMap<String, String>,
 }
 
 /// Cap on the summary's title / last message.
 const SUMMARY_CHARS: usize = 120;
 
+/// Cap on the *full* first prompt kept in [`Summary::first_prompt`]. Generous
+/// enough that a real prompt survives whole, bounded because this rides in the
+/// per-file cache: a pasted stack trace or a subagent brief runs to tens of KB,
+/// and the cache holds one entry per transcript the user has ever run.
+const FULL_PROMPT_CHARS: usize = 8_000;
+
+/// How many trailing messages [`Summary::recent`] keeps.
+const RECENT_TURNS: usize = 3;
+
+/// Opening-tag names of the turns a *harness* writes into the transcript with
+/// the `user` role — slash-command echoes, hook output, injected notifications.
+/// Every entry was observed in a real transcript.
+///
+/// This is an observed-tag list on purpose, **not** a general "the line starts
+/// with an XML tag" filter: a prompt that genuinely opens with `<my-element>`
+/// is something a person typed, and a generic filter would silently swallow it
+/// as the session's title. Widen the list when a new injected tag shows up;
+/// don't replace it with a shape test.
+const INJECTED_TAGS: &[&str] = &[
+    "agent-message",
+    "bash-input",
+    "bash-stderr",
+    "bash-stdout",
+    "command-args",
+    "command-message",
+    "command-name",
+    "cross-session-message",
+    "fork-boilerplate",
+    "system-reminder",
+    "task-notification",
+    "teammate-message",
+    "user-memory-input",
+    "user-prompt-submit-hook",
+];
+
+/// Injected-tag families matched by prefix, where the tail varies:
+/// `local-command-stdout` / `-stderr` / `-caveat` are all one shape.
+const INJECTED_TAG_PREFIXES: &[&str] = &["local-command-"];
+
+/// Injected turns that open with prose rather than a tag — matched against the
+/// start of the line, case-insensitively, for the same reason as
+/// [`INJECTED_TAGS`]: an observed list, never a general shape.
+const INJECTED_PREFIXES: &[&str] = &[
+    "<channel source=",
+    "[request interrupted",
+    "a message arrived from ",
+    "another claude session sent a message",
+    "no response requested.",
+    "caveat: the messages below",
+    "this session is being continued from a previous conversation",
+];
+
+/// ASCII-case-insensitive `starts_with`, over bytes so a multi-byte boundary
+/// can't panic the slice.
+fn starts_with_ci(haystack: &str, needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    h.len() >= n.len() && h[..n.len()].eq_ignore_ascii_case(n)
+}
+
+/// [`starts_with_ci`]'s counterpart.
+fn ends_with_ci(haystack: &str, needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    h.len() >= n.len() && h[h.len() - n.len()..].eq_ignore_ascii_case(n)
+}
+
+/// The name of the XML-ish tag a line opens with, if it opens with one:
+/// everything between `<` and the first `>`, `/` or space.
+fn opening_tag(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('<')?;
+    let end = rest.find(|c: char| c == '>' || c == '/' || c.is_whitespace())?;
+    Some(&rest[..end])
+}
+
+/// Whether a display line is harness bookkeeping rather than a typed prompt.
+fn is_harness_injected(line: &str) -> bool {
+    if INJECTED_PREFIXES.iter().any(|p| starts_with_ci(line, p)) {
+        return true;
+    }
+    let Some(tag) = opening_tag(line) else {
+        return false;
+    };
+    INJECTED_TAGS.iter().any(|t| tag.eq_ignore_ascii_case(t))
+        || INJECTED_TAG_PREFIXES
+            .iter()
+            .any(|p| starts_with_ci(tag, p))
+        // `mcp-<server>-update`: the server's name sits inside the tag, so the
+        // length floor is what keeps `mcp--update` (no server) from matching.
+        || (starts_with_ci(tag, "mcp-")
+            && ends_with_ci(tag, "-update")
+            && tag.len() > "mcp--update".len())
+}
+
 /// A message's prose as one display line: its first non-empty line, capped at
 /// [`SUMMARY_CHARS`] chars (an ellipsis marks the cut — taken by `char`, so a
 /// multi-byte boundary can't be split). `None` for text with no prose, and for
-/// the slash-command echoes Claude writes as user lines (`<command-name>…`,
-/// `<local-command-stdout>…`) — those aren't a prompt anyone typed.
+/// the turns a harness wrote as `user` lines — see [`INJECTED_TAGS`]. Those
+/// carry `isMeta` only sometimes (`<task-notification>` and
+/// `[Request interrupted…]` don't), so the caller's `isMeta` check can't be the
+/// only gate.
 pub(crate) fn one_line(text: &str) -> Option<String> {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
-    if line.starts_with("<command-") || line.starts_with("<local-command-") {
+    if is_harness_injected(line) {
         return None;
     }
     let mut chars = line.chars();
@@ -423,6 +656,24 @@ pub(crate) fn one_line(text: &str) -> Option<String> {
         out.push('…');
     }
     Some(out)
+}
+
+/// `text` trimmed to at most `max` **chars** (never bytes — a byte cut can split
+/// a multi-byte boundary), with a flag saying whether anything was dropped.
+fn cap_chars(text: &str, max: usize) -> (String, bool) {
+    let mut chars = text.chars();
+    let out: String = chars.by_ref().take(max).collect();
+    (out, chars.next().is_some())
+}
+
+/// The single field of a `<task-notification>` block, e.g. `<status>` — the
+/// shape a *background* Task's completion is reported in (a synchronous one
+/// reports through `toolUseResult` instead). Plain slicing rather than a regex:
+/// the workspace carries no regex dependency, and these tags never nest.
+fn tag_value<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let rest = &text[text.find(&open)? + open.len()..];
+    Some(&rest[..rest.find(&format!("</{tag}>"))?])
 }
 
 /// Classify a transcript path into `(project-slug, owning-session-id, is_main)`,
@@ -502,14 +753,15 @@ fn parse_from(path: &Path, from: u64, base: Option<&FileData>) -> Option<Parsed>
     let consumed = from + complete as u64;
     let text = String::from_utf8_lossy(&buf[..complete]);
 
-    let (mut events, mut context, mut cwd, mut summary) = match base {
+    let (mut events, mut context, mut cwd, mut summary, mut agent_status) = match base {
         Some(b) => (
             b.events.clone(),
             b.context.clone(),
             b.cwd.clone(),
             b.summary.clone(),
+            b.agent_status.clone(),
         ),
-        None => (Vec::new(), None, None, Summary::default()),
+        None => (Vec::new(), None, None, Summary::default(), HashMap::new()),
     };
     for line in text.lines() {
         let Ok(l) = serde_json::from_str::<Line>(line) else {
@@ -518,6 +770,13 @@ fn parse_from(path: &Path, from: u64, base: Option<&FileData>) -> Option<Parsed>
         if cwd.is_none() {
             cwd = l.cwd;
         }
+        // A synchronous Task's verdict. Last-wins: a re-run under the same agent
+        // id supersedes what the earlier one reported.
+        if let Some(r) = &l.tool_use_result {
+            if let (Some(id), Some(status)) = (&r.agent_id, &r.status) {
+                agent_status.insert(id.clone(), status.clone());
+            }
+        }
         let is_user = l.kind.as_deref() == Some("user");
         let is_assistant = l.kind.as_deref() == Some("assistant");
         if is_user || is_assistant {
@@ -525,23 +784,46 @@ fn parse_from(path: &Path, from: u64, base: Option<&FileData>) -> Option<Parsed>
                 summary.first_ts_ms.get_or_insert(ts);
                 summary.last_ts_ms = Some(summary.last_ts_ms.map_or(ts, |cur| cur.max(ts)));
             }
-            let prose = l
-                .message
-                .as_ref()
-                .and_then(|m| m.content.as_ref())
-                .filter(|_| !l.is_meta)
-                .and_then(|c| c.0.iter().find_map(|b| one_line(b)));
-            if let Some(prose) = prose {
-                summary.message_count += 1;
-                if is_user {
-                    summary.title.get_or_insert(prose.clone());
+            let blocks = l.message.as_ref().and_then(|m| m.content.as_ref());
+            // A *background* Task reports through an injected `<task-notification>`
+            // user turn, which `one_line` deliberately refuses as prose — so read
+            // it off the raw blocks, before the prose filter.
+            if is_user {
+                for text in blocks.iter().flat_map(|c| c.0.iter()) {
+                    if !text.trim_start().starts_with("<task-notification>") {
+                        continue;
+                    }
+                    if let (Some(id), Some(status)) =
+                        (tag_value(text, "task-id"), tag_value(text, "status"))
+                    {
+                        agent_status.insert(id.to_string(), status.to_string());
+                    }
                 }
-                // Lines are chronological: the latest prose wins, whoever's.
-                summary.last_from = Some(if is_user {
+            }
+            // The block the display line came from, kept so the full prompt can
+            // be taken from it without a second pass over the file.
+            let prose = blocks
+                .filter(|_| !l.is_meta)
+                .and_then(|c| c.0.iter().find_map(|b| one_line(b).map(|line| (line, b))));
+            if let Some((prose, block)) = prose {
+                summary.message_count += 1;
+                let from = if is_user {
                     LastMessageFrom::You
                 } else {
                     LastMessageFrom::Agent
-                });
+                };
+                if is_user && summary.title.is_none() {
+                    summary.title = Some(prose.clone());
+                    let (full, cut) = cap_chars(block.trim(), FULL_PROMPT_CHARS);
+                    summary.first_prompt = Some(full);
+                    summary.first_prompt_truncated = cut;
+                }
+                summary.recent.push_back((from, prose.clone()));
+                while summary.recent.len() > RECENT_TURNS {
+                    summary.recent.pop_front();
+                }
+                // Lines are chronological: the latest prose wins, whoever's.
+                summary.last_from = Some(from);
                 summary.last_message = Some(prose);
             }
         }
@@ -598,6 +880,7 @@ fn parse_from(path: &Path, from: u64, base: Option<&FileData>) -> Option<Parsed>
             events,
             context,
             summary,
+            agent_status,
         },
         consumed,
     })
@@ -622,12 +905,23 @@ fn approx_bytes(fd: &FileData) -> usize {
         .iter()
         .map(|e| std::mem::size_of::<Ev>() + opt(&e.id) + opt(&e.request_id) + e.model.len())
         .sum();
+    let recent: usize = fd.summary.recent.iter().map(|(_, t)| t.len()).sum();
+    // Bounded per entry (one short id + one short word each), but a session can
+    // spawn many subagents, so it is counted rather than assumed negligible.
+    let statuses: usize = fd
+        .agent_status
+        .iter()
+        .map(|(id, s)| id.len() + s.len() + std::mem::size_of::<(String, String)>())
+        .sum();
     events
         + fd.project.len()
         + opt(&fd.cwd)
         + fd.session_id.len()
         + opt(&fd.summary.title)
+        + opt(&fd.summary.first_prompt)
         + opt(&fd.summary.last_message)
+        + recent
+        + statuses
 }
 
 struct Entry {
@@ -981,6 +1275,24 @@ fn aggregate(
     let week_start = now_ms - 7 * DAY;
     let month_start = now_ms - 30 * DAY;
 
+    // Claude Code streams several assistant rows under one `message.id`, and a
+    // later row can carry a fuller `usage` than the first — the earlier ones are
+    // written mid-turn, before the totals are final. First-wins therefore
+    // undercounts (output most of all), so fold every row sharing a key into a
+    // field-wise max up front and let the first occurrence own the attribution
+    // (its session, model and timestamp bucket).
+    let mut folded: HashMap<String, Toks> = HashMap::new();
+    for f in files {
+        for e in &f.events {
+            if let Some(key) = dedup_key(e) {
+                folded
+                    .entry(key)
+                    .and_modify(|t| *t = t.max_of(&e.toks))
+                    .or_insert(e.toks);
+            }
+        }
+    }
+
     let mut seen: HashSet<String> = HashSet::new();
     let mut total = Acc::default();
     let mut today = Acc::default();
@@ -998,35 +1310,38 @@ fn aggregate(
             sess.cwd.clone_from(&f.cwd);
         }
         for e in &f.events {
-            // Dedup whenever the turn has a message.id: a resumed session copies
-            // prior turns into a new file, and they'd otherwise double-count. The
-            // requestId (possibly absent) is folded into the key so genuinely
-            // distinct turns sharing an id stay separate.
-            if let Some(id) = &e.id {
-                let dedup_key = format!("{id}\u{0}{}", e.request_id.as_deref().unwrap_or(""));
-                if !seen.insert(dedup_key) {
-                    continue;
+            // A keyed turn is counted once — a resumed session copies prior
+            // turns into a new file, and they'd otherwise double-count — with
+            // the folded numbers, not this row's.
+            let toks = match dedup_key(e) {
+                Some(key) => {
+                    let merged = folded.get(&key).copied().unwrap_or(e.toks);
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    merged
                 }
-            }
-            total.add(table, &e.model, &e.toks);
+                None => e.toks,
+            };
+            total.add(table, &e.model, &toks);
             if e.ts_ms >= today_start {
-                today.add(table, &e.model, &e.toks);
+                today.add(table, &e.model, &toks);
             }
             if e.ts_ms >= week_start {
-                week.add(table, &e.model, &e.toks);
+                week.add(table, &e.model, &toks);
             }
             if e.ts_ms >= month_start {
-                month.add(table, &e.model, &e.toks);
+                month.add(table, &e.model, &toks);
             }
             by_model
                 .entry(e.model.clone())
                 .or_default()
-                .add(table, &e.model, &e.toks);
-            sess.acc.add(table, &e.model, &e.toks);
+                .add(table, &e.model, &toks);
+            sess.acc.add(table, &e.model, &toks);
             sess.models
                 .entry(e.model.clone())
                 .or_default()
-                .add(table, &e.model, &e.toks);
+                .add(table, &e.model, &toks);
             sess.last_ms = sess.last_ms.max(e.ts_ms);
         }
         // The main transcript owns the session's live context + display model.
@@ -1188,22 +1503,67 @@ fn primary_model(events: &[Ev]) -> Option<String> {
         .map(|(m, _)| m.to_string())
 }
 
-/// How many subagent transcripts a main transcript has: the `*.jsonl` files under
-/// `<dir>/<session-id>/subagents/`, the tree `classify` folds into the session.
+/// How many subagent transcripts a main transcript has: the `agent-<id>.jsonl`
+/// files directly under `<dir>/<session-id>/subagents/`, the tree `classify`
+/// folds into the session.
+///
+/// Claude names every Task subagent transcript `agent-<id>.jsonl`, and the same
+/// directory holds other things — `agent-<id>.meta.json` sidecars, a `workflows/`
+/// subdirectory. Counting entries rather than transcripts would let the badge
+/// disagree with the list it stands for, so match the name Claude actually
+/// writes: direct children only, no recursion.
 fn subagent_count(main: &Path) -> u32 {
-    let Some(dir) = main
-        .parent()
+    subagent_files(main).len() as u32
+}
+
+/// `<dir>/<session-id>/subagents/` for a main transcript at `<dir>/<sid>.jsonl`.
+fn subagents_dir(main: &Path) -> Option<PathBuf> {
+    main.parent()
         .zip(main.file_stem())
         .map(|(dir, stem)| dir.join(stem).join("subagents"))
+}
+
+/// The subagent transcripts of a main transcript, sorted by name so the listing
+/// is stable across reads. **The one predicate**: [`subagent_count`] is its
+/// length, so the badge and the expanded list can never disagree.
+///
+/// Containment is enforced at both levels, because `canonicalize` *resolves* a
+/// symlink rather than refusing it:
+///
+/// * **The directory.** Its canonical form must still sit under the transcript's
+///   own canonical project directory, so a `<sid>` or `<sid>/subagents` planted
+///   as a link to somewhere else lists nothing. Canonicalizing first is what
+///   makes this a containment test and not a textual one — `starts_with` alone
+///   would pass `<dir>/../../etc`.
+/// * **Each entry.** `DirEntry::file_type` does not follow links, so a symlinked
+///   `agent-x.jsonl` is not a file and never lists; and each survivor is
+///   canonicalized and required to still sit *directly* in that directory.
+fn subagent_files(main: &Path) -> Vec<PathBuf> {
+    let Some(project) = main.parent().and_then(|p| p.canonicalize().ok()) else {
+        return Vec::new();
+    };
+    let Some(dir) = subagents_dir(main)
+        .and_then(|d| d.canonicalize().ok())
+        .filter(|d| d.starts_with(&project))
     else {
-        return 0;
+        return Vec::new();
     };
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return 0;
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
     };
-    rd.flatten()
-        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
-        .count() as u32
+    let mut out: Vec<PathBuf> = rd
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("agent-") && n.ends_with(".jsonl"))
+        })
+        .filter_map(|e| e.path().canonicalize().ok())
+        .filter(|p| p.parent() == Some(dir.as_path()))
+        .collect();
+    out.sort();
+    out
 }
 
 /// Summaries of the Claude sessions that ran in `worktree`, keyed by session id:
@@ -1220,16 +1580,22 @@ fn subagent_count(main: &Path) -> u32 {
 pub(crate) fn worktree_summaries(
     worktree: &Path,
     known: &[(String, String)],
+    table: &PriceTable,
 ) -> HashMap<String, SessionSummary> {
-    summaries_in(&projects_roots(), worktree, known)
+    summaries_in(&projects_roots(), worktree, known, table)
 }
 
-/// [`worktree_summaries`] over explicit `projects` roots (tests pin them).
-fn summaries_in(
+/// The main transcripts that could belong to `worktree`, and which of them the
+/// terminal registry vouched for: `(paths, registered)`. Only the project dirs
+/// whose slug is the worktree's, or extends it (a subdir cwd), are looked at,
+/// and a candidate whose *head* names a foreign `cwd` is dropped before any full
+/// parse. Belonging is still confirmed from the parse — a head with no `cwd`
+/// survives to be decided there.
+fn candidate_transcripts(
     roots: &[PathBuf],
     worktree: &Path,
     known: &[(String, String)],
-) -> HashMap<String, SessionSummary> {
+) -> (Vec<PathBuf>, HashSet<PathBuf>) {
     let slug = crate::session::project_slug(&worktree.to_string_lossy());
     let subdir_prefix = format!("{slug}-");
     let mut paths: Vec<PathBuf> = Vec::new();
@@ -1266,8 +1632,6 @@ fn summaries_in(
                 if !is_main || registered.contains(&p) || paths.contains(&p) {
                     continue;
                 }
-                // A head with no `cwd` still gets parsed: the parse's own `cwd`
-                // decides below.
                 if peek_cwd(&p).is_some_and(|cwd| !cwd_belongs_to(&cwd, worktree)) {
                     continue;
                 }
@@ -1275,6 +1639,17 @@ fn summaries_in(
             }
         }
     }
+    (paths, registered)
+}
+
+/// [`worktree_summaries`] over explicit `projects` roots (tests pin them).
+fn summaries_in(
+    roots: &[PathBuf],
+    worktree: &Path,
+    known: &[(String, String)],
+    table: &PriceTable,
+) -> HashMap<String, SessionSummary> {
+    let (paths, registered) = candidate_transcripts(roots, worktree, known);
     let mut out = HashMap::new();
     for p in &paths {
         // One file at a time: `load_files` skips what it can't parse, so a batch
@@ -1302,10 +1677,257 @@ fn summaries_in(
                 model: primary_model(&fd.events),
                 started_at_ms: s.first_ts_ms,
                 last_activity_ms: s.last_ts_ms,
+                spend: Some(session_spend(p, &fd, table)),
             },
         );
     }
     out
+}
+
+/// One session's tokens and cost: its main transcript plus the subagent
+/// transcripts that fold into it, deduped by `(message.id, requestId)` with the
+/// field-wise max — the same rule [`aggregate`] applies globally, so the two
+/// surfaces report the same number for the same session.
+///
+/// A model absent from the price table contributes tokens but **no** cost, and
+/// says so with `None` rather than a `0` the UI would render as "free".
+fn session_spend(main: &Path, fd: &FileData, table: &PriceTable) -> SessionSpend {
+    let subs = load_files(&subagent_files(main), |_, _| {});
+    let files: Vec<&FileData> = std::iter::once(fd)
+        .chain(subs.iter().map(|a| a.as_ref()))
+        .collect();
+
+    let mut folded: HashMap<String, Toks> = HashMap::new();
+    for f in &files {
+        for e in &f.events {
+            if let Some(key) = dedup_key(e) {
+                folded
+                    .entry(key)
+                    .and_modify(|t| *t = t.max_of(&e.toks))
+                    .or_insert(e.toks);
+            }
+        }
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+    // `(tokens, cost)` per model; cost stays `None` until a priced turn adds to it.
+    let mut by_model: HashMap<&str, (f64, Option<f64>)> = HashMap::new();
+    for f in &files {
+        for e in &f.events {
+            let toks = match dedup_key(e) {
+                Some(key) => {
+                    let merged = folded.get(&key).copied().unwrap_or(e.toks);
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    merged
+                }
+                None => e.toks,
+            };
+            let entry = by_model.entry(&e.model).or_insert((0.0, None));
+            entry.0 += toks.input + toks.output + toks.cache_read + toks.cache_write();
+            if table.lookup(&e.model).is_some() {
+                *entry.1.get_or_insert(0.0) += cost_for(table, &e.model, &toks);
+            }
+        }
+    }
+
+    let mut models: Vec<SessionModelSpend> = by_model
+        .into_iter()
+        .map(|(model, (total_tokens, cost_usd))| SessionModelSpend {
+            model: model.to_string(),
+            total_tokens,
+            cost_usd,
+        })
+        .collect();
+    models.sort_by(|a, b| {
+        b.total_tokens
+            .partial_cmp(&a.total_tokens)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let total_tokens = models.iter().map(|m| m.total_tokens).sum();
+    let cost_usd = models
+        .iter()
+        .filter_map(|m| m.cost_usd)
+        .reduce(|a, b| a + b);
+    SessionSpend {
+        total_tokens,
+        cost_usd,
+        models,
+    }
+}
+
+// ── Expanded session detail (Trees history row) ─────────────────────────────
+
+/// The main transcript of `session_id` within `worktree`, or `None` when it has
+/// none on disk.
+///
+/// `session_id` is only ever *compared* against a candidate's file stem — never
+/// joined onto a path — so a caller cannot steer the read with it. The candidate
+/// set is the same one the history listing is built from.
+pub(crate) fn worktree_transcript(
+    worktree: &Path,
+    known: &[(String, String)],
+    session_id: &str,
+) -> Option<PathBuf> {
+    transcript_in(&projects_roots(), worktree, known, session_id)
+}
+
+/// [`worktree_transcript`] over explicit `projects` roots (tests pin them).
+fn transcript_in(
+    roots: &[PathBuf],
+    worktree: &Path,
+    known: &[(String, String)],
+    session_id: &str,
+) -> Option<PathBuf> {
+    let (paths, registered) = candidate_transcripts(roots, worktree, known);
+    paths.into_iter().find(|p| {
+        if p.file_stem().and_then(|s| s.to_str()) != Some(session_id) {
+            return false;
+        }
+        // Registry rows are vouched for; anything found by scanning has to say
+        // it ran here, exactly as `summaries_in` decides.
+        registered.contains(p)
+            || load_files(std::slice::from_ref(p), |_, _| {})
+                .pop()
+                .and_then(|fd| fd.cwd.clone())
+                .is_some_and(|cwd| cwd_belongs_to(&cwd, worktree))
+    })
+}
+
+/// What the expanded history row shows for one session, from the same cached
+/// parse the list already paid for. Blocking (disk) — call from `spawn_blocking`.
+pub(crate) fn session_detail(main: &Path) -> SessionDetail {
+    let Some(fd) = load_files(std::slice::from_ref(&main.to_path_buf()), |_, _| {}).pop() else {
+        return SessionDetail::default();
+    };
+    let s = &fd.summary;
+    SessionDetail {
+        first_prompt: s.first_prompt.clone(),
+        first_prompt_truncated: s.first_prompt_truncated,
+        recent_turns: s
+            .recent
+            .iter()
+            .map(|(from, text)| SessionTurn {
+                from: *from,
+                text: text.clone(),
+            })
+            .collect(),
+        cwd: fd.cwd.clone(),
+    }
+}
+
+/// A transcript is treated as still running when it was written to within this
+/// window and no terminal status was reported for it. Long enough to cover a
+/// subagent thinking between tool calls, short enough that yesterday's crashed
+/// run doesn't claim to be live.
+const RUNNING_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// Map a CLI-reported status word onto the domain enum. `None` for anything
+/// non-terminal (`async_launched`, which only says the Task started) or
+/// unrecognised — the caller then falls back to the freshness window, and an
+/// unknown status must never be guessed into a verdict.
+fn terminal_status(reported: &str) -> Option<SubagentStatus> {
+    match reported {
+        "completed" => Some(SubagentStatus::Completed),
+        "failed" => Some(SubagentStatus::Failed),
+        // The CLI's two words for "it did not finish on its own".
+        "killed" | "stopped" => Some(SubagentStatus::Stopped),
+        _ => None,
+    }
+}
+
+/// The `{agentType, description, parentAgentId, spawnDepth}` sidecar Claude
+/// writes beside each subagent transcript. Every field is optional: a missing or
+/// corrupt sidecar must cost the row its metadata, never its listing.
+#[derive(Deserialize, Default)]
+struct SubagentMeta {
+    #[serde(rename = "agentType")]
+    agent_type: Option<String>,
+    description: Option<String>,
+    #[serde(rename = "parentAgentId")]
+    parent_agent_id: Option<String>,
+    #[serde(rename = "spawnDepth")]
+    spawn_depth: Option<u32>,
+}
+
+/// The Task subagents of one Claude session, with the spawn relationships the
+/// sidecars record — `parentAgentId` and `spawnDepth`, which is what lets the
+/// pane draw the real tree instead of a flat list.
+///
+/// Status comes from whichever transcript *spawned* the subagent, since that is
+/// the only record of how it ended (see [`FileData::agent_status`]). That is the
+/// main transcript for a depth-1 agent and a **sibling subagent's** transcript
+/// for anything deeper, so every transcript in the session contributes its
+/// reports — an agent id appears in exactly one of them. With no terminal report,
+/// a transcript touched inside [`RUNNING_WINDOW_MS`] reads as running and
+/// anything older stays `Unknown`.
+///
+/// Blocking (disk + parse) — call from `spawn_blocking`.
+pub(crate) fn session_subagents(main: &Path, now_ms: i64) -> Vec<SessionSubagent> {
+    let files = subagent_files(main);
+    if files.is_empty() {
+        return Vec::new();
+    }
+    // Every transcript in the session, parsed once through the shared cache; the
+    // per-row reads below are then cache hits. Order doesn't matter here — an
+    // agent id is reported by exactly one transcript.
+    let mut reported: HashMap<String, String> = HashMap::new();
+    for fd in load_files(std::slice::from_ref(&main.to_path_buf()), |_, _| {})
+        .iter()
+        .chain(load_files(&files, |_, _| {}).iter())
+    {
+        reported.extend(
+            fd.agent_status
+                .iter()
+                .map(|(id, s)| (id.clone(), s.clone())),
+        );
+    }
+
+    files
+        .iter()
+        .map(|path| {
+            // `agent-<id>.jsonl` — the stem past the prefix is the agent id.
+            let agent_id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("agent-"))
+                .unwrap_or_default()
+                .to_string();
+            let meta: SubagentMeta = std::fs::read_to_string(path.with_extension("meta.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or_default();
+            let last_activity_ms = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64);
+            let status = reported
+                .get(&agent_id)
+                .and_then(|s| terminal_status(s))
+                .unwrap_or_else(|| match last_activity_ms {
+                    Some(ms) if now_ms - ms < RUNNING_WINDOW_MS => SubagentStatus::Running,
+                    _ => SubagentStatus::Unknown,
+                });
+            let message_count = load_files(std::slice::from_ref(path), |_, _| {})
+                .pop()
+                .map_or(0, |fd| fd.summary.message_count);
+            SessionSubagent {
+                agent_id,
+                parent_agent_id: meta.parent_agent_id,
+                // Claude's depth is 1-based; treat a missing one as top level
+                // rather than inventing a `0` tier the tree would have to
+                // special-case.
+                depth: meta.spawn_depth.unwrap_or(1).max(1),
+                agent_type: meta.agent_type,
+                description: meta.description,
+                message_count,
+                status,
+                last_activity_ms: last_activity_ms.map(|ms| ms as f64),
+            }
+        })
+        .collect()
 }
 
 // ── Live-refresh watcher (mirrors git_watch.rs) ─────────────────────────────
@@ -1404,13 +2026,26 @@ mod tests {
     }
 
     fn file(project: &str, sid: &str, events: Vec<Ev>, context: Option<Ctx>) -> Arc<FileData> {
+        file_in(project, sid, None, events, context)
+    }
+
+    /// Same, with the transcript's real `cwd` — the input `resolve_location`
+    /// resolves a session's repo and worktree from.
+    fn file_in(
+        project: &str,
+        sid: &str,
+        cwd: Option<&str>,
+        events: Vec<Ev>,
+        context: Option<Ctx>,
+    ) -> Arc<FileData> {
         Arc::new(FileData {
             project: project.into(),
-            cwd: None,
+            cwd: cwd.map(str::to_string),
             session_id: sid.into(),
             events,
             context,
             summary: Summary::default(),
+            agent_status: HashMap::new(),
         })
     }
 
@@ -1579,6 +2214,28 @@ mod tests {
         );
         let r = aggregate(&[a, b], NOW, &tbl(), &[]);
         assert_eq!(r.total.input_tokens, 10.0);
+    }
+
+    /// Claude streams repeated rows for one turn and the later ones can carry a
+    /// fuller `usage`, so the fold has to be a field-wise max — first-wins would
+    /// bill the mid-turn snapshot.
+    #[test]
+    fn repeated_rows_for_one_turn_take_the_largest_of_each_field() {
+        let partial = ev("dup", "claude-sonnet-4-5", NOW, 10.0, 4.0, 100.0, 7.0);
+        let mut complete = ev("dup", "claude-sonnet-4-5", NOW, 10.0, 900.0, 80.0, 7.0);
+        complete.toks.cache_1h = 5.0;
+        let f = file("-repo", "s1", vec![partial, complete], None);
+
+        let r = aggregate(&[f], NOW, &tbl(), &[]);
+        assert_eq!(r.total.output_tokens, 900.0, "the fuller row's output wins");
+        assert_eq!(r.total.input_tokens, 10.0, "counted once, not summed");
+        assert_eq!(
+            r.total.cache_read_tokens, 100.0,
+            "a field that shrank keeps its larger value"
+        );
+        assert_eq!(r.total.cache_write_tokens, 12.0, "5m 7 + 1h 5, both maxed");
+        assert_eq!(r.sessions.len(), 1);
+        assert_eq!(r.sessions[0].totals.output_tokens, 900.0);
     }
 
     #[test]
@@ -1814,6 +2471,62 @@ mod tests {
         );
     }
 
+    /// The wiring, not the helper. `resolve_location` is pinned directly above,
+    /// but every other `aggregate` test passes `&[]` for `repos` and a transcript
+    /// with no `cwd` — so nothing proved a session's own working directory and the
+    /// registered repo list ever reach it. They are what turns a transcript into a
+    /// row the Usage panel can group under a repo and a worktree.
+    #[test]
+    fn aggregate_resolves_each_sessions_repo_and_worktree_from_its_cwd() {
+        // The registered *name* deliberately differs from the folder it points at:
+        // falling back to the path would yield "canary-monorepo", so the repo list
+        // has to actually reach the resolver for these assertions to hold.
+        let repos = vec![(
+            "canary".to_string(),
+            "/Users/me/src/canary-monorepo".to_string(),
+        )];
+        // Claude's cwd-mangled project directory. Also deliberately unlike the repo
+        // name: it is what the resolver falls back to when the `cwd` is missing.
+        let slug = "-Users-me-src-canary-monorepo--santree-worktrees-AK-182";
+        let in_worktree = file_in(
+            slug,
+            "s1",
+            Some("/Users/me/src/canary-monorepo/.santree/worktrees/AK-182/backend"),
+            vec![ev("a", "claude-opus-4-8", NOW, 10.0, 0.0, 0.0, 0.0)],
+            None,
+        );
+        let in_main = file_in(
+            "-Users-me-src-canary-monorepo",
+            "s2",
+            Some("/Users/me/src/canary-monorepo"),
+            vec![ev("b", "claude-opus-4-8", NOW - 1_000, 10.0, 0.0, 0.0, 0.0)],
+            None,
+        );
+
+        let r = aggregate(&[in_worktree, in_main], NOW, &tbl(), &repos);
+        let session = |id: &str| {
+            r.sessions
+                .iter()
+                .find(|s| s.session_id == id)
+                .unwrap_or_else(|| panic!("no session {id} in the report"))
+        };
+
+        let wt = session("s1");
+        assert_eq!(wt.repo, "canary", "the registered repo, not the path");
+        assert_eq!(
+            wt.worktree.as_deref(),
+            Some("AK-182"),
+            "the worktree id under .santree/worktrees, even from a subdir"
+        );
+
+        let main = session("s2");
+        assert_eq!(main.repo, "canary");
+        assert_eq!(
+            main.worktree, None,
+            "the repo's own checkout is not a worktree"
+        );
+    }
+
     #[test]
     fn parse_file_reads_usage_cwd_and_splits_cache() {
         let dir = std::env::temp_dir().join(format!("santree-usage-test-{}", std::process::id()));
@@ -1951,6 +2664,61 @@ mod tests {
         );
     }
 
+    /// Shapes taken from real transcripts in `~/.claude/projects`. The ones
+    /// without `isMeta` are why this filter exists at all: they reach the
+    /// summary looking exactly like a prompt someone typed.
+    #[test]
+    fn one_line_drops_harness_injected_turns() {
+        for injected in [
+            "<task-notification>\n<task-id>a4d4</task-id>",
+            "<system-reminder>\nAs you answer the user's questions…",
+            "<user-prompt-submit-hook>advice</user-prompt-submit-hook>",
+            "<user-memory-input>remember this</user-memory-input>",
+            "<agent-message from=\"explorer\">found it</agent-message>",
+            "<teammate-message>ping</teammate-message>",
+            "<cross-session-message>hi</cross-session-message>",
+            "<fork-boilerplate>…</fork-boilerplate>",
+            "<bash-input>ls</bash-input>",
+            "<bash-stdout>a b c</bash-stdout>",
+            "<bash-stderr>boom</bash-stderr>",
+            "<command-name>/clear</command-name>",
+            "<command-message>compact</command-message>",
+            "<command-args>--hard</command-args>",
+            "<local-command-stdout>ok</local-command-stdout>",
+            "<local-command-caveat>Caveat: generated</local-command-caveat>",
+            "<mcp-linear-update>3 issues</mcp-linear-update>",
+            "<MCP-Memory-Update>recalled</MCP-Memory-Update>",
+            "<SYSTEM-REMINDER>shouting is still injected</SYSTEM-REMINDER>",
+            "<channel source=\"slack\">…",
+            "[Request interrupted by user]",
+            "[Request interrupted by user for tool use]",
+            "A message arrived from santree-bot",
+            "Another Claude session sent a message",
+            "No response requested.",
+            "Caveat: The messages below were generated by the user while…",
+            "This session is being continued from a previous conversation…",
+        ] {
+            assert_eq!(one_line(injected), None, "injected: {injected}");
+        }
+
+        // The list is observed tags, not a shape test: a prompt that opens with
+        // an unknown tag is still something a person typed.
+        for typed in [
+            "<my-element> should render inline, fix it",
+            "<div class=\"x\"> is being escaped twice",
+            "<3 this feature, ship it",
+            "commandeer the release branch",
+            "mcp-linear-update is the tag I mean",
+            "[Requesting] a second look at the diff",
+        ] {
+            assert_eq!(
+                one_line(typed).as_deref(),
+                Some(typed),
+                "not injected: {typed}"
+            );
+        }
+    }
+
     #[test]
     fn cwd_belongs_to_excludes_nested_worktrees_from_the_base() {
         let root = Path::new("/Users/me/dev/repo");
@@ -2016,12 +2784,13 @@ mod tests {
             line(&wt_str, "registered") + "\n",
         )
         .unwrap();
-        std::fs::create_dir_all(main_dir.join("reg").join("subagents")).unwrap();
-        std::fs::write(
-            main_dir.join("reg").join("subagents").join("a.jsonl"),
-            "{}\n",
-        )
-        .unwrap();
+        // Claude's real layout: one `agent-<id>.jsonl` transcript beside the
+        // sidecar and directory that must not be counted with it.
+        let subagents = main_dir.join("reg").join("subagents");
+        std::fs::create_dir_all(subagents.join("workflows")).unwrap();
+        std::fs::write(subagents.join("agent-a.jsonl"), "{}\n").unwrap();
+        std::fs::write(subagents.join("agent-a.meta.json"), "{}\n").unwrap();
+        std::fs::create_dir_all(subagents.join("x.jsonl")).unwrap();
         std::fs::write(
             sub_dir.join("hand.jsonl"),
             line(&format!("{wt_str}/backend"), "by hand") + "\n",
@@ -2033,7 +2802,7 @@ mod tests {
         )
         .unwrap();
 
-        let got = summaries_in(&[projects], &wt, &[(wt_str.clone(), "reg".into())]);
+        let got = summaries_in(&[projects], &wt, &[(wt_str.clone(), "reg".into())], &tbl());
 
         let mut ids: Vec<&str> = got.keys().map(String::as_str).collect();
         ids.sort_unstable();
@@ -2043,7 +2812,11 @@ mod tests {
             "the sibling checkout's session is not ours"
         );
         assert_eq!(got["reg"].title.as_deref(), Some("registered"));
-        assert_eq!(got["reg"].subagent_count, 1);
+        assert_eq!(
+            got["reg"].subagent_count, 1,
+            "only the agent-*.jsonl transcript counts — not its .meta.json \
+             sidecar, the workflows/ dir, or a directory named x.jsonl"
+        );
         assert_eq!(got["hand"].title.as_deref(), Some("by hand"));
         assert_eq!(got["hand"].subagent_count, 0);
 
@@ -2173,5 +2946,431 @@ mod tests {
         assert!(third[0].events.is_empty(), "a shrunk file is re-read whole");
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+    // ---- the expanded history row ----
+
+    /// A scratch `projects/<slug>/` root with one main transcript, returning
+    /// `(root dir, projects dir, worktree dir, main transcript path)`.
+    fn detail_fixture(tag: &str, lines: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("santree-usage-detail-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let projects = dir.join("projects");
+        let wt = dir
+            .join("repo")
+            .join(".santree")
+            .join("worktrees")
+            .join("T-1");
+        let slug = crate::session::project_slug(&wt.to_string_lossy());
+        let project_dir = projects.join(slug);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let main = project_dir.join("sess.jsonl");
+        std::fs::write(&main, lines).unwrap();
+        (dir, projects, wt, main)
+    }
+
+    /// A `user`/`assistant` line carrying one text block.
+    fn prose_line(kind: &str, cwd: &str, text: &str) -> String {
+        let text = serde_json::to_string(text).unwrap();
+        format!(
+            r#"{{"type":"{kind}","timestamp":"2026-07-05T10:00:00.000Z","cwd":"{cwd}","message":{{"role":"{kind}","content":{text}}}}}"#
+        )
+    }
+
+    #[test]
+    fn the_detail_carries_the_whole_first_prompt_and_the_last_three_turns() {
+        // Longer than the 120-char list cap, so "the row's title" and "the full
+        // prompt" cannot accidentally be the same string.
+        let long = "explain ".repeat(40);
+        let (dir, _projects, wt, main) = detail_fixture("full", "");
+        let cwd = wt.to_string_lossy().into_owned();
+        let lines = [
+            prose_line("user", &cwd, &long),
+            prose_line("assistant", &cwd, "first answer"),
+            prose_line("user", &cwd, "second question"),
+            prose_line("assistant", &cwd, "second answer"),
+            prose_line("user", &cwd, "third question"),
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(&main, lines).unwrap();
+
+        let got = session_detail(&main);
+        assert_eq!(
+            got.first_prompt.as_deref(),
+            Some(long.trim()),
+            "the expansion shows the prompt in full, not the list's one-liner"
+        );
+        assert!(!got.first_prompt_truncated);
+        assert_eq!(got.cwd.as_deref(), Some(cwd.as_str()));
+        assert_eq!(
+            got.recent_turns
+                .iter()
+                .map(|t| (t.from, t.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (LastMessageFrom::You, "second question"),
+                (LastMessageFrom::Agent, "second answer"),
+                (LastMessageFrom::You, "third question"),
+            ],
+            "the last three turns, oldest first, each with its author"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_oversized_first_prompt_is_capped_and_says_so() {
+        let huge = "x".repeat(FULL_PROMPT_CHARS + 10);
+        let (dir, _projects, wt, main) = detail_fixture("cap", "");
+        let cwd = wt.to_string_lossy().into_owned();
+        std::fs::write(&main, prose_line("user", &cwd, &huge) + "\n").unwrap();
+
+        let got = session_detail(&main);
+        assert_eq!(
+            got.first_prompt.map(|p| p.chars().count()),
+            Some(FULL_PROMPT_CHARS)
+        );
+        assert!(
+            got.first_prompt_truncated,
+            "the cut is announced, not hidden"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_id_that_is_not_the_worktrees_does_not_resolve_to_a_transcript() {
+        let (dir, projects, wt, main) = detail_fixture("lookup", "");
+        let cwd = wt.to_string_lossy().into_owned();
+        std::fs::write(&main, prose_line("user", &cwd, "hello") + "\n").unwrap();
+        // A transcript from a different checkout, in its own project dir.
+        let other = projects.join("-elsewhere");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("foreign.jsonl"),
+            prose_line("user", "/elsewhere", "not yours") + "\n",
+        )
+        .unwrap();
+
+        assert!(
+            transcript_in(std::slice::from_ref(&projects), &wt, &[], "sess").is_some(),
+            "the worktree's own session resolves"
+        );
+        assert!(
+            transcript_in(std::slice::from_ref(&projects), &wt, &[], "foreign").is_none(),
+            "a session id from another checkout resolves to nothing"
+        );
+        assert!(
+            transcript_in(&[projects], &wt, &[], "../../etc/passwd").is_none(),
+            "the id is compared against a file stem, never joined onto a path"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- the subagent tree ----
+
+    /// Write `agent-<id>.jsonl` plus its sidecar under `main`'s subagents dir.
+    fn write_subagent(main: &Path, id: &str, meta: &str, lines: &str) -> PathBuf {
+        let dir = subagents_dir(main).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("agent-{id}.jsonl"));
+        std::fs::write(&path, lines).unwrap();
+        if !meta.is_empty() {
+            std::fs::write(dir.join(format!("agent-{id}.meta.json")), meta).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn subagents_carry_their_sidecar_metadata_and_the_parents_verdict() {
+        let (dir, _projects, wt, main) = detail_fixture("subagents", "");
+        let cwd = wt.to_string_lossy().into_owned();
+        // The parent reports one child through a background `<task-notification>`
+        // and the other through a synchronous `toolUseResult`.
+        let notification = prose_line(
+            "user",
+            &cwd,
+            "<task-notification>\n<task-id>aaa</task-id>\n<status>completed</status>\n</task-notification>",
+        );
+        let sync = format!(
+            r#"{{"type":"user","timestamp":"2026-07-05T10:00:00.000Z","cwd":"{cwd}","toolUseResult":{{"agentId":"bbb","status":"killed","prompt":"a very long brief"}},"message":{{"role":"user","content":"done"}}}}"#
+        );
+        // A `toolUseResult` that is a bare string must not fail its line.
+        let string_result = format!(
+            r#"{{"type":"user","timestamp":"2026-07-05T10:00:00.000Z","cwd":"{cwd}","toolUseResult":"plain text","message":{{"role":"user","content":"shell output"}}}}"#
+        );
+        std::fs::write(
+            &main,
+            [
+                prose_line("user", &cwd, "kick it off"),
+                notification,
+                sync,
+                string_result,
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        write_subagent(
+            &main,
+            "aaa",
+            r#"{"agentType":"Explore","description":"Find the thing","spawnDepth":1}"#,
+            &(prose_line("user", &cwd, "go") + "\n"),
+        );
+        write_subagent(
+            &main,
+            "bbb",
+            r#"{"agentType":"session-learner","description":"Learn","parentAgentId":"aaa","spawnDepth":2}"#,
+            "",
+        );
+        // No sidecar at all, and a corrupt one.
+        write_subagent(&main, "ccc", "", "");
+        write_subagent(&main, "ddd", "{not json", "");
+
+        let got = session_subagents(&main, NOW);
+        let by_id = |id: &str| {
+            got.iter()
+                .find(|s| s.agent_id == id)
+                .unwrap_or_else(|| panic!("{id} missing"))
+                .clone()
+        };
+        assert_eq!(got.len(), 4, "one row per agent-*.jsonl, sidecar or not");
+        assert_eq!(subagent_count(&main), 4, "the badge counts the same set");
+
+        let a = by_id("aaa");
+        assert_eq!(a.agent_type.as_deref(), Some("Explore"));
+        assert_eq!(a.description.as_deref(), Some("Find the thing"));
+        assert_eq!(a.depth, 1);
+        assert_eq!(a.parent_agent_id, None);
+        assert_eq!(a.status, SubagentStatus::Completed);
+        assert_eq!(a.message_count, 1);
+
+        let b = by_id("bbb");
+        assert_eq!(
+            b.parent_agent_id.as_deref(),
+            Some("aaa"),
+            "the spawn edge survives"
+        );
+        assert_eq!(b.depth, 2);
+        assert_eq!(
+            b.status,
+            SubagentStatus::Stopped,
+            "the CLI's `killed` is the user's `stopped`"
+        );
+
+        let c = by_id("ccc");
+        assert_eq!(
+            c.agent_type, None,
+            "a missing sidecar costs metadata, not the row"
+        );
+        assert_eq!(c.depth, 1, "no spawnDepth reads as top level");
+        assert_eq!(by_id("ddd").agent_type, None, "a corrupt sidecar likewise");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreported_subagent_is_running_only_while_its_transcript_is_fresh() {
+        let (dir, _projects, wt, main) = detail_fixture("fresh", "");
+        let cwd = wt.to_string_lossy().into_owned();
+        std::fs::write(&main, prose_line("user", &cwd, "go") + "\n").unwrap();
+        let path = write_subagent(&main, "eee", "", "");
+        let modified = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let fresh = session_subagents(&main, modified + RUNNING_WINDOW_MS - 1);
+        assert_eq!(fresh[0].status, SubagentStatus::Running);
+        let stale = session_subagents(&main, modified + RUNNING_WINDOW_MS + 1);
+        assert_eq!(
+            stale[0].status,
+            SubagentStatus::Unknown,
+            "an old transcript with no verdict is unknown, never 'completed'"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A depth-2 agent is spawned by a depth-1 *subagent*, so its verdict is
+    /// written into that subagent's transcript and never into the session's main
+    /// one. Reading only the main transcript left every nested agent `Unknown`.
+    #[test]
+    fn a_nested_subagents_verdict_is_read_from_the_subagent_that_spawned_it() {
+        let (dir, _projects, wt, main) = detail_fixture("nested", "");
+        let cwd = wt.to_string_lossy().into_owned();
+        // The main transcript reports only the depth-1 agent.
+        std::fs::write(
+            &main,
+            prose_line(
+                "user",
+                &cwd,
+                "<task-notification>\n<task-id>parent</task-id>\n<status>completed</status>\n</task-notification>",
+            ) + "\n",
+        )
+        .unwrap();
+        // The depth-1 agent's own transcript reports the one it spawned.
+        write_subagent(
+            &main,
+            "parent",
+            r#"{"agentType":"general-purpose","spawnDepth":1}"#,
+            &(prose_line(
+                "user",
+                &cwd,
+                "<task-notification>\n<task-id>child</task-id>\n<status>failed</status>\n</task-notification>",
+            ) + "\n"),
+        );
+        write_subagent(
+            &main,
+            "child",
+            r#"{"agentType":"Explore","parentAgentId":"parent","spawnDepth":2}"#,
+            "",
+        );
+
+        let got = session_subagents(&main, NOW);
+        let status = |id: &str| got.iter().find(|s| s.agent_id == id).unwrap().status;
+        assert_eq!(status("parent"), SubagentStatus::Completed);
+        assert_eq!(
+            status("child"),
+            SubagentStatus::Failed,
+            "the nested verdict comes from the subagent that spawned it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_subagent_transcript_pointing_outside_is_not_listed() {
+        let (dir, _projects, wt, main) = detail_fixture("symlink", "");
+        let cwd = wt.to_string_lossy().into_owned();
+        std::fs::write(&main, prose_line("user", &cwd, "go") + "\n").unwrap();
+        let subagents = subagents_dir(&main).unwrap();
+        std::fs::create_dir_all(&subagents).unwrap();
+        let outside = dir.join("secret.jsonl");
+        std::fs::write(&outside, "{}\n").unwrap();
+        std::os::unix::fs::symlink(&outside, subagents.join("agent-evil.jsonl")).unwrap();
+
+        assert!(
+            session_subagents(&main, NOW).is_empty(),
+            "a link out of the directory is neither counted nor read"
+        );
+        assert_eq!(subagent_count(&main), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The entry-level check measures against the *resolved* directory, so a
+    /// `subagents` planted as a link out of the project tree would have listed
+    /// everything in its target — sidecars and all — as this session's agents.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_subagents_directory_lists_nothing() {
+        let (dir, _projects, wt, main) = detail_fixture("dirlink", "");
+        let cwd = wt.to_string_lossy().into_owned();
+        std::fs::write(&main, prose_line("user", &cwd, "go") + "\n").unwrap();
+        // A real directory of plausible-looking transcripts, outside the tree.
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("agent-planted.jsonl"), "{}\n").unwrap();
+        std::fs::write(elsewhere.join("agent-planted.meta.json"), "{}\n").unwrap();
+
+        let subagents = subagents_dir(&main).unwrap();
+        std::fs::create_dir_all(subagents.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &subagents).unwrap();
+
+        assert!(
+            subagent_files(&main).is_empty(),
+            "the directory is resolved, then required to still be inside the project"
+        );
+        assert_eq!(subagent_count(&main), 0);
+        assert!(session_subagents(&main, NOW).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- per-session spend ----
+
+    #[test]
+    fn spend_prices_known_models_and_leaves_an_unknown_one_costless() {
+        let (dir, _projects, wt, main) = detail_fixture("spend", "");
+        let cwd = wt.to_string_lossy().into_owned();
+        let assistant = |id: &str, model: &str, input: u64| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-07-05T10:00:00.000Z","requestId":"r-{id}","cwd":"{cwd}","message":{{"id":"{id}","model":"{model}","usage":{{"input_tokens":{input},"output_tokens":0}}}}}}"#
+            )
+        };
+        std::fs::write(
+            &main,
+            [
+                assistant("m1", "claude-opus-4-8", 1_000_000),
+                // The same turn twice, as a resumed session copies it — counted
+                // once, at the fuller row's numbers.
+                assistant("m1", "claude-opus-4-8", 2_000_000),
+                assistant("m2", "some-unreleased-model", 500),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let fd = load_files(std::slice::from_ref(&main), |_, _| {})
+            .pop()
+            .unwrap();
+
+        let got = session_spend(&main, &fd, &tbl());
+        assert_eq!(
+            got.total_tokens, 2_000_500.0,
+            "the duplicated turn is folded to its max, not summed"
+        );
+        let opus = got
+            .models
+            .iter()
+            .find(|m| m.model == "claude-opus-4-8")
+            .unwrap();
+        assert_eq!(opus.cost_usd, Some(10.0), "2M input tokens at $5/M");
+        let unknown = got
+            .models
+            .iter()
+            .find(|m| m.model == "some-unreleased-model")
+            .unwrap();
+        assert_eq!(
+            unknown.cost_usd, None,
+            "an unpriced model reports no cost — a $0.00 would read as free"
+        );
+        assert_eq!(
+            got.cost_usd,
+            Some(10.0),
+            "the total sums the priced models only"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_with_no_priced_model_reports_no_cost_at_all() {
+        let (dir, _projects, wt, main) = detail_fixture("nocost", "");
+        let cwd = wt.to_string_lossy().into_owned();
+        std::fs::write(
+            &main,
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-07-05T10:00:00.000Z","requestId":"r1","cwd":"{cwd}","message":{{"id":"m1","model":"mystery","usage":{{"input_tokens":10,"output_tokens":1}}}}}}"#
+            ) + "\n",
+        )
+        .unwrap();
+        let fd = load_files(std::slice::from_ref(&main), |_, _| {})
+            .pop()
+            .unwrap();
+
+        let got = session_spend(&main, &fd, &tbl());
+        assert_eq!(got.total_tokens, 11.0);
+        assert_eq!(got.cost_usd, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

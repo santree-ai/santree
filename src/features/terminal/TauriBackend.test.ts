@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { commands } from "../../bindings";
+import { paneAddress } from "./paneAddress";
 import { TauriBackend } from "./TauriBackend";
 import type { OpenOpts, OutputHandlers } from "./types";
 
@@ -174,23 +175,54 @@ describe("TauriBackend", () => {
   });
 
   describe("adopt", () => {
-    /** Keyed by label, because that is what a pane coming up knows about
-     *  itself — the same `term_key` its surface has always used. */
-    it("returns inherited sessions keyed by label", async () => {
+    /** Keyed by the pane's address, because that is what a pane coming up knows
+     *  about itself — the same `term_key` its surface has always used, plus the
+     *  provider it runs. */
+    it("returns inherited sessions keyed by their pane address", async () => {
       terminalAdopt.mockResolvedValue({
         status: "ok",
         data: [
-          { id: 3, label: "tree:a", cwd: "/repo", command: "/bin/zsh" },
-          { id: 4, label: "tree:b", cwd: "/repo", command: "/bin/zsh" },
+          { id: 3, label: "tree:a", agentKind: "Claude", cwd: "/repo", command: "/bin/zsh" },
+          { id: 4, label: "tree:b", agentKind: null, cwd: "/repo", command: "/bin/zsh" },
         ],
       });
       const adopted = await new TauriBackend().adopt("page-2");
       expect(adopted).toEqual(
         new Map([
-          ["tree:a", 3],
-          ["tree:b", 4],
+          [paneAddress("tree:a", "Claude"), 3],
+          [paneAddress("tree:b", null), 4],
         ]),
       );
+    });
+
+    /** A PR under review by both providers is two live sessions on one surface —
+     *  the shape the durable table has always allowed. Keyed by label alone the
+     *  two would collapse, both panes would adopt whichever came last, and the
+     *  other session would be stranded with nothing pointing at it. */
+    it("keeps two providers on one surface apart", async () => {
+      terminalAdopt.mockResolvedValue({
+        status: "ok",
+        data: [
+          {
+            id: 5,
+            label: "ai-review:acme/app#7",
+            agentKind: "Claude",
+            cwd: "/repo",
+            command: "/bin/zsh",
+          },
+          {
+            id: 6,
+            label: "ai-review:acme/app#7",
+            agentKind: "Codex",
+            cwd: "/repo",
+            command: "/bin/zsh",
+          },
+        ],
+      });
+      const adopted = await new TauriBackend().adopt("page-2");
+      expect(adopted.size).toBe(2);
+      expect(adopted.get(paneAddress("ai-review:acme/app#7", "Claude"))).toBe(5);
+      expect(adopted.get(paneAddress("ai-review:acme/app#7", "Codex"))).toBe(6);
     });
 
     it("is empty on a first load", async () => {
@@ -199,11 +231,23 @@ describe("TauriBackend", () => {
     });
   });
 
-  it("passes the label through so a reloaded page can find the session", async () => {
+  /** The two halves of the identity travel as two fields. The label is the
+   *  `term_key` verbatim — it is joined byte-for-byte against the durable row,
+   *  and a provider appended to it matched nothing, which is what made a live
+   *  triage agent read as exited. */
+  it("passes the label and the provider through as separate fields", async () => {
     const backend = new TauriBackend();
-    await backend.open(opts, spyHandlers());
+    await backend.open({ ...opts, agentKind: "Codex" }, spyHandlers());
     expect(terminalOpen).toHaveBeenCalledWith(
-      expect.objectContaining({ label: "tree:a" }),
+      expect.objectContaining({ label: "tree:a", agentKind: "Codex" }),
+      expect.anything(),
+    );
+  });
+
+  it("sends a plain shell's provider as null rather than inventing one", async () => {
+    await new TauriBackend().open(opts, spyHandlers());
+    expect(terminalOpen).toHaveBeenCalledWith(
+      expect.objectContaining({ label: "tree:a", agentKind: null }),
       expect.anything(),
     );
   });

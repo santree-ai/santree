@@ -17,6 +17,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::db::Db;
 use crate::error::CmdResult;
+use santree_core::domain::AgentKind;
 use santree_pty::{Anchor, OpenOpts, PtyManager, ReplayMode, SessionId};
 
 /// A PTY output chunk, wrapped so it crosses the Tauri IPC [`Channel`] as raw
@@ -71,7 +72,28 @@ pub struct TerminalOpenOpts {
     /// What the frontend calls this session (its `term_key`). Handed back by
     /// [`terminal_adopt`] so a reloaded page can match a live session to the
     /// surface that owns it. Opaque, exactly like `owner`.
+    ///
+    /// Exactly the `term_key` — never a decorated form of it. The pane's
+    /// provider travels in `agent_kind` below, because this string is joined
+    /// byte-for-byte against `terminal_sessions.term_key` to decide whether an
+    /// agent is still running.
     pub label: String,
+    /// Which agent the frontend is launching here, or `null` for a plain shell.
+    ///
+    /// The other half of the session's identity: `terminal_sessions` is keyed by
+    /// `(repo, term_key, agent_kind)`, so one surface can hold one live session
+    /// per provider and neither field names a session on its own.
+    ///
+    /// **It must name the CLI the seed actually `exec`s.** This value and the
+    /// seed line arrive as two independent IPC arguments, and the provider's own
+    /// hook writes the durable row from the CLI it is running — so a pane
+    /// registered as `Codex` whose seed launches `claude` puts `(surface, Codex)`
+    /// in the live set against a `(surface, Claude)` row, the liveness join
+    /// matches nothing, and the working agent reads as exited. That is the same
+    /// failure a provider-decorated `label` caused. Every launch site derives
+    /// both halves from one resolved provider (`useAgentTab`, the triage hooks,
+    /// `ReviewTerminal`); a new one must too.
+    pub agent_kind: Option<AgentKind>,
 }
 
 /// Where a reattaching client is in a session's output stream.
@@ -176,11 +198,32 @@ pub struct AdoptedSession {
     pub id: SessionId,
     /// The `term_key` it was opened under — how the caller finds its surface.
     pub label: String,
+    /// The provider it was opened for. With `label`, the pair that names the
+    /// pane: a caller keying adopted sessions by label alone would hand one
+    /// session to both panes of a surface a user has open under two providers.
+    pub agent_kind: Option<AgentKind>,
     pub cwd: Option<String>,
     pub command: String,
 }
 
-/// The `term_key`s that have a live PTY right now.
+/// One live PTY, named the way `terminal_sessions` names a session: the surface
+/// it hosts and the provider running in it.
+///
+/// The pair is the identity, and it is a pair on purpose. `term_key` alone is
+/// what the durable row is keyed by *together with* `agent_kind` — one surface
+/// holds one conversation per provider — so a single string could only carry
+/// both by decorating one with the other, which is exactly the bug this replaced:
+/// a triage PTY opened under `AK-1::codex` matched no `term_key` on the way back,
+/// and a live agent was reported as exited.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LiveTerminal {
+    /// The `term_key` the pane's PTY was opened under.
+    pub term_key: String,
+    /// The provider santree launched in it, or `None` for a plain shell.
+    pub agent_kind: Option<AgentKind>,
+}
+
+/// The `(term_key, agent_kind)` pairs that have a live PTY right now.
 ///
 /// This is santree's whole answer to "which agents are actually running", and it
 /// is a *live read*, not a record: the manager holds the real processes, and
@@ -188,30 +231,43 @@ pub struct AdoptedSession {
 /// cannot outlive the app — which is what makes an empty set after a restart the
 /// correct answer rather than a missing one.
 ///
-/// A session's `label` **is** its `term_key` (see [`TerminalOpenOpts::label`] and
-/// `TauriBackend.ts`, which keys adopted sessions by it), so this needs no
-/// translation. Consumed by `hooks::session_states`.
-pub fn live_terminals(manager: &PtyManager) -> HashSet<String> {
+/// A session's `label` **is** its `term_key` and its `agent_kind` **is** the
+/// provider column (see [`TerminalOpenOpts`] and `TauriBackend.ts`, which keys
+/// adopted sessions by the same pair), so this needs no translation. Consumed by
+/// `hooks::session_states`.
+pub fn live_terminals(manager: &PtyManager) -> HashSet<LiveTerminal> {
     manager
         .sessions()
         .into_iter()
         .filter(|s| s.alive)
-        .map(|s| s.label)
+        .map(|s| LiveTerminal {
+            term_key: s.label,
+            agent_kind: s.agent_kind,
+        })
         .collect()
 }
 
-/// Each live PTY session's `term_key` paired with its root pid — the pane roots
-/// a process-table scan walks down from (`agent_procs::detect`).
+/// Each live PTY session's address paired with its root pid — the pane roots a
+/// process-table scan walks down from (`agent_procs::detect`).
 ///
 /// Sibling of [`live_terminals`]: the same live read of the manager, asked a
 /// different question. A session the platform reported no pid for is omitted
 /// rather than guessed at, which is the same rule the resource accounting uses.
-pub fn pane_roots(manager: &PtyManager) -> Vec<(String, u32)> {
+pub fn pane_roots(manager: &PtyManager) -> Vec<(LiveTerminal, u32)> {
     manager
         .sessions()
         .into_iter()
         .filter(|s| s.alive)
-        .filter_map(|s| Some((s.label, s.pid?)))
+        .filter_map(|s| {
+            let pid = s.pid?;
+            Some((
+                LiveTerminal {
+                    term_key: s.label,
+                    agent_kind: s.agent_kind,
+                },
+                pid,
+            ))
+        })
         .collect()
 }
 
@@ -230,6 +286,7 @@ pub fn pane_roots(manager: &PtyManager) -> Vec<(String, u32)> {
 fn retiring_sink(
     db: Db,
     label: String,
+    agent_kind: Option<AgentKind>,
     cwd: Option<String>,
     forward: impl Fn(Vec<u8>) + Send + 'static,
 ) -> impl Fn(Vec<u8>) + Send + 'static {
@@ -241,7 +298,7 @@ fn retiring_sink(
         }
         let (db, label, cwd) = (db.clone(), label.clone(), cwd.clone());
         tauri::async_runtime::spawn(async move {
-            match crate::hooks::retire_terminal(&db, &label, cwd.as_deref()).await {
+            match crate::hooks::retire_terminal(&db, &label, agent_kind, cwd.as_deref()).await {
                 Ok(n) if n > 0 => log::info!("pty for {label} exited; retired {n} session row(s)"),
                 Ok(_) => {}
                 Err(e) => log::warn!("retiring session rows for {label}: {e}"),
@@ -526,11 +583,13 @@ pub async fn terminal_open(
         env,
         owner: opts.owner,
         label: opts.label,
+        agent_kind: opts.agent_kind,
     };
     let manager = manager.inner().clone();
     let sink = retiring_sink(
         db.inner().clone(),
         opts.label.clone(),
+        opts.agent_kind,
         opts.cwd.clone(),
         move |bytes| {
             // A failed send means the channel was dropped (view unmounted); the
@@ -657,7 +716,7 @@ pub async fn terminal_attach(
         .sessions()
         .into_iter()
         .find(|s| s.id == id)
-        .map(|s| (s.label, s.cwd));
+        .map(|s| (s.label, s.agent_kind, s.cwd));
     let forward = {
         let on_output = on_output.clone();
         move |bytes: Vec<u8>| {
@@ -665,10 +724,10 @@ pub async fn terminal_attach(
         }
     };
     let replay = match owner {
-        Some((label, cwd)) => manager.attach(
+        Some((label, agent_kind, cwd)) => manager.attach(
             id,
             &anchor.into(),
-            retiring_sink(db.inner().clone(), label, cwd, forward),
+            retiring_sink(db.inner().clone(), label, agent_kind, cwd, forward),
         ),
         None => manager.attach(id, &anchor.into(), forward),
     }?;
@@ -728,8 +787,8 @@ pub async fn terminal_sessions(manager: State<'_, PtyManager>) -> CmdResult<Vec<
 /// die with the *page*: every handle to one lived in the webview, and a reload
 /// threw all of them away, so the sessions were unreachable and had to be
 /// reaped. They no longer are. Each session records its own recent output, so a
-/// reloaded page can rebuild the tab from `label` and catch the pane up from the
-/// stream — a reload now costs the view, not the work.
+/// reloaded page can rebuild the tab from `(label, agent_kind)` and catch the
+/// pane up from the stream — a reload now costs the view, not the work.
 ///
 /// The caller must close whatever it cannot host (a worktree deleted while the
 /// page was down); this reports everything rather than filtering, because only
@@ -751,6 +810,7 @@ pub async fn terminal_adopt(
         .map(|info| AdoptedSession {
             id: info.id,
             label: info.label,
+            agent_kind: info.agent_kind,
             cwd: info.cwd,
             command: info.command,
         })
@@ -1006,6 +1066,7 @@ mod tests {
                     cols: 80,
                     rows: 24,
                     label: "tree:AK-1".into(),
+                    agent_kind: Some(AgentKind::Codex),
                     ..Default::default()
                 },
                 |_| {},
@@ -1014,9 +1075,15 @@ mod tests {
 
         let roots = pane_roots(&manager);
         assert_eq!(
-            roots.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-            vec!["tree:AK-1"],
-            "the pane is keyed by its term_key"
+            roots
+                .iter()
+                .map(|(pane, _)| pane.clone())
+                .collect::<Vec<_>>(),
+            vec![LiveTerminal {
+                term_key: "tree:AK-1".into(),
+                agent_kind: Some(AgentKind::Codex),
+            }],
+            "the pane is addressed by its term_key AND the provider in it"
         );
 
         // The process table snapshot is cached for 500ms, so the first scan can
@@ -1036,7 +1103,8 @@ mod tests {
             found,
             vec![santree_core::domain::AgentProcess {
                 term_key: "tree:AK-1".into(),
-                agent_kind: santree_core::domain::AgentKind::Codex,
+                pane_agent_kind: Some(AgentKind::Codex),
+                agent_kind: AgentKind::Codex,
             }],
             "a pty-hosted `codex` must be seen in its pane's foreground"
         );

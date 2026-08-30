@@ -82,7 +82,8 @@ export function ReviewBriefSection({
   const liveSession = tabs.some(
     (tab) =>
       tab.source === "review" &&
-      tab.refId === `${aiReviewTermKey(pr)}::${actionAgent.toLowerCase()}`,
+      tab.refId === aiReviewTermKey(pr) &&
+      tab.agent?.kind === actionAgent,
   );
 
   // A brief written against an older head describes code that no longer exists.

@@ -30,8 +30,11 @@ export function PrFileDiffPane({ pr, file, path }: { pr: ReviewPr; file: PrFile;
   const [owner, name] = splitRepoSlug(pr.repo);
   const { data: detail } = usePrDetail(owner, name, pr.number);
   const { data: drafts = [] } = useReviewDrafts(pr.repo, pr.number);
+  // `diffMode`, not `mode`: DiffPane declares a `mode` of its own three lines
+  // above the call to this one, and it means an unrelated thing — which *source*
+  // the diff is read from (`prDiffModeFor`), not how it is laid out.
   const { data: diffModeSetting } = useResolvedSetting(repo, TREES_DIFF_MODE_KEY);
-  const mode = diffModeSetting === "unified" ? "unified" : "split";
+  const diffMode = diffModeSetting === "unified" ? "unified" : "split";
 
   const headSha = detail?.headSha ?? "";
   const baseSha = detail?.baseSha ?? "";
@@ -72,7 +75,7 @@ export function PrFileDiffPane({ pr, file, path }: { pr: ReviewPr; file: PrFile;
         target={target}
         oldText={source?.oldText}
         newText={source?.newText}
-        mode={mode}
+        mode={diffMode}
         // Your own PR: a comment written here is either something to say on
         // GitHub or something to fix — never a review batched at yourself.
         draftMode="queue"

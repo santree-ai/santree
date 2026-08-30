@@ -1,55 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { Task, Worktree } from "../../bindings";
+import { agentEntry, NOW, STALE, task, worktree } from "../../test/fixtures";
 import { buildTicketGroups, type TicketFoldInput } from "./useTickets";
-
-function task(id: string, repoProject: string, overrides: Partial<Task> = {}): Task {
-  return {
-    id,
-    title: id,
-    project: repoProject,
-    projectMilestone: null,
-    projectColor: null,
-    projectIcon: null,
-    projectTargetDate: null,
-    parentId: null,
-    priority: "None",
-    estimate: null,
-    status: "Todo",
-    ready: true,
-    blockedBy: [],
-    actionable: true,
-    assignee: null,
-    assigneeAvatarUrl: null,
-    x: 0,
-    y: 0,
-    ...overrides,
-  };
-}
-
-function worktree(id: string): Worktree {
-  return {
-    id,
-    title: id,
-    status: null,
-    addLines: 0,
-    delLines: 0,
-    dirty: false,
-    ahead: 0,
-    behind: 0,
-    unpushed: 0,
-    remoteBehind: 0,
-    pullConflict: false,
-    agent: "Claude",
-    activity: null,
-    branch: `feature/${id}`,
-    path: `/tmp/${id}`,
-    project: null,
-    baseBranch: "main",
-    setupRan: false,
-    pending: false,
-  };
-}
 
 function fold(overrides: Partial<TicketFoldInput> = {}) {
   return buildTicketGroups({
@@ -59,7 +11,12 @@ function fold(overrides: Partial<TicketFoldInput> = {}) {
     prs: new Map(),
     agents: [],
     seen: {},
-    nowMs: Date.now(),
+    // The shared fixture clock, not the wall clock: `buildTicketGroups` feeds
+    // this to `levelOf`, whose first tier is `nowMs - updatedAtMs <= 30min`, and
+    // every shared agent fixture is stamped `NOW`. A live `Date.now()` here
+    // makes any agent passed in years stale, so the fresh-hook tier of the
+    // attention join silently reports "idle" instead.
+    nowMs: NOW,
     actionableOnly: true,
     ...overrides,
   });
@@ -111,6 +68,40 @@ describe("buildTicketGroups", () => {
     expect(row.worktree).not.toBeNull();
     // Started work is no longer on offer.
     expect(summary.ready).toBe(0);
+  });
+
+  /** The row's dot is `highest` over its agents' `levelOf`, and `levelOf`'s first
+   *  tier is the hook event while it is still fresh — which is only reachable
+   *  because `nowMs` is the same fixed clock the agent fixtures are stamped
+   *  against. With a live `Date.now()` here every entry read as long-stale and
+   *  this came back `idle` no matter what the agents were doing. */
+  it("takes a row's attention from the busiest agent on its ticket", () => {
+    const { groups } = fold({
+      repos: ["one"],
+      tasks: new Map([["one", [task("A-1", "Alpha")]]]),
+      agents: [
+        agentEntry({ bucket: "working", repo: "one", termKey: "tree:A-1", sessionId: "s1" }),
+        agentEntry({ bucket: "attention", repo: "one", termKey: "tree:A-1", sessionId: "s2" }),
+      ],
+    });
+
+    const [row] = groups[0].milestones[0].items;
+    expect(row.agents.map((a) => a.sessionId)).toEqual(["s1", "s2"]);
+    expect(row.attention.level).toBe("needs-you");
+  });
+
+  /** Same agents, one stale hook event: the row falls back to rest rather than
+   *  asserting a reading nothing has confirmed in half an hour. */
+  it("lets a row's attention decay once its agent's last event goes stale", () => {
+    const { groups } = fold({
+      repos: ["one"],
+      tasks: new Map([["one", [task("A-1", "Alpha")]]]),
+      agents: [
+        agentEntry({ bucket: "working", repo: "one", termKey: "tree:A-1", updatedAtMs: STALE }),
+      ],
+    });
+
+    expect(groups[0].milestones[0].items[0].attention.level).toBe("idle");
   });
 
   it("keeps the same identifier apart when it belongs to two orgs", () => {

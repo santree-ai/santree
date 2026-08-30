@@ -201,6 +201,17 @@ fn content(text: &str, is_error: bool) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
 }
 
+/// One reply as it goes on the wire: the compact JSON, then the newline the
+/// transport delimits on. `Value`'s `Display` escapes any newline *inside* a
+/// string, so one message is always exactly one line.
+///
+/// Its own function rather than a `writeln!` inside [`serve`] so a test can
+/// assert on the framing the server actually uses — proving `serde_json`
+/// escapes newlines says nothing about whether we then pretty-print them back.
+fn frame(reply: &Value) -> String {
+    format!("{reply}\n")
+}
+
 /// Read `params.arguments` as an object, so a tool never has to re-check.
 pub(crate) fn args_object(args: &Value) -> Map<String, Value> {
     args.as_object().cloned().unwrap_or_default()
@@ -228,9 +239,8 @@ pub(crate) fn serve(db_path: &str, scope: McpScope) {
         let Some(reply) = session.handle_line(&line) else {
             continue;
         };
-        // `to_string` escapes any newline inside a string, so one message really is
-        // one line — the framing the transport depends on.
-        if writeln!(stdout, "{reply}")
+        if stdout
+            .write_all(frame(&reply).as_bytes())
             .and_then(|()| stdout.flush())
             .is_err()
         {
@@ -306,7 +316,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out["result"]["protocolVersion"], "2024-11-05");
-        assert_eq!(out["result"]["serverInfo"]["name"], SERVER_NAME);
+        // The literal, not the constant it was built from: this name is half of a
+        // cross-crate contract. `src-tauri`'s `hooks.rs` pins the same string in
+        // `MCP_SERVER_NAME` and grants `mcp__santree-review`, so renaming it on
+        // one side alone leaves every permission rule matching nothing.
+        assert_eq!(out["result"]["serverInfo"]["name"], "santree-review");
     }
 
     #[test]
@@ -408,7 +422,8 @@ mod tests {
     #[test]
     fn one_message_is_always_one_line() {
         // The transport is newline-delimited, so a body with a newline in it must
-        // not split the reply in two.
+        // not split the reply in two. Asserted on [`frame`] — what `serve` writes —
+        // rather than on the `Value`, which would only prove serde_json escapes.
         let mut s = Session::new(Stub {
             last: None,
             answer: Ok("first\nsecond".into()),
@@ -418,7 +433,48 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"x"}}"#,
         )
         .unwrap();
-        assert!(!out.to_string().contains('\n'));
+
+        let wire = frame(&out);
+        assert!(wire.ends_with('\n'), "a message is terminated: {wire:?}");
+        assert_eq!(
+            wire.matches('\n').count(),
+            1,
+            "exactly one newline, the delimiter: {wire:?}"
+        );
+        // …and the body really did survive it.
+        assert_eq!(
+            serde_json::from_str::<Value>(wire.trim_end()).unwrap()["result"]["content"][0]["text"],
+            "first\nsecond"
+        );
+    }
+
+    /// Every frame is JSON-RPC 2.0 or it is not a protocol message at all. Nothing
+    /// else asserts this: every `jsonrpc` elsewhere in this module is inside a
+    /// *request* string we wrote, so dropping the field from [`result`]/[`error`]
+    /// left all ten tests green while a spec-conformant client rejected the lot.
+    #[test]
+    fn every_reply_carries_the_json_rpc_envelope() {
+        let mut s = Session::new(Stub::ok());
+        for (request, key) in [
+            (
+                r#"{"jsonrpc":"2.0","id":"a","method":"ping"}"#,
+                "result", // the success envelope
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":"a","method":"resources/list"}"#,
+                "error", // …and the failure one
+            ),
+        ] {
+            let out = line(&mut s, request).unwrap();
+            assert_eq!(out["jsonrpc"], "2.0", "{out}");
+            assert_eq!(out["id"], "a", "a reply is matched to its request: {out}");
+            assert!(out.get(key).is_some(), "{out}");
+        }
+        // A message we couldn't even parse still answers in the envelope, with the
+        // null id the spec requires when there is no id to echo.
+        let parse = line(&mut s, "not json {{{").unwrap();
+        assert_eq!(parse["jsonrpc"], "2.0", "{parse}");
+        assert_eq!(parse["id"], Value::Null);
     }
 
     #[test]

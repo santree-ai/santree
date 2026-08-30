@@ -5,8 +5,16 @@ import type { ReviewPr } from "../../bindings";
 
 const review = vi.hoisted(() => ({
   open: vi.fn(),
-  tabs: [] as { source: string; refId: string }[],
+  tabs: [] as { source: string; refId: string; agent?: { kind: string } }[],
 }));
+
+/** A live review pane: the PR's own `term_key` as the ref — never decorated with
+ *  the provider — and the agent running it beside. */
+const reviewPane = (kind: string) => ({
+  source: "review",
+  refId: "ai-review:acme/app#7",
+  agent: { kind },
+});
 
 vi.mock("../../lib/queries", () => ({
   REVIEW_AGENT_KEY: "review_agent",
@@ -29,7 +37,7 @@ const pr = {
 
 describe("ReviewBriefSection", () => {
   it("brands the open action with the active review provider", () => {
-    review.tabs = [{ source: "review", refId: "ai-review:acme/app#7::codex" }];
+    review.tabs = [reviewPane("Codex")];
 
     render(
       <ReviewBriefSection
@@ -48,7 +56,7 @@ describe("ReviewBriefSection", () => {
   /** The Trees host renders the brief beside a PR it can't start a session for
    *  from this pane, and a button that does nothing is worse than no button. */
   it("renders read-only when the host can't start a review", () => {
-    review.tabs = [{ source: "review", refId: "ai-review:acme/app#7::codex" }];
+    review.tabs = [reviewPane("Codex")];
 
     render(
       <ReviewBriefSection

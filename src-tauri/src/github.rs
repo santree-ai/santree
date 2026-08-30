@@ -1953,6 +1953,58 @@ struct PagePr<T> {
     page: Connection<T>,
 }
 
+/// One inline review thread off a PR — the *anchor* contract.
+///
+/// At module level, unlike the rest of [`pr_conversation`]'s wire structs, because
+/// these fields decide where a comment is drawn: `startLine` and `diffSide` are
+/// `Option`s reached only through their renames, so a lost rename doesn't fail —
+/// it collapses a multi-line comment to one line and moves an old-side comment
+/// onto the new side, i.e. it puts the comment on the wrong line. Being nameable
+/// is what lets a test decode the real GitHub shape and catch that.
+#[derive(Deserialize)]
+struct ReviewThreadNode {
+    /// Pages the thread's own replies (see [`drain_thread_comments`]), and is
+    /// what resolve/unresolve mutates.
+    id: String,
+    path: String,
+    line: Option<u32>,
+    #[serde(rename = "startLine")]
+    start_line: Option<u32>,
+    #[serde(rename = "diffSide")]
+    diff_side: Option<String>,
+    #[serde(rename = "isResolved")]
+    is_resolved: bool,
+    #[serde(rename = "isOutdated")]
+    is_outdated: bool,
+    #[serde(rename = "viewerCanResolve")]
+    viewer_can_resolve: bool,
+    #[serde(rename = "viewerCanUnresolve")]
+    viewer_can_unresolve: bool,
+    comments: Connection<ReviewThreadComment>,
+}
+
+/// Which side of the diff a thread is anchored to. GitHub's `diffSide` is `RIGHT`
+/// for the new file and `LEFT` for the old; absent defaults to the new side, the
+/// common single-line case.
+fn thread_on_right(diff_side: Option<&str>) -> bool {
+    diff_side != Some("LEFT")
+}
+
+#[derive(Deserialize)]
+struct ReviewThreadComment {
+    /// GitHub's `BigInt` scalar — a JSON *string* of digits, not a number.
+    /// Kept untyped so a future representation change can't fail the whole
+    /// PR's conversation to deserialize over an id only the reply path uses.
+    #[serde(rename = "fullDatabaseId")]
+    full_database_id: Option<serde_json::Value>,
+    /// `PENDING` while it belongs to an unsubmitted review of the viewer's.
+    state: Option<String>,
+    author: Option<Actor>,
+    body: String,
+    #[serde(rename = "createdAt")]
+    created_at: String,
+}
+
 /// Append the pages the PR query didn't return into `conn`, following the cursor
 /// until exhausted. `query` comes from [`conversation_page_query`]. Nothing is
 /// dropped silently: a reviewer who saw only the first page of `reviewThreads`
@@ -2076,7 +2128,7 @@ async fn pr_conversation(
         comments: Connection<Comment>,
         reviews: Connection<Review>,
         #[serde(rename = "reviewThreads")]
-        review_threads: Connection<Thread>,
+        review_threads: Connection<ReviewThreadNode>,
         // Renamed (vs the module-level `CommitNode`) because this one reads the
         // rollup's individual check `contexts`, not the aggregate `state`.
         commits: Connection<DetailCommitNode>,
@@ -2197,42 +2249,6 @@ async fn pr_conversation(
         #[serde(rename = "createdAt")]
         created_at: String,
     }
-    #[derive(Deserialize)]
-    struct Thread {
-        /// Pages the thread's own replies (see [`drain_thread_comments`]), and is
-        /// what resolve/unresolve mutates.
-        id: String,
-        path: String,
-        line: Option<u32>,
-        #[serde(rename = "startLine")]
-        start_line: Option<u32>,
-        #[serde(rename = "diffSide")]
-        diff_side: Option<String>,
-        #[serde(rename = "isResolved")]
-        is_resolved: bool,
-        #[serde(rename = "isOutdated")]
-        is_outdated: bool,
-        #[serde(rename = "viewerCanResolve")]
-        viewer_can_resolve: bool,
-        #[serde(rename = "viewerCanUnresolve")]
-        viewer_can_unresolve: bool,
-        comments: Connection<ThreadComment>,
-    }
-    #[derive(Deserialize)]
-    struct ThreadComment {
-        /// GitHub's `BigInt` scalar — a JSON *string* of digits, not a number.
-        /// Kept untyped so a future representation change can't fail the whole
-        /// PR's conversation to deserialize over an id only the reply path uses.
-        #[serde(rename = "fullDatabaseId")]
-        full_database_id: Option<serde_json::Value>,
-        /// `PENDING` while it belongs to an unsubmitted review of the viewer's.
-        state: Option<String>,
-        author: Option<Actor>,
-        body: String,
-        #[serde(rename = "createdAt")]
-        created_at: String,
-    }
-
     // Follow-up query for additional check-context pages (see the paging loop
     // below). Only the head commit's `contexts` connection, keyed by cursor.
     let contexts_query = r"
@@ -2388,9 +2404,7 @@ async fn pr_conversation(
             path: t.path,
             line: t.line,
             start_line: t.start_line,
-            // GitHub's `diffSide` is RIGHT for the new side, LEFT for the old;
-            // default to the new side when absent (the common single-line case).
-            on_right: t.diff_side.as_deref() != Some("LEFT"),
+            on_right: thread_on_right(t.diff_side.as_deref()),
             is_resolved: t.is_resolved,
             is_outdated: t.is_outdated,
             viewer_can_resolve: t.viewer_can_resolve,
@@ -2823,6 +2837,34 @@ fn file_paging(fetched: usize, page_len: usize) -> FilePaging {
     }
 }
 
+/// Drain a page-numbered endpoint under [`file_paging`]'s rules: `fetch(page)`
+/// returns one page, 1-based, and the driver stops on a short page or at
+/// [`PR_FILES_CAP`]. The bool is "there are more we didn't fetch".
+///
+/// Split from [`pr_files`]'s request so the loop that *decides* that bool is
+/// reachable without HTTP: the paging table is well pinned, but nothing else
+/// proves the caller ever acts on `Truncated` — a driver that always broke `false`
+/// would page forever or under-report, and every existing test would still pass.
+async fn collect_pages<T, F, Fut>(fetch: F) -> Result<(Vec<T>, bool)>
+where
+    F: Fn(usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<T>>>,
+{
+    let mut items: Vec<T> = Vec::new();
+    let truncated = loop {
+        let page = items.len() / PR_FILES_PER_PAGE + 1;
+        let batch = fetch(page).await?;
+        let paging = file_paging(items.len() + batch.len(), batch.len());
+        items.extend(batch);
+        match paging {
+            FilePaging::More => {}
+            FilePaging::Truncated => break true,
+            FilePaging::Done => break false,
+        }
+    };
+    Ok((items, truncated))
+}
+
 /// Changed files for a PR, with their unified-diff patches (REST files API), paged
 /// up to [`PR_FILES_CAP`]. The bool is "there are more files we didn't fetch".
 async fn pr_files(
@@ -2845,31 +2887,30 @@ async fn pr_files(
     let url = api_url(&["repos", owner, name, "pulls", &number.to_string(), "files"])?;
     let per_page = PR_FILES_PER_PAGE.to_string();
 
-    let mut files: Vec<PrFile> = Vec::new();
-    let truncated = loop {
-        let page = files.len() / PR_FILES_PER_PAGE + 1;
-        let batch: Vec<RestFile> = get_json(
-            url.clone(),
-            &[("per_page", per_page.as_str()), ("page", &page.to_string())],
-            token,
-        )
-        .await?;
-        let paging = file_paging(files.len() + batch.len(), batch.len());
-        files.extend(batch.into_iter().map(|f| PrFile {
-            path: f.filename,
-            previous_path: f.previous_filename,
-            status: f.status,
-            additions: f.additions,
-            deletions: f.deletions,
-            patch: f.patch,
-            sha: f.sha,
-        }));
-        match paging {
-            FilePaging::More => {}
-            FilePaging::Truncated => break true,
-            FilePaging::Done => break false,
+    let (files, truncated) = collect_pages(|page| {
+        let (url, per_page) = (url.clone(), per_page.clone());
+        async move {
+            let batch: Vec<RestFile> = get_json(
+                url,
+                &[("per_page", per_page.as_str()), ("page", &page.to_string())],
+                token,
+            )
+            .await?;
+            Ok(batch
+                .into_iter()
+                .map(|f| PrFile {
+                    path: f.filename,
+                    previous_path: f.previous_filename,
+                    status: f.status,
+                    additions: f.additions,
+                    deletions: f.deletions,
+                    patch: f.patch,
+                    sha: f.sha,
+                })
+                .collect())
         }
-    };
+    })
+    .await?;
     if truncated {
         log::warn!(
             "PR {owner}/{name}#{number} has more than {PR_FILES_CAP} changed files; the diff list is truncated"
@@ -3207,6 +3248,49 @@ mod tests {
         );
     }
 
+    /// Drive [`collect_pages`] over pages of the given lengths, recording which
+    /// page numbers it actually asked for. A page past the fixture comes back
+    /// empty — a short page — so a driver that lost its stop condition ends the
+    /// test instead of hanging it.
+    async fn pages_of(lens: &[usize]) -> (usize, bool, Vec<usize>) {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let (items, truncated) = collect_pages(|page| {
+            asked.borrow_mut().push(page);
+            let len = lens.get(page - 1).copied().unwrap_or(0);
+            async move { Ok((0..len).collect::<Vec<usize>>()) }
+        })
+        .await
+        .unwrap();
+        (items.len(), truncated, asked.into_inner())
+    }
+
+    /// The loop that *consumes* `file_paging`. The table above says what each
+    /// verdict means; this is the only thing that proves the caller acts on it — a
+    /// driver that never returned `true` would report a 900-file PR as complete,
+    /// and a reviewer marking every listed file "Viewed" would be approving a diff
+    /// they never saw.
+    #[tokio::test]
+    async fn collect_pages_stops_at_the_cap_and_reports_the_truncation() {
+        let full = PR_FILES_CAP / PR_FILES_PER_PAGE;
+        // More full pages exist than the cap allows.
+        let (count, truncated, asked) = pages_of(&vec![PR_FILES_PER_PAGE; full + 2]).await;
+        assert!(truncated, "landing on the cap must report truncation");
+        assert_eq!(count, PR_FILES_CAP);
+        // The cap is a stop, not a filter: the page past it is never requested.
+        assert_eq!(asked, (1..=full).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn collect_pages_walks_pages_in_order_until_a_short_one() {
+        let (count, truncated, asked) = pages_of(&[PR_FILES_PER_PAGE, PR_FILES_PER_PAGE, 40]).await;
+        assert!(!truncated, "a short page means GitHub had nothing more");
+        assert_eq!(count, PR_FILES_PER_PAGE * 2 + 40);
+        assert_eq!(asked, vec![1, 2, 3], "pages are asked for in order, from 1");
+
+        // A single short page is one request, not two.
+        assert_eq!(pages_of(&[7]).await, (7, false, vec![1]));
+    }
+
     /// A follow-up page decodes into the same struct as the first one, so the two
     /// selections have to stay identical — and the paged connections have to ask
     /// for the cursor that drives the drain at all.
@@ -3495,6 +3579,194 @@ mod tests {
             budget.windows[1].limit, 30.0,
             "search is its own small pool"
         );
+    }
+
+    // ── The wire shapes (decoded, not built) ─────────────────────────────
+    //
+    // 73 of the 77 `Deserialize` types in this module were never fed a byte of
+    // JSON. These three are the ones where a silently-defaulted field corrupts
+    // something the user then acts on, so they are decoded from the exact shape
+    // the queries above ask for:
+    //
+    //   * `PrNode`     — the whole Reviews inbox. Twenty renames; `reviewDecision`
+    //                    and `viewerLatestReview` are `Option`s that default to
+    //                    "nothing is required / you never reviewed".
+    //   * review threads — where a comment is *drawn*. `startLine`/`diffSide`
+    //                    default to None, which silently moves a comment.
+    //   * `PageData`   — the cursor every `drain_*` loop turns on.
+    //
+    // Checks and the REST file list are deliberately left out: their wire fields
+    // are either snake_case already (`RestFile`) or lose presentation detail
+    // (a job link, a duration) rather than a decision.
+
+    /// One `PR_FIELDS` node, exactly as GitHub sends it, through the mapping the
+    /// inbox renders.
+    ///
+    /// Every field below reaches [`PrNode`] through a `#[serde(rename)]`, and the
+    /// `Option`s among them fall back rather than fail: drop `reviewDecision`'s
+    /// rename and every PR reads as `ReviewDecision::None`; drop
+    /// `viewerLatestReview`'s and the inbox forgets you ever reviewed anything;
+    /// drop `headRef`/`baseRef`'s and a PR stops binding to its worktree.
+    #[test]
+    fn a_pr_node_decodes_the_fields_the_inbox_sorts_and_renders_by() {
+        let node: PrNode = serde_json::from_str(
+            r#"{
+              "id": "PR_kwDO", "number": 51, "title": "Make Codex a first-class agent",
+              "url": "https://github.com/acme/web/pull/51", "state": "OPEN",
+              "isDraft": true, "updatedAt": "2026-08-29T12:00:00Z",
+              "createdAt": "2026-08-27T09:00:00Z",
+              "headRefName": "santi/codex-first-class", "baseRefName": "main",
+              "isInMergeQueue": false,
+              "headRef": { "id": "REF_head" },
+              "baseRef": { "id": "REF_base" },
+              "repository": { "nameWithOwner": "acme/web" },
+              "author": { "__typename": "User", "login": "santiago", "avatarUrl": "https://a/1.png" },
+              "reviewDecision": "CHANGES_REQUESTED",
+              "comments": { "totalCount": 7 },
+              "additions": 120, "deletions": 34, "changedFiles": 9,
+              "viewerLatestReview": { "state": "APPROVED", "submittedAt": "2026-08-28T10:00:00Z" },
+              "commits": { "nodes": [{ "commit": {
+                "oid": "deadbee", "committedDate": "2026-08-29T11:00:00Z",
+                "statusCheckRollup": { "state": "FAILURE" } } }] },
+              "reviewRequests": { "nodes": [
+                { "requestedReviewer": { "__typename": "User", "login": "ada", "avatarUrl": "https://a/2.png" } },
+                { "requestedReviewer": { "__typename": "Team", "name": "Agent Knowledge" } },
+                { "requestedReviewer": { "__typename": "Mannequin", "login": "ghost" } }
+              ] },
+              "timelineItems": { "nodes": [
+                { "createdAt": "2026-08-28T08:00:00Z",
+                  "requestedReviewer": { "__typename": "User", "login": "santiago" } }
+              ] }
+            }"#,
+        )
+        .expect("a PR_FIELDS node");
+
+        let pr = to_review_pr(node, &viewer());
+
+        assert_eq!(pr.repo, "acme/web");
+        assert_eq!(pr.head_ref, "santi/codex-first-class");
+        assert_eq!(pr.head_ref_id.as_deref(), Some("REF_head"));
+        assert_eq!(pr.base_ref_id.as_deref(), Some("REF_base"));
+        assert_eq!(pr.head_sha, "deadbee");
+        assert_eq!(pr.head_committed_at, "2026-08-29T11:00:00Z");
+        assert_eq!(pr.changed_files, 9);
+        assert_eq!(pr.comment_count, 7);
+        assert!(pr.is_draft, "a draft PR must not read as ready for review");
+        assert_eq!(pr.state, PrState::Open);
+        assert_eq!(pr.checks, CheckRollup::Failure);
+        assert_eq!(pr.review_decision, ReviewDecision::ChangesRequested);
+        // "You already looked at this" — the field the inbox dims a row on.
+        let review = pr.viewer_review.as_ref().expect("the viewer's own review");
+        assert_eq!(review.state, ViewerReviewState::Approved);
+        assert_eq!(review.submitted_at, "2026-08-28T10:00:00Z");
+        // The timeline event naming the viewer dates the wait, not `createdAt`.
+        assert_eq!(pr.waiting_since, "2026-08-28T08:00:00Z");
+        // A user, a team, and a mannequin that is neither.
+        let reviewers: Vec<(&str, ReviewerKind)> = pr
+            .reviewers
+            .iter()
+            .map(|r| (r.name.as_str(), r.kind))
+            .collect();
+        assert_eq!(
+            reviewers,
+            [
+                ("ada", ReviewerKind::User),
+                ("Agent Knowledge", ReviewerKind::Team)
+            ]
+        );
+    }
+
+    /// An inline review thread, decoded from the shape the `reviewThreads`
+    /// selection asks for.
+    ///
+    /// CLAUDE.md's rule — never let a comment land on the wrong line — rests on
+    /// these four fields. `startLine` and `diffSide` are `Option`s reached only
+    /// through their renames, so losing one doesn't fail: a multi-line comment
+    /// collapses to its last line, and an old-side comment is drawn on the new
+    /// side, against whatever code now occupies that number.
+    #[test]
+    fn a_review_thread_decodes_the_anchor_the_comment_is_drawn_at() {
+        let thread: ReviewThreadNode = serde_json::from_str(
+            r#"{
+              "id": "PRRT_kwDO", "path": "src-tauri/src/github.rs",
+              "line": 480, "startLine": 471, "diffSide": "LEFT",
+              "isResolved": false, "isOutdated": true,
+              "viewerCanResolve": true, "viewerCanUnresolve": false,
+              "comments": { "nodes": [{
+                "fullDatabaseId": "2318804429", "state": "PENDING",
+                "author": { "__typename": "Bot", "login": "github-actions", "avatarUrl": "" },
+                "body": "This drops the guard.", "createdAt": "2026-08-28T09:00:00Z"
+              }], "pageInfo": { "hasNextPage": true, "endCursor": "Y3Vyc" } }
+            }"#,
+        )
+        .expect("a reviewThreads node");
+
+        assert_eq!(thread.path, "src-tauri/src/github.rs");
+        assert_eq!(thread.line, Some(480));
+        assert_eq!(
+            thread.start_line,
+            Some(471),
+            "a multi-line comment must not collapse to its last line"
+        );
+        assert!(
+            !thread_on_right(thread.diff_side.as_deref()),
+            "a LEFT-side comment belongs on the old file, not the new one"
+        );
+        assert!(!thread.is_resolved, "an open thread still needs a human");
+        assert!(thread.is_outdated);
+        assert!(thread.viewer_can_resolve && !thread.viewer_can_unresolve);
+
+        let comment = &thread.comments.nodes[0];
+        // GitHub's BigInt arrives as a string of digits; the reply endpoint needs it.
+        assert_eq!(
+            bigint_to_string(comment.full_database_id.as_ref().unwrap()),
+            "2318804429"
+        );
+        assert_eq!(comment.state.as_deref(), Some("PENDING"));
+        assert!(comment.author.as_ref().expect("author").is_bot());
+        assert_eq!(comment.created_at, "2026-08-28T09:00:00Z");
+        // The thread's replies page too — `drain_thread_comments` loops on this.
+        assert!(thread.comments.page_info.has_next_page);
+        assert_eq!(
+            thread.comments.page_info.end_cursor.as_deref(),
+            Some("Y3Vyc")
+        );
+
+        // An absent `diffSide` is the common single-line case: the new side.
+        assert!(thread_on_right(None));
+        assert!(thread_on_right(Some("RIGHT")));
+    }
+
+    /// The follow-up page every `drain_*` loop decodes. Its cursor is the only
+    /// thing that stops a long PR being read off its first hundred nodes — the
+    /// failure `drain_conversation`'s own comment names: a PR that looks fully
+    /// resolved while an unresolved thread sits past the cut.
+    #[test]
+    fn a_conversation_page_decodes_the_cursor_that_drains_it() {
+        let page: PageData<ReviewThreadNode> = serde_json::from_str(
+            r#"{"data_ignored":1,"repository":{"pullRequest":{"page":{
+                 "nodes": [{
+                   "id": "PRRT_2", "path": "a.rs", "line": 3, "startLine": null,
+                   "diffSide": "RIGHT", "isResolved": false, "isOutdated": false,
+                   "viewerCanResolve": true, "viewerCanUnresolve": false,
+                   "comments": { "nodes": [] } }],
+                 "pageInfo": { "hasNextPage": true, "endCursor": "cursor-2" }}}}}"#,
+        )
+        .expect("a conversation page");
+
+        let conn = page
+            .repository
+            .and_then(|r| r.pull_request)
+            .map(|p| p.page)
+            .expect("the aliased `page` connection");
+        assert_eq!(conn.nodes.len(), 1);
+        assert!(conn.page_info.has_next_page, "the drain must keep going");
+        assert_eq!(conn.page_info.end_cursor.as_deref(), Some("cursor-2"));
+
+        // A PR whose id names nothing decodes to "stop", not to a failure.
+        let empty: PageData<ReviewThreadNode> =
+            serde_json::from_str(r#"{"repository":{"pullRequest":null}}"#).unwrap();
+        assert!(empty.repository.expect("repository").pull_request.is_none());
     }
 
     /// A pool GitHub omits is absent, not zero. A zero-remaining row reads as

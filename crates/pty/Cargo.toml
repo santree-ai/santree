@@ -6,6 +6,11 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+# For `AgentKind` alone: a session's identity is the (surface, provider) pair,
+# and carrying the provider as an untyped string would put a fallible parse in
+# the middle of the liveness join. `santree-core` is pure domain — this crate
+# stays Tauri-agnostic and unit-testable against a real shell.
+santree-core = { path = "../core" }
 portable-pty = { workspace = true }
 anyhow = { workspace = true }
 # Logging via the `log` facade; the host app installs the global logger.

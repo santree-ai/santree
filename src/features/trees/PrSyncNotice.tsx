@@ -47,7 +47,9 @@ export function PrSyncNotice({
         disabled={isPending}
         onClick={() => push(worktree.id)}
       >
-        {isPending ? <Spinner size={10} /> : <PushIcon size={11} />}
+        {/* `color` explicitly: the Spinner defaults to `--accent`, which IS the
+            primary button's fill — an invisible spinner. */}
+        {isPending ? <Spinner size={10} color="var(--on-accent)" /> : <PushIcon size={11} />}
         Push
       </Button>
     </div>

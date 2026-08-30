@@ -37,7 +37,6 @@ import {
   useUsageWatcher,
   useWorktreeWatcher,
 } from "../lib/queries";
-import { DEFAULT_ACCENT } from "../theme/colors";
 
 /** Slow-changing shared data — the part most `useApp()` consumers read. */
 interface AppData {
@@ -45,7 +44,9 @@ interface AppData {
   activeRepo: string;
   setActiveRepo: (repo: string) => void;
 
-  /** The fixed theme accent (exposed for inline styles). */
+  /** The theme accent, as a CSS value (`var(--accent)`) for inline styles.
+   *  Deliberately NOT a hex: the accent inverts per theme (white on dark,
+   *  near-black on light) and only the cascade knows which one is live. */
   accent: string;
 
   /** Live settings (null until the backend seed loads). Edits persist via
@@ -365,11 +366,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // the invalidation is a no-op until the panel actually observes the query.
   useUsageWatcher();
 
-  // The accent is a fixed theme color, set once on the root.
-  useEffect(() => {
-    document.documentElement.style.setProperty("--accent", DEFAULT_ACCENT);
-  }, []);
-
   // The active ViewChrome owns the live `--sidebar-width` variable so dragging it
   // does not invalidate styles across the entire app. Persist only the committed
   // value here so a resize survives a relaunch.
@@ -409,7 +405,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     () => ({
       activeRepo,
       setActiveRepo,
-      accent: DEFAULT_ACCENT,
+      accent: "var(--accent)",
       settings,
       setAgentExec: (agent, exec) =>
         applySettings((s) => ({

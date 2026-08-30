@@ -1,35 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { Task } from "../../bindings";
+import { task } from "../../test/fixtures";
 import { layoutGraph, NODE_H, NODE_W } from "./layout";
 
 function milestone(id: string, sortOrder: number) {
   return { id, name: `Milestone ${id}`, targetDate: null, sortOrder };
-}
-
-/** Minimal Task fixture — only the fields layoutGraph reads vary across cases. */
-function task(overrides: Partial<Task> = {}): Task {
-  return {
-    id: "AK-1",
-    title: "Task AK-1",
-    priority: "None",
-    estimate: null,
-    project: "Core",
-    projectColor: null,
-    projectIcon: null,
-    projectTargetDate: null,
-    projectMilestone: null,
-    parentId: null,
-    status: "Todo",
-    ready: true,
-    blockedBy: [],
-    actionable: true,
-    assignee: null,
-    assigneeAvatarUrl: null,
-    x: 0,
-    y: 0,
-    ...overrides,
-  };
 }
 
 /** A box's vertical span, for overlap checks. */
@@ -47,15 +22,13 @@ describe("layoutGraph", () => {
 
   it("nests each task inside a non-overlapping milestone band", () => {
     const tasks = [
-      task({ id: "A-1", project: "Alpha", projectMilestone: milestone("now", 0) }),
-      task({
-        id: "A-2",
-        project: "Alpha",
+      task("A-1", "Alpha", { projectMilestone: milestone("now", 0) }),
+      task("A-2", "Alpha", {
         projectMilestone: milestone("now", 0),
         blockedBy: ["A-1"],
       }),
-      task({ id: "A-3", project: "Alpha", projectMilestone: milestone("next", 1) }),
-      task({ id: "A-4", project: "Alpha", projectMilestone: null }),
+      task("A-3", "Alpha", { projectMilestone: milestone("next", 1) }),
+      task("A-4", "Alpha", { projectMilestone: null }),
     ];
     const { pos, boxes, milestoneBoxes } = layoutGraph(tasks);
 
@@ -89,8 +62,8 @@ describe("layoutGraph", () => {
 
   it("keeps cross-milestone dependencies visible without merging their layouts", () => {
     const tasks = [
-      task({ id: "A-1", projectMilestone: milestone("one", 0) }),
-      task({ id: "A-2", projectMilestone: milestone("two", 1), blockedBy: ["A-1"] }),
+      task("A-1", "Core", { projectMilestone: milestone("one", 0) }),
+      task("A-2", "Core", { projectMilestone: milestone("two", 1), blockedBy: ["A-1"] }),
     ];
     const { milestoneBoxes, pos } = layoutGraph(tasks);
     expect(milestoneBoxes.map((box) => box.key)).toEqual(["one", "two"]);
@@ -99,11 +72,11 @@ describe("layoutGraph", () => {
 
   it("positions every node inside its own project band's bounding box", () => {
     const tasks = [
-      task({ id: "A-1", project: "Alpha" }),
-      task({ id: "A-2", project: "Alpha", blockedBy: ["A-1"] }),
-      task({ id: "B-1", project: "Beta" }),
-      task({ id: "B-2", project: "Beta", blockedBy: ["B-1"] }),
-      task({ id: "B-3", project: "Beta", blockedBy: ["B-1"] }),
+      task("A-1", "Alpha"),
+      task("A-2", "Alpha", { blockedBy: ["A-1"] }),
+      task("B-1", "Beta"),
+      task("B-2", "Beta", { blockedBy: ["B-1"] }),
+      task("B-3", "Beta", { blockedBy: ["B-1"] }),
     ];
     const { pos, boxes } = layoutGraph(tasks);
 
@@ -127,7 +100,7 @@ describe("layoutGraph", () => {
   });
 
   it("omits a milestone band when every task in a project is unassigned", () => {
-    const tasks = [task({ id: "A-1" }), task({ id: "A-2", blockedBy: ["A-1"] })];
+    const tasks = [task("A-1", "Core"), task("A-2", "Core", { blockedBy: ["A-1"] })];
     const { boxes, milestoneBoxes, pos } = layoutGraph(tasks);
     expect(boxes).toHaveLength(1);
     expect(milestoneBoxes).toEqual([]);
@@ -136,12 +109,12 @@ describe("layoutGraph", () => {
 
   it("stacks project bands without vertical overlap", () => {
     const tasks = [
-      task({ id: "A-1", project: "Alpha" }),
-      task({ id: "A-2", project: "Alpha", blockedBy: ["A-1"] }),
-      task({ id: "A-3", project: "Alpha", blockedBy: ["A-2"] }),
-      task({ id: "B-1", project: "Beta" }),
-      task({ id: "C-1", project: "Gamma" }),
-      task({ id: "C-2", project: "Gamma", blockedBy: ["C-1"] }),
+      task("A-1", "Alpha"),
+      task("A-2", "Alpha", { blockedBy: ["A-1"] }),
+      task("A-3", "Alpha", { blockedBy: ["A-2"] }),
+      task("B-1", "Beta"),
+      task("C-1", "Gamma"),
+      task("C-2", "Gamma", { blockedBy: ["C-1"] }),
     ];
     const { boxes } = layoutGraph(tasks);
     expect(boxes).toHaveLength(3);
@@ -155,9 +128,9 @@ describe("layoutGraph", () => {
 
   it("orders a blocker strictly left of the task it blocks (rankdir LR)", () => {
     const tasks = [
-      task({ id: "A-1", project: "Alpha" }),
-      task({ id: "A-2", project: "Alpha", blockedBy: ["A-1"] }),
-      task({ id: "A-3", project: "Alpha", blockedBy: ["A-2"] }),
+      task("A-1", "Alpha"),
+      task("A-2", "Alpha", { blockedBy: ["A-1"] }),
+      task("A-3", "Alpha", { blockedBy: ["A-2"] }),
     ];
     const { pos } = layoutGraph(tasks);
     const p1 = pos.get("A-1");
@@ -171,10 +144,10 @@ describe("layoutGraph", () => {
 
   it("ignores a cross-project blocker for band membership (node stays in its own band)", () => {
     const tasks = [
-      task({ id: "A-1", project: "Alpha" }),
+      task("A-1", "Alpha"),
       // Blocked by a task from a different project — must not be pulled into
       // Alpha's band or otherwise break layout of either band.
-      task({ id: "B-1", project: "Beta", blockedBy: ["A-1"] }),
+      task("B-1", "Beta", { blockedBy: ["A-1"] }),
     ];
     const { pos, boxes } = layoutGraph(tasks);
     expect(boxes.map((b) => b.project)).toEqual(["Alpha", "Beta"]);
@@ -185,10 +158,10 @@ describe("layoutGraph", () => {
 
   it("is deterministic for the same input", () => {
     const tasks = [
-      task({ id: "A-1", project: "Alpha" }),
-      task({ id: "A-2", project: "Alpha", blockedBy: ["A-1"] }),
-      task({ id: "B-1", project: "Beta" }),
-      task({ id: "B-2", project: "Beta", blockedBy: ["B-1"] }),
+      task("A-1", "Alpha"),
+      task("A-2", "Alpha", { blockedBy: ["A-1"] }),
+      task("B-1", "Beta"),
+      task("B-2", "Beta", { blockedBy: ["B-1"] }),
     ];
     const first = layoutGraph(tasks);
     const second = layoutGraph(tasks);

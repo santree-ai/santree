@@ -334,4 +334,69 @@ mod tests {
         .unwrap();
         assert_eq!(data["viewer"]["id"], "u1");
     }
+
+    // ── The pagination cursor ─────────────────────────────────────────────
+
+    #[derive(Deserialize)]
+    struct Node {
+        id: String,
+    }
+    #[derive(Deserialize)]
+    struct Page {
+        issues: Connection<Node>,
+    }
+
+    /// Nine pagination loops in `linear.rs` and `github.rs` turn on this one
+    /// decode, and until this test nothing deserialized it — every `hasNextPage`
+    /// in the tree was inside a query *string*. Drop [`Connection`]'s `pageInfo`
+    /// rename or [`PageInfo`]'s `rename_all` and the `serde(default)` underneath
+    /// answers "no more pages": every loop stops after page 1 while its query
+    /// still asks for the cursor, and the caller sees a short list it has no way
+    /// to tell from a complete one.
+    #[tokio::test]
+    async fn a_connection_decodes_the_cursor_its_query_asked_for() {
+        let page: Page = post(
+            client().post(serve_once(
+                "200 OK",
+                r#"{"data":{"issues":{
+                     "nodes":[{"id":"a"},{"id":"b"}],
+                     "pageInfo":{"hasNextPage":true,"endCursor":"Y3Vyc29yOnYyOpHOACk"}}}}"#,
+            )),
+            "Linear",
+        )
+        .await
+        .unwrap();
+
+        let ids: Vec<&str> = page.issues.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(
+            page.issues.page_info.has_next_page,
+            "the wire said there is another page"
+        );
+        assert_eq!(
+            page.issues.page_info.end_cursor.as_deref(),
+            Some("Y3Vyc29yOnYyOpHOACk"),
+            "the cursor the next request has to send back"
+        );
+    }
+
+    /// The other half of the contract the `serde(default)`s exist for: a query
+    /// that never asked for `pageInfo` (most of them) reads as one complete page
+    /// rather than failing to decode.
+    #[test]
+    fn a_connection_without_a_cursor_reads_as_one_complete_page() {
+        for body in [
+            r#"{"issues":{"nodes":[{"id":"a"}]}}"#,
+            // Asked for, but the service answered with an empty object.
+            r#"{"issues":{"nodes":[{"id":"a"}],"pageInfo":{}}}"#,
+        ] {
+            let page: Page = serde_json::from_str(body).expect(body);
+            assert_eq!(page.issues.nodes.len(), 1, "{body}");
+            assert!(!page.issues.page_info.has_next_page, "{body}");
+            assert!(page.issues.page_info.end_cursor.is_none(), "{body}");
+        }
+        // And an absent connection is no nodes, not a decode failure.
+        let page: Page = serde_json::from_str(r#"{"issues":{}}"#).unwrap();
+        assert!(page.issues.nodes.is_empty());
+    }
 }

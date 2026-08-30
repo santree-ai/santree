@@ -9,6 +9,7 @@
  */
 import { useEffect, useState } from "react";
 
+import type { AgentKind } from "../../bindings";
 import { useTerminals } from "../terminal/TerminalsContext";
 
 export interface ReviewSessionLatch {
@@ -24,9 +25,15 @@ export interface ReviewSessionLatch {
   requestResume: () => void;
 }
 
-export function useReviewSessionLatch(termKey: string): ReviewSessionLatch {
+/** `termKey` is the PR's surface; `agentKind` is which provider's review this
+ *  pane is. Both, because a PR can be under review by two providers at once —
+ *  the surface alone would let a Codex review keep the Claude pane from ever
+ *  launching its own. */
+export function useReviewSessionLatch(termKey: string, agentKind: AgentKind): ReviewSessionLatch {
   const { tabs } = useTerminals();
-  const liveSession = tabs.some((t) => t.source === "review" && t.refId === termKey);
+  const liveSession = tabs.some(
+    (t) => t.source === "review" && t.refId === termKey && t.agent?.kind === agentKind,
+  );
   // State, not a ref, so the exit re-renders the pane into its resume offer.
   const [liveSeen, setLiveSeen] = useState(false);
   const [resumeRequested, setResumeRequested] = useState(false);

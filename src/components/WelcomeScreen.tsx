@@ -50,7 +50,9 @@ export function WelcomeScreen() {
           disabled={addRepo.isPending}
           className="mt-6 gap-2"
         >
-          {addRepo.isPending && <Spinner size={12} />}
+          {/* The Spinner defaults to `--accent`, which IS this button's fill —
+              pass the on-fill colour or it renders invisible. */}
+          {addRepo.isPending && <Spinner size={12} color="var(--on-accent)" />}
           {addRepo.isPending ? "Validating…" : "Open a repository…"}
         </Button>
         <p className="mt-3 text-[11px] text-muted-4">Choose any folder inside a git checkout.</p>

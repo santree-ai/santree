@@ -16,8 +16,8 @@ use base64::Engine;
 use tauri::ipc::Channel;
 
 use santree_core::domain::{
-    AgentKind, ChangedFile, FileSource, RepoBranch, ScriptInfo, TriageComment, TriageDetail,
-    Worktree, WorktreeSession,
+    AgentKind, ChangedFile, FileSource, RepoBranch, ScriptInfo, SessionDetail, SessionSubagent,
+    TriageComment, TriageDetail, Worktree, WorktreeSession,
 };
 
 use crate::db::Db;
@@ -1017,6 +1017,45 @@ pub async fn branch_file_diff(db: &Db, repo: &str, issue_id: &str, path: &str) -
 pub async fn sessions(db: &Db, repo: &str, issue_id: &str) -> Result<Vec<WorktreeSession>> {
     let path = worktree_path(db, repo, issue_id).await?;
     session::history(db, repo, issue_id, &path).await
+}
+
+/// What one of those sessions shows when its row is expanded. The listing is
+/// re-derived here rather than trusted from IPC, exactly as the resume path does
+/// it — `session::listed_transcript` then requires the id to be in it.
+pub async fn session_detail(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    session_id: &str,
+) -> Result<SessionDetail> {
+    let path = worktree_path(db, repo, issue_id).await?;
+    let listed = session::history(db, repo, issue_id, &path).await?;
+    session::detail(db, repo, issue_id, &path, &listed, session_id).await
+}
+
+/// The Task subagents of one of those sessions, as a flat list carrying each
+/// one's parent and depth (the pane nests them).
+pub async fn session_subagents(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    session_id: &str,
+) -> Result<Vec<SessionSubagent>> {
+    let path = worktree_path(db, repo, issue_id).await?;
+    let listed = session::history(db, repo, issue_id, &path).await?;
+    session::subagents(db, repo, issue_id, &path, &listed, session_id).await
+}
+
+/// Reveal one of those sessions' transcripts in the OS file browser.
+pub async fn reveal_session_transcript(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    session_id: &str,
+) -> Result<()> {
+    let path = worktree_path(db, repo, issue_id).await?;
+    let listed = session::history(db, repo, issue_id, &path).await?;
+    session::reveal_transcript(db, repo, issue_id, &path, &listed, session_id).await
 }
 
 pub async fn files(db: &Db, repo: &str, issue_id: &str) -> Result<Vec<String>> {

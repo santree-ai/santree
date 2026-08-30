@@ -183,6 +183,17 @@ jobs:
       # release profile without the DMG's AppleScript layout (skipped under CI
       # anyway) or the AppImage's network-fetched tooling.
       - name: Bundle
+        # This job asks one question — does a bundle assemble, carry its resources
+        # and launch — and none of it is about how fast the binary runs. The release
+        # profile's `lto = true` + `codegen-units = 1` buy runtime speed at a steep
+        # link-time cost, and they dominated this job: on the worst observed run it
+        # took 10m53s while both backend jobs finished under 3m, making it the whole
+        # critical path. Thin LTO answers the same question in a fraction of the time.
+        # Overridden per-step rather than in a profile so `release.yml`, which builds
+        # what users actually install, keeps the full-fat settings untouched.
+        env:
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
         run: pnpm tauri build --bundles ${{ matrix.os == 'macos-latest' && 'app' || 'deb' }}
 
       # The hook is staged by `pnpm bundle:hook` and copied in as a bundle

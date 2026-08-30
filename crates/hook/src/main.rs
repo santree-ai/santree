@@ -137,6 +137,47 @@ fn binds_session_id(agent: AgentKind, source: Option<&str>) -> bool {
     }
 }
 
+/// The fields one hook invocation takes out of its payload.
+#[derive(Debug, PartialEq, Eq)]
+struct HookInput<'a> {
+    /// Empty when absent — a payload we can't correlate to a session.
+    session_id: &'a str,
+    cwd: &'a str,
+    transcript_path: Option<&'a str>,
+    /// Tooltip text for the "needs you" states only (see [`read_hook_input`]).
+    message: Option<String>,
+    /// `SessionStart`'s reason, which decides whether Claude rebinds the row.
+    source: Option<&'a str>,
+}
+
+/// Read a hook payload's fields, by the key names both CLIs actually send.
+///
+/// Split out of `main` because those key *spellings* are the whole contract with
+/// the vendors: Claude and Codex both send snake_case, and a payload read under
+/// any other spelling parses fine, resolves a state, finds an empty session id and
+/// exits 0 — no error, no row, no session on the sidebar. Nothing else in this
+/// binary would notice, so the test that pins them needs a seam to read through.
+///
+/// Only the "needs you" states carry tooltip text; running/idle/exited don't (so
+/// consecutive tool events dedup to a single "running", see [`record`]). For
+/// permission, fall back to the tool name as "run <tool>".
+fn read_hook_input(payload: &Value, state: AgentState) -> HookInput<'_> {
+    let field = |k: &str| payload.get(k).and_then(Value::as_str);
+    HookInput {
+        session_id: field("session_id").unwrap_or_default(),
+        cwd: field("cwd").unwrap_or_default(),
+        transcript_path: field("transcript_path"),
+        message: match state {
+            AgentState::Permission => field("message")
+                .map(str::to_string)
+                .or_else(|| field("tool_name").map(|t| format!("run {t}"))),
+            AgentState::Waiting => field("message").map(str::to_string),
+            _ => None,
+        },
+        source: field("source"),
+    }
+}
+
 /// What this invocation is. The trailing positional selects it: a hook event
 /// name, Claude's `statusline` command, or `mcp` — the AI-review tool server.
 #[derive(Debug, PartialEq, Eq)]
@@ -254,28 +295,21 @@ fn main() {
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
     let payload: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-    let field = |k: &str| payload.get(k).and_then(Value::as_str);
 
     let Some(state) = resolve_state(&event, &payload) else {
         return; // event/notification that doesn't change state
     };
 
-    let session_id = field("session_id").unwrap_or_default();
+    let HookInput {
+        session_id,
+        cwd,
+        transcript_path: transcript,
+        message,
+        source,
+    } = read_hook_input(&payload, state);
     if session_id.is_empty() {
         return; // can't correlate without a session id
     }
-    let cwd = field("cwd").unwrap_or_default();
-    let transcript = field("transcript_path");
-    // Only the "needs you" states carry tooltip text; running/idle/exited don't
-    // (so consecutive tool events dedup to a single "running", see `record`). For
-    // permission, fall back to the tool name as "run <tool>".
-    let message = match state {
-        AgentState::Permission => field("message")
-            .map(str::to_string)
-            .or_else(|| field("tool_name").map(|t| format!("run {t}"))),
-        AgentState::Waiting => field("message").map(str::to_string),
-        _ => None,
-    };
 
     // A one-shot insert on a minimal current-thread runtime; swallow every error.
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
@@ -309,7 +343,7 @@ fn main() {
     // The terminal's own identity is exported into our env at launch, so we write
     // *only that one terminal's* row — never another tab's, even though sibling
     // tabs share a cwd.
-    if event == "SessionStart" && binds_session_id(agent, field("source")) {
+    if event == "SessionStart" && binds_session_id(agent, source) {
         let repo = std::env::var("SANTREE_REPO").unwrap_or_default();
         let term_key = std::env::var("SANTREE_TERM_KEY").unwrap_or_default();
         if repo.is_empty() || term_key.is_empty() {
@@ -1258,6 +1292,235 @@ mod tests {
         assert_eq!(
             resolve_state("Notification", &Value::Null),
             Some(AgentState::Waiting)
+        );
+    }
+
+    /// Claude Code's own payload, verbatim.
+    ///
+    /// The key *spellings* are the whole contract with the vendor, so they are in
+    /// this test's source as literal JSON rather than built from the same
+    /// constants the code reads with — a rename to any other spelling parses,
+    /// resolves a state, finds no session id and exits 0, and every other test in
+    /// this file still passes while no session ever reaches the sidebar.
+    #[test]
+    fn reads_claudes_hook_payload_by_its_real_key_names() {
+        // PermissionRequest: santree's "needs you" tooltip comes from `message`.
+        let permission: Value = serde_json::from_str(
+            r#"{
+              "session_id": "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
+              "transcript_path": "/Users/me/.claude/projects/-Users-me-dev-app/9f1c0e2a.jsonl",
+              "cwd": "/Users/me/dev/app",
+              "permission_mode": "default",
+              "hook_event_name": "PermissionRequest",
+              "tool_name": "Bash",
+              "tool_input": { "command": "rm -rf build", "description": "Clean" }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_hook_input(&permission, AgentState::Permission),
+            HookInput {
+                session_id: "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
+                cwd: "/Users/me/dev/app",
+                transcript_path: Some(
+                    "/Users/me/.claude/projects/-Users-me-dev-app/9f1c0e2a.jsonl"
+                ),
+                // No `message` on this one, so the tool name is the tooltip.
+                message: Some("run Bash".into()),
+                source: None,
+            }
+        );
+
+        // Notification: the type refines the state, the message is the tooltip.
+        let notification: Value = serde_json::from_str(
+            r#"{
+              "session_id": "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
+              "transcript_path": "/Users/me/.claude/projects/-Users-me-dev-app/9f1c0e2a.jsonl",
+              "cwd": "/Users/me/dev/app",
+              "hook_event_name": "Notification",
+              "notification_type": "agent_needs_input",
+              "message": "Claude is waiting for your input"
+            }"#,
+        )
+        .unwrap();
+        let state = resolve_state("Notification", &notification);
+        assert_eq!(state, Some(AgentState::Waiting));
+        assert_eq!(
+            read_hook_input(&notification, state.unwrap())
+                .message
+                .as_deref(),
+            Some("Claude is waiting for your input")
+        );
+
+        // SessionStart: `source` is what decides whether Claude rebinds the row.
+        let cleared: Value = serde_json::from_str(
+            r#"{
+              "session_id": "1a2b3c4d-5e6f-4071-8899-aabbccddeeff",
+              "transcript_path": "/Users/me/.claude/projects/-Users-me-dev-app/1a2b3c4d.jsonl",
+              "cwd": "/Users/me/dev/app",
+              "hook_event_name": "SessionStart",
+              "source": "clear"
+            }"#,
+        )
+        .unwrap();
+        let input = read_hook_input(&cleared, AgentState::Idle);
+        assert_eq!(input.source, Some("clear"));
+        assert!(
+            binds_session_id(AgentKind::Claude, input.source),
+            "a /clear mints an id santree never chose; the row must be repointed"
+        );
+    }
+
+    /// Codex's own payload, verbatim — the shapes its binary publishes as JSON
+    /// Schema (`session-start.command.input` / `permission-request.command.input`,
+    /// codex-cli 0.151.0). It shares Claude's snake_case names and adds two of its
+    /// own: a nullable `transcript_path`, and `agent_id` on a subagent's events.
+    #[test]
+    fn reads_codexs_hook_payload_by_its_real_key_names() {
+        let session_start: Value = serde_json::from_str(
+            r#"{
+              "cwd": "/Users/me/dev/app",
+              "hook_event_name": "SessionStart",
+              "model": "gpt-5.1-codex",
+              "permission_mode": "default",
+              "session_id": "01998f6c-1d3f-7c11-9a2b-4e6f8a0b1c2d",
+              "source": "startup",
+              "transcript_path": null
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_hook_input(&session_start, AgentState::Idle),
+            HookInput {
+                session_id: "01998f6c-1d3f-7c11-9a2b-4e6f8a0b1c2d",
+                cwd: "/Users/me/dev/app",
+                // A JSON null is absent, not the string "null".
+                transcript_path: None,
+                message: None,
+                source: Some("startup"),
+            }
+        );
+        // Codex mints its own id, so every SessionStart binds it to the terminal.
+        assert!(binds_session_id(AgentKind::Codex, Some("startup")));
+
+        // Codex's PermissionRequest carries no `message` at all — the tool-name
+        // fallback is the only tooltip a Codex permission prompt ever gets.
+        let permission: Value = serde_json::from_str(
+            r#"{
+              "cwd": "/Users/me/dev/app",
+              "hook_event_name": "PermissionRequest",
+              "model": "gpt-5.1-codex",
+              "permission_mode": "default",
+              "session_id": "01998f6c-1d3f-7c11-9a2b-4e6f8a0b1c2d",
+              "tool_input": { "command": ["bash", "-lc", "cargo test"] },
+              "tool_name": "shell",
+              "transcript_path": "/Users/me/.codex/sessions/2026/08/30/rollout-01998f6c.jsonl",
+              "turn_id": "turn_3"
+            }"#,
+        )
+        .unwrap();
+        let input = read_hook_input(&permission, AgentState::Permission);
+        assert_eq!(input.message.as_deref(), Some("run shell"));
+        assert_eq!(
+            input.transcript_path,
+            Some("/Users/me/.codex/sessions/2026/08/30/rollout-01998f6c.jsonl")
+        );
+
+        // The same event from a Codex *subagent* carries `agent_id`, and the whole
+        // payload is ignored — that spelling is what keeps a helper's state off the
+        // user's surface.
+        let subagent: Value = serde_json::from_str(
+            r#"{
+              "agent_id": "agent_01",
+              "agent_type": "reviewer",
+              "cwd": "/Users/me/dev/app",
+              "hook_event_name": "PermissionRequest",
+              "model": "gpt-5.1-codex",
+              "permission_mode": "default",
+              "session_id": "01998f6c-1d3f-7c11-9a2b-4e6f8a0b1c2d",
+              "tool_input": {},
+              "tool_name": "shell",
+              "transcript_path": null,
+              "turn_id": "turn_4"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(resolve_state("PermissionRequest", &subagent), None);
+    }
+
+    /// A camelCase payload must read as *nothing*, not as a session.
+    ///
+    /// Accepting both spellings would look like robustness and would instead hide
+    /// the day a vendor changed its wire format: the state would keep being
+    /// recorded under whichever name still matched, and the drift would surface as
+    /// an unexplained empty sidebar much later.
+    #[test]
+    fn a_camel_case_payload_is_not_a_session() {
+        let payload: Value = serde_json::from_str(
+            r#"{
+              "sessionId": "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
+              "transcriptPath": "/Users/me/.claude/projects/-Users-me-dev-app/9f1c0e2a.jsonl",
+              "toolName": "Bash",
+              "hookEventName": "PermissionRequest"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_hook_input(&payload, AgentState::Permission),
+            HookInput {
+                // Empty ⇒ `main` returns before writing anything.
+                session_id: "",
+                cwd: "",
+                transcript_path: None,
+                message: None,
+                source: None,
+            }
+        );
+    }
+
+    /// Which states carry a tooltip, and where the text comes from. Consecutive
+    /// tool events have to dedup to a single "running" (see `record`), which they
+    /// only do while running/idle/exited keep carrying no message.
+    #[test]
+    fn only_the_needs_you_states_carry_a_message() {
+        let payload: Value = serde_json::from_str(
+            r#"{
+              "session_id": "s1",
+              "cwd": "/w",
+              "hook_event_name": "PermissionRequest",
+              "message": "Claude needs your permission to use Bash",
+              "tool_name": "Bash"
+            }"#,
+        )
+        .unwrap();
+        // The explicit message wins over the tool-name fallback.
+        let message = |state| read_hook_input(&payload, state).message;
+        assert_eq!(
+            message(AgentState::Permission).as_deref(),
+            Some("Claude needs your permission to use Bash")
+        );
+        assert_eq!(
+            message(AgentState::Waiting).as_deref(),
+            Some("Claude needs your permission to use Bash")
+        );
+        for state in [AgentState::Active, AgentState::Idle, AgentState::Exited] {
+            assert_eq!(message(state), None, "{state:?} must carry no tooltip");
+        }
+
+        // Waiting has no tool-name fallback: a tool name is not what the user is
+        // being asked, so a bare tool name must not become the tooltip.
+        let no_message: Value =
+            serde_json::from_str(r#"{ "session_id": "s1", "cwd": "/w", "tool_name": "Bash" }"#)
+                .unwrap();
+        assert_eq!(
+            read_hook_input(&no_message, AgentState::Waiting).message,
+            None
+        );
+        assert_eq!(
+            read_hook_input(&no_message, AgentState::Permission)
+                .message
+                .as_deref(),
+            Some("run Bash")
         );
     }
 

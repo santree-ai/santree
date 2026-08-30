@@ -8,8 +8,9 @@ import { useCallback, useMemo, useRef, useState } from "react";
 
 import type { AgentKind } from "../../bindings";
 
-/** Where a terminal was opened from. Pairs with `refId` to identify a session:
- *  the Agents panel maps a stored `term_key` back to its live PTY through it. */
+/** Where a terminal was opened from — a grouping, not an identity. A pane is
+ *  identified by its `refId` (the surface's `term_key`) and the provider in it;
+ *  see {@link TerminalSpec.refId}. */
 export type TerminalSource = "shell" | "triage" | "issue" | "review";
 
 /**
@@ -45,7 +46,14 @@ export interface TerminalSpec {
   seed?: string;
   /** Category, for grouping (defaults to "shell"). */
   source?: TerminalSource;
-  /** When opened for a ticket/issue, its id — lets callers find/reuse the session. */
+  /** The surface this pane hosts, as its `term_key` — `tree:<id>`,
+   *  `triage:<ticket>`, `ai-review:<owner>/<name>#<n>`, … — and nothing else.
+   *
+   *  It IS the label the PTY is opened under and the key the durable session row
+   *  carries, so it must never be decorated: a provider-suffixed one stopped
+   *  matching the row and the agent behind it read as exited. The provider is
+   *  the other half of the pane's identity and travels in {@link agent}, which
+   *  is why one surface can have a pane per provider. */
   refId?: string;
   /** Set when this tab hosts an agent santree launched; absent for a plain shell.
    *  See {@link AgentTabIdentity}. */
@@ -101,7 +109,8 @@ export interface TerminalTabs {
   setActiveKey: (key: string) => void;
   /** Open a new terminal tab and focus it; returns its key. */
   open: (spec: TerminalSpec) => string;
-  /** Open a session for `refId` if one doesn't exist yet; returns its key. */
+  /** Open a session for this pane if one doesn't exist yet; returns its key.
+   *  Idempotent per `(source, refId, agent.kind)` — the pane's whole identity. */
   ensure: (spec: TerminalSpec & { refId: string }) => string;
   /** Close a tab and end its session.
    *
@@ -152,14 +161,29 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
     return tab.key;
   }, []);
 
-  // Reuse an existing session for the same (source, refId) so re-entering an
-  // issue's Investigate tab attaches to its live shell instead of spawning a new
-  // one. Returns the existing or newly-created key.
+  // Reuse an existing session for the same (source, refId, provider) so
+  // re-entering an issue's Investigate tab attaches to its live shell instead of
+  // spawning a new one. Returns the existing or newly-created key.
+  //
+  // The provider is part of the key, not decoration on `refId`: a surface hosts
+  // one session per provider (the pair `terminal_sessions` is keyed by), so a
+  // Codex and a Claude investigation of one ticket are two panes — while two
+  // calls naming the same provider are always the same pane.
   const ensure = useCallback((spec: TerminalSpec & { refId: string }) => {
     const source = spec.source ?? "shell";
-    const found = tabsRef.current.find((t) => t.source === source && t.refId === spec.refId);
+    // An agent pane's surface key is the `term_key` it launched with, taken from
+    // the identity itself rather than from a second argument that could disagree
+    // with it. That is the whole of what went wrong before: a launch site keyed
+    // its PTY by a decorated ref (`AK-1::codex`), the durable row was still keyed
+    // by `triage:AK-1`, and the liveness join matched nothing — so a working
+    // agent read as exited. Deriving it here makes that unrepresentable at the
+    // one call every agent pane goes through.
+    const refId = spec.agent?.termKey ?? spec.refId;
+    const found = tabsRef.current.find(
+      (t) => t.source === source && t.refId === refId && t.agent?.kind === spec.agent?.kind,
+    );
     if (found) return found.key;
-    const tab = withKey(spec);
+    const tab = withKey({ ...spec, refId });
     tabsRef.current = [...tabsRef.current, tab];
     setTabs(tabsRef.current);
     return tab.key;

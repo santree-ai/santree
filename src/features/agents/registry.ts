@@ -13,7 +13,9 @@
  */
 import type { AgentKind, AgentState, SessionState, Task, Worktree } from "../../bindings";
 import { HOOK_STALE_AFTER_MS, levelOf, needsYou, type SeenMap } from "../../lib/attention";
+import { resolvePaneAgentOwner } from "../../lib/paneAgentOwner";
 import type { TerminalTab } from "../terminal/orchestrator";
+import { paneAddress } from "../terminal/paneAddress";
 
 /** The base-branch entry's sentinel ticket id (mirrors the Trees model's
  *  `BASE_ID` / Rust `worktree::BASE_ID` — duplicated here so this feature doesn't
@@ -74,36 +76,24 @@ export function parseTermKey(termKey: string | null | undefined): AgentOrigin {
 }
 
 /**
- * The live terminal tab that hosts a session, if the app has one open right now.
- * `term_key` and the terminal registry's `refId` agree everywhere except triage,
- * where the tab is registered under the bare ticket id with source `"triage"` —
- * so the lookup goes through the origin, not the raw key.
+ * The live terminal tab hosting a session, if this app has one open for it.
+ *
+ * The join is the session's own identity — its `term_key` and the provider that
+ * owns it — because that pair is what addresses a pane: every launch site opens
+ * its PTY under the plain `term_key` (`TerminalSpec.refId`) and names the
+ * provider beside it, exactly as `terminal_sessions` keys the row. Both halves
+ * are required. Matching the key alone would report a Claude session as live
+ * because a Codex pane happens to be open on the same surface; a session whose
+ * provider santree cannot name matches nothing at all, so it reads as not-live
+ * rather than as someone else's.
  */
-export function terminalRefFor(
+export function liveTabFor(
   termKey: string | null,
-  origin: AgentOrigin,
-  /** `null`/omitted when the session's provider is unknown — the ref then falls
-   *  back to the bare key, which matches no per-provider tab, so an
-   *  unattributable session reads as not-live rather than as someone else's. */
-  agentKind?: AgentKind | null,
-): { source: string; refId: string } | null {
-  if (!termKey) return null;
-  if (origin.kind === "triage") {
-    const refId = origin.ticket ?? "";
-    return {
-      source: "triage",
-      refId: agentKind ? `${refId}::${agentKind.toLowerCase()}` : refId,
-    };
-  }
-  // Both review sessions register under the `review` source, keyed by their own
-  // term key — so the two can be open on one PR at once.
-  if (origin.kind === "review" || origin.kind === "ai-review") {
-    return {
-      source: "review",
-      refId: agentKind ? `${termKey}::${agentKind.toLowerCase()}` : termKey,
-    };
-  }
-  return { source: "issue", refId: termKey };
+  agentKind: AgentKind | null,
+  terminals: TerminalTab[],
+): TerminalTab | undefined {
+  if (!termKey || !agentKind) return undefined;
+  return terminals.find((t) => t.refId === termKey && t.agent?.kind === agentKind);
 }
 
 /**
@@ -212,7 +202,7 @@ export interface BuildInput {
    */
   allRepos: string[];
   /**
-   * Every open pane's terminal title, by pane label (`useSessionTitles`).
+   * Every open pane's terminal title, by pane address (`useSessionTitles`).
    *
    * Only panes that exist right now are in it, so joining through the live tab
    * below is also the live-PTY gate — a session whose process ended can't pick
@@ -221,7 +211,8 @@ export interface BuildInput {
   titles?: ReadonlyMap<string, string>;
   /**
    * Which agent the host process table says owns each pane's foreground, keyed
-   * by the pane's `term_key` (`useAgentProcesses`).
+   * by the pane's address — its `term_key` and the provider in it
+   * (`useAgentProcesses`).
    *
    * Observation, where the two sources above are memory — so it is the one that
    * catches an agent santree never launched, and the one that survives a user
@@ -268,36 +259,18 @@ function basename(path: string): string {
   return i === -1 ? trimmed : trimmed.slice(i + 1);
 }
 
-/** The live PTY hosting a session, if this app has one open for it. */
-function liveTabFor(
-  s: SessionState,
-  origin: AgentOrigin,
-  terminals: TerminalTab[],
-): TerminalTab | undefined {
-  const ref = terminalRefFor(s.termKey, origin, s.agentKind);
-  return ref ? terminals.find((t) => t.source === ref.source && t.refId === ref.refId) : undefined;
-}
-
 /**
  * Fold the raw session rows into display entries.
  *
- * Three sources, because the first is not always prompt and the second is only
- * a memory:
+ * Three sources, because the first is not always prompt and the third is only a
+ * memory: the session rows, the process table (`detected`), and santree's own
+ * launch record. Their order — and the reason each tier beats the next — lives
+ * once, in `lib/paneAgentOwner.ts`; every `agentKind` below comes out of
+ * {@link resolvePaneAgentOwner}, so this fold and the status bar's count cannot
+ * answer the question differently.
  *
- *  1. **The session rows** — what the providers' own hooks reported. Decisive
- *     where they exist: a row carries a provider-minted session id, and an
- *     identity taken from anywhere else would not match it.
- *  2. **The process table** (`detected`) — what `ps` says is in each pane's
- *     foreground *right now*. The only source that survives a user quitting one
- *     CLI and starting another in the same pane, and the only one that can see
- *     an agent santree never launched.
- *  3. **santree's own launch record** (a tab's `AgentTabIdentity`) — what santree
- *     put in the pane. It stands wherever the scan names nothing, which is why
- *     detection supplements it rather than replacing it: `ps` can fail, and a
- *     CLI behind an interpreter is not recognisable by `argv[0]`.
- *
- * The three are one ordered lookup producing one `agentKind`, so they cannot
- * disagree. A pane that 2 or 3 speaks for but 1 does not still gets an entry —
+ * A pane that the process table or the launch record speaks for but no session
+ * row does still gets an entry —
  * it is a real agent, running in a PTY this app owns, and waiting for its
  * provider to introduce itself would leave a freshly opened Codex tab absent
  * from the sidebar until its first turn (see `agentProvider.ts` for why that is
@@ -344,7 +317,7 @@ export function buildAgentEntries(input: BuildInput): AgentEntry[] {
     if (s.repo && known.has(s.repo) && !byRepo.has(s.repo)) continue;
 
     const origin = parseTermKey(s.termKey);
-    const tab = liveTabFor(s, origin, terminals);
+    const tab = liveTabFor(s.termKey, s.agentKind, terminals);
     const live = tab !== undefined;
     if (tab) announced.add(tab.key);
     const bucket = bucketOf(s.state, live);
@@ -364,7 +337,11 @@ export function buildAgentEntries(input: BuildInput): AgentEntry[] {
     const identity = sessionIdentity(origin, worktree, task);
     entries.push({
       sessionId: s.sessionId,
-      agentKind: s.agentKind,
+      // Through the arbiter like every other identity here, with only its top
+      // tier to offer: the row's provider is half the join that found the tab
+      // above, so where it speaks it has already won, and where it is silent
+      // there is no pane address to ask the lower two tiers about.
+      agentKind: resolvePaneAgentOwner({ sessionAgent: s.agentKind }),
       state: s.state,
       bucket,
       origin,
@@ -375,10 +352,13 @@ export function buildAgentEntries(input: BuildInput): AgentEntry[] {
       updatedAtMs: s.updatedAtMs,
       live,
       tabKey: tab?.key ?? null,
-      // Joined through the live tab, whose `refId ?? key` IS the label the pane
-      // files its title under (see `TerminalLayer`) — so this is null exactly
-      // when there is no PTY, with no separate liveness check to keep in sync.
-      terminalTitle: tab ? (titles?.get(tab.refId ?? tab.key) ?? null) : null,
+      // Joined through the live tab, whose address — `refId ?? key` plus the
+      // provider in it — IS what the pane files its title under (see
+      // `TerminalLayer`), so this is null exactly when there is no PTY, with no
+      // separate liveness check to keep in sync.
+      terminalTitle: tab
+        ? (titles?.get(paneAddress(tab.refId ?? tab.key, tab.agent?.kind)) ?? null)
+        : null,
       // An unparseable term key means no surface to open — `useOpenAgent` would
       // have nowhere to navigate, so the action is disabled instead of silently
       // doing nothing (which is exactly how it felt).
@@ -395,17 +375,19 @@ export function buildAgentEntries(input: BuildInput): AgentEntry[] {
   for (const tab of terminals) {
     if (announced.has(tab.key)) continue;
     // A pane's label IS its `term_key`: `TerminalLayer` opens the PTY under
-    // `refId ?? key`, and that is the key the process scan reports back under.
-    const paneKey = tab.refId ?? tab.key;
-    // Precedence, so the two can never disagree: what `ps` sees now beats what
-    // santree recorded at launch — it is the only one that survives the user
-    // quitting one CLI and starting another in the same pane — and the launch
-    // record stands wherever the scan names nothing. One ordered lookup, one
-    // answer, and a pane neither speaks for is not an agent at all.
-    const kind = detected?.get(paneKey) ?? tab.agent?.kind ?? null;
+    // `refId ?? key`, and the process scan reports back under that key and the
+    // provider beside it — the pane's address, which is what these maps hold.
+    const paneKey = paneAddress(tab.refId ?? tab.key, tab.agent?.kind);
+    // No session row speaks for this pane (the loop above would have claimed
+    // it), so the arbiter runs on its lower two tiers. A pane neither of them
+    // names is not an agent at all.
+    const kind = resolvePaneAgentOwner({
+      detectedAgent: detected?.get(paneKey),
+      launchAgent: tab.agent?.kind,
+    });
     if (!kind) continue;
 
-    const termKey = tab.agent?.termKey ?? paneKey;
+    const termKey = tab.agent?.termKey ?? tab.refId ?? tab.key;
     const origin = parseTermKey(termKey);
     // An agent santree did not launch carries no repo of its own; it is placed
     // through its ticket when that is unambiguous, and left unattributed when
@@ -464,8 +446,8 @@ export function agentKey(entry: AgentEntry): string {
 
 /** Project ownership and session purpose are separate dimensions: a Codex
  *  investigation and a Claude worktree can belong to the same Linear project,
- *  while fixed surfaces (the Triage desk, base workspace and Dev) have a clear
- *  home without pretending they came from a ticket. */
+ *  while fixed surfaces (the base workspace) have a clear home without
+ *  pretending they came from a ticket. */
 function sessionIdentity(
   origin: AgentOrigin,
   worktree: Worktree | null,
@@ -493,9 +475,7 @@ function sessionIdentity(
           }
         : { project, ...projectMeta, purpose: "Worktree tab" };
     case "triage":
-      return origin.ticket?.startsWith("__repo__:")
-        ? { project: "Workspace", projectColor: null, projectIcon: null, purpose: "Triage desk" }
-        : { project, ...projectMeta, purpose: "Investigation" };
+      return { project, ...projectMeta, purpose: "Investigation" };
     case "review":
       return { project: "Reviews", projectColor: null, projectIcon: null, purpose: "PR session" };
     case "ai-review":
@@ -531,9 +511,6 @@ function label(
       };
     }
     case "triage":
-      if (origin.ticket?.startsWith("__repo__:")) {
-        return { title: "Triage desk", subtitle: "Ask general questions about the repository" };
-      }
       return { title: origin.ticket ?? basename(cwd), subtitle: summary ?? "investigation" };
     case "review":
       return { title: origin.pr ?? basename(cwd), subtitle: "asking about a PR" };
@@ -577,8 +554,7 @@ export function countAttention(
 ): number {
   let n = 0;
   for (const s of sessions) {
-    const origin = parseTermKey(s.termKey);
-    const live = liveTabFor(s, origin, terminals) !== undefined;
+    const live = liveTabFor(s.termKey, s.agentKind, terminals) !== undefined;
     if (bucketOf(s.state, live) !== "attention") continue;
     if (nowMs - (s.updatedAtMs ?? 0) > HOOK_STALE_AFTER_MS) continue;
     n++;

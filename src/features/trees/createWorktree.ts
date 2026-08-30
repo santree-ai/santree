@@ -8,7 +8,7 @@
  * a name `git check-ref-format` refuses, a parent worktree that must become the
  * new tree's *base* rather than a second notion of nesting.
  */
-import type { RepoBranch, WorktreeBranchSource } from "../../bindings";
+import type { RepoBranch, WorktreeLaunch } from "../../bindings";
 
 /** Why git would refuse this branch name, or `null` when it wouldn't.
  *
@@ -86,12 +86,11 @@ export type WorktreeChoice =
   | { kind: "existing"; branch: string }
   | { kind: "new"; branch: string };
 
-/** The `createManualWorktree` payload. */
+/** The `createWorktree` payload, minus the agent the dialog resolves separately. */
 export interface CreateWorktreeArgs {
   issueId: string;
   title: string;
-  project: string | null;
-  source: WorktreeBranchSource;
+  launch: WorktreeLaunch;
   base: string | null;
 }
 
@@ -134,25 +133,23 @@ export function createArgsFor(
       return {
         issueId: choice.id,
         title: choice.title,
-        project: choice.project,
-        source: { type: "derived" },
+        launch: { type: "ticket", project: choice.project },
         base,
       };
     case "existing":
       return {
         issueId: worktreeIdForBranch(choice.branch),
-        // No ticket behind this one, so the branch is the only name it has.
+        // No ticket behind this one, so the branch is the only name it has —
+        // and no project either, which the origin says rather than a null field.
         title: choice.branch,
-        project: null,
-        source: { type: "existing", branch: choice.branch },
+        launch: { type: "existingBranch", branch: choice.branch },
         base,
       };
     case "new":
       return {
         issueId: worktreeIdForBranch(choice.branch),
         title: choice.branch,
-        project: null,
-        source: { type: "new", branch: choice.branch },
+        launch: { type: "newBranch", branch: choice.branch },
         base,
       };
   }

@@ -13,7 +13,7 @@ import { Avatar } from "../../components/Avatar";
 import { AgentsIcon, BranchIcon, CopyIcon, GitHubLogo, PanelIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import { Button, Pill } from "../../components/primitives";
-import { useCreateReviewWorktree, useRepos, useWorktreePrs, useWorktrees } from "../../lib/queries";
+import { useCreateWorktree, useRepos, useWorktreePrs, useWorktrees } from "../../lib/queries";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import {
@@ -42,7 +42,7 @@ export function ReviewHeader({ pr }: { pr: ReviewPr }) {
   const repoName = targetRepo?.name ?? "";
   const { data: worktrees = [] } = useWorktrees(repoName);
   const { data: worktreePrs = [] } = useWorktreePrs(repoName);
-  const createTree = useCreateReviewWorktree(repoName);
+  const createTree = useCreateWorktree(repoName);
   const { addPendingLaunches, removePendingLaunch, requestTreeFocus } = useAppUi();
   const navigate = useNavigate();
   const decision = reviewDecisionMeta[pr.reviewDecision];
@@ -63,16 +63,20 @@ export function ReviewHeader({ pr }: { pr: ReviewPr }) {
 
   const openAsTree = () => {
     if (!targetRepo || existingTree || isMine) return;
-    addPendingLaunches([{ id: treeId, title: pr.title, project: "Reviews", agent: null }]);
+    // No project: a PR is not one, and the placeholder is merged straight into
+    // the sidebar's worktree list, so a stand-in here opens a band of its own.
+    addPendingLaunches([{ id: treeId, title: pr.title, project: null, agent: null }]);
     setActiveRepo(targetRepo.name);
     navigate({ to: "/trees" });
     createTree.mutate(
       {
-        prRepo: pr.repo,
-        id: treeId,
+        issueId: treeId,
         title: pr.title,
-        branch: pr.headRef,
+        launch: { type: "pr", prRepo: pr.repo, branch: pr.headRef },
         base: pr.baseRef || null,
+        // Deliberately no agent: Trees owns provider choice through its
+        // persisted `+` tabs.
+        agent: null,
       },
       {
         onSuccess: (worktree) => {

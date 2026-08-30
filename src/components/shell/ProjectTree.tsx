@@ -184,7 +184,7 @@ export function ProjectSection({
           only opacity, so revealing them on hover never reflows the row under the
           pointer that is revealing them. */}
       <div
-        className="tree-row group relative mx-1.5 flex w-[calc(100%-12px)] items-center gap-2 py-(--density-compact) pr-1.5"
+        className="tree-band group relative mx-1.5 flex w-[calc(100%-12px)] items-center gap-2 py-(--density-compact) pr-1.5"
         style={{ paddingLeft: HEADER_GUTTER - 6 }}
       >
         <button
@@ -338,7 +338,7 @@ function ProjectBandHeading({
       aria-label={`${open ? "Collapse" : "Expand"} project ${band.label}`}
       // No focus styling of its own: THE ring is the one global `:focus-visible`
       // rule in styles.css, and a local override escapes its pointer gate.
-      className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2 pt-2.5 pb-1 text-left text-[11px] font-medium text-muted-3 transition-colors hover:bg-hover hover:text-fg-2"
+      className="tree-band flex w-full cursor-pointer items-center gap-1.5 px-2 pt-2.5 pb-1 text-left text-[11px] font-medium text-muted-3 hover:text-fg-2"
     >
       <Chevron size={9} className="flex-none" />
       <ProjectGlyph color={band.color} icon={band.icon} size={6} />

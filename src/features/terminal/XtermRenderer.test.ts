@@ -45,8 +45,9 @@ vi.mock("@xterm/xterm", () => ({
 
 describe("withAlpha", () => {
   it("expands a hex accent to an rgba() literal xterm can parse", () => {
-    expect(withAlpha("#2dd4a7", 0.2)).toBe("rgba(45, 212, 167, 0.2)");
-    expect(withAlpha("2dd4a7", 0.2)).toBe("rgba(45, 212, 167, 0.2)");
+    // The two live accents (dark, then light) plus a 3-digit form.
+    expect(withAlpha("#ffffff", 0.2)).toBe("rgba(255, 255, 255, 0.2)");
+    expect(withAlpha("16171b", 0.2)).toBe("rgba(22, 23, 27, 0.2)");
     expect(withAlpha("#0af", 0.5)).toBe("rgba(0, 170, 255, 0.5)");
   });
 

@@ -93,7 +93,12 @@ export function PrCommentsSection({ pr }: { pr: ReviewPr }) {
         <div className="mb-2.5 overflow-hidden rounded-md border border-line-2">
           <div className="border-b border-line-2 bg-raised px-2.5 py-1 text-[10px] text-muted-4">
             On the code
-            {unresolved > 0 && <span className="text-accent"> · {unresolved} unresolved</span>}
+            {/* Weight, not just colour: the accent is monochrome, so accent-as-text
+                lands within ~1.2:1 of the label beside it and would read as the
+                same run of type. `font-medium` is what makes it emphasis. */}
+            {unresolved > 0 && (
+              <span className="font-medium text-accent"> · {unresolved} unresolved</span>
+            )}
           </div>
           {byFile.map(({ path, count, open }) => (
             <button

@@ -2,6 +2,7 @@ import { fireEvent, render, waitFor } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { PrThread, ReviewDraft } from "../../bindings";
+import type { DiffMode } from "../trees/DiffViewer";
 import type { CommentTarget } from "./commentTarget";
 import { PrFileDiff } from "./PrFileDiff";
 
@@ -130,23 +131,47 @@ describe("PrFileDiff", () => {
   });
 });
 
-/** The code cell of the row carrying `line` on the new side. */
-function content(container: HTMLElement, line: number) {
-  const span = container.querySelector(`span[data-line-new-num="${line}"]`);
-  return span?.closest("tr")?.querySelector("td.diff-line-content") as HTMLElement;
+/** The row carrying `line` on the new side. Unified keeps both sides' numbers in
+ *  one cell, under `data-line-<side>-num`; split gives the new side a cell of its
+ *  own and numbers it `data-line-num`. */
+function newRow(container: HTMLElement, mode: DiffMode, line: number) {
+  const span =
+    mode === "unified"
+      ? container.querySelector(`span[data-line-new-num="${line}"]`)
+      : container.querySelector(`td.diff-line-new-num span[data-line-num="${line}"]`);
+  return span?.closest("tr") ?? null;
 }
 
-/** The `+` of the row carrying `line` on the new side, and its line-number cell. */
-function gutter(container: HTMLElement, line: number) {
-  const span = container.querySelector(`span[data-line-new-num="${line}"]`);
-  const cell = span?.closest("td.diff-line-num");
+/** The code cell of the row carrying `line` on the new side. */
+function content(container: HTMLElement, mode: DiffMode, line: number) {
+  const cell = mode === "unified" ? "td.diff-line-content" : "td.diff-line-new-content";
+  return newRow(container, mode, line)?.querySelector(cell) as HTMLElement;
+}
+
+/** That row's line-number cell and the `+` inside it. Split renders a second `+`
+ *  in the code cell — `contentPlus` — which holds no line number of its own.
+ *
+ *  These are the `<button>`s, not their wrappers: the library's own composer-on-
+ *  mousedown hangs off the button, so pressing anything else would test the drag
+ *  without the handler it has to out-race. */
+function gutter(container: HTMLElement, mode: DiffMode, line: number) {
+  const cell = newRow(container, mode, line)?.querySelector(
+    mode === "unified" ? "td.diff-line-num" : "td.diff-line-new-num",
+  );
   return {
     cell: cell as HTMLElement,
-    plus: cell?.querySelector(".diff-add-widget-wrapper") as HTMLElement,
+    plus: cell?.querySelector(".diff-add-widget-wrapper button") as HTMLElement,
+    contentPlus: content(container, mode, line)?.querySelector(
+      ".diff-add-widget-wrapper button",
+    ) as HTMLElement,
   };
 }
 
-describe("commenting on a range", () => {
+// Both modes, because the gesture is DOM-shaped: the library names the line-number
+// cells and their number attributes differently in each. Trees renders your own
+// PR's diff split by default, Reviews takes the unified one — a hook written
+// against unified selectors alone leaves half the app without the gesture.
+describe.each(["unified", "split"] as const)("commenting on a range (%s)", (mode) => {
   const RANGE = ["@@ -41,0 +41,4 @@", "+one", "+two", "+three", "+four"].join("\n");
 
   it("presses the + and drags to cover several lines", async () => {
@@ -161,14 +186,15 @@ describe("commenting on a range", () => {
         threads={NO_THREADS}
         drafts={NO_DRAFTS}
         target={TARGET}
+        mode={mode}
       />,
     );
 
-    fireEvent.mouseDown(gutter(container, 41).plus);
+    fireEvent.mouseDown(gutter(container, mode, 41).plus);
     // Nothing yet: the press is the start of a gesture, not a click.
     expect(container.querySelector("textarea")).toBeNull();
 
-    fireEvent.mouseOver(gutter(container, 43).cell);
+    fireEvent.mouseOver(gutter(container, mode, 43).cell);
     fireEvent.mouseUp(document);
 
     await waitFor(() =>
@@ -190,11 +216,12 @@ describe("commenting on a range", () => {
         threads={NO_THREADS}
         drafts={NO_DRAFTS}
         target={TARGET}
+        mode={mode}
       />,
     );
 
-    fireEvent.mouseDown(gutter(container, 41).plus);
-    fireEvent.mouseOver(content(container, 43));
+    fireEvent.mouseDown(gutter(container, mode, 41).plus);
+    fireEvent.mouseOver(content(container, mode, 43));
     fireEvent.mouseUp(document);
 
     await waitFor(() =>
@@ -211,10 +238,11 @@ describe("commenting on a range", () => {
         threads={NO_THREADS}
         drafts={NO_DRAFTS}
         target={TARGET}
+        mode={mode}
       />,
     );
 
-    fireEvent.mouseDown(gutter(container, 42).plus);
+    fireEvent.mouseDown(gutter(container, mode, 42).plus);
     fireEvent.mouseUp(document);
 
     await waitFor(() => expect(container.textContent).toContain("Add a comment on line R42"));
@@ -229,11 +257,12 @@ describe("commenting on a range", () => {
         threads={NO_THREADS}
         drafts={NO_DRAFTS}
         target={TARGET}
+        mode={mode}
       />,
     );
 
-    fireEvent.mouseDown(gutter(container, 41).plus);
-    fireEvent.mouseOver(gutter(container, 42).cell);
+    fireEvent.mouseDown(gutter(container, mode, 41).plus);
+    fireEvent.mouseOver(gutter(container, mode, 42).cell);
     fireEvent.mouseUp(document);
     await waitFor(() => getByText("Suggestion"));
     fireEvent.click(getByText("Suggestion"));
@@ -242,4 +271,77 @@ describe("commenting on a range", () => {
       "```suggestion\none\ntwo\n```\n",
     );
   });
+
+  if (mode === "split") {
+    it("works from either column, on a row whose two sides disagree", async () => {
+      // Split lays a deletion and its replacement on one row, and that row's two
+      // number cells disagree the moment the file has shifted. Each column's
+      // code-cell `+` has to resolve through its *own* side — one written against
+      // the new side alone leaves every left-hand `+` dead.
+      const SHIFTED = ["@@ -10,2 +20,2 @@", " ctx", "-was", "+now"].join("\n");
+      const press = (container: HTMLElement, side: "old" | "new", line: number) => {
+        const row = container
+          .querySelector(`td.diff-line-${side}-num span[data-line-num="${line}"]`)
+          ?.closest("tr");
+        fireEvent.mouseDown(
+          row?.querySelector(
+            `td.diff-line-${side}-content .diff-add-widget-wrapper button`,
+          ) as HTMLElement,
+        );
+        fireEvent.mouseUp(document);
+      };
+      const diff = (
+        <PrFileDiff
+          path="a.ts"
+          status="modified"
+          patch={SHIFTED}
+          threads={NO_THREADS}
+          drafts={NO_DRAFTS}
+          target={TARGET}
+          mode={mode}
+        />
+      );
+
+      const left = render(diff);
+      press(left.container, "old", 11);
+      await waitFor(() =>
+        expect(left.container.textContent).toContain("Add a comment on line L11"),
+      );
+
+      const right = render(diff);
+      press(right.container, "new", 21);
+      await waitFor(() =>
+        expect(right.container.textContent).toContain("Add a comment on line R21"),
+      );
+    });
+
+    it("drags from the copy of the + that sits in the code cell", async () => {
+      // Split renders the button twice per row, once either side of the gutter
+      // boundary, and only the gutter copy sits next to a line number. The library
+      // arms a drag on both, so pressing the code-cell one has to behave the same
+      // — otherwise its mousedown reaches the library's own handler, which opens
+      // the composer on the pressed line and clears the range on the way.
+      const { container } = render(
+        <PrFileDiff
+          path="a.ts"
+          status="modified"
+          patch={RANGE}
+          threads={NO_THREADS}
+          drafts={NO_DRAFTS}
+          target={TARGET}
+          mode={mode}
+        />,
+      );
+
+      fireEvent.mouseDown(gutter(container, mode, 41).contentPlus);
+      expect(container.querySelector("textarea")).toBeNull();
+
+      fireEvent.mouseOver(content(container, mode, 43));
+      fireEvent.mouseUp(document);
+
+      await waitFor(() =>
+        expect(container.textContent).toContain("Add a comment on lines R41 to R43"),
+      );
+    });
+  }
 });

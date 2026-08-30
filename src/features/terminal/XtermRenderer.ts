@@ -12,7 +12,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
-import { DEFAULT_ACCENT } from "../../theme/colors";
+import { XTERM_ACCENT_FALLBACK } from "../../theme/colors";
 import type { TerminalRenderer } from "./types";
 
 const DARK_THEME = {
@@ -41,10 +41,13 @@ const LIGHT_THEME = {
 };
 
 // xterm renders to canvas/WebGL, not CSS, so it can't take `var(--accent)`
-// directly — resolve the live value each time a theme is built instead of
-// baking in the app's default accent hex.
+// directly — resolve the live value each time a theme is built instead of baking
+// in one theme's hex. `getComputedStyle` resolves a CSS-*declared* custom
+// property, so this picks up whichever of the two `:root` accent literals the
+// active `data-theme` selected.
 const liveAccent = () =>
-  getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || DEFAULT_ACCENT;
+  getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() ||
+  XTERM_ACCENT_FALLBACK;
 
 /** A translucent version of a color for xterm's theme. The app's `alpha()` helper
  *  emits `color-mix()`, which only a CSS engine understands — xterm parses the
@@ -68,12 +71,6 @@ const themeFor = (mode: string | null) => {
     selectionBackground: withAlpha(accent, 0.2),
   };
 };
-
-/** Pulls the `--accent` declaration out of a raw `style` attribute string, so
- *  the mutation observer below can tell whether an accent change is what
- *  triggered a `style` mutation without forcing a style recalc. */
-const accentDeclaration = (styleText: string | null) =>
-  styleText?.match(/--accent:\s*([^;]+)/)?.[1]?.trim();
 
 /** WebKit only keeps ~16 live WebGL contexts per page; past that it silently
  *  drops the oldest ones, and an xterm whose context is lost that way never gets
@@ -123,27 +120,16 @@ export class XtermRenderer implements TerminalRenderer {
     // system browser — send matched links through the opener plugin instead.
     this.term.loadAddon(new WebLinksAddon((_e, uri) => void openUrl(uri)));
 
-    // Re-theme live when the app theme (data-theme on <html>) flips, or when
-    // the accent CSS var changes. Both land as attribute mutations on the
-    // same <html> element (data-theme / inline style respectively).
+    // Re-theme live when the app theme flips. `data-theme` on <html> is the only
+    // thing that moves the accent (each theme declares its own literal in CSS;
+    // nothing writes `--accent` inline), so that one attribute is the whole
+    // trigger.
     if (typeof MutationObserver !== "undefined") {
       const html = document.documentElement;
-      this.themeObserver = new MutationObserver((mutations) => {
-        const accentChanged = mutations.some(
-          (m) =>
-            m.attributeName === "style" &&
-            accentDeclaration(m.oldValue) !== accentDeclaration(html.getAttribute("style")),
-        );
-        const themeChanged = mutations.some((m) => m.attributeName === "data-theme");
-        if (accentChanged || themeChanged) {
-          this.term.options.theme = themeFor(html.getAttribute("data-theme"));
-        }
+      this.themeObserver = new MutationObserver(() => {
+        this.term.options.theme = themeFor(html.getAttribute("data-theme"));
       });
-      this.themeObserver.observe(html, {
-        attributes: true,
-        attributeFilter: ["data-theme", "style"],
-        attributeOldValue: true,
-      });
+      this.themeObserver.observe(html, { attributes: true, attributeFilter: ["data-theme"] });
     }
   }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AgentKind } from "../../bindings";
-import { agentProvider, providerExecutable, sessionAgent } from "./agentProvider";
+import { agentProvider, agentSessionSeed, providerExecutable, sessionAgent } from "./agentProvider";
 
 describe("agent provider contract", () => {
   it("registers every generated provider kind explicitly", () => {
@@ -31,8 +31,11 @@ describe("agent provider contract", () => {
 
   it("never treats an unsupported provider as Claude", () => {
     expect(agentProvider("Cursor").capabilities.cliLaunchOptions).toBe(false);
+    // No launch spec at all, so there is nothing to fall back to a default with:
+    // the tab opens as a plain shell and the history row offers no resume line.
+    expect(agentProvider("Cursor").launch).toBeNull();
     expect(
-      agentProvider("Cursor").buildSeed(
+      agentSessionSeed(
         {
           type: "fresh",
           agentKind: "Cursor",

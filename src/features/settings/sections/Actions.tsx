@@ -206,9 +206,16 @@ function AppTriagePanel() {
               : "Connect Linear first (Settings → Integrations) to enable triage."}
           </div>
         </div>
-        <div className={linear ? "" : "pointer-events-none opacity-40"}>
-          <Toggle on={enabled} onClick={() => toggleIntegration("triage")} />
-        </div>
+        {/* The real `disabled`, not a wrapper's `pointer-events-none`: without
+            Linear there is nothing for triage to pull, and a mouse-shaped block
+            still lets a keyboard user tab in and turn it on. `Toggle` dims
+            itself when disabled, so the wrapper earned nothing either. */}
+        <Toggle
+          on={enabled}
+          disabled={!linear}
+          ariaLabel="Enable Triage"
+          onClick={() => toggleIntegration("triage")}
+        />
       </div>
 
       {/* Grayed out while triage is off. `pointer-events-none` only stops the

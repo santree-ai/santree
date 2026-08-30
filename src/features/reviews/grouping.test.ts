@@ -17,7 +17,7 @@ import {
 
 function pr(over: Partial<ReviewPr> = {}): ReviewPr {
   return {
-    id: over.id ?? "node-1",
+    id: "node-1",
     number: 1,
     title: "A change",
     url: "https://github.com/acme/web/pull/1",

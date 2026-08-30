@@ -20,8 +20,9 @@
 
 /* ------------------------------------------------------------------ *
  * Design tokens. These codify santree's dark palette as Tailwind
- * colors (usable as bg-*, text-*, border-*). The accent is a runtime
- * CSS variable so the Appearance setting can re-theme the whole app.
+ * colors (usable as bg-*, text-*, border-*). The accent is monochrome
+ * and per-theme: each theme declares its own literal on :root below
+ * (there is no accent picker — Appearance only chooses light/dark/auto).
  * ------------------------------------------------------------------ */
 @theme {
   --font-sans: "Geist Variable", system-ui, -apple-system, sans-serif;
@@ -46,19 +47,12 @@
 
   /* Loading skeleton fill. */
   --color-skeleton: #23242a;
-  /* Tinted graph-node backgrounds (selected / running / done states). */
-  --color-node-sel: #14181a;
-  --color-node-run: #13181a;
-  --color-node-done: #141815;
   /* A neutral focus-ring / dot tone (was the inline #3a3a44). */
   --color-dot: #3a3a44;
-  /* Soft pastel text tones tuned for dark surfaces (diff, branch labels,
-     transcript user lines); retuned darker for light surfaces below. */
-  --color-diff-add: #7ee0b0;
-  --color-diff-del: #f0a0a0;
-  --color-diff-hunk: #6fa8d0;
-  --color-branch: #9ee6c9;
-  --color-user-line: #dbe6f2;
+  /* The tone a branch name wears where it's shown as an identifier (the PR
+     header's branch chip). Neutral on purpose: a branch is a name, not a
+     success state. Retuned darker for light surfaces below. */
+  --color-branch: #b9bac2;
 
   /* Borders / hairlines */
   --color-hairline: #18181c;
@@ -89,14 +83,12 @@
   --color-status-red: #f85149;
   --color-status-purple: #a78bfa;
   --color-status-slate: #6e7681;
-  --color-term-cyan: #6fd3e0;
-  --color-cross: #c98a4a;
 
-  /* Accent — overridden at runtime via --accent on :root */
-  --color-accent: var(--accent, #2dd4a7);
+  /* Accent — the per-theme value declared on :root below. */
+  --color-accent: var(--accent);
   /* The solid accent fill (primary buttons, launch checkboxes) — see
      --accent-fill below. Aliased here so the `bg-accent-fill` utility exists. */
-  --color-accent-fill: var(--accent-fill, var(--accent, #2dd4a7));
+  --color-accent-fill: var(--accent-fill);
 
   --animate-spin: spin 0.7s linear infinite;
 }
@@ -118,13 +110,27 @@
      border at rest, not a third semantic strength; hover restores the full
      subtle edge and selected/attention states use the defined edge. */
   --border-resting: color-mix(in srgb, var(--border-subtle) 48%, transparent);
-  --accent: #2dd4a7;
+  /* The accent is monochrome, and it is a VALUE rather than a hue: white on
+     dark, near-black on light. That is deliberate — a neutral bright enough to
+     clear AA against the surface necessarily lands within ~1.2:1 of body text,
+     so "accent as tinted text" is not a signal that survives. What the accent
+     has instead is (1) inversion — the solid fill is the only inverted patch on
+     screen; (2) hairline geometry — the 2px card spine, the tab underline, the
+     focus ring; (3) weight; and (4) a monotonic opacity ladder for fills, since
+     every state fill is now the same "hue". Each theme declares its own literal
+     (see `:root[data-theme="light"]`) rather than deriving one from the other:
+     with no hue left there is nothing to derive from. */
+  --accent: #ffffff;
   /* Interaction states are intentionally separate from semantic status colors.
      Accent means "this is the current destination" everywhere; green/amber/red
      remain available for success, activity, urgency, and failure only. */
   --interaction-hover: color-mix(in srgb, var(--color-hover) 72%, transparent);
-  --selection-fill: color-mix(in srgb, var(--accent) 7%, transparent);
-  --selection-border: color-mix(in srgb, var(--accent) 48%, transparent);
+  /* Hover and selected used to be separated by hue; now they differ only in
+     value, so the ladder has to stay monotonic and legible —
+     hover (#121317) < selected (#222326) is the entire distinction. Do not
+     lower the selection percentage without re-checking that step. */
+  --selection-fill: color-mix(in srgb, var(--accent) 10%, transparent);
+  --selection-border: color-mix(in srgb, var(--accent) 45%, transparent);
   --selection-text: var(--accent-text);
   /* THE focus ring's color — see the `:focus-visible` rule below for why it is a
      hairline of --accent-text rather than a slab of --accent. Named separately so
@@ -142,23 +148,27 @@
      ON whatever fill the card already has instead of fighting it. Deliberately
      NOT tinted: hue in this tree is reserved for state. */
   --tree-tag-fill: color-mix(in srgb, var(--color-fg) 9%, transparent);
-  /* A text-safe accent. Equal to the accent on dark surfaces; darkened on light
-     ones (teal on white is otherwise too low-contrast to read). Tracks any
-     runtime --accent override via color-mix. */
-  --accent-text: var(--accent);
-  /* The SOLID accent fill (primary buttons, launch checkboxes). Equal to the
-     accent on dark; darkened on light — a bright mint slab with dark text looks
-     harsh on white, so light mode inverts the pair (deep accent fill + white
-     --on-accent). Tracks any runtime --accent override via color-mix. */
-  --accent-fill: var(--accent);
+  /* A text-safe accent — the accent used AS text or an icon on an ordinary
+     (untinted) surface. Kept as its own token so a text use can be re-tuned
+     without moving what the fill means; both themes declare it as a literal
+     alongside --accent. Because it sits within ~1.2:1 of body text, a text-only
+     accent needs a second signal (weight, a dot, a hairline) to read as
+     emphasis — see PrCommentsSection. */
+  --accent-text: #ffffff;
+  /* The SOLID accent fill (primary buttons, launch checkboxes). Inversion is
+     what the accent has instead of hue: on dark this slab is the brightest
+     thing on screen, on light the darkest, and it should stay the only inverted
+     patch in a view. */
+  --accent-fill: #ffffff;
   /* Text/icon color for content sitting ON --accent-fill. Near-black on the
      dark theme's bright fill; flipped to white on the light theme's deep fill.
-     Distinct from --accent-text, which is the accent used AS text on tinted
-     surfaces. */
-  --on-accent: #06231a;
+     Distinct from --accent-text, which is the accent used AS text on ordinary
+     surfaces. NOTE: on dark this is byte-identical to --color-app, so it must
+     only ever sit on the fill — anywhere else it is invisible. */
+  --on-accent: #0a0b0e;
   /* Text/icon color for content sitting ON the solid danger (red) fill — white
-     in both themes since the danger red is shared. The dark --on-accent only
-     reads on the teal accent, so destructive buttons need their own token. */
+     in both themes since the danger red is shared. The dark --on-accent is the
+     app background, so destructive buttons need their own token. */
   --on-danger: #ffffff;
   /* Linear's brand color (logo tint, connected badge). Single source for the
      `LINEAR_BRAND` token in theme/colors and the `text-[color:var(--linear-brand)]`
@@ -245,11 +255,21 @@
   background: var(--tree-selected);
 }
 
+/* The vocabulary's third register: a CONTAINER row — a repo header, a Linear
+   project band, a milestone band. It folds its children and it carries
+   affordances, but it is not a destination: pressing it opens nothing, so the
+   fill that means "you selected this" on the rows below would be a promise it
+   can't keep. Shape and rhythm only, no fill. */
+.tree-band {
+  border-radius: var(--radius-md);
+  transition: color 120ms ease;
+}
+
 /* A word-tag in the rail — `primary` on the repo's own checkout. Neutral by
    construction: a foreground wash for the fill and plain muted ink for the word,
-   so it labels the row without competing with it. A tinted (mint) version of this
-   tag was tried and removed for being loud; so was the dashed edge that replaced
-   it.
+   so it labels the row without competing with it. An accent-tinted version of
+   this tag was tried and removed for being loud; so was the dashed edge that
+   replaced it.
 
    `--color-muted` and not the dimmer `--color-muted-4` the rail's other small
    text uses, because that token is tuned to clear AA against the *bare* surface
@@ -294,15 +314,19 @@
 /* ------------------------------------------------------------------ *
  * Light theme. The app is dark by default; setting data-theme="light"
  * on <html> (Settings → Appearance, or "Auto" following the system)
- * remaps the surface / border / text tokens. Semantic status colors and
- * the accent are intentionally shared across both themes.
+ * remaps the surface / border / text tokens. Semantic status colors are
+ * intentionally shared across both themes; the accent is NOT — it inverts.
  * ------------------------------------------------------------------ */
 :root[data-theme="light"] {
-  --accent-text: color-mix(in srgb, var(--accent) 60%, #000);
-  /* Deep accent fill + white text (see :root) — 60% mix keeps white ≥ 4.5:1
-     (WCAG AA) for the default accent, and matches --accent-text so filled and
-     text accents read as one color. */
-  --accent-fill: color-mix(in srgb, var(--accent) 60%, #000);
+  /* The mirror of the dark accent: near-black on white instead of white on
+     near-black, so the fill is still the one inverted patch in a view. Written
+     as literals, not derived from the dark value: the accent is two values, one
+     per theme, not one hue with two derivations. The --selection-* percentages
+     in :root need no override — 10% of #16171b over white is #e8e8e9 against a
+     #f4f5f7 hover, the same ~1.16:1 step the dark ladder has. */
+  --accent: #16171b;
+  --accent-text: #0c0d11;
+  --accent-fill: #17181c;
   --on-accent: #ffffff;
 
   /* Surfaces */
@@ -340,17 +364,10 @@
   --color-muted-4: #6e6e76;
   --color-muted-5: #b2b3ba;
 
-  /* Loading / graph / dot accents, retuned for light surfaces. */
+  /* Loading / dot / branch-label tones, retuned for light surfaces. */
   --color-skeleton: #e4e6ea;
-  --color-node-sel: #e9faf4;
-  --color-node-run: #e7f8f1;
-  --color-node-done: #e9f6ed;
   --color-dot: #c2c5cc;
-  --color-diff-add: #1f8b3b;
-  --color-diff-del: #c4332b;
-  --color-diff-hunk: #2f6aa8;
-  --color-branch: #0f9b73;
-  --color-user-line: #2a4a66;
+  --color-branch: #4c4d55;
 }
 
 html,
@@ -442,11 +459,11 @@ button:focus:not(:focus-visible) {
 
    A hairline, not a slab: 2px of full accent read as a highlight on the control
    rather than a marker beside it, and on a dense surface (a status bar, a row of
-   icon buttons) several of them turn the chrome green. A 1px line held two pixels
-   clear of the control is unmistakable when you tab onto it and takes up almost
-   no ink. The color is --accent-text, not --accent, because the ring has to hold its
-   own against the surface behind it in BOTH themes: raw accent on white is a
-   ~1.8:1 mint hairline, while --accent-text is the darkened-for-light pair. */
+   icon buttons) several of them turn the chrome into a light show. A 1px line
+   held two pixels clear of the control is unmistakable when you tab onto it and
+   takes up almost no ink. The color is --accent-text, not --accent, so the ring
+   can be re-tuned for legibility against a surface without moving what the fill
+   means; both are per-theme literals, so it inverts with the app. */
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,

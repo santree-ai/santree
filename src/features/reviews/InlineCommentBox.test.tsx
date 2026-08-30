@@ -30,10 +30,12 @@ const TARGET: CommentTarget = {
   pendingReviewId: null,
 };
 
-const box = (line: number, startLine: number) =>
+/** `target` is a parameter: the composer's primary action reads off
+ *  `pendingReviewId`, so a single frozen TARGET closes one of its two labels. */
+const box = (line: number, startLine: number, target: CommentTarget = TARGET) =>
   render(
     <InlineCommentBox
-      target={TARGET}
+      target={target}
       path="src/retry.ts"
       patch={PATCH}
       line={line}
@@ -101,6 +103,15 @@ describe("InlineCommentBox", () => {
     // that omits a line it replaces deletes it.
     const { queryByText } = box(14, 13);
     expect(queryByText("Suggestion")).toBeNull();
+  });
+
+  /** Once a review is open the same button adds to that batch instead of
+   *  starting another — and the label is the only thing that tells the user
+   *  which of the two is about to happen. */
+  it("adds to the review already open instead of starting another", () => {
+    const { getByText, queryByText } = box(11, 11, { ...TARGET, pendingReviewId: "R_1" });
+    expect(getByText("Add to review")).toBeInTheDocument();
+    expect(queryByText("Start a review")).toBeNull();
   });
 
   describe("on your own PR", () => {

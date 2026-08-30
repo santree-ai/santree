@@ -31,13 +31,13 @@ import {
   useResolvedProviderSetting,
   useResolvedSetting,
 } from "../../lib/queries";
-import { agentProvider, sessionAgent } from "../terminal/agentProvider";
-import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
+import { sessionAgent } from "../terminal/agentProvider";
+import { agentSessionSeed } from "../terminal/agentSeed";
 import type { AgentTabIdentity } from "../terminal/orchestrator";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
 import { useHookInjection } from "../terminal/useHookInjection";
-import { triageTerminalRef } from "./providerSessions";
+import { triageTermKey } from "./providerSessions";
 
 export function InvestigatePane({
   repo,
@@ -65,8 +65,13 @@ export function InvestigatePane({
   // pane, and its Resume button clears the latch to re-seed. This pane is keyed
   // by ticket, so reopening the ticket resets the latch.
   const { tabs } = useTerminals();
-  const terminalRef = triageTerminalRef(ticketId, agentKind);
-  const liveSession = tabs.some((t) => t.source === "triage" && t.refId === terminalRef);
+  const termKey = triageTermKey(ticketId);
+  // The pane is one provider's investigation of this ticket, and so is its tab:
+  // the surface key alone would also match the *other* provider's pane, and this
+  // one would then sit behind a resume offer while its own agent never launched.
+  const liveSession = tabs.some(
+    (t) => t.source === "triage" && t.refId === termKey && t.agent?.kind === agentKind,
+  );
   const [liveSeen, setLiveSeen] = useState(false);
   // A brand-new investigation (no stored session) auto-launches when opened; one
   // that already has a stored session waits behind the resume pane until the user
@@ -82,7 +87,6 @@ export function InvestigatePane({
     }
   }, [liveSession]);
 
-  const termKey = `triage:${ticketId}`;
   const canLaunch = !!cwd;
   const qc = useQueryClient();
   // Something to resume: it ran and exited in-place (liveSeen), or a past
@@ -105,7 +109,6 @@ export function InvestigatePane({
   // `ready`) so the file exists before the agent starts.
   const investigatePrompt = useInvestigatePrompt(repo, ticketId, needsSeed);
   const resolvedAgent = sessionAgent(session.data, agentKind);
-  const provider = agentProvider(resolvedAgent);
   const model = useResolvedProviderSetting(
     repo,
     INVESTIGATE_MODEL_KEY,
@@ -124,10 +127,6 @@ export function InvestigatePane({
     agentKind,
     INVESTIGATE_AGENT_KEY,
   );
-  const modelFlag =
-    resolvedAgent === agentKind && model.data ? `--model ${shellQuote(model.data)}` : undefined;
-  const effortFlag =
-    resolvedAgent === agentKind && effort.data ? `--effort ${shellQuote(effort.data)}` : undefined;
   // `--remote-control` is opt-out (Settings → Agents → Claude Code): some environments
   // run a `claude` build old enough to predate the flag, which would otherwise
   // fail every launch with no visible cause (see CLAUDE.md's "verify vendor
@@ -148,15 +147,15 @@ export function InvestigatePane({
     prompt: investigatePrompt.data
       ? `Read ${investigatePrompt.data} and follow the instructions inside.`
       : `Investigate ${ticketId}.`,
-    modelFlag,
-    effortFlag,
-    permissionMode: provider.capabilities.permissionMode
-      ? (permissionMode.data ?? undefined)
-      : undefined,
-    remoteControl:
-      provider.capabilities.remoteControl && remoteControlEnabled ? ticketId : undefined,
-    settingsFlag: hooks.flagFor(resolvedAgent),
-    chrome: provider.capabilities.cliLaunchOptions && startWithChrome,
+    // Typed configuration, not flags — the provider's launch spec knows which
+    // of these its CLI spells and which it must never receive.
+    configuredFor: agentKind,
+    model: model.data,
+    effort: effort.data,
+    permissionMode: permissionMode.data,
+    remoteControl: remoteControlEnabled ? ticketId : null,
+    hookFlag: hooks.flagFor(resolvedAgent),
+    chrome: startWithChrome,
   });
   // Hold the embed until the seed decision, the remote-control setting, and the
   // prompt file are all fresh, so the new PTY carries the right flags and reads a
@@ -219,7 +218,7 @@ export function InvestigatePane({
       {ready ? (
         <InvestigateTerminal
           ticketId={ticketId}
-          terminalRef={terminalRef}
+          termKey={termKey}
           cwd={cwd}
           seed={seed}
           agent={{ kind: resolvedAgent, repo, termKey }}
@@ -239,21 +238,23 @@ export function InvestigatePane({
  *  instead of leaving it pointed at a detached node. */
 function InvestigateTerminal({
   ticketId,
-  terminalRef,
+  termKey,
   cwd,
   seed,
   agent,
   onExited,
 }: {
   ticketId: string;
-  terminalRef: string;
+  /** The surface's `term_key` — the tab's `refId`, the PTY's label, the durable
+   *  row's key. The provider goes in `agent`, never in here. */
+  termKey: string;
   cwd?: string;
   seed?: string;
   agent: AgentTabIdentity;
   onExited: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
-    spec: { title: ticketId, cwd, source: "triage", refId: terminalRef, seed, agent },
+    spec: { title: ticketId, cwd, source: "triage", refId: termKey, seed, agent },
     onExited,
   });
   // The TerminalLayer overlays this host with the ticket's live session.

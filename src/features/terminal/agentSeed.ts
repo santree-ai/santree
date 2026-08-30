@@ -1,19 +1,22 @@
 /**
- * Build the shell command that (re)launches an agent in a terminal, from a
- * backend-resolved {@link AgentSession}. `exec` is the agent binary; `prompt` is
- * the first message for a fresh start (the rendered work prompt, or a
- * `/investigate` command); `modelFlag` / `effortFlag` are optional pre-quoted
- * `--model …` / `--effort …` prefixes (applied only on a fresh start — a resume
- * keeps the session's own model/effort); `remoteControl` names the session for
- * Claude's Remote Control web (we pass the ticket id, so triage/work sessions are
- * easy to spot there). Returns `undefined` for a plain shell.
+ * The launch-line surface, in one import for the four places that open an agent
+ * terminal.
  *
- * `exec <bin>` replaces the login shell so quitting the agent ends the PTY — and
- * the next time the tab opens, the session has a transcript on disk, so the
- * backend resolves it to a `--resume` instead of a fresh start.
+ * {@link AgentLaunchConfig} is typed, provider-neutral data — a model name, an
+ * effort, a permission mode, a path — and each provider's `AgentLaunchSpec`
+ * (see `agentProvider.ts`) is the only thing that knows how its CLI spells
+ * them. Call sites pass what the user configured; they do not build flags,
+ * quote values, or remember which of them a given CLI must not receive.
+ *
+ * {@link resumeInvocation} is the same knowledge pointed the other way: the
+ * command a human would type to continue a session in their own terminal, built
+ * from the identical provider record the seed uses, so the copied line and the
+ * launched one cannot drift.
  */
 export {
-  type AgentSeedOptions,
+  type AgentLaunchConfig,
+  type AgentLaunchSpec,
   agentSessionSeed,
+  resumeInvocation,
   shellQuote,
 } from "./agentProvider";

@@ -11,12 +11,10 @@ import { INTERACTIVE_AGENTS } from "./providerSessions";
 export function DetailTabs({
   tab,
   providers,
-  includeDiscussion = true,
   onTab,
 }: {
   tab: DetailTab;
   providers: AgentKind[];
-  includeDiscussion?: boolean;
   onTab: (t: DetailTab) => void;
 }) {
   const { accent } = useApp();
@@ -25,9 +23,7 @@ export function DetailTabs({
   const codexAccount = useCodexAccount(codexHealth.data?.available === true);
   const codexReady = !!codexHealth.data?.available && !!codexAccount.data?.connected;
   const tabs: TabItem<DetailTab>[] = [
-    ...(includeDiscussion
-      ? ([{ value: "discussion", label: "Discussion" }] as TabItem<DetailTab>[])
-      : []),
+    { value: "discussion", label: "Discussion" },
     ...providers.map(
       (agent): TabItem<DetailTab> => ({
         value: agent,

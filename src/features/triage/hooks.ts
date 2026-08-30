@@ -21,10 +21,10 @@ import { CLAUDE_START_WITH_CHROME_KEY, queryKeys, useBoolSetting } from "../../l
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { toast } from "../../state/toast";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
-import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
+import { agentSessionSeed } from "../terminal/agentSeed";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useHookInjection } from "../terminal/useHookInjection";
-import { triageTerminalRef } from "./providerSessions";
+import { triageTermKey } from "./providerSessions";
 
 /** Discussion, or the provider-specific investigation currently in front. */
 export type DetailTab = "discussion" | AgentKind;
@@ -186,32 +186,37 @@ export function useBatchInvestigate(opts: {
             pr.status === "ok"
               ? `Read ${pr.data} and follow the instructions inside.`
               : `Investigate ${id}.`;
-          const r = await commands.agentSession(repo, `triage:${id}`, cwd, true, agentKind);
+          const termKey = triageTermKey(id);
+          const r = await commands.agentSession(repo, termKey, cwd, true, agentKind);
           if (r.status === "error") throw new Error(r.error);
           const resolvedAgent = sessionAgent(r.data, agentKind);
           const provider = agentProvider(resolvedAgent);
           const seed = agentSessionSeed(r.data, {
             repo,
-            termKey: `triage:${id}`,
+            termKey,
             prompt,
-            modelFlag:
-              resolvedAgent === agentKind && model ? `--model ${shellQuote(model)}` : undefined,
-            effortFlag:
-              resolvedAgent === agentKind && effort ? `--effort ${shellQuote(effort)}` : undefined,
-            permissionMode: provider.capabilities.permissionMode
-              ? (permissionMode ?? undefined)
-              : undefined,
-            remoteControl: provider.capabilities.remoteControl && remoteControl ? id : undefined,
-            settingsFlag: flagFor(resolvedAgent),
-            chrome: provider.capabilities.cliLaunchOptions && startWithChrome,
+            // Exactly what InvestigatePane passes, because it is the same launch
+            // — typed configuration, with the provider's own spec deciding how
+            // its CLI spells it and which of it that CLI must never receive.
+            configuredFor: agentKind,
+            model,
+            effort,
+            permissionMode,
+            remoteControl: remoteControl ? id : null,
+            hookFlag: flagFor(resolvedAgent),
+            chrome: startWithChrome,
           });
           ensure({
             title: `${id} · ${provider.label}`,
             cwd,
             source: "triage",
-            refId: triageTerminalRef(id, resolvedAgent),
+            // One string for the surface: the tab's `refId` IS the PTY's label
+            // and the durable row's `term_key`. The provider is the other half of
+            // the pane's identity and lives in `agent`, so a Codex and a Claude
+            // investigation of one ticket are still two panes.
+            refId: termKey,
             seed,
-            agent: { kind: resolvedAgent, repo, termKey: `triage:${id}` },
+            agent: { kind: resolvedAgent, repo, termKey },
           });
         }),
       );

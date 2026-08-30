@@ -32,7 +32,11 @@ vi.mock("../../lib/queries", () => ({
   useStageAction: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
 }));
 
-const file = (path: string, staged: boolean): ChangedFile => ({
+/** `status` is what the list splits on — tracked rows against the "Untracked
+ *  files" section, and Discard against Delete — so it has to be overridable:
+ *  pinning it to `Modified` made half of `ChangesList` unreachable from the one
+ *  file that tests it. */
+const file = (path: string, staged: boolean, over: Partial<ChangedFile> = {}): ChangedFile => ({
   path,
   oldPath: null,
   status: "Modified",
@@ -40,6 +44,7 @@ const file = (path: string, staged: boolean): ChangedFile => ({
   addLines: 1,
   delLines: 0,
   binary: false,
+  ...over,
 });
 
 describe("ChangesList loading state", () => {
@@ -76,5 +81,19 @@ describe("ChangesList loading state", () => {
     expect(screen.getByText("b.ts")).toBeInTheDocument();
     expect(screen.getByText("1/2 staged")).toBeInTheDocument();
     expect(document.querySelector(".animate-pulse")).not.toBeInTheDocument();
+  });
+
+  /** A new file is not a change to an existing one: it gets its own section, and
+   *  the destructive action on it deletes rather than discards. The split is on
+   *  `status`, which the fixture pinned to `Modified` until now. */
+  it("puts new files in their own section rather than among the changes", () => {
+    render(
+      <ChangesList
+        files={[file("a.ts", true), file("new.ts", false, { status: "Untracked" })]}
+        committed={[]}
+      />,
+    );
+    expect(screen.getByText("Changes")).toBeInTheDocument();
+    expect(screen.getByText("Untracked files")).toBeInTheDocument();
   });
 });

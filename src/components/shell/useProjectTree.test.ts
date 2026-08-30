@@ -3,60 +3,30 @@ import { describe, expect, it } from "vitest";
 import type { Task, Worktree, WorktreePr } from "../../bindings";
 import type { AgentBucket, AgentEntry, AgentOriginKind } from "../../features/agents/registry";
 import type { SeenMap } from "../../lib/attention";
+import {
+  agentEntry as fxAgentEntry,
+  task as fxTask,
+  worktree as fxWorktree,
+  NOW,
+  STALE,
+} from "../../test/fixtures";
 import { PROJECT_FALLBACK } from "../../theme/colors";
+import { NO_PROJECT } from "../WorkSignals";
 import { buildProjectNode, groupAgentsByWorktree, worktreeKey } from "./useProjectTree";
 
-const NOW = 1_700_000_000_000;
+/** This file's own defaults over the shared fixtures (`src/test/fixtures.ts`):
+ *  the sidebar tree is what groups by project and milestone, so a project is the
+ *  ordinary case here rather than the neutral one. Everything else — including
+ *  the two fields `levelOf` arbitrates between, `updatedAtMs` and
+ *  `terminalTitle` — comes from the shared defaults and is overridable. */
+const worktree = (id: string, over: Partial<Worktree> = {}) =>
+  fxWorktree(id, { project: "Core", baseBranch: "master", ...over });
 
-function worktree(id: string, over: Partial<Worktree> = {}): Worktree {
-  return {
-    id,
-    title: `Task ${id}`,
-    status: null,
-    addLines: 0,
-    delLines: 0,
-    dirty: false,
-    ahead: 0,
-    behind: 0,
-    unpushed: 0,
-    remoteBehind: 0,
-    pullConflict: false,
-    agent: "Claude",
-    activity: null,
-    branch: `santree/${id.toLowerCase()}`,
-    path: `/tmp/${id}`,
-    project: "Core",
-    baseBranch: "master",
-    setupRan: true,
-    pending: false,
-    ...over,
-  } as Worktree;
-}
+const task = (id: string, over: Partial<Task> = {}) => fxTask(id, "Core", over);
 
-function task(id: string, over: Partial<Task> = {}): Task {
-  return {
-    id,
-    title: `Task ${id}`,
-    project: "Core",
-    projectMilestone: null,
-    projectColor: null,
-    projectIcon: null,
-    projectTargetDate: null,
-    parentId: null,
-    priority: "None",
-    estimate: null,
-    status: "Todo",
-    ready: true,
-    blockedBy: [],
-    actionable: true,
-    assignee: null,
-    assigneeAvatarUrl: null,
-    x: 0,
-    y: 0,
-    ...over,
-  } as Task;
-}
-
+/** An agent entry addressed by origin rather than by term key, because that is
+ *  what this fold groups on. The key is derived from the ticket so the two can
+ *  never disagree; pass `termKey` explicitly to say they do. */
 function entry(
   over: Partial<AgentEntry> & { sessionId: string; bucket: AgentBucket } & {
     originKind?: AgentOriginKind;
@@ -64,28 +34,12 @@ function entry(
   },
 ): AgentEntry {
   const { originKind = "tree", ticket = "AK-1", ...rest } = over;
-  return {
-    agentKind: "Claude",
-    state: "active",
+  return fxAgentEntry({
     origin: { kind: originKind, ticket, tabId: null, pr: null },
-    repo: "acme/app",
     termKey: `tree:${ticket}`,
-    cwd: "/repo",
-    message: null,
-    updatedAtMs: NOW,
-    live: true,
-    tabKey: null,
-    openable: true,
     ticket,
-    project: "Core",
-    projectColor: null,
-    projectIcon: null,
-    purpose: "work",
-    title: "Task",
-    subtitle: null,
-    worktree: null,
     ...rest,
-  } as AgentEntry;
+  });
 }
 
 const noSeen: SeenMap = {};
@@ -213,6 +167,79 @@ describe("groupAgentsByWorktree", () => {
     expect(groupAgentsByWorktree([done], { "tree:AK-1": NOW }, NOW).get(key)?.[0]?.unseen).toBe(
       false,
     );
+  });
+
+  /**
+   * The two tiers below `levelOf`'s first one. Every test above stamps its
+   * entries with `NOW`, which keeps the fold permanently on tier 1 (the hook
+   * row, taken at face value) — so the decay that exists for a *missing* hook
+   * event, and the terminal-title fallback under it, never ran here at all.
+   *
+   * The bug they guard is the one the decay was written for: a dropped
+   * `Stop`/`UserPromptSubmit` leaves a row asserting "waiting on you" forever,
+   * and the sidebar sorts that agent above everything actually happening, with
+   * nothing able to correct it.
+   */
+  describe("once the hook row has gone stale", () => {
+    const key = worktreeKey("acme/app", "AK-1");
+    const levelOfOne = (e: AgentEntry) =>
+      groupAgentsByWorktree([e], noSeen, NOW).get(key)?.[0]?.attention;
+
+    it("stops believing a stale claim that the agent is blocked on you", () => {
+      const fresh = entry({ sessionId: "s1", bucket: "attention", updatedAtMs: NOW });
+      const stale = entry({ sessionId: "s1", bucket: "attention", updatedAtMs: STALE });
+      expect(levelOfOne(fresh)?.level).toBe("needs-you");
+      expect(levelOfOne(stale)?.level).toBe("idle");
+    });
+
+    // Tier 2: the spinner a coding CLI animates into its OSC title is the one
+    // live signal left once the row has stopped being evidence.
+    it("falls back to the live terminal's own title", () => {
+      const working = entry({
+        sessionId: "s1",
+        bucket: "idle",
+        updatedAtMs: STALE,
+        terminalTitle: "◐ Cooking up a plan",
+      });
+      const resting = entry({
+        sessionId: "s1",
+        bucket: "working",
+        updatedAtMs: STALE,
+        terminalTitle: "✳ Ready",
+      });
+      expect(levelOfOne(working)).toMatchObject({ level: "working", source: "title" });
+      expect(levelOfOne(resting)).toMatchObject({ level: "idle", source: "title" });
+    });
+
+    // …but only with a PTY behind it. A title outlives the process that set it,
+    // so a dead pane's last frame would read as "working" for as long as the app
+    // stayed open.
+    it("ignores the title of a pane with no live process", () => {
+      const ghost = entry({
+        sessionId: "s1",
+        bucket: "working",
+        updatedAtMs: STALE,
+        live: false,
+        terminalTitle: "◐ Cooking up a plan",
+      });
+      expect(levelOfOne(ghost)).toMatchObject({ level: "idle", source: "none" });
+    });
+
+    // Tier 3, and the reason the ladder ends rather than looping back: with no
+    // fresh event and no title, the row renders at rest instead of holding an
+    // hours-old claim nothing can support.
+    it("settles at rest when neither the row nor a title can speak", () => {
+      const silent = entry({ sessionId: "s1", bucket: "working", updatedAtMs: STALE });
+      expect(levelOfOne(silent)).toMatchObject({ level: "idle", source: "none" });
+    });
+
+    // The one exemption. A finished session is terminal — its process is gone,
+    // so no later evidence can exist and there is nothing for the window to
+    // protect against.
+    it("still surfaces a finished agent you have not looked at, however old", () => {
+      const done = entry({ sessionId: "s1", bucket: "done", updatedAtMs: STALE });
+      expect(levelOfOne(done)?.level).toBe("done");
+    });
   });
 
   // A permission prompt stays actionable however long you look at it, whereas a
@@ -546,6 +573,50 @@ describe("buildProjectNode grouping modes", () => {
       groupBy: "project",
     });
     expect(shape(node)).toEqual([["No Project", [["No milestone", ["AK-1", "AK-2"]]]]]);
+  });
+
+  /**
+   * A worktree checked out from someone else's PR is not Linear work, and the
+   * "Reviews" tab it was opened from is not a Linear project — but the PR create
+   * path used to record exactly that string as the tree's project, and this fold
+   * reads `worktree.project` straight back out as a band name. The result was a
+   * project band literally called "Reviews" sitting beside the real ones.
+   *
+   * The origin now carries no project at all (Rust `WorktreeLaunch::Pr`), so a PR
+   * tree bands like every other ticket-less row: in the one trailing catch-all.
+   * The assertion is on the *band names*, because that is what the bug was — a
+   * name in the project axis that no Linear project answers to.
+   */
+  it("opens no band of its own for a worktree checked out from someone else's PR", () => {
+    const node = build({
+      worktrees: [
+        worktree("AK-1"),
+        worktree("review-4-acme-3-app-42", {
+          project: null,
+          title: "Fix the thing",
+          branch: "feature/fix-the-thing",
+        }),
+      ],
+      tasks: [task("AK-1", { project: "Core" })],
+      groupBy: "project",
+    });
+    expect(node.linearProjects.map((p) => p.label)).toEqual(["Core", NO_PROJECT]);
+    expect(shape(node)).toEqual([
+      ["Core", [["No milestone", ["AK-1"]]]],
+      [NO_PROJECT, [["No milestone", ["review-4-acme-3-app-42"]]]],
+    ]);
+  });
+
+  /** The same tree with a *real* ticket behind it — a PR whose branch carries a
+   *  ticket tag — bands under that ticket's own project. Deriving a band from the
+   *  origin instead would have overridden a name Linear actually gave it. */
+  it("bands a PR tree under its ticket's project when the branch names one", () => {
+    const node = build({
+      worktrees: [worktree("AK-7", { project: null, branch: "feature/ak-7-thing" })],
+      tasks: [task("AK-7", { project: "Observability" })],
+      groupBy: "project",
+    });
+    expect(node.linearProjects.map((p) => p.label)).toEqual(["Observability"]);
   });
 
   it("never renders one worktree in two bands, whichever mode is on", () => {

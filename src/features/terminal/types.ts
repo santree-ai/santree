@@ -7,6 +7,8 @@
  * id. Nothing outside the single `XtermRenderer` implementation imports xterm.
  */
 
+import type { AgentKind } from "../../bindings";
+
 export type SessionId = number;
 export type Unsubscribe = () => void;
 
@@ -17,9 +19,15 @@ export interface OpenOpts {
   args: string[];
   cols: number;
   rows: number;
-  /** What this session is called — the surface's `term_key`. Handed back by
-   *  `adopt` after a reload so the pane that owns it can find it again. */
+  /** What this session is called — the surface's `term_key`, exactly, with
+   *  nothing appended. Handed back by `adopt` after a reload so the pane that
+   *  owns it can find it again. */
   label: string;
+  /** Which agent is being launched here; absent for a plain shell. The other
+   *  half of the session's identity: a surface hosts one session per provider,
+   *  and the backend joins `(label, agentKind)` against `terminal_sessions`'
+   *  own primary key to decide whether an agent is still running. */
+  agentKind?: AgentKind | null;
 }
 
 /** Where a client is in a session's output stream.
@@ -97,7 +105,8 @@ export interface TerminalBackend {
   attach(id: SessionId, anchor: Anchor, handlers: OutputHandlers): Promise<Attached>;
   /** Stop receiving a session's output without ending it. */
   detach(id: SessionId): void;
-  /** Claim the sessions a previous page load left running, by `label`. */
+  /** Claim the sessions a previous page load left running, keyed by their pane
+   *  address (`paneAddress`: the label plus the provider in them). */
   adopt(owner: string): Promise<Map<string, SessionId>>;
   /** Keystrokes, verbatim. A paste is keystrokes too, so nothing may reshape
    *  what goes through here — see `seed` for the one line santree composes. */

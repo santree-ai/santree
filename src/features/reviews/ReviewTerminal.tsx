@@ -13,7 +13,6 @@ import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
 
 export function ReviewTerminal({
   termKey,
-  terminalRef = termKey,
   title,
   cwd,
   seed,
@@ -21,8 +20,10 @@ export function ReviewTerminal({
   attach,
   onExited,
 }: {
+  /** The PR's surface key — the tab's `refId`, the PTY's label and the durable
+   *  row's `term_key`, one string. Which provider is reviewing travels in
+   *  `agent`, so both reviews of a PR can be open at once. */
   termKey: string;
-  terminalRef?: string;
   title: string;
   cwd?: string;
   seed?: string;
@@ -31,7 +32,7 @@ export function ReviewTerminal({
   onExited: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
-    spec: { title, cwd, source: "review", refId: terminalRef, seed, agent },
+    spec: { title, cwd, source: "review", refId: termKey, seed, agent },
     attach,
     onExited,
   });

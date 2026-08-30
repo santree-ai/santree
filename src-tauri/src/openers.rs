@@ -115,6 +115,41 @@ pub fn open(path: &str, key: &str) -> Result<()> {
     open_app(c, dir)
 }
 
+/// Show `file` in the OS file browser, selected rather than opened.
+///
+/// Deliberately not routed through [`open`]'s validation: **no IPC value reaches
+/// here**. Every caller derives the path in Rust from a record santree itself
+/// located (a session transcript under the Claude projects root), so there is no
+/// untrusted string to gate — and the gate that exists, `worktree_dir`, would
+/// reject a file anyway. `open -R` reveals in Finder without launching what it
+/// is given, which the fallback path can't promise, so elsewhere the *parent
+/// directory* is what opens.
+///
+/// The one check kept from `worktree_dir` is absoluteness, and it is about argv
+/// rather than trust: the projects root is built from `CLAUDE_CONFIG_DIR` when
+/// the user sets one, and a relative value beginning with `-` would reach `open`
+/// as a flag instead of a path.
+pub(crate) fn reveal(file: &Path) -> Result<()> {
+    if !file.is_absolute() {
+        bail!("path to reveal must be absolute: {}", file.display());
+    }
+    let path = file
+        .to_str()
+        .ok_or_else(|| anyhow!("path is not valid UTF-8: {}", file.display()))?;
+    #[cfg(target_os = "macos")]
+    {
+        run(Command::new("open").args(["-R", path]))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let dir = file
+            .parent()
+            .and_then(Path::to_str)
+            .ok_or_else(|| anyhow!("path has no parent directory: {path}"))?;
+        open_file_browser(dir)
+    }
+}
+
 /// Validate an IPC-supplied opener path down to the one domain this command is
 /// ever meant to serve: a worktree directory.
 ///

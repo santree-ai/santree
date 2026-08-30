@@ -24,10 +24,10 @@ use santree_core::{
         LinearApiBudget, LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr,
         NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo,
         RepoBranch, ResourceUsage, ReviewBrief, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
-        ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionState,
-        SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail,
-        TriageSchedule, TriageSession, TriageTicket, UsageReport, ViewedMarks, Worktree,
-        WorktreeBranchSource, WorktreePr, WorktreeSession, WorktreeTab,
+        ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail,
+        SessionState, SessionSubagent, SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task,
+        TicketRef, TriageDetail, TriageSchedule, TriageSession, TriageTicket, UsageReport,
+        ViewedMarks, Worktree, WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
     },
 };
 
@@ -170,31 +170,70 @@ pub async fn base_worktree(repo: String, db: State<'_, Db>) -> CmdResult<Option<
     Ok(worktree::base_worktree(&db, &repo).await?)
 }
 
-/// Start a task: create a worktree for an issue (branching off `base`) and record
-/// the issue ↔ worktree link. Running `.santree/init.sh` is a separate step —
-/// see `run_worktree_setup_streamed` — so it isn't gated on this call.
+/// Find-or-create a worktree and record the issue ↔ worktree link. `launch` says
+/// where the work came from — a Linear ticket, a branch picked or named in the
+/// "Create worktree" dialog, or someone else's pull request — and that origin is
+/// the only thing the three paths differ on: what the branch is, and whether
+/// there is a Linear project to file the tree under. `base` is the parent
+/// worktree's branch when one was picked (a *stacked* worktree), else `None` for
+/// the repo's default branch.
+///
+/// Idempotent (see `worktree::create`): an already-tracked id, or a tree already
+/// holding the requested branch, is returned rather than re-created. Running
+/// `.santree/init.sh` is a separate step — see `run_worktree_setup_streamed` —
+/// so it isn't gated on this call.
 #[tauri::command]
 #[specta::specta]
 pub async fn create_worktree(
     repo: String,
     issue_id: String,
     title: String,
-    project: Option<String>,
+    launch: WorktreeLaunch,
     base: Option<String>,
-    agent: AgentKind,
+    agent: Option<AgentKind>,
     db: State<'_, Db>,
 ) -> CmdResult<Worktree> {
-    Ok(worktree::create(
+    Ok(create_from_launch(
         &db,
         &repo,
         &issue_id,
         &title,
-        project.as_deref(),
+        &launch,
         base.as_deref(),
-        Some(agent),
-        worktree::BranchPlan::Derived,
+        agent,
     )
     .await?)
+}
+
+/// [`create_worktree`] minus Tauri, so the origin → (project, branch plan)
+/// resolution is testable without a `State`.
+async fn create_from_launch(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    title: &str,
+    launch: &WorktreeLaunch,
+    base: Option<&str>,
+    agent: Option<AgentKind>,
+) -> anyhow::Result<Worktree> {
+    // A PR's repo is checked against the registered checkout's own origin before
+    // anything else — it decides whether this create may happen at all, not just
+    // what it creates. Every branch name below is re-validated inside
+    // `worktree::create` (`git::safe_branch`) before it can reach a `git` argv.
+    if let WorktreeLaunch::Pr { pr_repo, .. } = launch {
+        let (local_owner, local_name) = reviews::origin(db, repo).await?;
+        validate_pr_repo(pr_repo, &local_owner, &local_name)?;
+    }
+    // Only a ticket has a project. The other origins record none rather than a
+    // stand-in: `worktree_links.project` is read straight back as a Linear
+    // project band, so any constant put here renders as a project that isn't one.
+    let (project, plan) = match launch {
+        WorktreeLaunch::Ticket { project } => (project.as_deref(), worktree::BranchPlan::Derived),
+        WorktreeLaunch::ExistingBranch { branch } => (None, worktree::BranchPlan::Existing(branch)),
+        WorktreeLaunch::NewBranch { branch } => (None, worktree::BranchPlan::New(branch)),
+        WorktreeLaunch::Pr { branch, .. } => (None, worktree::BranchPlan::Existing(branch)),
+    };
+    worktree::create(db, repo, issue_id, title, project, base, agent, plan).await
 }
 
 /// The repo's branches (local, plus `origin`-only ones), each flagged with
@@ -204,78 +243,6 @@ pub async fn create_worktree(
 #[specta::specta]
 pub async fn repo_branches(repo: String, db: State<'_, Db>) -> CmdResult<Vec<RepoBranch>> {
     Ok(worktree::branches(&db, &repo).await?)
-}
-
-/// Create a worktree from the sidebar's "Create worktree" dialog, which — unlike
-/// [`create_worktree`] — may have no Linear ticket behind it at all: `source`
-/// says whether the branch is derived from the id, checked out from one that
-/// exists, or created under a name the user typed. `base` is the parent
-/// worktree's branch when one was picked (a *stacked* worktree), else `None` for
-/// the repo's default branch.
-#[tauri::command]
-#[specta::specta]
-#[allow(clippy::too_many_arguments)] // Typed IPC fields stay explicit at this security boundary.
-pub async fn create_manual_worktree(
-    repo: String,
-    issue_id: String,
-    title: String,
-    project: Option<String>,
-    source: WorktreeBranchSource,
-    base: Option<String>,
-    agent: AgentKind,
-    db: State<'_, Db>,
-) -> CmdResult<Worktree> {
-    // Every branch name below is re-validated inside `worktree::create`
-    // (`git::safe_branch`) before it can reach a `git` argv.
-    let plan = match &source {
-        WorktreeBranchSource::Derived => worktree::BranchPlan::Derived,
-        WorktreeBranchSource::Existing { branch } => worktree::BranchPlan::Existing(branch),
-        WorktreeBranchSource::New { branch } => worktree::BranchPlan::New(branch),
-    };
-    Ok(worktree::create(
-        &db,
-        &repo,
-        &issue_id,
-        &title,
-        project.as_deref(),
-        base.as_deref(),
-        Some(agent),
-        plan,
-    )
-    .await?)
-}
-
-/// Find-or-create a worktree for a pull request: reuse the one already tracked
-/// under `issue_id` or `branch` if present, else create one that **checks out the
-/// PR's head branch** so commits made in it land on the PR. `pr_repo` must match
-/// this registered checkout's origin; org-wide Reviews must never route a PR to
-/// whichever repo happens to be active. Used by both Open-as-tree and Fix CI.
-#[tauri::command]
-#[specta::specta]
-#[allow(clippy::too_many_arguments)] // Typed IPC fields stay explicit at this security boundary.
-pub async fn create_worktree_for_pr(
-    repo: String,
-    pr_repo: String,
-    issue_id: String,
-    title: String,
-    branch: String,
-    base: Option<String>,
-    agent: Option<AgentKind>,
-    db: State<'_, Db>,
-) -> CmdResult<Worktree> {
-    let (local_owner, local_name) = reviews::origin(&db, &repo).await?;
-    validate_pr_repo(&pr_repo, &local_owner, &local_name)?;
-    Ok(worktree::create(
-        &db,
-        &repo,
-        &issue_id,
-        &title,
-        Some("Reviews"),
-        base.as_deref(),
-        agent,
-        worktree::BranchPlan::Existing(&branch),
-    )
-    .await?)
 }
 
 fn validate_pr_repo(pr_repo: &str, local_owner: &str, local_name: &str) -> anyhow::Result<()> {
@@ -476,6 +443,125 @@ pub async fn worktree_sessions(
     db: State<'_, Db>,
 ) -> CmdResult<Vec<WorktreeSession>> {
     Ok(worktree::sessions(&db, &repo, &issue_id).await?)
+}
+
+/// What one of those sessions shows when its history row is expanded: the full
+/// first prompt (which the list deliberately doesn't carry — it would bloat
+/// every scan) and the tail of the conversation.
+///
+/// Same validation posture as [`resume_worktree_session`]: `issue_id` is gated
+/// by naming a worktree the repo tracks, and the IPC-supplied `session_id` is
+/// never looked up directly — the candidate set is re-derived from
+/// [`worktree_sessions`] and the id must be in it. Display-only, and nothing
+/// read here reaches a model or a terminal (COMPLIANCE.md, "Transcript reads").
+#[tauri::command]
+#[specta::specta]
+pub async fn worktree_session_detail(
+    repo: String,
+    issue_id: String,
+    session_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<SessionDetail> {
+    Ok(worktree::session_detail(&db, &repo, &issue_id, &session_id).await?)
+}
+
+/// The Task subagents of one of those sessions — one row per `agent-*.jsonl`
+/// under the transcript's `subagents/` directory, carrying the `parentAgentId`
+/// and `spawnDepth` its sidecar records so the pane can nest them.
+///
+/// View-only: a subagent shares its parent's session id, so there is nothing
+/// here to resume. Arguments are validated exactly as
+/// [`worktree_session_detail`]'s are; the directory is derived server-side from
+/// the located transcript and never accepted from IPC.
+#[tauri::command]
+#[specta::specta]
+pub async fn worktree_session_subagents(
+    repo: String,
+    issue_id: String,
+    session_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<Vec<SessionSubagent>> {
+    Ok(worktree::session_subagents(&db, &repo, &issue_id, &session_id).await?)
+}
+
+/// Reveal one of those sessions' transcripts in the OS file browser. The path is
+/// derived in Rust from the validated listing — the webview names a session, not
+/// a file.
+#[tauri::command]
+#[specta::specta]
+pub async fn reveal_worktree_session_transcript(
+    repo: String,
+    issue_id: String,
+    session_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(worktree::reveal_session_transcript(&db, &repo, &issue_id, &session_id).await?)
+}
+
+/// Point a freshly-opened agent tab at one of the worktree's past sessions, so
+/// its launch resumes that conversation instead of starting a new one — the
+/// Session history pane's click.
+///
+/// Nothing about the launch is re-implemented here: this writes the same
+/// `terminal_sessions` row a reopened tab already reads, and `agent_session`
+/// then resolves the tab to `Resume` unchanged. The click that opens the tab is
+/// the whole of the trigger, and no byte reaches a terminal from here
+/// (COMPLIANCE.md, "a `--resume` seed is built only when a human opens the tab").
+///
+/// `session_id` is IPC-supplied and therefore never looked up directly: the
+/// candidate set is re-derived from [`worktree_sessions`] itself, and the id must
+/// be in it. The surface is derived here too — a caller passes the tab id it
+/// minted, never a whole terminal key, so it cannot name `triage:…` or another
+/// worktree's tab as the row to repoint.
+#[tauri::command]
+#[specta::specta]
+pub async fn resume_worktree_session(
+    repo: String,
+    issue_id: String,
+    tab_id: String,
+    session_id: String,
+    agent_kind: AgentKind,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    validate_tab_id(&tab_id)?;
+    // Also the `issue_id` gate: this errors unless the id names a worktree the
+    // repo actually tracks, so nothing unvouched-for reaches the key below.
+    let listed = worktree::sessions(&db, &repo, &issue_id).await?;
+    let term_key = format!("tree:{issue_id}:tab:{tab_id}");
+    validate_term_key(&term_key)?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let sessions_root = codex_rollouts::sessions_root();
+    let worktree_dir = worktree::coords(&db, &repo, &issue_id).await?.path;
+    Ok(session::adopt(
+        &db,
+        &listed,
+        session::ResumeRequest {
+            repo: &repo,
+            term_key: &term_key,
+            session_id: &session_id,
+            agent_kind,
+            worktree: &worktree_dir,
+            home: home.as_deref(),
+            sessions_root: sessions_root.as_deref(),
+        },
+    )
+    .await?)
+}
+
+/// A worktree tab's id, as the Trees model mints it (a UUID). Validated because
+/// it is half of the terminal key [`resume_worktree_session`] derives: a `:` in
+/// it would name a different surface, and a separator or `..` would ride that
+/// key into everything derived from it.
+fn validate_tab_id(tab_id: &str) -> Result<(), String> {
+    if tab_id.is_empty()
+        || tab_id.len() > 64
+        || !tab_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err("invalid tab id".into());
+    }
+    Ok(())
 }
 
 /// Every browsable file in the worktree (tracked + untracked, gitignore-aware).
@@ -969,6 +1055,14 @@ async fn validate_agent_cwd(
         .strip_prefix("tree:")
         .and_then(|rest| rest.split(':').next())
         .ok_or_else(|| "unknown terminal surface".to_string())?;
+    // The base entry is the repo root itself, not a tracked row: `worktree::BASE_ID`
+    // is a sentinel the helpers map to the registered path, so its tabs have no
+    // `worktree_links` path to match. The registered root is what the cwd must equal.
+    if issue_id == worktree::BASE_ID {
+        return (cwd == repo_root)
+            .then_some(())
+            .ok_or_else(|| "terminal cwd is not the repository root".into());
+    }
     let stored: Option<String> = sqlx::query_scalar(
         "SELECT worktree_path FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
     )
@@ -2477,6 +2571,28 @@ mod tests {
             .unwrap();
     }
 
+    /// `resume_worktree_session` builds a terminal key out of the tab id, so the
+    /// id must not be able to *be* a key: a `:` would let a caller name
+    /// `tree:AK-1:tab:x:tab:y` — or, with an empty id, the worktree's own main
+    /// session — as the row to repoint at a session of their choosing.
+    #[test]
+    fn a_tab_id_cannot_smuggle_a_terminal_key_of_its_own() {
+        assert!(validate_tab_id("0b9c4f2e-1a3d-4c5b-8e7f-0a1b2c3d4e5f").is_ok());
+        assert!(validate_tab_id("fixci_2").is_ok());
+        for bad in [
+            "",
+            "tab:other",
+            "../../etc/passwd",
+            "a/b",
+            "id with spaces",
+            "%_",
+            "\u{1}",
+            &"x".repeat(65),
+        ] {
+            assert!(validate_tab_id(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
     #[tokio::test]
     async fn session_context_scopes_tabs_and_uses_persisted_provider() {
         let (base, db) = test_db("session-context").await;
@@ -2650,6 +2766,52 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    /// The base entry has no `worktree_links` row by construction, so the row
+    /// lookup can never accept it — the registered root has to be matched directly
+    /// or every base tab launches a bare shell instead of its agent.
+    #[tokio::test]
+    async fn base_entry_cwd_must_be_the_registered_repository_root() {
+        let (base, db) = test_db("base-entry-cwd").await;
+        let repo = base.join("repo");
+        let outside = base.join("outside");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        register_repo(
+            &db,
+            "registered",
+            &repo,
+            "https://github.com/acme/project.git",
+        )
+        .await;
+        let repo_root = std::fs::canonicalize(&repo).unwrap();
+        let key = format!("tree:{}:tab:abc", crate::worktree::BASE_ID);
+
+        assert!(validate_agent_cwd(
+            &db,
+            "registered",
+            &key,
+            &repo_root,
+            &repo_root,
+            repo.to_str().unwrap(),
+        )
+        .await
+        .is_ok());
+        let result = validate_agent_cwd(
+            &db,
+            "registered",
+            &key,
+            &std::fs::canonicalize(&outside).unwrap(),
+            &repo_root,
+            repo.to_str().unwrap(),
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "terminal cwd is not the repository root"
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn review_identity_binds_provider_authority_to_one_pr() {
         assert_eq!(
@@ -2666,6 +2828,188 @@ mod tests {
         assert!(validate_pr_repo("Acme/Project", "acme", "project").is_ok());
         assert!(validate_pr_repo("acme/other", "acme", "project").is_err());
         assert!(validate_pr_repo("acme/project/extra", "acme", "project").is_err());
+    }
+
+    // ── Worktree origins ─────────────────────────────────────────────────────
+    // One create command, one `WorktreeLaunch` per origin. Each case runs the
+    // real thing — a real git repo, real SQLite — because what is being asserted
+    // is the row that lands in `worktree_links`, not the match arm above it.
+
+    fn run_git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A registered repo with one commit on `main`, a GitHub-shaped `origin`
+    /// (`acme/project` — what the PR guard matches against) and a
+    /// `feature/pr-head` branch standing in for a pull request's head.
+    ///
+    /// Checking out an existing branch freshens it from `origin` first
+    /// (`git::add_worktree_for_branch`), so both transports are pointed at
+    /// nothing reachable: the fetch is best-effort and must fail in
+    /// milliseconds here rather than dial github.com — or, worse, sit on a
+    /// credential prompt — from a unit test.
+    async fn repo_with_a_pr_branch(label: &str) -> (std::path::PathBuf, Db) {
+        let (base, db) = test_db(label).await;
+        let repo = base.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        run_git(&repo, &["config", "core.sshCommand", "false"]);
+        run_git(&repo, &["config", "http.proxy", "http://127.0.0.1:1"]);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/project.git",
+            ],
+        );
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "--quiet", "-m", "init"]);
+        run_git(&repo, &["branch", "feature/pr-head"]);
+        sqlx::query("INSERT INTO repos (name, path) VALUES ('test', ?)")
+            .bind(repo.to_str().unwrap())
+            .execute(&db)
+            .await
+            .unwrap();
+        (base, db)
+    }
+
+    async fn launch(
+        db: &Db,
+        issue_id: &str,
+        title: &str,
+        launch: WorktreeLaunch,
+    ) -> anyhow::Result<Worktree> {
+        create_from_launch(db, "test", issue_id, title, &launch, None, None).await
+    }
+
+    /// The ticket origin is the only one that names a project, and the only one
+    /// whose branch santree derives rather than being told.
+    #[tokio::test]
+    async fn a_ticket_launch_derives_its_branch_and_files_the_tree_under_its_project() {
+        let (base, db) = repo_with_a_pr_branch("launch-ticket").await;
+        let wt = launch(
+            &db,
+            "AK-1",
+            "Fix the login bug",
+            WorktreeLaunch::Ticket {
+                project: Some("Booking".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(wt.id, "AK-1");
+        assert_eq!(wt.branch, "santree/ak-1-fix-the-login-bug");
+        assert_eq!(wt.project.as_deref(), Some("Booking"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A ticketless branch checkout has no project to record — and must not be
+    /// given one.
+    #[tokio::test]
+    async fn an_existing_branch_launch_checks_that_branch_out_under_no_project() {
+        let (base, db) = repo_with_a_pr_branch("launch-existing").await;
+        let wt = launch(
+            &db,
+            "feature-pr-head",
+            "feature/pr-head",
+            WorktreeLaunch::ExistingBranch {
+                branch: "feature/pr-head".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(wt.branch, "feature/pr-head");
+        assert_eq!(wt.project, None);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A typed name is used verbatim — no `santree/` prefix, no slug — and still
+    /// carries no project.
+    #[tokio::test]
+    async fn a_new_branch_launch_uses_exactly_the_typed_name_under_no_project() {
+        let (base, db) = repo_with_a_pr_branch("launch-new").await;
+        let wt = launch(
+            &db,
+            "feature-typed",
+            "feature/typed",
+            WorktreeLaunch::NewBranch {
+                branch: "feature/typed".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(wt.branch, "feature/typed");
+        assert_eq!(wt.project, None);
+        assert_eq!(wt.base_branch, "main");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The bug this union was introduced to kill: the PR path used to hand
+    /// `worktree::create` a literal `Some("Reviews")`, which the sidebar read
+    /// straight back out of `worktree_links.project` and rendered as a Linear
+    /// project band sitting beside the real ones. A pull request is an origin,
+    /// not a project — so it stores none at all.
+    #[tokio::test]
+    async fn a_pr_launch_stores_no_project_at_all() {
+        let (base, db) = repo_with_a_pr_branch("launch-pr").await;
+        let wt = launch(
+            &db,
+            "review-4-acme-7-project-42",
+            "Someone else's PR",
+            WorktreeLaunch::Pr {
+                pr_repo: "acme/project".into(),
+                branch: "feature/pr-head".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(wt.branch, "feature/pr-head");
+        assert_eq!(
+            wt.project, None,
+            "a PR tree must carry no project — a constant here renders as a Linear project band"
+        );
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT project FROM worktree_links WHERE issue_id = 'review-4-acme-7-project-42'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(stored, None, "and nothing was persisted for a later read");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The origin guard still runs from inside the union: a PR belonging to
+    /// another repository must not be checked out into this one.
+    #[tokio::test]
+    async fn a_pr_launch_from_a_foreign_repo_is_refused_before_any_git_work() {
+        let (base, db) = repo_with_a_pr_branch("launch-pr-foreign").await;
+        let error = launch(
+            &db,
+            "review-4-acme-5-other-1",
+            "Foreign PR",
+            WorktreeLaunch::Pr {
+                pr_repo: "acme/other".into(),
+                branch: "feature/pr-head".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match local repo"));
+        assert!(
+            !base.join("repo/.santree/worktrees").exists(),
+            "refused before anything was created on disk"
+        );
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

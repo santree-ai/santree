@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 use crate::db::Db;
+use crate::terminal::LiveTerminal;
 
 /// The session-state events we inject. The CLI (`santree-hook`) owns the
 /// event→state mapping; this list only decides which events fire our binary.
@@ -771,7 +772,8 @@ pub async fn claude_rate_limits(db: &Db) -> Result<Vec<ClaudeRateLimitWindow>> {
 /// both of this module's historical bugs happened.
 ///
 /// **Alive** is a join, never a stored record. `live_terminals` is the set of
-/// `term_key`s that have a live PTY *right now*, straight out of the in-memory
+/// `(term_key, agent_kind)` pairs that have a live PTY *right now* — the same
+/// pair `terminal_sessions` is keyed by — straight out of the in-memory
 /// [`santree_pty::PtyManager`]. A row whose terminal is not in that set cannot be
 /// running, whatever it last stored — so a dead agent is unrepresentable as a
 /// live-looking state, no matter how its terminal died (a kill -9, a crash, the
@@ -786,7 +788,10 @@ pub async fn claude_rate_limits(db: &Db) -> Result<Vec<ClaudeRateLimitWindow>> {
 /// the "needs-you" states are set by a hook, but the user *resolving* the prompt
 /// in the terminal (accept / reject a permission, or type a reply) fires no hook,
 /// so a stored row can be stale.
-pub async fn session_states(db: &Db, live_terminals: HashSet<String>) -> Result<Vec<SessionState>> {
+pub async fn session_states(
+    db: &Db,
+    live_terminals: HashSet<LiveTerminal>,
+) -> Result<Vec<SessionState>> {
     let now_ms = now_ms();
     if let Err(e) = prune_stale_sessions(db, now_ms).await {
         log::warn!("pruning stale session rows failed: {e}");
@@ -841,7 +846,7 @@ type StateRow = (
 fn reconcile_rows(
     rows: Vec<StateRow>,
     now_ms: i64,
-    live_terminals: &HashSet<String>,
+    live_terminals: &HashSet<LiveTerminal>,
 ) -> Vec<SessionState> {
     rows.into_iter()
         .filter_map(
@@ -888,8 +893,13 @@ fn reconcile_rows(
                 // because it is the only one derived from live state rather than a
                 // record: see [`session_states`].
                 if state != AgentState::Exited
-                    && terminal_liveness(term_key.as_deref(), heartbeat_ms, now_ms, live_terminals)
-                        == Some(false)
+                    && terminal_liveness(
+                        term_key.as_deref(),
+                        kind,
+                        heartbeat_ms,
+                        now_ms,
+                        live_terminals,
+                    ) == Some(false)
                 {
                     state = AgentState::Exited;
                     message = None;
@@ -948,13 +958,21 @@ const HEARTBEAT_DEAD_MS: i64 = STATUSLINE_REFRESH_SECS as i64 * 1_000 * 4;
 ///   also what makes an app restart correct for free — nothing is live, so every
 ///   stored row retires instead of sitting at "active" until a timer notices.
 ///
-///   Matched on `term_key` alone, never on `cwd`. The key is santree's own opaque
-///   string, compared byte-for-byte against the `label` the same frontend value
-///   opened the PTY under; a `cwd` would have to survive path normalization
-///   (`/var` vs `/private/var` on macOS alone), and a normalization mismatch here
-///   would retire *every* session at once. The cost is that two repos sharing a
-///   `term_key` (`tree:AK-1` in both) read as live while either is — permissive
-///   in the safe direction, by design.
+///   Matched on the row's own identity — `(term_key, agent_kind)`, the pair its
+///   primary key is — and never on `cwd`. Both halves, because a surface hosts
+///   one live session *per provider*: matching the key alone would report a
+///   Claude row as running because a Codex pane happens to be open on the same
+///   PR. The key is santree's own opaque string, compared byte-for-byte against
+///   the `label` the same frontend value opened the PTY under; a `cwd` would have
+///   to survive path normalization (`/var` vs `/private/var` on macOS alone), and
+///   a normalization mismatch here would retire *every* session at once. The cost
+///   is that two repos sharing a `term_key` (`tree:AK-1` in both) read as live
+///   while either is — permissive in the safe direction, by design.
+///
+///   A row whose stored provider this build cannot parse keeps that permissive
+///   direction: it matches any pane on its surface rather than none, because the
+///   asymmetry above says a session santree cannot classify must not be declared
+///   dead.
 ///
 /// - **`term_key` absent** — a session that lost its registry join (a `/clear`
 ///   mints a fresh id under the old terminal). Fall back to the status line: a
@@ -963,12 +981,15 @@ const HEARTBEAT_DEAD_MS: i64 = STATUSLINE_REFRESH_SECS as i64 * 1_000 * 4;
 ///   session — Codex has no status-line hook) yields `None`, not a guess.
 fn terminal_liveness(
     term_key: Option<&str>,
+    agent_kind: Option<AgentKind>,
     heartbeat_ms: Option<i64>,
     now_ms: i64,
-    live_terminals: &HashSet<String>,
+    live_terminals: &HashSet<LiveTerminal>,
 ) -> Option<bool> {
     match term_key {
-        Some(key) => Some(live_terminals.contains(key)),
+        Some(key) => Some(live_terminals.iter().any(|live| {
+            live.term_key == key && (agent_kind.is_none() || live.agent_kind == agent_kind)
+        })),
         None => heartbeat_ms.map(|ms| now_ms - ms < HEARTBEAT_DEAD_MS),
     }
 }
@@ -998,18 +1019,33 @@ fn terminal_liveness(
 /// `Exited`. Here the failure modes are reversed, so precision wins: if the two
 /// `cwd` spellings ever disagree this updates nothing, and the read-path join
 /// still gives the right answer on its own.
-pub async fn retire_terminal(db: &Db, term_key: &str, cwd: Option<&str>) -> Result<u64> {
+///
+/// Scoped by the exiting pane's provider for the same reason: a surface holds a
+/// row per provider, and quitting a Codex review of a PR must not stamp "exited"
+/// on the Claude review of it that is still running. `None` — a pane santree
+/// opened as a plain shell — retires the surface's rows as before, since there is
+/// no provider to be more precise about.
+pub async fn retire_terminal(
+    db: &Db,
+    term_key: &str,
+    agent_kind: Option<AgentKind>,
+    cwd: Option<&str>,
+) -> Result<u64> {
+    let agent_kind = agent_kind.map(AgentKind::as_str);
     let rows = sqlx::query(
         "UPDATE session_state SET state = ?, event = ?, message = NULL, updated_at_ms = ? \
          WHERE state IN ('active', 'delegating', 'permission', 'waiting') \
            AND session_id IN ( \
                  SELECT session_id FROM terminal_sessions \
-                 WHERE term_key = ? AND (? IS NULL OR cwd = ?))",
+                 WHERE term_key = ? AND (? IS NULL OR agent_kind = ?) \
+                   AND (? IS NULL OR cwd = ?))",
     )
     .bind(AgentState::Exited.as_str())
     .bind(PTY_EXIT_EVENT)
     .bind(now_ms())
     .bind(term_key)
+    .bind(agent_kind)
+    .bind(agent_kind)
     .bind(cwd)
     .bind(cwd)
     .execute(db)
@@ -1314,8 +1350,23 @@ mod tests {
     }
 
     /// The set of `term_key`s the PTY manager would report as alive.
-    fn live<const N: usize>(keys: [&str; N]) -> HashSet<String> {
-        keys.iter().map(|k| k.to_string()).collect()
+    fn live<const N: usize>(panes: [(&str, Option<AgentKind>); N]) -> HashSet<LiveTerminal> {
+        panes
+            .into_iter()
+            .map(|(key, kind)| pane(key, kind))
+            .collect()
+    }
+
+    /// The pane a Claude row of these fixtures would be running in.
+    const CLAUDE: Option<AgentKind> = Some(AgentKind::Claude);
+
+    /// One live pane, addressed the way the manager reports it: the surface and
+    /// the provider santree launched in it.
+    fn pane(term_key: &str, agent_kind: Option<AgentKind>) -> LiveTerminal {
+        LiveTerminal {
+            term_key: term_key.to_string(),
+            agent_kind,
+        }
     }
 
     // Write a throwaway transcript; the unique name per call avoids cross-test
@@ -1408,7 +1459,7 @@ mod tests {
                 None,
             ),
         ];
-        let out = reconcile_rows(rows, T, &live(["tree:AK-1"]));
+        let out = reconcile_rows(rows, T, &live([("tree:AK-1", CLAUDE)]));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].session_id, "s2");
         assert_eq!(out[0].state, AgentState::Idle);
@@ -1439,20 +1490,26 @@ mod tests {
             )
         };
         assert_eq!(
-            reconcile_rows(vec![row(Some("Codex"))], T, &live(["tree:AK-1"]))[0].agent_kind,
+            reconcile_rows(
+                vec![row(Some("Codex"))],
+                T,
+                &live([("tree:AK-1", Some(AgentKind::Codex))])
+            )[0]
+            .agent_kind,
             Some(santree_core::domain::AgentKind::Codex)
         );
         // No join, no provider — and *no guess*. A terminal keeps one row per
         // logical surface, so minting a second session orphans the first, and a
         // Claude default would repaint that orphaned Codex session as Claude.
         assert_eq!(
-            reconcile_rows(vec![row(None)], T, &live(["tree:AK-1"]))[0].agent_kind,
+            reconcile_rows(vec![row(None)], T, &live([("tree:AK-1", CLAUDE)]))[0].agent_kind,
             None
         );
         // A value this build doesn't know is unknown too — the row survives
         // (its state is still worth showing), it just claims no provider.
         assert_eq!(
-            reconcile_rows(vec![row(Some("Cowork"))], T, &live(["tree:AK-1"]))[0].agent_kind,
+            reconcile_rows(vec![row(Some("Cowork"))], T, &live([("tree:AK-1", CLAUDE)]))[0]
+                .agent_kind,
             None
         );
     }
@@ -1717,12 +1774,12 @@ mod tests {
 
         for state in ["active", "delegating", "permission", "waiting"] {
             // Terminal still open → the stored state stands.
-            let out = reconcile_rows(vec![row(state)], now_ms(), &live(["tree:AK-1"]));
+            let out = reconcile_rows(vec![row(state)], now_ms(), &live([("tree:AK-1", CLAUDE)]));
             assert_ne!(out[0].state, AgentState::Exited, "{state} with a live pty");
 
             // Terminal gone (closed, crashed, or the app restarted) → exited, and
             // the now-meaningless prompt text goes with it.
-            let out = reconcile_rows(vec![row(state)], now_ms(), &live(["tree:OTHER"]));
+            let out = reconcile_rows(vec![row(state)], now_ms(), &live([("tree:OTHER", CLAUDE)]));
             assert_eq!(out[0].state, AgentState::Exited, "{state} with a dead pty");
             assert_eq!(out[0].message, None, "{state} keeps no stale prompt text");
         }
@@ -1732,6 +1789,95 @@ mod tests {
         // outlive the process that opened it.
         let out = reconcile_rows(vec![row("active")], now_ms(), &live([]));
         assert_eq!(out[0].state, AgentState::Exited);
+    }
+
+    /// The bug this join was rebuilt for. A triage investigation and an AI review
+    /// open their PTY like every other surface — under the plain `term_key`, with
+    /// the provider beside it — so the join finds them. It used to be handed a
+    /// label the launch site had decorated with the provider (`AK-1::codex`),
+    /// which matched no `term_key` at all: every one of these rows was forced to
+    /// `Exited` while its agent sat there working, and a `waiting` review lost the
+    /// only signal saying it needed a human.
+    #[test]
+    fn a_live_triage_or_review_pane_is_not_retired_by_the_join() {
+        let row = |term_key: &str, kind: &str, state: &str| {
+            (
+                "s1".to_string(),
+                state.to_string(),
+                "Notification".to_string(),
+                "/w".to_string(),
+                Some("Which environment?".to_string()),
+                None,
+                now_ms(),
+                Some("canary".to_string()),
+                Some(term_key.to_string()),
+                Some(kind.to_string()),
+                None,
+            )
+        };
+        for (term_key, kind, agent) in [
+            ("triage:AK-1", "Codex", Some(AgentKind::Codex)),
+            ("ai-review:acme/web#53957", "Claude", CLAUDE),
+        ] {
+            let live_now = live([(term_key, agent)]);
+            for state in ["active", "delegating", "permission", "waiting"] {
+                let out = reconcile_rows(vec![row(term_key, kind, state)], now_ms(), &live_now);
+                assert_ne!(
+                    out[0].state,
+                    AgentState::Exited,
+                    "{term_key} ({kind}) is running in a live pane, in state {state}"
+                );
+            }
+            // The prompt text a `waiting` row carries is what the retirement ate.
+            let out = reconcile_rows(vec![row(term_key, kind, "waiting")], now_ms(), &live_now);
+            assert_eq!(out[0].message.as_deref(), Some("Which environment?"));
+        }
+    }
+
+    /// The shape the real database already holds: one `ai-review:` surface with a
+    /// row per provider. They are two sessions in two panes, and the join answers
+    /// each on its own evidence — a Codex pane is not proof that the Claude
+    /// session beside it is alive.
+    #[test]
+    fn two_providers_on_one_surface_are_joined_apart() {
+        let surface = "ai-review:acme/web#53957";
+        let row = |kind: &str| {
+            (
+                format!("s-{kind}"),
+                "active".to_string(),
+                "UserPromptSubmit".to_string(),
+                "/w".to_string(),
+                None,
+                None,
+                now_ms(),
+                Some("canary".to_string()),
+                Some(surface.to_string()),
+                Some(kind.to_string()),
+                None,
+            )
+        };
+        let rows = vec![row("Claude"), row("Codex")];
+
+        // Both panes open: both rows stand.
+        let out = reconcile_rows(
+            rows.clone(),
+            now_ms(),
+            &live([(surface, CLAUDE), (surface, Some(AgentKind::Codex))]),
+        );
+        assert!(out.iter().all(|s| s.state != AgentState::Exited));
+
+        // Only Codex's pane open: Claude's row retires, Codex's does not. Keyed by
+        // the surface alone, the Codex pane would have kept the dead Claude
+        // session looking alive.
+        let out = reconcile_rows(rows, now_ms(), &live([(surface, Some(AgentKind::Codex))]));
+        let state_of = |id: &str| {
+            out.iter()
+                .find(|s| s.session_id == id)
+                .map(|s| s.state)
+                .expect("row")
+        };
+        assert_eq!(state_of("s-Claude"), AgentState::Exited);
+        assert_eq!(state_of("s-Codex"), AgentState::Active);
     }
 
     /// A row that lost its `terminal_sessions` join (a `/clear` mints a fresh id
@@ -1745,17 +1891,17 @@ mod tests {
         let now = now_ms();
         let empty = live([]);
         assert_eq!(
-            terminal_liveness(None, Some(now - 5_000), now, &empty),
+            terminal_liveness(None, None, Some(now - 5_000), now, &empty),
             Some(true),
             "a status line rendered seconds ago is a live session"
         );
         assert_eq!(
-            terminal_liveness(None, Some(now - HEARTBEAT_DEAD_MS - 1), now, &empty),
+            terminal_liveness(None, None, Some(now - HEARTBEAT_DEAD_MS - 1), now, &empty),
             Some(false),
             "one that has been silent for four missed renders is gone"
         );
         assert_eq!(
-            terminal_liveness(None, None, now, &empty),
+            terminal_liveness(None, None, None, now, &empty),
             None,
             "never rendered one at all (any Codex session) — unknown, not dead"
         );
@@ -1830,7 +1976,7 @@ mod tests {
             .unwrap();
         }
 
-        let retired = retire_terminal(&db, "tree:AK-1", Some("/w/alpha"))
+        let retired = retire_terminal(&db, "tree:AK-1", None, Some("/w/alpha"))
             .await
             .unwrap();
         assert_eq!(retired, 1, "only alpha's running session");
@@ -1864,7 +2010,10 @@ mod tests {
 
         // With no cwd to scope by, every row under the key is fair game — the
         // caller only passes `None` when the pty never reported one.
-        assert_eq!(retire_terminal(&db, "tree:AK-1", None).await.unwrap(), 1);
+        assert_eq!(
+            retire_terminal(&db, "tree:AK-1", None, None).await.unwrap(),
+            1
+        );
         assert_eq!(state_of("s-beta").await.0, "exited");
 
         let _ = std::fs::remove_dir_all(&base);

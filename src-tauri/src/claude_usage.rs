@@ -367,6 +367,22 @@ async fn store(db: &Db, windows: &[ClaudeRateLimitWindow]) -> Result<()> {
 ///
 /// Never returns `Err` for the ordinary states — not signed in, token rejected,
 /// endpoint unreachable — because those are answers the meter should show, not
+/// The one endpoint the stored credential may be sent to, or `None` when `raw`
+/// doesn't resolve to [`USAGE_HOST`].
+///
+/// Parse at the sink, compared by **host** and never by string prefix — a prefix
+/// test also matches `api.anthropic.com.evil.test`, and what would leave with the
+/// request is the user's Claude Code credential.
+///
+/// Its own function so a test can run *this* check against a look-alike. Inline in
+/// [`fetch`] it was unreachable without a token and a database, so the test parsed
+/// its own URLs instead and would have stayed green if the check became a
+/// `starts_with`.
+fn usage_endpoint(raw: &str) -> Option<reqwest::Url> {
+    let url = reqwest::Url::parse(raw).ok()?;
+    (url.host_str() == Some(USAGE_HOST)).then_some(url)
+}
+
 /// failures to toast. A real `Err` means the database write failed.
 pub async fn fetch(db: &Db) -> Result<ClaudeUsageFetch> {
     let Some(token) = tokio::task::spawn_blocking(read_token).await.ok().flatten() else {
@@ -379,15 +395,13 @@ pub async fn fetch(db: &Db) -> Result<ClaudeUsageFetch> {
         });
     };
 
-    // Parse at the sink: the token goes to this host or nowhere.
-    let url = reqwest::Url::parse(USAGE_URL).context("the usage URL is malformed")?;
-    if url.host_str() != Some(USAGE_HOST) {
+    let Some(url) = usage_endpoint(USAGE_URL) else {
         return Ok(ClaudeUsageFetch {
             windows: Vec::new(),
             status: ClaudeUsageStatus::Unavailable,
             detail: Some("refusing to send the credential to an unexpected host".into()),
         });
-    }
+    };
 
     let response = crate::gql::client()
         .get(url)
@@ -558,19 +572,33 @@ mod tests {
     }
 
     /// The host check is a parse, so a look-alike host can never match.
+    ///
+    /// Run through [`usage_endpoint`] — the function [`fetch`] actually gates on.
+    /// Parsing URLs in the test body instead proved only that `reqwest` works:
+    /// the real check could have become a `starts_with` and stayed green.
     #[test]
     fn the_usage_host_is_matched_by_parse_not_by_prefix() {
-        let ours = reqwest::Url::parse(USAGE_URL).unwrap();
-        assert_eq!(ours.host_str(), Some(USAGE_HOST));
+        assert_eq!(
+            usage_endpoint(USAGE_URL)
+                .as_ref()
+                .and_then(|u| u.host_str()),
+            Some(USAGE_HOST),
+            "our own endpoint has to resolve, or the meter never loads"
+        );
         for evil in [
+            // Each of these passes `starts_with("https://api.anthropic.com")`.
             "https://api.anthropic.com.evil.test/api/oauth/usage",
-            "https://evil.test/api.anthropic.com/api/oauth/usage",
             "https://api.anthropic.com@evil.test/api/oauth/usage",
+            "https://evil.test/api.anthropic.com/api/oauth/usage",
+            "https://API.anthropic.com.evil.test/api/oauth/usage",
         ] {
-            let url = reqwest::Url::parse(evil).unwrap();
-            assert_ne!(url.host_str(), Some(USAGE_HOST), "{evil}");
-            // …while a naive prefix test would have let the first one through.
+            assert!(
+                usage_endpoint(evil).is_none(),
+                "{evil} must never receive the credential"
+            );
         }
+        // And a URL that isn't one is refused rather than panicking the fetch.
+        assert!(usage_endpoint("api.anthropic.com/api/oauth/usage").is_none());
     }
 
     /// COMPLIANCE.md forbids spoofing a vendor client, and this request is the

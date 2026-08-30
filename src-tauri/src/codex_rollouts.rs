@@ -44,7 +44,7 @@ use serde::{Deserialize, Deserializer};
 
 use santree_core::domain::{CodexRateLimitWindow, CodexRateLimits, LastMessageFrom};
 
-use crate::session::SessionSummary;
+use crate::session::{RecordPresence, SessionSummary};
 use crate::usage::{cwd_belongs_to, one_line, Blocks};
 
 /// `$CODEX_HOME/sessions` (Codex's own override), else `~/.codex/sessions` — when
@@ -62,17 +62,39 @@ pub(crate) fn sessions_root() -> Option<PathBuf> {
 /// real directories are entered (no symlinks) and the walk is bounded to the
 /// partition depth, so a stray link can't drag it elsewhere.
 fn collect_rollouts(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
+    // The listing surfaces are display-only: an unreadable partition there shows
+    // fewer sessions, which is a cosmetic loss. Only the *resume decision* needs
+    // to tell "empty" from "couldn't look", and it takes the checked walk below.
+    let _ = collect_rollouts_checked(dir, depth, out);
+}
+
+/// [`collect_rollouts`], reporting the IO error instead of swallowing it.
+/// `Ok(())` with nothing collected means the tree really is empty: a missing
+/// root (Codex has not run here) is [`session::is_absence`] and not an error,
+/// while an unreadable one is. Whatever was collected before the failure stays
+/// in `out`, which is what lets the lenient wrapper keep its old behaviour.
+fn collect_rollouts_checked(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if crate::session::is_absence(&e) => return Ok(()),
+        Err(e) => return Err(e),
     };
-    for e in rd.flatten() {
-        let Ok(ft) = e.file_type() else {
-            continue;
+    for entry in rd {
+        // An entry that vanished mid-walk is absence, not a failed look.
+        let e = match entry {
+            Ok(e) => e,
+            Err(err) if crate::session::is_absence(&err) => continue,
+            Err(err) => return Err(err),
+        };
+        let ft = match e.file_type() {
+            Ok(ft) => ft,
+            Err(err) if crate::session::is_absence(&err) => continue,
+            Err(err) => return Err(err),
         };
         let p = e.path();
         if ft.is_dir() {
             if depth < 3 {
-                collect_rollouts(&p, depth + 1, out);
+                collect_rollouts_checked(&p, depth + 1, out)?;
             }
         } else if ft.is_file()
             && p.extension().and_then(|x| x.to_str()) == Some("jsonl")
@@ -83,6 +105,7 @@ fn collect_rollouts(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) {
             out.push(p);
         }
     }
+    Ok(())
 }
 
 // ── Record shapes (parse only what we need) ─────────────────────────────────
@@ -146,8 +169,13 @@ struct ThreadSettings {
 /// Whether a user-role text is Codex's own injection rather than something the
 /// user typed: the `# AGENTS.md instructions for <dir>` block, or a block that
 /// opens with an XML-ish tag (`<environment_context>`, `<user_instructions>`,
-/// `<permissions instructions>`, `<task-notification>`, …). The tag shape, not a
-/// list of names, so the next injected block Codex adds doesn't become a title.
+/// `<permissions instructions>`, `<task-notification>`, `<image name=… path=…>`,
+/// …). The tag shape, not a list of names, so the next injected block Codex adds
+/// doesn't become a title.
+///
+/// Only the tag's *name* has to look like a name — attributes may hold anything
+/// (Codex's `<image>` marker carries a quoted path), but the tag must actually
+/// close, so `<3 this feature` and `<unterminated tag` stay the user's words.
 fn is_injected(text: &str) -> bool {
     let t = text.trim_start();
     if t.starts_with("# AGENTS.md instructions") {
@@ -159,11 +187,12 @@ fn is_injected(text: &str) -> bool {
     let Some(tag) = rest.split('>').next() else {
         return false;
     };
-    tag.starts_with(|c: char| c.is_ascii_alphabetic())
+    let name = tag.split_whitespace().next().unwrap_or_default();
+    name.starts_with(|c: char| c.is_ascii_alphabetic())
         && rest.len() > tag.len()
-        && tag
+        && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | ' '))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':'))
 }
 
 /// The first display line of a user-authored text, skipping what Codex injected.
@@ -213,12 +242,18 @@ fn read_meta(path: &Path) -> Option<Meta> {
         return None;
     }
     let p = rec.payload?;
-    let is_subagent = p.thread_source.as_deref() == Some("subagent");
+    // `user` is the only source that means a person started this thread. Anything
+    // else Codex names — `subagent`, `guardian_review`, whatever comes next — is a
+    // thread some other thread started, and belongs to its parent's count rather
+    // than the top-level list. Matching `subagent` alone let `guardian_review`
+    // rollouts (present on this machine) show up as sessions of their own.
+    // An *absent* source is an older rollout, which is nobody's child.
+    let is_child = p.thread_source.as_deref().is_some_and(|s| s != "user");
     Some(Meta {
         thread_id: p.id?,
         cwd: p.cwd?,
         started_ms: ts_ms(p.timestamp.as_deref()).or(ts_ms(rec.timestamp.as_deref())),
-        parent: p.parent_thread_id.filter(|_| is_subagent),
+        parent: p.parent_thread_id.filter(|_| is_child),
     })
 }
 
@@ -550,12 +585,24 @@ pub(crate) fn worktree_summaries(
 /// guess that missed would silently start a replacement thread and strand the
 /// user's history. Blocking (disk) — call from `spawn_blocking`; peeks are
 /// process-cached, so repeated checks re-read nothing.
-pub(crate) fn rollout_exists_in(root: &Path, thread_id: &str) -> bool {
+///
+/// Three-way, for the same reason the Claude side is (see [`RecordPresence`]):
+/// a `read_dir` that fails because the tree is unreadable is not a tree with
+/// nothing in it, and reporting the second would let the next launch's
+/// `SessionStart` repoint the row onto a brand-new thread.
+pub(crate) fn rollout_presence_in(root: &Path, thread_id: &str) -> RecordPresence {
     let mut paths = Vec::new();
-    collect_rollouts(root, 0, &mut paths);
-    paths
+    if let Err(e) = collect_rollouts_checked(root, 0, &mut paths) {
+        return RecordPresence::Unknown(format!("{}: {e}", root.display()));
+    }
+    if paths
         .iter()
         .any(|path| peek(path).is_some_and(|meta| meta.thread_id == thread_id))
+    {
+        RecordPresence::Present
+    } else {
+        RecordPresence::Absent
+    }
 }
 
 /// [`worktree_summaries`] over an explicit `sessions` root (tests pin it).
@@ -618,6 +665,10 @@ fn summaries_in(root: &Path, worktree: &Path, known: &[String]) -> HashMap<Strin
                     .or_else(|| parsed.turn_model.clone()),
                 started_at_ms: meta.started_ms.or(parsed.started_ms).or(parsed.first_ms),
                 last_activity_ms: parsed.last_ms,
+                // A rollout carries no per-turn token counts to price, and the
+                // one `token_count` record it does write is a rate-limit window,
+                // not a spend. No number is honest here.
+                spend: None,
             },
         );
     }
@@ -815,14 +866,28 @@ mod tests {
     use super::*;
 
     fn meta_line(id: &str, cwd: &str, ts: &str, subagent_of: Option<&str>) -> String {
-        let source = match subagent_of {
-            Some(parent) => format!(
-                r#","parent_thread_id":"{parent}","thread_source":"subagent","agent_path":"/root/helper""#
+        match subagent_of {
+            Some(parent) => child_meta_line(id, cwd, ts, parent, "subagent"),
+            // What a person-started thread really records (`user`, observed).
+            None => meta_line_with(id, cwd, ts, r#","thread_source":"user""#),
+        }
+    }
+
+    /// A rollout some other thread started: a `parent_thread_id` plus a source.
+    fn child_meta_line(id: &str, cwd: &str, ts: &str, parent: &str, source: &str) -> String {
+        meta_line_with(
+            id,
+            cwd,
+            ts,
+            &format!(
+                r#","parent_thread_id":"{parent}","thread_source":"{source}","agent_path":"/root/helper""#
             ),
-            None => r#","thread_source":"cli""#.to_string(),
-        };
+        )
+    }
+
+    fn meta_line_with(id: &str, cwd: &str, ts: &str, extra: &str) -> String {
         format!(
-            r#"{{"timestamp":"{ts}","type":"session_meta","payload":{{"id":"{id}","session_id":"{id}","timestamp":"{ts}","cwd":"{cwd}","originator":"codex-tui","cli_version":"0.149.1"{source}}}}}"#
+            r#"{{"timestamp":"{ts}","type":"session_meta","payload":{{"id":"{id}","session_id":"{id}","timestamp":"{ts}","cwd":"{cwd}","originator":"codex-tui","cli_version":"0.149.1"{extra}}}}}"#
         )
     }
 
@@ -1160,6 +1225,11 @@ mod tests {
             "<permissions instructions>\n</permissions instructions>"
         ));
         assert!(is_injected("<task-notification>\n<task-id>a</task-id>"));
+        // Codex's clipboard-image marker, verbatim from a rollout — it was
+        // reaching Session History as if the user had typed it.
+        assert!(is_injected(
+            r#"<image name=[Image #1] path="/var/folders/T/clipboard.png">"#
+        ));
         assert!(!is_injected("Fix the build"));
         assert!(!is_injected("<3 this feature, ship it"));
         assert!(!is_injected("< 5 lines please"));
@@ -1186,6 +1256,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Every non-`user` thread source is somebody's child, not a session of its
+    /// own — `guardian_review` rollouts on this machine were being listed as
+    /// top-level ones because only `subagent` was recognised.
+    #[test]
+    fn any_non_user_thread_source_is_a_child_thread() {
+        let dir = std::env::temp_dir().join(format!(
+            "santree-codex-rollouts-source-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ts = "2026-08-27T10:00:00.000Z";
+        let read = |name: &str, line: String| {
+            let p = dir.join(name);
+            std::fs::write(&p, line + "\n").unwrap();
+            read_meta(&p).unwrap()
+        };
+
+        for source in ["subagent", "guardian_review", "something-codex-adds-next"] {
+            let m = read(
+                &format!("rollout-{source}.jsonl"),
+                child_meta_line("c", "/wt", ts, "root", source),
+            );
+            assert_eq!(m.parent.as_deref(), Some("root"), "source {source}");
+        }
+        assert!(
+            read("rollout-user.jsonl", meta_line("u", "/wt", ts, None))
+                .parent
+                .is_none(),
+            "a user-started thread is top-level"
+        );
+        // Pre-`thread_source` rollouts: no source at all, so nobody's child.
+        assert!(
+            read(
+                "rollout-old.jsonl",
+                meta_line_with("o", "/wt", ts, r#","parent_thread_id":"root""#),
+            )
+            .parent
+            .is_none(),
+            "an absent source is an older rollout, not a child"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The resume gate `session.rs` asks before offering a stored thread id. It
     /// answers from `session_meta.id`, so a rollout whose *file name* happens to
     /// carry another id still counts for the thread it actually holds — a name
@@ -1208,11 +1322,23 @@ mod tests {
         )
         .unwrap();
 
-        assert!(rollout_exists_in(&sessions, "thread-live"));
-        assert!(!rollout_exists_in(&sessions, "copied-name"));
-        assert!(!rollout_exists_in(&sessions, "thread-pruned"));
+        assert!(matches!(
+            rollout_presence_in(&sessions, "thread-live"),
+            RecordPresence::Present
+        ));
+        assert!(matches!(
+            rollout_presence_in(&sessions, "copied-name"),
+            RecordPresence::Absent
+        ));
+        assert!(matches!(
+            rollout_presence_in(&sessions, "thread-pruned"),
+            RecordPresence::Absent
+        ));
         // A root that was never created is simply "nothing resumable".
-        assert!(!rollout_exists_in(&dir.join("missing"), "thread-live"));
+        assert!(matches!(
+            rollout_presence_in(&dir.join("missing"), "thread-live"),
+            RecordPresence::Absent
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

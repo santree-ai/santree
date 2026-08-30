@@ -14,9 +14,11 @@ updater contract (the pubkey and endpoints in `tauri.conf.json`, the
 an installed app will meet their future versions.
 
 **Views:** all of them — Triage, Issues, Trees, Reviews, Settings, Terminal — are
-backed by real data. **There is no mock/sample data anywhere**; when a backend isn't
+backed by real data. **No view ever renders sample data**; when a backend isn't
 connected (no Linear org, no `gh` auth, no repo path) commands return real-but-empty
-results and the view shows its empty state.
+results and the view shows its empty state. The one sample lives outside the views:
+`prompts::preview` renders a template against a built-in sample ticket so the prompt
+editor can re-render on every keystroke without a fetch.
 
 **Trees is the workspace; Reviews is the inbox.** A PR *you* opened is worked on in
 Trees, beside its worktree and its agents (the right panel's PR and AI-work panes).
@@ -52,7 +54,8 @@ applied version the resolved set no longer has — and `0028` drops the table.
   no `tailwind.config`), xterm.js, react-markdown, refractor (Prism) for syntax
   highlighting, mermaid (dynamic-imported — never in the startup bundle). Biome
   for lint+format. Vitest.
-- **Cargo workspace:** `src-tauri` (thin Tauri adapter) + `crates/core` (pure domain
+- **Cargo workspace:** `src-tauri` (the backend: the Tauri adapter plus the
+  integrations and services it drives) + `crates/core` (pure domain
   + static config, no Tauri dep) + `crates/pty` (PTY manager, Tauri-agnostic) +
   `crates/hook` (the bundled `santree-hook`: Claude hooks, status line, MCP server).
 

@@ -27,7 +27,7 @@ import {
   WORK_PERMISSION_MODE_KEY,
 } from "../../lib/queries";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
-import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
+import { agentSessionSeed } from "../terminal/agentSeed";
 import type { AgentTabIdentity } from "../terminal/orchestrator";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useHookInjection } from "../terminal/useHookInjection";
@@ -93,7 +93,12 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   // when there's none to attach to — and `liveSeen` latches, so quitting the agent
   // (the session dies under us) doesn't immediately re-resume it into a loop.
   const { tabs } = useTerminals();
-  const live = tabs.some((t) => t.source === "issue" && t.refId === refId);
+  // The pane hosting this surface, if one is open. Found by `refId` alone,
+  // whatever provider it runs: a worktree terminal is one pane per surface, and
+  // the point of holding the tab (rather than a boolean) is that its provider is
+  // the one actually running — see `resolvedAgent` below.
+  const liveTab = tabs.find((t) => t.source === "issue" && t.refId === refId);
+  const live = liveTab !== undefined;
   const [liveSeen, setLiveSeen] = useState(false);
   useEffect(() => {
     if (live) setLiveSeen(true);
@@ -104,7 +109,13 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   const session = useAgentSession(repo, refId, cwd, allowFresh, agent ?? "Claude", needsSeed);
 
   const requestedAgent = agent ?? "Claude";
-  const resolvedAgent = sessionAgent(session.data, requestedAgent);
+  // A live pane's provider is whatever it was launched with, full stop. Changing
+  // the worktree's configured agent does not re-point a terminal that is already
+  // running one — it takes effect at the next launch, exactly as it did before
+  // the pane's identity became `(surface, provider)`. Without this the changed
+  // setting would read as a *different* pane and spawn a second PTY on the same
+  // worktree, silently, while the first one kept working.
+  const resolvedAgent = liveTab?.agent?.kind ?? sessionAgent(session.data, requestedAgent);
   const provider = agentProvider(resolvedAgent);
   const model = useResolvedProviderSetting(repo, WORK_MODEL_KEY, requestedAgent, WORK_AGENT_KEY);
   const effort = useResolvedProviderSetting(repo, WORK_EFFORT_KEY, requestedAgent, WORK_AGENT_KEY);
@@ -115,7 +126,7 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
     WORK_AGENT_KEY,
   );
   // Whatever this provider's hooks ride in on — a `--settings` file, `-c` config
-  // overrides — lands in `settingsFlag`, because to the seed builder they are the
+  // overrides — lands in `hookFlag`, because to the launch builder they are the
   // same thing: the flag that makes this launch report its session back.
   const hooks = useHookInjection({ noGit, settingsPath: opts.settingsPath });
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
@@ -125,35 +136,24 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   // configured for this agent in Settings → Actions → Work (a resume carries the
   // session's own).
   //
-  // Everything below is Claude's launch line. Codex's — sandbox, approval policy,
-  // model, effort, and a review's MCP tool server — is resolved backend-side from
-  // the same settings and rides on `session.data.launchFlags`, so it cannot be
-  // dropped by a call site that forgot to pass it. See `codex_config.rs`.
+  // What goes in is *configuration*, not flags: which CLI spells what, and which
+  // of these a given CLI must never receive, is the provider's own launch spec
+  // (`terminal/agentProvider.ts`). Codex's sandbox, approval policy, model,
+  // effort and a review's MCP tool server are resolved backend-side from the
+  // same settings and ride on `session.data.launchFlags`, so they cannot be
+  // dropped by a call site that forgot to pass them. See `codex_config.rs`.
   const seed = agentSessionSeed(session.data, {
     repo,
     termKey: refId,
     prompt: opts.prompt,
-    remoteControl:
-      provider.capabilities.remoteControl && remoteControl.data !== "false"
-        ? opts.remoteControl
-        : undefined,
-    modelFlag:
-      provider.capabilities.cliLaunchOptions && model.data
-        ? `--model ${shellQuote(model.data)}`
-        : undefined,
-    effortFlag:
-      provider.capabilities.cliLaunchOptions && effort.data
-        ? `--effort ${shellQuote(effort.data)}`
-        : undefined,
-    settingsFlag: hooks.flagFor(resolvedAgent),
-    mcpFlag:
-      provider.capabilities.cliLaunchOptions && opts.mcpConfigPath
-        ? `--mcp-config ${shellQuote(opts.mcpConfigPath)}`
-        : undefined,
-    chrome: provider.capabilities.cliLaunchOptions && startWithChrome.value,
-    permissionMode: provider.capabilities.permissionMode
-      ? (permissionMode.data ?? undefined)
-      : undefined,
+    configuredFor: requestedAgent,
+    remoteControl: remoteControl.data !== "false" ? opts.remoteControl : null,
+    model: model.data,
+    effort: effort.data,
+    hookFlag: hooks.flagFor(resolvedAgent),
+    mcpConfigPath: opts.mcpConfigPath,
+    chrome: startWithChrome.value,
+    permissionMode: permissionMode.data,
   });
 
   // Every launch flag must have *resolved* before the PTY spawns — not just the

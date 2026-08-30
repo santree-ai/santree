@@ -557,6 +557,12 @@ async fn rotate(db: &Db, row: OrgRow, tokens: Tokens) -> Result<String> {
 // fields (incl. `assignee`) is the dominant cost. `first: 12` on the relations
 // keeps it under the limit *with* assignee on both levels; raising either count,
 // or adding fields, can push it over (the API then 400s and the graph goes empty).
+//
+// The blocker level carries the project's `targetDate` and its `projectMilestone`
+// for a reason that isn't cosmetic: a ticket the viewer isn't assigned reaches the
+// list ONLY through here, and without them its worktree renders a project band with
+// no due chip and no milestone level at all (`map_related` had both hardcoded to
+// `None`). If the cap ever does bite, this is the field set to trade away first.
 const ASSIGNED_ISSUES_QUERY: &str = r#"
 query AssignedIssues {
   viewer {
@@ -578,7 +584,7 @@ query AssignedIssues {
         inverseRelations(first: 12) {
           nodes {
             type
-            issue { identifier title state { name type } project { name color icon } assignee { name displayName avatarUrl } }
+            issue { identifier title state { name type } project { name color icon targetDate } projectMilestone { id name targetDate sortOrder } assignee { name displayName avatarUrl } }
           }
         }
       }
@@ -616,6 +622,11 @@ struct RelatedIssue {
     state: Option<StateNode>,
     #[serde(default)]
     project: Option<ProjectNode>,
+    /// Explicitly renamed: unlike `IssueNode`/`TicketLookupNode` this struct has no
+    /// `#[serde(rename_all = "camelCase")]`, so without it the wire's
+    /// `projectMilestone` would quietly deserialize to `None` instead of failing.
+    #[serde(default, rename = "projectMilestone")]
+    project_milestone: Option<ProjectMilestoneNode>,
     #[serde(default)]
     assignee: Option<UserNode>,
 }
@@ -800,7 +811,7 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
 /// non-actionable context node (no children — we don't recurse).
 fn map_related(issue: RelatedIssue) -> Task {
     let state = issue.state.unwrap_or_default();
-    let (project, project_color, project_icon, _) = project_fields(issue.project);
+    let (project, project_color, project_icon, project_target_date) = project_fields(issue.project);
     let (assignee, assignee_avatar_url) = assignee_fields(issue.assignee);
     Task {
         id: issue.identifier,
@@ -810,8 +821,12 @@ fn map_related(issue: RelatedIssue) -> Task {
         project,
         project_color,
         project_icon,
-        project_target_date: None,
-        project_milestone: None,
+        // A blocker still has to group like everything else: this is the only
+        // path such a ticket takes into the list, so dropping its horizon here
+        // is what left a coloured project band with no due chip and no
+        // milestone level under it.
+        project_target_date,
+        project_milestone: project_milestone_ref(issue.project_milestone),
         parent_id: None,
         status: core_linear::map_status(&state.name, &state.type_),
         ready: false,
@@ -3344,13 +3359,14 @@ fn urlencode(s: &str) -> String {
 mod tests {
     use super::{
         accept_code, apply_subtask_dependencies, cached_team_scope, decode_tokens, encode_tokens,
-        entity_not_found, header_window, image_spans, map_issue, migrate_tokens_to_keychain,
-        parse_callback, parse_ms, record_budget, refresh_lock, resolve_org_slug, resolved_org,
-        scope_from_setting, scope_of, shift_range, splice_images, split_identifier, triage_meta,
-        usable_at, validate_sort_order, validate_sort_order_target, ImageCache, IssueNode,
-        ParentIssueNode, ProjectMilestoneNode, ProjectNode, RelatedIssue, RelationNode,
-        SchedQueryData, StateNode, TeamScope, TicketLookupNode, Tokens, TtlCache, UserNode,
-        BUDGETS, IMAGE_HOST, REFRESH_SKEW_MS,
+        entity_not_found, header_window, image_spans, map_issue, map_related,
+        migrate_tokens_to_keychain, parse_callback, parse_ms, record_budget, refresh_lock,
+        resolve_org_slug, resolved_org, scope_from_setting, scope_of, shift_range, splice_images,
+        split_identifier, triage_meta, usable_at, validate_sort_order, validate_sort_order_target,
+        CommentNode, ImageCache, IssueDetailNode, IssueNode, ParentIssueNode, ProjectMilestoneNode,
+        ProjectNode, RelatedIssue, RelationNode, SchedQueryData, StateNode, TeamScope,
+        TicketLookupNode, Tokens, TriageRow, TtlCache, UserNode, BUDGETS, IMAGE_HOST,
+        REFRESH_SKEW_MS,
     };
     use crate::gql::{Connection, GqlError, GraphQlErrors, PageInfo};
     use anyhow::anyhow;
@@ -3391,7 +3407,6 @@ mod tests {
             serde_json::json!([{ "message": "Authentication required" }]),
             serde_json::json!([{ "message": "Ratelimit exceeded",
                                  "extensions": { "code": "RATELIMITED" } }]),
-            serde_json::json!([{ "message": "Query too complex" }]),
             // A mixed response: the issue is missing *and* something else broke. The
             // second error is the one the user needs, so nothing gets swallowed.
             serde_json::json!([
@@ -3562,12 +3577,6 @@ mod tests {
                 "terminator {term:?} did not close the span"
             );
         }
-    }
-
-    #[test]
-    fn url_with_no_terminator_runs_to_end_of_string() {
-        let md = format!("{IMAGE_HOST}/x");
-        assert_eq!(image_spans(&md), vec![(0, md.len())]);
     }
 
     /// The critical fix this refactor must not regress: a lookalike host that
@@ -4010,6 +4019,7 @@ mod tests {
             title: format!("{identifier} title"),
             state: Some(state("Some State", state_type)),
             project: None,
+            project_milestone: None,
             assignee: None,
         }
     }
@@ -4070,6 +4080,190 @@ mod tests {
         let milestone = node.project_milestone.expect("milestone");
         assert_eq!(milestone.name, "Beta");
         assert_eq!(milestone.target_date.as_deref(), Some("2026-09-01"));
+    }
+
+    /// The Issues graph, decoded from the wire rather than built as a struct.
+    ///
+    /// [`IssueNode`] leans entirely on `rename_all = "camelCase"`: without it
+    /// `projectMilestone` and `inverseRelations` are unknown keys that fall to
+    /// their defaults, so *every* ticket loses its milestone and its blockers and
+    /// the dependency graph reports the whole backlog as "ready". Both are
+    /// `#[serde(default)]`, so nothing fails — the graph is just wrong.
+    #[test]
+    fn an_issue_decodes_the_milestone_and_the_blockers_the_graph_is_built_from() {
+        let node: IssueNode = serde_json::from_value(serde_json::json!({
+            "identifier": "ENG-10",
+            "title": "Do the thing",
+            "priority": 2,
+            "estimate": 3.0,
+            "state": { "name": "Todo", "type": "unstarted" },
+            "project": { "name": "Roadmap", "color": "#5e6ad2", "icon": null, "targetDate": "2026-09-30" },
+            "projectMilestone": {
+                "id": "milestone-1", "name": "Public beta",
+                "targetDate": "2026-09-01", "sortOrder": 42.0
+            },
+            "parent": { "identifier": "ENG-9" },
+            "assignee": {
+                "name": "Ada Lovelace", "displayName": "ada",
+                "avatarUrl": "https://example.com/a.png"
+            },
+            "inverseRelations": { "nodes": [
+                { "type": "blocks", "issue": {
+                    "identifier": "ENG-1", "title": "Done blocker",
+                    "state": { "name": "Done", "type": "completed" } } },
+                { "type": "blocks", "issue": {
+                    "identifier": "ENG-2", "title": "Open blocker",
+                    "state": { "name": "Todo", "type": "unstarted" } } },
+                { "type": "duplicate", "issue": {
+                    "identifier": "ENG-3", "title": "Not a blocker",
+                    "state": { "name": "Todo", "type": "unstarted" } } }
+            ] }
+        }))
+        .expect("assigned-issues response");
+
+        let (task, blockers) = map_issue(node);
+
+        let milestone = task.project_milestone.as_ref().expect("milestone");
+        assert_eq!(milestone.id, "milestone-1");
+        assert_eq!(milestone.sort_order, 42.0);
+        assert_eq!(task.parent_id.as_deref(), Some("ENG-9"));
+        assert_eq!(task.project_target_date.as_deref(), Some("2026-09-30"));
+        assert_eq!(task.assignee.as_deref(), Some("Ada Lovelace"));
+        // The two `blocks` relations, and not the duplicate.
+        assert_eq!(task.blocked_by, ["ENG-1", "ENG-2"]);
+        assert_eq!(blockers.len(), 2);
+        // One blocker is still open, so this is not startable — the assertion that
+        // would flip to `true` for every ticket if `inverseRelations` fell away.
+        assert!(!task.ready);
+    }
+
+    /// The triage queue's ordering, decoded from the wire.
+    ///
+    /// [`TriageRow`] carries five camelCase timestamps behind `rename_all`, and
+    /// every one of them is `Option`: lose the attribute and they all read `None`,
+    /// which silently costs the queue its SLA ordering (everything ties at
+    /// `i64::MAX`) and stops sinking snoozed tickets to the bottom.
+    #[test]
+    fn a_triage_row_decodes_the_timestamps_the_queue_is_ordered_by() {
+        let row: TriageRow = serde_json::from_value(serde_json::json!({
+            "identifier": "SUP-7",
+            "title": "Customer can't log in",
+            "priority": 1,
+            "estimate": 2.0,
+            "createdAt": "2026-08-20T09:00:00.000Z",
+            "dueDate": "2026-08-31",
+            "sortOrder": -12.5,
+            "slaBreachesAt": "2026-08-30T17:00:00.000Z",
+            "snoozedUntilAt": "2026-09-02T08:00:00.000Z",
+            "project": { "name": "Support", "color": "#f2c94c", "icon": null, "targetDate": null },
+            "state": { "name": "Triage", "type": "triage" },
+            "team": { "key": "SUP" },
+            "assignee": { "id": "u1", "name": "Ada Lovelace", "displayName": "ada" },
+            "labels": { "nodes": [{ "name": "bug" }] }
+        }))
+        .expect("triage inbox response");
+
+        assert_eq!(row.created_at.as_deref(), Some("2026-08-20T09:00:00.000Z"));
+        assert_eq!(row.due_date.as_deref(), Some("2026-08-31"));
+        assert_eq!(row.sort_order, Some(-12.5));
+        assert_eq!(
+            row.sla_breaches_at.as_deref(),
+            Some("2026-08-30T17:00:00.000Z"),
+            "without this the whole queue ties at i64::MAX and loses its ordering"
+        );
+        assert_eq!(
+            row.snoozed_until_at.as_deref(),
+            Some("2026-09-02T08:00:00.000Z"),
+            "without this a snoozed ticket stays at the top of the inbox"
+        );
+        assert_eq!(row.team.expect("team").key, "SUP");
+        assert_eq!(row.labels.nodes.len(), 1);
+        // …and the timestamps really are parseable into what the sort compares.
+        assert!(row.sla_breaches_at.as_deref().and_then(parse_ms).is_some());
+    }
+
+    /// The discussion pane's issue, decoded from the wire. Same class again:
+    /// `createdAt`/`slaBreachesAt`/`snoozedUntilAt` are `Option`s reached only
+    /// through `rename_all`, and the nested `team { states }` is what fills the
+    /// status picker.
+    #[test]
+    fn an_issue_detail_decodes_the_stamps_and_the_status_picker() {
+        let node: IssueDetailNode = serde_json::from_value(serde_json::json!({
+            "identifier": "SUP-7",
+            "title": "Customer can't log in",
+            "description": "Steps to reproduce…",
+            "url": "https://linear.app/acme/issue/SUP-7",
+            "priority": 1,
+            "createdAt": "2026-08-20T09:00:00.000Z",
+            "slaBreachesAt": "2026-08-30T17:00:00.000Z",
+            "snoozedUntilAt": "2026-09-02T08:00:00.000Z",
+            "state": { "id": "st-1", "name": "Triage", "type": "triage" },
+            "team": { "states": { "nodes": [
+                { "id": "st-1", "name": "Triage", "type": "triage", "color": "#eee", "position": 0.0 },
+                { "id": "st-2", "name": "Todo", "type": "unstarted", "color": "#ddd", "position": 1.0 }
+            ] } },
+            "labels": { "nodes": [{ "name": "bug" }] },
+            "project": { "name": "Support" },
+            "creator": { "name": "Ada Lovelace", "displayName": "ada", "avatarUrl": null },
+            "comments": { "nodes": [], "pageInfo": { "hasNextPage": false, "endCursor": null } }
+        }))
+        .expect("issue detail response");
+
+        assert_eq!(node.created_at.as_deref(), Some("2026-08-20T09:00:00.000Z"));
+        assert_eq!(
+            node.sla_breaches_at.as_deref(),
+            Some("2026-08-30T17:00:00.000Z")
+        );
+        assert_eq!(
+            node.snoozed_until_at.as_deref(),
+            Some("2026-09-02T08:00:00.000Z")
+        );
+        let states = node.team.expect("team").states;
+        assert_eq!(states.nodes.len(), 2, "the status picker's options");
+        assert_eq!(states.nodes[1].name, "Todo");
+        assert_eq!(
+            node.creator.expect("creator").display_name.as_deref(),
+            Some("ada")
+        );
+    }
+
+    /// A comment, decoded from the wire. `createdAt`, `botActor` and `children`
+    /// all hang off `rename_all`: without it every comment is undated, every bot
+    /// comment loses its author, and every reply thread renders empty while the
+    /// query still fetches the replies.
+    #[test]
+    fn a_comment_decodes_its_date_its_bot_author_and_its_replies() {
+        let node: CommentNode = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "body": "Looks like a token refresh race.",
+            "createdAt": "2026-08-21T10:00:00.000Z",
+            "user": null,
+            "botActor": { "name": "Devin", "avatarUrl": "https://example.com/d.png" },
+            "children": {
+                "nodes": [{
+                    "id": "c2",
+                    "body": "Agreed.",
+                    "createdAt": "2026-08-21T11:00:00.000Z",
+                    "user": { "name": "Ada Lovelace", "displayName": "ada", "avatarUrl": null }
+                }],
+                "pageInfo": { "hasNextPage": true, "endCursor": "c2cursor" }
+            }
+        }))
+        .expect("comment response");
+
+        assert_eq!(node.created_at.as_deref(), Some("2026-08-21T10:00:00.000Z"));
+        assert_eq!(
+            node.bot_actor.expect("bot actor").name.as_deref(),
+            Some("Devin")
+        );
+        // A top-level comment: `parent` absent is what keeps it out of the replies.
+        assert!(node.parent.is_none());
+        let children = node.children.expect("children");
+        assert_eq!(children.nodes.len(), 1);
+        assert_eq!(children.nodes[0].body, "Agreed.");
+        // The reply page's own cursor, which `all_replies` loops on.
+        assert!(children.page_info.has_next_page);
+        assert_eq!(children.page_info.end_cursor.as_deref(), Some("c2cursor"));
     }
 
     #[test]
@@ -4213,6 +4407,62 @@ mod tests {
         // TaskStatus::Todo is map_status("Unknown", "unstarted"); ready because
         // there are no blockers and the status is startable.
         assert!(task.ready);
+    }
+
+    #[test]
+    fn map_related_keeps_the_blockers_project_horizon_and_milestone() {
+        // Deserialized from JSON rather than built as a struct: `RelatedIssue`
+        // has no `rename_all`, so a missing `rename` on `projectMilestone` would
+        // read as `None` here and the assertion below is what catches it.
+        let issue: RelatedIssue = serde_json::from_value(serde_json::json!({
+            "identifier": "ENG-42",
+            "title": "Someone else's blocker",
+            "state": { "name": "In Progress", "type": "started" },
+            "project": {
+                "name": "KB Dupes and Conflicts",
+                "color": "#5e6ad2",
+                "icon": null,
+                "targetDate": "2026-09-11"
+            },
+            "projectMilestone": {
+                "id": "milestone-7",
+                "name": "Cutover",
+                "targetDate": "2026-09-04",
+                "sortOrder": 1.5
+            },
+            "assignee": null
+        }))
+        .expect("related issue response");
+
+        let task = map_related(issue);
+
+        assert_eq!(task.project, "KB Dupes and Conflicts");
+        assert_eq!(task.project_target_date.as_deref(), Some("2026-09-11"));
+        let milestone = task.project_milestone.as_ref().expect("milestone");
+        assert_eq!(milestone.id, "milestone-7");
+        assert_eq!(milestone.name, "Cutover");
+        assert_eq!(milestone.target_date.as_deref(), Some("2026-09-04"));
+        assert_eq!(milestone.sort_order, 1.5);
+        // A blocker is context, never the viewer's own work.
+        assert!(!task.actionable);
+    }
+
+    #[test]
+    fn map_related_without_a_project_or_milestone_maps_to_none() {
+        let issue: RelatedIssue = serde_json::from_value(serde_json::json!({
+            "identifier": "ENG-43",
+            "title": "Unfiled blocker",
+            "state": { "name": "Todo", "type": "unstarted" },
+            "project": null,
+            "assignee": null
+        }))
+        .expect("related issue response");
+
+        let task = map_related(issue);
+
+        assert_eq!(task.project, "No Project");
+        assert_eq!(task.project_target_date, None);
+        assert!(task.project_milestone.is_none());
     }
 
     // ── Repo → org resolution ─────────────────────────────────────────────

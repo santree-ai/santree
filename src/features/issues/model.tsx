@@ -576,20 +576,22 @@ export function IssuesProvider({
       else requestTreeLaunch(targets[0].id);
       navigate({ to: "/trees" });
       void Promise.allSettled(
-        targets.map((task) =>
-          createWorktree({
+        targets.map((task) => {
+          const base = baseOf(task);
+          return createWorktree({
             issueId: task.id,
             title: task.title,
-            project: projectOf(task),
-            stackOn: baseOf(task),
+            launch: { type: "ticket", project: projectOf(task) },
+            base: base?.branch ?? null,
+            stackedOn: base?.ticket,
             agent: launchAgent,
             quiet: bulk,
           }).catch(() => {
             removePendingLaunch(task.id);
             clearBackgroundLaunch(task.id);
             return null;
-          }),
-        ),
+          });
+        }),
       ).then((results) => {
         if (!bulk) return;
         const created = countLaunchSuccesses(results);
@@ -635,8 +637,9 @@ export function IssuesProvider({
       void createWorktree({
         issueId: task.id,
         title: task.title,
-        project,
-        stackOn: base,
+        launch: { type: "ticket", project },
+        base: base?.branch ?? null,
+        stackedOn: base?.ticket,
         agent: launchAgent,
         quiet,
       }).catch(() => {

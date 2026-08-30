@@ -11,6 +11,9 @@ import {
 // Settings → Actions is a leaf view over the settings hooks: mock the data layer
 // (and AppContext) so the panel can render without a Tauri backend.
 let triageOn = false;
+// Mutable like `triageOn`: `linear` gates the master toggle and the panel's
+// copy, and a hardcoded `true` here made the not-connected half unrenderable.
+let linearOn = true;
 let settingValues: Record<string, string | null> = {};
 
 vi.mock("../../../lib/queries", () => ({
@@ -73,7 +76,7 @@ vi.mock("../../../state/AppContext", () => ({
   useApp: () => ({
     settings: {
       defaultAgent: "Codex",
-      integrations: { linear: true, triage: triageOn },
+      integrations: { linear: linearOn, triage: triageOn },
       agents: [
         { key: "Claude", model: "opus" },
         { key: "Codex", model: "" },
@@ -86,6 +89,7 @@ vi.mock("../../../state/AppContext", () => ({
 describe("app-scope Triage settings", () => {
   beforeEach(() => {
     triageOn = false;
+    linearOn = true;
     settingValues = {};
   });
 
@@ -101,6 +105,18 @@ describe("app-scope Triage settings", () => {
     const switches = screen.getAllByRole("switch");
     expect(switches[0]).toBeEnabled();
     for (const s of switches.slice(1)) expect(s).toBeDisabled();
+  });
+
+  /** Triage has nothing to pull without Linear, so the master switch is dimmed —
+   *  and dimming it is only honest if it is also really `disabled`. The panel's
+   *  own rule (every control below takes the real attribute, not just
+   *  `pointer-events-none`) has to hold for the switch that turns it all on. */
+  it("really disables the master toggle while Linear is not connected", () => {
+    linearOn = false;
+    render(<TriageActionSection />);
+
+    expect(screen.getByText(/Connect Linear first/)).toBeInTheDocument();
+    expect(screen.getAllByRole("switch")[0]).toBeDisabled();
   });
 
   it("leaves them all live once triage is on", () => {

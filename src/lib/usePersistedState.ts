@@ -1,13 +1,17 @@
 /**
- * `useState` whose value outlives the component — backed by `localStorage`.
+ * `useState` whose value outlives the component — backed by browser storage.
  *
  * Route-scoped view state dies with its route. Leaving Trees for Dev unmounted
  * `TreesProvider`, so coming back reset the selected worktree to "" and dropped
  * every per-worktree tab and open file: the terminal session was still alive in
  * the global layer, but the view had forgotten which worktree it belonged to and
  * landed on the all-agents overview. Persisting the selection keeps the two in
- * step across that round trip (and, as a side effect, across restarts — the same
- * as the active repo, theme, and sidebar width already do).
+ * step across that round trip.
+ *
+ * `scope` picks how long "outlives" means. `"local"` (the default) is
+ * `localStorage`: kept across restarts, like the active repo, theme, and sidebar
+ * width. `"session"` is `sessionStorage`: it still survives a route change and a
+ * webview reload, but a cold launch starts from the fallback.
  *
  * Chrome/UI state only. Anything functional or cross-device belongs in the
  * settings table instead — see CLAUDE.md.
@@ -17,11 +21,23 @@
  */
 import { type Dispatch, type SetStateAction, useEffect, useRef, useState } from "react";
 
+export type PersistScope = "local" | "session";
+
+/** The backing store, or `null` where the context refuses one (a privacy mode, a
+ *  test env without jsdom) — the hook then degrades to a plain `useState`. */
+function store(scope: PersistScope): Storage | null {
+  try {
+    return scope === "session" ? sessionStorage : localStorage;
+  } catch {
+    return null;
+  }
+}
+
 /** Read `key`, distinguishing "absent" from "stored null" — which a plain
  *  `?? fallback` would collapse together. */
-function load<T>(key: string): { hit: true; value: T } | { hit: false } {
+function load<T>(key: string, scope: PersistScope): { hit: true; value: T } | { hit: false } {
   try {
-    const raw = localStorage.getItem(key);
+    const raw = store(scope)?.getItem(key) ?? null;
     if (raw === null) return { hit: false };
     return { hit: true, value: JSON.parse(raw) as T };
   } catch {
@@ -31,9 +47,13 @@ function load<T>(key: string): { hit: true; value: T } | { hit: false } {
   }
 }
 
-export function usePersistedState<T>(key: string, fallback: T): [T, Dispatch<SetStateAction<T>>] {
+export function usePersistedState<T>(
+  key: string,
+  fallback: T,
+  scope: PersistScope = "local",
+): [T, Dispatch<SetStateAction<T>>] {
   const [value, setValue] = useState<T>(() => {
-    const stored = load<T>(key);
+    const stored = load<T>(key, scope);
     return stored.hit ? stored.value : fallback;
   });
 
@@ -47,12 +67,17 @@ export function usePersistedState<T>(key: string, fallback: T): [T, Dispatch<Set
       return;
     }
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      store(scope)?.setItem(key, JSON.stringify(value));
     } catch {
       // Quota exhaustion or a privacy mode that refuses writes. The value still
       // works for this session; only its persistence is lost.
     }
-  }, [key, value]);
+  }, [key, value, scope]);
 
+  // `setValue` goes back out unwrapped, which is why nothing here tests the
+  // updater form — `set((n) => n + 1)` works because React's setter does, and a
+  // test for it would be a test of React. Wrap this (to debounce the write, to
+  // reject a value, to notify another pane) and that stops being true: the
+  // updater form becomes santree's behaviour and needs its own case.
   return [value, setValue];
 }

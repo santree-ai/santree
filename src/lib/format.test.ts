@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { diffLabel, formatCompact, formatUntil, formatUntilPrecise } from "./format";
+import {
+  diffLabel,
+  formatCompact,
+  formatCostPrecise,
+  formatUntil,
+  formatUntilPrecise,
+} from "./format";
 
 describe("format helpers", () => {
   it("formats a diff with a real minus sign", () => {
@@ -19,6 +25,30 @@ describe("format helpers", () => {
     expect(formatCompact(999_950)).toBe("1M");
     expect(formatCompact(999_999)).toBe("1M");
     expect(formatCompact(999_999_950)).toBe("1B");
+  });
+});
+
+describe("formatCostPrecise", () => {
+  /** The whole point: a sub-cent spend at two decimals is "$0.00", which a
+   *  reader takes as free. Four decimals keeps a real number visible. */
+  it("keeps four decimals below a cent", () => {
+    expect(formatCostPrecise(0.0037)).toBe("$0.0037");
+    expect(formatCostPrecise(0.00004)).toBe("$0.0000");
+    expect(formatCostPrecise(0.0099)).toBe("$0.0099");
+  });
+
+  it("uses two decimals from a cent up, with thousands separators", () => {
+    expect(formatCostPrecise(0.41)).toBe("$0.41");
+    expect(formatCostPrecise(0.01)).toBe("$0.01");
+    expect(formatCostPrecise(1204)).toBe("$1,204.00");
+  });
+
+  /** An unpriced model sends `null`, not `0` — and the caller must render
+   *  nothing rather than claim the work was free. */
+  it("omits the cost entirely when there is no price", () => {
+    expect(formatCostPrecise(null)).toBeNull();
+    expect(formatCostPrecise(undefined)).toBeNull();
+    expect(formatCostPrecise(0)).toBe("$0");
   });
 });
 

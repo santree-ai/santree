@@ -12,11 +12,10 @@
  * provider opens (and persists) the "Address review" tab. The agent it starts runs
  * with commit/push denied — fixing is its job, sending is the user's.
  */
-import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 
 import { type AgentKind, commands, type ReviewPr, type TabPr } from "../../bindings";
-import { queryKeys, REVIEW_AGENT_KEY, unwrap, useResolvedSetting } from "../../lib/queries";
+import { REVIEW_AGENT_KEY, unwrap, useCreateWorktree, useResolvedSetting } from "../../lib/queries";
 import { useLaunchGuard } from "../../lib/useLaunchGuard";
 import { useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
@@ -122,29 +121,30 @@ export function useStartAiReviewInWorktree(pr: ReviewPr, worktreeId: string, san
  *  there, then launch. */
 export function useStartWorkFromReviews(pr: ReviewPr, santreeRepo: string) {
   const navigate = useNavigate();
-  const qc = useQueryClient();
   const { requestFixCiLaunch, addPendingLaunches, removePendingLaunch } = useAppUi();
   const guard = useLaunchGuard();
+  // Silent, and quiet below: this flow reports its own failure and goes straight
+  // to the tree it made, so neither half of the create needs a toast of its own.
+  const { mutateAsync: createWorktree } = useCreateWorktree(santreeRepo, { silent: true });
 
   return () => {
     if (!guard.take()) return;
     const issueId = ticketIdFor(pr) ?? `pr-${pr.number}`;
-    addPendingLaunches([{ id: issueId, title: pr.title, project: "Reviews", agent: "Claude" }]);
+    // No project: a PR isn't one. When the branch carries a ticket tag the
+    // sidebar bands the tree by that ticket's real project; otherwise it sits
+    // with the rest of the unbanded work.
+    addPendingLaunches([{ id: issueId, title: pr.title, project: null, agent: "Claude" }]);
     navigate({ to: "/trees" });
     void (async () => {
       try {
-        const worktree = await unwrap(
-          commands.createWorktreeForPr(
-            santreeRepo,
-            pr.repo,
-            issueId,
-            pr.title,
-            pr.headRef,
-            null,
-            "Claude",
-          ),
-        );
-        await qc.invalidateQueries({ queryKey: queryKeys.worktrees(santreeRepo) });
+        const worktree = await createWorktree({
+          issueId,
+          title: pr.title,
+          launch: { type: "pr", prRepo: pr.repo, branch: pr.headRef },
+          base: null,
+          agent: "Claude",
+          quiet: true,
+        });
         const launch = await unwrap(commands.reviewFixLaunch(santreeRepo, reviewTargetFor(pr)));
         requestFixCiLaunch({
           worktreeId: worktree.id,

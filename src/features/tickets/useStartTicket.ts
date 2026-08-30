@@ -72,9 +72,9 @@ export function useStartTicket(): (target: StartTarget, opts?: { background?: bo
         {
           issueId: target.id,
           title: target.title,
-          project,
+          launch: { type: "ticket", project },
           // Startable tickets have no unfinished blocker to stack on.
-          stackOn: null,
+          base: null,
           agent,
           quiet: target.background,
         },

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { AgentState, SessionState, Worktree } from "../../bindings";
+import type { AgentKind, SessionState, Worktree } from "../../bindings";
 import { HOOK_STALE_AFTER_MS } from "../../lib/attention";
-import type { TerminalTab } from "../terminal/orchestrator";
+import { session as baseSession, worktree as baseWorktree, NOW } from "../../test/fixtures";
+import type { TerminalSource, TerminalTab } from "../terminal/orchestrator";
+import { paneAddress } from "../terminal/paneAddress";
 import {
   attentionCount,
   type BuildInput,
@@ -10,60 +12,51 @@ import {
   buildAgentEntries,
   countAttention,
   DONE_WINDOW_MS,
+  liveTabFor,
   parseTermKey,
   type RepoData,
-  terminalRefFor,
 } from "./registry";
 
-const NOW = 1_700_000_000_000;
+const worktree = (id: string, over: Partial<Worktree> = {}) =>
+  baseWorktree(id, { path: `/repo/.santree/worktrees/${id}`, ...over });
 
-function worktree(id: string): Worktree {
+/**
+ * A session row, scoped to this file's repo.
+ *
+ * The overrides are spread LAST, deliberately and load-bearingly: this helper
+ * used to end with `agentKind: over.agentKind ?? "Claude"`, which quietly took
+ * `null` out of the field's domain — a caller could pass it and still get back
+ * "Claude". The whole "santree cannot name this session's provider" branch of
+ * `liveTabFor` was therefore unconstructible from here, and untested. See
+ * `src/test/fixtures.ts`.
+ */
+const session = (over: Partial<SessionState> & { sessionId: string }) =>
+  baseSession({ repo: "canary", ...over });
+
+/**
+ * One live PTY pane, addressed the way every launch site addresses one: the
+ * surface's `term_key` as the tab's `refId` — undecorated, exactly the string
+ * the durable row carries — and the provider santree launched in it beside it.
+ */
+function pane(
+  termKey: string,
+  kind: AgentKind,
+  source: TerminalSource = "issue",
+  key = `p-${source}-${termKey}-${kind}`,
+): TerminalTab {
   return {
-    id,
-    title: `Task ${id}`,
-    status: null,
-    addLines: 0,
-    delLines: 0,
-    dirty: false,
-    ahead: 0,
-    behind: 0,
-    unpushed: 0,
-    remoteBehind: 0,
-    pullConflict: false,
-    agent: "Claude",
-    activity: null,
-    branch: `santree/${id.toLowerCase()}`,
-    path: `/repo/.santree/worktrees/${id}`,
-    project: null,
-    baseBranch: "main",
-    setupRan: true,
-    pending: false,
+    key,
+    title: termKey,
+    source,
+    refId: termKey,
+    agent: { kind, repo: "canary", termKey },
   };
 }
 
-function session(over: Partial<SessionState> & { sessionId: string }): SessionState {
-  return {
-    state: "active" as AgentState,
-    event: "UserPromptSubmit",
-    cwd: "/repo",
-    message: null,
-    transcriptPath: null,
-    updatedAtMs: NOW,
-    repo: "canary",
-    termKey: null,
-    ...over,
-    agentKind: over.agentKind ?? "Claude",
-  };
-}
-
-/** Live PTY tabs for the given tree term keys — what makes a session `live`. */
+/** Live Claude PTY tabs for the given tree term keys — what makes a session
+ *  `live`. */
 function liveTabs(...termKeys: string[]): TerminalTab[] {
-  return termKeys.map((refId, i) => ({
-    key: `t${i}`,
-    title: refId,
-    source: "issue" as const,
-    refId,
-  }));
+  return termKeys.map((termKey, i) => pane(termKey, "Claude", "issue", `t${i}`));
 }
 
 /** One selected repo's enrichment. Defaults to "canary" with nothing in it. */
@@ -122,26 +115,43 @@ describe("parseTermKey", () => {
   });
 });
 
-describe("terminalRefFor", () => {
-  it("looks a triage session up by its bare ticket id, not its term key", () => {
-    // InvestigatePane registers the tab as refId=<ticket> under source "triage",
-    // while its term_key is "triage:<ticket>" — the one place the two differ.
-    expect(terminalRefFor("triage:AK-9", parseTermKey("triage:AK-9"))).toEqual({
-      source: "triage",
-      refId: "AK-9",
-    });
-    expect(terminalRefFor("tree:AK-1", parseTermKey("tree:AK-1"))).toEqual({
-      source: "issue",
-      refId: "tree:AK-1",
-    });
+describe("liveTabFor", () => {
+  /** The regression this join exists for. Triage and the AI review used to open
+   *  their PTY under a provider-suffixed key (`triage:AK-9::codex`), which
+   *  matched no `term_key` anywhere — so a running investigation was reported as
+   *  having no live pane, and the fold below turned it into `done`. Every
+   *  surface now opens under the plain key, whatever its provider. */
+  it("finds a triage or AI-review pane by the surface key the row stores", () => {
+    const terminals = [
+      pane("triage:AK-9", "Codex", "triage"),
+      pane("ai-review:acme/web#7", "Claude", "review"),
+      pane("tree:AK-1", "Claude"),
+    ];
+    expect(liveTabFor("triage:AK-9", "Codex", terminals)?.refId).toBe("triage:AK-9");
+    expect(liveTabFor("ai-review:acme/web#7", "Claude", terminals)?.refId).toBe(
+      "ai-review:acme/web#7",
+    );
+    expect(liveTabFor("tree:AK-1", "Claude", terminals)?.refId).toBe("tree:AK-1");
   });
 
-  it("keeps historical and current review sessions under one source", () => {
-    // The retired read-only pane's records remain recognizable beside current AI
-    // reviews, preserving historical session provenance without reviving its UI.
-    for (const key of ["review:acme/web#7", "ai-review:acme/web#7"]) {
-      expect(terminalRefFor(key, parseTermKey(key))).toEqual({ source: "review", refId: key });
-    }
+  /** The other half of the pair. One surface can host a pane per provider, so
+   *  the key alone would report the Claude session as running because the Codex
+   *  pane beside it is. */
+  it("keeps two providers on one surface apart", () => {
+    const terminals = [
+      pane("ai-review:acme/web#7", "Claude", "review"),
+      pane("ai-review:acme/web#7", "Codex", "review"),
+    ];
+    expect(liveTabFor("ai-review:acme/web#7", "Claude", terminals)?.agent?.kind).toBe("Claude");
+    expect(liveTabFor("ai-review:acme/web#7", "Codex", terminals)?.agent?.kind).toBe("Codex");
+    expect(liveTabFor("triage:AK-9", "Codex", terminals)).toBeUndefined();
+  });
+
+  it("matches nothing for a session santree cannot attribute", () => {
+    const terminals = [pane("triage:AK-9", "Codex", "triage")];
+    expect(liveTabFor(null, "Codex", terminals)).toBeUndefined();
+    expect(liveTabFor("triage:AK-9", null, terminals)).toBeUndefined();
+    expect(liveTabFor("triage:AK-9", "Claude", terminals)).toBeUndefined();
   });
 });
 
@@ -197,6 +207,95 @@ describe("buildAgentEntries", () => {
     expect(entries[1]).toMatchObject({ live: false, tabKey: null, bucket: "detached" });
   });
 
+  /** The surfaces the Trees-shaped tests above never covered. A triage
+   *  investigation and an AI review used to open their PTY under a
+   *  provider-suffixed ref, so no tab matched the `term_key` their row carries
+   *  and a running agent was folded away as having no process. */
+  it("marks a live triage or AI-review session live, whatever provider runs it", () => {
+    const entries = buildAgentEntries(
+      build({
+        sessions: [
+          session({
+            sessionId: "inv",
+            termKey: "triage:AK-9",
+            agentKind: "Codex",
+            state: "waiting",
+            message: "Which environment?",
+          }),
+          session({
+            sessionId: "rev",
+            termKey: "ai-review:acme/web#7",
+            agentKind: "Claude",
+            state: "active",
+          }),
+        ],
+        terminals: [
+          pane("triage:AK-9", "Codex", "triage"),
+          pane("ai-review:acme/web#7", "Claude", "review"),
+        ],
+      }),
+    );
+    expect(entries.map((e) => [e.origin.kind, e.live, e.bucket])).toEqual([
+      ["triage", true, "attention"],
+      ["ai-review", true, "working"],
+    ]);
+    // …and the attention signal survives the fold, which is what the bug ate.
+    expect(attentionCount(entries, NOW)).toBe(1);
+  });
+
+  /** The real DB has both providers' rows on one `ai-review:` surface. They are
+   *  two sessions in two panes, and each must find its own. */
+  it("gives a surface's two providers one live entry each", () => {
+    const sessions = [
+      session({ sessionId: "c", termKey: "ai-review:acme/web#7", agentKind: "Claude" }),
+      session({ sessionId: "x", termKey: "ai-review:acme/web#7", agentKind: "Codex" }),
+    ];
+    const claudePane = pane("ai-review:acme/web#7", "Claude", "review");
+    const entries = buildAgentEntries(build({ sessions, terminals: [claudePane] }));
+    expect(entries.map((e) => [e.sessionId, e.live, e.tabKey])).toEqual([
+      ["c", true, claudePane.key],
+      // Only Claude's pane is open, so Codex's row is detached rather than
+      // borrowing the liveness of the pane beside it.
+      ["x", false, null],
+    ]);
+  });
+
+  /**
+   * The branch this file's `session()` helper made unconstructible until its
+   * spread order was fixed: a row whose provider santree cannot name.
+   *
+   * `SessionState.agentKind` is `null` when the session lost the registry row
+   * that named it — a terminal keeps one row per logical surface, so the moment
+   * it mints a *second* session the first one's join is gone. The pane on that
+   * surface is still open and still belongs to somebody, so the unnamed row must
+   * match NOTHING: reported not-live, its own provider left blank rather than
+   * guessed, and no attention raised for a process that may already be dead.
+   * Borrowing the neighbouring pane's liveness is the alternative, and it would
+   * paint a finished session with a live "waiting on you" dot.
+   */
+  it("matches no pane for a session whose provider it cannot name", () => {
+    const claudePane = pane("tree:AK-1", "Claude");
+    const entries = buildAgentEntries(
+      build({
+        repos: [repoData({ worktrees: [worktree("AK-1")] })],
+        sessions: [
+          session({ sessionId: "named", termKey: "tree:AK-1", agentKind: "Claude" }),
+          session({ sessionId: "orphan", termKey: "tree:AK-1", agentKind: null, state: "waiting" }),
+        ],
+        terminals: [claudePane],
+      }),
+    );
+
+    expect(entries.map((e) => [e.sessionId, e.agentKind, e.live, e.tabKey])).toEqual([
+      ["named", "Claude", true, claudePane.key],
+      ["orphan", null, false, null],
+    ]);
+    // Detached, not "attention": nothing may ask the user to answer a prompt
+    // santree can no longer prove is still on screen.
+    expect(entries.map((e) => e.bucket)).toEqual(["working", "detached"]);
+    expect(attentionCount(entries, NOW)).toBe(0);
+  });
+
   it("enriches every selected repo, not just one active one", () => {
     const entries = buildAgentEntries(
       build({
@@ -226,7 +325,6 @@ describe("buildAgentEntries", () => {
           session({ sessionId: "base", termKey: "tree:__base__" }),
           session({ sessionId: "base-tab", termKey: "tree:__base__:tab:one" }),
           session({ sessionId: "work", termKey: "tree:AK-1" }),
-          session({ sessionId: "desk", termKey: "triage:__repo__:canary" }),
           session({ sessionId: "review", termKey: "ai-review:acme/app#7" }),
         ],
       }),
@@ -236,7 +334,6 @@ describe("buildAgentEntries", () => {
       { project: "Workspace", purpose: "Base workspace", title: "master" },
       { project: "Workspace", purpose: "Base workspace tab", title: "master" },
       { project: "Knowledge Base", purpose: "Worktree", title: "AK-1" },
-      { project: "Workspace", purpose: "Triage desk", title: "Triage desk" },
       { project: "Reviews", purpose: "AI review", title: "acme/app#7" },
     ]);
   });
@@ -385,7 +482,8 @@ describe("terminal titles", () => {
       build({
         sessions: [session({ sessionId: "a", termKey: "tree:AK-1" })],
         terminals: liveTabs("tree:AK-1"),
-        titles: new Map([["tree:AK-1", "\u25d0 Fix the flaky suite"]]),
+        // Keyed by the pane's address, exactly as `TerminalView` files it.
+        titles: new Map([[paneAddress("tree:AK-1", "Claude"), "\u25d0 Fix the flaky suite"]]),
       }),
     );
     expect(entries[0].terminalTitle).toBe("\u25d0 Fix the flaky suite");
@@ -518,6 +616,7 @@ describe("agents santree launched that have not announced a session", () => {
           session({
             sessionId: "01a0",
             termKey: "tree:AK-1",
+            agentKind: "Codex",
             state: "exited",
             updatedAtMs: NOW - DONE_WINDOW_MS - 1,
           }),
@@ -529,7 +628,13 @@ describe("agents santree launched that have not announced a session", () => {
   });
 
   it("ignores a plain shell tab, which is nobody's agent", () => {
-    expect(buildAgentEntries(build({ terminals: liveTabs("tree:AK-1") }))).toHaveLength(0);
+    const shell: TerminalTab = {
+      key: "t-shell",
+      title: "tree:AK-1",
+      source: "issue",
+      refId: "tree:AK-1",
+    };
+    expect(buildAgentEntries(build({ terminals: [shell] }))).toHaveLength(0);
   });
 
   it("respects the repo the picker turned off", () => {
@@ -594,7 +699,9 @@ describe("agents the process table sees", () => {
     const entries = buildAgentEntries(
       build({
         terminals: [launchedTab("tree:AK-1", "Claude")],
-        detected: new Map([["tree:AK-1", "Codex"]]),
+        // The scan answers per pane, so it is keyed per pane: the surface plus
+        // the provider santree launched there.
+        detected: new Map([[paneAddress("tree:AK-1", "Claude"), "Codex"]]),
       }),
     );
     expect(entries).toHaveLength(1);
@@ -623,8 +730,8 @@ describe("agents the process table sees", () => {
     const entries = buildAgentEntries(
       build({
         sessions: [session({ sessionId: "01a0", termKey: "tree:AK-1", agentKind: "Codex" })],
-        terminals: [shellTab("tree:AK-1")],
-        detected: new Map([["tree:AK-1", "Codex"]]),
+        terminals: [launchedTab("tree:AK-1", "Codex")],
+        detected: new Map([[paneAddress("tree:AK-1", "Codex"), "Codex"]]),
       }),
     );
     expect(entries).toHaveLength(1);

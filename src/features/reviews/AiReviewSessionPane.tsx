@@ -34,7 +34,7 @@ import {
   useReviewWorkspace,
 } from "../../lib/queries";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
-import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
+import { agentSessionSeed } from "../terminal/agentSeed";
 import { useHookInjection } from "../terminal/useHookInjection";
 import { useReviewsModel } from "./model";
 import { ReviewFooter, reviewTargetFor } from "./ReviewSessionShared";
@@ -60,13 +60,12 @@ export function AiReviewSessionPane({
 }) {
   const { repo } = useReviewsModel();
   const termKey = aiReviewTermKey(pr);
-  const terminalRef = `${termKey}::${agentKind.toLowerCase()}`;
   const {
     ended,
     needsSeed: freshOpen,
     resumeRequested,
     requestResume,
-  } = useReviewSessionLatch(terminalRef);
+  } = useReviewSessionLatch(termKey, agentKind);
 
   const target = useMemo(() => (pr.headSha ? reviewTargetFor(pr) : null), [pr]);
   const needsSeed = !!target && freshOpen;
@@ -109,23 +108,16 @@ export function AiReviewSessionPane({
     prompt: launch.data
       ? `Read ${launch.data.promptPath} and follow the instructions inside.`
       : `Review pull request #${pr.number}.`,
-    modelFlag:
-      provider.capabilities.cliLaunchOptions && model.data
-        ? `--model ${shellQuote(model.data)}`
-        : undefined,
-    effortFlag:
-      provider.capabilities.cliLaunchOptions && effort.data
-        ? `--effort ${shellQuote(effort.data)}`
-        : undefined,
-    permissionMode: provider.capabilities.permissionMode
-      ? (permissionMode.data ?? undefined)
-      : undefined,
-    settingsFlag: hooks.flagFor(resolvedAgent),
-    mcpFlag:
-      provider.capabilities.cliLaunchOptions && launch.data
-        ? `--mcp-config ${shellQuote(launch.data.mcpConfigPath)}`
-        : undefined,
-    chrome: provider.capabilities.cliLaunchOptions && startWithChrome.value,
+    // Typed configuration, not flags. The AI review deliberately passes no
+    // Remote Control name: it is santree's own session, not one the user drives
+    // from the web.
+    configuredFor: agentKind,
+    model: model.data,
+    effort: effort.data,
+    permissionMode: permissionMode.data,
+    hookFlag: hooks.flagFor(resolvedAgent),
+    mcpConfigPath: launch.data?.mcpConfigPath,
+    chrome: startWithChrome.value,
   });
 
   // Every launch input must have resolved before the PTY spawns: the seed is built
@@ -191,7 +183,6 @@ export function AiReviewSessionPane({
         {ready ? (
           <ReviewTerminal
             termKey={termKey}
-            terminalRef={terminalRef}
             title={`Review #${pr.number} · ${provider.label}`}
             cwd={cwd}
             seed={seed}

@@ -143,20 +143,20 @@ export const commands = {
 	pending: boolean,
 } | null, CmdError>(__TAURI_INVOKE("base_worktree", { repo })),
 	/**
-	 *  Start a task: create a worktree for an issue (branching off `base`) and record
-	 *  the issue ↔ worktree link. Running `.santree/init.sh` is a separate step —
-	 *  see `run_worktree_setup_streamed` — so it isn't gated on this call.
-	 */
-	createWorktree: (repo: string, issueId: string, title: string, project: string | null, base: string | null, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree", { repo, issueId, title, project, base, agent })),
-	/**
-	 *  Create a worktree from the sidebar's "Create worktree" dialog, which — unlike
-	 *  [`create_worktree`] — may have no Linear ticket behind it at all: `source`
-	 *  says whether the branch is derived from the id, checked out from one that
-	 *  exists, or created under a name the user typed. `base` is the parent
+	 *  Find-or-create a worktree and record the issue ↔ worktree link. `launch` says
+	 *  where the work came from — a Linear ticket, a branch picked or named in the
+	 *  "Create worktree" dialog, or someone else's pull request — and that origin is
+	 *  the only thing the three paths differ on: what the branch is, and whether
+	 *  there is a Linear project to file the tree under. `base` is the parent
 	 *  worktree's branch when one was picked (a *stacked* worktree), else `None` for
 	 *  the repo's default branch.
+	 * 
+	 *  Idempotent (see `worktree::create`): an already-tracked id, or a tree already
+	 *  holding the requested branch, is returned rather than re-created. Running
+	 *  `.santree/init.sh` is a separate step — see `run_worktree_setup_streamed` —
+	 *  so it isn't gated on this call.
 	 */
-	createManualWorktree: (repo: string, issueId: string, title: string, project: string | null, source: WorktreeBranchSource, base: string | null, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_manual_worktree", { repo, issueId, title, project, source, base, agent })),
+	createWorktree: (repo: string, issueId: string, title: string, launch: WorktreeLaunch, base: string | null, agent: "Claude" | "Codex" | "Cursor" | "Opencode" | null) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree", { repo, issueId, title, launch, base, agent })),
 	/**
 	 *  The repo's branches (local, plus `origin`-only ones), each flagged with
 	 *  whether it is already checked out somewhere — the Create-worktree dialog's
@@ -233,6 +233,53 @@ export const commands = {
 	 */
 	worktreeSessions: (repo: string, issueId: string) => typedError<WorktreeSession[], CmdError>(__TAURI_INVOKE("worktree_sessions", { repo, issueId })),
 	/**
+	 *  What one of those sessions shows when its history row is expanded: the full
+	 *  first prompt (which the list deliberately doesn't carry — it would bloat
+	 *  every scan) and the tail of the conversation.
+	 * 
+	 *  Same validation posture as [`resume_worktree_session`]: `issue_id` is gated
+	 *  by naming a worktree the repo tracks, and the IPC-supplied `session_id` is
+	 *  never looked up directly — the candidate set is re-derived from
+	 *  [`worktree_sessions`] and the id must be in it. Display-only, and nothing
+	 *  read here reaches a model or a terminal (COMPLIANCE.md, "Transcript reads").
+	 */
+	worktreeSessionDetail: (repo: string, issueId: string, sessionId: string) => typedError<SessionDetail, CmdError>(__TAURI_INVOKE("worktree_session_detail", { repo, issueId, sessionId })),
+	/**
+	 *  The Task subagents of one of those sessions — one row per `agent-*.jsonl`
+	 *  under the transcript's `subagents/` directory, carrying the `parentAgentId`
+	 *  and `spawnDepth` its sidecar records so the pane can nest them.
+	 * 
+	 *  View-only: a subagent shares its parent's session id, so there is nothing
+	 *  here to resume. Arguments are validated exactly as
+	 *  [`worktree_session_detail`]'s are; the directory is derived server-side from
+	 *  the located transcript and never accepted from IPC.
+	 */
+	worktreeSessionSubagents: (repo: string, issueId: string, sessionId: string) => typedError<SessionSubagent[], CmdError>(__TAURI_INVOKE("worktree_session_subagents", { repo, issueId, sessionId })),
+	/**
+	 *  Reveal one of those sessions' transcripts in the OS file browser. The path is
+	 *  derived in Rust from the validated listing — the webview names a session, not
+	 *  a file.
+	 */
+	revealWorktreeSessionTranscript: (repo: string, issueId: string, sessionId: string) => typedError<null, CmdError>(__TAURI_INVOKE("reveal_worktree_session_transcript", { repo, issueId, sessionId })),
+	/**
+	 *  Point a freshly-opened agent tab at one of the worktree's past sessions, so
+	 *  its launch resumes that conversation instead of starting a new one — the
+	 *  Session history pane's click.
+	 * 
+	 *  Nothing about the launch is re-implemented here: this writes the same
+	 *  `terminal_sessions` row a reopened tab already reads, and `agent_session`
+	 *  then resolves the tab to `Resume` unchanged. The click that opens the tab is
+	 *  the whole of the trigger, and no byte reaches a terminal from here
+	 *  (COMPLIANCE.md, "a `--resume` seed is built only when a human opens the tab").
+	 * 
+	 *  `session_id` is IPC-supplied and therefore never looked up directly: the
+	 *  candidate set is re-derived from [`worktree_sessions`] itself, and the id must
+	 *  be in it. The surface is derived here too — a caller passes the tab id it
+	 *  minted, never a whole terminal key, so it cannot name `triage:…` or another
+	 *  worktree's tab as the row to repoint.
+	 */
+	resumeWorktreeSession: (repo: string, issueId: string, tabId: string, sessionId: string, agentKind: AgentKind) => typedError<null, CmdError>(__TAURI_INVOKE("resume_worktree_session", { repo, issueId, tabId, sessionId, agentKind })),
+	/**
 	 *  Start (or re-point) the filesystem watcher at the given repo's worktrees, so
 	 *  the Trees views refresh live when files change on disk (e.g. an agent editing
 	 *  in the terminal). A no-op for repos without a local path; idempotent, so the
@@ -283,14 +330,6 @@ export const commands = {
 	 *  investigation analog of [`work_prompt`]; regenerated on every launch.
 	 */
 	investigatePrompt: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("investigate_prompt", { repo, issueId })),
-	/**
-	 *  Find-or-create a worktree for a pull request: reuse the one already tracked
-	 *  under `issue_id` or `branch` if present, else create one that **checks out the
-	 *  PR's head branch** so commits made in it land on the PR. `pr_repo` must match
-	 *  this registered checkout's origin; org-wide Reviews must never route a PR to
-	 *  whichever repo happens to be active. Used by both Open-as-tree and Fix CI.
-	 */
-	createWorktreeForPr: (repo: string, prRepo: string, issueId: string, title: string, branch: string, base: string | null, agent: "Claude" | "Codex" | "Cursor" | "Opencode" | null) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree_for_pr", { repo, prRepo, issueId, title, branch, base, agent })),
 	agentSession: (repo: string, termKey: string, cwd: string, allowFresh: boolean, agent: AgentKind) => typedError<AgentSession, CmdError>(__TAURI_INVOKE("agent_session", { repo, termKey, cwd, allowFresh, agent })),
 	/**
 	 *  Stored Triage surfaces and their sticky providers. Drives resume affordances
@@ -1106,8 +1145,8 @@ export const commands = {
 	 *  die with the *page*: every handle to one lived in the webview, and a reload
 	 *  threw all of them away, so the sessions were unreachable and had to be
 	 *  reaped. They no longer are. Each session records its own recent output, so a
-	 *  reloaded page can rebuild the tab from `label` and catch the pane up from the
-	 *  stream — a reload now costs the view, not the work.
+	 *  reloaded page can rebuild the tab from `(label, agent_kind)` and catch the
+	 *  pane up from the stream — a reload now costs the view, not the work.
 	 * 
 	 *  The caller must close whatever it cannot host (a worktree deleted while the
 	 *  page was down); this reports everything rather than filtering, because only
@@ -1151,6 +1190,12 @@ export type AdoptedSession = {
 	id: number,
 	/**  The `term_key` it was opened under — how the caller finds its surface. */
 	label: string,
+	/**
+	 *  The provider it was opened for. With `label`, the pair that names the
+	 *  pane: a caller keying adopted sessions by label alone would hand one
+	 *  session to both panes of a surface a user has open under two providers.
+	 */
+	agentKind: AgentKind | null,
 	cwd: string | null,
 	command: string,
 };
@@ -1198,7 +1243,13 @@ export type AgentDef = {
 	available: boolean,
 };
 
-/**  Which coding agent ("harness") runs a task. */
+/**
+ *  Which coding agent ("harness") runs a task.
+ * 
+ *  `Hash` because this is half of a terminal's identity: a surface hosts one
+ *  PTY *per provider* (the pair `terminal_sessions` is keyed by), so the live-
+ *  terminal set is a set of pairs.
+ */
 export type AgentKind = "Claude" | "Codex" | "Cursor" | "Opencode";
 
 /**
@@ -1219,6 +1270,16 @@ export type AgentKind = "Claude" | "Codex" | "Cursor" | "Opencode";
 export type AgentProcess = {
 	/**  The `term_key` the pane's PTY was opened under. */
 	termKey: string,
+	/**
+	 *  The provider santree launched in that pane — the *other half of the
+	 *  pane's address*, not an observation. One surface hosts one pane per
+	 *  provider (a Claude and a Codex review of the same PR), so `term_key`
+	 *  alone does not name a pane and a caller keying by it would attribute one
+	 *  pane's agent to the other. `None` for a pane santree opened as a plain
+	 *  shell.
+	 */
+	paneAgentKind: AgentKind | null,
+	/**  Which agent the process table actually sees in the pane's foreground. */
 	agentKind: AgentKind,
 };
 
@@ -2709,6 +2770,57 @@ export type ScriptInfo = {
 };
 
 /**
+ *  What a session's transcript says beyond the list row — read only when a row
+ *  is expanded, because the full first prompt would bloat every list scan.
+ */
+export type SessionDetail = {
+	/**
+	 *  The first prompt the user actually typed, in full (bounded — see
+	 *  `first_prompt_truncated`). `None` when the transcript has no such turn.
+	 */
+	firstPrompt: string | null,
+	/**  Whether `first_prompt` was cut at the bound. */
+	firstPromptTruncated: boolean,
+	/**  The last few messages, oldest first. */
+	recentTurns: SessionTurn[],
+	/**
+	 *  The directory the session actually ran in — the worktree root, or a
+	 *  subdirectory of it when the agent was launched from one.
+	 */
+	cwd: string | null,
+};
+
+/**  Tokens attributed to one model inside a session, with its approximate cost. */
+export type SessionModelSpend = {
+	/**  Raw model id from the transcript; the frontend maps it to a family label. */
+	model: string,
+	/**  Every token class summed — the one number the row shows. */
+	totalTokens: number | null,
+	/**
+	 *  `None` when the model is absent from the price table. A `0` here would
+	 *  render as "$0.00", i.e. free, which is a lie about an unpriced model.
+	 */
+	costUsd: number | null,
+};
+
+/**
+ *  A session's total tokens and cost, plus the per-model split behind them.
+ *  Deduped within the session exactly as the Usage panel dedupes globally
+ *  (field-wise max per `(message.id, requestId)`, counted once), and it includes
+ *  the session's subagent transcripts — the same spend the panel folds in.
+ */
+export type SessionSpend = {
+	totalTokens: number | null,
+	/**
+	 *  Summed over the priced models only; `None` when nothing in the session
+	 *  could be priced (see [`SessionModelSpend::cost_usd`]).
+	 */
+	costUsd: number | null,
+	/**  Most-used first. */
+	models: SessionModelSpend[],
+};
+
+/**
  *  The current state of one agent session, captured live via the hooks santree
  *  injects into its `claude` / `codex` launches. One per session id (a
  *  current-state row, not an event log). The frontend correlates a session back
@@ -2765,6 +2877,46 @@ export type SessionState = {
  *  enough (mirrors how `WorktreeChanged` drives a targeted invalidation).
  */
 export type SessionStateChanged = Record<string, never>;
+
+/**
+ *  One Task subagent of a Claude session, as its `subagents/` sidecar describes
+ *  it. `parent_agent_id` + `depth` are what let the pane draw the real spawn
+ *  tree rather than a flat list: a depth-2 agent nests under the depth-1 agent
+ *  that spawned it.
+ * 
+ *  View-only. Every subagent shares its parent's session id, so there is nothing
+ *  here to resume.
+ */
+export type SessionSubagent = {
+	/**  The `<id>` of `agent-<id>.jsonl` — unique within the session. */
+	agentId: string,
+	/**
+	 *  The agent that spawned this one, when the sidecar names one. Absent at
+	 *  depth 1, and possibly naming an agent whose transcript is gone.
+	 */
+	parentAgentId: string | null,
+	/**  `spawnDepth` from the sidecar, 1-based; 1 when it is missing. */
+	depth: number,
+	/**
+	 *  The subagent type (`Explore`, `general-purpose`, …). `None` when the
+	 *  sidecar is missing or unreadable — the row still lists.
+	 */
+	agentType: string | null,
+	/**  The one-line task description the parent gave it. */
+	description: string | null,
+	/**  User + assistant messages carrying prose in its own transcript. */
+	messageCount: number,
+	status: SubagentStatus,
+	/**  Epoch ms of its transcript's last write. */
+	lastActivityMs: number | null,
+};
+
+/**  One message in a session's tail, for the expanded history row. */
+export type SessionTurn = {
+	from: LastMessageFrom,
+	/**  One display line, trimmed like [`WorktreeSession::last_message`]. */
+	text: string,
+};
 
 /**
  *  Token usage for one Claude session (one main transcript), plus its current
@@ -2869,6 +3021,15 @@ export type Settings = {
  *  to a terminal emulator verbatim. `Done` reports the exit status.
  */
 export type StreamEvent = { type: "chunk"; text: string } | { type: "done"; ok: boolean };
+
+/**
+ *  How a Task subagent ended, read from the *parent* transcript (a subagent's own
+ *  transcript never records its verdict). `Unknown` is honest ignorance and
+ *  renders no indicator — it is not a synonym for "finished".
+ */
+export type SubagentStatus = "Running" | "Completed" | "Failed" | 
+/**  The user stopped it, or it was killed. */
+"Stopped" | "Unknown";
 
 /**  What an extra Trees main-area tab hosts: an agent session or a login shell. */
 export type TabKind = "agent" | "terminal" | 
@@ -3038,8 +3199,31 @@ export type TerminalOpenOpts = {
 	 *  What the frontend calls this session (its `term_key`). Handed back by
 	 *  [`terminal_adopt`] so a reloaded page can match a live session to the
 	 *  surface that owns it. Opaque, exactly like `owner`.
+	 * 
+	 *  Exactly the `term_key` — never a decorated form of it. The pane's
+	 *  provider travels in `agent_kind` below, because this string is joined
+	 *  byte-for-byte against `terminal_sessions.term_key` to decide whether an
+	 *  agent is still running.
 	 */
 	label: string,
+	/**
+	 *  Which agent the frontend is launching here, or `null` for a plain shell.
+	 * 
+	 *  The other half of the session's identity: `terminal_sessions` is keyed by
+	 *  `(repo, term_key, agent_kind)`, so one surface can hold one live session
+	 *  per provider and neither field names a session on its own.
+	 * 
+	 *  **It must name the CLI the seed actually `exec`s.** This value and the
+	 *  seed line arrive as two independent IPC arguments, and the provider's own
+	 *  hook writes the durable row from the CLI it is running — so a pane
+	 *  registered as `Codex` whose seed launches `claude` puts `(surface, Codex)`
+	 *  in the live set against a `(surface, Claude)` row, the liveness join
+	 *  matches nothing, and the working agent reads as exited. That is the same
+	 *  failure a provider-decorated `label` caused. Every launch site derives
+	 *  both halves from one resolved provider (`useAgentTab`, the triage hooks,
+	 *  `ReviewTerminal`); a new one must too.
+	 */
+	agentKind: AgentKind | null,
 };
 
 export type TerminalReplayMode = "exact" | "tail" | "reanchor";
@@ -3188,8 +3372,7 @@ export type TriageSchedule = {
 
 /**
  *  A persisted Triage terminal and the provider that owns its durable session.
- *  `ref_id` is normally a Linear ticket id; Triage's repo-wide scratch session
- *  uses its reserved frontend sentinel instead.
+ *  `ref_id` is the Linear ticket the investigation belongs to.
  */
 export type TriageSession = {
 	refId: string,
@@ -3483,26 +3666,6 @@ export type Worktree = {
 };
 
 /**
- *  Which branch a newly created worktree lands on.
- * 
- *  The three cases are genuinely different git operations — derive a name and
- *  branch it off the base, check out a branch that already exists, or create one
- *  under a name the user typed — and they used to be an `Option<String>` plus a
- *  convention. Naming them keeps the "check out" and "create" paths from being
- *  one boolean apart at the sink.
- */
-export type WorktreeBranchSource = 
-/**
- *  Name the branch after the work (`santree/<id>-<slug>`) and branch it off
- *  the base — how a ticket's worktree has always been created.
- */
-{ type: "derived" } | 
-/**  Check out a branch that already exists, locally or on `origin`. */
-{ type: "existing"; branch: string } | 
-/**  Create a branch under exactly this name, off the base. */
-{ type: "new"; branch: string };
-
-/**
  *  Debounced "a worktree's files changed on disk" signal. The frontend reacts by
  *  invalidating that worktree's status/files/diff queries for the active repo.
  *  `issue_id` is [`BASE_ID`] for a change to the base worktree (the repo root).
@@ -3510,6 +3673,48 @@ export type WorktreeBranchSource =
 export type WorktreeChanged = {
 	issueId: string,
 };
+
+/**
+ *  Where a new worktree comes from — the one thing santree's three creation
+ *  paths actually differ on.
+ * 
+ *  This used to be encoded in *which command you called* (`create_worktree` /
+ *  `create_manual_worktree` / `create_worktree_for_pr`), which left every caller
+ *  re-stating the same eight arguments and let one path smuggle in a value the
+ *  origin doesn't have: the PR path passed a literal `"Reviews"` as the
+ *  worktree's Linear project, and the sidebar rendered it as a project band
+ *  beside the real ones. An origin is a fact about the work, so it is modelled
+ *  as one and each variant carries only what its own origin knows.
+ * 
+ *  Three of the four variants name a branch. Every one is re-validated at the
+ *  git sink (`git::safe_branch`) — a name reaching a `git` argv is untrusted
+ *  whichever variant carried it.
+ */
+export type WorktreeLaunch = 
+/**
+ *  A Linear ticket. The branch is derived from the work
+ *  (`santree/<id>-<slug>`) and branched off the base, and the ticket's
+ *  project is the worktree's — the only origin that has one.
+ */
+{ type: "ticket"; project: string | null } | 
+/**
+ *  A branch that already exists, locally or on `origin`, checked out with no
+ *  ticket behind it.
+ */
+{ type: "existingBranch"; branch: string } | 
+/**  A branch created under exactly the name the user typed, off the base. */
+{ type: "newBranch"; branch: string } | 
+/**
+ *  Someone else's pull request, checked out as a writable tree so commits
+ *  land on the PR's head branch. `pr_repo` must match the local checkout's
+ *  `origin` — org-wide Reviews must never route a PR into whichever repo
+ *  happens to be active.
+ * 
+ *  It carries **no project**: a PR is not a Linear project, and the sidebar
+ *  bands a worktree by the project of the ticket it resolves (a PR whose
+ *  branch carries a ticket tag still gets its real one) or by nothing at all.
+ */
+{ type: "pr"; prRepo: string; branch: string };
 
 /**
  *  Live status of the PR opened from a worktree's branch (fetched from GitHub,
@@ -3570,6 +3775,12 @@ export type WorktreeSession = {
 	 */
 	startedAtMs: number | null,
 	lastActivityMs: number | null,
+	/**
+	 *  What the session cost, from its own transcript. `None` when there is no
+	 *  record to price (a registry row whose transcript is gone) or when the
+	 *  provider keeps no token counts — never a zeroed placeholder.
+	 */
+	spend: SessionSpend | null,
 };
 
 /**

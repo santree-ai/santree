@@ -575,7 +575,13 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // Trees for another tab unmounts it — and every one of these resetting is what
   // made coming back land on the all-agents overview instead of the worktree,
   // tab and file the user left open. See usePersistedState.
-  const [activeId, setActiveId] = usePersistedState(ACTIVE_ID_KEY, "");
+  // Session-scoped, unlike the rest: it has to survive a route change and a
+  // webview reload (terminals adopt across a reload, so the pane must come back
+  // to its host) but a cold launch belongs on the welcome surface, not on
+  // whichever worktree was open when the app last quit. The per-worktree maps
+  // below stay local — they are "what this worktree was showing", restored on an
+  // explicit click rather than on a navigation.
+  const [activeId, setActiveId] = usePersistedState(ACTIVE_ID_KEY, "", "session");
   // Tell the app shell which workspace is open, so the sidebar can mark its row.
   // This provider is route-scoped and the tree is permanent, so the selection has
   // to travel through AppUi rather than being read from here.

@@ -36,7 +36,7 @@ import { BranchIcon, LinearLogo, SearchIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import { Button, Segmented, Spinner, useModalA11y } from "../../components/primitives";
 import {
-  useCreateManualWorktree,
+  useCreateWorktree,
   useRepoBranches,
   useResolvedSetting,
   useTasks,
@@ -82,7 +82,7 @@ export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose:
   );
   const { data: worktrees = [] } = useWorktrees(repo);
   const { data: workAgent } = useResolvedSetting(repo, WORK_AGENT_KEY);
-  const { mutate: create, isPending } = useCreateManualWorktree(repo);
+  const { mutate: create, isPending } = useCreateWorktree(repo, { silent: true });
   const guard = useLaunchGuard();
 
   const dialogRef = useRef<HTMLDivElement>(null);

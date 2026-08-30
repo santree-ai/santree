@@ -14,15 +14,26 @@
  * open it ourselves on mouseup, on the last line of the selection, which is where
  * the library anchors a range comment anyway.
  *
- * **It only grows the range while the pointer is over the line numbers.** The `+`
- * straddles the boundary between the gutter and the code, so dragging straight
- * down from it lands on the content cells and the range stops at the line that
- * was pressed. Every row carries its line numbers in a sibling cell, so while a
- * drag is running we forward the hover there, and the manager extends as if the
- * pointer had stayed in the gutter.
+ * **In unified it only grows the range while the pointer is over the line
+ * numbers.** The `+` straddles the boundary between the gutter and the code, so
+ * dragging straight down from it lands on the content cells and the range stops
+ * at the line that was pressed. Every row carries its line numbers in a sibling
+ * cell, so while a drag is running we forward the hover there, and the manager
+ * extends as if the pointer had stayed in the gutter. (Split needs none of that —
+ * it resolves a code cell to its own side's number cell already.)
  *
  * A press with no movement still selects a single line, so a plain click on the
  * `+` behaves as it always did.
+ *
+ * **Both diff modes, and they are shaped differently.** Trees renders your own
+ * PR's diff split by default; Reviews takes the unified one. Unified gives a row
+ * one `td.diff-line-num` holding both sides' numbers and one `+`; split gives
+ * each side a `.diff-line-<side>-num` numbered `data-line-num`, and renders the
+ * `+` twice — once there, once in the code cell, where there is no number beside
+ * it. Everything below matches both; a selector that only knows unified leaves
+ * half the app without the gesture, and worse than inert: the press falls
+ * through to the library's own handler, which opens the composer on the one
+ * pressed line *and* clears the range the manager had just armed.
  */
 import { SplitSide } from "@git-diff-view/react";
 import { type RefObject, useCallback, useEffect, useRef } from "react";
@@ -37,14 +48,41 @@ export interface GutterSelection {
 /** Opens the composer on a line — `setWidget` from the library's widget store. */
 type OpenWidget = (at: { side: SplitSide; lineNumber: number }) => void;
 
+/** The line-number cells a range can be dragged from. Unified gives a row one,
+ *  holding both sides' numbers; split gives each side its own. */
+const NUM_CELL = ".diff-line-num, .diff-line-old-num, .diff-line-new-num";
+
+/** The cell holding the number of the line a `+` belongs to. */
+function numberCell(widget: Element, side: "old" | "new"): Element | null {
+  const unified = widget.closest(".diff-line-num");
+  if (unified) return unified;
+  // Split renders the `+` twice per row — once in the number cell, once in the
+  // code cell, where there is no number to read. Walk the code-cell copy back to
+  // the number cell for its *own* side, the way the library's
+  // `getNumberHolderElement_Split` does: a split row has one on each side, so
+  // anything less specific picks the wrong column.
+  return (
+    widget.closest(`.diff-line-${side}-num`) ??
+    widget
+      .closest(`.diff-line-${side}-content`)
+      ?.parentElement?.querySelector(`.diff-line-${side}-num`) ??
+    null
+  );
+}
+
 /** The line a gutter `+` belongs to, read back out of the row it sits in. */
 function lineAt(widget: Element): GutterSelection | null {
-  // `data-add-widget` carries the side's name; the numbers live in the sibling
-  // spans of the same line-number cell.
+  // `data-add-widget` carries the side's name in both modes. The number itself is
+  // spelled per mode: `data-line-<side>-num` in unified, where one cell holds
+  // both, and a plain `data-line-num` in split, where the cell is already a side.
   const side = widget.getAttribute("data-add-widget") === "old" ? "old" : "new";
-  const cell = widget.closest("td");
-  const span = cell?.querySelector(`span[data-line-${side}-num]`);
-  const n = Number(span?.getAttribute(`data-line-${side}-num`));
+  const cell = numberCell(widget, side);
+  const span =
+    cell?.querySelector(`span[data-line-${side}-num]`) ??
+    cell?.querySelector("span[data-line-num]");
+  const n = Number(
+    span?.getAttribute(`data-line-${side}-num`) ?? span?.getAttribute("data-line-num"),
+  );
   return Number.isFinite(n) && n > 0 ? { side, from: n, to: n } : null;
 }
 
@@ -73,13 +111,15 @@ export function useGutterDrag(root: RefObject<HTMLElement | null>) {
 
     const onDown = (e: MouseEvent) => {
       const target = e.target as Element | null;
-      // The manager only arms on the line-number cell, so nothing else can be
-      // the start of a range.
-      if (!target?.closest?.("td.diff-line-num")) return;
+      if (!target) return;
+      const widget = target.closest(".diff-add-widget-wrapper");
+      // The manager arms on a line-number cell — and, in split, on the `+` in the
+      // code cell as well, which it resolves back to one. Nothing else can be the
+      // start of a range.
+      if (!widget && !target.closest(NUM_CELL)) return;
       dragging.current = true;
       selection.current = null;
 
-      const widget = target.closest(".diff-add-widget-wrapper");
       if (!widget) return;
       pressed.current = lineAt(widget);
       // Swallow it before React's root listener dispatches the button's own
@@ -91,7 +131,11 @@ export function useGutterDrag(root: RefObject<HTMLElement | null>) {
       if (!dragging.current) return;
       const target = e.target as Element | null;
       // Already in the gutter: the manager saw this one on its way up.
-      if (!target || target.closest("td.diff-line-num")) return;
+      if (!target || target.closest(NUM_CELL)) return;
+      // Unified's selector on purpose, which makes this a no-op in split: split
+      // resolves a code cell to the number cell beside it itself, and its rows
+      // carry one per side — re-aiming at whichever came first would drag the
+      // wrong column.
       const gutter = target.closest("tr")?.querySelector("td.diff-line-num");
       // Re-aimed at the row's line numbers. This bubbles back through our own
       // listener, where the check above stops it going round again.

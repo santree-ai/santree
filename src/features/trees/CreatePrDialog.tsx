@@ -250,7 +250,9 @@ export function CreatePrDialog() {
           <Button variant="primary" onClick={onCreate} disabled={!canCreate}>
             {creating ? (
               <>
-                <Spinner size={12} /> Creating…
+                {/* The Spinner defaults to `--accent`, which IS this button's
+                    fill — pass the on-fill colour or it renders invisible. */}
+                <Spinner size={12} color="var(--on-accent)" /> Creating…
               </>
             ) : draftPr ? (
               "Create draft"

@@ -140,10 +140,30 @@ site must be justified against these same conditions before merging.**
 → `codex_helpers_disable_ambient_extensions_and_writes`
 
 **Transcript reads.** Three readers. `usage.rs` and `codex_rollouts.rs` are
-display-only — a summary is shown, never fed to a session. The third is opt-in:
-with the transcripts checkbox on, a single-shot PR-body draft receives the
-session text with tool calls and results stripped, and the user reviews what
-comes back.
+display-only for *content* — a summary is shown, and no transcript text ever
+reaches a model. One field is not content: the session **id**, which
+`session::history` takes from those readers so the Session history pane can
+resume a past conversation. On a click, `resume_worktree_session` writes that id
+into `terminal_sessions` and the tab's ordinary launch builds `--resume <id>`
+from it. The id is re-derived from the worktree's own listing rather than
+trusted from IPC, and a human opening the tab is still the whole of the trigger.
+The third reader is opt-in: with the transcripts checkbox
+on, a single-shot PR-body draft receives the session text with tool calls and
+results stripped, and the user reviews what comes back.
+
+Expanding a history row reads more of the same records and shows more of them —
+the full first prompt, the last few messages, the Task subagents a session
+spawned and how each ended, and what it cost — and every one of those is still
+display-only: none reaches a model, a prompt, or a PTY. Two things about that
+surface are load-bearing. Its commands take the same `(repo, issue_id,
+session_id)` and re-derive the candidate set from `worktree::sessions` exactly as
+`resume_worktree_session` does, so an IPC value never becomes a path — the id is
+compared against a located transcript's file stem and nothing else. And "Open
+transcript" is the one place santree hands a transcript to something outside
+itself: `reveal_worktree_session_transcript` derives the path in Rust and passes
+it to the OS file browser (`open -R`, which selects the file rather than
+launching it). The webview names a session; it never supplies, or receives, a
+path.
 
 **Session-state hooks + status line.** Every santree `claude` launch layers a
 `--settings` file, which is a key-level override — the user's other keys are

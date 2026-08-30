@@ -14,6 +14,7 @@ import { Channel } from "@tauri-apps/api/core";
 
 import { commands, type TerminalAnchor } from "../../bindings";
 import { PAGE_OWNER } from "./pageOwner";
+import { paneAddress } from "./paneAddress";
 import type {
   Anchor,
   Attached,
@@ -65,6 +66,10 @@ export class TauriBackend implements TerminalBackend {
         // rather than start over (see PAGE_OWNER).
         owner: PAGE_OWNER,
         label: opts.label,
+        // The provider as its own field, never appended to the label: the label
+        // is joined byte-for-byte against `terminal_sessions.term_key`, which
+        // keys the same surface by a separate provider column.
+        agentKind: opts.agentKind ?? null,
       },
       channelFor(handlers),
     );
@@ -85,11 +90,14 @@ export class TauriBackend implements TerminalBackend {
   async adopt(owner: string): Promise<Map<string, SessionId>> {
     const result = await commands.terminalAdopt(owner);
     if (result.status === "error") throw new Error(result.error);
-    // Keyed by label — the surface's `term_key` — because that is what a pane
-    // coming up knows about itself. A session whose label nothing claims stays
+    // Keyed by the pane's address — the surface's `term_key` AND the provider
+    // in it — because that is what a pane coming up knows about itself, and
+    // because one surface can have a pane per provider (a Claude and a Codex
+    // review of the same PR): keyed by label alone, both would adopt the same
+    // session and the other would be stranded. A session nothing claims stays
     // alive and unattached; it costs a ring and a shell until the app exits,
     // which is strictly better than killing work the user can still get back to.
-    return new Map(result.data.map((s) => [s.label, s.id]));
+    return new Map(result.data.map((s) => [paneAddress(s.label, s.agentKind), s.id]));
   }
 
   write(id: SessionId, data: string) {

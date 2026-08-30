@@ -122,7 +122,10 @@ function open() {
 }
 
 describe("TreesProvider · selectFile", () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
 
   it("opens the file in the main area and leaves the right panel where it is", () => {
     open();

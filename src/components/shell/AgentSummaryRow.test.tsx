@@ -7,7 +7,10 @@ import { AgentSummaryRow } from "./AgentSummaryRow";
 import type { AgentNode } from "./useProjectTree";
 
 let seq = 0;
-function agent(level: AttentionLevel, kind: AgentKind = "Claude"): AgentNode {
+/** `kind` is required and nullable: a `= "Claude"` default both closed the
+ *  unattributable-session case (the type would not even accept `null`) and hid
+ *  which provider each assertion below is actually naming. */
+function agent(level: AttentionLevel, kind: AgentKind | null): AgentNode {
   seq += 1;
   return {
     entry: { sessionId: `s${seq}`, agentKind: kind } as AgentNode["entry"],
@@ -32,7 +35,7 @@ describe("AgentSummaryRow", () => {
    *  carry what they show — otherwise the collapsed state is opaque to a screen
    *  reader in exactly the case it matters (something is waiting on you). */
   it("names what the chips show", () => {
-    renderRow([agent("needs-you", "Codex"), agent("idle"), agent("idle")]);
+    renderRow([agent("needs-you", "Codex"), agent("idle", "Claude"), agent("idle", "Claude")]);
     expect(
       screen.getByRole("button", {
         name: "Expand agents. 3 agents: 1 Codex needs you, 2 Claude idle",
@@ -87,10 +90,28 @@ describe("AgentSummaryRow", () => {
     expect(container.textContent).toContain("+2");
   });
 
+  /** A session santree cannot attribute to a provider still gets a chip: the
+   *  mark's slot stays empty rather than the chip collapsing onto its dot, so a
+   *  row of them keeps one shape. `agentKind: null` is the state the registry
+   *  reports when the row that named the provider is gone. */
+  it("keeps the mark's slot when a session has no provider", () => {
+    const { container } = renderRow([agent("needs-you", "Codex"), agent("idle", null)]);
+    expect(chipStates(container)).toEqual(["Needs you", "Idle"]);
+    // One provider mark plus the row's own chevron — the second chip draws none.
+    expect(container.querySelectorAll("svg").length).toBe(2);
+    // ...but both chips still reserve the mark's slot, so the row keeps one shape.
+    expect(container.querySelectorAll('[class*="size-3.5"]').length).toBe(2);
+    expect(
+      screen.getByRole("button", {
+        name: "Expand agents. 2 agents: 1 Codex needs you, 1 agent idle",
+      }),
+    ).toBeTruthy();
+  });
+
   /** Expanded, the list underneath is saying all of it — repeating the chips
    *  above it would be the same fact twice. */
   it("gives way to a plain count once expanded", () => {
-    const { container } = renderRow([agent("idle"), agent("working")], true);
+    const { container } = renderRow([agent("idle", "Claude"), agent("working", "Claude")], true);
     expect(container.textContent).toContain("2 agents");
     expect(container.querySelector("[role='img']")).toBeNull();
   });

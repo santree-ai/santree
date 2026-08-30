@@ -35,6 +35,8 @@ function draft(over: Partial<ReviewDraft> = {}): ReviewDraft {
   };
 }
 
+/** Spread over this in a test that cares — `pendingReviewId` picks the button's
+ *  label, so leaving it pinned here would close one of the two. */
 const target: CommentTarget = {
   prRepo: "acme/api",
   number: 7,
@@ -85,6 +87,19 @@ describe("ReviewDraftsBar", () => {
 
     expect(await screen.findByText(/Added 2 of 3/)).toBeInTheDocument();
     expect(screen.getByText(/The rest are still here/)).toBeInTheDocument();
+  });
+
+  /** With no review open yet the same button starts one, and the label is the
+   *  only thing that says the click is about to create a review under your name. */
+  it("offers to start a review when there is no pending one", () => {
+    render(
+      <ReviewDraftsBar
+        target={{ ...target, pendingReviewId: null }}
+        drafts={[draft({ id: "d1" })]}
+      />,
+    );
+    expect(screen.getByText("Start a review with all")).toBeInTheDocument();
+    expect(screen.queryByText("Add all to review")).toBeNull();
   });
 
   it("offers nothing to send when every draft predates the current head", () => {

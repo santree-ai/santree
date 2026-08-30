@@ -282,7 +282,9 @@ export function RunningStatus({
   );
 }
 
-/** A spinning ring, themable by color. */
+/** A spinning ring, themable by color. Inside a `variant="primary"` Button pass
+ *  `color="var(--on-accent)"`: the default is `--accent`, which IS that button's
+ *  fill, so the ring would be invisible on it. */
 export function Spinner({ size = 11, color = "var(--accent)" }: { size?: number; color?: string }) {
   return (
     <span

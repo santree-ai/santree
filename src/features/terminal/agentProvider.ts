@@ -1,36 +1,81 @@
 import type { AgentKind, AgentSession, Settings } from "../../bindings";
 
 /**
- * Per-launch inputs a call site supplies. Everything here is **Claude's** launch
- * line except `prompt`, `repo`/`termKey` and `settingsFlag`: Claude's model,
- * effort, MCP config and permission mode are assembled by the caller from
- * settings, while Codex's equivalents ride on the resolved session
- * (`AgentSession.launchFlags`), built in Rust by `codex_config.rs`.
+ * A launch, as **structured data**: what the user configured, never how a
+ * particular CLI spells it. Each provider's [`AgentLaunchSpec`] turns this into
+ * its own argv, and the whole thing is serialised into one shell word list
+ * exactly once, at the PTY boundary ([`agentSessionSeed`]).
  *
- * That split is not cosmetic. A Codex sandbox, approval policy and review tool
- * server are security configuration, and every call site that had to remember
- * them was one that could forget: the AI review's `mcpFlag` is gated on
- * `cliLaunchOptions`, a Claude capability, so a Codex review launched with no
- * tools and produced no drafts, silently. Anything a Codex launch must not run
- * without belongs on the session, not in here.
+ * That direction matters. The previous shape took *pre-spelled* fragments
+ * (`modelFlag: "--model 'opus'"`), so every call site had to know Claude's flag
+ * names, Claude's quoting, and which of them Codex must not receive — four
+ * components each assembling a slightly different version of one command line.
+ * The comparators show where the string route ends: one of them carries a shell
+ * tokenizer, an executable-position finder and a span splicer just to edit the
+ * command it built, dispatched by `if (agent === 'claude')`.
+ *
+ * Two fields arrive pre-quoted and stay opaque, because Rust built them and
+ * nothing here may second-guess their content: `hookFlag` (`hooks.rs`) and the
+ * session's own `launchFlags` (`codex_config.rs`).
  */
-export interface AgentSeedOptions {
+export interface AgentLaunchConfig {
+  /** The first message, seeded on a fresh start only — a resume continues a
+   *  conversation that already has one. */
   prompt?: string;
-  /** Claude's `--model`. Codex's model comes from the session's launch flags. */
-  modelFlag?: string;
-  /** Claude's `--effort`. Codex's comes from the session's launch flags. */
-  effortFlag?: string;
-  remoteControl?: string;
-  /** Whatever carries santree's session hooks for this provider: Claude's
-   *  `--settings <file>`, Codex's `-c 'hooks.<Event>=[…]'` overrides. */
-  settingsFlag?: string;
-  /** Claude's `--mcp-config`. Codex takes MCP servers as configuration, so its
-   *  review server is in the session's launch flags. */
-  mcpFlag?: string;
+  /**
+   * The provider `model` / `effort` / `permissionMode` were read for. Those
+   * settings are per provider, so when the resolved session turns out to run a
+   * *different* one — a persisted Codex investigation reopened from a
+   * Claude-configured surface — they are somebody else's values and are
+   * dropped rather than passed on. Omit only where the two cannot differ.
+   */
+  configuredFor?: AgentKind;
+  model?: string | null;
+  effort?: string | null;
+  /** Claude's `--permission-mode`. Empty/absent means "the CLI's default" —
+   *  santree never selects a permissive one (COMPLIANCE.md). */
+  permissionMode?: string | null;
+  /** The name to register with Claude's Remote Control web (we pass the ticket
+   *  id). `null` when the user turned it off, or the surface doesn't use it. */
+  remoteControl?: string | null;
   chrome?: boolean;
-  permissionMode?: string;
+  /** santree's own MCP config file — the AI review's tool server. */
+  mcpConfigPath?: string | null;
+  /** santree's session hooks in whatever form this provider takes them
+   *  (Claude's `--settings <file>`, Codex's `-c 'hooks.<Event>=[…]'`), built in
+   *  Rust and already shell-quoted. Comes from `useHookInjection`, which is the
+   *  one place that picks the mechanism. */
+  hookFlag?: string;
+  /** The surface's identity, exported so the hook binary knows which row to
+   *  update. Both or neither. */
   repo?: string;
   termKey?: string;
+}
+
+/** A session santree can actually launch — everything but a plain shell. */
+type LaunchableSession = Exclude<AgentSession, { type: "shell" }>;
+
+/**
+ * How one CLI spells a launch: three ordered lists of shell words that follow
+ * the binary. A new provider is this record plus its capabilities — not an edit
+ * to every component that opens a terminal.
+ */
+export interface AgentLaunchSpec {
+  /** What every launch of this provider carries, fresh or resumed. */
+  common: (session: LaunchableSession, config: AgentLaunchConfig) => string[];
+  /** What only a *fresh* start adds — the settings a resumed session keeps for
+   *  itself, and the id santree reserved for it. */
+  fresh: (session: Extract<AgentSession, { type: "fresh" }>, config: AgentLaunchConfig) => string[];
+  /**
+   * How this CLI is told to continue session `id`.
+   *
+   * **The one definition.** The seed the PTY runs and the command the Session
+   * history pane copies to the clipboard are the same invocation with different
+   * wrappers, and writing it twice is how it drifts: a comparator with this
+   * exact duplication already resumes one of its agents by session id in one
+   * spelling and by transcript path in the other.
+   */
+  resume: (sessionId: string) => string[];
 }
 
 export interface ProviderCapabilities {
@@ -56,10 +101,9 @@ interface AgentProviderContract {
   label: string;
   defaultExecutable: string;
   capabilities: ProviderCapabilities;
-  buildSeed: (
-    session: Exclude<AgentSession, { type: "shell" }>,
-    options: AgentSeedOptions,
-  ) => string | undefined;
+  /** `null` for a provider santree cannot drive: a tab for it opens as a plain
+   *  shell, and it has no resume line to copy either. */
+  launch: AgentLaunchSpec | null;
 }
 
 export function shellQuote(value: string): string {
@@ -72,7 +116,12 @@ export function shellQuote(value: string): string {
   return `'${sanitized.replace(/'/g, `'\\''`)}'`;
 }
 
-const unsupportedSeed: AgentProviderContract["buildSeed"] = () => undefined;
+/** `--flag 'value'`, or nothing when the value is absent or blank. Trailing
+ *  whitespace is the user's, not a value. */
+function flag(name: string, value: string | null | undefined): string[] {
+  const trimmed = value?.trim();
+  return trimmed ? [name, shellQuote(trimmed)] : [];
+}
 
 const providers: Record<AgentKind, AgentProviderContract> = {
   Claude: {
@@ -88,33 +137,27 @@ const providers: Record<AgentKind, AgentProviderContract> = {
       settingsPanel: "cli",
       hookInjection: "settings-file",
     },
-    buildSeed: (session, options) => {
-      const bin = shellQuote(session.executable);
-      const env =
-        options.repo && options.termKey
-          ? `env SANTREE_REPO=${shellQuote(options.repo)} SANTREE_TERM_KEY=${shellQuote(options.termKey)} `
-          : "";
-      const remote = options.remoteControl
-        ? `--remote-control ${shellQuote(options.remoteControl)} `
-        : "";
-      const settings = options.settingsFlag ? `${options.settingsFlag} ` : "";
-      const mcp = options.mcpFlag ? `${options.mcpFlag} ` : "";
-      const chrome = options.chrome ? "--chrome " : "";
-      const permission = options.permissionMode
-        ? `--permission-mode ${shellQuote(options.permissionMode)} `
-        : "";
-      if (session.type === "resume") {
-        return `exec ${env}${bin} ${remote}${settings}${mcp}${chrome}${permission}--resume ${shellQuote(session.sessionId)}`;
-      }
-      const model = options.modelFlag ? `${options.modelFlag} ` : "";
-      const effort = options.effortFlag ? `${options.effortFlag} ` : "";
-      const prompt = options.prompt !== undefined ? ` ${shellQuote(options.prompt)}` : "";
-      // `--session-id` only when santree chose one. The field is nullable
-      // because Codex mints its own id and reports it back through a hook;
-      // Claude always gets one from us, so this is type honesty, not a case
-      // the launch path is expected to hit.
-      const id = session.sessionId ? `--session-id ${shellQuote(session.sessionId)}` : "";
-      return `exec ${env}${bin} ${remote}${settings}${mcp}${chrome}${permission}${model}${effort}${id}${prompt}`;
+    launch: {
+      common: (_session, config) => [
+        ...flag("--remote-control", config.remoteControl),
+        // Pre-quoted in Rust: one word already, whatever it contains.
+        ...(config.hookFlag ? [config.hookFlag] : []),
+        ...flag("--mcp-config", config.mcpConfigPath),
+        // A launch-time capability, so it applies to a resume too.
+        ...(config.chrome ? ["--chrome"] : []),
+        ...flag("--permission-mode", config.permissionMode),
+      ],
+      fresh: (session, config) => [
+        // Model and effort are fresh-only: a resumed session keeps its own.
+        ...flag("--model", config.model),
+        ...flag("--effort", config.effort),
+        // `--session-id` only when santree chose one. The field is nullable
+        // because Codex mints its own id and reports it back through a hook;
+        // Claude always gets one from us, so this is type honesty, not a case
+        // the launch path is expected to hit.
+        ...flag("--session-id", session.sessionId),
+      ],
+      resume: (sessionId) => ["--resume", shellQuote(sessionId)],
     },
   },
   Codex: {
@@ -130,50 +173,40 @@ const providers: Record<AgentKind, AgentProviderContract> = {
       settingsPanel: "codex",
       hookInjection: "config-flags",
     },
-    buildSeed: (session, options) => {
+    launch: {
       // The plain CLI, not an App Server attachment. `resume --remote <socket>`
       // routed every Codex TUI through one santree-owned `codex app-server`,
       // which enforces a single writer per thread — so a re-launch against a
       // thread whose previous process still held the lock failed outright with
       // "already has an active writer" and dropped the tab to a bare shell.
       // Orca and Superset both spawn the plain binary; so do we now.
-      const bin = shellQuote(session.executable);
-      // Same attribution channel Claude uses: the hook reads these to bind the
-      // id Codex mints to the surface that launched it.
-      const env =
-        options.repo && options.termKey
-          ? `env SANTREE_REPO=${shellQuote(options.repo)} SANTREE_TERM_KEY=${shellQuote(options.termKey)} `
-          : "";
-      // Codex's hooks are injected per launch (`-c 'hooks.<Event>=[…]'`), built
-      // backend-side where the bundled hook binary's path is known. They are
-      // SILENTLY skipped without the trust bypass — re-verified on codex-cli
-      // 0.150.1 in an isolated CODEX_HOME: no hook ran, and no warning or error
-      // said so — so the flag rides with the injection and never alone.
       //
-      // The flag is not scoped to our hook: it lifts the trust gate for every
-      // enabled hook in that invocation, the user's own global ones included
-      // (for that session only — nothing is persisted). Trusting just ours is
-      // possible in principle and measured to work; see `hooks.rs`
-      // `codex_hook_flags` for the key format, and for the one piece missing.
-      const hooks = options.settingsFlag
-        ? `--dangerously-bypass-hook-trust ${options.settingsFlag} `
-        : "";
-      // What this session runs *under* — sandbox, approval policy, model,
-      // reasoning effort, and for a review santree's own MCP tool server, with
-      // `required = true` so a review whose tools cannot start fails instead of
-      // running as an ordinary agent. Built in Rust (`codex_config.rs`) against
-      // the surface the backend resolved, already shell-quoted, and carried on
-      // the session so that no launch site can omit it. Empty for Claude, whose
-      // launch line is assembled from `options` above.
-      const launch = session.launchFlags ? `${session.launchFlags} ` : "";
-      const prompt = options.prompt !== undefined ? ` ${shellQuote(options.prompt)}` : "";
-      // The hook and launch flags are top-level options (`codex [OPTIONS]
-      // <COMMAND>`), so they precede `resume` rather than sitting between it and
-      // its id — clap accepts either, but the id belongs next to the subcommand
-      // that takes it.
-      if (session.type === "resume") {
-        return `exec ${env}${bin} ${hooks}${launch}resume ${shellQuote(session.sessionId)}`;
-      }
+      // Codex's model, effort, sandbox, approval policy and — for a review —
+      // santree's own MCP tool server are NOT assembled here: they are resolved
+      // backend-side (`codex_config.rs`) against the surface and ride on the
+      // session, so no launch site can omit them. Everything below is what a
+      // *call site* legitimately owns.
+      common: (session, config) => [
+        // Codex's hooks are injected per launch (`-c 'hooks.<Event>=[…]'`), built
+        // backend-side where the bundled hook binary's path is known. They are
+        // SILENTLY skipped without the trust bypass — re-verified on codex-cli
+        // 0.150.1 in an isolated CODEX_HOME: no hook ran, and no warning or error
+        // said so — so the flag rides with the injection and never alone.
+        //
+        // The flag is not scoped to our hook: it lifts the trust gate for every
+        // enabled hook in that invocation, the user's own global ones included
+        // (for that session only — nothing is persisted). Trusting just ours is
+        // possible in principle and measured to work; see `hooks.rs`
+        // `codex_hook_flags` for the key format, and for the one piece missing.
+        ...(config.hookFlag ? ["--dangerously-bypass-hook-trust", config.hookFlag] : []),
+        // What this session runs *under*, already shell-quoted by Rust. It rides
+        // on the session precisely so a call site cannot drop it: a review that
+        // launched without `--sandbox read-only` would come back with write
+        // access, and one without its MCP server with nowhere to record a
+        // finding. Top-level options (`codex [OPTIONS] <COMMAND>`), so they
+        // precede `resume` rather than sitting between it and its id.
+        ...(session.launchFlags ? [session.launchFlags] : []),
+      ],
       // No id on a fresh launch: Codex has no launch-time id flag. It mints one
       // and the `SessionStart` hook reports it back, which is what binds the
       // session to this surface for the next resume.
@@ -183,7 +216,8 @@ const providers: Record<AgentKind, AgentProviderContract> = {
       // left at the prompt reports nothing at all (verified on codex-cli 0.151.0
       // — see `hooks.rs` `CODEX_EVENTS`). Anything that must show a Codex agent
       // before it has been spoken to reads santree's own launch, not the hook.
-      return `exec ${env}${bin} ${hooks}${launch}`.trimEnd() + prompt;
+      fresh: () => [],
+      resume: (sessionId) => ["resume", shellQuote(sessionId)],
     },
   },
   Cursor: {
@@ -199,7 +233,7 @@ const providers: Record<AgentKind, AgentProviderContract> = {
       settingsPanel: "unsupported",
       hookInjection: null,
     },
-    buildSeed: unsupportedSeed,
+    launch: null,
   },
   Opencode: {
     label: "OpenCode",
@@ -214,7 +248,7 @@ const providers: Record<AgentKind, AgentProviderContract> = {
       settingsPanel: "unsupported",
       hookInjection: null,
     },
-    buildSeed: unsupportedSeed,
+    launch: null,
   },
 };
 
@@ -238,10 +272,88 @@ export function providerExecutable(
   );
 }
 
+/**
+ * Drop the per-provider settings when the session turns out to run a different
+ * provider than the one they were read for. A worktree configured for Codex
+ * whose stored session is a Claude one must not hand Codex's model name to
+ * `claude --model`.
+ */
+function scopedToSession(session: LaunchableSession, config: AgentLaunchConfig): AgentLaunchConfig {
+  if (!config.configuredFor || config.configuredFor === session.agentKind) return config;
+  return { ...config, model: null, effort: null, permissionMode: null };
+}
+
+/** `env NAME=value …` — the attribution channel santree's hook binary reads to
+ *  bind the id the CLI mints to the surface that launched it. Both halves or
+ *  neither: a partial pair names nothing. */
+function envWords(config: AgentLaunchConfig): string[] {
+  if (!config.repo || !config.termKey) return [];
+  return [
+    "env",
+    `SANTREE_REPO=${shellQuote(config.repo)}`,
+    `SANTREE_TERM_KEY=${shellQuote(config.termKey)}`,
+  ];
+}
+
+/**
+ * The shell command that (re)launches an agent in a terminal, from a
+ * backend-resolved {@link AgentSession} and a provider-neutral
+ * {@link AgentLaunchConfig}. `undefined` for a plain shell, or a provider
+ * santree cannot drive.
+ *
+ * `exec <bin>` replaces the login shell so quitting the agent ends the PTY — and
+ * the next time the tab opens, the session has a record on disk, so the backend
+ * resolves it to a resume instead of a fresh start.
+ *
+ * This is the single serialisation point: everything above it is typed data,
+ * everything below it is bytes the PTY runs. Built **once**, when a human opens
+ * a tab, and applied at session creation — never re-parsed, never re-emitted
+ * (COMPLIANCE.md: no output-parsing influences input, no unattended loop).
+ */
 export function agentSessionSeed(
   session: AgentSession | undefined,
-  options: AgentSeedOptions,
+  config: AgentLaunchConfig = {},
 ): string | undefined {
   if (!session || session.type === "shell") return undefined;
-  return agentProvider(session.agentKind).buildSeed(session, options);
+  const spec = agentProvider(session.agentKind).launch;
+  if (!spec) return undefined;
+
+  const scoped = scopedToSession(session, config);
+  const words = [
+    "exec",
+    ...envWords(scoped),
+    shellQuote(session.executable),
+    ...spec.common(session, scoped),
+  ];
+  if (session.type === "resume") {
+    words.push(...spec.resume(session.sessionId));
+  } else {
+    words.push(...spec.fresh(session, scoped));
+    if (scoped.prompt !== undefined) words.push(shellQuote(scoped.prompt));
+  }
+  return words.join(" ");
+}
+
+/**
+ * The same invocation a launched session runs, as a line a user can paste into
+ * their own terminal. `null` for a provider with no resume path.
+ *
+ * The only legitimate difference from the seed is the wrapper: a PTY session
+ * gets its working directory from the spawn, while a pasted command has to say
+ * it — and it is load-bearing, since Claude looks a conversation up under the
+ * directory it ran in. The invocation itself comes from the provider's one
+ * {@link AgentLaunchSpec.resume}, so the copied line and the seeded one cannot
+ * disagree about how this CLI is resumed.
+ */
+export function resumeInvocation(
+  kind: AgentKind,
+  sessionId: string,
+  cwd?: string | null,
+): string | null {
+  const { defaultExecutable, launch } = agentProvider(kind);
+  if (!launch) return null;
+  // The plain binary name, not santree's resolved path: this is typed by a
+  // human into their own shell, where their own PATH applies.
+  const invocation = [defaultExecutable, ...launch.resume(sessionId)].join(" ");
+  return cwd ? `cd ${shellQuote(cwd)} && ${invocation}` : invocation;
 }

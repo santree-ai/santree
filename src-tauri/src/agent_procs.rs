@@ -93,8 +93,10 @@ pub fn foreground_agent(
         })
 }
 
-/// Scan every live pane. `panes` is `(term_key, root pid)` — see
-/// [`crate::terminal::pane_roots`].
+/// Scan every live pane. `panes` is `(pane address, root pid)` — see
+/// [`crate::terminal::pane_roots`]. The address is the pair, not the `term_key`
+/// alone: one surface can host a pane per provider, and a result keyed by the
+/// key alone would attribute one of them to the other.
 ///
 /// A pane that cannot be attributed is simply absent from the result. That
 /// includes an unreadable process table: `ps` is a process spawn and it can be
@@ -103,7 +105,7 @@ pub fn foreground_agent(
 /// whose failure is itself cached so the next caller is answered immediately.
 /// The failure mode is "we don't know yet", which the frontend already has to
 /// handle for every pane the walk finds nothing in.
-pub async fn detect(panes: &[(String, u32)]) -> Vec<AgentProcess> {
+pub async fn detect(panes: &[(crate::terminal::LiveTerminal, u32)]) -> Vec<AgentProcess> {
     if panes.is_empty() {
         return Vec::new();
     }
@@ -117,9 +119,10 @@ pub async fn detect(panes: &[(String, u32)]) -> Vec<AgentProcess> {
     let catalog = catalog();
     panes
         .iter()
-        .filter_map(|(term_key, pid)| {
+        .filter_map(|(pane, pid)| {
             foreground_agent(&tree, *pid, &catalog).map(|agent_kind| AgentProcess {
-                term_key: term_key.clone(),
+                term_key: pane.term_key.clone(),
+                pane_agent_kind: pane.agent_kind,
                 agent_kind,
             })
         })
@@ -227,7 +230,14 @@ mod tests {
     async fn detect_reports_only_what_it_can_attribute() {
         assert!(detect(&[]).await.is_empty());
         let mine = std::process::id();
-        let found = detect(&[("term:test".to_string(), mine)]).await;
+        let found = detect(&[(
+            crate::terminal::LiveTerminal {
+                term_key: "term:test".to_string(),
+                agent_kind: None,
+            },
+            mine,
+        )])
+        .await;
         assert!(
             found.iter().all(|p| p.term_key == "term:test"),
             "a result can only ever name the pane it was asked about"

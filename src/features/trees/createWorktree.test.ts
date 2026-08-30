@@ -133,25 +133,26 @@ describe("createArgsFor", () => {
     ).toEqual({
       issueId: "AK-1",
       title: "Do a thing",
-      project: "Booking",
-      source: { type: "derived" },
+      launch: { type: "ticket", project: "Booking" },
       base: null,
     });
   });
 
+  // A project belongs to the ticket origin and nowhere else — the branch origins
+  // carry no field that could hold one, which is what stops a stand-in ever
+  // reaching `worktree_links.project` and banding the sidebar.
   it("checks out an existing branch under no project and no ticket", () => {
     expect(createArgsFor({ kind: "existing", branch: "feature/sidebar" }, null)).toEqual({
       issueId: "feature-sidebar",
       title: "feature/sidebar",
-      project: null,
-      source: { type: "existing", branch: "feature/sidebar" },
+      launch: { type: "existingBranch", branch: "feature/sidebar" },
       base: null,
     });
   });
 
   it("creates a new branch under exactly the typed name", () => {
     const args = createArgsFor({ kind: "new", branch: "feature/brand-new" }, null);
-    expect(args.source).toEqual({ type: "new", branch: "feature/brand-new" });
+    expect(args.launch).toEqual({ type: "newBranch", branch: "feature/brand-new" });
     expect(args.title).toBe("feature/brand-new");
   });
 

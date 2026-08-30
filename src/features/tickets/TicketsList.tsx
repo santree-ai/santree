@@ -52,11 +52,15 @@ function ProjectHeading({
       type="button"
       onClick={onToggle}
       aria-expanded={open}
-      className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 pt-3 pb-1 text-left hover:bg-hover"
+      // `tree-band`, the same container register the sidebar's bands use: this
+      // folds its rows, it doesn't open anything, so it must not paint the fill
+      // that means "selected" on the ticket rows below. The chevron carries the
+      // hover feedback instead, since the label is already at full strength.
+      className="tree-band group flex w-full cursor-pointer items-center gap-2 px-2 pt-3 pb-1 text-left"
     >
       <ChevronDownIcon
         size={11}
-        className={`flex-none text-muted-4 ${open ? "transition-transform" : "-rotate-90 transition-transform"}`}
+        className={`flex-none text-muted-4 transition-[transform,color] group-hover:text-muted-3 ${open ? "" : "-rotate-90"}`}
       />
       <ProjectGlyph color={group.color} icon={group.icon} size={7} />
       <span className="truncate text-[12px] font-semibold text-fg-2">{group.project}</span>

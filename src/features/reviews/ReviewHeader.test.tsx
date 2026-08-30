@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ReviewPr, Worktree, WorktreePr } from "../../bindings";
+import { worktree as fxWorktree } from "../../test/fixtures";
 
 const state = vi.hoisted(() => ({
   mine: false,
@@ -22,7 +23,7 @@ vi.mock("../../lib/queries", () => ({
   useRepos: () => ({ data: state.repos }),
   useWorktrees: () => ({ data: state.worktrees }),
   useWorktreePrs: () => ({ data: state.worktreePrs }),
-  useCreateReviewWorktree: () => ({ mutate: state.mutate, isPending: false }),
+  useCreateWorktree: () => ({ mutate: state.mutate, isPending: false }),
 }));
 vi.mock("../../state/AppContext", () => ({
   useApp: () => ({ setActiveRepo: state.setActiveRepo }),
@@ -74,11 +75,10 @@ const pr = {
   viewerReview: null,
 } satisfies ReviewPr;
 
-const existing = {
-  id: "AK-42",
-  title: "Fix the thing",
-  branch: pr.headRef,
-} as Worktree;
+/** Deliberately NOT on `pr.headRef`. `existingTree` is a two-armed lookup —
+ *  linked by PR url, or matched by branch — and a fixture that satisfies both at
+ *  once lets either arm be deleted with the suite still green. */
+const existing = fxWorktree("AK-42", { title: "Fix the thing", branch: "someone/unrelated" });
 
 beforeEach(() => {
   state.mine = false;
@@ -119,17 +119,37 @@ describe("ReviewHeader tree action", () => {
     expect(state.navigate).toHaveBeenCalledWith({ to: "/trees" });
   });
 
+  /** The other arm: someone checked the branch out before the PR was linked, so
+   *  there is no `worktreePrs` row — the branch match is all santree has. */
+  it("focuses a tree already sitting on the PR's branch, with no PR link recorded", () => {
+    state.worktrees = [{ ...existing, branch: pr.headRef }];
+    state.worktreePrs = [];
+    render(<ReviewHeader pr={pr} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "View tree" }));
+    expect(state.mutate).not.toHaveBeenCalled();
+    expect(state.requestTreeFocus).toHaveBeenCalledWith(existing.id);
+  });
+
   it("creates an unowned PR tree without assigning a provider", () => {
     render(<ReviewHeader pr={pr} />);
     fireEvent.click(screen.getByRole("button", { name: "Open as tree" }));
 
+    // The placeholder is merged straight into the sidebar's worktree list, so a
+    // project on it opens a band exactly as a stored one would.
     expect(state.addPendingLaunches).toHaveBeenCalledWith([
-      expect.objectContaining({ id: reviewTreeId(pr), agent: null }),
+      expect.objectContaining({ id: reviewTreeId(pr), agent: null, project: null }),
     ]);
     expect(state.mutate).toHaveBeenCalledWith(
-      expect.objectContaining({ prRepo: pr.repo, branch: pr.headRef }),
+      expect.objectContaining({
+        issueId: reviewTreeId(pr),
+        launch: { type: "pr", prRepo: pr.repo, branch: pr.headRef },
+        agent: null,
+      }),
       expect.any(Object),
     );
+    // The origin has no project field to fill in, which is the point.
+    expect(state.mutate.mock.calls[0][0]).not.toHaveProperty("project");
   });
 
   it("disables tree creation when the PR's repository is not registered locally", () => {

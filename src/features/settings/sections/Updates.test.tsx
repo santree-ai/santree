@@ -14,22 +14,29 @@ const checkReset = vi.fn();
 const installMutate = vi.fn();
 const setSetting = vi.fn();
 
-vi.mock("../../../lib/queries", () => ({
-  UPDATE_CHANNEL_KEY: "update_channel",
-  parseUpdateChannel: (raw: string | null | undefined) => (raw === "beta" ? "beta" : "stable"),
-  useAppVersion: () => ({ data: "0.1.0" }),
-  useSetting: () => ({ data: channelValue }),
-  useSetSetting: () => ({ mutate: setSetting }),
-  useCheckForUpdate: () => ({
-    mutate: checkMutate,
-    reset: checkReset,
-    data: checkData,
-    isPending: false,
-  }),
-  useInstallUpdate: () => ({ mutate: installMutate, isPending: installing }),
-  useUpdateProgress: () => null,
-  useClaudeModels: () => ({ data: [] }),
-}));
+// The hooks are stubbed, but the channel parser and its key are taken from the
+// real module: a stub of `parseUpdateChannel` here would be a second copy of the
+// rule under test, and "defaults to stable when nothing is stored" would then be
+// asserting the copy rather than the parser the app runs.
+vi.mock("../../../lib/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../lib/queries")>();
+  return {
+    UPDATE_CHANNEL_KEY: actual.UPDATE_CHANNEL_KEY,
+    parseUpdateChannel: actual.parseUpdateChannel,
+    useAppVersion: () => ({ data: "0.1.0" }),
+    useSetting: () => ({ data: channelValue }),
+    useSetSetting: () => ({ mutate: setSetting }),
+    useCheckForUpdate: () => ({
+      mutate: checkMutate,
+      reset: checkReset,
+      data: checkData,
+      isPending: false,
+    }),
+    useInstallUpdate: () => ({ mutate: installMutate, isPending: installing }),
+    useUpdateProgress: () => null,
+    useClaudeModels: () => ({ data: [] }),
+  };
+});
 
 describe("Settings → Updates", () => {
   beforeEach(() => {
@@ -43,6 +50,23 @@ describe("Settings → Updates", () => {
     render(<UpdatesSection />);
     expect(screen.getByRole("combobox")).toHaveValue("stable");
     expect(screen.getByText("0.1.0 (stable)")).toBeInTheDocument();
+  });
+
+  // The other two branches of the real parser, through the pane that reads it.
+  // The fallback is not cosmetic: Rust's `update.rs` makes the same call on the
+  // same row, so a value neither side recognises has to mean stable in both —
+  // otherwise a hand-edited setting strands the install on a channel that
+  // publishes no manifest at all.
+  it("shows a stored channel, and falls back to stable for one it doesn't know", () => {
+    channelValue = "beta";
+    const { unmount } = render(<UpdatesSection />);
+    expect(screen.getByRole("combobox")).toHaveValue("beta");
+    expect(screen.getByText("0.1.0 (beta)")).toBeInTheDocument();
+    unmount();
+
+    channelValue = "nightly";
+    render(<UpdatesSection />);
+    expect(screen.getByRole("combobox")).toHaveValue("stable");
   });
 
   it("checks for updates on demand", () => {

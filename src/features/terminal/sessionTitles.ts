@@ -4,10 +4,13 @@
  * A module-scope store rather than context state, for the same reason the
  * terminal layer is mounted once at the root: titles arrive from a renderer
  * callback, not from a render, and they have to survive every navigation the
- * pane behind them survives. The key is the pane's `label` — `refId ?? key`,
- * which is also the backend's session label and the DB's `term_key` — so the
- * agent registry can join a stored session to the title of the terminal running
- * it without inventing a second identity (see `buildAgentEntries`).
+ * pane behind them survives. The key is the pane's *address* (`paneAddress`):
+ * its `label` — `refId ?? key`, which is also the backend's session label and
+ * the DB's `term_key` — paired with the provider running in it, because one
+ * surface can host a pane per provider and a Codex spinner must not be read as
+ * the Claude session's status. The registry joins a stored session to the title
+ * of the terminal running it through that same pair, inventing no second
+ * identity (see `buildAgentEntries`).
  *
  * **A title lives exactly as long as its PTY.** `TerminalView` clears its entry
  * on teardown, so a session whose process ended has no title here at all —
@@ -31,8 +34,8 @@ import { useSyncExternalStore } from "react";
 
 import { classifyAgentTitle, type TitleActivity } from "./agentTitle";
 
-/** Titles by pane label. Replaced (never mutated) so `useSyncExternalStore` can
- *  compare snapshots by identity. */
+/** Titles by pane address. Replaced (never mutated) so `useSyncExternalStore`
+ *  can compare snapshots by identity. */
 let snapshot: ReadonlyMap<string, string> = new Map();
 
 /** The newest title per pane, published or not — what a new title is compared
@@ -46,7 +49,8 @@ function publish(next: Map<string, string>) {
   for (const listener of listeners) listener();
 }
 
-/** Record the title a pane's terminal just set. */
+/** Record the title a pane's terminal just set. `label` is the pane's address
+ *  (`paneAddress`), not its `term_key` alone. */
 export function setSessionTitle(label: string, title: string): void {
   const activity = classifyAgentTitle(title);
   const previous = latest.get(label);
@@ -80,7 +84,7 @@ export function sessionTitles(): ReadonlyMap<string, string> {
   return snapshot;
 }
 
-/** Every live pane's terminal title, by pane label. */
+/** Every live pane's terminal title, by pane address. */
 export function useSessionTitles(): ReadonlyMap<string, string> {
   return useSyncExternalStore(subscribeSessionTitles, sessionTitles, sessionTitles);
 }

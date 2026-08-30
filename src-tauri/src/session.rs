@@ -21,9 +21,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, ensure, Result};
 use santree_core::domain::{
-    AgentKind, AgentSession, LastMessageFrom, TriageSession, WorktreeSession,
+    AgentKind, AgentSession, LastMessageFrom, SessionDetail, SessionSpend, SessionSubagent,
+    TriageSession, WorktreeSession,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -50,14 +51,81 @@ pub(crate) fn project_slug(cwd: &str) -> String {
         .collect()
 }
 
+/// What santree could learn about a session's on-disk record — a Claude
+/// transcript, a Codex rollout.
+///
+/// **Absence and "couldn't look" are different answers**, and collapsing them
+/// into one `bool` is a data-loss bug rather than an untidiness. A bare
+/// `path.exists()` answers `false` when `~/.claude/projects` is unreadable —
+/// a permission change, an unmounted volume, a transient IO error — santree
+/// reads that as "the CLI pruned it", and the tab silently starts a *new*
+/// conversation on top of one the user still has. Only [`std::io::ErrorKind::NotFound`]
+/// and [`std::io::ErrorKind::NotADirectory`] mean the record is gone; every
+/// other error means santree does not know, and a caller may not round that
+/// down to "gone".
+#[derive(Debug)]
+pub(crate) enum RecordPresence {
+    /// The record is there: this session can be resumed.
+    Present,
+    /// The record is genuinely not there — the CLI pruned it, or it never
+    /// existed.
+    Absent,
+    /// santree could not find out. Carries why, for the message the user sees.
+    Unknown(String),
+}
+
+impl RecordPresence {
+    /// Stat one record. Blocking; callers hand it to the blocking pool.
+    pub(crate) fn of(path: &Path) -> Self {
+        match std::fs::metadata(path) {
+            Ok(_) => Self::Present,
+            Err(e) if is_absence(&e) => Self::Absent,
+            Err(e) => Self::Unknown(format!("{}: {e}", path.display())),
+        }
+    }
+}
+
+/// The only two IO errors that mean "there is nothing here". Everything else —
+/// `PermissionDenied`, `Other` from an unmounted volume, an interrupted or
+/// timed-out network filesystem — means the question went unanswered.
+pub(crate) fn is_absence(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
 /// Whether `session_id` can still be resumed for a claude run in `cwd`. The stat
 /// goes to the blocking pool: `~/.claude/projects` can sit on a slow or networked
 /// filesystem, and every caller here is on the async runtime.
-async fn is_resumable(home: &Path, cwd: &str, session_id: &str) -> bool {
+///
+/// No `home` is [`RecordPresence::Unknown`], not [`RecordPresence::Absent`]:
+/// without it transcripts cannot be located *at all*, so santree is guessing,
+/// not observing. (A surface with no stored row never reaches here — a first
+/// launch still mints a session on a machine with no `HOME`.)
+async fn transcript_presence(home: Option<&Path>, cwd: &str, session_id: &str) -> RecordPresence {
+    let Some(home) = home else {
+        return RecordPresence::Unknown(
+            "HOME is not set, so Claude's transcripts cannot be located".into(),
+        );
+    };
     let path = transcript_path(home, cwd, session_id);
-    tokio::task::spawn_blocking(move || path.exists())
+    tokio::task::spawn_blocking(move || RecordPresence::of(&path))
         .await
-        .unwrap_or(false)
+        // A cancelled or panicked stat is another way of not knowing — the old
+        // `unwrap_or(false)` here reported it as "pruned".
+        .unwrap_or_else(|e| RecordPresence::Unknown(format!("the transcript check failed: {e}")))
+}
+
+/// The message a resume decision refuses with when it could not read the
+/// record. Refusing is the whole point: the alternative is starting a fresh
+/// conversation over one that is probably still there.
+fn unreadable_record(why: &str) -> anyhow::Error {
+    anyhow!(
+        "santree couldn't read this session's record, so it can't tell whether the saved \
+         conversation is still there — and it won't start a new one over it. Check that the \
+         agent's session directory is readable, then try again ({why})"
+    )
 }
 
 /// Resolve how to (re)launch claude for the logical terminal `term_key` in
@@ -66,8 +134,13 @@ async fn is_resumable(home: &Path, cwd: &str, session_id: &str) -> bool {
 /// plain shell. A fresh launch reuses the stored id when the transcript was
 /// pruned, so a later resume can still find the conversation. `home` is the
 /// user's home directory (`None` when `HOME` isn't set), resolved once by the
-/// caller — transcripts can never be found without it, so we just treat that
-/// as "nothing resumable".
+/// caller.
+///
+/// **Errs when the transcript could not be read** (see [`RecordPresence`]).
+/// A stored session whose record santree cannot stat is not a pruned one: the
+/// launch stops, the tab falls back to a plain shell in the same directory, and
+/// the row is left untouched so the conversation is still there to resume once
+/// the filesystem is. Reporting "pruned" instead would mint a launch over it.
 pub async fn resolve(
     db: &Db,
     repo: &str,
@@ -91,17 +164,17 @@ pub async fn resolve(
         if agent_kind != AgentKind::Claude {
             anyhow::bail!("stored provider does not match Claude session resolver");
         }
-        let resumable = match home {
-            Some(h) => is_resumable(h, &stored_cwd, &session_id).await,
-            None => false,
-        };
-        if resumable {
-            return Ok(AgentSession::Resume {
-                agent_kind: AgentKind::Claude,
-                executable: executable.to_string(),
-                session_id,
-                launch_flags: String::new(),
-            });
+        match transcript_presence(home, &stored_cwd, &session_id).await {
+            RecordPresence::Present => {
+                return Ok(AgentSession::Resume {
+                    agent_kind: AgentKind::Claude,
+                    executable: executable.to_string(),
+                    session_id,
+                    launch_flags: String::new(),
+                })
+            }
+            RecordPresence::Unknown(why) => return Err(unreadable_record(&why)),
+            RecordPresence::Absent => {}
         }
         return Ok(if allow_fresh {
             AgentSession::Fresh {
@@ -171,15 +244,22 @@ pub async fn resolve_codex(db: &Db, opts: CodexSessionOpts<'_>) -> Result<AgentS
         // gone (Codex pruned it, or `CODEX_HOME` moved), so the stored id is only
         // a resume target while its rollout is on disk. A stale row is left in
         // place rather than deleted: the fresh run's `SessionStart` repoints it.
-        if codex_rollout_exists(sessions_root, &thread_id).await? {
-            return Ok(AgentSession::Resume {
-                agent_kind: AgentKind::Codex,
-                executable: executable.to_string(),
-                session_id: thread_id,
-                // Filled in by `CodexProvider`, which owns what a Codex session
-                // runs under; the resolver only decides which thread it is.
-                launch_flags: String::new(),
-            });
+        match codex_rollout_presence(sessions_root, &thread_id).await? {
+            RecordPresence::Present => {
+                return Ok(AgentSession::Resume {
+                    agent_kind: AgentKind::Codex,
+                    executable: executable.to_string(),
+                    session_id: thread_id,
+                    // Filled in by `CodexProvider`, which owns what a Codex session
+                    // runs under; the resolver only decides which thread it is.
+                    launch_flags: String::new(),
+                });
+            }
+            // An unreadable rollout tree is not a pruned thread. Starting fresh
+            // here lets the new run's `SessionStart` repoint the row, and the
+            // user's thread stops being reachable from this surface at all.
+            RecordPresence::Unknown(why) => return Err(unreadable_record(&why)),
+            RecordPresence::Absent => {}
         }
     }
 
@@ -194,15 +274,23 @@ pub async fn resolve_codex(db: &Db, opts: CodexSessionOpts<'_>) -> Result<AgentS
     })
 }
 
-/// [`crate::codex_rollouts::rollout_exists_in`] off the async runtime — the
+/// [`crate::codex_rollouts::rollout_presence_in`] off the async runtime — the
 /// rollout directory is a real directory walk, and every caller here is on it.
-async fn codex_rollout_exists(sessions_root: Option<&Path>, thread_id: &str) -> Result<bool> {
+///
+/// No `sessions_root` is [`RecordPresence::Absent`], not `Unknown`, and that is
+/// not the same call as Claude's `home`: `codex_rollouts::sessions_root()`
+/// answers `Some` only for a directory that is *there*, so `None` is Codex
+/// never having written a session on this machine — a real absence.
+async fn codex_rollout_presence(
+    sessions_root: Option<&Path>,
+    thread_id: &str,
+) -> Result<RecordPresence> {
     let Some(root) = sessions_root.map(Path::to_path_buf) else {
-        return Ok(false);
+        return Ok(RecordPresence::Absent);
     };
     let thread_id = thread_id.to_string();
     Ok(tokio::task::spawn_blocking(move || {
-        crate::codex_rollouts::rollout_exists_in(&root, &thread_id)
+        crate::codex_rollouts::rollout_presence_in(&root, &thread_id)
     })
     .await?)
 }
@@ -252,6 +340,9 @@ pub async fn started_investigations(db: &Db, repo: &str) -> Result<Vec<TriageSes
     rows.into_iter()
         .filter_map(|(key, kind)| {
             key.strip_prefix("triage:")
+                // Sentinel keys from the removed repo-wide Triage desk are still in
+                // the table, and no ticket will ever match them again.
+                .filter(|ref_id| !ref_id.starts_with("__"))
                 .map(|ref_id| (ref_id.to_string(), kind))
         })
         .map(|(ref_id, kind)| {
@@ -330,6 +421,9 @@ pub(crate) struct SessionSummary {
     pub model: Option<String>,
     pub started_at_ms: Option<i64>,
     pub last_activity_ms: Option<i64>,
+    /// Tokens + cost, when the provider's record carries them. Codex rollouts
+    /// don't, so theirs stays `None` rather than reporting a zero as a total.
+    pub spend: Option<SessionSpend>,
 }
 
 /// A worktree's registered session with the hook-tracked state joined on:
@@ -379,9 +473,12 @@ pub async fn history(
         .map(|r| r.0.clone())
         .collect();
     let dir = worktree.to_path_buf();
+    // The same table the Usage panel prices with, so a session's cost reads the
+    // same in both places. Never blocks on the network (see `pricing`).
+    let table = crate::pricing::ensure_fresh(db).await;
     let mut summaries: HashMap<String, (AgentKind, SessionSummary)> =
         tokio::task::spawn_blocking(move || {
-            let claude = crate::usage::worktree_summaries(&dir, &known_claude)
+            let claude = crate::usage::worktree_summaries(&dir, &known_claude, &table)
                 .into_iter()
                 .map(|(id, s)| (id, (AgentKind::Claude, s)));
             let codex = crate::codex_rollouts::worktree_summaries(&dir, &known_codex)
@@ -429,6 +526,7 @@ pub async fn history(
                 model: s.as_ref().and_then(|s| s.model.clone()),
                 started_at_ms: started.map(|ms| ms as f64),
                 last_activity_ms: last.map(|ms| ms as f64),
+                spend: s.as_ref().and_then(|s| s.spend.clone()),
             },
         ));
     }
@@ -450,12 +548,250 @@ pub async fn history(
                 model: s.model,
                 started_at_ms: s.started_at_ms.map(|ms| ms as f64),
                 last_activity_ms: s.last_activity_ms.map(|ms| ms as f64),
+                spend: s.spend,
             },
         ));
     }
     // Newest first; a session with no timestamp at all sinks to the bottom.
     out.sort_by_key(|(when, _)| std::cmp::Reverse(*when));
     Ok(out.into_iter().map(|(_, s)| s).collect())
+}
+
+/// The Claude transcript of one of the worktree's *listed* sessions.
+///
+/// `session_id` crosses IPC, so it is never looked up directly: `listed` is
+/// re-derived by the caller from [`history`] — the very command the pane reads —
+/// and the id must name a Claude session in it. That is the same
+/// "discoverable ⇒ actionable" gate [`adopt`] applies, and it is also the
+/// `issue_id` gate, since `listed` only exists for a worktree the repo tracks.
+/// The id then only ever *compares* against a candidate's file stem; nothing
+/// derived from IPC is joined onto a path.
+///
+/// `Ok(None)` when the session is a Codex one (no Claude transcript exists) or
+/// its transcript has since been pruned — an empty result, not an error.
+async fn listed_transcript(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    worktree: &Path,
+    listed: &[WorktreeSession],
+    session_id: &str,
+) -> Result<Option<PathBuf>> {
+    let Some(_) = listed
+        .iter()
+        .find(|s| s.session_id == session_id && s.agent_kind == AgentKind::Claude)
+    else {
+        ensure!(
+            listed.iter().any(|s| s.session_id == session_id),
+            "no session '{session_id}' has run in this worktree"
+        );
+        return Ok(None); // listed, but not a Claude session
+    };
+    let known = claude_known(db, repo, issue_id).await?;
+    let dir = worktree.to_path_buf();
+    let id = session_id.to_string();
+    Ok(
+        tokio::task::spawn_blocking(move || crate::usage::worktree_transcript(&dir, &known, &id))
+            .await?,
+    )
+}
+
+/// The `(cwd, session_id)` pairs of the worktree's registered Claude sessions —
+/// what locates their transcripts, wherever they ran.
+async fn claude_known(db: &Db, repo: &str, issue_id: &str) -> Result<Vec<(String, String)>> {
+    let (exact, prefix) = worktree_key_patterns(issue_id);
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT cwd, session_id FROM terminal_sessions
+         WHERE repo = ? AND agent_kind = ? AND (term_key = ? OR term_key LIKE ? ESCAPE '\\')",
+    )
+    .bind(repo)
+    .bind(AgentKind::Claude.as_str())
+    .bind(exact)
+    .bind(prefix)
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
+/// What the expanded history row shows for one session: the full first prompt
+/// and the tail of the conversation. Empty when the session has no Claude
+/// transcript (see [`listed_transcript`] for the validation).
+pub async fn detail(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    worktree: &Path,
+    listed: &[WorktreeSession],
+    session_id: &str,
+) -> Result<SessionDetail> {
+    let Some(path) = listed_transcript(db, repo, issue_id, worktree, listed, session_id).await?
+    else {
+        return Ok(SessionDetail::default());
+    };
+    Ok(tokio::task::spawn_blocking(move || crate::usage::session_detail(&path)).await?)
+}
+
+/// The session's Task subagents, with the spawn relationships their sidecars
+/// record. Empty for a session with none, and for a provider that writes no
+/// sidecars (Codex folds its children into the parent's count instead).
+pub async fn subagents(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    worktree: &Path,
+    listed: &[WorktreeSession],
+    session_id: &str,
+) -> Result<Vec<SessionSubagent>> {
+    let Some(path) = listed_transcript(db, repo, issue_id, worktree, listed, session_id).await?
+    else {
+        return Ok(Vec::new());
+    };
+    let now = chrono::Local::now().timestamp_millis();
+    Ok(tokio::task::spawn_blocking(move || crate::usage::session_subagents(&path, now)).await?)
+}
+
+/// Reveal the session's transcript in the OS file browser. The path is derived
+/// here, from the same validated listing everything else in this pane uses — a
+/// webview supplies a session id and never a path (CLAUDE.md, "santree derives
+/// its own paths").
+pub async fn reveal_transcript(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    worktree: &Path,
+    listed: &[WorktreeSession],
+    session_id: &str,
+) -> Result<()> {
+    let path = listed_transcript(db, repo, issue_id, worktree, listed, session_id)
+        .await?
+        .ok_or_else(|| anyhow!("that session has no transcript on disk"))?;
+    tokio::task::spawn_blocking(move || crate::openers::reveal(&path)).await?
+}
+
+/// Which surface [`adopt`] points at which session, and where the two providers'
+/// records are looked for. The roots are passed in rather than read from the
+/// environment here, for the same reason [`CodexSessionOpts`] does it: a test
+/// pins a fixture instead of mutating process-global state.
+pub struct ResumeRequest<'a> {
+    pub repo: &'a str,
+    /// The freshly-minted surface to point at the session. Derived in Rust from
+    /// the worktree and the new tab's id — never taken whole from IPC, or a
+    /// caller could repoint an unrelated surface's conversation.
+    pub term_key: &'a str,
+    pub session_id: &'a str,
+    pub agent_kind: AgentKind,
+    /// The worktree directory — the cwd a session found on disk with no registry
+    /// row ran in.
+    pub worktree: &'a Path,
+    /// The user's home directory, which locates a Claude transcript.
+    pub home: Option<&'a Path>,
+    /// `$CODEX_HOME/sessions`, which locates a Codex rollout.
+    pub sessions_root: Option<&'a Path>,
+}
+
+/// Point `term_key` at one of a worktree's past sessions, so the tab the user
+/// just opened `--resume`s that conversation instead of starting a new one.
+///
+/// The launch path is deliberately untouched: this writes the same
+/// `terminal_sessions` row a reopened tab already reads, and [`resolve`] /
+/// [`resolve_codex`] answer `Resume` from it with no change of their own. Only a
+/// human's click reaches here, and nothing here writes to a terminal — the seed
+/// is still built by the tab's own launch (COMPLIANCE.md, "a `--resume` seed is
+/// built only when a human opens the tab").
+///
+/// `listed` is the worktree's own session listing, re-derived by the caller from
+/// the very command the history pane reads (`worktree::sessions`) — the id is
+/// IPC-supplied, so it is never looked up directly. It must be *in* that set,
+/// which is the same "discoverable ⇒ actionable" predicate the delete path uses
+/// and keeps the two from drifting into "resumable but not listed". Four further
+/// refusals:
+///
+/// * **A flag-shaped id.** This is the first writer to put an id *read off disk*
+///   into the registry — every other one is a [`mint`] UUID or what the CLI
+///   itself reported through the hook — and that id becomes a positional argument
+///   of `--resume` / `resume`. `shellQuote` stops metacharacters but not a
+///   leading `-`, which the CLI would read as a flag. Same no-leading-dash rule
+///   the branch validators apply.
+/// * **Zero turns.** Resuming a transcript with no conversation drops the user
+///   into an empty session that reads as a bug. `message_count` is counted from
+///   the record itself, so `0` also covers "the record is gone".
+/// * **No record at the worktree's own cwd.** The tab runs in the worktree, and
+///   Claude addresses a transcript by the directory it ran in — so the pair this
+///   row stores is `(worktree, session_id)` and is confirmed here. A session
+///   launched by hand from a *subdirectory* is therefore refused rather than
+///   adopted: it would resolve to `Fresh`, or `--resume` into a project dir the
+///   tab isn't in.
+/// * **A surface that already has a conversation.** The insert yields instead of
+///   replacing, so a tab id that names an existing tab can't silently repoint it
+///   at someone else's session.
+pub async fn adopt(db: &Db, listed: &[WorktreeSession], req: ResumeRequest<'_>) -> Result<()> {
+    // Only the two providers with an on-disk record have a resume path at all;
+    // the others reach the listing solely as registry rows.
+    ensure!(
+        matches!(req.agent_kind, AgentKind::Claude | AgentKind::Codex),
+        "{} sessions cannot be resumed",
+        req.agent_kind.as_str()
+    );
+    ensure!(
+        !req.session_id.starts_with('-'),
+        "session ids cannot start with '-'"
+    );
+    let session = listed
+        .iter()
+        .find(|s| s.session_id == req.session_id && s.agent_kind == req.agent_kind)
+        .ok_or_else(|| {
+            anyhow!(
+                "no {} session '{}' has run in this worktree",
+                req.agent_kind.as_str(),
+                req.session_id
+            )
+        })?;
+    ensure!(
+        session.message_count > 0,
+        "that session recorded no conversation to resume"
+    );
+
+    // The cwd the new tab will actually run in — every Trees surface launches in
+    // the worktree root (`validate_agent_cwd` enforces it), so this is both the
+    // pair `resolve` will stat and the project directory the CLI will look the
+    // conversation up in.
+    let cwd = req.worktree.to_string_lossy().into_owned();
+    let on_disk = match req.agent_kind {
+        // A rollout is addressed by thread id alone, wherever it ran.
+        AgentKind::Codex => codex_rollout_presence(req.sessions_root, req.session_id).await?,
+        // Claude (the `ensure!` above leaves nothing else).
+        _ => transcript_presence(req.home, &cwd, req.session_id).await,
+    };
+    match on_disk {
+        RecordPresence::Present => {}
+        RecordPresence::Absent => bail!(
+            "santree can't find that session's record for this worktree, so there is nothing to resume"
+        ),
+        // Distinct from absence on purpose: pointing the tab at a session
+        // santree could not confirm would claim a resume it may not be able to
+        // deliver, and the click is undoable only by deleting the tab.
+        RecordPresence::Unknown(why) => return Err(unreadable_record(&why)),
+    }
+
+    // The primary key is `(repo, term_key, agent_kind)`. Yield rather than
+    // replace: the surface is supposed to be one the caller just minted, and a
+    // silent overwrite would move an *existing* tab onto a different
+    // conversation (and orphan its own).
+    let inserted = sqlx::query(
+        "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (repo, term_key, agent_kind) DO NOTHING",
+    )
+    .bind(req.repo)
+    .bind(req.term_key)
+    .bind(&cwd)
+    .bind(req.session_id)
+    .bind(req.agent_kind.as_str())
+    .execute(db)
+    .await?
+    .rows_affected();
+    ensure!(inserted == 1, "that tab already has a session of its own");
+    Ok(())
 }
 
 /// Escape the three SQL `LIKE` metacharacters (`\`, `%`, `_`) so a value can be
@@ -486,6 +822,9 @@ pub async fn worktree_has_transcripts(
         return Ok(false);
     }
     let home = home.to_path_buf();
+    // A plain `exists()` is right here and only here: this gates a checkbox, so
+    // an unreadable transcript directory hides an option rather than starting a
+    // conversation over one the user still has (see [`RecordPresence`]).
     Ok(tokio::task::spawn_blocking(move || {
         rows.iter()
             .any(|(sid, cwd, _)| transcript_path(&home, cwd, sid).exists())
@@ -652,8 +991,16 @@ pub async fn reap_stale(db: &Db, home: Option<&Path>) -> Result<u64> {
 
     let mut reaped = 0;
     for (repo, term_key, cwd, session_id) in rows {
-        if is_resumable(home, &cwd, &session_id).await {
-            continue;
+        match transcript_presence(Some(home), &cwd, &session_id).await {
+            RecordPresence::Absent => {}
+            RecordPresence::Present => continue,
+            // The blast-radius guard again: a transcript directory that can't be
+            // read makes *every* row look transcript-less, and one startup would
+            // delete the sessions the user is actively resuming.
+            RecordPresence::Unknown(why) => {
+                log::warn!("not reaping session {repo}/{term_key}: {why}");
+                continue;
+            }
         }
         // A logical surface may also have a live Codex thread. Delete only the
         // exact Claude row we inspected; matching the session id also makes a
@@ -877,6 +1224,207 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Make `dir` unreadable and hand back a guard that puts it back — so a
+    /// failing assertion can't leave a directory the test harness can't clean up.
+    /// `None` when the mode bits don't actually bite (running as root), which is
+    /// the only honest way to skip: the point of the test is a *failed* read.
+    #[cfg(unix)]
+    fn deny_reads(dir: &Path, probe: &Path) -> Option<ModeGuard> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let guard = ModeGuard(dir.to_path_buf());
+        std::fs::metadata(probe).err().map(|e| {
+            assert!(
+                !is_absence(&e),
+                "the probe must fail for a reason that is not absence, got {e}"
+            );
+            guard
+        })
+    }
+
+    /// Restores a directory's mode, whatever the test does next.
+    #[cfg(unix)]
+    struct ModeGuard(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for ModeGuard {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// A transcript santree cannot *read* is not a transcript that is gone.
+    ///
+    /// `is_resumable` used to answer a bare `bool` from `path.exists()`, which is
+    /// `false` for an unreadable `~/.claude/projects` exactly as it is for a
+    /// pruned session — so an unmounted volume or a permission change made the
+    /// tab start a brand-new conversation over one the user still had, silently.
+    /// Now that third state is its own answer and the launch refuses.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_refuses_a_transcript_it_cannot_read_instead_of_starting_fresh() {
+        let base =
+            std::env::temp_dir().join(format!("santree-session-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let cwd = "/tmp/santree/work/AK-1";
+        let key = "tree:AK-1";
+
+        let fresh = resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", true)
+            .await
+            .unwrap();
+        let AgentSession::Fresh {
+            session_id: Some(session_id),
+            ..
+        } = fresh
+        else {
+            panic!("expected Fresh with a santree-minted id, got {fresh:?}");
+        };
+        let path = transcript_path(&home, cwd, &session_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}").unwrap();
+
+        // The conversation is on disk and resumable — right up until the read fails.
+        let projects = home.join(".claude/projects");
+        let Some(_guard) = deny_reads(&projects, &path) else {
+            return; // running as root: the mode bits don't bite, nothing to prove
+        };
+
+        // Neither a passive reopen nor an explicit launch may answer "pruned".
+        for allow_fresh in [false, true] {
+            let err = resolve(
+                &db,
+                "repo",
+                key,
+                cwd,
+                Some(&home),
+                "/bin/claude",
+                allow_fresh,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("won't start a new one over it"), "{err}");
+        }
+        // …and the row survives, so the conversation is still there to resume
+        // once the filesystem is.
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT session_id FROM terminal_sessions WHERE repo = 'repo'")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(session_id.clone(),)]);
+
+        // No HOME at all is the same class of answer: santree cannot look, so it
+        // does not get to say "gone".
+        assert!(resolve(&db, "repo", key, cwd, None, "/bin/claude", true)
+            .await
+            .is_err());
+
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The GC has the same rule, and the higher price for breaking it: a
+    /// transcript directory that can't be read makes *every* row look
+    /// transcript-less, and one startup would delete the sessions the user is
+    /// actively resuming.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reap_stale_keeps_the_rows_it_could_not_check() {
+        let base =
+            std::env::temp_dir().join(format!("santree-reap-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let cwd = "/tmp/santree/work";
+
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, created_at)
+             VALUES ('repo', 'triage:AK-1', ?, 'sid-1',
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days'))",
+        )
+        .bind(cwd)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let path = transcript_path(&home, cwd, "sid-1");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let projects = home.join(".claude/projects");
+        let Some(_guard) = deny_reads(&projects, &path) else {
+            return;
+        };
+
+        assert_eq!(reap_stale(&db, Some(&home)).await.unwrap(), 0);
+        let left: Vec<(String,)> =
+            sqlx::query_as("SELECT term_key FROM terminal_sessions WHERE repo = 'repo'")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(left, vec![("triage:AK-1".to_string(),)]);
+
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Codex's rollout walk had the identical shape — `let Ok(rd) =
+    /// read_dir(dir) else { return }` reported an unreadable tree as an empty
+    /// one — with the same consequence: the fresh run's `SessionStart` repoints
+    /// the row, and the user's thread stops being reachable from that surface.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_codex_refuses_a_rollout_tree_it_cannot_read() {
+        let base =
+            std::env::temp_dir().join(format!("santree-codex-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let sessions = base.join("sessions");
+        write_rollout(&sessions, "thread-live");
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', 'tree:AK-1', '/tmp/santree/work', 'thread-live', 'Codex')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let opts = CodexSessionOpts {
+            executable: "/bin/codex",
+            repo: "repo",
+            term_key: "tree:AK-1",
+            allow_fresh: true,
+            sessions_root: Some(sessions.as_path()),
+        };
+        assert!(matches!(
+            resolve_codex(&db, opts).await.unwrap(),
+            AgentSession::Resume { .. }
+        ));
+
+        let Some(_guard) = deny_reads(&sessions, &sessions.join("2026")) else {
+            return;
+        };
+        let err = resolve_codex(
+            &db,
+            CodexSessionOpts {
+                executable: "/bin/codex",
+                repo: "repo",
+                term_key: "tree:AK-1",
+                allow_fresh: true,
+                sessions_root: Some(sessions.as_path()),
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("won't start a new one over it"), "{err}");
+
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[tokio::test]
     async fn mint_adopts_the_existing_session_when_it_loses_the_race() {
         // Second mint stands in for the loser of two concurrent launches: it must
@@ -972,6 +1520,15 @@ mod tests {
         )
         .await
         .unwrap();
+        // A leftover row from the removed repo-wide Triage desk.
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', 'triage:__repo__:repo', ?, 'desk', 'Claude')",
+        )
+        .bind(cwd)
+        .execute(&db)
+        .await
+        .unwrap();
         // A different repo's investigation must not leak in.
         resolve(
             &db,
@@ -990,8 +1547,9 @@ mod tests {
             (&a.ref_id, a.agent_kind.as_str()).cmp(&(&b.ref_id, b.agent_kind.as_str()))
         });
         // Only the triage tickets with a stored row — not the worktree, the
-        // never-launched AK-9, or the other repo's ticket. Transcript existence
-        // is irrelevant, and one ticket can retain both providers.
+        // never-launched AK-9, the other repo's ticket, or the removed desk's
+        // sentinel. Transcript existence is irrelevant, and one ticket can
+        // retain both providers.
         assert_eq!(
             got,
             vec![
@@ -1153,6 +1711,318 @@ mod tests {
                 ("thread-live".to_string(), "/tmp/santree/work".to_string()),
                 ("thread-pruned".to_string(), "/tmp/santree/work".to_string()),
             ]
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A history row as the pane shows it — only the four fields [`adopt`]
+    /// actually predicates on carry meaning here.
+    fn listed(session_id: &str, agent_kind: AgentKind, message_count: u32) -> WorktreeSession {
+        WorktreeSession {
+            session_id: session_id.to_string(),
+            agent_kind,
+            term_key: None,
+            title: None,
+            last_message: None,
+            last_message_from: None,
+            message_count,
+            subagent_count: 0,
+            model: None,
+            started_at_ms: None,
+            last_activity_ms: None,
+            spend: None,
+        }
+    }
+
+    async fn adopted_rows(db: &Db) -> Vec<(String, String, String, String)> {
+        let mut rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT term_key, cwd, session_id, agent_kind FROM terminal_sessions WHERE repo = 'repo'",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap();
+        rows.sort();
+        rows
+    }
+
+    /// The history pane's click: a listed Claude session with a transcript still
+    /// on disk is adopted onto the freshly-minted tab, and the existing launch
+    /// path then resolves that tab to `--resume` with no change of its own.
+    #[tokio::test]
+    async fn adopt_points_a_new_tab_at_a_listed_claude_session() {
+        let base = std::env::temp_dir().join(format!("santree-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let worktree = base.join("work").join("AK-1");
+        let cwd = worktree.to_string_lossy().into_owned();
+
+        let path = transcript_path(&home, &cwd, "sid-live");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}").unwrap();
+
+        let rows = vec![listed("sid-live", AgentKind::Claude, 7)];
+        adopt(
+            &db,
+            &rows,
+            ResumeRequest {
+                repo: "repo",
+                term_key: "tree:AK-1:tab:new",
+                session_id: "sid-live",
+                agent_kind: AgentKind::Claude,
+                worktree: &worktree,
+                home: Some(&home),
+                sessions_root: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            adopted_rows(&db).await,
+            vec![(
+                "tree:AK-1:tab:new".to_string(),
+                cwd.clone(),
+                "sid-live".to_string(),
+                "Claude".to_string(),
+            )],
+            "a session found on disk with no row is stored at the worktree's own cwd"
+        );
+        // The whole point: nothing about the launch path changes.
+        assert_eq!(
+            resolve(
+                &db,
+                "repo",
+                "tree:AK-1:tab:new",
+                &cwd,
+                Some(&home),
+                "/bin/claude",
+                true,
+            )
+            .await
+            .unwrap(),
+            AgentSession::Resume {
+                agent_kind: AgentKind::Claude,
+                executable: "/bin/claude".into(),
+                session_id: "sid-live".into(),
+                launch_flags: String::new(),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A Claude session launched by hand from a *subdirectory* of the worktree
+    /// is listed (its cwd is under the worktree) but cannot be adopted: the tab
+    /// runs in the worktree root, and Claude looks a conversation up in the
+    /// project directory it ran in. Adopting it would write a row that either
+    /// resolves to `Fresh` forever or `--resume`s an id the CLI can't find.
+    #[tokio::test]
+    async fn adopt_refuses_a_session_that_ran_below_the_worktree_root() {
+        let base = std::env::temp_dir().join(format!("santree-adopt-cwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let worktree = base.join("work").join("AK-1");
+        let ran_in = worktree.join("packages").join("api");
+        let ran_in = ran_in.to_string_lossy().into_owned();
+
+        let path = transcript_path(&home, &ran_in, "sid-sub");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}").unwrap();
+
+        let err = adopt(
+            &db,
+            &[listed("sid-sub", AgentKind::Claude, 3)],
+            ResumeRequest {
+                repo: "repo",
+                term_key: "tree:AK-1:tab:new",
+                session_id: "sid-sub",
+                agent_kind: AgentKind::Claude,
+                worktree: &worktree,
+                home: Some(&home),
+                sessions_root: None,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("nothing to resume"), "{err}");
+        assert!(adopted_rows(&db).await.is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The surface is supposed to be one the caller just minted. A tab id that
+    /// names a tab which already holds a conversation must not silently move it
+    /// onto a different session (and orphan its own).
+    #[tokio::test]
+    async fn adopt_will_not_repoint_a_surface_that_already_has_a_session() {
+        let base = std::env::temp_dir().join(format!("santree-adopt-taken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let worktree = base.join("work").join("AK-1");
+        let cwd = worktree.to_string_lossy().into_owned();
+
+        for sid in ["sid-taken", "sid-other"] {
+            let path = transcript_path(&home, &cwd, sid);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "{}").unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', 'tree:AK-1:tab:open', ?, 'sid-taken', 'Claude')",
+        )
+        .bind(&cwd)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let err = adopt(
+            &db,
+            &[listed("sid-other", AgentKind::Claude, 2)],
+            ResumeRequest {
+                repo: "repo",
+                term_key: "tree:AK-1:tab:open",
+                session_id: "sid-other",
+                agent_kind: AgentKind::Claude,
+                worktree: &worktree,
+                home: Some(&home),
+                sessions_root: None,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("already has a session"), "{err}");
+        assert_eq!(
+            adopted_rows(&db).await,
+            vec![(
+                "tree:AK-1:tab:open".to_string(),
+                cwd,
+                "sid-taken".to_string(),
+                "Claude".to_string(),
+            )],
+            "the tab keeps the conversation it had"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Every refusal, each leaving `terminal_sessions` untouched: an id the
+    /// worktree's own listing doesn't contain, a session with no turns, a record
+    /// that is gone, and a provider with no resume path at all.
+    #[tokio::test]
+    async fn adopt_refuses_anything_the_worktrees_listing_does_not_vouch_for() {
+        let base = std::env::temp_dir().join(format!("santree-adopt-deny-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let worktree = base.join("work").join("AK-1");
+        let cwd = worktree.to_string_lossy().into_owned();
+        let sessions = base.join("sessions");
+        write_rollout(&sessions, "thread-live");
+
+        // On disk, and with turns — but only `sid-live` and `thread-live` are
+        // listed for this worktree.
+        for sid in ["sid-live", "sid-elsewhere"] {
+            let path = transcript_path(&home, &cwd, sid);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "{}").unwrap();
+        }
+        let rows = vec![
+            listed("sid-live", AgentKind::Claude, 7),
+            listed("sid-empty", AgentKind::Claude, 0),
+            listed("sid-pruned", AgentKind::Claude, 4),
+            listed("thread-live", AgentKind::Codex, 5),
+            listed("thread-pruned", AgentKind::Codex, 5),
+            listed("cursor-sid", AgentKind::Cursor, 5),
+            // A thread id is whatever the rollout's `session_meta.id` says, and
+            // this is the first path that promotes an id read off disk into an
+            // argument of `codex resume`. `shellQuote` would pass this through
+            // as a flag.
+            listed("--config", AgentKind::Codex, 5),
+        ];
+        let request = |session_id, agent_kind| ResumeRequest {
+            repo: "repo",
+            term_key: "tree:AK-1:tab:new",
+            session_id,
+            agent_kind,
+            worktree: &worktree,
+            home: Some(&home),
+            sessions_root: Some(sessions.as_path()),
+        };
+
+        // Not in the worktree's own listing — even though its transcript exists,
+        // so an id-shaped guess can't reach another worktree's conversation.
+        let err = adopt(&db, &rows, request("sid-elsewhere", AgentKind::Claude))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("has run in this worktree"), "{err}");
+        // Listed, but under the other provider.
+        assert!(adopt(&db, &rows, request("sid-live", AgentKind::Codex))
+            .await
+            .is_err());
+        // Zero turns: resuming this lands the user in an empty session.
+        let err = adopt(&db, &rows, request("sid-empty", AgentKind::Claude))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no conversation"), "{err}");
+        // Listed with turns, but the record has since been pruned.
+        let err = adopt(&db, &rows, request("sid-pruned", AgentKind::Claude))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing to resume"), "{err}");
+        let err = adopt(&db, &rows, request("thread-pruned", AgentKind::Codex))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing to resume"), "{err}");
+        // No transcript is findable at all without a home directory.
+        assert!(adopt(
+            &db,
+            &rows,
+            ResumeRequest {
+                home: None,
+                ..request("sid-live", AgentKind::Claude)
+            },
+        )
+        .await
+        .is_err());
+        // A provider santree can't resume, however it got into the registry.
+        assert!(adopt(&db, &rows, request("cursor-sid", AgentKind::Cursor))
+            .await
+            .is_err());
+        // A flag-shaped id, even with a real rollout behind it.
+        write_rollout(&sessions, "--config");
+        let err = adopt(&db, &rows, request("--config", AgentKind::Codex))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot start with"), "{err}");
+
+        assert!(
+            adopted_rows(&db).await.is_empty(),
+            "a refusal writes nothing"
+        );
+
+        // The one that is listed, has turns, and still has its rollout.
+        adopt(&db, &rows, request("thread-live", AgentKind::Codex))
+            .await
+            .unwrap();
+        assert_eq!(
+            adopted_rows(&db).await,
+            vec![(
+                "tree:AK-1:tab:new".to_string(),
+                cwd,
+                "thread-live".to_string(),
+                "Codex".to_string(),
+            )]
         );
 
         let _ = std::fs::remove_dir_all(&base);

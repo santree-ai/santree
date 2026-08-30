@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentBucket, AgentEntry } from "../features/agents/registry";
+import { agentEntry as entry, NOW, STALE } from "../test/fixtures";
 import {
   compareAttention,
   decayDeadline,
@@ -16,35 +16,6 @@ import {
   seenKeyOf,
   useDecayClock,
 } from "./attention";
-
-const NOW = 1_700_000_000_000;
-
-function entry(over: Partial<AgentEntry> & { bucket: AgentBucket }): AgentEntry {
-  return {
-    sessionId: "s1",
-    agentKind: "Claude",
-    state: "active",
-    origin: { kind: "tree", ticket: "AK-1", pr: null, path: null },
-    repo: "acme/app",
-    termKey: "tree:AK-1",
-    cwd: "/repo",
-    message: null,
-    updatedAtMs: NOW,
-    live: true,
-    tabKey: null,
-    terminalTitle: null,
-    openable: true,
-    ticket: "AK-1",
-    project: "Core",
-    projectColor: null,
-    projectIcon: null,
-    purpose: "work",
-    title: "Task",
-    subtitle: null,
-    worktree: null,
-    ...over,
-  } as AgentEntry;
-}
 
 describe("seenKeyOf", () => {
   it("follows the logical terminal, so a resumed session stays acknowledged", () => {
@@ -102,7 +73,6 @@ describe("levelOf", () => {
  */
 describe("levelOf tiers", () => {
   const seen: SeenMap = {};
-  const STALE = NOW - HOOK_STALE_AFTER_MS - 1;
 
   it("lets a fresh hook event win over a title that contradicts it", () => {
     // The hook sits inside the agent's own lifecycle; a title is an artifact of

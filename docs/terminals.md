@@ -32,8 +32,11 @@ Five facts that explain most of the rest:
 
 1. **A session is owned by the Rust process, not by the page or the pane.** A
    pane unmounting detaches; only closing a tab kills a process.
-2. **One string identifies a terminal everywhere.** The frontend calls it
-   `refId`, the PTY calls it `label`, SQLite calls it `term_key`. Same value.
+2. **One identity names a terminal everywhere**, and it is a *pair*: the surface
+   plus the provider in it. The surface is one string — the frontend calls it
+   `refId`, the PTY calls it `label`, SQLite calls it `term_key`, same value —
+   and the provider rides beside it in all three (`agent.kind`, `agent_kind`,
+   the `agent_kind` column).
 3. **Every session records its recent output**, so a client that lost its view
    can be caught up instead of losing the session.
 4. **There is no daemon.** Sessions survive a webview reload; they die when
@@ -75,16 +78,17 @@ its live session instead of spawning a second.
 
 ---
 
-## Identity: one string, three homes
+## Identity: one pair, three homes
 
 This is worth stating plainly because it is what makes reattach possible at all.
 
 - **Minted** at the launch site — e.g. ``refId: `tree:${worktree.id}:tab:${tab.id}` ``
-  (`TreesView.tsx`).
-- **Sent to the PTY** as `OpenOpts.label` (`TerminalView.tsx` → `terminal.rs` →
-  `crates/pty`). Opaque there: stored and compared for equality, never a path.
-- **Stored** as `terminal_sessions.term_key`, which maps a surface to a durable
-  agent conversation id.
+  (`TreesView.tsx`), beside the tab's `agent.kind`.
+- **Sent to the PTY** as `OpenOpts.label` + `OpenOpts.agent_kind`
+  (`TerminalView.tsx` → `terminal.rs` → `crates/pty`). Opaque there: stored and
+  compared for equality, never a path.
+- **Stored** as `terminal_sessions.(term_key, agent_kind)`, which maps a surface
+  and a provider to a durable agent conversation id.
 
 ```sql
 CREATE TABLE terminal_sessions (
@@ -101,9 +105,16 @@ conversation *per provider*, so switching a worktree from Claude to Codex and
 back finds both threads still there. `cwd` is stored because it is what locates
 Claude's transcript on disk.
 
-Because the identity is one string, a reloaded page can take a live session it
-knows nothing about and put it back on the pane that owns it. That is the entire
-adoption mechanism.
+**The PTY carries the same two columns, as two fields.** It has to: the label is
+compared byte-for-byte against `term_key`, so a launch site that folded the
+provider into it (`triage:AK-1` opened as `AK-1::codex`) matched no row on the way
+back, and `hooks::session_states` reported a working agent as exited. A pane, a
+title, an adopted session and a process-table result are therefore all keyed by
+the *pair* — `paneAddress` on the frontend, `terminal::LiveTerminal` in Rust.
+
+Because that identity is a value both ends can re-derive, a reloaded page can take
+a live session it knows nothing about and put it back on the pane that owns it.
+That is the entire adoption mechanism.
 
 ---
 
@@ -213,9 +224,11 @@ app:
   until adoption settles. One IPC round-trip of an invisible overlay buys
   correctness.
 
-**One label, one session.** Two live sessions under the same label means an
-earlier page leaked one; only one is reachable, so adoption keeps the newest and
-ends the rest.
+**One pane, one session.** Two live sessions under the same label *and the same
+provider* means an earlier page leaked one; only one is reachable, so adoption
+keeps the newest and ends the rest. Two under the same label and *different*
+providers are two panes the user can legitimately have open at once (a Claude and
+a Codex review of one PR), and both survive.
 
 ---
 
@@ -380,16 +393,16 @@ reconciliation at all. The registry's `agent_kind` decides; when that join is
 gone, the `rollout-` file-name prefix does.
 
 **Liveness is a join, not a record.** `session_states` takes the set of
-`term_key`s with a live PTY (`terminal::live_terminals`, straight out of the
-in-memory manager) and no row whose terminal is absent can come back
-live-looking. Because santree has no daemon, a PTY cannot outlive the app —
+`(term_key, agent_kind)` pairs with a live PTY (`terminal::live_terminals`,
+straight out of the in-memory manager) and no row whose terminal is absent can
+come back live-looking. Because santree has no daemon, a PTY cannot outlive the app —
 so an empty set after a restart is the *correct* answer, not a missing one. This
 is why there is no sweeper, no decay timer and no straggler window: the answer is
 recomputed from live state on every read, so a hook that lands after the process
-died has nothing to win against. Matching is on `term_key` alone, never `cwd`
-(path normalization — `/var` vs `/private/var` — would retire every
-session at once); the *write* half, `retire_terminal`, scopes by `cwd` too,
-because there the failure modes are reversed. A row with no terminal to join
+died has nothing to win against. Matching is on the row's own identity — `(term_key, agent_kind)` — and never on
+`cwd` (path normalization — `/var` vs `/private/var` — would retire every
+session at once); the *write* half, `retire_terminal`, scopes by `cwd` and the
+provider too, because there the failure modes are reversed. A row with no terminal to join
 falls back to the status-line heartbeat, and a row with neither is left alone:
 a false "exited" hides a working agent, which is the failure this exists to
 prevent.
@@ -455,7 +468,8 @@ started themselves by typing `codex` in a santree shell, and neither notices whe
 the CLI in a pane is replaced by a different one.
 
 So santree also *observes*. `agent_procs::detect` takes each live PTY's
-`term_key` and root pid (`terminal::pane_roots`), walks that pid's descendants in
+address — `term_key` and the provider in it — and its root pid
+(`terminal::pane_roots`), walks that pid's descendants in
 one shared `ps` listing (`proc_table`), and reports which catalog binary owns the
 pane's **foreground process group** — `ps`'s `+` flag in `stat`. Measured against
 the real CLIs:
@@ -654,7 +668,8 @@ src-tauri/src/stream.rs      background runs behind a PTY → read-only panes
 src-tauri/src/session_signal.rs   the socket the hook nudges to push state changes
 src/features/terminal/
   types.ts                   the two seams: TerminalRenderer, TerminalBackend
-  TauriBackend.ts            IPC implementation; channel wiring; adoption by label
+  TauriBackend.ts            IPC implementation; channel wiring; adoption by address
+  paneAddress.ts             (term_key, provider) — the pane's key in every map
   TerminalView.tsx           one pane: open-or-attach, detach on unmount, resize
   TerminalLayer.tsx          the persistent overlay that outlives routes
   TerminalsContext.tsx       once-per-document adoption

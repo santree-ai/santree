@@ -20,6 +20,7 @@ import type {
   PrState,
   ReadingRole,
   ReviewDecision,
+  SubagentStatus,
   TaskStatus,
   WatchOutKind,
 } from "../bindings";
@@ -39,8 +40,12 @@ export const palette = {
   muted: "#5b5b63",
 } as const;
 
-/** The default accent; the live value is the `--accent` CSS variable. */
-export const DEFAULT_ACCENT = "#2dd4a7";
+/** The dark theme's accent as a literal hex — a **fallback for non-CSS
+ *  renderers only** (xterm paints to canvas/WebGL and can't take a CSS var, so
+ *  it resolves `--accent` at theme-build time and falls back to this if the
+ *  computed style is empty). Everything that renders through CSS must use
+ *  {@link accentVar} instead, so the accent still inverts in light mode. */
+export const XTERM_ACCENT_FALLBACK = "#ffffff";
 
 /** Fixed, deterministic palette for {@link Avatar} initials — a name hashes to
  *  one of these. Literal hex (not theme colors): the same name must map to the
@@ -48,7 +53,7 @@ export const DEFAULT_ACCENT = "#2dd4a7";
 export const AVATAR_PALETTE = [
   "#5b8def",
   "#a78bfa",
-  "#2dd4a7",
+  "#4fb0c6",
   "#d29922",
   "#f0709a",
   "#6fd3e0",
@@ -73,7 +78,11 @@ export function agentBrandColor(kind: string): string {
 }
 
 export const statusColor: Record<TaskStatus, string> = {
-  InReview: palette.green,
+  // Not green: "in review" is a state a ticket is *waiting* in, and it can still
+  // come back rejected — green read as "done and good". Cyan rather than blue
+  // because these render as 6–8px dots beside each other in the ticket list and
+  // the graph, and `Todo` already owns blue.
+  InReview: palette.cyan,
   InProgress: palette.amber,
   Todo: palette.blue,
   Backlog: palette.slate,
@@ -89,7 +98,7 @@ export function modelMeta(model: string): { key: string; label: string; color: s
   const m = model.toLowerCase();
   if (m.includes("opus")) return { key: "opus", label: "Opus", color: palette.purple };
   if (m.includes("sonnet")) return { key: "sonnet", label: "Sonnet", color: palette.blue };
-  if (m.includes("haiku")) return { key: "haiku", label: "Haiku", color: palette.green };
+  if (m.includes("haiku")) return { key: "haiku", label: "Haiku", color: palette.cyan };
   if (m.includes("fable")) return { key: "fable", label: "Fable", color: palette.amber };
   return { key: model, label: model, color: palette.slate };
 }
@@ -175,10 +184,12 @@ export function reviewAgeColor(days: number): string {
 }
 
 /** Color for the review-effort size chip: the small ones read as "you could do
- *  this now", the big ones as "block out time". */
+ *  this now", the big ones as "block out time". Only the big end is tinted —
+ *  "small" is a fact about the diff, not an approval, and painting XS/S green
+ *  made every tiny PR look pre-approved. */
 export const prSizeColor: Record<"XS" | "S" | "M" | "L" | "XL", string> = {
-  XS: palette.green,
-  S: palette.green,
+  XS: palette.slate,
+  S: palette.slate,
   M: palette.slate,
   L: palette.amber,
   XL: palette.red,
@@ -189,12 +200,14 @@ export const prSizeColor: Record<"XS" | "S" | "M" | "L" | "XL", string> = {
  *
  * The three skimmable roles share one muted tone deliberately: the reading order's
  * job is to say where attention goes, and painting "generated" the same grey as
- * "trivial" is the visual form of "you don't need to read these closely".
+ * "trivial" is the visual form of "you don't need to read these closely". `test`
+ * sits one step up from them in slate rather than being tinted: green there read
+ * as "the tests pass", which is a claim this label never makes.
  */
 export const readingRoleMeta: Record<ReadingRole, { label: string; color: string }> = {
   entryPoint: { label: "start here", color: palette.indigo },
   coreLogic: { label: "core", color: palette.blue },
-  test: { label: "tests", color: palette.green },
+  test: { label: "tests", color: palette.slate },
   config: { label: "config", color: palette.muted },
   generated: { label: "generated", color: palette.muted },
   trivial: { label: "skim", color: palette.muted },
@@ -298,6 +311,23 @@ export const sessionStateMeta: Record<
   exited: { color: palette.muted, short: "exited", label: "Exited" },
 };
 
+/** How a Task subagent ended, for the spawn tree in the expanded history row.
+ *  `Unknown` carries **no** color on purpose: the outcome was never recorded, and
+ *  any dot at all would assert one. Running matches `sessionStateMeta.active`
+ *  and Completed matches `statusColor.Done`, so a subagent reads like every
+ *  other running/done thing in the app. */
+export const subagentStatusMeta: Record<
+  SubagentStatus,
+  { color: string | null; label: string; glow?: boolean }
+> = {
+  Running: { color: palette.green, label: "Running", glow: true },
+  Completed: { color: palette.purple, label: "Completed" },
+  Failed: { color: palette.red, label: "Failed" },
+  // Not red: the user stopping a subagent is a decision, not a fault.
+  Stopped: { color: palette.slate, label: "Stopped" },
+  Unknown: { color: null, label: "Outcome not recorded" },
+};
+
 /** Fallback color for a project box when the backend sends no `project_color`
  *  (real projects ship one on the `Task` domain type). */
 export const PROJECT_FALLBACK = palette.slate;
@@ -320,14 +350,16 @@ export function agentSlug(kind: AgentKind): string {
 }
 
 /**
- * The live accent as a CSS value (reads the runtime `--accent` token). Use this
- * instead of hardcoding the default accent hex so swatch changes flow through.
+ * The live accent as a CSS value (the `--accent` token). Always use this rather
+ * than a literal: the accent is monochrome and *inverts* per theme (white on
+ * dark, near-black on light), so a hardcoded hex is right in exactly one theme.
  */
 export const accentVar = "var(--accent)";
 
 /** The solid accent fill (`--accent-fill`) for primary buttons / launch
- *  checkboxes: the accent itself on dark, darkened on light so the white
- *  `--on-accent` content reads. Pair the two — never raw accent + on-accent. */
+ *  checkboxes. Inversion is what the accent has instead of hue, so this slab is
+ *  the brightest thing on a dark screen and the darkest on a light one. Pair it
+ *  with `--on-accent` — never raw accent + on-accent. */
 export const accentFillVar = "var(--accent-fill)";
 
 /**

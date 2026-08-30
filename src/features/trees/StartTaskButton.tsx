@@ -62,10 +62,10 @@ export function StartTaskButton({
       {
         issueId: t.id,
         title: t.title,
-        project,
+        launch: { type: "ticket", project },
         // Only `ready` tickets are offered here (see `startCandidates`), and a
         // ready ticket has no unfinished blocker to stack on.
-        stackOn: null,
+        base: null,
         agent,
       },
       {

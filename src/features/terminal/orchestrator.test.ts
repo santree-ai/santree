@@ -55,6 +55,51 @@ describe("useTerminalTabs", () => {
       expect(result.current.tabs[0].refId).toBe("AK-1");
     });
 
+    /** A surface holds one session per provider — the pair `terminal_sessions` is
+     *  keyed by — so a ticket investigated by both agents is two panes, and
+     *  re-entering either finds its own. */
+    it("gives a surface one pane per provider, and reuses each", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      const investigate = (kind: "Claude" | "Codex") => ({
+        title: `AK-1 (${kind})`,
+        source: "triage" as const,
+        refId: "triage:AK-1",
+        agent: { kind, repo: "acme/app", termKey: "triage:AK-1" },
+      });
+
+      let codex = "";
+      let claude = "";
+      let again = "";
+      act(() => {
+        codex = result.current.ensure(investigate("Codex"));
+        claude = result.current.ensure(investigate("Claude"));
+        again = result.current.ensure(investigate("Codex"));
+      });
+
+      expect(codex).not.toBe(claude);
+      expect(again).toBe(codex);
+      expect(result.current.tabs).toHaveLength(2);
+      // Both panes carry the surface key undecorated — it is the PTY's label and
+      // the durable row's `term_key`, and the provider is the field beside it.
+      expect(result.current.tabs.map((t) => t.refId)).toEqual(["triage:AK-1", "triage:AK-1"]);
+    });
+
+    /** The identity is the launch's own `term_key`, not a second argument that
+     *  can drift from it: a decorated ref is what stopped the liveness join
+     *  matching, and it is unrepresentable here. */
+    it("keys an agent pane by the term_key it launched with, whatever ref it was passed", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      act(() => {
+        result.current.ensure({
+          title: "AK-1",
+          source: "triage",
+          refId: "triage:AK-1::codex",
+          agent: { kind: "Codex", repo: "acme/app", termKey: "triage:AK-1" },
+        });
+      });
+      expect(result.current.tabs[0].refId).toBe("triage:AK-1");
+    });
+
     it("treats the same refId under a different source as a distinct session", () => {
       const { result } = renderHook(() => useTerminalTabs());
 

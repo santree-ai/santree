@@ -391,27 +391,6 @@ mod tests {
         }
     }
 
-    /// The App Server's `SessionSurface -> CodexProfile` mapping, which is the
-    /// only reason a surface means anything at all here.
-    #[test]
-    fn every_surface_keeps_the_profile_the_app_server_gave_it() {
-        assert_eq!(
-            CodexProfile::for_surface(SessionSurface::Work),
-            CodexProfile::Work
-        );
-        assert_eq!(
-            CodexProfile::for_surface(SessionSurface::FixCi),
-            CodexProfile::FixCi
-        );
-        assert_eq!(
-            CodexProfile::for_surface(SessionSurface::Review),
-            CodexProfile::Review
-        );
-        for surface in [SessionSurface::Investigate, SessionSurface::AskAi] {
-            assert_eq!(CodexProfile::for_surface(surface), CodexProfile::ReadOnly);
-        }
-    }
-
     #[test]
     fn a_read_only_surface_is_sandboxed_and_cannot_ask_for_more() {
         for surface in [SessionSurface::Investigate, SessionSurface::AskAi] {

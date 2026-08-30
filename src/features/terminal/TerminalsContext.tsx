@@ -13,7 +13,9 @@ import type { SessionId } from "./types";
 const TerminalsContext = createContext<TerminalTabs | null>(null);
 
 /**
- * Live sessions this page inherited from the last one, by `term_key`.
+ * Live sessions this page inherited from the last one, by pane address
+ * (`paneAddress`: the surface's `term_key` and the provider running in it —
+ * one surface can have a pane per provider, and both must find their own).
  *
  * `ready` is load-bearing, not a loading flag. A pane consults this map exactly
  * once, as it mounts, and its mount effect never re-runs — so a pane that

@@ -799,6 +799,8 @@ fn parse_list<T: serde::de::DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
+    use santree_core::domain::AgentKind;
+
     /// The server, its advertised tool list, and the allowlist `src-tauri` hands
     /// Codex must all name the same set.
     ///
@@ -966,9 +968,16 @@ mod tests {
 
     // ── Against a real database ──────────────────────────────────────────────
 
-    /// A temp db with just the two tables these tools touch (mirrors migrations
-    /// 0019 and 0023), plus a `ReviewTools` scoped to one PR.
+    /// [`tools_as`] for the common case. Codex is a first-class agent here, so
+    /// anything that *stores* or *reports* the agent must use `tools_as` and cover
+    /// both — a fixture that only ever runs as Claude cannot see a hardcoded one.
     fn tools(name: &str) -> (ReviewTools, std::path::PathBuf) {
+        tools_as(name, AgentKind::Claude)
+    }
+
+    /// A temp db with just the two tables these tools touch (mirrors migrations
+    /// 0019 and 0023), plus a `ReviewTools` scoped to one PR, launched as `kind`.
+    fn tools_as(name: &str, kind: AgentKind) -> (ReviewTools, std::path::PathBuf) {
         let base = std::env::temp_dir().join(format!(
             "santree-review-tools-{}-{name}",
             std::process::id()
@@ -1010,12 +1019,16 @@ mod tests {
             c.close().await.unwrap();
         });
 
+        // Through `with_agent_kind`, the way `mcp` mode builds it from argv —
+        // `McpScope::new` alone silently means Claude.
         let scope = McpScope::new(
             "acme/web".into(),
             "42".into(),
             "abc1234".into(),
             diff_path.to_string_lossy().into_owned(),
         )
+        .unwrap()
+        .with_agent_kind(kind.as_str())
         .unwrap();
         (
             ReviewTools::new(rt, db_path.to_string_lossy().into_owned(), scope),
@@ -1279,6 +1292,63 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("diff index isn't readable"), "{e}");
+    }
+
+    /// A draft and a brief carry the agent that wrote them, and that agent comes
+    /// from the launch scope — never from a constant.
+    ///
+    /// `McpScope::new` defaults to Claude, so every other test here runs as Claude
+    /// and a hardcoded `.bind("Claude")` at either write site stays green through
+    /// all of them — while every Codex-authored draft and brief is stored, and shown
+    /// in the app, under Claude's name. That is the regression this covers: making
+    /// Codex a first-class agent is only real if the write sites read the scope.
+    #[test]
+    fn a_draft_and_a_brief_record_the_agent_that_wrote_them() {
+        for kind in [AgentKind::Claude, AgentKind::Codex] {
+            let (mut t, _dir) = tools_as(&format!("agent-{}", kind.as_str()), kind);
+            call(
+                &mut t,
+                "add_review_comment",
+                json!({ "path": "src/a.rs", "line": 44, "body": "b" }),
+            )
+            .unwrap();
+            call(
+                &mut t,
+                "set_review_brief",
+                json!({
+                    "summary": "Adds retries.",
+                    "readingOrder": [{ "path": "src/a.rs", "role": "coreLogic", "why": "the change" }],
+                }),
+            )
+            .unwrap();
+
+            let (draft_kind, brief_kind, brief_json): (String, String, String) = t
+                .with_db(async |conn| {
+                    let (draft,): (String,) =
+                        sqlx::query_as("SELECT agent_kind FROM review_drafts")
+                            .fetch_one(&mut *conn)
+                            .await
+                            .map_err(db_err)?;
+                    let (brief, json): (String, String) =
+                        sqlx::query_as("SELECT agent_kind, brief FROM review_briefs")
+                            .fetch_one(conn)
+                            .await
+                            .map_err(db_err)?;
+                    Ok((draft, brief, json))
+                })
+                .unwrap();
+
+            let expected = kind.as_str();
+            assert_eq!(draft_kind, expected, "the draft row's author");
+            assert_eq!(brief_kind, expected, "the brief row's author");
+            // The brief is also rendered from its own JSON, so the blob has to agree
+            // with the column it was stored beside.
+            let brief: ReviewBrief = serde_json::from_str(&brief_json).unwrap();
+            assert_eq!(
+                brief.agent_kind, kind,
+                "the brief's own record of its author"
+            );
+        }
     }
 
     #[test]

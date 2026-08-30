@@ -861,8 +861,9 @@ fn only_the_terminal_adapter_writes_bytes_into_a_pty() {
         "src-tauri/src/update.rs",    // closes every session before restarting
     ];
     // `agent_procs.rs` deliberately does NOT appear above: it reads the process
-    // table, not the manager, and takes its pane roots as plain `(term_key, pid)`
-    // pairs from `terminal::pane_roots`. Keeping it unable to name a PtyManager
+    // table, not the manager, and takes its pane roots as plain
+    // `(LiveTerminal, pid)` pairs — a term_key, the provider in that pane, and a
+    // pid — from `terminal::pane_roots`. Keeping it unable to name a PtyManager
     // is what makes "observation only" structural rather than a promise.
 
     for (path, src) in rust_sources() {

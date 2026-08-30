@@ -7,7 +7,9 @@
  */
 import { useCallback, useEffect, useRef } from "react";
 
+import type { AgentKind } from "../../bindings";
 import type { PaneHandle } from "./orchestrator";
+import { paneAddress } from "./paneAddress";
 import { clearSessionTitle, setSessionTitle } from "./sessionTitles";
 import { tauriBackend } from "./TauriBackend";
 import type { SessionId, TerminalBackend, TerminalRenderer } from "./types";
@@ -18,9 +20,14 @@ export interface TerminalViewProps {
   /** Empty ⇒ the user's login shell. */
   command?: string;
   args?: string[];
-  /** What this session is called to the backend — the surface's `term_key`.
-   *  How a reloaded page finds this pane's session again. */
+  /** What this session is called to the backend — the surface's `term_key`,
+   *  exactly. How a reloaded page finds this pane's session again. */
   label: string;
+  /** Which agent this pane hosts, or `null` for a plain shell — the other half
+   *  of the session's identity (see `paneAddress`). It reaches the backend as
+   *  its own field, because `label` is joined byte-for-byte against
+   *  `terminal_sessions.term_key`, which keys a surface's providers apart. */
+  agentKind?: AgentKind | null;
   /** A live session from a previous page load to take over instead of spawning.
    *  When set, the pane attaches to it and catches up from what the backend
    *  kept; `command`/`seed` are not re-run, because the process they describe
@@ -59,6 +66,7 @@ export function TerminalView({
   command = "",
   args,
   label,
+  agentKind = null,
   adoptId,
   seed,
   active = true,
@@ -127,7 +135,7 @@ export function TerminalView({
     // events go quiet. Registered before the session is opened or adopted so a
     // replayed backlog's titles are caught too. Read `agentTitle.ts` before
     // using this for anything else — the title must never reach a PTY write.
-    renderer.onTitle((title) => setSessionTitle(label, title));
+    renderer.onTitle((title) => setSessionTitle(paneAddress(label, agentKind), title));
 
     let unregisterInput: (() => void) | undefined;
     let disposed = false;
@@ -151,7 +159,7 @@ export function TerminalView({
         const created = startRef.current === null && adoptId === undefined;
         if (created) {
           startRef.current = backend.open(
-            { cwd, command, args: args ?? [], cols, rows, label },
+            { cwd, command, args: args ?? [], cols, rows, label, agentKind },
             handlers,
           );
         } else if (startRef.current === null && adoptId !== undefined) {
@@ -260,7 +268,7 @@ export function TerminalView({
       // The title outlives nothing: this pane going away is the only moment
       // santree stops hearing from the process, so a title left behind would
       // report "working" forever with nothing able to correct it.
-      clearSessionTitle(label);
+      clearSessionTitle(paneAddress(label, agentKind));
       renderer.dispose();
       rendererRef.current = null;
       // `idRef` deliberately survives: if this effect runs again on the same

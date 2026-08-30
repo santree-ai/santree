@@ -47,6 +47,26 @@ export function formatUsd(value: Num): string {
   return `$${Math.round(n).toLocaleString()}`;
 }
 
+/**
+ * A session's approximate cost, to the resolution the number actually has:
+ * `$0.41`, `$1,204.00`, and **four** decimals below a cent (`$0.0037`) — a
+ * sub-cent spend rounded to `$0.00` is indistinguishable from free.
+ *
+ * `null` in, `null` out, and that is the whole contract for an **unpriced
+ * model**: the backend sends `null` rather than `0` when it has no rate for the
+ * model (see `SessionModelSpend`), and the caller renders nothing. Never
+ * substitute a zero here.
+ */
+export function formatCostPrecise(value: number | null | undefined): string | null {
+  if (value == null) return null;
+  if (value <= 0) return "$0";
+  if (value < 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 /** Bytes as the OS would show them: "451.8 MB", "1.76 GB". Decimal units — the
  *  same base Activity Monitor uses, so the two agree. */
 export function formatBytes(value: Num): string {

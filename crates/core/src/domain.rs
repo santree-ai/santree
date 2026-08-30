@@ -11,7 +11,11 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 
 /// Which coding agent ("harness") runs a task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+///
+/// `Hash` because this is half of a terminal's identity: a surface hosts one
+/// PTY *per provider* (the pair `terminal_sessions` is keyed by), so the live-
+/// terminal set is a set of pairs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
 pub enum AgentKind {
     Claude,
     Codex,
@@ -69,8 +73,7 @@ impl std::str::FromStr for AgentKind {
 }
 
 /// A persisted Triage terminal and the provider that owns its durable session.
-/// `ref_id` is normally a Linear ticket id; Triage's repo-wide scratch session
-/// uses its reserved frontend sentinel instead.
+/// `ref_id` is the Linear ticket the investigation belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TriageSession {
@@ -1699,27 +1702,45 @@ pub struct RepoBranch {
     pub updated_at: String,
 }
 
-/// Which branch a newly created worktree lands on.
+/// Where a new worktree comes from — the one thing santree's three creation
+/// paths actually differ on.
 ///
-/// The three cases are genuinely different git operations — derive a name and
-/// branch it off the base, check out a branch that already exists, or create one
-/// under a name the user typed — and they used to be an `Option<String>` plus a
-/// convention. Naming them keeps the "check out" and "create" paths from being
-/// one boolean apart at the sink.
+/// This used to be encoded in *which command you called* (`create_worktree` /
+/// `create_manual_worktree` / `create_worktree_for_pr`), which left every caller
+/// re-stating the same eight arguments and let one path smuggle in a value the
+/// origin doesn't have: the PR path passed a literal `"Reviews"` as the
+/// worktree's Linear project, and the sidebar rendered it as a project band
+/// beside the real ones. An origin is a fact about the work, so it is modelled
+/// as one and each variant carries only what its own origin knows.
+///
+/// Three of the four variants name a branch. Every one is re-validated at the
+/// git sink (`git::safe_branch`) — a name reaching a `git` argv is untrusted
+/// whichever variant carried it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Type)]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
     tag = "type"
 )]
-pub enum WorktreeBranchSource {
-    /// Name the branch after the work (`santree/<id>-<slug>`) and branch it off
-    /// the base — how a ticket's worktree has always been created.
-    Derived,
-    /// Check out a branch that already exists, locally or on `origin`.
-    Existing { branch: String },
-    /// Create a branch under exactly this name, off the base.
-    New { branch: String },
+pub enum WorktreeLaunch {
+    /// A Linear ticket. The branch is derived from the work
+    /// (`santree/<id>-<slug>`) and branched off the base, and the ticket's
+    /// project is the worktree's — the only origin that has one.
+    Ticket { project: Option<String> },
+    /// A branch that already exists, locally or on `origin`, checked out with no
+    /// ticket behind it.
+    ExistingBranch { branch: String },
+    /// A branch created under exactly the name the user typed, off the base.
+    NewBranch { branch: String },
+    /// Someone else's pull request, checked out as a writable tree so commits
+    /// land on the PR's head branch. `pr_repo` must match the local checkout's
+    /// `origin` — org-wide Reviews must never route a PR into whichever repo
+    /// happens to be active.
+    ///
+    /// It carries **no project**: a PR is not a Linear project, and the sidebar
+    /// bands a worktree by the project of the ticket it resolves (a PR whose
+    /// branch carries a ticket tag still gets its real one) or by nothing at all.
+    Pr { pr_repo: String, branch: String },
 }
 
 /// Whether a changed file was added, modified, deleted, renamed, or is untracked.
@@ -1800,6 +1821,106 @@ pub struct WorktreeSession {
     /// Epoch ms — `f64` like every other exported timestamp, since specta
     /// refuses `i64` (see [`SessionState::updated_at_ms`]).
     pub started_at_ms: Option<f64>,
+    pub last_activity_ms: Option<f64>,
+    /// What the session cost, from its own transcript. `None` when there is no
+    /// record to price (a registry row whose transcript is gone) or when the
+    /// provider keeps no token counts — never a zeroed placeholder.
+    pub spend: Option<SessionSpend>,
+}
+
+/// Tokens attributed to one model inside a session, with its approximate cost.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModelSpend {
+    /// Raw model id from the transcript; the frontend maps it to a family label.
+    pub model: String,
+    /// Every token class summed — the one number the row shows.
+    pub total_tokens: f64,
+    /// `None` when the model is absent from the price table. A `0` here would
+    /// render as "$0.00", i.e. free, which is a lie about an unpriced model.
+    pub cost_usd: Option<f64>,
+}
+
+/// A session's total tokens and cost, plus the per-model split behind them.
+/// Deduped within the session exactly as the Usage panel dedupes globally
+/// (field-wise max per `(message.id, requestId)`, counted once), and it includes
+/// the session's subagent transcripts — the same spend the panel folds in.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSpend {
+    pub total_tokens: f64,
+    /// Summed over the priced models only; `None` when nothing in the session
+    /// could be priced (see [`SessionModelSpend::cost_usd`]).
+    pub cost_usd: Option<f64>,
+    /// Most-used first.
+    pub models: Vec<SessionModelSpend>,
+}
+
+/// One message in a session's tail, for the expanded history row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTurn {
+    pub from: LastMessageFrom,
+    /// One display line, trimmed like [`WorktreeSession::last_message`].
+    pub text: String,
+}
+
+/// What a session's transcript says beyond the list row — read only when a row
+/// is expanded, because the full first prompt would bloat every list scan.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDetail {
+    /// The first prompt the user actually typed, in full (bounded — see
+    /// `first_prompt_truncated`). `None` when the transcript has no such turn.
+    pub first_prompt: Option<String>,
+    /// Whether `first_prompt` was cut at the bound.
+    pub first_prompt_truncated: bool,
+    /// The last few messages, oldest first.
+    pub recent_turns: Vec<SessionTurn>,
+    /// The directory the session actually ran in — the worktree root, or a
+    /// subdirectory of it when the agent was launched from one.
+    pub cwd: Option<String>,
+}
+
+/// How a Task subagent ended, read from the *parent* transcript (a subagent's own
+/// transcript never records its verdict). `Unknown` is honest ignorance and
+/// renders no indicator — it is not a synonym for "finished".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum SubagentStatus {
+    Running,
+    Completed,
+    Failed,
+    /// The user stopped it, or it was killed.
+    Stopped,
+    Unknown,
+}
+
+/// One Task subagent of a Claude session, as its `subagents/` sidecar describes
+/// it. `parent_agent_id` + `depth` are what let the pane draw the real spawn
+/// tree rather than a flat list: a depth-2 agent nests under the depth-1 agent
+/// that spawned it.
+///
+/// View-only. Every subagent shares its parent's session id, so there is nothing
+/// here to resume.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSubagent {
+    /// The `<id>` of `agent-<id>.jsonl` — unique within the session.
+    pub agent_id: String,
+    /// The agent that spawned this one, when the sidecar names one. Absent at
+    /// depth 1, and possibly naming an agent whose transcript is gone.
+    pub parent_agent_id: Option<String>,
+    /// `spawnDepth` from the sidecar, 1-based; 1 when it is missing.
+    pub depth: u32,
+    /// The subagent type (`Explore`, `general-purpose`, …). `None` when the
+    /// sidecar is missing or unreadable — the row still lists.
+    pub agent_type: Option<String>,
+    /// The one-line task description the parent gave it.
+    pub description: Option<String>,
+    /// User + assistant messages carrying prose in its own transcript.
+    pub message_count: u32,
+    pub status: SubagentStatus,
+    /// Epoch ms of its transcript's last write.
     pub last_activity_ms: Option<f64>,
 }
 
@@ -2406,6 +2527,14 @@ pub struct TerminalUsage {
 pub struct AgentProcess {
     /// The `term_key` the pane's PTY was opened under.
     pub term_key: String,
+    /// The provider santree launched in that pane — the *other half of the
+    /// pane's address*, not an observation. One surface hosts one pane per
+    /// provider (a Claude and a Codex review of the same PR), so `term_key`
+    /// alone does not name a pane and a caller keying by it would attribute one
+    /// pane's agent to the other. `None` for a pane santree opened as a plain
+    /// shell.
+    pub pane_agent_kind: Option<AgentKind>,
+    /// Which agent the process table actually sees in the pane's foreground.
     pub agent_kind: AgentKind,
 }
 

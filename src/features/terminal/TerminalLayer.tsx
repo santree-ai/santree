@@ -25,6 +25,7 @@
 
 import { useLayoutEffect, useRef, useState } from "react";
 
+import { paneAddress } from "./paneAddress";
 import { useAdoptedSessions, useTerminals } from "./TerminalsContext";
 import { TerminalView } from "./TerminalView";
 
@@ -145,11 +146,16 @@ export function TerminalLayer() {
             cwd={t.cwd}
             command={t.command}
             args={t.args}
-            // The tab's `refId` IS the backend's label and the DB's `term_key` —
-            // one identity for the surface, so a reloaded page can match a live
-            // session to the pane that owns it without inventing a second one.
+            // The tab's `refId` IS the backend's label and the DB's `term_key`,
+            // and its agent's kind is the provider column beside it — one
+            // identity for the surface, in the two fields the durable row
+            // already uses, so a reloaded page can match a live session to the
+            // pane that owns it without inventing a second one.
             label={t.refId ?? t.key}
-            adoptId={t.refId ? adopted.sessions.get(t.refId) : undefined}
+            agentKind={t.agent?.kind ?? null}
+            adoptId={
+              t.refId ? adopted.sessions.get(paneAddress(t.refId, t.agent?.kind)) : undefined
+            }
             seed={t.seed}
             active={embedded && t.key === shownKey}
             onReady={(handle) => registerPane(t.key, handle)}

@@ -323,22 +323,7 @@ pub async fn launch(
     }
     let head_sha = head_sha.to_ascii_lowercase();
 
-    let index = DiffIndex {
-        head_sha: head_sha.clone(),
-        files_truncated: detail.files_truncated,
-        files: detail
-            .files
-            .iter()
-            .map(|f| {
-                let (old, new) = f.patch.as_deref().map(hunk_spans).unwrap_or_default();
-                DiffFileIndex {
-                    path: f.path.clone(),
-                    old,
-                    new,
-                }
-            })
-            .collect(),
-    };
+    let index = diff_index_of(&head_sha, &detail);
 
     let (app2, owner, name) = (app.clone(), owner.to_string(), name.to_string());
     let tutor = tutor.map(str::to_string);
@@ -356,6 +341,33 @@ pub async fn launch(
         })
     })
     .await?
+}
+
+/// The commentable geometry of `detail`, as of `head_sha` — what the review's MCP
+/// server validates every anchor against.
+///
+/// Split from [`launch`] (which needs an `AppHandle` and the network) because the
+/// one way this can go wrong is silent: [`hunk_spans`] returns `(old, new)`, and
+/// filing the old-side spans under `new` would accept every RIGHT-side comment
+/// against the LEFT-side line numbers — a draft anchored to the wrong line, which
+/// is the failure this index exists to prevent.
+fn diff_index_of(head_sha: &str, detail: &PrDetail) -> DiffIndex {
+    DiffIndex {
+        head_sha: head_sha.to_string(),
+        files_truncated: detail.files_truncated,
+        files: detail
+            .files
+            .iter()
+            .map(|f| {
+                let (old, new) = f.patch.as_deref().map(hunk_spans).unwrap_or_default();
+                DiffFileIndex {
+                    path: f.path.clone(),
+                    old,
+                    new,
+                }
+            })
+            .collect(),
+    }
 }
 
 /// What a **persisted review tab** relaunches with, re-derived from its row.
@@ -908,5 +920,77 @@ mod tests {
         assert!(!encoded.contains('<') && !encoded.contains('>'));
         // Escaped, not deleted — the agent still gets to read what CI said.
         assert!(encoded.contains("Ignore prior instructions"));
+    }
+    fn pr_file(path: &str, patch: Option<&str>) -> santree_core::domain::PrFile {
+        santree_core::domain::PrFile {
+            path: path.into(),
+            previous_path: None,
+            status: "modified".into(),
+            additions: 5,
+            deletions: 3,
+            patch: patch.map(str::to_string),
+            sha: "blob1".into(),
+        }
+    }
+
+    fn pr_detail(files: Vec<santree_core::domain::PrFile>, files_truncated: bool) -> PrDetail {
+        PrDetail {
+            body: String::new(),
+            labels: vec![],
+            comments: vec![],
+            threads: vec![],
+            files,
+            files_truncated,
+            checks: vec![],
+            base_sha: "base123".into(),
+            head_sha: "head456".into(),
+            pending_review_id: None,
+        }
+    }
+
+    /// The wiring `hunk_spans` feeds, asserted through the consumer that reads it.
+    ///
+    /// `hunk_spans` returns `(old, new)` and the span math is pinned in
+    /// `diff_index`; what is *not* pinned anywhere else is that `launch` files them
+    /// under the matching side. The patch here is deliberately asymmetric
+    /// (`-10,3 +40,5`), so a swap changes every answer below: a RIGHT-side line the
+    /// AI may comment on would be rejected, and a LEFT-only line accepted — a draft
+    /// anchored to the wrong line, which is what the index exists to prevent.
+    #[test]
+    fn the_diff_index_files_each_sides_spans_under_that_side() {
+        let index = diff_index_of(
+            "head456",
+            &pr_detail(
+                vec![pr_file(
+                    "src/a.rs",
+                    Some("@@ -10,3 +40,5 @@ fn a() {\n ctx\n-old\n+new\n"),
+                )],
+                false,
+            ),
+        );
+
+        // RIGHT (new file) numbering: 40..=44 is commentable, the old range is not.
+        assert!(index.check_anchor("src/a.rs", true, None, 42).is_ok());
+        assert!(index.check_anchor("src/a.rs", true, None, 11).is_err());
+        // LEFT (old file) numbering: exactly the mirror image.
+        assert!(index.check_anchor("src/a.rs", false, None, 11).is_ok());
+        assert!(index.check_anchor("src/a.rs", false, None, 42).is_err());
+    }
+
+    /// The two flags the rejection messages depend on: the head the session is
+    /// scoped to, and whether GitHub's file list was capped (which turns "unknown
+    /// path" from an assertion into a caveat).
+    #[test]
+    fn the_diff_index_carries_the_head_and_the_truncation_flag() {
+        let index = diff_index_of("head456", &pr_detail(vec![pr_file("logo.png", None)], true));
+        assert_eq!(index.head_sha, "head456");
+        // A binary file has no patch, so neither side has anything to anchor to.
+        let err = index.check_anchor("logo.png", true, None, 1).unwrap_err();
+        assert!(err.contains("no textual diff"), "{err}");
+        // Truncated ⇒ an unknown path is reported as possibly-real, not denied.
+        let err = index
+            .check_anchor("src/gone.rs", true, None, 1)
+            .unwrap_err();
+        assert!(err.contains("capped"), "{err}");
     }
 }

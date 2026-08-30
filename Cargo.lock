@@ -4325,6 +4325,7 @@ dependencies = [
  "anyhow",
  "log",
  "portable-pty",
+ "santree-core",
 ]
 
 [[package]]

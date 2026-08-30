@@ -56,25 +56,50 @@ pub(crate) fn status() -> Result<ClaudeGlobalCapture> {
 /// wrapper at the current hook binary without nesting it.
 pub(crate) fn set(app: &AppHandle, enabled: bool) -> Result<ClaudeGlobalCapture> {
     let path = settings_path()?;
-    let text = read_text(&path)?;
+    if !enabled {
+        return apply(&path, None);
+    }
+    // Only an *enable* needs these, so a disable still works from a build whose
+    // bundled hook has gone missing.
+    let bin = hook_bin(app).context("the santree-hook binary is not available")?;
+    let db = db_path(app).context("no app data directory")?;
+    apply(
+        &path,
+        Some(&|original| wrapper_command(&bin, &db, original)),
+    )
+}
+
+/// Builds the wrapped `statusLine` command from whatever the user already had
+/// there — [`wrapper_command`] with the hook binary and db path already bound.
+type StatusLineWrapper<'a> = dyn Fn(Option<&str>) -> Result<String> + 'a;
+
+/// The file half of [`set`]: read → edit → back up once → write → report.
+/// `Some(wrapper)` enables (it builds the wrapped `statusLine` command from
+/// whatever was there); `None` disables.
+///
+/// Split out from [`set`] — which adds only the `AppHandle` lookups above — so
+/// the tests drive this path instead of a copy of it. A test that re-implements
+/// read/backup/write cannot see [`backup_once`] disappear, and what disappears
+/// with it is the user's only copy of a `~/.claude/settings.json` we are about
+/// to rewrite.
+fn apply(path: &Path, wrapper: Option<&StatusLineWrapper<'_>>) -> Result<ClaudeGlobalCapture> {
+    let text = read_text(path)?;
     let mut doc = Doc::parse(text.as_deref())?;
 
-    let changed = if enabled {
-        let bin = hook_bin(app).context("the santree-hook binary is not available")?;
-        let db = db_path(app).context("no app data directory")?;
-        let wrapper = |original: Option<&str>| wrapper_command(&bin, &db, original);
-        enable(&mut doc.root, wrapper)?
-    } else {
-        disable(&mut doc.root)
+    let changed = match wrapper {
+        Some(wrapper) => enable(&mut doc.root, wrapper)?,
+        None => disable(&mut doc.root),
     };
 
     if changed {
+        // Only when there was a file to lose: a settings.json santree creates has
+        // no prior version worth keeping.
         if text.is_some() {
-            backup_once(&path)?;
+            backup_once(path)?;
         }
-        write_atomic(&path, &doc.render())?;
+        write_atomic(path, &doc.render())?;
     }
-    Ok(capture_status(&doc.root, &path))
+    Ok(capture_status(&doc.root, path))
 }
 
 // ── The settings file ───────────────────────────────────────────────────────
@@ -459,26 +484,15 @@ mod tests {
         dir
     }
 
-    /// The pure enable/disable applied to a file on disk, exactly as `set` does
-    /// it minus the `AppHandle`.
+    /// [`super::apply`] — the real read/backup/write path, which is everything
+    /// `set` does apart from resolving the hook binary and db path from the
+    /// `AppHandle`. Re-implementing it here instead is how the backup could have
+    /// been deleted with every one of these tests still green.
     fn apply(path: &Path, enabled: bool, bin: &str) -> ClaudeGlobalCapture {
-        let text = read_text(path).unwrap();
-        let mut doc = Doc::parse(text.as_deref()).unwrap();
-        let changed = if enabled {
-            enable(&mut doc.root, |o| {
-                wrapper_command(Path::new(bin), Path::new(DB), o)
-            })
-            .unwrap()
-        } else {
-            disable(&mut doc.root)
-        };
-        if changed {
-            if text.is_some() {
-                backup_once(path).unwrap();
-            }
-            write_atomic(path, &doc.render()).unwrap();
-        }
-        capture_status(&doc.root, path)
+        let wrapper =
+            |original: Option<&str>| wrapper_command(Path::new(bin), Path::new(DB), original);
+        let wrapper: Option<&StatusLineWrapper<'_>> = if enabled { Some(&wrapper) } else { None };
+        super::apply(path, wrapper).unwrap()
     }
 
     fn status_of(path: &Path) -> ClaudeGlobalCapture {
