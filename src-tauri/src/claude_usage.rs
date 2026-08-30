@@ -19,6 +19,11 @@
 //! * **Display-only.** What comes back is a number for a meter. Nothing derived
 //!   from it is ever written toward a session, same bound as the status line.
 use std::path::PathBuf;
+// macOS-only: the keychain read shells `security`. On Linux the credential
+// file is read directly (see the `cfg(not(target_os = "macos"))` branch below),
+// so importing this unconditionally is an unused import there — which CI's
+// Linux clippy job denies.
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Duration;
 
@@ -48,8 +53,10 @@ const USER_AGENT: &str = concat!("santree/", env!("CARGO_PKG_VERSION"));
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// A keychain prompt that nobody answers must not wedge the refresh.
+#[cfg(target_os = "macos")]
 const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// The generic-password service Claude Code stores its credentials under.
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
 // ── Credentials ─────────────────────────────────────────────────────────────
