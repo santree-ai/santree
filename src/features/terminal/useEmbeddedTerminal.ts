@@ -67,18 +67,21 @@ export function useEmbeddedTerminal(opts: {
   // Pull the spec into primitive fields so the embed effect re-runs on real
   // changes (a new ticket/command) rather than on every render's fresh object
   // identity. args is folded into a stable string key.
-  const { title, cwd, command, args, seed, source, refId } = spec;
+  const { title, cwd, command, args, seed, source, refId, agent } = spec;
   const argsKey = args?.join(" ");
+  // Same treatment as `args`: the identity is a fresh object every render, and
+  // only a real change of provider/repo/surface should re-run the embed.
+  const agentKey = agent && `${agent.kind} ${agent.repo} ${agent.termKey}`;
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: argsKey stands in for args.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: argsKey/agentKey stand in for args/agent.
   useLayoutEffect(() => {
-    const key = ensure({ title, cwd, command, args, seed, source, refId });
+    const key = ensure({ title, cwd, command, args, seed, source, refId, agent });
     keyRef.current = key;
     seenRef.current = false;
     const host = hostRef.current;
     if (!attach || !host) return;
     return attachEmbed({ host, key });
-  }, [title, cwd, command, seed, source, refId, argsKey, attach, ensure, attachEmbed]);
+  }, [title, cwd, command, seed, source, refId, argsKey, agentKey, attach, ensure, attachEmbed]);
 
   // Seen-latch exit detection (see the file header).
   useEffect(() => {

@@ -1,12 +1,15 @@
 /**
  * COMPLIANCE.md's terminal rule, made executable on the TypeScript side.
  *
- * `COMPLIANCE.md` says of `src/features/terminal/`: "the app's only terminal API.
- * It does placement + a single optional **seed** (`terminal_write` of bytes,
- * identical to human typing). It does not read output or drive the session." And
- * of the whole product: "No auto-responders, no output-parsing that feeds new
- * prompts back in… The backend streams bytes; it never inspects them to decide
- * what to type next."
+ * `COMPLIANCE.md`: "The only bytes santree writes to a terminal are the user's
+ * keystrokes and the single human-initiated seed prompt. Orchestration stops at:
+ * choose a cwd, place the pane, send one seed." And: "No auto-responders, no
+ * output-parsing that feeds new prompts back in… The backend streams bytes; it
+ * never inspects them to decide what to type next."
+ *
+ * `src/features/terminal/` is where that holds or fails on this side: it does
+ * placement plus that one seed (`terminal_seed`, with keystrokes going through
+ * `terminal_write`), and it never reads output or drives the session.
  *
  * That rule is about a path that must not exist — PTY output reaching PTY input —
  * so there is no function to call and assert on. These are source scans over the
@@ -142,9 +145,16 @@ function handlerBodies(src: string, name: string): string[] {
   }
 }
 
-/** Receivers whose `.write()` reaches the PTY. The renderer's `write()` is the
+/** Every call that puts bytes into a PTY: keystrokes (`write`) and the one
+ *  human-initiated launch line (`seed`). The renderer's `write()` is the
  *  opposite direction — bytes onto the screen — and is deliberately not here. */
-const PTY_WRITES = ["backend.write(", "pane.write(", "commands.terminalWrite("];
+const PTY_WRITES = [
+  "backend.write(",
+  "backend.seed(",
+  "pane.write(",
+  "commands.terminalWrite(",
+  "commands.terminalSeed(",
+];
 
 /** Names anything carrying PTY output would be called. A write whose argument
  *  mentions one of these is a write derived from what the agent printed. */
@@ -152,19 +162,22 @@ const OUTPUT_WORDS = /output|bytes|chunk|stdout|stderr|scrollback|screen|transcr
 
 describe("COMPLIANCE.md: the terminal orchestrator places panes and seeds once", () => {
   it("keeps every PTY write behind the one backend module", () => {
-    // COMPLIANCE.md names `terminal_write` as the single way bytes go into a
-    // session. A second caller is a second place that could answer the agent.
-    const callers = Object.entries(APP)
-      .filter(([, source]) => source.includes("commands.terminalWrite"))
-      .map(([path]) => path);
-    expect(callers).toEqual(["src/features/terminal/TauriBackend.ts"]);
+    // COMPLIANCE.md names two commands as the way bytes go into a session:
+    // `terminal_write` for keystrokes and `terminal_seed` for the single
+    // human-initiated launch line. A second caller of either is a second place
+    // that could answer the agent.
+    for (const [command, parameters] of [
+      ["commands.terminalWrite(", "id, data"],
+      ["commands.terminalSeed(", "id, seed"],
+    ] as const) {
+      const callers = Object.entries(APP)
+        .filter(([, source]) => source.includes(command))
+        .map(([path]) => path);
+      expect(callers).toEqual(["src/features/terminal/TauriBackend.ts"]);
 
-    // …and that one caller forwards its own parameter, nothing derived.
-    const forwarded = callArgs(
-      APP["src/features/terminal/TauriBackend.ts"],
-      "commands.terminalWrite(",
-    );
-    expect(forwarded).toEqual(["id, data"]);
+      // …and that one caller forwards its own parameters, nothing derived.
+      expect(callArgs(APP["src/features/terminal/TauriBackend.ts"], command)).toEqual([parameters]);
+    }
   });
 
   it("never turns a session's output back into text", () => {

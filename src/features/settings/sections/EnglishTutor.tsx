@@ -253,7 +253,7 @@ function DaySection({ day, defaultOpen }: { day: EnglishDay; defaultOpen: boolea
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"
+        className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left hover:bg-hover"
       >
         <ChevronRightIcon
           size={11}

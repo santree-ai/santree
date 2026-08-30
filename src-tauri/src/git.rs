@@ -5,7 +5,7 @@
 //! higher-level orchestration (DB links, setup scripts, agent launch) lives in
 //! [`crate::worktree`]. Ported from the CLI's `source/lib/git.ts`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 
-use santree_core::domain::{ChangedFile, FileSource, FileStatus};
+use santree_core::domain::{ChangedFile, FileSource, FileStatus, RepoBranch};
 
 /// Resolve a frontend-supplied *relative* path against the worktree, refusing
 /// anything that escapes it (absolute paths or `..` traversal). These paths
@@ -400,6 +400,54 @@ pub fn add_worktree_for_branch(repo: &Path, worktree_path: &Path, branch: &str) 
     bail!("branch '{branch}' not found locally or on origin (a fork PR?)");
 }
 
+/// Reject anything that isn't a legal branch name before it reaches a `git` argv.
+///
+/// Two separate hazards, one gate:
+///
+/// * **Flag injection.** Branch names are passed positionally (`worktree add -b
+///   <branch>`, `fetch origin <branch>`), so a leading `-` would be read as an
+///   option — `--upload-pack=<cmd>` is remote code execution on a fetch. Rejected
+///   outright, exactly as [`safe_sha`] does for object ids.
+/// * **Validity.** The Create-worktree dialog lets the user *type* a new branch
+///   name, which is untrusted input that git itself would reject halfway through
+///   the operation. These are `git check-ref-format`'s documented rules for
+///   `refs/heads/<name>`, applied up front so the UI can disable the button
+///   instead of letting the user click into a git error.
+///
+/// Every real branch satisfies this — git applied the same rules when it was
+/// created — so it is also safe on names that came back from `git for-each-ref`.
+pub fn safe_branch(name: &str) -> Result<&str> {
+    let invalid = |why: &str| anyhow!("'{name}' is not a valid branch name ({why})");
+    if name.is_empty() {
+        return Err(invalid("empty"));
+    }
+    // Ours, not git's: a positional argument starting with a dash is a flag.
+    if name.starts_with('-') {
+        return Err(invalid("starts with '-'"));
+    }
+    if name.contains("..") || name.contains("@{") || name == "@" {
+        return Err(invalid("reserved sequence"));
+    }
+    if name.chars().any(|c| {
+        c.is_ascii_control()
+            || matches!(c, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\' | '\u{7f}')
+    }) {
+        return Err(invalid("illegal character"));
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.contains("//") {
+        return Err(invalid("empty path component"));
+    }
+    if name.ends_with('.') {
+        return Err(invalid("ends with '.'"));
+    }
+    for component in name.split('/') {
+        if component.starts_with('.') || component.ends_with(".lock") {
+            return Err(invalid("illegal path component"));
+        }
+    }
+    Ok(name)
+}
+
 /// Reject anything that isn't a plain git object id before it reaches a `git`
 /// argv.
 ///
@@ -541,6 +589,89 @@ pub fn worktree_branch(repo: &Path, worktree_path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Every branch already checked out in one of the repo's worktrees — the main
+/// checkout included.
+///
+/// Git allows exactly one checkout per branch, so this is precisely the set
+/// `worktree add` would refuse. Read from git rather than from santree's own
+/// `worktree_links` so a worktree the app didn't create still counts.
+fn checked_out_branches(repo: &Path) -> HashSet<String> {
+    let Ok(out) = git_output(repo, &["worktree", "list", "--porcelain"]) else {
+        return HashSet::new();
+    };
+    out.lines()
+        .filter_map(|l| l.strip_prefix("branch refs/heads/"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The repo's branches — every local one, plus the `origin/` branches that have
+/// no local counterpart — newest commit first.
+///
+/// Remote-only branches are included because [`add_worktree_for_branch`] can
+/// check one out (it creates a local tracking branch), which is what makes "the
+/// branch a teammate pushed" reachable from the Create-worktree dialog without a
+/// manual `git fetch` first.
+pub fn branches(repo: &Path) -> Result<Vec<RepoBranch>> {
+    let checked_out = checked_out_branches(repo);
+    // One process for both namespaces. `%09` is a tab: a branch name can contain
+    // almost anything except a control character, so it can't appear in the name
+    // and the split is unambiguous.
+    let out = git_output(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%09%(committerdate:iso-strict)",
+            "refs/heads",
+            "refs/remotes/origin",
+        ],
+    )?;
+
+    let mut locals: Vec<RepoBranch> = Vec::new();
+    let mut remotes: Vec<RepoBranch> = Vec::new();
+    for line in out.lines() {
+        let (name, updated_at) = line.split_once('\t').unwrap_or((line, ""));
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match name.strip_prefix("origin/") {
+            // `origin/HEAD` is a symbolic alias for the default branch, not a
+            // branch of its own — offering it would create a worktree on a ref
+            // whose name means something else tomorrow.
+            Some("HEAD") => continue,
+            Some(short) => remotes.push(RepoBranch {
+                name: short.to_string(),
+                has_worktree: checked_out.contains(short),
+                remote_only: true,
+                updated_at: updated_at.to_string(),
+            }),
+            None => locals.push(RepoBranch {
+                name: name.to_string(),
+                has_worktree: checked_out.contains(name),
+                remote_only: false,
+                updated_at: updated_at.to_string(),
+            }),
+        }
+    }
+
+    let local_names: HashSet<&str> = locals.iter().map(|b| b.name.as_str()).collect();
+    let mut all: Vec<RepoBranch> = remotes
+        .iter()
+        .filter(|b| !local_names.contains(b.name.as_str()))
+        .cloned()
+        .collect();
+    all.extend(locals);
+    // Newest first: a branch picker is nearly always reaching for recent work.
+    // Name as the tiebreak so refs sharing a commit date keep a stable order.
+    all.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(all)
 }
 
 /// The ref to log/diff a worktree branch against for PR-style "what this branch
@@ -1412,6 +1543,97 @@ mod tests {
             .unwrap()
             .success();
         assert!(ok, "git {args:?} failed");
+    }
+
+    // ---- safe_branch (flag injection + git's own ref rules) ----
+
+    #[test]
+    fn safe_branch_accepts_real_branch_names() {
+        for name in [
+            "main",
+            "feature/AK-1-do-a-thing",
+            "santree/ak-165-fix",
+            "release-2.0",
+            "user@host",
+            "a.b.c",
+        ] {
+            assert!(safe_branch(name).is_ok(), "{name} should be valid");
+        }
+    }
+
+    #[test]
+    fn safe_branch_rejects_flag_injection() {
+        // The branch is passed positionally to `worktree add -b`/`fetch origin`,
+        // so a leading dash is an option, not a ref — `--upload-pack=<cmd>` on a
+        // fetch is remote code execution.
+        assert!(safe_branch("--upload-pack=/bin/sh").is_err());
+        assert!(safe_branch("-b").is_err());
+        assert!(safe_branch("-").is_err());
+    }
+
+    #[test]
+    fn safe_branch_rejects_what_check_ref_format_rejects() {
+        for name in [
+            "",     // empty
+            "a..b", // double dot
+            "a b",  // space
+            "a~b",  // ~ ^ : ? * [ \\ are all reserved
+            "a^b",
+            "a:b",
+            "a?b",
+            "a*b",
+            "a[b",
+            "a\\b",
+            "feat/@{now}", // @{ sequence
+            "@",           // the single-character @
+            ".hidden",     // component starting with a dot
+            "feat/.hidden",
+            "feat.lock", // component ending in .lock
+            "feat/x.lock",
+            "/leading",
+            "trailing/",
+            "double//slash",
+            "ends.with.dot.",
+            "new\nline", // control character
+        ] {
+            assert!(safe_branch(name).is_err(), "{name:?} should be rejected");
+        }
+    }
+
+    /// The invariant the picker depends on: a branch git already holds in a
+    /// worktree is flagged, because `worktree add` would refuse a second one.
+    #[test]
+    fn branches_flag_the_ones_already_checked_out() {
+        let base = scratch_dir("branches");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        run_git(&repo, &["branch", "spare"]);
+        run_git(&repo, &["branch", "taken"]);
+        let wt = base.join("wt");
+        run_git(
+            &repo,
+            &["worktree", "add", wt.to_string_lossy().as_ref(), "taken"],
+        );
+
+        let listed = branches(&repo).unwrap();
+        let by_name = |n: &str| listed.iter().find(|b| b.name == n).cloned();
+
+        // `main` is the repo's own checkout — also a worktree, also unavailable.
+        assert!(by_name("main").unwrap().has_worktree);
+        assert!(by_name("taken").unwrap().has_worktree);
+        assert!(!by_name("spare").unwrap().has_worktree);
+        assert!(!by_name("spare").unwrap().remote_only);
+        assert!(
+            listed.iter().all(|b| !b.updated_at.is_empty()),
+            "every row carries a real committer date"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // ---- safe_path (lexical traversal guard) ----

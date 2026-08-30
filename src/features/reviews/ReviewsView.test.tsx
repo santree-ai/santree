@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ReviewInbox, ReviewPr, TicketRef } from "../../bindings";
+import { NO_PROJECT } from "./grouping";
 import { ReviewsSidebarView } from "./ReviewsSidebar";
 
 function pr(
@@ -370,7 +371,10 @@ describe("ReviewsSidebarView", () => {
     );
 
     expect(screen.getByText("Voice")).toBeInTheDocument();
-    expect(screen.getByText("No project")).toBeInTheDocument();
+    // `getByText` — not `getAllByText`: exactly ONE band. The backend spells a
+    // project-less issue "No Project", so a second, differently-cased local
+    // constant used to open a near-identical sibling band beside this one.
+    expect(screen.getByText(NO_PROJECT)).toBeInTheDocument();
     // Re-cutting the rail must not change *which* PRs it shows, or one would be
     // visible under one grouping and invisible under another.
     expect(screen.getByText("Tighten rate limiter")).toBeInTheDocument();

@@ -3,19 +3,19 @@ import { describe, expect, it } from "vitest";
 import type { AgentSession } from "../../bindings";
 import { agentSessionSeed, shellQuote } from "./agentSeed";
 
-const fresh: AgentSession = {
+const fresh: Extract<AgentSession, { type: "fresh" }> = {
   type: "fresh",
   agentKind: "Claude",
   executable: "claude",
   sessionId: "sess-1",
-  remote: null,
+  launchFlags: "",
 };
-const resume: AgentSession = {
+const resume: Extract<AgentSession, { type: "resume" }> = {
   type: "resume",
   agentKind: "Claude",
   executable: "claude",
   sessionId: "sess-1",
-  remote: null,
+  launchFlags: "",
 };
 
 describe("agentSessionSeed", () => {
@@ -37,6 +37,7 @@ describe("agentSessionSeed", () => {
         agentKind: "Codex",
         executable: "/custom/codex",
         sessionId: null,
+        launchFlags: "",
       },
       { prompt: "inspect this" },
     );
@@ -52,6 +53,7 @@ describe("agentSessionSeed", () => {
           agentKind: "Codex",
           executable: "/custom/codex",
           sessionId: "thread-1",
+          launchFlags: "",
         },
         {},
       ),
@@ -64,7 +66,7 @@ describe("agentSessionSeed", () => {
    *  with nothing to inject would widen trust for no reason. */
   it("pairs Codex's hook injection with the trust bypass", () => {
     const seed = agentSessionSeed(
-      { type: "resume", agentKind: "Codex", executable: "codex", sessionId: "t1" },
+      { type: "resume", agentKind: "Codex", executable: "codex", sessionId: "t1", launchFlags: "" },
       { settingsFlag: "-c 'hooks.SessionStart=[]'", repo: "acme/app", termKey: "tree:AK-1" },
     );
     expect(seed).toContain("--dangerously-bypass-hook-trust -c 'hooks.SessionStart=[]'");
@@ -73,7 +75,7 @@ describe("agentSessionSeed", () => {
 
   it("never passes the trust bypass with no hooks to inject", () => {
     const seed = agentSessionSeed(
-      { type: "resume", agentKind: "Codex", executable: "codex", sessionId: "t1" },
+      { type: "resume", agentKind: "Codex", executable: "codex", sessionId: "t1", launchFlags: "" },
       {},
     );
     expect(seed).not.toContain("--dangerously-bypass-hook-trust");

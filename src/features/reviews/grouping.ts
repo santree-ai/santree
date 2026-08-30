@@ -17,6 +17,7 @@ import type { ReviewPr, TicketRef } from "../../bindings";
 import {
   groupByMilestone,
   NO_MILESTONE as SHARED_NO_MILESTONE,
+  NO_PROJECT as SHARED_NO_PROJECT,
 } from "../../components/WorkSignals";
 
 /** How the sidebar's rows are bucketed into sections. */
@@ -173,8 +174,15 @@ export function groupPrs(
   return ordered;
 }
 
-/** Heading for PRs whose ticket carries no project (or that have no ticket). */
-export const NO_PROJECT = "No project";
+/** Heading for PRs whose ticket carries no project (or that have no ticket).
+ *
+ * Re-exported from the shared constant rather than spelled again: the backend
+ * hands a project-less issue the literal string `"No Project"`
+ * (`linear.rs` `project_fields`), so a local `"No project"` split the inbox in
+ * two — tickets *with* no project landed in one band (the `??` never fires on a
+ * non-null sentinel) and PRs with no ticket at all in another, under headings
+ * that differ by one letter. `NO_MILESTONE` was already shared for this reason. */
+export const NO_PROJECT = SHARED_NO_PROJECT;
 
 export const NO_MILESTONE = SHARED_NO_MILESTONE;
 

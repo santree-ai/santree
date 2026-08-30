@@ -471,7 +471,7 @@ function RailSelect({
       title={title}
       aria-label={title}
       wrapperClassName="min-w-0 flex-1"
-      className="w-full rounded-[6px] border border-line-2 bg-input py-1 pr-6 pl-2 text-[11px] text-fg-2 hover:border-line-strong focus-visible:outline-2 focus-visible:outline-[color:var(--accent)]"
+      className="w-full rounded-[6px] border border-line-2 bg-input py-1 pr-6 pl-2 text-[11px] text-fg-2 hover:border-line-strong"
     >
       {children}
     </ChevronSelect>

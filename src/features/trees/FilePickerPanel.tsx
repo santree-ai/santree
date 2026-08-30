@@ -109,6 +109,7 @@ export function FilePickerPanel() {
     activeId,
     activePr,
     fileTab,
+    hasTicket,
     setFileTab,
     rightCollapsed,
     rightWidth,
@@ -128,10 +129,15 @@ export function FilePickerPanel() {
   // that into "no changes" and assert something we don't know yet.
   const { data: status } = useWorktreeStatus(repo, activeId);
 
-  // Which panes this worktree has — the base checkout has no ticket, and the PR
-  // panes need a pull request. `availableFileTabs` is the single answer, shared
-  // with `resolveFileTab`, so the strip can't hide a pane the model resolves to.
-  const available = availableFileTabs({ isBase: activeId === BASE_ID, hasPr: activePr !== null });
+  // Which panes this worktree has — the base checkout and a worktree cut from a
+  // plain branch have no ticket, and the PR panes need a pull request.
+  // `availableFileTabs` is the single answer, shared with `resolveFileTab`, so the
+  // strip can't hide a pane the model resolves to.
+  const available = availableFileTabs({
+    isBase: activeId === BASE_ID,
+    hasPr: activePr !== null,
+    hasTicket,
+  });
   const tabs = TABS.filter((t) => available.includes(t.tab));
 
   // A width persisted before the strip grew a pane sits below the new minimum,
@@ -167,6 +173,17 @@ export function FilePickerPanel() {
   // main tab bar's trailing edge, where the panel's own toggle was, so there is
   // no need for a leftover strip here.
   if (rightCollapsed) return null;
+
+  const panes: Record<FileTab, ReactNode> = {
+    issue: active && <WorktreeIssuePane key={active.id} repo={repo} worktree={active} />,
+    // Keyed by PR so switching worktrees resets the sections' open state rather
+    // than carrying one PR's expansions onto another's.
+    pr: activePr && <WorktreePrPane key={`${activePr.repo}#${activePr.number}`} pr={activePr} />,
+    aiWork: <WorktreeAiWorkPane key={`${activePr?.repo}#${activePr?.number}`} pr={activePr} />,
+    files: <AllFilesList />,
+    changes: <GitPanel status={status} />,
+    history: <SessionHistory />,
+  };
 
   return (
     <div
@@ -243,21 +260,11 @@ export function FilePickerPanel() {
         <PanelToggle />
       </div>
 
-      {fileTab === "issue" ? (
-        active && <WorktreeIssuePane key={active.id} repo={repo} worktree={active} />
-      ) : fileTab === "pr" ? (
-        // Keyed by PR so switching worktrees resets the sections' open state
-        // rather than carrying one PR's expansions onto another's.
-        activePr && <WorktreePrPane key={`${activePr.repo}#${activePr.number}`} pr={activePr} />
-      ) : fileTab === "aiWork" ? (
-        <WorktreeAiWorkPane key={`${activePr?.repo}#${activePr?.number}`} pr={activePr} />
-      ) : fileTab === "files" ? (
-        <AllFilesList />
-      ) : fileTab === "changes" ? (
-        <GitPanel status={status} />
-      ) : (
-        <SessionHistory />
-      )}
+      {/* A total map rather than a ternary cascade: every pane is named by its own
+          tab, so a new `FileTab` is a compile error here instead of silently
+          landing in whichever arm happened to be last. Only `panes[fileTab]`
+          mounts — the others are element descriptions nothing renders. */}
+      {panes[fileTab]}
     </div>
   );
 }

@@ -4,6 +4,7 @@
 //! [`commands`], and the real logic lives in the `santree-core` crate.
 
 mod agent;
+mod agent_procs;
 mod awake;
 mod claude_usage;
 mod codex_cli;
@@ -31,6 +32,7 @@ mod notes;
 mod openers;
 mod pr;
 mod pricing;
+mod proc_table;
 mod prompts;
 mod provider;
 mod repo;
@@ -98,6 +100,8 @@ fn specta_builder() -> AppBuilder {
             commands::worktrees,
             commands::base_worktree,
             commands::create_worktree,
+            commands::create_manual_worktree,
+            commands::repo_branches,
             commands::remove_worktree,
             commands::run_worktree_setup_streamed,
             commands::cancel_worktree_setup,
@@ -197,6 +201,7 @@ fn specta_builder() -> AppBuilder {
             commands::claude_global_capture_status,
             commands::set_claude_global_capture,
             commands::resource_usage,
+            commands::agent_processes,
             commands::triage_schedule,
             commands::get_settings,
             commands::set_settings,
@@ -228,6 +233,7 @@ fn specta_builder() -> AppBuilder {
             commands::set_keep_awake,
             terminal::terminal_open,
             terminal::terminal_write,
+            terminal::terminal_seed,
             terminal::terminal_resize,
             terminal::terminal_close,
             terminal::terminal_attach,

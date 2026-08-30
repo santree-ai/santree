@@ -6,11 +6,20 @@
  * highlight covers them too. Inside, an agent row can still take its own hover —
  * they composite, so a hovered agent reads on a selected card.
  *
- * **Line one is identity.** The title, the branch glyph that marks the repo's own
- * checkout, and at the trailing edge the marks of what this work is linked to
- * (its Linear ticket, its GitHub PR). The marks moved up here from the branch
- * line because that is what they describe — the *work*, not the ref it happens
- * to live on.
+ * **Line one is identity.** A leading branch glyph on the repo's own checkout,
+ * the title, and at the trailing edge a `primary` tag on that same checkout plus
+ * the marks of what this work is linked to (its Linear ticket, its GitHub PR).
+ * The marks moved up here from the branch line because that is what they
+ * describe — the *work*, not the ref it happens to live on.
+ *
+ * That checkout needs telling apart: it is not a ticket, and a row of otherwise
+ * identical cards gives you nothing to distinguish it by. It gets **a glyph and
+ * a word**, at the two ends of the line, rather than a treatment of the card —
+ * an edge around the whole row (tried: a dashed outline) reads as a state, which
+ * on a rail whose card fills already mean hover and selection is a third thing
+ * competing for the same channel. The tag is grey and not tinted for the same
+ * reason the earlier mint `primary` pill was removed: hue in this tree belongs
+ * to state, and this is a label.
  *
  * **The branch name is gone from the row.** It is the longest string in the tree
  * and the least often read: it repeats the title in kebab-case, and a sidebar
@@ -33,6 +42,7 @@
  */
 import { useState } from "react";
 
+import { agentKey } from "../../features/agents/registry";
 import { MAX_DEPTH } from "../../features/trees/worktreeGrouping";
 import type { TreeFocusPane } from "../../state/AppContext";
 import { BranchIcon, LinearLogo } from "../icons";
@@ -135,6 +145,16 @@ export function WorktreeRow({
           </>
         ) : (
           <>
+            {/* Leads the line rather than trailing it: read left to right, the
+                glyph says "this one is a branch checkout" before the name lands,
+                and the name is then the only thing that varies down the column.
+                Decorative to a screen reader — the `primary` tag below says the
+                same thing in words, and the row's tooltip says it in full. */}
+            {node.primary && (
+              <span aria-hidden className="flex flex-none items-center text-muted-3">
+                <BranchIcon size={12} />
+              </span>
+            )}
             <MarkdownTitle
               className={`min-w-0 flex-1 truncate text-[13px] leading-5 ${
                 selected ? "font-medium text-fg" : "font-medium text-fg-2"
@@ -142,19 +162,9 @@ export function WorktreeRow({
             >
               {w.title || w.id}
             </MarkdownTitle>
-            {/* Not a claim about the default branch: this is the repo's own
-                checkout, sitting on whatever branch it happens to have — which
-                is why the mark is a branch glyph in the row's own ink and not a
-                tinted "primary" label the data can't back up. */}
-            {node.primary && (
-              <span
-                role="img"
-                aria-label={PRIMARY_LABEL}
-                className="flex flex-none items-center text-fg-2"
-              >
-                <BranchIcon size={12} />
-              </span>
-            )}
+            {/* Not a claim about the default branch (see PRIMARY_LABEL): the tag
+                says which checkout this is, in the rail's own grey. */}
+            {node.primary && <span className="tree-tag">primary</span>}
             {linked && (
               <span className="relative flex flex-none items-center gap-0.5">
                 {task && (
@@ -196,7 +206,7 @@ export function WorktreeRow({
         expanded &&
         agents.map((agent) => (
           <AgentRow
-            key={agent.entry.sessionId}
+            key={agentKey(agent.entry)}
             node={agent}
             indent={CARD_INSET + INDENT_PX}
             onOpen={() => onOpenAgent(agent)}

@@ -1,44 +1,53 @@
 /**
  * The one line that stands in for a worktree's agents while they're collapsed.
  *
- * Collapsed, it is chips: one per attention level, each a dot plus the marks of
- * the providers in it. That shape answers the two questions a sidebar row is
- * asked at a glance — is anything waiting on me, and who is doing the work —
- * without spending a row per agent. Expanded, the chips give way to the plain
- * count, because the list underneath is now saying all of it.
+ * Collapsed, it is chips: one per **provider**, each a dot, that provider's mark
+ * and how many of it are running. That shape answers the two questions a sidebar
+ * row is asked at a glance — is anything waiting on me, and who is doing the
+ * work — without spending a row per agent, and without a count that belongs to
+ * nobody in particular. Expanded, the chips give way to the plain count, because
+ * the list underneath is now saying all of it.
+ *
+ * **Hue is the attention level's, never the provider's.** The mark already says
+ * which tool is running, so the colour is free to carry the only other thing a
+ * collapsed row has to: what that tool needs. A provider→colour map here would
+ * be a second thing colour means in a tree where colour means state (see
+ * `AttentionDot`), and would have to disagree with the dot it sits beside.
  *
  * A worktree with exactly one agent never gets this: the agent's own row is
  * shorter *and* says more (see {@link AgentRow}), so summarizing one thing would
  * be strictly worse.
  */
+import { alpha } from "../../theme/colors";
 import { AgentIcon, ChevronDownIcon } from "../icons";
-import { AttentionDot } from "./AttentionDot";
-import { type AgentGroup, describeAgents, pickGroupIcons, splitGroups } from "./agentGrouping";
+import { AttentionDot, attentionMeta } from "./AttentionDot";
+import { type AgentGroup, describeAgents, splitGroups } from "./agentGrouping";
 import type { AgentNode } from "./useProjectTree";
 
-/** One level's chip: its dot, a mark per provider, and what didn't fit. */
-function GroupChip({ group }: { group: AgentGroup }) {
-  const icons = pickGroupIcons(group.agents);
-  const hidden = group.agents.length - icons.length;
+/** One provider's chip: the state of its busiest agent, its mark, its count. */
+function ProviderChip({ group }: { group: AgentGroup }) {
+  const { level } = group.attention;
+  const count = group.agents.length;
+  // A wash of the level's own colour, so the chips read as coloured at a glance
+  // and a resting one stays out of the way: `idle`'s dot is a near-neutral grey
+  // whose 16% mix would disappear, so at rest the chip keeps the tree's plain
+  // surface step instead.
+  const tint = level === "idle" ? "var(--color-hover-2)" : alpha(16, attentionMeta[level].color);
+
   return (
-    <span className="inline-flex flex-none items-center gap-1 rounded-[var(--radius-sm)] bg-hover-2 px-1 py-0.5">
-      <AttentionDot level={group.level} size={6} />
-      {/* Overlapped, like a face pile: the marks are one fact ("these providers")
-          rather than a list, and at 14px the overlap is what keeps three of them
-          from eating the row. */}
-      <span className="inline-flex flex-none items-center -space-x-1">
-        {icons.map((agent) => (
-          <span
-            key={agent.entry.sessionId}
-            className="flex size-3.5 items-center justify-center rounded-full border border-line-2 bg-panel"
-          >
-            {agent.entry.agentKind && (
-              <AgentIcon kind={agent.entry.agentKind} size={9} className="text-muted-2" />
-            )}
-          </span>
-        ))}
+    <span
+      className="inline-flex flex-none items-center gap-1 rounded-[var(--radius-sm)] px-1 py-0.5"
+      style={{ background: tint }}
+    >
+      <AttentionDot level={level} size={6} />
+      {/* A fixed slot, so a session santree can't attribute to a provider keeps
+          the chip's shape instead of collapsing onto its dot. */}
+      <span className="flex size-3.5 flex-none items-center justify-center">
+        {group.kind && <AgentIcon kind={group.kind} size={10} className="text-fg-2" />}
       </span>
-      {hidden > 0 && <span className="text-[10px] text-muted-4 tabular-nums">+{hidden}</span>}
+      {/* One agent is what a single mark already says; the number earns its
+          space only from two. */}
+      {count > 1 && <span className="text-[10px] text-muted-2 tabular-nums">{count}</span>}
     </span>
   );
 }
@@ -79,8 +88,10 @@ export function AgentSummaryRow({
       ) : (
         <span className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden" aria-hidden>
           {visible.map((group) => (
-            <GroupChip key={group.level} group={group} />
+            <ProviderChip key={group.kind ?? "unknown"} group={group} />
           ))}
+          {/* The providers that didn't fit, as agents — a "+2" beside two chips
+              means two more sessions, not two more tools. */}
           {hiddenAgents > 0 && (
             <span className="flex-none text-[10px] text-muted-4 tabular-nums">+{hiddenAgents}</span>
           )}

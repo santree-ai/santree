@@ -16,7 +16,11 @@
 //!
 //! Invariant: this MUST NEVER disrupt the user's session. Every failure path
 //! (bad args, unparseable stdin, empty session id, missing/locked db) exits 0
-//! silently — a non-zero exit could block or warn inside the agent.
+//! silently — a non-zero exit could block or warn inside the agent. Silent to
+//! the *agent*, though, is not the same as silent full stop: a failed write
+//! leaves a line in `<db_dir>/santree-hook-errors.log` ([`note`]), because
+//! "nothing was recorded" and "the hook never ran" were otherwise the same
+//! observation, and that ambiguity is what let a Codex bug survive three fixes.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -280,8 +284,11 @@ fn main() {
     else {
         return;
     };
-    let mut wrote = rt
-        .block_on(record(
+    let mut wrote = noted(
+        &db_path,
+        &event,
+        "recording session state",
+        rt.block_on(record(
             &db_path,
             session_id,
             state,
@@ -289,8 +296,9 @@ fn main() {
             cwd,
             message.as_deref(),
             transcript,
-        ))
-        .unwrap_or(false);
+        )),
+    )
+    .unwrap_or(false);
 
     // Bind the live session id to the terminal that launched it (see
     // [`binds_session_id`] for why each provider needs this). For Claude it
@@ -302,18 +310,32 @@ fn main() {
     // *only that one terminal's* row — never another tab's, even though sibling
     // tabs share a cwd.
     if event == "SessionStart" && binds_session_id(agent, field("source")) {
-        if let (Ok(repo), Ok(term_key)) = (
-            std::env::var("SANTREE_REPO"),
-            std::env::var("SANTREE_TERM_KEY"),
-        ) {
-            if !repo.is_empty() && !term_key.is_empty() {
-                let reconciled = rt
-                    .block_on(reconcile_terminal_session(
-                        &db_path, &repo, &term_key, cwd, session_id, agent,
-                    ))
-                    .unwrap_or(false);
-                wrote = wrote || reconciled;
-            }
+        let repo = std::env::var("SANTREE_REPO").unwrap_or_default();
+        let term_key = std::env::var("SANTREE_TERM_KEY").unwrap_or_default();
+        if repo.is_empty() || term_key.is_empty() {
+            // The one failure that makes a session permanently unattributable:
+            // without these the row can't be bound to a surface, and every
+            // downstream symptom (no sidebar row, an unresumable session) reads
+            // as "the hook never ran". Say so once, here.
+            note(
+                &db_path,
+                &event,
+                &format!(
+                    "not binding session {session_id}: SANTREE_REPO/SANTREE_TERM_KEY \
+                     missing from the hook's environment (repo={repo:?}, term_key={term_key:?})"
+                ),
+            );
+        } else {
+            let reconciled = noted(
+                &db_path,
+                &event,
+                "binding the session to its terminal",
+                rt.block_on(reconcile_terminal_session(
+                    &db_path, &repo, &term_key, cwd, session_id, agent,
+                )),
+            )
+            .unwrap_or(false);
+            wrote = wrote || reconciled;
         }
     }
 
@@ -340,6 +362,63 @@ fn install_exit_zero_panic_hook() {
         report(info);
         std::process::exit(0);
     }));
+}
+
+/// The file [`note`] appends to, beside the db this hook was pointed at.
+const FAILURE_LOG: &str = "santree-hook-errors.log";
+
+/// Past this the log is truncated before the next line. Failures are rare by
+/// construction, so this is a backstop against an unbounded file, not a budget.
+const FAILURE_LOG_MAX_BYTES: u64 = 64 * 1024;
+
+/// Leave one line in `<db_dir>/santree-hook-errors.log` saying what went wrong.
+///
+/// This binary's contract is that it prints nothing on the hook path and exits 0
+/// however badly it fails (COMPLIANCE.md) — which also meant that *every* way it
+/// could fail was invisible. A Codex session that never reached the sidebar, a
+/// `--db` bound to the wrong path, a locked database: all of them looked
+/// identical from outside, and identical to "the hook never ran at all". Three
+/// separate fixes were aimed at the wrong half of that ambiguity before the real
+/// cause was found.
+///
+/// A file, not stdout/stderr: the invariant above is load-bearing and this must
+/// not become output the agent CLI can see. Every step is best-effort — a hook
+/// that cannot write its own error log still exits 0 and says nothing.
+fn note(db_path: &str, event: &str, detail: &str) {
+    let Some(path) = Path::new(db_path).parent().map(|d| d.join(FAILURE_LOG)) else {
+        return;
+    };
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > FAILURE_LOG_MAX_BYTES) {
+        let _ = std::fs::remove_file(&path);
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{} [{event}] {detail}", now_ms());
+}
+
+/// Unwrap a hook-path result, leaving a [`note`] behind when it failed.
+///
+/// The error is dropped, not propagated: the caller's next step is still to exit
+/// 0. What changes is that the failure is now recoverable *by a human reading
+/// the log*, instead of being indistinguishable from a hook that never fired.
+fn noted<T, E: std::fmt::Display>(
+    db_path: &str,
+    event: &str,
+    what: &str,
+    result: Result<T, E>,
+) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(e) => {
+            note(db_path, event, &format!("{what} failed: {e}"));
+            None
+        }
+    }
 }
 
 /// Send a one-byte nudge over the app's signal socket (`<db_dir>/santree-signal.sock`).
@@ -895,6 +974,66 @@ async fn reconcile_terminal_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hook stays silent to the agent and still leaves a trace for a human.
+    ///
+    /// The bug this test exists for was invisible for a day: every failure path
+    /// exits 0 and prints nothing, so "the write failed" and "the hook never
+    /// fired" produced exactly the same evidence — none — and three fixes were
+    /// aimed at the wrong one.
+    #[test]
+    fn a_failed_write_leaves_a_line_beside_the_db() {
+        let dir = std::env::temp_dir().join(format!("santree-hook-note-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("santree.db");
+        let log = dir.join(FAILURE_LOG);
+        let _ = std::fs::remove_file(&log);
+
+        let kept: Option<u8> = noted(
+            db.to_str().unwrap(),
+            "SessionStart",
+            "binding the session to its terminal",
+            Err::<u8, _>("database is locked"),
+        );
+        assert!(kept.is_none());
+
+        let written = std::fs::read_to_string(&log).unwrap();
+        assert!(written.contains("[SessionStart]"), "{written}");
+        assert!(written.contains("database is locked"), "{written}");
+
+        // A success writes nothing: the log is for failures, not a trace of
+        // every hook invocation.
+        std::fs::remove_file(&log).unwrap();
+        assert_eq!(
+            noted(
+                db.to_str().unwrap(),
+                "Stop",
+                "recording",
+                Ok::<_, String>(7)
+            ),
+            Some(7)
+        );
+        assert!(!log.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unbounded append is how a "harmless" log becomes a real problem on a
+    /// machine that hits the failure in a loop.
+    #[test]
+    fn the_failure_log_is_bounded() {
+        let dir = std::env::temp_dir().join(format!("santree-hook-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("santree.db");
+        let log = dir.join(FAILURE_LOG);
+        std::fs::write(&log, "x".repeat(FAILURE_LOG_MAX_BYTES as usize + 1)).unwrap();
+
+        note(db.to_str().unwrap(), "Stop", "over the cap");
+        let len = std::fs::metadata(&log).unwrap().len();
+        assert!(len < FAILURE_LOG_MAX_BYTES, "log kept growing: {len} bytes");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn parse(args: &[&str]) -> Option<(String, Mode)> {
         parse_args(args.iter().map(|s| s.to_string()))

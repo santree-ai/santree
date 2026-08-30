@@ -98,6 +98,9 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    · linear.rs (GraphQL + OAuth + token store) · db.rs (sqlx pool +
                    migrations) · repo.rs · settings.rs · terminal.rs · stream.rs
                    (background command runs behind a PTY → read-only log panes)
+                   · proc_table.rs (the one `ps` listing, cached 500ms) +
+                   agent_procs.rs (which agent owns each pane's foreground —
+                   identity, never status; see COMPLIANCE.md)
                    · hooks.rs (the `--settings` file EVERY santree `claude` launch
                    layers on: session-state hooks, statusLine, English tutor; plus
                    the AI review's deny/allow variant and its `--mcp-config`)
@@ -308,6 +311,19 @@ version.
 - **External CLI contracts:** verify vendor flags against `--help`, don't guess.
   Claude `--model` takes dash-form ids or aliases (`sonnet`/`opus`/`haiku`) —
   dotted (`claude-sonnet-4.5`) is invalid and fails launch.
+- **Codex fires `SessionStart` on the first turn, not at launch** (0.151.0,
+  measured). So a Codex tab that hasn't been prompted has no `session_state` row
+  and no `terminal_sessions` binding — nothing hook-fed knows it exists. Anything
+  that must show an agent promptly reads the process table (`agent_procs.rs`, the
+  pane's foreground process group) or santree's own launch record (the terminal
+  tab's `AgentTabIdentity`), not the hook. **Which agent** is running has one
+  ordered arbiter — session row → process table → launch record — and **what it
+  is doing** still has only `lib/attention.ts`; never let the first answer the
+  second. See `docs/terminals.md` "Agent state" and "Agent identity".
+- **A `santree-hook` write that fails leaves a line in
+  `<app_data_dir>/santree-hook-errors.log`.** The binary is silent to the agent
+  by contract, which used to mean silent full stop — check that file before
+  concluding a hook never fired.
 - **Non-idempotent effects** (setup scripts, PTY spawn, worktree create) must stay
   mounted with `display:none`, never `cond && <C/>` — remount re-fires them.
 - **A11y baseline:** new interactive elements need keyboard focus + an accessible

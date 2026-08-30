@@ -8,6 +8,7 @@
  * nothing, so only the visible pane attaches. Releasing the claim doesn't touch the
  * session — the layer just stops pointing at this host.
  */
+import type { AgentTabIdentity } from "../terminal/orchestrator";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
 
 export function ReviewTerminal({
@@ -16,6 +17,7 @@ export function ReviewTerminal({
   title,
   cwd,
   seed,
+  agent,
   attach,
   onExited,
 }: {
@@ -24,11 +26,12 @@ export function ReviewTerminal({
   title: string;
   cwd?: string;
   seed?: string;
+  agent: AgentTabIdentity;
   attach: boolean;
   onExited: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
-    spec: { title, cwd, source: "review", refId: terminalRef, seed },
+    spec: { title, cwd, source: "review", refId: terminalRef, seed, agent },
     attach,
     onExited,
   });

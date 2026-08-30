@@ -82,7 +82,11 @@ const SEEN_KEY = "santree.agents.seenAt";
  * this" should follow); fall back to the session for an unattributed agent.
  */
 export function seenKeyOf(entry: AgentEntry): string {
-  return entry.termKey ?? `session:${entry.sessionId}`;
+  if (entry.termKey) return entry.termKey;
+  // An agent santree launched has no session id until its provider announces
+  // one, so the tab is the last identity left. It only lasts as long as the tab
+  // does, which is fine: so does the entry it names.
+  return entry.sessionId ? `session:${entry.sessionId}` : `tab:${entry.tabKey}`;
 }
 
 /**

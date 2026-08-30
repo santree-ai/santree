@@ -720,7 +720,7 @@ function AgentSelect({
   defaultLabel,
   "aria-labelledby": ariaLabelledBy,
 }: {
-  agents: { key: AgentKind; label: string; available: boolean }[];
+  agents: { key: AgentKind; label: string }[];
   value: string;
   onChange: (v: string | null) => void;
   inherits: boolean;
@@ -728,10 +728,11 @@ function AgentSelect({
   defaultLabel: string;
   "aria-labelledby"?: string;
 }) {
+  // Every caller passes the already-filtered `availableAgents`, so there is no
+  // unavailable option left to grey out.
   const options = agents.map((a) => (
-    <option key={a.key} value={a.key} disabled={!agentAvailable(a)} className="bg-input">
+    <option key={a.key} value={a.key} className="bg-input">
       {a.label}
-      {agentAvailable(a) ? "" : " — WIP"}
     </option>
   ));
   if (inherits) {

@@ -33,6 +33,7 @@ import {
 } from "../../lib/queries";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
+import type { AgentTabIdentity } from "../terminal/orchestrator";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
 import { useHookInjection } from "../terminal/useHookInjection";
@@ -221,6 +222,7 @@ export function InvestigatePane({
           terminalRef={terminalRef}
           cwd={cwd}
           seed={seed}
+          agent={{ kind: resolvedAgent, repo, termKey }}
           onExited={handleExited}
         />
       ) : (
@@ -240,16 +242,18 @@ function InvestigateTerminal({
   terminalRef,
   cwd,
   seed,
+  agent,
   onExited,
 }: {
   ticketId: string;
   terminalRef: string;
   cwd?: string;
   seed?: string;
+  agent: AgentTabIdentity;
   onExited: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
-    spec: { title: ticketId, cwd, source: "triage", refId: terminalRef, seed },
+    spec: { title: ticketId, cwd, source: "triage", refId: terminalRef, seed, agent },
     onExited,
   });
   // The TerminalLayer overlays this host with the ticket's live session.

@@ -74,13 +74,20 @@ pub async fn health(executable: Option<String>) -> CodexHealth {
 /// than mapping it to an enum, so a new auth method Codex adds shows up as
 /// itself instead of as "unknown".
 pub async fn account(executable: &str) -> Result<CodexAccount> {
-    let output = run(executable, &["login", "status"]).await?;
-    Ok(parse_login_status(&output))
+    let out = run_streams(executable, &["login", "status"]).await?;
+    // `codex login status` prints its answer on **stderr** and leaves stdout
+    // empty (verified against 0.151.0: `stdout[0] b""`, `stderr[24] b"Logged in
+    // using ChatGPT\n"`, exit 0). Reading stdout alone reported every signed-in
+    // user as "Not signed in" — a silent wrong answer, since the exit code is 0
+    // either way. Both streams are considered so this survives Codex moving the
+    // line back to stdout, which is where it belongs.
+    Ok(parse_login_status(&out.stdout, &out.stderr))
 }
 
-fn parse_login_status(output: &str) -> CodexAccount {
-    let line = output
-        .lines()
+fn parse_login_status(stdout: &str, stderr: &str) -> CodexAccount {
+    let line = [stdout, stderr]
+        .iter()
+        .flat_map(|stream| stream.lines())
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or_default();
@@ -214,7 +221,19 @@ fn parse_version(version: &str) -> (u64, u64, u64) {
 /// otherwise sit forever on a terminal nobody is watching, holding a
 /// blocking-pool slot — the same class of stuck process the App Server left 87
 /// of behind.
+/// The child's stdout, for the subcommands that answer there.
 async fn run(executable: &str, args: &[&str]) -> Result<String> {
+    Ok(run_streams(executable, args).await?.stdout)
+}
+
+/// Both of the child's streams, because which one carries the answer is the
+/// CLI's choice and not always stdout — see [`account`].
+struct Streams {
+    stdout: String,
+    stderr: String,
+}
+
+async fn run_streams(executable: &str, args: &[&str]) -> Result<Streams> {
     let mut child = tokio::process::Command::new(executable)
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -257,7 +276,10 @@ async fn run(executable: &str, args: &[&str]) -> Result<String> {
             let detail = detail.lines().next().unwrap_or_default();
             bail!("codex {} exited {status}: {detail}", args.join(" "));
         }
-        Ok(String::from_utf8_lossy(&out).into_owned())
+        Ok(Streams {
+            stdout: String::from_utf8_lossy(&out).into_owned(),
+            stderr: String::from_utf8_lossy(&err).into_owned(),
+        })
     };
     tokio::time::timeout(CALL_TIMEOUT, call)
         .await
@@ -271,10 +293,33 @@ mod tests {
     /// The exact strings `codex` 0.150.1 prints — read out of the shipped
     /// binary rather than guessed, because this parser *is* the contract with a
     /// human-readable command.
+    /// The regression this parser shipped with: `codex login status` answers on
+    /// **stderr**, exit 0, stdout empty — so a stdout-only read called every
+    /// signed-in user "Not signed in", with no error anywhere to say why.
+    #[test]
+    fn login_status_is_read_when_the_cli_answers_on_stderr() {
+        assert_eq!(
+            parse_login_status("", "Logged in using ChatGPT\n"),
+            parse_login_status("Logged in using ChatGPT\n", ""),
+        );
+        assert_eq!(
+            parse_login_status("", "Logged in using ChatGPT\n"),
+            CodexAccount {
+                connected: true,
+                auth_type: "ChatGPT".into(),
+            },
+        );
+        // Still nothing to report when neither stream says anything.
+        assert_eq!(parse_login_status("", ""), CodexAccount::default());
+    }
+
     #[test]
     fn login_status_is_read_from_the_clis_own_wording() {
-        assert_eq!(parse_login_status("Not logged in"), CodexAccount::default());
-        assert_eq!(parse_login_status(""), CodexAccount::default());
+        assert_eq!(
+            parse_login_status("Not logged in", ""),
+            CodexAccount::default()
+        );
+        assert_eq!(parse_login_status("", ""), CodexAccount::default());
         for (line, method) in [
             ("Logged in using ChatGPT", "ChatGPT"),
             ("Logged in using access token", "access token"),
@@ -288,7 +333,7 @@ mod tests {
                 "Amazon Bedrock API key",
             ),
         ] {
-            let account = parse_login_status(line);
+            let account = parse_login_status(line, "");
             assert!(account.connected, "{line}");
             assert_eq!(account.auth_type, method);
         }
@@ -298,7 +343,7 @@ mod tests {
     /// hint. It must not become part of the method the UI shows.
     #[test]
     fn an_api_key_hint_never_reaches_the_account_field() {
-        let account = parse_login_status("Logged in using an API key - sk-proj-abc…xyz\n");
+        let account = parse_login_status("Logged in using an API key - sk-proj-abc…xyz\n", "");
         assert!(account.connected);
         assert_eq!(account.auth_type, "an API key");
     }

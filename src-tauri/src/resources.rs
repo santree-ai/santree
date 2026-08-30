@@ -1,11 +1,12 @@
 //! Resource usage of the processes santree owns — the Resource Manager's data.
 //!
-//! One host-wide `ps` listing per call, parsed into a parent→children tree; each
+//! One host-wide `ps` listing (from the shared [`crate::proc_table`] snapshot,
+//! which agent detection reads too), parsed into a parent→children tree; each
 //! PTY session's root pid (from [`PtyManager::sessions`]) is then summed with all
 //! its descendants, and the app's own process gets whatever is left of its
 //! subtree once the terminals are carved out. Read-only and input-free: nothing
 //! here takes an IPC value, the `ps` argv is a constant, and no process is
-//! signalled, written to or inspected beyond the four columns `ps` prints.
+//! signalled, written to or inspected beyond the columns `ps` prints.
 //!
 //! Terminals are grouped by the directory they started in, joined against the
 //! repo registry and worktree links (the backend never learns which tab opened a
@@ -32,21 +33,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use santree_core::domain::{RepoUsage, ResourceUsage, TerminalUsage, WorktreeUsage};
 use santree_pty::{PtyManager, SessionInfo};
 
 use crate::db::{self, Db};
+use crate::proc_table::{Proc, ProcTree};
 use crate::worktree::BASE_ID;
-
-/// The one process-table read. `-ax` is every process (ours are children of the
-/// app, but a `ps` restricted to the session would miss a terminal's daemonised
-/// children); `rss` is KiB on both macOS and Linux; `stat` is only read for its
-/// zombie flag; `ucomm` is the executable's basename on both (`comm` is the full
-/// path on macOS) and goes last because it may contain spaces.
-const PS_ARGS: &[&str] = &["-axo", "pid=,ppid=,pcpu=,rss=,stat=,ucomm="];
 
 /// Logical cores, the denominator that makes a summed `pcpu` mean anything: on
 /// a 14-core machine `ps` will happily report 800% for one hot process tree,
@@ -62,67 +56,6 @@ fn core_count() -> u32 {
         .unwrap_or(1)
 }
 
-/// One row of the process table.
-#[derive(Debug, Clone, PartialEq)]
-struct Proc {
-    pid: u32,
-    ppid: u32,
-    /// Percent of one core, as `ps` reports it.
-    cpu_pct: f64,
-    rss_bytes: f64,
-    zombie: bool,
-    name: String,
-}
-
-fn snapshot() -> Result<Vec<Proc>> {
-    let out = Command::new("ps")
-        .args(PS_ARGS)
-        .output()
-        .context("running ps")?;
-    if !out.status.success() {
-        bail!("ps exited with {}", out.status);
-    }
-    Ok(parse_ps(&String::from_utf8_lossy(&out.stdout)))
-}
-
-/// Parse the `ps` listing. A line that doesn't fit is skipped, never fatal: a
-/// kernel thread with a blank field or a name `ps` couldn't read must not hide
-/// every other process.
-fn parse_ps(text: &str) -> Vec<Proc> {
-    text.lines().filter_map(parse_line).collect()
-}
-
-fn parse_line(line: &str) -> Option<Proc> {
-    let mut rest = line;
-    let pid = field(&mut rest)?.parse().ok()?;
-    let ppid = field(&mut rest)?.parse().ok()?;
-    let cpu_pct: f64 = field(&mut rest)?.parse().ok()?;
-    let rss_kib: f64 = field(&mut rest)?.parse().ok()?;
-    let stat = field(&mut rest)?;
-    let name = rest.trim();
-    if name.is_empty() || !cpu_pct.is_finite() || !rss_kib.is_finite() {
-        return None;
-    }
-    Some(Proc {
-        pid,
-        ppid,
-        cpu_pct: cpu_pct.max(0.0),
-        rss_bytes: rss_kib.max(0.0) * 1024.0,
-        zombie: stat.starts_with('Z'),
-        name: name.to_string(),
-    })
-}
-
-/// Take the next whitespace-delimited token off `rest`, leaving the remainder
-/// (so the final, space-containing column can be taken whole).
-fn field<'a>(rest: &mut &'a str) -> Option<&'a str> {
-    let trimmed = rest.trim_start();
-    let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
-    let (token, remainder) = trimmed.split_at(end);
-    *rest = remainder;
-    (!token.is_empty()).then_some(token)
-}
-
 /// What one process subtree adds up to.
 #[derive(Debug, Default, Clone, PartialEq)]
 struct Subtree {
@@ -133,86 +66,38 @@ struct Subtree {
     heaviest: Option<String>,
 }
 
-struct ProcTree {
-    procs: HashMap<u32, Proc>,
-    children: HashMap<u32, Vec<u32>>,
+/// Every process in `root`'s subtree, without descending into `stop` — the same
+/// walk [`subtree`] sums, kept as individual rows. Heaviest first; `root` is
+/// always first regardless, because it is the process the subtree is *about* and
+/// a helper outweighing it doesn't change that.
+fn subtree_procs<'a>(tree: &'a ProcTree, root: u32, stop: &HashSet<u32>) -> Vec<&'a Proc> {
+    let mut out: Vec<&Proc> = tree
+        .descend(root, stop)
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    out.sort_by(|a, b| match (a.pid == root, b.pid == root) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => b.rss_bytes.total_cmp(&a.rss_bytes),
+    });
+    out
 }
 
-impl ProcTree {
-    fn new(procs: Vec<Proc>) -> Self {
-        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-        for p in &procs {
-            // A pid that is its own parent (pid 0 on macOS) would otherwise be an
-            // infinite descent.
-            if p.ppid != p.pid {
-                children.entry(p.ppid).or_default().push(p.pid);
-            }
+/// Sum `root` and every descendant, without descending into `stop` (pids whose
+/// subtrees are accounted for elsewhere).
+fn subtree(tree: &ProcTree, root: u32, stop: &HashSet<u32>) -> Subtree {
+    let mut total = Subtree::default();
+    let mut heaviest_rss = -1.0;
+    for (_, p) in tree.descend(root, stop) {
+        total.cpu_pct += p.cpu_pct;
+        total.rss_bytes += p.rss_bytes;
+        if p.rss_bytes > heaviest_rss {
+            heaviest_rss = p.rss_bytes;
+            total.heaviest = Some(p.name.clone());
         }
-        let procs = procs.into_iter().map(|p| (p.pid, p)).collect();
-        Self { procs, children }
     }
-
-    /// Whether `pid` exists and isn't a zombie.
-    fn live(&self, pid: u32) -> bool {
-        self.procs.get(&pid).is_some_and(|p| !p.zombie)
-    }
-
-    /// Every process in `root`'s subtree, without descending into `stop` — the
-    /// same walk [`Self::subtree`] sums, kept as individual rows. Heaviest first;
-    /// `root` is always first regardless, because it is the process the subtree
-    /// is *about* and a helper outweighing it doesn't change that.
-    fn subtree_procs(&self, root: u32, stop: &HashSet<u32>) -> Vec<&Proc> {
-        let mut out = Vec::new();
-        let mut visited = HashSet::new();
-        let mut stack = vec![root];
-        while let Some(pid) = stack.pop() {
-            if !visited.insert(pid) {
-                continue;
-            }
-            let Some(p) = self.procs.get(&pid) else {
-                continue;
-            };
-            out.push(p);
-            if let Some(kids) = self.children.get(&pid) {
-                stack.extend(kids.iter().filter(|kid| !stop.contains(kid)));
-            }
-        }
-        out.sort_by(|a, b| match (a.pid == root, b.pid == root) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => b.rss_bytes.total_cmp(&a.rss_bytes),
-        });
-        out
-    }
-
-    /// Sum `root` and every descendant, without descending into `stop` (pids
-    /// whose subtrees are accounted for elsewhere). A `visited` set guards the
-    /// walk against a parent cycle in the snapshot, which a reused pid can
-    /// produce between two lines of one listing.
-    fn subtree(&self, root: u32, stop: &HashSet<u32>) -> Subtree {
-        let mut total = Subtree::default();
-        let mut heaviest_rss = -1.0;
-        let mut visited = HashSet::new();
-        let mut stack = vec![root];
-        while let Some(pid) = stack.pop() {
-            if !visited.insert(pid) {
-                continue;
-            }
-            let Some(p) = self.procs.get(&pid) else {
-                continue;
-            };
-            total.cpu_pct += p.cpu_pct;
-            total.rss_bytes += p.rss_bytes;
-            if p.rss_bytes > heaviest_rss {
-                heaviest_rss = p.rss_bytes;
-                total.heaviest = Some(p.name.clone());
-            }
-            if let Some(kids) = self.children.get(&pid) {
-                stack.extend(kids.iter().filter(|kid| !stop.contains(kid)));
-            }
-        }
-        total
-    }
+    total
 }
 
 /// A registered repo's root, canonicalised for comparison.
@@ -333,14 +218,15 @@ fn canonical(path: &str) -> PathBuf {
 }
 
 /// The snapshot: every PTY session's subtree placed under its repo/worktree, plus
-/// the app's own process. Two blocking hops (the `ps` run, then the walk + the
-/// registry's canonicalisation), neither on the async runtime.
+/// the app's own process. Nothing here pins a runtime worker: the `ps` is async
+/// I/O, and both CPU hops — parsing the listing and canonicalising the registry —
+/// run on the blocking pool (see [`crate::proc_table::snapshot`]).
 pub async fn resource_usage(db: &Db, manager: &PtyManager) -> Result<ResourceUsage> {
     let sessions = manager.sessions();
     let (repos, links) = registry(db).await?;
-    let procs = tokio::task::spawn_blocking(snapshot).await??;
+    let tree = crate::proc_table::snapshot().await?;
     Ok(assemble(
-        ProcTree::new(procs),
+        &tree,
         sessions,
         std::process::id(),
         &repos,
@@ -352,7 +238,7 @@ pub async fn resource_usage(db: &Db, manager: &PtyManager) -> Result<ResourceUsa
 
 #[allow(clippy::too_many_arguments)]
 fn assemble(
-    tree: ProcTree,
+    tree: &ProcTree,
     sessions: Vec<SessionInfo>,
     app_pid: u32,
     repos: &[RepoRef],
@@ -373,7 +259,7 @@ fn assemble(
         };
         let live = tree.live(pid);
         let sub = if live {
-            tree.subtree(pid, &none)
+            subtree(tree, pid, &none)
         } else {
             Subtree::default()
         };
@@ -442,14 +328,12 @@ fn assemble(
     // column to join on — there is no sound way to tell ours from another
     // WebKit app's in a process-table scan. Rather than guess, this reports the
     // side it can prove.
-    let app = tree.subtree(app_pid, &roots);
+    let app = subtree(tree, app_pid, &roots);
     let app_name = tree
-        .procs
-        .get(&app_pid)
+        .get(app_pid)
         .map(|p| p.name.clone())
         .unwrap_or_else(|| "santree".to_string());
-    let processes: Vec<TerminalUsage> = tree
-        .subtree_procs(app_pid, &roots)
+    let processes: Vec<TerminalUsage> = subtree_procs(tree, app_pid, &roots)
         .into_iter()
         .map(|p| TerminalUsage {
             // `None`: these are processes, not PTY sessions — the frontend keys
@@ -488,46 +372,23 @@ fn assemble(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proc_table::parse_ps;
 
+    /// The columns `proc_table` selects. Parsing is tested there; this fixture
+    /// only has to be a plausible host for the accounting below.
     const LISTING: &str = "\
-    1     0   0.0  24688 Ss   launchd
-  100     1   1.5  50000 S    santree
-  200   100   0.0   4000 S    zsh
-  201   200  12.5 300000 R+   claude
-  202   201   0.5  20000 S    node
-  210   100   0.0   3000 Z    zsh
-  300     1   0.0   5000 S    Claude Helper
-  400   100   2.0  10000 S    codex
+    1     0   0.0  24688 Ss   /sbin/launchd
+  100     1   1.5  50000 S    /Applications/santree.app/Contents/MacOS/santree
+  200   100   0.0   4000 S    /bin/zsh
+  201   200  12.5 300000 R+   /opt/homebrew/bin/claude
+  202   201   0.5  20000 S    /usr/local/bin/node
+  210   100   0.0   3000 Z    /bin/zsh
+  300     1   0.0   5000 S    /Applications/Other.app/Contents/MacOS/Other
+  400   100   2.0  10000 S    /opt/homebrew/bin/codex
     x     y   0.0      0 S    junk
-  500   100   abc    100 S    bad-cpu
+  500   100   abc    100 S    /bin/bad-cpu
   600   100   0.0
 ";
-
-    /// The real `ps` columns, including a name with a space and rows the parser
-    /// must skip rather than choke on.
-    #[test]
-    fn parse_ps_reads_the_columns_and_skips_malformed_lines() {
-        let procs = parse_ps(LISTING);
-        let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
-        assert_eq!(pids, vec![1, 100, 200, 201, 202, 210, 300, 400]);
-
-        let claude = procs.iter().find(|p| p.pid == 201).unwrap();
-        assert_eq!(claude.ppid, 200);
-        assert_eq!(claude.cpu_pct, 12.5);
-        assert_eq!(
-            claude.rss_bytes,
-            300_000.0 * 1024.0,
-            "rss is KiB on the wire"
-        );
-        assert!(!claude.zombie);
-
-        let helper = procs.iter().find(|p| p.pid == 300).unwrap();
-        assert_eq!(helper.name, "Claude Helper", "the name keeps its space");
-
-        assert!(procs.iter().find(|p| p.pid == 210).unwrap().zombie);
-        assert!(parse_ps("").is_empty());
-        assert!(parse_ps("\n\n   \n").is_empty());
-    }
 
     /// A terminal's figures are its whole subtree; the app's are its subtree
     /// minus the terminals it hosts; a dead root reports nothing.
@@ -535,12 +396,12 @@ mod tests {
     fn subtree_sums_descendants_and_stops_at_carved_out_roots() {
         let tree = ProcTree::new(parse_ps(LISTING));
 
-        let terminal = tree.subtree(200, &HashSet::new());
+        let terminal = subtree(&tree, 200, &HashSet::new());
         assert_eq!(terminal.cpu_pct, 13.0);
         assert_eq!(terminal.rss_bytes, (4000.0 + 300_000.0 + 20_000.0) * 1024.0);
         assert_eq!(terminal.heaviest.as_deref(), Some("claude"));
 
-        let app = tree.subtree(100, &HashSet::from([200, 210]));
+        let app = subtree(&tree, 100, &HashSet::from([200, 210]));
         assert_eq!(app.cpu_pct, 1.5 + 2.0, "santree + codex, not the terminal");
         assert_eq!(app.rss_bytes, (50_000.0 + 10_000.0) * 1024.0);
         assert_eq!(app.heaviest.as_deref(), Some("santree"));
@@ -548,32 +409,7 @@ mod tests {
         assert!(tree.live(200));
         assert!(!tree.live(210), "a zombie is not live");
         assert!(!tree.live(999), "a vanished pid is not live");
-        assert_eq!(tree.subtree(999, &HashSet::new()), Subtree::default());
-    }
-
-    /// A parent cycle in one listing (pid reuse mid-read) must terminate.
-    #[test]
-    fn subtree_survives_a_parent_cycle() {
-        let tree = ProcTree::new(vec![
-            Proc {
-                pid: 1,
-                ppid: 2,
-                cpu_pct: 1.0,
-                rss_bytes: 1.0,
-                zombie: false,
-                name: "a".into(),
-            },
-            Proc {
-                pid: 2,
-                ppid: 1,
-                cpu_pct: 1.0,
-                rss_bytes: 1.0,
-                zombie: false,
-                name: "b".into(),
-            },
-        ]);
-        let sub = tree.subtree(1, &HashSet::new());
-        assert_eq!((sub.cpu_pct, sub.rss_bytes), (2.0, 2.0));
+        assert_eq!(subtree(&tree, 999, &HashSet::new()), Subtree::default());
     }
 
     /// The cwd → group resolution order, and that containment is component-wise.
@@ -690,7 +526,7 @@ mod tests {
             },
         ];
 
-        let usage = assemble(tree, sessions, 100, &repos, &links, 42.0, 8);
+        let usage = assemble(&tree, sessions, 100, &repos, &links, 42.0, 8);
         assert_eq!(usage.sampled_at_ms, 42.0);
         assert_eq!(usage.core_count, 8, "the CPU denominator rides along");
 
@@ -757,17 +593,6 @@ mod tests {
         assert!(
             cores <= 4096,
             "a plausible core count, not a parse artifact"
-        );
-    }
-
-    /// The real `ps`: it runs, and this test process is in its own listing.
-    #[test]
-    fn snapshot_lists_this_process() {
-        let procs = snapshot().expect("ps runs");
-        let me = std::process::id();
-        assert!(
-            procs.iter().any(|p| p.pid == me && !p.name.is_empty()),
-            "pid {me} should be in the listing"
         );
     }
 }

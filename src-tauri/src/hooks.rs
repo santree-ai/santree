@@ -256,6 +256,18 @@ pub(crate) fn statusline_command(bin: &str, db: &str, then: Option<&str>) -> Str
 /// The other five (`PreToolUse`, `SubagentStart`, `SubagentStop`, `PreCompact`,
 /// `PostCompact`) would fire the hook binary for no state change, so they are
 /// left unregistered rather than registered-and-ignored.
+///
+/// **`SessionStart` is not a launch event for Codex.** Claude fires it while the
+/// TUI is coming up; Codex fires it when the *first turn is submitted*, because
+/// that is when it creates the thread the id belongs to. Measured on codex-cli
+/// 0.151.0 in a real pty with these exact flags: idle for 95s after boot → only
+/// `SessionEnd` ever fires (at quit); the same launch with one prompt typed →
+/// `SessionStart` lands the instant it is submitted, then `UserPromptSubmit`,
+/// `Stop`, `SessionEnd`. Since `SessionStart` is what binds the session to its
+/// terminal (`reconcile_terminal_session`), a Codex tab that has been opened but
+/// not yet prompted is invisible to every hook-fed surface — which is why the
+/// registry does not wait for one; see `registry.ts`'s launched-but-unannounced
+/// entries.
 const CODEX_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",

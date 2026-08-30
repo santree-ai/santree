@@ -148,7 +148,11 @@ comes back.
 **Session-state hooks + status line.** Every santree `claude` launch layers a
 `--settings` file, which is a key-level override — the user's other keys are
 untouched. It injects eight events, each running the bundled hook binary, which
-prints nothing on the hook path and always exits 0. The decision-capable ones are
+prints nothing on the hook path and always exits 0. (A write it could not perform
+appends one line to `<db_dir>/santree-hook-errors.log`, santree's own directory —
+never to a stream the CLI can see, so the "silent to the agent" property is
+unchanged; the file exists because a failure that leaves no trace anywhere is
+indistinguishable from a hook that never ran.) The decision-capable ones are
 `async: true` — the CLI's own schema defines that as "hook runs in background
 without blocking" — so they structurally cannot approve or deny; `SessionEnd` is
 synchronous only because it fires at teardown.
@@ -271,6 +275,30 @@ seeing it.**
 **santree derives its own paths.** The settings, prompt, and MCP file a session
 launches with are derived in Rust from the tab's own row. Browser storage never
 selects one, and a webview may supply a PR identity but never a path.
+
+**Reading the OS process table is observation, not a loop.** santree asks the
+kernel which process owns each pane's foreground process group, so it knows
+*which agent* is in a pane rather than only which one it launched
+(`proc_table.rs`, `agent_procs.rs`). Terminal output is untouched by this; it is
+the same passive class as reading a pane's OSC title. It answers **identity,
+never status** — the state ladder is still the hooks, then the title — and
+nothing derived from it is written back into a PTY, gates a launch, chooses a
+prompt, or becomes an argument to a command. It reaches the sidebar as a provider
+mark and stops. The `ps` argv is a constant, so no IPC value reaches it. The
+inability to write is structural rather than a promise: `agent_procs.rs` may not
+name a `PtyManager` at all, so it holds no handle on a terminal.
+
+The listing selects `ps`'s `command` column, so the read *transits* every host
+process's full argv — which on any machine can carry a secret somebody put on a
+command line. **Only `argv[0]`'s basename is retained**, at the parse
+(`proc_table.rs`), before anything else sees a row: the rest is dropped and never
+logged, persisted, or sent across IPC. `ucomm` would avoid the transit but is
+unusable — it reported `claude.exe` for a running `claude` *and* for a `ugrep`
+that Claude spawned — and no cross-platform column yields `argv[0]` alone. The
+narrow retention is what makes the wider read acceptable; widening it is a change
+to this paragraph, not just to a parser.
+→ `only_the_terminal_adapter_writes_bytes_into_a_pty` (its allowlist is what
+keeps that module away from the PTY)
 
 **Terminal reattach.** A session survives a webview reload: the PTY lives in the
 Rust process and keeps a bounded ring of its recent output

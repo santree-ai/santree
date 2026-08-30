@@ -73,6 +73,9 @@ class FakeBackend implements TerminalBackend {
   opened?: OpenOpts;
   handlers?: OutputHandlers;
   writes: Array<[SessionId, string]> = [];
+  /** Seeds are recorded apart from keystrokes because the backend treats them
+   *  differently — see `terminal_seed` in `terminal.rs`. */
+  seeded: Array<[SessionId, string]> = [];
   closed: SessionId[] = [];
   detached: SessionId[] = [];
   attaches: Array<[SessionId, Anchor]> = [];
@@ -97,6 +100,9 @@ class FakeBackend implements TerminalBackend {
   }
   write(id: SessionId, data: string) {
     this.writes.push([id, data]);
+  }
+  seed(id: SessionId, seed: string) {
+    this.seeded.push([id, seed]);
   }
   resized: Array<[number, number]> = [];
   resize(_id: SessionId, cols: number, rows: number) {
@@ -127,8 +133,10 @@ test("TerminalView wires the renderer to the backend and cleans up", async () =>
   expect(renderer.mounted).toBe(true);
   expect(backend.opened).toMatchObject({ cwd: "/tmp", command: "", cols: 100, rows: 30 });
 
-  // Seed is sent as if typed (with a trailing Enter).
-  await waitFor(() => expect(backend.writes).toContainEqual([7, "echo hi\r"]));
+  // The seed goes out on the seed channel, not as keystrokes: the backend adds
+  // the Enter and decides whether the line can be typed at all (see below).
+  await waitFor(() => expect(backend.seeded).toContainEqual([7, "echo hi"]));
+  expect(backend.writes).toEqual([]);
 
   // PTY output → renderer.
   backend.handlers?.onOutput(new Uint8Array([104, 105]));
@@ -144,6 +152,35 @@ test("TerminalView wires the renderer to the backend and cleans up", async () =>
   expect(backend.detached).toContain(7);
   expect(backend.closed).toEqual([]);
   expect(renderer.disposed).toBe(true);
+});
+
+/** The launch line is the one thing santree types on the user's behalf, and it
+ *  is the one thing that may have to be reshaped before it can be typed at all:
+ *  a tty in canonical mode drops everything past ~1KB of a line without a word,
+ *  which is how a Codex launch (an `env` prefix, six `-c 'hooks.…'` flags, and
+ *  two absolute paths repeated in each) came to sit half-typed at the prompt.
+ *  Keeping that decision behind `seed()` is what lets the backend make it — and
+ *  what keeps it away from `write()`, where a long paste must stay verbatim. */
+test("hands the launch line to the backend's seed channel however long it is", async () => {
+  const renderer = new FakeRenderer();
+  const backend = new FakeBackend();
+  const long = `exec env SANTREE_TERM_KEY='tree:AK-1' '/opt/homebrew/bin/codex' ${"-c 'hooks.X=[]' ".repeat(200)}`;
+
+  render(
+    <TerminalView
+      label="tree:AK-1"
+      command=""
+      seed={long}
+      backend={backend}
+      createRenderer={() => renderer}
+    />,
+  );
+
+  await waitFor(() => expect(backend.seeded.length).toBe(1));
+  // Untouched on the way out: the frontend neither shortens it nor splits it.
+  // Whether it can be typed as one line is the backend's call.
+  expect(backend.seeded[0]).toEqual([7, long]);
+  expect(backend.writes).toEqual([]);
 });
 
 describe("terminal title", () => {
@@ -201,6 +238,7 @@ describe("adoption", () => {
     // cannot duplicate anything already on it.
     expect(backend.attaches[0]).toEqual([42, { kind: "fresh" }]);
     expect(backend.writes).toEqual([]);
+    expect(backend.seeded).toEqual([]);
   });
 
   /** Keystrokes and output have to reach the adopted session, not a phantom. */
@@ -253,7 +291,7 @@ describe("adoption", () => {
     expect(backend.opens).toBe(1);
     expect(backend.closed).toEqual([]);
     // ...and the seed ran exactly once, not once per effect run.
-    expect(backend.writes.filter(([, d]) => d === "echo hi\r")).toHaveLength(1);
+    expect(backend.seeded).toEqual([[7, "echo hi"]]);
 
     rerender(<StrictMode>{view}</StrictMode>);
     expect(backend.opens).toBe(1);

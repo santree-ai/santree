@@ -9,7 +9,7 @@ import {
 } from "../../../lib/queries";
 import { LINEAR_BRAND } from "../../../theme/colors";
 import { Heading, SELECT_CLASS } from "../widgets";
-import { linearBadge } from "./Integrations";
+import { linearBadge } from "./Linear";
 
 export function RepoLinearSection({ repo }: { repo: string }) {
   const { data: orgs = [] } = useLinearOrgs();

@@ -149,6 +149,21 @@ export const commands = {
 	 */
 	createWorktree: (repo: string, issueId: string, title: string, project: string | null, base: string | null, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree", { repo, issueId, title, project, base, agent })),
 	/**
+	 *  Create a worktree from the sidebar's "Create worktree" dialog, which — unlike
+	 *  [`create_worktree`] — may have no Linear ticket behind it at all: `source`
+	 *  says whether the branch is derived from the id, checked out from one that
+	 *  exists, or created under a name the user typed. `base` is the parent
+	 *  worktree's branch when one was picked (a *stacked* worktree), else `None` for
+	 *  the repo's default branch.
+	 */
+	createManualWorktree: (repo: string, issueId: string, title: string, project: string | null, source: WorktreeBranchSource, base: string | null, agent: AgentKind) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_manual_worktree", { repo, issueId, title, project, source, base, agent })),
+	/**
+	 *  The repo's branches (local, plus `origin`-only ones), each flagged with
+	 *  whether it is already checked out somewhere — the Create-worktree dialog's
+	 *  Branch source. Empty when the repo has no local path.
+	 */
+	repoBranches: (repo: string) => typedError<RepoBranch[], CmdError>(__TAURI_INVOKE("repo_branches", { repo })),
+	/**
 	 *  Remove a worktree (and its branch), drop the issue link, and delete its
 	 *  on-disk work prompt.
 	 */
@@ -640,12 +655,41 @@ export const commands = {
 	/**  Tickets awaiting triage — live from Linear when connected, else empty. */
 	listTriageTickets: (repo: string) => typedError<TriageTicket[], CmdError>(__TAURI_INVOKE("list_triage_tickets", { repo })),
 	/**
-	 *  The full triage issue (description + comments) for the discussion pane. `None`
-	 *  means no Linear org is connected — an issue that genuinely doesn't exist errors
-	 *  out of `linear::triage_detail` itself, so reporting this as "not found" would
-	 *  have misdescribed exactly the failure the user needs to diagnose.
+	 *  The full triage issue (description + comments) for the discussion pane.
+	 * 
+	 *  `null` means there is no ticket to show — no Linear org is connected, or Linear
+	 *  answered that this id names no issue (a worktree cut from a plain branch carries a
+	 *  branch slug where a ticket id would be). That is a state the UI renders, not a
+	 *  failure: it hides the Issue pane rather than raising a toast. Anything Linear
+	 *  *couldn't* answer — an expired token, a rate limit, a dead network — still errors.
 	 */
-	triageDetail: (repo: string, ticketId: string) => typedError<TriageDetail, CmdError>(__TAURI_INVOKE("triage_detail", { repo, ticketId })),
+	triageDetail: (repo: string, ticketId: string) => typedError<{
+	id: string,
+	title: string,
+	priority: Priority,
+	/**  Workflow state name (e.g. "Triage"). */
+	state: string,
+	/**  Id of the current workflow state (for the status picker's selection). */
+	stateId: string | null,
+	/**  All workflow states the issue can move to, ordered as in Linear. */
+	states: WorkflowState[],
+	/**  Canonical Linear URL for the issue. */
+	url: string,
+	author: string,
+	/**  Public avatar URL of the issue creator, when they have one. */
+	authorAvatarUrl: string | null,
+	/**  Epoch ms the issue was created — raw, formatted live by the frontend. */
+	createdAtMs: number | null,
+	labels: string[],
+	project: string | null,
+	/**  Absolute epoch ms the issue's SLA breaches, if it has one. */
+	slaBreachMs: number | null,
+	/**  Epoch ms the issue is snoozed until, if snoozed. */
+	snoozedUntilMs: number | null,
+	/**  Markdown description — may contain inline images. */
+	description: string,
+	comments: TriageComment[],
+} | null, CmdError>(__TAURI_INVOKE("triage_detail", { repo, ticketId })),
 	/**
 	 *  Move a triage issue to a different workflow state (the status picker). Moving
 	 *  it out of `triage` is how the UI promotes an item. Requires a connected,
@@ -777,6 +821,17 @@ export const commands = {
 	 *  input-free: no IPC value reaches a path, a pid or an argv.
 	 */
 	resourceUsage: () => typedError<ResourceUsage, CmdError>(__TAURI_INVOKE("resource_usage")),
+	/**
+	 *  Which coding agent is running in each terminal pane right now, observed in
+	 *  the host process table instead of remembered from the launch.
+	 * 
+	 *  Identity only — the attention ladder is untouched by this (see
+	 *  `agent_procs`). Read-only and input-free: no IPC value reaches the `ps` argv,
+	 *  and a process table that cannot be read yields an empty list ("we don't
+	 *  know") rather than an error, because a `ps` that is slow or killed must never
+	 *  take a render down with it.
+	 */
+	agentProcesses: () => typedError<AgentProcess[], CmdError>(__TAURI_INVOKE("agent_processes")),
 	/**
 	 *  The team triage rotations (who is on-call now), from Linear's responsibility
 	 *  schedules — one per team the viewer is on. Empty when none are configured.
@@ -982,13 +1037,36 @@ export const commands = {
 	 */
 	terminalOpen: (opts: TerminalOpenOpts, onOutput: Channel<ArrayBuffer>) => typedError<number, CmdError>(__TAURI_INVOKE("terminal_open", { opts, onOutput })),
 	/**
-	 *  Write raw bytes (keystrokes or a seed) to a session.
+	 *  Write raw bytes to a session — the user's keystrokes, verbatim.
+	 * 
+	 *  Verbatim is the contract: a paste is keystrokes too, and it is longer than a
+	 *  line more often than not, so nothing here may rewrite what it was given. The
+	 *  one launch line santree types on the user's behalf goes through
+	 *  [`terminal_seed`] instead, which is what makes the two distinguishable.
 	 * 
 	 *  Unlike resize/close, this can genuinely block (see the comment above): the
 	 *  write is offloaded to a blocking-pool thread so a stuck child's full PTY
 	 *  buffer can never pin a tokio worker and starve every other async command.
 	 */
 	terminalWrite: (id: number, data: string) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_write", { id, data })),
+	/**
+	 *  Type the one human-initiated seed into a session, followed by Enter.
+	 * 
+	 *  This is the launch line — `exec <agent> …` — and it is a separate command
+	 *  from [`terminal_write`] for one reason: a seed is the only input santree
+	 *  composes itself, so it is the only input santree may reshape. Anything over
+	 *  [`MAX_SEED_LINE`] is spilled to a private script and typed as an `exec` of
+	 *  it, because a tty silently truncates a long line and leaves the launch
+	 *  half-typed at the prompt. A keystroke can never take that path.
+	 * 
+	 *  Both parameters are untrusted, and neither gains authority here: `id` is an
+	 *  integer looked up in the manager, exactly as [`terminal_write`] looks it up,
+	 *  and `seed` becomes bytes in a PTY that the caller could already have written
+	 *  one keystroke at a time. It never reaches a path — the spill file's name is a
+	 *  UUID this process mints — and it is shell-quoted by the builder that composed
+	 *  it (`agentProvider.ts`), which this must preserve rather than redo.
+	 */
+	terminalSeed: (id: number, seed: string) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_seed", { id, seed })),
 	/**  Resize a session's PTY to the visible grid. */
 	terminalResize: (id: number, cols: number, rows: number) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_resize", { id, cols, rows })),
 	/**  Kill a session's child and free it. */
@@ -1122,6 +1200,27 @@ export type AgentDef = {
 
 /**  Which coding agent ("harness") runs a task. */
 export type AgentKind = "Claude" | "Codex" | "Cursor" | "Opencode";
+
+/**
+ *  Which coding agent the host process table says is running in one terminal
+ *  pane, keyed by the pane's `term_key`. Read by walking the pane's process
+ *  subtree for whoever owns its foreground process group (see
+ *  `src-tauri/src/agent_procs.rs`).
+ * 
+ *  **Identity, never status.** This says *which* agent is there, not what it is
+ *  doing: `src/lib/attention.ts` remains the one state vocabulary, fed by the
+ *  hook rows and then the terminal title.
+ * 
+ *  **A missing pane is no information, not "no agent".** `ps` can fail or be
+ *  slow, and a CLI launched through an interpreter is not recognisable by
+ *  `argv[0]`. Nothing may read an absent entry as a claim that a pane is a plain
+ *  shell, and nothing may substitute a default provider for one.
+ */
+export type AgentProcess = {
+	/**  The `term_key` the pane's PTY was opened under. */
+	termKey: string,
+	agentKind: AgentKind,
+};
 
 /**
  *  How a terminal should (re)launch its provider, resolved against the persisted
@@ -2231,6 +2330,30 @@ export type Repo = {
 	 *  migration `0002_repo_path` and the removed built-in seed repos).
 	 */
 	path: string | null,
+};
+
+/**
+ *  One of the repo's branches, as offered by the "Create worktree" dialog's
+ *  Branch source.
+ * 
+ *  `has_worktree` is read from git's own worktree list rather than from
+ *  santree's `worktree_links`: git allows exactly one checkout of a branch, so a
+ *  branch held by *any* worktree (santree's, a hand-made one, the repo's own
+ *  checkout) is one `worktree add` would refuse. The picker disables those rows
+ *  instead of letting the user click into that error.
+ */
+export type RepoBranch = {
+	/**
+	 *  Short name (`main`, `feature/x`) — never the `origin/` qualified form,
+	 *  which is what `worktree add --track -b` reconstructs for a remote-only one.
+	 */
+	name: string,
+	/**  Already checked out somewhere; a second worktree for it is impossible. */
+	hasWorktree: boolean,
+	/**  Exists only on `origin`. Checking it out creates a local branch tracking it. */
+	remoteOnly: boolean,
+	/**  Committer date of the branch tip (ISO-8601), newest first in the list. */
+	updatedAt: string,
 };
 
 /**
@@ -3358,6 +3481,26 @@ export type Worktree = {
 	 */
 	pending: boolean,
 };
+
+/**
+ *  Which branch a newly created worktree lands on.
+ * 
+ *  The three cases are genuinely different git operations — derive a name and
+ *  branch it off the base, check out a branch that already exists, or create one
+ *  under a name the user typed — and they used to be an `Option<String>` plus a
+ *  convention. Naming them keeps the "check out" and "create" paths from being
+ *  one boolean apart at the sink.
+ */
+export type WorktreeBranchSource = 
+/**
+ *  Name the branch after the work (`santree/<id>-<slug>`) and branch it off
+ *  the base — how a ticket's worktree has always been created.
+ */
+{ type: "derived" } | 
+/**  Check out a branch that already exists, locally or on `origin`. */
+{ type: "existing"; branch: string } | 
+/**  Create a branch under exactly this name, off the base. */
+{ type: "new"; branch: string };
 
 /**
  *  Debounced "a worktree's files changed on disk" signal. The frontend reacts by

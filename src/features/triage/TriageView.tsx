@@ -575,7 +575,11 @@ export function TriageView() {
 
   // Header and body both key off `activeId`, so they switch together in one
   // render — never a new title over the previous ticket's content.
-  const { data: detail } = useTriageDetail(activeRepo, activeId);
+  // Every id here came out of Linear's own queue, so "no such issue" isn't a state
+  // this view can reach — a `null` would only mean the org went away mid-session,
+  // which reads the same as not loaded.
+  const { data: liveDetail } = useTriageDetail(activeRepo, activeId);
+  const detail = liveDetail ?? undefined;
   const { refresh, fetching: refreshing } = useRefreshTriage(activeRepo, activeId);
 
   // Recently-viewed discussion panes stay mounted (hidden) so revisiting a

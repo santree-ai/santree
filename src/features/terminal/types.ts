@@ -99,7 +99,20 @@ export interface TerminalBackend {
   detach(id: SessionId): void;
   /** Claim the sessions a previous page load left running, by `label`. */
   adopt(owner: string): Promise<Map<string, SessionId>>;
+  /** Keystrokes, verbatim. A paste is keystrokes too, so nothing may reshape
+   *  what goes through here — see `seed` for the one line santree composes. */
   write(id: SessionId, data: string): void;
+  /** Type the one human-initiated launch line, followed by Enter.
+   *
+   *  Separate from `write` precisely so the backend can tell them apart: a tty
+   *  in canonical mode silently truncates a long line (macOS `MAX_CANON` is
+   *  1024 bytes), which is how a Codex launch came to sit half-typed at the
+   *  prompt. `terminal_seed` spills anything near that limit to a private script
+   *  and types a reference to it instead — a rewrite that would be wrong for a
+   *  keystroke and is invisible for a seed. The reference follows the seed's own
+   *  shape (`exec <path>` for an `exec …` launch line, sourcing otherwise), so a
+   *  seed keeps the session lifecycle it would have had if it were typed. */
+  seed(id: SessionId, seed: string): void;
   resize(id: SessionId, cols: number, rows: number): void;
   /** End the session and kill its process. */
   close(id: SessionId): void;

@@ -6,9 +6,33 @@
  */
 import { useCallback, useMemo, useRef, useState } from "react";
 
+import type { AgentKind } from "../../bindings";
+
 /** Where a terminal was opened from. Pairs with `refId` to identify a session:
  *  the Agents panel maps a stored `term_key` back to its live PTY through it. */
 export type TerminalSource = "shell" | "triage" | "issue" | "review";
+
+/**
+ * What santree knows about an agent it launched *before the agent says anything*.
+ *
+ * This is the app's own record of a launch, not a report from the CLI: santree
+ * chose the surface, the repo and the provider, so all three are known the
+ * instant the PTY is spawned. It exists because a provider's own announcement is
+ * not guaranteed to be prompt — Codex creates its thread on the first submitted
+ * turn and only fires `SessionStart` there, so a tab opened and left at the
+ * prompt reports nothing at all (see `agentProvider.ts`). Without this the agent
+ * registry, and therefore the sidebar, had nothing to show for it.
+ *
+ * All three fields together or none: a tab carrying a partial identity could be
+ * filed under the wrong worktree, which is worse than not being filed at all.
+ */
+export interface AgentTabIdentity {
+  kind: AgentKind;
+  repo: string;
+  /** The logical terminal's `term_key` — the same string the launch exports as
+   *  `SANTREE_TERM_KEY` and the hook writes into `terminal_sessions`. */
+  termKey: string;
+}
 
 /** A terminal to open: a cwd + command (empty ⇒ login shell), optional seed. */
 export interface TerminalSpec {
@@ -23,6 +47,9 @@ export interface TerminalSpec {
   source?: TerminalSource;
   /** When opened for a ticket/issue, its id — lets callers find/reuse the session. */
   refId?: string;
+  /** Set when this tab hosts an agent santree launched; absent for a plain shell.
+   *  See {@link AgentTabIdentity}. */
+  agent?: AgentTabIdentity;
 }
 
 export interface TerminalTab extends TerminalSpec {

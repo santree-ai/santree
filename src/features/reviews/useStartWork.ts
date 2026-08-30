@@ -14,10 +14,10 @@
  */
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useRef } from "react";
 
 import { type AgentKind, commands, type ReviewPr, type TabPr } from "../../bindings";
 import { queryKeys, REVIEW_AGENT_KEY, unwrap, useResolvedSetting } from "../../lib/queries";
+import { useLaunchGuard } from "../../lib/useLaunchGuard";
 import { useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import { reviewTargetFor } from "./ReviewSessionShared";
@@ -31,22 +31,6 @@ const TAB_TITLE = "Address review";
  *  restart, once the in-memory hand-off below is gone. */
 function tabPrFor(pr: ReviewPr): TabPr {
   return { repo: pr.repo, number: pr.number };
-}
-
-/** Guards a launch that is several awaits long: a second click before the first
- *  finishes would create a second worktree and a second agent tab. */
-function useLaunchGuard() {
-  const running = useRef(false);
-  return {
-    take: () => {
-      if (running.current) return false;
-      running.current = true;
-      return true;
-    },
-    release: () => {
-      running.current = false;
-    },
-  };
 }
 
 /** The agent a review launch runs as when the caller doesn't pick one: the repo's

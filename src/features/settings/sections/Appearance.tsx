@@ -40,7 +40,7 @@ function TextSizeRow() {
           type="button"
           onClick={() => set(DEFAULT_ZOOM)}
           title="Reset to 100%"
-          className="w-[52px] cursor-pointer rounded-lg px-1 py-1 text-center font-mono text-[11.5px] text-fg-3 hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"
+          className="w-[52px] cursor-pointer rounded-lg px-1 py-1 text-center font-mono text-[11.5px] text-fg-3 hover:bg-hover"
         >
           {Math.round(level * 100)}%
         </button>

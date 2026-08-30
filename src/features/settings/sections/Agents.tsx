@@ -1,22 +1,20 @@
-/** The Agents section: one tab per harness, each with its own auth, executable,
- * version, and provider-specific behavior. Workflow models live under Actions. */
+/** The Agents sections: one settings item per harness, each with its own auth,
+ * executable, version, and provider-specific behavior. The left nav is the
+ * switch between them. Workflow models live under Actions. */
 
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import type { AgentKind } from "../../../bindings";
 import {
-  AgentIcon,
   CheckIcon,
   CliIcon,
-  CloseIcon,
   KeyIcon,
   PlayIcon,
   RefreshIcon,
   WarningIcon,
 } from "../../../components/icons";
-import { Badge, Button, Tabs } from "../../../components/primitives";
-import { agentAvailable } from "../../../lib/format";
+import { Badge, Button } from "../../../components/primitives";
 import {
   CLAUDE_REMOTE_CONTROL_KEY,
   CLAUDE_START_WITH_CHROME_KEY,
@@ -37,32 +35,25 @@ import {
 import { useApp } from "../../../state/AppContext";
 import { alpha } from "../../../theme/colors";
 import { agentProvider } from "../../terminal/agentProvider";
-import { useEmbeddedTerminal } from "../../terminal/useEmbeddedTerminal";
+import { LoginTerminal } from "../LoginTerminal";
 import { Block, Heading, KvRow, ToggleRow } from "../widgets";
 
-export function AgentsSection() {
+export const ClaudeAgentSection = () => <ProviderSection kind="Claude" name="Claude Code" />;
+export const CodexAgentSection = () => <ProviderSection kind="Codex" name="Codex" />;
+
+/** One provider's whole configuration. `name` is the nav's label, used until the
+ *  catalog answers so the title never flickers into place. */
+function ProviderSection({ kind, name }: { kind: AgentKind; name: string }) {
   const { data: agents = [] } = useAgents();
-  const [tab, setTab] = useState<AgentKind>("Claude");
+  const def = agents.find((a) => a.key === kind);
 
   return (
     <>
       <Heading
-        title="Agents"
-        subtitle="Connect and maintain each provider here. Which provider and model performs a job is configured separately under Workflow defaults."
+        title={def?.label ?? name}
+        subtitle="Connect and maintain this provider here. Which provider and model performs a job is configured separately under Workflow defaults."
       />
-      <Tabs
-        tabs={agents.map((a) => ({
-          value: a.key,
-          label: a.label,
-          icon: <AgentIcon kind={a.key} size={14} />,
-          dimmed: !agentAvailable(a),
-          badge: agentAvailable(a) ? undefined : <Badge color="var(--color-muted-2)">WIP</Badge>,
-        }))}
-        value={tab}
-        onChange={setTab}
-        className="mb-6"
-      />
-      <HarnessPanel kind={tab} />
+      <HarnessPanel kind={kind} />
     </>
   );
 }
@@ -80,10 +71,6 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
   // pattern applied to the setup-script textarea); instead we buffer edits
   // locally and only call setAgentExec on blur/Enter.
   const [execDraft, setExecDraft] = useState<string | null>(null);
-  // Reset the draft when switching harness tabs so we don't carry one agent's
-  // in-progress edit over to another.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run on kind change.
-  useEffect(() => setExecDraft(null), [kind]);
 
   if (!settings) return null;
   const def = agents.find((a) => a.key === kind);
@@ -99,21 +86,6 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
     if (execDraft !== null && execDraft !== savedExec) setAgentExec(kind, execDraft);
     setExecDraft(null);
   };
-
-  if (!agentAvailable(def)) {
-    return (
-      <div className="flex flex-col items-center gap-3 rounded-xl border border-line-2 bg-raised px-6 py-10 text-center">
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-input text-muted-2">
-          <AgentIcon kind={kind} size={22} />
-        </div>
-        <div className="text-[14px] font-semibold text-fg-2">{def.label} support is coming</div>
-        <div className="max-w-[380px] text-[12px] text-muted-3">
-          This provider has no registered interactive-session adapter yet.
-        </div>
-        <Badge color="var(--color-muted-2)">WIP</Badge>
-      </div>
-    );
-  }
 
   return (
     <div className="flex flex-col gap-5">
@@ -467,48 +439,5 @@ function ClaudeTerminalBlock() {
         />
       </div>
     </Block>
-  );
-}
-
-/** A small embedded terminal that runs an agent's login command in place — the
- * persistent TerminalLayer overlays the host div below the auth table. */
-function LoginTerminal({
-  refId,
-  command,
-  onClose,
-}: {
-  refId: string;
-  command: string;
-  onClose: () => void;
-}) {
-  const { hostRef, close } = useEmbeddedTerminal({
-    spec: { title: command, source: "shell", refId, seed: command },
-    onExited: onClose,
-  });
-
-  const closeNow = () => {
-    close();
-    onClose();
-  };
-
-  return (
-    <div className="mt-3 overflow-hidden rounded-lg border border-line-3">
-      <div className="flex items-center justify-between bg-input px-3 py-2">
-        <span className="text-[11.5px] text-muted-2">
-          Running <span className="font-mono text-fg-3">{command}</span>
-        </span>
-        <button
-          type="button"
-          onClick={closeNow}
-          aria-label="Close"
-          className="flex h-5 w-5 cursor-pointer items-center justify-center rounded text-muted-3 hover:bg-hover hover:text-fg-2"
-        >
-          <CloseIcon size={13} />
-        </button>
-      </div>
-      <div className="h-[280px] bg-panel">
-        <div ref={hostRef} className="h-full w-full" />
-      </div>
-    </div>
   );
 }

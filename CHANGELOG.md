@@ -7,6 +7,20 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.5-beta.2 — 2026-08-29
+
+- Codex sessions now appear in the sidebar as soon as a tab opens. Codex only reports a session once its first prompt is sent, so Santree also recognises the running agent from the process itself.
+- Santree no longer runs a background Codex service. It launches the Codex CLI directly, which removes the "thread already has an active writer" resume failures and a process leak that could leave dozens of stray helpers running.
+- Codex sign-in status is read correctly again; it previously always showed "Not signed in".
+- Agent status is more accurate: a long tool call keeps reading as working instead of falling back to idle, and an agent whose terminal has closed no longer lingers.
+- Pull requests are matched to a worktree by branch, so a PR opened from GitHub or with a renamed title is found instead of offering "Create PR" over an existing one.
+- Worktrees no longer need a Linear ticket. Create one from a project's + button, choosing a ticket, an existing branch, or a new branch, with an optional parent worktree.
+- Claude usage shows the 5-hour, weekly, and per-model windows again, each with its own reset time. The context meter now follows the agent tab you are looking at instead of showing an unrelated session.
+- Resource usage reports CPU against the machine's core count, with hover notes explaining both figures.
+- Settings are reorganised into Integrations and Agents sections with Usage alongside them, and GitHub sign-in can be run from Settings the way Claude's already could.
+- The sidebar groups by Linear project as well as milestone (Settings, Linear), counts agents per provider, and stays quieter at rest.
+- Focus outlines are subtler throughout and no longer appear when clicking with a pointer.
+
 ## 0.1.5-beta.1 — 2026-08-27
 
 - Reviews now includes an editable Improvements worklist for manual notes, GitHub review threads, and local AI comments, with visible source links and file-and-line navigation.

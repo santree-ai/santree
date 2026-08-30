@@ -195,6 +195,7 @@ export function AiReviewSessionPane({
             title={`Review #${pr.number} · ${provider.label}`}
             cwd={cwd}
             seed={seed}
+            agent={{ kind: resolvedAgent, repo, termKey }}
             attach={visible}
             onExited={dropCachedSession}
           />

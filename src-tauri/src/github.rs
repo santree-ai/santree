@@ -333,95 +333,129 @@ struct CreatedPr {
 }
 
 #[derive(Deserialize)]
-struct SearchResp {
-    items: Vec<SearchItem>,
-}
-
-#[derive(Deserialize)]
-struct SearchItem {
+struct PullItem {
     number: u32,
     title: String,
     html_url: String,
     state: String,
-    pull_request: Option<PrRef>,
+    merged_at: Option<String>,
+    head: PullRef,
 }
 
 #[derive(Deserialize)]
-struct PrRef {
-    merged_at: Option<String>,
+struct PullRef {
+    #[serde(rename = "ref")]
+    name: String,
+    /// The repo the head branch lives in. `None` once a fork is deleted, which is
+    /// why [`RepoPr::same_repo`] treats absence as "not ours" rather than assuming.
+    repo: Option<PullRepo>,
 }
 
-/// One PR from a repo-wide search — title included so [`crate::pr::statuses`] can
-/// match it against several linked issue ids without a search call per issue.
+#[derive(Deserialize)]
+struct PullRepo {
+    full_name: String,
+}
+
+/// One PR from the repo's PR list. Carries both join keys [`crate::pr::statuses`]
+/// uses to attach it to a worktree — its head branch and its title — so a whole
+/// repo's PRs can be matched against every linked worktree client-side, with no
+/// API call per worktree.
 pub struct RepoPr {
     pub number: u32,
     pub title: String,
     pub url: String,
     pub state: PrState,
+    /// The PR's head branch. GitHub deletes the *branch* on merge but keeps this
+    /// field on the PR record, so it stays a valid join key for merged PRs too.
+    pub head_ref: String,
+    /// Whether that head branch lives in **this** repo rather than a fork.
+    ///
+    /// `head_ref` is a bare branch name with no owner in it, so a PR raised from a
+    /// fork whose branch happens to share a name with one of our worktree branches
+    /// would otherwise bind a stranger's PR to the user's work — a false positive,
+    /// which is worse than showing no PR at all. False when GitHub reports no head
+    /// repo (a deleted fork): unconfirmed is not the same as ours.
+    pub same_repo: bool,
 }
 
-/// The 100 most-recently-**updated** PRs in `owner/repo` — one GitHub API call
-/// regardless of how many worktrees/issues the caller wants to match against.
+/// The 100 most-recently-**updated** PRs in `owner/repo`, any state — one GitHub
+/// API call regardless of how many worktrees the caller wants to match against.
 ///
-/// Replaces the old "one search per issue id" approach: GitHub's search API
-/// has a secondary rate limit of ~30 requests/minute, and `worktreePrs` is
-/// refetched on a 60s staleTime *and* after every worktree mutation — a repo
-/// with a modest number of active worktrees could blow through that budget in
-/// one refetch, silently dropping PR chips. Callers match titles against the
-/// `[ISSUE-ID] …` tag our commit/PR flow writes (see `pr::issue_tag`) rather
-/// than the branch, which GitHub deletes on merge (so merged PRs would vanish
-/// from a branch-based lookup).
+/// Deliberately the `/pulls` list endpoint rather than a PR search: it is the
+/// only one of the two that returns each PR's head branch (`head.ref`), which is
+/// the exact key [`crate::pr::statuses`] joins on, it reads live data instead of
+/// the search index (a just-opened PR shows up immediately), and it spends the
+/// 5000/hour REST budget instead of search's ~30/minute secondary limit —
+/// `worktreePrs` is refetched on a 60s staleTime *and* after every worktree
+/// mutation, which is close enough to that ceiling to matter.
 ///
 /// Ordered by update (not creation) time: in a busy monorepo, hundreds of PRs
 /// can be *created* after a worktree's PR while it's still being actively
 /// worked — pushes/comments keep it in the recently-updated window. A PR
-/// outside even this window is caught by the caller's per-issue fallback
-/// ([`prs_for_issue`]). Network errors bubble up.
+/// outside even this window is caught by the caller's per-branch fallback
+/// ([`prs_for_branch`]). Network errors bubble up.
 pub async fn prs_for_repo(token: &str, owner: &str, repo: &str) -> Result<Vec<RepoPr>> {
-    let q = format!("repo:{owner}/{repo} type:pr");
-    let body: SearchResp = get_json(
-        "https://api.github.com/search/issues",
-        &[
-            ("q", q.as_str()),
-            ("per_page", "100"),
-            ("sort", "updated"),
-            ("order", "desc"),
-        ],
+    list_pulls(
         token,
+        owner,
+        repo,
+        &[
+            ("state", "all"),
+            ("sort", "updated"),
+            ("direction", "desc"),
+            ("per_page", "100"),
+        ],
     )
-    .await?;
-    Ok(body.items.into_iter().map(to_repo_pr).collect())
+    .await
 }
 
-/// Newest PRs whose title mentions `issue_id` — the narrow fallback for a
-/// worktree whose PR fell outside [`prs_for_repo`]'s recently-updated window
-/// (e.g. a dormant PR in a high-traffic repo). The caller still verifies the
-/// exact `[ISSUE-ID]` tag on each result; the search is just the candidate
-/// filter (GitHub's tokenizer ignores the brackets).
-pub async fn prs_for_issue(
+/// The PRs opened from `branch` — the narrow fallback for a worktree whose PR
+/// fell outside [`prs_for_repo`]'s recently-updated window (e.g. a dormant PR in
+/// a high-traffic repo). GitHub filters on the head ref recorded on the PR, so
+/// this still finds a merged PR whose branch has since been deleted.
+///
+/// `head` is qualified with the repo owner, which is where santree pushes its
+/// worktree branches; a PR raised from someone's fork is left to the bulk list.
+pub async fn prs_for_branch(
     token: &str,
     owner: &str,
     repo: &str,
-    issue_id: &str,
+    branch: &str,
 ) -> Result<Vec<RepoPr>> {
-    let q = format!("repo:{owner}/{repo} type:pr in:title \"{issue_id}\"");
-    let body: SearchResp = get_json(
-        "https://api.github.com/search/issues",
-        &[
-            ("q", q.as_str()),
-            ("per_page", "10"),
-            ("sort", "created"),
-            ("order", "desc"),
-        ],
+    let head = format!("{owner}:{branch}");
+    list_pulls(
         token,
+        owner,
+        repo,
+        &[
+            ("state", "all"),
+            ("sort", "updated"),
+            ("direction", "desc"),
+            ("per_page", "10"),
+            ("head", head.as_str()),
+        ],
     )
-    .await?;
-    Ok(body.items.into_iter().map(to_repo_pr).collect())
+    .await
 }
 
-fn to_repo_pr(p: SearchItem) -> RepoPr {
-    let merged = p.pull_request.and_then(|r| r.merged_at).is_some();
-    let state = if merged {
+/// `GET /repos/{owner}/{repo}/pulls` with the caller's filters, mapped to
+/// [`RepoPr`]. Owner/repo are parsed from the `origin` remote and the branch
+/// comes from the DB, so the path is built by [`api_url`] and the filters go
+/// through reqwest's query encoder — never `format!`ed into the URL.
+async fn list_pulls(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    query: &[(&str, &str)],
+) -> Result<Vec<RepoPr>> {
+    let url = api_url(&["repos", owner, repo, "pulls"])?;
+    let items: Vec<PullItem> = get_json(url, query, token).await?;
+    let slug = format!("{owner}/{repo}");
+    Ok(items.into_iter().map(|p| to_repo_pr(p, &slug)).collect())
+}
+
+fn to_repo_pr(p: PullItem, base_slug: &str) -> RepoPr {
+    let state = if p.merged_at.is_some() {
         PrState::Merged
     } else if p.state == "closed" {
         PrState::Closed
@@ -433,6 +467,8 @@ fn to_repo_pr(p: SearchItem) -> RepoPr {
         title: p.title,
         url: p.html_url,
         state,
+        head_ref: p.head.name,
+        same_repo: p.head.repo.is_some_and(|r| r.full_name == base_slug),
     }
 }
 

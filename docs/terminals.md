@@ -20,7 +20,7 @@ xterm.js (webview)          one instance per tab, mounted in a persistent overla
    │  keystrokes ↓   ↑ bytes
    │  Tauri Channel<ArrayBuffer>   (raw, not JSON; empty chunk = process exited)
    ▼
-terminal.rs                 thin adapter: open/attach/detach/adopt/write/resize/close/sessions
+terminal.rs                 thin adapter: open/attach/detach/adopt/write/seed/resize/close/sessions
    ▼
 crates/pty PtyManager       one kernel PTY + one reader thread per session
    │                        each session keeps a 2 MiB ring of its recent output
@@ -125,9 +125,10 @@ remount loses it) so the same sentinel retires the terminal's agent rows in
 integration to recover it: the seed is `exec <cli>`, so the PTY **is** the agent
 process and its EOF is the agent exiting, however it died.
 
-`terminal_open` and `terminal_write` run on the blocking pool: a spawn is a
-fork/exec with a full env copy, and a write can block on a wedged child's full
-PTY buffer. Neither may pin a tokio worker. `resize`/`close`/`detach` are cheap
+`terminal_open`, `terminal_write` and `terminal_seed` run on the blocking pool:
+a spawn is a fork/exec with a full env copy, a write can block on a wedged
+child's full PTY buffer, and a seed may write a file before either. None of them
+may pin a tokio worker. `resize`/`close`/`detach` are cheap
 and stay inline. Each session has its own writer mutex, so a stuck child
 serializes only itself.
 
@@ -316,6 +317,10 @@ Sessions belong to the document, not to the route.
 santree never infers agent state from terminal output. For Claude it comes from
 **hooks**; Codex has none.
 
+Which agent is running is a *separate question* from what it is doing, and it has
+its own source — see "Agent identity: the process table" below. The state ladder
+described here is unchanged by it.
+
 ### Claude
 
 Every santree `claude` launch layers a `--settings` file (written by `hooks.rs`)
@@ -412,6 +417,21 @@ terminal's registry row rather than assumed, so a Codex session is no longer
 painted with the Claude mark. Its rows reconcile like Claude's, against the
 rollout rather than a transcript (`codex_rollouts::last_activity_ms`).
 
+**`SessionStart` is not a launch event here.** Claude fires it while the TUI comes
+up; Codex fires it when the *first turn is submitted*, because that is when it
+creates the thread the session id belongs to. Measured on codex-cli 0.151.0 in a
+real pty with santree's exact flags: idle for 95s after boot and only `SessionEnd`
+ever fires, at quit; type one prompt and `SessionStart` lands the instant it is
+submitted, followed by `UserPromptSubmit`, `Stop`, `SessionEnd`.
+
+That matters because `SessionStart` is what writes the `terminal_sessions` row
+binding the session to its surface — so between opening a Codex tab and speaking
+to it, *nothing hook-fed knows the session exists*. This is why the agent registry
+does not wait for it: a tab carries santree's own record of the launch (provider,
+repo, term key — `AgentTabIdentity`), and `buildAgentEntries` renders an entry from
+that until the provider's row supersedes it. Anything new that must show a Codex
+agent promptly reads the launch or the process table, not the hook.
+
 Codex also has *history*, reconstructed from rollout files under
 `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<thread>.jsonl` — prompts, replies,
 model, subagent counts — read display-only and bounded by a first-line peek plus
@@ -424,6 +444,56 @@ orphaned processes and held Codex's per-thread writer lock, which surfaced as
 `codex` (or `codex resume <thread>`) in a PTY, and the surfaces that used the
 protocol ask the CLI: `codex login status`, `codex debug models`, `codex logout`.
 Subscription usage comes from the `token_count` record in the rollout itself.
+
+---
+
+## Agent identity: the process table
+
+The two sources above are *records*. A hook row is what a provider said; an
+`AgentTabIdentity` is what santree launched. Neither can see an agent the user
+started themselves by typing `codex` in a santree shell, and neither notices when
+the CLI in a pane is replaced by a different one.
+
+So santree also *observes*. `agent_procs::detect` takes each live PTY's
+`term_key` and root pid (`terminal::pane_roots`), walks that pid's descendants in
+one shared `ps` listing (`proc_table`), and reports which catalog binary owns the
+pane's **foreground process group** — `ps`'s `+` flag in `stat`. Measured against
+the real CLIs:
+
+| pane | `stat` | detected |
+|---|---|---|
+| `codex`, opened and never prompted | `Ss+` | Codex |
+| `claude`, opened and never prompted | `Ss+` | Claude |
+| `/bin/zsh -l` at its prompt | `Ss+` | *(nothing — zsh is not in the catalog)* |
+| a shell in which the user typed `codex` | shell `Ss`, codex `S+` | Codex |
+| …then suspended it with `^Z` | shell `Ss+`, codex `T` | *(nothing — the pane is the user's again)* |
+
+Rules that make this safe to trust:
+
+- **Identity, never status.** It answers "which agent is here", never "what is it
+  doing". `lib/attention.ts` remains the one state vocabulary; the hook rows and
+  then the terminal title still decide the dot.
+- **Precedence is one ordered lookup**, so the three sources cannot disagree: a
+  provider's own session row, then the process table, then santree's launch
+  record. The scan outranks the record because it observes reality; it does not
+  *replace* it, because a failed `ps` or a CLI behind an interpreter (an
+  npm-installed agent under `#!/usr/bin/env node`) names nothing, and the record
+  is what stands then.
+- **Absence is unknown, not "no agent".** Nothing substitutes a default provider
+  for a pane the walk could not attribute.
+- **`argv[0]`'s basename, matched against the agent catalog** — not `ucomm`,
+  which lies (a running `claude` reports `claude.exe`, and so did a `ugrep` it
+  spawned), and not the whole command line, which would claim `vim codex`.
+- One `ps` for the whole app: the listing is cached 500ms and the Resource
+  Manager reads the same snapshot. A 3s timeout bounds it, and a failure degrades
+  to an empty result rather than an error.
+
+The trigger is the pane set, not a clock. `useAgentEntries` invalidates the read
+whenever a tab opens or closes, so a new Codex tab is scanned immediately; the
+query's own 10s interval (the cadence `useSessionStates` already uses, and only
+while a pane is open) exists to catch an agent started *inside* an existing pane.
+Orca binds the same scan to pane bind and OSC 133 command start/finish; santree
+has no shell integration to hook, so the tab set is the bind signal it has.
 
 ---
 
@@ -454,6 +524,64 @@ exec <env> <bin> <remote><settings><mcp><chrome><permission><model><effort>--ses
 Every value is single-quoted through `shellQuote`, which strips newlines and all
 C0/C1 control characters first — the seed is written to a PTY, where control
 bytes would be interpreted.
+
+### A seed longer than a line
+
+**A tty silently truncates a long line, so no seed is ever typed as one.** The
+seed goes to the PTY through its own command, `terminal_seed` — not
+`terminal_write` — and that command types it verbatim only while it fits in
+`MAX_SEED_LINE` (512 bytes, half of macOS's `MAX_CANON`; Linux's
+`N_TTY_BUF_SIZE` is 4096). Past that the line is written to
+`<app_data_dir>/seeds/seed-<uuid>.sh` — `0700`, in a `0700` directory — and what
+is typed is a reference to it, measured at 123 bytes in this repo whatever the
+command was.
+
+**The reference's form follows the seed.** A seed starting with `exec ` — every
+agent launch — is referenced with `exec '<path>'`: the shell is replaced by the
+script and the script's own `exec` replaces that with the agent, so the PTY is
+still the agent and its EOF is still the agent exiting. Anything else is sourced
+(`. '<path>'`), which leaves the login shell alive exactly as typing the command
+would; `exec`ing it would instead end the session the moment the command
+finished. Nothing produces a long non-`exec` seed today — the Settings login box
+is the only non-`exec` caller and its command is a few bytes — so that branch
+exists to stop a future one being silently redefined.
+
+Three things about it are load-bearing:
+
+- **The split is per input kind, not per length.** A keystroke — a long paste
+  included — must arrive byte-for-byte, so `terminal_write` may never take this
+  path. Only the one line santree composes itself may be reshaped, which is why
+  it has a command of its own.
+- **The limit is the line discipline, not the write.** Splitting the write into
+  chunks does not help; the tty's canonical-mode buffer drops the overflow with
+  no error and no signal, which is why this failed as "the command is sitting
+  half-typed at the prompt" rather than as an error.
+- **The directory is never followed through a symlink.** `create_new` protects
+  the script's own name, but `create_dir_all` decides "already there" with
+  `is_dir()` and `set_permissions` is `chmod`, not `lchmod` — so a symlink in
+  place of `seeds/` would hand the mode change, and the sweep's delete loop, to
+  whatever it points at. Planting it needs santree's own UID, which can do worse
+  directly, but on macOS it would let a process that can write to Application
+  Support (not TCC-protected) borrow a signed app's reach into Documents. Both
+  paths bail on `symlink_metadata` first.
+- **Scripts are swept by age, not deleted after use.** Nothing here may watch a
+  session to learn when the shell got to its script (that is output-parsing), and
+  a login shell resolving `direnv`/nix can take seconds — so each launch first
+  deletes any seed script older than ten minutes. A crash between the write and
+  the exec cleans up on the next launch instead of never.
+
+The same trap had already been paid for twice, each time with a local
+workaround: `hooks.rs` spills Claude's settings JSON to a `--settings` file, and
+every launch site that would otherwise inline a rendered prompt seeds `Read
+<path> and follow the instructions inside` instead (`useWorktreeAgent`,
+`AiReviewSessionPane`, the triage panes). The Codex `-c 'hooks.<Event>=[…]'`
+flags — six of them, each repeating an absolute hook-binary path and an absolute
+db path — then reintroduced it by a third route, at 1.4–2 KB depending on how
+deep those two paths are (a real launch from a `.santree/worktrees/<branch>`
+checkout measured just over 2 KB). Those workarounds are still worth keeping —
+a file is a better home for a page of prose than a command line either way —
+but they are no longer what stands between a launch and a mangled line. The
+guard sits below every provider, so the next one inherits it without knowing.
 
 **The launch is gated on `isFetched`, never on a value.** A boolean setting reads
 `false` both when it is off and when it has not loaded, and launching in that
@@ -499,6 +627,12 @@ parts that bear on this layer:
   it back.
 - No credential handling; `resolve_env` is the single env-injection chokepoint,
   with values in the OS keychain and only names in SQLite.
+- **Reading the process table is observation, not a control loop.** It is the
+  same passive class as reading a pane's title: nothing derived from `ps` is ever
+  written back into a PTY, gates a launch, chooses a prompt, or becomes an
+  argument to a command. `agent_procs.rs` also cannot name a `PtyManager` — the
+  compliance scan's allowlist enforces it — so it has no path to a terminal even
+  in principle.
 - The deny lists in restricted flows are **best-effort defence-in-depth, not a
   security boundary** — they are text-matched and bypassable. Never build on them
   as a gate.
@@ -511,7 +645,9 @@ parts that bear on this layer:
 crates/pty/src/lib.rs        PtyManager: spawn, read loop, attach/detach/adopt, close_all
 crates/pty/src/ring.rs       the output ring + the anchor protocol
 crates/hook/src/main.rs      the hook binary: state hooks, status line, MCP mode
-src-tauri/src/terminal.rs    Tauri adapter + the RawBytes channel
+src-tauri/src/terminal.rs    Tauri adapter + the RawBytes channel; pane_roots
+src-tauri/src/proc_table.rs  the one `ps` listing, cached 500ms and shared
+src-tauri/src/agent_procs.rs which agent owns each pane's foreground
 src-tauri/src/hooks.rs       the --settings file every claude launch layers
 src-tauri/src/session.rs     term_key → durable conversation id (resolve/mint/forget)
 src-tauri/src/stream.rs      background runs behind a PTY → read-only panes

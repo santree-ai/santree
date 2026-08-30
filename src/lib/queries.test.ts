@@ -48,6 +48,7 @@ import {
   filterTriageQueue,
   newestSessionByPath,
   parseBatchSetup,
+  parseLinearGroupBy,
   parseLinearScope,
   patchSettingCache,
   promptPreviewKey,
@@ -565,6 +566,23 @@ describe("parseBatchSetup", () => {
     expect(parseBatchSetup(undefined)).toBe("ask");
     expect(parseBatchSetup("")).toBe("ask");
     expect(parseBatchSetup("sometimes")).toBe("ask");
+  });
+});
+
+describe("parseLinearGroupBy", () => {
+  it("reads the stored nesting", () => {
+    expect(parseLinearGroupBy("none")).toBe("none");
+    expect(parseLinearGroupBy("project")).toBe("project");
+    expect(parseLinearGroupBy("project_milestone")).toBe("project_milestone");
+  });
+
+  // Unset falls back to the shape the sidebar has always had, so this setting
+  // changes nothing until somebody picks something else.
+  it("falls back to milestone", () => {
+    expect(parseLinearGroupBy(null)).toBe("milestone");
+    expect(parseLinearGroupBy(undefined)).toBe("milestone");
+    expect(parseLinearGroupBy("")).toBe("milestone");
+    expect(parseLinearGroupBy("project-milestone")).toBe("milestone");
   });
 });
 

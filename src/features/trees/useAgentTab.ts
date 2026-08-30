@@ -28,6 +28,7 @@ import {
 } from "../../lib/queries";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
+import type { AgentTabIdentity } from "../terminal/orchestrator";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useHookInjection } from "../terminal/useHookInjection";
 
@@ -78,6 +79,10 @@ export interface AgentTab {
   resume: () => void;
   /** Hand to `WorktreeTerminal.onExited`. */
   onExited: () => void;
+  /** Who this tab runs, for the terminal spec — santree's own record of the
+   *  launch, which the agent registry shows until the provider's hooks report a
+   *  session. `undefined` for a plain shell, which is nobody's agent. */
+  agent: AgentTabIdentity | undefined;
 }
 
 export function useAgentTab(opts: AgentTabOptions): AgentTab {
@@ -189,7 +194,19 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
     setLiveSeen(false);
   }, [dropSession]);
 
-  return { live, ended, preparing, session, seed, resume, onExited: dropSession };
+  return {
+    live,
+    ended,
+    preparing,
+    session,
+    seed,
+    resume,
+    onExited: dropSession,
+    // `resolvedAgent` rather than the requested one: a resumed session keeps the
+    // provider it was created with, and the registry must name the CLI that is
+    // actually running.
+    agent: shellOnly || !agent ? undefined : { kind: resolvedAgent, repo, termKey: refId },
+  };
 }
 
 /** The resolved session's id, or null for a plain shell / an unresolved session —

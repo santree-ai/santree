@@ -35,7 +35,7 @@ function session(sessionId: string, termKey: string): SessionState {
   return {
     agentKind: "Claude",
     sessionId,
-    state: "Working",
+    state: "idle",
     event: "Stop",
     cwd: "/tmp/ak-1",
     message: null,

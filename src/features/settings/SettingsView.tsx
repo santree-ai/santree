@@ -2,9 +2,10 @@
  *
  * Settings takes the whole window — the route root swaps the app shell out for
  * it — so it draws its own frame: a left column with the way back to the app,
- * the app/repo scope switch and the section nav (flat items plus grouped
- * sections like "Actions"), and a content column with the one section pane.
- * Each pane lives in `sections/`; shared widgets in `widgets.tsx`. */
+ * the app/repo scope switch and the section nav (flat items plus headed groups
+ * like "Integrations", "Agents" and "Workflow defaults"), and a content column
+ * with the one section pane. Each pane lives in `sections/`; shared widgets in
+ * `widgets.tsx`. */
 
 import { useCanGoBack, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
@@ -12,18 +13,18 @@ import { useEffect, useState } from "react";
 import type { Repo } from "../../bindings";
 import { RepoAvatar } from "../../components/chrome/RepoAvatar";
 import {
-  AgentsIcon,
+  AgentIcon,
   BackArrowIcon,
   BoltIcon,
   ChevronDownIcon,
   ContrastIcon,
   DocsIcon,
   GearIcon,
+  GitHubLogo,
   KeyIcon,
   LinearLogo,
   PencilIcon,
   PlayIcon,
-  PlugIcon,
   PrIcon,
   TelescopeIcon,
   TerminalIcon,
@@ -34,12 +35,13 @@ import { useRepos } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
 import { ReviewActionSection, TriageActionSection } from "./sections/Actions";
-import { AgentsSection } from "./sections/Agents";
+import { ClaudeAgentSection, CodexAgentSection } from "./sections/Agents";
 import { AppearanceSection } from "./sections/Appearance";
 import { EnglishTutorSection } from "./sections/EnglishTutor";
 import { EnvironmentSection } from "./sections/Environment";
 import { GeneralSection } from "./sections/General";
-import { IntegrationsSection } from "./sections/Integrations";
+import { GitHubSection } from "./sections/GitHub";
+import { LinearSection } from "./sections/Linear";
 import { PromptsSection } from "./sections/Prompts";
 import { RepoLinearSection } from "./sections/RepoLinear";
 import { TerminalSection } from "./sections/Terminal";
@@ -70,6 +72,9 @@ interface NavGroup {
 type NavNode = SectionDef | NavGroup;
 
 const isGroup = (n: NavNode): n is NavGroup => "group" in n;
+/** DOM id tying a group's heading to the list of items it labels. */
+const groupHeadingId = (group: string): string =>
+  `settings-nav-${group.toLowerCase().replace(/\s+/g, "-")}`;
 /** All sections, flattened out of any groups, for lookup by key. */
 const flatten = (nodes: NavNode[]): SectionDef[] =>
   nodes.flatMap((n) => (isGroup(n) ? n.sections : [n]));
@@ -118,22 +123,54 @@ const APP_NAV: NavNode[] = [
     render: () => <GeneralSection />,
   },
   {
-    key: "integrations",
-    label: "Integrations",
-    icon: <PlugIcon size={ICON_SIZE} />,
-    render: () => <IntegrationsSection />,
-  },
-  {
     key: "appearance",
     label: "Appearance",
     icon: <ContrastIcon size={ICON_SIZE} />,
     render: () => <AppearanceSection />,
   },
+  // One item per connected service, and one per agent harness: each provider is
+  // its own destination, so the pane it opens is only ever about that provider.
   {
-    key: "agents",
-    label: "Agents",
-    icon: <AgentsIcon size={ICON_SIZE} />,
-    render: () => <AgentsSection />,
+    group: "Integrations",
+    sections: [
+      {
+        key: "linear",
+        label: "Linear",
+        icon: <LinearLogo size={ICON_SIZE} />,
+        render: () => <LinearSection />,
+      },
+      {
+        key: "github",
+        label: "GitHub",
+        icon: <GitHubLogo size={ICON_SIZE} />,
+        render: () => <GitHubSection />,
+      },
+    ],
+  },
+  {
+    group: "Agents",
+    sections: [
+      {
+        key: "agent-claude",
+        label: "Claude Code",
+        icon: <AgentIcon kind="Claude" size={ICON_SIZE} />,
+        render: () => <ClaudeAgentSection />,
+      },
+      {
+        key: "agent-codex",
+        label: "Codex",
+        icon: <AgentIcon kind="Codex" size={ICON_SIZE} />,
+        render: () => <CodexAgentSection />,
+      },
+    ],
+  },
+  // Top-level beside those two groups, not inside Agents: it reports on every
+  // provider at once, and on the API services alongside them.
+  {
+    key: "usage",
+    label: "Usage",
+    icon: <BoltIcon size={ICON_SIZE} />,
+    render: () => <UsageSection />,
   },
   {
     key: "english-tutor",
@@ -152,12 +189,6 @@ const APP_NAV: NavNode[] = [
     label: "Terminal",
     icon: <TerminalIcon size={ICON_SIZE} />,
     render: () => <TerminalSection />,
-  },
-  {
-    key: "usage",
-    label: "Usage",
-    icon: <BoltIcon size={ICON_SIZE} />,
-    render: () => <UsageSection />,
   },
   {
     group: "Workflow defaults",
@@ -189,19 +220,23 @@ const REPO_NAV: NavNode[] = [
 /** The default section key for a scope (the first one in its nav). */
 const defaultSection = (nodes: NavNode[]): string => flatten(nodes)[0].key;
 
-/** Resolve a (possibly stale/deep-linked) section key for a scope's nav. The
- *  legacy `?section=actions` deep-link now lands on the Triage action. */
+/** Section keys that no longer exist, mapped to where their content lives now.
+ *  `integrations` and `agents` were single panes before each provider got its own
+ *  item; the status bar's usage panel still links to both, so they land on the
+ *  first item of the group that replaced them. */
+const LEGACY_SECTIONS: Record<string, string> = {
+  actions: "triage",
+  issues: "work",
+  trees: "work",
+  updates: "general",
+  integrations: "linear",
+  agents: "agent-claude",
+};
+
+/** Resolve a (possibly stale/deep-linked) section key for a scope's nav. */
 function resolveSection(nodes: NavNode[], key: string | undefined): SectionDef {
   const sections = flatten(nodes);
-  // Legacy deep-links: `actions` → Triage; the former `issues`/`trees` → Work.
-  const wanted =
-    key === "actions"
-      ? "triage"
-      : key === "issues" || key === "trees"
-        ? "work"
-        : key === "updates"
-          ? "general"
-          : key;
+  const wanted = (key && LEGACY_SECTIONS[key]) ?? key;
   return sections.find((s) => s.key === wanted) ?? sections[0];
 }
 
@@ -246,25 +281,29 @@ export function SettingsView() {
     </button>
   );
 
+  // The scope switch and, under Repo, the picker for *which* repo's settings are
+  // being edited — separate from the app's active repo (changing it here doesn't
+  // re-point the app). Stacked, not side by side: a repo name is as long as it is,
+  // and beside the tabs the pair overflowed the column and spilled onto the pane.
   const scopeTabs = (
-    <div className="flex h-8 items-center gap-2.5">
-      <Tabs<Scope>
-        variant="inset"
-        className="h-full gap-0.5"
-        tabClassName="h-full"
-        tabs={[
-          { value: "app", label: "User" },
-          { value: "repo", label: "Repo" },
-        ]}
-        value={scope}
-        onChange={switchScope}
-      />
-      {/* Under the Repo scope, pick *which* repo's settings to edit — separate
-          from the app's active repo (changing it here doesn't re-point the app). */}
+    <>
+      <div className="flex h-8 items-center">
+        <Tabs<Scope>
+          variant="inset"
+          className="h-full gap-0.5"
+          tabClassName="h-full"
+          tabs={[
+            { value: "app", label: "User" },
+            { value: "repo", label: "Repo" },
+          ]}
+          value={scope}
+          onChange={switchScope}
+        />
+      </div>
       {scope === "repo" && (
         <RepoScopePicker repos={repos} value={settingsRepo} onChange={setSettingsRepo} />
       )}
-    </div>
+    </>
   );
 
   const navButton = (s: SectionDef) => {
@@ -278,6 +317,7 @@ export function SettingsView() {
         key={s.key}
         onClick={() => setSection(s.key)}
         data-active={isActive}
+        aria-current={isActive ? "page" : undefined}
         className="selection-row mb-0.5 flex w-full cursor-pointer items-center gap-2.5 rounded-md px-3 py-[9px] text-left text-[12.5px]"
         style={style}
       >
@@ -305,15 +345,24 @@ export function SettingsView() {
           {scopeTabs}
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="p-2">
+          {/* Real headings, not styled text: the groups are how this list is
+              structured, so a screen reader has to be able to walk it that way. */}
+          <nav aria-label="Settings sections" className="p-2">
             {nav.map((node) =>
               isGroup(node) ? (
-                <div key={node.group} className="mt-3 first:mt-0">
-                  <div className="mb-1 px-3 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
+                <section
+                  key={node.group}
+                  aria-labelledby={groupHeadingId(node.group)}
+                  className="mt-3 first:mt-0"
+                >
+                  <h2
+                    id={groupHeadingId(node.group)}
+                    className="mb-1 px-3 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase"
+                  >
                     {node.group}
-                  </div>
+                  </h2>
                   {node.sections.map(navButton)}
-                </div>
+                </section>
               ) : (
                 <div
                   key={node.key}
@@ -323,7 +372,7 @@ export function SettingsView() {
                 </div>
               ),
             )}
-          </div>
+          </nav>
         </div>
       </div>
 
@@ -335,7 +384,14 @@ export function SettingsView() {
           <div className="flex min-h-0 min-w-0 flex-1">{active.render(settingsRepo)}</div>
         ) : (
           <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
-            <div className="settings-pane mx-auto w-full max-w-[720px] px-5 pt-2 pb-11 sm:px-[30px]">
+            {/* Centered, deliberately — `mx-auto` has been tried both ways. The
+                max-width caps line length; without the centering the column hugs
+                the nav and leaves the whole remaining width empty to its right,
+                which reads worse on a wide window than symmetric margins do.
+                (What actually looked broken here was the repo picker overflowing
+                the 264px nav and spilling into this margin; that is fixed at the
+                picker, not by moving the pane.) */}
+            <div className="mx-auto w-full max-w-[720px] px-5 pt-2 pb-11 sm:px-[30px]">
               {active.render(settingsRepo)}
             </div>
           </div>
@@ -362,12 +418,14 @@ function RepoScopePicker({
     <Dropdown
       open={open}
       onOpenChange={setOpen}
-      menuClassName="w-[260px] overflow-hidden p-1.5"
+      // Matches the trigger: NAV_WIDTH less the column's px-2.5, so the menu
+      // lands over the nav rather than poking into the pane beside it.
+      menuClassName="w-[244px] overflow-hidden p-1.5"
       trigger={(toggle) => (
         <button
           type="button"
           onClick={toggle}
-          className="flex h-full min-w-[180px] cursor-pointer items-center gap-[7px] rounded-md border bg-input-alt px-[9px] transition-colors hover:border-line-strong"
+          className="flex h-8 w-full cursor-pointer items-center gap-[7px] rounded-md border bg-input-alt px-[9px] transition-colors hover:border-line-strong"
           style={{ borderColor: open ? accent : "var(--color-line-3)" }}
         >
           <RepoAvatar repo={value} size={16} />

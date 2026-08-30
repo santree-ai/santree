@@ -22,40 +22,69 @@ function renderRow(agents: AgentNode[], expanded = false) {
   );
 }
 
+/** The chips' state, in chip order — each dot's label is its level. */
+function chipStates(container: HTMLElement): (string | null)[] {
+  return [...container.querySelectorAll("[role='img']")].map((el) => el.getAttribute("aria-label"));
+}
+
 describe("AgentSummaryRow", () => {
   /** The dots and logomarks say nothing out loud, so the button's name has to
    *  carry what they show — otherwise the collapsed state is opaque to a screen
    *  reader in exactly the case it matters (something is waiting on you). */
   it("names what the chips show", () => {
-    renderRow([agent("needs-you"), agent("idle"), agent("idle")]);
+    renderRow([agent("needs-you", "Codex"), agent("idle"), agent("idle")]);
     expect(
-      screen.getByRole("button", { name: "Expand agents. 3 agents: 1 needs you, 2 idle" }),
+      screen.getByRole("button", {
+        name: "Expand agents. 3 agents: 1 Codex needs you, 2 Claude idle",
+      }),
     ).toBeTruthy();
   });
 
-  it("draws one chip per attention level, most urgent first", () => {
-    const { container } = renderRow([agent("idle"), agent("needs-you")]);
-    const dots = [...container.querySelectorAll("[role='img']")].map((el) =>
-      el.getAttribute("aria-label"),
-    );
-    expect(dots).toEqual(["Needs you", "Idle"]);
+  it("draws one chip per provider, the one that needs you first", () => {
+    const { container } = renderRow([agent("idle", "Claude"), agent("needs-you", "Codex")]);
+    expect(chipStates(container)).toEqual(["Needs you", "Idle"]);
+    // Two provider marks plus the row's own chevron.
+    expect(container.querySelectorAll("svg").length).toBe(3);
   });
 
-  /** Five sessions of one provider is one mark and a count. The alternative —
+  /** The colour is the busiest agent's, not the newest one's or the group's
+   *  first — the same `highest` the worktree's own dot is drawn from. */
+  it("colours a provider's chip by its busiest agent", () => {
+    const { container } = renderRow([agent("idle", "Claude"), agent("needs-you", "Claude")]);
+    expect(chipStates(container)).toEqual(["Needs you"]);
+  });
+
+  /** Five sessions of one provider is one mark and its count. The alternative —
    *  five identical marks — spends the whole row saying nothing. */
-  it("collapses repeats of one provider into a count", () => {
+  it("counts repeats of one provider on that provider's chip", () => {
     const { container } = renderRow([
       agent("idle", "Claude"),
       agent("idle", "Claude"),
       agent("idle", "Claude"),
     ]);
-    expect(container.textContent).toContain("+2");
+    expect(chipStates(container)).toEqual(["Idle"]);
+    expect(container.textContent).toContain("3");
   });
 
-  it("shows both providers when both are working", () => {
+  /** One is what the mark already says; a "1" beside every chip would be noise
+   *  on the common row. */
+  it("leaves a single agent's chip uncounted", () => {
     const { container } = renderRow([agent("working", "Claude"), agent("working", "Codex")]);
-    expect(container.querySelectorAll("svg[aria-hidden]").length).toBeGreaterThanOrEqual(2);
-    expect(container.textContent).not.toContain("+");
+    expect(container.textContent).toBe("");
+  });
+
+  /** More providers than the row has room for fold into a count of agents, so
+   *  the number beside the chips is never a number of tools. */
+  it("folds the providers that do not fit into a trailing count", () => {
+    const { container } = renderRow([
+      agent("needs-you", "Claude"),
+      agent("done", "Codex"),
+      agent("working", "Cursor"),
+      agent("idle", "Opencode"),
+      agent("idle", "Opencode"),
+    ]);
+    expect(chipStates(container)).toEqual(["Needs you", "Just finished", "Working"]);
+    expect(container.textContent).toContain("+2");
   });
 
   /** Expanded, the list underneath is saying all of it — repeating the chips

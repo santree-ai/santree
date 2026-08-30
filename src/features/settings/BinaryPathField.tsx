@@ -66,7 +66,7 @@ export function BinaryPathField({ name, hint }: { name: string; hint?: string })
           onKeyDown={(e) => {
             if (e.key === "Enter") submit(value.trim() || null);
           }}
-          className="min-w-[220px] flex-1 rounded-lg border border-line-3 bg-input px-[11px] py-1.5 font-mono text-[11.5px] text-fg-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"
+          className="min-w-[220px] flex-1 rounded-lg border border-line-3 bg-input px-[11px] py-1.5 font-mono text-[11.5px] text-fg-3"
         />
         <Button size="sm" disabled={isPending} onClick={() => submit(value.trim() || null)}>
           {isPending ? <Spinner size={10} /> : null}

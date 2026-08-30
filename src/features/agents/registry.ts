@@ -138,14 +138,20 @@ export const DONE_WINDOW_MS = 8 * 60 * 60 * 1000;
 
 /** One agent as the panel renders it. */
 export interface AgentEntry {
-  sessionId: string;
+  /** The provider's durable session id, or `null` for an agent running in an
+   *  open pane that has not announced one yet — see {@link buildAgentEntries}.
+   *  Use {@link agentKey} wherever a stable identity is needed. */
+  sessionId: string | null;
   /** Provider that owns this durable session. Kept on the display model so the
    *  control surface never has to infer identity from a title or terminal key.
    *  `null` when the session lost the registry row that named it (a terminal that
    *  minted a second session takes the row with it) — the UI then shows no
    *  provider mark, rather than defaulting to one and labelling it wrong. */
   agentKind: AgentKind | null;
-  state: AgentState;
+  /** The last state a hook recorded. `null` when no hook has spoken for this
+   *  agent yet — deliberately not a stand-in value, because the row's text falls
+   *  back to its purpose rather than asserting a status nothing reported. */
+  state: AgentState | null;
   bucket: AgentBucket;
   origin: AgentOrigin;
   /** Repo the session belongs to (`null` when unattributed). */
@@ -213,8 +219,46 @@ export interface BuildInput {
    * up a title, and can't keep one.
    */
   titles?: ReadonlyMap<string, string>;
+  /**
+   * Which agent the host process table says owns each pane's foreground, keyed
+   * by the pane's `term_key` (`useAgentProcesses`).
+   *
+   * Observation, where the two sources above are memory — so it is the one that
+   * catches an agent santree never launched, and the one that survives a user
+   * quitting one CLI and starting another in the same pane. An absent pane means
+   * *nothing was observed*, never "no agent": `ps` can fail, and a CLI behind an
+   * interpreter is not recognisable by `argv[0]`. Identity only — nothing here
+   * asserts a status.
+   */
+  detected?: ReadonlyMap<string, AgentKind>;
   /** `Date.now()` at render — passed in so the fold stays pure/testable. */
   nowMs: number;
+}
+
+/** One repo's enrichment, indexed for lookup. */
+interface RepoLookup {
+  base: Worktree | null;
+  worktrees: Map<string, Worktree>;
+  tasks: Map<string, Task>;
+}
+
+/**
+ * The repo owning `ticket`, when exactly one shown repo has it.
+ *
+ * Only needed for an agent santree did not launch: its own launches carry the
+ * repo on the tab. Ambiguity resolves to `null` rather than to a guess — filing
+ * an agent under the wrong worktree is worse than leaving it unattributed, which
+ * is a shape the panel already renders.
+ */
+function repoOfTicket(ticket: string | null, byRepo: Map<string, RepoLookup>): string | null {
+  if (!ticket || ticket === BASE_TICKET) return null;
+  let found: string | null = null;
+  for (const [repo, data] of byRepo) {
+    if (!data.worktrees.has(ticket) && !data.tasks.has(ticket)) continue;
+    if (found) return null;
+    found = repo;
+  }
+  return found;
 }
 
 /** Last path segment of a cwd, the only label an unattributed session can offer. */
@@ -237,6 +281,30 @@ function liveTabFor(
 /**
  * Fold the raw session rows into display entries.
  *
+ * Three sources, because the first is not always prompt and the second is only
+ * a memory:
+ *
+ *  1. **The session rows** — what the providers' own hooks reported. Decisive
+ *     where they exist: a row carries a provider-minted session id, and an
+ *     identity taken from anywhere else would not match it.
+ *  2. **The process table** (`detected`) — what `ps` says is in each pane's
+ *     foreground *right now*. The only source that survives a user quitting one
+ *     CLI and starting another in the same pane, and the only one that can see
+ *     an agent santree never launched.
+ *  3. **santree's own launch record** (a tab's `AgentTabIdentity`) — what santree
+ *     put in the pane. It stands wherever the scan names nothing, which is why
+ *     detection supplements it rather than replacing it: `ps` can fail, and a
+ *     CLI behind an interpreter is not recognisable by `argv[0]`.
+ *
+ * The three are one ordered lookup producing one `agentKind`, so they cannot
+ * disagree. A pane that 2 or 3 speaks for but 1 does not still gets an entry —
+ * it is a real agent, running in a PTY this app owns, and waiting for its
+ * provider to introduce itself would leave a freshly opened Codex tab absent
+ * from the sidebar until its first turn (see `agentProvider.ts` for why that is
+ * minutes, not milliseconds). Such an entry carries `sessionId: null` and
+ * `state: null`: nothing has reported a status, and none of this invents one.
+ * It is superseded the moment its session row appears.
+ *
  * Rows are dropped only when they are both **unactionable and stale** — showing
  * them would be a to-do item you can neither do nor dismiss:
  *  - a **finished session with no owner**: `terminal_sessions` keeps one row per
@@ -249,11 +317,11 @@ function liveTabFor(
  *    simply not have caught up yet — but a two-day-old one is not news.
  */
 export function buildAgentEntries(input: BuildInput): AgentEntry[] {
-  const { sessions, terminals, repos, allRepos, titles, nowMs } = input;
+  const { sessions, terminals, repos, allRepos, titles, detected, nowMs } = input;
   const known = new Set(allRepos);
   // Per-repo lookups, built once. Every selected repo is enriched — there is no
   // "active" repo here; the panel spans all of them at the same fidelity.
-  const byRepo = new Map(
+  const byRepo = new Map<string, RepoLookup>(
     repos.map((r) => [
       r.repo,
       {
@@ -265,6 +333,10 @@ export function buildAgentEntries(input: BuildInput): AgentEntry[] {
   );
 
   const entries: AgentEntry[] = [];
+  // Tabs a session row already speaks for. Collected before the filters below,
+  // so a row that is dropped as stale still counts as "the provider announced
+  // this one" and can't come back as a second, launch-shaped entry.
+  const announced = new Set<string>();
   for (const s of sessions) {
     // A session whose repo is registered but unselected is out. Unattributed and
     // non-repo-scoped sessions have no checkbox, so they're never filtered here —
@@ -274,6 +346,7 @@ export function buildAgentEntries(input: BuildInput): AgentEntry[] {
     const origin = parseTermKey(s.termKey);
     const tab = liveTabFor(s, origin, terminals);
     const live = tab !== undefined;
+    if (tab) announced.add(tab.key);
     const bucket = bucketOf(s.state, live);
     const stale = nowMs - (s.updatedAtMs ?? 0) > DONE_WINDOW_MS;
 
@@ -316,7 +389,77 @@ export function buildAgentEntries(input: BuildInput): AgentEntry[] {
       worktree,
     });
   }
+
+  // Agents in an open pane that no session row speaks for yet — santree's own
+  // launch record, and whatever the process table currently sees.
+  for (const tab of terminals) {
+    if (announced.has(tab.key)) continue;
+    // A pane's label IS its `term_key`: `TerminalLayer` opens the PTY under
+    // `refId ?? key`, and that is the key the process scan reports back under.
+    const paneKey = tab.refId ?? tab.key;
+    // Precedence, so the two can never disagree: what `ps` sees now beats what
+    // santree recorded at launch — it is the only one that survives the user
+    // quitting one CLI and starting another in the same pane — and the launch
+    // record stands wherever the scan names nothing. One ordered lookup, one
+    // answer, and a pane neither speaks for is not an agent at all.
+    const kind = detected?.get(paneKey) ?? tab.agent?.kind ?? null;
+    if (!kind) continue;
+
+    const termKey = tab.agent?.termKey ?? paneKey;
+    const origin = parseTermKey(termKey);
+    // An agent santree did not launch carries no repo of its own; it is placed
+    // through its ticket when that is unambiguous, and left unattributed when
+    // it is not.
+    const repo = tab.agent?.repo ?? repoOfTicket(origin.ticket, byRepo);
+    if (repo && known.has(repo) && !byRepo.has(repo)) continue;
+
+    const data = repo ? byRepo.get(repo) : undefined;
+    const worktree = origin.ticket
+      ? origin.ticket === BASE_TICKET
+        ? (data?.base ?? null)
+        : (data?.worktrees.get(origin.ticket) ?? null)
+      : null;
+    const task = origin.ticket ? (data?.tasks.get(origin.ticket) ?? null) : null;
+    const cwd = tab.cwd ?? "";
+
+    entries.push({
+      sessionId: null,
+      agentKind: kind,
+      // No hook has spoken, so there is nothing to report but the agent's
+      // presence. `idle` is the bucket, not a claim about the agent: `bucketOf`
+      // gives a live session with no attention state exactly this, and
+      // `updatedAtMs` being null keeps `levelOf` from treating any of it as
+      // evidence — the row's dot comes from the terminal title or sits at rest.
+      state: null,
+      bucket: "idle",
+      origin,
+      repo,
+      termKey,
+      cwd,
+      message: null,
+      updatedAtMs: null,
+      live: true,
+      tabKey: tab.key,
+      terminalTitle: titles?.get(paneKey) ?? null,
+      openable: origin.kind !== "unknown",
+      ticket: origin.ticket,
+      ...sessionIdentity(origin, worktree, task),
+      ...label(origin, worktree, task, cwd),
+      worktree,
+    });
+  }
   return entries;
+}
+
+/**
+ * An entry's stable identity, for React keys, sorting and acknowledgement.
+ *
+ * The provider's session id when there is one, the logical terminal otherwise:
+ * an agent santree has launched but whose provider has not announced itself has
+ * no session id yet, and `null` is not a key.
+ */
+export function agentKey(entry: AgentEntry): string {
+  return entry.sessionId ?? entry.termKey ?? `tab:${entry.tabKey}`;
 }
 
 /** Project ownership and session purpose are separate dimensions: a Codex

@@ -211,6 +211,7 @@ export function useBatchInvestigate(opts: {
             source: "triage",
             refId: triageTerminalRef(id, resolvedAgent),
             seed,
+            agent: { kind: resolvedAgent, repo, termKey: `triage:${id}` },
           });
         }),
       );

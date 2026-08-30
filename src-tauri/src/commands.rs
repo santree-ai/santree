@@ -17,17 +17,17 @@ use tauri_specta::Event;
 use santree_core::{
     config,
     domain::{
-        AgentAuth, AgentDef, AgentKind, AgentSession, AgentVersionStatus, AiReviewLaunch,
-        AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
+        AgentAuth, AgentDef, AgentKind, AgentProcess, AgentSession, AgentVersionStatus,
+        AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
         ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
         EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget, GithubStatus, LegacyCliMigration,
         LinearApiBudget, LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr,
         NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo,
-        ResourceUsage, ReviewBrief, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
+        RepoBranch, ResourceUsage, ReviewBrief, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
         ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionState,
         SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail,
         TriageSchedule, TriageSession, TriageTicket, UsageReport, ViewedMarks, Worktree,
-        WorktreePr, WorktreeSession, WorktreeTab,
+        WorktreeBranchSource, WorktreePr, WorktreeSession, WorktreeTab,
     },
 };
 
@@ -192,7 +192,55 @@ pub async fn create_worktree(
         project.as_deref(),
         base.as_deref(),
         Some(agent),
-        None,
+        worktree::BranchPlan::Derived,
+    )
+    .await?)
+}
+
+/// The repo's branches (local, plus `origin`-only ones), each flagged with
+/// whether it is already checked out somewhere — the Create-worktree dialog's
+/// Branch source. Empty when the repo has no local path.
+#[tauri::command]
+#[specta::specta]
+pub async fn repo_branches(repo: String, db: State<'_, Db>) -> CmdResult<Vec<RepoBranch>> {
+    Ok(worktree::branches(&db, &repo).await?)
+}
+
+/// Create a worktree from the sidebar's "Create worktree" dialog, which — unlike
+/// [`create_worktree`] — may have no Linear ticket behind it at all: `source`
+/// says whether the branch is derived from the id, checked out from one that
+/// exists, or created under a name the user typed. `base` is the parent
+/// worktree's branch when one was picked (a *stacked* worktree), else `None` for
+/// the repo's default branch.
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)] // Typed IPC fields stay explicit at this security boundary.
+pub async fn create_manual_worktree(
+    repo: String,
+    issue_id: String,
+    title: String,
+    project: Option<String>,
+    source: WorktreeBranchSource,
+    base: Option<String>,
+    agent: AgentKind,
+    db: State<'_, Db>,
+) -> CmdResult<Worktree> {
+    // Every branch name below is re-validated inside `worktree::create`
+    // (`git::safe_branch`) before it can reach a `git` argv.
+    let plan = match &source {
+        WorktreeBranchSource::Derived => worktree::BranchPlan::Derived,
+        WorktreeBranchSource::Existing { branch } => worktree::BranchPlan::Existing(branch),
+        WorktreeBranchSource::New { branch } => worktree::BranchPlan::New(branch),
+    };
+    Ok(worktree::create(
+        &db,
+        &repo,
+        &issue_id,
+        &title,
+        project.as_deref(),
+        base.as_deref(),
+        Some(agent),
+        plan,
     )
     .await?)
 }
@@ -225,7 +273,7 @@ pub async fn create_worktree_for_pr(
         Some("Reviews"),
         base.as_deref(),
         agent,
-        Some(&branch),
+        worktree::BranchPlan::Existing(&branch),
     )
     .await?)
 }
@@ -1721,20 +1769,21 @@ pub async fn list_triage_tickets(repo: String, db: State<'_, Db>) -> CmdResult<V
         .unwrap_or_default())
 }
 
-/// The full triage issue (description + comments) for the discussion pane. `None`
-/// means no Linear org is connected — an issue that genuinely doesn't exist errors
-/// out of `linear::triage_detail` itself, so reporting this as "not found" would
-/// have misdescribed exactly the failure the user needs to diagnose.
+/// The full triage issue (description + comments) for the discussion pane.
+///
+/// `null` means there is no ticket to show — no Linear org is connected, or Linear
+/// answered that this id names no issue (a worktree cut from a plain branch carries a
+/// branch slug where a ticket id would be). That is a state the UI renders, not a
+/// failure: it hides the Issue pane rather than raising a toast. Anything Linear
+/// *couldn't* answer — an expired token, a rate limit, a dead network — still errors.
 #[tauri::command]
 #[specta::specta]
 pub async fn triage_detail(
     repo: String,
     ticket_id: String,
     db: State<'_, Db>,
-) -> CmdResult<TriageDetail> {
-    Ok(linear::triage_detail(&db, &repo, &ticket_id)
-        .await?
-        .ok_or("no Linear org connected")?)
+) -> CmdResult<Option<TriageDetail>> {
+    Ok(linear::triage_detail(&db, &repo, &ticket_id).await?)
 }
 
 /// The team triage rotations (who is on-call now), from Linear's responsibility
@@ -2101,6 +2150,22 @@ pub async fn resource_usage(
     manager: State<'_, santree_pty::PtyManager>,
 ) -> CmdResult<ResourceUsage> {
     Ok(crate::resources::resource_usage(&db, &manager).await?)
+}
+
+/// Which coding agent is running in each terminal pane right now, observed in
+/// the host process table instead of remembered from the launch.
+///
+/// Identity only — the attention ladder is untouched by this (see
+/// `agent_procs`). Read-only and input-free: no IPC value reaches the `ps` argv,
+/// and a process table that cannot be read yields an empty list ("we don't
+/// know") rather than an error, because a `ps` that is slow or killed must never
+/// take a render down with it.
+#[tauri::command]
+#[specta::specta]
+pub async fn agent_processes(
+    manager: State<'_, santree_pty::PtyManager>,
+) -> CmdResult<Vec<AgentProcess>> {
+    Ok(crate::agent_procs::detect(&crate::terminal::pane_roots(&manager)).await)
 }
 
 /// The current state of every agent session santree has launched, as recorded

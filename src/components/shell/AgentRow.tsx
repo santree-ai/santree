@@ -15,9 +15,14 @@ import { RelativeTime } from "../RelativeTime";
 import { AttentionDot } from "./AttentionDot";
 import type { AgentNode } from "./useProjectTree";
 
-/** What the row says: the ask, else the state, else the provider's name. */
+/** What the row says: the ask, else the state, else what the session is for.
+ *
+ *  The last fallback is load-bearing rather than defensive: an agent santree has
+ *  launched whose provider hasn't reported in yet has no state to name, and the
+ *  row says what it is ("Worktree tab") instead of inventing a status. */
 function textOf(entry: AgentEntry): string {
-  return entry.message ?? sessionStateMeta[entry.state]?.label ?? entry.purpose;
+  const state = entry.state ? sessionStateMeta[entry.state]?.label : undefined;
+  return entry.message ?? state ?? entry.purpose;
 }
 
 /** One agent row. `indent` is the left gutter its nesting level has earned. */

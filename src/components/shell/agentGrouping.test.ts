@@ -2,98 +2,111 @@ import { describe, expect, it } from "vitest";
 
 import type { AgentKind } from "../../bindings";
 import type { AttentionLevel } from "../../lib/attention";
-import { describeAgents, groupByAttention, pickGroupIcons, splitGroups } from "./agentGrouping";
+import { describeAgents, groupByProvider, splitGroups } from "./agentGrouping";
 import type { AgentNode } from "./useProjectTree";
 
 let seq = 0;
-function agent(level: AttentionLevel, kind: AgentKind = "Claude"): AgentNode {
+/** `at` defaults to a rising sequence, so agents differ the way real events do;
+ *  pass it explicitly to test what happens when two groups tie exactly. */
+function agent(level: AttentionLevel, kind?: AgentKind, at?: number): AgentNode {
   seq += 1;
   return {
     entry: { sessionId: `s${seq}`, agentKind: kind } as AgentNode["entry"],
     unseen: false,
-    attention: { level, at: seq },
+    attention: { level, at: at ?? seq },
   };
 }
 
-describe("groupByAttention", () => {
-  it("orders groups by the attention ladder, not by arrival", () => {
-    const groups = groupByAttention([
-      agent("idle"),
-      agent("working"),
-      agent("needs-you"),
-      agent("done"),
-    ]);
-    expect(groups.map((g) => g.level)).toEqual(["needs-you", "done", "working", "idle"]);
-  });
-
-  it("keeps every agent of a level together", () => {
-    const groups = groupByAttention([agent("idle"), agent("idle"), agent("working")]);
-    expect(groups.map((g) => [g.level, g.agents.length])).toEqual([
-      ["working", 1],
-      ["idle", 2],
-    ]);
-  });
-
-  /** A level nobody is in must not render a chip — an empty chip reads as a
-   *  state something is actually in. */
-  it("omits levels with no agents", () => {
-    expect(groupByAttention([agent("idle")]).map((g) => g.level)).toEqual(["idle"]);
-    expect(groupByAttention([])).toEqual([]);
-  });
-});
-
-describe("pickGroupIcons", () => {
-  /** The whole reason for deduping: five Claude marks say nothing the count
-   *  doesn't. Two providers and a "+3" says which tools are on the job. */
-  it("shows one mark per provider, busiest provider first", () => {
-    const agents = [
+describe("groupByProvider", () => {
+  /** The point of the whole regroup: a count belongs to a provider, not to a
+   *  pile of marks. Two Claudes and a Codex is "Claude 2" and "Codex", never
+   *  one chip with a "+2" nobody can attribute. */
+  it("makes one group per provider, whatever state its agents are in", () => {
+    const groups = groupByProvider([
+      agent("idle", "Claude"),
+      agent("working", "Claude"),
       agent("idle", "Codex"),
-      agent("idle", "Claude"),
-      agent("idle", "Claude"),
-      agent("idle", "Claude"),
-    ];
-    const icons = pickGroupIcons(agents);
-    expect(icons.map((a) => a.entry.agentKind)).toEqual(["Claude", "Codex"]);
-    expect(agents.length - icons.length).toBe(2);
+    ]);
+    expect(groups.map((g) => [g.kind, g.agents.length])).toEqual([
+      ["Claude", 2],
+      ["Codex", 1],
+    ]);
   });
 
-  it("breaks a tie on the order the agents arrived in", () => {
-    const icons = pickGroupIcons([agent("idle", "Codex"), agent("idle", "Claude")]);
-    expect(icons.map((a) => a.entry.agentKind)).toEqual(["Codex", "Claude"]);
+  /** The chip's color has one source, and it is the same aggregation the
+   *  worktree's own dot uses — `highest`, not a second reading of the agents. */
+  it("takes a group's attention from the busiest agent in it", () => {
+    const [group] = groupByProvider([agent("idle", "Claude"), agent("needs-you", "Claude")]);
+    expect(group.attention.level).toBe("needs-you");
   });
 
-  it("caps the marks it returns", () => {
-    const agents = [agent("idle", "Claude"), agent("idle", "Codex")];
-    expect(pickGroupIcons(agents, 1)).toHaveLength(1);
+  it("orders providers by the attention ladder, most urgent first", () => {
+    const groups = groupByProvider([
+      agent("idle", "Cursor"),
+      agent("working", "Codex"),
+      agent("needs-you", "Claude"),
+    ]);
+    expect(groups.map((g) => g.kind)).toEqual(["Claude", "Codex", "Cursor"]);
+  });
+
+  /** A session santree can't attribute to a provider is its own chip — folding
+   *  it into a real provider's count would attribute it by accident. */
+  it("keeps an unattributable session out of a provider's count", () => {
+    const groups = groupByProvider([agent("idle", "Claude", 5), agent("idle", undefined, 5)]);
+    expect(groups.map((g) => [g.kind, g.agents.length])).toEqual([
+      ["Claude", 1],
+      [null, 1],
+    ]);
+  });
+
+  it("breaks an exact tie on the order the providers arrived in", () => {
+    const groups = groupByProvider([agent("idle", "Codex", 5), agent("idle", "Claude", 5)]);
+    expect(groups.map((g) => g.kind)).toEqual(["Codex", "Claude"]);
+  });
+
+  it("has nothing to group with no agents", () => {
+    expect(groupByProvider([])).toEqual([]);
   });
 });
 
 describe("splitGroups", () => {
-  it("keeps every group when they fit", () => {
-    const { visible, hiddenAgents } = splitGroups([agent("needs-you"), agent("idle")]);
-    expect(visible.map((g) => g.level)).toEqual(["needs-you", "idle"]);
+  it("keeps every chip when they fit", () => {
+    const { visible, hiddenAgents } = splitGroups([agent("needs-you", "Claude"), agent("idle")]);
+    expect(visible.map((g) => g.kind)).toEqual(["Claude", null]);
     expect(hiddenAgents).toBe(0);
   });
 
-  /** With four levels and room for three, the one that folds away is always the
-   *  least urgent — and it folds into a count, never silently. */
-  it("folds the least urgent level into a count", () => {
+  /** With more providers than room, the ones that fold away are always the
+   *  least urgent — and they fold into a count of *agents*, never silently. */
+  it("folds the least urgent providers into an agent count", () => {
     const { visible, hiddenAgents } = splitGroups([
-      agent("needs-you"),
-      agent("done"),
-      agent("working"),
-      agent("idle"),
-      agent("idle"),
+      agent("needs-you", "Claude"),
+      agent("done", "Codex"),
+      agent("working", "Cursor"),
+      agent("idle", "Opencode"),
+      agent("idle", "Opencode"),
     ]);
-    expect(visible.map((g) => g.level)).toEqual(["needs-you", "done", "working"]);
+    expect(visible.map((g) => g.kind)).toEqual(["Claude", "Codex", "Cursor"]);
     expect(hiddenAgents).toBe(2);
   });
 });
 
 describe("describeAgents", () => {
-  it("spells the chips out for a screen reader, in chip order", () => {
-    expect(describeAgents([agent("idle"), agent("needs-you"), agent("idle")])).toBe(
-      "3 agents: 1 needs you, 2 idle",
+  /** The chips are silent: a dot has no text and a logomark has no name, so
+   *  this sentence is the whole of what a screen reader gets. */
+  it("names each chip's provider, count and state, in chip order", () => {
+    expect(
+      describeAgents([
+        agent("idle", "Codex"),
+        agent("working", "Claude"),
+        agent("working", "Claude"),
+      ]),
+    ).toBe("3 agents: 2 Claude working, 1 Codex idle");
+  });
+
+  it("says plain 'agent' for a session with no provider", () => {
+    expect(describeAgents([agent("needs-you"), agent("idle", "Claude")])).toBe(
+      "2 agents: 1 agent needs you, 1 Claude idle",
     );
   });
 });

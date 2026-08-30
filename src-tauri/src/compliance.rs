@@ -832,9 +832,14 @@ fn every_pty_spawn_site_strips_the_inherited_session_markers() {
 
 /// COMPLIANCE.md, "No automated control loop" and "Where this is enforced in
 /// code": the backend streams bytes and never inspects them to decide what to
-/// type. `terminal.rs` is the one adapter over the PTY, and `terminal_write` —
-/// carrying the user's keystrokes and the single human-initiated seed — is the
-/// only way bytes go *in*.
+/// type. `terminal.rs` is the one adapter over the PTY, and its two input
+/// commands — `terminal_write` for the user's keystrokes, `terminal_seed` for
+/// the single human-initiated launch line — are the only way bytes go *in*.
+///
+/// Both reach the PTY through the module's one `write_pty` helper, so counting
+/// `manager.write(` alone would no longer notice a *third* command: it would
+/// call the helper and leave that count at one. The helper's own call sites are
+/// therefore counted too, and a new writer has to come here and say why.
 ///
 /// Breaking this is the line the whole document exists to hold: a second module
 /// with PTY-write access is a module that can answer the agent on the user's
@@ -855,6 +860,10 @@ fn only_the_terminal_adapter_writes_bytes_into_a_pty() {
         "src-tauri/src/resources.rs", // sums each session's process tree
         "src-tauri/src/update.rs",    // closes every session before restarting
     ];
+    // `agent_procs.rs` deliberately does NOT appear above: it reads the process
+    // table, not the manager, and takes its pane roots as plain `(term_key, pid)`
+    // pairs from `terminal::pane_roots`. Keeping it unable to name a PtyManager
+    // is what makes "observation only" structural rather than a promise.
 
     for (path, src) in rust_sources() {
         if path.starts_with("crates/pty/") {
@@ -876,12 +885,22 @@ fn only_the_terminal_adapter_writes_bytes_into_a_pty() {
         }
     }
 
+    let terminal = shipped("src-tauri/src/terminal.rs");
     assert_eq!(
-        shipped("src-tauri/src/terminal.rs")
-            .matches("manager.write(")
-            .count(),
+        terminal.matches("manager.write(").count(),
         1,
-        "terminal.rs should hold exactly one PTY write — the `terminal_write` command"
+        "terminal.rs should hold exactly one PTY write — the `write_pty` helper that \
+         `terminal_write` and `terminal_seed` both go through"
+    );
+    // One definition plus exactly two callers. A third is a third way for bytes
+    // to enter a terminal, which is the thing this whole test exists to notice.
+    assert_eq!(
+        terminal.matches("write_pty(").count(),
+        3,
+        "write_pty should have exactly two callers — `terminal_write` (the user's \
+         keystrokes) and `terminal_seed` (the one human-initiated launch line). A new \
+         one is a new way to answer the agent on the user's behalf: name it here, with \
+         a reason, or route it through one of the two."
     );
 }
 

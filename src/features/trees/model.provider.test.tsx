@@ -42,6 +42,9 @@ vi.mock("../../lib/queries", () => ({
   useBaseWorktree: () => ({ data: null, isLoading: false }),
   useWorktreePrs: () => ({ data: [pr] }),
   useTasks: () => ({ data: [] }),
+  // `undefined` is "Linear hasn't answered yet", which is how the model treats a
+  // worktree it has no verdict on: the Issue pane stays available.
+  useTriageDetail: () => ({ data: undefined }),
   useWorktreeTabs: () => ({ data: [] }),
   useAddWorktreeTab: () => ({ mutate: vi.fn() }),
   useRenameWorktreeTab: () => ({ mutate: vi.fn() }),

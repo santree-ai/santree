@@ -16,8 +16,8 @@ use base64::Engine;
 use tauri::ipc::Channel;
 
 use santree_core::domain::{
-    AgentKind, ChangedFile, FileSource, ScriptInfo, TriageComment, TriageDetail, Worktree,
-    WorktreeSession,
+    AgentKind, ChangedFile, FileSource, RepoBranch, ScriptInfo, TriageComment, TriageDetail,
+    Worktree, WorktreeSession,
 };
 
 use crate::db::Db;
@@ -45,14 +45,40 @@ fn validate_issue_id(issue_id: &str) -> Result<()> {
     }
 }
 
-/// Reject a branch name that could be parsed as a flag by `git` instead of a
-/// positional ref — an IPC-supplied `base` reaching `git fetch origin <base>`
-/// unquoted (`git.rs`) must not be able to smuggle e.g. `--upload-pack=<cmd>`.
+/// Reject a branch name that `git` would refuse — or, worse, read as a flag
+/// rather than a positional ref: an IPC-supplied `base` reaching
+/// `git fetch origin <base>` must not be able to smuggle e.g.
+/// `--upload-pack=<cmd>`. See [`git::safe_branch`] for the full rule set.
 fn validate_branch_name(name: &str) -> Result<()> {
-    if name.is_empty() || name.starts_with('-') {
-        bail!("invalid branch name '{name}'");
-    }
+    git::safe_branch(name)?;
     Ok(())
+}
+
+/// Which branch a new worktree lands on — the one thing the three creation paths
+/// (a ticket, an existing branch, a branch the user just named) actually differ
+/// on at the git sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchPlan<'a> {
+    /// Derive `santree/<issue>-<slug(title)>` and branch it off the base — how a
+    /// ticket's worktree has always been named.
+    Derived,
+    /// Check out a branch that already exists locally or on `origin` (a PR's head
+    /// branch, or one picked in the Create-worktree dialog), so commits made in
+    /// the worktree land on *that* branch.
+    Existing(&'a str),
+    /// Create a branch under exactly this name, off the base.
+    New(&'a str),
+}
+
+impl BranchPlan<'_> {
+    /// The branch the caller named, when it named one. `None` for
+    /// [`BranchPlan::Derived`], whose name this module derives itself.
+    fn named(&self) -> Option<&str> {
+        match self {
+            Self::Derived => None,
+            Self::Existing(b) | Self::New(b) => Some(b),
+        }
+    }
 }
 
 /// A stored issue ↔ worktree link's git coordinates, hydrated from
@@ -388,6 +414,18 @@ pub async fn get(db: &Db, repo: &str, issue_id: &str) -> Result<Option<Worktree>
     ))
 }
 
+/// The repo's branches, for the Create-worktree dialog's Branch source. Empty
+/// when the repo has no local path — the picker then shows its empty state
+/// rather than a failure.
+pub async fn branches(db: &Db, repo: &str) -> Result<Vec<RepoBranch>> {
+    let Some(root) = repo::path(db, repo).await? else {
+        return Ok(Vec::new());
+    };
+    // `for-each-ref` + `worktree list` are two blocking git processes — off the
+    // async runtime, like every other git read in this module.
+    tokio::task::spawn_blocking(move || git::branches(Path::new(&root))).await?
+}
+
 type CreateLock = Arc<tokio::sync::Mutex<()>>;
 
 /// Identity locks serializing [`create`]. Issue IDs protect destination paths and PR
@@ -426,13 +464,13 @@ pub async fn create(
     project: Option<&str>,
     base: Option<&str>,
     agent: Option<AgentKind>,
-    checkout_branch: Option<&str>,
+    plan: BranchPlan<'_>,
 ) -> Result<Worktree> {
     validate_issue_id(issue_id)?;
     if let Some(b) = base {
         validate_branch_name(b)?;
     }
-    if let Some(b) = checkout_branch {
+    if let Some(b) = plan.named() {
         validate_branch_name(b)?;
     }
     let root = repo_root(db, repo).await?;
@@ -442,7 +480,8 @@ pub async fn create(
     // destination path (issue id) and checked-out branch. Lock both in stable order
     // so neither two branches racing one path nor one branch racing two paths can
     // reach `git worktree add` concurrently.
-    let target_branch = checkout_branch
+    let target_branch = plan
+        .named()
         .map(str::to_string)
         .unwrap_or_else(|| format!("santree/{}-{}", issue_id.to_lowercase(), slugify(title)));
     let mut lock_keys = [
@@ -463,7 +502,7 @@ pub async fn create(
     // branch. Returning the old checkout would give the new PR prompt authority over
     // unrelated files under a deceptively matching ticket id.
     if let Some(existing) = get(db, repo, issue_id).await? {
-        if let Some(requested_branch) = checkout_branch {
+        if let Some(requested_branch) = plan.named() {
             ensure!(
                 existing.branch == requested_branch,
                 "worktree {issue_id} already tracks branch {}, not requested branch {requested_branch}",
@@ -497,11 +536,16 @@ pub async fn create(
 
     // The git work (branch resolution, `worktree add`, fetch) is blocking — run it
     // off the async runtime.
+    // The plan collapses to one bit for the blocking half: whether the branch is
+    // one to *check out* (fetch it, put the worktree on it) or one to *create*
+    // off the base. `git::create_worktree` already covers both Derived and New —
+    // it branches `target_branch` from the base, or checks it out if it turns out
+    // to exist — so only Existing needs the other call.
+    let checkout_existing = matches!(plan, BranchPlan::Existing(_));
     let (base_branch, branch, wt_path_str) = {
         let root = root.clone();
         let issue_id = issue_id.to_string();
         let base = base.map(str::to_string);
-        let checkout_branch = checkout_branch.map(str::to_string);
         let target_branch = target_branch.clone();
         tokio::task::spawn_blocking(move || -> Result<_> {
             let root_path = Path::new(&root);
@@ -534,12 +578,12 @@ pub async fn create(
                     wt_path.display()
                 );
                 b
-            } else if let Some(cb) = checkout_branch {
+            } else if checkout_existing {
                 // Check out an existing branch (a PR's head) rather than branching new
                 // work — so commits made here land on the PR's branch.
-                git::add_worktree_for_branch(root_path, &wt_path, &cb)?;
-                log::info!("created worktree {issue_id} on existing branch {cb}");
-                cb
+                git::add_worktree_for_branch(root_path, &wt_path, &target_branch)?;
+                log::info!("created worktree {issue_id} on existing branch {target_branch}");
+                target_branch
             } else {
                 git::create_worktree(root_path, &wt_path, &target_branch, &base_branch)?;
                 log::info!("created worktree {issue_id} on branch {target_branch}");
@@ -1725,7 +1769,7 @@ mod tests {
             None,
             None,
             Some(AgentKind::Claude),
-            None,
+            BranchPlan::Derived,
         )
         .await
         .unwrap()
@@ -1996,7 +2040,7 @@ mod tests {
             None,
             None,
             Some(AgentKind::Claude),
-            None,
+            BranchPlan::Derived,
         )
         .await
         .expect_err("a directory that isn't a worktree must not be adopted");
@@ -2190,7 +2234,7 @@ mod tests {
             Some("Booking"),
             None,
             Some(AgentKind::Claude),
-            None,
+            BranchPlan::Derived,
         )
         .await
         .unwrap();
@@ -2225,7 +2269,7 @@ mod tests {
             None,
             None,
             Some(AgentKind::Claude),
-            None,
+            BranchPlan::Derived,
         )
         .await
         .unwrap();
@@ -2247,7 +2291,7 @@ mod tests {
             Some("Reviews"),
             None,
             None,
-            Some("different-pr-branch"),
+            BranchPlan::Existing("different-pr-branch"),
         )
         .await
         .unwrap_err();
@@ -2266,7 +2310,7 @@ mod tests {
             Some("Reviews"),
             None,
             None,
-            Some(&wt.branch),
+            BranchPlan::Existing(&wt.branch),
         )
         .await
         .unwrap();
@@ -2288,7 +2332,7 @@ mod tests {
             None,
             None,
             Some(AgentKind::Claude),
-            None,
+            BranchPlan::Derived,
         )
         .await
         .unwrap();
@@ -2393,7 +2437,7 @@ mod tests {
             None,
             None,
             Some(AgentKind::Claude),
-            None,
+            BranchPlan::Derived,
         )
         .await
         .unwrap();
@@ -2408,7 +2452,7 @@ mod tests {
             None,
             Some(&ak1.branch),
             Some(AgentKind::Claude),
-            None,
+            BranchPlan::Derived,
         )
         .await
         .unwrap();
@@ -2479,7 +2523,7 @@ mod tests {
             None,
             None,
             Some(AgentKind::Claude),
-            None,
+            BranchPlan::Derived,
         )
         .await
         .unwrap();
@@ -2496,6 +2540,155 @@ mod tests {
             fetched.remote_behind, 1,
             "the pending remote commit lands on the next refresh"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The Create-worktree dialog's Branch source, both ways round: an existing
+    /// branch is *checked out* (commits land on it), a typed name is *created*
+    /// off the base — and neither needs a Linear ticket behind it.
+    #[tokio::test]
+    async fn a_manual_worktree_can_check_out_a_branch_or_create_one() {
+        let (base, repo_dir, db) = test_repo("manual-branch").await;
+        run_git(&repo_dir, &["branch", "existing-work"]);
+
+        let checked_out = create(
+            &db,
+            "test",
+            "existing-work",
+            "existing-work",
+            None,
+            None,
+            Some(AgentKind::Claude),
+            BranchPlan::Existing("existing-work"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(checked_out.branch, "existing-work");
+        assert_eq!(checked_out.base_branch, "main");
+        assert!(
+            checked_out.project.is_none(),
+            "a branch-sourced worktree has no Linear project"
+        );
+        assert!(Path::new(&checked_out.path).join("README.md").is_file());
+
+        let fresh = create(
+            &db,
+            "test",
+            "brand-new",
+            "brand/new",
+            None,
+            None,
+            Some(AgentKind::Claude),
+            BranchPlan::New("brand/new"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fresh.branch, "brand/new",
+            "the typed name is used verbatim, not slugified into santree/<id>-<title>"
+        );
+        assert!(Path::new(&fresh.path).join("README.md").is_file());
+
+        // A parent worktree maps onto the existing stacked-worktree base: the
+        // child branches off the parent's branch, not the repo's default.
+        let stacked = create(
+            &db,
+            "test",
+            "stacked",
+            "stacked",
+            None,
+            Some(&fresh.branch),
+            Some(AgentKind::Claude),
+            BranchPlan::New("stacked-branch"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stacked.base_branch, "brand/new");
+
+        // Every branch the picker offers is one git could add — the ones it holds
+        // already are flagged, and the two just created are among them.
+        let listed = branches(&db, "test").await.unwrap();
+        for name in ["existing-work", "brand/new", "stacked-branch", "main"] {
+            let row = listed.iter().find(|b| b.name == name);
+            assert!(
+                row.is_some_and(|b| b.has_worktree),
+                "{name} is checked out and must be offered disabled"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Every branch name in the new dialog's payload is an IPC value that reaches
+    /// a `git` argv. A hostile one must be refused before any git process runs —
+    /// and before a worktree directory is created for it.
+    #[tokio::test]
+    async fn a_manual_worktree_refuses_hostile_branch_names_and_ids() {
+        let (base, _repo_dir, db) = test_repo("manual-hostile").await;
+
+        for bad in [
+            "--upload-pack=/tmp/pwn",
+            "-b",
+            "",
+            "a b",
+            "feat/@{0}",
+            "..",
+            "double//slash",
+            ".hidden",
+        ] {
+            for plan in [BranchPlan::Existing(bad), BranchPlan::New(bad)] {
+                let err = create(
+                    &db,
+                    "test",
+                    "hostile",
+                    "Hostile",
+                    None,
+                    None,
+                    Some(AgentKind::Claude),
+                    plan,
+                )
+                .await
+                .expect_err("branch name {bad:?} must be refused");
+                assert!(
+                    err.to_string().contains("not a valid branch name"),
+                    "{bad:?}: {err}"
+                );
+            }
+        }
+
+        // The same gate on the base (a parent worktree's branch) and on the id
+        // that becomes the worktree *directory*.
+        assert!(create(
+            &db,
+            "test",
+            "hostile",
+            "Hostile",
+            None,
+            Some("--upload-pack=/tmp/pwn"),
+            Some(AgentKind::Claude),
+            BranchPlan::Derived,
+        )
+        .await
+        .is_err());
+        for bad_id in ["../escape", "/etc/passwd", "a/b", ""] {
+            assert!(
+                create(
+                    &db,
+                    "test",
+                    bad_id,
+                    "Hostile",
+                    None,
+                    None,
+                    Some(AgentKind::Claude),
+                    BranchPlan::Derived,
+                )
+                .await
+                .is_err(),
+                "issue id {bad_id:?} must not reach the filesystem"
+            );
+        }
+        assert!(list(&db, "test").await.unwrap().is_empty());
 
         let _ = std::fs::remove_dir_all(&base);
     }

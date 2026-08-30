@@ -36,6 +36,7 @@ import {
   useRemoveWorktreeTab,
   useRenameWorktreeTab,
   useTasks,
+  useTriageDetail,
   useWorktreePrs,
   useWorktrees,
   useWorktreeTabs,
@@ -161,12 +162,27 @@ export function isTreeLaunchDead(
  *  review. */
 export type FileTab = "issue" | "pr" | "aiWork" | "files" | "changes" | "history";
 
-/** Which panes the active worktree actually has: the Issue pane needs a ticket,
- *  which the base-branch entry doesn't have, and the PR and AI work panes need a
- *  pull request. Ordered as the strip renders them — the work's own material
- *  first (ticket, files, changes, sessions), then what happens to it once it is
- *  out for review, which is also the pair that comes and goes. The AI work queue
- *  sits directly after the PR because it is what you *do* about that PR.
+/** What decides which panes a worktree has. Every one of them is a fact about the
+ *  worktree, never about what happens to be on screen. */
+export interface FileTabInputs {
+  /** The repo's own checkout — a branch, not a ticket, and never a PR of ours. */
+  isBase: boolean;
+  hasPr: boolean;
+  /** Whether this worktree's id names a real Linear ticket. False for one cut from
+   *  a plain branch: santree keys worktrees by ticket id, but a branch-born one
+   *  carries a branch slug there, and Linear has no issue by that name. Assumed
+   *  true until Linear says otherwise — tickets usually exist, so showing the pane
+   *  and dropping it beats a pane that pops in a round-trip late. */
+  hasTicket: boolean;
+}
+
+/** Which panes the active worktree actually has: the Issue pane needs a ticket —
+ *  which neither the base-branch entry nor a worktree cut from a plain branch has —
+ *  and the PR and AI work panes need a pull request. Ordered as the strip renders
+ *  them — the work's own material first (ticket, files, changes, sessions), then
+ *  what happens to it once it is out for review, which is also the pair that comes
+ *  and goes. The AI work queue sits directly after the PR because it is what you
+ *  *do* about that PR.
  *
  *  The queue half of that pane is not really PR-specific, but its rows are keyed
  *  `(pr_repo, pr_number)` in SQLite, so `hasPr` gates the tab until a migration
@@ -176,9 +192,9 @@ export type FileTab = "issue" | "pr" | "aiWork" | "files" | "changes" | "history
  *  Paired with {@link resolveFileTab} in one file deliberately — split apart, the
  *  strip ends up hiding a pane the model still resolves to, and the user lands on
  *  a tab they can't see. Exported for testing — see model.test.ts. */
-export function availableFileTabs(opts: { isBase: boolean; hasPr: boolean }): FileTab[] {
+export function availableFileTabs(opts: FileTabInputs): FileTab[] {
   const tabs: FileTab[] = [];
-  if (!opts.isBase) tabs.push("issue");
+  if (!opts.isBase && opts.hasTicket) tabs.push("issue");
   tabs.push("files", "changes", "history");
   if (opts.hasPr) tabs.push("pr", "aiWork");
   return tabs;
@@ -186,10 +202,7 @@ export function availableFileTabs(opts: { isBase: boolean; hasPr: boolean }): Fi
 
 /** Resolve the remembered right-panel pane, falling back to Changes when it isn't
  *  one this worktree has. Exported for testing — see model.test.ts. */
-export function resolveFileTab(
-  remembered: FileTab,
-  opts: { isBase: boolean; hasPr: boolean },
-): FileTab {
+export function resolveFileTab(remembered: FileTab, opts: FileTabInputs): FileTab {
   return availableFileTabs(opts).includes(remembered) ? remembered : "changes";
 }
 
@@ -372,6 +385,10 @@ interface TreesModel {
   rightCollapsed: boolean;
   rightWidth: number;
   fileTab: FileTab;
+  /** Whether the active worktree's id names a real Linear ticket — the Issue pane's
+   *  gate. See {@link FileTabInputs.hasTicket} for what "no" means and why the
+   *  answer is optimistic while Linear is still being asked. */
+  hasTicket: boolean;
   /** The file shown in the (shared) main-area File tab, or null if none is open. */
   selectedFile: string | null;
   /** Which diff `selectedFile` shows (see {@link FileScope}). */
@@ -565,6 +582,18 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setOpenWorktree(activeId ? { repo: activeRepo, id: activeId } : null);
   }, [activeId, activeRepo, setOpenWorktree]);
+
+  // Does the active worktree's id name a real ticket? Only Linear can say: absence
+  // from `tasks` above proves nothing (that fetch is the viewer's own issues), so
+  // this asks the same query the Issue pane reads — one round-trip that also warms
+  // the pane. `null` is Linear's definitive "no such issue"; `undefined` is "still
+  // asking", and tickets usually exist, so the pane shows until told otherwise.
+  // Skipped for the base entry, which has no ticket by construction.
+  const { data: activeTicket } = useTriageDetail(
+    activeRepo,
+    activeId === BASE_ID ? null : activeId,
+  );
+  const hasTicket = activeTicket !== null;
 
   const [rightCollapsed, setRightCollapsed] = usePersistedState(RIGHT_COLLAPSED_KEY, false);
   const [rightWidth, setRightWidth] = usePersistedState(RIGHT_WIDTH_KEY, 320);
@@ -866,7 +895,9 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       fileTab: resolveFileTab(fileTab, {
         isBase: activeId === BASE_ID,
         hasPr: activePr !== null,
+        hasTicket,
       }),
+      hasTicket,
       selectedFile,
       selectedFileScope,
       setupFor,
@@ -993,6 +1024,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     rightCollapsed,
     rightWidth,
     fileTab,
+    hasTicket,
     setFileTab,
     setRightCollapsed,
     setRightWidth,

@@ -11,15 +11,16 @@
  * Two orderings meet here and the precedence matters. Attention (see
  * `lib/attention.ts`) decides which worktree is worth looking at, so it sorts
  * first, with a label tiebreak so an all-idle repo keeps a fixed order instead
- * of reshuffling as timestamps land. Linear's milestone grouping and the
- * stacked-branch nesting the Trees rail established then apply *inside* that
- * order — a branch relationship must not drag a row across its planning
- * boundary, and neither structure should outrank "this one is blocked on you".
+ * of reshuffling as timestamps land. Linear's planning grouping (project and/or
+ * milestone, per the `linear_group_by` setting) and the stacked-branch nesting
+ * the Trees rail established then apply *inside* that order — a branch
+ * relationship must not drag a row across its planning boundary, and neither
+ * structure should outrank "this one is blocked on you".
  */
 import { useCallback, useMemo } from "react";
 
 import type { Task, Worktree, WorktreePr } from "../../bindings";
-import type { AgentEntry } from "../../features/agents/registry";
+import { type AgentEntry, agentKey } from "../../features/agents/registry";
 import { useAgentEntries } from "../../features/agents/useAgents";
 import { mergeWorktrees } from "../../features/trees/model";
 import { stackWorktrees } from "../../features/trees/worktreeGrouping";
@@ -35,15 +36,29 @@ import {
   useSeenAgents,
 } from "../../lib/attention";
 import {
+  LINEAR_GROUP_BY_KEY,
+  type LinearGroupBy,
+  parseLinearGroupBy,
   useBaseWorktreesByRepo,
   useRepos,
+  useSetting,
   useTasksByRepo,
   useWorktreePrsByRepo,
   useWorktreesByRepo,
 } from "../../lib/queries";
 import { shortRepoName } from "../../lib/repoName";
 import { useApp, useAppUi } from "../../state/AppContext";
-import { groupByMilestone, showMilestoneGroups } from "../WorkSignals";
+import { PROJECT_FALLBACK } from "../../theme/colors";
+import {
+  groupByMilestone,
+  groupByProject,
+  type MilestoneGroup,
+  NO_MILESTONE,
+  NO_PROJECT,
+  type ProjectGroup,
+  showMilestoneGroups,
+  showProjectGroups,
+} from "../WorkSignals";
 
 /** Stable stand-in for "the session read hasn't landed yet", so a render before
  *  it does doesn't hand every memo below a fresh array identity. */
@@ -75,12 +90,39 @@ export interface WorktreeNode {
   attention: Attention;
 }
 
-/** A Linear milestone band inside one repo's section. */
+/** A Linear milestone band inside one project band. */
 export interface MilestoneNode {
   key: string;
   label: string;
   targetDate: string | null;
   worktrees: WorktreeNode[];
+}
+
+/**
+ * A Linear **project** band inside one repo's section.
+ *
+ * Qualified because the sidebar's own "Projects" are the registered repos (see
+ * {@link ProjectNode}); this is the project a Linear issue belongs to.
+ *
+ * Every mode builds this level, including the ones that don't group by project:
+ * with grouping off the section holds a single band whose heading is suppressed,
+ * so the sidebar renders one tree shape instead of branching on the setting.
+ */
+export interface LinearProjectNode {
+  key: string;
+  label: string;
+  /** Linear's own project color, or the shared fallback when it has none. */
+  color: string;
+  /** An emoji, a Linear icon name, or nothing — see `ProjectGlyph`. */
+  icon: string | null;
+  targetDate: string | null;
+  milestones: MilestoneNode[];
+  /** Whether the milestone headings **inside this band** carry information (see
+   *  `showMilestoneGroups`). Per band, not per repo: one project can be split
+   *  across real milestones while the next has none at all. */
+  showMilestones: boolean;
+  /** Rows in the band — the count beside its heading. */
+  worktreeCount: number;
 }
 
 /** One repo's collapsible section. */
@@ -92,9 +134,11 @@ export interface ProjectNode {
   /** The repo's own checkout (see {@link WorktreeNode.primary} — whatever branch
    *  it holds, not necessarily the default one), or `null` with no local path. */
   base: WorktreeNode | null;
-  milestones: MilestoneNode[];
-  /** Whether the milestone headings carry information here (see `showMilestoneGroups`). */
-  showMilestones: boolean;
+  /** The section's work, always one level of project bands deep (see
+   *  {@link LinearProjectNode}). */
+  linearProjects: LinearProjectNode[];
+  /** Whether the project headings carry information here (see `showProjectGroups`). */
+  showProjects: boolean;
   /** Task worktrees in this repo — the count beside the header. */
   worktreeCount: number;
   /** The most urgent of every row in the section — the header's dot. */
@@ -161,7 +205,7 @@ export function groupAgentsByWorktree(
     nodes.sort(
       (a, b) =>
         compareAttention(a.attention, b.attention) ||
-        a.entry.sessionId.localeCompare(b.entry.sessionId),
+        agentKey(a.entry).localeCompare(agentKey(b.entry)),
     );
   }
   return byWorktree;
@@ -183,10 +227,22 @@ export function buildProjectNode(input: {
   tasks: Task[];
   prs: WorktreePr[];
   agentsByWorktree: Map<string, AgentNode[]>;
+  /** Which levels of Linear's planning structure the tree nests by. */
+  groupBy: LinearGroupBy;
 }): ProjectNode {
-  const { repo, worktrees, base, tasks, prs, agentsByWorktree } = input;
+  const { repo, worktrees, base, tasks, prs, agentsByWorktree, groupBy } = input;
 
   const tasksById = new Map(tasks.map((task) => [task.id, task]));
+  // A project's colour and icon belong to the *project*, not to the ticket that
+  // happens to carry them — so any live ticket in a project can supply them for a
+  // worktree whose own ticket no longer resolves (an issue that has aged out of
+  // the active set still names its project on the worktree row). Keyed by name
+  // because that is all the worktree kept.
+  const projectMetaByName = new Map(
+    tasks
+      .filter((task) => task.projectColor || task.projectIcon || task.projectTargetDate)
+      .map((task) => [task.project, task]),
+  );
   const prsByWorktree = new Map<string, WorktreePr[]>();
   for (const pr of prs) {
     prsByWorktree.set(pr.issueId, [...(prsByWorktree.get(pr.issueId) ?? []), pr]);
@@ -218,18 +274,80 @@ export function buildProjectNode(input: {
       labelOf(a).localeCompare(labelOf(b)),
   );
 
-  const groups = groupByMilestone(
-    ordered,
-    (worktree) => tasksById.get(worktree.id)?.projectMilestone,
-  );
-  const milestones: MilestoneNode[] = groups.map((group) => ({
-    key: group.key,
-    label: group.label,
-    targetDate: group.targetDate,
-    worktrees: stackWorktrees(group.items).map(({ worktree, depth }) =>
-      nodeOf(worktree, depth, false),
-    ),
-  }));
+  // Both levels are always built; the setting only decides whether each one is
+  // grouped for real or collapsed into a single suppressed band. A row therefore
+  // sits in exactly one project band and exactly one milestone band in every
+  // mode, which is what keeps it from being rendered twice.
+  const wholeSection = (items: Worktree[]): ProjectGroup<Worktree>[] =>
+    items.length === 0
+      ? []
+      : [{ key: NO_PROJECT, label: NO_PROJECT, color: null, icon: null, targetDate: null, items }];
+  const oneBand = (items: Worktree[]): MilestoneGroup<Worktree>[] => [
+    {
+      key: NO_MILESTONE,
+      label: NO_MILESTONE,
+      targetDate: null,
+      sortOrder: Number.POSITIVE_INFINITY,
+      items,
+    },
+  ];
+
+  const byProject =
+    groupBy === "project" || groupBy === "project_milestone"
+      ? groupByProject(ordered, (worktree) => {
+          const task = tasksById.get(worktree.id);
+          // The live ticket first — it is the only source that also carries the
+          // project's colour, icon and target date.
+          if (task) {
+            return {
+              name: task.project,
+              color: task.projectColor,
+              icon: task.projectIcon,
+              targetDate: task.projectTargetDate,
+            };
+          }
+          // Then the project santree recorded on the worktree itself. A repo
+          // whose Linear org isn't connected resolves no tickets at all, so
+          // reading only the live task collapsed every one of its worktrees
+          // into the unnamed band — while the name sat in `worktree_links`
+          // the whole time. Name only: the rest is the ticket's to give, and
+          // the glyph falls back rather than inventing a colour.
+          if (!worktree.project) return null;
+          const known = projectMetaByName.get(worktree.project);
+          return {
+            name: worktree.project,
+            color: known?.projectColor ?? null,
+            icon: known?.projectIcon ?? null,
+            targetDate: known?.projectTargetDate ?? null,
+          };
+        })
+      : wholeSection(ordered);
+
+  const linearProjects: LinearProjectNode[] = byProject.map((band) => {
+    const groups =
+      groupBy === "milestone" || groupBy === "project_milestone"
+        ? groupByMilestone(band.items, (worktree) => tasksById.get(worktree.id)?.projectMilestone)
+        : oneBand(band.items);
+    return {
+      key: band.key,
+      label: band.label,
+      color: band.color ?? PROJECT_FALLBACK,
+      icon: band.icon,
+      targetDate: band.targetDate,
+      // Stacking runs inside a band and never across two: a branch relationship
+      // must not drag a row over a planning boundary.
+      milestones: groups.map((group) => ({
+        key: group.key,
+        label: group.label,
+        targetDate: group.targetDate,
+        worktrees: stackWorktrees(group.items).map(({ worktree, depth }) =>
+          nodeOf(worktree, depth, false),
+        ),
+      })),
+      showMilestones: showMilestoneGroups(groups),
+      worktreeCount: band.items.length,
+    };
+  });
 
   const baseNode = base ? nodeOf(base, 0, true) : null;
 
@@ -237,8 +355,8 @@ export function buildProjectNode(input: {
     repo,
     label: shortRepoName(repo),
     base: baseNode,
-    milestones,
-    showMilestones: showMilestoneGroups(groups),
+    linearProjects,
+    showProjects: showProjectGroups(byProject),
     worktreeCount: list.length,
     attention: highest([...(baseNode ? [baseNode.attention] : []), ...[...attentionById.values()]]),
     loading: worktrees === undefined,
@@ -267,6 +385,9 @@ export function useProjectTree(): ProjectTreeModel {
   // started from.
   const { activeRepo } = useApp();
   const { pendingLaunches, pendingDeletes } = useAppUi();
+  // App-scoped: the tree is cross-repo, so one shape has to serve all of it.
+  const { data: groupByRaw } = useSetting("app", LINEAR_GROUP_BY_KEY);
+  const groupBy = parseLinearGroupBy(groupByRaw);
 
   const agentsByWorktree = useMemo(
     () => groupAgentsByWorktree(entries ?? EMPTY_ENTRIES, seen, nowMs),
@@ -295,9 +416,10 @@ export function useProjectTree(): ProjectTreeModel {
           tasks: tasksByRepo.get(repo) ?? [],
           prs: prsByRepo.get(repo) ?? [],
           agentsByWorktree,
+          groupBy,
         }),
       ),
-    [repoNames, worktreesFor, basesByRepo, tasksByRepo, prsByRepo, agentsByWorktree],
+    [repoNames, worktreesFor, basesByRepo, tasksByRepo, prsByRepo, agentsByWorktree, groupBy],
   );
 
   return { projects, loading: repos === undefined, markSeen };

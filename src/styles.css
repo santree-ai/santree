@@ -126,12 +126,22 @@
   --selection-fill: color-mix(in srgb, var(--accent) 7%, transparent);
   --selection-border: color-mix(in srgb, var(--accent) 48%, transparent);
   --selection-text: var(--accent-text);
+  /* THE focus ring's color — see the `:focus-visible` rule below for why it is a
+     hairline of --accent-text rather than a slab of --accent. Named separately so
+     the ring can be re-tuned in one place without touching what "accent" means. */
+  --focus-ring: var(--accent-text);
   /* The sidebar tree's two steps (see `.tree-card`). Mixed from the foreground
      so one pair works in both themes — it lightens on dark surfaces and darkens
      on light ones — and translucent so nested rows composite instead of
      replacing the card beneath them. */
   --tree-hover: color-mix(in srgb, var(--color-fg) 5%, transparent);
   --tree-selected: color-mix(in srgb, var(--color-fg) 10%, transparent);
+  /* The fill behind a tag in the rail (see `.tree-tag`) — the `primary` label on
+     the repo's own checkout. Mixed from the foreground like the two fills above,
+     for the same reason: one value reads in both themes, and translucent it sits
+     ON whatever fill the card already has instead of fighting it. Deliberately
+     NOT tinted: hue in this tree is reserved for state. */
+  --tree-tag-fill: color-mix(in srgb, var(--color-fg) 9%, transparent);
   /* A text-safe accent. Equal to the accent on dark surfaces; darkened on light
      ones (teal on white is otherwise too low-contrast to read). Tracks any
      runtime --accent override via color-mix. */
@@ -233,6 +243,29 @@
 .tree-card[data-active="true"],
 .tree-row[data-active="true"] {
   background: var(--tree-selected);
+}
+
+/* A word-tag in the rail — `primary` on the repo's own checkout. Neutral by
+   construction: a foreground wash for the fill and plain muted ink for the word,
+   so it labels the row without competing with it. A tinted (mint) version of this
+   tag was tried and removed for being loud; so was the dashed edge that replaced
+   it.
+
+   `--color-muted` and not the dimmer `--color-muted-4` the rail's other small
+   text uses, because that token is tuned to clear AA against the *bare* surface
+   and the fill darkens the ground under it — 4.6:1 becomes 3.9:1 in light mode.
+   One step up buys the pill back its contrast in both themes; it still sits well
+   under the row's own title. */
+.tree-tag {
+  flex: none;
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: var(--tree-tag-fill);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  line-height: 1.4;
+  color: var(--color-muted);
 }
 
 .ledger-row {
@@ -405,15 +438,23 @@ button:focus:not(:focus-visible) {
 /* THE focus ring. One rule, one mechanism — an `outline`, never a `ring-*`
    box-shadow: the pointer gate below can only take back what it can see, and a
    component that rolls its own ring escapes it and leaves an accent box behind
-   on a plain click. Add roles here rather than styling focus in a component. */
+   on a plain click. Add roles here rather than styling focus in a component.
+
+   A hairline, not a slab: 2px of full accent read as a highlight on the control
+   rather than a marker beside it, and on a dense surface (a status bar, a row of
+   icon buttons) several of them turn the chrome green. A 1px line held two pixels
+   clear of the control is unmistakable when you tab onto it and takes up almost
+   no ink. The color is --accent-text, not --accent, because the ring has to hold its
+   own against the surface behind it in BOTH themes: raw accent on white is a
+   ~1.8:1 mint hairline, while --accent-text is the darkened-for-light pair. */
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
 button:focus-visible,
 [role="button"]:focus-visible,
 [role="tab"]:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: 1px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 /* While the user is driving with a pointer, no focus ring — see
@@ -421,10 +462,12 @@ button:focus-visible,
    open, and handing focus back to the trigger on close) counts as `:focus-visible`
    to the engine, so without this a *click* leaves an accent ring behind on both.
    The mark is cleared by the first navigation key, so keyboard focus always rings.
-   Text fields keep theirs: a caret is not a focus indicator on an empty input;
-   a `<select>` has no caret, so it follows the buttons it is styled to look like. */
+   Text fields are in here too: clicking into a field gives you a blinking caret
+   and the field's own focus border, and a ring on top of those is the thing that
+   made every textbox flash accent on a plain click. Tab to the same field and it
+   rings, because the mark is gone by then. */
 :root[data-pointer-nav]
-  :where(button, select, [role="button"], [role="tab"]):focus-visible {
+  :where(input, select, textarea, button, [role="button"], [role="tab"]):focus-visible {
   outline: none;
 }
 
@@ -438,8 +481,14 @@ button:focus-visible,
 }
 .prompt-editor:has(textarea:focus-visible),
 .shell-editor:has(textarea:focus-visible) {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline: 1px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+/* …and the pointer gate has to reach the wrapper too, since the textarea it is
+   standing in for is one of the elements the gate suppresses. */
+:root[data-pointer-nav] .prompt-editor:has(textarea:focus-visible),
+:root[data-pointer-nav] .shell-editor:has(textarea:focus-visible) {
+  outline: none;
 }
 
 /* Thin dark scrollbars to match the design. */

@@ -33,6 +33,7 @@ import {
 } from "../../lib/queries";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed, shellQuote } from "../terminal/agentSeed";
+import type { AgentTabIdentity } from "../terminal/orchestrator";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useEmbeddedTerminal } from "../terminal/useEmbeddedTerminal";
 import { useHookInjection } from "../terminal/useHookInjection";
@@ -181,6 +182,7 @@ export function RepoSessionPane({
           branch={branch}
           cwd={cwd}
           seed={seed}
+          agent={{ kind: resolvedAgent, repo, termKey }}
           onExited={dropCachedSession}
         />
       ) : (
@@ -200,16 +202,18 @@ function RepoSessionTerminal({
   branch,
   cwd,
   seed,
+  agent,
   onExited,
 }: {
   refId: string;
   branch: string;
   cwd?: string;
   seed?: string;
+  agent: AgentTabIdentity;
   onExited: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
-    spec: { title: branch, cwd, source: "triage", refId, seed },
+    spec: { title: branch, cwd, source: "triage", refId, seed, agent },
     onExited,
   });
   return <div ref={hostRef} className="h-full w-full" />;

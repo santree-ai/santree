@@ -26,14 +26,23 @@ import { AgentsIcon } from "../../icons";
 import { STATUS_SEGMENT } from "./StatusSegment";
 
 /** Sessions with a live PTY in this app that haven't exited — the agents that
- *  are actually running right now, as opposed to rows the table still holds. */
+ *  are actually running right now, as opposed to rows the table still holds —
+ *  plus the ones santree has launched that no row speaks for yet.
+ *
+ *  That second group is not a rounding error: Codex fires `SessionStart` on its
+ *  first submitted turn, so a tab opened and left at the prompt has a running
+ *  agent and no row (see `registry.ts`). The tree counts it; so must this. */
 function countLive(sessions: SessionState[], terminals: TerminalTab[]): number {
+  const announced = new Set<string>();
   let n = 0;
   for (const s of sessions) {
     const ref = terminalRefFor(s.termKey, parseTermKey(s.termKey), s.agentKind);
-    const live = !!ref && terminals.some((t) => t.source === ref.source && t.refId === ref.refId);
-    if (live && bucketOf(s.state, live) !== "done") n++;
+    const tab = ref && terminals.find((t) => t.source === ref.source && t.refId === ref.refId);
+    if (!tab) continue;
+    announced.add(tab.key);
+    if (bucketOf(s.state, true) !== "done") n++;
   }
+  for (const t of terminals) if (t.agent && !announced.has(t.key)) n++;
   return n;
 }
 

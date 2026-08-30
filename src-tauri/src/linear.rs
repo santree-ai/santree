@@ -1942,18 +1942,65 @@ async fn map_comment(
     }
 }
 
+/// Whether a failed Linear query failed *because the id names nothing* — Linear's
+/// answer to `issue(id: "not-a-ticket")`, which it reports as HTTP 200 with an
+/// `errors` array rather than an empty `data`.
+///
+/// This is the seam between "there is no such ticket" (a state: a worktree cut from
+/// a plain branch, a PR title with no ticket id) and "Linear could not answer" (a
+/// failure: an expired token, a rate limit, a dead network, a complexity overflow).
+/// Only the first may be swallowed, so the test is deliberately narrow:
+///
+/// - the failure has to be a GraphQL `errors` array at all — every transport failure
+///   and every non-2xx status is a [`gql::HttpError`] or a reqwest error instead,
+///   and none of those reach here;
+/// - **every** entry has to be an entity-not-found, so a response that also carries a
+///   permission or rate-limit error still surfaces;
+/// - an entry counts by Linear's own `extensions.code` when it sends one, and
+///   otherwise by its canonical message ("Entity not found: Issue — Could not find
+///   referenced Issue."), which is what the API returns today.
+fn entity_not_found(err: &anyhow::Error) -> bool {
+    let Some(errors) = gql::graphql_errors(err) else {
+        return false;
+    };
+    !errors.errors.is_empty()
+        && errors.errors.iter().all(|e| {
+            e.extensions
+                .code
+                .as_deref()
+                .is_some_and(|c| c.eq_ignore_ascii_case("ENTITY_NOT_FOUND"))
+                || e.message
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("entity not found")
+        })
+}
+
 /// The full triage issue (description + comments) for the discussion pane, with
 /// inline Linear-CDN images downloaded and embedded as data URIs.
+///
+/// `None` means *there is no ticket to show*: either no Linear org is connected, or
+/// Linear answered definitively that this id names no issue — santree's worktrees are
+/// keyed by a ticket id, but a worktree cut from a plain branch carries a branch slug
+/// there instead, and a missing ticket is that worktree's normal state, not a fault.
+/// Everything Linear *couldn't* answer still errors; see [`entity_not_found`].
 pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Option<TriageDetail>> {
     let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
-    let data: IssueDetailData = session
+    let data: IssueDetailData = match session
         .query(ISSUE_DETAIL_QUERY, serde_json::json!({ "id": ticket_id }))
-        .await?;
-    let mut issue = data
-        .issue
-        .ok_or_else(|| anyhow!("issue {ticket_id} not found"))?;
+        .await
+    {
+        Ok(data) => data,
+        Err(err) if entity_not_found(&err) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    // Linear reports a missing issue through the `errors` array above rather than a
+    // null field, but a null one says the same thing — no issue, not a failure.
+    let Some(mut issue) = data.issue else {
+        return Ok(None);
+    };
 
     // A long-running thread can exceed one page of comments — pull the rest via
     // cursor. Comments are cheap relative to the complexity budget (unlike
@@ -3297,19 +3344,73 @@ fn urlencode(s: &str) -> String {
 mod tests {
     use super::{
         accept_code, apply_subtask_dependencies, cached_team_scope, decode_tokens, encode_tokens,
-        header_window, image_spans, map_issue, migrate_tokens_to_keychain, parse_callback,
-        parse_ms, record_budget, refresh_lock, resolve_org_slug, resolved_org, scope_from_setting,
-        scope_of, shift_range, splice_images, split_identifier, triage_meta, usable_at,
-        validate_sort_order, validate_sort_order_target, ImageCache, IssueNode, ParentIssueNode,
-        ProjectMilestoneNode, ProjectNode, RelatedIssue, RelationNode, SchedQueryData, StateNode,
-        TeamScope, TicketLookupNode, Tokens, TtlCache, UserNode, BUDGETS, IMAGE_HOST,
-        REFRESH_SKEW_MS,
+        entity_not_found, header_window, image_spans, map_issue, migrate_tokens_to_keychain,
+        parse_callback, parse_ms, record_budget, refresh_lock, resolve_org_slug, resolved_org,
+        scope_from_setting, scope_of, shift_range, splice_images, split_identifier, triage_meta,
+        usable_at, validate_sort_order, validate_sort_order_target, ImageCache, IssueNode,
+        ParentIssueNode, ProjectMilestoneNode, ProjectNode, RelatedIssue, RelationNode,
+        SchedQueryData, StateNode, TeamScope, TicketLookupNode, Tokens, TtlCache, UserNode,
+        BUDGETS, IMAGE_HOST, REFRESH_SKEW_MS,
     };
-    use crate::gql::{Connection, PageInfo};
+    use crate::gql::{Connection, GqlError, GraphQlErrors, PageInfo};
+    use anyhow::anyhow;
     use santree_core::domain::{ApiBudgetKind, Task, TaskStatus};
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    /// Build the failure `gql::post` raises for an HTTP 200 + `errors` response,
+    /// decoding the array exactly as the wire path does.
+    fn gql_failure(errors_json: serde_json::Value) -> anyhow::Error {
+        let errors: Vec<GqlError> = serde_json::from_value(errors_json).unwrap();
+        anyhow::Error::new(GraphQlErrors::new("Linear", errors))
+    }
+
+    /// The whole point of the classifier: a worktree whose id is a branch slug, not a
+    /// ticket, must resolve to "no ticket" instead of a red toast.
+    #[test]
+    fn a_missing_issue_is_recognised_as_not_found() {
+        assert!(entity_not_found(&gql_failure(serde_json::json!([{
+            "message": "Entity not found: Issue - Could not find referenced Issue.",
+            "path": ["issue"],
+            "extensions": { "type": "invalid_input", "userError": true }
+        }]))));
+        // Same answer via Linear's machine-readable code, whatever the wording.
+        assert!(entity_not_found(&gql_failure(serde_json::json!([{
+            "message": "no such thing",
+            "extensions": { "code": "ENTITY_NOT_FOUND" }
+        }]))));
+    }
+
+    /// The other half, and the one that matters more: a Linear that *couldn't answer*
+    /// must keep failing loudly. Collapsing these to "no ticket" would present an
+    /// expired token or a throttled org as a worktree with nothing linked to it.
+    #[test]
+    fn a_real_linear_failure_is_not_mistaken_for_a_missing_issue() {
+        for errors in [
+            serde_json::json!([{ "message": "Authentication required" }]),
+            serde_json::json!([{ "message": "Ratelimit exceeded",
+                                 "extensions": { "code": "RATELIMITED" } }]),
+            serde_json::json!([{ "message": "Query too complex" }]),
+            // A mixed response: the issue is missing *and* something else broke. The
+            // second error is the one the user needs, so nothing gets swallowed.
+            serde_json::json!([
+                { "message": "Entity not found: Issue" },
+                { "message": "Ratelimit exceeded" },
+            ]),
+            serde_json::json!([]),
+        ] {
+            assert!(!entity_not_found(&gql_failure(errors.clone())), "{errors}");
+        }
+
+        // And a failure that never carried a GraphQL `errors` array at all — every
+        // transport error, timeout and non-2xx status (a 401, a 429) arrives this
+        // way, carrying the wording but never the structure the classifier reads.
+        assert!(!entity_not_found(&anyhow!("connection reset")));
+        assert!(!entity_not_found(&anyhow!(
+            "Linear: Entity not found: Issue"
+        )));
+    }
 
     #[test]
     fn linear_scope_requires_an_explicit_write_choice() {

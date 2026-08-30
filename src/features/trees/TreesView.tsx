@@ -19,6 +19,7 @@ import { useWorktreeTabLaunch } from "../../lib/queries";
 import { useAgentRuns } from "../../state/AgentRuns";
 import { alpha } from "../../theme/colors";
 import { agentProvider } from "../terminal/agentProvider";
+import type { AgentTabIdentity } from "../terminal/orchestrator";
 import { CheckLogView } from "./CheckLogView";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { FilePickerPanel } from "./FilePickerPanel";
@@ -145,7 +146,7 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
   const { repo, selectedFile, activeTab, extraTabs, setupFor, openCheckLog } = useTrees();
   const { requestAgentLaunch, clearAgentLaunch } = useAgentRuns();
 
-  const { launching, initialSetup, ended, seed, preparing, resume, onExited } =
+  const { launching, initialSetup, ended, seed, preparing, resume, onExited, agent } =
     useWorktreeAgent(worktree);
 
   return (
@@ -187,6 +188,7 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
                   </>
                 }
                 seed={seed}
+                agent={agent}
                 onExited={onExited}
                 onResume={() => {
                   // Resuming is an explicit launch: the launch flag lets the
@@ -258,6 +260,7 @@ function AgentSurface({
   endedTitle,
   endedSubtitle,
   seed,
+  agent,
   onResume,
   onExited,
   onLaunched,
@@ -265,6 +268,7 @@ function AgentSurface({
   worktree: Worktree;
   termId: string;
   branch: string;
+  agent: AgentTabIdentity | undefined;
   preparing: boolean;
   preparingTitle: string;
   preparingSubtitle: string;
@@ -288,6 +292,7 @@ function AgentSurface({
       branch={branch}
       cwd={worktree.path}
       seed={seed}
+      agent={agent}
       onLaunched={onLaunched}
       onExited={onExited}
     />
@@ -327,7 +332,7 @@ function AgentTabPane({
   const persisted = useWorktreeTabLaunch(repo, tab.id, review && !handoff);
   const launch = handoff ?? persisted.data ?? undefined;
 
-  const { ended, preparing, seed, resume, onExited } = useAgentTab({
+  const { ended, preparing, seed, resume, onExited, agent } = useAgentTab({
     repo,
     refId: `tree:${worktree.id}:tab:${tab.id}`,
     cwd: worktree.path,
@@ -380,6 +385,7 @@ function AgentTabPane({
         )
       }
       seed={seed}
+      agent={agent}
       onResume={resume}
       onExited={onExited}
     />

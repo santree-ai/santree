@@ -451,3 +451,223 @@ describe("attention counting", () => {
     ).toBe(0);
   });
 });
+
+/**
+ * The Codex-shaped gap this exists to close: a provider that does not announce
+ * its session at launch.
+ *
+ * Codex creates its thread on the first submitted turn and fires `SessionStart`
+ * only there, so a tab opened and left at the prompt produces no session row and
+ * no `terminal_sessions` binding — for minutes, or forever if the user never
+ * types. Reading only the rows meant the sidebar showed nothing for a real,
+ * running agent (see `hooks.rs` `CODEX_EVENTS` for the measurement).
+ */
+describe("agents santree launched that have not announced a session", () => {
+  /** A tab carrying santree's own record of the launch. */
+  function agentTab(termKey: string, kind: "Claude" | "Codex" = "Codex"): TerminalTab {
+    return {
+      key: "t-launch",
+      title: termKey,
+      source: "issue" as const,
+      refId: termKey,
+      cwd: "/repo/.santree/worktrees/AK-1",
+      agent: { kind, repo: "canary", termKey },
+    };
+  }
+
+  it("shows the launch, filed under its worktree, with no session id or state", () => {
+    const entries = buildAgentEntries(
+      build({
+        terminals: [agentTab("tree:AK-1")],
+        repos: [repoData({ worktrees: [worktree("AK-1")] })],
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    const [entry] = entries;
+    expect(entry.sessionId).toBeNull();
+    // Never a stand-in status: nothing has reported one.
+    expect(entry.state).toBeNull();
+    expect(entry.agentKind).toBe("Codex");
+    expect(entry.repo).toBe("canary");
+    expect(entry.termKey).toBe("tree:AK-1");
+    expect(entry.origin).toEqual({ kind: "tree", ticket: "AK-1", tabId: null, pr: null });
+    expect(entry.worktree?.id).toBe("AK-1");
+    expect(entry.live).toBe(true);
+    expect(entry.openable).toBe(true);
+    expect(entry.updatedAtMs).toBeNull();
+  });
+
+  it("is superseded — not duplicated — once the provider's row arrives", () => {
+    const entries = buildAgentEntries(
+      build({
+        sessions: [session({ sessionId: "01a0", termKey: "tree:AK-1", agentKind: "Codex" })],
+        terminals: [agentTab("tree:AK-1")],
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0].sessionId).toBe("01a0");
+  });
+
+  it("stays superseded even when the row is dropped as stale", () => {
+    // A finished session past the done window is filtered out of the panel. The
+    // tab it ran in is still open, and must not come back as a second, launch-
+    // shaped row claiming a fresh agent.
+    const entries = buildAgentEntries(
+      build({
+        sessions: [
+          session({
+            sessionId: "01a0",
+            termKey: "tree:AK-1",
+            state: "exited",
+            updatedAtMs: NOW - DONE_WINDOW_MS - 1,
+          }),
+        ],
+        terminals: [agentTab("tree:AK-1")],
+      }),
+    );
+    expect(entries).toHaveLength(0);
+  });
+
+  it("ignores a plain shell tab, which is nobody's agent", () => {
+    expect(buildAgentEntries(build({ terminals: liveTabs("tree:AK-1") }))).toHaveLength(0);
+  });
+
+  it("respects the repo the picker turned off", () => {
+    const hidden = {
+      ...agentTab("tree:AK-1"),
+      agent: { kind: "Codex" as const, repo: "other", termKey: "tree:AK-1" },
+    };
+    expect(buildAgentEntries(build({ terminals: [hidden] }))).toHaveLength(0);
+  });
+
+  it("never asks the user for anything — it has reported nothing to ask with", () => {
+    const entries = buildAgentEntries(build({ terminals: [agentTab("tree:AK-1")] }));
+    expect(attentionCount(entries, NOW)).toBe(0);
+  });
+});
+
+/**
+ * What `ps` sees, folded in beside the two records.
+ *
+ * Process detection observes reality — it catches an agent the user started by
+ * hand, and it survives them quitting one CLI and starting another in the same
+ * pane — so it outranks santree's launch record. It cannot *replace* it: a `ps`
+ * that fails, or a CLI behind an interpreter, names nothing, and the record is
+ * what stands then. Identity only: nothing here may produce a status.
+ */
+describe("agents the process table sees", () => {
+  function shellTab(refId: string, key = "t-shell"): TerminalTab {
+    return {
+      key,
+      title: refId,
+      source: "issue" as const,
+      refId,
+      cwd: "/repo/.santree/worktrees/AK-1",
+    };
+  }
+
+  function launchedTab(termKey: string, kind: "Claude" | "Codex"): TerminalTab {
+    return { ...shellTab(termKey, "t-launch"), agent: { kind, repo: "canary", termKey } };
+  }
+
+  it("claims an agent the user started in a shell tab, filed under its worktree", () => {
+    const entries = buildAgentEntries(
+      build({
+        terminals: [shellTab("tree:AK-1")],
+        repos: [repoData({ worktrees: [worktree("AK-1")] })],
+        detected: new Map([["tree:AK-1", "Codex"]]),
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    const [entry] = entries;
+    expect(entry.agentKind).toBe("Codex");
+    // The ticket is in exactly one shown repo, so the placement is unambiguous.
+    expect(entry.repo).toBe("canary");
+    expect(entry.worktree?.id).toBe("AK-1");
+    expect(entry.termKey).toBe("tree:AK-1");
+    expect(entry.sessionId).toBeNull();
+    expect(entry.state).toBeNull();
+    expect(entry.live).toBe(true);
+  });
+
+  it("outranks santree's launch record, which is only a memory of the launch", () => {
+    const entries = buildAgentEntries(
+      build({
+        terminals: [launchedTab("tree:AK-1", "Claude")],
+        detected: new Map([["tree:AK-1", "Codex"]]),
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0].agentKind).toBe("Codex");
+  });
+
+  it("leaves the launch record standing when the scan names nothing", () => {
+    // A failed or slow `ps`, or a CLI whose argv[0] is its interpreter: absence
+    // is no information, never "no agent".
+    for (const detected of [undefined, new Map()]) {
+      const entries = buildAgentEntries(
+        build({ terminals: [launchedTab("tree:AK-1", "Codex")], detected }),
+      );
+      expect(entries).toHaveLength(1);
+      expect(entries[0].agentKind).toBe("Codex");
+    }
+  });
+
+  it("still ignores a plain shell tab nothing was seen in", () => {
+    expect(
+      buildAgentEntries(build({ terminals: [shellTab("tree:AK-1")], detected: new Map() })),
+    ).toHaveLength(0);
+  });
+
+  it("is superseded by the provider's own row, not duplicated by it", () => {
+    const entries = buildAgentEntries(
+      build({
+        sessions: [session({ sessionId: "01a0", termKey: "tree:AK-1", agentKind: "Codex" })],
+        terminals: [shellTab("tree:AK-1")],
+        detected: new Map([["tree:AK-1", "Codex"]]),
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0].sessionId).toBe("01a0");
+  });
+
+  it("leaves an unplaceable agent honestly unattributed instead of guessing", () => {
+    const entries = buildAgentEntries(
+      build({
+        terminals: [shellTab("term-7")],
+        detected: new Map([["term-7", "Claude"]]),
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0].repo).toBeNull();
+    expect(entries[0].origin.kind).toBe("unknown");
+    // Nowhere to navigate, so the action says so rather than doing nothing.
+    expect(entries[0].openable).toBe(false);
+  });
+
+  it("does not place a ticket two shown repos both claim", () => {
+    const entries = buildAgentEntries(
+      build({
+        terminals: [shellTab("tree:AK-1")],
+        repos: [
+          repoData({ worktrees: [worktree("AK-1")] }),
+          repoData({ repo: "other", worktrees: [worktree("AK-1")] }),
+        ],
+        detected: new Map([["tree:AK-1", "Codex"]]),
+      }),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0].repo).toBeNull();
+  });
+
+  it("reports identity, never a status — it cannot make anything need you", () => {
+    const entries = buildAgentEntries(
+      build({
+        terminals: [shellTab("tree:AK-1")],
+        detected: new Map([["tree:AK-1", "Codex"]]),
+      }),
+    );
+    expect(entries[0].state).toBeNull();
+    expect(attentionCount(entries, NOW)).toBe(0);
+  });
+});

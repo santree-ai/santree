@@ -419,14 +419,12 @@ describe("prDiffModeFor", () => {
 });
 
 describe("availableFileTabs", () => {
+  /** A ticket-tracked worktree with no PR — the ordinary case the others vary. */
+  const ticketed = { isBase: false, hasPr: false, hasTicket: true };
+
   it("offers the PR and its AI work queue only once the branch has one", () => {
-    expect(availableFileTabs({ isBase: false, hasPr: false })).toEqual([
-      "issue",
-      "files",
-      "changes",
-      "history",
-    ]);
-    expect(availableFileTabs({ isBase: false, hasPr: true })).toEqual([
+    expect(availableFileTabs(ticketed)).toEqual(["issue", "files", "changes", "history"]);
+    expect(availableFileTabs({ ...ticketed, hasPr: true })).toEqual([
       "issue",
       "files",
       "changes",
@@ -439,12 +437,35 @@ describe("availableFileTabs", () => {
   // The queue is what you do about the PR, so it sits against the PR's own tab
   // rather than at the end of the strip.
   it("puts the AI work queue directly after the PR", () => {
-    const tabs = availableFileTabs({ isBase: false, hasPr: true });
+    const tabs = availableFileTabs({ ...ticketed, hasPr: true });
     expect(tabs[tabs.indexOf("pr") + 1]).toBe("aiWork");
   });
 
   it("drops the Issue pane on the base entry — it has no ticket", () => {
-    expect(availableFileTabs({ isBase: true, hasPr: false })).not.toContain("issue");
+    expect(availableFileTabs({ ...ticketed, isBase: true })).not.toContain("issue");
+  });
+
+  // A worktree cut from a plain branch: santree keys it by a branch slug, Linear
+  // has no issue by that name, and offering a tab onto a ticket that doesn't exist
+  // is what put an error toast on screen.
+  it("drops the Issue pane on a worktree with no Linear ticket", () => {
+    expect(availableFileTabs({ ...ticketed, hasTicket: false })).toEqual([
+      "files",
+      "changes",
+      "history",
+    ]);
+  });
+
+  // …and loses nothing else with it: a ticket-less worktree is still a worktree,
+  // with a branch, a diff, a session history and — once pushed — a PR.
+  it("keeps every other pane on a ticket-less worktree", () => {
+    expect(availableFileTabs({ isBase: false, hasPr: true, hasTicket: false })).toEqual([
+      "files",
+      "changes",
+      "history",
+      "pr",
+      "aiWork",
+    ]);
   });
 });
 
@@ -469,7 +490,7 @@ describe("aiWorkDot", () => {
 });
 
 describe("resolveFileTab", () => {
-  const task = { isBase: false, hasPr: true };
+  const task = { isBase: false, hasPr: true, hasTicket: true };
 
   it("keeps every pane the worktree actually has", () => {
     for (const tab of availableFileTabs(task)) {
@@ -478,31 +499,47 @@ describe("resolveFileTab", () => {
   });
 
   it("falls back off the Issue pane for the base entry — it has no ticket", () => {
-    expect(resolveFileTab("issue", { isBase: true, hasPr: false })).toBe("changes");
+    expect(resolveFileTab("issue", { ...task, isBase: true, hasPr: false })).toBe("changes");
+  });
+
+  // The Issue pane is the persisted default, so the *first* worktree a user opens
+  // after cutting one from a plain branch lands here — it has to fall back rather
+  // than resolve to a pane the strip is no longer showing.
+  it("falls back off the Issue pane on a worktree with no Linear ticket", () => {
+    expect(resolveFileTab("issue", { ...task, hasTicket: false })).toBe("changes");
   });
 
   // The strip hides these when there's no PR, so a remembered one would leave the
   // user on a pane with no tab to get back to.
   it("falls back off the PR panes when the branch has no pull request", () => {
-    expect(resolveFileTab("pr", { isBase: false, hasPr: false })).toBe("changes");
-    expect(resolveFileTab("aiWork", { isBase: false, hasPr: false })).toBe("changes");
+    expect(resolveFileTab("pr", { ...task, hasPr: false })).toBe("changes");
+    expect(resolveFileTab("aiWork", { ...task, hasPr: false })).toBe("changes");
   });
 
   // The base checkout can still carry a PR (a branch pushed from the repo root),
   // so the AI work pane survives there even though the ticket pane doesn't.
   it("keeps the AI work pane on the base entry when it has a pull request", () => {
-    expect(resolveFileTab("aiWork", { isBase: true, hasPr: true })).toBe("aiWork");
+    expect(resolveFileTab("aiWork", { ...task, isBase: true })).toBe("aiWork");
   });
 
-  it("leaves the other panes alone on the base entry", () => {
-    expect(resolveFileTab("files", { isBase: true, hasPr: false })).toBe("files");
-    expect(resolveFileTab("history", { isBase: true, hasPr: false })).toBe("history");
+  it("leaves the other panes alone without a ticket or a PR", () => {
+    const plain = { isBase: true, hasPr: false, hasTicket: false };
+    expect(resolveFileTab("files", plain)).toBe("files");
+    expect(resolveFileTab("history", plain)).toBe("history");
   });
 });
 
 /** Minimal WorktreeTab fixture. */
 function extraTabRow(id: string, kind: TabKind, title: string): WorktreeTab {
-  return { id, worktreeId: "AK-1", kind, agentKind: kind === "terminal" ? null : "Codex", title };
+  // `pr` is set only on the review kinds; these are agent/terminal tabs.
+  return {
+    id,
+    worktreeId: "AK-1",
+    kind,
+    agentKind: kind === "terminal" ? null : "Codex",
+    title,
+    pr: null,
+  };
 }
 
 describe("defaultTabTitle", () => {

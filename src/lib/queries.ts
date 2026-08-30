@@ -44,6 +44,7 @@ import type {
   TriageTicket,
   UpdateProgress,
   ViewedMarks,
+  WorktreeBranchSource,
   WorktreeTab,
 } from "../bindings";
 import { commands, events } from "../bindings";
@@ -252,6 +253,7 @@ export const queryKeys = {
   englishLog: ["english-log"] as const,
   englishAnalysis: ["english-analysis"] as const,
   sessionStates: ["session-states"] as const,
+  agentProcesses: ["agent-processes"] as const,
   claudeRateLimits: ["claude-rate-limits"] as const,
   claudeAccountUsage: ["claude-account-usage"] as const,
   claudeGlobalCapture: ["claude-global-capture"] as const,
@@ -264,6 +266,7 @@ export const queryKeys = {
   tasksPrefix: ["tasks"] as const,
   tasks: (repo: string) => ["tasks", repo] as const,
   worktrees: (repo: string) => ["worktrees", repo] as const,
+  repoBranches: (repo: string) => ["repo-branches", repo] as const,
   baseWorktree: (repo: string) => ["base-worktree", repo] as const,
   worktreeStatus: (repo: string, id: string) => ["worktree-status", repo, id] as const,
   worktreeFiles: (repo: string, id: string) => ["worktree-files", repo, id] as const,
@@ -490,6 +493,27 @@ export const TRIAGE_SNOOZED_KEY = "triage_show_snoozed";
  * Mirrors Linear's own "Display names" preference. App-scoped, defaults to full.
  */
 export const DISPLAY_NAMES_KEY = "display_names";
+
+/**
+ * How the sidebar nests a repo's work: not at all, by Linear project, by
+ * milestone, or project → milestone. App-scoped, because the sidebar is
+ * cross-repo and one tree can only have one shape.
+ *
+ * One selector rather than two toggles: "project" and "milestone" are levels of
+ * the same nesting, and independent switches would let you ask for a milestone
+ * inside a project you had turned off.
+ */
+export const LINEAR_GROUP_BY_KEY = "linear_group_by";
+
+/** The nestings the sidebar tree knows how to build. */
+export type LinearGroupBy = "none" | "project" | "milestone" | "project_milestone";
+
+/** The stored `linear_group_by` value, or "milestone" for anything unset or
+ *  unknown. Milestone is the default because it is the shape the tree has always
+ *  had: an install that never opens Settings sees exactly the sidebar it had
+ *  before this setting existed. Exported for testing. */
+export const parseLinearGroupBy = (raw: string | null | undefined): LinearGroupBy =>
+  raw === "none" || raw === "project" || raw === "project_milestone" ? raw : "milestone";
 
 /** Whether to confirm before quitting the app. App-scoped; defaults to ON (a
  *  missing value means confirm), so read it as `data !== "false"`. */
@@ -992,6 +1016,34 @@ export const useSessionByPath = (): Map<string, SessionState> => {
   const { data } = useSessionStates();
   return useMemo(() => newestSessionByPath(data ?? []), [data]);
 };
+
+/**
+ * Which coding agent the process table says is in each pane's foreground —
+ * observation, where `useSessionStates` and the launch record are memory.
+ *
+ * It is what makes an unprompted Codex tab visible (Codex fires `SessionStart`
+ * on its first turn, so nothing hook-fed knows the tab exists) and what catches
+ * an agent the user started by typing `codex` in a santree shell.
+ *
+ * **Identity only.** A result never carries a status: the attention ladder still
+ * comes from the hook rows, then the terminal title. And an absent pane is *no
+ * information*, never "no agent" — `ps` can fail, and the backend answers an
+ * unreadable process table with an empty list rather than an error.
+ *
+ * Two triggers, no fast poller. The bind is event-driven, as Orca's is:
+ * {@link useAgentEntries} invalidates this whenever the set of open panes
+ * changes, so a new tab is scanned immediately. The interval only has to catch
+ * an agent that starts *inside* an existing pane, so it rides the same 10s
+ * cadence `useSessionStates` uses, and stops entirely when no pane is open. One
+ * `ps` per burst regardless: the backend caches the listing for 500ms and the
+ * resource panel reads the same snapshot.
+ */
+export const useAgentProcesses = (panes: number) =>
+  useUnwrappedQuery(queryKeys.agentProcesses, () => commands.agentProcesses(), {
+    refetchInterval: panes > 0 ? 10_000 : false,
+    staleTime: 2_000,
+    meta: { silent: true },
+  });
 
 /**
  * Keep `useSessionStates` fresh in realtime. The `santree-hook` binary bumps a
@@ -2338,6 +2390,63 @@ export const useCreateWorktree = (repo: string) =>
           : `Created worktree for ${wt.id}.`,
   });
 
+/**
+ * The repo's branches, for the Create-worktree dialog's Branch source. Each row
+ * says whether the branch is already checked out, which is what lets the picker
+ * disable it rather than let the user click into git's "already used by
+ * worktree" error.
+ *
+ * Read only while the dialog is open (`enabled`), and kept briefly: branches
+ * move under us (a fetch, a push from a terminal), so a long stale window would
+ * offer a branch that has since been taken.
+ */
+export const useRepoBranches = (repo: string, enabled = true) =>
+  useUnwrappedQuery(queryKeys.repoBranches(repo), () => commands.repoBranches(repo), {
+    enabled: enabled && repo.length > 0,
+    staleTime: 15_000,
+  });
+
+/**
+ * Create a worktree from the sidebar's "Create worktree" dialog.
+ *
+ * Unlike {@link useCreateWorktree} this one may have no Linear ticket behind it
+ * at all: `source` says whether the branch is derived from the id, checked out
+ * from one that exists, or created under a name the user typed.
+ *
+ * `silent` because the dialog shows the failure inline and stays open on it —
+ * a name git refuses is fixed where it was typed, not read off a toast after
+ * the form has closed.
+ */
+export const useCreateManualWorktree = (repo: string) =>
+  useActionMutation({
+    mutationFn: (a: {
+      issueId: string;
+      title: string;
+      project: string | null;
+      source: WorktreeBranchSource;
+      /** The parent worktree's branch — a *stacked* worktree — or null for the
+       *  repo's default branch. */
+      base: string | null;
+      agent: AgentKind;
+    }) =>
+      unwrap(
+        commands.createManualWorktree(
+          repo,
+          a.issueId,
+          a.title,
+          a.project,
+          a.source,
+          a.base,
+          a.agent,
+        ),
+      ),
+    silent: true,
+    // The branch list too: the new worktree has taken its branch, so a reopened
+    // dialog must show it as unavailable.
+    invalidate: () => [queryKeys.worktrees(repo), queryKeys.repoBranches(repo)],
+    success: (wt) => `Created worktree ${wt.id} on ${wt.branch}.`,
+  });
+
 /** Check out a pull request as a normal writable tree. It intentionally does not
  * launch an agent: Trees owns provider choice through its persisted `+` tabs. */
 export const useCreateReviewWorktree = (repo: string) =>
@@ -2848,7 +2957,13 @@ export const useTriageTickets = (repo: string) =>
     gcTime: TRIAGE_GC_TIME,
   });
 
-/** The full triage issue (description + comments) for the discussion pane. */
+/** The full triage issue (description + comments) for the discussion pane.
+ *
+ *  Three states, not two: `undefined` while it loads, `null` once Linear has said
+ *  this id names no issue (a worktree cut from a plain branch is keyed by a branch
+ *  slug, not a ticket) and the detail otherwise. `null` is a *successful* answer —
+ *  the surfaces that read it hide their ticket UI rather than raising a toast, which
+ *  a rejected query would. Anything Linear couldn't answer still rejects. */
 export const useTriageDetail = (repo: string, id: string | null) =>
   useUnwrappedQuery(
     queryKeys.triageDetail(repo, id ?? ""),
@@ -2910,7 +3025,7 @@ export const useTriageSetState = (repo: string) =>
     optimistic: (qc, args) => {
       const detailKey = queryKeys.triageDetail(repo, args.ticketId);
       const queueKey = queryKeys.triageTickets(repo);
-      const prevDetail = qc.getQueryData<TriageDetail>(detailKey);
+      const prevDetail = qc.getQueryData<TriageDetail | null>(detailKey);
       const prevQueue = qc.getQueryData<TriageTicket[]>(queueKey);
 
       // The target state's category (triage | backlog | …) comes from the
@@ -2983,7 +3098,7 @@ export const useAddComment = (repo: string) =>
       unwrap(commands.triageAddComment(repo, args.ticketId, args.parentId, args.body)),
     optimistic: (qc, args) => {
       const detailKey = queryKeys.triageDetail(repo, args.ticketId);
-      const prev = qc.getQueryData<TriageDetail>(detailKey);
+      const prev = qc.getQueryData<TriageDetail | null>(detailKey);
       if (!prev) return;
 
       // Author is unknown client-side (no viewer-identity query); "You" is a

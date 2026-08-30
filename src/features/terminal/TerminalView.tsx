@@ -198,9 +198,15 @@ export function TerminalView({
         // that is already running the agent it names — `adoptId` is the test,
         // not `created`, because a session this pane opened still needs its seed
         // no matter which run of the effect ends up delivering it.
+        //
+        // It goes through `seed`, not `write`: the backend has to know this line
+        // is santree's and not the user's, because a launch command can outgrow
+        // what a tty accepts on one line and has to be spilled to a script,
+        // while a keystroke — a long paste included — must always arrive
+        // verbatim. See `terminal_seed` in `terminal.rs`.
         if (seed && adoptId === undefined && !seededRef.current) {
           seededRef.current = true;
-          backend.write(id, seed.endsWith("\r") ? seed : `${seed}\r`);
+          backend.seed(id, seed);
         }
         renderer.focus();
       } catch (e) {

@@ -25,7 +25,11 @@ export function SessionHistory() {
   const { data: sessions, refetch, isFetching } = useWorktreeSessions(repo, activeId);
   const entries = useAgentEntries([activeRepo], [activeRepo]);
   const openAgent = useOpenAgent();
-  const liveById = new Map((entries ?? []).map((e) => [e.sessionId, e]));
+  // Keyed by the provider's session id, so only agents that have announced one
+  // can match a history row — the history *is* the list of durable sessions.
+  const liveById = new Map(
+    (entries ?? []).flatMap((e) => (e.sessionId ? [[e.sessionId, e] as const] : [])),
+  );
 
   return (
     <>
@@ -91,7 +95,7 @@ function SessionList({
               <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-fg-2">
                 {s.title ?? "Untitled session"}
               </span>
-              {live && (
+              {live?.state && (
                 <span
                   className="flex-none rounded-full"
                   style={{

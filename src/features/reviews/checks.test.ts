@@ -5,7 +5,19 @@ import { checkStatusMeta } from "../../theme/colors";
 import { groupChecks, SKIPPED_KEY, toggleCollapsed } from "./checks";
 
 function check(name: string, status: CheckStatus): PrCheck {
-  return { name, status, description: null, url: null, steps: [], annotations: [], jobId: null };
+  // A bare status context: no Actions run behind it, so no ids and no timings.
+  return {
+    name,
+    status,
+    description: null,
+    url: null,
+    steps: [],
+    annotations: [],
+    jobId: null,
+    runId: null,
+    startedAt: null,
+    completedAt: null,
+  };
 }
 
 describe("groupChecks", () => {

@@ -1677,6 +1677,51 @@ pub struct Worktree {
     pub pending: bool,
 }
 
+/// One of the repo's branches, as offered by the "Create worktree" dialog's
+/// Branch source.
+///
+/// `has_worktree` is read from git's own worktree list rather than from
+/// santree's `worktree_links`: git allows exactly one checkout of a branch, so a
+/// branch held by *any* worktree (santree's, a hand-made one, the repo's own
+/// checkout) is one `worktree add` would refuse. The picker disables those rows
+/// instead of letting the user click into that error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoBranch {
+    /// Short name (`main`, `feature/x`) — never the `origin/` qualified form,
+    /// which is what `worktree add --track -b` reconstructs for a remote-only one.
+    pub name: String,
+    /// Already checked out somewhere; a second worktree for it is impossible.
+    pub has_worktree: bool,
+    /// Exists only on `origin`. Checking it out creates a local branch tracking it.
+    pub remote_only: bool,
+    /// Committer date of the branch tip (ISO-8601), newest first in the list.
+    pub updated_at: String,
+}
+
+/// Which branch a newly created worktree lands on.
+///
+/// The three cases are genuinely different git operations — derive a name and
+/// branch it off the base, check out a branch that already exists, or create one
+/// under a name the user typed — and they used to be an `Option<String>` plus a
+/// convention. Naming them keeps the "check out" and "create" paths from being
+/// one boolean apart at the sink.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Type)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
+pub enum WorktreeBranchSource {
+    /// Name the branch after the work (`santree/<id>-<slug>`) and branch it off
+    /// the base — how a ticket's worktree has always been created.
+    Derived,
+    /// Check out a branch that already exists, locally or on `origin`.
+    Existing { branch: String },
+    /// Create a branch under exactly this name, off the base.
+    New { branch: String },
+}
+
 /// Whether a changed file was added, modified, deleted, renamed, or is untracked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 pub enum FileStatus {
@@ -2341,6 +2386,27 @@ pub struct TerminalUsage {
     /// whose process exited but whose pane is still open reports `false` and
     /// zeros.
     pub live: bool,
+}
+
+/// Which coding agent the host process table says is running in one terminal
+/// pane, keyed by the pane's `term_key`. Read by walking the pane's process
+/// subtree for whoever owns its foreground process group (see
+/// `src-tauri/src/agent_procs.rs`).
+///
+/// **Identity, never status.** This says *which* agent is there, not what it is
+/// doing: `src/lib/attention.ts` remains the one state vocabulary, fed by the
+/// hook rows and then the terminal title.
+///
+/// **A missing pane is no information, not "no agent".** `ps` can fail or be
+/// slow, and a CLI launched through an interpreter is not recognisable by
+/// `argv[0]`. Nothing may read an absent entry as a claim that a pane is a plain
+/// shell, and nothing may substitute a default provider for one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProcess {
+    /// The `term_key` the pane's PTY was opened under.
+    pub term_key: String,
+    pub agent_kind: AgentKind,
 }
 
 #[cfg(test)]

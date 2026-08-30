@@ -96,6 +96,10 @@ export class TauriBackend implements TerminalBackend {
     void commands.terminalWrite(id, data);
   }
 
+  seed(id: SessionId, seed: string) {
+    void commands.terminalSeed(id, seed);
+  }
+
   resize(id: SessionId, cols: number, rows: number) {
     void commands.terminalResize(id, cols, rows);
   }

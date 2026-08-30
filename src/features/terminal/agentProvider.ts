@@ -177,6 +177,12 @@ const providers: Record<AgentKind, AgentProviderContract> = {
       // No id on a fresh launch: Codex has no launch-time id flag. It mints one
       // and the `SessionStart` hook reports it back, which is what binds the
       // session to this surface for the next resume.
+      //
+      // That report does NOT arrive at launch. Codex creates the thread on the
+      // first submitted turn and fires `SessionStart` there, so a tab opened and
+      // left at the prompt reports nothing at all (verified on codex-cli 0.151.0
+      // — see `hooks.rs` `CODEX_EVENTS`). Anything that must show a Codex agent
+      // before it has been spoken to reads santree's own launch, not the hook.
       return `exec ${env}${bin} ${hooks}${launch}`.trimEnd() + prompt;
     },
   },

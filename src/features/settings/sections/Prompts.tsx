@@ -489,7 +489,9 @@ function PreviewPane({
     debounced,
     repo,
     issueId || undefined,
-    issueId ? detail : undefined,
+    // `null` is Linear's "no such issue" — the preview treats it like an
+    // unresolved one and renders against the sample ticket instead.
+    issueId ? (detail ?? undefined) : undefined,
   );
   const { data: tasks = [] } = useTasks(repo);
   const error = data?.error ?? null;

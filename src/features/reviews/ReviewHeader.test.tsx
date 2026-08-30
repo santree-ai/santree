@@ -108,7 +108,9 @@ describe("ReviewHeader tree action", () => {
 
   it("focuses an existing PR tree instead of trying to create another checkout", () => {
     state.worktrees = [existing];
-    state.worktreePrs = [{ issueId: existing.id, number: pr.number, url: pr.url, state: "Open" }];
+    state.worktreePrs = [
+      { issueId: existing.id, repo: pr.repo, number: pr.number, url: pr.url, state: "Open" },
+    ];
     render(<ReviewHeader pr={pr} />);
 
     fireEvent.click(screen.getByRole("button", { name: "View tree" }));
