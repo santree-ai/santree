@@ -428,11 +428,18 @@ export function Toggle({
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledBy}
       className="relative h-[21px] w-[38px] flex-none cursor-pointer rounded-full border-none transition-colors duration-150 disabled:cursor-default disabled:opacity-45"
-      style={{ background: on ? "var(--accent)" : "var(--color-line-3)" }}
+      // The monochrome accent means the on-track is the inversion slab
+      // (--accent-fill), so the knob must invert with it (--on-accent) — a
+      // white knob on the dark theme's white fill is invisible.
+      style={{ background: on ? "var(--accent-fill)" : "var(--color-line-3)" }}
     >
       <span
-        className="absolute top-[2px] h-[17px] w-[17px] rounded-full bg-white transition-[left] duration-150"
-        style={{ left: on ? 18 : 2, boxShadow: "0 1px 2px rgba(0,0,0,.4)" }}
+        className="absolute top-[2px] h-[17px] w-[17px] rounded-full transition-[left,background-color] duration-150"
+        style={{
+          left: on ? 18 : 2,
+          background: on ? "var(--on-accent)" : "#fff",
+          boxShadow: "0 1px 2px rgba(0,0,0,.4)",
+        }}
       />
     </button>
   );

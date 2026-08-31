@@ -40,8 +40,11 @@ export function WelcomeSurface() {
   const { toggleShortcuts } = useAppUi();
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-8 py-10">
-      <div className="flex w-full max-w-[420px] flex-1 flex-col items-center justify-center gap-7">
+    <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto pb-10">
+      {/* No tab bar mounts over this surface, so it carries its own drag strip —
+          the window must stay grabbable along the top like every other view. */}
+      <div data-tauri-drag-region className="h-[46px] w-full flex-none" />
+      <div className="flex w-full max-w-[420px] flex-1 flex-col items-center justify-center gap-7 px-8">
         <div className="flex flex-col items-center gap-3">
           <span className="flex h-14 w-14 items-center justify-center rounded-[16px] border border-line-2 bg-raised text-accent">
             <TreeIcon size={26} />

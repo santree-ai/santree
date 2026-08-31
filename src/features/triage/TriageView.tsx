@@ -641,6 +641,14 @@ export function TriageView() {
       {lanes.queue.length > 0 && (
         <div className="mb-2">
           <QueueLaneHeader label="Queue" count={lanes.queue.length} />
+          {/* The disabled grips explain themselves only on hover, which reads as
+              "drag is broken" — say it once, visibly, per lane. */}
+          {order === "manual" && linearReadOnly && (
+            <p className="mb-1.5 px-2 text-[11px] leading-[1.45] text-muted-4">
+              Reordering is locked: this Linear connection is read-only. Choose read &amp; write
+              access in Settings → Linear and reconnect to drag.
+            </p>
+          )}
           {lanes.queue.map((ticket) => renderRow(ticket, order === "manual"))}
         </div>
       )}

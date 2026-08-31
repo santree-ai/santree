@@ -554,9 +554,11 @@ async fn rotate(db: &Db, row: OrgRow, tokens: Tokens) -> Result<String> {
 //
 // NOTE: Linear caps query complexity at 10000. This query sits near that ceiling
 // — `assignedIssues(first: 100)` × `inverseRelations(first: N)` × the per-issue
-// fields (incl. `assignee`) is the dominant cost. `first: 12` on the relations
-// keeps it under the limit *with* assignee on both levels; raising either count,
-// or adding fields, can push it over (the API then 400s and the graph goes empty).
+// fields (incl. `assignee`) is the dominant cost. Measured against the live API
+// (2026-08-30, x-complexity header): `first: 12` on the relations costs 12351 —
+// over the cap, a 400, and the graph goes empty — and each step of that `first`
+// moves the total by ~940, so `first: 8` lands at 8591. Anyone adding a field
+// here must re-measure; the cap failure is silent apart from the error toast.
 //
 // The blocker level carries the project's `targetDate` and its `projectMilestone`
 // for a reason that isn't cosmetic: a ticket the viewer isn't assigned reaches the
@@ -581,7 +583,7 @@ query AssignedIssues {
         projectMilestone { id name targetDate sortOrder }
         parent { identifier }
         assignee { name displayName avatarUrl }
-        inverseRelations(first: 12) {
+        inverseRelations(first: 8) {
           nodes {
             type
             issue { identifier title state { name type } project { name color icon targetDate } projectMilestone { id name targetDate sortOrder } assignee { name displayName avatarUrl } }
