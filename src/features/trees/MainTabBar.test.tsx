@@ -17,15 +17,17 @@ import type { MainTab } from "./model";
 /** The Trees model slice the bar reads, dialled per test. */
 const trees = vi.hoisted(() => ({
   activeId: "AK-1",
-  activeTab: "terminal" as MainTab,
+  activeTab: "terminal" as MainTab | null,
   extraTabs: [] as WorktreeTab[],
   active: { agent: "Claude" },
   selectedFile: null as string | null,
   setupFor: null as string | null,
+  mainTerminalOpen: true,
   setActiveTab: vi.fn(),
   closeFileTab: vi.fn(),
   addTab: vi.fn<(kind: TabKind, agentKind?: AgentKind) => void>(),
   closeTab: vi.fn<(id: string) => void>(),
+  closeMainTerminal: vi.fn(),
   renameTab: vi.fn(),
 }));
 
@@ -85,8 +87,10 @@ beforeEach(() => {
   trees.extraTabs = [];
   trees.selectedFile = null;
   trees.setupFor = null;
+  trees.mainTerminalOpen = true;
   trees.addTab.mockClear();
   trees.closeTab.mockClear();
+  trees.closeMainTerminal.mockClear();
 });
 
 describe("MainTabBar", () => {
@@ -156,6 +160,45 @@ describe("MainTabBar", () => {
 
     expect(liveRefIds()).not.toContain(refIdOf("t1"));
     expect(trees.closeTab).toHaveBeenCalledWith("t1");
+  });
+
+  // The work terminal is a tab like any other now: it closes, its PTY goes with
+  // it, and the strip can end up with nothing in it at all. Its conversation is
+  // not lost — Session history resumes it into a fresh tab.
+  describe("the work terminal", () => {
+    it("closes, tearing down the worktree's own PTY session", () => {
+      mount();
+      act(() => {
+        registry.open({ title: "AK-1", source: "issue", refId: "tree:AK-1" });
+      });
+      expect(liveRefIds()).toContain("tree:AK-1");
+
+      fireEvent.click(screen.getByRole("button", { name: "Close Claude Code" }));
+
+      expect(liveRefIds()).not.toContain("tree:AK-1");
+      expect(trees.closeMainTerminal).toHaveBeenCalled();
+    });
+
+    it("leaves the strip once closed, without touching the extra tabs", () => {
+      trees.mainTerminalOpen = false;
+      trees.extraTabs = [tab("t1", "terminal")];
+      trees.activeTab = "tab:t1";
+      mount();
+
+      expect(screen.queryByRole("tab", { name: /Claude Code/ })).not.toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: /Terminal 2/ })).toBeInTheDocument();
+    });
+
+    // Closing the last tab must still leave a way back: the bar (and its "+")
+    // stays, which is what the empty surface below it points at.
+    it("leaves an empty strip that still offers a new tab", () => {
+      trees.mainTerminalOpen = false;
+      trees.activeTab = null;
+      mount();
+
+      expect(screen.queryAllByRole("tab")).toHaveLength(0);
+      expect(screen.getByRole("button", { name: /New tab/ })).toBeInTheDocument();
+    });
   });
 
   describe("the new-tab menu", () => {

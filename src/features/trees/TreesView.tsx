@@ -1,14 +1,17 @@
-/** The Trees view: the selected worktree's workspace. The tab strip · the
- *  always-on terminal (or a picked file's diff/contents) with the session status
- *  line and bottom status bar under it · a collapsible right panel (the ticket,
- *  files, changes, session history).
+/** The Trees view: the selected worktree's workspace. The tab strip · whatever
+ *  tab is showing (a terminal, an agent, a picked file's diff/contents) · a
+ *  collapsible right panel (the ticket, files, changes, session history).
+ *
+ *  Every tab closes, so "whatever is showing" can be nothing: with none open the
+ *  pane falls through to the welcome surface, and the bar above it is how you
+ *  open the next one.
  *
  *  There is deliberately no header naming the worktree: the sidebar row that
  *  selected it already names it and is always on screen, and the actions a header
  *  would carry act on the checkout as a place on disk — they live on that row's
  *  right-click menu. Which worktree is selected comes from the app shell's project
  *  tree; with nothing selected the view shows its launch surface. */
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 
 import type { Worktree, WorktreeTab } from "../../bindings";
 import { CloseIcon, PrIcon } from "../../components/icons";
@@ -143,11 +146,32 @@ function PrSuggestionBar({ worktree }: { worktree: Worktree }) {
 }
 
 function WorktreePane({ worktree }: { worktree: Worktree }) {
-  const { repo, selectedFile, activeTab, extraTabs, setupFor, openCheckLog } = useTrees();
+  const {
+    repo,
+    selectedFile,
+    activeTab,
+    extraTabs,
+    setupFor,
+    openCheckLog,
+    mainTerminalOpen,
+    openMainTerminal,
+  } = useTrees();
   const { requestAgentLaunch, clearAgentLaunch } = useAgentRuns();
 
   const { launching, initialSetup, ended, seed, preparing, resume, onExited, agent } =
     useWorktreeAgent(worktree);
+
+  // Re-opening the work terminal carries the same intent as Resume: closing it
+  // tore its PTY down, so the pane has to re-resolve the session instead of
+  // latching on the one it saw before and greeting the user with a resume button
+  // for the terminal they just asked to open. (The hook stays mounted across tab
+  // switches on purpose — that latch is what stops a switch away and back from
+  // relaunching the agent — so the reset has to be explicit.)
+  const wasOpen = useRef(mainTerminalOpen);
+  useEffect(() => {
+    if (mainTerminalOpen && !wasOpen.current) resume();
+    wasOpen.current = mainTerminalOpen;
+  }, [mainTerminalOpen, resume]);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -159,6 +183,14 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
             the overlay; the session + scrollback persist and re-attach on return.
             The File / Setup views stay mounted (hidden when inactive). */}
         <div className="relative min-h-0 flex-1">
+          {/* Nothing open. The bar above still carries "+", and this offers the
+              one tab the workspace is named for — its work terminal, agent
+              session and all (Session history resumes any of the others). */}
+          {activeTab === null && (
+            <div className="absolute inset-0 flex flex-col">
+              <WelcomeSurface workspace={{ onOpenTerminal: openMainTerminal }} />
+            </div>
+          )}
           {/* Don't spawn the terminal during the FIRST setup — the PTY's shell
               would capture pre-setup env, and the agent seed only applies on
               session creation (setup writes .env / configures direnv first). A

@@ -270,32 +270,41 @@ export function defaultTabTitle(
   return candidate();
 }
 
-/** Resolve the active worktree's remembered main tab, falling back to the
- *  terminal when the remembered tab is no longer available: the File tab needs
- *  an open file, the Setup tab needs setup still running for THIS worktree
- *  (`setupFor` is a single slot — another worktree's setup can supersede it),
- *  and a `tab:<id>` tab needs that persisted extra tab to still exist.
+/** The main-area tabs a worktree has open, in strip order — the list the tab bar
+ *  renders and {@link resolveActiveTab} picks from.
+ *
+ *  The work terminal is not a fixture. It opens by default and comes back
+ *  whenever the work session is put on screen (a task starts, setup finishes, a
+ *  sidebar agent row jumps to it), but closing it sticks — which is what lets a
+ *  workspace end up with no tabs at all and fall through to its empty surface.
+ *  The rest appear with whatever they show: a picked file, a setup run belonging
+ *  to THIS worktree (`setupFor` is a single slot — another worktree's run can
+ *  supersede it), a check's job log, and one per persisted extra tab.
  *  Exported for testing — see model.test.ts. */
-export function resolveActiveTab(
-  remembered: MainTab | undefined,
-  opts: {
-    selectedFile: string | null;
-    setupFor: string | null;
-    activeId: string;
-    extraTabIds: string[];
-    checkLog: OpenCheckLog | null;
-  },
-): MainTab {
-  const { selectedFile, setupFor, activeId, extraTabIds, checkLog } = opts;
-  const tabId =
-    typeof remembered === "string" && remembered.startsWith("tab:") ? remembered.slice(4) : null;
-  const tabAvailable =
-    remembered === "terminal" ||
-    (remembered === "file" && selectedFile !== null) ||
-    (remembered === "setup" && setupFor === activeId) ||
-    (remembered === "checkLog" && checkLog !== null) ||
-    (tabId !== null && extraTabIds.includes(tabId));
-  return remembered && tabAvailable ? remembered : "terminal";
+export function openMainTabs(opts: {
+  terminalOpen: boolean;
+  extraTabIds: string[];
+  hasFile: boolean;
+  hasSetup: boolean;
+  hasCheckLog: boolean;
+}): MainTab[] {
+  const tabs: MainTab[] = [];
+  if (opts.terminalOpen) tabs.push("terminal");
+  for (const id of opts.extraTabIds) tabs.push(extraTab(id));
+  if (opts.hasFile) tabs.push("file");
+  if (opts.hasSetup) tabs.push("setup");
+  if (opts.hasCheckLog) tabs.push("checkLog");
+  return tabs;
+}
+
+/** Which open tab is showing: the remembered one while it is still open, else the
+ *  first — and `null` once nothing is open, which is what puts the empty surface
+ *  on screen. Closing a tab therefore needs no fallback of its own: dropping it
+ *  from `open` is what moves the selection, so there is one rule for "what am I
+ *  looking at" instead of one per close button.
+ *  Exported for testing — see model.test.ts. */
+export function resolveActiveTab(remembered: MainTab | undefined, open: MainTab[]): MainTab | null {
+  return remembered !== undefined && open.includes(remembered) ? remembered : (open[0] ?? null);
 }
 
 /** Which agent session the main area is showing, as the `{termKey, agentKind}`
@@ -310,13 +319,13 @@ export function resolveActiveTab(
  *  point at. Each of those is `null` rather than the nearest available numbers.
  *  Exported for testing — see model.test.ts. */
 export function focusedAgentFor(opts: {
-  activeTab: MainTab;
+  activeTab: MainTab | null;
   activeId: string;
   extraTabs: WorktreeTab[];
   worktreeAgent: AgentKind | null;
 }): { termKey: string; agentKind: AgentKind } | null {
   const { activeTab, activeId, extraTabs, worktreeAgent } = opts;
-  if (!activeId) return null;
+  if (!activeId || activeTab === null) return null;
   if (activeTab === "terminal") {
     if (activeId === BASE_ID || !worktreeAgent) return null;
     return { termKey: `tree:${activeId}`, agentKind: worktreeAgent };
@@ -397,12 +406,15 @@ interface TreesModel {
    *  The runs themselves are owned by `AgentRuns` at the app shell (they outlive
    *  this route); this is just the slice the tab bar and tab resolution need. */
   setupFor: string | null;
-  /** Which main-area tab is showing. */
-  activeTab: MainTab;
+  /** Which main-area tab is showing, or null when the workspace has none open. */
+  activeTab: MainTab | null;
   /** The check whose raw job log is open in the main area, or null. */
   openCheckLog: OpenCheckLog | null;
+  /** Whether the active worktree's main work terminal is one of its open tabs.
+   *  Open by default and closable; the choice is remembered per worktree. */
+  mainTerminalOpen: boolean;
   /** Persisted extra tabs (Claude sessions / terminals) for the active worktree,
-   *  in open order. The primary "terminal" tab is always present and not listed. */
+   *  in open order. The main work terminal is not one of them. */
   extraTabs: WorktreeTab[];
 
   setActive: (id: string) => void;
@@ -414,16 +426,22 @@ interface TreesModel {
   selectFile: (path: string | null, scope?: FileScope) => void;
   /** Switch which main-area tab is showing (the tab must be present). */
   setActiveTab: (tab: MainTab) => void;
-  /** Close the File tab (back to the terminal). */
+  /** Close the File tab (the selection falls to whatever is still open). */
   closeFileTab: () => void;
   /** Open a check's raw job log in the main area (the "View full details" action
    *  on an expanded check), replacing whichever log was open. */
   showCheckLog: (log: OpenCheckLog) => void;
-  /** Close the check-log tab (back to the terminal). */
+  /** Close the check-log tab (the selection falls to whatever is still open). */
   closeCheckLog: () => void;
   /** Open (and persist) a new Claude or terminal tab for the active worktree
    *  and focus it. */
   addTab: (kind: TabKind, agentKind?: AgentKind) => void;
+  /** Bring the active worktree's main work terminal back and focus it. */
+  openMainTerminal: () => void;
+  /** Close the main work terminal tab for the active worktree — it stays closed
+   *  until the work session is put back on screen. The caller tears down its PTY
+   *  session, exactly as it does for an extra tab. */
+  closeMainTerminal: () => void;
   /** Close a persisted extra tab (the caller tears down its PTY session). A
    *  Claude tab's stored session is forgotten with it. */
   closeTab: (id: string) => void;
@@ -482,6 +500,7 @@ const FILE_TAB_KEY = "santree-trees-file-tab-v5";
 const FILE_SCOPE_BY_WT_KEY = "santree-trees-file-scope-by-wt";
 const TAB_BY_WT_KEY = "santree-trees-tab-by-worktree";
 const FILE_BY_WT_KEY = "santree-trees-file-by-worktree";
+const MAIN_TERM_CLOSED_KEY = "santree-trees-main-terminal-closed";
 
 const TreesContext = createContext<TreesModel | null>(null);
 
@@ -627,6 +646,14 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     FILE_BY_WT_KEY,
     {},
   );
+  // Which worktrees have had their main work terminal closed. Absent means open —
+  // a workspace you have never opened starts with its terminal, and only an
+  // explicit ✕ takes it away. Persisted beside the tab selection (the extra tabs
+  // themselves are DB-backed) so a restart reopens exactly what was on screen.
+  const [mainTermClosedByWt, setMainTermClosedByWt] = usePersistedState<Record<string, boolean>>(
+    MAIN_TERM_CLOSED_KEY,
+    {},
+  );
   // The setters below come from `usePersistedState`, which returns `useState`'s
   // own setter — stable for the component's life, so listing it changes nothing
   // at runtime. Biome only knows that guarantee for a literal `useState` call.
@@ -638,6 +665,26 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     (id: string, file: string | null) => setSelectedFileByWt((m) => ({ ...m, [id]: file })),
     [setSelectedFileByWt],
   );
+  // Every path that puts the *work session* on screen goes through here: a closed
+  // terminal has to come back when a task starts, when setup hands over to the
+  // agent, or when a sidebar agent row jumps to it — otherwise those land on a
+  // tab that isn't there and the pane reads as empty while an agent runs in it.
+  const reopenMainTerminal = useCallback(
+    (id: string) => setMainTermClosedByWt((m) => (m[id] ? { ...m, [id]: false } : m)),
+    [setMainTermClosedByWt],
+  );
+  // A closed work terminal is a closed *empty* one. Closing kills its PTY, so a
+  // live `tree:<id>` session means something started one since — the off-screen
+  // launcher consuming a background launch from Issues, most of all — and the tab
+  // has to come back rather than leave an agent running behind an empty pane.
+  // This can't resurrect a tab the user just dismissed: `close` drops the session
+  // from the registry in the same batch that sets the flag.
+  useEffect(() => {
+    for (const refId of liveTermRefIds) {
+      const id = /^tree:([^:]+)$/.exec(refId)?.[1];
+      if (id) reopenMainTerminal(id);
+    }
+  }, [liveTermRefIds, reopenMainTerminal]);
   const [fileScopeByWt, setFileScopeByWt] = usePersistedState<Record<string, FileScope>>(
     FILE_SCOPE_BY_WT_KEY,
     {},
@@ -699,10 +746,11 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     (id: string, opts?: { focus?: boolean }) => {
       if (opts?.focus ?? true) select(id);
       setFileFor(id, null);
+      reopenMainTerminal(id);
       setTabFor(id, startTabFor(runSetupOnStart));
       beginRun(id);
     },
-    [runSetupOnStart, beginRun, select, setFileFor, setTabFor],
+    [runSetupOnStart, beginRun, select, setFileFor, setTabFor, reopenMainTerminal],
   );
 
   // The Setup tab is temporary: when a worktree's script finishes, *that* worktree
@@ -716,9 +764,12 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   );
   const wasSettingUp = useRef(settingUpIds);
   useEffect(() => {
-    for (const id of finishedSetups(wasSettingUp.current, settingUpIds)) setTabFor(id, "terminal");
+    for (const id of finishedSetups(wasSettingUp.current, settingUpIds)) {
+      reopenMainTerminal(id);
+      setTabFor(id, "terminal");
+    }
     wasSettingUp.current = settingUpIds;
-  }, [settingUpIds, setTabFor]);
+  }, [settingUpIds, setTabFor, reopenMainTerminal]);
 
   // Clear the selection if the active worktree vanished (e.g. it was deleted).
   // The base entry isn't in `worktrees`, so it's never cleared here.
@@ -766,6 +817,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       // Pre-arm the main tab *before* the real worktree's pane can mount, so the
       // terminal never spawns a bare shell ahead of setup. The run itself only
       // begins once the real worktree exists (it has no path yet).
+      reopenMainTerminal(treeLaunch);
       setTabFor(treeLaunch, startTabFor(runSetupOnStart));
       return;
     }
@@ -781,6 +833,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     startAgent,
     select,
     setTabFor,
+    reopenMainTerminal,
   ]);
 
   // Consume a cross-view "open" request (from the Issues graph/"Open in Trees"):
@@ -802,14 +855,26 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     // unconditional reset to "terminal" made impossible — every agent, every
     // history row and every palette jump landed on tab one. `resolveActiveTab`
     // still has the last word, so naming a tab that has since been closed falls
-    // back to the terminal rather than stranding the user on nothing.
-    if (tab !== undefined) setTabFor(id, tab === null ? "terminal" : extraTab(tab));
+    // back to whatever is still open rather than stranding the user on nothing.
+    if (tab !== undefined) {
+      if (tab === null) reopenMainTerminal(id);
+      setTabFor(id, tab === null ? "terminal" : extraTab(tab));
+    }
     // Same contract for the panel: the sidebar's Linear and GitHub marks each
     // name their own pane, and `resolveFileTab` degrades a PR pane on a worktree
     // without one.
     if (pane !== undefined) setFileTab(pane);
     consumeTreeFocus();
-  }, [treeFocus, worktrees, consumeTreeFocus, select, setFileFor, setTabFor, setFileTab]);
+  }, [
+    treeFocus,
+    worktrees,
+    consumeTreeFocus,
+    select,
+    setFileFor,
+    setTabFor,
+    setFileTab,
+    reopenMainTerminal,
+  ]);
 
   // Consume a "Fix CI with AI" hand-off from Reviews: once the PR's worktree has
   // landed, open its freshly-minted Fix-CI tab (persist the row, stash the prompt
@@ -871,20 +936,21 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     const extraTabs = tabsByWt.get(activeId) ?? [];
     const selectedFile = selectedFileByWt[activeId] ?? null;
     const selectedFileScope: FileScope = fileScopeByWt[activeId] ?? "working";
-    // Resolve the active worktree's remembered tab (falls back to a safe
-    // default — Issue, or Terminal for the base entry — when it's no longer
-    // available; see resolveActiveTab's doc comment for why each tab can
-    // become unavailable).
     // The Setup tab only exists while THIS worktree's script is running.
     const setupFor = settingUpActive ? activeId : null;
     const openCheckLog = checkLogByWt[activeId] ?? null;
-    const activeTab = resolveActiveTab(activeTabByWt[activeId], {
-      selectedFile,
-      setupFor,
-      activeId,
+    const mainTerminalOpen = !mainTermClosedByWt[activeId];
+    // One list of what is open, and the remembered selection resolved against it
+    // — see openMainTabs/resolveActiveTab for why each tab comes and goes, and
+    // why the answer can be "nothing".
+    const openTabs = openMainTabs({
+      terminalOpen: mainTerminalOpen,
       extraTabIds: extraTabs.map((t) => t.id),
-      checkLog: openCheckLog,
+      hasFile: selectedFile !== null,
+      hasSetup: setupFor !== null,
+      hasCheckLog: openCheckLog !== null,
     });
+    const activeTab = resolveActiveTab(activeTabByWt[activeId], openTabs);
     const activePr = primaryPr(prsByWorktree.get(activeId) ?? []) ?? null;
     return {
       repo: activeRepo,
@@ -909,6 +975,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       setupFor,
       activeTab,
       openCheckLog,
+      mainTerminalOpen,
       extraTabs,
       // Switching worktrees just changes which one is active — each remembers its
       // own tab/file (see activeTabByWt/selectedFileByWt), so returning to a worktree
@@ -923,14 +990,15 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       selectFile: (path, scope = "working") => {
         setFileFor(activeId, path);
         setFileScopeFor(activeId, scope);
-        setTabFor(activeId, path ? "file" : "terminal");
-        if (path) setRightCollapsed(false);
+        if (path) {
+          setTabFor(activeId, "file");
+          setRightCollapsed(false);
+        }
       },
       setActiveTab: (tab) => setTabFor(activeId, tab),
-      closeFileTab: () => {
-        setFileFor(activeId, null);
-        if (activeTab === "file") setTabFor(activeId, "terminal");
-      },
+      // No fallback to pick here: with no file the File tab leaves `openMainTabs`,
+      // and `resolveActiveTab` moves the selection to whatever is still open.
+      closeFileTab: () => setFileFor(activeId, null),
       showCheckLog: (log) => {
         setCheckLogByWt((current) => ({ ...current, [activeId]: log }));
         setTabFor(activeId, "checkLog");
@@ -942,7 +1010,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
           delete next[activeId];
           return next;
         });
-        if (activeTab === "checkLog") setTabFor(activeId, "terminal");
       },
       // The id is minted here (not by the backend) so the optimistic cache patch
       // is the exact row the DB will hold and the tab can be focused immediately.
@@ -962,6 +1029,18 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         });
         setTabFor(activeId, extraTab(id));
       },
+      openMainTerminal: () => {
+        if (!activeId) return;
+        reopenMainTerminal(activeId);
+        setTabFor(activeId, "terminal");
+      },
+      // Closing sticks: the terminal stays gone until the work session is put back
+      // on screen (a task start, a finished setup, a sidebar agent row, or the
+      // empty surface's own button). Its PTY is torn down by the caller.
+      closeMainTerminal: () => {
+        if (!activeId) return;
+        setMainTermClosedByWt((m) => ({ ...m, [activeId]: true }));
+      },
       closeTab: (id) => {
         removeTabRow(id);
         setFixCiLaunchByTab((current) => {
@@ -970,8 +1049,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
           delete next[id];
           return next;
         });
-        // If the closed tab was showing, fall back to the primary terminal.
-        if (activeTab === extraTab(id)) setTabFor(activeId, "terminal");
       },
       renameTab: (id, title) => {
         const trimmed = title.trim();
@@ -1039,6 +1116,9 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     setFileScopeFor,
     settingUpActive,
     activeTabByWt,
+    mainTermClosedByWt,
+    setMainTermClosedByWt,
+    reopenMainTerminal,
     setTabFor,
     setFileFor,
     select,

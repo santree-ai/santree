@@ -1,14 +1,16 @@
 /**
- * The one behaviour of `TreesProvider` that cannot be tested through its pure
- * helpers: picking a file moves the **main** area and leaves the right panel's
- * pane alone.
+ * The behaviours of `TreesProvider` that cannot be tested through its pure
+ * helpers.
  *
- * It matters most for the AI work pane, whose brief is a list of files you open
- * one after another — a `selectFile` that also reset the pane would send the
- * reader back to the ticket after every entry — but it holds for the Files,
- * Changes and PR panes too, which are equally lists you click down.
+ * 1. Picking a file moves the **main** area and leaves the right panel's pane
+ *    alone. It matters most for the AI work pane, whose brief is a list of files
+ *    you open one after another — a `selectFile` that also reset the pane would
+ *    send the reader back to the ticket after every entry — but it holds for the
+ *    Files, Changes and PR panes too, which are equally lists you click down.
+ * 2. Closing the work terminal sticks (and is remembered across a restart), which
+ *    is what lets a workspace end up showing nothing at all.
  */
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Worktree, WorktreePr } from "../../bindings";
@@ -92,11 +94,30 @@ vi.mock("./useWorktreeDeletion", () => ({
 import { TreesProvider, useTrees } from "./model";
 
 function Probe() {
-  const { fileTab, activeTab, selectedFile, setActive, setFileTab, selectFile } = useTrees();
+  const {
+    fileTab,
+    activeTab,
+    selectedFile,
+    setActive,
+    setFileTab,
+    selectFile,
+    closeFileTab,
+    openMainTerminal,
+    closeMainTerminal,
+  } = useTrees();
   return (
     <div>
       <button type="button" onClick={() => setActive("AK-1")}>
         open worktree
+      </button>
+      <button type="button" onClick={closeFileTab}>
+        close file
+      </button>
+      <button type="button" onClick={closeMainTerminal}>
+        close terminal
+      </button>
+      <button type="button" onClick={openMainTerminal}>
+        open terminal
       </button>
       <button type="button" onClick={() => setFileTab("aiWork")}>
         show AI work queue
@@ -105,7 +126,7 @@ function Probe() {
         pick file
       </button>
       <output data-testid="pane">{fileTab}</output>
-      <output data-testid="main">{activeTab}</output>
+      <output data-testid="main">{activeTab ?? "none"}</output>
       <output data-testid="file">{selectedFile ?? "none"}</output>
     </div>
   );
@@ -136,5 +157,56 @@ describe("TreesProvider · selectFile", () => {
     expect(screen.getByTestId("pane")).toHaveTextContent("aiWork");
     expect(screen.getByTestId("main")).toHaveTextContent("file");
     expect(screen.getByTestId("file")).toHaveTextContent("src/lib/queries.ts");
+  });
+});
+
+describe("TreesProvider · the work terminal", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it("starts open on a worktree that has never been visited", () => {
+    open();
+
+    expect(screen.getByTestId("main")).toHaveTextContent("terminal");
+  });
+
+  // The whole point: with the terminal closed and no extra tabs, the workspace
+  // has nothing open, which is what puts the welcome surface on screen.
+  it("closes to nothing, and re-opens on demand", () => {
+    open();
+
+    fireEvent.click(screen.getByText("close terminal"));
+    expect(screen.getByTestId("main")).toHaveTextContent("none");
+
+    fireEvent.click(screen.getByText("open terminal"));
+    expect(screen.getByTestId("main")).toHaveTextContent("terminal");
+  });
+
+  // Remembered per worktree, so a restart restores the pane as it was left —
+  // closing it is a decision, not a one-session accident.
+  it("remembers the close across a remount", () => {
+    open();
+    fireEvent.click(screen.getByText("close terminal"));
+    cleanup();
+
+    open();
+
+    expect(screen.getByTestId("main")).toHaveTextContent("none");
+  });
+
+  // Closing the File tab used to fall back to the terminal by name. With the
+  // terminal closed there is nothing to fall back to, and the pane must say so
+  // rather than select a tab that isn't in the strip.
+  it("falls back to nothing when the last remaining tab is closed", () => {
+    open();
+    fireEvent.click(screen.getByText("close terminal"));
+    fireEvent.click(screen.getByText("pick file"));
+    expect(screen.getByTestId("main")).toHaveTextContent("file");
+
+    fireEvent.click(screen.getByText("close file"));
+
+    expect(screen.getByTestId("main")).toHaveTextContent("none");
   });
 });

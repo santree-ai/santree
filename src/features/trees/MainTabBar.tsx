@@ -1,12 +1,14 @@
 /** The main-area tab bar: the places you *work*, and — at its trailing edge —
  *  the two controls that act on the pane as a whole.
  *
- *  "Terminal" is always present and can't be closed. A shared "File" tab
- *  (whatever file you click) and a temporary "Setup" tab (while the setup script
- *  runs) appear on demand, and the persisted extra tabs opened via the "+" tab
- *  (agent sessions / terminals) are closable and renameable (double-click the
- *  label). All tabs share the same shape — an optional leading icon + label with
- *  an optional trailing affordance (a close × or a status dot) in a fixed slot.
+ *  Every tab closes, the work terminal included — close them all and the pane
+ *  falls through to its empty surface, with this bar (and its "+") still on top.
+ *  A shared "File" tab (whatever file you click) and a temporary "Setup" tab
+ *  (while the setup script runs) appear on demand, and the persisted extra tabs
+ *  opened via the "+" tab (agent sessions / terminals) are also renameable
+ *  (double-click the label). All tabs share the same shape — an optional leading
+ *  icon + label with an optional trailing affordance (a close × or a status dot)
+ *  in a fixed slot.
  *
  *  The trailing cluster is not part of the tablist: the worktree's setup script
  *  (the one command this pane runs) and the right panel's expand control, which
@@ -69,6 +71,8 @@ export function MainTabBar() {
     renameTab,
     runSetup,
     rightCollapsed,
+    mainTerminalOpen,
+    closeMainTerminal,
   } = useTrees();
   const { tabs, close } = useTerminals();
   const tabAreaRef = useRef<HTMLDivElement>(null);
@@ -77,14 +81,22 @@ export function MainTabBar() {
   const hasFile = selectedFile !== null;
   const hasSetup = setupFor !== null && setupFor === activeId;
 
-  // Closing an extra tab tears down its PTY session (found by refId) too, so it
-  // doesn't linger in the global Terminal tab (and a Claude tab's stored session
-  // is forgotten by the backend).
-  const closeExtra = (t: WorktreeTab) => {
-    const refId = `tree:${activeId}:tab:${t.id}`;
+  // Closing a tab tears down its PTY session (found by refId) too, so it doesn't
+  // linger in the global Terminal tab. For an extra tab the row goes with it (and
+  // a Claude tab's stored session is forgotten by the backend); the work terminal
+  // has no row — it is remembered as closed until the work session is put back on
+  // screen. Its conversation survives either way: Session history resumes it.
+  const closeSession = (refId: string) => {
     const live = tabs.find((x) => x.refId === refId);
     if (live) close(live.key);
+  };
+  const closeExtra = (t: WorktreeTab) => {
+    closeSession(`tree:${activeId}:tab:${t.id}`);
     closeTab(t.id);
+  };
+  const closeMain = () => {
+    closeSession(`tree:${activeId}`);
+    closeMainTerminal();
   };
 
   // Auto-close an extra *terminal* tab once its shell exits (its session vanishes
@@ -110,18 +122,23 @@ export function MainTabBar() {
   // One list, so the fit/hide decision below sees every tab — the main work
   // terminal, the persisted extras, and the on-demand File/Setup/Check ones.
   const items: TabItem[] = [
-    {
-      // The main work terminal hosts the worktree's agent session, so it is
-      // named after that agent — not after the pane. "Terminal" beside the Codex
-      // mark, on a tab running Codex, is the tab lying about itself; an extra tab
-      // has said `agentLabel(kind)` since it was born (see `defaultTabTitle`),
-      // and this one had no `worktree_tabs` row to carry a title, which is the
-      // only reason it ever said otherwise. The base entry is a plain shell and a
-      // worktree with no agent yet has nothing to name, so both keep the literal.
-      tab: "terminal",
-      label: !isBase && active?.agent ? agentLabel(active.agent) : "Terminal",
-      icon: !isBase && active?.agent ? <AgentTabIcon kind={active.agent} /> : undefined,
-    },
+    // The main work terminal hosts the worktree's agent session, so it is named
+    // after that agent — not after the pane. "Terminal" beside the Codex mark, on
+    // a tab running Codex, is the tab lying about itself; an extra tab has said
+    // `agentLabel(kind)` since it was born (see `defaultTabTitle`), and this one
+    // had no `worktree_tabs` row to carry a title, which is the only reason it
+    // ever said otherwise. The base entry is a plain shell and a worktree with no
+    // agent yet has nothing to name, so both keep the literal.
+    ...(mainTerminalOpen
+      ? [
+          {
+            tab: "terminal" as const,
+            label: !isBase && active?.agent ? agentLabel(active.agent) : "Terminal",
+            icon: !isBase && active?.agent ? <AgentTabIcon kind={active.agent} /> : undefined,
+            onClose: closeMain,
+          },
+        ]
+      : []),
     ...extraTabs.map((t) => ({
       tab: extraTab(t.id),
       label: t.title,
@@ -179,16 +196,19 @@ export function MainTabBar() {
       <div ref={tabAreaRef} className="flex min-w-0 flex-1 items-stretch">
         {/* The tablist clips rather than pushing: `min-w-0` + `overflow-hidden`
           means even a pathological pane width costs the last tab's right edge,
-          not the "+" button or the controls beyond it. */}
-        <div
-          role="tablist"
-          onKeyDown={onTabStripKeyDown}
-          className="flex min-w-0 items-stretch overflow-hidden"
-        >
-          {shown.map((it) => (
-            <Tab key={it.tab} {...it} active={activeTab} onSelect={setActiveTab} />
-          ))}
-        </div>
+          not the "+" button or the controls beyond it. It goes entirely once
+          every tab is closed — a tablist owning no tabs is not a thing. */}
+        {shown.length > 0 && (
+          <div
+            role="tablist"
+            onKeyDown={onTabStripKeyDown}
+            className="flex min-w-0 items-stretch overflow-hidden"
+          >
+            {shown.map((it) => (
+              <Tab key={it.tab} {...it} active={activeTab} onSelect={setActiveTab} />
+            ))}
+          </div>
+        )}
         {hidden.length > 0 && <OverflowTabsMenu tabs={hidden} onSelect={setActiveTab} />}
         <NewTabButton onAdd={addTab} />
         <div data-tauri-drag-region className="min-w-2 flex-1" />
@@ -469,7 +489,7 @@ function Tab({
   label: string;
   /** Leading logomark (e.g. the Claude spark on agent tabs). */
   icon?: ReactNode;
-  active: MainTab;
+  active: MainTab | null;
   onSelect: (tab: MainTab) => void;
   /** When set, the trailing slot is a close button. */
   onClose?: () => void;

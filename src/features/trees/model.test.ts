@@ -23,7 +23,7 @@ import {
   isTreeLaunchDead,
   type MainTab,
   mergeWorktrees,
-  type OpenCheckLog,
+  openMainTabs,
   pendingWorktree,
   prDiffModeFor,
   resolveActiveTab,
@@ -285,57 +285,103 @@ describe("shouldHoldTerminal", () => {
   });
 });
 
-describe("resolveActiveTab", () => {
+describe("openMainTabs", () => {
   const base = {
-    selectedFile: null as string | null,
-    setupFor: null as string | null,
-    activeId: "AK-1",
+    terminalOpen: true,
     extraTabIds: [] as string[],
-    checkLog: null as OpenCheckLog | null,
+    hasFile: false,
+    hasSetup: false,
+    hasCheckLog: false,
   };
 
+  it("opens a never-visited worktree on its work terminal alone", () => {
+    expect(openMainTabs(base)).toEqual(["terminal"]);
+  });
+
+  // The whole point of the change: closing every tab has to be reachable, and
+  // "no tabs" is what the empty surface renders on.
+  it("can be empty once the terminal is closed and nothing else is open", () => {
+    expect(openMainTabs({ ...base, terminalOpen: false })).toEqual([]);
+  });
+
+  it("lists the strip in bar order: terminal, extras, then the on-demand tabs", () => {
+    expect(
+      openMainTabs({
+        terminalOpen: true,
+        extraTabIds: ["a1", "b2"],
+        hasFile: true,
+        hasSetup: true,
+        hasCheckLog: true,
+      }),
+    ).toEqual(["terminal", "tab:a1", "tab:b2", "file", "setup", "checkLog"]);
+  });
+
+  it("keeps the extra tabs when the work terminal is closed", () => {
+    expect(openMainTabs({ ...base, terminalOpen: false, extraTabIds: ["a1"] })).toEqual(["tab:a1"]);
+  });
+});
+
+describe("resolveActiveTab", () => {
+  const open = (o: Partial<Parameters<typeof openMainTabs>[0]>) =>
+    openMainTabs({
+      terminalOpen: true,
+      extraTabIds: [],
+      hasFile: false,
+      hasSetup: false,
+      hasCheckLog: false,
+      ...o,
+    });
+
   it("defaults a never-visited worktree to the Terminal tab", () => {
-    expect(resolveActiveTab(undefined, base)).toBe("terminal");
+    expect(resolveActiveTab(undefined, open({}))).toBe("terminal");
   });
 
   it("keeps a remembered Terminal tab as-is", () => {
-    expect(resolveActiveTab("terminal", base)).toBe("terminal");
+    expect(resolveActiveTab("terminal", open({}))).toBe("terminal");
   });
 
   it("keeps the File tab only while a file is actually open", () => {
-    expect(resolveActiveTab("file", { ...base, selectedFile: "src/main.rs" })).toBe("file");
-    expect(resolveActiveTab("file", base)).toBe("terminal");
+    expect(resolveActiveTab("file", open({ hasFile: true }))).toBe("file");
+    expect(resolveActiveTab("file", open({}))).toBe("terminal");
   });
 
   it("keeps the Setup tab only while setup is running for THIS worktree", () => {
-    expect(resolveActiveTab("setup", { ...base, setupFor: "AK-1" })).toBe("setup");
-    // A different worktree's setup superseded the single setupFor slot.
-    expect(resolveActiveTab("setup", { ...base, setupFor: "AK-2" })).toBe("terminal");
+    expect(resolveActiveTab("setup", open({ hasSetup: true }))).toBe("setup");
+    // A different worktree's setup superseded the single setupFor slot, so this
+    // one contributes no Setup tab at all.
+    expect(resolveActiveTab("setup", open({}))).toBe("terminal");
   });
 
   it("keeps a remembered extra tab only while that tab still exists", () => {
-    expect(resolveActiveTab("tab:a1", { ...base, extraTabIds: ["a1", "b2"] })).toBe("tab:a1");
-    expect(resolveActiveTab("tab:a1", { ...base, extraTabIds: ["b2"] })).toBe("terminal");
+    expect(resolveActiveTab("tab:a1", open({ extraTabIds: ["a1", "b2"] }))).toBe("tab:a1");
+    expect(resolveActiveTab("tab:a1", open({ extraTabIds: ["b2"] }))).toBe("terminal");
   });
 
   // The log itself is deliberately not persisted, so a remembered "checkLog" tab
   // routinely comes back with an empty slot — after a reload, or on a worktree
   // whose log was closed elsewhere.
   it("keeps the check-log tab only while a log is actually open", () => {
-    const checkLog: OpenCheckLog = {
-      jobId: 42,
-      name: "test (ubuntu-latest)",
-      url: null,
-      prRepo: "acme/api",
-    };
-    expect(resolveActiveTab("checkLog", { ...base, checkLog })).toBe("checkLog");
-    expect(resolveActiveTab("checkLog", base)).toBe("terminal");
+    expect(resolveActiveTab("checkLog", open({ hasCheckLog: true }))).toBe("checkLog");
+    expect(resolveActiveTab("checkLog", open({}))).toBe("terminal");
+  });
+
+  // The terminal is no longer the universal fallback: a worktree that has closed
+  // it must land on a tab that is actually there.
+  it("falls back to the first open tab, not to a closed terminal", () => {
+    expect(resolveActiveTab("file", open({ terminalOpen: false, extraTabIds: ["a1"] }))).toBe(
+      "tab:a1",
+    );
+  });
+
+  it("resolves to nothing at all once every tab is closed", () => {
+    expect(resolveActiveTab("terminal", [])).toBeNull();
+    expect(resolveActiveTab(undefined, [])).toBeNull();
   });
 });
 
 describe("focusedAgentFor", () => {
   const base = {
-    activeTab: "terminal" as MainTab,
+    activeTab: "terminal" as MainTab | null,
     activeId: "AK-1",
     extraTabs: [] as WorktreeTab[],
     worktreeAgent: "Claude" as AgentKind | null,
@@ -354,6 +400,12 @@ describe("focusedAgentFor", () => {
   it("has nothing to point at with no worktree open, or none launched yet", () => {
     expect(focusedAgentFor({ ...base, activeId: "" })).toBeNull();
     expect(focusedAgentFor({ ...base, worktreeAgent: null })).toBeNull();
+  });
+
+  // Every tab closed: the main area is showing the empty surface, so the status
+  // bar's meter has no session to scope itself to either.
+  it("has nothing to point at when no tab is open", () => {
+    expect(focusedAgentFor({ ...base, activeTab: null })).toBeNull();
   });
 
   it("points at an extra agent tab's own session, with that tab's provider", () => {
