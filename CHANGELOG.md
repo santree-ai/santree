@@ -7,6 +7,11 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.5-beta.5 — 2026-08-31
+
+- A workspace's Terminal tab can be closed. It still opens by default, but it is no longer permanent, and closing it is remembered for that worktree.
+- Close every tab in a workspace and you land back on the welcome screen, with a button to start a terminal again. Past agents are still there to resume in Session history.
+
 ## 0.1.5-beta.4 — 2026-08-31
 
 - Project deadlines and milestone groups are back in the sidebar. The query behind them had grown past Linear's per-request complexity limit, which also caused the "Query too complex" error on refresh.
