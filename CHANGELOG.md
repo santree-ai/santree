@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.5-beta.4 — 2026-08-31
+
+- Project deadlines and milestone groups are back in the sidebar. The query behind them had grown past Linear's per-request complexity limit, which also caused the "Query too complex" error on refresh.
+- Toggle switches are readable in dark mode again — the knob no longer disappears into the track.
+- When manual triage ordering is locked because the Linear connection is read-only, the queue now says so and points at the setting to change, instead of just refusing to drag.
+- The window can be dragged by the top of the welcome screen, like every other view.
+
 ## 0.1.5-beta.3 — 2026-08-30
 
 - Santree is black and white. The green accent is gone; emphasis now comes from contrast and weight instead of colour, and green is kept only where it means something, like a passing check or an added line.
