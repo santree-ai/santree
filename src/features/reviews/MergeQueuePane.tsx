@@ -2,9 +2,14 @@
  * The Reviews tab's merge-queue panel — shown in the detail pane when the "Merge
  * queue" sidebar button is active. Lists the PRs waiting to merge into the repo's
  * default branch, in queue order, highlighting the viewer's own PRs so they can
- * see where they sit in line. Data comes from `useMergeQueue` (the active repo's
- * default-branch queue); an empty/absent queue renders the relevant empty state.
+ * see where they sit in line.
+ *
+ * Unlike the inbox in the rail, this question is scoped to a single repository —
+ * so every state here names the `owner/name` it is about. Without that, "this
+ * repository has no merge queue" sat beside an org-wide inbox showing another
+ * repo's PRs, and neither said which repository it meant.
  */
+import { useNavigate } from "@tanstack/react-router";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import type { MergeQueueEntry } from "../../bindings";
@@ -13,11 +18,18 @@ import { GitHubLogo } from "../../components/icons";
 import { Button, Dot, EmptyState, Skeleton } from "../../components/primitives";
 import { useMergeQueue } from "../../lib/queries";
 import { alpha, mergeQueueStateMeta } from "../../theme/colors";
+import { GitHubNotConnected } from "./GitHubNotConnected";
 import { useReviewsModel } from "./model";
 
 export function MergeQueuePane() {
   const { repo } = useReviewsModel();
-  const { data: queue, isLoading, isError } = useMergeQueue(repo);
+  const navigate = useNavigate();
+  const { data: view, isLoading, isError } = useMergeQueue(repo);
+  const queue = view?.queue ?? null;
+  // The scope the header and both empty states are about. Falls back to santree's
+  // own name for the repo when its `origin` isn't a GitHub remote we can parse —
+  // an unnamed empty state is the defect, so never render one.
+  const scope = view?.repo || repo;
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">
@@ -30,17 +42,15 @@ export function MergeQueuePane() {
             </span>
           )}
         </div>
-        {queue && (
-          <div className="mt-1 flex items-center gap-2 font-mono text-[11px] text-muted-3">
-            <span>{queue.repo}</span>
-            {queue.branch && (
-              <>
-                <span className="text-muted-4">→</span>
-                <span>{queue.branch}</span>
-              </>
-            )}
-          </div>
-        )}
+        <div className="mt-1 flex items-center gap-2 font-mono text-[11px] text-muted-3">
+          <span>{scope}</span>
+          {queue?.branch && (
+            <>
+              <span className="text-muted-4">→</span>
+              <span>{queue.branch}</span>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
@@ -55,11 +65,19 @@ export function MergeQueuePane() {
           </div>
         )}
 
-        {!isLoading && !isError && !queue && (
+        {!isLoading && !isError && view && !view.githubConnected && (
+          <div className="mt-16">
+            <GitHubNotConnected
+              onOpenSettings={() => navigate({ to: "/settings", search: { section: "github" } })}
+            />
+          </div>
+        )}
+
+        {!isLoading && !isError && view?.githubConnected && !queue && (
           <div className="mt-16">
             <EmptyState
               title="No merge queue"
-              subtitle="This repository doesn't have a merge queue enabled on its default branch."
+              subtitle={`${scope} doesn't have a merge queue enabled on its default branch.`}
             />
           </div>
         )}
@@ -68,7 +86,7 @@ export function MergeQueuePane() {
           <div className="mt-16">
             <EmptyState
               title="Queue is empty"
-              subtitle="No pull requests are waiting to merge right now."
+              subtitle={`No pull requests are waiting to merge into ${scope} right now.`}
             />
           </div>
         )}

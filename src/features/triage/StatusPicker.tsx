@@ -71,7 +71,7 @@ export function StatusPicker({
             >
               <span className="h-2 w-2 flex-none rounded-full" style={{ background: s.color }} />
               <span className="flex-1">{s.name}</span>
-              {isCurrent && <span className="text-[10px] text-[color:var(--accent)]">✓</span>}
+              {isCurrent && <span className="text-[10px] text-[color:var(--accent-text)]">✓</span>}
             </button>
           );
         })

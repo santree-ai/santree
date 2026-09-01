@@ -30,10 +30,22 @@ import {
   useStageAction,
 } from "../../lib/queries";
 import { accentActiveStyle } from "../../theme/colors";
-import { buildChangeTree, type ChangeTreeNode, filesUnder, STATUS_META } from "./changeTree";
+import {
+  buildChangeTree,
+  CHANGE_ROW_WINDOW,
+  type ChangeTreeNode,
+  dirFlagsOf,
+  filesUnder,
+  STATUS_META,
+  windowRows,
+} from "./changeTree";
 import { fileIconUrl, folderIconUrl } from "./fileIcons";
 import { IndentGuides, ROW_MIN_H, TREE_GROUP } from "./IndentGuides";
 import { useTrees } from "./model";
+
+/** One shared empty list rather than a fresh `[]` per render: it is the identity
+ *  the memos below key on, and a new array every time re-runs all of them. */
+const NO_FILES: ChangedFile[] = [];
 
 /** `files === undefined` means the worktree status hasn't loaded — distinct from
  *  `[]`, which means it loaded and there's nothing to commit. `committed` is the
@@ -48,10 +60,19 @@ export function ChangesList({
   const { repo, activeId, selectedFile, selectedFileScope, selectFile } = useTrees();
   const { mutate: act, mutateAsync: actAsync } = useStageAction(repo, activeId);
   const loading = files === undefined;
-  const list = files ?? [];
-  const tracked = useMemo(() => list.filter((f) => f.status !== "Untracked"), [list]);
-  const untracked = useMemo(() => list.filter((f) => f.status === "Untracked"), [list]);
-  const stagedCount = list.filter((f) => f.staged).length;
+  const list = files ?? NO_FILES;
+  // One pass for the split and the counter: during a merge conflict this list is
+  // thousands of files long and re-arrives on every optimistic staging patch.
+  const { tracked, untracked, stagedCount } = useMemo(() => {
+    const t: ChangedFile[] = [];
+    const u: ChangedFile[] = [];
+    let staged = 0;
+    for (const f of list) {
+      (f.status === "Untracked" ? u : t).push(f);
+      if (f.staged) staged += 1;
+    }
+    return { tracked: t, untracked: u, stagedCount: staged };
+  }, [list]);
   const allStaged = list.length > 0 && stagedCount === list.length;
   // The file or folder pending a discard confirmation (discard is destructive —
   // uncommitted work is unrecoverable — so it asks first, like the worktree
@@ -251,7 +272,14 @@ function Section({
 }
 
 /** One section's rows, in the flat or the collapsed-folder layout. `readOnly`
- *  drops staging and discard — the committed list is a record, not a queue. */
+ *  drops staging and discard — the committed list is a record, not a queue.
+ *
+ *  Only the first window of rows is rendered, and "Show more" doubles it: a
+ *  merge conflict puts thousands of files in this pane, and rendering all of
+ *  them costs a second of blocked UI for rows nobody scrolls to — while a
+ *  handful of clicks still reaches the end of the list for anyone who wants it.
+ *  The window is on what is *drawn* only; every count in the pane (the section
+ *  header, a folder's tally, the staged counter) stays the true total. */
 function FileRows({
   files,
   tree,
@@ -273,12 +301,17 @@ function FileRows({
   onDiscardDir?: (path: string) => void;
   onStageDir?: (path: string, staged: boolean) => void;
 }) {
+  const [limit, setLimit] = useState(CHANGE_ROW_WINDOW);
+  const showMore = useCallback(() => setLimit((n) => n * 2), []);
+
   if (tree) {
     return (
       <ChangesTree
         files={files}
         readOnly={readOnly}
         selectedFile={selectedFile}
+        limit={limit}
+        onShowMore={showMore}
         onToggle={onToggle}
         onOpen={onOpen}
         onDiscard={onDiscard}
@@ -287,9 +320,10 @@ function FileRows({
       />
     );
   }
+  const { shown, hidden } = windowRows(files, limit);
   return (
     <>
-      {files.map((f) => (
+      {shown.map((f) => (
         <ChangeRow
           key={f.path}
           file={f}
@@ -300,7 +334,27 @@ function FileRows({
           onDiscard={onDiscard}
         />
       ))}
+      {hidden > 0 && <ShowMoreRow hidden={hidden} onClick={showMore} />}
     </>
+  );
+}
+
+/** The tail of a windowed section: what the click does on the left, what it is
+ *  holding back on the right — the same label/count shape as a section header,
+ *  so the number reads as a fact about the list rather than as part of the
+ *  button's promise (one click reveals the next window, not all of them). */
+function ShowMoreRow({ hidden, onClick }: { hidden: number; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex w-full cursor-pointer items-center gap-2 ${ROW_MIN_H} px-2.5 text-left font-mono text-[10.5px] text-muted-3 hover:bg-hover hover:text-fg-2`}
+    >
+      <span>Show more</span>
+      <span className="ml-auto flex-none tabular-nums text-muted-5">
+        {hidden.toLocaleString()} hidden
+      </span>
+    </button>
   );
 }
 
@@ -341,6 +395,8 @@ function ChangesTree({
   files,
   readOnly = false,
   selectedFile,
+  limit,
+  onShowMore,
   onToggle,
   onOpen,
   onDiscard,
@@ -350,6 +406,10 @@ function ChangesTree({
   files: ChangedFile[];
   readOnly?: boolean;
   selectedFile: string | null;
+  /** How many *visible* rows to draw — folder rows included, since they are what
+   *  the tree costs as much as its files. */
+  limit: number;
+  onShowMore: () => void;
   onToggle?: (f: ChangedFile) => void;
   onOpen: (path: string) => void;
   onDiscard?: (f: ChangedFile) => void;
@@ -371,27 +431,8 @@ function ChangesTree({
 
   // What each folder's actions have to say, from the files actually under it: a
   // folder of untracked files can only be *deleted*, and one that is already
-  // fully staged offers to take that back. Read off this section's own list, so
-  // an untracked file in the same folder but listed in the other section can't
-  // change what this row claims.
-  const dirFlags = useMemo(() => {
-    const flags = new Map<string, { untracked: boolean; allStaged: boolean }>();
-    const walk = (nodes: ChangeTreeNode[]) => {
-      for (const node of nodes) {
-        if (node.kind !== "dir") continue;
-        const under = filesUnder(files, node.path);
-        // `every` on an empty list is vacuously true — a folder that matched
-        // nothing must not claim to be untracked *and* fully staged.
-        flags.set(node.path, {
-          untracked: under.length > 0 && under.every((f) => f.status === "Untracked"),
-          allStaged: under.length > 0 && under.every((f) => f.staged),
-        });
-        walk(node.children);
-      }
-    };
-    walk(tree);
-    return flags;
-  }, [tree, files]);
+  // fully staged offers to take that back.
+  const dirFlags = useMemo(() => dirFlagsOf(tree), [tree]);
 
   const rows = useMemo(() => {
     const out: { node: ChangeTreeNode; depth: number }[] = [];
@@ -404,10 +445,11 @@ function ChangesTree({
     walk(tree, 0);
     return out;
   }, [tree, collapsed]);
+  const { shown, hidden } = windowRows(rows, limit);
 
   return (
     <>
-      {rows.map(({ node, depth }) =>
+      {shown.map(({ node, depth }) =>
         node.kind === "dir" ? (
           <ChangeFolderRow
             key={node.path}
@@ -436,6 +478,7 @@ function ChangesTree({
           />
         ),
       )}
+      {hidden > 0 && <ShowMoreRow hidden={hidden} onClick={onShowMore} />}
     </>
   );
 }

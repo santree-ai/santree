@@ -86,11 +86,15 @@ import { ScheduleSection } from "./ScheduleSection";
  *  shell, and the queue is a list of uniform rows rather than a nested tree. */
 const QUEUE_WIDTH = 300;
 
+/** A lane divider inside one team's queue. Same register as the sidebar's
+ *  milestone band — mono, uppercase, `muted-4` — rather than the 8.5px `muted-5`
+ *  it used to be: that tier is the app's non-text gray, and a heading you are
+ *  meant to read has to clear AA like every other label. */
 function QueueLaneHeader({ label, count }: { label: string; count: number }) {
   return (
-    <div className="flex items-center gap-1.5 px-2 pt-1 pb-1 font-mono text-[8.5px] tracking-[.08em] text-muted-5 uppercase">
+    <div className="flex items-center gap-1.5 px-2 pt-2.5 pb-1.5 font-mono text-[10px] tracking-[.05em] text-muted-4 uppercase">
       <span>{label}</span>
-      <span>{count}</span>
+      <span className="text-muted-5">{count}</span>
     </div>
   );
 }
@@ -102,12 +106,14 @@ const MAX_KEPT_PANES = 6;
  *  as "all caught up" (mirrors the Reviews sidebar's skeleton). */
 function QueueSkeleton() {
   return (
-    <div className="mt-1.5">
+    // Shaped like the row it stands in for: identity line, title, context line,
+    // at the row's own padding, so nothing shifts when the read lands.
+    <div className="mt-1.5" aria-hidden>
       {[0, 1, 2, 3].map((i) => (
-        <div key={i} className="mb-[5px] rounded-[9px] px-[11px] py-2.5">
-          <Skeleton className="mb-2 h-2.5 w-12" />
-          <Skeleton className="mb-2 h-3 w-4/5" />
-          <Skeleton className="h-2.5 w-20" />
+        <div key={i} className="px-3 py-(--density-standard)">
+          <Skeleton className="h-2.5 w-12" />
+          <Skeleton className="mt-1 h-3.5" style={{ width: `${[82, 64, 74, 58][i]}%` }} />
+          <Skeleton className="mt-1 h-2.5 w-24" />
         </div>
       ))}
     </div>
@@ -198,7 +204,7 @@ function TriageHome({
     <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-10">
       <div className="w-full max-w-[720px]">
         <div className="mb-7 flex items-start gap-4">
-          <span className="relative flex h-11 w-11 flex-none items-center justify-center rounded-[var(--radius-lg)] border border-line-2 bg-raised text-accent">
+          <span className="relative flex h-11 w-11 flex-none items-center justify-center rounded-[var(--radius-lg)] border border-line-2 bg-raised text-[color:var(--accent-text)]">
             <TelescopeIcon size={19} />
             <span className="absolute -right-1.5 -bottom-1 text-[16px] leading-none">🌱</span>
           </span>
@@ -726,7 +732,7 @@ export function TriageView() {
             </div>
           )}
           <ScheduleSection schedules={schedules} />
-          <div className="flex-1 overflow-y-auto p-2">
+          <div className="flex-1 overflow-y-auto px-1.5 py-1.5">
             {loading ? (
               <QueueSkeleton />
             ) : ordered.length === 0 ? (
@@ -734,13 +740,20 @@ export function TriageView() {
             ) : grouped ? (
               renderedGroups.map(({ team, lanes }) => (
                 <div key={team} className="mb-3">
-                  <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-1 font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">
+                  {/* The loudest of the list's three registers — a team heading,
+                      the lane band under it, then the rows — so depth reads from
+                      weight and indentation the way the project tree's does. The
+                      hairline rail this used to hang off is gone for the same
+                      reason: a rule states a boundary that indentation already
+                      states, and the rail is the thing that made the queue look
+                      like a table instead of a list. */}
+                  <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-[11px] font-semibold text-fg-2">
                     {team}
-                    <span className="text-muted-5">
+                    <span className="font-mono text-[10px] text-muted-4 tabular-nums">
                       {lanes.investigations.length + lanes.queue.length + lanes.snoozed.length}
                     </span>
                   </div>
-                  <div className="border-l border-hairline pl-1.5">{renderLanes(lanes)}</div>
+                  <div className="pl-1.5">{renderLanes(lanes)}</div>
                 </div>
               ))
             ) : (

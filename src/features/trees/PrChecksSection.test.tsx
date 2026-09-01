@@ -61,6 +61,37 @@ describe("PrChecksSection", () => {
     expect(screen.getByText("failing").previousSibling).toHaveTextContent("1");
   });
 
+  /** A queued/in-progress run is what you're waiting on — it gets counted by
+   *  name in the summary and listed above the finished checks, rather than
+   *  disappearing into the "other" tally. */
+  it("counts running checks and lists them above the finished ones", () => {
+    renderSection([
+      check({ name: "lint", status: "Success" }),
+      check({ name: "docs", status: "Skipped" }),
+      check({ name: "e2e", status: "Pending" }),
+      check({ name: "build", status: "Pending" }),
+    ]);
+
+    expect(screen.getByText("running").previousSibling).toHaveTextContent("2");
+    expect(screen.getByText("other").previousSibling).toHaveTextContent("1");
+
+    // The section headers, in the order they render.
+    const headers = screen.getAllByTitle(/⌘-click for all/);
+    expect(headers.map((h) => h.textContent?.trim())).toEqual([
+      "2 running",
+      "1 passed",
+      "1 skipped",
+    ]);
+  });
+
+  /** The static glyph reads as an outcome; a running check hasn't got one, so it
+   *  wears the app's pulsing in-progress dot instead. */
+  it("marks a running check as active rather than settled", () => {
+    const { container } = renderSection([check({ name: "e2e", status: "Pending" })]);
+    expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("img", { name: "running" }).length).toBe(1);
+  });
+
   /** A repo can run a hundred path-filter checks on one change. Listing them by
    *  default buries the conversation and the brief under a wall of rows — the
    *  summary line is the answer nearly every time. */

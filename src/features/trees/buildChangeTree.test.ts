@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import type { ChangedFile } from "../../bindings";
-import { buildChangeTree, type ChangeTreeNode, filesUnder } from "./changeTree";
+import {
+  buildChangeTree,
+  CHANGE_ROW_WINDOW,
+  type ChangeTreeNode,
+  dirFlagsOf,
+  filesUnder,
+  windowRows,
+} from "./changeTree";
 
-/** Minimal ChangedFile for path-shape assertions (status/stats don't matter here). */
-function file(path: string): ChangedFile {
+/** Minimal ChangedFile for path-shape assertions (status/stats don't matter
+ *  here) — except for the folder-flag suite, which is entirely about `status`
+ *  and `staged`, so both are overridable. */
+function file(path: string, over: Partial<ChangedFile> = {}): ChangedFile {
   return {
     path,
     oldPath: null,
@@ -13,6 +22,7 @@ function file(path: string): ChangedFile {
     addLines: 0,
     delLines: 0,
     binary: false,
+    ...over,
   };
 }
 
@@ -77,5 +87,89 @@ describe("filesUnder", () => {
 
   it("returns nothing for a directory with no changed files", () => {
     expect(filesUnder(files, "docs")).toEqual([]);
+  });
+});
+
+/** The flags behind a folder row's two actions. These used to be read by
+ *  rescanning the file list once per directory — O(dirs x files), which is what
+ *  made the pane unusable during a merge conflict — so they are pinned against
+ *  the answers that scan gave. */
+describe("dirFlagsOf", () => {
+  const flagsFor = (files: ChangedFile[]) => dirFlagsOf(buildChangeTree(files));
+
+  it("marks a folder untracked only when every file under it is", () => {
+    const flags = flagsFor([
+      file("new/a.ts", { status: "Untracked" }),
+      file("new/b.ts", { status: "Untracked" }),
+      file("mixed/a.ts", { status: "Untracked" }),
+      file("mixed/b.ts"),
+    ]);
+    expect(flags.get("new")?.untracked).toBe(true);
+    expect(flags.get("mixed")?.untracked).toBe(false);
+  });
+
+  it("marks a folder fully staged only when every file under it is", () => {
+    const flags = flagsFor([
+      file("all/a.ts", { staged: true }),
+      file("all/b.ts", { staged: true }),
+      file("some/a.ts", { staged: true }),
+      file("some/b.ts"),
+    ]);
+    expect(flags.get("all")?.allStaged).toBe(true);
+    expect(flags.get("some")?.allStaged).toBe(false);
+  });
+
+  it("folds nested subtrees into the ancestor's flags", () => {
+    // The parent's answer has to cover `deep/`, not just the file beside it.
+    const flags = flagsFor([
+      file("pkg/a.ts", { staged: true }),
+      file("pkg/deep/b.ts", { staged: false }),
+    ]);
+    expect(flags.get("pkg/deep")?.allStaged).toBe(false);
+    expect(flags.get("pkg")?.allStaged).toBe(false);
+  });
+
+  it("keys the flags by the collapsed-chain path the folder row renders", () => {
+    const flags = flagsFor([file("a/b/c/one.ts", { status: "Untracked" })]);
+    expect([...flags.keys()]).toEqual(["a/b/c"]);
+    expect(flags.get("a/b/c")).toEqual({ untracked: true, allStaged: false });
+  });
+});
+
+/** What the Changes pane actually draws. A merge conflict makes this list
+ *  thousands of rows wide; the window is what keeps the pane responsive, and it
+ *  must stay invisible at the sizes the pane normally sees. */
+describe("windowRows", () => {
+  const rows = (n: number) => Array.from({ length: n }, (_, i) => i);
+
+  it("leaves a list under the limit untouched, down to its identity", () => {
+    const input = rows(40);
+    const { shown, hidden } = windowRows(input, CHANGE_ROW_WINDOW);
+    // Same array, not a copy: it is what the memoized rows are keyed on.
+    expect(shown).toBe(input);
+    expect(hidden).toBe(0);
+  });
+
+  it("does not window a list that exactly fills the limit", () => {
+    expect(windowRows(rows(CHANGE_ROW_WINDOW), CHANGE_ROW_WINDOW).hidden).toBe(0);
+  });
+
+  it("keeps the leading rows in order and reports the true remainder", () => {
+    const { shown, hidden } = windowRows(rows(3000), CHANGE_ROW_WINDOW);
+    expect(shown).toHaveLength(CHANGE_ROW_WINDOW);
+    expect(shown[0]).toBe(0);
+    expect(shown.at(-1)).toBe(CHANGE_ROW_WINDOW - 1);
+    // The count behind "Show more" is the whole remainder, never a page of it.
+    expect(hidden).toBe(3000 - CHANGE_ROW_WINDOW);
+  });
+
+  it("reaches the end of a huge list in a handful of doublings", () => {
+    let limit = CHANGE_ROW_WINDOW;
+    let clicks = 0;
+    while (windowRows(rows(3000), limit).hidden > 0) {
+      limit *= 2;
+      clicks += 1;
+    }
+    expect(clicks).toBeLessThanOrEqual(5);
   });
 });

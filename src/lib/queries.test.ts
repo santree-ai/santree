@@ -87,6 +87,8 @@ describe("reviewAwaitingCount", () => {
       mine: [],
       requested: [direct, reviewed],
       teams: [{ slug: "eng", name: "Engineering", prs: [direct, pushed] }],
+      org: "acme",
+      githubConnected: true,
     } satisfies ReviewInbox;
 
     expect(reviewAwaitingCount(inbox)).toBe(2);

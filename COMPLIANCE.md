@@ -281,9 +281,37 @@ from what it replaced. **`--dangerously-bypass-approvals-and-sandbox` is never
 passed.** Other launchers default to it. A bypassed sandbox is the first step to
 not needing `review_drafts::publish`, which is the decision the review feature
 exists to preserve.
+
+**Two bounded wideners, and the shape of the boundary.** "Only tightens" held
+absolutely until a linked worktree made it untenable: the checkout's `.git` is a
+*file* pointing at the main repo, so under Codex's own `workspace-write` default
+every byte git writes for a fetch, merge or rebase — `FETCH_HEAD`, `index`, the
+shared object store — sits outside the writable root, and the agent cannot
+complete a merge it was asked to do. So santree now names two permissive things,
+both narrow, both on the surfaces that write the checkout:
+
+1. `--add-dir <the checkout's common git directory>`, unconditional on the work
+   and Address-review surfaces. It grants no capability the agent lacked: it can
+   already edit the files those objects record. The directory is resolved from
+   the checkout's own pointer files and accepted only if it is demonstrably a git
+   directory, so an unreadable or bogus `.git` degrades to *no flag* rather than
+   to a wider root.
+2. `sandbox_workspace_write.network_access`, off by default and behind a Settings
+   toggle, because Codex has no host allowlist and this is every outbound
+   connection a model-generated command makes.
+
+The network knob reaches **the work session only**. Address review writes the
+checkout and still never gets it: the setting is global, so a user enabling it for
+their own work would otherwise hand api.github.com to a session santree pointed at
+a pull request — and an agent that can reach the API posts without the click below.
+Both wideners are inert on the read-only surfaces, which stay pinned to
+`--sandbox read-only`.
 → `no_surface_can_produce_the_bypass_flag`,
 `the_work_surface_does_not_override_the_users_own_sandbox`,
-`nothing_asks_codex_to_bypass_its_sandbox`
+`nothing_asks_codex_to_bypass_its_sandbox`,
+`network_access_is_opt_in_and_never_reaches_a_read_only_surface`,
+`a_review_session_never_gets_the_network_even_when_the_user_opted_in`,
+`an_unresolvable_git_directory_drops_the_grant_rather_than_widening_it`
 
 **A draft becomes a comment only on a click.** `review_drafts::publish` is the
 only path from an agent's finding to GitHub, it runs on a user action into their

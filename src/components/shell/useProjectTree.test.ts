@@ -12,7 +12,15 @@ import {
 } from "../../test/fixtures";
 import { PROJECT_FALLBACK } from "../../theme/colors";
 import { NO_PROJECT } from "../WorkSignals";
-import { buildProjectNode, groupAgentsByWorktree, worktreeKey } from "./useProjectTree";
+import {
+  ancestorGroupKeys,
+  buildProjectNode,
+  groupAgentsByWorktree,
+  milestoneKey,
+  projectKey,
+  repoKey,
+  worktreeKey,
+} from "./useProjectTree";
 
 /** This file's own defaults over the shared fixtures (`src/test/fixtures.ts`):
  *  the sidebar tree is what groups by project and milestone, so a project is the
@@ -702,6 +710,82 @@ describe("buildProjectNode grouping modes", () => {
         ["AK-1", 0],
         ["AK-2", 1],
       ],
+    ]);
+  });
+});
+
+/**
+ * What a selection made *outside* the sidebar has to expand before its row is on
+ * screen. The nesting is configurable, so the answer is too: only a heading that
+ * is actually drawn gates its rows, and a suppressed one has no key at all.
+ */
+describe("ancestorGroupKeys", () => {
+  /** Two projects (so the project headings survive) with one of them split
+   *  across milestones (so those headings survive too) — the deepest shape the
+   *  tree can take. */
+  const deep = {
+    worktrees: [worktree("AK-1"), worktree("AK-2"), worktree("AK-3")],
+    tasks: [
+      task("AK-1", { project: "Core", projectMilestone: milestone("m1", "M1", 1) }),
+      task("AK-2", { project: "Core", projectMilestone: milestone("m2", "M2", 2) }),
+      task("AK-3", { project: "Infra" }),
+    ],
+  };
+
+  it("names every level of the deepest nesting, outermost first", () => {
+    const node = build({ ...deep, groupBy: "project_milestone" });
+    expect(ancestorGroupKeys([node], "AK-1", "acme/app")).toEqual([
+      repoKey("acme/app"),
+      projectKey("acme/app", "Core"),
+      milestoneKey("acme/app", "Core", "m1"),
+    ]);
+  });
+
+  // With grouping off the section is one suppressed band holding every row, and
+  // a suppressed heading renders its rows whatever the collapse record says —
+  // so expanding it would be expanding something that isn't there.
+  it("names only the repo section in the shallowest shape", () => {
+    const node = build({ ...deep, groupBy: "none" });
+    expect(ancestorGroupKeys([node], "AK-1", "acme/app")).toEqual([repoKey("acme/app")]);
+  });
+
+  // The default tree: one implicit project band whose heading is suppressed,
+  // real milestone headings inside it.
+  it("skips the level whose heading the mode suppresses", () => {
+    const node = build({ ...deep, groupBy: "milestone" });
+    expect(ancestorGroupKeys([node], "AK-1", "acme/app")).toEqual([
+      repoKey("acme/app"),
+      milestoneKey("acme/app", NO_PROJECT, "m1"),
+    ]);
+  });
+
+  // The repo's own checkout leads the section and sits under no band.
+  it("names just the section for the repo's own checkout", () => {
+    const node = build({ base: worktree("master"), groupBy: "project_milestone" });
+    expect(ancestorGroupKeys([node], "master", "acme/app")).toEqual([repoKey("acme/app")]);
+  });
+
+  it("returns nothing for a worktree the tree has no row for yet", () => {
+    const node = build({ ...deep, groupBy: "project_milestone" });
+    expect(ancestorGroupKeys([node], "AK-404", "acme/app")).toEqual([]);
+  });
+
+  // Two repos routinely carry the same ticket id. Naming the repo picks the one
+  // section that is meant…
+  it("reveals only the named repo's row when both repos carry the id", () => {
+    const mine = build({ repo: "acme/app", worktrees: [worktree("AK-1")] });
+    const theirs = build({ repo: "acme/api", worktrees: [worktree("AK-1")] });
+    expect(ancestorGroupKeys([mine, theirs], "AK-1", "acme/api")).toEqual([repoKey("acme/api")]);
+  });
+
+  // …but a caller whose repo hasn't caught up with the selection still gets a
+  // visible row, which beats a selection that looks like it did nothing.
+  it("reveals every section holding the id when the repo says nothing useful", () => {
+    const mine = build({ repo: "acme/app", worktrees: [worktree("AK-1")] });
+    const theirs = build({ repo: "acme/api", worktrees: [worktree("AK-1")] });
+    expect(ancestorGroupKeys([mine, theirs], "AK-1", "")).toEqual([
+      repoKey("acme/app"),
+      repoKey("acme/api"),
     ]);
   });
 });

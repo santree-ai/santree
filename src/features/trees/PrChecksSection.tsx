@@ -21,8 +21,15 @@ import { Button, Skeleton } from "../../components/primitives";
 import { usePrDetail, useReviewWorkItems } from "../../lib/queries";
 import { splitRepoSlug } from "../../lib/repo";
 import { checkStatusMeta } from "../../theme/colors";
-import { groupChecks, SKIPPED_KEY, tallyChecks, toggleCollapsed } from "../reviews/checks";
+import {
+  groupChecks,
+  isRunning,
+  SKIPPED_KEY,
+  tallyChecks,
+  toggleCollapsed,
+} from "../reviews/checks";
 import { QueueAction } from "../reviews/QueueAction";
+import { RunningDot } from "../reviews/RunningDot";
 import { useTrees } from "./model";
 
 /** An absolute timestamp, short — a check that ran twenty minutes ago and one
@@ -84,14 +91,17 @@ export function PrChecksSection({ pr }: { pr: ReviewPr }) {
           size={11}
           className={`flex-none text-muted-4 transition-transform ${open ? "" : "-rotate-90"}`}
         />
-        {tally.passing > 0 && (
-          <Tally color={checkStatusMeta.Success} n={tally.passing} label="passing" />
-        )}
+        {/* Same order as the sections below — failed, then still running, then the
+            outcomes you don't have to do anything about. The line and the list
+            can't rank the run differently. */}
         {tally.failing > 0 && (
           <Tally color={checkStatusMeta.Failure} n={tally.failing} label="failing" />
         )}
         {tally.running > 0 && (
-          <Tally color={checkStatusMeta.Pending} n={tally.running} label="running" />
+          <Tally color={checkStatusMeta.Pending} n={tally.running} label="running" pulse />
+        )}
+        {tally.passing > 0 && (
+          <Tally color={checkStatusMeta.Success} n={tally.passing} label="passing" />
         )}
         {tally.other > 0 && <Tally color={checkStatusMeta.Skipped} n={tally.other} label="other" />}
       </button>
@@ -120,6 +130,7 @@ export function PrChecksSection({ pr }: { pr: ReviewPr }) {
                     size={9}
                     className={`flex-none transition-transform ${groupCollapsed ? "-rotate-90" : ""}`}
                   />
+                  {g.running && <RunningDot />}
                   {g.checks.length} {g.label}
                 </button>
                 {!groupCollapsed &&
@@ -139,14 +150,17 @@ function Tally({
   color,
   n,
   label,
+  pulse = false,
 }: {
   color: { color: string; glyph: string };
   n: number;
   label: string;
+  /** Render the in-progress dot instead of the status glyph. */
+  pulse?: boolean;
 }) {
   return (
     <span className="flex items-center gap-1" style={{ color: color.color }}>
-      <span className="font-mono">{color.glyph}</span>
+      <span className="flex items-center font-mono">{pulse ? <RunningDot /> : color.glyph}</span>
       <span className="tabular-nums">{n}</span>
       <span className="text-muted-3">{label}</span>
     </span>
@@ -169,8 +183,11 @@ function CheckRow({ check, pr }: { check: PrCheck; pr: ReviewPr }) {
           size={9}
           className={`flex-none text-muted-4 transition-transform ${open ? "" : "-rotate-90"}`}
         />
-        <span className="flex-none font-mono text-[11px]" style={{ color: meta.color }}>
-          {meta.glyph}
+        <span
+          className="flex w-[1ch] flex-none items-center justify-center font-mono text-[11px]"
+          style={{ color: meta.color }}
+        >
+          {isRunning(check) ? <RunningDot label={meta.label} /> : meta.glyph}
         </span>
         <span className="min-w-0 flex-1 truncate text-[11.5px] text-fg-3">{check.name}</span>
       </button>

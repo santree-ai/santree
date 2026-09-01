@@ -6,8 +6,8 @@
  * "No changes." until its git status landed — asserting a fact the app didn't
  * have yet. These pin the two states apart.
  */
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChangedFile } from "../../bindings";
 import { ChangesList } from "./ChangesList";
@@ -23,14 +23,23 @@ vi.mock("./model", async (importOriginal) => ({
   }),
 }));
 
+// The list/tree choice is a persisted setting, so the mock has to be able to
+// answer either way — the windowing has to hold in both layouts, and the tree is
+// the one that renders folder rows on top of the files.
+const settings = vi.hoisted(() => ({ view: null as string | null }));
+
 // The list's data hooks and the commit box below it all reach for the query
 // layer; this suite is only about which branch the list renders.
 vi.mock("../../lib/queries", () => ({
   TREES_CHANGES_VIEW_KEY: "trees-changes-view",
-  useSetting: () => ({ data: null }),
+  useSetting: () => ({ data: settings.view }),
   useSetSetting: () => ({ mutate: vi.fn() }),
   useStageAction: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
 }));
+
+beforeEach(() => {
+  settings.view = null;
+});
 
 /** `status` is what the list splits on — tracked rows against the "Untracked
  *  files" section, and Discard against Delete — so it has to be overridable:
@@ -95,5 +104,73 @@ describe("ChangesList loading state", () => {
     );
     expect(screen.getByText("Changes")).toBeInTheDocument();
     expect(screen.getByText("Untracked files")).toBeInTheDocument();
+  });
+});
+
+/**
+ * A merge conflict makes the branch diff thousands of files wide until
+ * `git merge --continue` — a transient state that used to lock the pane up for
+ * a second on every optimistic staging patch. Only a window of rows is drawn.
+ * What must NOT change: the counts (they are the totals, not the window), and
+ * anything at the pane's normal scale.
+ */
+describe("ChangesList windowing", () => {
+  const many = (n: number, path: (i: number) => string) =>
+    Array.from({ length: n }, (_, i) => file(path(i), false));
+  /** File rows carry `selection-row`; folder rows don't, so this counts files. */
+  const fileRows = () => document.querySelectorAll(".selection-row").length;
+  const showMore = () => screen.queryByText("Show more");
+
+  it("draws every row of a normal-sized list, with no affordance", () => {
+    render(<ChangesList files={many(40, (i) => `src/f${i}.ts`)} committed={[]} />);
+    expect(fileRows()).toBe(40);
+    expect(showMore()).not.toBeInTheDocument();
+  });
+
+  it("caps a huge list and offers the rest behind one control", () => {
+    render(<ChangesList files={many(2500, (i) => `src/f${i}.ts`)} committed={[]} />);
+    expect(fileRows()).toBe(100);
+    expect(showMore()).toBeInTheDocument();
+    expect(screen.getByText("2,400 hidden")).toBeInTheDocument();
+  });
+
+  it("keeps the section header at the true total, not the drawn count", () => {
+    render(<ChangesList files={many(150, (i) => `src/f${i}.ts`)} committed={[]} />);
+    // The only bare "150" on screen is the "Changes" header's count; the staged
+    // counter renders as one "0/150 staged" string.
+    expect(screen.getByText("150")).toBeInTheDocument();
+    expect(fileRows()).toBe(100);
+  });
+
+  it("reveals more rows on click and drops the control at the end of the list", () => {
+    render(<ChangesList files={many(150, (i) => `src/f${i}.ts`)} committed={[]} />);
+    fireEvent.click(screen.getByText("Show more"));
+    expect(fileRows()).toBe(150);
+    expect(showMore()).not.toBeInTheDocument();
+  });
+
+  it("windows each section on its own, so a huge one can't hide a small one", () => {
+    render(
+      <ChangesList
+        files={[
+          ...many(150, (i) => `src/f${i}.ts`),
+          file("new.ts", false, { status: "Untracked" }),
+        ]}
+        committed={[]}
+      />,
+    );
+    expect(screen.getByText("new.ts")).toBeInTheDocument();
+    expect(screen.getAllByText("Show more")).toHaveLength(1);
+  });
+
+  it("windows the tree layout too, counting its folder rows against the cap", () => {
+    settings.view = "tree";
+    render(<ChangesList files={many(150, (i) => `src/d${i % 10}/f${i}.ts`)} committed={[]} />);
+    // 150 files + 11 folder rows, windowed to 100 drawn rows in total — so fewer
+    // than 100 of them are files.
+    expect(fileRows()).toBeLessThan(100);
+    expect(showMore()).toBeInTheDocument();
+    // Both the section header and the `src` folder row still say 150.
+    expect(screen.getAllByText("150")).toHaveLength(2);
   });
 });

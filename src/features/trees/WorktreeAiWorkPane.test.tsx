@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ReviewBrief, ReviewPr } from "../../bindings";
 
@@ -9,6 +9,7 @@ const spies = vi.hoisted(() => ({
   addItem: vi.fn(),
   startReview: vi.fn(),
   startWork: vi.fn(),
+  starting: false,
   brief: null as ReviewBrief | null,
 }));
 
@@ -39,9 +40,11 @@ vi.mock("./model", () => ({
   }),
 }));
 
+// Both launchers report whether their (multi-second) launch is still running, so
+// the pane's buttons can show it — see `StartWorkLauncher`.
 vi.mock("../reviews/useStartWork", () => ({
-  useStartAiReviewInWorktree: () => spies.startReview,
-  useStartWorkInWorktree: () => spies.startWork,
+  useStartAiReviewInWorktree: () => ({ start: spies.startReview, starting: spies.starting }),
+  useStartWorkInWorktree: () => ({ start: spies.startWork, starting: spies.starting }),
 }));
 
 import { WorktreeAiWorkPane } from "./WorktreeAiWorkPane";
@@ -70,6 +73,10 @@ function brief(over: Partial<ReviewBrief> = {}): ReviewBrief {
 }
 
 describe("WorktreeAiWorkPane", () => {
+  beforeEach(() => {
+    spies.starting = false;
+  });
+
   /** The merge is the whole point: reading the brief is where you decide what to
    *  fix, and the queue is where a fix goes. Two tabs meant a switch per item. */
   it("renders the queue and the brief in one pane, queue first", () => {
@@ -124,6 +131,25 @@ describe("WorktreeAiWorkPane", () => {
     render(<WorktreeAiWorkPane pr={{ repo: "acme/app", number: 7 } as never} />);
 
     expect(screen.getByRole("button", { name: /Start Codex review/ })).toBeInTheDocument();
+  });
+
+  /** The launch is seconds of backend work (fetch the PR, build the diff index,
+   *  render the prompt) before its tab can run anything. For as long as the guard
+   *  was a bare ref that ran without a render, the button that started it said
+   *  "Start" throughout — so the only feedback a click had was more clicking. */
+  it("shows the review launch running, and refuses a second click", () => {
+    spies.brief = null;
+    spies.starting = true;
+    spies.startReview.mockClear();
+
+    render(<WorktreeAiWorkPane pr={{ repo: "acme/app", number: 7 } as never} />);
+
+    const button = screen.getByRole("button", { name: /Starting/ });
+    expect(button).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /Start Codex review/ })).toBeNull();
+
+    fireEvent.click(button);
+    expect(spies.startReview).not.toHaveBeenCalled();
   });
 
   /** The queue rows are keyed `(pr_repo, pr_number)` in SQLite, so there is

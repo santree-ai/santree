@@ -55,6 +55,8 @@ const inbox: ReviewInbox = {
       prs: [pr("t1", 498, "Migrate billing jobs", "acme/platform")],
     },
   ],
+  org: "acme",
+  githubConnected: true,
 };
 
 describe("ReviewsSidebarView", () => {
@@ -174,7 +176,13 @@ describe("ReviewsSidebarView", () => {
     ]);
     const { container } = render(
       <ReviewsSidebarView
-        inbox={{ mine: [], requested: [parent, child], teams: [] }}
+        inbox={{
+          mine: [],
+          requested: [parent, child],
+          teams: [],
+          org: "acme",
+          githubConnected: true,
+        }}
         loading={false}
         total={2}
         activeId={null}
@@ -405,10 +413,13 @@ describe("ReviewsSidebarView", () => {
     expect(screen.getAllByText("Tighten rate limiter")).toHaveLength(1);
   });
 
-  it("shows an empty state when there are no PRs", () => {
+  // An empty inbox and the merge queue's "no queue" sat side by side saying
+  // nothing about what either had asked. The inbox is org-wide, so it names the
+  // org; the merge queue names its owner/name (see MergeQueuePane).
+  it("names the org it searched when there are no PRs", () => {
     render(
       <ReviewsSidebarView
-        inbox={{ mine: [], requested: [], teams: [] }}
+        inbox={{ mine: [], requested: [], teams: [], org: "acme", githubConnected: true }}
         loading={false}
         total={0}
         activeId={null}
@@ -416,5 +427,26 @@ describe("ReviewsSidebarView", () => {
       />,
     );
     expect(screen.getByText("No open pull requests")).toBeInTheDocument();
+    expect(screen.getByText(/acme org/)).toBeInTheDocument();
+  });
+
+  // A signed-out `gh` returns the same empty inbox as a quiet morning. The two
+  // must not render the same.
+  it("reports a disconnected GitHub instead of an empty inbox", () => {
+    const onOpenGitHubSettings = vi.fn();
+    render(
+      <ReviewsSidebarView
+        inbox={{ mine: [], requested: [], teams: [], org: "", githubConnected: false }}
+        loading={false}
+        total={0}
+        activeId={null}
+        onSelect={vi.fn()}
+        onOpenGitHubSettings={onOpenGitHubSettings}
+      />,
+    );
+    expect(screen.queryByText("No open pull requests")).not.toBeInTheDocument();
+    expect(screen.getByText("GitHub isn't connected")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    expect(onOpenGitHubSettings).toHaveBeenCalled();
   });
 });

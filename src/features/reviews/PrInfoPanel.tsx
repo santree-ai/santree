@@ -121,7 +121,8 @@ export function PrInfoPanel({
             detail={detail}
             drafts={drafts ?? []}
             onFocusFile={focusFile}
-            onStartWork={startWork}
+            onStartWork={startWork.start}
+            startingWork={startWork.starting}
           />
           <ReviewBriefSection
             pr={pr}

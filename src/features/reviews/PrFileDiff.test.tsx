@@ -197,9 +197,7 @@ describe.each(["unified", "split"] as const)("commenting on a range (%s)", (mode
     fireEvent.mouseOver(gutter(container, mode, 43).cell);
     fireEvent.mouseUp(document);
 
-    await waitFor(() =>
-      expect(container.textContent).toContain("Add a comment on lines R41 to R43"),
-    );
+    await waitFor(() => expect(container.textContent).toContain("Add a comment on lines 41–43"));
     expect(getByText("Start a review")).toBeTruthy();
   });
 
@@ -224,9 +222,7 @@ describe.each(["unified", "split"] as const)("commenting on a range (%s)", (mode
     fireEvent.mouseOver(content(container, mode, 43));
     fireEvent.mouseUp(document);
 
-    await waitFor(() =>
-      expect(container.textContent).toContain("Add a comment on lines R41 to R43"),
-    );
+    await waitFor(() => expect(container.textContent).toContain("Add a comment on lines 41–43"));
   });
 
   it("still opens on one line when the + is only clicked", async () => {
@@ -245,7 +241,7 @@ describe.each(["unified", "split"] as const)("commenting on a range (%s)", (mode
     fireEvent.mouseDown(gutter(container, mode, 42).plus);
     fireEvent.mouseUp(document);
 
-    await waitFor(() => expect(container.textContent).toContain("Add a comment on line R42"));
+    await waitFor(() => expect(container.textContent).toContain("Add a comment on line 42"));
   });
 
   it("prefills a suggestion with every line of the range", async () => {
@@ -305,13 +301,13 @@ describe.each(["unified", "split"] as const)("commenting on a range (%s)", (mode
       const left = render(diff);
       press(left.container, "old", 11);
       await waitFor(() =>
-        expect(left.container.textContent).toContain("Add a comment on line L11"),
+        expect(left.container.textContent).toContain("Add a comment on old line 11"),
       );
 
       const right = render(diff);
       press(right.container, "new", 21);
       await waitFor(() =>
-        expect(right.container.textContent).toContain("Add a comment on line R21"),
+        expect(right.container.textContent).toContain("Add a comment on line 21"),
       );
     });
 
@@ -339,9 +335,7 @@ describe.each(["unified", "split"] as const)("commenting on a range (%s)", (mode
       fireEvent.mouseOver(content(container, mode, 43));
       fireEvent.mouseUp(document);
 
-      await waitFor(() =>
-        expect(container.textContent).toContain("Add a comment on lines R41 to R43"),
-      );
+      await waitFor(() => expect(container.textContent).toContain("Add a comment on lines 41–43"));
     });
   }
 });

@@ -38,6 +38,10 @@ function basename(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
+/** Both header badges, so they are the same shape: same radius, same padding,
+ *  same height. They differ only in what they say and in their tint. */
+const BADGE = "gap-1 px-1.5 py-px text-[9.5px] font-medium";
+
 export function ReviewDraftCard({
   draft,
   target,
@@ -86,25 +90,41 @@ export function ReviewDraftCard({
 
   return (
     <div className="border-l-2 bg-app" style={{ borderColor: palette.purple }}>
-      <div className="flex items-center gap-2 px-3 py-1.5">
-        <AgentIcon kind={draft.agentKind} size={11} className="flex-none text-muted-3" />
-        <span className="font-mono text-[10.5px] text-muted-3">
-          {basename(draft.path)} · {anchor.toLowerCase()}
+      {/* One line-box height (`leading-4`) across three type sizes, so the path,
+          the badges and the time sit on one line instead of three near-misses. */}
+      <div className="flex items-center gap-2 px-3 py-1.5 leading-4">
+        <span className="flex min-w-0 items-center text-[10.5px] text-muted-3">
+          {/* Only the path is code — the anchor is prose, so it stays in the UI
+              face. The title carries the *whole* path because this card also
+              renders in Trees' PR pane, away from its file, where `a/util.py`
+              and `b/util.py` are the same basename. */}
+          <span className="truncate font-mono" title={draft.path}>
+            {basename(draft.path)}
+          </span>
+          <span className="flex-none whitespace-pre"> · {anchor}</span>
         </span>
+        {/* The agent's mark rides *inside* the badge rather than leading the row:
+            as a separate 11px logomark in the dimmest token it read as a smudge,
+            and it said "AI" twice over. Here it inherits the pill's purple, and
+            one badge answers both what this is and who wrote it. */}
         <Pill
           color={palette.purple}
-          className="px-1 py-px text-[9.5px] font-medium"
-          title="Written by the AI review. Only you can see it until you add it to your review"
+          className={BADGE}
+          title={`Written by the ${draft.agentKind} review. Only you can see it until you add it to your review`}
         >
+          <AgentIcon kind={draft.agentKind} size={10} />
           AI draft
         </Pill>
+        {/* Amber, not the dimmest token in the palette: this is the row's warning
+            — publishing is refused while it stands. */}
         {stale && (
-          <span
-            className="rounded bg-input px-1 py-px text-[9.5px] text-muted-4"
+          <Pill
+            color={palette.amber}
+            className={BADGE}
             title="Written against an earlier commit. The PR has moved since, so these line numbers may point at different code."
           >
             Older commit
-          </span>
+          </Pill>
         )}
         <RelativeTime
           ms={draft.updatedAtMs}

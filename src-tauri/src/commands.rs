@@ -21,7 +21,7 @@ use santree_core::{
         AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
         ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
         EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget, GithubStatus, LegacyCliMigration,
-        LinearApiBudget, LinearOrg, LinearStatus, MergeQueue, NewInlineComment, NewPr,
+        LinearApiBudget, LinearOrg, LinearStatus, MergeQueueView, NewInlineComment, NewPr,
         NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo,
         RepoBranch, ResourceUsage, ReviewBrief, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
         ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail,
@@ -889,9 +889,10 @@ struct SessionContext {
     agent: Option<AgentKind>,
     /// The pull request whose review tools this session launches with, as
     /// `(owner, name, number)`. Only the two review-scoped surfaces have one, and
-    /// it comes from the terminal key (checked against the registered origin by
-    /// [`validate_agent_cwd`]) or from the tab's own persisted row — never from a
-    /// path the webview supplied.
+    /// it comes from the terminal key (checked against the registry by
+    /// [`validate_agent_cwd`], which refuses a PR no registered checkout is a
+    /// clone of) or from the tab's own persisted row — never from a path the
+    /// webview supplied.
     review_pr: Option<(String, String, u32)>,
 }
 
@@ -1015,14 +1016,20 @@ async fn validate_agent_cwd(
     }
     if term_key.starts_with("review:") || term_key.starts_with("ai-review:") {
         let (requested_owner, requested_name, number) = review_identity(term_key)?;
-        let (owner, name) = crate::reviews::origin(db, repo)
-            .await
-            .map_err(|_| "registered repository origin is unavailable".to_string())?;
-        if !requested_owner.eq_ignore_ascii_case(&owner)
-            || !requested_name.eq_ignore_ascii_case(&name)
-        {
-            return Err("review terminal repository does not match the registered origin".into());
-        }
+        // The checkout lives under whichever *registered* repo is a clone of the
+        // PR's repo, which need not be the active one — the same resolution that
+        // created it. Still santree's own answer, never the webview's: an
+        // unregistered repo has no root here and the launch is refused.
+        let (root, owner, name) =
+            crate::reviews::repo_for_pr(db, repo, &format!("{requested_owner}/{requested_name}"))
+                .await
+                .map_err(|_| "registered repository origin is unavailable".to_string())?
+                .ok_or_else(|| {
+                    "review terminal repository is not a registered checkout".to_string()
+                })?;
+        let repo_root = std::fs::canonicalize(&root)
+            .map_err(|_| "registered repository path is unavailable".to_string())?;
+        let repo_root = repo_root.as_path();
         let santree_dir = repo_root.join(".santree");
         let reviews_dir = santree_dir.join(crate::reviews::REVIEWS_DIR);
         let dir = crate::reviews::review_dir_name(&owner, &name, number)
@@ -1255,8 +1262,8 @@ pub async fn pr_tickets(
 
 /// Find-or-create the read-only checkout of a PR's head for an AI review session
 /// to read real code in — a detached worktree under `.santree/reviews/`, pruned to
-/// the few most recent. `None` when the PR lives in a repo the active santree repo
-/// isn't a clone of; the session then runs diff-only.
+/// the few most recent. `None` when the PR lives in a repo *none* of the
+/// registered ones is a clone of; the session then runs diff-only.
 #[tauri::command]
 #[specta::specta]
 pub async fn review_workspace(
@@ -1267,15 +1274,18 @@ pub async fn review_workspace(
     Ok(reviews::review_workspace(&db, &repo, &target).await?)
 }
 
-/// Delete a PR's review checkout. Idempotent.
+/// Delete a PR's review checkout. Idempotent. `pr_repo` names the checkout to
+/// delete, because it may live under a registered repo other than the active one
+/// — the same resolution `review_workspace` created it through.
 #[tauri::command]
 #[specta::specta]
 pub async fn remove_review_workspace(
     repo: String,
+    pr_repo: String,
     number: u32,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
-    Ok(reviews::remove_review_workspace(&db, &repo, number).await?)
+    Ok(reviews::remove_review_workspace(&db, &repo, &pr_repo, number).await?)
 }
 
 /// The cached AI review brief for a PR (summary, reading order, watch-outs), or
@@ -1532,11 +1542,11 @@ pub async fn publish_review_drafts(
 }
 
 /// The merge queue for the active `repo`'s default branch — the ordered list of
-/// PRs waiting to merge, so the user can see where their own PRs sit. `None` when
-/// `gh` isn't authenticated or the repo has no merge queue enabled.
+/// PRs waiting to merge, so the user can see where their own PRs sit, wrapped in
+/// the `owner/name` it was asked about and whether `gh` could be asked at all.
 #[tauri::command]
 #[specta::specta]
-pub async fn merge_queue(repo: String, db: State<'_, Db>) -> CmdResult<Option<MergeQueue>> {
+pub async fn merge_queue(repo: String, db: State<'_, Db>) -> CmdResult<MergeQueueView> {
     Ok(reviews::merge_queue(&db, &repo).await?)
 }
 
@@ -2668,7 +2678,7 @@ mod tests {
 
     /// The other end of the same scoping: an `ai-review:` terminal names its PR
     /// in the key, and `validate_agent_cwd` is what checks that claim against the
-    /// registered origin before it is used to find a config file.
+    /// registry before it is used to find a config file.
     #[tokio::test]
     async fn a_review_terminal_key_scopes_the_tools_to_the_pr_it_names() {
         let (base, db) = test_db("session-context-key").await;
@@ -2759,9 +2769,13 @@ mod tests {
             repo.to_str().unwrap(),
         )
         .await;
+        // `a/b-c` is a real slug that simply isn't in the registry, so that is what
+        // it is refused as. Were it registered, it would resolve to *its own* root
+        // and its own directory name — which is exactly what the assertion above
+        // says can never be `a-b/c`'s.
         assert_eq!(
             result.unwrap_err(),
-            "review terminal repository does not match the registered origin"
+            "review terminal repository is not a registered checkout"
         );
         std::fs::remove_dir_all(base).unwrap();
     }

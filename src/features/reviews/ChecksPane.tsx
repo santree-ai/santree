@@ -19,7 +19,8 @@ import { usePrCheckLog, usePrDetail } from "../../lib/queries";
 import { splitRepoSlug } from "../../lib/repo";
 import { checkStatusMeta } from "../../theme/colors";
 import { CheckLogBody } from "./CheckLog";
-import { groupChecks, SKIPPED_KEY, toggleCollapsed } from "./checks";
+import { groupChecks, isRunning, SKIPPED_KEY, toggleCollapsed } from "./checks";
+import { RunningDot } from "./RunningDot";
 
 // GitHub annotation levels → tint. `notice` is informational; error/warning
 // map to the shared status palette so they read the same as check glyphs.
@@ -76,7 +77,7 @@ export function ChecksPane({ pr }: { pr: ReviewPr }) {
                 size={11}
                 className={`flex-none transition-transform ${isCollapsed ? "-rotate-90" : ""}`}
               />
-              {g.glyph} {g.checks.length} {g.label}
+              {g.running ? <RunningDot /> : g.glyph} {g.checks.length} {g.label}
             </button>
             {!isCollapsed && <CheckGroup checks={g.checks} owner={owner} name={name} />}
           </section>
@@ -119,8 +120,11 @@ function CheckRow({ check, owner, name }: { check: PrCheck; owner: string; name:
 
   const header = (
     <>
-      <span className="flex-none font-mono text-[12px]" style={{ color: m.color }}>
-        {m.glyph}
+      <span
+        className="flex w-[1ch] flex-none items-center justify-center font-mono text-[12px]"
+        style={{ color: m.color }}
+      >
+        {isRunning(check) ? <RunningDot label={m.label} /> : m.glyph}
       </span>
       <span className="min-w-0 flex-1 truncate text-[12.5px] text-fg-2">{check.name}</span>
       {check.description && (

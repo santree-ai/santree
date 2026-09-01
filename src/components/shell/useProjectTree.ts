@@ -168,6 +168,63 @@ export function worktreeKey(repo: string, worktreeId: string): string {
   return `${repo}\v${worktreeId}`;
 }
 
+/**
+ * Section keys for the sidebar's persisted collapse record: a repo, a Linear
+ * project band inside it, and a milestone band inside that. Namespaced so all
+ * three can share a single record; the milestone key carries its project because
+ * two projects routinely hold a band with the same name (their "No milestone").
+ */
+export const repoKey = (repo: string) => `repo:${repo}`;
+export const projectKey = (repo: string, key: string) => `proj:${repo}:${key}`;
+export const milestoneKey = (repo: string, project: string, key: string) =>
+  `ms:${repo}:${project}:${key}`;
+
+/**
+ * The sections that have to be open for one worktree's row to be on screen,
+ * outermost first — and only the ones that actually gate it: a suppressed
+ * heading (see {@link ProjectNode.showProjects} and
+ * {@link LinearProjectNode.showMilestones}) renders its rows unconditionally, so
+ * there is nothing to expand at that level.
+ *
+ * This is what a selection made *outside* the sidebar needs. The row it lands on
+ * is worthless as confirmation while it sits folded away inside a collapsed
+ * parent, and the tree has no other way to know which parents those are.
+ *
+ * `repo` narrows the answer without restricting it: two repos routinely carry
+ * the same ticket id, and revealing both beats revealing neither when the active
+ * repo hasn't caught up with the selection yet.
+ *
+ * Exported for testing.
+ */
+export function ancestorGroupKeys(
+  projects: ProjectNode[],
+  worktreeId: string,
+  repo?: string | null,
+): string[] {
+  const holders = projects
+    .map((project) => ({ project, keys: sectionKeysFor(project, worktreeId) }))
+    .filter((hit): hit is { project: ProjectNode; keys: string[] } => hit.keys !== null);
+  const scoped = holders.filter((hit) => hit.project.repo === repo);
+  return (scoped.length > 0 ? scoped : holders).flatMap((hit) => hit.keys);
+}
+
+/** One section's keys, or `null` when the worktree isn't in it. */
+function sectionKeysFor(project: ProjectNode, worktreeId: string): string[] | null {
+  // The repo's own checkout leads the section and sits under no band.
+  if (project.base?.worktree.id === worktreeId) return [repoKey(project.repo)];
+  for (const band of project.linearProjects) {
+    for (const milestone of band.milestones) {
+      if (!milestone.worktrees.some((node) => node.worktree.id === worktreeId)) continue;
+      return [
+        repoKey(project.repo),
+        ...(project.showProjects ? [projectKey(project.repo, band.key)] : []),
+        ...(band.showMilestones ? [milestoneKey(project.repo, band.key, milestone.key)] : []),
+      ];
+    }
+  }
+  return null;
+}
+
 /** A worktree's stable sort label — the tiebreak that keeps equal rows still. */
 function labelOf(worktree: Worktree): string {
   return worktree.title || worktree.id;

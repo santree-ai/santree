@@ -29,13 +29,21 @@ import { CommentComposer } from "./CommentComposer";
 import type { CommentTarget } from "./commentTarget";
 import { patchLineRange } from "./patchLines";
 
-/** GitHub's own shorthand for a diff anchor: side letter + line number, as in
- *  "line R4" (new side) or "lines L10 to L14" (old side). */
+/**
+ * A diff anchor in words: "line 4", "lines 10–14", and — for the old side —
+ * "old line 4".
+ *
+ * Not GitHub's `R4`/`L4` shorthand. That letter is the diff's internal
+ * coordinate: each side is numbered independently, so the number alone is
+ * ambiguous — but a reader has to be taught the letter before it says anything,
+ * and every anchor santree shows in prose ("Add a comment on …") would carry it.
+ * The side is only worth a word when it isn't the new code you are reading.
+ */
 export function anchorLabel(startLine: number | null, line: number, onRight: boolean): string {
-  const side = onRight ? "R" : "L";
+  const side = onRight ? "" : "old ";
   return startLine === null || startLine >= line
-    ? `line ${side}${line}`
-    : `lines ${side}${startLine} to ${side}${line}`;
+    ? `${side}line ${line}`
+    : `${side}lines ${startLine}–${line}`;
 }
 
 export function InlineCommentBox({

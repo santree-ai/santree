@@ -20,6 +20,7 @@
  * `ReviewsSidebar` wires the view-model; `ReviewsSidebarView` is the pure render
  * (split out so it can be tested without AppContext/router).
  */
+import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
 import type { ReviewInbox, ReviewPr, TeamReviews, TicketRef } from "../../bindings";
@@ -59,6 +60,7 @@ import {
   reviewAgeColor,
   reviewDecisionMeta,
 } from "../../theme/colors";
+import { GitHubNotConnected } from "./GitHubNotConnected";
 import {
   type Grouping,
   groupPrs,
@@ -106,7 +108,8 @@ export function ReviewsSidebar() {
     setSort,
     ticketFor,
   } = useReviewsModel();
-  const { data: queue } = useMergeQueue(repo);
+  const { data: mergeQueue } = useMergeQueue(repo);
+  const navigate = useNavigate();
   // What this rail actually renders — not `allPrs`, which still carries the
   // viewer's own PRs for the deep-link and "is this mine" lookups elsewhere. A
   // header count larger than the list under it is just a wrong number.
@@ -127,8 +130,9 @@ export function ReviewsSidebar() {
       ticketFor={ticketFor}
       onOpenMergeQueue={openMergeQueue}
       mergeQueueActive={showMergeQueue}
-      mergeQueueCount={queue?.entries.length ?? 0}
-      mergeQueueHasMine={queue?.entries.some((e) => e.isMine) ?? false}
+      mergeQueueCount={mergeQueue?.queue?.entries.length ?? 0}
+      mergeQueueHasMine={mergeQueue?.queue?.entries.some((e) => e.isMine) ?? false}
+      onOpenGitHubSettings={() => navigate({ to: "/settings", search: { section: "github" } })}
     />
   );
 }
@@ -148,6 +152,7 @@ export function ReviewsSidebarView({
   mergeQueueActive = false,
   mergeQueueCount = 0,
   mergeQueueHasMine = false,
+  onOpenGitHubSettings,
 }: {
   inbox: ReviewInbox | undefined;
   loading: boolean;
@@ -165,6 +170,9 @@ export function ReviewsSidebarView({
   mergeQueueCount?: number;
   /** True when the viewer has a PR in the queue — nudges the button to accent. */
   mergeQueueHasMine?: boolean;
+  /** Jumps to Settings → Integrations → GitHub, where `gh` signs in. Optional for
+   *  the same reason as `onOpenMergeQueue`: the pure render stays router-free. */
+  onOpenGitHubSettings?: () => void;
 }) {
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const toggle = (key: string) => {
@@ -248,12 +256,23 @@ export function ReviewsSidebarView({
       <div className="flex-1 overflow-y-auto p-2">
         {loading && total === 0 && <SidebarSkeleton />}
 
+        {/* An empty inbox and a missing merge queue are answers to different
+            questions — this one is org-wide — so it names the org it searched,
+            and says outright when nothing was searched at all. */}
         {!loading && total === 0 && (
           <div className="mt-10">
-            <EmptyState
-              title="No open pull requests"
-              subtitle="Authored PRs and review requests for this org will show up here."
-            />
+            {inbox && !inbox.githubConnected ? (
+              <GitHubNotConnected onOpenSettings={onOpenGitHubSettings} />
+            ) : (
+              <EmptyState
+                title="No open pull requests"
+                subtitle={
+                  inbox?.org
+                    ? `No review requests across the ${inbox.org} org are waiting on you.`
+                    : "Review requests across your org will show up here."
+                }
+              />
+            )}
           </div>
         )}
 

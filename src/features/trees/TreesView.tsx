@@ -11,12 +11,15 @@
  *  would carry act on the checkout as a place on disk — they live on that row's
  *  right-click menu. Which worktree is selected comes from the app shell's project
  *  tree; with nothing selected the view shows its launch surface. */
+import { useEffect } from "react";
+
 import type { Worktree, WorktreeTab } from "../../bindings";
 import { CloseIcon, PrIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import { Button, EmptyState, TerminalActivity } from "../../components/primitives";
-import { useWorktreeTabLaunch } from "../../lib/queries";
+import { useWorktreeTabLaunch, useWorktreeTabs } from "../../lib/queries";
 import { useAgentRuns } from "../../state/AgentRuns";
+import { useAppUi } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
 import { agentProvider } from "../terminal/agentProvider";
 import { CheckLogView } from "./CheckLogView";
@@ -33,6 +36,7 @@ import { WorktreeTerminal } from "./WorktreeTerminal";
 
 function TreesContent() {
   const { worktrees, active, loading } = useTrees();
+  useAbandonedLaunchTabs();
 
   // Nothing selected and no worktrees yet: show a loading state while the first
   // fetch is in flight (otherwise the empty state flashes as if nothing exists),
@@ -70,6 +74,31 @@ function TreesContent() {
       )}
     </div>
   );
+}
+
+/** Close the tab a failed launch left behind.
+ *
+ *  A review launch opens its tab at the click, before the command that renders its
+ *  prompt has even been sent — which is the whole point, but it means a failure
+ *  has to un-open it. Left alone the row is an agent tab holding a session on paths
+ *  that will never arrive: permanently "Reading pull request…", and only closable
+ *  by hand. Trees does it rather than the launcher because tab rows are Trees'
+ *  state, and the launcher runs from Reviews too. */
+function useAbandonedLaunchTabs() {
+  const { repo, closeTab } = useTrees();
+  // The repo's tabs, not the selected worktree's: a launch takes seconds, and the
+  // user is free to walk to another worktree inside them.
+  const { data: tabs = [] } = useWorktreeTabs(repo);
+  const { abandonedLaunchTabs, consumeAbandonedLaunchTab } = useAppUi();
+  useEffect(() => {
+    for (const id of abandonedLaunchTabs) {
+      // Not every abandoned launch got as far as a row (the Reviews path can fail
+      // in `createWorktree`, before there is a worktree to open a tab on), so the
+      // id is consumed either way.
+      if (tabs.some((tab) => tab.id === id)) closeTab(id);
+      consumeAbandonedLaunchTab(id);
+    }
+  }, [abandonedLaunchTabs, tabs, closeTab, consumeAbandonedLaunchTab]);
 }
 
 /** Shown while a freshly-launched worktree is still being created (no path/branch
@@ -242,11 +271,18 @@ function AgentTabPane({
   const { clearAgentLaunch } = useAgentRuns();
   const review = tab.kind === "fixCi" || tab.kind === "aiReview";
   const handoff = fixCiLaunchFor(tab.id);
-  const promptPath = handoff?.promptPath;
+  // The tab is opened at the click, so the first hand-off it gets is identity
+  // only — the command that renders the prompt and writes the settings/MCP paths
+  // is still running. That is *not* a launch: spawning against a missing MCP
+  // config would hand the agent the standard tool grants and a stale diff index.
+  // So it holds exactly as a restart does, and says which wait it is in.
+  const rendering = handoff?.phase === "preparing" ? handoff : undefined;
+  const ready = rendering ? undefined : handoff;
+  const promptPath = ready?.promptPath;
   // Only after a restart (or a reload) is the hand-off missing; re-derive from the
   // row then, and hold the launch until it lands.
   const persisted = useWorktreeTabLaunch(repo, tab.id, review && !handoff);
-  const launch = handoff ?? persisted.data ?? undefined;
+  const launch = ready ?? persisted.data ?? undefined;
   const work = useWorkLaunch(repo, worktree, tab.id);
 
   const { preparing, seed, onExited, agent } = useAgentTab({
@@ -286,21 +322,31 @@ function AgentTabPane({
     );
   }
   if (preparing) {
-    return (
-      <EmptyState
-        className="h-full"
-        title={
-          work.launching
-            ? "Preparing the agent…"
-            : `Starting ${agentProvider(tab.agentKind ?? "Claude").label}…`
+    // Say which wait this is, not "please wait". Each line is something the
+    // frontend can actually observe — the render command still in flight, the
+    // work prompt still being written, the session itself resolving — so the copy
+    // can never claim progress the app hasn't seen. The terminal replaces this in
+    // the same tab; there is no second place to look.
+    const label = agentProvider(tab.agentKind ?? "Claude").label;
+    const phase = rendering
+      ? {
+          title: `Reading pull request #${rendering.pr.number}…`,
+          subtitle: `Rendering the prompt and ${label}'s review tools. The terminal opens here when they land.`,
         }
-        subtitle={
-          review
-            ? "Reading the pull request. The terminal opens in a moment."
-            : "The terminal opens in a moment."
-        }
-      />
-    );
+      : // No hand-off at all: this tab outlived the app that opened it, and its
+        // settings and MCP paths are being re-derived from the persisted row.
+        persisted.isLoading
+        ? {
+            title: "Restoring the review session…",
+            subtitle: `Re-deriving ${label}'s review tools from the saved tab.`,
+          }
+        : {
+            title: work.launching ? "Preparing the agent…" : `Starting ${label}…`,
+            subtitle: review
+              ? "The prompt is ready. The terminal opens here in a moment."
+              : "The terminal opens in a moment.",
+          };
+    return <EmptyState className="h-full" title={phase.title} subtitle={phase.subtitle} />;
   }
   return (
     <WorktreeTerminal

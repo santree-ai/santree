@@ -49,6 +49,7 @@ export function ReviewBriefSection({
   santreeRepo: repo,
   onJump: focusFile,
   onStartReview,
+  startingReview = false,
   canPickAgent = false,
 }: {
   pr: ReviewPr;
@@ -63,6 +64,9 @@ export function ReviewBriefSection({
    *  (Settings owns {@link REVIEW_AGENT_KEY}). Omit to render the brief read-only,
    *  which is what a host does when it can't launch one. */
   onStartReview?: (agent?: AgentKind) => void;
+  /** That launch is running. Only a host whose launcher is asynchronous sets it —
+   *  Reviews' request opens a pane on the spot and is never in flight. */
+  startingReview?: boolean;
   /** Offer the "run it as a different agent" picker beside the run button. Only a
    *  host that actually *forwards* the argument sets this: the Reviews tab's
    *  request is a nonce that always opens its configured agent's tab (and it has
@@ -91,6 +95,15 @@ export function ReviewBriefSection({
   // disagree about the same PR.
   const stale = reviewBriefStale(brief, pr.headSha);
 
+  // The launch is several seconds of backend work before anything appears, so
+  // every control that can start one says so while one is running — and refuses
+  // the second click that would otherwise look like the fix for the silence.
+  const runLabel = startingReview
+    ? "Starting…"
+    : liveSession
+      ? `Open ${actionProvider.label} review`
+      : "Review again";
+
   const run = (agent?: AgentKind) => {
     if (!onStartReview) return;
     if (!pr.headSha) {
@@ -115,6 +128,7 @@ export function ReviewBriefSection({
               size="sm"
               variant="ghost"
               onClick={() => run()}
+              disabled={startingReview}
               title={
                 liveSession
                   ? `Show the ${actionProvider.label} review session`
@@ -122,7 +136,7 @@ export function ReviewBriefSection({
               }
             >
               {liveSession ? <AgentIcon kind={actionAgent} size={10} /> : <RefreshIcon size={10} />}
-              {liveSession ? `Open ${actionProvider.label} review` : "Review again"}
+              {runLabel}
             </Button>
             {canPickAgent && <AgentPicker onPick={run} />}
           </div>
@@ -139,8 +153,14 @@ export function ReviewBriefSection({
             slowLabel="Still reading. A large diff takes a few minutes."
           />
           {onStartReview && (
-            <Button size="sm" variant="ghost" className="mt-2" onClick={() => run()}>
-              Open {actionProvider.label} review
+            <Button
+              size="sm"
+              variant="ghost"
+              className="mt-2"
+              onClick={() => run()}
+              disabled={startingReview}
+            >
+              {startingReview ? "Starting…" : `Open ${actionProvider.label} review`}
             </Button>
           )}
         </div>
@@ -154,9 +174,9 @@ export function ReviewBriefSection({
           </p>
           {onStartReview && (
             <div className="flex items-center gap-0.5">
-              <Button size="sm" variant="primary" onClick={() => run()}>
+              <Button size="sm" variant="primary" onClick={() => run()} disabled={startingReview}>
                 <AgentIcon kind={defaultAgent} size={11} />
-                Start {agentProvider(defaultAgent).label} review
+                {startingReview ? "Starting…" : `Start ${agentProvider(defaultAgent).label} review`}
               </Button>
               {canPickAgent && <AgentPicker onPick={run} />}
             </div>

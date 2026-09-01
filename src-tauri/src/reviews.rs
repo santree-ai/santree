@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 
 use santree_core::domain::{
-    CheckLog, FileSource, MergeQueue, NewInlineComment, PrDetail, PrLabel, ReviewEvent,
+    CheckLog, FileSource, MergeQueueView, NewInlineComment, PrDetail, PrLabel, ReviewEvent,
     ReviewInbox, ReviewPr, ReviewTarget,
 };
 
@@ -61,29 +61,80 @@ pub(crate) fn review_dir_name(owner: &str, name: &str, number: u32) -> Result<St
     Ok(dir)
 }
 
+/// The registered checkout whose `origin` is `pr_repo`, as `(local root, owner,
+/// name)`.
+///
+/// Searched across the **whole** registry, starting with `active`. The inbox is
+/// org-scoped, so a PR routinely belongs to a sibling project the user has also
+/// registered; matching only the active repo made those degrade to a diff-only
+/// review of code already sitting on disk. `Ok(None)` when nothing registered
+/// points at that slug — still the common case, and still not an error.
+///
+/// `pr_repo` crosses IPC and the answer becomes a filesystem root and a `git`
+/// argv, so it is parsed into exactly two components and compared one component
+/// at a time, ASCII-case-insensitively (how GitHub itself treats them). A prefix
+/// or `contains` test would match `acme/web-evil` against `acme/web` and hand a
+/// PR someone else's checkout. The returned owner/name come from *git's* answer
+/// for the matched root, not from the argument, so every name downstream is one
+/// the repo on disk agrees with.
+pub(crate) async fn repo_for_pr(
+    db: &Db,
+    active: &str,
+    pr_repo: &str,
+) -> Result<Option<(String, String, String)>> {
+    let (want_owner, want_name) = github::split_slug(pr_repo)?;
+    if !repo::valid_github_component(want_owner) || !repo::valid_github_component(want_name) {
+        return Err(anyhow!("refusing to resolve a checkout for '{pr_repo}'"));
+    }
+    let (want_owner, want_name) = (want_owner.to_string(), want_name.to_string());
+
+    // Active repo first: it is the overwhelmingly common answer, every other
+    // candidate costs a `git remote` shell-out to rule out, and the checkout
+    // belongs in the clone the user is actually working in. That makes the answer
+    // depend on `active`, which only matters when two clones of the *same* GitHub
+    // repo are registered — so all four callers (create, look-up, delete, and the
+    // terminal-cwd check) must be handed the same active repo, as they are: each
+    // gets it from the Reviews model or from `agent_session`'s own `repo`.
+    let mut roots: Vec<String> = repo::path(db, active).await?.into_iter().collect();
+    for path in repo::paths(db).await? {
+        if !roots.contains(&path) {
+            roots.push(path);
+        }
+    }
+
+    // One blocking hop for the whole scan rather than one per candidate — it
+    // short-circuits on the first match, which is usually the first entry.
+    tokio::task::spawn_blocking(move || {
+        for root in roots {
+            let Ok((owner, name)) = github::owner_repo(Path::new(&root)) else {
+                continue;
+            };
+            if owner.eq_ignore_ascii_case(&want_owner) && name.eq_ignore_ascii_case(&want_name) {
+                return Some((root, owner, name));
+            }
+        }
+        None
+    })
+    .await
+    .map_err(Into::into)
+}
+
 /// Find-or-create the read-only checkout of a PR's head, for the AI review
 /// session to read real code in.
 ///
-/// `Ok(None)` — not an error — when the PR lives in a repo this santree repo isn't
-/// a clone of. The Reviews inbox is org-scoped, so most PRs in it belong to repos
-/// the user has never cloned; the caller falls back to a diff-only session rather
-/// than refusing to open.
+/// `Ok(None)` — not an error — when the PR lives in a repo *none* of the
+/// registered ones is a clone of. The Reviews inbox is org-scoped, so most PRs in
+/// it belong to repos the user has never cloned; the caller falls back to a
+/// diff-only session rather than refusing to open. The checkout lands under the
+/// repo that owns the PR, which need not be the active one (see [`repo_for_pr`]).
 pub async fn review_workspace(
     db: &Db,
     repo: &str,
     target: &ReviewTarget,
 ) -> Result<Option<String>> {
-    let root = repo::path(db, repo)
-        .await?
-        .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
-    let (owner, name) = origin(db, repo).await?;
-    // Parse-and-compare, never a prefix/contains match on the slug.
-    if !target
-        .pr_repo
-        .eq_ignore_ascii_case(&format!("{owner}/{name}"))
-    {
+    let Some((root, owner, name)) = repo_for_pr(db, repo, &target.pr_repo).await? else {
         return Ok(None);
-    }
+    };
 
     let number = target.number;
     let head_sha = target.head_sha.clone();
@@ -138,16 +189,9 @@ pub async fn existing_review_workspace(
     repo: &str,
     target: &ReviewTarget,
 ) -> Result<Option<String>> {
-    let Some(root) = repo::path(db, repo).await? else {
+    let Some((root, owner, name)) = repo_for_pr(db, repo, &target.pr_repo).await? else {
         return Ok(None);
     };
-    let (owner, name) = origin(db, repo).await?;
-    if !target
-        .pr_repo
-        .eq_ignore_ascii_case(&format!("{owner}/{name}"))
-    {
-        return Ok(None);
-    }
     let dir = review_dir_name(&owner, &name, target.number)?;
     let path = PathBuf::from(root)
         .join(".santree")
@@ -161,12 +205,17 @@ pub async fn existing_review_workspace(
     Ok(exists.then(|| path.to_string_lossy().into_owned()))
 }
 
-/// Delete one PR's review checkout. Idempotent — "it isn't there" is success.
-pub async fn remove_review_workspace(db: &Db, repo: &str, number: u32) -> Result<()> {
-    let root = repo::path(db, repo)
-        .await?
-        .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
-    let (owner, name) = origin(db, repo).await?;
+/// Delete one PR's review checkout. Idempotent — "it isn't there" is success,
+/// which includes a `pr_repo` no registered checkout matches.
+pub async fn remove_review_workspace(
+    db: &Db,
+    repo: &str,
+    pr_repo: &str,
+    number: u32,
+) -> Result<()> {
+    let Some((root, owner, name)) = repo_for_pr(db, repo, pr_repo).await? else {
+        return Ok(());
+    };
     let dir = review_dir_name(&owner, &name, number)?;
     tokio::task::spawn_blocking(move || {
         let root = PathBuf::from(root);
@@ -177,18 +226,26 @@ pub async fn remove_review_workspace(db: &Db, repo: &str, number: u32) -> Result
     Ok(())
 }
 
-/// The categorized PR inbox for the org the active `repo` belongs to. Empty when
-/// `gh` isn't authenticated.
+/// The categorized PR inbox for the org the active `repo` belongs to. Empty —
+/// but labelled with the org it asked about, and with whether it could ask —
+/// when `gh` isn't authenticated.
 pub async fn inbox(db: &Db, repo: &str) -> Result<ReviewInbox> {
-    let empty = ReviewInbox {
-        mine: vec![],
-        requested: vec![],
-        teams: vec![],
-    };
     // Independent, so they overlap: the token is a `gh auth token` subprocess on a
     // cold cache, the origin a DB read plus a `git remote` shell-out — both on the
     // critical path of every Reviews load.
     let (token, remote) = tokio::join!(github::token(), origin(db, repo));
+    // The scope survives both failure modes below: an empty inbox that can't name
+    // its org is indistinguishable from the repo-scoped merge queue beside it.
+    let empty = ReviewInbox {
+        mine: vec![],
+        requested: vec![],
+        teams: vec![],
+        org: remote
+            .as_ref()
+            .map(|(org, _)| org.clone())
+            .unwrap_or_default(),
+        github_connected: token.is_some(),
+    };
     // Token first: an unauthenticated `gh` is an empty inbox, so a repo with no
     // local path has to stay a non-event there, exactly as when these ran in sequence.
     let Some(token) = token else {
@@ -251,19 +308,37 @@ pub async fn inbox(db: &Db, repo: &str) -> Result<ReviewInbox> {
         mine,
         requested,
         teams,
+        org,
+        github_connected: true,
     })
 }
 
 /// The merge queue for the active repo's default branch — the ordered list of
 /// PRs waiting to merge, so the user can see where their own PRs sit in line.
-/// `None` when `gh` isn't authenticated or the repo has no merge queue enabled.
-pub async fn merge_queue(db: &Db, repo: &str) -> Result<Option<MergeQueue>> {
+///
+/// Unlike [`inbox`], this question is scoped to a single `owner/name`, and the
+/// answer is carried back with it: the panel's "no queue here" is about *this*
+/// repo while the inbox beside it is about the whole org, and neither empty
+/// state is readable without saying which.
+pub async fn merge_queue(db: &Db, repo: &str) -> Result<MergeQueueView> {
     let (token, remote) = tokio::join!(github::token(), origin(db, repo));
+    let slug = remote
+        .as_ref()
+        .map(|(owner, name)| format!("{owner}/{name}"))
+        .unwrap_or_default();
     let Some(token) = token else {
-        return Ok(None);
+        return Ok(MergeQueueView {
+            repo: slug,
+            github_connected: false,
+            queue: None,
+        });
     };
     let (owner, name) = remote?;
-    github::merge_queue(&token, &owner, &name).await
+    Ok(MergeQueueView {
+        repo: slug,
+        github_connected: true,
+        queue: github::merge_queue(&token, &owner, &name).await?,
+    })
 }
 
 /// Full detail (body, conversation, changed files) for one PR. Empty when `gh`
@@ -480,42 +555,126 @@ mod tests {
         assert!(review_dir_name("..", "victim", 7).is_err());
     }
 
+    /// A registered git repo at `<base>/<name>` whose `origin` is `remote`,
+    /// inserted into `db` under `name` — the registry rows [`repo_for_pr`] scans.
+    async fn register(db: &Db, base: &Path, name: &str, remote: &str) -> PathBuf {
+        let root = base.join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["remote", "add", "origin", remote],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success());
+        }
+        sqlx::query("INSERT INTO repos (name, path) VALUES (?, ?)")
+            .bind(name)
+            .bind(root.to_str().unwrap())
+            .execute(db)
+            .await
+            .unwrap();
+        root
+    }
+
+    async fn registry(label: &str) -> (PathBuf, Db) {
+        let base = std::env::temp_dir().join(format!("santree-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        (base, db)
+    }
+
+    /// The fix for a PR that degraded to diff-only although its project was
+    /// registered: the active repo is one candidate among all of them, not the
+    /// only one. The owner/name come back from the matched repo's own `origin`.
+    #[tokio::test]
+    async fn a_pull_request_resolves_to_any_registered_clone() {
+        let (base, db) = registry("review-repo-for-pr").await;
+        register(&db, &base, "web", "https://github.com/acme/web.git").await;
+        let other = register(&db, &base, "k8s", "git@github.com:acme/kubernetes.git").await;
+
+        assert_eq!(
+            repo_for_pr(&db, "web", "acme/kubernetes").await.unwrap(),
+            Some((
+                other.to_string_lossy().into_owned(),
+                "acme".into(),
+                "kubernetes".into()
+            ))
+        );
+        // GitHub treats owner/name case-insensitively, so the slug the inbox
+        // hands back must not have to match the remote's spelling.
+        assert!(repo_for_pr(&db, "web", "Acme/Kubernetes")
+            .await
+            .unwrap()
+            .is_some());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The org-scoped inbox is full of repos the user never cloned. That has to
+    /// stay `Ok(None)` — the caller degrades to a diff-only review rather than
+    /// refusing to open the PR at all.
+    #[tokio::test]
+    async fn an_unregistered_repo_still_degrades_to_diff_only() {
+        let (base, db) = registry("review-unregistered").await;
+        register(&db, &base, "web", "https://github.com/acme/web.git").await;
+
+        assert_eq!(repo_for_pr(&db, "web", "acme/nowhere").await.unwrap(), None);
+        assert_eq!(
+            repo_for_pr(&db, "web", "someone-else/web").await.unwrap(),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The slug crosses IPC and the answer becomes a filesystem root plus a `git`
+    /// argv. Both components are compared whole: a name that merely *starts with*
+    /// a registered one must not borrow its checkout.
+    #[tokio::test]
+    async fn a_near_miss_repo_name_never_borrows_a_checkout() {
+        let (base, db) = registry("review-near-miss").await;
+        register(&db, &base, "web", "https://github.com/acme/web.git").await;
+
+        for slug in ["acme/web-evil", "acme/we", "acme-evil/web", "acme/webb"] {
+            assert_eq!(
+                repo_for_pr(&db, "web", slug).await.unwrap(),
+                None,
+                "{slug} must not resolve to acme/web's checkout"
+            );
+        }
+        // Not two components at all — rejected before anything is scanned.
+        assert!(repo_for_pr(&db, "web", "acme/web/../../victim")
+            .await
+            .is_err());
+        assert!(repo_for_pr(&db, "web", "acme").await.is_err());
+        assert!(repo_for_pr(&db, "web", "acme/..").await.is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A registered repo whose `origin` isn't a parseable GitHub remote is not a
+    /// candidate for anything — it can neither be matched nor deleted through.
+    /// The escape this guards was a remote of `.../acme/x/../../victim`.
     #[tokio::test]
     async fn malicious_origin_cannot_escape_review_deletion_root() {
-        let base = std::env::temp_dir().join(format!(
-            "santree-review-remove-origin-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&base);
-        let repo_root = base.join("repo");
+        let (base, db) = registry("review-remove-origin").await;
+        let repo_root =
+            register(&db, &base, "repo", "https://github.com/acme/x/../../victim").await;
         let victim = repo_root.join(".santree/victim-7");
         std::fs::create_dir_all(&victim).unwrap();
         std::fs::write(victim.join("keep"), "safe").unwrap();
-        assert!(std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(&repo_root)
-            .status()
-            .unwrap()
-            .success());
-        assert!(std::process::Command::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/acme/x/../../victim",
-            ])
-            .current_dir(&repo_root)
-            .status()
-            .unwrap()
-            .success());
-        let db = crate::db::init(base.join("test.db")).await.unwrap();
-        sqlx::query("INSERT INTO repos (name, path) VALUES ('repo', ?)")
-            .bind(repo_root.to_str().unwrap())
-            .execute(&db)
-            .await
-            .unwrap();
 
-        assert!(remove_review_workspace(&db, "repo", 7).await.is_err());
+        assert_eq!(repo_for_pr(&db, "repo", "acme/victim").await.unwrap(), None);
+        assert!(
+            remove_review_workspace(&db, "repo", "acme/x/../../victim", 7)
+                .await
+                .is_err()
+        );
+        assert!(remove_review_workspace(&db, "repo", "acme/victim", 7)
+            .await
+            .is_ok());
         assert!(victim.join("keep").is_file());
         let _ = std::fs::remove_dir_all(&base);
     }

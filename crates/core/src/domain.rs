@@ -941,6 +941,15 @@ pub struct ReviewInbox {
     pub requested: Vec<ReviewPr>,
     /// PRs requested via a team the viewer is on — one section per team.
     pub teams: Vec<TeamReviews>,
+    /// The GitHub org these searches were scoped to — the active repo's `origin`
+    /// owner. Empty when it couldn't be resolved. An empty inbox has to name it:
+    /// the merge queue sitting beside it is scoped to a single *repo*, so
+    /// unnamed, the two read as contradictory answers to the same question.
+    pub org: String,
+    /// `gh` had a token. Without it every search below returns nothing, which
+    /// renders identically to a genuinely quiet morning — the one distinction
+    /// the empty state can't make for itself.
+    pub github_connected: bool,
 }
 
 /// Which pull request an AI review surface is working on.
@@ -1270,6 +1279,23 @@ pub struct MergeQueue {
     /// The branch the queue merges into (its default branch).
     pub branch: String,
     pub entries: Vec<MergeQueueEntry>,
+}
+
+/// What the merge-queue panel knows, whether or not there is a queue: which repo
+/// it asked about, whether it could ask at all, and the queue if that repo has
+/// one. All three of its answers are different facts — "not connected", "this
+/// repo has no queue", "the queue is empty" — and none of them means anything
+/// without the `owner/name` it is about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeQueueView {
+    /// "owner/name" the lookup was scoped to; empty when the active repo has no
+    /// resolvable GitHub origin.
+    pub repo: String,
+    /// See [`ReviewInbox::github_connected`] — same distinction, separate call.
+    pub github_connected: bool,
+    /// `None` when the repo's default branch has no merge queue enabled.
+    pub queue: Option<MergeQueue>,
 }
 
 /// Where a PR comment originated, so the UI can label/anchor it.

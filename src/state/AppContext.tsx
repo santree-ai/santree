@@ -162,6 +162,16 @@ interface AppUi {
   requestFixCiLaunch: (launch: FixCiLaunch) => void;
   consumeFixCiLaunch: () => void;
 
+  /** Tab ids whose launch died before it could ever start. Because the tab is
+   *  opened at the click — before the command that produces its prompt has even
+   *  been sent — a failure has to take it back down: left alone it is an agent tab
+   *  holding a session on paths that will never arrive, i.e. a dead tab the user
+   *  must close by hand. Trees consumes these (it owns the tab rows); requesting
+   *  one also cancels a matching hand-off that hasn't been picked up yet. */
+  abandonedLaunchTabs: string[];
+  abandonLaunchTab: (tabId: string) => void;
+  consumeAbandonedLaunchTab: (tabId: string) => void;
+
   /** Whether the left sidebar is collapsed (Conductor-style). */
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -217,6 +227,11 @@ export interface TreeFocus {
    *  minted before every agent lived in one, which selects the worktree and
    *  leaves its tab alone. */
   tab?: string | null;
+  /** The request came from a click in the sidebar's own project tree, so that
+   *  tree already shows the row and must not expand anything to reveal it. Every
+   *  other caller — Issues, the graph, the palette, a session-history row — is
+   *  selecting a row the tree may have folded away, and leaves this unset. */
+  fromSidebar?: boolean;
 }
 
 /** A task whose worktree is mid-creation, enough to render a placeholder. */
@@ -236,11 +251,21 @@ export interface PendingLaunch {
 
 /** A Reviews→Trees review hand-off: which worktree + freshly-minted review tab to
  *  open, and the on-disk prompt file the tab's Claude session should read on
- *  launch. */
+ *  launch.
+ *
+ *  Sent **twice** under one tab id, which is what makes the click feel instant:
+ *  `preparing` the moment the button is pressed (identity only — enough for Trees
+ *  to open and focus the tab), then `ready` with the paths once the render command
+ *  has fetched the PR and written them. The pane holds its PTY across the gap, so
+ *  the terminal still arrives last; only the *waiting* moved into the tab. */
 export interface FixCiLaunch {
   worktreeId: string;
   tabId: string;
-  promptPath: string;
+  /** `preparing`: the launch command is still running, so the paths below are
+   *  absent and no session may spawn against them yet. `ready`: they landed. */
+  phase: "preparing" | "ready";
+  /** Absent while `preparing` — it is the thing being rendered. */
+  promptPath?: string;
   /** Which review session this is. Persisted with the tab, so a resume after a
    * restart re-derives the same launch configuration instead of guessing. */
   kind: Extract<TabKind, "fixCi" | "aiReview">;
@@ -306,6 +331,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [reviewFocus, setReviewFocus] = useState<string | null>(null);
   const [triageFocus, setTriageFocus] = useState<string | null>(null);
   const [fixCiLaunch, setFixCiLaunch] = useState<FixCiLaunch | null>(null);
+  const [abandonedLaunchTabs, setAbandonedLaunchTabs] = useState<string[]>([]);
   const [pendingLaunches, setPendingLaunches] = useState<PendingLaunch[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(new Set());
   const [theme, setThemeState] = useState<Theme>(
@@ -461,6 +487,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const consumeReviewFocus = useCallback(() => setReviewFocus(null), []);
   const consumeTriageFocus = useCallback(() => setTriageFocus(null), []);
   const consumeFixCiLaunch = useCallback(() => setFixCiLaunch(null), []);
+  // Both halves, because the failure can land on either side of the hand-off: the
+  // request may still be sitting here unread (its worktree never appeared), or
+  // Trees may already have turned it into a tab row.
+  const abandonLaunchTab = useCallback((tabId: string) => {
+    setFixCiLaunch((current) => (current?.tabId === tabId ? null : current));
+    setAbandonedLaunchTabs((prev) => (prev.includes(tabId) ? prev : [...prev, tabId]));
+  }, []);
+  const consumeAbandonedLaunchTab = useCallback((tabId: string) => {
+    setAbandonedLaunchTabs((prev) => prev.filter((id) => id !== tabId));
+  }, []);
   const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), []);
   // Republished by an effect that re-runs on every Trees state change, so an
   // unchanged focus must not mint a new object: this value is read from the
@@ -542,6 +578,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       fixCiLaunch,
       requestFixCiLaunch: setFixCiLaunch,
       consumeFixCiLaunch,
+      abandonedLaunchTabs,
+      abandonLaunchTab,
+      consumeAbandonedLaunchTab,
       pendingLaunches,
       addPendingLaunches,
       removePendingLaunch,
@@ -582,6 +621,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       consumeReviewFocus,
       consumeTriageFocus,
       consumeFixCiLaunch,
+      abandonedLaunchTabs,
+      abandonLaunchTab,
+      consumeAbandonedLaunchTab,
       toggleSidebar,
       addPendingLaunches,
       removePendingLaunch,

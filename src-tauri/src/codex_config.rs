@@ -29,14 +29,39 @@
 //! Other launchers default to it; santree's whole review story is that the
 //! agent's findings reach GitHub only through `review_drafts::publish`, on a
 //! click, and a bypassed sandbox is the first step to not needing that path.
+//!
+//! **`--add-dir` is the one thing here that loosens**, and it is the narrowest
+//! shape that makes a broken session work. Naming no sandbox on Work and Fix-CI
+//! leaves Codex's own default, `workspace-write`, whose only writable root is the
+//! cwd — and a santree cwd is a *linked worktree*, whose `.git` is a file pointing
+//! at `<repo>/.git/worktrees/<id>`. So `FETCH_HEAD`, `index`, `ORIG_HEAD`,
+//! `objects/` and `refs/` all sit outside the writable root, and the agent could
+//! edit the branch but not fetch, merge, rebase or commit on it. Three measured
+//! things keep the grant honest: writable roots are **inert under `read-only`**,
+//! so a user who chose that still gets it; it is one directory — git's own store,
+//! never a parent; and it hands the session no capability it did not effectively
+//! have, since an agent that can already write the checkout can commit those same
+//! objects back through git. Network is the *other* half of `workspace-write`,
+//! and it is not fixed here: it stays off unless the user turns
+//! [`NETWORK_ACCESS_KEY`] on.
 
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 
+use crate::git;
 use crate::hooks::sh_quote;
 use crate::provider::SessionSurface;
+
+/// The `settings` key (app scope) behind Settings → Codex → "Allow network
+/// access". Anything but `"true"` — including absence, the default — is off.
+///
+/// Opt-in because the flag it gates is not narrow: Codex has no host allowlist,
+/// so `network_access = true` lifts *all* outbound network for model-generated
+/// commands, not only git's. santree's own fetches run outside the sandbox, so
+/// "Update base" keeps `origin/*` fresh without it.
+pub const NETWORK_ACCESS_KEY: &str = "codex_sandbox_network_access";
 
 /// How restricted a Codex launch is. Recovered from the `SessionSurface ->
 /// CodexProfile` mapping the App Server used (`provider.rs` before the removal),
@@ -92,6 +117,32 @@ impl CodexProfile {
     pub fn wants_review_tools(self) -> bool {
         matches!(self, Self::Review | Self::FixCi)
     }
+
+    /// Whether the session is meant to change the checkout — the two profiles
+    /// that need git to work, and so the only two that get [`LaunchConfig::cwd`]'s
+    /// git directory as a writable root or the network knob. The read-only
+    /// surfaces are pinned to `--sandbox read-only`, where both are inert anyway;
+    /// gating on this keeps santree from *emitting* a widening flag on a surface
+    /// whose whole point is that it cannot write.
+    fn writes_the_checkout(self) -> bool {
+        matches!(self, Self::Work | Self::FixCi)
+    }
+
+    /// Whether [`NETWORK_ACCESS_KEY`] may reach this surface at all — the user's
+    /// own session, and nothing else.
+    ///
+    /// `FixCi` writes the checkout but is deliberately excluded: its whole
+    /// premise (see its doc above) is that it edits the branch and still cannot
+    /// talk its way past the sandbox. Outbound network is exactly that talking.
+    /// santree's rule is that nothing an agent writes reaches GitHub without a
+    /// click — the review tools write santree's own rows and `review_drafts::
+    /// publish` is the only way out — and an Address-review session that can
+    /// reach api.github.com posts without one. Off by default is not enough
+    /// there: the setting is global, so a user who enables it for their own work
+    /// would silently open that path too.
+    fn may_reach_the_network(self) -> bool {
+        matches!(self, Self::Work)
+    }
 }
 
 /// Everything a Codex launch needs beyond the binary and the session id.
@@ -106,6 +157,14 @@ pub struct LaunchConfig<'a> {
     /// `--mcp-config`), when this surface has one. Derived in Rust from the
     /// session's own row — never supplied over IPC.
     pub review_mcp_config: Option<&'a Path>,
+    /// The directory the session runs in — santree's own worktree path, from the
+    /// tab's row, never from the webview. Only its *git* directory is read out of
+    /// this (see the module note on `--add-dir`); the cwd itself is already the
+    /// sandbox's writable root, and santree does not name it.
+    pub cwd: Option<&'a Path>,
+    /// [`NETWORK_ACCESS_KEY`], already resolved. Off is the default and the whole
+    /// point: a Codex sandbox has no host allowlist, so this is all-or-nothing.
+    pub network_access: bool,
 }
 
 /// The flag string a Codex launch is spliced with, already shell-quoted.
@@ -123,6 +182,30 @@ pub fn launch_flags(config: &LaunchConfig<'_>) -> Result<String> {
     }
     if let Some(approval) = profile.approval() {
         flags.push(format!("--ask-for-approval {approval}"));
+    }
+
+    if profile.writes_the_checkout() {
+        // The one directory outside the worktree that git *must* be able to write
+        // — see the module note. Resolved from the checkout's own pointer files,
+        // and `None` for anything that is not demonstrably a git directory, so an
+        // unreadable or bogus `.git` degrades to no flag rather than to a wider
+        // root. `to_str` and not `to_string_lossy`: a path we cannot reproduce
+        // byte-for-byte is not one to hand a child process as a writable root.
+        if let Some(dir) = config.cwd.and_then(git::common_git_dir) {
+            if let Some(dir) = dir.to_str() {
+                flags.push(format!("--add-dir {}", sh_quote(dir)));
+            } else {
+                log::warn!("{} is not valid UTF-8, so this Codex session launches without git metadata writes", dir.display());
+            }
+        }
+        // Off by default, and deliberately not inferred from "the agent needs to
+        // pull": Codex has no host allowlist, so this is every outbound connection
+        // a model-generated command makes. Scoped to the user's own session — see
+        // `may_reach_the_network` for why Address-review is excluded even when the
+        // user has turned this on.
+        if config.network_access && profile.may_reach_the_network() {
+            flags.push(config_flag("sandbox_workspace_write.network_access=true"));
+        }
     }
 
     if config.fresh {
@@ -388,6 +471,8 @@ mod tests {
             model: None,
             effort: None,
             review_mcp_config: None,
+            cwd: None,
+            network_access: false,
         }
     }
 
@@ -418,12 +503,165 @@ mod tests {
     #[test]
     fn the_work_surface_does_not_override_the_users_own_sandbox() {
         assert_eq!(launch_flags(&config(SessionSurface::Work)).unwrap(), "");
+
+        // Still true once it is given a worktree to widen: `--add-dir` adds a
+        // writable root to whatever sandbox the user chose, and never names one.
+        let tree = write_linked_worktree("keeps-user-sandbox");
+        let mut cfg = config(SessionSurface::Work);
+        cfg.cwd = Some(&tree.worktree);
+        let flags = launch_flags(&cfg).unwrap();
+        assert!(!flags.contains("--sandbox"), "{flags}");
+        assert!(!flags.contains("--ask-for-approval"), "{flags}");
+        tree.remove();
+    }
+
+    /// The bug this exists for: `workspace-write`'s only writable root is the
+    /// cwd, a santree cwd is a *linked* worktree, and everything git writes for a
+    /// fetch/merge/rebase lives in the main repo's `.git`. So the flag must name
+    /// the common directory, not the worktree's own pointer.
+    #[test]
+    fn a_writing_session_may_write_the_repos_git_directory() {
+        let tree = write_linked_worktree("git-writes");
+        let common = std::fs::canonicalize(tree.repo.join(".git")).unwrap();
+
+        for surface in [SessionSurface::Work, SessionSurface::FixCi] {
+            let mut cfg = config(surface);
+            cfg.cwd = Some(&tree.worktree);
+            let review = write_review_config("git-writes");
+            if CodexProfile::for_surface(surface).wants_review_tools() {
+                cfg.review_mcp_config = Some(&review);
+            }
+            let flags = launch_flags(&cfg).unwrap();
+            std::fs::remove_file(review).unwrap();
+            assert!(
+                flags.contains(&format!("--add-dir {}", sh_quote(common.to_str().unwrap()))),
+                "{surface:?}: {flags}"
+            );
+        }
+
+        // Never on a surface that is pinned read-only: santree does not emit a
+        // widening flag on a session whose point is that it cannot write.
+        for surface in [
+            SessionSurface::Investigate,
+            SessionSurface::AskAi,
+            SessionSurface::Review,
+        ] {
+            let mut cfg = config(surface);
+            cfg.cwd = Some(&tree.worktree);
+            let review = write_review_config("git-writes-ro");
+            if CodexProfile::for_surface(surface).wants_review_tools() {
+                cfg.review_mcp_config = Some(&review);
+            }
+            let flags = launch_flags(&cfg).unwrap();
+            std::fs::remove_file(review).unwrap();
+            assert!(!flags.contains("--add-dir"), "{surface:?}: {flags}");
+        }
+        tree.remove();
+    }
+
+    /// A cwd whose git directory cannot be resolved loses the grant rather than
+    /// widening it: no flag beats a flag naming the wrong root.
+    #[test]
+    fn an_unresolvable_git_directory_drops_the_grant_rather_than_widening_it() {
+        let tree = write_linked_worktree("unresolvable");
+        std::fs::write(tree.worktree.join(".git"), "gitdir: /\n").unwrap();
+        let mut cfg = config(SessionSurface::Work);
+        cfg.cwd = Some(&tree.worktree);
+        assert_eq!(launch_flags(&cfg).unwrap(), "");
+
+        std::fs::remove_file(tree.worktree.join(".git")).unwrap();
+        assert_eq!(launch_flags(&cfg).unwrap(), "");
+        tree.remove();
+    }
+
+    /// The network half of `workspace-write` is a user decision, not a
+    /// consequence of needing git: absent the setting there is no flag at all.
+    #[test]
+    fn network_access_is_opt_in_and_never_reaches_a_read_only_surface() {
+        let mut cfg = config(SessionSurface::Work);
+        assert!(!launch_flags(&cfg).unwrap().contains("network_access"));
+
+        cfg.network_access = true;
+        assert!(launch_flags(&cfg)
+            .unwrap()
+            .contains(r#"-c 'sandbox_workspace_write.network_access=true'"#));
+
+        for surface in [SessionSurface::Investigate, SessionSurface::AskAi] {
+            let mut cfg = config(surface);
+            cfg.network_access = true;
+            let flags = launch_flags(&cfg).unwrap();
+            assert!(!flags.contains("network_access"), "{surface:?}: {flags}");
+        }
+    }
+
+    /// The setting is global, so turning it on for your own work must not also
+    /// hand it to the sessions santree points at a pull request. Address-review is
+    /// the case that needs saying: it *does* write the checkout, so it takes the
+    /// git-metadata root and would take this too by that test alone. But an agent
+    /// that can reach api.github.com posts without the click `review_drafts::
+    /// publish` exists to require, so the network half stops at `Work`. (The AI
+    /// review itself needs no test here — it is pinned `--sandbox read-only`, where
+    /// `writes_the_checkout` is already false and both wideners are inert.)
+    #[test]
+    fn address_review_never_gets_the_network_even_when_the_user_opted_in() {
+        let mut cfg = config(SessionSurface::FixCi);
+        let path = write_review_config("fixci-network");
+        cfg.review_mcp_config = Some(&path);
+        cfg.network_access = true;
+        let flags = launch_flags(&cfg).unwrap();
+        assert!(!flags.contains("network_access"), "{flags}");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A linked worktree's on-disk shape, written directly rather than via `git`
+    /// (the resolution itself is `git::common_git_dir`'s to test against a real
+    /// repo): `<base>/wt/.git` is a file pointing at `<base>/repo/.git/worktrees/wt`,
+    /// whose `commondir` points back at `<base>/repo/.git`.
+    struct LinkedWorktree {
+        base: std::path::PathBuf,
+        repo: std::path::PathBuf,
+        worktree: std::path::PathBuf,
+    }
+
+    impl LinkedWorktree {
+        fn remove(self) {
+            let _ = std::fs::remove_dir_all(self.base);
+        }
+    }
+
+    fn write_linked_worktree(tag: &str) -> LinkedWorktree {
+        let base =
+            std::env::temp_dir().join(format!("santree-codex-cwd-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(git_dir.join("objects")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let per_worktree = git_dir.join("worktrees/wt");
+        std::fs::create_dir_all(&per_worktree).unwrap();
+        std::fs::write(per_worktree.join("commondir"), "../..\n").unwrap();
+
+        let worktree = base.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", per_worktree.display()),
+        )
+        .unwrap();
+        LinkedWorktree {
+            base,
+            repo,
+            worktree,
+        }
     }
 
     /// The flag every other launcher reaches for, and the one santree must never
     /// emit — from any surface, with any settings.
     #[test]
     fn no_surface_can_produce_the_bypass_flag() {
+        // With both wideners turned all the way up, since they are the only two
+        // things here that loosen at all.
+        let tree = write_linked_worktree("bypass");
         for surface in [
             SessionSurface::Work,
             SessionSurface::Investigate,
@@ -432,6 +670,8 @@ mod tests {
             SessionSurface::FixCi,
         ] {
             let mut config = config(surface);
+            config.cwd = Some(&tree.worktree);
+            config.network_access = true;
             let path = write_review_config("bypass");
             if CodexProfile::for_surface(surface).wants_review_tools() {
                 config.review_mcp_config = Some(&path);
@@ -444,6 +684,7 @@ mod tests {
             );
             std::fs::remove_file(path).unwrap();
         }
+        tree.remove();
     }
 
     #[test]

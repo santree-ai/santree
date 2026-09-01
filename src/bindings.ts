@@ -428,12 +428,16 @@ export const commands = {
 	/**
 	 *  Find-or-create the read-only checkout of a PR's head for an AI review session
 	 *  to read real code in — a detached worktree under `.santree/reviews/`, pruned to
-	 *  the few most recent. `None` when the PR lives in a repo the active santree repo
-	 *  isn't a clone of; the session then runs diff-only.
+	 *  the few most recent. `None` when the PR lives in a repo *none* of the
+	 *  registered ones is a clone of; the session then runs diff-only.
 	 */
 	reviewWorkspace: (repo: string, target: ReviewTarget) => typedError<string | null, CmdError>(__TAURI_INVOKE("review_workspace", { repo, target })),
-	/**  Delete a PR's review checkout. Idempotent. */
-	removeReviewWorkspace: (repo: string, number: number) => typedError<null, CmdError>(__TAURI_INVOKE("remove_review_workspace", { repo, number })),
+	/**
+	 *  Delete a PR's review checkout. Idempotent. `pr_repo` names the checkout to
+	 *  delete, because it may live under a registered repo other than the active one
+	 *  — the same resolution `review_workspace` created it through.
+	 */
+	removeReviewWorkspace: (repo: string, prRepo: string, number: number) => typedError<null, CmdError>(__TAURI_INVOKE("remove_review_workspace", { repo, prRepo, number })),
 	/**
 	 *  The cached AI review brief for a PR (summary, reading order, watch-outs), or
 	 *  `None` when none has been generated. A single row read — the panel renders its
@@ -506,16 +510,10 @@ export const commands = {
 	publishReviewDrafts: (prRepo: string, number: number, ids: string[]) => typedError<ReviewPublishOutcome, CmdError>(__TAURI_INVOKE("publish_review_drafts", { prRepo, number, ids })),
 	/**
 	 *  The merge queue for the active `repo`'s default branch — the ordered list of
-	 *  PRs waiting to merge, so the user can see where their own PRs sit. `None` when
-	 *  `gh` isn't authenticated or the repo has no merge queue enabled.
+	 *  PRs waiting to merge, so the user can see where their own PRs sit, wrapped in
+	 *  the `owner/name` it was asked about and whether `gh` could be asked at all.
 	 */
-	mergeQueue: (repo: string) => typedError<{
-	/**  "owner/name" of the repo whose queue this is. */
-	repo: string,
-	/**  The branch the queue merges into (its default branch). */
-	branch: string,
-	entries: MergeQueueEntry[],
-} | null, CmdError>(__TAURI_INVOKE("merge_queue", { repo })),
+	mergeQueue: (repo: string) => typedError<MergeQueueView, CmdError>(__TAURI_INVOKE("merge_queue", { repo })),
 	/**
 	 *  Full detail for one PR — body, conversation (comments + reviews + inline
 	 *  threads), and changed files with diffs. Empty when `gh` isn't authenticated.
@@ -1977,6 +1975,25 @@ export type MergeQueueState =
 /**  Any state GitHub adds later that we don't map yet. */
 "Unknown";
 
+/**
+ *  What the merge-queue panel knows, whether or not there is a queue: which repo
+ *  it asked about, whether it could ask at all, and the queue if that repo has
+ *  one. All three of its answers are different facts — "not connected", "this
+ *  repo has no queue", "the queue is empty" — and none of them means anything
+ *  without the `owner/name` it is about.
+ */
+export type MergeQueueView = {
+	/**
+	 *  "owner/name" the lookup was scoped to; empty when the active repo has no
+	 *  resolvable GitHub origin.
+	 */
+	repo: string,
+	/**  See [`ReviewInbox::github_connected`] — same distinction, separate call. */
+	githubConnected: boolean,
+	/**  `None` when the repo's default branch has no merge queue enabled. */
+	queue: MergeQueue | null,
+};
+
 /**  Token usage attributed to one model, summed across every session. */
 export type ModelUsage = {
 	/**
@@ -2583,6 +2600,19 @@ export type ReviewInbox = {
 	requested: ReviewPr[],
 	/**  PRs requested via a team the viewer is on — one section per team. */
 	teams: TeamReviews[],
+	/**
+	 *  The GitHub org these searches were scoped to — the active repo's `origin`
+	 *  owner. Empty when it couldn't be resolved. An empty inbox has to name it:
+	 *  the merge queue sitting beside it is scoped to a single *repo*, so
+	 *  unnamed, the two read as contradictory answers to the same question.
+	 */
+	org: string,
+	/**
+	 *  `gh` had a token. Without it every search below returns nothing, which
+	 *  renders identically to a genuinely quiet morning — the one distinction
+	 *  the empty state can't make for itself.
+	 */
+	githubConnected: boolean,
 };
 
 /**

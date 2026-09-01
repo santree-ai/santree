@@ -1397,16 +1397,23 @@ pub async fn merge_queue(token: &str, owner: &str, name: &str) -> Result<Option<
 
 /// Full detail for one PR: body + merged conversation + changed files (with diffs).
 pub async fn pr_detail(token: &str, owner: &str, name: &str, number: u32) -> Result<PrDetail> {
+    // The compare call needs the two oids only the conversation query returns, so
+    // it is chained to *that* leg rather than run after the join — the file pages,
+    // usually the slow half, then cover it instead of extending the wait.
     let (conversation, files) = tokio::join!(
-        pr_conversation(token, owner, name, number),
+        async {
+            let c = pr_conversation(token, owner, name, number).await?;
+            // GitHub's PR patches are based on the merge base, not today's
+            // base-branch tip. Loading old file contents from `baseRefOid` makes
+            // context expansion disagree with every hunk after the base branch
+            // advances.
+            let base_sha = merge_base_sha(token, owner, name, &c.base_sha, &c.head_sha).await?;
+            Ok::<_, anyhow::Error>((c, base_sha))
+        },
         pr_files(token, owner, name, number),
     );
-    let c = conversation?;
+    let (c, base_sha) = conversation?;
     let (files, files_truncated) = files?;
-    // GitHub's PR patches are based on the merge base, not today's base-branch
-    // tip. Loading old file contents from `baseRefOid` makes context expansion
-    // disagree with every hunk after the base branch advances.
-    let base_sha = merge_base_sha(token, owner, name, &c.base_sha, &c.head_sha).await?;
     Ok(PrDetail {
         body: c.body,
         labels: c.labels,

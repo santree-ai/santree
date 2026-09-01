@@ -331,6 +331,71 @@ fn local_base_is_fresher(repo: &Path, base: &str) -> bool {
     .is_ok()
 }
 
+/// The **common** git directory behind a checkout: `<repo>/.git` for a plain
+/// clone, and the same `<repo>/.git` for every linked worktree branched off it.
+///
+/// A linked worktree's `.git` is a *file* holding `gitdir: <repo>/.git/worktrees/<id>`,
+/// and that per-worktree directory's `commondir` points back at the shared one.
+/// Everything git writes for a fetch, merge or rebase is under the answer:
+/// `FETCH_HEAD` / `index` / `ORIG_HEAD` in the per-worktree directory, `objects/`
+/// and `refs/` in the common one — and the common one contains the per-worktree
+/// one, so a single path covers both.
+///
+/// Resolved by reading the two pointer files rather than by shelling out to
+/// `git rev-parse --git-common-dir`: this runs on the session-launch path, where a
+/// subprocess is the expensive part, and the layout is git's own on-disk contract.
+/// Nothing here is assumed about *where* the pointers lead — an absolute `gitdir:`
+/// and a relative `commondir` are both what git actually writes.
+///
+/// `None` on anything unexpected, and that matters more than usual: the caller
+/// ([`crate::codex_config`]) uses this to *widen* an agent sandbox, so a wrong
+/// answer is worse than no answer. The result must be an absolute, canonical path
+/// that really is a git directory — it has `HEAD` and `objects/` — or nothing.
+/// Absolute is also what keeps it from being read as a flag when it reaches argv.
+pub fn common_git_dir(cwd: &Path) -> Option<PathBuf> {
+    let dot_git = cwd.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let target = read_pointer_file(&dot_git)?;
+        let target = target
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("gitdir:"))?
+            .trim();
+        if target.is_empty() {
+            return None;
+        }
+        // `join` on an absolute `target` discards `cwd`, which is exactly right:
+        // git writes the link absolute here and relative-to-the-worktree elsewhere.
+        cwd.join(target)
+    };
+    let common = match read_pointer_file(&git_dir.join("commondir")) {
+        Some(rel) => {
+            let rel = rel.trim();
+            if rel.is_empty() {
+                return None;
+            }
+            git_dir.join(rel)
+        }
+        // A plain clone's `.git` has no `commondir`: it is already the common one.
+        None => git_dir,
+    };
+    let common = std::fs::canonicalize(common).ok()?;
+    let is_git_dir = common.join("HEAD").is_file() && common.join("objects").is_dir();
+    (common.is_absolute() && is_git_dir).then_some(common)
+}
+
+/// One of git's short on-disk pointer files (`.git`, `commondir`). Capped, because
+/// a multi-megabyte file at either path is not a pointer whatever else it is, and
+/// this runs before anything has established that the directory is a repo at all.
+fn read_pointer_file(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 4096 {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 /// Create a git worktree at `worktree_path` checked out on `branch`.
 ///
 /// Best-effort fetches `base` first so the new branch starts from the freshest
@@ -2324,6 +2389,83 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
+    }
+
+    // ---- common_git_dir (the writable root a sandboxed agent's git needs) ----
+
+    /// A one-commit repo with a linked worktree beside it, the shape every
+    /// santree worktree has. Returns `(repo, worktree)`.
+    fn init_repo_with_linked_worktree(name: &str) -> (PathBuf, PathBuf) {
+        let base = scratch_dir(name);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+        let worktree = base.join("wt");
+        run_git(
+            &repo,
+            &["worktree", "add", worktree.to_str().unwrap(), "-b", "feat"],
+        );
+        (repo, worktree)
+    }
+
+    #[test]
+    fn common_git_dir_of_a_linked_worktree_is_the_main_repos() {
+        let (repo, worktree) = init_repo_with_linked_worktree("common-dir-linked");
+        assert!(
+            worktree.join(".git").is_file(),
+            "a linked worktree's .git is a pointer file, not a directory"
+        );
+
+        let expected = std::fs::canonicalize(repo.join(".git")).unwrap();
+        assert_eq!(common_git_dir(&worktree).as_deref(), Some(&*expected));
+        // The per-worktree metadata a fetch/rebase writes sits under it, so the
+        // one root covers both halves.
+        assert!(expected.join("worktrees/wt").is_dir());
+
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn common_git_dir_of_a_plain_checkout_is_its_own_git_dir() {
+        let (repo, _worktree) = init_repo_with_linked_worktree("common-dir-plain");
+        let expected = std::fs::canonicalize(repo.join(".git")).unwrap();
+        assert_eq!(common_git_dir(&repo).as_deref(), Some(&*expected));
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    /// The failure mode that matters: the answer widens a sandbox, so anything
+    /// unreadable, unparseable, or not actually a git directory must come back
+    /// `None` — never a broader root, and never a panic.
+    #[test]
+    fn common_git_dir_degrades_to_none_rather_than_to_a_broader_root() {
+        let dir = scratch_dir("common-dir-degrade");
+        assert_eq!(common_git_dir(&dir), None, "no .git at all");
+
+        let dot_git = dir.join(".git");
+        for bogus in [
+            "",
+            "not a gitdir line\n",
+            "gitdir:\n",
+            // A pointer at a real directory that is not a git directory: the
+            // shape that would otherwise hand an agent a writable `/` or `$HOME`.
+            "gitdir: /\n",
+            "gitdir: ../\n",
+        ] {
+            std::fs::write(&dot_git, bogus).unwrap();
+            assert_eq!(common_git_dir(&dir), None, "{bogus:?}");
+        }
+
+        // A pointer at nothing at all, and one too large to be a pointer.
+        std::fs::write(&dot_git, "gitdir: ./nowhere\n").unwrap();
+        assert_eq!(common_git_dir(&dir), None);
+        std::fs::write(&dot_git, "x".repeat(8192)).unwrap();
+        assert_eq!(common_git_dir(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- update_base ----

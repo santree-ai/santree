@@ -46,24 +46,27 @@ const box = (line: number, startLine: number, target: CommentTarget = TARGET) =>
   );
 
 describe("anchorLabel", () => {
-  it("names a single line the way GitHub does", () => {
-    expect(anchorLabel(null, 4, true)).toBe("line R4");
-    expect(anchorLabel(null, 4, false)).toBe("line L4");
+  /** The side is a diff coordinate, not something a reader has been taught: the
+   *  new side is just "the line", and the old one earns a word, never a letter. */
+  it("names a single line without leaking the diff side", () => {
+    expect(anchorLabel(null, 4, true)).toBe("line 4");
+    expect(anchorLabel(null, 4, false)).toBe("old line 4");
   });
 
   it("names a range by both ends", () => {
-    expect(anchorLabel(10, 14, true)).toBe("lines R10 to R14");
+    expect(anchorLabel(10, 14, true)).toBe("lines 10–14");
+    expect(anchorLabel(10, 14, false)).toBe("old lines 10–14");
   });
 
   it("treats a range that doesn't span as a single line", () => {
-    expect(anchorLabel(4, 4, true)).toBe("line R4");
+    expect(anchorLabel(4, 4, true)).toBe("line 4");
   });
 });
 
 describe("InlineCommentBox", () => {
   it("posts a single-line comment with no range", () => {
     const { getByText, getByPlaceholderText, container } = box(11, 11);
-    expect(container.textContent).toContain("Add a comment on line R11");
+    expect(container.textContent).toContain("Add a comment on line 11");
 
     fireEvent.change(getByPlaceholderText("Leave a comment"), { target: { value: "nit" } });
     fireEvent.click(getByText("Comment"));
@@ -78,7 +81,7 @@ describe("InlineCommentBox", () => {
 
   it("carries both ends of a dragged range", () => {
     const { getByText, getByPlaceholderText, container } = box(12, 10);
-    expect(container.textContent).toContain("Add a comment on lines R10 to R12");
+    expect(container.textContent).toContain("Add a comment on lines 10–12");
 
     fireEvent.change(getByPlaceholderText("Leave a comment"), { target: { value: "all three" } });
     fireEvent.click(getByText("Start a review"));

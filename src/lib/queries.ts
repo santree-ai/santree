@@ -591,6 +591,13 @@ export const CLAUDE_STATUS_LINE_KEY = "claude_status_line";
  *  `opts.chrome` at every Claude launch site. */
 export const CLAUDE_START_WITH_CHROME_KEY = "claude_start_with_chrome";
 
+/** Let model-generated commands in a Codex work / address-review session reach the
+ *  network. App-scoped, defaults to OFF (`data === "true"` = on). Read by Rust
+ *  (`codex_config.rs` / `provider.rs`), which turns it into
+ *  `-c sandbox_workspace_write.network_access=true` on the launch line — so it
+ *  applies to sessions started afterwards, not to ones already running. */
+export const CODEX_NETWORK_ACCESS_KEY = "codex_sandbox_network_access";
+
 /** Send Reviews "Viewed" marks to GitHub instead of this machine's table, so they
  *  are the same checkbox as the github.com Files tab. App-scoped, defaults to OFF
  *  (`data === "true"` = on) — the local store needs no network. Read by Rust
@@ -2643,8 +2650,9 @@ export const usePrSummary = (prRepo: string | null, number: number) =>
   );
 
 /** The Reviews dashboard inbox (my PRs / review requests / per-team), scoped to
- *  the org of the active repo. Empty when `gh` isn't authenticated. Cached a
- *  minute — PR state changes server-side and the user can refetch by revisiting. */
+ *  the org of the active repo — which it names back, along with whether `gh` was
+ *  connected, so an empty inbox can say what it searched. Cached a minute — PR
+ *  state changes server-side and the user can refetch by revisiting. */
 export const useReviews = (repo: string) =>
   useUnwrappedQuery(queryKeys.reviews(repo), () => commands.reviews(repo), {
     enabled: !!repo,
@@ -2662,9 +2670,10 @@ export const usePrTickets = (repo: string, ids: string[], enabled = true) =>
   });
 
 /** The active repo's merge queue (its default branch's queue) — the ordered PRs
- *  waiting to merge, for the Reviews tab's merge-queue panel. `null` when GitHub
- *  isn't connected or the repo has no merge queue. Positions shift as PRs merge,
- *  so it's cached only briefly and refetches on revisit. */
+ *  waiting to merge, for the Reviews tab's merge-queue panel. Always resolves to
+ *  the `owner/name` it asked about plus whether `gh` could be asked; `queue` is
+ *  `null` when that repo has no merge queue. Positions shift as PRs merge, so
+ *  it's cached only briefly and refetches on revisit. */
 export const useMergeQueue = (repo: string) =>
   useUnwrappedQuery(queryKeys.mergeQueue(repo), () => commands.mergeQueue(repo), {
     enabled: !!repo,
@@ -3130,6 +3139,7 @@ function patchAiDraftCount(qc: QueryClient, prRepo: string, number: number, delt
   for (const [key, inbox] of before) {
     if (!inbox) continue;
     qc.setQueryData<ReviewInbox>(key, {
+      ...inbox,
       mine: inbox.mine.map(patch),
       requested: inbox.requested.map(patch),
       teams: inbox.teams.map((team) => ({ ...team, prs: team.prs.map(patch) })),
@@ -3198,7 +3208,8 @@ export const useReviewAiWatcher = () => {
 export const useRemoveReviewWorkspace = (repo: string) => {
   const qc = useQueryClient();
   return useActionMutation<{ prRepo: string; number: number; headSha: string }, null>({
-    mutationFn: ({ number }) => unwrap(commands.removeReviewWorkspace(repo, number)),
+    mutationFn: ({ prRepo, number }) =>
+      unwrap(commands.removeReviewWorkspace(repo, prRepo, number)),
     invalidate: ({ prRepo, number, headSha }) => {
       // Drop the memoized path so the next open recreates rather than handing the
       // terminal a cwd that no longer exists.

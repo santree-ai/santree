@@ -270,6 +270,8 @@ impl AgentProvider for CodexProvider {
             model: request.model,
             effort: request.effort,
             review_mcp_config: request.review_mcp_config,
+            cwd: Some(request.cwd),
+            network_access: codex_network_access(request.db).await,
         })?;
         // The CLI ignores a `-c` key it does not recognise, so "we passed it" is
         // not "it applied". Checked against this exact binary, once per launch,
@@ -277,6 +279,20 @@ impl AgentProvider for CodexProvider {
         codex_config::validate_overrides(&self.executable, &flags).await?;
         Ok(session.with_launch_flags(flags))
     }
+}
+
+/// Whether the user has turned the Codex sandbox's network back on. App-scoped,
+/// and read here rather than in [`codex_config`] so that module stays a pure
+/// argv builder with no database of its own.
+///
+/// Absence is off, and so is a failed read: a knob that lifts every outbound
+/// connection a model-generated command makes must never come on because a query
+/// errored.
+async fn codex_network_access(db: &Db) -> bool {
+    matches!(
+        settings::get(db, "app", codex_config::NETWORK_ACCESS_KEY).await,
+        Ok(Some(value)) if value == "true"
+    )
 }
 
 pub fn provider(kind: AgentKind, executable: String) -> Result<Box<dyn AgentProvider>> {

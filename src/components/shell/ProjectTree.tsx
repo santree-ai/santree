@@ -23,20 +23,24 @@
  * this component starts at the first repo header.
  */
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useOpenAgent } from "../../features/agents/useOpenAgent";
 import { CreateWorktreeDialog } from "../../features/trees/CreateWorktreeDialog";
 import { usePersistedState } from "../../lib/usePersistedState";
-import { type TreeFocusPane, useApp, useAppUi } from "../../state/AppContext";
+import { type TreeFocus, type TreeFocusPane, useApp, useAppUi } from "../../state/AppContext";
 import { RepoAvatar } from "../chrome/RepoAvatar";
 import { ChevronDownIcon, ChevronRightIcon, PlusIcon } from "../icons";
 import { ProjectGlyph, Skeleton } from "../primitives";
 import { MilestoneHeading, ProjectDueDate } from "../WorkSignals";
 import {
   type AgentNode,
+  ancestorGroupKeys,
   type LinearProjectNode,
+  milestoneKey,
   type ProjectNode,
+  projectKey,
+  repoKey,
   useProjectTree,
 } from "./useProjectTree";
 import { INDENT_PX, WorktreeRow } from "./WorktreeRow";
@@ -58,14 +62,6 @@ const WORKTREE_GUTTER = HEADER_GUTTER + INDENT_PX;
  *  one level, so a band reads as a group and not as one more row. */
 const BAND_GUTTER = WORKTREE_GUTTER - 8;
 
-/** Section key for a repo, for a Linear project band inside it, and for a
- *  milestone band inside that. Namespaced so all three can share a single
- *  persisted record; the milestone key carries its project because two projects
- *  routinely hold a band with the same name (their "No milestone"). */
-const repoKey = (repo: string) => `repo:${repo}`;
-const projectKey = (repo: string, key: string) => `proj:${repo}:${key}`;
-const milestoneKey = (repo: string, project: string, key: string) => `ms:${repo}:${project}:${key}`;
-
 /**
  * The projects → worktrees → agents tree.
  *
@@ -77,8 +73,8 @@ const milestoneKey = (repo: string, project: string, key: string) => `ms:${repo}
 export function ProjectTree() {
   const { projects, loading, markSeen } = useProjectTree();
   const navigate = useNavigate();
-  const { setActiveRepo } = useApp();
-  const { requestTreeFocus, openWorktree } = useAppUi();
+  const { activeRepo, setActiveRepo } = useApp();
+  const { requestTreeFocus, openWorktree, treeFocus } = useAppUi();
   const openAgent = useOpenAgent();
 
   // Which repo's "Create worktree" dialog is open, if any. Held here rather
@@ -97,11 +93,36 @@ export function ProjectTree() {
     (repo: string, worktreeId: string, pane?: TreeFocusPane) => {
       setActiveRepo(repo);
       // The sidebar has always landed on the ticket; the marks name their own.
-      requestTreeFocus(worktreeId, { pane: pane ?? "issue" });
+      // `fromSidebar` is what keeps the reveal effect below off a row the user
+      // just clicked — it is already in front of them.
+      requestTreeFocus(worktreeId, { pane: pane ?? "issue", fromSidebar: true });
       navigate({ to: "/trees" });
     },
     [navigate, setActiveRepo, requestTreeFocus],
   );
+
+  // A worktree picked anywhere else — Issues, the graph, the palette, a
+  // session-history row — lands on a row this tree may have folded away, which
+  // reads as nothing having happened. Expand its ancestors so the selection is
+  // visible. Expanding only: a fold the user chose elsewhere in the tree is not
+  // this request's to undo.
+  const revealed = useRef<TreeFocus | null>(null);
+  useEffect(() => {
+    if (!treeFocus || treeFocus.fromSidebar || treeFocus === revealed.current) return;
+    const keys = ancestorGroupKeys(projects, treeFocus.id, activeRepo);
+    // Not in the tree yet — a worktree still being created, a repo whose read
+    // hasn't landed. Leave the request unhandled so the next fold reveals it.
+    if (keys.length === 0) return;
+    revealed.current = treeFocus;
+    setCollapsed((current) => {
+      // Nothing folded: return the same record rather than minting one, so a
+      // selection that needed no reveal costs no re-render and no write.
+      if (keys.every((key) => !current[key])) return current;
+      const next = { ...current };
+      for (const key of keys) next[key] = false;
+      return next;
+    });
+  }, [treeFocus, projects, activeRepo, setCollapsed]);
 
   const openAgentRow = useCallback(
     (agent: AgentNode) => {

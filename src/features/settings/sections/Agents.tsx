@@ -19,6 +19,7 @@ import {
   CLAUDE_REMOTE_CONTROL_KEY,
   CLAUDE_START_WITH_CHROME_KEY,
   CLAUDE_STATUS_LINE_KEY,
+  CODEX_NETWORK_ACCESS_KEY,
   useAgentAuth,
   useAgents,
   useAgentVersionStatus,
@@ -314,7 +315,48 @@ function CodexPanel() {
           className="w-full rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-[11.5px]"
         />
       </Block>
+
+      <CodexSandboxBlock />
     </div>
+  );
+}
+
+/** The one Codex knob santree owns that *widens* its sandbox rather than
+ *  narrowing it. Everything else about the sandbox stays the user's own
+ *  `~/.codex/config.toml`. */
+function CodexSandboxBlock() {
+  const { value: networkAccess } = useBoolSetting("app", CODEX_NETWORK_ACCESS_KEY);
+  const { mutate: setSetting } = useSetSetting();
+
+  return (
+    <Block
+      title="Sandbox"
+      subtitle="Codex sandboxes the commands it runs. Santree adds the repo's .git directory to what a work session may write — without it, git cannot fetch, merge, rebase or commit inside a worktree."
+    >
+      <div className="rounded-xl border border-line-3 bg-surface px-3.5 py-0.5">
+        <ToggleRow
+          label="Allow network access"
+          hint={
+            <>
+              Let commands Codex runs in a work or address-review session reach the network. This
+              lifts <em>all</em> outbound access, not just GitHub — Codex has no host allowlist, so
+              anything the model runs can reach anything. Santree's own fetches run outside the
+              sandbox, so <span className="font-mono">Update base</span> already keeps{" "}
+              <span className="font-mono">origin/*</span> fresh with this off. Applies to sessions
+              started after the change.
+            </>
+          }
+          on={networkAccess}
+          onChange={(next) =>
+            setSetting({
+              scope: "app",
+              key: CODEX_NETWORK_ACCESS_KEY,
+              value: next ? "true" : "false",
+            })
+          }
+        />
+      </div>
+    </Block>
   );
 }
 

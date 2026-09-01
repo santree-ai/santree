@@ -270,6 +270,26 @@ pub async fn base_worktree(db: &Db, repo: &str) -> Result<Option<Worktree>> {
     Ok(Some(wt))
 }
 
+/// Whether this repo tracks a worktree checked out on `branch`.
+///
+/// Deliberately not `list(..).any(..)`: the registry row *is* the whole answer,
+/// while [`list`] spends a throttled `git fetch` plus a status fan-out per
+/// worktree building stats a yes/no question never reads. That fan-out used to sit
+/// on the critical path of launching a review session.
+pub async fn tracked_on_branch(db: &Db, repo: &str, branch: &str) -> Result<bool> {
+    let Some(root) = repo::path(db, repo).await? else {
+        return Ok(false);
+    };
+    let tracked = sqlx::query_scalar::<_, String>(
+        "SELECT issue_id FROM worktree_links WHERE repo_path = ? AND branch = ? LIMIT 1",
+    )
+    .bind(&root)
+    .bind(branch)
+    .fetch_optional(db)
+    .await?;
+    Ok(tracked.is_some())
+}
+
 /// Every tracked worktree for a repo, with live git stats. Empty when the repo
 /// has no worktrees yet — or no local path at all — so the Trees view shows its
 /// empty state (and the caller needn't pre-check the path).

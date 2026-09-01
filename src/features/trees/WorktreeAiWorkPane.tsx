@@ -83,14 +83,16 @@ function Loaded({ pr }: { pr: ReviewPr }) {
         detail={detail}
         drafts={drafts}
         onFocusFile={jump}
-        onStartWork={startWork}
+        onStartWork={startWork.start}
+        startingWork={startWork.starting}
       />
       <ReviewBriefSection
         pr={pr}
         activeReviewAgent={null}
         santreeRepo={repo}
         onJump={jump}
-        onStartReview={startReview}
+        onStartReview={startReview.start}
+        startingReview={startReview.starting}
         // The launcher takes a per-launch agent override, so the picker beside
         // the run button is live here (it is not in Reviews — see the prop).
         canPickAgent

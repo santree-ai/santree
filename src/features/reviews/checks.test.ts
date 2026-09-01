@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { CheckStatus, PrCheck } from "../../bindings";
 import { checkStatusMeta } from "../../theme/colors";
-import { groupChecks, SKIPPED_KEY, toggleCollapsed } from "./checks";
+import { groupChecks, SKIPPED_KEY, tallyChecks, toggleCollapsed } from "./checks";
 
 function check(name: string, status: CheckStatus): PrCheck {
   // A bare status context: no Actions run behind it, so no ids and no timings.
@@ -54,6 +54,24 @@ describe("groupChecks", () => {
     expect(trailing.glyph).toBe(checkStatusMeta.Skipped.glyph);
   });
 
+  /** A running check is the one you're waiting on: it gets its own section above
+   *  the finished ones, never the trailing catch-all. */
+  it("flags the running section, and only it", () => {
+    const sections = groupChecks([
+      check("e2e", "Pending"),
+      check("lint", "Success"),
+      check("build", "Failure"),
+      check("skip", "Skipped"),
+    ]);
+    expect(sections.filter((s) => s.running).map((s) => s.key)).toEqual(["Pending"]);
+    const running = sections.find((s) => s.running);
+    expect(running?.label).toBe("running");
+    // Above every section that already has a verdict.
+    expect(sections.findIndex((s) => s.running)).toBeLessThan(
+      sections.findIndex((s) => s.key === "Success"),
+    );
+  });
+
   it("keeps each section's checks in their original order", () => {
     const sections = groupChecks([
       check("b", "Failure"),
@@ -61,6 +79,48 @@ describe("groupChecks", () => {
       check("c", "Failure"),
     ]);
     expect(sections[0].checks.map((c) => c.name)).toEqual(["b", "a", "c"]);
+  });
+});
+
+describe("tallyChecks", () => {
+  it("counts each outcome, running on its own line", () => {
+    expect(
+      tallyChecks([
+        check("a", "Success"),
+        check("b", "Failure"),
+        check("c", "Pending"),
+        check("d", "Pending"),
+        check("e", "Skipped"),
+        check("f", "Neutral"),
+      ]),
+    ).toEqual({ passing: 1, failing: 1, running: 2, other: 2 });
+  });
+
+  /** "Waiting on CI" is a different answer from "CI had nothing to say" —
+   *  folding a queued run into `other` is what hid it from the summary line. */
+  it("never folds a running check into other", () => {
+    const tally = tallyChecks([check("e2e", "Pending")]);
+    expect(tally.running).toBe(1);
+    expect(tally.other).toBe(0);
+  });
+
+  it("agrees with groupChecks on every count", () => {
+    const checks = [
+      check("a", "Success"),
+      check("b", "Pending"),
+      check("c", "Neutral"),
+      check("d", "Failure"),
+    ];
+    const tally = tallyChecks(checks);
+    const sizeOf = (key: string) => groupChecks(checks).find((s) => s.key === key)?.checks.length;
+    expect(sizeOf("Success")).toBe(tally.passing);
+    expect(sizeOf("Failure")).toBe(tally.failing);
+    expect(sizeOf("Pending")).toBe(tally.running);
+    expect(sizeOf(SKIPPED_KEY)).toBe(tally.other);
+  });
+
+  it("counts nothing for a PR with no checks", () => {
+    expect(tallyChecks([])).toEqual({ passing: 0, failing: 0, running: 0, other: 0 });
   });
 });
 

@@ -51,6 +51,20 @@ pub async fn list(db: &Db) -> Result<Vec<Repo>> {
         .collect())
 }
 
+/// Every registered repo's stored top-level path, in insertion order. Deliberately
+/// not [`list`]: that one resolves Linear orgs to build display labels, and the
+/// callers here are asking a filesystem question.
+pub(crate) async fn paths(db: &Db) -> Result<Vec<String>> {
+    Ok(sqlx::query_as::<_, (String,)>(
+        "SELECT path FROM repos WHERE path IS NOT NULL ORDER BY rowid",
+    )
+    .fetch_all(db)
+    .await?
+    .into_iter()
+    .map(|(path,)| path)
+    .collect())
+}
+
 /// The stored top-level path of a registered repo, if it has one.
 pub async fn path(db: &Db, name: &str) -> Result<Option<String>> {
     let row: Option<(Option<String>,)> = sqlx::query_as("SELECT path FROM repos WHERE name = ?")

@@ -57,10 +57,25 @@ describe("ReviewDraftCard", () => {
   it("says whose it is and where it goes", () => {
     render(<ReviewDraftCard draft={draft()} target={target} />);
     expect(screen.getByText("AI draft")).toBeInTheDocument();
-    expect(screen.getByText(/retry.ts · line r42/i)).toBeInTheDocument();
+    // Basename in the code face, anchor in words — and no "R"/"L", which is the
+    // diff's coordinate rather than anything the reader was taught.
+    expect(screen.getByText("retry.ts")).toBeInTheDocument();
+    expect(screen.getByText("· line 42")).toBeInTheDocument();
     // No pending review yet, so sending this one starts it — the same words the
     // diff's own composer uses.
     expect(screen.getByText("Start a review")).toBeInTheDocument();
+  });
+
+  /** The card also renders in Trees' PR pane, away from its file, where two
+   *  `util.py`s under different directories are the same basename. */
+  it("keeps the whole path on the basename's title", () => {
+    render(<ReviewDraftCard draft={draft({ path: "src/net/retry.ts" })} target={target} />);
+    expect(screen.getByText("retry.ts")).toHaveAttribute("title", "src/net/retry.ts");
+  });
+
+  it("names an old-side anchor in words, never as a side letter", () => {
+    render(<ReviewDraftCard draft={draft({ onRight: false, startLine: 40 })} target={target} />);
+    expect(screen.getByText("· old lines 40–42")).toBeInTheDocument();
   });
 
   it("says 'Add to review' once a review is open", () => {

@@ -4,12 +4,29 @@ import { checkStatusMeta } from "../../theme/colors";
 /** The trailing catch-all section — skipped + other non-pass/fail outcomes. */
 export const SKIPPED_KEY = "skipped";
 
+/**
+ * The one status that means "still going". GitHub's `QUEUED` / `IN_PROGRESS` /
+ * `WAITING` runs and a status context's `PENDING` / `EXPECTED` all normalize to
+ * `Pending` upstream (`check_run_status` in github.rs), so this is the single
+ * state to test for — never a set the callers re-spell.
+ */
+const RUNNING: CheckStatus = "Pending";
+
+/** Whether a check is still running — what both hosts ask before swapping the
+ *  static status glyph for the app's pulsing in-progress dot. */
+export function isRunning(check: PrCheck): boolean {
+  return check.status === RUNNING;
+}
+
 /** One collapsible section of the Checks tab. */
 export interface CheckSection {
   key: string;
   color: string;
   glyph: string;
   label: string;
+  /** Still-running checks. Carried on the section so a host renders the activity
+   *  affordance off this classification instead of re-testing the status. */
+  running: boolean;
   checks: PrCheck[];
 }
 
@@ -23,11 +40,18 @@ export function groupChecks(checks: PrCheck[]): CheckSection[] {
   const of = (s: CheckStatus) => checks.filter((c) => c.status === s);
   const sections: CheckSection[] = [];
 
-  for (const s of ["Failure", "Pending", "Success"] as CheckStatus[]) {
+  for (const s of ["Failure", RUNNING, "Success"] as CheckStatus[]) {
     const list = of(s);
     if (list.length > 0) {
       const m = checkStatusMeta[s];
-      sections.push({ key: s, color: m.color, glyph: m.glyph, label: m.label, checks: list });
+      sections.push({
+        key: s,
+        color: m.color,
+        glyph: m.glyph,
+        label: m.label,
+        running: s === RUNNING,
+        checks: list,
+      });
     }
   }
 
@@ -39,6 +63,7 @@ export function groupChecks(checks: PrCheck[]): CheckSection[] {
       color: m.color,
       glyph: m.glyph,
       label: SKIPPED_KEY,
+      running: false,
       checks: skipped,
     });
   }
@@ -50,8 +75,10 @@ export function groupChecks(checks: PrCheck[]): CheckSection[] {
 export interface CheckTally {
   passing: number;
   failing: number;
+  /** Still going. Counted on its own line and never folded into {@link other} —
+   *  "waiting on CI" is a different answer from "CI had nothing to say". */
   running: number;
-  /** Skipped + neutral — everything that finished without a pass/fail verdict. */
+  /** Skipped + neutral — everything that *finished* without a pass/fail verdict. */
   other: number;
 }
 
@@ -67,7 +94,7 @@ export function tallyChecks(checks: PrCheck[]): CheckTally {
   return {
     passing: count("Success"),
     failing: count("Failure"),
-    running: count("Pending"),
+    running: count(RUNNING),
     other: count("Skipped") + count("Neutral"),
   };
 }

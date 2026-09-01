@@ -9,6 +9,12 @@
  * component's, not each caller's, because a second row that merely *looks* like
  * this one is how the two halves of the panel drift apart.
  *
+ * It is one line, always. Label, number and countdown take the width their text
+ * actually needs and the track absorbs whatever is left, so nothing wraps a row
+ * to double height: a fixed countdown column was narrower than "resets in
+ * 16h 33m", and the panel read as a column of two-line rows for the sake of a
+ * few pixels of track.
+ *
  * The tone is the caller's, though, and deliberately: a call pool goes amber on
  * how little is left (`apiBudgetColor`), a provider window on how much is spent,
  * against the same thresholds the terminal bar and the tree status line use. One
@@ -42,25 +48,28 @@ export function BudgetLine({
   nowMs: number;
 }) {
   return (
-    <span className="flex items-center gap-2 text-[10.5px]">
+    <span className="flex items-center gap-1.5 text-[10.5px]">
+      {/* The one column allowed to give: a label is recoverable from its `hint`
+          and from the row it sits under, a count and a countdown are not. */}
       <span className="w-[62px] flex-none truncate text-muted-4" title={hint}>
         {label}
       </span>
       {/* A hair of fill for anything above zero: a budget that has been touched
-          at all should not read as an empty track. */}
+          at all should not read as an empty track. The track is the row's only
+          flexible part — it is the piece whose exact width carries no reading. */}
       <span className="h-[5px] min-w-0 flex-1 overflow-hidden rounded-full bg-input">
         <span
           className="block h-full rounded-full"
           style={{ width: `${Math.max(pct > 0 ? 1 : 0, pct)}%`, background: color }}
         />
       </span>
-      <span className="flex-none tabular-nums text-fg">{value}</span>
+      <span className="flex-none whitespace-nowrap tabular-nums text-fg">{value}</span>
       {/* The reset is the other half of the number: 12 search calls left is fine
           when the pool refills in 20 seconds and a wall when it refills in an
           hour, and a 5-hour window at 90% means something different an hour
           before it rolls than a minute before. Coarse here — the precise
           countdown is on the settings meters. */}
-      <span className="w-[74px] flex-none text-right text-[10px] text-muted-4">
+      <span className="flex-none whitespace-nowrap text-[10px] text-muted-4">
         {resetsAtMs ? `resets in ${formatUntil(resetsAtMs, nowMs)}` : ""}
       </span>
     </span>
