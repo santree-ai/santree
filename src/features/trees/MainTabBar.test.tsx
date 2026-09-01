@@ -1,9 +1,9 @@
 /**
- * The main-area tab bar's real logic: naming the main work tab after the agent
- * actually running in it, pruning a dead terminal tab (and only a *dead* one —
- * a mis-prune closes a tab the user is still using, or strands one that isn't),
- * and closing a tab tearing its PTY session down with it. Plus the new-tab
- * menu's digit shortcuts, which mount and unmount with the menu.
+ * The main-area tab bar's real logic: pruning a tab whose process has exited (and
+ * only a *dead* one — a mis-prune closes a tab the user is still using, or
+ * strands one that isn't), and closing a tab tearing its PTY session down with
+ * it. Plus the new-tab menu's digit shortcuts, which mount and unmount with the
+ * menu.
  */
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,17 +17,15 @@ import type { MainTab } from "./model";
 /** The Trees model slice the bar reads, dialled per test. */
 const trees = vi.hoisted(() => ({
   activeId: "AK-1",
-  activeTab: "terminal" as MainTab | null,
-  extraTabs: [] as WorktreeTab[],
+  activeTab: null as MainTab | null,
+  tabs: [] as WorktreeTab[],
   active: { agent: "Claude" },
   selectedFile: null as string | null,
   setupFor: null as string | null,
-  mainTerminalOpen: true,
   setActiveTab: vi.fn(),
   closeFileTab: vi.fn(),
-  addTab: vi.fn<(kind: TabKind, agentKind?: AgentKind) => void>(),
+  addTab: vi.fn<(kind: TabKind, agentKind?: AgentKind) => string | null>(),
   closeTab: vi.fn<(id: string) => void>(),
-  closeMainTerminal: vi.fn(),
   renameTab: vi.fn(),
 }));
 
@@ -83,22 +81,20 @@ const liveRefIds = () => registry.tabs.map((t) => t.refId);
 
 beforeEach(() => {
   trees.activeId = "AK-1";
-  trees.activeTab = "terminal";
-  trees.extraTabs = [];
+  trees.activeTab = null;
+  trees.tabs = [];
   trees.selectedFile = null;
   trees.setupFor = null;
-  trees.mainTerminalOpen = true;
   trees.addTab.mockClear();
   trees.closeTab.mockClear();
-  trees.closeMainTerminal.mockClear();
 });
 
 describe("MainTabBar", () => {
   describe("pruning dead tabs", () => {
     // An extra *terminal* tab is its shell: once the shell exits there's nothing
     // left to show, so the tab goes rather than lingering as a dead one to ✕ by hand.
-    it("closes an extra terminal tab once its shell exits", () => {
-      trees.extraTabs = [tab("t1", "terminal")];
+    it("closes a terminal tab once its shell exits", () => {
+      trees.tabs = [tab("t1", "terminal")];
       mount();
       spawn("t1");
       expect(trees.closeTab).not.toHaveBeenCalled();
@@ -112,7 +108,7 @@ describe("MainTabBar", () => {
     // PTY registers. Pruning on "no session" alone would close the tab in that gap,
     // before it ever ran.
     it("leaves a tab whose session hasn't registered yet alone", () => {
-      trees.extraTabs = [tab("t1", "terminal")];
+      trees.tabs = [tab("t1", "terminal")];
       const { rerender } = mount();
 
       rerender(
@@ -125,24 +121,34 @@ describe("MainTabBar", () => {
       expect(trees.closeTab).not.toHaveBeenCalled();
     });
 
-    // A Claude tab's session is meant to outlive its process: quitting claude shows
-    // the resume pane, and the tab comes back after an app restart.
-    it("keeps a Claude tab whose process exited (it's resumable)", () => {
-      trees.extraTabs = [tab("c1", "agent")];
+    // An agent tab is its process too. Quitting claude used to leave a resume
+    // pane behind; now the tab goes with the process, and Session history is what
+    // reopens the conversation.
+    it("closes an agent tab once its process exits", () => {
+      trees.tabs = [tab("c1", "agent")];
       mount();
       spawn("c1");
 
       kill("c1");
 
-      expect(trees.closeTab).not.toHaveBeenCalled();
+      expect(trees.closeTab).toHaveBeenCalledWith("c1");
     });
 
-    it("keeps a Fix-CI tab whose process exited (a Claude session too)", () => {
-      trees.extraTabs = [tab("f1", "fixCi")];
+    it("closes a Fix-CI tab once its process exits", () => {
+      trees.tabs = [tab("f1", "fixCi")];
       mount();
       spawn("f1");
 
       kill("f1");
+
+      expect(trees.closeTab).toHaveBeenCalledWith("f1");
+    });
+
+    // A tab restored by a restart has never been live, so there is nothing to
+    // prune — it waits to be opened instead of being swept before it ever runs.
+    it("leaves a restored tab that has not run yet alone", () => {
+      trees.tabs = [tab("c1", "agent")];
+      mount();
 
       expect(trees.closeTab).not.toHaveBeenCalled();
     });
@@ -150,8 +156,8 @@ describe("MainTabBar", () => {
 
   // Closing the tab by hand must tear the PTY down too, or the shell/agent keeps
   // running and its session lingers under a dead name in the global Terminal tab.
-  it("closing an extra tab tears down its PTY session", () => {
-    trees.extraTabs = [tab("t1", "terminal")];
+  it("closing a tab tears down its PTY session", () => {
+    trees.tabs = [tab("t1", "terminal")];
     mount();
     spawn("t1");
     expect(liveRefIds()).toContain(refIdOf("t1"));
@@ -162,43 +168,13 @@ describe("MainTabBar", () => {
     expect(trees.closeTab).toHaveBeenCalledWith("t1");
   });
 
-  // The work terminal is a tab like any other now: it closes, its PTY goes with
-  // it, and the strip can end up with nothing in it at all. Its conversation is
-  // not lost — Session history resumes it into a fresh tab.
-  describe("the work terminal", () => {
-    it("closes, tearing down the worktree's own PTY session", () => {
-      mount();
-      act(() => {
-        registry.open({ title: "AK-1", source: "issue", refId: "tree:AK-1" });
-      });
-      expect(liveRefIds()).toContain("tree:AK-1");
+  // Closing the last tab must still leave a way back: the bar (and its "+") stays,
+  // which is what the empty surface below it points at.
+  it("leaves an empty strip that still offers a new tab", () => {
+    mount();
 
-      fireEvent.click(screen.getByRole("button", { name: "Close Claude Code" }));
-
-      expect(liveRefIds()).not.toContain("tree:AK-1");
-      expect(trees.closeMainTerminal).toHaveBeenCalled();
-    });
-
-    it("leaves the strip once closed, without touching the extra tabs", () => {
-      trees.mainTerminalOpen = false;
-      trees.extraTabs = [tab("t1", "terminal")];
-      trees.activeTab = "tab:t1";
-      mount();
-
-      expect(screen.queryByRole("tab", { name: /Claude Code/ })).not.toBeInTheDocument();
-      expect(screen.getByRole("tab", { name: /Terminal 2/ })).toBeInTheDocument();
-    });
-
-    // Closing the last tab must still leave a way back: the bar (and its "+")
-    // stays, which is what the empty surface below it points at.
-    it("leaves an empty strip that still offers a new tab", () => {
-      trees.mainTerminalOpen = false;
-      trees.activeTab = null;
-      mount();
-
-      expect(screen.queryAllByRole("tab")).toHaveLength(0);
-      expect(screen.getByRole("button", { name: /New tab/ })).toBeInTheDocument();
-    });
+    expect(screen.queryAllByRole("tab")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: /New tab/ })).toBeInTheDocument();
   });
 
   describe("the new-tab menu", () => {
@@ -273,32 +249,6 @@ describe("MainTabBar", () => {
   });
 });
 
-describe("the main work tab's name", () => {
-  /** It used to read "Terminal" whatever was running in it, which on a Codex
-   *  worktree put the word "Terminal" next to the Codex logomark on a tab whose
-   *  content was the Codex TUI. The tab was lying about itself. */
-  it("names the tab after the agent running in it", () => {
-    trees.active = { agent: "Codex" };
-    mount();
-    expect(screen.getByRole("tab", { name: "Codex" })).toBeTruthy();
-    expect(screen.queryByRole("tab", { name: "Terminal" })).toBeNull();
-  });
-
-  it("uses the agent's full display name", () => {
-    trees.active = { agent: "Claude" };
-    mount();
-    expect(screen.getByRole("tab", { name: "Claude Code" })).toBeTruthy();
-  });
-
-  /** The base checkout runs a plain login shell and a fresh worktree has not
-   *  launched anything yet — neither has an agent to be named after. */
-  it("stays 'Terminal' when no agent has been launched", () => {
-    trees.active = { agent: null } as unknown as typeof trees.active;
-    mount();
-    expect(screen.getByRole("tab", { name: "Terminal" })).toBeTruthy();
-  });
-});
-
 /**
  * A narrow pane. Tab labels are one line, ellipsised — "Claude Code" used to
  * wrap onto two — and the strip shrinks its tabs only to a readable floor,
@@ -324,20 +274,30 @@ describe("fitting the tabs to the pane", () => {
       toJSON: () => ({}),
     } as DOMRect);
   };
-  const sessions = (n: number): WorktreeTab[] =>
-    Array.from({ length: n }, (_, i) => ({
-      id: `t${i + 1}`,
+  /** A worktree's tabs: the one a task started in, plus `n` more. */
+  const sessions = (n: number): WorktreeTab[] => [
+    {
+      id: "w1",
       worktreeId: trees.activeId,
       kind: "agent",
-      agentKind: "Codex",
+      agentKind: "Claude",
+      title: "Claude Code",
+      pr: null,
+    },
+    ...Array.from({ length: n }, (_, i) => ({
+      id: `t${i + 1}`,
+      worktreeId: trees.activeId,
+      kind: "agent" as const,
+      agentKind: "Codex" as const,
       title: `Session ${i + 1}`,
       pr: null,
-    }));
+    })),
+  ];
   const tabNames = () => screen.getAllByRole("tab").map((t) => t.textContent);
 
   beforeEach(() => {
     trees.active = { agent: "Claude" };
-    trees.extraTabs = sessions(4);
+    trees.tabs = sessions(4);
     trees.setActiveTab.mockClear();
   });
   afterEach(() => {

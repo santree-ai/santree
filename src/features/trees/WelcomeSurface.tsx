@@ -10,9 +10,9 @@
  * `/` redirects here (see `routes/index.tsx`): the workspace is the landing
  * route, so there is no separate home view to keep in step with this one.
  *
- * With `workspace`: one *is* picked and every one of its tabs has been closed.
- * The same surface, minus its own drag strip (the tab bar above owns that one),
- * offering the tab that workspace is for — its work terminal.
+ * With `workspace`: one *is* picked and it has no tabs open — every one closed,
+ * or none ever opened. The same surface, minus its own drag strip (the tab bar
+ * above owns that one), offering the plainest thing that bar can open.
  */
 import { openUrl } from "@tauri-apps/plugin-opener";
 

@@ -115,7 +115,7 @@ interface AppUi {
 
   /** The agent session the main area is actually showing — published by
    *  `TreesProvider` so the status bar's session meter can scope itself to the
-   *  tab under the user's eyes instead of to the worktree's main terminal.
+   *  tab under the user's eyes instead of to whichever tab is first.
    *
    *  **Transient by design**, unlike {@link openWorktree} directly above: that
    *  one deliberately outlives a navigation, this one must not. "Which agent am
@@ -212,8 +212,10 @@ export interface TreeFocus {
   id: string;
   /** Right-panel pane to show; `undefined` leaves the panel where it is. */
   pane?: TreeFocusPane;
-  /** Main-area tab to show: an extra tab's id, `null` for the main work
-   *  terminal, `undefined` to keep the worktree's last-used tab. */
+  /** Main-area tab to show: a tab's id, `undefined` to keep the worktree's
+   *  last-used tab, and `null` for a caller with no tab to name — a session
+   *  minted before every agent lived in one, which selects the worktree and
+   *  leaves its tab alone. */
   tab?: string | null;
 }
 

@@ -71,7 +71,7 @@ describe("AgentRuns", () => {
     backend.runSetupPref = false;
     const { result } = renderHook(() => useAgentRuns(), { wrapper });
 
-    await beginRun(() => result.current.beginRun("AK-1"));
+    await beginRun(() => result.current.beginRun("AK-1", "tab-AK-1"));
 
     expect(result.current.launchAgents.has("AK-1")).toBe(true);
     expect(backend.runSetup).not.toHaveBeenCalled();
@@ -88,7 +88,7 @@ describe("AgentRuns", () => {
     const { result } = renderHook(() => useAgentRuns(), { wrapper });
     expect(result.current.runSetupOnStart).toBe(false); // the hook can't tell yet
 
-    await beginRun(() => result.current.beginRun("AK-1"));
+    await beginRun(() => result.current.beginRun("AK-1", "tab-AK-1"));
 
     expect(backend.runSetup).toHaveBeenCalledTimes(1);
     expect(result.current.isInitialSetup("AK-1")).toBe(true);
@@ -103,17 +103,17 @@ describe("AgentRuns", () => {
     const { result } = renderHook(() => useAgentRuns(), { wrapper });
 
     act(() => result.current.planSetup(["AK-1", "AK-2"], false));
-    await beginRun(() => result.current.beginRun("AK-1"));
+    await beginRun(() => result.current.beginRun("AK-1", "tab-AK-1"));
 
     expect(backend.runSetup).not.toHaveBeenCalled();
     expect(result.current.launchAgents.has("AK-1")).toBe(true);
 
     // The plan is per worktree, so the batch's other ticket honours it too…
-    await beginRun(() => result.current.beginRun("AK-2"));
+    await beginRun(() => result.current.beginRun("AK-2", "tab-AK-2"));
     expect(backend.runSetup).not.toHaveBeenCalled();
 
     // …and a worktree outside the batch still follows the preference.
-    await beginRun(() => result.current.beginRun("AK-9"));
+    await beginRun(() => result.current.beginRun("AK-9", "tab-AK-9"));
     expect(backend.runSetup).toHaveBeenCalledTimes(1);
     expect(result.current.isInitialSetup("AK-9")).toBe(true);
   });
@@ -123,8 +123,8 @@ describe("AgentRuns", () => {
     const { result } = renderHook(() => useAgentRuns(), { wrapper });
 
     act(() => result.current.planSetup(["AK-1", "AK-2"], true)); // …the batch says yes
-    await beginRun(() => result.current.beginRun("AK-1"));
-    await beginRun(() => result.current.beginRun("AK-2"));
+    await beginRun(() => result.current.beginRun("AK-1", "tab-AK-1"));
+    await beginRun(() => result.current.beginRun("AK-2", "tab-AK-2"));
 
     expect(backend.runSetup).toHaveBeenCalledTimes(2);
     expect(result.current.isInitialSetup("AK-1")).toBe(true);
@@ -139,7 +139,7 @@ describe("AgentRuns", () => {
   it("hands off to the agent launch when a task-start setup finishes", async () => {
     const { result } = renderHook(() => useAgentRuns(), { wrapper });
 
-    await beginRun(() => result.current.beginRun("AK-1"));
+    await beginRun(() => result.current.beginRun("AK-1", "tab-AK-1"));
     expect(result.current.isSettingUp("AK-1")).toBe(true);
     expect(result.current.isInitialSetup("AK-1")).toBe(true);
     expect(result.current.launchAgents.has("AK-1")).toBe(false); // not yet — setup first
@@ -170,9 +170,9 @@ describe("AgentRuns", () => {
   it("keeps concurrent setup runs independent", async () => {
     const { result } = renderHook(() => useAgentRuns(), { wrapper });
 
-    await beginRun(() => result.current.beginRun("AK-1"));
+    await beginRun(() => result.current.beginRun("AK-1", "tab-AK-1"));
     const first = channels.last;
-    await beginRun(() => result.current.beginRun("AK-2"));
+    await beginRun(() => result.current.beginRun("AK-2", "tab-AK-2"));
     const second = channels.last;
 
     expect(result.current.isSettingUp("AK-1")).toBe(true);
@@ -194,7 +194,7 @@ describe("AgentRuns", () => {
   // `npm install`. Chunks are kept raw and in order for the pane to replay.
   it("streams setup output into the shared store, keyed by worktree", async () => {
     const { result } = renderHook(() => useAgentRuns(), { wrapper });
-    await beginRun(() => result.current.beginRun("AK-1"));
+    await beginRun(() => result.current.beginRun("AK-1", "tab-AK-1"));
 
     act(() => {
       channels.last?.onmessage?.({ type: "chunk", text: "installing\r\n" } as StreamEvent);
@@ -210,7 +210,7 @@ describe("AgentRuns", () => {
   it("won't start a second run for a worktree already setting up", async () => {
     const { result } = renderHook(() => useAgentRuns(), { wrapper });
 
-    await beginRun(() => result.current.beginRun("AK-1"));
+    await beginRun(() => result.current.beginRun("AK-1", "tab-AK-1"));
     act(() => result.current.runSetup("AK-1"));
 
     expect(backend.runSetup).toHaveBeenCalledTimes(1);

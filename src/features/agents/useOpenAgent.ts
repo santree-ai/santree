@@ -34,13 +34,14 @@ export function useOpenAgent(): (entry: AgentTarget) => void {
       switch (entry.origin.kind) {
         case "tree":
         case "tree-tab":
-          // Name the tab the session actually lives in: `tabId` is null for a
-          // `tree` origin, which IS the main work terminal, and the extra tab's
-          // id for a `tree-tab` one. Dropping it is why every agent used to land
-          // on tab one — including a Codex tab whose row you clicked. The pane is
-          // deliberately left unnamed: opening an agent says nothing about which
-          // right-panel pane you wanted, and forcing one is how a click in the
-          // History pane used to jump you to the ticket.
+          // Name the tab the session actually lives in. Dropping it is why every
+          // agent used to land on tab one — including a Codex tab whose row you
+          // clicked. `tabId` is null only for a `tree` origin, a session minted
+          // before every agent lived in a tab: there is no tab to name, so this
+          // selects the worktree and leaves whatever it had open. The pane is
+          // deliberately left unnamed too: opening an agent says nothing about
+          // which right-panel pane you wanted, and forcing one is how a click in
+          // the History pane used to jump you to the ticket.
           if (entry.origin.ticket) {
             requestTreeFocus(entry.origin.ticket, { tab: entry.origin.tabId });
           }

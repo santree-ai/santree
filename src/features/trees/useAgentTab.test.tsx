@@ -263,17 +263,6 @@ describe("useAgentTab", () => {
         queryKey: ["agent-session", "acme/app", REF, "Codex"],
       });
     });
-
-    it("a shell tab is never 'ended' and never resolves a session", () => {
-      const t = mount(opts({ shellOnly: true, agent: null }));
-      t.spawn();
-      t.kill();
-
-      expect(t.tab().ended).toBe(false);
-      expect(t.tab().preparing).toBe(false);
-      expect(t.tab().seed).toBeUndefined();
-      expect(t.resolving()).toBe(false);
-    });
   });
 
   describe("preparing (the hold gate in front of the PTY spawn)", () => {

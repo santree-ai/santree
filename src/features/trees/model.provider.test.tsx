@@ -7,13 +7,13 @@
  *    you open one after another — a `selectFile` that also reset the pane would
  *    send the reader back to the ticket after every entry — but it holds for the
  *    Files, Changes and PR panes too, which are equally lists you click down.
- * 2. Closing the work terminal sticks (and is remembered across a restart), which
- *    is what lets a workspace end up showing nothing at all.
+ * 2. A worktree with no tab rows is showing nothing at all, and closing the last
+ *    of them puts it back there — there is no tab the workspace keeps for itself.
  */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Worktree, WorktreePr } from "../../bindings";
+import type { Worktree, WorktreePr, WorktreeTab } from "../../bindings";
 
 const worktree = {
   id: "AK-1",
@@ -39,19 +39,47 @@ const worktree = {
 
 const pr = { issueId: "AK-1", repo: "acme/app", number: 7 } as WorktreePr;
 
-vi.mock("../../lib/queries", () => ({
-  useWorktrees: () => ({ data: [worktree], isLoading: false }),
-  useBaseWorktree: () => ({ data: null, isLoading: false }),
-  useWorktreePrs: () => ({ data: [pr] }),
-  useTasks: () => ({ data: [] }),
-  // `undefined` is "Linear hasn't answered yet", which is how the model treats a
-  // worktree it has no verdict on: the Issue pane stays available.
-  useTriageDetail: () => ({ data: undefined }),
-  useWorktreeTabs: () => ({ data: [] }),
-  useAddWorktreeTab: () => ({ mutate: vi.fn() }),
-  useRenameWorktreeTab: () => ({ mutate: vi.fn() }),
-  useRemoveWorktreeTab: () => ({ mutate: vi.fn() }),
+/** The tab rows, as the DB would hold them. The real add/remove mutations patch
+ *  the query cache optimistically, so a write re-renders every reader; the mock
+ *  keeps that promise with a listener set rather than a cache. Without it a close
+ *  would mutate the array and nothing would re-read it — the provider's own tab
+ *  resolution, which is what these tests exercise, would never run again. */
+const rows = vi.hoisted(() => ({
+  tabs: [] as WorktreeTab[],
+  listeners: new Set<() => void>(),
+  write(tabs: WorktreeTab[]) {
+    this.tabs = tabs;
+    for (const l of [...this.listeners]) l();
+  },
 }));
+
+vi.mock("../../lib/queries", async () => {
+  const { useEffect, useReducer } = await import("react");
+  return {
+    useWorktrees: () => ({ data: [worktree], isLoading: false }),
+    useBaseWorktree: () => ({ data: null, isLoading: false }),
+    useWorktreePrs: () => ({ data: [pr] }),
+    useTasks: () => ({ data: [] }),
+    // `undefined` is "Linear hasn't answered yet", which is how the model treats
+    // a worktree it has no verdict on: the Issue pane stays available.
+    useTriageDetail: () => ({ data: undefined }),
+    useWorktreeTabs: () => {
+      const [, bump] = useReducer((n: number) => n + 1, 0);
+      useEffect(() => {
+        rows.listeners.add(bump);
+        return () => void rows.listeners.delete(bump);
+      }, []);
+      return { data: rows.tabs };
+    },
+    useAddWorktreeTab: () => ({
+      mutate: (t: WorktreeTab) => rows.write([...rows.tabs, t]),
+    }),
+    useRenameWorktreeTab: () => ({ mutate: vi.fn() }),
+    useRemoveWorktreeTab: () => ({
+      mutate: (id: string) => rows.write(rows.tabs.filter((t) => t.id !== id)),
+    }),
+  };
+});
 
 vi.mock("../../components/PrChip", () => ({
   primaryPr: (list: WorktreePr[]) => list[0] ?? null,
@@ -102,8 +130,9 @@ function Probe() {
     setFileTab,
     selectFile,
     closeFileTab,
-    openMainTerminal,
-    closeMainTerminal,
+    closeTab,
+    addTab,
+    tabs,
   } = useTrees();
   return (
     <div>
@@ -113,11 +142,11 @@ function Probe() {
       <button type="button" onClick={closeFileTab}>
         close file
       </button>
-      <button type="button" onClick={closeMainTerminal}>
-        close terminal
-      </button>
-      <button type="button" onClick={openMainTerminal}>
+      <button type="button" onClick={() => addTab("terminal")}>
         open terminal
+      </button>
+      <button type="button" onClick={() => tabs[0] && closeTab(tabs[0].id)}>
+        close first tab
       </button>
       <button type="button" onClick={() => setFileTab("aiWork")}>
         show AI work queue
@@ -146,6 +175,7 @@ describe("TreesProvider · selectFile", () => {
   beforeEach(() => {
     localStorage.clear();
     sessionStorage.clear();
+    rows.tabs = [];
   });
 
   it("opens the file in the main area and leaves the right panel where it is", () => {
@@ -160,48 +190,36 @@ describe("TreesProvider · selectFile", () => {
   });
 });
 
-describe("TreesProvider · the work terminal", () => {
+describe("TreesProvider · tabs", () => {
   beforeEach(() => {
     localStorage.clear();
     sessionStorage.clear();
+    rows.tabs = [];
   });
 
-  it("starts open on a worktree that has never been visited", () => {
+  // No tab is privileged, so a worktree nobody has opened a tab on is showing
+  // nothing — which is what puts the welcome surface on screen.
+  it("starts a worktree with nothing open", () => {
     open();
 
-    expect(screen.getByTestId("main")).toHaveTextContent("terminal");
-  });
-
-  // The whole point: with the terminal closed and no extra tabs, the workspace
-  // has nothing open, which is what puts the welcome surface on screen.
-  it("closes to nothing, and re-opens on demand", () => {
-    open();
-
-    fireEvent.click(screen.getByText("close terminal"));
     expect(screen.getByTestId("main")).toHaveTextContent("none");
+  });
+
+  it("opens a tab and falls back to nothing when it closes", () => {
+    open();
 
     fireEvent.click(screen.getByText("open terminal"));
-    expect(screen.getByTestId("main")).toHaveTextContent("terminal");
-  });
+    expect(screen.getByTestId("main")).not.toHaveTextContent("none");
 
-  // Remembered per worktree, so a restart restores the pane as it was left —
-  // closing it is a decision, not a one-session accident.
-  it("remembers the close across a remount", () => {
-    open();
-    fireEvent.click(screen.getByText("close terminal"));
-    cleanup();
-
-    open();
-
+    fireEvent.click(screen.getByText("close first tab"));
     expect(screen.getByTestId("main")).toHaveTextContent("none");
   });
 
-  // Closing the File tab used to fall back to the terminal by name. With the
-  // terminal closed there is nothing to fall back to, and the pane must say so
-  // rather than select a tab that isn't in the strip.
-  it("falls back to nothing when the last remaining tab is closed", () => {
+  // Closing the File tab used to fall back to a tab that was always there. With
+  // no tabs at all the pane must say so rather than select one that isn't in the
+  // strip.
+  it("falls back to nothing when the last remaining view is closed", () => {
     open();
-    fireEvent.click(screen.getByText("close terminal"));
     fireEvent.click(screen.getByText("pick file"));
     expect(screen.getByTestId("main")).toHaveTextContent("file");
 

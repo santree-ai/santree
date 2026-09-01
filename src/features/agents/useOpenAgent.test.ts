@@ -38,9 +38,9 @@ function open(termKey: string, repo: string | null = "acme/app") {
 }
 
 describe("useOpenAgent", () => {
-  /** A `tree` session IS the main work terminal — `null` names it explicitly, so
+  /** A `tree` session predates tabs, so there is no tab to name — `null` says so, so
    *  the model moves there rather than leaving whatever tab was last open. */
-  it("sends a main-terminal session to the main terminal", () => {
+  it("names no tab for a session minted before tabs existed", () => {
     open("tree:AK-1");
     expect(spies.requestTreeFocus).toHaveBeenCalledWith("AK-1", { tab: null });
     expect(spies.navigate).toHaveBeenCalledWith({ to: "/trees" });

@@ -2,7 +2,7 @@
  *  tree, the Tickets fold, a worktree's session history — so these read a caller-
  *  supplied repo list rather than the app's single active one. */
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 import type { AgentKind } from "../../bindings";
 import {
@@ -76,6 +76,16 @@ export function useAgentEntries(
  * OSC 133 command start/finish; santree has no shell integration to hook, so
  * the tab set is the bind signal it does have.
  *
+ * That same signal re-reads the **session rows**, which matter most on the way
+ * *down*: closing a tab leaves a row whose `term_key` no longer names a live
+ * pane, and until it is re-read the sidebar keeps drawing that agent under its
+ * worktree. `useSessionStates` polls only while something is unsettled, so an
+ * app that had gone quiet never noticed on its own and the chip sat there —
+ * seconds for a busy agent (the 10s poll caught it), indefinitely for an idle
+ * one. The re-read is what retires it: the backend answers a `term_key` with no
+ * live PTY as exited, and an extra tab's close took its `terminal_sessions` row
+ * with it, so the row comes back unattributed and leaves the tree entirely.
+ *
  * Exported because the status bar's live count needs the same tier-2 signal the
  * fold does — it is one of the arbiter's three inputs (`lib/paneAgentOwner.ts`),
  * and a consumer that skipped it would be back to counting santree's launch
@@ -93,6 +103,18 @@ export function useDetectedAgents(terminals: TerminalTab[]): ReadonlyMap<string,
     // anyway — so the last pane closing costs no `ps`.
     if (!panes) return;
     qc.invalidateQueries({ queryKey: queryKeys.agentProcesses });
+  }, [qc, panes]);
+
+  // The session rows are re-read whichever way the set moved, closing the *last*
+  // pane included — that is precisely when a row left behind draws a ghost.
+  // Only on a real change, never on mount: reconciling each row against its
+  // transcript is genuine fs work, this hook is mounted by four surfaces, and
+  // the query already fetches for itself when it has nothing cached.
+  const lastPanes = useRef(panes);
+  useEffect(() => {
+    if (panes === lastPanes.current) return;
+    lastPanes.current = panes;
+    qc.invalidateQueries({ queryKey: queryKeys.sessionStates });
   }, [qc, panes]);
 
   const { data } = useAgentProcesses(terminals.length);

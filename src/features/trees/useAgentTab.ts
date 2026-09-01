@@ -1,6 +1,7 @@
 /**
- * The agent-session pipeline shared by every tab that runs an agent: the worktree's
- * main work terminal, an extra Claude tab, a Fix-CI tab, and the off-screen launcher.
+ * The agent-session pipeline shared by every tab that runs an agent: the tab a
+ * started task launches into, one opened from the "+" menu or resumed from Session
+ * history, a Fix-CI tab, and the off-screen launcher.
  *
  * All of them need the same six things — latch whether a live PTY exists, decide
  * resume-vs-fresh-vs-shell, resolve exec/model/effort/settings/permission-mode,
@@ -40,15 +41,13 @@ export interface AgentTabOptions {
   cwd: string;
   /** Which agent binary to run. `null` (the base worktree) means a plain shell. */
   agent: AgentKind | null;
-  /** Whether opening this tab may mint a *fresh* session, or only resume one. A
-   *  Claude/Fix-CI tab exists to run the agent, so any open is an explicit launch;
-   *  the main work terminal only launches when a task was actually started. */
+  /** Whether opening this tab may mint a *fresh* session, or only resume one. An
+   *  agent tab exists to run the agent, so any open is an explicit launch — the
+   *  resolve still prefers resuming whatever that tab already has. */
   allowFresh: boolean;
   /** Hold the terminal back even once the session resolves — the caller has another
-   *  input still in flight (the main terminal waits on its work-prompt file). */
+   *  input still in flight (a started task's tab waits on its work-prompt file). */
   hold?: boolean;
-  /** Don't resolve a session at all: this tab is a plain shell (the base worktree). */
-  shellOnly?: boolean;
   /** The opening prompt, seeded on a fresh launch only. */
   prompt?: string;
   /** Name the session for Claude's Remote Control web (we pass the ticket id). */
@@ -86,7 +85,7 @@ export interface AgentTab {
 }
 
 export function useAgentTab(opts: AgentTabOptions): AgentTab {
-  const { repo, refId, cwd, agent, allowFresh, hold, shellOnly, noGit } = opts;
+  const { repo, refId, cwd, agent, allowFresh, hold, noGit } = opts;
   const qc = useQueryClient();
 
   // Whether a live PTY already exists for this session. We only resolve a (re)launch
@@ -103,9 +102,9 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   useEffect(() => {
     if (live) setLiveSeen(true);
   }, [live]);
-  const ended = !shellOnly && liveSeen && !live;
+  const ended = liveSeen && !live;
 
-  const needsSeed = !shellOnly && !hold && !live && !liveSeen;
+  const needsSeed = !hold && !live && !liveSeen;
   const session = useAgentSession(repo, refId, cwd, allowFresh, agent ?? "Claude", needsSeed);
 
   const requestedAgent = agent ?? "Claude";
@@ -178,8 +177,7 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
         permissionMode.isFetched &&
         startWithChrome.isFetched &&
         remoteControl.isFetched));
-  const preparing =
-    !shellOnly && (hold === true || (needsSeed && (session.isFetching || !flagsReady)));
+  const preparing = hold === true || (needsSeed && (session.isFetching || !flagsReady));
 
   // Drop the cached session resolution: it may predate this exit (the process can
   // die while the pane is unmounted, so `onExited` never fired) and would replay a
@@ -205,7 +203,7 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
     // `resolvedAgent` rather than the requested one: a resumed session keeps the
     // provider it was created with, and the registry must name the CLI that is
     // actually running.
-    agent: shellOnly || !agent ? undefined : { kind: resolvedAgent, repo, termKey: refId },
+    agent: agent ? { kind: resolvedAgent, repo, termKey: refId } : undefined,
   };
 }
 

@@ -124,8 +124,11 @@ src/
                    Changes · History · PR · AI work queue; the last two only when
                    the branch has one). The AI-work pane is the queue AND the AI's
                    brief, in that order — one destination, not two tabs. Main area
-                   = terminal · agent tabs · a picked file's diff · setup logs · a
-                   check's raw job log
+                   = the worktree's tabs (every agent and shell it has open, the
+                   one a started task runs in included — each a `worktree_tabs`
+                   row, so a restart reopens exactly what was open, and closing
+                   the last leaves the welcome surface) · a picked file's diff ·
+                   setup logs · a check's raw job log
   features/reviews/  OTHER PEOPLE's PRs (the inbox) + the PR components both
                    hosts share — checks, brief, queue list, file body, cards
   lib/queries.ts   ALL data hooks (useUnwrappedQuery, useOptimisticMutation, …)

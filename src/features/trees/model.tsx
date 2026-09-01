@@ -91,8 +91,8 @@ export function pendingWorktree(p: PendingLaunch): Worktree {
  *  `status` comes from the linked Linear task's workflow state, and stays null when
  *  the task isn't in the current tasks fetch (e.g. it isn't assigned to the viewer)
  *  — the sidebar then renders no chip, rather than a confident lie. `activity` is
- *  derived from whether a live PTY session exists for the worktree's main terminal
- *  (`tree:<id>`), which is a real signal. Exported for testing — see model.test.ts. */
+ *  derived from whether any of the worktree's panes has a live PTY session, which
+ *  is a real signal. Exported for testing — see model.test.ts. */
 export function withLiveWorktreeStatus(
   w: Worktree,
   statusByTaskId: Map<string, TaskStatus>,
@@ -101,8 +101,22 @@ export function withLiveWorktreeStatus(
   return {
     ...w,
     status: statusByTaskId.get(w.id) ?? w.status,
-    activity: liveTermRefIds.has(`tree:${w.id}`) ? "Running" : "Idle",
+    activity: hasLivePane(liveTermRefIds, w.id) ? "Running" : "Idle",
   };
+}
+
+/** Whether any pane belonging to this worktree is live. Every one of its agents
+ *  and shells is a tab (`tree:<id>:tab:<tab id>`), so this is a prefix test — but
+ *  a `startsWith` alone would let `tree:AK-1` claim `tree:AK-12`'s panes, so the
+ *  separator is part of it. The bare `tree:<id>` key is matched too: it is what
+ *  every session minted before tabs became the only surface still carries.
+ *  Exported for testing — see model.test.ts. */
+export function hasLivePane(liveTermRefIds: Set<string>, worktreeId: string): boolean {
+  const key = `tree:${worktreeId}`;
+  if (liveTermRefIds.has(key)) return true;
+  const prefix = `${key}:`;
+  for (const refId of liveTermRefIds) if (refId.startsWith(prefix)) return true;
+  return false;
 }
 
 /** The effective, display-ready Claude session state, reconciling the
@@ -228,10 +242,12 @@ export function prDiffModeFor(opts: { inPr: boolean; unpushed: number }): PrDiff
   if (!opts.inPr) return "local";
   return opts.unpushed > 0 ? "localAhead" : "pr";
 }
-/** The main-area tabs. "terminal" is always present (and can't be closed);
- *  "file"/"setup"/"checkLog" appear on demand; `tab:<id>` are the persisted extra
- *  tabs (Claude sessions / terminals) opened via the "+" tab (closable). */
-export type MainTab = "terminal" | "file" | "setup" | "checkLog" | `tab:${string}`;
+/** The main-area tabs. `tab:<id>` are the persisted tabs — every agent and every
+ *  shell the worktree has open, the one a started task runs in included, each a
+ *  `worktree_tabs` row so the set survives a restart. "file"/"setup"/"checkLog"
+ *  are the transient views that appear with the thing they show. All of them
+ *  close, and closing the last one leaves the workspace showing nothing. */
+export type MainTab = "file" | "setup" | "checkLog" | `tab:${string}`;
 
 /** A CI check whose raw job log is open in the **main** area.
  *
@@ -273,24 +289,20 @@ export function defaultTabTitle(
 /** The main-area tabs a worktree has open, in strip order — the list the tab bar
  *  renders and {@link resolveActiveTab} picks from.
  *
- *  The work terminal is not a fixture. It opens by default and comes back
- *  whenever the work session is put on screen (a task starts, setup finishes, a
- *  sidebar agent row jumps to it), but closing it sticks — which is what lets a
- *  workspace end up with no tabs at all and fall through to its empty surface.
- *  The rest appear with whatever they show: a picked file, a setup run belonging
- *  to THIS worktree (`setupFor` is a single slot — another worktree's run can
- *  supersede it), a check's job log, and one per persisted extra tab.
+ *  There is no privileged tab. A worktree's agents and shells are all persisted
+ *  rows, so what is open is whatever `worktree_tabs` says, and a workspace whose
+ *  rows are all closed has nothing open at all — which is what puts the empty
+ *  surface on screen. The transient three appear with whatever they show: a
+ *  picked file, a setup run belonging to THIS worktree (`setupFor` is a single
+ *  slot — another worktree's run can supersede it), and a check's job log.
  *  Exported for testing — see model.test.ts. */
 export function openMainTabs(opts: {
-  terminalOpen: boolean;
-  extraTabIds: string[];
+  tabIds: string[];
   hasFile: boolean;
   hasSetup: boolean;
   hasCheckLog: boolean;
 }): MainTab[] {
-  const tabs: MainTab[] = [];
-  if (opts.terminalOpen) tabs.push("terminal");
-  for (const id of opts.extraTabIds) tabs.push(extraTab(id));
+  const tabs: MainTab[] = opts.tabIds.map(extraTab);
   if (opts.hasFile) tabs.push("file");
   if (opts.hasSetup) tabs.push("setup");
   if (opts.hasCheckLog) tabs.push("checkLog");
@@ -307,40 +319,50 @@ export function resolveActiveTab(remembered: MainTab | undefined, open: MainTab[
   return remembered !== undefined && open.includes(remembered) ? remembered : (open[0] ?? null);
 }
 
+/** Which of a worktree's tabs may name it in Claude's Remote Control web, or null
+ *  when none can.
+ *
+ *  The name is the worktree id, so only one session can hold it — two panes under
+ *  one name collide, which is why an extra agent tab never claimed it while the
+ *  work terminal existed. Now that every agent is a tab, the claim goes to the
+ *  worktree's first Claude tab: that is the one a started task minted (it is
+ *  created before any other) and, once it is closed, whichever Claude tab is now
+ *  oldest. It has to be tab-shaped rather than launch-shaped because
+ *  `--remote-control` rides on *every* launch, resume included — scoping it to the
+ *  fresh launch would drop the name the first time the tab was reopened. Only
+ *  Claude has the capability at all, so a Codex tab standing first must not
+ *  consume the claim. Exported for testing — see model.test.ts. */
+export function remoteControlTab(tabs: WorktreeTab[]): string | null {
+  return tabs.find((t) => t.kind === "agent" && t.agentKind === "Claude")?.id ?? null;
+}
+
 /** Which agent session the main area is showing, as the `{termKey, agentKind}`
  *  the status bar's session meter joins on — `null` whenever what's on screen is
  *  not an agent.
  *
  *  The distinction the meter needs and the worktree alone can't make: a workspace
  *  can have several agent tabs *and* a plain shell tab, and the main area is just
- *  as often showing a diff, the setup log or a check's job log. The base entry's
- *  "terminal" is a shell at the repo root, not an agent; an extra `terminal` tab
- *  is a shell too; and a worktree with no agent launched yet has no session to
- *  point at. Each of those is `null` rather than the nearest available numbers.
+ *  as often showing a diff, the setup log, a check's job log or nothing at all. A
+ *  `terminal` tab is a shell, not an agent, and is `null` here rather than the
+ *  nearest available numbers.
  *  Exported for testing — see model.test.ts. */
 export function focusedAgentFor(opts: {
   activeTab: MainTab | null;
   activeId: string;
-  extraTabs: WorktreeTab[];
-  worktreeAgent: AgentKind | null;
+  tabs: WorktreeTab[];
 }): { termKey: string; agentKind: AgentKind } | null {
-  const { activeTab, activeId, extraTabs, worktreeAgent } = opts;
-  if (!activeId || activeTab === null) return null;
-  if (activeTab === "terminal") {
-    if (activeId === BASE_ID || !worktreeAgent) return null;
-    return { termKey: `tree:${activeId}`, agentKind: worktreeAgent };
-  }
-  if (!activeTab.startsWith("tab:")) return null;
-  const tab = extraTabs.find((t) => t.id === activeTab.slice(4));
+  const { activeTab, activeId, tabs } = opts;
+  if (!activeId || activeTab === null || !activeTab.startsWith("tab:")) return null;
+  const tab = tabs.find((t) => t.id === activeTab.slice(4));
   if (!tab || tab.kind === "terminal" || !tab.agentKind) return null;
   return { termKey: `tree:${activeId}:tab:${tab.id}`, agentKind: tab.agentKind };
 }
 
-/** Whether the main terminal must be withheld while the *work prompt* is still
- *  being written. The PTY applies a seed only at session creation, so mounting in
- *  this window spawns a bare shell and the agent launch is silently lost — no
- *  session row is ever minted, which later strands the Resume button in a
- *  shell↔"session ended" loop. (During setup the terminal is withheld by the setup
+/** Whether a started task's terminal must be withheld while the *work prompt* is
+ *  still being written. The PTY applies a seed only at session creation, so
+ *  mounting in this window spawns a bare shell and the agent launch is silently
+ *  lost — no session row is ever minted, and the tab is left running a shell the
+ *  ticket knows nothing about. (During setup the terminal is withheld by the setup
  *  gate instead; the rest of the seed inputs are gated inside `useAgentTab`.)
  *  Exported for testing — see model.test.ts. */
 export function shouldHoldTerminal(opts: {
@@ -353,18 +375,18 @@ export function shouldHoldTerminal(opts: {
 }
 
 /** Which main tab "begin a task" opens: the Setup tab when the script runs first
- *  (the agent launches once it finishes), otherwise straight to the terminal — per
- *  the "run setup on new worktrees" preference. Exported for testing — see
- *  model.test.ts. */
-export function startTabFor(runSetupPref: boolean): Extract<MainTab, "setup" | "terminal"> {
-  return runSetupPref ? "setup" : "terminal";
+ *  (the agent launches into `tabId` once it finishes), otherwise straight to the
+ *  tab the agent is starting in — per the "run setup on new worktrees"
+ *  preference. Exported for testing — see model.test.ts. */
+export function startTabFor(runSetupPref: boolean, tabId: string): MainTab {
+  return runSetupPref ? "setup" : extraTab(tabId);
 }
 
-/** The worktrees whose setup script has just finished — each lands on its own
- *  terminal tab. Tracked per worktree rather than as one "was setting up" flag,
- *  which conflates them: switching away mid-setup would drop the *new* worktree
- *  onto its terminal (spawning a shell it never asked for) while the one that
- *  actually finished never gets switched. Exported for testing — see model.test.ts. */
+/** The worktrees whose setup script has just finished — each lands on the tab its
+ *  agent is starting in. Tracked per worktree rather than as one "was setting up"
+ *  flag, which conflates them: switching away mid-setup would drop the *new*
+ *  worktree onto a tab it never asked for while the one that actually finished
+ *  never gets switched. Exported for testing — see model.test.ts. */
 export function finishedSetups(prev: Set<string>, now: Set<string>): string[] {
   return [...prev].filter((id) => !now.has(id));
 }
@@ -410,12 +432,10 @@ interface TreesModel {
   activeTab: MainTab | null;
   /** The check whose raw job log is open in the main area, or null. */
   openCheckLog: OpenCheckLog | null;
-  /** Whether the active worktree's main work terminal is one of its open tabs.
-   *  Open by default and closable; the choice is remembered per worktree. */
-  mainTerminalOpen: boolean;
-  /** Persisted extra tabs (Claude sessions / terminals) for the active worktree,
-   *  in open order. The main work terminal is not one of them. */
-  extraTabs: WorktreeTab[];
+  /** The active worktree's persisted tabs, in open order — every agent and every
+   *  shell it has open, the one a started task runs in included. This is the
+   *  whole set: there is no tab outside it. */
+  tabs: WorktreeTab[];
 
   setActive: (id: string) => void;
   toggleRightPanel: () => void;
@@ -433,24 +453,21 @@ interface TreesModel {
   showCheckLog: (log: OpenCheckLog) => void;
   /** Close the check-log tab (the selection falls to whatever is still open). */
   closeCheckLog: () => void;
-  /** Open (and persist) a new Claude or terminal tab for the active worktree
-   *  and focus it. */
-  addTab: (kind: TabKind, agentKind?: AgentKind) => void;
-  /** Bring the active worktree's main work terminal back and focus it. */
-  openMainTerminal: () => void;
-  /** Close the main work terminal tab for the active worktree — it stays closed
-   *  until the work session is put back on screen. The caller tears down its PTY
-   *  session, exactly as it does for an extra tab. */
-  closeMainTerminal: () => void;
-  /** Close a persisted extra tab (the caller tears down its PTY session). A
-   *  Claude tab's stored session is forgotten with it. */
+  /** Open (and persist) a new agent or terminal tab for the active worktree and
+   *  focus it. Returns the new tab's id. */
+  addTab: (kind: TabKind, agentKind?: AgentKind) => string | null;
+  /** Close a tab and delete its row (the caller tears down its PTY session). An
+   *  agent tab's stored session is forgotten with it — the conversation itself
+   *  survives on disk, and Session history is how it comes back. */
   closeTab: (id: string) => void;
-  /** Rename a persisted extra tab (blank titles are ignored). */
+  /** Rename a tab (blank titles are ignored). */
   renameTab: (id: string, title: string) => void;
 
-  /** Begin a task: open the worktree and hand the run to `AgentRuns` (setup first,
-   *  then the agent — or straight to the agent, per the preference). */
-  startAgent: (id: string) => void;
+  /** Begin a task: mint its tab, open the worktree and hand the run to
+   *  `AgentRuns` (setup first, then the agent — or straight to the agent, per the
+   *  preference). `agent` names the provider for a worktree that was created a
+   *  moment ago and isn't in the worktrees read yet. */
+  startAgent: (id: string, opts?: { agent?: AgentKind | null }) => void;
   /** Open the Setup tab and run the script (the manual "Run setup" action). */
   runSetup: (id: string) => void;
 
@@ -500,7 +517,6 @@ const FILE_TAB_KEY = "santree-trees-file-tab-v5";
 const FILE_SCOPE_BY_WT_KEY = "santree-trees-file-scope-by-wt";
 const TAB_BY_WT_KEY = "santree-trees-tab-by-worktree";
 const FILE_BY_WT_KEY = "santree-trees-file-by-worktree";
-const MAIN_TERM_CLOSED_KEY = "santree-trees-main-terminal-closed";
 
 const TreesContext = createContext<TreesModel | null>(null);
 
@@ -522,7 +538,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   } = useAppUi();
   // Setup runs and queued launches are owned by the app shell, not this route — a
   // run must survive navigating away from Trees (see AgentRuns).
-  const { beginRun, runSetup, isSettingUp, runSetupOnStart, setVisibleWorktree } = useAgentRuns();
+  const { beginRun, runSetup, isSettingUp, runSetupOnStart, setVisibleWorktree, launchAgents } =
+    useAgentRuns();
   const { data: realWorktrees = [], isLoading: worktreesLoading } = useWorktrees(activeRepo);
   const { data: baseWorktree = null, isLoading: baseWorktreeLoading } = useBaseWorktree(activeRepo);
   const { data: worktreePrs = [] } = useWorktreePrs(activeRepo);
@@ -534,7 +551,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // The backend ships `status`/`activity` as null rather than guessing — fill them
   // from real signals here: `status` joins the linked Linear task's workflow state
   // (the tasks query already fetches it for Issues), `activity` reflects whether a
-  // live PTY session exists for the worktree's main terminal. A worktree whose task
+  // live PTY session exists for any of the worktree's panes. A worktree whose task
   // isn't in the current fetch (unassigned to the viewer) keeps a null status and
   // renders no chip.
   const { data: tasks = [] } = useTasks(activeRepo);
@@ -646,14 +663,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     FILE_BY_WT_KEY,
     {},
   );
-  // Which worktrees have had their main work terminal closed. Absent means open —
-  // a workspace you have never opened starts with its terminal, and only an
-  // explicit ✕ takes it away. Persisted beside the tab selection (the extra tabs
-  // themselves are DB-backed) so a restart reopens exactly what was on screen.
-  const [mainTermClosedByWt, setMainTermClosedByWt] = usePersistedState<Record<string, boolean>>(
-    MAIN_TERM_CLOSED_KEY,
-    {},
-  );
   // The setters below come from `usePersistedState`, which returns `useState`'s
   // own setter — stable for the component's life, so listing it changes nothing
   // at runtime. Biome only knows that guarantee for a literal `useState` call.
@@ -665,26 +674,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     (id: string, file: string | null) => setSelectedFileByWt((m) => ({ ...m, [id]: file })),
     [setSelectedFileByWt],
   );
-  // Every path that puts the *work session* on screen goes through here: a closed
-  // terminal has to come back when a task starts, when setup hands over to the
-  // agent, or when a sidebar agent row jumps to it — otherwise those land on a
-  // tab that isn't there and the pane reads as empty while an agent runs in it.
-  const reopenMainTerminal = useCallback(
-    (id: string) => setMainTermClosedByWt((m) => (m[id] ? { ...m, [id]: false } : m)),
-    [setMainTermClosedByWt],
-  );
-  // A closed work terminal is a closed *empty* one. Closing kills its PTY, so a
-  // live `tree:<id>` session means something started one since — the off-screen
-  // launcher consuming a background launch from Issues, most of all — and the tab
-  // has to come back rather than leave an agent running behind an empty pane.
-  // This can't resurrect a tab the user just dismissed: `close` drops the session
-  // from the registry in the same batch that sets the flag.
-  useEffect(() => {
-    for (const refId of liveTermRefIds) {
-      const id = /^tree:([^:]+)$/.exec(refId)?.[1];
-      if (id) reopenMainTerminal(id);
-    }
-  }, [liveTermRefIds, reopenMainTerminal]);
   const [fileScopeByWt, setFileScopeByWt] = usePersistedState<Record<string, FileScope>>(
     FILE_SCOPE_BY_WT_KEY,
     {},
@@ -740,23 +729,51 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     return () => setVisibleWorktree(null);
   }, [setVisibleWorktree]);
 
-  // Begin a task: open it and hand the run to AgentRuns. `focus` (default true)
-  // makes the worktree active; a launch that shouldn't steal the view passes false.
+  // Read at call time rather than captured, so `startAgent` keeps a stable
+  // identity: the effects that depend on it would otherwise re-run on every
+  // worktrees or tabs refetch.
+  const worktreesRef = useRef(worktrees);
+  worktreesRef.current = worktrees;
+  const tabsByWtRef = useRef(tabsByWt);
+  tabsByWtRef.current = tabsByWt;
+
+  // Begin a task: mint the tab the agent will run in, open it, and hand the run to
+  // AgentRuns. The row is written before the run begins because the launch names
+  // the tab — a start that only set a flag on the worktree could be consumed by
+  // whichever agent tab happened to mount first, and the *work prompt* would open
+  // someone else's conversation. `focus` (default true) makes the worktree active;
+  // a launch that shouldn't steal the view passes false.
   const startAgent = useCallback(
-    (id: string, opts?: { focus?: boolean }) => {
+    (id: string, opts?: { focus?: boolean; agent?: AgentKind | null }) => {
+      const tabId = crypto.randomUUID();
+      // The worktree's configured provider. A start that follows a create races the
+      // worktrees read, so the caller passes the provider it just created the
+      // worktree with rather than letting the lookup miss and fall back — that
+      // fallback would run Claude in a tab the user asked Codex for. "Claude" is
+      // the same last resort `useAgentTab` applies to a worktree with no provider
+      // recorded at all.
+      const agent = opts?.agent ?? worktreesRef.current.find((w) => w.id === id)?.agent ?? "Claude";
+      addTabRow({
+        id: tabId,
+        worktreeId: id,
+        kind: "agent",
+        agentKind: agent,
+        title: defaultTabTitle("agent", agent, tabsByWtRef.current.get(id) ?? []),
+        pr: null,
+      });
       if (opts?.focus ?? true) select(id);
       setFileFor(id, null);
-      reopenMainTerminal(id);
-      setTabFor(id, startTabFor(runSetupOnStart));
-      beginRun(id);
+      setTabFor(id, startTabFor(runSetupOnStart, tabId));
+      beginRun(id, tabId);
     },
-    [runSetupOnStart, beginRun, select, setFileFor, setTabFor, reopenMainTerminal],
+    [runSetupOnStart, beginRun, select, setFileFor, setTabFor, addTabRow],
   );
 
   // The Setup tab is temporary: when a worktree's script finishes, *that* worktree
-  // lands on its terminal (where the agent is starting, if the run was part of a
-  // task start) — even if the user has since switched to another one. The runs are
-  // owned by AgentRuns; this just follows them in the UI.
+  // lands on the tab its agent is starting in — even if the user has since
+  // switched to another one. The runs are owned by AgentRuns; this just follows
+  // them in the UI. A manual re-run launches nothing, so it names no tab and this
+  // leaves the selection alone.
   const settingUpActive = isSettingUp(activeId);
   const settingUpIds = useMemo(
     () => new Set([BASE_ID, ...worktrees.map((w) => w.id)].filter((id) => isSettingUp(id))),
@@ -765,11 +782,11 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const wasSettingUp = useRef(settingUpIds);
   useEffect(() => {
     for (const id of finishedSetups(wasSettingUp.current, settingUpIds)) {
-      reopenMainTerminal(id);
-      setTabFor(id, "terminal");
+      const tabId = launchAgents.get(id);
+      if (tabId) setTabFor(id, extraTab(tabId));
     }
     wasSettingUp.current = settingUpIds;
-  }, [settingUpIds, setTabFor, reopenMainTerminal]);
+  }, [settingUpIds, setTabFor, launchAgents]);
 
   // Clear the selection if the active worktree vanished (e.g. it was deleted).
   // The base entry isn't in `worktrees`, so it's never cleared here.
@@ -813,28 +830,14 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       focusedLaunchRef.current = treeLaunch;
       select(treeLaunch);
     }
-    if (wt.pending) {
-      // Pre-arm the main tab *before* the real worktree's pane can mount, so the
-      // terminal never spawns a bare shell ahead of setup. The run itself only
-      // begins once the real worktree exists (it has no path yet).
-      reopenMainTerminal(treeLaunch);
-      setTabFor(treeLaunch, startTabFor(runSetupOnStart));
-      return;
-    }
-    startAgent(treeLaunch);
+    // Nothing to pre-arm while the worktree is still being created: it has no
+    // tabs yet, so nothing can mount and spawn a bare shell ahead of setup. The
+    // run begins — and mints its tab — once the real worktree exists.
+    if (wt.pending) return;
+    startAgent(treeLaunch, { agent: wt.agent });
     consumeTreeLaunch();
     focusedLaunchRef.current = null;
-  }, [
-    treeLaunch,
-    worktrees,
-    pendingLaunches,
-    runSetupOnStart,
-    consumeTreeLaunch,
-    startAgent,
-    select,
-    setTabFor,
-    reopenMainTerminal,
-  ]);
+  }, [treeLaunch, worktrees, pendingLaunches, consumeTreeLaunch, startAgent, select]);
 
   // Consume a cross-view "open" request (from the Issues graph/"Open in Trees"):
   // select the existing worktree and open the ticket beside it — no agent start,
@@ -849,32 +852,20 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     if (id !== BASE_ID && !worktrees.some((w) => w.id === id)) return;
     select(id);
     setFileFor(id, null);
-    // Only move what the caller named. `tab === null` means the main work
-    // terminal (a `tree` agent lives there); a string is an extra tab's id;
-    // `undefined` keeps whatever the worktree had open, which is what the old
-    // unconditional reset to "terminal" made impossible — every agent, every
-    // history row and every palette jump landed on tab one. `resolveActiveTab`
-    // still has the last word, so naming a tab that has since been closed falls
-    // back to whatever is still open rather than stranding the user on nothing.
-    if (tab !== undefined) {
-      if (tab === null) reopenMainTerminal(id);
-      setTabFor(id, tab === null ? "terminal" : extraTab(tab));
-    }
+    // Only move what the caller named. A string is a tab id; `null` is a caller
+    // that has no tab to name (a session minted before every agent lived in one),
+    // and `undefined` keeps whatever the worktree had open — which is what the old
+    // unconditional reset made impossible: every agent, every history row and
+    // every palette jump landed on tab one. `resolveActiveTab` still has the last
+    // word, so naming a tab that has since been closed falls back to whatever is
+    // still open rather than stranding the user on nothing.
+    if (tab) setTabFor(id, extraTab(tab));
     // Same contract for the panel: the sidebar's Linear and GitHub marks each
     // name their own pane, and `resolveFileTab` degrades a PR pane on a worktree
     // without one.
     if (pane !== undefined) setFileTab(pane);
     consumeTreeFocus();
-  }, [
-    treeFocus,
-    worktrees,
-    consumeTreeFocus,
-    select,
-    setFileFor,
-    setTabFor,
-    setFileTab,
-    reopenMainTerminal,
-  ]);
+  }, [treeFocus, worktrees, consumeTreeFocus, select, setFileFor, setTabFor, setFileTab]);
 
   // Consume a "Fix CI with AI" hand-off from Reviews: once the PR's worktree has
   // landed, open its freshly-minted Fix-CI tab (persist the row, stash the prompt
@@ -933,19 +924,17 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const value = useMemo<TreesModel>(() => {
     const active =
       activeId === BASE_ID ? baseWorktree : (worktrees.find((w) => w.id === activeId) ?? null);
-    const extraTabs = tabsByWt.get(activeId) ?? [];
+    const tabs = tabsByWt.get(activeId) ?? [];
     const selectedFile = selectedFileByWt[activeId] ?? null;
     const selectedFileScope: FileScope = fileScopeByWt[activeId] ?? "working";
     // The Setup tab only exists while THIS worktree's script is running.
     const setupFor = settingUpActive ? activeId : null;
     const openCheckLog = checkLogByWt[activeId] ?? null;
-    const mainTerminalOpen = !mainTermClosedByWt[activeId];
     // One list of what is open, and the remembered selection resolved against it
     // — see openMainTabs/resolveActiveTab for why each tab comes and goes, and
     // why the answer can be "nothing".
     const openTabs = openMainTabs({
-      terminalOpen: mainTerminalOpen,
-      extraTabIds: extraTabs.map((t) => t.id),
+      tabIds: tabs.map((t) => t.id),
       hasFile: selectedFile !== null,
       hasSetup: setupFor !== null,
       hasCheckLog: openCheckLog !== null,
@@ -975,12 +964,11 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       setupFor,
       activeTab,
       openCheckLog,
-      mainTerminalOpen,
-      extraTabs,
+      tabs,
       // Switching worktrees just changes which one is active — each remembers its
       // own tab/file (see activeTabByWt/selectedFileByWt), so returning to a worktree
-      // restores whatever it was last showing instead of snapping back to the
-      // terminal, which is where a never-visited one starts.
+      // restores whatever it was last showing instead of snapping back to its first
+      // tab.
       setActive: select,
       toggleRightPanel: () => setRightCollapsed((c) => !c),
       setRightWidth,
@@ -1014,7 +1002,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       // The id is minted here (not by the backend) so the optimistic cache patch
       // is the exact row the DB will hold and the tab can be focused immediately.
       addTab: (kind, agentKind) => {
-        if (!activeId) return;
+        if (!activeId) return null;
         const id = crypto.randomUUID();
         const resolvedAgent = kind === "terminal" ? null : (agentKind ?? "Codex");
         addTabRow({
@@ -1022,24 +1010,13 @@ export function TreesProvider({ children }: { children: ReactNode }) {
           worktreeId: activeId,
           kind,
           agentKind: resolvedAgent,
-          title: defaultTabTitle(kind, resolvedAgent, extraTabs),
+          title: defaultTabTitle(kind, resolvedAgent, tabs),
           // The "+" menu opens agent and terminal tabs only; a PR belongs to the
           // review kinds, which arrive through the hand-off above.
           pr: null,
         });
         setTabFor(activeId, extraTab(id));
-      },
-      openMainTerminal: () => {
-        if (!activeId) return;
-        reopenMainTerminal(activeId);
-        setTabFor(activeId, "terminal");
-      },
-      // Closing sticks: the terminal stays gone until the work session is put back
-      // on screen (a task start, a finished setup, a sidebar agent row, or the
-      // empty surface's own button). Its PTY is torn down by the caller.
-      closeMainTerminal: () => {
-        if (!activeId) return;
-        setMainTermClosedByWt((m) => ({ ...m, [activeId]: true }));
+        return id;
       },
       closeTab: (id) => {
         removeTabRow(id);
@@ -1116,9 +1093,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     setFileScopeFor,
     settingUpActive,
     activeTabByWt,
-    mainTermClosedByWt,
-    setMainTermClosedByWt,
-    reopenMainTerminal,
     setTabFor,
     setFileFor,
     select,
@@ -1142,8 +1116,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     const focus = focusedAgentFor({
       activeTab: value.activeTab,
       activeId: value.activeId,
-      extraTabs: value.extraTabs,
-      worktreeAgent: value.active?.agent ?? null,
+      tabs: value.tabs,
     });
     setFocusedAgent(focus && activeRepo ? { repo: activeRepo, ...focus } : null);
   }, [value, activeRepo, setFocusedAgent]);

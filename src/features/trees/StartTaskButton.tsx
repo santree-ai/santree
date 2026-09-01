@@ -71,7 +71,7 @@ export function StartTaskButton({
       {
         // Open the new worktree and begin the task: run setup on the logs page
         // (per the preference), then launch the agent.
-        onSuccess: (wt) => startAgent(wt.id),
+        onSuccess: (wt) => startAgent(wt.id, { agent: wt.agent }),
         onError: () => removePendingLaunch(t.id),
       },
     );

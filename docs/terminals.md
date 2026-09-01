@@ -67,14 +67,21 @@ rather than failing the spawn, and says so in the log.
 
 | surface | `term_key` |
 |---|---|
-| a worktree's main terminal | `tree:<worktree_id>` |
-| an extra agent/terminal tab | `tree:<worktree_id>:tab:<tab_id>` |
+| a worktree's agent or terminal tab | `tree:<worktree_id>:tab:<tab_id>` |
 | a triage investigation | `triage:<ticket>` |
 | an AI review | `ai-review:<owner>/<name>#<n>` |
 | the Settings agent-login box | `login:<agent>` |
 
 `useTerminalTabs.ensure()` dedupes on it, so re-entering a surface attaches to
 its live session instead of spawning a second.
+
+A worktree has **no privileged terminal**. Every agent and shell it runs is a
+`worktree_tabs` row, the one a started task launches into included, so what a
+worktree has open is exactly what that table says and a restart reopens it. The
+bare `tree:<worktree_id>` key belongs to sessions minted before that was true;
+nothing writes it any more, and the reads that span a worktree (`hasLivePane`,
+`session::worktree_key_patterns`) still match it so those conversations stay
+attributed.
 
 ---
 

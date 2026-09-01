@@ -71,7 +71,7 @@ function resumeBlocker(s: WorktreeSession): string | null {
 }
 
 export function SessionHistory() {
-  const { repo, activeId, active, extraTabs, setActiveTab } = useTrees();
+  const { repo, activeId, active, tabs, setActiveTab } = useTrees();
   const { activeRepo } = useApp();
   const { data: sessions, refetch, isFetching } = useWorktreeSessions(repo, activeId);
   const entries = useAgentEntries([activeRepo], [activeRepo]);
@@ -119,7 +119,7 @@ export function SessionHistory() {
           worktreeId: activeId,
           kind: "agent",
           agentKind: s.agentKind,
-          title: defaultTabTitle("agent", s.agentKind, extraTabs),
+          title: defaultTabTitle("agent", s.agentKind, tabs),
           // Only the review kinds carry a PR, and those arrive through their own
           // hand-off, never from here.
           pr: null,
@@ -132,7 +132,7 @@ export function SessionHistory() {
         setResumingId(null);
       }
     },
-    [activeId, addTab, extraTabs, resumeSession, resumingId, setActiveTab],
+    [activeId, addTab, tabs, resumeSession, resumingId, setActiveTab],
   );
 
   return (

@@ -1,14 +1,14 @@
 /** The main-area tab bar: the places you *work*, and — at its trailing edge —
  *  the two controls that act on the pane as a whole.
  *
- *  Every tab closes, the work terminal included — close them all and the pane
- *  falls through to its empty surface, with this bar (and its "+") still on top.
- *  A shared "File" tab (whatever file you click) and a temporary "Setup" tab
- *  (while the setup script runs) appear on demand, and the persisted extra tabs
- *  opened via the "+" tab (agent sessions / terminals) are also renameable
- *  (double-click the label). All tabs share the same shape — an optional leading
- *  icon + label with an optional trailing affordance (a close × or a status dot)
- *  in a fixed slot.
+ *  Every tab is a `worktree_tabs` row — the agents and shells a worktree has
+ *  open, including the one a started task runs in — and every one of them closes
+ *  and renames (double-click the label). Close them all and the pane falls
+ *  through to its empty surface, with this bar (and its "+") still on top. A
+ *  shared "File" tab (whatever file you click) and a temporary "Setup" tab (while
+ *  the setup script runs) appear on demand beside them. All tabs share the same
+ *  shape — an optional leading icon + label with an optional trailing affordance
+ *  (a close × or a status dot) in a fixed slot.
  *
  *  The trailing cluster is not part of the tablist: the worktree's setup script
  *  (the one command this pane runs) and the right panel's expand control, which
@@ -49,7 +49,6 @@ import {
 import { useAgentAuth, useCodexAccount, useCodexHealth } from "../../lib/queries";
 import { targetOwnsKey, useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { CHROME } from "../../state/AppContext";
-import { agentLabel } from "../../theme/colors";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { PanelToggle } from "./FilePickerPanel";
 import { BASE_ID, extraTab, type MainTab, useTrees } from "./model";
@@ -65,81 +64,56 @@ export function MainTabBar() {
     closeFileTab,
     openCheckLog,
     closeCheckLog,
-    extraTabs,
+    tabs,
     addTab,
     closeTab,
     renameTab,
     runSetup,
     rightCollapsed,
-    mainTerminalOpen,
-    closeMainTerminal,
   } = useTrees();
-  const { tabs, close } = useTerminals();
+  // The live PTY registry, not the tab rows above — one names processes, the
+  // other names what the strip draws, and a tab can have either without the other.
+  const { tabs: sessions, close: endSession } = useTerminals();
   const tabAreaRef = useRef<HTMLDivElement>(null);
   const tabAreaWidth = useTrackedWidth(tabAreaRef);
   const isBase = activeId === BASE_ID;
   const hasFile = selectedFile !== null;
   const hasSetup = setupFor !== null && setupFor === activeId;
 
-  // Closing a tab tears down its PTY session (found by refId) too, so it doesn't
-  // linger in the global Terminal tab. For an extra tab the row goes with it (and
-  // a Claude tab's stored session is forgotten by the backend); the work terminal
-  // has no row — it is remembered as closed until the work session is put back on
-  // screen. Its conversation survives either way: Session history resumes it.
-  const closeSession = (refId: string) => {
-    const live = tabs.find((x) => x.refId === refId);
-    if (live) close(live.key);
-  };
-  const closeExtra = (t: WorktreeTab) => {
-    closeSession(`tree:${activeId}:tab:${t.id}`);
+  // Closing a tab tears its PTY session down (found by refId) too, so it doesn't
+  // linger in the global Terminal tab, and the row goes with it — an agent tab's
+  // stored session is forgotten by the backend. The conversation itself survives
+  // on disk: Session history is how it comes back.
+  const closeWithSession = (t: WorktreeTab) => {
+    const live = sessions.find((x) => x.refId === `tree:${activeId}:tab:${t.id}`);
+    if (live) endSession(live.key);
     closeTab(t.id);
   };
-  const closeMain = () => {
-    closeSession(`tree:${activeId}`);
-    closeMainTerminal();
-  };
 
-  // Auto-close an extra *terminal* tab once its shell exits (its session vanishes
-  // from `tabs`), so it disappears instead of lingering as a dead/gray tab you
-  // have to ✕ by hand. We only prune a tab we've *seen* live, so the brief gap
-  // before a freshly-opened session registers doesn't drop it. Claude tabs are
-  // exempt: their session is meant to outlive the process (quitting claude shows
-  // the resume pane; the tab comes back after an app restart too). This pane is
-  // keyed by worktree id, so `seen` is naturally scoped to the active worktree.
+  // A tab is its process. Once that process exits its session vanishes from the
+  // registry, and the tab goes with it rather than lingering as a dead one to ✕ by
+  // hand — for an agent exactly as for a shell, because a pane with nothing
+  // running in it has nothing to show and Session history already keeps the
+  // conversation. We only prune a tab we've *seen* live, so the gap before a
+  // freshly-opened session registers doesn't drop it, and a tab restored by a
+  // restart waits to be opened rather than being swept before it ever runs. This
+  // pane is keyed by worktree id, so `seen` is naturally scoped to it.
   const seen = useRef<Set<string>>(new Set());
   useEffect(() => {
-    for (const t of extraTabs) {
-      if (t.kind !== "terminal") continue;
-      const alive = tabs.some((x) => x.refId === `tree:${activeId}:tab:${t.id}`);
+    for (const t of tabs) {
+      const alive = sessions.some((x) => x.refId === `tree:${activeId}:tab:${t.id}`);
       if (alive) seen.current.add(t.id);
       else if (seen.current.has(t.id)) {
         seen.current.delete(t.id);
         closeTab(t.id);
       }
     }
-  }, [tabs, extraTabs, activeId, closeTab]);
+  }, [sessions, tabs, activeId, closeTab]);
 
-  // One list, so the fit/hide decision below sees every tab — the main work
-  // terminal, the persisted extras, and the on-demand File/Setup/Check ones.
+  // One list, so the fit/hide decision below sees every tab — the persisted rows
+  // and the on-demand File/Setup/Check ones.
   const items: TabItem[] = [
-    // The main work terminal hosts the worktree's agent session, so it is named
-    // after that agent — not after the pane. "Terminal" beside the Codex mark, on
-    // a tab running Codex, is the tab lying about itself; an extra tab has said
-    // `agentLabel(kind)` since it was born (see `defaultTabTitle`), and this one
-    // had no `worktree_tabs` row to carry a title, which is the only reason it
-    // ever said otherwise. The base entry is a plain shell and a worktree with no
-    // agent yet has nothing to name, so both keep the literal.
-    ...(mainTerminalOpen
-      ? [
-          {
-            tab: "terminal" as const,
-            label: !isBase && active?.agent ? agentLabel(active.agent) : "Terminal",
-            icon: !isBase && active?.agent ? <AgentTabIcon kind={active.agent} /> : undefined,
-            onClose: closeMain,
-          },
-        ]
-      : []),
-    ...extraTabs.map((t) => ({
+    ...tabs.map((t) => ({
       tab: extraTab(t.id),
       label: t.title,
       icon:
@@ -148,7 +122,7 @@ export function MainTabBar() {
         ) : (
           <AgentTabIcon kind={t.agentKind ?? "Claude"} />
         ),
-      onClose: () => closeExtra(t),
+      onClose: () => closeWithSession(t),
       onRename: (title: string) => renameTab(t.id, title),
     })),
     ...(hasFile ? [{ tab: "file" as const, label: "File", onClose: closeFileTab }] : []),
