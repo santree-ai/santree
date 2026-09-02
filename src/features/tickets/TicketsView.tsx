@@ -18,15 +18,18 @@
 import { useCallback, useMemo } from "react";
 
 import { BranchIcon, ListIcon } from "../../components/icons";
-import { Dot, Segmented } from "../../components/primitives";
+import { Button, Dot, Segmented, SwitchTrack } from "../../components/primitives";
+import { PanelToggle } from "../../components/SidePanel";
 import { usePersistedState } from "../../lib/usePersistedState";
-import { accentActiveStyle, successColor } from "../../theme/colors";
+import { CHROME } from "../../state/AppContext";
+import { raisedActiveStyle, successColor } from "../../theme/colors";
 import { IssuesProvider, useIssues } from "../issues/model";
 import { RightPanel } from "../issues/RightPanel";
 import { useIssuesShortcuts } from "../issues/shortcuts";
 import { TicketsGraph } from "./TicketsGraph";
 import { TicketsList } from "./TicketsList";
-import { type TicketsSummary, useTickets } from "./useTickets";
+import { type TicketProjectGroup, type TicketsSummary, useTickets } from "./useTickets";
+import { WorkRepoGateProvider } from "./WorkRepoGate";
 
 type Mode = "list" | "graph";
 
@@ -44,23 +47,64 @@ function summaryLine({ total, projects, ready, blocked }: TicketsSummary): strin
   return `${scope} · ${ready} ready · ${blocked} blocked`;
 }
 
-function ActionableChip({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+/** The filter, as the switch it is — drawn as one chip of the same family as
+ *  the button and the segmented control beside it: the same height, edge and
+ *  fill, with a small track inside next to the words. A full-size settings
+ *  switch standing free beside a label was the one heavy, unbordered thing in
+ *  the row, and read as a stranger to it. The whole chip is the switch. */
+function ActionableSwitch({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   return (
     <button
       type="button"
+      role="switch"
+      aria-checked={on}
       onClick={onToggle}
-      aria-pressed={on}
       title={
         on
-          ? "Showing only tickets you can act on (⌘⇧.). Click to reveal blockers owned by others or already done."
-          : "Showing all related tickets (⌘⇧.). Click to hide the non-actionable ones."
+          ? "Showing only tickets you can act on (⌘⇧.). Turn off to reveal blockers owned by others or already done."
+          : "Showing all related tickets (⌘⇧.). Turn on to hide the non-actionable ones."
       }
-      className="flex h-6 flex-none cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 text-[11px] whitespace-nowrap text-muted-2 transition-colors hover:border-line-strong"
-      style={on ? accentActiveStyle() : undefined}
+      className={`flex h-6 flex-none cursor-pointer items-center gap-2 rounded-md border border-line-2 bg-input pr-1.5 pl-2.5 text-[11px] whitespace-nowrap transition-colors hover:border-line-strong ${
+        on ? "text-fg-2" : "text-muted-2"
+      }`}
     >
-      <Dot color={on ? successColor : "var(--color-muted-4)"} size={5} />
       Actionable only
+      <SwitchTrack on={on} size="sm" />
     </button>
+  );
+}
+
+/** Fill the launch queue with every ready ticket — or, raised, empty it of them
+ *  again. It was the graph's floating tray's; the queue is not a graph thing,
+ *  so it sits with the page's other controls and works over the list too. The
+ *  count is the active repo's, which is the repo a launch runs in. The model
+ *  opens the rail on the queue pane when this fills it. */
+function SelectReadyButton() {
+  const { tasks, isEligible, selected, selectReady } = useIssues();
+  const readyIds = useMemo(
+    () => tasks.filter((t) => t.ready && isEligible(t)).map((t) => t.id),
+    [tasks, isEligible],
+  );
+  const allSelected = readyIds.length > 0 && readyIds.every((id) => selected[id]);
+
+  return (
+    <Button
+      size="sm"
+      onClick={selectReady}
+      disabled={readyIds.length === 0}
+      aria-pressed={allSelected}
+      title={
+        allSelected
+          ? "Take the ready tickets back out of the launch queue"
+          : "Add every ready ticket to the launch queue"
+      }
+      className="h-6 flex-none px-2 whitespace-nowrap"
+      style={allSelected ? raisedActiveStyle() : undefined}
+    >
+      <Dot color={successColor} size={5} />
+      Select Ready
+      <span className="font-mono text-[10px] tabular-nums opacity-70">{readyIds.length}</span>
+    </Button>
   );
 }
 
@@ -88,27 +132,77 @@ export function TicketsView() {
 
   return (
     <IssuesProvider actionable={actionable}>
-      <TicketsShortcuts onToggleActionable={toggleActionable} />
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
-        <div className="flex h-11 flex-none items-center gap-2.5 border-b border-line px-3">
+      {/* Which project a start runs in, asked once for the list's Run and its
+          queue alike — see the gate. */}
+      <WorkRepoGateProvider>
+        <TicketsShortcuts onToggleActionable={toggleActionable} />
+        <TicketsPage
+          mode={mode}
+          onMode={setMode}
+          actionableOnly={actionableOnly}
+          onToggleActionable={toggleActionable}
+          groups={groups}
+          summary={summary}
+          loading={loading}
+        />
+      </WorkRepoGateProvider>
+    </IssuesProvider>
+  );
+}
+
+/** The page under the provider: its own strip over the list or graph, and the
+ *  ticket rail beside both, full height — the shape Trees and Reviews have. */
+function TicketsPage({
+  mode,
+  onMode,
+  actionableOnly,
+  onToggleActionable,
+  groups,
+  summary,
+  loading,
+}: {
+  mode: Mode;
+  onMode: (mode: Mode) => void;
+  actionableOnly: boolean;
+  onToggleActionable: () => void;
+  groups: TicketProjectGroup[];
+  summary: TicketsSummary;
+  loading: boolean;
+}) {
+  const { rightCollapsed, toggleRightPanel } = useIssues();
+
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 bg-app">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* The page's strip: the height and chrome of the other views' tab bars,
+            so the rail's strip beside it reads as the same bar, and a drag
+            region like theirs. Its trailing cluster ends 8px from the edge —
+            where the rail's toggle sits while the rail is open — so when the
+            rail collapses the toggle lands here without stepping sideways. */}
+        <div
+          data-tauri-drag-region
+          className={`flex ${CHROME.subBar} flex-none items-center gap-2.5 border-b border-line bg-deep pr-2 pl-3`}
+        >
           <span className="flex-none text-[13px] font-semibold text-fg">Tickets</span>
           <span className="min-w-0 truncate text-[11px] text-muted-4">{summaryLine(summary)}</span>
           <div className="ml-auto flex flex-none items-center gap-2">
-            <ActionableChip on={actionableOnly} onToggle={toggleActionable} />
+            <SelectReadyButton />
+            <ActionableSwitch on={actionableOnly} onToggle={onToggleActionable} />
             <Segmented
               options={MODE_OPTIONS}
               value={mode}
-              onChange={setMode}
+              onChange={onMode}
               className="w-[146px]"
             />
+            {rightCollapsed && <PanelToggle collapsed onToggle={toggleRightPanel} />}
           </div>
         </div>
 
         <div className="relative flex min-h-0 min-w-0 flex-1">
           {mode === "list" ? <TicketsList groups={groups} loading={loading} /> : <TicketsGraph />}
-          <RightPanel />
         </div>
       </div>
-    </IssuesProvider>
+      <RightPanel />
+    </div>
   );
 }

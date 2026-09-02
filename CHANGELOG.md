@@ -7,6 +7,24 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## Unreleased
+
+- Triage moved into the sidebar. A Triage section lists who is on rotation (click it to see the shifts), the tickets waiting with their SLA, and a folded Snoozed group; the Mine / All switch sits on its title. Opening a ticket gives it a workspace of its own: a Linear tab with the ticket, one tab per investigating agent, and a terminal.
+- A triage ticket now runs on a project you attach to it, on that project's main branch, and no worktree is created. The first thing that needs one asks which project, with a default you can set in Settings. Its right panel carries the attachment, the project's files and the sessions that have run there.
+- Every project row in the sidebar now shows its pull requests and its worktrees as counts beside their icons, instead of hiding the worktree count until you hover.
+- The text size setting is gone, along with its ⌘+, ⌘− and ⌘0 shortcuts. The app draws at one size again.
+- Appearance is no longer its own settings tab. Theme and display names now sit in General, beside Updates.
+- Worktrees cut to review a pull request no longer strand themselves. Once the pull request is merged or closed, the checkout comes back as an ordinary worktree in Trees, where you can delete it. Nothing is deleted for you, and any checkout left over from before shows up on the next launch.
+- Manual ordering of triage tickets is gone, together with the order menu, drag-to-reorder and batch "Investigate N tickets". The queue is always soonest SLA first. The "Show snoozed issues" and "Be a good citizen" settings are gone too — the Snoozed group and the Mine / All switch replace them.
+- The "My PRs" rows are gone from the sidebar, and with them the "Show my own pull requests" setting. Your own pull request is reached through its worktree.
+- The pull request pane and the ticket pane in the right panel each gained an expand control that opens the full page as a closable tab: the whole pull request with its Conversation, Commits, Checks and Files changed, or the ticket with its discussion. Reviews got the same for the ticket.
+- The Linear and GitHub marks on a worktree's sidebar row now open those full pages as tabs, instead of turning the right panel to the ticket or the pull request.
+- The prompt "Start work" hands an agent — every open item in a pull request's work queue — is now editable in Settings → Prompts, under Reviews, as “Work on queue items”. Its default explains each kind of item the queue holds and lays the items out one by one, and its preview renders over a sample queue you build yourself: add a failing check, a review comment, an AI draft or a note, and see exactly what the agent would be given.
+- Settings → Prompts got a header that says what the prompts are — Jinja templates, rendered by minijinja — whose defaults you are looking at, and links to the syntax, filter and test references. The rail's groups fold, each prompt wears its workflow's icon, and prompts that take no ticket no longer offer the sample-ticket picker. The English tutor and English analysis prompts are shown read-only: the tutor's wording is part of the hook santree configures around it, and the analysis's output is what its pane renders.
+- Work has a default project, like Triage. When more than one of your projects shares a ticket's Linear workspace, Run and the launch queue both start it in that project; without one set, the first such start asks which and offers to remember the answer. A ticket only one project carries never asks.
+- Every ticket in the list shows its assignee's face, your own tickets included. Before, only tickets assigned to someone else did.
+- The cycle mark is Linear's own: the ring fills as the cycle's time runs, so every ticket in the current cycle shows how far along it is.
+
 ## 0.1.5-beta.5 — 2026-08-31
 
 - A workspace's Terminal tab can be closed. It still opens by default, but it is no longer permanent, and closing it is remembered for that worktree.

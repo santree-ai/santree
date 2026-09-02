@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -15,8 +15,16 @@ let triageOn = false;
 // copy, and a hardcoded `true` here made the not-connected half unrenderable.
 let linearOn = true;
 let settingValues: Record<string, string | null> = {};
+const setSetting = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../lib/queries", () => ({
+  TRIAGE_DEFAULT_REPO_KEY: "triage.defaultRepo",
+  useRepos: () => ({
+    data: [
+      { name: "acme/app", path: "/src/app" },
+      { name: "acme/web", path: "/src/web" },
+    ],
+  }),
   COMMIT_MESSAGE_AGENT_KEY: "commit.agent",
   COMMIT_MESSAGE_MODEL_KEY: "commit.model",
   DEFAULT_HELPER_MODEL: "haiku",
@@ -34,8 +42,6 @@ vi.mock("../../../lib/queries", () => ({
   REVIEW_MODEL_KEY: "review.model",
   REVIEW_PERMISSION_MODE_KEY: "review.permissionMode",
   SYNC_VIEWED_KEY: "syncViewed",
-  TRIAGE_GOOD_CITIZEN_KEY: "triage.goodCitizen",
-  TRIAGE_SNOOZED_KEY: "triage.snoozed",
   WORK_AGENT_KEY: "work.agent",
   WORK_ASK_BASE_KEY: "work.askBase",
   WORK_EFFORT_KEY: "work.effort",
@@ -67,7 +73,7 @@ vi.mock("../../../lib/queries", () => ({
   }),
   useGithubStatus: () => ({ data: { authenticated: false } }),
   useResolvedSetting: () => ({ data: null }),
-  useSetSetting: () => ({ mutate: vi.fn() }),
+  useSetSetting: () => ({ mutate: setSetting }),
   useSetSyncViewed: () => ({ mutate: vi.fn() }),
   useSetting: (_scope: string, key: string) => ({ data: settingValues[key] ?? null }),
 }));
@@ -100,11 +106,22 @@ describe("app-scope Triage settings", () => {
     // `disabled` a keyboard user tabs straight in and mutates a setting the UI
     // shows as off.
     for (const select of screen.getAllByRole("combobox")) expect(select).toBeDisabled();
-    // The switches below the master toggle (which stays live — it's what turns
-    // triage back on).
+    // The master toggle stays live — it's what turns triage back on.
     const switches = screen.getAllByRole("switch");
+    expect(switches).toHaveLength(1);
     expect(switches[0]).toBeEnabled();
-    for (const s of switches.slice(1)) expect(s).toBeDisabled();
+  });
+
+  /** The queue's Mine/All switch lives on the sidebar's Triage section, and the
+   *  snoozed lane is a subsection there — a copy of either here would be two
+   *  controls for one setting, disagreeing the moment one lagged. */
+  it("offers no queue preferences — the sidebar section is the one control", () => {
+    triageOn = true;
+    render(<TriageActionSection />);
+
+    expect(screen.queryByText("Be a good citizen")).toBeNull();
+    expect(screen.queryByText("Show snoozed issues")).toBeNull();
+    expect(screen.getByText(/Show the Triage section in the sidebar/)).toBeInTheDocument();
   });
 
   /** Triage has nothing to pull without Linear, so the master switch is dimmed —
@@ -125,6 +142,46 @@ describe("app-scope Triage settings", () => {
 
     for (const select of screen.getAllByRole("combobox")) expect(select).toBeEnabled();
     for (const s of screen.getAllByRole("switch")) expect(s).toBeEnabled();
+  });
+
+  /** One setting for two things — where tickets run, and which Linear org the
+   *  queue reads — so it is offered once, over the registry, with a real "None". */
+  it("offers the registered projects as the triage default, None included", () => {
+    triageOn = true;
+    setSetting.mockClear();
+    settingValues = { "triage.defaultRepo": "acme/web" };
+    render(<TriageActionSection />);
+
+    const select = screen.getByLabelText("Default project");
+    expect(select).toHaveValue("acme/web");
+    expect(
+      within(select)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual(["None", "acme/app", "acme/web"]);
+
+    fireEvent.change(select, { target: { value: "acme/app" } });
+    expect(setSetting).toHaveBeenCalledWith({
+      scope: "app",
+      key: "triage.defaultRepo",
+      value: "acme/app",
+    });
+    fireEvent.change(select, { target: { value: "" } });
+    expect(setSetting).toHaveBeenLastCalledWith({
+      scope: "app",
+      key: "triage.defaultRepo",
+      value: null,
+    });
+  });
+
+  /** A stored name the registry no longer has still shows, as itself: reading
+   *  it as "None" would hide a row on disk that keeps pointing elsewhere. */
+  it("keeps a default the registry no longer has on the list", () => {
+    triageOn = true;
+    settingValues = { "triage.defaultRepo": "gone/repo" };
+    render(<TriageActionSection />);
+
+    expect(screen.getByLabelText("Default project")).toHaveValue("gone/repo");
   });
 });
 

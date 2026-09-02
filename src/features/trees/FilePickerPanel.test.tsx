@@ -15,7 +15,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { WorktreePr } from "../../bindings";
-import type { FileTab } from "./model";
+import type { FileScope, FileTab } from "./model";
 
 const trees = vi.hoisted(() => ({
   repo: "acme/app",
@@ -24,6 +24,12 @@ const trees = vi.hoisted(() => ({
   activePr: null as WorktreePr | null,
   fileTab: "issue" as FileTab,
   hasTicket: true,
+  prsByWorktree: new Map<string, WorktreePr[]>(),
+  openPrDialog: vi.fn(),
+  suggestPr: vi.fn(),
+  selectFile: vi.fn(),
+  selectedFile: null as string | null,
+  selectedFileScope: "working" as FileScope,
   setFileTab: vi.fn(),
   rightCollapsed: false,
   rightWidth: 340,
@@ -41,6 +47,17 @@ vi.mock("../../lib/queries", () => ({
   usePrReviewBrief: () => ({ data: undefined }),
   useReviewWorkItems: () => ({ data: [] }),
   useWorktreeStatus: () => ({ data: undefined }),
+  useSetWorktreeTitle: () => ({ mutate: vi.fn() }),
+}));
+
+// Reach a router and a query client to launch an agent; the panel only needs the
+// launchers to exist. Same for resuming a session — its own tests cover it.
+vi.mock("../reviews/useStartWork", () => ({
+  useStartWorkInWorktree: () => ({ start: vi.fn(), starting: false }),
+  useStartAiReviewInWorktree: () => ({ start: vi.fn(), starting: false }),
+}));
+vi.mock("./useResumeSession", () => ({
+  useResumeSessionInWorktree: () => ({ resume: vi.fn(), resumingId: null }),
 }));
 
 // Each pane stands in for itself: what matters here is *which* one the body
@@ -49,9 +66,9 @@ vi.mock("../../lib/queries", () => ({
 const { stub } = vi.hoisted(() => ({
   stub: (name: string) => () => <div>{name} pane</div>,
 }));
-vi.mock("./WorktreeIssuePane", () => ({ WorktreeIssuePane: stub("Issue") }));
+vi.mock("../../components/IssuePane", () => ({ IssuePane: stub("Issue") }));
 vi.mock("./WorktreePrPane", () => ({ WorktreePrPane: stub("PR") }));
-vi.mock("./WorktreeAiWorkPane", () => ({ WorktreeAiWorkPane: stub("AI work") }));
+vi.mock("../reviews/AiWorkPane", () => ({ AiWorkPane: stub("AI work"), aiWorkDot: () => null }));
 vi.mock("./AllFilesList", () => ({ AllFilesList: stub("Files") }));
 vi.mock("./GitPanel", () => ({ GitPanel: stub("Changes") }));
 vi.mock("./SessionHistory", () => ({ SessionHistory: stub("History") }));

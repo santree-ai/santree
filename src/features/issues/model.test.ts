@@ -10,6 +10,8 @@ function task(overrides: Partial<Task> = {}): Task {
     title: "Task AK-1",
     priority: "None",
     estimate: null,
+    cycle: null,
+    dueDate: null,
     project: "Core",
     projectColor: null,
     projectIcon: null,

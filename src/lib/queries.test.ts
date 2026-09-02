@@ -1,16 +1,9 @@
 import { QueryClient, QueryClientProvider, type QueryKey } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type {
-  ChangedFile,
-  ReviewInbox,
-  ReviewPr,
-  SessionState,
-  TriageDetail,
-  TriageTicket,
-} from "../bindings";
+import type { ChangedFile, ReviewInbox, ReviewPr, TriageDetail, TriageTicket } from "../bindings";
 
 // The git mutations below are exercised end-to-end (mutate → settle → invalidate),
 // so the commands they wrap are stubbed. Everything else in this file is pure.
@@ -18,6 +11,31 @@ const git = vi.hoisted(() => ({
   ok: vi.fn(async () => ({ status: "ok" as const, data: "main" })),
 }));
 const codex = vi.hoisted(() => ({ account: vi.fn() }));
+// `useTriageRepo` runs through the real hooks — two setting reads, the repo
+// list and an optimistic write — so those commands are stubbed against an
+// in-memory settings table rather than mocked one hook at a time.
+const settings = vi.hoisted(() => {
+  const store: Record<string, string | null> = {};
+  const at = (scope: string, key: string) => `${scope}/${key}`;
+  return {
+    store,
+    repos: [] as { name: string; path: string }[],
+    getSetting: vi.fn(async (scope: string, key: string) => ({
+      status: "ok" as const,
+      data: store[at(scope, key)] ?? null,
+    })),
+    setSetting: vi.fn(async (scope: string, key: string, value: string | null) => {
+      store[at(scope, key)] = value;
+      return { status: "ok" as const, data: null };
+    }),
+    reset(repos: string[]) {
+      for (const key of Object.keys(store)) delete store[key];
+      this.repos = repos.map((name) => ({ name, path: `/src/${name}` }));
+      this.getSetting.mockClear();
+      this.setSetting.mockClear();
+    },
+  };
+});
 // Captures the worktreeChanged handler so watcher tests can fire events at it.
 const watcher = vi.hoisted(() => ({
   handler: undefined as ((e: { payload: { issueId: string } }) => void) | undefined,
@@ -29,6 +47,9 @@ vi.mock("../bindings", () => ({
     pullRemoteWorktree: git.ok,
     updateBaseBranch: git.ok,
     codexAccount: codex.account,
+    getSetting: settings.getSetting,
+    setSetting: settings.setSetting,
+    listRepos: vi.fn(async () => ({ status: "ok" as const, data: settings.repos })),
     watchWorktrees: vi.fn(async () => ({ status: "ok" as const, data: null })),
     // The manual refresh clears the backend's Linear caches before refetching.
     linearInvalidateCaches: vi.fn(async () => null),
@@ -45,53 +66,168 @@ vi.mock("../bindings", () => ({
 
 import {
   applyStage,
+  awaitingReviewPrs,
   filterTriageQueue,
-  newestSessionByPath,
+  isOptedIn,
   parseBatchSetup,
+  parseGithubGroupBy,
   parseLinearGroupBy,
   parseLinearScope,
   patchSettingCache,
   promptPreviewKey,
   queryKeys,
   resolveHelperAgent,
-  reviewAwaitingCount,
+  reviewCountsByProject,
+  reviewGroupsByProject,
   useCodexAccount,
   useCommitWorktree,
   useOptimisticMutation,
   usePullRemoteWorktree,
   usePushWorktree,
   useRefreshExternal,
+  useTriageRepo,
   useUpdateBaseBranch,
   useWorktreeWatcher,
 } from "./queries";
 
-describe("reviewAwaitingCount", () => {
-  const review = (
-    id: string,
-    viewerReview: ReviewPr["viewerReview"] = null,
-    headCommittedAt = "2026-08-24T10:00:00Z",
-  ) => ({ id, viewerReview, headCommittedAt }) as ReviewPr;
-
-  it("deduplicates direct/team requests and excludes already-reviewed heads", () => {
-    const direct = review("direct");
-    const reviewed = review("reviewed", {
-      state: "Approved",
-      submittedAt: "2026-08-24T11:00:00Z",
-    });
-    const pushed = review(
-      "pushed",
-      { state: "ChangesRequested", submittedAt: "2026-08-24T09:00:00Z" },
-      "2026-08-24T12:00:00Z",
-    );
+describe("reviewCountsByProject", () => {
+  // The per-project badge is the same "needs you" rule as the tab badge, split by
+  // the project the backend attributed each PR to. Anything that made these two
+  // disagree — a second filter, a count over raw open PRs — is the bug this pins.
+  it("splits the awaiting count by project and keeps quiet projects at zero", () => {
+    const attributed = (id: string, project: string | null) =>
+      ({
+        id,
+        project,
+        viewerReview: null,
+        headCommittedAt: "2026-08-24T10:00:00Z",
+      }) as ReviewPr;
+    const reviewed = {
+      ...attributed("reviewed", "acme/web"),
+      viewerReview: { state: "Approved", submittedAt: "2026-08-24T11:00:00Z" },
+    } as ReviewPr;
     const inbox = {
       mine: [],
-      requested: [direct, reviewed],
-      teams: [{ slug: "eng", name: "Engineering", prs: [direct, pushed] }],
-      org: "acme",
+      requested: [attributed("a", "acme/web"), reviewed, attributed("c", null)],
+      teams: [
+        {
+          org: "acme",
+          slug: "eng",
+          name: "Engineering",
+          // Also in `requested` — one PR, counted once.
+          prs: [attributed("a", "acme/web"), attributed("b", "acme/kubernetes")],
+        },
+      ],
+      projects: [
+        { repo: "acme/web", slug: "acme/web" },
+        { repo: "acme/kubernetes", slug: "acme/kubernetes" },
+        { repo: "scratch", slug: null },
+      ],
+      orgs: ["acme"],
       githubConnected: true,
     } satisfies ReviewInbox;
 
-    expect(reviewAwaitingCount(inbox)).toBe(2);
+    expect(reviewCountsByProject(inbox)).toEqual(
+      new Map([
+        // "a" is asked of both you and your team; the personal ask wins so the
+        // halves still sum to the total — and no team is named for it, because
+        // the row would be telling you to go and ask them about your own request.
+        ["acme/web", { direct: 1, team: 0, total: 1, teams: [] }],
+        // Org-qualified: the hover has to name a team you can actually find.
+        ["acme/kubernetes", { direct: 0, team: 1, total: 1, teams: ["acme/eng"] }],
+        // Registered, nothing waiting: a quiet row, not a missing one.
+        ["scratch", { direct: 0, team: 0, total: 0, teams: [] }],
+      ]),
+    );
+    // An unattributed PR is still in the inbox, it just isn't one of the projects.
+    expect(awaitingReviewPrs(inbox)).toHaveLength(3);
+  });
+});
+
+describe("reviewGroupsByProject", () => {
+  const pr = (id: string, over: Partial<ReviewPr> = {}) =>
+    ({
+      id,
+      title: id,
+      project: "acme/web",
+      viewerReview: null,
+      headCommittedAt: "2026-08-24T10:00:00Z",
+      waitingSince: "2026-08-24T09:00:00Z",
+      updatedAt: "2026-08-24T10:00:00Z",
+      ...over,
+    }) as ReviewPr;
+
+  /** The blocks and the badge are one fact seen twice. This is the invariant that
+   *  keeps them from becoming two: everything a review block holds is counted,
+   *  each PR exactly once, however many people asked for it. */
+  it("splits the same PRs the count counts, disjointly and once each", () => {
+    const both = pr("asked-of-you-and-your-team");
+    const inbox = {
+      mine: [pr("mine")],
+      requested: [pr("direct"), both],
+      teams: [
+        { org: "acme", slug: "eng", name: "Engineering", prs: [both, pr("via-eng")] },
+        // The same PR reaches you through a second team you're on.
+        { org: "acme", slug: "web", name: "Web", prs: [pr("via-eng")] },
+      ],
+      projects: [{ repo: "acme/web", slug: "acme/web" }],
+      orgs: ["acme"],
+      githubConnected: true,
+    } satisfies ReviewInbox;
+
+    const groups = reviewGroupsByProject(inbox).get("acme/web") ?? [];
+    expect(groups.map((g) => [g.label, g.prs.map((p) => p.id)])).toEqual([
+      // Your own PR is not a block: it is yours to land, not a review waiting on
+      // you, and it already has a row under its worktree.
+      // The personal ask wins over the team one, the same tiebreak the counts
+      // use. Equal waits fall back to the id, so this order is stable.
+      ["Assigned to me", ["asked-of-you-and-your-team", "direct"]],
+      ["Team · Engineering", ["via-eng"]],
+      // Claimed by Engineering above, so Web is left with nothing and drops out.
+    ]);
+
+    const listed = groups.flatMap((g) => g.prs);
+    expect(listed).toHaveLength(reviewCountsByProject(inbox).get("acme/web")?.total ?? -1);
+  });
+
+  /** A PR you already reviewed is out of both the count and the blocks until its
+   *  author pushes again — one rule, not two. */
+  it("leaves out what you have already reviewed, and seeds a quiet project empty", () => {
+    const inbox = {
+      mine: [],
+      requested: [
+        pr("reviewed", {
+          viewerReview: { state: "Approved", submittedAt: "2026-08-24T11:00:00Z" },
+        }),
+      ],
+      teams: [],
+      projects: [
+        { repo: "acme/web", slug: "acme/web" },
+        { repo: "scratch", slug: null },
+      ],
+      orgs: ["acme"],
+      githubConnected: true,
+    } satisfies ReviewInbox;
+
+    expect(reviewGroupsByProject(inbox).get("acme/web")).toEqual([]);
+    // Registered and quiet is an entry, not a missing key: the section decides
+    // what to render, and "we have no idea" is a different answer.
+    expect(reviewGroupsByProject(inbox).has("scratch")).toBe(true);
+  });
+
+  /** A PR from a repo you never cloned belongs to no project and has no row to
+   *  sit under. It is still in the Reviews view itself. */
+  it("drops PRs no registered project owns", () => {
+    const inbox = {
+      mine: [],
+      requested: [pr("unowned", { project: null })],
+      teams: [],
+      projects: [{ repo: "acme/web", slug: "acme/web" }],
+      orgs: ["acme"],
+      githubConnected: true,
+    } satisfies ReviewInbox;
+
+    expect(reviewGroupsByProject(inbox).get("acme/web")).toEqual([]);
   });
 });
 
@@ -394,6 +530,12 @@ describe("promptPreviewKey", () => {
       createdAtMs: null,
       labels: [],
       project: null,
+      projectMilestone: null,
+      assignee: null,
+      assigneeAvatarUrl: null,
+      estimate: null,
+      cycle: null,
+      dueDate: null,
       slaBreachMs: null,
       snoozedUntilMs: null,
       description: "body",
@@ -405,28 +547,53 @@ describe("promptPreviewKey", () => {
   const body = "Fix {{ issue.title }}";
 
   it("is stable for identical inputs (so a re-render doesn't refetch)", () => {
-    const a = promptPreviewKey("work", body, "acme", "ENG-1", detail());
-    const b = promptPreviewKey("work", body, "acme", "ENG-1", detail());
+    const a = promptPreviewKey("work", body, "acme", "ENG-1", detail(), undefined);
+    const b = promptPreviewKey("work", body, "acme", "ENG-1", detail(), undefined);
     expect(a).toEqual(b);
   });
 
   it("changes when the draft changes", () => {
-    const a = promptPreviewKey("work", body, "acme", "ENG-1", detail());
-    const b = promptPreviewKey("work", `${body} now`, "acme", "ENG-1", detail());
+    const a = promptPreviewKey("work", body, "acme", "ENG-1", detail(), undefined);
+    const b = promptPreviewKey("work", `${body} now`, "acme", "ENG-1", detail(), undefined);
     expect(a).not.toEqual(b);
   });
 
   it("changes when the sample issue changes — a refetched detail must re-render, not serve the stale preview", () => {
-    const a = promptPreviewKey("work", body, "acme", "ENG-1", detail());
-    const b = promptPreviewKey("work", body, "acme", "ENG-1", detail({ description: "edited" }));
+    const a = promptPreviewKey("work", body, "acme", "ENG-1", detail(), undefined);
+    const b = promptPreviewKey(
+      "work",
+      body,
+      "acme",
+      "ENG-1",
+      detail({ description: "edited" }),
+      undefined,
+    );
     expect(a).not.toEqual(b);
   });
 
+  it("changes when the sample work queue changes — the Start-work preview is rendered over it", () => {
+    const item = {
+      source: "manual" as const,
+      description: "Add a test",
+      path: null,
+      line: null,
+      author: null,
+      body: null,
+    };
+    const a = promptPreviewKey("pr-fix", body, "acme", "", undefined, [item]);
+    const b = promptPreviewKey("pr-fix", body, "acme", "", undefined, [
+      { ...item, description: "Add two tests" },
+    ]);
+    expect(a).not.toEqual(b);
+    // Hashed like the draft: the queue's text never sits in the key.
+    for (const part of a as unknown[]) expect(String(part)).not.toContain("Add a test");
+  });
+
   it("never carries the draft text itself — the cache must not retain a copy per keystroke", () => {
-    const key = promptPreviewKey("work", body, "acme", "ENG-1", detail());
+    const key = promptPreviewKey("work", body, "acme", "ENG-1", detail(), undefined);
     expect(key).not.toContain(body);
     // Every part stays short regardless of how big the template gets.
-    const huge = promptPreviewKey("work", "x".repeat(50_000), "acme", "ENG-1", detail());
+    const huge = promptPreviewKey("work", "x".repeat(50_000), "acme", "ENG-1", detail(), undefined);
     for (const part of huge as unknown[]) {
       expect(String(part).length).toBeLessThan(32);
     }
@@ -585,6 +752,39 @@ describe("parseLinearGroupBy", () => {
     expect(parseLinearGroupBy(undefined)).toBe("milestone");
     expect(parseLinearGroupBy("")).toBe("milestone");
     expect(parseLinearGroupBy("project-milestone")).toBe("milestone");
+  });
+});
+
+describe("isOptedIn", () => {
+  /** The opposite convention to the settings that default *on* and read
+   *  `!== "false"`. Getting the two mixed up silently flips a default, so the
+   *  boundary is pinned rather than left to whoever reads the call site. */
+  it("treats anything but a literal true as off", () => {
+    expect(isOptedIn("true")).toBe(true);
+    expect(isOptedIn("false")).toBe(false);
+    expect(isOptedIn(null)).toBe(false);
+    expect(isOptedIn(undefined)).toBe(false);
+    expect(isOptedIn("")).toBe(false);
+    expect(isOptedIn("1")).toBe(false);
+  });
+});
+
+describe("parseGithubGroupBy", () => {
+  it("reads the stored nesting", () => {
+    expect(parseGithubGroupBy("project")).toBe("project");
+    expect(parseGithubGroupBy("milestone")).toBe("milestone");
+    expect(parseGithubGroupBy("project_milestone")).toBe("project_milestone");
+  });
+
+  /** The opposite default to Linear's, and deliberately: the worktree tree has
+   *  always been nested, the Reviews section has always been flat, and a review
+   *  inbox is usually short enough that a heading per project explains nothing.
+   *  Turning it on is a choice. */
+  it("falls back to none", () => {
+    expect(parseGithubGroupBy(null)).toBe("none");
+    expect(parseGithubGroupBy(undefined)).toBe("none");
+    expect(parseGithubGroupBy("")).toBe("none");
+    expect(parseGithubGroupBy("project-milestone")).toBe("none");
   });
 });
 
@@ -750,96 +950,153 @@ describe("patchSettingCache", () => {
   });
 });
 
-describe("newestSessionByPath", () => {
-  const at = (cwd: string, sessionId: string, updatedAtMs: number | null): SessionState => ({
-    agentKind: "Claude",
-    sessionId,
-    state: "active",
-    event: "Stop",
-    cwd,
-    message: null,
-    transcriptPath: null,
-    updatedAtMs,
-    repo: "canary",
-    termKey: null,
-  });
-
-  // A worktree can host several Claude tabs. The backend hands them over newest
-  // first, but the correlation must not *depend* on that: pick the newest.
-  it("keeps the most recently updated session for each worktree path", () => {
-    const map = newestSessionByPath([
-      at("/wt/a", "old", 1),
-      at("/wt/a", "new", 5),
-      at("/wt/b", "other", 3),
-    ]);
-
-    expect(map.get("/wt/a")?.sessionId).toBe("new");
-    expect(map.get("/wt/b")?.sessionId).toBe("other");
-    expect(map.size).toBe(2);
-  });
-
-  it("falls back to the backend's order when timestamps tie or are missing", () => {
-    const map = newestSessionByPath([at("/wt/a", "first", null), at("/wt/a", "second", null)]);
-
-    expect(map.get("/wt/a")?.sessionId).toBe("first");
-  });
-});
-
 describe("filterTriageQueue", () => {
   function ticket(id: string, opts: { mine: boolean; snoozed?: boolean }): TriageTicket {
     return {
       id,
       title: id,
       priority: "Medium",
-      estimate: null,
-      project: null,
-      projectColor: null,
-      projectIcon: null,
-      projectTargetDate: null,
-      dueDate: null,
-      sortOrder: null,
-      createdAtMs: null,
-      meta: "",
       team: null,
       slaBreachMs: null,
       snoozedUntilMs: opts.snoozed ? Date.now() + 60_000 : null,
       mine: opts.mine,
     };
   }
+  const ids = (tickets: TriageTicket[]) => tickets.map((t) => t.id);
 
   // One active + one snoozed ticket for each of "mine" and "theirs", so every
-  // case below can assert both the mine/team split and the snoozed filter.
+  // case below can assert both the mine/team split and the snoozed split.
   const mine = ticket("mine-active", { mine: true });
   const mineSnoozed = ticket("mine-snoozed", { mine: true, snoozed: true });
   const theirs = ticket("theirs-active", { mine: false });
   const theirsSnoozed = ticket("theirs-snoozed", { mine: false, snoozed: true });
   const tickets = [mine, mineSnoozed, theirs, theirsSnoozed];
 
-  it("mine-only (good-citizen off): shows only the viewer's active tickets, snoozed hidden", () => {
-    const result = filterTriageQueue(tickets, { goodCitizen: false, showSnoozed: false });
-    expect(result.visible.map((t) => t.id)).toEqual([mine.id]);
-    // teamWaiting always counts others' active tickets, independent of the toggle.
-    expect(result.teamWaiting).toBe(1);
+  it("mine-only (good-citizen off): the viewer's own tickets, split on snooze", () => {
+    const result = filterTriageQueue(tickets, { goodCitizen: false });
+    expect(ids(result.active)).toEqual([mine.id]);
+    expect(ids(result.snoozed)).toEqual([mineSnoozed.id]);
   });
 
-  it("mine-only + show snoozed: includes the viewer's own snoozed ticket, still excludes the team", () => {
-    const result = filterTriageQueue(tickets, { goodCitizen: false, showSnoozed: true });
-    expect(result.visible.map((t) => t.id).sort()).toEqual([mine.id, mineSnoozed.id].sort());
+  it("good citizen: widens both lists to the whole team inbox (issues not assigned to you included), unconditionally", () => {
+    const result = filterTriageQueue(tickets, { goodCitizen: true });
+    expect(ids(result.active)).toEqual([mine.id, theirs.id]);
+    expect(ids(result.snoozed)).toEqual([mineSnoozed.id, theirsSnoozed.id]);
   });
 
-  it("good citizen: widens to the whole team inbox (issues not assigned to you included), unconditionally", () => {
-    const result = filterTriageQueue(tickets, { goodCitizen: true, showSnoozed: false });
-    expect(result.visible.map((t) => t.id).sort()).toEqual([mine.id, theirs.id].sort());
+  /** The backend already ordered the queue (soonest SLA first); the filter keeps
+   *  that order within each list rather than sorting again, so the Triage view
+   *  and the sidebar's section, which both read this, agree on who is first. */
+  it("preserves the backend's order within each list", () => {
+    const shuffled = [theirsSnoozed, theirs, mineSnoozed, mine];
+    const result = filterTriageQueue(shuffled, { goodCitizen: true });
+    expect(ids(result.active)).toEqual([theirs.id, mine.id]);
+    expect(ids(result.snoozed)).toEqual([theirsSnoozed.id, mineSnoozed.id]);
+  });
+});
+
+describe("useTriageRepo", () => {
+  const DEFAULT = "app/triage_default_repo";
+  const OWN = "app/triage_repo:AK-1";
+
+  function mount(ticketId: string | null) {
+    const qc = makeClient();
+    const { result } = renderHook(() => useTriageRepo(ticketId), { wrapper: wrapper(qc) });
+    return { qc, result };
+  }
+  /** Both reads and the repo list have landed, so a `null` answer is a verdict
+   *  and not the pre-fetch blank. */
+  const settled = (qc: QueryClient, ticketId: string) =>
+    waitFor(() => {
+      expect(qc.getQueryData(queryKeys.repos)).toBeDefined();
+      expect(qc.getQueryData(queryKeys.setting("app", "triage_default_repo"))).toBeDefined();
+      expect(qc.getQueryData(queryKeys.setting("app", `triage_repo:${ticketId}`))).toBeDefined();
+    });
+
+  beforeEach(() => settings.reset(["acme/app", "acme/web"]));
+
+  it("resolves the ticket's own pick over the triage default", async () => {
+    settings.store[DEFAULT] = "acme/app";
+    settings.store[OWN] = "acme/web";
+    const { result } = mount("AK-1");
+
+    await waitFor(() => expect(result.current.repo).toBe("acme/web"));
+    expect(result.current.attached).toBe(true);
+    expect(result.current.defaultRepo).toBe("acme/app");
   });
 
-  it("show snoozed widens the team view too once good-citizen is showing it", () => {
-    const result = filterTriageQueue(tickets, { goodCitizen: true, showSnoozed: true });
-    expect(result.visible.map((t) => t.id).sort()).toEqual(tickets.map((t) => t.id).sort());
+  it("falls back to the default when the ticket has no pick of its own", async () => {
+    settings.store[DEFAULT] = "acme/app";
+    const { result } = mount("AK-1");
+
+    await waitFor(() => expect(result.current.repo).toBe("acme/app"));
+    expect(result.current.attached).toBe(false);
   });
 
-  it("teamWaiting excludes the viewer's own tickets and snoozed tickets, regardless of toggles", () => {
-    const result = filterTriageQueue(tickets, { goodCitizen: true, showSnoozed: true });
-    expect(result.teamWaiting).toBe(1);
+  /** A project removed from the registry must read as "nothing attached": a
+   *  name every launch would fail on is worse than an honest empty state. */
+  it("reads a name the registry no longer has as null", async () => {
+    settings.store[OWN] = "gone/repo";
+    settings.store[DEFAULT] = "gone/default";
+    const { qc, result } = mount("AK-1");
+
+    await settled(qc, "AK-1");
+    expect(result.current.loading).toBe(false);
+    expect(result.current.repo).toBeNull();
+    expect(result.current.attached).toBe(false);
+    expect(result.current.defaultRepo).toBeNull();
+  });
+
+  /** The per-ticket row lands a frame after the default; a launch in that frame
+   *  would run on the default when the ticket had picked otherwise. */
+  it("reports loading until the registry and both rows have been read", async () => {
+    settings.store[DEFAULT] = "acme/app";
+    settings.store[OWN] = "acme/web";
+    const { qc, result } = mount("AK-1");
+    expect(result.current.loading).toBe(true);
+
+    await settled(qc, "AK-1");
+    expect(result.current.loading).toBe(false);
+    expect(result.current.repo).toBe("acme/web");
+  });
+
+  it("setRepo(null) clears the pick, optimistically, back onto the default", async () => {
+    settings.store[DEFAULT] = "acme/app";
+    settings.store[OWN] = "acme/web";
+    const { result } = mount("AK-1");
+    await waitFor(() => expect(result.current.repo).toBe("acme/web"));
+
+    act(() => result.current.setRepo(null));
+
+    await waitFor(() => expect(result.current.repo).toBe("acme/app"));
+    expect(result.current.attached).toBe(false);
+    expect(settings.setSetting).toHaveBeenCalledWith("app", "triage_repo:AK-1", null);
+    expect(settings.setSetting).toHaveBeenCalledTimes(1);
+  });
+
+  it("asDefault writes the default beside the ticket's own pick", async () => {
+    const { result } = mount("AK-1");
+
+    act(() => result.current.setRepo("acme/web", { asDefault: true }));
+
+    await waitFor(() => expect(result.current.defaultRepo).toBe("acme/web"));
+    expect(result.current.repo).toBe("acme/web");
+    expect(result.current.attached).toBe(true);
+    expect(settings.setSetting).toHaveBeenCalledWith("app", "triage_repo:AK-1", "acme/web");
+    expect(settings.setSetting).toHaveBeenCalledWith("app", "triage_default_repo", "acme/web");
+  });
+
+  it("without a ticket reads only the default, and never mints a per-ticket row", async () => {
+    settings.store[DEFAULT] = "acme/app";
+    const { result } = mount(null);
+    await waitFor(() => expect(result.current.repo).toBe("acme/app"));
+    expect(result.current.attached).toBe(false);
+
+    act(() => result.current.setRepo("acme/web", { asDefault: true }));
+
+    await waitFor(() => expect(result.current.repo).toBe("acme/web"));
+    expect(settings.setSetting).toHaveBeenCalledTimes(1);
+    expect(settings.setSetting).toHaveBeenCalledWith("app", "triage_default_repo", "acme/web");
   });
 });
 

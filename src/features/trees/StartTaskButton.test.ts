@@ -9,6 +9,8 @@ function task(id: string, ready = true): Task {
     title: `Task ${id}`,
     priority: "None",
     estimate: null,
+    cycle: null,
+    dueDate: null,
     project: "Core",
     projectColor: null,
     projectIcon: null,

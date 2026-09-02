@@ -118,11 +118,14 @@ function draft(over: Partial<ReviewDraft> & { id: string }): ReviewDraft {
 function detail(over: Partial<PrDetail> = {}): PrDetail {
   return {
     body: "",
+    attachments: [],
     labels: [],
     comments: [],
     threads: [],
     files: [],
     filesTruncated: false,
+    commits: [],
+    commitsTruncated: false,
     checks: [],
     baseSha: "base",
     headSha: "head",
@@ -137,6 +140,7 @@ const PR: ReviewPr = {
   title: "Booking webhook retries",
   url: "https://github.com/acme/api/pull/7",
   repo: "acme/api",
+  project: null,
   headRef: "you/pr-7",
   headRefId: null,
   baseRef: "main",

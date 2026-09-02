@@ -225,6 +225,36 @@ describe.each(["unified", "split"] as const)("commenting on a range (%s)", (mode
     await waitFor(() => expect(container.textContent).toContain("Add a comment on lines 41–43"));
   });
 
+  /**
+   * What a pointer actually lands on. The tests above aim their `mouseover` at
+   * the content *cell*; a mouse is over the syntax-highlighted `<span>` inside
+   * it, one level deeper. Unified was covered either way because the forwarding
+   * found its single `td.diff-line-num` from the row; split had none to find, so
+   * the range stopped at the pressed line — which is why this was reported as
+   * "works in Reviews, not in Trees".
+   */
+  it("follows a pointer that is over the code's own markup, not the cell", async () => {
+    const { container } = render(
+      <PrFileDiff
+        path="a.ts"
+        status="modified"
+        patch={RANGE}
+        threads={NO_THREADS}
+        drafts={NO_DRAFTS}
+        target={TARGET}
+        mode={mode}
+      />,
+    );
+
+    fireEvent.mouseDown(gutter(container, mode, 41).plus);
+    const cell = content(container, mode, 43);
+    const inner = cell.querySelector("span") ?? cell;
+    fireEvent.mouseOver(inner);
+    fireEvent.mouseUp(document);
+
+    await waitFor(() => expect(container.textContent).toContain("Add a comment on lines 41–43"));
+  });
+
   it("still opens on one line when the + is only clicked", async () => {
     const { container } = render(
       <PrFileDiff
@@ -269,6 +299,30 @@ describe.each(["unified", "split"] as const)("commenting on a range (%s)", (mode
   });
 
   if (mode === "split") {
+    /** Reported: multi-line works in Reviews (unified) and not in Trees (split).
+     *  The `+` you actually press in split is the one drawn *in the code cell* —
+     *  the gutter copy is behind the pointer by then — and a drag that starts
+     *  there has to grow like any other. */
+    it("drags a range from the + in the code cell", async () => {
+      const { container } = render(
+        <PrFileDiff
+          path="a.ts"
+          status="modified"
+          patch={RANGE}
+          threads={NO_THREADS}
+          drafts={NO_DRAFTS}
+          target={TARGET}
+          mode={mode}
+        />,
+      );
+
+      fireEvent.mouseDown(gutter(container, mode, 41).contentPlus);
+      fireEvent.mouseOver(content(container, mode, 43));
+      fireEvent.mouseUp(document);
+
+      await waitFor(() => expect(container.textContent).toContain("Add a comment on lines 41–43"));
+    });
+
     it("works from either column, on a row whose two sides disagree", async () => {
       // Split lays a deletion and its replacement on one row, and that row's two
       // number cells disagree the moment the file has shifted. Each column's

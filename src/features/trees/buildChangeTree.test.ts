@@ -5,6 +5,7 @@ import {
   buildChangeTree,
   CHANGE_ROW_WINDOW,
   type ChangeTreeNode,
+  changeSubtreeDirs,
   dirFlagsOf,
   filesUnder,
   windowRows,
@@ -171,5 +172,28 @@ describe("windowRows", () => {
       clicks += 1;
     }
     expect(clicks).toBeLessThanOrEqual(5);
+  });
+});
+
+/** What a ⌘-click on a folder reaches — that folder's own subtree, never the
+ *  whole list. The scope feeds the one rule in `lib/disclosure`; getting it
+ *  wrong either does nothing or unfolds a monorepo in a single click. */
+describe("changeSubtreeDirs", () => {
+  const tree = buildChangeTree([
+    file("src/a/one.ts"),
+    file("src/a/deep/two.ts"),
+    file("src/b/three.ts"),
+    file("top.ts"),
+  ]);
+
+  it("lists every directory below the one clicked, and none beside it", () => {
+    expect(changeSubtreeDirs(tree, "src/a")).toEqual(["src/a/deep"]);
+    expect([...changeSubtreeDirs(tree, "src")].sort()).toEqual(["src/a", "src/a/deep", "src/b"]);
+  });
+
+  it("has nothing to reach from a leaf folder, a file, or an unknown path", () => {
+    expect(changeSubtreeDirs(tree, "src/b")).toEqual([]);
+    expect(changeSubtreeDirs(tree, "top.ts")).toEqual([]);
+    expect(changeSubtreeDirs(tree, "nope")).toEqual([]);
   });
 });

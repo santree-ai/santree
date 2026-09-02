@@ -946,6 +946,24 @@ fn cap_tail(s: String, budget: usize) -> String {
     format!("[…earlier conversation omitted…]\n{tail}")
 }
 
+/// Drop **one provider's** stored session on a surface, leaving the others.
+///
+/// A logical surface holds one durable conversation per provider (see migration
+/// `0025`), so closing a Codex review must not take the Claude one with it —
+/// which is exactly what [`forget`] would do.
+///
+/// The transcript on disk is untouched: it is what Session history reads, and
+/// "close this tab" has never meant "delete what it said".
+pub async fn forget_provider(db: &Db, repo: &str, term_key: &str, agent: AgentKind) -> Result<()> {
+    sqlx::query("DELETE FROM terminal_sessions WHERE repo = ? AND term_key = ? AND agent_kind = ?")
+        .bind(repo)
+        .bind(term_key)
+        .bind(agent.as_str())
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// Drop a terminal's stored session, so its next `resolve` mints a fresh one
 /// instead of resuming a conversation whose worktree no longer exists. Callers
 /// remove a worktree's own directory then call this with `term_key`

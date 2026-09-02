@@ -1,57 +1,38 @@
-/** The main-area tab bar: the places you *work*, and — at its trailing edge —
+/** Trees' main tab bar: the worktree's tabs on the shared {@link TabStrip}, plus
  *  the two controls that act on the pane as a whole.
  *
  *  Every tab is a `worktree_tabs` row — the agents and shells a worktree has
  *  open, including the one a started task runs in — and every one of them closes
  *  and renames (double-click the label). Close them all and the pane falls
- *  through to its empty surface, with this bar (and its "+") still on top. A
- *  shared "File" tab (whatever file you click) and a temporary "Setup" tab (while
- *  the setup script runs) appear on demand beside them. All tabs share the same
- *  shape — an optional leading icon + label with an optional trailing affordance
- *  (a close × or a status dot) in a fixed slot.
+ *  through to its empty surface, with this bar (and its "+") still on top. Beside
+ *  them, on demand: the worktree's pull request and its ticket at reading width
+ *  ("GitHub PR", "Linear" — the right panel's panes, expanded), a shared "File"
+ *  tab (whatever file you click) and a temporary "Setup" tab (while the setup
+ *  script runs).
  *
  *  The trailing cluster is not part of the tablist: the worktree's setup script
  *  (the one command this pane runs) and the right panel's expand control, which
  *  lives here only while the panel is hidden — collapsing it from its own header
- *  and reopening it somewhere else is how a toggle goes missing. It is a
- *  `flex-none` sibling of a `flex-1 min-w-0` tab area, so the tabs shrink around
- *  it and can never push it off the bar.
+ *  and reopening it somewhere else is how a toggle goes missing.
  *
- *  Narrow panes: a tab shrinks (its label ellipsises on one line) to `TAB_MIN_W`
- *  and no further — past that the strip drops tabs into an overflow menu instead
- *  of squeezing them into unreadable slivers. See {@link fitTabs}. */
-import {
-  type ReactNode,
-  type RefObject,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
-
-import type { AgentKind, TabKind, WorktreeTab } from "../../bindings";
+ *  This file is only Trees' *wiring*: the chrome, the fitting and the keyboard
+ *  model belong to the strip, which knows nothing about either host's model. */
+import type { AgentKind, TabKind } from "../../bindings";
 import {
   AgentIcon,
-  ChevronDownIcon,
-  CloseIcon,
   GitHubLogo,
   GlobeIcon,
+  LinearLogo,
   PlayIcon,
-  PlusIcon,
   TerminalIcon,
 } from "../../components/icons";
-import {
-  Dropdown,
-  MENU_ITEM,
-  onTabStripKeyDown,
-  underlineTabStyle,
-} from "../../components/primitives";
+import { MENU_ITEM } from "../../components/primitives";
+import { PanelToggle } from "../../components/SidePanel";
+import { type StripTab, TabStrip } from "../../components/TabStrip";
 import { useAgentAuth, useCodexAccount, useCodexHealth } from "../../lib/queries";
-import { targetOwnsKey, useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
-import { CHROME } from "../../state/AppContext";
-import { useTerminals } from "../terminal/TerminalsContext";
-import { PanelToggle } from "./FilePickerPanel";
+import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { BASE_ID, extraTab, type MainTab, useTrees } from "./model";
+import { useTabSessions } from "./useTabSessions";
 
 export function MainTabBar() {
   const {
@@ -64,55 +45,24 @@ export function MainTabBar() {
     closeFileTab,
     openCheckLog,
     closeCheckLog,
+    prViewOpen,
+    closePrView,
+    issueViewOpen,
+    closeIssueView,
     tabs,
     addTab,
     closeTab,
     renameTab,
     runSetup,
     rightCollapsed,
+    toggleRightPanel,
   } = useTrees();
-  // The live PTY registry, not the tab rows above — one names processes, the
-  // other names what the strip draws, and a tab can have either without the other.
-  const { tabs: sessions, close: endSession } = useTerminals();
-  const tabAreaRef = useRef<HTMLDivElement>(null);
-  const tabAreaWidth = useTrackedWidth(tabAreaRef);
+  const { closeWithSession } = useTabSessions(activeId, tabs, closeTab);
   const isBase = activeId === BASE_ID;
-  const hasFile = selectedFile !== null;
-  const hasSetup = setupFor !== null && setupFor === activeId;
 
-  // Closing a tab tears its PTY session down (found by refId) too, so it doesn't
-  // linger in the global Terminal tab, and the row goes with it — an agent tab's
-  // stored session is forgotten by the backend. The conversation itself survives
-  // on disk: Session history is how it comes back.
-  const closeWithSession = (t: WorktreeTab) => {
-    const live = sessions.find((x) => x.refId === `tree:${activeId}:tab:${t.id}`);
-    if (live) endSession(live.key);
-    closeTab(t.id);
-  };
-
-  // A tab is its process. Once that process exits its session vanishes from the
-  // registry, and the tab goes with it rather than lingering as a dead one to ✕ by
-  // hand — for an agent exactly as for a shell, because a pane with nothing
-  // running in it has nothing to show and Session history already keeps the
-  // conversation. We only prune a tab we've *seen* live, so the gap before a
-  // freshly-opened session registers doesn't drop it, and a tab restored by a
-  // restart waits to be opened rather than being swept before it ever runs. This
-  // pane is keyed by worktree id, so `seen` is naturally scoped to it.
-  const seen = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    for (const t of tabs) {
-      const alive = sessions.some((x) => x.refId === `tree:${activeId}:tab:${t.id}`);
-      if (alive) seen.current.add(t.id);
-      else if (seen.current.has(t.id)) {
-        seen.current.delete(t.id);
-        closeTab(t.id);
-      }
-    }
-  }, [sessions, tabs, activeId, closeTab]);
-
-  // One list, so the fit/hide decision below sees every tab — the persisted rows
-  // and the on-demand File/Setup/Check ones.
-  const items: TabItem[] = [
+  // One list, so the fit/hide decision sees every tab — the persisted rows and
+  // the on-demand ones, in `openMainTabs`' order.
+  const items: StripTab<MainTab>[] = [
     ...tabs.map((t) => ({
       tab: extraTab(t.id),
       label: t.title,
@@ -120,13 +70,37 @@ export function MainTabBar() {
         t.kind === "terminal" ? (
           <TerminalIcon size={11} className="text-muted-3" />
         ) : (
-          <AgentTabIcon kind={t.agentKind ?? "Claude"} />
+          // The agent's logomark. Claude's spark reads as "Claude" at a glance;
+          // every mark takes the text colour so the strip stays one weight.
+          <AgentIcon kind={t.agentKind ?? "Claude"} size={11} className="text-muted-3" />
         ),
       onClose: () => closeWithSession(t),
       onRename: (title: string) => renameTab(t.id, title),
     })),
-    ...(hasFile ? [{ tab: "file" as const, label: "File", onClose: closeFileTab }] : []),
-    ...(hasSetup
+    ...(prViewOpen
+      ? [
+          {
+            tab: "prView" as const,
+            label: "GitHub PR",
+            icon: <GitHubLogo size={11} className="text-muted-3" />,
+            onClose: closePrView,
+          },
+        ]
+      : []),
+    ...(issueViewOpen
+      ? [
+          {
+            tab: "issueView" as const,
+            label: "Linear",
+            icon: <LinearLogo size={11} className="text-muted-3" />,
+            onClose: closeIssueView,
+          },
+        ]
+      : []),
+    ...(selectedFile !== null
+      ? [{ tab: "file" as const, label: "File", onClose: closeFileTab }]
+      : []),
+    ...(setupFor !== null && setupFor === activeId
       ? [
           {
             tab: "setup" as const,
@@ -146,244 +120,39 @@ export function MainTabBar() {
         ]
       : []),
   ];
-  const { shown, hidden } = fitTabs(
-    items,
-    items.findIndex((i) => i.tab === activeTab),
-    tabAreaWidth,
-  );
 
   return (
-    // The bar doubles as the window's drag region for this column: with the
-    // shell collapsed into one window, the sidebar's title strip was the only
-    // draggable chrome, so grabbing the window anywhere over the work area was
-    // impossible. `data-tauri-drag-region` only applies to the element under
-    // the pointer, so the tabs and buttons inside keep their own clicks — the
-    // gaps between them move the window, exactly like a native tab bar.
-    <div
-      data-tauri-drag-region
-      className={`flex ${CHROME.subBar} flex-none items-stretch border-b border-line bg-deep`}
-    >
-      {/* Everything the tabs may use: `flex-1 min-w-0` so it takes what the
-        trailing cluster leaves, and never a pixel more. Its measured width is
-        the budget `fitTabs` spends, and it doesn't depend on how many tabs we
-        render — so observing it can't feed back into itself. */}
-      <div ref={tabAreaRef} className="flex min-w-0 flex-1 items-stretch">
-        {/* The tablist clips rather than pushing: `min-w-0` + `overflow-hidden`
-          means even a pathological pane width costs the last tab's right edge,
-          not the "+" button or the controls beyond it. It goes entirely once
-          every tab is closed — a tablist owning no tabs is not a thing. */}
-        {shown.length > 0 && (
-          <div
-            role="tablist"
-            onKeyDown={onTabStripKeyDown}
-            className="flex min-w-0 items-stretch overflow-hidden"
-          >
-            {shown.map((it) => (
-              <Tab key={it.tab} {...it} active={activeTab} onSelect={setActiveTab} />
-            ))}
-          </div>
-        )}
-        {hidden.length > 0 && <OverflowTabsMenu tabs={hidden} onSelect={setActiveTab} />}
-        <NewTabButton onAdd={addTab} />
-        <div data-tauri-drag-region className="min-w-2 flex-1" />
-      </div>
-
-      <div data-tauri-drag-region className="flex flex-none items-center gap-0.5 pr-2 pl-2">
-        {!isBase && active && (
-          <button
-            type="button"
-            onClick={() => runSetup(active.id)}
-            title="Run .santree/init.sh and watch its logs"
-            className="flex h-[22px] cursor-pointer items-center gap-1.5 rounded px-2 text-[11px] whitespace-nowrap text-muted-2 hover:bg-hover hover:text-fg-2"
-          >
-            <PlayIcon size={10} />
-            {active.setupRan ? "Re-run setup" : "Run setup"}
-          </button>
-        )}
-        {rightCollapsed && <PanelToggle />}
-      </div>
-    </div>
-  );
-}
-
-/** Everything a {@link Tab} needs, so the whole strip can be built as one list
- *  and *then* fitted to the pane. */
-type TabItem = {
-  tab: MainTab;
-  label: string;
-  icon?: ReactNode;
-  onClose?: () => void;
-  onRename?: (title: string) => void;
-  trailing?: ReactNode;
-};
-
-/** The narrow-pane budget, in px.
- *
- *  `TAB_MIN_W` is the floor a tab shrinks to — roughly the icon, the trailing
- *  slot and a few characters of label. Below it a tab is a sliver that names
- *  nothing, so the strip stops shrinking and starts hiding instead.
- *  `TAB_MAX_W` keeps one long renamed title from eating the whole strip.
- *  The other two mirror the trailing controls' own widths (`w-8` for "+", and
- *  the chevron + count for the overflow trigger), because they are spent out of
- *  the same budget as the tabs. */
-const TAB_MIN_W = 84;
-const TAB_MAX_W = 200;
-const NEW_TAB_W = 32;
-const OVERFLOW_W = 34;
-
-/** Split the strip into the tabs that fit and the ones the overflow menu takes.
- *
- *  **The active tab is never hidden.** You cannot switch away from a tab you can
- *  no longer see, and dropping it would also leave the tablist with no
- *  `tabIndex={0}` element — the keyboard's only way into the strip. So it takes
- *  the last visible slot when it would otherwise have been dropped; everything
- *  else is dropped from the right, in order. (The alternative — hide by position
- *  and rely on the menu alone — makes the current tab's own name vanish, which
- *  is the one label that has to stay on screen.)
- *
- *  A width of 0 means "not measured yet" (first paint, or a test/headless
- *  environment with no layout): show everything rather than flash a collapsed
- *  strip that a measurement one frame later would undo. */
-function fitTabs<T>(items: T[], activeIndex: number, width: number) {
-  if (width <= 0) return { shown: items, hidden: [] as T[] };
-  if (Math.floor((width - NEW_TAB_W) / TAB_MIN_W) >= items.length)
-    return { shown: items, hidden: [] as T[] };
-  // Hiding costs the overflow trigger, so the budget shrinks the moment we do it.
-  const keep = Math.max(1, Math.floor((width - NEW_TAB_W - OVERFLOW_W) / TAB_MIN_W));
-  const visible = new Set<number>();
-  for (let i = 0; i < keep && i < items.length; i++) visible.add(i);
-  if (activeIndex >= 0 && !visible.has(activeIndex)) {
-    visible.delete(keep - 1);
-    visible.add(activeIndex);
-  }
-  return {
-    shown: items.filter((_, i) => visible.has(i)),
-    hidden: items.filter((_, i) => !visible.has(i)),
-  };
-}
-
-/** An element's live width. `ResizeObserver` is guarded because jsdom has none;
- *  there the first (0-width) read stands, which {@link fitTabs} reads as
- *  "unmeasured, show everything". */
-function useTrackedWidth(ref: RefObject<HTMLElement | null>) {
-  const [width, setWidth] = useState(0);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const read = () => setWidth(el.getBoundingClientRect().width);
-    read();
-    if (typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(read);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [ref]);
-  return width;
-}
-
-/** The tabs that didn't fit, reachable from a menu. Menu rows are buttons, not
- *  `role="tab"`s — a hidden tab is out of the DOM entirely, so it can't strand
- *  the roving tabindex, and picking one here makes it visible again (it becomes
- *  the active tab, which {@link fitTabs} always keeps). */
-function OverflowTabsMenu({
-  tabs,
-  onSelect,
-}: {
-  tabs: TabItem[];
-  onSelect: (tab: MainTab) => void;
-}) {
-  const label = `Show ${tabs.length} hidden ${tabs.length === 1 ? "tab" : "tabs"}`;
-  return (
-    <Dropdown
-      align="right"
-      menuClassName="w-52 overflow-hidden"
-      trigger={(toggle) => (
-        // h-full so the trigger fills the bar like the tabs beside it (the
-        // Dropdown wrapper is a block, so a content-height button rides up).
-        <button
-          type="button"
-          onClick={toggle}
-          title={label}
-          aria-label={label}
-          className="flex h-full cursor-pointer items-center gap-0.5 border-r border-line px-1.5 text-[11px] font-medium text-muted-2 hover:bg-hover hover:text-fg-2"
-        >
-          {tabs.length}
-          <ChevronDownIcon size={11} />
-        </button>
-      )}
-    >
-      {(close) =>
-        tabs.map((t) => (
-          <button
-            key={t.tab}
-            type="button"
-            onClick={() => {
-              onSelect(t.tab);
-              close();
-            }}
-            className={MENU_ITEM}
-          >
-            {t.icon ?? <span className="w-[11px]" />}
-            <span className="truncate">{t.label}</span>
-          </button>
-        ))
+    <TabStrip
+      tabs={items}
+      active={activeTab}
+      onSelect={setActiveTab}
+      ariaLabel="Worktree tabs"
+      newTabMenu={(close) => <NewTabMenu onAdd={addTab} close={close} />}
+      newTabMenuClassName="w-40 overflow-hidden"
+      trailing={
+        <>
+          {!isBase && active && (
+            <button
+              type="button"
+              onClick={() => runSetup(active.id)}
+              title="Run .santree/init.sh and watch its logs"
+              className="flex h-[22px] cursor-pointer items-center gap-1.5 rounded px-2 text-[11px] whitespace-nowrap text-muted-2 hover:bg-hover hover:text-fg-2"
+            >
+              <PlayIcon size={10} />
+              {active.setupRan ? "Re-run setup" : "Run setup"}
+            </button>
+          )}
+          {rightCollapsed && <PanelToggle collapsed onToggle={toggleRightPanel} />}
+        </>
       }
-    </Dropdown>
+    />
   );
 }
 
-/** The agent's logomark for the main work tab — Claude gets its brand color so
- *  the spark reads as "Claude" at a glance; other agents use the text color. */
-function AgentTabIcon({ kind }: { kind: AgentKind }) {
-  return <AgentIcon kind={kind} size={11} className="text-muted-3" />;
-}
-
-/** The trailing "+" tab: opens a new Claude session or terminal (or a browser,
- *  once that's built). ⌘T opens the menu while a worktree is active (this bar is
- *  on screen); then 1 selects Claude, 2 Terminal, and 3 would select Web (WIP). */
-function NewTabButton({ onAdd }: { onAdd: (kind: TabKind, agentKind?: AgentKind) => void }) {
-  const [open, setOpen] = useState(false);
-
-  // ⌘T opens the menu. Scoped to this component's lifetime, which matches "a
-  // worktree is active in Trees" (the bar only renders then).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.key !== "t") return;
-      if (targetOwnsKey(e)) return;
-      e.preventDefault();
-      setOpen((o) => !o);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  return (
-    <Dropdown
-      align="left"
-      menuClassName="w-40 overflow-hidden"
-      open={open}
-      onOpenChange={setOpen}
-      trigger={(toggle) => (
-        // h-full so the button fills the bar's height (the Dropdown wrapper is a
-        // block, so without it the button is content-height and rides up to the top
-        // — visibly higher than the tabs). An SVG plus centers crisply.
-        <button
-          type="button"
-          onClick={toggle}
-          title="New tab (⌘T)"
-          className="flex h-full w-8 cursor-pointer items-center justify-center text-muted-3 hover:bg-hover hover:text-fg-2"
-        >
-          <PlusIcon size={13} />
-        </button>
-      )}
-    >
-      {(close) => <NewTabMenu onAdd={onAdd} close={close} />}
-    </Dropdown>
-  );
-}
-
-/** New-tab menu rows. Mounted only while the menu is open, so its digit-key
- *  listener (1 → Claude, 2 → Terminal, 3 → Web) is live exactly when the menu is
- *  visible. */
+/** New-tab menu rows: a new Claude/Codex session or a terminal (or a browser,
+ *  once that's built). Mounted only while the menu is open, so its digit-key
+ *  listener (1 → Codex, 2 → Claude Code, 3 → Terminal) is live exactly when the
+ *  menu is visible. */
 function NewTabMenu({
   onAdd,
   close,
@@ -446,139 +215,5 @@ function NewTabMenu({
         <span className="ml-auto text-[10px] text-muted-4">WIP</span>
       </button>
     </>
-  );
-}
-
-function Tab({
-  tab,
-  label,
-  icon,
-  active,
-  onSelect,
-  onClose,
-  onRename,
-  trailing,
-}: {
-  tab: MainTab;
-  label: string;
-  /** Leading logomark (e.g. the Claude spark on agent tabs). */
-  icon?: ReactNode;
-  active: MainTab | null;
-  onSelect: (tab: MainTab) => void;
-  /** When set, the trailing slot is a close button. */
-  onClose?: () => void;
-  /** When set, double-clicking the label edits it inline. */
-  onRename?: (title: string) => void;
-  /** A non-interactive trailing affordance (e.g. a status dot). */
-  trailing?: ReactNode;
-}) {
-  const on = active === tab;
-  const [editing, setEditing] = useState(false);
-  return (
-    // Presentational wrapper: the strip is the tablist and the label button is the
-    // tab — the close × has to stay a sibling of it, because a tab's children are
-    // presentational to AT and it would disappear inside one.
-    <div
-      role="presentation"
-      className="flex items-stretch border-r border-line text-[11.5px] font-medium"
-      // The floor and the cap the strip is fitted to (see `fitTabs`): a tab
-      // shrinks between them and its label ellipsises, never below the floor —
-      // `MainTabBar` only renders as many tabs as fit at that floor.
-      style={{ ...underlineTabStyle(on), minWidth: TAB_MIN_W, maxWidth: TAB_MAX_W }}
-    >
-      {editing && onRename ? (
-        <RenameInput
-          initial={label}
-          onDone={(title) => {
-            setEditing(false);
-            if (title) onRename(title);
-          }}
-        />
-      ) : (
-        <button
-          type="button"
-          role="tab"
-          aria-selected={on}
-          tabIndex={on ? 0 : -1}
-          onClick={() => onSelect(tab)}
-          onDoubleClick={onRename ? () => setEditing(true) : undefined}
-          // F2 is the keyboard path to the rename the double-click opens —
-          // without it renaming a tab is pointer-only.
-          onKeyDown={
-            onRename
-              ? (e) => {
-                  if (e.key !== "F2") return;
-                  e.preventDefault();
-                  setEditing(true);
-                }
-              : undefined
-          }
-          // The title also carries the full label, which a narrow pane may have
-          // ellipsised away.
-          title={onRename ? `${label} — double-click (or F2) to rename` : label}
-          // `min-w-0` is what lets the button shrink past its content: without
-          // it a flex child's automatic minimum size is its min-content width,
-          // which for a two-word label is one word — so the label wrapped onto a
-          // second line instead of ellipsising.
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 pr-1.5 pl-3"
-        >
-          {icon && <span className="flex flex-none items-center">{icon}</span>}
-          <span className="truncate">{label}</span>
-        </button>
-      )}
-      {/* Fixed trailing slot so all tabs are the same shape — `flex-none` so the
-        shrinking label can never eat the close button. */}
-      <span className="flex w-5 flex-none items-center justify-center pr-1.5">
-        {onClose ? (
-          <button
-            type="button"
-            onClick={onClose}
-            title="Close"
-            aria-label={`Close ${label}`}
-            className="flex h-4 w-4 cursor-pointer items-center justify-center rounded text-[13px] leading-none text-muted-3 hover:bg-hover hover:text-fg-2"
-          >
-            <CloseIcon size={10} />
-          </button>
-        ) : (
-          trailing
-        )}
-      </span>
-    </div>
-  );
-}
-
-/** The inline rename field a tab swaps to on double-click. Enter/blur commit,
- *  Escape cancels; committing is latched so Enter's commit isn't followed by the
- *  unmount blur re-firing `onDone`. */
-function RenameInput({
-  initial,
-  onDone,
-}: {
-  initial: string;
-  onDone: (title: string | null) => void;
-}) {
-  const [value, setValue] = useState(initial);
-  const done = useRef(false);
-  const finish = (title: string | null) => {
-    if (done.current) return;
-    done.current = true;
-    onDone(title);
-  };
-  return (
-    <input
-      // biome-ignore lint/a11y/noAutofocus: the field replaces the label the user just double-clicked — focus must follow.
-      autoFocus
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      onFocus={(e) => e.currentTarget.select()}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") finish(value.trim() || null);
-        else if (e.key === "Escape") finish(null);
-      }}
-      onBlur={() => finish(value.trim() || null)}
-      aria-label="Tab name"
-      className="my-1 ml-2 rounded border border-line bg-app px-1.5 text-[11.5px] text-fg-2 outline-none focus-visible:border-accent"
-      style={{ width: `${Math.min(Math.max(value.length + 3, 10), 32)}ch` }}
-    />
   );
 }

@@ -30,12 +30,22 @@ import {
   type ReviewPr,
   type TabPr,
 } from "../../bindings";
-import { REVIEW_AGENT_KEY, unwrap, useCreateWorktree, useResolvedSetting } from "../../lib/queries";
+import {
+  REVIEW_AGENT_KEY,
+  unwrap,
+  useCreateWorktree,
+  usePromoteReviewWorktree,
+  useResolvedSetting,
+} from "../../lib/queries";
 import { useLaunchGuard } from "../../lib/useLaunchGuard";
+import { useOptionalAgentRuns } from "../../state/AgentRuns";
 import { type FixCiLaunch, useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
+import { reviewTreeId } from "./checkoutSource";
+import type { PrCheckout } from "./PrCheckout";
 import { reviewTargetFor } from "./ReviewSessionShared";
 import { ticketIdFor } from "./ticket";
+import { useWorktreeGate } from "./WorktreeGate";
 
 /** The tab a "Start work" launch opens, in both hosts. */
 const TAB_TITLE = "Address review";
@@ -82,9 +92,14 @@ function useDefaultReviewAgent(santreeRepo: string): AgentKind {
 /** Start work on a PR from the Trees tab, where the worktree already exists.
  *
  *  The returned launcher takes an optional agent — a per-launch override, not a
- *  preference: it never writes {@link REVIEW_AGENT_KEY}, which Settings owns. */
+ *  preference: it never writes {@link REVIEW_AGENT_KEY}, which Settings owns.
+ *
+ *  `pr` is undefined while the branch's PR summary is still being fetched: the
+ *  panel that hosts these buttons builds the launcher a level above the pane that
+ *  waits for it. Nothing can be launched against a PR we can't name yet, and no
+ *  button that calls this renders until it resolves. */
 export function useStartWorkInWorktree(
-  pr: ReviewPr,
+  pr: ReviewPr | undefined,
   worktreeId: string,
   santreeRepo: string,
 ): StartWorkLauncher {
@@ -95,7 +110,7 @@ export function useStartWorkInWorktree(
   return {
     starting: guard.pending,
     start: (agent?: AgentKind) => {
-      if (!guard.take()) return;
+      if (!pr || !guard.take()) return;
       // The worktree is already on screen, so nothing is unknown at the click:
       // the tab can be minted, opened and focused before the first await.
       const seed: TabSeed = {
@@ -133,9 +148,11 @@ export function useStartWorkInWorktree(
  * It runs as an ordinary agent tab in the main area, launched with the review
  * prompt, the deny-list settings and santree's review MCP server — the same three
  * paths the Reviews session uses, so the drafts it writes land in the same place.
+ *
+ * `pr` is undefined while its summary loads, for the same reason as above.
  */
 export function useStartAiReviewInWorktree(
-  pr: ReviewPr,
+  pr: ReviewPr | undefined,
   worktreeId: string,
   santreeRepo: string,
 ): StartWorkLauncher {
@@ -146,7 +163,7 @@ export function useStartAiReviewInWorktree(
   return {
     starting: guard.pending,
     start: (agent?: AgentKind) => {
-      if (!guard.take()) return;
+      if (!pr || !guard.take()) return;
       const seed: TabSeed = {
         worktreeId,
         tabId: crypto.randomUUID(),
@@ -172,8 +189,19 @@ export function useStartAiReviewInWorktree(
 }
 
 /** Start work on a PR from the Reviews tab: create (or adopt) its worktree, go
- *  there, then launch. */
-export function useStartWorkFromReviews(pr: ReviewPr, santreeRepo: string): StartWorkLauncher {
+ *  there, then launch.
+ *
+ *  `santreeRepo` must be **the project this PR belongs to** (`pr.project`), not
+ *  whichever project the app happens to be pointed at: the inbox spans the whole
+ *  registry now, so the two are routinely different and the worktree would be cut
+ *  in the wrong checkout. The backend fails closed on the mismatch
+ *  (`validate_pr_repo`), so the cost of getting it wrong is a refusal rather than
+ *  a wrong branch — but a refusal is not an answer to a click either. */
+export function useStartWorkFromReviews(
+  pr: ReviewPr,
+  santreeRepo: string,
+  checkout: PrCheckout,
+): StartWorkLauncher {
   const navigate = useNavigate();
   const { requestFixCiLaunch, abandonLaunchTab, addPendingLaunches, removePendingLaunch } =
     useAppUi();
@@ -181,18 +209,49 @@ export function useStartWorkFromReviews(pr: ReviewPr, santreeRepo: string): Star
   // Silent, and quiet below: this flow reports its own failure and goes straight
   // to the tree it made, so neither half of the create needs a toast of its own.
   const { mutateAsync: createWorktree } = useCreateWorktree(santreeRepo, { silent: true });
+  const askForWorktree = useWorktreeGate();
+  const { mutateAsync: promote } = usePromoteReviewWorktree(santreeRepo);
+  const agentRuns = useOptionalAgentRuns();
 
   return {
     starting: guard.pending,
     start: () => {
       if (!guard.take()) return;
-      const issueId = ticketIdFor(pr) ?? `pr-${pr.number}`;
-      // No project: a PR isn't one. When the branch carries a ticket tag the
-      // sidebar bands the tree by that ticket's real project; otherwise it sits
-      // with the rest of the unbanded work.
-      addPendingLaunches([{ id: issueId, title: pr.title, project: null, agent: "Claude" }]);
-      navigate({ to: "/trees" });
+      // The one id a PR's checkout has, except when its branch names a ticket —
+      // then the ticket's own id, so the sidebar bands the tree by that ticket's
+      // project rather than leaving it with the unbanded work. What it must not
+      // be is a third scheme: `pr-<n>` used to be one, and a PR could end up with
+      // a differently-named tree depending on which button reached it first.
+      const issueId = ticketIdFor(pr) ?? reviewTreeId(pr);
+      // Set by the dialog's toggle, read once the worktree exists to run it in.
+      let pendingSetup = false;
       void (async () => {
+        // Nothing new reaches the disk when the PR is already checked out, so
+        // there is nothing to confirm. A checkout still labelled a review is
+        // promoted instead of asked about: it is about to become the tree you are
+        // working in, and Trees — where this navigates — does not list reviews.
+        if (!checkout.worktree) {
+          if (checkout.source.isReview) {
+            try {
+              await promote({ prRepo: pr.repo, number: pr.number });
+            } catch {
+              guard.release();
+              return;
+            }
+          } else {
+            const choice = await askForWorktree("Starting work on this pull request");
+            if (!choice.ok) {
+              guard.release();
+              return;
+            }
+            if (choice.runSetup) pendingSetup = true;
+          }
+        }
+        // No project: a PR isn't one, and the placeholder is merged straight into
+        // the sidebar's worktree list, where a stand-in would open a band of its
+        // own.
+        addPendingLaunches([{ id: issueId, title: pr.title, project: null, agent: "Claude" }]);
+        navigate({ to: "/trees" });
         // Unlike the two Trees paths, the tab cannot be opened at the click: there
         // is no worktree to hang it on yet. The sidebar's pending row covers that
         // stretch, and the tab goes up the moment the create resolves — still
@@ -207,6 +266,7 @@ export function useStartWorkFromReviews(pr: ReviewPr, santreeRepo: string): Star
             agent: "Claude",
             quiet: true,
           });
+          if (pendingSetup) agentRuns?.runSetup(worktree.id);
           seed = {
             worktreeId: worktree.id,
             tabId: crypto.randomUUID(),

@@ -23,8 +23,8 @@ import {
   useOpenInApp,
   useResolvedSetting,
 } from "../../lib/queries";
-import { toast } from "../../state/toast";
 import { BranchIcon, CopyIcon, TrashIcon } from "../icons";
+import { copyText } from "../menuRows";
 import { ConfirmDialog, ContextMenu, type ContextMenuItem } from "../primitives";
 
 export function WorktreeMenu({
@@ -70,10 +70,7 @@ export function WorktreeMenu({
       key: "copy-path",
       label: "Copy path",
       icon: <CopyIcon size={13} />,
-      run: () => {
-        void navigator.clipboard.writeText(worktree.path);
-        toast.success("Path copied.");
-      },
+      run: () => copyText(worktree.path, "Path"),
     },
     // The branch used to have its own line on the row and lost it: it repeats
     // the title in kebab-case, and it is the longest string in a rail this
@@ -84,10 +81,7 @@ export function WorktreeMenu({
       key: "copy-branch",
       label: "Copy branch",
       icon: <BranchIcon size={13} />,
-      run: () => {
-        void navigator.clipboard.writeText(worktree.branch);
-        toast.success("Branch copied.");
-      },
+      run: () => copyText(worktree.branch, "Branch"),
     },
     ...(primary
       ? []

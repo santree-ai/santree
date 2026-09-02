@@ -50,21 +50,18 @@ export function ReviewSubmitBar({
   number,
   reviewId,
   drafts,
-  santreeRepo: repo,
 }: {
   prRepo: string;
   number: number;
   /** The viewer's pending review — the bar only renders when there is one. */
   reviewId: string;
   drafts: number;
-  /** The santree repo, which the submit mutation invalidates alongside the PR. */
-  santreeRepo: string;
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const [event, setEvent] = useState<ReviewEvent>("Comment");
   const [summary, setSummary] = useState("");
-  const submit = useSubmitPrReview(repo, prRepo, number);
+  const submit = useSubmitPrReview(prRepo, number);
   const discard = useDiscardPrReview(prRepo, number);
 
   // GitHub's rule, enforced here so it's a disabled button rather than a 422:

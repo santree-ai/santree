@@ -1,11 +1,15 @@
 /** Settings → Integrations → Linear: the workspace connection, what the next
  *  connect asks for, and how the sidebar nests what Linear returns.
  *
+ *  Three cards, one per question — connecting, what is left of the API budget,
+ *  and the sidebar's shape. They are independent decisions, so a reader should
+ *  be able to find one without reading the other two. The budget follows the
+ *  connection directly, as GitHub's does: it belongs to the workspace just
+ *  connected, ahead of a display preference.
+ *
  *  Everything here is app-scoped — a Linear workspace is connected once for the
  *  whole install, and the sidebar tree is cross-repo. *Which* connected org a
  *  given repo draws its issues from is the per-repo pane (`RepoLinear.tsx`). */
-
-import { type ReactNode, useId } from "react";
 
 import { LinearLogo } from "../../../components/icons";
 import { Badge, Button, ChevronSelect } from "../../../components/primitives";
@@ -24,7 +28,7 @@ import {
 } from "../../../lib/queries";
 import { LINEAR_BRAND } from "../../../theme/colors";
 import { ApiBudgetMeters } from "../ApiBudget";
-import { Heading } from "../widgets";
+import { CardRow, Heading } from "../widgets";
 
 /** Linear's real app-icon treatment — the official monochrome logomark, white on
  *  a near-black tile (theme-independent, like the GitHub mark beside it). */
@@ -117,8 +121,27 @@ export function LinearSection() {
           )}
         </CardRow>
 
-        {/* One selector rather than nested toggles: project and milestone are
-            levels of the same nesting, so the user picks the depth outright. */}
+        {connected && (
+          <div className="border-t border-line bg-surface px-4 py-2">
+            {orgs.map((org) => (
+              <div key={org.slug} className="flex items-center gap-2 py-1.5">
+                <span className="h-1.5 w-1.5 rounded-full" style={{ background: LINEAR_BRAND }} />
+                <span className="text-[12px] text-fg-3">{org.name}</span>
+                <span className="font-mono text-[10.5px] text-muted-4">{org.slug}</span>
+                {!org.canWrite && <Badge>read-only</Badge>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {connected && <LinearBudget />}
+
+      {/* Its own card: how the sidebar is shaped is a display preference, not
+          part of connecting — and it applies whether or not an org is attached.
+          One selector rather than nested toggles, since project and milestone
+          are levels of the same nesting. */}
+      <div className="mt-3 overflow-hidden rounded-xl border border-line-2 bg-raised">
         <CardRow
           label="Group issues by"
           hint="How the sidebar nests each project's tickets and worktrees. The tree is cross-repo, so this shape applies everywhere."
@@ -139,49 +162,8 @@ export function LinearSection() {
             </ChevronSelect>
           )}
         </CardRow>
-
-        {connected && (
-          <div className="border-t border-line bg-surface px-4 py-2">
-            {orgs.map((org) => (
-              <div key={org.slug} className="flex items-center gap-2 py-1.5">
-                <span className="h-1.5 w-1.5 rounded-full" style={{ background: LINEAR_BRAND }} />
-                <span className="text-[12px] text-fg-3">{org.name}</span>
-                <span className="font-mono text-[10.5px] text-muted-4">{org.slug}</span>
-                {!org.canWrite && <Badge>read-only</Badge>}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {connected && <LinearBudget />}
       </div>
     </>
-  );
-}
-
-/** A label + hint on the left, one control on the right. The caption is wired to
- *  the control via `aria-labelledby` (handed to the child as an id), so the
- *  visible text doubles as the control's programmatic name. */
-function CardRow({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint: ReactNode;
-  children: (labelId: string) => ReactNode;
-}) {
-  const labelId = useId();
-  return (
-    <div className="flex items-center gap-4 border-t border-line px-4 py-3">
-      <div className="min-w-0 flex-1">
-        <div id={labelId} className="mb-[3px] text-[12.5px] font-medium text-fg-3">
-          {label}
-        </div>
-        <div className="text-[11.5px] text-muted-3">{hint}</div>
-      </div>
-      {children(labelId)}
-    </div>
   );
 }
 
@@ -196,7 +178,7 @@ function LinearBudget() {
   if (budgets.length === 0) return null;
 
   return (
-    <div className="border-t border-line px-4 py-3.5">
+    <div className="mt-3 rounded-xl border border-line-2 bg-raised px-4 py-3.5">
       <div className="mb-2.5 flex items-baseline gap-2">
         <span className="text-[12.5px] font-medium text-fg-3">API budget</span>
         <span className="text-[11.5px] text-muted-3">

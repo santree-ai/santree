@@ -1,265 +1,34 @@
 /**
- * Triage view logic, pulled out of the (otherwise JSX-light) orchestrator so
- * each concern is small, named, and testable on its own:
- *
- *  - `useTriageSelection`  — the active-ticket selection, kept valid as the queue
- *    changes underneath it.
- *  - `useTabByTicket`      — per-ticket detail-tab memory (each ticket remembers
- *    Discussion vs Investigation independently).
- *  - `useKeptPanes`        — the mounted-pane cache (keep recently-viewed panes
- *    mounted, toggle visibility) so revisiting a ticket is instant.
- *  - `useTriageKeyboard`   — the vim-style queue keybindings (j/k, ⌘I, ⌘O).
- *  - `useInvestigateSelection` / `useBatchInvestigate` — multi-select in the
- *    queue + starting an investigation session per selected ticket at once.
+ * The Triage workspace's keyboard model. Small on purpose: the queue lives in
+ * the sidebar and its selection in the route, so all that is left to a hook here
+ * is the vim-style stepping between tickets and the two ⌘ actions on the open one.
  */
-import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { startTransition, useCallback, useEffect, useRef, useState } from "react";
+import { useEffect } from "react";
 
-import { type AgentKind, commands, type TriageDetail, type TriageTicket } from "../../bindings";
-import { CLAUDE_START_WITH_CHROME_KEY, queryKeys, useBoolSetting } from "../../lib/queries";
+import type { TriageDetail, TriageTicket } from "../../bindings";
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
-import { toast } from "../../state/toast";
-import { agentProvider, sessionAgent } from "../terminal/agentProvider";
-import { agentSessionSeed } from "../terminal/agentSeed";
-import { useTerminals } from "../terminal/TerminalsContext";
-import { useHookInjection } from "../terminal/useHookInjection";
-import { triageTermKey } from "./providerSessions";
-
-/** Discussion, or the provider-specific investigation currently in front. */
-export type DetailTab = "discussion" | AgentKind;
-
-/**
- * The selected ticket. `selectedId` is the raw click target; `activeId` is the
- * resolved selection. No selection is intentional: the main pane shows the
- * triage home. A stale id resolves to null instead of silently opening a
- * different ticket after the queue changes underneath the user.
- */
-export function useTriageSelection(visible: TriageTicket[]) {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  const activeId = selectedId && visible.some((t) => t.id === selectedId) ? selectedId : null;
-  const activeTicket = visible.find((t) => t.id === activeId) ?? null;
-
-  const select = useCallback((id: string) => setSelectedId(id), []);
-
-  return { activeId, activeTicket, select };
-}
-
-/**
- * Per-ticket detail-tab memory: each ticket remembers whichever tab it was on
- * (Discussion or a provider session) so switching tickets and coming back restores
- * it. `tabFor(id)` defaults to Discussion until the ticket's investigation opens.
- */
-export function useTabByTicket() {
-  const [tabByTicket, setTabByTicket] = useState<Record<string, DetailTab>>({});
-
-  const tabFor = useCallback(
-    (id: string | null): DetailTab => (id ? (tabByTicket[id] ?? "discussion") : "discussion"),
-    [tabByTicket],
-  );
-  const setTab = useCallback((id: string | null, tab: DetailTab) => {
-    if (id) setTabByTicket((m) => ({ ...m, [id]: tab }));
-  }, []);
-
-  return { tabFor, setTab };
-}
-
-/**
- * A mounted-pane cache for expensive detail bodies (markdown + inline base64
- * images): keep the most-recently-viewed panes mounted and just toggle their
- * visibility, so revisiting a ticket is instant (no re-parse).
- *
- * A pane is added at *transition* priority, so its first heavy render never
- * blocks the click — the row highlight + header commit immediately, and the
- * body's paint lands in the deferred commit. `detailFor(id)` snapshots each
- * ticket's detail so inactive (hidden) panes keep rendering their own content
- * even after the active detail has moved on.
- *
- * `detailsRef` is pruned to match `keptPanes` on every eviction — otherwise
- * every detail ever viewed (images included) would outlive the query cache's
- * own gcTime, pinned in memory for the life of the view. `resetKey` (e.g. the
- * active repo) additionally drops the whole cache outright on change, so
- * switching repos doesn't ride old-repo details along until they age out.
- *
- * Generic over the detail shape; callers feed the currently-active detail.
- */
-export function useKeptPanes<D extends { id: string }>(
-  activeDetail: D | undefined,
-  max: number,
-  resetKey?: unknown,
-) {
-  const detailsRef = useRef(new Map<string, D>());
-  const [keptPanes, setKeptPanes] = useState<string[]>([]);
-
-  // Reset the whole cache when `resetKey` changes (e.g. the active repo).
-  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run on resetKey change.
-  useEffect(() => {
-    detailsRef.current.clear();
-    setKeptPanes([]);
-  }, [resetKey]);
-
-  useEffect(() => {
-    if (!activeDetail) return;
-    detailsRef.current.set(activeDetail.id, activeDetail);
-    startTransition(() => {
-      setKeptPanes((cur) =>
-        cur.includes(activeDetail.id) ? cur : [...cur, activeDetail.id].slice(-max),
-      );
-    });
-  }, [activeDetail, max]);
-
-  // Prune alongside eviction: once a pane ages out of `keptPanes` its detail
-  // (and any inlined images) has no reason to stay in `detailsRef`.
-  useEffect(() => {
-    for (const id of detailsRef.current.keys()) {
-      if (!keptPanes.includes(id)) detailsRef.current.delete(id);
-    }
-  }, [keptPanes]);
-
-  const detailFor = useCallback((id: string) => detailsRef.current.get(id), []);
-
-  return { keptPanes, detailFor };
-}
-
-/**
- * Multi-select for batch investigation (mirrors the Issues launch selection).
- * `selectAll` toggles the whole eligible set — if every eligible ticket is
- * already selected it clears them instead, like Issues' "Select Ready".
- */
-export function useInvestigateSelection(eligibleIds: string[]) {
-  const [selected, setSelected] = useState<Record<string, boolean>>({});
-
-  const toggle = useCallback((id: string) => setSelected((s) => ({ ...s, [id]: !s[id] })), []);
-  const clear = useCallback(() => setSelected({}), []);
-  const selectAll = useCallback(() => {
-    if (eligibleIds.length === 0) return;
-    setSelected((s) => {
-      const allSelected = eligibleIds.every((id) => s[id]);
-      const next = { ...s };
-      for (const id of eligibleIds) next[id] = !allSelected;
-      return next;
-    });
-  }, [eligibleIds]);
-
-  return { selected, toggle, clear, selectAll };
-}
-
-/**
- * Start (or resume) investigations for several tickets at once, without
- * visiting each one. Per ticket this does exactly what InvestigatePane's launch
- * does — resolve its persisted session (a fresh `--session-id`, or `--resume`
- * when a transcript is still on disk) and open the seeded PTY — but in the
- * background: the sessions live in the persistent TerminalLayer, so each
- * ticket's Investigation tab (and the Terminal view) attaches to them whenever
- * they're opened. `ensure` is idempotent per (source, refId), so a ticket whose
- * investigation is already live is a no-op. Raises one summary toast when done.
- */
-export function useBatchInvestigate(opts: {
-  repo: string;
-  /** The repo's local path (where the agent runs); no path ⇒ can't launch. */
-  cwd: string | undefined;
-  agentKind: AgentKind;
-  model: string | null;
-  effort: string | null;
-  permissionMode: string | null;
-  remoteControl: boolean;
-}) {
-  const { ensure } = useTerminals();
-  const qc = useQueryClient();
-  // Whichever way each ticket's provider takes santree's session hooks — resolved
-  // per ticket below, since a ticket with a persisted session carries its own.
-  const { flagFor } = useHookInjection();
-  const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
-  const { repo, cwd, agentKind, model, effort, permissionMode, remoteControl } = opts;
-
-  return useCallback(
-    async (ids: string[]) => {
-      if (!cwd || ids.length === 0) return;
-      const results = await Promise.allSettled(
-        ids.map(async (id) => {
-          // Render + write this ticket's triage prompt (screenshots extracted to
-          // files) and seed `Read <path> …`; fall back to a bare prompt only if the
-          // render fails (e.g. Linear unreachable) so one ticket can't sink the batch.
-          const pr = await commands.investigatePrompt(repo, id);
-          const prompt =
-            pr.status === "ok"
-              ? `Read ${pr.data} and follow the instructions inside.`
-              : `Investigate ${id}.`;
-          const termKey = triageTermKey(id);
-          const r = await commands.agentSession(repo, termKey, cwd, true, agentKind);
-          if (r.status === "error") throw new Error(r.error);
-          const resolvedAgent = sessionAgent(r.data, agentKind);
-          const provider = agentProvider(resolvedAgent);
-          const seed = agentSessionSeed(r.data, {
-            repo,
-            termKey,
-            prompt,
-            // Exactly what InvestigatePane passes, because it is the same launch
-            // — typed configuration, with the provider's own spec deciding how
-            // its CLI spells it and which of it that CLI must never receive.
-            configuredFor: agentKind,
-            model,
-            effort,
-            permissionMode,
-            remoteControl: remoteControl ? id : null,
-            hookFlag: flagFor(resolvedAgent),
-            chrome: startWithChrome,
-          });
-          ensure({
-            title: `${id} · ${provider.label}`,
-            cwd,
-            source: "triage",
-            // One string for the surface: the tab's `refId` IS the PTY's label
-            // and the durable row's `term_key`. The provider is the other half of
-            // the pane's identity and lives in `agent`, so a Codex and a Claude
-            // investigation of one ticket are still two panes.
-            refId: termKey,
-            seed,
-            agent: { kind: resolvedAgent, repo, termKey },
-          });
-        }),
-      );
-      // Each launch recorded a session — refresh the "started" set so the
-      // resumable indicator/tab surface for these tickets once they exit.
-      qc.invalidateQueries({ queryKey: queryKeys.startedInvestigations(repo) });
-      const failed = results.filter((r) => r.status === "rejected").length;
-      const started = ids.length - failed;
-      if (started > 0)
-        toast.success(`Started ${started} investigation${started === 1 ? "" : "s"}.`);
-      if (failed > 0)
-        toast.error(`Couldn't start ${failed} investigation${failed === 1 ? "" : "s"}.`);
-    },
-    [
-      repo,
-      cwd,
-      agentKind,
-      model,
-      effort,
-      permissionMode,
-      remoteControl,
-      flagFor,
-      startWithChrome,
-      ensure,
-      qc,
-    ],
-  );
-}
 
 /**
  * Vim-style queue navigation, mounted on `window`: j / k step through the queue,
- * ⌘I investigates the current issue, ⌘O opens it in Linear. Skipped while focus
- * is in a field (incl. the embedded terminal, whose xterm input is a textarea),
- * so these keys never steal from the agent.
+ * ⌘I investigates the current issue, ⌘O opens it in Linear, ⌘L shows or hides
+ * the ticket panel (the same key Trees and Reviews give their rails). Skipped
+ * while focus is in a field (incl. the embedded terminal, whose xterm input is
+ * a textarea), so these keys never steal from the agent.
  */
 export function useTriageKeyboard(opts: {
+  /** Every ticket the sidebar lists, in its order — active, then snoozed. */
   ordered: TriageTicket[];
   activeId: string | null;
   detail: TriageDetail | undefined;
   onSelect: (id: string) => void;
   onInvestigate: () => void;
+  /** Toggle the right rail. Only with a ticket open: without a workspace there
+   *  is no rail, and flipping a persisted flag nobody can see is a surprise
+   *  saved for later. */
+  onTogglePanel: () => void;
 }) {
-  const { ordered, activeId, detail, onSelect, onInvestigate } = opts;
+  const { ordered, activeId, detail, onSelect, onInvestigate, onTogglePanel } = opts;
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -270,6 +39,12 @@ export function useTriageKeyboard(opts: {
         if (!activeId) return;
         e.preventDefault();
         onInvestigate();
+        return;
+      }
+      if (mod && !e.altKey && !e.shiftKey && e.code === "KeyL") {
+        if (!activeId) return;
+        e.preventDefault();
+        onTogglePanel();
         return;
       }
       if (mod && !e.altKey && (e.key === "o" || e.key === "O")) {
@@ -297,7 +72,7 @@ export function useTriageKeyboard(opts: {
         const next = ordered[nextIdx];
         if (!next || next.id === activeId) return;
         onSelect(next.id);
-        // Keep the newly-selected row visible in the scrollable queue.
+        // Keep the newly-selected row visible in the sidebar's scrolling section.
         requestAnimationFrame(() => {
           document
             .querySelector(`[data-ticket-id="${CSS.escape(next.id)}"]`)
@@ -307,5 +82,5 @@ export function useTriageKeyboard(opts: {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [ordered, activeId, detail, onSelect, onInvestigate]);
+  }, [ordered, activeId, detail, onSelect, onInvestigate, onTogglePanel]);
 }

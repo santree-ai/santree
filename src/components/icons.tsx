@@ -1,28 +1,10 @@
+import { useId } from "react";
+
 /** Inline SVG icons used across the chrome. Stroke uses `currentColor`. */
 
 interface IconProps {
   size?: number;
   className?: string;
-}
-
-export function GripIcon({ size = 14, className }: IconProps) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      className={className}
-      aria-hidden
-    >
-      <circle cx="8" cy="6" r="1.5" />
-      <circle cx="16" cy="6" r="1.5" />
-      <circle cx="8" cy="12" r="1.5" />
-      <circle cx="16" cy="12" r="1.5" />
-      <circle cx="8" cy="18" r="1.5" />
-      <circle cx="16" cy="18" r="1.5" />
-    </svg>
-  );
 }
 
 export function GearIcon({ size = 14, className }: IconProps) {
@@ -213,6 +195,110 @@ export function BranchIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** Linear's cycle mark: a ring with the first third of the lap filled in. */
+export function CycleIcon({
+  size = 14,
+  className,
+  progress = null,
+}: IconProps & {
+  /** How far through the cycle now is, 0–1. `null` draws the ring unbroken. */
+  progress?: number | null;
+}) {
+  const p = progress === null ? null : Math.min(1, Math.max(0, progress));
+  const ring =
+    p === null || p <= 0 ? (
+      <circle {...CYCLE_RING} stroke="currentColor" opacity={CYCLE_TRACK_OPACITY} />
+    ) : p >= 1 ? (
+      <circle {...CYCLE_RING} stroke="var(--linear-brand)" />
+    ) : (
+      <>
+        {/* The track: what is left of the cycle, from the end of the progress
+            arc (plus the gap) back round to the top. */}
+        <circle
+          {...CYCLE_RING}
+          stroke="currentColor"
+          opacity={CYCLE_TRACK_OPACITY}
+          strokeDasharray={`${(1 - p) * CYCLE_ARC_SPAN} ${CYCLE_CIRCUMFERENCE}`}
+          transform={`rotate(${-90 + CYCLE_GAP_DEG / 2 + p * CYCLE_ARC_DEG + CYCLE_GAP_DEG} 8 8)`}
+        />
+        {/* The elapsed arc, growing clockwise from the top. */}
+        <circle
+          {...CYCLE_RING}
+          stroke="var(--linear-brand)"
+          strokeDasharray={`${p * CYCLE_ARC_SPAN} ${CYCLE_CIRCUMFERENCE}`}
+          transform={`rotate(${-90 + CYCLE_GAP_DEG / 2} 8 8)`}
+        />
+      </>
+    );
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" className={className} aria-hidden>
+      {ring}
+      <path
+        d="M6.95588 5.28329L10.6901 7.43926C11.0235 7.63171 11.0235 8.11283 10.6901 8.30528L6.95588 10.4612C6.62255 10.6537 6.20588 10.4131 6.20588 10.0282L6.20588 5.71631C6.20588 5.33141 6.62255 5.09084 6.95588 5.28329Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+/** Linear's cycle mark, as it draws it: a 1.5px ring of radius 6.25 on a 16px
+ *  box around a play triangle. The ring is two arcs with round caps — the
+ *  elapsed part of the cycle in the brand colour, clockwise from twelve, and
+ *  the remainder as a quieter track — with a gap between them at each end. The
+ *  gap is measured before the caps; the caps eat about half of it. */
+const CYCLE_RADIUS = 6.25;
+const CYCLE_CIRCUMFERENCE = 2 * Math.PI * CYCLE_RADIUS;
+const CYCLE_GAP_DEG = 28;
+const CYCLE_ARC_DEG = 360 - 2 * CYCLE_GAP_DEG;
+const CYCLE_ARC_SPAN = CYCLE_CIRCUMFERENCE * (CYCLE_ARC_DEG / 360);
+const CYCLE_TRACK_OPACITY = 0.45;
+const CYCLE_RING = {
+  cx: 8,
+  cy: 8,
+  r: CYCLE_RADIUS,
+  fill: "none",
+  strokeWidth: 1.5,
+  strokeLinecap: "round",
+} as const;
+
+/** Linear's estimate mark: a rounded triangle. */
+export function EstimateIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.2}
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M12 4.5 L20.5 19 H3.5 Z" />
+    </svg>
+  );
+}
+
+/** Linear's milestone mark: a diamond. */
+export function MilestoneIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.2}
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M12 3.5 L20.5 12 L12 20.5 L3.5 12 Z" />
+    </svg>
+  );
+}
+
 /** Two overlapping sheets — the standard "copy to clipboard" affordance. */
 export function CopyIcon({ size = 14, className }: IconProps) {
   return (
@@ -230,6 +316,27 @@ export function CopyIcon({ size = 14, className }: IconProps) {
     >
       <rect x="9" y="9" width="11" height="11" rx="2" />
       <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+    </svg>
+  );
+}
+
+/** A chain link — "copy link". */
+export function LinkIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.5 1.5" />
+      <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.5-1.5" />
     </svg>
   );
 }
@@ -275,6 +382,99 @@ export function PrIcon({ size = 13, className }: IconProps) {
       <path d="M4.5 5.6v4.8" />
       <path d="M11.5 10.4V7.4A2.4 2.4 0 0 0 9.1 5H7" />
       <path d="M8.6 3.4 7 5l1.6 1.6" />
+    </svg>
+  );
+}
+
+/** A merged pull request — the branch's line folded into the trunk. Pairs with
+ *  {@link PrIcon} (open) and {@link PrClosedIcon} in the PR state pill. */
+export function PrMergedIcon({ size = 13, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <circle cx="4.5" cy="12" r="1.6" />
+      <circle cx="4.5" cy="4" r="1.6" />
+      <circle cx="11.5" cy="7" r="1.6" />
+      <path d="M4.5 5.6v4.8" />
+      <path d="M6 4.6a4 4 0 0 0 3.9 2.4" />
+    </svg>
+  );
+}
+
+/** A closed (unmerged) pull request — the branch's line stopping short. */
+export function PrClosedIcon({ size = 13, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <circle cx="4.5" cy="12" r="1.6" />
+      <circle cx="4.5" cy="4" r="1.6" />
+      <path d="M4.5 5.6v4.8" />
+      <path d="M9.5 3.5 13 7M13 3.5 9.5 7" />
+    </svg>
+  );
+}
+
+/** A merge queue — pull requests waiting in line, the one at the front leaving to
+ *  merge. Drawn on {@link ListIcon}'s three-row grid so the queue reads as a
+ *  queue rather than as another branch glyph, at the PR family's weight. */
+export function MergeQueueIcon({ size = 13, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <line x1="3" y1="4" x2="8.5" y2="4" />
+      <path d="M10.3 2.2 12.6 4l-2.3 1.8" />
+      <line x1="3" y1="8" x2="13" y2="8" />
+      <line x1="3" y1="12" x2="13" y2="12" />
+    </svg>
+  );
+}
+
+/** A single commit — a node on the branch line. */
+export function CommitIcon({ size = 13, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      className={className}
+      aria-hidden
+    >
+      <circle cx="8" cy="8" r="2.6" />
+      <path d="M1.5 8h3.9M10.6 8h3.9" />
     </svg>
   );
 }
@@ -424,6 +624,86 @@ export function LinearLogo({ size = 18, className }: IconProps) {
   );
 }
 
+/**
+ * santree's own logomark — the two stacked triangles from the app icon, filled
+ * with `currentColor` so it tints like every other glyph.
+ *
+ * It marks work santree itself produced, where the useful answer to "who wrote
+ * this" is the app rather than whichever agent happened to run: an AI review's
+ * draft comment is santree's review of the pull request, and it stays santree's
+ * whether Claude or Codex was behind it. Which harness ran is still on the
+ * card's badge, where it is a detail rather than an identity.
+ */
+/**
+ * The app's own icon — the tile in `src-tauri/icons`, drawn as vectors so it is
+ * crisp at any size: a deep green rounded square, and the two-triangle tree in
+ * the emerald gradient the website's mark wears. The two leaves carry classes
+ * so a surface can let the tree grow in (see `.welcome-leaf` in styles.css);
+ * anywhere else they simply sit still.
+ */
+export function SantreeAppIcon({ size = 64, className }: IconProps) {
+  const id = useId();
+  const tile = `${id}-tile`;
+  const leaf = `${id}-leaf`;
+  return (
+    <svg width={size} height={size} viewBox="0 0 512 512" className={className} aria-hidden>
+      <defs>
+        <radialGradient id={tile} cx="50%" cy="-10%" r="120%">
+          <stop offset="0" stopColor="#1d4d42" />
+          <stop offset="0.55" stopColor="#0d2622" />
+          <stop offset="1" stopColor="#071513" />
+        </radialGradient>
+        <linearGradient
+          id={leaf}
+          x1="140"
+          y1="120"
+          x2="372"
+          y2="392"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset="0" stopColor="#c8f6e7" />
+          <stop offset="0.24" stopColor="#4fd4ad" />
+          <stop offset="0.47" stopColor="#e2fff5" />
+          <stop offset="0.6" stopColor="#1f9c7d" />
+          <stop offset="0.8" stopColor="#5fceac" />
+          <stop offset="1" stopColor="#0c6f59" />
+        </linearGradient>
+      </defs>
+      <rect width="512" height="512" rx="116" fill={`url(#${tile})`} />
+      <rect
+        x="1"
+        y="1"
+        width="510"
+        height="510"
+        rx="115"
+        fill="none"
+        stroke="rgba(255,255,255,.07)"
+        strokeWidth="2"
+      />
+      <g fill={`url(#${leaf})`}>
+        <path className="welcome-leaf" d="M256 248 L148 384 L364 384 Z" />
+        <path className="welcome-leaf" d="M256 128 L173 232 L339 232 Z" />
+      </g>
+    </svg>
+  );
+}
+
+export function SantreeMark({ size = 12, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="112 112 288 288"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+    >
+      <path d="M256 128 L173 232 L339 232 Z" />
+      <path d="M256 248 L148 384 L364 384 Z" />
+    </svg>
+  );
+}
+
 export function HelpIcon({ size = 15, className }: IconProps) {
   return (
     <svg
@@ -469,17 +749,6 @@ function Stroke({
     >
       {children}
     </svg>
-  );
-}
-
-/** Integrations — a plug/connection. */
-export function PlugIcon(props: IconProps) {
-  return (
-    <Stroke {...props}>
-      <path d="M12 22v-5" />
-      <path d="M9 8V2M15 8V2" />
-      <path d="M18 8v3a6 6 0 0 1-12 0V8z" />
-    </Stroke>
   );
 }
 
@@ -860,27 +1129,6 @@ export function PushIcon({ size = 13, className }: IconProps) {
   );
 }
 
-/** A sidebar-collapse glyph — a framed panel with a left rail. */
-export function CollapseIcon({ size = 16, className }: IconProps) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden
-    >
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <line x1="9" y1="4" x2="9" y2="20" />
-    </svg>
-  );
-}
-
 /** A keyboard glyph — the keyboard-shortcuts menu item. */
 export function KbdIcon({ size = 15, className }: IconProps) {
   return (
@@ -943,26 +1191,6 @@ export function FeedbackIcon({ size = 15, className }: IconProps) {
   );
 }
 
-/** An activity/pulse glyph — the Diagnostics menu item. */
-export function DiagIcon({ size = 15, className }: IconProps) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden
-    >
-      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-    </svg>
-  );
-}
-
 /** Flat list — three full-width rows. Pairs with TreeIcon for the changes view toggle. */
 export function ListIcon({ size = 12, className }: IconProps) {
   return (
@@ -980,6 +1208,31 @@ export function ListIcon({ size = 12, className }: IconProps) {
       <line x1="3" y1="4" x2="13" y2="4" />
       <line x1="3" y1="8" x2="13" y2="8" />
       <line x1="3" y1="12" x2="13" y2="12" />
+    </svg>
+  );
+}
+
+/** The launch queue: a list whose rows are ticked. */
+export function QueueIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M2.5 4.2l1.3 1.3 2.2-2.4" />
+      <line x1="8.5" y1="4.2" x2="13.5" y2="4.2" />
+      <path d="M2.5 8.7l1.3 1.3 2.2-2.4" />
+      <line x1="8.5" y1="8.7" x2="13.5" y2="8.7" />
+      <line x1="8.5" y1="13" x2="13.5" y2="13" />
+      <line x1="3" y1="13" x2="6" y2="13" />
     </svg>
   );
 }
@@ -1117,5 +1370,29 @@ export function MarkdownIcon({ size = 12, className }: IconProps) {
       <path d="M6 15.5v-7l3 3.5 3-3.5v7" />
       <path d="M17 8.5v7m0 0 2-2.2m-2 2.2-2-2.2" />
     </svg>
+  );
+}
+
+/** "Open in a tab" — the rail's pane expanding into the main area: two corner
+ *  arrows pulling apart. Distinct from {@link ExternalLinkIcon}, which leaves
+ *  the app. */
+export function ExpandIcon({ size = 12, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={1.8}>
+      <path d="M15 4h5v5" />
+      <path d="M9 20H4v-5" />
+      <path d="m20 4-6 6" />
+      <path d="m4 20 6-6" />
+    </Stroke>
+  );
+}
+
+/** Snoozed — a crescent with a "z" beside it. */
+export function SnoozeIcon({ size = 12, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className} width={1.8}>
+      <path d="M16.5 14.8A7 7 0 1 1 9.2 6.5a5.5 5.5 0 0 0 7.3 8.3z" />
+      <path d="M15 3h5l-5 5.5h5" />
+    </Stroke>
   );
 }

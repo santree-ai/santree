@@ -1,242 +1,139 @@
 /**
- * Right pane of the Reviews tab. A shared header ({@link ReviewHeader}: repo ·
- * #number · branch · open) sits above three tabs — **Pull request** (the per-file
- * diff with inline review comments), **Checks** (the head commit's CI, with
- * "Fix CI with AI") and **AI review** (the session that writes draft comments into
- * the diff) — beside the {@link PrInfoPanel} rail, which carries the reading
- * material: the description, conversation, and linked ticket.
+ * Right pane of the Reviews tab: **the pull request as one tab among the others**.
  *
- * The split is by *what you do with it*: the two main tabs are the change itself,
- * the rail is everything you consult while reading it. Keeping the ticket beside
- * the diff instead of replacing it is the whole point — reading a PR
- * against its ticket used to mean flipping away from the code.
+ * The main area is the same window manager every other view has — a strip of real
+ * tabs ({@link ReviewTabBar}) over whatever one of them is showing. The first is
+ * the pull request itself — {@link PrPage}, the same page Trees opens a worktree's
+ * own PR into — hosted here with what this view decides for it: which section is
+ * showing, the rail's jump into the diff, and whether the header offers to check
+ * the PR out (not for your own).
+ *
+ * Beside that tab are the PR checkout's own tabs, the ticket the PR is for (the
+ * "Linear" tab the rail's pane expands into) and the AI review sessions — see
+ * {@link useReviewTabs} for why one of those needs a worktree and the others
+ * don't.
+ *
+ * The split against the {@link ReviewSidePanel} rail is by *what you do with it*:
+ * the main tabs are where you work — the things that need width and that you act
+ * on — and the rail is what you consult while reading, the ticket and the AI's
+ * work queue. Keeping the ticket beside the diff instead of replacing it is the
+ * whole point: reading a PR against its ticket used to mean flipping away from the
+ * code.
  *
  */
 import { useCallback, useEffect, useState } from "react";
 
 import type { AgentKind, ReviewPr } from "../../bindings";
-import { AgentIcon, PlusIcon, PrIcon, SparklesIcon } from "../../components/icons";
-import { MarkdownTitle } from "../../components/Markdown";
-import { Badge, Dropdown, MENU_ITEM, Tabs } from "../../components/primitives";
-import { PriorityBars } from "../../components/WorkSignals";
-import {
-  REVIEW_AGENT_KEY,
-  useAgentAuth,
-  useCodexAccount,
-  useCodexHealth,
-  useResolvedSetting,
-  useReviewDrafts,
-  useSessionProviders,
-} from "../../lib/queries";
-import { checkRollupMeta, palette } from "../../theme/colors";
-import { agentProvider } from "../terminal/agentProvider";
-import { AiReviewSessionPane, aiReviewTermKey } from "./AiReviewSessionPane";
-import { ChecksPane } from "./ChecksPane";
-import { splitByStance, waitingDays, waitingLabel } from "./grouping";
+import { IssuePage } from "../../components/IssuePage";
+import { PrIcon } from "../../components/icons";
+import { EmptyState } from "../../components/primitives";
+import { REVIEW_AGENT_KEY, useResolvedSetting } from "../../lib/queries";
+import { useAgentRuns } from "../../state/AgentRuns";
+import { AgentTabPane } from "../trees/AgentTabPane";
+import { WorktreeTerminal } from "../trees/WorktreeTerminal";
+import { AiReviewSessionPane } from "./AiReviewSessionPane";
 import { MergeQueuePane } from "./MergeQueuePane";
 import { useReviewsModel } from "./model";
-import { type PanelTab, PrInfoPanel } from "./PrInfoPanel";
-import { PrReviewPane } from "./PrReviewPane";
-import { ReviewHeader } from "./ReviewHeader";
-
-type DetailTab = "pr" | "checks" | AgentKind;
-const REVIEW_AGENTS: AgentKind[] = ["Codex", "Claude"];
+import { PrPage, type PrTab } from "./PrPage";
+import { defaultRailTab, type RailTab, ReviewSidePanel } from "./ReviewSidePanel";
+import { ReviewTabBar } from "./ReviewTabBar";
+import { ticketIdFor } from "./ticket";
+import { useResumeReviewSession } from "./useResumeReviewSession";
+import { aiTab, aiTabAgent, checkoutTab, type ReviewTabs, useReviewTabs } from "./useReviewTabs";
 
 export function ReviewDetail() {
   const { active, showMergeQueue } = useReviewsModel();
 
   if (showMergeQueue) return <MergeQueuePane />;
 
-  if (!active) {
-    return <ReviewsHome />;
-  }
+  // The sidebar *is* the inbox. This used to be a landing page — a "Review
+  // inbox" hero with a needs-review count, a merge-queue button and a "pick up
+  // next" grid — built when the view had a rail of its own to land in. Every one
+  // of those is now a row in the sidebar's Reviews section, one click from
+  // anywhere, and the page was reachable only by arriving at /reviews with no PR
+  // in the url: a second inbox nothing navigated to.
+  if (!active) return <NothingPicked />;
   // Keyed remount so per-PR query state, the active tabs, and scroll reset on switch.
   return <Detail key={active.id} pr={active} />;
 }
 
-/** Inbox landing surface. Selection stays deliberate while the largest pane
- * answers the useful first question: what should I review next? */
-function ReviewsHome() {
-  const { inbox, loading, allPrs, ticketFor, setActive, openMergeQueue } = useReviewsModel();
-  const requested = [
-    ...new Map(
-      [...(inbox?.requested ?? []), ...(inbox?.teams.flatMap((t) => t.prs) ?? [])].map((pr) => [
-        pr.id,
-        pr,
-      ]),
-    ).values(),
-  ];
-  const waiting = splitByStance(requested).waiting;
-  const next = [...waiting].sort((a, b) => waitingDays(b) - waitingDays(a)).slice(0, 4);
-
+/** What the view shows before a pull request is picked. Deliberately small: the
+ *  sidebar next to it is the list, so the only thing missing here is a choice. */
+function NothingPicked() {
   return (
-    <div className="flex min-w-0 flex-1 flex-col bg-app">
-      <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-10">
-        <div className="w-full max-w-[720px]">
-          <div className="mb-7 flex items-start gap-4">
-            <span className="flex h-11 w-11 flex-none items-center justify-center rounded-[var(--radius-lg)] border border-line-2 bg-raised text-accent">
-              <PrIcon size={19} />
-            </span>
-            <div className="min-w-0 flex-1">
-              <h1 className="text-[18px] font-semibold tracking-[-.01em] text-fg-bright">
-                Review inbox
-              </h1>
-              <p className="mt-1 max-w-[560px] text-[12.5px] leading-5 text-muted-3">
-                Pick up the oldest request, check your open work, or inspect the merge queue.
-              </p>
-            </div>
-          </div>
-
-          <div className="mb-5 grid grid-cols-2 divide-x divide-line overflow-hidden rounded-[var(--radius-md)] border border-line bg-raised">
-            <SummaryStat label="Needs review" value={waiting.length} />
-            <button
-              type="button"
-              onClick={openMergeQueue}
-              className="cursor-pointer px-4 py-3 text-left hover:bg-hover"
-            >
-              <span className="block font-mono text-[15px] text-fg-bright">queue</span>
-              <span className="mt-0.5 block text-[10.5px] text-muted-4">merge status</span>
-            </button>
-          </div>
-
-          {loading ? (
-            <div className="py-8 text-center font-mono text-[11px] text-muted-4">
-              ······ loading
-            </div>
-          ) : next.length > 0 ? (
-            <div>
-              <div className="mb-2 font-mono text-[9px] tracking-[.08em] text-muted-4 uppercase">
-                Pick up next
-              </div>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {next.map((pr) => {
-                  const ticket = ticketFor(pr);
-                  return (
-                    <button
-                      key={pr.id}
-                      type="button"
-                      onClick={() => setActive(pr.id)}
-                      className="entity-card cursor-pointer p-3 text-left"
-                    >
-                      <span className="flex items-center gap-2 font-mono text-[9.5px] text-muted-4">
-                        <span>#{pr.number}</span>
-                        {ticket?.priority !== undefined && ticket.priority !== "None" && (
-                          <PriorityBars priority={ticket.priority} />
-                        )}
-                        <span className="ml-auto">{waitingLabel(waitingDays(pr))}</span>
-                      </span>
-                      <MarkdownTitle className="mt-1.5 block line-clamp-2 text-[11.5px] leading-4 text-fg-2">
-                        {pr.title}
-                      </MarkdownTitle>
-                      {pr.aiDraftCount > 0 && (
-                        <span
-                          className="mt-2 flex items-center gap-1 font-mono text-[9px]"
-                          style={{ color: palette.purple }}
-                        >
-                          <SparklesIcon size={9} /> {pr.aiDraftCount} AI draft
-                          {pr.aiDraftCount === 1 ? "" : "s"}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-[var(--radius-md)] border border-line bg-raised px-4 py-5 text-[12px] text-muted-3">
-              No review requests are waiting. You can still open one of your {allPrs.length} visible
-              pull requests from the sidebar.
-            </div>
-          )}
-
-          <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line pt-4 font-mono text-[10px] text-muted-4">
-            <span>
-              <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">⌘K</kbd>
-              find anything
-            </span>
-            <span>
-              <kbd className="mr-1.5 rounded border border-line-2 bg-input px-1.5 py-0.5">⌘B</kbd>
-              sidebar
-            </span>
-            <span className="ml-auto">select a pull request to open its diff</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SummaryStat({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="px-4 py-3">
-      <span className="block font-mono text-[15px] text-fg-bright">{value}</span>
-      <span className="mt-0.5 block text-[10.5px] text-muted-4">{label}</span>
+    <div className="flex min-w-0 flex-1 items-center justify-center bg-app">
+      <EmptyState
+        icon={<PrIcon size={16} className="text-muted-4" />}
+        title="No pull request open"
+        subtitle="Pick one from the Reviews section in the sidebar."
+      />
     </div>
   );
 }
 
 function Detail({ pr }: { pr: ReviewPr }) {
-  const { infoCollapsed, toggleInfo } = useReviewsModel();
-  const [panelTab, setPanelTab] = useState<PanelTab>("description");
-  const [detailTab, setDetailTab] = useState<DetailTab>("pr");
+  const { repo, infoCollapsed, toggleInfo } = useReviewsModel();
+  // Keyed by PR id one level up, so this resolves once per pull request rather
+  // than carrying the last one's landing pane onto a PR that has no ticket.
+  const [panelTab, setPanelTab] = useState<RailTab>(() => defaultRailTab(!!ticketIdFor(pr)));
+  const tabs = useReviewTabs(pr, repo);
+  // The strip is what a resumed conversation opens into, so the host that owns
+  // it is the one that can offer the action (see `useResumeReviewSession`).
+  const resumer = useResumeReviewSession(tabs);
   /** Show a rail tab, un-collapsing the rail if it's hidden — the one entry point,
    *  so a caller can't leave the user staring at a tab they can't see. */
-  const openPanel = (tab: PanelTab) => {
+  const openPanel = (tab: RailTab) => {
     setPanelTab(tab);
     if (infoCollapsed) toggleInfo();
   };
 
   return (
     <div className="relative flex min-w-0 flex-1 overflow-hidden">
-      <PrPane pr={pr} tab={detailTab} setTab={setDetailTab} />
-      <PrInfoPanel
+      <PrWorkspace pr={pr} tabs={tabs} />
+      <ReviewSidePanel
         pr={pr}
         tab={panelTab}
         onTabChange={openPanel}
-        activeReviewAgent={detailTab === "Codex" || detailTab === "Claude" ? detailTab : null}
+        activeReviewAgent={aiTabAgent(tabs.active)}
+        resumer={resumer}
+        onOpenIssueView={tabs.openIssueView}
       />
     </div>
   );
 }
 
-function PrPane({
-  pr,
-  tab,
-  setTab,
-}: {
-  pr: ReviewPr;
-  tab: DetailTab;
-  setTab: (tab: DetailTab) => void;
-}) {
-  const { repo, fileFocus, aiReviewRequest } = useReviewsModel();
-  const [mountedProviders, setMountedProviders] = useState<AgentKind[]>([]);
-  const checks = checkRollupMeta[pr.checks];
-  const { data: drafts } = useReviewDrafts(pr.repo, pr.number);
+/** The main column: the tab strip, and whichever tab is showing.
+ *
+ *  Only the checkout's terminals mount and unmount with their tab — the live PTY
+ *  lives in the global TerminalLayer, so unmounting the host just detaches the
+ *  overlay. The pull request, the ticket and the AI reviews stay mounted and
+ *  hidden: the first two so a long diff's (or thread's) scroll position and
+ *  expansions survive a tab switch, the last because unmounting it would throw
+ *  away a running session and its checkout. */
+function PrWorkspace({ pr, tabs }: { pr: ReviewPr; tabs: ReviewTabs }) {
+  const { repo, fileFocus, focusFile, aiReviewRequest, inbox } = useReviewsModel();
+  const [prTab, setPrTab] = useState<PrTab>("conversation");
+  // Your own PR is worked on in Trees, beside its worktree; the header's offer
+  // to check it out from here is for other people's. Said by withholding the
+  // checkout — see `ReviewHeader`.
+  const isMine = inbox?.mine.some((candidate) => candidate.id === pr.id) ?? false;
+  const ticketId = ticketIdFor(pr);
   const { data: configuredAgent } = useResolvedSetting(repo, REVIEW_AGENT_KEY);
-  const claudeReady = !!useAgentAuth("Claude").data?.connected;
-  const codexHealth = useCodexHealth();
-  const codexAccount = useCodexAccount(codexHealth.data?.available === true);
-  const codexReady = !!codexHealth.data?.available && !!codexAccount.data?.connected;
   const defaultAgent = (configuredAgent as AgentKind | null) ?? "Claude";
-  const termKey = aiReviewTermKey(pr);
-  const { data: storedProviders = [] } = useSessionProviders(repo, termKey);
-  const providers = REVIEW_AGENTS.filter(
-    (agent) => storedProviders.includes(agent) || mountedProviders.includes(agent),
-  );
-  const openReview = useCallback(
-    (agent: AgentKind) => {
-      setMountedProviders((current) => (current.includes(agent) ? current : [...current, agent]));
-      setTab(agent);
-    },
-    [setTab],
-  );
+  const { select, openReview } = tabs;
+  const worktree = tabs.checkout.worktree;
 
-  // The brief's rail is visible from every tab, so a jump from it has to bring the
-  // diff back with it — otherwise clicking a reading-order entry from Checks looks
-  // like nothing happened.
+  const showFiles = useCallback(() => {
+    setPrTab("files");
+    select("pr");
+  }, [select]);
+
+  // The rail is visible from every tab, so a jump from it has to bring the diff
+  // back with it — otherwise clicking a reading-order entry from the AI's brief
+  // looks like nothing happened.
   useEffect(() => {
-    if (fileFocus) setTab("pr");
-  }, [fileFocus, setTab]);
+    if (fileFocus) showFiles();
+  }, [fileFocus, showFiles]);
 
   // "Start AI review" comes from the rail, which is beside this column rather than
   // in it. A nonce, so asking again on an already-open tab still brings it forward.
@@ -245,94 +142,78 @@ function PrPane({
     openReview(defaultAgent);
   }, [aiReviewRequest, defaultAgent, openReview]);
 
+  // A checkout tab hosts that worktree's session right here, so the off-screen
+  // launcher has to skip it — two hosts for one session fight over the single
+  // xterm overlay. Only while such a tab is showing: with the pull request on
+  // screen there is no host here, and a queued launch should still run.
+  const { setVisibleWorktree } = useAgentRuns();
+  const hosted = tabs.active.startsWith("tab:") ? tabs.checkout.worktreeId : "";
+  useEffect(() => {
+    setVisibleWorktree(hosted || null);
+    return () => setVisibleWorktree(null);
+  }, [hosted, setVisibleWorktree]);
+
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">
-      <ReviewHeader pr={pr} />
-
-      <div className="flex flex-none items-stretch pr-5">
-        <Tabs
-          className="min-w-0 flex-1 px-5 pr-0"
-          value={tab}
-          onChange={(next) => {
-            if (next === "Codex" || next === "Claude") openReview(next);
-            else setTab(next);
-          }}
-          tabs={[
-            { value: "pr", label: "Pull request" },
-            {
-              value: "checks",
-              label: "Checks",
-              badge: (
-                <span className="font-mono text-[11px]" style={{ color: checks.color }}>
-                  {checks.glyph}
-                </span>
-              ),
-            },
-            ...providers.map((agent) => {
-              const count = drafts?.filter((draft) => draft.agentKind === agent).length ?? 0;
-              return {
-                value: agent as DetailTab,
-                label: agentProvider(agent).label,
-                icon: <AgentIcon kind={agent} size={11} />,
-                badge: count ? <Badge color={palette.purple}>{count}</Badge> : undefined,
-              };
-            }),
-          ]}
-        />
-        {providers.length < REVIEW_AGENTS.length && (
-          <Dropdown
-            align="right"
-            menuClassName="w-44 overflow-hidden"
-            trigger={(toggle) => (
-              <button
-                type="button"
-                onClick={toggle}
-                title="Review with another agent"
-                aria-label="Review with another agent"
-                className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-muted-3 hover:bg-hover hover:text-fg-2"
-              >
-                <PlusIcon size={12} />
-              </button>
-            )}
-          >
-            {(close) =>
-              REVIEW_AGENTS.filter((agent) => !providers.includes(agent)).map((agent) => (
-                <button
-                  key={agent}
-                  type="button"
-                  disabled={agent === "Codex" ? !codexReady : !claudeReady}
-                  title={
-                    (agent === "Codex" ? codexReady : claudeReady)
-                      ? undefined
-                      : `Connect ${agentProvider(agent).label} in Settings first`
-                  }
-                  className={MENU_ITEM}
-                  onClick={() => {
-                    openReview(agent);
-                    close();
-                  }}
-                >
-                  <AgentIcon kind={agent} size={13} />
-                  {agentProvider(agent).label}
-                </button>
-              ))
-            }
-          </Dropdown>
-        )}
-      </div>
-
-      {tab === "pr" && <PrReviewPane pr={pr} santreeRepo={repo} fileFocus={fileFocus} />}
-      {tab === "checks" && <ChecksPane pr={pr} />}
-      {mountedProviders.map((agent) => (
-        <div key={agent} className={tab === agent ? "flex min-h-0 flex-1" : "hidden"}>
-          <AiReviewSessionPane
+      <ReviewTabBar pr={pr} tabs={tabs} />
+      <div className="relative min-h-0 flex-1">
+        {/* One display class, not `flex … hidden`: which of the two wins is a
+            question about stylesheet order, and the answer must not be. */}
+        <div className={tabs.active === "pr" ? "absolute inset-0 flex flex-col" : "hidden"}>
+          <PrPage
             pr={pr}
-            agentKind={agent}
-            visible={tab === agent}
-            onShowDrafts={() => setTab("pr")}
+            tab={prTab}
+            onTab={setPrTab}
+            fileFocus={fileFocus}
+            focusFile={focusFile}
+            checkout={isMine ? undefined : tabs.checkout}
           />
         </div>
-      ))}
+        {/* The rail's ticket pane at reading width. It opens from that pane and
+            only with a ticket to open — the strip's half of the same gate is in
+            `useReviewTabs`. */}
+        {ticketId && tabs.issueViewOpen && (
+          <div
+            className={tabs.active === "issueView" ? "absolute inset-0 flex flex-col" : "hidden"}
+          >
+            <IssuePage repo={repo} ticketId={ticketId} />
+          </div>
+        )}
+        {worktree &&
+          tabs.rows.map((t) =>
+            tabs.active === checkoutTab(t.id) ? (
+              t.kind !== "terminal" ? (
+                <AgentTabPane
+                  key={t.id}
+                  repo={tabs.checkout.repo}
+                  worktree={worktree}
+                  tab={t}
+                  tabs={tabs.rows}
+                />
+              ) : (
+                <WorktreeTerminal
+                  key={t.id}
+                  id={`${worktree.id}:tab:${t.id}`}
+                  branch={t.title}
+                  cwd={worktree.path}
+                />
+              )
+            ) : null,
+          )}
+        {tabs.mounted.map((agent) => (
+          <div
+            key={agent}
+            className={tabs.active === aiTab(agent) ? "absolute inset-0 flex flex-col" : "hidden"}
+          >
+            <AiReviewSessionPane
+              pr={pr}
+              agentKind={agent}
+              visible={tabs.active === aiTab(agent)}
+              onShowDrafts={showFiles}
+            />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

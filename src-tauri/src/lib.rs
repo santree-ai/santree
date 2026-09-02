@@ -149,7 +149,11 @@ fn specta_builder() -> AppBuilder {
             commands::reviews,
             commands::pr_tickets,
             commands::review_workspace,
+            commands::review_checkout,
             commands::remove_review_workspace,
+            commands::promote_review_worktree,
+            commands::close_review_session,
+            commands::close_investigation_session,
             commands::pr_review_brief,
             commands::ai_review_launch,
             commands::review_fix_launch,
@@ -186,7 +190,7 @@ fn specta_builder() -> AppBuilder {
             commands::list_triage_tickets,
             commands::triage_detail,
             commands::triage_set_state,
-            commands::triage_set_sort_order,
+            commands::triage_snooze,
             commands::triage_add_comment,
             commands::binary_status,
             commands::set_binary_path,
@@ -621,7 +625,10 @@ pub fn run() {
             //  · `terminal_sessions` — no code path drops a Triage investigation's row,
             //    so it would grow by one per ticket ever investigated;
             //  · `reviewed_files` — no code path drops a merged/closed PR's marks, so it
-            //    would grow with the whole org's PR history.
+            //    would grow with the whole org's PR history;
+            //  · `review_worktrees` — a checkout whose PR has merged is hidden from
+            //    Trees and unreachable in Reviews, so nothing could delete it.
+            //    Released, not deleted: the worktree comes back as an ordinary row.
             // (`session_state` / `session_usage_live` are pruned on their own poll, in
             // hooks.rs.) Best-effort and off the startup path — a failed sweep must never
             // block the app from opening.
@@ -646,6 +653,19 @@ pub fn run() {
                         Ok(0) => {}
                         Ok(n) => log::info!("dropped {n} AI review draft(s) from stale PRs"),
                         Err(e) => log::warn!("review-draft sweep failed: {e:#}"),
+                    }
+                    // The detached checkouts earlier versions parked under
+                    // `.santree/reviews/`. Their rows went with migration 0031;
+                    // this unregisters the git worktrees and reclaims the disk.
+                    reviews::sweep_legacy_checkouts(&db).await;
+                    // A reviewed PR that has since merged leaves a checkout no
+                    // surface can reach: Trees hides it, and Reviews resolves
+                    // PRs out of an inbox filtered to open ones. This hands it
+                    // back to Trees; it deletes nothing.
+                    match reviews::release_closed_checkouts(&db).await {
+                        Ok(0) => {}
+                        Ok(n) => log::info!("released {n} review checkout(s) whose PR is closed"),
+                        Err(e) => log::warn!("review-checkout release failed: {e:#}"),
                     }
                 });
             }

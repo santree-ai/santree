@@ -14,13 +14,21 @@
  * open it ourselves on mouseup, on the last line of the selection, which is where
  * the library anchors a range comment anyway.
  *
- * **In unified it only grows the range while the pointer is over the line
- * numbers.** The `+` straddles the boundary between the gutter and the code, so
- * dragging straight down from it lands on the content cells and the range stops
- * at the line that was pressed. Every row carries its line numbers in a sibling
- * cell, so while a drag is running we forward the hover there, and the manager
- * extends as if the pointer had stayed in the gutter. (Split needs none of that —
- * it resolves a code cell to its own side's number cell already.)
+ * **It only grows the range while the pointer is over the line numbers.** The
+ * `+` straddles the boundary between the gutter and the code, so dragging
+ * straight down from it lands on the content cells and the range stops at the
+ * line that was pressed. Every row carries its line numbers in a sibling cell,
+ * so while a drag is running we forward the hover there, and the manager extends
+ * as if the pointer had stayed in the gutter.
+ *
+ * Split needs the forwarding too, which is not what it looked like: the manager
+ * does resolve a *content cell* to its own side's number cell, so a synthetic
+ * event aimed at the cell extends fine — but a real pointer is over the `<span>`
+ * inside it, and that is one level too deep. Reviews takes the unified diff and
+ * Trees the split one, which is precisely why "multi-line works in Reviews and
+ * not in Trees" was reported. Split has one number cell per side, so the
+ * forwarding re-aims at the side the drag *started* on; anything less specific
+ * extends the wrong column.
  *
  * A press with no movement still selects a single line, so a plain click on the
  * `+` behaves as it always did.
@@ -93,6 +101,10 @@ export function useGutterDrag(root: RefObject<HTMLElement | null>) {
   const dragging = useRef(false);
   /** Set when the drag began on a `+`, holding the line it was pressed on. */
   const pressed = useRef<GutterSelection | null>(null);
+  /** Which column the drag is extending. Split has one per side and they
+   *  disagree the moment the file has shifted, so the side is read at the press
+   *  and kept — the pointer's own column is whatever it happens to be over. */
+  const side = useRef<"old" | "new">("new");
 
   /** Hand on the widget store once the library creates it. */
   const bindWidgetStore = useCallback((open: OpenWidget) => {
@@ -102,6 +114,9 @@ export function useGutterDrag(root: RefObject<HTMLElement | null>) {
   /** Record what a drag ended up covering (the library reports this on mouseup,
    *  before our own handler runs). */
   const onSelection = useCallback((next: GutterSelection | null) => {
+    // TEMPORARY (2026-09-02): tracking down "multi-line works in Reviews, not in
+    // Trees". Remove once the cause is known.
+    console.debug("[gutter] selection", JSON.stringify(next));
     selection.current = next;
   }, []);
 
@@ -116,12 +131,25 @@ export function useGutterDrag(root: RefObject<HTMLElement | null>) {
       // The manager arms on a line-number cell — and, in split, on the `+` in the
       // code cell as well, which it resolves back to one. Nothing else can be the
       // start of a range.
+      console.debug(
+        "[gutter] down",
+        JSON.stringify({
+          widget: !!widget,
+          tag: target.tagName,
+          cls: target.className?.toString().slice(0, 80),
+          inNum: !!target.closest(NUM_CELL),
+        }),
+      );
       if (!widget && !target.closest(NUM_CELL)) return;
       dragging.current = true;
       selection.current = null;
+      // Unified's one cell is spelled `.diff-line-num` and carries both sides;
+      // only split names a side here, so anything else reads as the new one.
+      side.current = target.closest(".diff-line-old-num, .diff-line-old-content") ? "old" : "new";
 
       if (!widget) return;
       pressed.current = lineAt(widget);
+      if (pressed.current) side.current = pressed.current.side;
       // Swallow it before React's root listener dispatches the button's own
       // handler. The range manager, further down the tree, has already seen it.
       e.stopPropagation();
@@ -132,11 +160,21 @@ export function useGutterDrag(root: RefObject<HTMLElement | null>) {
       const target = e.target as Element | null;
       // Already in the gutter: the manager saw this one on its way up.
       if (!target || target.closest(NUM_CELL)) return;
-      // Unified's selector on purpose, which makes this a no-op in split: split
-      // resolves a code cell to the number cell beside it itself, and its rows
-      // carry one per side — re-aiming at whichever came first would drag the
-      // wrong column.
-      const gutter = target.closest("tr")?.querySelector("td.diff-line-num");
+      // Unified first — one cell, both sides. Split has one per side, so it is
+      // the side the drag started on, never whichever column came first.
+      const row = target.closest("tr");
+      const gutter =
+        row?.querySelector("td.diff-line-num") ??
+        row?.querySelector(`.diff-line-${side.current}-num`);
+      console.debug(
+        "[gutter] over",
+        JSON.stringify({
+          tag: target.tagName,
+          cls: target.className?.toString().slice(0, 60),
+          row: !!row,
+          reaimed: !!gutter,
+        }),
+      );
       // Re-aimed at the row's line numbers. This bubbles back through our own
       // listener, where the check above stops it going round again.
       gutter?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
@@ -149,6 +187,7 @@ export function useGutterDrag(root: RefObject<HTMLElement | null>) {
       if (!from) return;
       // The selection the manager just completed, or — if it never armed — the
       // line that was pressed, so a `+` can never come out dead.
+      console.debug("[gutter] up", JSON.stringify({ pressed: from, selection: selection.current }));
       const at = selection.current ?? from;
       selection.current = null;
       openRef.current?.({

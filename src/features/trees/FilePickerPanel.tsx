@@ -10,38 +10,54 @@
  *  Each pane only *picks*: clicking a file swaps the main area to its
  *  diff/contents (see FileViewer). Resizable (drag the left edge) and collapsible
  *  (drag past the threshold, the tab bar's toggle, or ⌘L — it hides entirely when
- *  collapsed, and the main tab bar grows the control that brings it back). This
- *  is the thin shell: {@link WorktreeIssuePane}, {@link AllFilesList},
- *  {@link GitPanel}, {@link SessionHistory}, {@link WorktreePrPane} and
- *  {@link WorktreeAiWorkPane} own their content. */
-import { type CSSProperties, type ReactNode, useRef } from "react";
+ *  collapsed, and the main tab bar grows the control that brings it back).
+ *
+ *  This file is only Trees' *wiring*: the chrome, the geometry and the keyboard
+ *  model come from the shared {@link SidePanel}, and the content from
+ *  {@link IssuePane}, {@link AllFilesList}, {@link GitPanel},
+ *  {@link SessionHistory}, {@link WorktreePrPane} and {@link AiWorkPane}. All but
+ *  the PR pane are hosted by the Reviews rail too — they take their worktree, and
+ *  where a click lands, as props. What only Trees can answer is bound here: the
+ *  main area a file opens in, the create-PR dialog, the tab a resumed session
+ *  lands in, and the main-area tabs the ticket and PR panes expand into. */
+import { type ReactNode, useCallback, useRef } from "react";
 
+import type { ChangedFile } from "../../bindings";
+import { IssuePane } from "../../components/IssuePane";
 import {
   BranchIcon,
   ClockIcon,
   FilesIcon,
   GitHubLogo,
   LinearLogo,
-  PanelIcon,
   SparklesIcon,
 } from "../../components/icons";
-import { EdgeResizeHandle, onTabStripKeyDown } from "../../components/primitives";
+import { SidePanel, type SidePanelTab } from "../../components/SidePanel";
 import {
   usePrReviewBrief,
   usePrSummary,
   useReviewWorkItems,
+  useSetWorktreeTitle,
   useWorktreeStatus,
 } from "../../lib/queries";
-import { useEdgeResize } from "../../lib/useEdgeResize";
-import { checkRollupMeta, palette } from "../../theme/colors";
+import { checkRollupMeta } from "../../theme/colors";
+import { AiWorkPane, aiWorkDot } from "../reviews/AiWorkPane";
 import { reviewBriefStale } from "../reviews/briefStale";
+import { useStartAiReviewInWorktree, useStartWorkInWorktree } from "../reviews/useStartWork";
 import { AllFilesList } from "./AllFilesList";
 import { GitPanel } from "./GitPanel";
 import { availableFileTabs, BASE_ID, type FileTab, useTrees } from "./model";
 import { SessionHistory } from "./SessionHistory";
-import { WorktreeAiWorkPane } from "./WorktreeAiWorkPane";
-import { WorktreeIssuePane } from "./WorktreeIssuePane";
+import { useResumeSessionInWorktree } from "./useResumeSession";
 import { WorktreePrPane } from "./WorktreePrPane";
+
+/** The Changes tab's dot: the worktree has something uncommitted. Exported
+ *  because the Reviews rail hosts the same pane and must say it the same way —
+ *  a second rule for the same dot is how two strips start disagreeing about one
+ *  worktree. `undefined` is "not loaded yet", which is not a claim either way. */
+export function changesDot(status: ChangedFile[] | undefined): string | null {
+  return (status?.length ?? 0) > 0 ? "var(--accent)" : null;
+}
 
 /** Six 32px tabs (192px), the five 4px gaps between them (20px), the 28px collapse
  *  control and the strip's own 8px of padding each side come to 256px exactly;
@@ -53,16 +69,7 @@ const MIN_W = 256;
 const MAX_W = 680;
 const DEFAULT_W = 340;
 
-/** The AI work tab's dot. Two signals, one dot, and **status beats count**: a
- *  stale brief is a claim about whether what you are reading is still true, and
- *  "there are 3 open items" doesn't cancel it. Pure so it can be tested without
- *  rendering the strip — see model.test.ts. */
-export function aiWorkDot(staleReview: boolean, openWork: number): string | null {
-  if (staleReview) return palette.amber;
-  return openWork > 0 ? "var(--accent)" : null;
-}
-
-const TABS: { tab: FileTab; label: string; icon: ReactNode }[] = [
+const TABS: SidePanelTab<FileTab>[] = [
   { tab: "issue", label: "Issue", icon: <LinearLogo size={14} /> },
   { tab: "files", label: "Files", icon: <FilesIcon size={15} /> },
   { tab: "changes", label: "Changes", icon: <BranchIcon size={15} /> },
@@ -76,33 +83,7 @@ const TABS: { tab: FileTab; label: string; icon: ReactNode }[] = [
   { tab: "aiWork", label: "AI work queue", icon: <SparklesIcon size={15} /> },
 ];
 
-/**
- * The right panel's show/hide control.
- *
- * One component with one geometry, because it changes *host*: the panel's own
- * header owns it while the panel is open, and the main tab bar's trailing edge
- * takes it over once the panel is gone. Both hosts end their content 8px from
- * the same right edge, so the button stays put across the toggle instead of
- * stepping sideways — a control that moves when you press it reads as two
- * different controls.
- */
-export function PanelToggle() {
-  const { rightCollapsed, toggleRightPanel } = useTrees();
-  return (
-    <button
-      type="button"
-      onClick={toggleRightPanel}
-      aria-label={rightCollapsed ? "Show panel" : "Hide panel"}
-      title={rightCollapsed ? "Show panel (⌘L)" : "Hide panel (⌘L)"}
-      className="flex h-[22px] w-7 flex-none cursor-pointer items-center justify-center self-center rounded text-muted-4 transition-colors hover:bg-hover hover:text-fg-2"
-    >
-      <PanelIcon size={14} />
-    </button>
-  );
-}
-
 export function FilePickerPanel() {
-  const resizeTarget = useRef<HTMLDivElement>(null);
   const {
     repo,
     active,
@@ -110,11 +91,19 @@ export function FilePickerPanel() {
     activePr,
     fileTab,
     hasTicket,
+    prsByWorktree,
+    openPrDialog,
+    suggestPr,
+    selectFile,
+    selectedFile,
+    selectedFileScope,
     setFileTab,
     rightCollapsed,
     rightWidth,
     setRightWidth,
     toggleRightPanel,
+    openPrView,
+    openIssueView,
   } = useTrees();
   const { data: prSummary } = usePrSummary(activePr?.repo ?? null, activePr?.number ?? 0);
   const { data: workItems } = useReviewWorkItems(activePr?.repo ?? "", activePr?.number ?? 0);
@@ -128,6 +117,28 @@ export function FilePickerPanel() {
   // which the git panel renders as a skeleton. Defaulting here would collapse
   // that into "no changes" and assert something we don't know yet.
   const { data: status } = useWorktreeStatus(repo, activeId);
+  // Both launchers are built here rather than in the pane because the pane is
+  // shared with Reviews, whose "Start work" has to create the worktree first.
+  // This is the whole of Trees' half of that difference.
+  const summary = prSummary ?? undefined;
+  const startWork = useStartWorkInWorktree(summary, activeId, repo);
+  const startReview = useStartAiReviewInWorktree(summary, activeId, repo);
+  const resumeSession = useResumeSessionInWorktree();
+
+  // Self-heal the stored title: when the live Linear title differs from what's
+  // cached on the worktree (imported/renamed tickets), persist it so the sidebar
+  // card stays accurate. Once per worktree — the ref remembers which one it has
+  // already written, so switching trees arms it again and a refetch doesn't.
+  const { mutate: refreshTitle } = useSetWorktreeTitle(repo);
+  const healed = useRef<string | null>(null);
+  const onResolvedTitle = useCallback(
+    (live: string) => {
+      if (!active || healed.current === active.id || live === active.title) return;
+      healed.current = active.id;
+      refreshTitle({ id: active.id, title: live });
+    },
+    [active, refreshTitle],
+  );
 
   // Which panes this worktree has — the base checkout and a worktree cut from a
   // plain branch have no ticket, and the PR panes need a pull request.
@@ -138,18 +149,11 @@ export function FilePickerPanel() {
     hasPr: activePr !== null,
     hasTicket,
   });
-  const tabs = TABS.filter((t) => available.includes(t.tab));
 
-  // A width persisted before the strip grew a pane sits below the new minimum,
-  // and nothing re-clamps a stored number — the drag clamps, but only once the
-  // user drags. Clamp on the way out so the strip can't open overflowing, and
-  // leave what's stored alone in case the minimum ever comes back down.
-  const width = Math.min(MAX_W, Math.max(MIN_W, rightWidth));
-
-  /** A tab's dot: see the strip's comment below for what each one means. Null is
-   *  "nothing to say", which is most tabs most of the time. */
+  /** A tab's dot: see {@link SidePanel}'s strip comment for what each one means.
+   *  Null is "nothing to say", which is most tabs most of the time. */
   function dotFor(tab: FileTab): string | null {
-    if (tab === "changes") return (status?.length ?? 0) > 0 ? "var(--accent)" : null;
+    if (tab === "changes") return changesDot(status);
     if (tab === "pr")
       return prSummary && prSummary.checks !== "None"
         ? checkRollupMeta[prSummary.checks].color
@@ -158,113 +162,108 @@ export function FilePickerPanel() {
     return null;
   }
 
-  const resize = useEdgeResize({
-    cssVar: "--tree-right",
-    target: resizeTarget,
-    width,
-    min: MIN_W,
-    max: MAX_W,
-    edge: "left",
-    onCommit: setRightWidth,
-    collapse: { at: 190, resetTo: DEFAULT_W, onCollapse: toggleRightPanel },
-  });
-
-  // Fully hidden when collapsed — the control that brings it back moves to the
-  // main tab bar's trailing edge, where the panel's own toggle was, so there is
-  // no need for a leftover strip here.
-  if (rightCollapsed) return null;
+  const tabs = TABS.filter((t) => available.includes(t.tab)).map((t) => ({
+    ...t,
+    dot: dotFor(t.tab),
+  }));
 
   const panes: Record<FileTab, ReactNode> = {
-    issue: active && <WorktreeIssuePane key={active.id} repo={repo} worktree={active} />,
+    // Both expand into a main-area tab. The controls are drawn only where the
+    // panes are, and the panes only exist with a ticket / a PR to show — so the
+    // tabs can only ever be opened for something that is there.
+    issue: active && (
+      <IssuePane
+        key={active.id}
+        repo={repo}
+        ticketId={active.id}
+        fallbackTitle={active.title}
+        onResolvedTitle={onResolvedTitle}
+        onExpand={openIssueView}
+      />
+    ),
     // Keyed by PR so switching worktrees resets the sections' open state rather
     // than carrying one PR's expansions onto another's.
-    pr: activePr && <WorktreePrPane key={`${activePr.repo}#${activePr.number}`} pr={activePr} />,
-    aiWork: <WorktreeAiWorkPane key={`${activePr?.repo}#${activePr?.number}`} pr={activePr} />,
-    files: <AllFilesList />,
-    changes: <GitPanel status={status} />,
-    history: <SessionHistory />,
+    pr: activePr && (
+      <WorktreePrPane
+        key={`${activePr.repo}#${activePr.number}`}
+        pr={activePr}
+        onExpand={openPrView}
+      />
+    ),
+    aiWork: (
+      <AiWorkPane
+        key={`${activePr?.repo}#${activePr?.number}`}
+        pr={activePr}
+        santreeRepo={repo}
+        // Trees has no AI-review tab of its own to be "on": the session runs as an
+        // ordinary agent tab in the main area, like any other.
+        activeReviewAgent={null}
+        // A file opens in the **main** area and the panel stays put — see
+        // {@link AiWorkPane}.
+        onJump={(path) => selectFile(path, "branch")}
+        startWork={startWork}
+        onStartReview={startReview.start}
+        startingReview={startReview.starting}
+        // The launcher takes a per-launch agent override, so the picker beside
+        // the run button is live here (it is not in Reviews — see the prop).
+        canPickAgent
+      />
+    ),
+    files: (
+      <AllFilesList
+        repo={repo}
+        worktreeId={activeId}
+        selectedPath={selectedFile}
+        onOpen={selectFile}
+      />
+    ),
+    changes: (
+      <GitPanel
+        repo={repo}
+        worktreeId={activeId}
+        worktree={active}
+        status={status}
+        selectedPath={selectedFile}
+        selectedScope={selectedFileScope}
+        onOpen={selectFile}
+        createPr={{
+          hasPr: (prsByWorktree.get(activeId) ?? []).length > 0,
+          open: () => openPrDialog(activeId),
+          suggestAfterPush: () => suggestPr(activeId),
+        }}
+      />
+    ),
+    history: (
+      <SessionHistory
+        repo={repo}
+        worktreeId={activeId}
+        branch={active?.branch ?? null}
+        onResume={resumeSession.resume}
+        resumingId={resumeSession.resumingId}
+      />
+    ),
   };
 
   return (
-    <div
-      ref={resizeTarget}
-      className="relative flex flex-none flex-col border-l border-line bg-deep"
-      style={
-        {
-          "--tree-right": `${width}px`,
-          width: `var(--tree-right, ${DEFAULT_W}px)`,
-        } as CSSProperties
-      }
+    <SidePanel
+      tabs={tabs}
+      active={fileTab}
+      onSelect={setFileTab}
+      collapsed={rightCollapsed}
+      onToggle={toggleRightPanel}
+      width={rightWidth}
+      onWidth={setRightWidth}
+      cssVar="--tree-right"
+      min={MIN_W}
+      max={MAX_W}
+      resetTo={DEFAULT_W}
+      ariaLabel="Worktree panel"
     >
-      <EdgeResizeHandle edge="left" {...resize} />
-      {/* Icons only: the strip has to fit a narrow panel and the panes are
-          recognisable by glyph (the Linear mark, the GitHub mark, a generic AI
-          spark, a checklist, files, branch, clock); the name rides in the tooltip
-          and the accessible label. The selected pane is marked by an underline at the strip's edge,
-          not a filled tile, so the strip reads as tabs rather than as a row of
-          buttons; the panel's own collapse control sits at the far end, where it
-          can't be mistaken for another pane.
-
-          A tab's dot means "there is something here": pending changes and open
-          queue items take the accent, because they are counts. A *status* carries
-          its own colour instead — the PR's is the CI rollup, and the AI work
-          queue's is amber when its brief was written against a head the PR has
-          since moved past (advice about code that has changed reads as current,
-          which is worse than none). See {@link aiWorkDot} for why that beats the
-          count. */}
-      <div
-        data-tauri-drag-region
-        className="flex h-9 flex-none items-stretch justify-between border-b border-line px-2"
-      >
-        <div
-          role="tablist"
-          aria-label="Worktree panel"
-          onKeyDown={onTabStripKeyDown}
-          className="flex items-stretch gap-1"
-        >
-          {tabs.map(({ tab, label, icon }) => {
-            const on = fileTab === tab;
-            const dot = dotFor(tab);
-            return (
-              <button
-                key={tab}
-                type="button"
-                role="tab"
-                aria-selected={on}
-                aria-label={label}
-                title={label}
-                tabIndex={on ? 0 : -1}
-                onClick={() => setFileTab(tab)}
-                className={`relative flex w-8 cursor-pointer items-center justify-center transition-colors ${
-                  on ? "text-fg" : "text-muted-4 hover:text-fg-2"
-                }`}
-              >
-                {icon}
-                {dot && (
-                  <span
-                    aria-hidden
-                    className="absolute top-2 right-1 h-1.5 w-1.5 rounded-full"
-                    style={{ background: dot }}
-                  />
-                )}
-                {on && (
-                  <span
-                    aria-hidden
-                    className="absolute bottom-0 left-1/2 h-0.5 w-4 -translate-x-1/2 rounded-full bg-fg"
-                  />
-                )}
-              </button>
-            );
-          })}
-        </div>
-        <PanelToggle />
-      </div>
-
       {/* A total map rather than a ternary cascade: every pane is named by its own
           tab, so a new `FileTab` is a compile error here instead of silently
           landing in whichever arm happened to be last. Only `panes[fileTab]`
           mounts — the others are element descriptions nothing renders. */}
       {panes[fileTab]}
-    </div>
+    </SidePanel>
   );
 }

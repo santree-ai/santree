@@ -122,9 +122,11 @@ struct Placement {
     label: String,
 }
 
-/// Resolve a cwd against the registry: a linked worktree's exact path wins, then
-/// a repo root (the base entry), then any directory inside a root (a review
-/// checkout, a sub-folder the user `cd`'d a shell into) keyed by its relative
+/// Resolve a cwd against the registry: a linked worktree's exact path wins — which
+/// includes an AI review's checkout, registered like any other so its session
+/// lands under the pull request it is reading rather than in a path-shaped group —
+/// then a repo root (the base entry), then any other directory inside a root (a
+/// sub-folder the user `cd`'d a shell into) keyed by its relative
 /// path. A cwd outside every registered repo is its own group, named by the
 /// directory — real data, not a placeholder. Roots are tried longest-first so a
 /// repo nested inside another attributes to the inner one. Comparison is on

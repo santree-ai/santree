@@ -9,7 +9,12 @@
  *  reads are lazy and per-row, so a collapsed row costs nothing.
  *
  *  Several rows open at once, on purpose: comparing two sessions side by side is
- *  the reason to open one at all. */
+ *  the reason to open one at all.
+ *
+ *  Both rails host it — sessions run on a branch, and a reviewer with the PR
+ *  checked out has as much reason to read them as its author. Which worktree it
+ *  is about comes in as props; resuming one, which needs a tab strip to put the
+ *  new tab in, comes in as {@link SessionHistory.onResume}. */
 import { type ReactNode, useCallback, useId, useState } from "react";
 
 import type { SessionSubagent, WorktreeSession } from "../../bindings";
@@ -29,14 +34,11 @@ import { Badge, Button, Dot, EmptyState, ListSkeleton } from "../../components/p
 import { RelativeTime } from "../../components/RelativeTime";
 import { formatCompact, formatCostPrecise } from "../../lib/format";
 import {
-  useAddWorktreeTab,
-  useResumeWorktreeSession,
   useRevealSessionTranscript,
   useWorktreeSessionDetail,
   useWorktreeSessionSubagents,
   useWorktreeSessions,
 } from "../../lib/queries";
-import { useApp } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import {
   agentBrandColor,
@@ -49,7 +51,6 @@ import type { AgentEntry } from "../agents/registry";
 import { useAgentEntries } from "../agents/useAgents";
 import { useOpenAgent } from "../agents/useOpenAgent";
 import { resumeInvocation } from "../terminal/agentSeed";
-import { defaultTabTitle, extraTab, useTrees } from "./model";
 import {
   buildSubagentTree,
   compactPath,
@@ -70,15 +71,30 @@ function resumeBlocker(s: WorktreeSession): string | null {
   return s.messageCount > 0 ? null : "Nothing to resume: this session recorded no conversation.";
 }
 
-export function SessionHistory() {
-  const { repo, activeId, active, tabs, setActiveTab } = useTrees();
-  const { activeRepo } = useApp();
-  const { data: sessions, refetch, isFetching } = useWorktreeSessions(repo, activeId);
-  const entries = useAgentEntries([activeRepo], [activeRepo]);
+export function SessionHistory({
+  repo,
+  worktreeId,
+  branch,
+  onResume,
+  resumingId = null,
+}: {
+  repo: string;
+  worktreeId: string;
+  /** The branch these sessions ran on, for the expansion's "Where it ran". */
+  branch: string | null;
+  /** Run one of them again in a fresh agent tab. Optional: the tab lands in the
+   *  worktree's main-area strip, which only Trees has — the Reviews rail leaves
+   *  it out rather than offering a button with nowhere to open. Everything else
+   *  in the expansion (open a live session, copy the resume line, reveal the
+   *  transcript) works in both. */
+  onResume?: (session: WorktreeSession) => void;
+  /** The session a resume is in flight for, so its button reads busy. Owned by
+   *  whoever owns {@link SessionHistory.onResume}. */
+  resumingId?: string | null;
+}) {
+  const { data: sessions, refetch, isFetching } = useWorktreeSessions(repo, worktreeId);
+  const entries = useAgentEntries([repo], [repo]);
   const openAgent = useOpenAgent();
-  const addTab = useAddWorktreeTab(repo);
-  const resumeSession = useResumeWorktreeSession(repo, activeId);
-  const [resumingId, setResumingId] = useState<string | null>(null);
   // Every open row, not one: two sessions are compared side by side, which a
   // single `expandedId` makes impossible.
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
@@ -93,46 +109,6 @@ export function SessionHistory() {
   // can match a history row — the history *is* the list of durable sessions.
   const liveById = new Map(
     (entries ?? []).flatMap((e) => (e.sessionId ? [[e.sessionId, e] as const] : [])),
-  );
-
-  /** One click, one new tab, one seed: point a freshly-minted tab at this
-   *  session, then open it. The tab's own launch builds the `--resume` line —
-   *  nothing here writes to a terminal. */
-  const resume = useCallback(
-    async (s: WorktreeSession) => {
-      if (resumingId) return;
-      const tabId = crypto.randomUUID();
-      setResumingId(s.sessionId);
-      try {
-        // Both rows must be committed before the pane mounts: the backend
-        // resolves a launch from the tab row and the session row in SQLite, and
-        // a pane that beats them starts a *fresh* session instead of the one
-        // that was clicked. The tab still appears at once — its mutation patches
-        // the cache optimistically — only the focus waits.
-        await resumeSession.mutateAsync({
-          tabId,
-          sessionId: s.sessionId,
-          agentKind: s.agentKind,
-        });
-        await addTab.mutateAsync({
-          id: tabId,
-          worktreeId: activeId,
-          kind: "agent",
-          agentKind: s.agentKind,
-          title: defaultTabTitle("agent", s.agentKind, tabs),
-          // Only the review kinds carry a PR, and those arrive through their own
-          // hand-off, never from here.
-          pr: null,
-        });
-        setActiveTab(extraTab(tabId));
-      } catch {
-        // A failed mutation already red-toasts globally (main.tsx); the tab is
-        // simply not opened.
-      } finally {
-        setResumingId(null);
-      }
-    },
-    [activeId, addTab, tabs, resumeSession, resumingId, setActiveTab],
   );
 
   return (
@@ -171,12 +147,12 @@ export function SessionHistory() {
             <SessionRow
               key={s.sessionId}
               repo={repo}
-              worktreeId={activeId}
-              branch={active?.branch ?? null}
+              worktreeId={worktreeId}
+              branch={branch}
               session={s}
               live={liveById.get(s.sessionId)}
               openAgent={openAgent}
-              onResume={resume}
+              onResume={onResume}
               resumingId={resumingId}
               expanded={expanded.has(s.sessionId)}
               onToggle={toggle}
@@ -206,7 +182,7 @@ function SessionRow({
   session: WorktreeSession;
   live: AgentEntry | undefined;
   openAgent: (entry: AgentEntry) => void;
-  onResume: (session: WorktreeSession) => void;
+  onResume?: (session: WorktreeSession) => void;
   resumingId: string | null;
   expanded: boolean;
   onToggle: (sessionId: string) => void;
@@ -373,7 +349,7 @@ function SessionDetails({
   session: WorktreeSession;
   live: AgentEntry | undefined;
   openAgent: (entry: AgentEntry) => void;
-  onResume: (session: WorktreeSession) => void;
+  onResume?: (session: WorktreeSession) => void;
   resumingId: string | null;
 }) {
   const detail = useWorktreeSessionDetail(repo, worktreeId, s.sessionId, true);
@@ -425,21 +401,23 @@ function SessionDetails({
             Open session
           </Button>
         ) : (
-          <Button
-            variant="primary"
-            size="sm"
-            // Focusable rather than `disabled`, so the reason stays reachable:
-            // a disabled button takes neither the keyboard nor a hover tooltip.
-            aria-disabled={blocked !== null}
-            aria-busy={busy}
-            title={blocked ?? "Resume this session in a new agent tab"}
-            onClick={() => {
-              if (!blocked && !resumingId) onResume(s);
-            }}
-            className="aria-disabled:cursor-default aria-disabled:opacity-50"
-          >
-            {busy ? "Resuming…" : "Resume"}
-          </Button>
+          onResume && (
+            <Button
+              variant="primary"
+              size="sm"
+              // Focusable rather than `disabled`, so the reason stays reachable:
+              // a disabled button takes neither the keyboard nor a hover tooltip.
+              aria-disabled={blocked !== null}
+              aria-busy={busy}
+              title={blocked ?? "Resume this session in a new agent tab"}
+              onClick={() => {
+                if (!blocked && !resumingId) onResume(s);
+              }}
+              className="aria-disabled:cursor-default aria-disabled:opacity-50"
+            >
+              {busy ? "Resuming…" : "Resume"}
+            </Button>
+          )
         )}
         {command && (
           <Button
@@ -463,7 +441,9 @@ function SessionDetails({
           <ExternalLinkIcon size={11} /> Open transcript
         </Button>
       </div>
-      {blocked && !openable && <p className="text-[11px] text-muted-3">{blocked}</p>}
+      {/* Only where the button it explains is on offer — a reason you can't press
+          something that isn't there reads as a missing control. */}
+      {blocked && !openable && onResume && <p className="text-[11px] text-muted-3">{blocked}</p>}
 
       {s.messageCount === 0 ? (
         <div className="rounded border border-dashed border-line-2 px-2.5 py-2 text-[11px] leading-[1.5] text-muted-3">

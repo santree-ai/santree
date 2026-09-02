@@ -18,7 +18,7 @@ import type { PrComment, PrThread, ReviewPr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { MessageSquareIcon } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
-import { Pill, Segmented } from "../../components/primitives";
+import { Pill, Segmented, Skeleton } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
 import { usePrDetail, useReviewDrafts, useReviewWorkItems } from "../../lib/queries";
 import { isoMs } from "../../lib/relativeTime";
@@ -55,7 +55,7 @@ function groupThreadsByFile(threads: PrThread[]) {
 export function PrCommentsSection({ pr }: { pr: ReviewPr }) {
   const { selectFile } = useTrees();
   const [owner, name] = splitRepoSlug(pr.repo);
-  const { data: detail } = usePrDetail(owner, name, pr.number);
+  const { data: detail, isLoading } = usePrDetail(owner, name, pr.number);
   const { data: drafts = [] } = useReviewDrafts(pr.repo, pr.number);
   const [audience, setAudience] = useState<CommentAudience>("all");
 
@@ -128,7 +128,14 @@ export function PrCommentsSection({ pr }: { pr: ReviewPr }) {
         </div>
       )}
 
-      {shown.length === 0 && shownDrafts.length === 0 ? (
+      {isLoading ? (
+        // Not "no conversation yet" — that is an answer, and this read hasn't
+        // given one. Same rule the Reviews timeline follows.
+        <div className="space-y-2 py-1">
+          <Skeleton className="h-3 w-2/3" />
+          <Skeleton className="h-3 w-1/2" />
+        </div>
+      ) : shown.length === 0 && shownDrafts.length === 0 ? (
         <p className="py-1 text-[11px] text-muted-4">
           {comments.length === 0
             ? "No conversation on this pull request yet."

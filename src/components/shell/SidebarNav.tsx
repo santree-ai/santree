@@ -8,15 +8,27 @@
  * because that is what it does: it takes you to something.
  *
  * Counts are the standing "how much is waiting" signal now that no view carries a
- * header summary of its own. Triage's count is the untriaged queue, so it reads
- * as work to pick up; the others are plain totals.
+ * header summary of its own; they are plain totals.
+ *
+ * Tickets wears the Linear mark: it is the Linear queue, and the mark is what
+ * every ticket row further down the rail already leads with.
+ *
+ * **Reviews and Triage are deliberately absent.** One global Reviews entry could
+ * only ever show one number for every project at once, which is the wrong shape
+ * for an inbox that spans a registry: the answer you want is "does *this* project
+ * need me", and it lives on each project's own Reviews row in the tree below.
+ * Triage is a section of the rail in its own right (`TriageSection`, directly
+ * under this block): its queue *is* the list, so a row that only counted it was
+ * a click between you and the tickets. The routes still exist — the palette's
+ * Reviews entry is the everything view, and a triage ticket opens at
+ * `/triage?ticket=`.
  */
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
-import { useTriageQueue, useViewCounts } from "../../lib/queries";
+import { useTaskCount } from "../../lib/queries";
 import { useApp, useAppUi } from "../../state/AppContext";
-import { ListIcon, PrIcon, SearchIcon, TelescopeIcon } from "../icons";
+import { LinearLogo, SearchIcon } from "../icons";
 
 interface NavItem {
   label: string;
@@ -28,34 +40,18 @@ interface NavItem {
   /** Shown at the row's trailing edge for an action row, where a count would be. */
   hint?: string;
   count?: number;
-  /** Render the count as "act on this", not as a total. */
-  urgent?: boolean;
 }
 
 export function SidebarNav() {
   const navigate = useNavigate();
-  const { activeRepo, triageEnabled } = useApp();
+  const { activeRepo } = useApp();
   const { toggleCommandPalette } = useAppUi();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const counts = useViewCounts(activeRepo);
-  // Two Linear calls, so only asked for when the destination is actually reachable.
-  const { visible: triageVisible } = useTriageQueue(triageEnabled ? activeRepo : "");
+  const tasks = useTaskCount(activeRepo);
 
   const items: NavItem[] = [
     { label: "Search", icon: <SearchIcon size={13} />, action: toggleCommandPalette, hint: "⌘K" },
-    ...(triageEnabled
-      ? [
-          {
-            label: "Triage",
-            path: "/triage",
-            icon: <TelescopeIcon size={13} />,
-            count: triageVisible.length,
-            urgent: true,
-          },
-        ]
-      : []),
-    { label: "Tickets", path: "/issues", icon: <ListIcon size={12} />, count: counts.tasks },
-    { label: "Reviews", path: "/reviews", icon: <PrIcon size={12} />, count: counts.reviews },
+    { label: "Tickets", path: "/issues", icon: <LinearLogo size={12} />, count: tasks },
   ];
 
   return (
@@ -81,13 +77,7 @@ export function SidebarNav() {
               </kbd>
             )}
             {item.count !== undefined && item.count > 0 && (
-              <span
-                className={`ml-auto min-w-4 rounded-full px-1.5 text-center text-[10px] leading-4 ${
-                  item.urgent
-                    ? "bg-[var(--color-status-amber)] font-semibold text-black"
-                    : "bg-hover-2 text-muted-4"
-                }`}
-              >
+              <span className="ml-auto min-w-4 rounded-full bg-hover-2 px-1.5 text-center text-[10px] leading-4 text-muted-4">
                 {item.count}
               </span>
             )}

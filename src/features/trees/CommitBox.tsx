@@ -20,18 +20,27 @@ import {
   useResolvedHelperAgent,
   useSetCommitDraft,
 } from "../../lib/queries";
-import { BASE_ID, useTrees } from "./model";
+import type { CreatePrActions } from "./GitPanel";
+import { BASE_ID } from "./model";
 
 const SAVE_DEBOUNCE_MS = 500;
 
 export function CommitBox({
+  repo,
+  worktreeId,
   stagedCount,
   totalCount,
+  createPr,
 }: {
+  repo: string;
+  worktreeId: string;
   stagedCount: number;
   totalCount: number;
+  /** The after-commit follow-ups, when the host has a PR to open — see
+   *  {@link CreatePrActions}. Absent in the Reviews rail: committing to someone
+   *  else's PR branch is rare but possible, opening a second PR for it is not. */
+  createPr?: CreatePrActions;
 }) {
-  const { repo, activeId, openPrDialog, prsByWorktree, suggestPr } = useTrees();
   // Resolved through the repo's overrides — Settings → Trees offers these per repo
   // ("never auto-push in this one"), so reading the app default would ignore it.
   const stageAll = useResolvedBoolSetting(repo, TREES_STAGE_ALL_KEY).value;
@@ -39,10 +48,10 @@ export function CommitBox({
   const autoPush = useResolvedBoolSetting(repo, TREES_AUTO_PUSH_KEY).value;
   const draftAgent = useResolvedHelperAgent(repo, COMMIT_MESSAGE_AGENT_KEY);
 
-  const { data: saved } = useCommitDraft(repo, activeId);
+  const { data: saved } = useCommitDraft(repo, worktreeId);
   const { mutate: saveDraft } = useSetCommitDraft(repo);
   const { mutate: draft, isPending: drafting } = useCommitMessage(repo);
-  const { mutate: commit, isPending: committing } = useCommitWorktree(repo, activeId);
+  const { mutate: commit, isPending: committing } = useCommitWorktree(repo, worktreeId);
   const { mutate: push, isPending: pushing } = usePushWorktree(repo);
 
   const [message, setMessage] = useState("");
@@ -61,9 +70,9 @@ export function CommitBox({
   // stored — our optimistic write makes `saved` equal `message` after a save).
   useEffect(() => {
     if (!seeded.current || message === (saved ?? "")) return;
-    const timer = setTimeout(() => saveDraft({ id: activeId, message }), SAVE_DEBOUNCE_MS);
+    const timer = setTimeout(() => saveDraft({ id: worktreeId, message }), SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [message, saved, activeId, saveDraft]);
+  }, [message, saved, worktreeId, saveDraft]);
 
   // Mirror the latest values into refs so the unmount effect below can read them
   // without depending on (and re-firing for) every keystroke.
@@ -73,19 +82,19 @@ export function CommitBox({
   savedRef.current = saved;
   const saveDraftRef = useRef(saveDraft);
   saveDraftRef.current = saveDraft;
-  const activeIdRef = useRef(activeId);
-  activeIdRef.current = activeId;
+  const worktreeIdRef = useRef(worktreeId);
+  worktreeIdRef.current = worktreeId;
 
   // Switching worktrees mid-typing (this component is mounted with
   // key={worktreeId}) unmounts before the debounce timer above ever fires,
   // silently dropping the last edits. Flush any unsaved draft synchronously on
-  // teardown so typing is never lost. Mounted with key={activeId}, so this only
-  // runs on true mount/unmount, never on an activeId change underneath the same
+  // teardown so typing is never lost. Mounted with key={worktreeId}, so this only
+  // runs on true mount/unmount, never on a worktree change underneath the same
   // instance.
   useEffect(() => {
     return () => {
       if (messageRef.current !== (savedRef.current ?? "")) {
-        saveDraftRef.current({ id: activeIdRef.current, message: messageRef.current });
+        saveDraftRef.current({ id: worktreeIdRef.current, message: messageRef.current });
       }
     };
   }, []);
@@ -94,7 +103,7 @@ export function CommitBox({
   const committable = stageAll ? totalCount : stagedCount;
   const canCommit = committable > 0 && message.trim().length > 0 && !committing;
 
-  const onDraft = () => draft(activeId, { onSuccess: (msg) => setMessage(msg) });
+  const onDraft = () => draft(worktreeId, { onSuccess: (msg) => setMessage(msg) });
   const onCommit = () =>
     commit(
       { message: message.trim(), stageAll },
@@ -106,16 +115,12 @@ export function CommitBox({
           // "Push after every commit": upload the new commit to origin straight
           // away (sets upstream on first push). Once it lands, surface the PR
           // suggestion bar (skipped for the base branch). Independent of autoPr.
-          if (autoPush && activeId !== BASE_ID) {
-            push(activeId, { onSuccess: () => suggestPr(activeId) });
-          } else if (autoPush) {
-            push(activeId);
-          }
+          const suggest = createPr && worktreeId !== BASE_ID ? createPr.suggestAfterPush : null;
+          if (autoPush) push(worktreeId, suggest ? { onSuccess: suggest } : undefined);
           // "Open a PR on the first commit": prompt once there's a commit to PR
           // and no PR exists yet. The dialog validates commits-ahead itself. Never
           // for the base branch — you don't open a PR against main itself.
-          const hasPr = (prsByWorktree.get(activeId) ?? []).length > 0;
-          if (autoPr && !hasPr && activeId !== BASE_ID) openPrDialog(activeId);
+          if (autoPr && createPr && !createPr.hasPr && worktreeId !== BASE_ID) createPr.open();
         },
       },
     );

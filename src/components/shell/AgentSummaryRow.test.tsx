@@ -116,3 +116,24 @@ describe("AgentSummaryRow", () => {
     expect(container.querySelector("[role='img']")).toBeNull();
   });
 });
+
+/**
+ * The summary line folds its children; it opens nothing. Reported: hovering it
+ * lit the whole row, which reads as "you can pick this" — the same fill the agent
+ * rows inside it use to mean exactly that.
+ */
+describe("AgentSummaryRow is a band, not a destination", () => {
+  it("takes no selection fill, while the rows it expands into keep theirs", () => {
+    const { container } = render(
+      <AgentSummaryRow
+        agents={[agent("idle", "Claude"), agent("idle", "Codex")]}
+        expanded
+        onToggle={vi.fn()}
+        indent={24}
+      />,
+    );
+    const row = container.querySelector("button") as HTMLElement;
+    expect(row.className).toContain("tree-band");
+    expect(row.className).not.toContain("tree-row");
+  });
+});

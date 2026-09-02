@@ -508,18 +508,25 @@ button:focus-visible,
   outline: none;
 }
 
-/* Thin dark scrollbars to match the design. */
-::-webkit-scrollbar {
+/* Thin dark scrollbars to match the design.
+
+   Any `::-webkit-scrollbar` rule makes WebKit draw a classic scrollbar for the
+   element, one that reserves its width in the layout. `.scrollbar-native` opts
+   a scroller out of these rules and back to the OS's own — on macOS an overlay
+   that shows while scrolling and takes no room. The sidebar uses it: a 9px
+   gutter beside every row, whenever the queue ran long, was width taken from
+   the rows themselves. */
+:not(.scrollbar-native)::-webkit-scrollbar {
   width: 9px;
   height: 9px;
 }
-::-webkit-scrollbar-thumb {
+:not(.scrollbar-native)::-webkit-scrollbar-thumb {
   background: var(--color-line-3);
   border-radius: 8px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
-::-webkit-scrollbar-thumb:hover {
+:not(.scrollbar-native)::-webkit-scrollbar-thumb:hover {
   background: var(--color-line-strong);
   background-clip: content-box;
 }
@@ -871,3 +878,42 @@ button:focus-visible,
     content: "⠿";
   }
 }
+
+/* The welcome surface settles in once, top to bottom: each block fades up in
+   turn (`animation-delay` inline), and the tree on the app tile grows leaf by
+   leaf — the lower one first. Brief and once per mount, so it reads as the
+   surface arriving rather than as decoration; motion off, everything is simply
+   there. */
+.welcome-in {
+  animation: fadeUp 0.36s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes leafUp {
+  from {
+    opacity: 0;
+    transform: translateY(28px) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.welcome-leaf {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+}
+.welcome-in .welcome-leaf {
+  animation: leafUp 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.welcome-in .welcome-leaf:first-child {
+  animation-delay: 0.12s;
+}
+.welcome-in .welcome-leaf:last-child {
+  animation-delay: 0.26s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .welcome-in,
+  .welcome-in .welcome-leaf {
+    animation: none;
+  }
+}
+

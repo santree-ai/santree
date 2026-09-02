@@ -13,16 +13,16 @@ import {
   MiniMap,
   type Node,
   type NodeMouseHandler,
-  Panel,
   ReactFlow,
   ReactFlowProvider,
   useNodesInitialized,
   useReactFlow,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Task } from "../../bindings";
+import { PositionedMenu } from "../../components/primitives";
 import { usePrefetchOnHover } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import { alpha, PROJECT_FALLBACK, palette, statusColor, statusLabel } from "../../theme/colors";
@@ -31,6 +31,7 @@ import { layoutGraph } from "./layout";
 import { MilestoneNode, type MilestoneNodeData } from "./MilestoneNode";
 import { deriveIssueState, useIssueHover, useIssues } from "./model";
 import { ProjectNode, type ProjectNodeData } from "./ProjectNode";
+import { useTicketMenuItems } from "./ticketMenu";
 
 const nodeTypes = { issue: IssueNode, project: ProjectNode, milestone: MilestoneNode };
 
@@ -53,15 +54,20 @@ function Flow() {
     toggle,
     setFocus,
     toggleProjectFocus,
-    toggleActionableOnly,
   } = useIssues();
   const { setHover } = useIssueHover();
   const { activeRepo, theme } = useApp();
   const prefetchOnHover = usePrefetchOnHover(activeRepo);
   const { fitView } = useReactFlow();
 
-  // Grayed context blockers are hidden when "Actionable only" is on.
-  const hiddenCount = useMemo(() => tasks.filter((t) => !t.actionable).length, [tasks]);
+  // A node's right-click menu. The canvas keeps only where it opened and for
+  // which ticket; the rows come from the model (see `ticketMenu`).
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const closeMenu = useCallback(() => setMenu(null), []);
+  const menuItems = useTicketMenuItems(menu?.id ?? null);
+
+  // Grayed context blockers are hidden when "Actionable only" is on — the
+  // page's switch; the canvas carries no control of its own.
   const visibleTasks = useMemo(
     () => (actionableOnly ? tasks.filter((t) => t.actionable) : tasks),
     [tasks, actionableOnly],
@@ -138,8 +144,12 @@ function Flow() {
         zIndex: 2,
         data: {
           title: t.title,
+          status: t.status,
           statusColor: statusColor[t.status],
           statusLabel: statusLabel[t.status],
+          estimate: t.estimate,
+          cycle: t.cycle,
+          dueDate: t.dueDate,
           selected: st.selected,
           chainable: st.chainable && !st.selected,
           dim,
@@ -260,6 +270,14 @@ function Flow() {
     [setHover, prefetchOnHover],
   );
   const onNodeMouseLeave = useMemo<NodeMouseHandler>(() => () => setHover(null), [setHover]);
+  const onNodeContextMenu = useMemo<NodeMouseHandler>(
+    () => (e, node) => {
+      if (node.type !== "issue") return;
+      e.preventDefault();
+      setMenu({ id: node.id, x: e.clientX, y: e.clientY });
+    },
+    [],
+  );
 
   return (
     <ReactFlow
@@ -269,6 +287,7 @@ function Flow() {
       onNodeClick={onNodeClick}
       onNodeMouseEnter={onNodeMouseEnter}
       onNodeMouseLeave={onNodeMouseLeave}
+      onNodeContextMenu={onNodeContextMenu}
       nodesDraggable={false}
       nodesConnectable={false}
       elementsSelectable={false}
@@ -281,33 +300,6 @@ function Flow() {
       className="bg-app"
     >
       <Background variant={BackgroundVariant.Dots} gap={24} size={1} className="opacity-60" />
-      <Panel position="top-left">
-        <button
-          type="button"
-          onClick={toggleActionableOnly}
-          aria-pressed={actionableOnly}
-          title={
-            actionableOnly
-              ? "Showing only tickets you can act on. Click to reveal blockers owned by others or already done."
-              : "Showing all related tickets. Click to hide the non-actionable ones."
-          }
-          className="flex items-center gap-1.5 rounded-lg border border-line-2 bg-panel px-2.5 py-1.5 text-[11.5px] font-medium text-fg-2 shadow-lg transition-colors hover:border-line-strong"
-        >
-          <span
-            className="flex h-3 w-5 flex-none items-center rounded-full p-[2px] transition-colors"
-            style={{ background: actionableOnly ? "var(--accent)" : "var(--color-line-3)" }}
-          >
-            <span
-              className="h-2 w-2 rounded-full bg-white transition-transform"
-              style={{ transform: actionableOnly ? "translateX(8px)" : "translateX(0)" }}
-            />
-          </span>
-          Actionable only
-          {actionableOnly && hiddenCount > 0 && (
-            <span className="font-mono text-[10px] text-muted-3">+{hiddenCount}</span>
-          )}
-        </button>
-      </Panel>
       <Controls
         showInteractive={false}
         className="!rounded-lg !border !border-line-2 !bg-panel !shadow-lg [&>button:hover]:!bg-hover [&>button]:!border-line [&>button]:!bg-panel [&>button]:!text-fg-2 [&_svg]:!fill-current"
@@ -330,6 +322,7 @@ function Flow() {
               : (((n.data as IssueNodeData)?.statusColor as string) ?? "var(--color-line-3)")
         }
       />
+      <PositionedMenu at={menu} items={menuItems} onClose={closeMenu} />
     </ReactFlow>
   );
 }

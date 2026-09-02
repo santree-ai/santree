@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use santree_core::domain::{
-    ApiBudgetKind, ApiBudgetWindow, LinearApiBudget, LinearOrg, LinearStatus, ProjectMilestoneRef,
-    Task, TaskStatus, TicketRef, TriageComment, TriageDetail, TriageSchedule, TriageShift,
-    TriageTicket, WorkflowState,
+    ApiBudgetKind, ApiBudgetWindow, CycleRef, LinearApiBudget, LinearOrg, LinearStatus,
+    ProjectMilestoneRef, Task, TaskStatus, TicketRef, TriageComment, TriageDetail, TriageSchedule,
+    TriageShift, TriageTicket, WorkflowState,
 };
 use santree_core::{layout, linear as core_linear};
 
@@ -550,7 +550,7 @@ async fn rotate(db: &Db, row: OrgRow, tokens: Tokens) -> Result<String> {
 // ── GraphQL fetch ────────────────────────────────────────────────────────
 
 // `triage` is excluded alongside the terminal states: untriaged issues belong to
-// the dedicated Triage tab, not the Issues dependency graph.
+// the sidebar's Triage section, not the Issues dependency graph.
 //
 // NOTE: Linear caps query complexity at 10000. This query sits near that ceiling
 // — `assignedIssues(first: 100)` × `inverseRelations(first: N)` × the per-issue
@@ -559,6 +559,10 @@ async fn rotate(db: &Db, row: OrgRow, tokens: Tokens) -> Result<String> {
 // over the cap, a 400, and the graph goes empty — and each step of that `first`
 // moves the total by ~940, so `first: 8` lands at 8591. Anyone adding a field
 // here must re-measure; the cap failure is silent apart from the error toast.
+// `dueDate` and `cycle { number name startsAt endsAt }` (2026-09-02) are on the top-level
+// nodes only — a handful of scalars per issue, a few hundred against the ~1400
+// of headroom, and deliberately not on the relation nodes, where every field is
+// paid for eight times per issue.
 //
 // The blocker level carries the project's `targetDate` and its `projectMilestone`
 // for a reason that isn't cosmetic: a ticket the viewer isn't assigned reaches the
@@ -577,7 +581,8 @@ query AssignedIssues {
         identifier
         title
         priority
-        estimate
+        estimate dueDate
+        cycle { number name startsAt endsAt }
         state { name type }
         project { name color icon targetDate }
         projectMilestone { id name targetDate sortOrder }
@@ -690,6 +695,10 @@ struct IssueNode {
     priority: i64,
     #[serde(default)]
     estimate: Option<f64>,
+    #[serde(default)]
+    due_date: Option<String>,
+    #[serde(default)]
+    cycle: Option<CycleNode>,
     state: Option<StateNode>,
     project: Option<ProjectNode>,
     #[serde(default)]
@@ -753,6 +762,33 @@ fn project_milestone_ref(node: Option<ProjectMilestoneNode>) -> Option<ProjectMi
     })
 }
 
+/// An issue's cycle as Linear sends it (`number` is a Float there).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CycleNode {
+    #[serde(default)]
+    number: f64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    ends_at: Option<String>,
+    #[serde(default)]
+    starts_at: Option<String>,
+}
+
+fn cycle_ref(node: Option<CycleNode>) -> Option<CycleRef> {
+    node.map(|node| CycleRef {
+        number: node.number,
+        name: node.name,
+        ends_at_ms: node.ends_at.as_deref().and_then(parse_ms).map(|v| v as f64),
+        starts_at_ms: node
+            .starts_at
+            .as_deref()
+            .and_then(parse_ms)
+            .map(|v| v as f64),
+    })
+}
+
 /// Map an assigned issue to an actionable Task, returning its blocker issues so
 /// the caller can pull any that aren't themselves assigned into the graph as
 /// grayed context nodes.
@@ -789,6 +825,8 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
         title: node.title,
         priority: core_linear::map_priority(node.priority),
         estimate: node.estimate,
+        cycle: cycle_ref(node.cycle),
+        due_date: node.due_date,
         project,
         project_color,
         project_icon,
@@ -820,6 +858,10 @@ fn map_related(issue: RelatedIssue) -> Task {
         title: issue.title,
         priority: core_linear::map_priority(0),
         estimate: None,
+        // Not fetched at the blocker level: neither groups anything, and a field
+        // on a relation node costs eight times what it costs on the issue.
+        cycle: None,
+        due_date: None,
         project,
         project_color,
         project_icon,
@@ -1530,13 +1572,10 @@ const TRIAGE_INBOX_QUERY: &str = r#"
 query TriageInbox($filter: IssueFilter, $after: String) {
   issues(filter: $filter, first: 100, after: $after) {
     nodes {
-      identifier title priority createdAt dueDate sortOrder slaBreachesAt snoozedUntilAt
-      estimate
-      project { name color icon targetDate }
+      identifier title priority slaBreachesAt snoozedUntilAt
       state { name type }
       team { key }
-      assignee { id name displayName }
-      labels { nodes { name } }
+      assignee { id }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -1555,16 +1594,6 @@ struct TriageRow {
     #[serde(default)]
     priority: i64,
     #[serde(default)]
-    estimate: Option<f64>,
-    #[serde(default)]
-    project: Option<ProjectNode>,
-    #[serde(default)]
-    due_date: Option<String>,
-    #[serde(default)]
-    sort_order: Option<f64>,
-    #[serde(default)]
-    created_at: Option<String>,
-    #[serde(default)]
     sla_breaches_at: Option<String>,
     #[serde(default)]
     snoozed_until_at: Option<String>,
@@ -1572,8 +1601,6 @@ struct TriageRow {
     team: Option<TeamKeyNode>,
     #[serde(default)]
     assignee: Option<UserNode>,
-    #[serde(default)]
-    labels: Connection<LabelName>,
 }
 #[derive(Deserialize)]
 struct TriageInboxData {
@@ -1626,7 +1653,6 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
         after = Some(cursor);
     }
     let now = now_ms();
-    let style = name_style(db).await;
 
     let mut rows: Vec<(TriageTicket, bool, i64)> = nodes
         .into_iter()
@@ -1634,45 +1660,18 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
             let snooze_ms = r.snoozed_until_at.as_deref().and_then(parse_ms);
             let snoozed = core_linear::is_snoozed(snooze_ms, now);
             let sla_ms = r.sla_breaches_at.as_deref().and_then(parse_ms);
-            let labels: Vec<String> = r.labels.nodes.into_iter().map(|l| l.name).collect();
             let team = r.team.map(|t| t.key);
-            let (project, project_color, project_icon, project_target_date) = match r.project {
-                Some(project) => (
-                    project.name,
-                    project.color,
-                    project.icon,
-                    project.target_date,
-                ),
-                None => (None, None, None, None),
-            };
-            let assignee_user = r.assignee;
-            let mine = match (me, assignee_user.as_ref().and_then(|u| u.id.as_deref())) {
+            let mine = match (me, r.assignee.as_ref().and_then(|u| u.id.as_deref())) {
                 (Some(me), Some(a)) => me == a,
                 _ => false,
             };
-            let assignee = assignee_user.and_then(|u| pick_name(u.name, u.display_name, style));
             // Specta forbids exporting i64 (BigInt precision-loss risk), so the raw
             // millisecond timestamps cross the bridge as f64 — exact for epoch-ms
             // values for millennia to come.
-            let created_at_ms = r
-                .created_at
-                .as_deref()
-                .and_then(parse_ms)
-                .map(|v| v as f64)
-                .unwrap_or_default();
             let ticket = TriageTicket {
                 id: r.identifier,
                 title: r.title,
                 priority: core_linear::map_priority(r.priority),
-                estimate: r.estimate,
-                project,
-                project_color,
-                project_icon,
-                project_target_date,
-                due_date: r.due_date,
-                sort_order: r.sort_order,
-                created_at_ms,
-                meta: triage_meta(assignee.as_deref(), &labels),
                 team,
                 sla_breach_ms: sla_ms.map(|v| v as f64),
                 snoozed_until_ms: snoozed.then_some(snooze_ms).flatten().map(|v| v as f64),
@@ -1687,16 +1686,6 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
     Ok(Some(rows.into_iter().map(|(t, _, _)| t).collect()))
 }
 
-/// One-line meta: assignee (or "unassigned") · first label. The team is carried
-/// separately on the ticket so the queue can group by it.
-fn triage_meta(assignee: Option<&str>, labels: &[String]) -> String {
-    let mut parts: Vec<String> = vec![assignee.unwrap_or("unassigned").to_string()];
-    if let Some(l) = labels.first() {
-        parts.push(l.clone());
-    }
-    parts.join(" · ")
-}
-
 // The nested `children` connections below are pinned to `first: 50` — Linear's
 // default page size, i.e. exactly what these queries already cost. Complexity
 // multiplies across nesting levels (100 comments × N replies) against the 10000
@@ -1706,11 +1695,14 @@ fn triage_meta(assignee: Option<&str>, labels: &[String]) -> String {
 const ISSUE_DETAIL_QUERY: &str = r#"
 query GetIssue($id: String!) {
   issue(id: $id) {
-    identifier title description url priority createdAt slaBreachesAt snoozedUntilAt
+    identifier title description url priority estimate dueDate createdAt slaBreachesAt snoozedUntilAt
+    cycle { number name startsAt endsAt }
     state { id name type }
     team { states(first: 50) { nodes { id name type color position } } }
     labels { nodes { name } }
     project { name }
+    projectMilestone { id name targetDate sortOrder }
+    assignee { name displayName avatarUrl }
     creator { name displayName avatarUrl }
     comments(first: 100) {
       nodes {
@@ -1834,12 +1826,22 @@ struct IssueDetailNode {
     sla_breaches_at: Option<String>,
     #[serde(default)]
     snoozed_until_at: Option<String>,
+    #[serde(default)]
+    estimate: Option<f64>,
+    #[serde(default)]
+    due_date: Option<String>,
+    #[serde(default)]
+    cycle: Option<CycleNode>,
     state: Option<StateNode>,
     #[serde(default)]
     team: Option<TeamStates>,
     #[serde(default)]
     labels: Connection<LabelName>,
     project: Option<ProjectNode>,
+    #[serde(default)]
+    project_milestone: Option<ProjectMilestoneNode>,
+    #[serde(default)]
+    assignee: Option<UserNode>,
     #[serde(default)]
     creator: Option<UserNode>,
     #[serde(default)]
@@ -2061,6 +2063,15 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
     .await;
 
     let (author, author_avatar_url) = actor(issue.creator, None, style);
+    // Named the way the author is (the display-name setting applies to both),
+    // and absent rather than "Unknown" when nobody is assigned.
+    let (assignee, assignee_avatar_url) = match issue.assignee {
+        Some(user) => {
+            let (name, avatar) = actor(Some(user), None, style);
+            (Some(name), avatar)
+        }
+        None => (None, None),
+    };
     let snooze_ms = issue.snoozed_until_at.as_deref().and_then(parse_ms);
     let state = issue.state;
     let state_id = state.as_ref().and_then(|s| s.id.clone());
@@ -2096,6 +2107,12 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
             .unwrap_or_default(),
         labels: issue.labels.nodes.into_iter().map(|l| l.name).collect(),
         project: issue.project.and_then(|p| p.name),
+        project_milestone: project_milestone_ref(issue.project_milestone),
+        assignee,
+        assignee_avatar_url,
+        estimate: issue.estimate,
+        cycle: cycle_ref(issue.cycle),
+        due_date: issue.due_date,
         sla_breach_ms: issue
             .sla_breaches_at
             .as_deref()
@@ -2164,103 +2181,55 @@ async fn set_state(session: &Session<'_>, ticket_id: &str, state_id: &str) -> Re
     }
 }
 
-const SET_SORT_ORDER_MUTATION: &str = r#"
-mutation SetSortOrder($id: String!, $sortOrder: Float!) {
-  issueUpdate(id: $id, input: { sortOrder: $sortOrder }) {
+const SNOOZE_MUTATION: &str = r#"
+mutation Snooze($id: String!, $until: DateTime, $by: String) {
+  issueUpdate(id: $id, input: { snoozedUntilAt: $until, snoozedById: $by }) {
     success
-    issue { sortOrder }
   }
 }
 "#;
 
-const SORT_ORDER_TARGET_QUERY: &str = r#"
-query SortOrderTarget($id: String!) {
-  issue(id: $id) {
-    identifier
-    state { type }
-    team { key }
-  }
-}
-"#;
-
-fn validate_sort_order_target(
-    requested_id: &str,
-    actual_id: &str,
-    state_type: &str,
-    team_key: &str,
-    allowed_team_keys: &HashSet<&str>,
-) -> Result<()> {
-    let Some((requested_team_key, _)) = split_identifier(requested_id) else {
-        bail!("invalid Linear issue identifier")
-    };
-    if requested_id != actual_id
-        || requested_team_key != team_key
-        || state_type != "triage"
-        || !allowed_team_keys.contains(team_key)
-    {
-        bail!("issue is not in this repository's triage queue")
-    }
-    Ok(())
-}
-
-/// Move an issue within Linear's canonical manual order. The caller computes a
-/// fractional rank between the visible neighbors; Linear stores that same rank
-/// for every client, so Santree never creates a second local source of truth.
-pub async fn set_issue_sort_order(
+/// Snooze a triage issue until `until_ms` (epoch ms), or wake it with `None`.
+///
+/// Linear records *who* snoozed an issue beside *until when*, and its Triage
+/// view reads both — so the viewer's id rides along on a snooze, and clearing
+/// the pair is what wakes it. Requires a write-scoped token; `Ok(None)` when no
+/// Linear org is connected for the repo.
+pub async fn snooze_issue(
     db: &Db,
     repo: &str,
     ticket_id: &str,
-    sort_order: f64,
+    until_ms: Option<i64>,
 ) -> Result<Option<()>> {
-    validate_sort_order(sort_order)?;
-    let Some((requested_team_key, _)) = split_identifier(ticket_id) else {
-        bail!("invalid Linear issue identifier")
-    };
     let Some(session) = repo_write_session(db, repo).await? else {
         return Ok(None);
     };
-    let scope = team_scope(&session).await?;
-    let allowed_team_keys: HashSet<&str> =
-        scope.teams.iter().map(|team| team.key.as_str()).collect();
-    if !allowed_team_keys.contains(requested_team_key) {
-        bail!("issue is not in this repository's triage queue")
-    }
+    let until = until_ms
+        .map(|ms| {
+            chrono::DateTime::from_timestamp_millis(ms)
+                .map(|t| t.to_rfc3339())
+                .context("snooze time out of range")
+        })
+        .transpose()?;
 
     #[derive(Deserialize)]
-    struct SortOrderState {
-        #[serde(rename = "type")]
-        type_: String,
+    struct ViewerId {
+        id: String,
     }
     #[derive(Deserialize)]
-    struct SortOrderTeam {
-        key: String,
+    struct ViewerData {
+        viewer: ViewerId,
     }
-    #[derive(Deserialize)]
-    struct SortOrderTarget {
-        identifier: String,
-        state: SortOrderState,
-        team: SortOrderTeam,
-    }
-    #[derive(Deserialize)]
-    struct SortOrderTargetData {
-        issue: Option<SortOrderTarget>,
-    }
-    let target: SortOrderTargetData = session
-        .query(
-            SORT_ORDER_TARGET_QUERY,
-            serde_json::json!({ "id": ticket_id }),
-        )
-        .await?;
-    let target = target
-        .issue
-        .ok_or_else(|| anyhow!("Linear issue {ticket_id} not found"))?;
-    validate_sort_order_target(
-        ticket_id,
-        &target.identifier,
-        &target.state.type_,
-        &target.team.key,
-        &allowed_team_keys,
-    )?;
+    let by = match until {
+        Some(_) => Some(
+            session
+                .query::<ViewerData>("query { viewer { id } }", serde_json::json!({}))
+                .await?
+                .viewer
+                .id,
+        ),
+        None => None,
+    };
 
     #[derive(Deserialize)]
     struct UpdResult {
@@ -2269,33 +2238,23 @@ pub async fn set_issue_sort_order(
     }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct SetSortOrderData {
+    struct SnoozeData {
         issue_update: Option<UpdResult>,
     }
     let sent = session
-        .query::<SetSortOrderData>(
-            SET_SORT_ORDER_MUTATION,
-            serde_json::json!({ "id": ticket_id, "sortOrder": sort_order }),
+        .query::<SnoozeData>(
+            SNOOZE_MUTATION,
+            serde_json::json!({ "id": ticket_id, "until": until, "by": by }),
         )
         .await;
     issues_changed(&session.slug);
     let data = sent?;
-    if data
-        .issue_update
-        .map(|update| update.success)
-        .unwrap_or(false)
-    {
+    if data.issue_update.map(|u| u.success).unwrap_or(false) {
         Ok(Some(()))
     } else {
-        bail!("Linear rejected the manual-order change")
-    }
-}
-
-fn validate_sort_order(value: f64) -> Result<()> {
-    if value.is_finite() {
-        Ok(())
-    } else {
-        bail!("manual order must be a finite number")
+        // As in `set_state`: a bare `success: false` with no `errors` — don't
+        // guess a cause.
+        bail!("Linear rejected the snooze")
     }
 }
 
@@ -2739,7 +2698,8 @@ fn build_schedule(
                 TriageShift {
                     name,
                     avatar_url,
-                    range: shift_range(start, end),
+                    starts_at_ms: start.map(|v| v as f64),
+                    ends_at_ms: end.map(|v| v as f64),
                     is_current,
                     is_me,
                 },
@@ -2819,23 +2779,6 @@ fn parse_ms(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|dt| dt.timestamp_millis())
-}
-
-/// A short on-call range like "Jun 19 – Jun 26" from start/end epoch millis. The
-/// schedule's end is exclusive (midnight of the following day), so we show the
-/// last covered day instead — "Jun 19 – Jun 25" reads as the actual shift.
-fn shift_range(start: Option<i64>, end: Option<i64>) -> String {
-    let day = |ms: i64| {
-        chrono::DateTime::from_timestamp_millis(ms)
-            .map(|dt| dt.format("%b %-d").to_string())
-            .unwrap_or_default()
-    };
-    match (start, end) {
-        (Some(s), Some(e)) => format!("{} – {}", day(s), day(e - 86_400_000)),
-        (Some(s), None) => day(s),
-        (None, Some(e)) => day(e),
-        (None, None) => String::new(),
-    }
 }
 
 /// The CDN host image URLs are inlined from.
@@ -3360,20 +3303,19 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        accept_code, apply_subtask_dependencies, cached_team_scope, decode_tokens, encode_tokens,
-        entity_not_found, header_window, image_spans, map_issue, map_related,
+        accept_code, apply_subtask_dependencies, cached_team_scope, cycle_ref, decode_tokens,
+        encode_tokens, entity_not_found, header_window, image_spans, map_issue, map_related,
         migrate_tokens_to_keychain, parse_callback, parse_ms, record_budget, refresh_lock,
-        resolve_org_slug, resolved_org, scope_from_setting, scope_of, shift_range, splice_images,
-        split_identifier, triage_meta, usable_at, validate_sort_order, validate_sort_order_target,
-        CommentNode, ImageCache, IssueDetailNode, IssueNode, ParentIssueNode, ProjectMilestoneNode,
-        ProjectNode, RelatedIssue, RelationNode, SchedQueryData, StateNode, TeamScope,
-        TicketLookupNode, Tokens, TriageRow, TtlCache, UserNode, BUDGETS, IMAGE_HOST,
-        REFRESH_SKEW_MS,
+        resolve_org_slug, resolved_org, scope_from_setting, scope_of, splice_images,
+        split_identifier, usable_at, CommentNode, CycleNode, ImageCache, IssueDetailNode,
+        IssueNode, ParentIssueNode, ProjectMilestoneNode, ProjectNode, RelatedIssue, RelationNode,
+        SchedQueryData, StateNode, TeamScope, TicketLookupNode, Tokens, TriageRow, TtlCache,
+        UserNode, BUDGETS, IMAGE_HOST, REFRESH_SKEW_MS,
     };
     use crate::gql::{Connection, GqlError, GraphQlErrors, PageInfo};
     use anyhow::anyhow;
     use santree_core::domain::{ApiBudgetKind, Task, TaskStatus};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -3436,23 +3378,6 @@ mod tests {
         assert_eq!(scope_from_setting(None), "read");
         assert_eq!(scope_from_setting(Some("")), "read");
         assert_eq!(scope_from_setting(Some("read,write")), "read");
-    }
-
-    #[test]
-    fn manual_sort_order_rejects_non_finite_values() {
-        assert!(validate_sort_order(12.5).is_ok());
-        assert!(validate_sort_order(f64::NAN).is_err());
-        assert!(validate_sort_order(f64::INFINITY).is_err());
-    }
-
-    #[test]
-    fn manual_sort_order_is_limited_to_the_current_triage_scope() {
-        let allowed = HashSet::from(["AK", "MSG"]);
-        assert!(validate_sort_order_target("AK-12", "AK-12", "triage", "AK", &allowed).is_ok());
-        assert!(validate_sort_order_target("bad", "bad", "triage", "AK", &allowed).is_err());
-        assert!(validate_sort_order_target("AK-12", "AK-12", "started", "AK", &allowed).is_err());
-        assert!(validate_sort_order_target("OPS-12", "OPS-12", "triage", "OPS", &allowed).is_err());
-        assert!(validate_sort_order_target("AK-12", "AK-13", "triage", "AK", &allowed).is_err());
     }
 
     /// Both tokens share one keychain entry, so the blob is the only thing
@@ -3942,40 +3867,6 @@ mod tests {
         assert_eq!(error, None);
     }
 
-    // ── shift_range ───────────────────────────────────────────────────────
-
-    fn ms(rfc3339: &str) -> i64 {
-        chrono::DateTime::parse_from_rfc3339(rfc3339)
-            .unwrap()
-            .timestamp_millis()
-    }
-
-    #[test]
-    fn shift_range_shows_the_last_covered_day_not_the_exclusive_end() {
-        // A schedule end is exclusive (midnight of the day after the shift), so a
-        // Jan 1 - Jan 8 (exclusive) window is a shift that runs through Jan 7.
-        let start = ms("2024-01-01T00:00:00Z");
-        let end = ms("2024-01-08T00:00:00Z");
-        assert_eq!(shift_range(Some(start), Some(end)), "Jan 1 – Jan 7");
-    }
-
-    #[test]
-    fn shift_range_open_start_shows_only_the_end_day() {
-        let end = ms("2024-03-05T00:00:00Z");
-        assert_eq!(shift_range(None, Some(end)), "Mar 5");
-    }
-
-    #[test]
-    fn shift_range_open_end_shows_only_the_start_day() {
-        let start = ms("2024-03-05T00:00:00Z");
-        assert_eq!(shift_range(Some(start), None), "Mar 5");
-    }
-
-    #[test]
-    fn shift_range_neither_bound_is_empty() {
-        assert_eq!(shift_range(None, None), "");
-    }
-
     // ── parse_ms ──────────────────────────────────────────────────────────
 
     #[test]
@@ -3990,19 +3881,6 @@ mod tests {
     #[test]
     fn parse_ms_rejects_a_non_rfc3339_string() {
         assert_eq!(parse_ms("not-a-timestamp"), None);
-    }
-
-    // ── triage_meta ───────────────────────────────────────────────────────
-
-    #[test]
-    fn triage_meta_joins_assignee_and_first_label() {
-        let labels = vec!["bug".to_string(), "p1".to_string()];
-        assert_eq!(triage_meta(Some("Alice"), &labels), "Alice · bug");
-    }
-
-    #[test]
-    fn triage_meta_defaults_to_unassigned_with_no_labels() {
-        assert_eq!(triage_meta(None, &[]), "unassigned");
     }
 
     // ── map_issue / map_related ───────────────────────────────────────────
@@ -4032,6 +3910,8 @@ mod tests {
             title: id.into(),
             priority: santree_core::domain::Priority::None,
             estimate: None,
+            cycle: None,
+            due_date: None,
             project: "Project".into(),
             project_color: None,
             project_icon: None,
@@ -4098,6 +3978,8 @@ mod tests {
             "title": "Do the thing",
             "priority": 2,
             "estimate": 3.0,
+            "dueDate": "2026-09-05",
+            "cycle": { "number": 17, "name": null, "startsAt": "2026-08-31T16:00:00.000Z", "endsAt": "2026-09-07T16:00:00.000Z" },
             "state": { "name": "Todo", "type": "unstarted" },
             "project": { "name": "Roadmap", "color": "#5e6ad2", "icon": null, "targetDate": "2026-09-30" },
             "projectMilestone": {
@@ -4131,6 +4013,14 @@ mod tests {
         assert_eq!(task.parent_id.as_deref(), Some("ENG-9"));
         assert_eq!(task.project_target_date.as_deref(), Some("2026-09-30"));
         assert_eq!(task.assignee.as_deref(), Some("Ada Lovelace"));
+        // `dueDate` and `cycle` ride on `rename_all` too: without it the list
+        // shows every ticket as undated and out of any cycle.
+        assert_eq!(task.due_date.as_deref(), Some("2026-09-05"));
+        let cycle = task.cycle.as_ref().expect("cycle");
+        assert_eq!(cycle.number, 17.0);
+        assert_eq!(cycle.name, None);
+        assert_eq!(cycle.ends_at_ms, Some(1_788_796_800_000.0));
+        assert_eq!(cycle.starts_at_ms, Some(1_788_192_000_000.0));
         // The two `blocks` relations, and not the duplicate.
         assert_eq!(task.blocked_by, ["ENG-1", "ENG-2"]);
         assert_eq!(blockers.len(), 2);
@@ -4141,33 +4031,24 @@ mod tests {
 
     /// The triage queue's ordering, decoded from the wire.
     ///
-    /// [`TriageRow`] carries five camelCase timestamps behind `rename_all`, and
-    /// every one of them is `Option`: lose the attribute and they all read `None`,
-    /// which silently costs the queue its SLA ordering (everything ties at
-    /// `i64::MAX`) and stops sinking snoozed tickets to the bottom.
+    /// [`TriageRow`] carries both of its camelCase timestamps behind `rename_all`,
+    /// and both are `Option`: lose the attribute and they read `None`, which
+    /// silently costs the queue its SLA ordering (everything ties at `i64::MAX`)
+    /// and stops sinking snoozed tickets to the bottom.
     #[test]
     fn a_triage_row_decodes_the_timestamps_the_queue_is_ordered_by() {
         let row: TriageRow = serde_json::from_value(serde_json::json!({
             "identifier": "SUP-7",
             "title": "Customer can't log in",
             "priority": 1,
-            "estimate": 2.0,
-            "createdAt": "2026-08-20T09:00:00.000Z",
-            "dueDate": "2026-08-31",
-            "sortOrder": -12.5,
             "slaBreachesAt": "2026-08-30T17:00:00.000Z",
             "snoozedUntilAt": "2026-09-02T08:00:00.000Z",
-            "project": { "name": "Support", "color": "#f2c94c", "icon": null, "targetDate": null },
             "state": { "name": "Triage", "type": "triage" },
             "team": { "key": "SUP" },
-            "assignee": { "id": "u1", "name": "Ada Lovelace", "displayName": "ada" },
-            "labels": { "nodes": [{ "name": "bug" }] }
+            "assignee": { "id": "u1" }
         }))
         .expect("triage inbox response");
 
-        assert_eq!(row.created_at.as_deref(), Some("2026-08-20T09:00:00.000Z"));
-        assert_eq!(row.due_date.as_deref(), Some("2026-08-31"));
-        assert_eq!(row.sort_order, Some(-12.5));
         assert_eq!(
             row.sla_breaches_at.as_deref(),
             Some("2026-08-30T17:00:00.000Z"),
@@ -4179,7 +4060,12 @@ mod tests {
             "without this a snoozed ticket stays at the top of the inbox"
         );
         assert_eq!(row.team.expect("team").key, "SUP");
-        assert_eq!(row.labels.nodes.len(), 1);
+        // The assignee id is what decides `mine`.
+        assert_eq!(
+            row.assignee.expect("assignee").id.as_deref(),
+            Some("u1"),
+            "without this every ticket reads as someone else's"
+        );
         // …and the timestamps really are parseable into what the sort compares.
         assert!(row.sla_breaches_at.as_deref().and_then(parse_ms).is_some());
     }
@@ -4196,6 +4082,9 @@ mod tests {
             "description": "Steps to reproduce…",
             "url": "https://linear.app/acme/issue/SUP-7",
             "priority": 1,
+            "estimate": 2,
+            "dueDate": "2026-09-05",
+            "cycle": { "number": 17, "name": null, "startsAt": "2026-08-31T16:00:00.000Z", "endsAt": "2026-09-07T16:00:00.000Z" },
             "createdAt": "2026-08-20T09:00:00.000Z",
             "slaBreachesAt": "2026-08-30T17:00:00.000Z",
             "snoozedUntilAt": "2026-09-02T08:00:00.000Z",
@@ -4206,6 +4095,8 @@ mod tests {
             ] } },
             "labels": { "nodes": [{ "name": "bug" }] },
             "project": { "name": "Support" },
+            "projectMilestone": { "id": "m1", "name": "GA", "targetDate": "2026-10-01", "sortOrder": 1.0 },
+            "assignee": { "name": "Grace Hopper", "displayName": "grace", "avatarUrl": null },
             "creator": { "name": "Ada Lovelace", "displayName": "ada", "avatarUrl": null },
             "comments": { "nodes": [], "pageInfo": { "hasNextPage": false, "endCursor": null } }
         }))
@@ -4220,6 +4111,12 @@ mod tests {
             node.snoozed_until_at.as_deref(),
             Some("2026-09-02T08:00:00.000Z")
         );
+        assert_eq!(node.estimate, Some(2.0));
+        assert_eq!(node.due_date.as_deref(), Some("2026-09-05"));
+        let cycle = cycle_ref(node.cycle).expect("cycle");
+        assert_eq!(cycle.number, 17.0);
+        assert_eq!(cycle.ends_at_ms, Some(1_788_796_800_000.0));
+        assert_eq!(cycle.starts_at_ms, Some(1_788_192_000_000.0));
         let states = node.team.expect("team").states;
         assert_eq!(states.nodes.len(), 2, "the status picker's options");
         assert_eq!(states.nodes[1].name, "Todo");
@@ -4227,6 +4124,11 @@ mod tests {
             node.creator.expect("creator").display_name.as_deref(),
             Some("ada")
         );
+        assert_eq!(
+            node.assignee.expect("assignee").name.as_deref(),
+            Some("Grace Hopper")
+        );
+        assert_eq!(node.project_milestone.expect("milestone").name, "GA");
     }
 
     /// A comment, decoded from the wire. `createdAt`, `botActor` and `children`
@@ -4275,6 +4177,13 @@ mod tests {
             title: "Do the thing".into(),
             priority: 2,
             estimate: Some(3.0),
+            due_date: Some("2026-09-05".into()),
+            cycle: Some(CycleNode {
+                number: 17.0,
+                name: Some("Sprint 17".into()),
+                ends_at: Some("2026-09-07T16:00:00.000Z".into()),
+                starts_at: Some("2026-08-31T16:00:00.000Z".into()),
+            }),
             state: Some(state("Todo", "unstarted")),
             project: Some(ProjectNode {
                 name: Some("Roadmap".into()),
@@ -4322,6 +4231,12 @@ mod tests {
         assert_eq!(task.id, "ENG-10");
         assert_eq!(task.priority, santree_core::domain::Priority::High);
         assert_eq!(task.estimate, Some(3.0));
+        assert_eq!(task.due_date.as_deref(), Some("2026-09-05"));
+        let cycle = task.cycle.as_ref().expect("cycle");
+        assert_eq!(cycle.number, 17.0);
+        assert_eq!(cycle.name.as_deref(), Some("Sprint 17"));
+        assert_eq!(cycle.ends_at_ms, Some(1_788_796_800_000.0));
+        assert_eq!(cycle.starts_at_ms, Some(1_788_192_000_000.0));
         assert_eq!(task.project, "Roadmap");
         assert_eq!(task.parent_id.as_deref(), Some("ENG-9"));
         assert_eq!(task.project_target_date.as_deref(), Some("2026-09-30"));
@@ -4352,6 +4267,8 @@ mod tests {
             title: "Unblocked".into(),
             priority: 0,
             estimate: None,
+            due_date: None,
+            cycle: None,
             state: Some(state("Todo", "unstarted")),
             project: None,
             project_milestone: None,
@@ -4380,6 +4297,8 @@ mod tests {
             title: "Already going".into(),
             priority: 0,
             estimate: None,
+            due_date: None,
+            cycle: None,
             state: Some(state("In Progress", "started")),
             project: None,
             project_milestone: None,
@@ -4398,6 +4317,8 @@ mod tests {
             title: "No state on the wire".into(),
             priority: 0,
             estimate: None,
+            due_date: None,
+            cycle: None,
             state: None,
             project: None,
             project_milestone: None,

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PrDetail, PrFile, ReviewPr, ViewedMarks } from "../../bindings";
 import { PrReviewPane } from "./PrReviewPane";
+import { PR_COLUMN } from "./prLayout";
 
 // Counts how often a file card actually re-renders: the diff is rendered *inside*
 // PrFileCard, so a call here means the memo let a render through.
@@ -16,7 +17,7 @@ vi.mock("./PrFileDiff", () => ({
 }));
 
 vi.mock("../../lib/queries", () => ({
-  usePrDetail: () => ({ data: detail, isLoading: false }),
+  usePrDetail: () => ({ data: detail, isLoading: loading }),
   usePrFileSource: () => ({ data: undefined }),
   useReviewedFiles: () => ({ data: marks }),
   useReviewDrafts: () => ({ data: [] }),
@@ -37,11 +38,14 @@ function file(path: string): PrFile {
 
 const detail: PrDetail = {
   body: "",
+  attachments: [],
   labels: [],
   comments: [],
   threads: [],
   files: [file("a.ts"), file("b.ts")],
   filesTruncated: false,
+  commits: [],
+  commitsTruncated: false,
   checks: [],
   baseSha: "base",
   headSha: "head",
@@ -49,6 +53,7 @@ const detail: PrDetail = {
 };
 
 let marks: ViewedMarks = { source: "local", files: [] };
+let loading = false;
 
 /** Marks as the local table returns them — path + the blob SHA they were made at. */
 const local = (...files: { path: string; sha: string }[]): ViewedMarks => ({
@@ -63,6 +68,7 @@ function pr(overrides: Partial<ReviewPr> = {}): ReviewPr {
     title: "Booking webhook retries",
     url: "https://github.com/acme/booking-agent/pull/483",
     repo: "acme/booking-agent",
+    project: null,
     headRef: "you/pr-483",
     headRefId: null,
     baseRef: "main",
@@ -90,15 +96,40 @@ function pr(overrides: Partial<ReviewPr> = {}): ReviewPr {
   };
 }
 
-/** The santree repo the PR's checkout belongs to. Local repos are registered
- *  under their `owner/name` slug (see ReviewHeader's repo match), so for this PR
- *  that is its own repo. Only the submit bar reads it, to invalidate that repo's
- *  caches. */
-const SANTREE_REPO = "acme/booking-agent";
+const pane = (overrides: Partial<ReviewPr> = {}) => <PrReviewPane pr={pr(overrides)} />;
 
-const pane = (overrides: Partial<ReviewPr> = {}) => (
-  <PrReviewPane pr={pr(overrides)} santreeRepo={SANTREE_REPO} />
-);
+/**
+ * Every other pane on the PR page is capped at the reading column, and a sweep
+ * that lines them all up would take this one with it. It must not: a file list
+ * and a diff are unreadable run narrow the way prose is unreadable run wide, and
+ * capping this pane left a third of a maximised window empty beside code that
+ * was scrolling sideways to fit.
+ */
+describe("PrReviewPane's width", () => {
+  /** The same skeleton mismatch the Checks tab had: paragraph bars where a list
+   *  of files was about to appear. */
+  it("waits in the shape of the file list", () => {
+    loading = true;
+    const { container } = render(pane());
+    loading = false;
+    spies.renderDiff.mockClear();
+
+    // A row per file, banded and full-bleed like the real ones.
+    expect(container.querySelectorAll(".border-b.border-line-2").length).toBeGreaterThan(3);
+    expect(container.querySelector(".overflow-y-auto")?.className).not.toContain("py-4");
+  });
+
+  it("spans the pane instead of the page's reading column", () => {
+    const { container } = render(pane());
+    const scroller = container.querySelector(".overflow-y-auto") as HTMLElement;
+    for (const c of PR_COLUMN.split(" ")) expect(scroller.classList.contains(c)).toBe(false);
+    // Not even the page inset: the rows are raised bands, and a margin around
+    // the stack draws the two vertical edges that made it read as a card.
+    expect(scroller.className).not.toMatch(/\bp[xl]-/);
+    // This render's diffs would otherwise count against the memo test below.
+    spies.renderDiff.mockClear();
+  });
+});
 
 describe("PrReviewPane", () => {
   it("keeps the file cards memoized across an unrelated re-render", () => {

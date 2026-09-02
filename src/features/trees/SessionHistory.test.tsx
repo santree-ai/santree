@@ -25,27 +25,27 @@ vi.mock("../../lib/queries", () => ({
     return { data: enabled ? spies.subagents : undefined };
   },
   useRevealSessionTranscript: () => ({ mutate: spies.reveal }),
-  useAddWorktreeTab: () => ({ mutateAsync: vi.fn() }),
-  useResumeWorktreeSession: () => ({ mutateAsync: vi.fn() }),
 }));
 
-vi.mock("./model", () => ({
-  useTrees: () => ({
-    repo: "acme/app",
-    activeId: "AK-1",
-    active: { branch: "feat/ak-1" },
-    extraTabs: [],
-    setActiveTab: vi.fn(),
-  }),
-  defaultTabTitle: () => "Claude",
-  extraTab: (id: string) => id,
-}));
-
-vi.mock("../../state/AppContext", () => ({ useApp: () => ({ activeRepo: "acme/app" }) }));
 vi.mock("../agents/useAgents", () => ({ useAgentEntries: () => [] }));
 vi.mock("../agents/useOpenAgent", () => ({ useOpenAgent: () => vi.fn() }));
 
 import { SessionHistory } from "./SessionHistory";
+
+/** The pane as Trees hosts it: a worktree to read, and somewhere for a resume to
+ *  open. The Reviews rail's own wiring (no `onResume`) is pinned in
+ *  ReviewSidePanel.test. */
+function mount() {
+  return render(
+    <SessionHistory
+      repo="acme/app"
+      worktreeId="AK-1"
+      branch="feat/ak-1"
+      onResume={vi.fn()}
+      resumingId={null}
+    />,
+  );
+}
 
 function session(over: Partial<WorktreeSession> = {}): WorktreeSession {
   return {
@@ -98,7 +98,7 @@ function rowToggle(title: string) {
 describe("SessionHistory rows", () => {
   it("expands on the row and on the chevron, and both point at the same region", () => {
     reset([session()]);
-    render(<SessionHistory />);
+    mount();
     const row = rowToggle("Refactor the parser");
     const chevron = screen.getByRole("button", { name: /Expand Claude Code session/ });
     expect(row).toHaveAttribute("aria-expanded", "false");
@@ -114,7 +114,7 @@ describe("SessionHistory rows", () => {
    *  opening the second must not close the first. */
   it("keeps several rows open at once", () => {
     reset([session(), session({ sessionId: "s2", title: "Fix the lexer" })]);
-    render(<SessionHistory />);
+    mount();
     fireEvent.click(rowToggle("Refactor the parser"));
     fireEvent.click(rowToggle("Fix the lexer"));
     expect(rowToggle("Refactor the parser")).toHaveAttribute("aria-expanded", "true");
@@ -125,7 +125,7 @@ describe("SessionHistory rows", () => {
    *  transcript, and a session with no subagents never asks for them. */
   it("reads nothing until a row is expanded, and skips subagents when there are none", () => {
     reset([session()]);
-    render(<SessionHistory />);
+    mount();
     expect(spies.detailCalls).toEqual([]);
 
     fireEvent.click(rowToggle("Refactor the parser"));
@@ -139,7 +139,7 @@ describe("SessionHistory rows", () => {
       subagent(),
       subagent({ agentId: "a2", parentAgentId: "a1", depth: 2, description: "Check the tests" }),
     ];
-    render(<SessionHistory />);
+    mount();
     fireEvent.click(rowToggle("Refactor the parser"));
     expect(spies.subagentCalls.at(-1)).toEqual(["s1", true]);
     expect(screen.getByText("Find the parser")).toBeTruthy();
@@ -154,7 +154,7 @@ describe("SessionHistory rows", () => {
       recentTurns: [{ from: "You", text: "and the lexer?" }],
       cwd: "/Users/me/repo/.santree/worktrees/AK-1",
     };
-    render(<SessionHistory />);
+    mount();
     fireEvent.click(rowToggle("Refactor the parser"));
     expect(screen.getByText("Refactor the parser, and keep the error spans intact.")).toBeTruthy();
     expect(screen.getByText("and the lexer?")).toBeTruthy();
@@ -168,7 +168,7 @@ describe("SessionHistory rows", () => {
    *  rather than rendering two empty sections. */
   it("replaces the conversation sections when nothing was saved", () => {
     reset([session({ messageCount: 0, subagentCount: 3, lastMessage: null })]);
-    render(<SessionHistory />);
+    mount();
     fireEvent.click(rowToggle("Refactor the parser"));
     expect(screen.getByText("Conversation not saved.")).toBeTruthy();
     expect(screen.queryByText("First prompt")).toBeNull();
@@ -188,7 +188,7 @@ describe("SessionHistory rows", () => {
         },
       }),
     ]);
-    render(<SessionHistory />);
+    mount();
     const row = rowToggle("Refactor the parser");
     expect(within(row).getByText(/12\.3k/)).toBeTruthy();
     expect(row.textContent).not.toContain("$");
@@ -204,7 +204,7 @@ describe("SessionHistory rows", () => {
         },
       }),
     ]);
-    render(<SessionHistory />);
+    mount();
     const row = rowToggle("Refactor the parser");
     expect(within(row).getByText(/12\.3k/)).toBeTruthy();
     expect(within(row).getByText(/\$0\.41/)).toBeTruthy();
@@ -212,7 +212,7 @@ describe("SessionHistory rows", () => {
 
   it("reveals the transcript by session id, never by a path", () => {
     reset([session()]);
-    render(<SessionHistory />);
+    mount();
     fireEvent.click(rowToggle("Refactor the parser"));
     fireEvent.click(screen.getByRole("button", { name: /Open transcript/ }));
     expect(spies.reveal).toHaveBeenCalledWith("s1");

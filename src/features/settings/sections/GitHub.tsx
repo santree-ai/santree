@@ -1,6 +1,11 @@
 /** Settings → Integrations → GitHub: how santree authenticates GitHub (PRs +
  *  Reviews). Today only the `gh` CLI method is live; the GitHub App (OAuth) and
- *  Personal Access Token methods are shown as work-in-progress. */
+ *  Personal Access Token methods are shown as work-in-progress.
+ *
+ *  One card per question, rather than one card holding all of them: signing in,
+ *  what the session has left to spend, and the two preferences about how the
+ *  sidebar's Reviews section is drawn are four separate decisions, and stacking
+ *  them behind one border made the page read as a single long form. */
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -13,20 +18,49 @@ import {
   RefreshIcon,
   WarningIcon,
 } from "../../../components/icons";
-import { Badge, Button, Tabs } from "../../../components/primitives";
-import { queryKeys, useGithubApiBudget, useGithubStatus } from "../../../lib/queries";
+import { Badge, Button, ChevronSelect, Tabs } from "../../../components/primitives";
+import {
+  GITHUB_GROUP_BY_KEY,
+  isOptedIn,
+  type LinearGroupBy,
+  parseGithubGroupBy,
+  queryKeys,
+  REVIEWS_SHOW_EMPTY_KEY,
+  useGithubApiBudget,
+  useGithubStatus,
+  useSetSetting,
+  useSetting,
+} from "../../../lib/queries";
 import { ApiBudgetMeters } from "../ApiBudget";
 import { BinaryPathField } from "../BinaryPathField";
 import { LoginTerminal } from "../LoginTerminal";
-import { Heading, KvRow } from "../widgets";
+import { CardRow, Heading, KvRow, ToggleRow } from "../widgets";
 
-/** One card, one tab strip, one panel — the set of alternatives of which only
- *  some are live. The `gh` CLI method borrows the CLI's own session and powers
- *  PR creation + Reviews. */
+/** The sign-in card's alternatives, of which only some are live. The `gh` CLI
+ *  method borrows the CLI's own session and powers PR creation + Reviews. */
 type GhMethod = "cli" | "app" | "pat";
+
+/** The nestings the sidebar's Reviews section knows how to build, in increasing
+ *  depth. The same four Linear offers for the worktree tree, since both nest on
+ *  the same two Linear levels — but the default is None: a review inbox is short,
+ *  and a heading per project on four PRs explains nothing. */
+const GROUP_BY_OPTIONS: { value: LinearGroupBy; label: string }[] = [
+  { value: "none", label: "None" },
+  { value: "project", label: "Project" },
+  { value: "milestone", label: "Milestone" },
+  { value: "project_milestone", label: "Project → Milestone" },
+];
+
+/** The dropdown in the card's preference row — the same control the Linear card
+ *  uses, so the two settings read as one kind of choice. */
+const ROW_SELECT_CLASS =
+  "rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-[12px] text-fg-3";
 
 export function GitHubSection() {
   const { data: gh, refetch, isFetching } = useGithubStatus();
+  const groupBy: LinearGroupBy = parseGithubGroupBy(useSetting("app", GITHUB_GROUP_BY_KEY).data);
+  const showEmpty = isOptedIn(useSetting("app", REVIEWS_SHOW_EMPTY_KEY).data);
+  const { mutate: setSetting } = useSetSetting();
   const [method, setMethod] = useState<GhMethod>("cli");
   const [loginOpen, setLoginOpen] = useState(false);
   const qc = useQueryClient();
@@ -112,8 +146,6 @@ export function GitHubSection() {
               <BinaryPathField name="gh" hint="only needed if santree can't find it itself" />
             </div>
 
-            {gh?.authenticated && <GithubBudget />}
-
             {gh?.installed && (
               <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
                 {gh.authenticated && <KvRow label="Account" value={gh.account} />}
@@ -166,6 +198,52 @@ export function GitHubSection() {
           </div>
         )}
       </div>
+
+      {/* Its own card, beside the sign-in rather than inside it: the budget
+          belongs to the session that signing in produced, and it is the same
+          shape the Linear card shows for its workspace. */}
+      {gh?.authenticated && <GithubBudget />}
+
+      {/* How the inbox is *shown* has nothing to do with how santree signs in,
+          and it applies whichever method is live. One selector rather than
+          nested toggles, mirroring the Linear card — project and milestone are
+          levels of the same nesting. */}
+      <div className="mt-3 overflow-hidden rounded-xl border border-line-2 bg-raised">
+        <CardRow
+          label="Group reviews by"
+          hint="How each project's Reviews section in the sidebar nests the pull requests inside Assigned to me and each team that asked. Needs a connected Linear workspace — the projects and milestones are Linear's."
+        >
+          {(labelId) => (
+            <ChevronSelect
+              value={groupBy}
+              onChange={(value) => setSetting({ scope: "app", key: GITHUB_GROUP_BY_KEY, value })}
+              className={`w-[186px] ${ROW_SELECT_CLASS}`}
+              wrapperClassName="flex-none"
+              aria-labelledby={labelId}
+            >
+              {GROUP_BY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value} className="bg-input">
+                  {option.label}
+                </option>
+              ))}
+            </ChevronSelect>
+          )}
+        </CardRow>
+      </div>
+
+      {/* Off by default, and about what the *sidebar's* Reviews section lists —
+          which is why it sits here rather than in the view it affects: the
+          section is on screen whatever view you are in. */}
+      <div className="mt-3 rounded-xl border border-line-2 bg-raised px-4 py-1">
+        <ToggleRow
+          label="Show Reviews on quiet projects"
+          hint="Off, a project with nothing waiting shows no Reviews section at all. On, every project with a GitHub remote keeps a folded one, so a quiet repo reads as quiet rather than as unsupported."
+          on={showEmpty}
+          onChange={(next) =>
+            setSetting({ scope: "app", key: REVIEWS_SHOW_EMPTY_KEY, value: String(next) })
+          }
+        />
+      </div>
     </>
   );
 }
@@ -196,9 +274,17 @@ function GithubBudget() {
   const { data: budget } = useGithubApiBudget();
   if (!budget) return null;
   return (
-    <ApiBudgetMeters
-      windows={budget.windows}
-      caption="GitHub's own /rate_limit for this gh session. Shared with everything else signed in as the same account."
-    />
+    <div className="mt-3 rounded-xl border border-line-2 bg-raised px-4 py-3.5">
+      <div className="mb-2.5 flex items-baseline gap-2">
+        <span className="text-[12.5px] font-medium text-fg-3">API budget</span>
+        <span className="text-[11.5px] text-muted-3">
+          Per hour, per pool. Throttling stops on whichever one runs out first.
+        </span>
+      </div>
+      <ApiBudgetMeters
+        windows={budget.windows}
+        caption="GitHub's own /rate_limit for this gh session. Shared with everything else signed in as the same account."
+      />
+    </div>
   );
 }

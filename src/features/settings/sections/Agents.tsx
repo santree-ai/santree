@@ -397,11 +397,15 @@ function ClaudeVersionBlock() {
   );
 }
 
-/** Claude-only launch/terminal behavior toggles: launch with `--chrome` (browser
- *  control), and show santree's inline context-usage bar. santree always injects
- *  its own status line into the sessions it launches (leaving the user's own
- *  `~/.claude/settings.json` untouched), so usage is always captured; the toggle
- *  only gates the status bar's own segment (see `SessionSegment`). */
+/** Claude-only launch/terminal behavior toggles: Remote Control naming, launch
+ *  with `--chrome` (browser control), and two usage switches that are not one
+ *  setting in two halves. santree layers its own status line onto every
+ *  session it launches (leaving the user's `~/.claude/settings.json` alone), so
+ *  those sessions always report; "show inline context usage" only gates the
+ *  status bar's segment for the focused one (see `SessionSegment`). The global
+ *  capture is about *other* sessions: it widens what feeds the account meters
+ *  to Claude sessions started outside santree, and touches nothing about the
+ *  context bar — neither needs the other on. */
 function ClaudeTerminalBlock() {
   const remoteControl = useSetting("app", CLAUDE_REMOTE_CONTROL_KEY);
   const { value: startWithChrome } = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
@@ -455,16 +459,17 @@ function ClaudeTerminalBlock() {
         />
         <ToggleRow
           label="Show inline context usage"
-          hint="Show the open workspace's live context-fill bar in the status bar, in sync with the terminal's own status line. Usage is always captured from santree's status line; this only toggles the in-app bar, so it reflects instantly on sessions that are already running."
+          hint="Show the focused agent's context-fill bar in the status bar, matching the terminal's own status line. Every session santree starts reports this on its own, so nothing else needs to be on; it toggles instantly, running sessions included."
           on={santreeStatusLine}
           onChange={(next) => set(CLAUDE_STATUS_LINE_KEY, next)}
         />
         <ToggleRow
-          label="Capture usage from all Claude sessions"
+          label="Include Claude sessions started outside santree"
           hint={
             <>
-              Feed the usage meters from every Claude Code session on this Mac, not only the ones
-              santree starts. santree wraps the status line in{" "}
+              Feed the account usage meters — the 5-hour and weekly windows — from every Claude Code
+              session on this Mac, not only the ones santree starts. The context bar above is
+              unaffected. santree wraps the status line in{" "}
               <span className="font-mono">
                 {capture.data?.settingsPath ?? "~/.claude/settings.json"}
               </span>

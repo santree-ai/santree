@@ -17,7 +17,6 @@ import {
   BackArrowIcon,
   BoltIcon,
   ChevronDownIcon,
-  ContrastIcon,
   DocsIcon,
   GearIcon,
   GitHubLogo,
@@ -36,7 +35,6 @@ import { useApp } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
 import { ReviewActionSection, TriageActionSection } from "./sections/Actions";
 import { ClaudeAgentSection, CodexAgentSection } from "./sections/Agents";
-import { AppearanceSection } from "./sections/Appearance";
 import { EnglishTutorSection } from "./sections/EnglishTutor";
 import { EnvironmentSection } from "./sections/Environment";
 import { GeneralSection } from "./sections/General";
@@ -121,12 +119,6 @@ const APP_NAV: NavNode[] = [
     label: "General",
     icon: <GearIcon size={ICON_SIZE} />,
     render: () => <GeneralSection />,
-  },
-  {
-    key: "appearance",
-    label: "Appearance",
-    icon: <ContrastIcon size={ICON_SIZE} />,
-    render: () => <AppearanceSection />,
   },
   // One item per connected service, and one per agent harness: each provider is
   // its own destination, so the pane it opens is only ever about that provider.
@@ -226,6 +218,7 @@ const defaultSection = (nodes: NavNode[]): string => flatten(nodes)[0].key;
  *  first item of the group that replaced them. */
 const LEGACY_SECTIONS: Record<string, string> = {
   actions: "triage",
+  appearance: "general",
   issues: "work",
   trees: "work",
   updates: "general",

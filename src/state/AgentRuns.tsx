@@ -237,6 +237,18 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
   return <AgentRunsContext.Provider value={value}>{children}</AgentRunsContext.Provider>;
 }
 
+/** The runs context when there is one, `null` otherwise.
+ *
+ *  For a surface that *offers* a run rather than depending on one — Reviews'
+ *  worktree dialog, whose setup toggle is one option among several. The provider
+ *  is mounted at the app root, so in the running app this is never null; it is
+ *  the strict {@link useAgentRuns} that guarantees that, and this exists so a
+ *  component rendered without the whole root (a test, a story) still renders
+ *  instead of throwing over an optional extra. */
+export function useOptionalAgentRuns(): AgentRuns | null {
+  return useContext(AgentRunsContext) ?? null;
+}
+
 export function useAgentRuns(): AgentRuns {
   const ctx = useContext(AgentRunsContext);
   if (!ctx) throw new Error("useAgentRuns must be used within <AgentRunsProvider>");

@@ -11,8 +11,8 @@ import type {
 import type { PendingLaunch } from "../../state/AppContext";
 import { worktree as fxWorktree } from "../../test/fixtures";
 import { palette } from "../../theme/colors";
+import { aiWorkDot } from "../reviews/AiWorkPane";
 import type { TerminalTab } from "../terminal/orchestrator";
-import { aiWorkDot } from "./FilePickerPanel";
 import {
   availableFileTabs,
   defaultTabTitle,
@@ -289,6 +289,8 @@ describe("shouldHoldTerminal", () => {
 describe("openMainTabs", () => {
   const base = {
     tabIds: [] as string[],
+    hasPrView: false,
+    hasIssueView: false,
     hasFile: false,
     hasSetup: false,
     hasCheckLog: false,
@@ -300,15 +302,26 @@ describe("openMainTabs", () => {
     expect(openMainTabs(base)).toEqual([]);
   });
 
-  it("lists the strip in bar order: the tabs, then the on-demand views", () => {
+  it("lists the strip in bar order: the tabs, the reference views, then the transient ones", () => {
     expect(
       openMainTabs({
         tabIds: ["a1", "b2"],
+        hasPrView: true,
+        hasIssueView: true,
         hasFile: true,
         hasSetup: true,
         hasCheckLog: true,
       }),
-    ).toEqual(["tab:a1", "tab:b2", "file", "setup", "checkLog"]);
+    ).toEqual(["tab:a1", "tab:b2", "prView", "issueView", "file", "setup", "checkLog"]);
+  });
+
+  // The PR and ticket pages are opened on purpose and stay; a picked file comes
+  // and goes. Putting the file after them is what keeps them from shifting.
+  it("keeps the reference views ahead of a file that opens later", () => {
+    expect(openMainTabs({ ...base, hasIssueView: true, hasFile: true })).toEqual([
+      "issueView",
+      "file",
+    ]);
   });
 
   // A worktree with every tab closed can still be showing a diff or a setup log —
@@ -322,6 +335,8 @@ describe("resolveActiveTab", () => {
   const open = (o: Partial<Parameters<typeof openMainTabs>[0]>) =>
     openMainTabs({
       tabIds: ["a1"],
+      hasPrView: false,
+      hasIssueView: false,
       hasFile: false,
       hasSetup: false,
       hasCheckLog: false,
@@ -339,6 +354,15 @@ describe("resolveActiveTab", () => {
   it("keeps the File tab only while a file is actually open", () => {
     expect(resolveActiveTab("file", open({ hasFile: true }))).toBe("file");
     expect(resolveActiveTab("file", open({}))).toBe("tab:a1");
+  });
+
+  // A remembered "prView" survives a reload; the PR it showed may not have. The
+  // gate is the same one that decides whether the right panel has a PR pane.
+  it("keeps the PR and ticket views only while the worktree has them", () => {
+    expect(resolveActiveTab("prView", open({ hasPrView: true }))).toBe("prView");
+    expect(resolveActiveTab("prView", open({}))).toBe("tab:a1");
+    expect(resolveActiveTab("issueView", open({ hasIssueView: true }))).toBe("issueView");
+    expect(resolveActiveTab("issueView", open({}))).toBe("tab:a1");
   });
 
   it("keeps the Setup tab only while setup is running for THIS worktree", () => {
@@ -403,10 +427,11 @@ describe("focusedAgentFor", () => {
     expect(focusedAgentFor({ ...base, activeTab: "tab:gone" })).toBeNull();
   });
 
-  // A diff, a setup log and a job log are all things you read *about* the work,
-  // not the work running — the meter belongs to a session on screen.
-  it("has nothing to point at while the main area shows a file, setup or a job log", () => {
-    for (const tab of ["file", "setup", "checkLog"] as const) {
+  // A diff, a setup log, a job log, the PR page and the ticket page are all
+  // things you read *about* the work, not the work running — the meter belongs
+  // to a session on screen.
+  it("has nothing to point at while the main area shows a view rather than a tab row", () => {
+    for (const tab of ["file", "setup", "checkLog", "prView", "issueView"] as const) {
       expect(focusedAgentFor({ ...base, activeTab: tab })).toBeNull();
     }
   });

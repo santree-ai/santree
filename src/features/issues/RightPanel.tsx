@@ -1,69 +1,86 @@
-/** Right column of the Issues tab: a single pane showing the focused issue
- *  (header · add-to-queue · dependencies · description). Resizable (drag the
- *  left edge) and collapsible (the header chevron or ⌘L). */
-import { type CSSProperties, useRef } from "react";
+/**
+ * The Tickets page's right rail: the focused ticket and the launch queue, on the
+ * same {@link SidePanel} shell Trees, Reviews and Triage are built on — its
+ * strip, its toggle, its edge resize and its collapse-by-shove.
+ *
+ * Two panes. The ticket ({@link IssuePanel}) is the ticket as a whole: header,
+ * run control, blockers, the Linear body and thread, the notes. The queue
+ * ({@link QueuePane}) is what will launch and how. The queue's tab carries the
+ * shell's accent dot while there is anything in it — the strip's rule for a
+ * count — and, for a beat after each add, a `+N` in the dot's place, so filling
+ * the queue from the list or the graph is visibly landing somewhere.
+ *
+ * Collapsed, the shell draws nothing, and the page header's trailing edge takes
+ * the toggle over (see `TicketsView`) — the handoff Trees makes to its tab bar.
+ */
+import { useEffect, useState } from "react";
 
-import { ChevronDownIcon } from "../../components/icons";
-import { EdgeResizeHandle } from "../../components/primitives";
-import { useEdgeResize } from "../../lib/useEdgeResize";
+import { LinearLogo, QueueIcon } from "../../components/icons";
+import { SidePanel, type SidePanelTab } from "../../components/SidePanel";
 import { IssuePanel } from "./IssuePanel";
-import { useIssues } from "./model";
+import { QUEUE_BURST_MS, type RailTab, useIssues } from "./model";
+import { QueuePane } from "./QueuePane";
 
 const MIN_W = 264;
 const MAX_W = 560;
-/** Must match the `var(--issues-right, …)` fallback below and the model default. */
+/** Must match the model's default width. */
 const DEFAULT_W = 304;
 
+/** "+N" while the last burst of adds is fresh. A timer re-renders once it has
+ *  gone stale, so the bubble leaves on its own. */
+function useBurstLabel(): string | null {
+  const { queueBurst } = useIssues();
+  const [, tick] = useState(0);
+  const fresh = queueBurst !== null && Date.now() - queueBurst.at < QUEUE_BURST_MS;
+  useEffect(() => {
+    if (!queueBurst) return;
+    const left = QUEUE_BURST_MS - (Date.now() - queueBurst.at);
+    if (left <= 0) return;
+    const timer = setTimeout(() => tick((n) => n + 1), left);
+    return () => clearTimeout(timer);
+  }, [queueBurst]);
+  return fresh && queueBurst ? `+${queueBurst.count}` : null;
+}
+
 export function RightPanel() {
-  const resizeTarget = useRef<HTMLDivElement>(null);
-  const { rightCollapsed, rightWidth, setRightWidth, toggleRightPanel } = useIssues();
+  const {
+    rightCollapsed,
+    rightWidth,
+    setRightWidth,
+    toggleRightPanel,
+    railTab,
+    setRailTab,
+    selectedEligible,
+  } = useIssues();
+  const burst = useBurstLabel();
 
-  // Drag the left edge to resize. The width is committed to state only on
-  // pointer-up; during the drag the hook writes `--issues-right` directly so the
-  // heavy markdown pane doesn't re-render on every move.
-  const resize = useEdgeResize({
-    cssVar: "--issues-right",
-    target: resizeTarget,
-    width: rightWidth,
-    min: MIN_W,
-    max: MAX_W,
-    edge: "left",
-    onCommit: setRightWidth,
-  });
-
-  if (rightCollapsed) {
-    return (
-      <div className="flex w-9 flex-none flex-col items-center border-l border-line bg-panel pt-2.5 max-[1500px]:absolute max-[1500px]:inset-y-0 max-[1500px]:right-0 max-[1500px]:z-20">
-        <button
-          type="button"
-          onClick={toggleRightPanel}
-          title="Expand panel (⌘L)"
-          className="flex cursor-pointer items-center justify-center rounded-md p-1.5 text-muted-3 hover:bg-hover hover:text-fg-2"
-          aria-label="Expand panel"
-        >
-          <span className="inline-block rotate-90">
-            <ChevronDownIcon size={13} />
-          </span>
-        </button>
-      </div>
-    );
-  }
+  const tabs: SidePanelTab<RailTab>[] = [
+    { tab: "issue", label: "Linear ticket", icon: <LinearLogo size={13} /> },
+    {
+      tab: "queue",
+      label: "Launch queue",
+      icon: <QueueIcon size={15} />,
+      dot: selectedEligible.length > 0 ? "var(--accent)" : null,
+      badge: burst,
+    },
+  ];
 
   return (
-    <div
-      ref={resizeTarget}
-      className="relative flex flex-none flex-col border-l border-line bg-panel max-[1500px]:absolute max-[1500px]:inset-y-0 max-[1500px]:right-0 max-[1500px]:z-20 max-[1500px]:max-w-[min(78vw,560px)] max-[1500px]:shadow-2xl"
-      style={
-        {
-          "--issues-right": `${rightWidth}px`,
-          width: `var(--issues-right, ${DEFAULT_W}px)`,
-        } as CSSProperties
-      }
+    <SidePanel
+      tabs={tabs}
+      active={railTab}
+      onSelect={setRailTab}
+      collapsed={rightCollapsed}
+      onToggle={toggleRightPanel}
+      width={rightWidth}
+      onWidth={setRightWidth}
+      cssVar="--issues-right"
+      min={MIN_W}
+      max={MAX_W}
+      resetTo={DEFAULT_W}
+      ariaLabel="Ticket panel"
     >
-      <EdgeResizeHandle edge="left" {...resize} />
-      <div className="flex min-h-0 flex-1 flex-col">
-        <IssuePanel />
-      </div>
-    </div>
+      {railTab === "issue" ? <IssuePanel /> : <QueuePane />}
+    </SidePanel>
   );
 }

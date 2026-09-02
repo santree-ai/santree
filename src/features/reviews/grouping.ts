@@ -1,200 +1,39 @@
 /**
- * How the Reviews sidebar decides what to show first.
+ * Two rules the review surfaces share: which PRs of an inbox belong to one
+ * project, and how a chain of stacked PRs hangs together.
  *
- * Pure functions over `ReviewPr`, kept out of the component so the rules that
- * actually drive the inbox — what "waiting on you" means, how long something has
- * waited, how big a review is — are testable and stated once.
- *
- * The organizing idea is that a review inbox is only useful if it answers "what
- * should I pick up next?". That's three signals, in priority order:
- *   1. **Is it mine to act on?** A direct request outranks a team request, and a PR
- *      you've already reviewed drops out until the author pushes again.
- *   2. **How long has it waited?** Measured from `waitingSince` (when *you* were
- *      asked), not from the PR's last update — a busy PR isn't a fresh one.
- *   3. **How big is it?** So a ten-minute gap can be spent on something finishable.
+ * Pure functions over `ReviewPr`, kept out of the components so they are
+ * testable and stated once. This was once the whole judgement layer behind a
+ * review inbox — "does this still need you", "how long has it waited". Those
+ * moved out in two steps: the inbox's *shape* to `reviewGroupsByProject` in
+ * `lib/queries.ts` when the app sidebar became the one place PRs are listed, and
+ * the per-PR verdicts with the landing page that was their last caller.
  */
-import type { ReviewPr, TicketRef } from "../../bindings";
-import {
-  groupByMilestone,
-  NO_MILESTONE as SHARED_NO_MILESTONE,
-  NO_PROJECT as SHARED_NO_PROJECT,
-} from "../../components/WorkSignals";
-
-/** How the sidebar's rows are bucketed into sections. */
-export type Grouping = "category" | "project" | "repo";
-
-/** What orders rows within a section. */
-export type SortMode = "waiting" | "updated" | "size";
-
-/** Whether a PR is still the viewer's to act on, or already had their verdict. */
-export type ReviewStance = "waiting-on-you" | "reviewed";
-
-/**
- * Where a PR sits in the viewer's review queue.
- *
- * `reviewed` is deliberately *not* sticky: a review you left before the author
- * pushed again is a review of code that no longer exists, so new commits move the
- * PR back to "waiting on you". Comparing against the head commit's date (rather
- * than the PR's `updatedAt`) is what makes that honest — a comment, a label, or a
- * CI re-run all bump `updatedAt` without changing a line of code.
- */
-export function stanceOf(pr: ReviewPr): ReviewStance {
-  if (!pr.viewerReview) return "waiting-on-you";
-  return pr.headCommittedAt > pr.viewerReview.submittedAt ? "waiting-on-you" : "reviewed";
-}
-
-/** Split a list into the PRs still waiting on the viewer and the ones they've
- *  already reviewed, preserving order within each. */
-export function splitByStance(prs: ReviewPr[]): { waiting: ReviewPr[]; reviewed: ReviewPr[] } {
-  const waiting: ReviewPr[] = [];
-  const reviewed: ReviewPr[] = [];
-  for (const pr of prs) (stanceOf(pr) === "reviewed" ? reviewed : waiting).push(pr);
-  return { waiting, reviewed };
-}
-
-/** Whole days a PR has been waiting on the viewer, floored. `now` is injected so
- *  this stays pure (and testable without freezing the clock). */
-export function waitingDays(pr: ReviewPr, now: number = Date.now()): number {
-  const since = Date.parse(pr.waitingSince);
-  // An unparseable timestamp must not read as "waiting since 1970" and rocket to
-  // the top of the queue — treat it as brand new instead.
-  if (Number.isNaN(since)) return 0;
-  return Math.max(0, Math.floor((now - since) / 86_400_000));
-}
-
-/** Human age for the row chip: "today", "1d", "6d", "3w". */
-export function waitingLabel(days: number): string {
-  if (days < 1) return "today";
-  if (days < 14) return `${days}d`;
-  return `${Math.floor(days / 7)}w`;
-}
-
-/** Review-effort t-shirt size, from the diff and how far it's spread. A 400-line
- *  change in one file reviews faster than 400 lines across thirty, so file count
- *  carries weight of its own rather than being a tiebreak. */
-export type PrSize = "XS" | "S" | "M" | "L" | "XL";
-
-export function sizeOf(pr: ReviewPr): PrSize {
-  const score = pr.additions + pr.deletions + pr.changedFiles * 20;
-  if (score < 50) return "XS";
-  if (score < 200) return "S";
-  if (score < 600) return "M";
-  if (score < 1500) return "L";
-  return "XL";
-}
-
-/** Comparators for the sort control. All are total orders (ties break on PR id)
- *  so the list can't shuffle between refetches of identical data. */
-const COMPARATORS: Record<SortMode, (a: ReviewPr, b: ReviewPr) => number> = {
-  // Oldest wait first — the whole point of the sort.
-  waiting: (a, b) => a.waitingSince.localeCompare(b.waitingSince) || a.id.localeCompare(b.id),
-  updated: (a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id),
-  size: (a, b) => {
-    const score = (p: ReviewPr) => p.additions + p.deletions + p.changedFiles * 20;
-    return score(a) - score(b) || a.id.localeCompare(b.id);
-  },
-};
-
-export function sortPrs(prs: ReviewPr[], mode: SortMode): ReviewPr[] {
-  return [...prs].sort(COMPARATORS[mode]);
-}
-
-/** One rendered block of the sidebar. */
-export interface PrGroup {
-  /** Stable key + heading. */
-  key: string;
-  label: string;
-  prs: ReviewPr[];
-  /** Project color/icon, when grouping by project. */
-  color?: string | null;
-  icon?: string | null;
-  targetDate?: string | null;
-}
-
-export interface PrMilestoneGroup {
-  key: string;
-  label: string;
-  targetDate: string | null;
-  sortOrder: number;
-  prs: ReviewPr[];
-}
+import type { ReviewInbox, ReviewPr } from "../../bindings";
 
 export interface StackedPr {
   pr: ReviewPr;
   depth: number;
 }
 
-/** Short "name" from an "owner/name" slug. */
-export function repoName(slug: string): string {
-  return slug.split("/").pop() ?? slug;
-}
-
 /**
- * Group a flat PR list for the project/repo groupings.
+ * The same inbox, holding only the PRs of one registered project.
  *
- * `ticketProject` maps a PR to its Linear project; PRs with no ticket (or whose
- * ticket Linear didn't return) land in a trailing "No project" block rather than
- * being dropped — an inbox that silently hides rows is worse than an untidy one.
- * Groups are ordered by their most-waiting member so the same "oldest first"
- * question the sort answers within a block is also answered between blocks.
+ * `project` is matched exactly, `null` included — which is how a PR from a repo
+ * you never cloned keeps its own scope rather than joining a leftover pile.
+ * A team left with nothing drops out entirely, so a section can't render as an
+ * empty heading.
  */
-export function groupPrs(
-  prs: ReviewPr[],
-  by: Exclude<Grouping, "category">,
-  sort: SortMode,
-  ticketFor: (pr: ReviewPr) => TicketRef | undefined,
-): PrGroup[] {
-  const groups = new Map<string, PrGroup>();
-  for (const pr of prs) {
-    const ticket = by === "project" ? ticketFor(pr) : undefined;
-    const key = by === "repo" ? pr.repo : (ticket?.project ?? NO_PROJECT);
-    const existing = groups.get(key);
-    if (existing) {
-      existing.prs.push(pr);
-      continue;
-    }
-    groups.set(key, {
-      key,
-      label: by === "repo" ? repoName(key) : key,
-      prs: [pr],
-      color: ticket?.projectColor,
-      icon: ticket?.projectIcon,
-      targetDate: ticket?.projectTargetDate,
-    });
-  }
-
-  const ordered = [...groups.values()];
-  for (const g of ordered) g.prs = sortPrs(g.prs, sort);
-  ordered.sort((a, b) => {
-    // The catch-all always sinks, however old its contents.
-    if (a.key === NO_PROJECT) return 1;
-    if (b.key === NO_PROJECT) return -1;
-    return COMPARATORS[sort](a.prs[0], b.prs[0]) || a.label.localeCompare(b.label);
-  });
-  return ordered;
-}
-
-/** Heading for PRs whose ticket carries no project (or that have no ticket).
- *
- * Re-exported from the shared constant rather than spelled again: the backend
- * hands a project-less issue the literal string `"No Project"`
- * (`linear.rs` `project_fields`), so a local `"No project"` split the inbox in
- * two — tickets *with* no project landed in one band (the `??` never fires on a
- * non-null sentinel) and PRs with no ticket at all in another, under headings
- * that differ by one letter. `NO_MILESTONE` was already shared for this reason. */
-export const NO_PROJECT = SHARED_NO_PROJECT;
-
-export const NO_MILESTONE = SHARED_NO_MILESTONE;
-
-/** Group one project's already-sorted PRs by their Linear milestone. Milestones
- * follow Linear's manual order; rows keep the parent group's review-queue order. */
-export function groupPrsByMilestone(
-  prs: ReviewPr[],
-  ticketFor: (pr: ReviewPr) => TicketRef | undefined,
-): PrMilestoneGroup[] {
-  return groupByMilestone(prs, (pr) => ticketFor(pr)?.projectMilestone).map(
-    ({ items, ...group }) => ({ ...group, prs: items }),
-  );
+export function inboxOfProject(inbox: ReviewInbox, project: string | null): ReviewInbox {
+  const mine = (prs: ReviewPr[]) => prs.filter((pr) => pr.project === project);
+  return {
+    ...inbox,
+    mine: mine(inbox.mine),
+    requested: mine(inbox.requested),
+    teams: inbox.teams
+      .map((team) => ({ ...team, prs: mine(team.prs) }))
+      .filter((team) => team.prs.length > 0),
+  };
 }
 
 /** Put a stacked PR immediately below the PR whose head ref is its base ref.
@@ -226,4 +65,40 @@ export function stackPrs(prs: ReviewPr[], maxDepth = 3): StackedPr[] {
   // Cycles or malformed duplicate identities must never make a PR disappear.
   for (const pr of prs) if (!seen.has(pr.id)) stacked.push({ pr, depth: 0 });
   return stacked;
+}
+
+/**
+ * Which vertical rules each stacked row's connector draws — the rule a file
+ * tree follows, for the reason a file tree follows it.
+ *
+ * Every row used to draw a rule at each of its ancestor columns, full height,
+ * and a half-height one at its own. In a chain (the ordinary stack: B on A, C on
+ * B) that renders a line down the *last* child's column even though nothing else
+ * hangs off it, and stops the parent's own rule at the elbow — so the guide
+ * broke and restarted with a gap between, which is what reads as cut.
+ *
+ * The rule instead: a column is drawn on this row only while the branch that
+ * owns it still has something below. Column `k` belongs to the ancestor at depth
+ * `k`, and it survives past this row only if a further child of that ancestor
+ * comes later — which, walking the flattened pre-order list backwards, is one
+ * boolean per column.
+ *
+ * Returned per row as `guides[k]`: "the rule at column k continues below this
+ * row". The row's own column (`k === depth - 1`) is the elbow's: false is the
+ * last child's `└`, true the `├` of one with a sibling still to come.
+ */
+export function stackGuides(rows: StackedPr[]): boolean[][] {
+  const guides: boolean[][] = Array.from({ length: rows.length });
+  // Per column: does anything below the row being visited still hang off it?
+  const alive: boolean[] = [];
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const depth = rows[i].depth;
+    guides[i] = Array.from({ length: depth }, (_, k) => alive[k] ?? false);
+    // This row is itself a child of column `depth - 1`, so that column reaches
+    // at least this far; and being at `depth` it closes every deeper column,
+    // whose branch cannot continue past a row shallower than it.
+    for (let k = depth; k < alive.length; k++) alive[k] = false;
+    if (depth > 0) alive[depth - 1] = true;
+  }
+  return guides;
 }

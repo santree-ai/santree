@@ -6,7 +6,12 @@
  *
  *  All of it used to be spread across a top bar and a bottom bar wrapped around
  *  the terminal, which is two rows of chrome describing a list neither of them
- *  could see. Facts and the actions that change them belong beside that list. */
+ *  could see. Facts and the actions that change them belong beside that list.
+ *
+ *  The worktree comes in as props so both rails can host it — Trees' own
+ *  worktree, and the local checkout of the PR you are reviewing. Everything here
+ *  is a fact about a branch on disk and holds either way; the one exception is
+ *  {@link CreatePrActions}, which Reviews leaves out. */
 import type { ChangedFile, Worktree } from "../../bindings";
 import { DownloadIcon, PrIcon, PullIcon, PushIcon } from "../../components/icons";
 import { Spinner } from "../../components/primitives";
@@ -18,20 +23,59 @@ import {
 } from "../../lib/queries";
 import { ChangesList } from "./ChangesList";
 import { CommitBox } from "./CommitBox";
-import { BASE_ID, useTrees } from "./model";
+import { BASE_ID, type FileScope } from "./model";
 
 /** Shared shape for the pane's small git actions. */
 const ACTION =
   "flex h-[20px] flex-none cursor-pointer items-center gap-1 rounded px-1.5 font-mono text-[10.5px] whitespace-nowrap text-muted-2 transition-colors hover:bg-hover hover:text-fg-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent";
 
-export function GitPanel({ status }: { status: ChangedFile[] | undefined }) {
-  const { repo, activeId, active, openPrDialog, prsByWorktree } = useTrees();
-  const { data: committed } = useWorktreeBranchChanges(repo, activeId);
+/** Opening a pull request for this branch — the one thing the pane cannot answer
+ *  for itself, since only the host knows whether the branch already has one.
+ *
+ *  Absent in the Reviews rail, and that is the point: you are looking at the pull
+ *  request, so there is none to create and nothing to suggest after a push. One
+ *  optional group rather than three optional props, so a host can't half-wire it
+ *  into a "Create PR" button that leads nowhere. */
+export interface CreatePrActions {
+  /** True once the branch has one. Hides the button and stops the after-commit
+   *  prompt — never a reason to hide the pane itself. */
+  hasPr: boolean;
+  /** Open the create-PR dialog for this worktree. */
+  open: () => void;
+  /** Called after a push lands, so the host can raise its own PR suggestion. */
+  suggestAfterPush: () => void;
+}
+
+export function GitPanel({
+  repo,
+  worktreeId,
+  worktree,
+  status,
+  selectedPath,
+  selectedScope,
+  onOpen,
+  createPr,
+}: {
+  repo: string;
+  worktreeId: string;
+  /** The worktree row itself — its branch, its counters, the base it stands on.
+   *  Null while the list is still loading, which drops the header rather than
+   *  rendering a branch it can't name. */
+  worktree: Worktree | null;
+  status: ChangedFile[] | undefined;
+  selectedPath: string | null;
+  selectedScope: FileScope;
+  /** See {@link ChangesList.onOpen} — absent leaves the file names inert. */
+  onOpen?: (path: string, scope: FileScope) => void;
+  createPr?: CreatePrActions;
+}) {
+  const { data: committed } = useWorktreeBranchChanges(repo, worktreeId);
   // The one action the branch's state calls for: offered while it is ahead of
-  // its base with no PR yet (the primary checkout included — its base is the
-  // default branch, so a feature branch checked out at the root qualifies too).
-  const hasPr = (prsByWorktree.get(activeId) ?? []).length > 0;
-  const canCreatePr = !!active && active.ahead > 0 && !hasPr;
+  // its base with no PR yet, and only where the host can open one (the primary
+  // checkout included — its base is the default branch, so a feature branch
+  // checked out at the root qualifies too).
+  const openPr =
+    createPr && !createPr.hasPr && worktree && worktree.ahead > 0 ? createPr.open : null;
   // The branch's size is the sum of what it has committed against its base —
   // the same merge-base diff the "Committed on branch" list shows — not the
   // worktree entry's own counters, which the primary checkout reports as zero.
@@ -42,13 +86,13 @@ export function GitPanel({ status }: { status: ChangedFile[] | undefined }) {
 
   return (
     <>
-      {active && (
+      {worktree && (
         <div className="flex flex-none flex-col gap-1 border-b border-line px-3 py-2.5">
-          {canCreatePr && (
+          {openPr && (
             <div className="mb-1 flex items-center">
               <button
                 type="button"
-                onClick={() => openPrDialog(activeId)}
+                onClick={openPr}
                 title="Open a pull request for this branch"
                 className="flex h-6 cursor-pointer items-center gap-1.5 rounded-full bg-fg px-2.5 text-[11px] font-semibold text-app transition-opacity hover:opacity-85"
               >
@@ -60,9 +104,9 @@ export function GitPanel({ status }: { status: ChangedFile[] | undefined }) {
           <div className="flex items-center gap-2">
             <span
               className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-2"
-              title={active.branch}
+              title={worktree.branch}
             >
-              {active.branch}
+              {worktree.branch}
             </span>
             {size && (
               <span
@@ -75,22 +119,33 @@ export function GitPanel({ status }: { status: ChangedFile[] | undefined }) {
             )}
           </div>
           <div className="flex items-center gap-1">
-            <BaseSync worktree={active} />
+            <BaseSync repo={repo} worktree={worktree} />
             <span className="min-w-1 flex-1" />
-            <PullRemote worktree={active} />
-            <Push worktree={active} />
+            <PullRemote repo={repo} worktree={worktree} />
+            <Push repo={repo} worktree={worktree} onPushed={createPr?.suggestAfterPush} />
           </div>
         </div>
       )}
 
       {/* Keyed per worktree so each gets its own persisted-draft instance. */}
       <CommitBox
-        key={activeId}
+        key={worktreeId}
+        repo={repo}
+        worktreeId={worktreeId}
         stagedCount={(status ?? []).filter((f) => f.staged).length}
         totalCount={status?.length ?? 0}
+        createPr={createPr}
       />
 
-      <ChangesList files={status} committed={committed} />
+      <ChangesList
+        repo={repo}
+        worktreeId={worktreeId}
+        files={status}
+        committed={committed}
+        selectedPath={selectedPath}
+        selectedScope={selectedScope}
+        onOpen={onOpen}
+      />
     </>
   );
 }
@@ -104,8 +159,7 @@ export function GitPanel({ status }: { status: ChangedFile[] | undefined }) {
  *  Syncing the *local base branch itself* from origin is a repo-level action that
  *  never touches this worktree, so it stays on the sidebar's base entry rather
  *  than becoming a second thing this button might mean. */
-function BaseSync({ worktree }: { worktree: Worktree }) {
-  const { repo } = useTrees();
+function BaseSync({ repo, worktree }: { repo: string; worktree: Worktree }) {
   const { mutate: pull, isPending } = usePullWorktree(repo);
   const { ahead, behind, baseBranch } = worktree;
   // The base entry has no base of its own to be measured against.
@@ -137,8 +191,7 @@ function BaseSync({ worktree }: { worktree: Worktree }) {
  *  origin/<branch> when it can, else merges. Disabled rather than hidden when the
  *  pull would conflict, so the count is still readable and the tooltip says where
  *  to resolve it. */
-function PullRemote({ worktree }: { worktree: Worktree }) {
-  const { repo } = useTrees();
+function PullRemote({ repo, worktree }: { repo: string; worktree: Worktree }) {
   const { mutate: pullRemote, isPending } = usePullRemoteWorktree(repo);
   const n = worktree.remoteBehind;
   if (n === 0) return null;
@@ -164,18 +217,25 @@ function PullRemote({ worktree }: { worktree: Worktree }) {
 
 /** "Push" — only while the branch has commits its remote doesn't. Pushes to
  *  origin (setting upstream); the count clears on the next worktree refetch. */
-function Push({ worktree }: { worktree: Worktree }) {
-  const { repo, suggestPr } = useTrees();
+function Push({
+  repo,
+  worktree,
+  onPushed,
+}: {
+  repo: string;
+  worktree: Worktree;
+  /** What follows a push, when the host has something to follow it with. */
+  onPushed?: () => void;
+}) {
   const { mutate: push, isPending } = usePushWorktree(repo);
-  const isBase = worktree.id === BASE_ID;
+  // Nothing to suggest for the base branch — you don't open a PR against main.
+  const suggest = worktree.id === BASE_ID ? undefined : onPushed;
   const n = worktree.unpushed;
   if (n === 0) return null;
   return (
     <button
       type="button"
-      onClick={() =>
-        push(worktree.id, isBase ? undefined : { onSuccess: () => suggestPr(worktree.id) })
-      }
+      onClick={() => push(worktree.id, suggest ? { onSuccess: suggest } : undefined)}
       disabled={isPending}
       title={`Push ${n} commit${n === 1 ? "" : "s"} to origin`}
       className={ACTION}

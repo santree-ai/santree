@@ -2,10 +2,8 @@
  * Global keyboard shortcuts, mounted once in the app shell.
  *
  * ⌘; / ⌘, → Settings · ⌘1…⌘N → the sidebar's destinations in `SidebarNav` order
- * (Triage when enabled, then Tickets and Reviews) · ⌘B → sidebar · ⌘⇧R → re-pull
- * Linear and GitHub · Esc → back to the view Settings was opened from. The
- * destination routes are guarded by the views themselves, so an unavailable
- * target (e.g. Triage while disabled) simply redirects back.
+ * (Tickets, today the only one) · ⌘B → sidebar · ⌘⇧R → re-pull Linear and
+ * GitHub · Esc → back to the view Settings was opened from.
  *
  * Also home to {@link targetOwnsKey}, the guard the view-local shortcut
  * listeners share so they all treat text fields and terminals the same way.
@@ -13,9 +11,8 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 
-import { useAppOptional, useAppUiOptional } from "../state/AppContext";
+import { useAppUiOptional } from "../state/AppContext";
 import { useRefreshExternal } from "./queries";
-import { applyZoom, DEFAULT_ZOOM, loadZoom, step } from "./zoom";
 
 /** True when focus is in a field where keystrokes should be left alone. */
 export function inEditable(target: EventTarget | null): boolean {
@@ -31,7 +28,7 @@ export function inEditable(target: EventTarget | null): boolean {
 /** True when focus is inside a terminal — xterm's hidden helper textarea, which
  *  reads as a plain TEXTAREA to {@link inEditable}. `.xterm` is the class xterm
  *  puts on the element it owns (and what its stylesheet targets). */
-function inTerminal(target: EventTarget | null): boolean {
+export function inTerminal(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   return el?.closest?.(".xterm") != null;
 }
@@ -80,9 +77,7 @@ export function useKeyboardShortcuts() {
   const navigate = useNavigate();
   // Optional: this runs in the route root, which can render for a tick before
   // the app provider during a hot reload — degrade gracefully, never crash.
-  const app = useAppOptional();
   const ui = useAppUiOptional();
-  const triageEnabled = app?.triageEnabled ?? false;
   const toggleSidebar = ui?.toggleSidebar;
   const toggleShortcuts = ui?.toggleShortcuts;
   const toggleCommandPalette = ui?.toggleCommandPalette;
@@ -107,21 +102,7 @@ export function useKeyboardShortcuts() {
 
       const mod = e.metaKey || e.ctrlKey;
 
-      // Text size. Checked before the shift guard below, because ⌘+ *is* a shifted
-      // chord on most layouts (⌘⇧=) — and handled even inside a focused terminal,
-      // since scaling the app is chrome, not something a shell can mean.
       if (mod && !e.altKey) {
-        const dir = e.key === "+" || e.key === "=" ? 1 : e.key === "-" || e.key === "_" ? -1 : 0;
-        if (dir !== 0) {
-          e.preventDefault();
-          applyZoom(step(loadZoom(), dir as 1 | -1));
-          return;
-        }
-        if (e.key === "0") {
-          e.preventDefault();
-          applyZoom(DEFAULT_ZOOM);
-          return;
-        }
         // ⌘⇧R — re-pull Linear + GitHub. Shifted on purpose (plain ⌘R is the
         // webview's own reload), which is also why it's handled up here, above
         // the guard below that drops every shifted chord. `e.key` is the shifted
@@ -161,12 +142,14 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      // ⌘1…⌘N map to the sidebar's destinations, top to bottom: Triage when
-      // enabled, Tickets, then Reviews. Keep this in sync with `SidebarNav` so
-      // the numbers match what's on screen. The workspace (`/trees`) is
-      // deliberately unnumbered — it is reached by picking a worktree — and ⌘0 is
-      // already the zoom reset.
-      const paths = [...(triageEnabled ? ["/triage"] : []), "/issues", "/reviews"];
+      // ⌘1…⌘N map to the sidebar's destinations, top to bottom. Keep this in
+      // sync with `SidebarNav` so the numbers match what's on screen — Reviews
+      // and Triage both left the nav (each is a section of the tree now, reached
+      // by picking a row), so they left the numbers with them rather than
+      // becoming shortcuts to rows nobody can see. The workspace (`/trees`) is
+      // deliberately unnumbered — it is reached by picking a worktree. ⌘0 falls
+      // through to nothing: the ladder is 1-based, so index −1 matches no path.
+      const paths = ["/issues"];
       const idx = Number(e.key) - 1;
       const to = Number.isInteger(idx) && idx >= 0 ? paths[idx] : undefined;
       if (to) {
@@ -177,13 +160,5 @@ export function useKeyboardShortcuts() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [
-    navigate,
-    pathname,
-    triageEnabled,
-    toggleSidebar,
-    toggleShortcuts,
-    toggleCommandPalette,
-    refresh,
-  ]);
+  }, [navigate, pathname, toggleSidebar, toggleShortcuts, toggleCommandPalette, refresh]);
 }

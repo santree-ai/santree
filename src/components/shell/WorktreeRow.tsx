@@ -6,15 +6,16 @@
  * highlight covers them too. Inside, an agent row can still take its own hover —
  * they composite, so a hovered agent reads on a selected card.
  *
- * **Line one is identity.** A leading branch glyph on the repo's own checkout,
- * the title, and at the trailing edge a `primary` tag on that same checkout plus
- * the marks of what this work is linked to (its Linear ticket, its GitHub PR).
+ * **Line one is identity.** A leading branch glyph, the title, and at the trailing
+ * edge a `primary` tag on the repo's own checkout plus the marks of what this work
+ * is linked to (its Linear ticket, its GitHub PR).
  * The marks moved up here from the branch line because that is what they
  * describe — the *work*, not the ref it happens to live on.
  *
  * That checkout needs telling apart: it is not a ticket, and a row of otherwise
- * identical cards gives you nothing to distinguish it by. It gets **a glyph and
- * a word**, at the two ends of the line, rather than a treatment of the card —
+ * identical cards gives you nothing to distinguish it by. It gets **a word** at
+ * the trailing edge (the glyph now leads every worktree, so it marks the kind of
+ * row rather than this one), rather than a treatment of the card —
  * an edge around the whole row (tried: a dashed outline) reads as a state, which
  * on a rail whose card fills already mean hover and selection is a third thing
  * competing for the same channel. The tag is grey and not tinted for the same
@@ -49,23 +50,11 @@ import { BranchIcon, LinearLogo } from "../icons";
 import { MarkdownTitle } from "../Markdown";
 import { PrMark } from "../PrChip";
 import { Spinner } from "../primitives";
+import { CARD_GLYPH, CARD_INSET, CARD_LABEL_X, INDENT_PX } from "../WorkSignals";
 import { AgentRow } from "./AgentRow";
 import { AgentSummaryRow } from "./AgentSummaryRow";
 import type { AgentNode, WorktreeNode } from "./useProjectTree";
 import { WorktreeMenu } from "./WorktreeMenu";
-
-/** Width of one nesting level. Small on purpose: the tree is three levels deep
- *  before a stacked branch adds any, and a wider step starves the text column in
- *  a sidebar that is only a few hundred pixels across. */
-export const INDENT_PX = 14;
-
-/** How far the card overhangs its own row's text. The highlight starts one inset
- *  before the title rather than at the rail's edge, so it reads as an object you
- *  picked and not as a band across the window — a card under a milestone heading
- *  stays inside its group instead of stretching left past it. The text pays the
- *  inset back as padding, so its gutter is absolute and nothing shifts when the
- *  card lights up. */
-const CARD_INSET = 6;
 
 /** What the branch glyph on a `primary` row means. Deliberately not "the default
  *  branch": the flag marks the repo's own checkout, which sits on whatever branch
@@ -86,7 +75,7 @@ export function WorktreeRow({
   indent,
   selected,
   onSelect,
-  onOpenPane,
+  onOpenPage,
   onOpenAgent,
 }: {
   repo: string;
@@ -95,9 +84,9 @@ export function WorktreeRow({
   /** This is the worktree the workspace view has open. */
   selected: boolean;
   onSelect: () => void;
-  /** Open this worktree with a given right-panel pane showing — what the Linear
-   *  and GitHub marks do. */
-  onOpenPane: (pane: TreeFocusPane) => void;
+  /** Open this worktree with its ticket or its pull request expanded into a
+   *  main tab — what the Linear and GitHub marks do. */
+  onOpenPage: (page: TreeFocusPane) => void;
   onOpenAgent: (agent: AgentNode) => void;
 }) {
   const { worktree: w, prs, task, agents } = node;
@@ -146,15 +135,15 @@ export function WorktreeRow({
         ) : (
           <>
             {/* Leads the line rather than trailing it: read left to right, the
-                glyph says "this one is a branch checkout" before the name lands,
-                and the name is then the only thing that varies down the column.
-                Decorative to a screen reader — the `primary` tag below says the
-                same thing in words, and the row's tooltip says it in full. */}
-            {node.primary && (
-              <span aria-hidden className="flex flex-none items-center text-muted-3">
-                <BranchIcon size={12} />
-              </span>
-            )}
+                glyph says "this row is a checkout" before the name lands, and the
+                name is then the only thing that varies down the column. Every
+                worktree carries it, so what tells the repo's *own* checkout apart
+                is the `primary` tag at the other end — the glyph marks the kind
+                of row, the word marks the one that is special. Decorative to a
+                screen reader; the tag says it in words and the tooltip in full. */}
+            <span aria-hidden className="flex flex-none items-center text-muted-4">
+              <BranchIcon size={CARD_GLYPH} />
+            </span>
             <MarkdownTitle
               className={`min-w-0 flex-1 truncate text-[13px] leading-5 ${
                 selected ? "font-medium text-fg" : "font-medium text-fg-2"
@@ -172,7 +161,7 @@ export function WorktreeRow({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      onOpenPane("issue");
+                      onOpenPage("issue");
                     }}
                     title={`Linear · ${task.id} — open the ticket`}
                     aria-label={`Open the Linear ticket for ${w.title || w.id}`}
@@ -181,10 +170,11 @@ export function WorktreeRow({
                     <LinearLogo size={11} />
                   </button>
                 )}
-                {/* Both marks open the same panel, on their own pane: the mark
-                    says what this worktree is linked to, so pressing it should
-                    show that thing — not leave the app for github.com. */}
-                <PrMark prs={prs} onOpen={() => onOpenPane("pr")} className={MARK_CLASS} />
+                {/* Both marks open the thing they name, at reading width, as a
+                    main tab: the mark says what this worktree is linked to, so
+                    pressing it should show that thing — not a column beside the
+                    work, and not github.com. */}
+                <PrMark prs={prs} onOpen={() => onOpenPage("pr")} className={MARK_CLASS} />
               </span>
             )}
           </>
@@ -192,14 +182,14 @@ export function WorktreeRow({
       </div>
 
       {agents.length === 1 && (
-        <AgentRow node={agents[0]} indent={CARD_INSET} onOpen={() => onOpenAgent(agents[0])} />
+        <AgentRow node={agents[0]} indent={CARD_LABEL_X} onOpen={() => onOpenAgent(agents[0])} />
       )}
       {agents.length > 1 && (
         <AgentSummaryRow
           agents={agents}
           expanded={expanded}
           onToggle={() => setExpanded((open) => !open)}
-          indent={CARD_INSET}
+          indent={CARD_LABEL_X}
         />
       )}
       {agents.length > 1 &&
@@ -208,7 +198,7 @@ export function WorktreeRow({
           <AgentRow
             key={agentKey(agent.entry)}
             node={agent}
-            indent={CARD_INSET + INDENT_PX}
+            indent={CARD_LABEL_X + INDENT_PX}
             onOpen={() => onOpenAgent(agent)}
           />
         ))}

@@ -1,32 +1,29 @@
 /**
  * The single right-panel view for the focused issue: header + an "Add to queue"
  * control, then its dependencies (blocked by / blocks) and the Linear body +
- * comment thread. There's no separate Inspector tab — everything about the issue
- * lives here. The detail is fetched lazily (and prewarmed on graph hover).
+ * comment thread, with the notes pinned under it. There's no separate Inspector
+ * tab — everything about the issue lives here, which is why it is the Tickets
+ * rail's one pane (`RightPanel`) rather than the narrower `IssuePane` Trees
+ * consults beside a worktree. The detail is fetched lazily (and prewarmed on
+ * graph hover).
  */
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import type { Task, Worktree, WorktreePr } from "../../bindings";
+import type { Worktree, WorktreePr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { DiscussionContent } from "../../components/IssueDiscussion";
-import {
-  BlockedIcon,
-  BranchIcon,
-  CheckIcon,
-  ChevronDownIcon,
-  CloseIcon,
-  LinearLogo,
-  PlusIcon,
-} from "../../components/icons";
+import { factsOfTask, IssueProperties } from "../../components/IssueProperties";
+import { BlockedIcon, BranchIcon, CheckIcon, LinearLogo, PlusIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
-import { Button, Dot, EmptyState, Skeleton } from "../../components/primitives";
+import { Button, EmptyState, Skeleton } from "../../components/primitives";
 import { RelativeTime } from "../../components/RelativeTime";
+import { StatusGlyph } from "../../components/WorkSignals";
 import { WorktreeStats } from "../../components/WorktreeStats";
 import { useTriageDetail } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
-import { alpha, palette, statusColor, statusLabel } from "../../theme/colors";
+import { palette, raisedActiveStyle, statusColor, statusLabel } from "../../theme/colors";
 import { BlockerRow } from "./BlockerRow";
 import { useIssues } from "./model";
 import { TaskNotes } from "./TaskNotes";
@@ -71,17 +68,13 @@ export function IssuePanel() {
     byId,
     focusId,
     selected,
-    selectedEligible,
     isEligible,
     baseFor,
     toggle,
-    setFocus,
-    clearSelection,
     worktreeById,
     prByTask,
     goToWorktree,
     revealInGraph,
-    toggleRightPanel,
     queueEnabled,
     run,
     runBackground,
@@ -148,66 +141,39 @@ export function IssuePanel() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {selectedEligible.length > 0 && (
-        <QueueBar
-          items={selectedEligible}
-          focusId={focus.id}
-          onFocus={setFocus}
-          onRemove={toggle}
-          onClear={clearSelection}
-        />
-      )}
       <div className="flex-none border-b border-hairline px-5 pt-4 pb-3.5">
         <div className="mb-1.5 flex items-center gap-2">
           <span className="font-mono text-[11px] text-muted-2">{focus.id}</span>
           <span className="flex items-center gap-1.5 text-[11px] text-muted-2">
-            <Dot color={statusColor[focus.status]} size={7} />
+            <StatusGlyph status={focus.status} size={12} />
             {statusLabel[focus.status]}
           </span>
-          <div className="ml-auto flex items-center gap-1.5">
-            {ready && (
-              <button
-                type="button"
-                onClick={() => openUrl(ready.url)}
-                title="Open in Linear"
-                className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 py-1 text-[10.5px] text-muted-2 hover:text-fg-2"
-              >
-                <LinearLogo size={11} className="text-[color:var(--linear-brand)]" />
-                Open
-              </button>
-            )}
+          {/* No collapse control of its own: the panel's strip carries the one
+              shared toggle (see `RightPanel`), as every other right rail's does. */}
+          {ready && (
             <button
               type="button"
-              onClick={toggleRightPanel}
-              title="Collapse panel (⌘L)"
-              aria-label="Collapse panel"
-              className="flex flex-none cursor-pointer items-center rounded p-1 text-muted-4 hover:text-fg-2"
+              onClick={() => openUrl(ready.url)}
+              title="Open in Linear"
+              className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 py-1 text-[10.5px] text-muted-2 hover:text-fg-2"
             >
-              <span className="inline-block -rotate-90">
-                <ChevronDownIcon size={13} />
-              </span>
+              <LinearLogo size={11} className="text-[color:var(--linear-brand)]" />
+              Open
             </button>
-          </div>
+          )}
         </div>
         <MarkdownTitle className="block text-[15px] leading-[1.3] font-semibold text-fg-bright">
           {focus.title}
         </MarkdownTitle>
+        {/* The row knows everything but the labels, so the properties are there
+            before the detail lands; the author line waits for it. */}
+        <IssueProperties facts={factsOfTask(focus, ready)} dense className="mt-2" />
         {ready && (
-          <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[10.5px] text-muted-3">
-            <span className="flex items-center gap-1.5">
-              <Avatar name={ready.author} src={ready.authorAvatarUrl} size={15} />
-              {ready.author}
-            </span>
+          <div className="mt-2 flex items-center gap-1.5 text-[10.5px] text-muted-3">
+            <Avatar name={ready.author} src={ready.authorAvatarUrl} size={15} />
+            {ready.author}
             <span className="text-muted-5">·</span>
             <RelativeTime ms={ready.createdAtMs} />
-            {ready.labels.map((l) => (
-              <span
-                key={l}
-                className="rounded border border-line-2 bg-input px-1.5 py-px font-mono text-[9.5px] text-muted-2"
-              >
-                {l}
-              </span>
-            ))}
           </div>
         )}
 
@@ -305,81 +271,6 @@ export function IssuePanel() {
   );
 }
 
-/**
- * A compact strip of the currently-queued tickets, pinned above the issue detail
- * so the launch queue stays visible while you read any one ticket. Click a chip
- * to focus that ticket; the × removes it from the queue. The focused ticket's
- * chip is highlighted so you can tell where you are within the queue.
- */
-function QueueBar({
-  items,
-  focusId,
-  onFocus,
-  onRemove,
-  onClear,
-}: {
-  items: Task[];
-  focusId: string;
-  onFocus: (id: string) => void;
-  onRemove: (id: string) => void;
-  onClear: () => void;
-}) {
-  return (
-    <div className="flex-none border-b border-hairline bg-well px-4 pt-2.5 pb-2">
-      <div className="mb-1.5 flex items-center gap-1.5">
-        <span className="font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">Queue</span>
-        <span className="font-mono text-[10px] text-muted-3">{items.length}</span>
-        <button
-          type="button"
-          onClick={onClear}
-          className="ml-auto cursor-pointer text-[10.5px] text-muted-4 hover:text-muted"
-        >
-          clear
-        </button>
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {items.map((t) => {
-          const active = t.id === focusId;
-          return (
-            <span
-              key={t.id}
-              className="flex items-center gap-1 rounded-md border py-0.5 pr-1 pl-1.5"
-              style={
-                active
-                  ? { borderColor: alpha(40), background: alpha(12) }
-                  : { borderColor: "var(--color-line-2)", background: "var(--color-input)" }
-              }
-            >
-              <button
-                type="button"
-                onClick={() => onFocus(t.id)}
-                title={t.title}
-                className="flex cursor-pointer items-center gap-1.5"
-              >
-                <Dot color={statusColor[t.status]} size={6} />
-                <span
-                  className="font-mono text-[10px]"
-                  style={{ color: active ? "var(--accent-text)" : "var(--color-fg-3)" }}
-                >
-                  {t.id}
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => onRemove(t.id)}
-                aria-label={`Remove ${t.id} from queue`}
-                className="flex cursor-pointer items-center rounded p-0.5 text-muted-4 hover:text-fg-2"
-              >
-                <CloseIcon size={10} />
-              </button>
-            </span>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 /** True while ⌘ (macOS) / Ctrl is held down anywhere in the window, so a control
  *  can preview what a modifier-click will do. Resets on window blur so a missed
  *  keyup (e.g. after ⌘-Tab) can't leave it stuck on. */
@@ -403,18 +294,33 @@ function useModifierHeld() {
 /** The queue-off "Run" button. Its label previews the action: holding ⌘/Ctrl
  *  flips "Run" → "Run in background" (the same modifier the click reads), so the
  *  background launch is discoverable rather than a hidden shortcut. */
-function RunButton({ onRun, onRunBackground }: { onRun: () => void; onRunBackground: () => void }) {
+function RunButton({
+  onRun,
+  onRunBackground,
+  className = "",
+}: {
+  onRun: () => void;
+  onRunBackground: () => void;
+  className?: string;
+}) {
   const modifierHeld = useModifierHeld();
   return (
     <Button
-      variant="tinted"
+      // The panel's one action, so the one solid fill on it. It was `tinted` — a
+      // grey fill inside a darker rim — which in light mode, where the accent is
+      // near-black, read as a pressed, half-disabled button.
+      variant="primary"
       size="lg"
       onClick={(e) => (e.metaKey || e.ctrlKey ? onRunBackground() : onRun())}
       title="Run now. ⌘-click to run in the background."
-      className="w-full transition-colors"
-      // Armed look while ⌘/Ctrl is held: a stronger fill + accent border makes
-      // the background-launch mode unmistakable, matching the swapped label.
-      style={modifierHeld ? { background: alpha(22), borderColor: "var(--accent)" } : undefined}
+      className={`transition-[box-shadow,opacity] ${className}`}
+      // Armed look while ⌘/Ctrl is held: a ring held off the fill, matching the
+      // swapped label, so the background-launch mode is unmistakable.
+      style={
+        modifierHeld
+          ? { boxShadow: "0 0 0 2px var(--color-app), 0 0 0 3px var(--accent)" }
+          : undefined
+      }
     >
       <span className="text-[10px]">▶</span>
       {modifierHeld ? "Run in background" : "Run"}
@@ -451,20 +357,28 @@ function QueueControl({
   onRunBackground: () => void;
 }) {
   if (eligible) {
-    const control = !queueEnabled ? (
-      <RunButton onRun={onRun} onRunBackground={onRunBackground} />
-    ) : (
+    // Queueing is the secondary control — the queue's own pane launches — so it
+    // wears the neutral chip, raised while the ticket is in. With the queue
+    // setting off it sits beside Run; with it on, it is the whole control.
+    const queueToggle = (
       <Button
-        variant="tinted"
         size="lg"
         onClick={onToggle}
-        title={queued ? "Remove from queue" : "Add to the work queue"}
-        className="w-full"
-        style={queued ? { background: alpha(20), borderColor: alpha(40) } : undefined}
+        title={queued ? "Remove from the launch queue" : "Add to the launch queue"}
+        className={queueEnabled ? "w-full" : "flex-none"}
+        style={queued ? raisedActiveStyle() : undefined}
       >
         {queued ? <CheckIcon size={14} /> : <PlusIcon size={14} />}
-        {queued ? "Queued" : "Add to queue"}
+        {queued ? "Queued" : queueEnabled ? "Add to queue" : "Queue"}
       </Button>
+    );
+    const control = queueEnabled ? (
+      queueToggle
+    ) : (
+      <div className="flex gap-1.5">
+        <RunButton onRun={onRun} onRunBackground={onRunBackground} className="min-w-0 flex-1" />
+        {queueToggle}
+      </div>
     );
     if (!chainBase) return control;
     return (

@@ -20,7 +20,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { formatElapsed, useElapsed } from "../lib/useElapsed";
-import { alpha } from "../theme/colors";
+import { alpha, raisedActiveStyle } from "../theme/colors";
 import { ChevronDownIcon } from "./icons";
 
 /** The visual tiers a labeled action button can have. One filled style per
@@ -405,6 +405,46 @@ export function EmptyState({
  * sets the real `disabled` attribute (so it's unreachable/announced as
  * disabled by assistive tech, not just click-swallowed) and dims the control.
  */
+/** The switch's two sizes: the settings list's, and one that fits inside a
+ *  24px toolbar chip beside its own label. */
+const SWITCH_SIZE = {
+  md: { w: 38, h: 21, knob: 17 },
+  sm: { w: 26, h: 14, knob: 10 },
+} as const;
+
+/** The switch's track and knob on their own — what {@link Toggle} draws, and
+ *  what a control that puts its label *inside* the switch's button (the Tickets
+ *  header's filter) draws beside the words. One drawing, so the two can't
+ *  drift. Decorative: the state lives on the button around it. */
+export function SwitchTrack({ on, size = "md" }: { on: boolean; size?: keyof typeof SWITCH_SIZE }) {
+  const m = SWITCH_SIZE[size];
+  return (
+    <span
+      aria-hidden
+      className="relative block flex-none rounded-full transition-colors duration-150"
+      // The monochrome accent means the on-track is the inversion slab
+      // (--accent-fill), so the knob must invert with it (--on-accent) — a
+      // white knob on the dark theme's white fill is invisible.
+      style={{
+        width: m.w,
+        height: m.h,
+        background: on ? "var(--accent-fill)" : "var(--color-line-3)",
+      }}
+    >
+      <span
+        className="absolute top-[2px] rounded-full transition-[left,background-color] duration-150"
+        style={{
+          width: m.knob,
+          height: m.knob,
+          left: on ? m.w - m.knob - 2 : 2,
+          background: on ? "var(--on-accent)" : "#fff",
+          boxShadow: "0 1px 2px rgba(0,0,0,.4)",
+        }}
+      />
+    </span>
+  );
+}
+
 export function Toggle({
   on,
   onClick,
@@ -427,20 +467,9 @@ export function Toggle({
       aria-checked={on}
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledBy}
-      className="relative h-[21px] w-[38px] flex-none cursor-pointer rounded-full border-none transition-colors duration-150 disabled:cursor-default disabled:opacity-45"
-      // The monochrome accent means the on-track is the inversion slab
-      // (--accent-fill), so the knob must invert with it (--on-accent) — a
-      // white knob on the dark theme's white fill is invisible.
-      style={{ background: on ? "var(--accent-fill)" : "var(--color-line-3)" }}
+      className="flex flex-none cursor-pointer rounded-full border-none bg-transparent p-0 disabled:cursor-default disabled:opacity-45"
     >
-      <span
-        className="absolute top-[2px] h-[17px] w-[17px] rounded-full transition-[left,background-color] duration-150"
-        style={{
-          left: on ? 18 : 2,
-          background: on ? "var(--on-accent)" : "#fff",
-          boxShadow: "0 1px 2px rgba(0,0,0,.4)",
-        }}
-      />
+      <SwitchTrack on={on} />
     </button>
   );
 }
@@ -524,16 +553,12 @@ export function Segmented<T extends string>({
     >
       {options.map((opt, i) => {
         const active = opt.value === value;
-        // The checked option is *raised*, not tinted. A segmented control picks
-        // how one thing is filtered or drawn — Mine/All, List/Graph — which is a
-        // smaller claim than the accent's "this is the current destination", and
-        // an accent pill inside a toolbar competes with the content it describes.
+        // The checked option is *raised*, not tinted (see `raisedActiveStyle`):
+        // a segmented control picks how one thing is filtered or drawn — List/
+        // Graph — which is a smaller claim than the accent's "this is the current
+        // destination".
         const style: CSSProperties = active
-          ? {
-              background: "var(--color-raised-2)",
-              border: "1px solid var(--color-line-2)",
-              color: "var(--color-fg)",
-            }
+          ? raisedActiveStyle()
           : { border: "1px solid transparent", color: "var(--color-muted-2)" };
         return (
           // biome-ignore lint/a11y/useSemanticElements: custom-styled segmented control, not a native radio input.
@@ -617,6 +642,7 @@ export function Tabs<T extends string>({
   className,
   tabClassName,
   variant = "border",
+  rule = true,
   accent = "var(--accent)",
 }: {
   tabs: TabItem<T>[];
@@ -625,6 +651,10 @@ export function Tabs<T extends string>({
   className?: string;
   tabClassName?: string;
   variant?: TabsVariant;
+  /** Draw the strip's own bottom rule. Off when the *host* draws it instead —
+   *  a columned strip inside a full-width band, where the rule belongs to the
+   *  band or it stops short of the page. */
+  rule?: boolean;
   accent?: string;
 }) {
   const inset = variant === "inset";
@@ -633,7 +663,7 @@ export function Tabs<T extends string>({
     <div
       role="tablist"
       onKeyDown={onTabStripKeyDown}
-      className={`flex items-center gap-1 ${inset ? "" : "border-b border-line"} ${className ?? ""}`}
+      className={`flex items-center gap-1 ${inset || !rule ? "" : "border-b border-line"} ${className ?? ""}`}
     >
       {tabs.map((t, i) => {
         const active = t.value === value;
@@ -698,6 +728,7 @@ export function Pill({
   className,
   title,
   onClick,
+  ...aria
 }: {
   color: string;
   children: ReactNode;
@@ -706,7 +737,10 @@ export function Pill({
   /** Renders as a clickable `<button>` instead of a plain `<span>` when set —
    *  e.g. {@link PrChip}'s pressable PR pill. Visual output is otherwise identical. */
   onClick?: (e: ReactMouseEvent<HTMLButtonElement>) => void;
-}) {
+  /* The button form's accessible name and menu-button pair — what `Dropdown`
+     sets on its trigger, and what a pill whose visible label changes on hover
+     needs in order to keep one stable name. Dropped on the plain span. */
+} & Pick<ComponentProps<"button">, "aria-label" | "aria-haspopup" | "aria-expanded">) {
   const style: CSSProperties = {
     color,
     background: alpha(12, color),
@@ -721,6 +755,7 @@ export function Pill({
         onClick={onClick}
         className={`cursor-pointer ${classes}`}
         style={style}
+        {...aria}
       >
         {children}
       </button>
@@ -992,63 +1027,30 @@ export type ContextMenuItem =
  * because a context menu is a fixed list of actions on one object; giving each
  * call site the menu's chrome to re-render is how two menus drift apart.
  *
- * The menu is portaled to `document.body`, above the terminal overlay's stacking
- * context, and pulled back inside the viewport once its real size is known — a
- * row near the bottom edge would otherwise open a menu running off-screen.
+ * The surface is {@link PositionedMenu}, which stands on its own for the one
+ * host that has no region to wrap: the graph, where the row is a React Flow node
+ * and the right-click arrives as a canvas event with coordinates.
  */
 export function ContextMenu({
   items,
   children,
   className,
-  menuClassName = "w-52",
+  menuClassName,
+  onOpen,
 }: {
   items: ContextMenuItem[];
   /** The region that owns the menu. */
   children: ReactNode;
   className?: string;
   menuClassName?: string;
+  /** Called as the menu opens — for a host whose rows hang on a read that isn't
+   *  worth making until someone asks (the review rail's checkout lookup). */
+  onOpen?: () => void;
 }) {
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const restoreTo = useRef<HTMLElement | null>(null);
   const close = useCallback(() => setAt(null), []);
-
-  useDismiss(at !== null, close, [menuRef]);
-
-  // Measure, then clamp. Runs before paint, so the menu never shows at the
-  // unclamped position first.
-  useLayoutEffect(() => {
-    if (!at) {
-      setPos(null);
-      return;
-    }
-    const el = menuRef.current;
-    if (!el) return;
-    const { width, height } = el.getBoundingClientRect();
-    const margin = 8;
-    setPos({
-      left: Math.max(margin, Math.min(at.x, window.innerWidth - width - margin)),
-      top: Math.max(margin, Math.min(at.y, window.innerHeight - height - margin)),
-    });
-  }, [at]);
-
-  // Focus the first row on open and hand focus back on close, so a keyboard user
-  // isn't stranded on <body> — but only if the close didn't already move focus
-  // somewhere real.
-  const placed = at !== null && pos !== null;
-  useEffect(() => {
-    if (!placed) return;
-    menuRef.current?.querySelector<HTMLElement>(MENU_ITEM_SELECTOR)?.focus();
-    return () => {
-      const active = document.activeElement;
-      const stranded = !active || active === document.body || !!menuRef.current?.contains(active);
-      if (stranded) restoreTo.current?.focus();
-    };
-  }, [placed]);
-
   const openAt = (x: number, y: number) => {
-    restoreTo.current = document.activeElement as HTMLElement | null;
+    onOpen?.();
     setAt({ x, y });
   };
 
@@ -1074,52 +1076,115 @@ export function ContextMenu({
       }}
     >
       {children}
-      {at &&
-        createPortal(
-          <div
-            ref={menuRef}
-            role="menu"
-            onKeyDown={(e) => roveMenu(e, menuRef.current)}
-            style={{
-              position: "fixed",
-              left: pos?.left ?? at.x,
-              top: pos?.top ?? at.y,
-              visibility: pos ? undefined : "hidden",
-            }}
-            className={`z-[200] rounded-lg border border-line-3 bg-raised py-1 shadow-lg ${menuClassName}`}
-          >
-            {items.map((item) =>
-              item.kind === "rule" ? (
-                <div key={item.key} className="my-1 border-t border-line" />
-              ) : item.kind === "heading" ? (
-                <div
-                  key={item.key}
-                  className="px-3 pt-1 pb-0.5 text-[10px] font-medium tracking-wide text-muted-4"
-                >
-                  {item.label}
-                </div>
-              ) : (
-                <button
-                  key={item.key}
-                  type="button"
-                  role="menuitem"
-                  disabled={item.disabled}
-                  title={item.title}
-                  onClick={() => {
-                    close();
-                    item.run();
-                  }}
-                  className={`${MENU_ITEM} ${item.danger ? "!text-status-red" : ""}`}
-                >
-                  {item.icon && <span className="flex-none text-muted-2">{item.icon}</span>}
-                  {item.label}
-                </button>
-              ),
-            )}
-          </div>,
-          document.body,
-        )}
+      <PositionedMenu at={at} items={items} onClose={close} menuClassName={menuClassName} />
     </div>
+  );
+}
+
+/**
+ * The menu a {@link ContextMenu} opens: its rows, at a point on the screen.
+ *
+ * Portaled to `document.body`, above the terminal overlay's stacking context,
+ * and pulled back inside the viewport once its real size is known — a row near
+ * the bottom edge would otherwise open a menu running off-screen. The first row
+ * takes focus on open, and whatever had focus gets it back on close, so a
+ * keyboard user isn't stranded on <body> — unless the close already moved focus
+ * somewhere real.
+ */
+export function PositionedMenu({
+  at,
+  items,
+  onClose,
+  menuClassName = "w-52",
+}: {
+  /** Where to open, in viewport coordinates; null keeps the menu closed. */
+  at: { x: number; y: number } | null;
+  items: ContextMenuItem[];
+  onClose: () => void;
+  menuClassName?: string;
+}) {
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const restoreTo = useRef<HTMLElement | null>(null);
+
+  useDismiss(at !== null, onClose, [menuRef]);
+
+  // Measure, then clamp. Runs before paint, so the menu never shows at the
+  // unclamped position first. The element to hand focus back to is noted here,
+  // ahead of the focus move below — skipping one of this menu's own rows, which
+  // is what has focus when the menu is re-opened at another point.
+  useLayoutEffect(() => {
+    if (!at) {
+      setPos(null);
+      return;
+    }
+    const active = document.activeElement as HTMLElement | null;
+    if (!menuRef.current?.contains(active)) restoreTo.current = active;
+    const el = menuRef.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    const margin = 8;
+    setPos({
+      left: Math.max(margin, Math.min(at.x, window.innerWidth - width - margin)),
+      top: Math.max(margin, Math.min(at.y, window.innerHeight - height - margin)),
+    });
+  }, [at]);
+
+  const placed = at !== null && pos !== null;
+  useEffect(() => {
+    if (!placed) return;
+    menuRef.current?.querySelector<HTMLElement>(MENU_ITEM_SELECTOR)?.focus();
+    return () => {
+      const active = document.activeElement;
+      const stranded = !active || active === document.body || !!menuRef.current?.contains(active);
+      if (stranded) restoreTo.current?.focus();
+    };
+  }, [placed]);
+
+  if (!at) return null;
+  return createPortal(
+    <div
+      ref={menuRef}
+      role="menu"
+      onKeyDown={(e) => roveMenu(e, menuRef.current)}
+      style={{
+        position: "fixed",
+        left: pos?.left ?? at.x,
+        top: pos?.top ?? at.y,
+        visibility: pos ? undefined : "hidden",
+      }}
+      className={`z-[200] rounded-lg border border-line-3 bg-raised py-1 shadow-lg ${menuClassName}`}
+    >
+      {items.map((item) =>
+        item.kind === "rule" ? (
+          <div key={item.key} className="my-1 border-t border-line" />
+        ) : item.kind === "heading" ? (
+          <div
+            key={item.key}
+            className="px-3 pt-1 pb-0.5 text-[10px] font-medium tracking-wide text-muted-4"
+          >
+            {item.label}
+          </div>
+        ) : (
+          <button
+            key={item.key}
+            type="button"
+            role="menuitem"
+            disabled={item.disabled}
+            title={item.title}
+            onClick={() => {
+              onClose();
+              item.run();
+            }}
+            className={`${MENU_ITEM} ${item.danger ? "!text-status-red" : ""}`}
+          >
+            {item.icon && <span className="flex-none text-muted-2">{item.icon}</span>}
+            {item.label}
+          </button>
+        ),
+      )}
+    </div>,
+    document.body,
   );
 }
 

@@ -2,6 +2,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback } from "react";
 
+import type { AgentKind } from "../../bindings";
 import { useApp, useAppUi } from "../../state/AppContext";
 import type { AgentOrigin } from "./registry";
 
@@ -20,6 +21,10 @@ import type { AgentOrigin } from "./registry";
 export interface AgentTarget {
   repo: string | null;
   origin: AgentOrigin;
+  /** The provider running the session — which of a ticket's investigation tabs
+   *  to land on. `null` when santree cannot name it; the surface then opens on
+   *  its default tab rather than on a guess. */
+  agentKind: AgentKind | null;
 }
 
 export function useOpenAgent(): (entry: AgentTarget) => void {
@@ -48,20 +53,32 @@ export function useOpenAgent(): (entry: AgentTarget) => void {
           navigate({ to: "/trees" });
           return;
         case "triage":
-          if (entry.origin.ticket) requestTriageFocus(entry.origin.ticket);
-          navigate({ to: "/triage" });
+          if (!entry.origin.ticket) {
+            navigate({ to: "/triage" });
+            return;
+          }
+          // The focus names only the tab. The ticket rides in the route so the
+          // sidebar's Triage row lights on arrival rather than a frame later —
+          // the same reason the review case below puts the PR in the url.
+          requestTriageFocus(entry.origin.ticket, entry.agentKind ?? undefined);
+          navigate({ to: "/triage", search: { ticket: entry.origin.ticket } });
           return;
         case "review":
-        case "ai-review":
+        case "ai-review": {
           // Reviews selects a PR by its URL (the same handoff a PR pill uses).
           // Which of the two sessions it is isn't addressable cross-view, so this
           // lands on the PR and its last-used tab.
-          if (entry.origin.pr) {
-            const [repo, number] = entry.origin.pr.split("#");
-            if (repo && number) requestReviewFocus(`https://github.com/${repo}/pull/${number}`);
-          }
-          navigate({ to: "/reviews" });
+          const [prRepo, number] = entry.origin.pr?.split("#") ?? [];
+          const url = prRepo && number ? `https://github.com/${prRepo}/pull/${number}` : undefined;
+          if (url) requestReviewFocus(url);
+          // Reviews narrows to one registered project, so the session's own
+          // project has to ride along or the PR lands in an inbox without it.
+          // The PR rides in the route as well as in the focus request, so the
+          // sidebar lights its row on arrival rather than a frame later — the
+          // same reason `useOpenPr` puts it there.
+          navigate({ to: "/reviews", search: { project: entry.repo ?? undefined, pr: url } });
           return;
+        }
         default:
         // Nothing owns it, so there is nowhere to go. Registry entries in this
         // state carry `openable: false` and their action is disabled, so this is

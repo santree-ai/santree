@@ -3,10 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PrCheck, ReviewPr } from "../../bindings";
 
-const spies = vi.hoisted(() => ({ checks: [] as PrCheck[] }));
+const spies = vi.hoisted(() => ({ checks: [] as PrCheck[], loading: false }));
 
 vi.mock("../../lib/queries", () => ({
-  usePrDetail: () => ({ data: { checks: spies.checks }, isLoading: false }),
+  usePrDetail: () => ({ data: { checks: spies.checks }, isLoading: spies.loading }),
   usePrCheckLog: () => ({ data: null, isLoading: false }),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
@@ -30,6 +30,27 @@ function check(over: Partial<PrCheck> = {}): PrCheck {
 }
 
 const pr = { id: "p1", repo: "acme/api", number: 7 } as ReviewPr;
+
+/**
+ * The wait used to be four paragraph bars over a tall grey block — the generic
+ * "a document is loading" placeholder, on a tab that has never held a document.
+ * A skeleton that doesn't match what replaces it rearranges the page at the
+ * moment the read lands, which is the one moment it should be still.
+ */
+describe("ChecksPane while the read is in flight", () => {
+  it("waits in the shape of grouped check rows", () => {
+    spies.loading = true;
+    const { container } = render(<ChecksPane pr={pr} />);
+    spies.loading = false;
+
+    // Bordered rows in groups, the way checks arrive — not a block of prose.
+    const rows = container.querySelectorAll(".rounded-md.border");
+    expect(rows.length).toBeGreaterThan(2);
+    expect(container.querySelectorAll("section").length).toBeGreaterThan(1);
+    // And it claims nothing about the outcome while it waits.
+    expect(screen.queryByText(/No checks reported/)).not.toBeInTheDocument();
+  });
+});
 
 describe("ChecksPane", () => {
   /** A running check is the one you're waiting on, so it heads the list — and

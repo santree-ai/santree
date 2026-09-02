@@ -76,6 +76,11 @@ React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
   This also bans **hardcoded placeholder field values**: if a struct field isn't
   wired to a real source, derive it or don't render it — never ship a constant
   (e.g. a fixed `InProgress`/`Idle`) that the UI shows as live data.
+  The one sanctioned exception is the **screenshot fixture mode**
+  (`src/dev/fixtures/`, `VITE_SANTREE_FIXTURES=1 pnpm dev:alt`): a fake company
+  answered at the `invoke` boundary through a Vite alias of `@tauri-apps/api/core`,
+  for README and website captures. Dev-only by build-time constants, no view or
+  hook knows it exists, and it never ships — see its README before touching it.
 - **Domain types** live in `crates/core/src/domain.rs` and derive `specta::Type` —
   that's how their shapes reach `bindings.ts`. **Never hand-edit `bindings.ts`** (it's
   generated; run `pnpm gen:bindings` after changing a command or `Type`).
@@ -114,11 +119,15 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    + on-demand analysis)
 src-tauri/migrations/  0001_init … (SQLite schema; applied on startup)
 src/
-  main.tsx         QueryClient (+ global mutation→toast) · providers · router
+  main.tsx         QueryClient (+ global mutation→toast) · providers · router ·
+                   the fixture-mode boot hook (dev + `VITE_SANTREE_FIXTURES=1` only)
+  dev/fixtures/    the screenshot fixture world (see "No mock data") — its own
+                   README says what is fake and what stays real
   routes/          one file per destination → renders a feature view's CONTENT
                    (window chrome belongs to the shell, never to a view)
   components/shell/  the one permanent frame: sidebar (search · destinations ·
-                   projects → worktrees → agents) · status bar · AppShell
+                   triage → tickets → investigations · projects → worktrees →
+                   agents) · status bar · AppShell
   features/<view>/ each owns a model.tsx (context) + presentational components
   features/trees/  the worktree workspace. Right panel = 6 panes (Issue · Files ·
                    Changes · History · PR · AI work queue; the last two only when
@@ -128,13 +137,45 @@ src/
                    one a started task runs in included — each a `worktree_tabs`
                    row, so a restart reopens exactly what was open, and closing
                    the last leaves the welcome surface) · a picked file's diff ·
-                   setup logs · a check's raw job log
-  features/reviews/  OTHER PEOPLE's PRs (the inbox) + the PR components both
-                   hosts share — checks, brief, queue list, file body, cards
+                   setup logs · a check's raw job log · the PR page and the
+                   Linear ticket page, each opened from its rail pane's expand
+                   control (closable, and not a row)
+  features/reviews/  OTHER PEOPLE's PRs (the inbox). Main area = the same tab
+                   strip Trees has (`ReviewTabBar`): a non-closable **Pull
+                   Request** tab (its header, then Conversation — description
+                   block, then the comments — · Commits · Checks · Files changed,
+                   which carries the diffstat) · the PR checkout's own
+                   `worktree_tabs` rows · the AI review sessions · the Linear
+                   ticket page when expanded from the rail. Beside it a
+                   `ReviewSidePanel` rail of Issue + AI work queue. Also the PR
+                   components both hosts share — `PrPage` (the whole PR view,
+                   host-agnostic: Trees opens it too), checks, brief, queue list,
+                   AI work pane, file body, cards
+  features/triage/ the ticket workspace at `/triage?ticket=` — a third tab-strip
+                   host (`TriageTabBar`): a non-closable **Linear** tab
+                   (`components/IssuePage`), one closable tab per investigation
+                   agent, and a shell. Beside it a `TriageSidePanel` rail of
+                   Files · Session history, both reading the attached project's
+                   MAIN checkout and naming it (with its Change control) on
+                   their header line; with nothing attached each pane is the
+                   ask instead. `TriageRepoGate` is the modal that asks for
+                   that project. The queue itself lives in the
+                   sidebar's `TriageSection`.
   lib/queries.ts   ALL data hooks (useUnwrappedQuery, useOptimisticMutation, …)
   lib/attention.ts what needs a human: level ladder, seen-gating, tree ordering
   state/           AppContext (repo, theme, settings) · toast.tsx (notifications)
   components/       shared chrome + primitives.tsx (Badge, EmptyState, ChevronSelect…)
+                   · SidePanel (the one right-panel shell every view is built on)
+                   · TabStrip (the one main-area tab strip every view draws)
+                   · IssuePane (the Linear-ticket RAIL pane) + IssuePage (the
+                   same ticket at reading width, for a tab) · IssueProperties
+                   (the one Linear-style property strip — priority, points,
+                   cycle, due, project, milestone, assignee, labels — every
+                   ticket surface draws, from a row or from the detail) ·
+                   WorkSignals (the shared marks: PriorityBars, StatusGlyph,
+                   EstimateTag, CycleTag, the due-date signals, the headings)
+                   · ProjectPickerDialog (pick a registered project, with a
+                   default — what the triage repo gate asks through)
   theme/colors.ts  enum → color/label maps
 ```
 
@@ -149,18 +190,89 @@ src/
   `lib/attention.ts` (`levelOf` · `highest` · `compareAttention` · `useSeenAgents`) on
   top of the agent registry's buckets — never from a second classification.
 - **Your own PR lives in Trees, not Reviews.** The right panel's `pr` and `aiWork`
-  panes (`features/trees/WorktreePrPane` · `WorktreeAiWorkPane`) are the whole
+  panes (`features/trees/WorktreePrPane` · `reviews/AiWorkPane`) are the whole
   own-PR surface: state, checks, conversation, AI brief, and the work queue that a
   failing check, a review comment, an AI draft or a highlighted diff line all feed.
   One "Start work" agent drains it, in the same main panel as every other agent.
   Everything that *fills* the queue goes through `reviews/QueueAction` — one
   control, one spark glyph, one minted id — so the buttons and the tab read as one
   concept.
-  **Reviews is now only other people's PRs** — the inbox of what's waiting on you.
-  The components are shared, not duplicated: `ChecksPane`, `ReviewBriefSection`,
-  `ReviewWorklist`, `PrFileBody` and the draft/thread cards take their host's
-  callbacks as props (see `useStartWork.ts` for the one thing the two hosts really
-  differ on — whether the PR's worktree has to be created first).
+  The sidebar lists no own-PR rows: a worktree's PR is reached through the
+  worktree. The full PR page (header + Conversation · Commits · Checks · Files
+  changed) is `reviews/PrPage`, and the PR pane's expand control opens it as a
+  closable Trees tab — so do the Linear and GitHub marks on a sidebar worktree
+  row (`TreeFocus.expand`: the ticket page or the PR page, never the rail pane).
+  The prompt "Start work" hands the agent is the `pr-fix` template
+  (`review_ai::fix_prompt` renders it over the open queue items), editable in
+  Settings → Prompts under Reviews; its preview renders over a sample queue the
+  editor builds and the backend turns into the agent's JSON through the same
+  builder a real queue uses (`sample_fix_tasks`).
+  **Reviews is only other people's PRs** — the inbox of what's waiting on you.
+  The components are shared, not duplicated: `PrPage`, `ChecksPane`,
+  `ReviewBriefSection`, `ReviewWorklist`, `AiWorkPane`, `PrFileBody` and the
+  draft/thread cards take their host's callbacks as props (see `useStartWork.ts`
+  for the one thing the two hosts really differ on — whether the PR's worktree
+  has to be created first).
+- **Triage is a sidebar section, not a destination.** `shell/TriageSection`
+  lists the rotation (one row — who has it and until when; a click opens the
+  whole schedule in `shell/RotationDialog`), the active tickets with their SLA,
+  each ticket's investigation agents under it, and a folded Snoozed group — scoped
+  to the active repo and filtered by the header's scope menu — Mine/All, the
+  `triage_good_citizen` setting; that menu is its only control. A ticket opens
+  `/triage?ticket=<id>`; selection lives in the route so the row lights from it,
+  exactly as Reviews' `?pr=` does. There is no manual ordering: the order is the
+  backend's (active first, soonest SLA). `useTriageQueue` is the one source for
+  what the section shows. A row's right-click menu (`shell/TriageTicketMenu`)
+  snoozes it — the one Linear write offered from the rail, gated like the
+  status picker (disabled with `LINEAR_READ_ONLY_HINT`, refused by
+  `repo_write_session` regardless).
+- **A triage ticket runs on an attached project, never a worktree.** Two repos,
+  deliberately: the queue and the ticket come from one Linear org
+  (`useTriageOrgRepo` — the triage default, else the active repo — read by both
+  the section and the workspace so a row and the ticket it opens can't disagree),
+  while anything that *runs* uses the ticket's attached project (`useTriageRepo`:
+  its own `triage_repo:<id>`, else `triage_default_repo`), on that project's MAIN
+  checkout. An investigation, a terminal and the rail's file/history panes all
+  need one, so the first such action asks for it once through
+  `triage/TriageRepoGate` (the promise-resolving pattern `reviews/WorktreeGate`
+  established) and every action goes through one `withRepo`. Nothing here creates
+  a worktree, and the backend agrees: `validate_agent_cwd` refuses a `triage:`
+  session anywhere but the registered repo root.
+- **Where a ticket starts is the Work gate's answer.** Several registered
+  projects can share a ticket's Linear org, so the Tickets list resolves the
+  project once, through `tickets/WorkRepoGate` — the one project that carries
+  the ticket (no question), else the Work default (`work_default_repo`, Settings
+  → Work; distinct from triage's on purpose), else `ProjectPickerDialog` over just
+  those projects, with a save-as-default switch. Run and the launch queue both
+  take that answer (`enqueueIn` switches the active repo and parks the add when
+  the answer isn't it), and the menu's "Run in another project…" is the one way
+  past it for a single run.
+- **One right panel, four hosts.** `components/SidePanel` is the chrome — icon
+  strip, underline, dots, drag region, edge resize, collapse-to-nothing — and each
+  view supplies its own panes, dots and model (`trees/FilePickerPanel`,
+  `reviews/ReviewSidePanel`, `triage/TriageSidePanel`, and Tickets'
+  `issues/RightPanel`; distinct `cssVar`s, or they resize each other). What goes
+  in a rail is *reference beside the work*, which is why Reviews has no PR pane
+  and Triage no Issue pane: in each, the main area already **is** that thing.
+  Tickets' rail has two: the whole ticket (`issues/IssuePanel` — run control,
+  blockers, body, notes) and the launch queue (`issues/QueuePane` — one card per
+  queued ticket with its agent pick and notes, and the one Launch button; its
+  tab wears the accent dot while anything is queued and a `+N` for a beat after
+  each add). The queue is in-memory and the active repo's; the per-ticket pick
+  is the *agent* only — model and effort come from Settings for that agent, by
+  the rule in `issues/model.tsx`. Collapsed, a rail draws
+  nothing and its host's top strip takes the `PanelToggle` over at the same
+  right edge (Trees' tab bar, the Tickets header).
+- **One main tab strip, three hosts.** `components/TabStrip` is the chrome — fitting
+  and overflow, rename-in-place, the close ×, the "+" and its ⌘T, the drag region —
+  and each host supplies its tabs, its menu rows and its trailing controls
+  (`trees/MainTabBar`, `reviews/ReviewTabBar`, `triage/TriageTabBar`). A tab is a
+  `worktree_tabs` row, or one of two other things: the tab that *is* the view
+  (Reviews' "Pull Request", Triage's "Linear" — always there, never closes), or a
+  transient view that appears with what it shows (a picked file, setup logs, a
+  check log, the PR page, the ticket page — ephemeral `MainTab` literals, never
+  rows, closable). Closing a row tears its PTY down and a dead process closes its
+  row — both from `trees/useTabSessions`, once, for every strip.
 - **One place renders a diff.** `features/trees/DiffPane` picks the source with
   `prDiffModeFor`: GitHub's own patch when the file is in the PR (its line numbers
   are what the comments anchor to), the local branch-vs-base diff otherwise, and
@@ -177,6 +289,17 @@ src/
 - **Shared UI:** `primitives.tsx` (Badge, Dot, Toggle, Tabs, Segmented, EmptyState,
   ChevronSelect), `useEdgeResize` (panel resizers), `deriveIssueState` (the single
   source for a ticket's running/ready/blocked/chainable flags).
+- **Right-click menus:** `primitives` `ContextMenu` wraps a region (a row, a
+  card) and opens `PositionedMenu` at the pointer or from Shift-F10; the graph
+  opens `PositionedMenu` itself from React Flow's `onNodeContextMenu`. Four
+  objects have one: a worktree (`shell/WorktreeMenu`), a ticket (the Tickets
+  list row and the graph node — `tickets/TicketRow`, `issues/ticketMenu` — and
+  the triage row, `shell/TriageTicketMenu`), and a pull request in the sidebar
+  (`shell/ReviewPrMenu`). A ticket's Linear rows (open, copy id, copy link)
+  come from `components/menuRows` so every host offers the same three; the
+  Linear url is built from the org's slug (`useLinearIssueUrl`), never fetched.
+  Rows are declarative `ContextMenuItem`s — a menu is a fixed list of actions
+  on one object, and a render prop is how two of them drift.
 - **Colors:** never hardcode hex in components — use `theme/colors.ts` (`successColor`,
   `LINEAR_BRAND`, `alpha()`, `statusColor`) or a CSS token. Tinted-text/on-accent have
   dedicated tokens (`--accent-text`, `--on-accent`) so they flip in light mode.
@@ -304,6 +427,13 @@ version.
 
 - `bindings.ts` and `routeTree.gen.ts` are **generated but committed** — don't edit by
   hand; Biome ignores them.
+- **`tauri.dev.conf.json` carries the whole window entry**, not just its title:
+  a `--config` overlay merges by JSON merge-patch, so an `app.windows` array
+  *replaces* the base one — a one-field entry silently dropped
+  `titleBarStyle: Overlay` and gave the dev build a native title bar, shifting
+  every capture. Keep it a mirror of `tauri.conf.json`'s entry plus the title,
+  and remember `tauri dev` reads the overlay once at launch: editing it triggers
+  a rebuild but not a re-merge, so restart the dev stack to pick it up.
 - Tailwind v4 is CSS-first (`@theme` in `src/styles.css`, which Biome is configured to
   skip). IDE "unknown at-rule" warnings are handled by `.vscode/settings.json`.
 - **Terminals survive a reload, so a pane unmounting must never `close` a

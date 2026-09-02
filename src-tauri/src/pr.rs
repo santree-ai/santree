@@ -42,15 +42,7 @@ pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
         return Ok(vec![]);
     };
 
-    // Both join keys come from the same rows: the branch (exact) and the issue id
-    // (for the title-tag fallback). Ordered so the fallback probe below is
-    // deterministic in which ids it caps.
-    let links: Vec<(String, String)> = sqlx::query_as(
-        "SELECT issue_id, branch FROM worktree_links WHERE repo_path = ? ORDER BY issue_id",
-    )
-    .bind(&root)
-    .fetch_all(db)
-    .await?;
+    let links = linked_worktrees(db, &root).await?;
     if links.is_empty() {
         return Ok(vec![]);
     }
@@ -127,6 +119,27 @@ pub async fn statuses(db: &Db, repo: &str) -> Result<Vec<WorktreePr>> {
         }
     }
     Ok(out)
+}
+
+/// The repo's worktrees as `(issue id, branch)` — the join keys a repo-wide PR
+/// list is matched against. Ordered by id so the per-issue fallback probe below is
+/// deterministic in which ids it caps.
+///
+/// A review checkout is excluded. It sits on the PR's own branch, so it would
+/// match — but "which of my worktrees has a pull request" is a question about work
+/// the user started, and this answer is what the Trees sidebar hangs its PR marks
+/// off. The Reviews side finds a PR's checkout through `reviews::review_checkout`,
+/// which asks by pull request rather than by branch.
+pub(crate) async fn linked_worktrees(db: &Db, root: &str) -> Result<Vec<(String, String)>> {
+    let mut links: Vec<(String, String)> = sqlx::query_as(
+        "SELECT issue_id, branch FROM worktree_links WHERE repo_path = ? ORDER BY issue_id",
+    )
+    .bind(root)
+    .fetch_all(db)
+    .await?;
+    let reviews = crate::reviews::review_ids(db, root).await?;
+    links.retain(|(id, _)| !reviews.contains(id));
+    Ok(links)
 }
 
 /// The worktree a PR belongs to: its head branch first, its `[ISSUE-ID]` title tag

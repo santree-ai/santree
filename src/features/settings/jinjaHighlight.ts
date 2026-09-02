@@ -18,6 +18,12 @@ function escapeHtml(s: string): string {
 const MARK_OPEN = String.fromCharCode(0xe000);
 const MARK_CLOSE = String.fromCharCode(0xe001);
 
+/** The rendered prompt with the substitution marks removed — the text the agent
+ *  gets, for a view (the markdown one) that can't tint and must not show them. */
+export function stripRenderMarks(output: string): string {
+  return output.replace(new RegExp(`[${MARK_OPEN}${MARK_CLOSE}]`, "g"), "");
+}
+
 /** Highlight the *rendered* preview output as an HTML string: escape it, then tint
  *  the marker-wrapped spans (the values substituted from `{{ … }}`) so the
  *  issue-specific parts stand out from the template's static prose. Stray

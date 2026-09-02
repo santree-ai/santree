@@ -45,8 +45,9 @@ flow. Synthetic mouse clicks do NOT work — see harness notes below.
   reach the OS but never the WebView — they appear to succeed and do nothing.
   Do not use them, and do not conclude "no UI change" from one.
 - **Keystrokes DO work**: `osascript -e 'tell application "System Events" to
-  keystroke "1" using command down'` — use ⌘1–⌘5 to switch views, arrows/tab/
-  enter to move focus and activate.
+  keystroke "1" using command down'` — ⌘1 opens Tickets, ⌘K the palette (type
+  a destination or a PR), ⌘B toggles the sidebar; arrows/tab/enter move focus
+  and activate. Trees, Reviews and Triage tickets are reached from the sidebar.
 - **Capture**: `screencapture -x -l <windowId> out.png`, then Read the PNG.
   Get the window id from `screencapture -l`-style listing or
   `osascript -e 'tell application "santree" to id of window 1'`.

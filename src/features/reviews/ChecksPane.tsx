@@ -20,6 +20,7 @@ import { splitRepoSlug } from "../../lib/repo";
 import { checkStatusMeta } from "../../theme/colors";
 import { CheckLogBody } from "./CheckLog";
 import { groupChecks, isRunning, SKIPPED_KEY, toggleCollapsed } from "./checks";
+import { PR_COLUMN } from "./prLayout";
 import { RunningDot } from "./RunningDot";
 
 // GitHub annotation levels → tint. `notice` is informational; error/warning
@@ -41,7 +42,9 @@ export function ChecksPane({ pr }: { pr: ReviewPr }) {
   if (isLoading) {
     return (
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-        <BodySkeleton />
+        <div className={PR_COLUMN}>
+          <ChecksSkeleton />
+        </div>
       </div>
     );
   }
@@ -62,27 +65,29 @@ export function ChecksPane({ pr }: { pr: ReviewPr }) {
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-      {groups.map((g) => {
-        const isCollapsed = collapsed.has(g.key);
-        return (
-          <section key={g.key} className="mb-4">
-            <button
-              type="button"
-              onClick={(e) => toggle(g.key, e.metaKey || e.ctrlKey)}
-              title={`${isCollapsed ? "Expand" : "Collapse"} (⌘-click for all)`}
-              className="mb-1.5 flex w-full cursor-pointer items-center gap-1.5 font-mono text-[10px] tracking-[.06em] uppercase hover:brightness-125"
-              style={{ color: g.color }}
-            >
-              <ChevronDownIcon
-                size={11}
-                className={`flex-none transition-transform ${isCollapsed ? "-rotate-90" : ""}`}
-              />
-              {g.running ? <RunningDot /> : g.glyph} {g.checks.length} {g.label}
-            </button>
-            {!isCollapsed && <CheckGroup checks={g.checks} owner={owner} name={name} />}
-          </section>
-        );
-      })}
+      <div className={PR_COLUMN}>
+        {groups.map((g) => {
+          const isCollapsed = collapsed.has(g.key);
+          return (
+            <section key={g.key} className="mb-4">
+              <button
+                type="button"
+                onClick={(e) => toggle(g.key, e.metaKey || e.ctrlKey)}
+                title={`${isCollapsed ? "Expand" : "Collapse"} (⌘-click for all)`}
+                className="mb-1.5 flex w-full cursor-pointer items-center gap-1.5 font-mono text-[10px] tracking-[.06em] uppercase hover:brightness-125"
+                style={{ color: g.color }}
+              >
+                <ChevronDownIcon
+                  size={11}
+                  className={`flex-none transition-transform ${isCollapsed ? "-rotate-90" : ""}`}
+                />
+                {g.running ? <RunningDot /> : g.glyph} {g.checks.length} {g.label}
+              </button>
+              {!isCollapsed && <CheckGroup checks={g.checks} owner={owner} name={name} />}
+            </section>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -288,14 +293,44 @@ function CheckLogSection({
   );
 }
 
-function BodySkeleton() {
+/**
+ * Checks, in the shape checks arrive in: two collapsible groups of bordered
+ * rows, each row a status glyph and a name.
+ *
+ * It used to be four paragraph bars over a tall grey block — the generic "some
+ * text is coming" placeholder — which is what a *document* looks like loading,
+ * and this tab has never held one. A skeleton that doesn't match what replaces
+ * it makes the page jump at the exact moment the data lands, and tells the
+ * reader nothing while they wait.
+ */
+const CHECK_GROUPS = [
+  { heading: "w-24", rows: ["w-52", "w-64", "w-40"] },
+  { heading: "w-20", rows: ["w-56", "w-44"] },
+];
+
+function ChecksSkeleton() {
   return (
-    <div className="space-y-2.5">
-      <Skeleton className="h-3.5 w-1/3" />
-      <Skeleton className="h-3 w-full" />
-      <Skeleton className="h-3 w-11/12" />
-      <Skeleton className="h-3 w-4/5" />
-      <Skeleton className="mt-4 h-24 w-full rounded-lg" />
+    <div aria-hidden>
+      {CHECK_GROUPS.map((group) => (
+        <section key={group.heading} className="mb-4">
+          {/* The group's own heading: chevron, then its glyph, count and label. */}
+          <div className="mb-1.5 flex items-center gap-1.5">
+            <Skeleton className="h-2.5 w-2.5 flex-none rounded-sm" />
+            <Skeleton className={`h-2.5 ${group.heading}`} />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {group.rows.map((width) => (
+              <div
+                key={width}
+                className="flex items-center gap-2.5 rounded-md border border-line-2 bg-input px-3 py-2.5"
+              >
+                <Skeleton className="h-3 w-3 flex-none rounded-full" />
+                <Skeleton className={`h-3.5 ${width}`} />
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
     </div>
   );
 }

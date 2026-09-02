@@ -17,7 +17,17 @@ import { useSetTaskNote, useTaskNote } from "../../lib/queries";
 
 const SAVE_DEBOUNCE_MS = 500;
 
-export function TaskNotes({ repo, taskId }: { repo: string; taskId: string }) {
+export function TaskNotes({
+  repo,
+  taskId,
+  embedded = false,
+}: {
+  repo: string;
+  taskId: string;
+  /** Inside a card (the queue pane) rather than pinned under a panel: no strip
+   *  chrome of its own, and a shorter field. */
+  embedded?: boolean;
+}) {
   const { data: note } = useTaskNote(repo, taskId);
   const { mutate: saveNote } = useSetTaskNote(repo);
   const [open, setOpen] = useState(false);
@@ -71,7 +81,13 @@ export function TaskNotes({ repo, taskId }: { repo: string; taskId: string }) {
   const hasContent = saved.trim().length > 0;
 
   return (
-    <div className="flex-none border-t border-hairline bg-panel px-5 pt-1.5 pb-2">
+    <div
+      className={
+        embedded
+          ? "flex-none px-2 pt-1 pb-1.5"
+          : "flex-none border-t border-hairline bg-panel px-5 pt-1.5 pb-2"
+      }
+    >
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -104,7 +120,9 @@ export function TaskNotes({ repo, taskId }: { repo: string; taskId: string }) {
             if (draft !== saved) saveNote({ taskId, body: draft });
           }}
           placeholder="Context for this task. Stored locally, never synced to Linear. Agents get it as prompt context later."
-          className="mt-1.5 max-h-[40vh] min-h-[88px] w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] leading-[1.55] text-fg-2 placeholder:text-muted-4 focus:border-line-strong focus:outline-none"
+          className={`mt-1.5 max-h-[40vh] w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] leading-[1.55] text-fg-2 placeholder:text-muted-4 focus:border-line-strong focus:outline-none ${
+            embedded ? "min-h-[64px]" : "min-h-[88px]"
+          }`}
         />
       )}
     </div>

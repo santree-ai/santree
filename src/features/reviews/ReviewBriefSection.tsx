@@ -2,7 +2,7 @@
  * The review brief: the AI's orientation for a PR — what it does, what order to
  * read it in, where to look hardest, and what to ask the author.
  *
- * Lives at the top of the {@link PrInfoPanel} rail rather than in a tab of its
+ * Lives at the top of the {@link ReviewSidePanel} rail rather than in a tab of its
  * own, because the reading order is only useful *while* you're reading: the rail
  * spans the whole detail area, so the plan stays beside the diff on every tab.
  * Clicking any entry jumps the diff to that file (and line).
@@ -38,6 +38,7 @@ import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { aiReviewTermKey } from "./AiReviewSessionPane";
 import { reviewBriefStale } from "./briefStale";
+import { REVIEW_CHECKOUT_NOTE } from "./checkoutSource";
 
 /** The agents that can run a review, in the order the picker lists them. Mirrors
  *  {@link ReviewDetail}'s own list — one catalogue for "who can review". */
@@ -168,10 +169,13 @@ export function ReviewBriefSection({
 
       {!brief && !liveSession && (
         <div className="rounded-lg border border-line-2 bg-raised px-3 py-3">
-          <p className="mb-2.5 text-[11.5px] leading-[1.6] text-muted-2">
+          <p className="mb-2 text-[11.5px] leading-[1.6] text-muted-2">
             {agentProvider(defaultAgent).label} reads the PR and writes a brief here, plus draft
             comments in the diff. You edit them and decide which ones to send.
           </p>
+          {/* The one thing that isn't obvious from the button: it puts a real
+              checkout in the repo. Same sentence the "+" menu and the rail use. */}
+          <p className="mb-2.5 text-[10.5px] leading-[1.5] text-muted-4">{REVIEW_CHECKOUT_NOTE}</p>
           {onStartReview && (
             <div className="flex items-center gap-0.5">
               <Button size="sm" variant="primary" onClick={() => run()} disabled={startingReview}>

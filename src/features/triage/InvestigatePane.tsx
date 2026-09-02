@@ -47,7 +47,9 @@ export function InvestigatePane({
   hasStartedSession,
   onExited,
 }: {
-  /** Active repo name — scopes the persisted provider session. */
+  /** The ticket's attached project (see `useTriageRepo`) — scopes the persisted
+   *  provider session, and is the repo the stored-investigations read and the
+   *  tab's ✕ must use too, or they miss the row this writes. */
   repo: string;
   ticketId: string;
   cwd?: string;

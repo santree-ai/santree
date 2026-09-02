@@ -25,12 +25,12 @@ import {
   REVIEW_EFFORT_KEY,
   REVIEW_MODEL_KEY,
   REVIEW_PERMISSION_MODE_KEY,
-  TRIAGE_GOOD_CITIZEN_KEY,
-  TRIAGE_SNOOZED_KEY,
+  TRIAGE_DEFAULT_REPO_KEY,
   useAgents,
   useBoolSetting,
   useClaudeModels,
   useCodexModels,
+  useRepos,
   useSetSetting,
   useSetting,
   WORK_AGENT_KEY,
@@ -112,9 +112,9 @@ export function ReviewActionSection({ repo }: { repo?: string }) {
   );
 }
 
-/** The Triage Investigation action. Triage is global: the enable switch + queue
- * prefs live at the app level; a repo only overrides which agent/skill/model the
- * investigation runs. */
+/** The Triage Investigation action. Triage is global: the enable switch lives
+ * at the app level (the queue's Mine/All switch is on the sidebar section itself);
+ * a repo only overrides which agent/skill/model the investigation runs. */
 export function TriageActionSection({ repo }: { repo?: string }) {
   return (
     <>
@@ -181,19 +181,15 @@ export function WorkActionConfig({ repo }: { repo?: string }) {
 
 /**
  * The app-level Triage panel: a master enable switch (locked until Linear is
- * connected), then — grayed out while disabled — the queue preferences and the
- * investigation action config.
+ * connected), then — grayed out while disabled — the investigation action
+ * config. The queue's own preference (Mine/All) is not here: it is the switch
+ * on the sidebar's Triage section, and a second copy of it in Settings was two
+ * controls for one setting.
  */
 function AppTriagePanel() {
   const { settings, toggleIntegration } = useApp();
   const linear = !!settings?.integrations?.linear;
   const enabled = !!settings?.integrations?.triage;
-
-  const goodCitizen = useBoolSetting("app", TRIAGE_GOOD_CITIZEN_KEY).value;
-  const showSnoozed = useBoolSetting("app", TRIAGE_SNOOZED_KEY).value;
-  const setSetting = useSetSetting();
-  const setBool = (key: string, next: boolean) =>
-    setSetting.mutate({ scope: "app", key, value: next ? "true" : null });
 
   return (
     <div className="space-y-3.5">
@@ -202,7 +198,7 @@ function AppTriagePanel() {
           <div className="text-[13px] font-semibold text-fg-bright">Enable Triage</div>
           <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
             {linear
-              ? "Show the Triage tab and pull your Linear issues into it."
+              ? "Show the Triage section in the sidebar and pull your Linear issues into it."
               : "Connect Linear first (Settings → Integrations) to enable triage."}
           </div>
         </div>
@@ -228,23 +224,16 @@ function AppTriagePanel() {
         }
         aria-disabled={!enabled}
       >
-        <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
-          <ToggleRow
-            label="Be a good citizen"
-            hint="Show the whole team's issues, not only the ones assigned to you. Same switch as the Mine/All toggle in the Triage header."
-            on={goodCitizen}
+        <div>
+          <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
+            Project
+          </div>
+          <DefaultProjectField
+            settingKey={TRIAGE_DEFAULT_REPO_KEY}
+            hint="Where investigations and terminals run unless a ticket picks its own. Also the Linear workspace the triage queue is read from."
             disabled={!enabled}
-            onChange={(v) => setBool(TRIAGE_GOOD_CITIZEN_KEY, v)}
-          />
-          <ToggleRow
-            label="Show snoozed issues"
-            hint="Include snoozed issues in the queue (greyed, at the bottom). Off hides them until they wake."
-            on={showSnoozed}
-            disabled={!enabled}
-            onChange={(v) => setBool(TRIAGE_SNOOZED_KEY, v)}
           />
         </div>
-
         <div>
           <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
             Investigation
@@ -254,6 +243,49 @@ function AppTriagePanel() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The project a workflow falls back to, as one select over the registry with
+ *  a real "None". Triage's is where investigations run and, because the queue
+ *  is org-scoped, which Linear workspace it is read from (see
+ *  {@link TRIAGE_DEFAULT_REPO_KEY}); Work's is where a ticket more than one
+ *  project carries is started (`WORK_DEFAULT_REPO_KEY`). "None" leaves the first
+ *  such launch to ask. */
+export function DefaultProjectField({
+  settingKey,
+  hint,
+  disabled = false,
+}: {
+  settingKey: string;
+  hint: string;
+  disabled?: boolean;
+}) {
+  const { data: repos = [] } = useRepos();
+  const { data: value } = useSetting("app", settingKey);
+  const setSetting = useSetSetting();
+  // A stored name the registry no longer has still shows, as itself: reading
+  // it as "None" would hide a row on disk that keeps pointing elsewhere.
+  const names = repos.map((r) => r.name);
+  const options = value && !names.includes(value) ? [value, ...names] : names;
+  return (
+    <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
+      <Field label="Default project" hint={hint}>
+        <ChevronSelect
+          value={value ?? ""}
+          onChange={(v) => setSetting.mutate({ scope: "app", key: settingKey, value: v || null })}
+          disabled={disabled}
+          className={SELECT_CLASS}
+        >
+          <option value="">None</option>
+          {options.map((name) => (
+            <option key={name} value={name} className="bg-input">
+              {name}
+            </option>
+          ))}
+        </ChevronSelect>
+      </Field>
     </div>
   );
 }

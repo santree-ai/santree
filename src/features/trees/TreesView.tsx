@@ -11,32 +11,37 @@
  *  would carry act on the checkout as a place on disk — they live on that row's
  *  right-click menu. Which worktree is selected comes from the app shell's project
  *  tree; with nothing selected the view shows its launch surface. */
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import type { Worktree, WorktreeTab } from "../../bindings";
+import type { Worktree, WorktreePr } from "../../bindings";
+import { IssuePage } from "../../components/IssuePage";
 import { CloseIcon, PrIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
-import { Button, EmptyState, TerminalActivity } from "../../components/primitives";
-import { useWorktreeTabLaunch, useWorktreeTabs } from "../../lib/queries";
-import { useAgentRuns } from "../../state/AgentRuns";
+import { Button, TerminalActivity } from "../../components/primitives";
+import { usePrSummary, useWorktreeTabs } from "../../lib/queries";
 import { useAppUi } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
-import { agentProvider } from "../terminal/agentProvider";
+import type { FileFocus } from "../reviews/model";
+import { PrPage, PrPageSkeleton, type PrTab } from "../reviews/PrPage";
+import { AgentTabPane } from "./AgentTabPane";
 import { CheckLogView } from "./CheckLogView";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { FilePickerPanel } from "./FilePickerPanel";
 import { FileViewer } from "./FileViewer";
 import { MainTabBar } from "./MainTabBar";
-import { BASE_ID, extraTab, remoteControlTab, TreesProvider, useTrees } from "./model";
+import { BASE_ID, extraTab, TreesProvider, useTrees } from "./model";
 import { SetupLogsView } from "./SetupLogsView";
-import { useAgentTab } from "./useAgentTab";
-import { useWorkLaunch } from "./useWorkLaunch";
+import { useReopenClosedTab } from "./useReopenClosedTab";
 import { WelcomeSurface } from "./WelcomeSurface";
 import { WorktreeTerminal } from "./WorktreeTerminal";
 
 function TreesContent() {
   const { worktrees, active, loading } = useTrees();
   useAbandonedLaunchTabs();
+  // Clicking an exited agent in the rail asks for a tab its process took with
+  // it; this resumes the conversation into a new one. Above the early return so
+  // it keeps running whatever the view is showing.
+  useReopenClosedTab();
 
   // Nothing selected and no worktrees yet: show a loading state while the first
   // fetch is in flight (otherwise the empty state flashes as if nothing exists),
@@ -171,7 +176,19 @@ function PrSuggestionBar({ worktree }: { worktree: Worktree }) {
 }
 
 function WorktreePane({ worktree }: { worktree: Worktree }) {
-  const { repo, selectedFile, activeTab, tabs, setupFor, openCheckLog, addTab } = useTrees();
+  const {
+    repo,
+    selectedFile,
+    activeTab,
+    tabs,
+    setupFor,
+    openCheckLog,
+    addTab,
+    fixCiLaunchFor,
+    activePr,
+    prViewOpen,
+    issueViewOpen,
+  } = useTrees();
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -181,7 +198,8 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
             Investigate pane). The live xterm + PTY live in the global TerminalLayer
             (keyed `tree:<id>:tab:<tab id>`), so unmounting the host just detaches
             the overlay; the session + scrollback persist and re-attach on return.
-            The File / Setup views stay mounted (hidden when inactive). */}
+            The File / Setup / PR / ticket views stay mounted (hidden when
+            inactive). */}
         <div className="relative min-h-0 flex-1">
           {/* Nothing open — every tab was closed, or this workspace has never had
               one. The bar above still carries "+", and this offers the plainest
@@ -198,7 +216,14 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
           {tabs.map((t) =>
             activeTab === extraTab(t.id) ? (
               t.kind !== "terminal" ? (
-                <AgentTabPane key={t.id} repo={repo} worktree={worktree} tab={t} />
+                <AgentTabPane
+                  key={t.id}
+                  repo={repo}
+                  worktree={worktree}
+                  tab={t}
+                  tabs={tabs}
+                  handoff={fixCiLaunchFor(t.id)}
+                />
               ) : (
                 <WorktreeTerminal
                   key={t.id}
@@ -227,6 +252,27 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
               <CheckLogView log={openCheckLog} />
             </div>
           )}
+          {/* The right panel's PR and Issue panes at reading width. Same rule as
+              the log above — mounted while open, hidden while another tab shows —
+              so a long diff's expansions and a thread's scroll survive a switch.
+              One display class rather than `flex … hidden`: which of the two wins
+              is a question about stylesheet order, and the answer must not be. */}
+          {prViewOpen && activePr && (
+            <div
+              className={activeTab === "prView" ? "absolute inset-0 z-40 flex flex-col" : "hidden"}
+            >
+              <PrView key={`${activePr.repo}#${activePr.number}`} pr={activePr} />
+            </div>
+          )}
+          {issueViewOpen && (
+            <div
+              className={
+                activeTab === "issueView" ? "absolute inset-0 z-40 flex flex-col" : "hidden"
+              }
+            >
+              <IssuePage repo={repo} ticketId={worktree.id} />
+            </div>
+          )}
         </div>
         <PrSuggestionBar worktree={worktree} />
       </div>
@@ -235,129 +281,29 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
   );
 }
 
-/** One tab's agent: a persisted provider session rooted in the worktree.
+/** The worktree's own pull request as a page ({@link PrPage}), with what the page
+ *  leaves to its host kept here, per PR: which section is showing, and the jump
+ *  into the diff. Reviews keeps that jump in its view model because the rail
+ *  writes it from outside the page; here nothing outside the page does — a jump
+ *  only ever comes from the page's own conversation rows — so it lives beside
+ *  the page, and a jump brings Files changed forward itself.
  *
- *  Every agent is one of these — the one a started task launches, one opened from
- *  the "+" menu, one resumed from Session history, and the two PR-scoped review
- *  sessions. Its conversation is keyed by `tree:<worktree>:tab:<tab id>` in the
- *  session registry, so opening the tab — first ever, or after an app restart —
- *  resolves to a fresh `--session-id` launch or a `--resume` of the same
- *  conversation. When the process exits the tab closes with it (see `MainTabBar`),
- *  because a pane with nothing running has nothing to show; the conversation is
- *  still on disk, and Session history reopens it in a new tab.
- *
- *  Two variants differ from a plain one, and only in what they open with:
- *
- *  - the tab a **started task** minted seeds the ticket's *work prompt*, and holds
- *    its PTY until that prompt file (and any setup script before it) has landed —
- *    the seed only applies at session creation, so mounting early spawns a bare
- *    shell and silently drops the launch;
- *  - a **review** tab launches with the review deny list and santree's review MCP
- *    server, and opens by reading the prompt written when the Reviews button kicked
- *    it off. The prompt is seeded on the first (fresh) launch only; the capability
- *    paths apply to every launch, resume included — which is why they come from the
- *    persisted row (`useWorktreeTabLaunch`) once the in-memory hand-off is gone, and
- *    never from the plain no-git fallback. */
-function AgentTabPane({
-  repo,
-  worktree,
-  tab,
-}: {
-  repo: string;
-  worktree: Worktree;
-  tab: WorktreeTab;
-}) {
-  const { fixCiLaunchFor, tabs } = useTrees();
-  const { clearAgentLaunch } = useAgentRuns();
-  const review = tab.kind === "fixCi" || tab.kind === "aiReview";
-  const handoff = fixCiLaunchFor(tab.id);
-  // The tab is opened at the click, so the first hand-off it gets is identity
-  // only — the command that renders the prompt and writes the settings/MCP paths
-  // is still running. That is *not* a launch: spawning against a missing MCP
-  // config would hand the agent the standard tool grants and a stale diff index.
-  // So it holds exactly as a restart does, and says which wait it is in.
-  const rendering = handoff?.phase === "preparing" ? handoff : undefined;
-  const ready = rendering ? undefined : handoff;
-  const promptPath = ready?.promptPath;
-  // Only after a restart (or a reload) is the hand-off missing; re-derive from the
-  // row then, and hold the launch until it lands.
-  const persisted = useWorktreeTabLaunch(repo, tab.id, review && !handoff);
-  const launch = ready ?? persisted.data ?? undefined;
-  const work = useWorkLaunch(repo, worktree, tab.id);
+ *  No checkout is passed: this PR is your own, and its worktree is the view. */
+function PrView({ pr }: { pr: WorktreePr }) {
+  // The same read the right panel's PR pane made, already cached.
+  const { data: summary } = usePrSummary(pr.repo, pr.number);
+  const [tab, setTab] = useState<PrTab>("conversation");
+  const [fileFocus, setFileFocus] = useState<FileFocus | null>(null);
+  const focusFile = useCallback((path: string, line: number | null = null) => {
+    setFileFocus((prev) => ({ path, line, nonce: (prev?.nonce ?? 0) + 1 }));
+    setTab("files");
+  }, []);
 
-  const { preparing, seed, onExited, agent } = useAgentTab({
-    repo,
-    refId: `tree:${worktree.id}:tab:${tab.id}`,
-    cwd: worktree.path,
-    agent: tab.agentKind ?? "Claude",
-    // An agent tab exists to run the agent, so any (re)open is an explicit launch.
-    // The resolve still prefers resuming whatever this tab already has.
-    allowFresh: true,
-    // A review session without its own settings would run with the *standard* ones —
-    // no deny list at all — so it waits instead. Resolving them is local work: a
-    // settings write and a path derivation, no network.
-    hold: (review && !launch) || work.hold,
-    settingsPath: launch?.settingsPath,
-    mcpConfigPath: launch?.mcpConfigPath ?? undefined,
-    // A plain agent tab has no opening prompt (the user starts the conversation).
-    // A review tab seeds the short "read the file" line — the rendered prompt carries
-    // a whole PR diff, far past what can be typed into a shell — and a started task's
-    // tab seeds the same shape for the ticket's work prompt.
-    prompt: review
-      ? promptPath
-        ? `Read ${promptPath} and follow the instructions inside.`
-        : "Continue the review of this branch. Do not commit or push."
-      : work.prompt,
-    // One tab per worktree claims its Remote Control name — see remoteControlTab.
-    remoteControl: remoteControlTab(tabs) === tab.id ? worktree.id : undefined,
-  });
-
-  if (work.initialSetup) {
-    return (
-      <EmptyState
-        className="h-full"
-        title="Setting up the workspace…"
-        subtitle="The terminal opens once setup finishes."
-      />
-    );
-  }
-  if (preparing) {
-    // Say which wait this is, not "please wait". Each line is something the
-    // frontend can actually observe — the render command still in flight, the
-    // work prompt still being written, the session itself resolving — so the copy
-    // can never claim progress the app hasn't seen. The terminal replaces this in
-    // the same tab; there is no second place to look.
-    const label = agentProvider(tab.agentKind ?? "Claude").label;
-    const phase = rendering
-      ? {
-          title: `Reading pull request #${rendering.pr.number}…`,
-          subtitle: `Rendering the prompt and ${label}'s review tools. The terminal opens here when they land.`,
-        }
-      : // No hand-off at all: this tab outlived the app that opened it, and its
-        // settings and MCP paths are being re-derived from the persisted row.
-        persisted.isLoading
-        ? {
-            title: "Restoring the review session…",
-            subtitle: `Re-deriving ${label}'s review tools from the saved tab.`,
-          }
-        : {
-            title: work.launching ? "Preparing the agent…" : `Starting ${label}…`,
-            subtitle: review
-              ? "The prompt is ready. The terminal opens here in a moment."
-              : "The terminal opens in a moment.",
-          };
-    return <EmptyState className="h-full" title={phase.title} subtitle={phase.subtitle} />;
-  }
+  // A skeleton, never an empty state: the worktree says it has this PR, so
+  // "nothing here" would be a claim the pending read has not earned.
+  if (!summary) return <PrPageSkeleton />;
   return (
-    <WorktreeTerminal
-      id={`${worktree.id}:tab:${tab.id}`}
-      branch={tab.title}
-      cwd={worktree.path}
-      seed={seed}
-      agent={agent}
-      onLaunched={() => clearAgentLaunch(worktree.id)}
-      onExited={onExited}
-    />
+    <PrPage pr={summary} tab={tab} onTab={setTab} fileFocus={fileFocus} focusFile={focusFile} />
   );
 }
 

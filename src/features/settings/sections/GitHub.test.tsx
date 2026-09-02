@@ -22,9 +22,13 @@ vi.mock("../../../lib/queries", async () => {
   const actual =
     await vi.importActual<typeof import("../../../lib/queries")>("../../../lib/queries");
   return {
-    queryKeys: actual.queryKeys,
+    ...actual,
     useGithubStatus: () => ({ data: status, refetch: vi.fn(), isFetching: false }),
     useGithubApiBudget: () => ({ data: null }),
+    // The grouping row is a real setting read/write; this file is about the
+    // login flow, so both are stubbed rather than stood up on a query client.
+    useSetting: () => ({ data: undefined }),
+    useSetSetting: () => ({ mutate: vi.fn() }),
   };
 });
 

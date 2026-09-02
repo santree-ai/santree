@@ -153,6 +153,12 @@ export interface ProjectTreeModel {
   loading: boolean;
   /** Acknowledge an agent row, clearing its unseen treatment. */
   markSeen: (entry: AgentEntry) => void;
+  /** The AI review sessions running on each pull request, keyed by
+   *  {@link prAgentKey}. Not folded into `projects` the way worktree agents are:
+   *  a PR reaches the rail from the Reviews inbox, which is a different read on a
+   *  different schedule, so the section that draws those rows looks its agents up
+   *  rather than being handed a tree with them already inside. */
+  agentsByPr: Map<string, AgentNode[]>;
 }
 
 /**
@@ -178,6 +184,11 @@ export const repoKey = (repo: string) => `repo:${repo}`;
 export const projectKey = (repo: string, key: string) => `proj:${repo}:${key}`;
 export const milestoneKey = (repo: string, project: string, key: string) =>
   `ms:${repo}:${project}:${key}`;
+/** One block inside a project's Reviews section. Namespaced the same way, so
+ *  folding "Assigned to me" in one project leaves it open in the next. (The
+ *  section's own fold is not here: it defaults the other way, and lives in its
+ *  own record — see `REVIEWS_OPEN_KEY`.) */
+export const reviewGroupKey = (repo: string, group: string) => `reviews:${repo}:${group}`;
 
 /**
  * The sections that have to be open for one worktree's row to be on screen,
@@ -206,6 +217,33 @@ export function ancestorGroupKeys(
     .filter((hit): hit is { project: ProjectNode; keys: string[] } => hit.keys !== null);
   const scoped = holders.filter((hit) => hit.project.repo === repo);
   return (scoped.length > 0 ? scoped : holders).flatMap((hit) => hit.keys);
+}
+
+/**
+ * Every collapsible key *under* one — what a ⌘-click on that heading reaches.
+ *
+ * A repo section reaches its project bands and their milestones; a band reaches
+ * its own milestones; a milestone has nothing below it that folds, so it gets
+ * an empty scope and the gesture is simply a plain toggle there. Bands and
+ * milestones that this section doesn't draw (`showProjects`, `showMilestones`)
+ * are left out: a key nothing renders would persist a collapse state for a row
+ * that isn't there, and reappear the day the section starts drawing it.
+ */
+export function groupKeysUnder(projects: ProjectNode[], key: string): string[] {
+  const out: string[] = [];
+  for (const project of projects) {
+    const isRepo = key === repoKey(project.repo);
+    for (const band of project.linearProjects) {
+      const bandK = projectKey(project.repo, band.key);
+      if (!isRepo && key !== bandK) continue;
+      if (isRepo && project.showProjects) out.push(bandK);
+      if (!band.showMilestones) continue;
+      for (const milestone of band.milestones) {
+        out.push(milestoneKey(project.repo, band.key, milestone.key));
+      }
+    }
+  }
+  return out;
 }
 
 /** One section's keys, or `null` when the worktree isn't in it. */
@@ -266,6 +304,86 @@ export function groupAgentsByWorktree(
     );
   }
   return byWorktree;
+}
+
+/** The key an AI review session is filed under: `owner/name#number`, exactly as
+ *  `AiReviewSessionPane` mints it into the `ai-review:` term key. Not
+ *  repo-qualified the way {@link worktreeKey} is — a PR slug already names its
+ *  GitHub repo, and the registered santree project a session was launched under
+ *  is not part of what it is a review *of*. */
+export function prAgentKey(repo: string, number: number): string {
+  return `${repo}#${number}`;
+}
+
+/**
+ * The same fold as {@link groupAgentsByWorktree}, for the sessions that belong to
+ * a pull request instead of a checkout.
+ *
+ * Both review kinds land here. `ai-review` is what the AI review launches today;
+ * `review` is the retired read-only pane's, kept because a session minted under
+ * it can still be alive, and a live agent the rail can't show is worse than one
+ * whose surface has moved on.
+ */
+export function groupAgentsByPr(
+  entries: AgentEntry[],
+  seen: SeenMap,
+  nowMs: number = Date.now(),
+): Map<string, AgentNode[]> {
+  const byPr = new Map<string, AgentNode[]>();
+  for (const entry of entries) {
+    const { kind, pr } = entry.origin;
+    if (kind !== "ai-review" && kind !== "review") continue;
+    if (!pr) continue;
+    const node: AgentNode = {
+      entry,
+      unseen: isUnseen(entry, seen),
+      attention: levelOf(entry, seen, nowMs),
+    };
+    byPr.set(pr, [...(byPr.get(pr) ?? []), node]);
+  }
+  for (const nodes of byPr.values()) {
+    nodes.sort(
+      (a, b) =>
+        compareAttention(a.attention, b.attention) ||
+        agentKey(a.entry).localeCompare(agentKey(b.entry)),
+    );
+  }
+  return byPr;
+}
+
+/**
+ * The same fold again, for triage investigations, keyed by the ticket alone.
+ *
+ * Not repo-qualified the way {@link worktreeKey} is: the row these hang under is
+ * the Linear issue itself, not a checkout of it, and an investigation of AK-1
+ * run from another registered checkout is still an investigation of AK-1.
+ *
+ * Exported for testing.
+ */
+export function groupAgentsByTicket(
+  entries: AgentEntry[],
+  seen: SeenMap,
+  nowMs: number = Date.now(),
+): Map<string, AgentNode[]> {
+  const byTicket = new Map<string, AgentNode[]>();
+  for (const entry of entries) {
+    const { kind, ticket } = entry.origin;
+    if (kind !== "triage" || !ticket) continue;
+    const node: AgentNode = {
+      entry,
+      unseen: isUnseen(entry, seen),
+      attention: levelOf(entry, seen, nowMs),
+    };
+    byTicket.set(ticket, [...(byTicket.get(ticket) ?? []), node]);
+  }
+  for (const nodes of byTicket.values()) {
+    nodes.sort(
+      (a, b) =>
+        compareAttention(a.attention, b.attention) ||
+        agentKey(a.entry).localeCompare(agentKey(b.entry)),
+    );
+  }
+  return byTicket;
 }
 
 /**
@@ -450,6 +568,10 @@ export function useProjectTree(): ProjectTreeModel {
     () => groupAgentsByWorktree(entries ?? EMPTY_ENTRIES, seen, nowMs),
     [entries, seen, nowMs],
   );
+  const agentsByPr = useMemo(
+    () => groupAgentsByPr(entries ?? EMPTY_ENTRIES, seen, nowMs),
+    [entries, seen, nowMs],
+  );
 
   const worktreesFor = useCallback(
     (repo: string): Worktree[] | undefined => {
@@ -479,5 +601,32 @@ export function useProjectTree(): ProjectTreeModel {
     [repoNames, worktreesFor, basesByRepo, tasksByRepo, prsByRepo, agentsByWorktree, groupBy],
   );
 
-  return { projects, loading: repos === undefined, markSeen };
+  return { projects, loading: repos === undefined, markSeen, agentsByPr };
+}
+
+/**
+ * The investigation agents under each triage ticket, for the sidebar's Triage
+ * section.
+ *
+ * That section sits *beside* the project tree, not inside it, so it reads the
+ * same registry sources the tree does rather than asking the tree: the tree's
+ * fold rebuilds every repo's worktrees to answer, which is the wrong price for a
+ * question about tickets. Cross-repo like the tree, for the same reason — an
+ * investigation started from a checkout you are not looking at still belongs
+ * under its ticket.
+ */
+export function useTicketAgents(): {
+  agentsByTicket: Map<string, AgentNode[]>;
+  markSeen: (entry: AgentEntry) => void;
+} {
+  const { data: repos } = useRepos();
+  const repoNames = useMemo(() => (repos ?? []).map((repo) => repo.name), [repos]);
+  const entries = useAgentEntries(repoNames, repoNames);
+  const { seen, markSeen } = useSeenAgents();
+  const nowMs = useDecayClock(entries ?? EMPTY_ENTRIES);
+  const agentsByTicket = useMemo(
+    () => groupAgentsByTicket(entries ?? EMPTY_ENTRIES, seen, nowMs),
+    [entries, seen, nowMs],
+  );
+  return { agentsByTicket, markSeen };
 }

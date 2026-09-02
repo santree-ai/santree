@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AiReviewLaunch, ReviewPr } from "../../bindings";
 import type { FixCiLaunch } from "../../state/AppContext";
+import type { PrCheckout } from "./PrCheckout";
 
 const spies = vi.hoisted(() => ({
   requestFixCiLaunch: vi.fn(),
@@ -22,6 +23,7 @@ const spies = vi.hoisted(() => ({
   removePendingLaunch: vi.fn(),
   navigate: vi.fn(),
   createWorktree: vi.fn(),
+  promote: vi.fn(),
   reviewFixLaunch: vi.fn(),
   aiReviewLaunch: vi.fn(),
   error: vi.fn(),
@@ -43,6 +45,7 @@ vi.mock("../../lib/queries", () => ({
   unwrap: <T,>(p: Promise<T>) => p,
   useResolvedSetting: () => ({ data: "Codex" }),
   useCreateWorktree: () => ({ mutateAsync: spies.createWorktree }),
+  usePromoteReviewWorktree: () => ({ mutateAsync: spies.promote }),
 }));
 
 vi.mock("../../state/AppContext", () => ({
@@ -55,6 +58,16 @@ vi.mock("../../state/AppContext", () => ({
 }));
 
 vi.mock("../../state/toast", () => ({ toast: { error: spies.error, success: vi.fn() } }));
+// The worktree dialog, recorded rather than rendered: what matters here is that
+// the flow asks, names the action, and honours the answer.
+let asked: string[] = [];
+let gateAnswer = { ok: true, runSetup: false };
+vi.mock("./WorktreeGate", () => ({
+  useWorktreeGate: () => (action: string) => {
+    asked.push(action);
+    return Promise.resolve(gateAnswer);
+  },
+}));
 
 // Only the target mapping is needed here; the module also carries components.
 vi.mock("./ReviewSessionShared", () => ({
@@ -99,6 +112,8 @@ function handoffs(): FixCiLaunch[] {
 
 beforeEach(() => {
   for (const spy of Object.values(spies)) spy.mockReset();
+  asked = [];
+  gateAnswer = { ok: true, runSetup: false };
 });
 
 describe("useStartWorkInWorktree", () => {
@@ -209,13 +224,53 @@ describe("useStartAiReviewInWorktree", () => {
   });
 });
 
+/** A PR with nothing on disk. Starting work has to cut the checkout, which is
+ *  the thing the dialog exists to ask about. */
+const NO_CHECKOUT = {
+  repo: "acme/app",
+  worktree: null,
+  worktreeId: "",
+  source: { worktree: null, worktreeId: "", repo: "acme/app", isReview: false },
+  openAsTree: vi.fn(),
+  opening: false,
+  canOpen: true,
+} as unknown as PrCheckout;
+
+/** The same PR, already checked out *for review* — a worktree Trees doesn't list.
+ *  Nothing new reaches the disk, so there is nothing to confirm; what has to
+ *  happen is the label coming off, or this would navigate to a tree the
+ *  destination can't show. */
+const REVIEW_CHECKOUT = {
+  ...NO_CHECKOUT,
+  worktreeId: "review-4-acme-3-app-42",
+  source: {
+    worktree: { id: "review-4-acme-3-app-42" },
+    worktreeId: "review-4-acme-3-app-42",
+    repo: "acme/app",
+    isReview: true,
+  },
+} as unknown as PrCheckout;
+
+/** A PR that is already checked out: the flow then has nothing to put on disk,
+ *  so it neither asks nor promotes — which is what these cases exercise. The
+ *  gated path (no checkout at all) has its own case at the end. */
+const CHECKED_OUT = {
+  repo: "acme/app",
+  worktree: { id: "wt-9" },
+  worktreeId: "wt-9",
+  source: { worktree: { id: "wt-9" }, worktreeId: "wt-9", repo: "acme/app", isReview: false },
+  openAsTree: vi.fn(),
+  opening: false,
+  canOpen: true,
+} as unknown as PrCheckout;
+
 describe("useStartWorkFromReviews", () => {
   it("opens the tab as soon as the worktree lands, not when the prompt does", async () => {
     const command = pending<AiReviewLaunch>();
     spies.createWorktree.mockResolvedValue({ id: "wt-9" });
     spies.reviewFixLaunch.mockReturnValue(command.promise);
 
-    const { result } = renderHook(() => useStartWorkFromReviews(PR, "acme/app"));
+    const { result } = renderHook(() => useStartWorkFromReviews(PR, "acme/app", CHECKED_OUT));
     act(() => result.current.start());
 
     // Nothing to hang a tab on yet — the sidebar's pending row covers this bit.
@@ -244,7 +299,7 @@ describe("useStartWorkFromReviews", () => {
     spies.createWorktree.mockResolvedValue({ id: "wt-9" });
     spies.reviewFixLaunch.mockReturnValue(command.promise);
 
-    const { result } = renderHook(() => useStartWorkFromReviews(PR, "acme/app"));
+    const { result } = renderHook(() => useStartWorkFromReviews(PR, "acme/app", CHECKED_OUT));
     act(() => result.current.start());
     await act(async () => {
       await Promise.resolve();
@@ -265,7 +320,7 @@ describe("useStartWorkFromReviews", () => {
   it("leaves no tab to clean up when the worktree itself fails", async () => {
     spies.createWorktree.mockRejectedValue(new Error("worktree exists"));
 
-    const { result } = renderHook(() => useStartWorkFromReviews(PR, "acme/app"));
+    const { result } = renderHook(() => useStartWorkFromReviews(PR, "acme/app", CHECKED_OUT));
     act(() => result.current.start());
     await act(async () => {
       await Promise.resolve();
@@ -276,5 +331,55 @@ describe("useStartWorkFromReviews", () => {
     expect(spies.abandonLaunchTab).not.toHaveBeenCalled();
     expect(spies.removePendingLaunch).toHaveBeenCalled();
     await waitFor(() => expect(result.current.starting).toBe(false));
+  });
+
+  /** Reported: "Start work" on the queue went straight to cutting a worktree.
+   *  Every other surface that puts one on disk asks first, and this one is the
+   *  least expected of them — you are reading a pull request, not starting a
+   *  task in a repo you chose. */
+  it("asks before it cuts a checkout, and does nothing if declined", async () => {
+    gateAnswer = { ok: false, runSetup: false };
+    const { result } = renderHook(() => useStartWorkFromReviews(PR, "acme/app", NO_CHECKOUT));
+    act(() => result.current.start());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(asked).toEqual(["Starting work on this pull request"]);
+    expect(spies.createWorktree).not.toHaveBeenCalled();
+    expect(spies.addPendingLaunches).not.toHaveBeenCalled();
+    expect(spies.navigate).not.toHaveBeenCalled();
+    // …and the button comes back, or the surface is dead after a cancel.
+    await waitFor(() => expect(result.current.starting).toBe(false));
+  });
+
+  it("goes ahead once the worktree is confirmed", async () => {
+    spies.createWorktree.mockResolvedValue({ id: "wt-9" });
+    const { result } = renderHook(() => useStartWorkFromReviews(PR, "acme/app", NO_CHECKOUT));
+    act(() => result.current.start());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(spies.createWorktree).toHaveBeenCalled();
+    expect(spies.navigate).toHaveBeenCalled();
+  });
+
+  /** It navigates to Trees, and Trees does not list a checkout still labelled a
+   *  review — so the label has to come off on the way, or this lands on a
+   *  worktree the destination cannot show. */
+  it("keeps a review checkout instead of asking about one that exists", async () => {
+    spies.createWorktree.mockResolvedValue({ id: "review-4-acme-3-app-42" });
+    const { result } = renderHook(() => useStartWorkFromReviews(PR, "acme/app", REVIEW_CHECKOUT));
+    act(() => result.current.start());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(asked).toEqual([]);
+    expect(spies.promote).toHaveBeenCalledWith({ prRepo: PR.repo, number: PR.number });
   });
 });

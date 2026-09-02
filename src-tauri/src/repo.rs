@@ -22,47 +22,78 @@ use crate::linear;
 /// worktree links (one per issue with an active agent worktree) rather than a
 /// stored column, so it always reflects reality.
 pub async fn list(db: &Db) -> Result<Vec<Repo>> {
-    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, i64)>(
-        "SELECT r.name, r.tracker, r.path, r.linear_org_slug,
-                (SELECT COUNT(*) FROM worktree_links wl WHERE wl.repo_path = r.path)
-         FROM repos r ORDER BY r.rowid",
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+        "SELECT r.name, r.tracker, r.path, r.linear_org_slug FROM repos r ORDER BY r.rowid",
     )
     .fetch_all(db)
     .await?;
+    // Counted in Rust rather than as a correlated subquery so the review-checkout
+    // rows go through the one predicate that excludes them everywhere else — they
+    // are throwaway detached trees, not agents the user has working.
+    let counts = worktree_counts(db).await?;
     // The label has to name the org the repo's queries actually go to, so it comes
     // from the same resolver they do rather than a second copy of the fallback.
     let orgs = linear::orgs_by_name(db).await?;
 
     Ok(rows
         .into_iter()
-        .map(|(name, tracker, path, linked_slug, agents)| {
+        .map(|(name, tracker, path, linked_slug)| {
             let org_name = linear::resolved_org(&orgs, linked_slug.as_deref())
                 .map(|(_, org_name)| org_name.clone());
             Repo {
+                agents: path
+                    .as_deref()
+                    .map_or(0, |path| worktrees_at(&counts, path)),
                 name,
                 tracker: match org_name {
                     Some(org) => format!("Linear · {org}"),
                     None => tracker,
                 },
-                agents: agents as u32,
                 path,
             }
         })
         .collect())
 }
 
-/// Every registered repo's stored top-level path, in insertion order. Deliberately
-/// not [`list`]: that one resolves Linear orgs to build display labels, and the
-/// callers here are asking a filesystem question.
-pub(crate) async fn paths(db: &Db) -> Result<Vec<String>> {
-    Ok(sqlx::query_as::<_, (String,)>(
-        "SELECT path FROM repos WHERE path IS NOT NULL ORDER BY rowid",
+/// Every worktree link as `(repo path, issue id)` — the raw material both agent
+/// counts are derived from.
+/// Every `(repo_path, issue_id)` that counts as work the user started — the whole
+/// link table minus the pull requests being reviewed, which have worktrees of
+/// their own but are not tasks anyone opened.
+async fn worktree_counts(db: &Db) -> Result<Vec<(String, String)>> {
+    let mut links =
+        sqlx::query_as::<_, (String, String)>("SELECT repo_path, issue_id FROM worktree_links")
+            .fetch_all(db)
+            .await?;
+    let reviews = crate::reviews::all_review_ids(db).await?;
+    links.retain(|link| !reviews.contains(link));
+    Ok(links)
+}
+
+/// How many of those a repo path has.
+fn worktrees_at(links: &[(String, String)], repo_path: &str) -> u32 {
+    links.iter().filter(|(path, _)| path == repo_path).count() as u32
+}
+
+/// Every registered repo as `(registry name, stored top-level path)`, in insertion
+/// order. Deliberately not [`list`]: that one resolves Linear orgs to build display
+/// labels, and the callers here are asking a filesystem question — they just need
+/// to say which project the answer came from.
+pub(crate) async fn registered(db: &Db) -> Result<Vec<(String, String)>> {
+    Ok(sqlx::query_as::<_, (String, String)>(
+        "SELECT name, path FROM repos WHERE path IS NOT NULL ORDER BY rowid",
     )
     .fetch_all(db)
-    .await?
-    .into_iter()
-    .map(|(path,)| path)
-    .collect())
+    .await?)
+}
+
+/// Every registered repo's stored top-level path, in insertion order.
+pub(crate) async fn paths(db: &Db) -> Result<Vec<String>> {
+    Ok(registered(db)
+        .await?
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect())
 }
 
 /// The stored top-level path of a registered repo, if it has one.
@@ -136,17 +167,13 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
 
     // Usually 0 for a fresh repo, but re-adding an already-registered one
     // (the call is idempotent) can have existing worktree links.
-    let (agents,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM worktree_links WHERE repo_path = ?")
-            .bind(&toplevel)
-            .fetch_one(db)
-            .await?;
+    let agents = worktrees_at(&worktree_counts(db).await?, &toplevel);
 
     log::info!("registered repository {name} at {toplevel}");
     Ok(Repo {
         name,
         tracker,
-        agents: agents as u32,
+        agents,
         path: Some(toplevel),
     })
 }

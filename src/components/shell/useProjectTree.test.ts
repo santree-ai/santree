@@ -15,8 +15,11 @@ import { NO_PROJECT } from "../WorkSignals";
 import {
   ancestorGroupKeys,
   buildProjectNode,
+  groupAgentsByTicket,
   groupAgentsByWorktree,
+  groupKeysUnder,
   milestoneKey,
+  type ProjectNode,
   projectKey,
   repoKey,
   worktreeKey,
@@ -261,6 +264,71 @@ describe("groupAgentsByWorktree", () => {
     expect(groupAgentsByWorktree([blocked], seen, NOW).get(key)?.[0]?.attention.level).toBe(
       "needs-you",
     );
+  });
+});
+
+/**
+ * The sidebar's Triage section hangs each ticket's investigations under its row.
+ * Same fold, same ordering as the worktree one; the only rule of its own is the
+ * key, which is the ticket alone.
+ */
+describe("groupAgentsByTicket", () => {
+  const investigation = (
+    sessionId: string,
+    bucket: AgentBucket,
+    ticket = "AK-1",
+    over: Partial<AgentEntry> = {},
+  ) =>
+    fxAgentEntry({
+      sessionId,
+      bucket,
+      termKey: `triage:${ticket}`,
+      ...over,
+    });
+
+  it("files an investigation under its ticket", () => {
+    const grouped = groupAgentsByTicket([investigation("s1", "working")], noSeen, NOW);
+    expect(grouped.get("AK-1")?.map((n) => n.entry.sessionId)).toEqual(["s1"]);
+  });
+
+  // The row is the Linear issue, not a checkout of it: the same ticket
+  // investigated from two registered repos is one ticket with two agents.
+  it("keys by the ticket alone, across repos", () => {
+    const grouped = groupAgentsByTicket(
+      [
+        investigation("s1", "working", "AK-1", { repo: "acme/app" }),
+        investigation("s2", "working", "AK-1", { repo: "acme/api" }),
+      ],
+      noSeen,
+      NOW,
+    );
+    expect(grouped.get("AK-1")).toHaveLength(2);
+  });
+
+  // A worktree agent runs in a checkout and belongs to that row; a review belongs
+  // to its pull request. Neither is an investigation of a ticket.
+  it("drops sessions that aren't triage investigations", () => {
+    const tree = entry({ sessionId: "s1", bucket: "working" });
+    const review = entry({
+      sessionId: "s2",
+      bucket: "working",
+      originKind: "review",
+      ticket: null,
+    });
+    expect(groupAgentsByTicket([tree, review], noSeen, NOW).size).toBe(0);
+  });
+
+  it("orders a ticket's agents by attention, the one blocked on you first", () => {
+    const nodes = groupAgentsByTicket(
+      [
+        investigation("s1", "idle"),
+        investigation("s2", "attention"),
+        investigation("s3", "working"),
+      ],
+      noSeen,
+      NOW,
+    ).get("AK-1");
+    expect(nodes?.map((n) => n.entry.sessionId)).toEqual(["s2", "s3", "s1"]);
   });
 });
 
@@ -787,5 +855,75 @@ describe("ancestorGroupKeys", () => {
       repoKey("acme/app"),
       repoKey("acme/api"),
     ]);
+  });
+});
+
+/**
+ * What a ⌘-click on a sidebar heading reaches (see `lib/disclosure`): a repo
+ * section's bands and their milestones, a band's own milestones, and nothing
+ * from a level that this section doesn't draw — a key nothing renders would
+ * persist a fold for a row that isn't there and surface it the day it appears.
+ */
+describe("groupKeysUnder", () => {
+  /** Only the fields the scope walk reads — this is a shape question, not a
+   *  rendering one. */
+  const section = (
+    repo: string,
+    bands: [string, string[]][],
+    over: { showProjects?: boolean; showMilestones?: boolean } = {},
+  ) =>
+    ({
+      repo,
+      showProjects: over.showProjects ?? true,
+      linearProjects: bands.map(([key, milestones]) => ({
+        key,
+        showMilestones: over.showMilestones ?? true,
+        milestones: milestones.map((m) => ({ key: m })),
+      })),
+    }) as unknown as ProjectNode;
+
+  const projects = [
+    section("acme/web", [
+      ["proj-a", ["m1", "m2"]],
+      ["proj-b", ["m3"]],
+    ]),
+    section("acme/api", [["proj-c", ["m4"]]]),
+  ];
+
+  /** A level this section doesn't draw contributes no keys — see the doc above. */
+  it("skips levels the section doesn't render", () => {
+    const flat = [section("acme/web", [["proj-a", ["m1"]]], { showProjects: false })];
+    expect(groupKeysUnder(flat, repoKey("acme/web"))).toEqual([
+      milestoneKey("acme/web", "proj-a", "m1"),
+    ]);
+    const noMilestones = [section("acme/web", [["proj-a", ["m1"]]], { showMilestones: false })];
+    expect(groupKeysUnder(noMilestones, repoKey("acme/web"))).toEqual([
+      projectKey("acme/web", "proj-a"),
+    ]);
+  });
+
+  it("reaches a repo's bands and their milestones", () => {
+    expect(groupKeysUnder(projects, repoKey("acme/web")).sort()).toEqual(
+      [
+        projectKey("acme/web", "proj-a"),
+        projectKey("acme/web", "proj-b"),
+        milestoneKey("acme/web", "proj-a", "m1"),
+        milestoneKey("acme/web", "proj-a", "m2"),
+        milestoneKey("acme/web", "proj-b", "m3"),
+      ].sort(),
+    );
+  });
+
+  it("reaches only its own milestones from a band", () => {
+    expect(groupKeysUnder(projects, projectKey("acme/web", "proj-a")).sort()).toEqual(
+      [milestoneKey("acme/web", "proj-a", "m1"), milestoneKey("acme/web", "proj-a", "m2")].sort(),
+    );
+  });
+
+  /** A milestone is the bottom of the ladder: nothing below it folds, so the
+   *  gesture is simply a plain toggle there rather than a surprise. */
+  it("reaches nothing from a milestone or a key it doesn't know", () => {
+    expect(groupKeysUnder(projects, milestoneKey("acme/web", "proj-a", "m1"))).toEqual([]);
+    expect(groupKeysUnder(projects, "nope")).toEqual([]);
   });
 });

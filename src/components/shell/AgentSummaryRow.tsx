@@ -61,7 +61,9 @@ export function AgentSummaryRow({
   agents: AgentNode[];
   expanded: boolean;
   onToggle: () => void;
-  /** Left gutter, so the chips line up under the title's text column. */
+  /** Where the row's content starts — the worktree title's own column, so the
+   *  summary and the agent rows it expands into line up with the name above
+   *  them rather than each starting a column of their own. */
   indent: number;
 }) {
   const { visible, hiddenAgents } = splitGroups(agents);
@@ -78,7 +80,11 @@ export function AgentSummaryRow({
       aria-expanded={expanded}
       aria-label={expanded ? "Collapse agents" : `Expand agents. ${describeAgents(agents)}`}
       title={describeAgents(agents)}
-      className="tree-row relative flex h-6 w-full cursor-pointer items-center gap-1 pr-1.5 text-left"
+      // `.tree-band`, not `.tree-row`: this line folds its children and opens
+      // nothing, so the fill that means "you picked this" on the agent rows
+      // underneath would be a promise it can't keep. Same register as a project
+      // or milestone heading — the rows inside it still take their own hover.
+      className="tree-band relative flex h-6 w-full cursor-pointer items-center gap-1 pr-1.5 text-left"
       style={{ paddingLeft: indent }}
     >
       {expanded ? (

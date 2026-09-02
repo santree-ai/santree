@@ -5,7 +5,7 @@
  * treatment; code is monospaced in a subtle well.
  */
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { type CSSProperties, memo, type ReactNode } from "react";
+import { type CSSProperties, createContext, memo, type ReactNode, useContext } from "react";
 import ReactMarkdown, { type Components, defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -42,6 +42,87 @@ const sanitizeSchema = {
 // while keeping the default safety checks for everything else.
 const urlTransform = (url: string) =>
   url.startsWith("data:image/") ? url : defaultUrlTransform(url);
+
+/**
+ * Signed links for the `user-attachments` assets a GitHub body points at, by id.
+ *
+ * A screenshot in a PR description is written as
+ * `https://github.com/user-attachments/assets/<id>`, and on a private repo that
+ * URL is served only to a browser session — the webview has none, so every one
+ * of them rendered as a broken icon while GitHub's own page showed them fine.
+ * The backend reads GitHub's pre-signed CDN links out of the same PR query
+ * (`PrDetail.attachments`), and this is how they reach the `<img>`: a context
+ * rather than a prop, because the swap has to happen in a body, a comment, a
+ * review and a draft alike, and threading a map through all four would put the
+ * detail in every caller instead of in the one component that renders images.
+ *
+ * The links expire in about five minutes, so they are never stored — the map
+ * lives exactly as long as the read that produced it.
+ */
+const AttachmentContext = createContext<Record<string, string>>({});
+
+export function MarkdownAttachments({
+  attachments,
+  children,
+}: {
+  attachments: { id: string; url: string }[] | undefined;
+  children: ReactNode;
+}) {
+  // Rebuilt per render on purpose: the array is a query result, so it is
+  // referentially stable between refetches and changes exactly when the links do.
+  const map: Record<string, string> = {};
+  for (const a of attachments ?? []) map[a.id] = a.url;
+  return <AttachmentContext.Provider value={map}>{children}</AttachmentContext.Provider>;
+}
+
+/** The id in `https://github.com/user-attachments/assets/<id>`, or null for any
+ *  other image. Matched on the parsed URL, not a prefix: `github.com.evil.test`
+ *  starts with the same characters. */
+export function attachmentId(src: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(src);
+  } catch {
+    return null;
+  }
+  if (url.host !== "github.com") return null;
+  const [, first, second, id, ...rest] = url.pathname.split("/");
+  if (first !== "user-attachments" || second !== "assets" || rest.length > 0) return null;
+  return id || null;
+}
+
+/**
+ * One image in a body.
+ *
+ * A GitHub attachment is swapped for the signed link that will actually load it;
+ * everything else (a Linear `data:` URI, a public image) is rendered as written.
+ * An attachment with no link in the map is *not* rendered as a broken icon —
+ * that is the state this whole path exists to remove — but as its own alt text,
+ * which is what the author wrote the image to say.
+ */
+function BodyImage({ src, alt }: { src: string | undefined; alt: string | undefined }) {
+  const attachments = useContext(AttachmentContext);
+  const id = src ? attachmentId(src) : null;
+  const resolved = id ? attachments[id] : src;
+
+  if (id && !resolved) {
+    return (
+      <span
+        className="my-2.5 flex items-center gap-1.5 rounded-lg border border-dashed border-line-3 px-2.5 py-2 text-[11px] text-muted-4"
+        title="This attachment is private to the repository, and its signed link hasn't arrived yet."
+      >
+        {alt || "Attachment"}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={resolved}
+      alt={alt ?? ""}
+      className="my-2.5 max-w-full rounded-lg border border-line-3"
+    />
+  );
+}
 
 /** A hast node, structurally — enough to walk a `<pre>` without pulling in the
  *  full hast types for two fields. */
@@ -138,13 +219,7 @@ const components: Components = {
     </a>
   ),
   strong: ({ children }) => <strong className="font-semibold text-fg-bright">{children}</strong>,
-  img: ({ src, alt }) => (
-    <img
-      src={typeof src === "string" ? src : undefined}
-      alt={alt ?? ""}
-      className="my-2.5 max-w-full rounded-lg border border-line-3"
-    />
-  ),
+  img: ({ src, alt }) => <BodyImage src={typeof src === "string" ? src : undefined} alt={alt} />,
   // Block code is `<pre><code>`; the `pre` supplies the box so multi-line
   // fenced blocks render correctly even when they carry no language. `code`
   // styles inline snippets only (block code is detected by a language class or

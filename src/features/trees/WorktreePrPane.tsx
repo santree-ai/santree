@@ -4,10 +4,12 @@
  *
  * Top to bottom it answers the questions in the order they get asked — is it open,
  * is CI green, what has anyone said. What to *do* about it is the next tab along
- * ({@link WorktreeAiWorkPane}): the work queue and the AI's reading of the PR
+ * ({@link AiWorkPane}): the work queue and the AI's reading of the PR
  * that fills it, which at the bottom of this scroll nobody found. The code itself
  * is deliberately absent too — a diff belongs in the main area, and clicking
- * through from here opens it there.
+ * through from here opens it there. So does the whole pull request, at reading
+ * width: the header's "Open in a tab" expands this pane into the same
+ * {@link PrPage} Reviews shows for other people's PRs.
  *
  * Everything below the header is a component the Reviews tab already uses, given
  * this host's own callbacks — one implementation, two places to read it from.
@@ -18,8 +20,14 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 
 import type { ReviewPr, WorktreePr } from "../../bindings";
-import { ChevronDownIcon, GitHubLogo, MoreIcon, RefreshIcon } from "../../components/icons";
-import { Markdown, MarkdownTitle } from "../../components/Markdown";
+import {
+  ChevronDownIcon,
+  ExpandIcon,
+  GitHubLogo,
+  MoreIcon,
+  RefreshIcon,
+} from "../../components/icons";
+import { Markdown, MarkdownAttachments, MarkdownTitle } from "../../components/Markdown";
 import { Dropdown, MENU_ITEM, Pill, Skeleton } from "../../components/primitives";
 import { queryKeys, usePrDetail, usePrSummary } from "../../lib/queries";
 import { splitRepoSlug } from "../../lib/repo";
@@ -28,7 +36,14 @@ import { prStateMeta } from "../../theme/colors";
 import { PrChecksSection } from "./PrChecksSection";
 import { PrCommentsSection } from "./PrCommentsSection";
 
-export function WorktreePrPane({ pr }: { pr: WorktreePr }) {
+export function WorktreePrPane({
+  pr,
+  onExpand,
+}: {
+  pr: WorktreePr;
+  /** Open the pull request as a main-area tab. Drawn only when a host offers it. */
+  onExpand?: () => void;
+}) {
   const { data: summary } = usePrSummary(pr.repo, pr.number);
 
   if (!summary) {
@@ -40,21 +55,28 @@ export function WorktreePrPane({ pr }: { pr: WorktreePr }) {
       </div>
     );
   }
-  return <Loaded pr={summary} />;
+  return <Loaded pr={summary} onExpand={onExpand} />;
 }
 
-function Loaded({ pr }: { pr: ReviewPr }) {
+function Loaded({ pr, onExpand }: { pr: ReviewPr; onExpand?: () => void }) {
+  const [owner, name] = splitRepoSlug(pr.repo);
+  // The same read the sections below already share, for its signed attachment
+  // links: a screenshot in your own PR's description is behind the same auth
+  // wall as one in somebody else's (see `MarkdownAttachments`).
+  const { data: detail } = usePrDetail(owner, name, pr.number);
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <PrHeader pr={pr} />
-      <PrDescription pr={pr} />
-      <PrChecksSection pr={pr} />
-      <PrCommentsSection pr={pr} />
-    </div>
+    <MarkdownAttachments attachments={detail?.attachments}>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <PrHeader pr={pr} onExpand={onExpand} />
+        <PrDescription pr={pr} />
+        <PrChecksSection pr={pr} />
+        <PrCommentsSection pr={pr} />
+      </div>
+    </MarkdownAttachments>
   );
 }
 
-function PrHeader({ pr }: { pr: ReviewPr }) {
+function PrHeader({ pr, onExpand }: { pr: ReviewPr; onExpand?: () => void }) {
   const qc = useQueryClient();
   const [owner, name] = splitRepoSlug(pr.repo);
   const state = prStateMeta[pr.state];
@@ -89,6 +111,17 @@ function PrHeader({ pr }: { pr: ReviewPr }) {
         <span className="rounded bg-input px-1 py-px text-[9px] text-muted-4">draft</span>
       )}
       <span className="min-w-1 flex-1" />
+      {onExpand && (
+        <button
+          type="button"
+          onClick={onExpand}
+          title="Open in a tab"
+          aria-label="Open in a tab"
+          className="flex-none cursor-pointer text-muted-4 transition-colors hover:text-fg-2"
+        >
+          <ExpandIcon size={12} />
+        </button>
+      )}
       <button
         type="button"
         onClick={refresh}

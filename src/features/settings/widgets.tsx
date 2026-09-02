@@ -150,3 +150,33 @@ export function OverrideSelect({
     </div>
   );
 }
+
+/** A label + hint on the left, one control on the right. The caption is wired to
+ *  the control via `aria-labelledby` (handed to the child as an id), so the
+ *  visible text doubles as the control's programmatic name.
+ *
+ *  Shared rather than per-section: the Linear and GitHub cards both carry
+ *  preference rows and a second copy of these paddings is how the two drift into
+ *  looking like different kinds of control. */
+export function CardRow({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint: ReactNode;
+  children: (labelId: string) => ReactNode;
+}) {
+  const labelId = useId();
+  return (
+    <div className="flex items-center gap-4 border-t border-line px-4 py-3 first:border-t-0">
+      <div className="min-w-0 flex-1">
+        <div id={labelId} className="mb-[3px] text-[12.5px] font-medium text-fg-3">
+          {label}
+        </div>
+        <div className="text-[11.5px] text-muted-3">{hint}</div>
+      </div>
+      {children(labelId)}
+    </div>
+  );
+}

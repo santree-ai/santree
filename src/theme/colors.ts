@@ -152,6 +152,37 @@ export const prStateMeta: Record<PrState, { color: string; label: string }> = {
   Closed: { color: "#f85149", label: "closed" },
 };
 
+/**
+ * The four states GitHub's PR page names in its header pill. `Draft` is a state
+ * of an *open* PR rather than a fourth `PrState`, so it is resolved from
+ * `isDraft` (see {@link prStatePill}) instead of being a key of the backend enum.
+ */
+export type PrPageState = "Open" | "Draft" | "Merged" | "Closed";
+
+/**
+ * Color + label for the PR page's own state pill.
+ *
+ * Deliberately not {@link prStateMeta}, which is the *chip* in a list: there,
+ * "open" is the resting state of nearly every row, so green would paint the list
+ * as a wall of approval. Alone at the top of one pull request the pill is the
+ * page's headline fact, and GitHub's green/purple/red is the vocabulary a
+ * reviewer already reads. Merged and closed share the chip's colors — only
+ * "open" differs, and only because its context does.
+ */
+export const prStatePillMeta: Record<PrPageState, { color: string; label: string }> = {
+  Open: { color: palette.green, label: "Open" },
+  Draft: { color: palette.slate, label: "Draft" },
+  Merged: { color: prStateMeta.Merged.color, label: "Merged" },
+  Closed: { color: prStateMeta.Closed.color, label: "Closed" },
+};
+
+/** Which pill a PR wears: `isDraft` only distinguishes an open PR — GitHub keeps
+ *  the flag set on a merged or closed one that was never marked ready. */
+export function prStatePill(state: PrState, isDraft: boolean): PrPageState {
+  if (state !== "Open") return state;
+  return isDraft ? "Draft" : "Open";
+}
+
 /** Color + label for a PR's aggregate review decision (Reviews dashboard). */
 export const reviewDecisionMeta: Record<ReviewDecision, { color: string; label: string }> = {
   Approved: { color: palette.green, label: "approved" },
@@ -182,18 +213,6 @@ export function reviewAgeColor(days: number): string {
   if (days <= 3) return palette.amber;
   return palette.red;
 }
-
-/** Color for the review-effort size chip: the small ones read as "you could do
- *  this now", the big ones as "block out time". Only the big end is tinted —
- *  "small" is a fact about the diff, not an approval, and painting XS/S green
- *  made every tiny PR look pre-approved. */
-export const prSizeColor: Record<"XS" | "S" | "M" | "L" | "XL", string> = {
-  XS: palette.slate,
-  S: palette.slate,
-  M: palette.slate,
-  L: palette.amber,
-  XL: palette.red,
-};
 
 /**
  * Label + color for a reading-order step's role.
@@ -421,6 +440,21 @@ export function accentActiveStyle(): CSSProperties {
     background: "var(--selection-fill)",
     border: "1px solid var(--selection-border)",
     color: "var(--selection-text)",
+  };
+}
+
+/**
+ * The "on" look for a control that picks how one thing is filtered or drawn — a
+ * segmented option, a filter chip: *raised*, not tinted. That is a smaller claim
+ * than {@link accentActiveStyle}'s "this is the current destination", and an
+ * accent-rimmed chip in a toolbar competes with the content it filters (in light
+ * mode, where the accent is near-black, it read as a pressed, dark-edged button).
+ */
+export function raisedActiveStyle(): CSSProperties {
+  return {
+    background: "var(--color-raised-2)",
+    border: "1px solid var(--color-line-2)",
+    color: "var(--color-fg)",
   };
 }
 

@@ -23,6 +23,7 @@ use santree_core::domain::{
 use crate::db::Db;
 use crate::git;
 use crate::repo;
+use crate::reviews;
 use crate::session;
 use crate::stream::{self, StreamEvent};
 
@@ -37,12 +38,20 @@ pub const BASE_ID: &str = "__base__";
 /// mirrors `git.rs`'s `safe_path` guard. IPC-supplied, so a value like `".."` or
 /// `"/etc"` must not be allowed to escape `.santree/worktrees` and later get
 /// `remove_dir_all`'d as an "adopted" worktree.
-fn validate_issue_id(issue_id: &str) -> Result<()> {
+///
+/// It no longer reserves a namespace for review checkouts. It used to: they were
+/// a separate species of row, filtered out of every worktree-shaped read by an id
+/// prefix, so a caller allowed to mint one would have got a worktree no list could
+/// show. They are ordinary worktrees now, told apart by the `review_worktrees`
+/// table (see `reviews::mark_review`), and `create` reaching an id that is already
+/// a review checkout is the *correct* answer — it adopts it.
+pub(crate) fn validate_issue_id(issue_id: &str) -> Result<()> {
     let mut components = Path::new(issue_id).components();
     match (components.next(), components.next()) {
-        (Some(std::path::Component::Normal(_)), None) => Ok(()),
+        (Some(std::path::Component::Normal(_)), None) => {}
         _ => bail!("invalid issue id '{issue_id}'"),
     }
+    Ok(())
 }
 
 /// Reject a branch name that `git` would refuse — or, worse, read as a flag
@@ -281,13 +290,15 @@ pub async fn tracked_on_branch(db: &Db, repo: &str, branch: &str) -> Result<bool
         return Ok(false);
     };
     let tracked = sqlx::query_scalar::<_, String>(
-        "SELECT issue_id FROM worktree_links WHERE repo_path = ? AND branch = ? LIMIT 1",
+        "SELECT issue_id FROM worktree_links WHERE repo_path = ? AND branch = ?",
     )
     .bind(&root)
     .bind(branch)
-    .fetch_optional(db)
+    .fetch_all(db)
     .await?;
-    Ok(tracked.is_some())
+    // No exclusion for review checkouts: they are worktrees on real branches now,
+    // so one of them holding a branch is exactly what this question is asking.
+    Ok(!tracked.is_empty())
 }
 
 /// Every tracked worktree for a repo, with live git stats. Empty when the repo
@@ -297,12 +308,20 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<Worktree>> {
     let Some(root) = repo::path(db, repo).await? else {
         return Ok(Vec::new());
     };
-    let rows = sqlx::query_as::<_, LinkRow>(&format!(
+    let mut rows = sqlx::query_as::<_, LinkRow>(&format!(
         "SELECT {LINK_COLUMNS} FROM worktree_links WHERE repo_path = ? ORDER BY created_at DESC"
     ))
     .bind(&root)
     .fetch_all(db)
     .await?;
+    // The one place a review checkout differs from any other worktree: it is a
+    // pull request you are reading, not work you started, and this list is what
+    // Trees and the sidebar draw. Everything built on this list inherits the
+    // exclusion; everything that addresses a worktree by id — files, git status,
+    // tabs, session history, setup — does not, which is the point of keeping them
+    // one kind of thing.
+    let reviews: HashSet<String> = reviews::review_ids(db, &root).await?.into_iter().collect();
+    rows.retain(|row| !reviews.contains(&row.issue_id));
 
     // Which bases are *stacked* — i.e. another worktree's branch rather than an
     // upstream one. Derived from the rows already in hand, so `git::stats` gets the
@@ -343,12 +362,15 @@ fn base_kind(worktree_branches: &HashSet<&str>, base: &str) -> git::BaseKind {
 /// whole list in hand ([`get`], [`create`]). One indexed SQLite read — still no git
 /// process — versus the set `list` builds once for the whole batch.
 async fn base_kind_of(db: &Db, root: &str, base: &str) -> Result<git::BaseKind> {
-    let branches =
-        sqlx::query_scalar::<_, String>("SELECT branch FROM worktree_links WHERE repo_path = ?")
-            .bind(root)
-            .fetch_all(db)
-            .await?;
-    let set: HashSet<&str> = branches.iter().map(String::as_str).collect();
+    let branches = sqlx::query_as::<_, (String, String)>(
+        "SELECT issue_id, branch FROM worktree_links WHERE repo_path = ?",
+    )
+    .bind(root)
+    .fetch_all(db)
+    .await?;
+    // No exclusion: a review checkout sits on the PR's own branch, which is a
+    // perfectly good thing for later work to be stacked on.
+    let set: HashSet<&str> = branches.iter().map(|(_, branch)| branch.as_str()).collect();
     Ok(base_kind(&set, base))
 }
 
@@ -536,12 +558,17 @@ pub async fn create(
     // branch is the shared identity at the git sink, and must not be added to a
     // second worktree even when the UI cache is stale.
     let existing_issue = sqlx::query_scalar::<_, String>(
-        "SELECT issue_id FROM worktree_links WHERE repo_path = ? AND branch = ? LIMIT 1",
+        "SELECT issue_id FROM worktree_links WHERE repo_path = ? AND branch = ?",
     )
     .bind(&root)
     .bind(&target_branch)
-    .fetch_optional(db)
-    .await?;
+    .fetch_all(db)
+    .await?
+    .into_iter()
+    // A review checkout counts here now: it is on the PR's branch, so "open this
+    // PR as a tree" adopts the checkout the AI review already cut instead of
+    // trying to add a second worktree on a branch git has already checked out.
+    .next();
     if let Some(existing_issue) = existing_issue {
         return get(db, repo, &existing_issue)
             .await?
@@ -1832,6 +1859,83 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    /// A review checkout is registered in the same table as everything else so the
+    /// Reviews rail can read it by id — and filtered back out of every reader that
+    /// presents rows *as worktrees*, because it is a throwaway detached tree, not
+    /// work the user started.
+    ///
+    /// The branch column carrying a commit is load-bearing for the second half:
+    /// "is this branch already checked out?" gates creating a PR's own worktree,
+    /// and a review checkout must never be the answer.
+    #[tokio::test]
+    async fn a_review_checkout_is_addressable_but_never_listed_as_a_worktree() {
+        let (base, repo_dir, db) = test_repo("review-checkout-row").await;
+        let root = repo_dir.to_string_lossy().into_owned();
+        let mine = spawn_worktree(&db, "AK-1").await;
+
+        // A pull request's checkout is an ordinary worktree now — same directory,
+        // same row, a real branch — so the id is no longer reserved and `create`
+        // is allowed to mint it. What sets it apart is one membership row.
+        let id = crate::reviews::review_worktree_id("acme", "app", 7).unwrap();
+        assert!(validate_issue_id(&id).is_ok());
+        let checkout = repo_dir.join(".santree").join("worktrees").join(&id);
+        std::fs::create_dir_all(&checkout).unwrap();
+        sqlx::query(
+            "INSERT INTO worktree_links (repo_path, issue_id, branch, worktree_path, base_branch)
+             VALUES (?, ?, 'user/pr-branch', ?, 'main')",
+        )
+        .bind(&root)
+        .bind(&id)
+        .bind(checkout.to_string_lossy().as_ref())
+        .execute(&db)
+        .await
+        .unwrap();
+        crate::reviews::mark_review(&db, &root, &id, "acme/app", 7)
+            .await
+            .unwrap();
+
+        let listed = list(&db, "test").await.unwrap();
+        assert_eq!(
+            listed.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
+            ["AK-1"],
+            "a pull request you are reading is not work you started"
+        );
+        // …and every repo-level count built on the same table agrees.
+        let repos = crate::repo::list(&db).await.unwrap();
+        assert_eq!(repos[0].agents, 1);
+        assert!(
+            crate::pr::linked_worktrees(&db, &root)
+                .await
+                .unwrap()
+                .iter()
+                .all(|(issue_id, _)| issue_id == "AK-1"),
+            "the Trees sidebar's PR marks hang off work, not off reviews"
+        );
+
+        // Addressable, and by exactly the same reads as any other worktree — the
+        // point of making them one kind of thing.
+        assert_eq!(worktree_path(&db, "test", &id).await.unwrap(), checkout);
+        let opened = get(&db, "test", &id).await.unwrap().unwrap();
+        assert_eq!(opened.id, id);
+        assert_eq!(opened.branch, "user/pr-branch");
+
+        // The branch probe *does* see it: it holds that branch, so cutting a
+        // second worktree on it would be the bug. This is the flip that lets
+        // "open this PR as a tree" adopt the checkout the AI review already made.
+        assert!(tracked_on_branch(&db, "test", "user/pr-branch")
+            .await
+            .unwrap());
+        assert!(tracked_on_branch(&db, "test", &mine.branch).await.unwrap());
+
+        crate::reviews::unmark_review(&db, &root, &id).await;
+        let listed = list(&db, "test").await.unwrap();
+        assert!(
+            listed.iter().any(|w| w.id == id),
+            "unmarked, it is just a worktree"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Two Setup runs for one worktree must not stack: the check and the claim used to

@@ -1152,7 +1152,15 @@ mod tests {
             )
             .expect("open session");
 
-        mgr.write(id, b"echo before-gap\n").expect("write");
+        // The needle must not appear in the line the shell echoes back, or the
+        // wait below can return on that echo while the command's own output is
+        // still in flight — anchoring the reattach *before* the thing it is
+        // supposed to have already seen, and failing the assertion at the end
+        // for a reason that has nothing to do with the ring. `bef''ore-gap`
+        // prints `before-gap` while the echoed command line does not contain it.
+        // (Load-sensitive: it passed alone and failed under a parallel
+        // `--workspace` run.)
+        mgr.write(id, b"echo bef''ore-gap\n").expect("write");
         let first = wait_for_replay(&mgr, id, &Anchor::Fresh, b"before-gap");
         let epoch = mgr
             .sessions()
@@ -1162,7 +1170,7 @@ mod tests {
             .epoch;
 
         mgr.detach(id);
-        mgr.write(id, b"echo after-gap\n").expect("write");
+        mgr.write(id, b"echo aft''er-gap\n").expect("write");
 
         let anchor = Anchor::At {
             epoch,

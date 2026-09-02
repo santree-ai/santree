@@ -2,7 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TriageDetail, TriageTicket } from "../../bindings";
-import { useTriageKeyboard, useTriageSelection } from "./hooks";
+import { useTriageKeyboard } from "./hooks";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 const { openUrl } = await import("@tauri-apps/plugin-opener");
@@ -10,58 +10,13 @@ const { openUrl } = await import("@tauri-apps/plugin-opener");
 const ticket = (id: string) => ({ id }) as TriageTicket;
 const queue = (...ids: string[]) => ids.map(ticket);
 
-describe("useTriageSelection", () => {
-  it("starts without selecting a ticket", () => {
-    const q = queue("AK-1", "AK-2");
-    const { result } = renderHook(() => useTriageSelection(q));
-
-    expect(result.current.activeId).toBeNull();
-    expect(result.current.activeTicket).toBeNull();
-  });
-
-  it("honors an explicit selection", () => {
-    const q = queue("AK-1", "AK-2");
-    const { result } = renderHook(() => useTriageSelection(q));
-
-    act(() => result.current.select("AK-2"));
-
-    expect(result.current.activeId).toBe("AK-2");
-  });
-
-  it("returns home when the selection drops out of the visible set", () => {
-    const ordered = queue("AK-1", "AK-2");
-    const { result, rerender } = renderHook(({ visible }) => useTriageSelection(visible), {
-      initialProps: { visible: ordered },
-    });
-    act(() => result.current.select("AK-2"));
-    expect(result.current.activeId).toBe("AK-2");
-
-    rerender({ visible: queue("AK-1") });
-
-    expect(result.current.activeId).toBeNull();
-  });
-
-  it("has no active ticket when the queue is empty", () => {
-    const { result } = renderHook(() => useTriageSelection([]));
-
-    expect(result.current.activeId).toBeNull();
-    expect(result.current.activeTicket).toBeNull();
-  });
-
-  it("does not infer a selection from the visible queue", () => {
-    const { result } = renderHook(() => useTriageSelection(queue("AK-2")));
-
-    expect(result.current.activeId).toBeNull();
-    expect(result.current.activeTicket).toBeNull();
-  });
-});
-
 describe("useTriageKeyboard", () => {
   const detail = { id: "AK-1", url: "https://linear.app/x/AK-1" } as TriageDetail;
 
   function mount(over: Partial<Parameters<typeof useTriageKeyboard>[0]> = {}) {
     const onSelect = vi.fn();
     const onInvestigate = vi.fn();
+    const onTogglePanel = vi.fn();
     renderHook(() =>
       useTriageKeyboard({
         ordered: queue("AK-1", "AK-2", "AK-3"),
@@ -69,10 +24,11 @@ describe("useTriageKeyboard", () => {
         detail,
         onSelect,
         onInvestigate,
+        onTogglePanel,
         ...over,
       }),
     );
-    return { onSelect, onInvestigate };
+    return { onSelect, onInvestigate, onTogglePanel };
   }
 
   const press = (key: string, init: KeyboardEventInit = {}, target: EventTarget = window) =>
@@ -139,6 +95,18 @@ describe("useTriageKeyboard", () => {
     const noSel = mount({ activeId: null });
     press("i", { metaKey: true });
     expect(noSel.onInvestigate).not.toHaveBeenCalled();
+  });
+
+  /** Without a workspace there is no rail; flipping a persisted flag nobody can
+   *  see would be a surprise saved for the next ticket. */
+  it("⌘L toggles the panel with a ticket open, and does nothing without one", () => {
+    const withSel = mount();
+    press("l", { metaKey: true, code: "KeyL" });
+    expect(withSel.onTogglePanel).toHaveBeenCalledTimes(1);
+
+    const noSel = mount({ activeId: null });
+    press("l", { metaKey: true, code: "KeyL" });
+    expect(noSel.onTogglePanel).not.toHaveBeenCalled();
   });
 
   it("⌘O opens the ticket in Linear only once its detail has loaded", () => {

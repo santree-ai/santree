@@ -15,16 +15,10 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 const app = vi.hoisted(() => ({
-  triageEnabled: false,
   toggleSidebar: vi.fn(),
   toggleShortcuts: vi.fn(),
   toggleCommandPalette: vi.fn(),
 }));
-const zoom = vi.hoisted(() => ({ apply: vi.fn(), level: 1 }));
-vi.mock("./zoom", async (orig) => {
-  const real = (await orig()) as typeof import("./zoom");
-  return { ...real, applyZoom: zoom.apply, loadZoom: () => zoom.level };
-});
 
 // Stubbed like the app context above: this file tests the window handler, not
 // the query cache — and the real hook needs a QueryClientProvider the bare
@@ -35,7 +29,6 @@ vi.mock("./queries", () => ({
 }));
 
 vi.mock("../state/AppContext", () => ({
-  useAppOptional: () => ({ triageEnabled: app.triageEnabled }),
   useAppUiOptional: () => ({
     toggleSidebar: app.toggleSidebar,
     toggleShortcuts: app.toggleShortcuts,
@@ -88,7 +81,6 @@ function keyOn(el: Element, key: string, init: KeyboardEventInit = {}) {
 beforeEach(() => {
   router.pathname = "/";
   router.navigate.mockClear();
-  app.triageEnabled = false;
   app.toggleSidebar.mockClear();
   app.toggleShortcuts.mockClear();
   document.body.innerHTML = "";
@@ -146,35 +138,32 @@ describe("targetOwnsKey", () => {
 
 describe("useKeyboardShortcuts", () => {
   it("maps ⌘1…⌘N to the sidebar's destinations, top to bottom", () => {
-    app.triageEnabled = true;
-    renderHook(() => useKeyboardShortcuts());
-
-    for (const [key, to] of [
-      ["1", "/triage"],
-      ["2", "/issues"],
-      ["3", "/reviews"],
-    ]) {
-      router.navigate.mockClear();
-      press(key, { metaKey: true });
-      expect(router.navigate).toHaveBeenCalledWith({ to });
-    }
-  });
-
-  it("shifts the numbers up when Triage is disabled (no gap, no dead number)", () => {
     renderHook(() => useKeyboardShortcuts());
 
     press("1", { metaKey: true });
     expect(router.navigate).toHaveBeenCalledWith({ to: "/issues" });
-    press("2", { metaKey: true });
-    expect(router.navigate).toHaveBeenCalledWith({ to: "/reviews" });
 
+    // No dead number past the last destination.
     router.navigate.mockClear();
-    press("3", { metaKey: true });
+    press("2", { metaKey: true });
     expect(router.navigate).not.toHaveBeenCalled();
   });
 
+  /** Reviews and Triage both left the sidebar nav (each is a section of the tree
+   *  now), so they have to leave the numbers with them: a ⌘N that opened a
+   *  destination no row offers is a shortcut to something the user can't see,
+   *  and it would silently renumber everything below it if it stayed. */
+  it("gives Reviews and Triage no number of their own now that the nav has no row for them", () => {
+    renderHook(() => useKeyboardShortcuts());
+
+    for (const key of ["1", "2", "3", "4"]) {
+      press(key, { metaKey: true });
+    }
+    expect(router.navigate).not.toHaveBeenCalledWith({ to: "/reviews" });
+    expect(router.navigate).not.toHaveBeenCalledWith({ to: "/triage" });
+  });
+
   it("leaves the workspace unnumbered — it is reached by picking a worktree", () => {
-    app.triageEnabled = true;
     renderHook(() => useKeyboardShortcuts());
 
     for (const key of ["1", "2", "3", "4"]) {
@@ -346,56 +335,6 @@ describe("useDigitShortcuts", () => {
     press("1");
 
     expect(rows[0]).not.toHaveBeenCalled();
-  });
-});
-
-describe("text size shortcuts", () => {
-  beforeEach(() => {
-    zoom.apply.mockClear();
-    zoom.level = 1;
-  });
-
-  it("steps up on ⌘+ and ⌘=, down on ⌘-", () => {
-    renderHook(() => useKeyboardShortcuts());
-
-    // ⌘+ is a *shifted* chord on most layouts (⌘⇧=), so it has to be handled
-    // before the guard that drops every shifted combo.
-    press("+", { metaKey: true, shiftKey: true });
-    expect(zoom.apply).toHaveBeenLastCalledWith(1.1);
-
-    // The unshifted key on the same physical button, which is what browsers bind.
-    press("=", { metaKey: true });
-    expect(zoom.apply).toHaveBeenLastCalledWith(1.1);
-
-    press("-", { metaKey: true });
-    expect(zoom.apply).toHaveBeenLastCalledWith(0.9);
-  });
-
-  it("resets to 100% on ⌘0 without hitting tab navigation", () => {
-    renderHook(() => useKeyboardShortcuts());
-
-    press("0", { metaKey: true });
-    expect(zoom.apply).toHaveBeenLastCalledWith(1);
-    expect(router.navigate).not.toHaveBeenCalled();
-  });
-
-  it("still zooms while a terminal has focus", () => {
-    const term = document.createElement("div");
-    term.className = "xterm";
-    document.body.append(term);
-    renderHook(() => useKeyboardShortcuts());
-
-    // Scaling the app is chrome — a shell can't mean anything by ⌘-, so the
-    // terminal must not swallow it the way it does unmodified keys.
-    press("-", { metaKey: true, on: term });
-    expect(zoom.apply).toHaveBeenLastCalledWith(0.9);
-    term.remove();
-  });
-
-  it("leaves ⌥⌘- alone so it can't collide with a system binding", () => {
-    renderHook(() => useKeyboardShortcuts());
-    press("-", { metaKey: true, altKey: true });
-    expect(zoom.apply).not.toHaveBeenCalled();
   });
 });
 

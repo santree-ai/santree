@@ -147,11 +147,13 @@ interface AppUi {
   requestReviewFocus: (url: string) => void;
   consumeReviewFocus: () => void;
 
-  /** A ticket the Triage tab should select — set (as the ticket id) by the Agents
-   *  panel before navigating to Triage, consumed once there. Mirrors
-   *  {@link treeFocus}. */
-  triageFocus: string | null;
-  requestTriageFocus: (id: string) => void;
+  /** Which tab the Triage workspace should land on, once the route already
+   *  carries the ticket (`/triage?ticket=`). Only the tab: the ticket rides in
+   *  the url so the sidebar's Triage row lights on arrival, for the same reason
+   *  a pull request rides in Reviews' url. Set by `useOpenAgent` (and ⌘I) before
+   *  navigating, consumed by the workspace for that ticket. */
+  triageFocus: TriageFocus | null;
+  requestTriageFocus: (ticket: string, agent?: AgentKind) => void;
   consumeTriageFocus: () => void;
 
   /** A "Fix CI with AI" launch handed off from Reviews to Trees: open a new
@@ -222,6 +224,11 @@ export interface TreeFocus {
   id: string;
   /** Right-panel pane to show; `undefined` leaves the panel where it is. */
   pane?: TreeFocusPane;
+  /** Also open `pane`'s page — the pull request or the ticket at reading width
+   *  — as the main-area tab, the way the pane's own expand control does. The
+   *  sidebar's marks ask for this: a mark that says what the worktree is linked
+   *  to should show that thing, not a column beside the work. */
+  expand?: boolean;
   /** Main-area tab to show: a tab's id, `undefined` to keep the worktree's
    *  last-used tab, and `null` for a caller with no tab to name — a session
    *  minted before every agent lived in one, which selects the worktree and
@@ -232,6 +239,13 @@ export interface TreeFocus {
    *  other caller — Issues, the graph, the palette, a session-history row — is
    *  selecting a row the tree may have folded away, and leaves this unset. */
   fromSidebar?: boolean;
+}
+
+/** Where the Triage workspace should land for one ticket: the provider's
+ *  investigation tab, or the Linear tab when `agent` is null. */
+export interface TriageFocus {
+  ticket: string;
+  agent: AgentKind | null;
 }
 
 /** A task whose worktree is mid-creation, enough to render a placeholder. */
@@ -329,7 +343,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [focusedAgent, setFocusedAgentState] = useState<FocusedAgent | null>(null);
   const [bgLaunches, setBgLaunches] = useState<string[]>([]);
   const [reviewFocus, setReviewFocus] = useState<string | null>(null);
-  const [triageFocus, setTriageFocus] = useState<string | null>(null);
+  const [triageFocus, setTriageFocus] = useState<TriageFocus | null>(null);
   const [fixCiLaunch, setFixCiLaunch] = useState<FixCiLaunch | null>(null);
   const [abandonedLaunchTabs, setAbandonedLaunchTabs] = useState<string[]>([]);
   const [pendingLaunches, setPendingLaunches] = useState<PendingLaunch[]>([]);
@@ -486,6 +500,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
   const consumeReviewFocus = useCallback(() => setReviewFocus(null), []);
   const consumeTriageFocus = useCallback(() => setTriageFocus(null), []);
+  const requestTriageFocus = useCallback(
+    (ticket: string, agent?: AgentKind) => setTriageFocus({ ticket, agent: agent ?? null }),
+    [],
+  );
   const consumeFixCiLaunch = useCallback(() => setFixCiLaunch(null), []);
   // Both halves, because the failure can land on either side of the hand-off: the
   // request may still be sitting here unread (its worktree never appeared), or
@@ -573,7 +591,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       requestReviewFocus: setReviewFocus,
       consumeReviewFocus,
       triageFocus,
-      requestTriageFocus: setTriageFocus,
+      requestTriageFocus,
       consumeTriageFocus,
       fixCiLaunch,
       requestFixCiLaunch: setFixCiLaunch,
@@ -619,6 +637,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       consumeTreeFocus,
       requestTreeFocus,
       consumeReviewFocus,
+      requestTriageFocus,
       consumeTriageFocus,
       consumeFixCiLaunch,
       abandonedLaunchTabs,
@@ -663,15 +682,6 @@ export function useAppUi(): AppUi {
   const ctx = useContext(AppUiContext);
   if (!ctx) throw new Error("useAppUi must be used within <AppProvider>");
   return ctx;
-}
-
-/**
- * Like {@link useApp} / {@link useAppUi}, but return `null` instead of throwing
- * when no provider is mounted. For non-critical chrome (e.g. global keyboard
- * shortcuts in the route root) that must never crash during a transient render.
- */
-export function useAppOptional(): AppData | null {
-  return useContext(AppDataContext);
 }
 
 export function useAppUiOptional(): AppUi | null {

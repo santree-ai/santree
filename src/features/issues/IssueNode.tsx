@@ -8,16 +8,24 @@ import { Handle, type NodeProps, Position } from "@xyflow/react";
 import type { CSSProperties } from "react";
 import { memo } from "react";
 
+import type { CycleRef, TaskStatus } from "../../bindings";
 import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
-import { Badge, Dot } from "../../components/primitives";
+import { Badge } from "../../components/primitives";
+import { CycleTag, EstimateTag, IssueDueDate, StatusGlyph } from "../../components/WorkSignals";
 import { accentVar as accent, alpha } from "../../theme/colors";
 import { useIssueHover, useIssueNodeData } from "./model";
 
 export interface IssueNodeData {
   title: string;
+  status: TaskStatus;
   statusColor: string;
   statusLabel: string;
+  /** The planning signals the card's footer carries. The cycle is the one
+   *  non-primitive here; `dataEqual` compares it by value. */
+  estimate: number | null;
+  cycle: CycleRef | null;
+  dueDate: string | null;
   /** Stable primitive flags describing the node's state — the card's actual
    *  border/background/shadow is derived from these in `cardStyleFor` below.
    *  Keeping these primitive (not a pre-baked style object) is what lets this
@@ -79,11 +87,21 @@ const handleStyle: CSSProperties = {
 // change, handing each node a fresh `data` object even when nothing about it
 // changed. A reference compare would therefore re-render every node; this
 // value-compares the (all-primitive) data fields so unchanged nodes are skipped.
+function cycleEqual(a: CycleRef | null, b: CycleRef | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.number === b.number && a.name === b.name && a.endsAtMs === b.endsAtMs;
+}
+
 function dataEqual(a: IssueNodeData, b: IssueNodeData): boolean {
   return (
     a.title === b.title &&
+    a.status === b.status &&
     a.statusColor === b.statusColor &&
     a.statusLabel === b.statusLabel &&
+    a.estimate === b.estimate &&
+    cycleEqual(a.cycle, b.cycle) &&
+    a.dueDate === b.dueDate &&
     a.selected === b.selected &&
     a.chainable === b.chainable &&
     a.ready === b.ready &&
@@ -146,7 +164,7 @@ export const IssueNode = memo(
         ) : null}
 
         <div className="mb-1.5 flex items-center gap-[7px]">
-          <Dot color={data.statusColor} size={8} />
+          <StatusGlyph status={data.status} size={12} />
           <span className="font-mono text-[11px] text-muted-2">{id}</span>
           <div className="ml-auto flex items-center gap-1">
             {working && <Badge color="var(--color-status-amber)">WIP</Badge>}
@@ -176,6 +194,12 @@ export const IssueNode = memo(
         <div className="mt-[7px] flex min-h-[14px] items-center gap-[7px]">
           <span className="text-[10.5px] font-medium" style={{ color: data.statusColor }}>
             {data.statusLabel}
+          </span>
+          {/* The same trailing signals as the list row, at the card's edge. */}
+          <span className="ml-auto flex items-center gap-2 empty:hidden">
+            {data.cycle && <CycleTag cycle={data.cycle} />}
+            {data.estimate != null && data.estimate > 0 && <EstimateTag estimate={data.estimate} />}
+            <IssueDueDate date={data.dueDate} />
           </span>
         </div>
       </div>

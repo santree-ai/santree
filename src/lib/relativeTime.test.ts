@@ -1,7 +1,13 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { formatRelativeTime, formatSla, useLiveNow } from "./relativeTime";
+import {
+  formatRelativeTime,
+  formatShiftRange,
+  formatShiftTimes,
+  formatSla,
+  useLiveNow,
+} from "./relativeTime";
 
 const T0 = new Date("2026-07-13T12:00:00Z").getTime();
 
@@ -66,5 +72,30 @@ describe("formatSla", () => {
     expect(formatSla(T0 + 3 * 3_600_000, T0)).toBe("SLA in 3h");
     expect(formatSla(T0 + 30 * 3_600_000, T0)).toBe("SLA in 1d 6h");
     expect(formatSla(T0 - 1, T0)).toBe("SLA breached");
+  });
+});
+
+describe("formatShiftRange", () => {
+  // Local wall-clock instants, so the day each falls on doesn't depend on the
+  // zone the tests run in.
+  const start = new Date(2026, 7, 27, 16).getTime();
+  const end = new Date(2026, 8, 3, 16).getTime();
+
+  // Linear hands a rotation over at a time of day — 4 PM here — not at midnight.
+  // The day the end falls on is the shift's last day; stepping back a day (the
+  // backend's old "exclusive end" arithmetic) put Kelly's Aug 27 – Sep 3 shift a
+  // day short.
+  it("shows the day each bound falls on, the end included", () => {
+    expect(formatShiftRange(start, end)).toBe("Aug 27 – Sep 3");
+  });
+
+  it("shows the one bound a half-open shift has", () => {
+    expect(formatShiftRange(start, null)).toBe("Aug 27");
+    expect(formatShiftRange(null, end)).toBe("Sep 3");
+    expect(formatShiftRange(null, null)).toBe("");
+  });
+
+  it("spells the hand-over times out for the tooltip", () => {
+    expect(formatShiftTimes(start, end)).toMatch(/^Aug 27, 4:00\sPM – Sep 3, 4:00\sPM$/);
   });
 });

@@ -17,9 +17,9 @@ use serde::Deserialize;
 use santree_core::domain::{
     CheckAnnotation, CheckLog, CheckLogBlock, CheckLogLevel, CheckLogLine, CheckRollup,
     CheckStatus, CheckStep, CommentKind, FileSource, MergeQueue, MergeQueueEntry, MergeQueueState,
-    NewInlineComment, PrCheck, PrComment, PrDetail, PrFile, PrLabel, PrState, PrThread,
-    ReviewDecision, ReviewEvent, ReviewPr, Reviewer, ReviewerKind, TeamReviews, ViewerReview,
-    ViewerReviewState,
+    NewInlineComment, PrAttachment, PrCheck, PrComment, PrCommit, PrDetail, PrFile, PrLabel,
+    PrState, PrThread, ReviewDecision, ReviewEvent, ReviewPr, Reviewer, ReviewerKind, TeamReviews,
+    ViewerReview, ViewerReviewState,
 };
 
 use crate::git;
@@ -1003,6 +1003,9 @@ fn to_review_pr(n: PrNode, viewer: &ViewerCtx) -> ReviewPr {
         title: n.title,
         url: n.url,
         repo: n.repository.name_with_owner,
+        // Attributed by `reviews::inbox` once the repo registry is in hand — GitHub
+        // has never heard of the user's projects.
+        project: None,
         head_ref: n.head_ref_name,
         head_ref_id: n.head_ref.map(|r| r.id),
         base_ref: n.base_ref_name,
@@ -1156,13 +1159,21 @@ pub async fn viewer_login(token: &str) -> Result<String> {
     Ok(data.viewer.login)
 }
 
-/// The teams (slug, name) the viewer belongs to within `org`. Empty when the
-/// viewer isn't in that org or belongs to no teams there.
+/// The teams (slug, name) the viewer belongs to in each of `orgs`, in the order
+/// asked. An org the viewer isn't in, or has no teams in, is simply absent.
+///
+/// Every org is answered by **one** round-trip: the query already lists the
+/// viewer's organizations with their teams, so asking per org would re-run the
+/// same expensive document once per registered project for one answer.
 ///
 /// `login` is passed in rather than looked up here: the inbox needs it anyway (to
 /// decide which review-request events started *its* clock), and fetching it twice
 /// would put a second round-trip on the critical path of every Reviews load.
-pub async fn viewer_teams(token: &str, org: &str, login: &str) -> Result<Vec<(String, String)>> {
+pub async fn viewer_teams(
+    token: &str,
+    orgs: &[String],
+    login: &str,
+) -> Result<Vec<(String, Vec<(String, String)>)>> {
     #[derive(Deserialize)]
     struct Data {
         viewer: Viewer,
@@ -1189,40 +1200,119 @@ pub async fn viewer_teams(token: &str, org: &str, login: &str) -> Result<Vec<(St
     // would drop teams they merely maintain or merely belong to.
     let query = "query($login: String!) { viewer { organizations(first: 50) { nodes { login teams(first: 50, userLogins: [$login]) { nodes { slug name } } } } } }";
     let data: Data = graphql(token, query, serde_json::json!({ "login": login })).await?;
-    Ok(data
-        .viewer
-        .organizations
-        .nodes
-        .into_iter()
-        .find(|o| o.login == org)
-        .map(|o| {
-            o.teams
+    let memberships = data.viewer.organizations.nodes;
+    Ok(orgs
+        .iter()
+        .filter_map(|org| {
+            // GitHub compares owners case-insensitively and our spelling comes from
+            // a git remote, which need not match the org's canonical login. The
+            // *asked* spelling is what comes back, so the org keys here line up
+            // with the ones the inbox reports having searched.
+            let node = memberships
+                .iter()
+                .find(|o| o.login.eq_ignore_ascii_case(org))?;
+            // A slug from GitHub goes straight into a `team-review-requested:`
+            // qualifier below. Shape-checking it here keeps that guarantee local
+            // rather than borrowed from whatever the API happens to return.
+            let teams: Vec<(String, String)> = node
+                .teams
                 .nodes
-                .into_iter()
-                .map(|t| (t.slug, t.name))
-                .collect()
+                .iter()
+                .filter(|t| repo::valid_github_component(&t.slug))
+                .map(|t| (t.slug.clone(), t.name.clone()))
+                .collect();
+            (!teams.is_empty()).then(|| (org.clone(), teams))
         })
-        .unwrap_or_default())
+        .collect())
 }
 
 /// The filters every inbox search shares: open, non-archived PRs, newest-updated first.
 const INBOX_FILTERS: &str = "is:open is:pr archived:false sort:updated-desc";
 
-fn mine_query(org: &str) -> String {
-    format!("{INBOX_FILTERS} author:@me org:{org}")
+/// GitHub's documented ceiling on a search query. A registry spanning enough orgs
+/// can't ask its question in one string, so the qualifiers are batched up to here.
+/// The GraphQL endpoint currently answers longer queries too — measured, not
+/// promised, and a query GitHub decides to reject drops orgs from the inbox, so
+/// the documented number is the one we hold to.
+const SEARCH_QUERY_LIMIT: usize = 256;
+
+/// `prefix` plus one `org:` qualifier per org, split into the fewest queries that
+/// each stay under [`SEARCH_QUERY_LIMIT`].
+///
+/// Repeated `org:` qualifiers OR, so one batch answers for every org in it — the
+/// point being that the inbox pays one rate-limited call for a whole registry
+/// rather than one per project. (There is no OR at the *qualifier* level to reach
+/// for instead: GitHub 422s on `author:@me OR user-review-requested:@me`, with or
+/// without parens, which is why the me/team split stays two searches.)
+///
+/// An org whose own term overflows the budget is emitted alone rather than
+/// dropped: GitHub refusing a query is visible, a silently missing org is not.
+fn org_batches(prefix: &str, orgs: &[String]) -> Vec<String> {
+    let mut batches: Vec<String> = Vec::new();
+    for org in orgs {
+        let term = format!(" org:{org}");
+        match batches.last_mut() {
+            Some(q) if q.len() + term.len() <= SEARCH_QUERY_LIMIT => q.push_str(&term),
+            _ => batches.push(format!("{prefix}{term}")),
+        }
+    }
+    batches
 }
-fn requested_query(org: &str) -> String {
+
+fn mine_queries(orgs: &[String]) -> Vec<String> {
+    org_batches(&format!("{INBOX_FILTERS} author:@me"), orgs)
+}
+fn requested_queries(orgs: &[String]) -> Vec<String> {
     // `user-review-requested`, not `review-requested`: the plain qualifier also
     // matches PRs requested via a team the viewer is on, which belong to the
     // per-team sections — this section is direct requests only.
-    format!("{INBOX_FILTERS} user-review-requested:@me org:{org}")
+    org_batches(&format!("{INBOX_FILTERS} user-review-requested:@me"), orgs)
 }
 fn team_query(org: &str, slug: &str) -> String {
     format!("{INBOX_FILTERS} team-review-requested:{org}/{slug}")
 }
 
-/// The PRs the viewer authored and the PRs individually requested of them, in `org` —
-/// two independent searches, run concurrently.
+/// Run every batch concurrently and keep the ones that answered.
+///
+/// A failed batch costs the orgs *in it* and nothing else — a rate-limited or
+/// half-visible org must not empty an inbox that spans several. But *all* of them
+/// failing is not "nothing is waiting on you", so that surfaces as the error it
+/// is: an inbox silently reading empty is the exact failure this aggregation
+/// exists to remove.
+async fn search_batches(
+    token: &str,
+    queries: &[String],
+    viewer: &ViewerCtx,
+) -> Result<Vec<ReviewPr>> {
+    let results =
+        futures::future::join_all(queries.iter().map(|q| search_prs(token, q, viewer))).await;
+    keep_answered(queries, results)
+}
+
+/// The rule [`search_batches`] applies to its batches, as a pure function: keep
+/// what came back, log what didn't, and only fail when *nothing* did.
+fn keep_answered<T>(queries: &[String], results: Vec<Result<Vec<T>>>) -> Result<Vec<T>> {
+    let (mut kept, mut answered, mut failure) = (Vec::new(), false, None);
+    for (q, result) in queries.iter().zip(results) {
+        match result {
+            Ok(found) => {
+                answered = true;
+                kept.extend(found);
+            }
+            Err(e) => {
+                log::warn!("Reviews: search '{q}' failed: {e}");
+                failure = failure.or(Some(e));
+            }
+        }
+    }
+    match failure {
+        Some(e) if !answered => Err(e),
+        _ => Ok(kept),
+    }
+}
+
+/// The PRs the viewer authored and the PRs individually requested of them, across
+/// `orgs` — two independent searches (each possibly batched), run concurrently.
 ///
 /// Split from the team sections ([`team_reviews`]) because those can't start until the
 /// viewer's teams are known, and neither of these depends on that: `reviews::inbox`
@@ -1230,13 +1320,13 @@ fn team_query(org: &str, slug: &str) -> String {
 /// path of every Reviews load.
 pub async fn personal_reviews(
     token: &str,
-    org: &str,
+    orgs: &[String],
     viewer: &ViewerCtx,
 ) -> Result<(Vec<ReviewPr>, Vec<ReviewPr>)> {
-    let (mine_q, requested_q) = (mine_query(org), requested_query(org));
+    let (mine_q, requested_q) = (mine_queries(orgs), requested_queries(orgs));
     let (mine, requested) = tokio::join!(
-        search_prs(token, &mine_q, viewer),
-        search_prs(token, &requested_q, viewer),
+        search_batches(token, &mine_q, viewer),
+        search_batches(token, &requested_q, viewer),
     );
     Ok((mine?, requested?))
 }
@@ -1259,6 +1349,7 @@ pub async fn team_reviews(
                 Vec::new()
             });
         TeamReviews {
+            org: org.to_string(),
             slug: slug.clone(),
             name: name.clone(),
             prs,
@@ -1273,12 +1364,20 @@ pub async fn team_reviews(
 /// The repo's merge queue (its default branch's queue): the ordered list of PRs
 /// waiting to merge, each tagged with whether the viewer authored it. `None` when
 /// the repo has no merge queue enabled. One GraphQL round-trip — the viewer login
-/// is fetched alongside the queue so entries can be marked "mine".
+/// is fetched alongside the queue so entries can be marked "mine", and so is the
+/// 30-day merge count (a `search`, which has a budget of its own) that the panel
+/// shows as the queue's throughput.
 pub async fn merge_queue(token: &str, owner: &str, name: &str) -> Result<Option<MergeQueue>> {
     #[derive(Deserialize)]
     struct Data {
         viewer: Login,
         repository: Option<RepoNode>,
+        merged: Option<SearchCount>,
+    }
+    #[derive(Deserialize)]
+    struct SearchCount {
+        #[serde(rename = "issueCount")]
+        issue_count: u32,
     }
     #[derive(Deserialize)]
     struct Login {
@@ -1299,6 +1398,9 @@ pub async fn merge_queue(token: &str, owner: &str, name: &str) -> Result<Option<
     }
     #[derive(Deserialize)]
     struct QueueNode {
+        url: String,
+        #[serde(rename = "nextEntryEstimatedTimeToMerge")]
+        next_estimated: Option<i64>,
         entries: Connection<EntryNode>,
     }
     #[derive(Deserialize)]
@@ -1308,6 +1410,10 @@ pub async fn merge_queue(token: &str, owner: &str, name: &str) -> Result<Option<
         #[serde(default)]
         position: Option<u32>,
         state: Option<String>,
+        #[serde(rename = "enqueuedAt", default)]
+        enqueued_at: String,
+        #[serde(rename = "estimatedTimeToMerge")]
+        estimated: Option<i64>,
         #[serde(rename = "pullRequest")]
         pull_request: Option<QueuePr>,
     }
@@ -1319,27 +1425,41 @@ pub async fn merge_queue(token: &str, owner: &str, name: &str) -> Result<Option<
         author: Option<Actor>,
     }
 
+    // GitHub reports the estimates in seconds; a negative or absurd value is
+    // "no estimate" rather than a number to show.
+    let secs = |v: Option<i64>| v.and_then(|s| u32::try_from(s).ok());
+
     let query = r"
-        query($owner: String!, $name: String!) {
+        query($owner: String!, $name: String!, $merged: String!) {
           viewer { login }
           repository(owner: $owner, name: $name) {
             defaultBranchRef { name }
             mergeQueue {
+              url
+              nextEntryEstimatedTimeToMerge
               entries(first: 100) {
                 nodes {
                   position
                   state
+                  enqueuedAt
+                  estimatedTimeToMerge
                   pullRequest { number title url author { login avatarUrl } }
                 }
               }
             }
           }
+          merged: search(type: ISSUE, query: $merged, first: 1) { issueCount }
         }
     ";
+    let since = (chrono::Utc::now() - chrono::Duration::days(30)).format("%Y-%m-%d");
     let data: Data = graphql(
         token,
         query,
-        serde_json::json!({ "owner": owner, "name": name }),
+        serde_json::json!({
+            "owner": owner,
+            "name": name,
+            "merged": format!("repo:{owner}/{name} is:pr is:merged merged:>={since}"),
+        }),
     )
     .await?;
 
@@ -1361,15 +1481,20 @@ pub async fn merge_queue(token: &str, owner: &str, name: &str) -> Result<Option<
     nodes.sort_by_key(|e| e.position.unwrap_or(u32::MAX));
     let entries = nodes
         .into_iter()
-        .filter_map(|e| e.pull_request.map(|pr| (e.state, pr)))
+        .filter_map(|e| {
+            e.pull_request
+                .map(|pr| (e.state, e.enqueued_at, secs(e.estimated), pr))
+        })
         .enumerate()
-        .map(|(i, (state, pr))| {
+        .map(|(i, (state, enqueued_at, estimated_secs, pr))| {
             let (author, author_avatar_url) = pr
                 .author
                 .map(|a| (a.login, a.avatar_url))
                 .unwrap_or_default();
             MergeQueueEntry {
                 position: i as u32 + 1,
+                enqueued_at,
+                estimated_secs,
                 state: match state.as_deref() {
                     Some("QUEUED") => MergeQueueState::Queued,
                     Some("AWAITING_CHECKS") => MergeQueueState::AwaitingChecks,
@@ -1391,6 +1516,9 @@ pub async fn merge_queue(token: &str, owner: &str, name: &str) -> Result<Option<
     Ok(Some(MergeQueue {
         repo: format!("{owner}/{name}"),
         branch,
+        url: queue.url,
+        next_estimated_secs: secs(queue.next_estimated),
+        merged_last_30_days: data.merged.map(|m| m.issue_count),
         entries,
     }))
 }
@@ -1416,11 +1544,14 @@ pub async fn pr_detail(token: &str, owner: &str, name: &str, number: u32) -> Res
     let (files, files_truncated) = files?;
     Ok(PrDetail {
         body: c.body,
+        attachments: c.attachments,
         labels: c.labels,
         comments: c.comments,
         threads: c.threads,
         files,
         files_truncated,
+        commits: c.commits,
+        commits_truncated: c.commits_truncated,
         checks: c.checks,
         base_sha,
         head_sha: c.head_sha,
@@ -1875,43 +2006,54 @@ fn check_run_status(status: &str, conclusion: Option<&str>) -> CheckStatus {
 /// queries must request the same shape as the PR query's first page or a later page
 /// would decode into a different struct (`pr_conversation_selects_the_shared_fields`
 /// pins the two together).
-const COMMENT_FIELDS: &str = "author { __typename login avatarUrl } body createdAt";
+const COMMENT_FIELDS: &str = "author { __typename login avatarUrl } body bodyHTML createdAt";
 
 /// The same, for a *review* node. Beyond the shared comment shape it carries the
 /// three fields that identify the viewer's own unsubmitted review, which is what
 /// further draft comments attach to (and what must be kept out of the displayed
 /// conversation — a pending review's body is not something anyone has posted yet).
 const REVIEW_FIELDS: &str =
-    "id state viewerDidAuthor author { __typename login avatarUrl } body createdAt";
+    "id state viewerDidAuthor author { __typename login avatarUrl } body bodyHTML createdAt";
 
 /// The same, for a comment *inside* a review thread. `fullDatabaseId` is the id
 /// GitHub's REST reply endpoint takes (`databaseId` is a 32-bit `Int` and review
 /// comment ids have outgrown it); `state` marks the viewer's own drafts.
 const THREAD_COMMENT_FIELDS: &str =
-    "fullDatabaseId state author { __typename login avatarUrl } body createdAt";
+    "fullDatabaseId state author { __typename login avatarUrl } body bodyHTML createdAt";
 
 /// A GraphQL connection's maximum page size.
 const GRAPHQL_PAGE: usize = 100;
 
-/// The PR's conversation + head-commit checks. Every connection here asks for
-/// `pageInfo` — each is drained to exhaustion (see [`drain_conversation`]), so this
-/// is the first page, not the whole story.
+/// The PR's conversation + commit list + head-commit checks. Every connection here
+/// asks for `pageInfo` — each is drained to exhaustion (see [`drain_conversation`]),
+/// so this is the first page, not the whole story. `history` is the exception: it
+/// stops at one page and reports `hasNextPage` as `commits_truncated`.
+///
+/// `history` is an **alias** for the same `commits` field the check rollup selects
+/// as `commits(last: 1)`. GraphQL rejects two selections of one field with
+/// different arguments under the same response key, so the list has to be named
+/// apart from the head-commit lookup rather than sharing it.
 const PR_CONVERSATION_QUERY: &str = r"
     query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) {
         pullRequest(number: $number) {
           body
+          bodyHTML
           baseRefOid
           headRefOid
           labels(first: 30) { nodes { name color description } }
-          comments(first: 100) { nodes { author { __typename login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
-          reviews(first: 100) { nodes { id state viewerDidAuthor author { __typename login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
+          comments(first: 100) { nodes { author { __typename login avatarUrl } body bodyHTML createdAt } pageInfo { hasNextPage endCursor } }
+          reviews(first: 100) { nodes { id state viewerDidAuthor author { __typename login avatarUrl } body bodyHTML createdAt } pageInfo { hasNextPage endCursor } }
           reviewThreads(first: 100) {
             nodes {
               id path line startLine diffSide isResolved isOutdated viewerCanResolve viewerCanUnresolve
-              comments(first: 100) { nodes { fullDatabaseId state author { __typename login avatarUrl } body createdAt } pageInfo { hasNextPage endCursor } }
+              comments(first: 100) { nodes { fullDatabaseId state author { __typename login avatarUrl } body bodyHTML createdAt } pageInfo { hasNextPage endCursor } }
             }
             pageInfo { hasNextPage endCursor }
+          }
+          history: commits(first: 100) {
+            nodes { commit { oid abbreviatedOid messageHeadline messageBody committedDate url author { name avatarUrl user { login avatarUrl } } } }
+            pageInfo { hasNextPage }
           }
           commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
             nodes {
@@ -1997,6 +2139,73 @@ fn thread_on_right(diff_side: Option<&str>) -> bool {
     diff_side != Some("LEFT")
 }
 
+/// The host GitHub serves a private repo's attachments from once it has signed
+/// the link. Matched by parse at the sink, never by prefix.
+const ATTACHMENT_CDN: &str = "private-user-images.githubusercontent.com";
+
+/// Where an attachment's id sits in the markdown GitHub gives us back.
+const ATTACHMENT_PATH: &str = "https://github.com/user-attachments/assets/";
+
+/// Pair every attachment a PR's prose points at with a link that will load.
+///
+/// The markdown carries `https://github.com/user-attachments/assets/<id>`, which
+/// on a private repo is served only to a browser session — an API token gets the
+/// sign-in page, and an unauthenticated `<img>` gets a 404. GitHub's own
+/// rendering of the same text carries pre-signed CDN links, which need no
+/// credential, so this reads the ids out of one and the links out of the other.
+///
+/// The two are matched by the id *appearing in* the signed URL rather than by
+/// order or by the CDN's filename shape: GitHub is free to change how it names
+/// the object, and a positional match would silently hand a comment the wrong
+/// image the first time a render dropped one.
+fn attachment_links(markdown: &[&str], html: &[&str]) -> Vec<PrAttachment> {
+    let mut ids: Vec<String> = Vec::new();
+    for text in markdown {
+        for rest in text.split(ATTACHMENT_PATH).skip(1) {
+            let id: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if !id.is_empty() && !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    if ids.is_empty() {
+        return Vec::new();
+    }
+
+    let mut links: Vec<PrAttachment> = Vec::new();
+    for text in html {
+        for rest in text.split("src=\"").skip(1) {
+            let Some(url) = rest.split('"').next() else {
+                continue;
+            };
+            // The signature *is* the credential on these links, so the host is
+            // checked by parse before one is handed to the UI — a `src` a PR
+            // author wrote themselves must not reach it wearing GitHub's name.
+            if reqwest::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(String::from))
+                != Some(ATTACHMENT_CDN.to_string())
+            {
+                continue;
+            }
+            let decoded = url.replace("&amp;", "&");
+            for id in &ids {
+                if decoded.contains(id.as_str()) && !links.iter().any(|a| &a.id == id) {
+                    links.push(PrAttachment {
+                        id: id.clone(),
+                        url: decoded.clone(),
+                    });
+                    break;
+                }
+            }
+        }
+    }
+    links
+}
+
 #[derive(Deserialize)]
 struct ReviewThreadComment {
     /// GitHub's `BigInt` scalar — a JSON *string* of digits, not a number.
@@ -2008,6 +2217,8 @@ struct ReviewThreadComment {
     state: Option<String>,
     author: Option<Actor>,
     body: String,
+    #[serde(rename = "bodyHTML", default)]
+    body_html: String,
     #[serde(rename = "createdAt")]
     created_at: String,
 }
@@ -2096,9 +2307,12 @@ async fn drain_thread_comments<T: DeserializeOwned>(
 /// at the call site would still compile.
 struct Conversation {
     body: String,
+    attachments: Vec<PrAttachment>,
     labels: Vec<PrLabel>,
     comments: Vec<PrComment>,
     threads: Vec<PrThread>,
+    commits: Vec<PrCommit>,
+    commits_truncated: bool,
     checks: Vec<PrCheck>,
     base_sha: String,
     head_sha: String,
@@ -2127,6 +2341,8 @@ async fn pr_conversation(
     #[derive(Deserialize)]
     struct Pr {
         body: String,
+        #[serde(rename = "bodyHTML", default)]
+        body_html: String,
         #[serde(rename = "baseRefOid")]
         base_ref_oid: String,
         #[serde(rename = "headRefOid")]
@@ -2136,9 +2352,45 @@ async fn pr_conversation(
         reviews: Connection<Review>,
         #[serde(rename = "reviewThreads")]
         review_threads: Connection<ReviewThreadNode>,
+        /// The PR's commit list — the query's `history:` alias for `commits`.
+        history: Connection<HistoryCommitNode>,
         // Renamed (vs the module-level `CommitNode`) because this one reads the
         // rollup's individual check `contexts`, not the aggregate `state`.
         commits: Connection<DetailCommitNode>,
+    }
+    #[derive(Deserialize)]
+    struct HistoryCommitNode {
+        commit: HistoryCommit,
+    }
+    #[derive(Deserialize)]
+    struct HistoryCommit {
+        oid: String,
+        #[serde(rename = "abbreviatedOid")]
+        abbreviated_oid: String,
+        #[serde(rename = "messageHeadline")]
+        message_headline: String,
+        #[serde(rename = "messageBody")]
+        message_body: String,
+        #[serde(rename = "committedDate")]
+        committed_date: String,
+        url: String,
+        author: Option<GitActor>,
+    }
+    /// A commit's author. `user` is the GitHub account the commit's email resolves
+    /// to and is `None` for a commit authored from an unlinked address — which is
+    /// why the git-side `name` is carried too, rather than showing an empty author.
+    #[derive(Deserialize)]
+    struct GitActor {
+        name: Option<String>,
+        #[serde(rename = "avatarUrl")]
+        avatar_url: Option<String>,
+        user: Option<GitActorUser>,
+    }
+    #[derive(Deserialize)]
+    struct GitActorUser {
+        login: String,
+        #[serde(rename = "avatarUrl")]
+        avatar_url: String,
     }
     #[derive(Deserialize)]
     struct LabelNode {
@@ -2240,6 +2492,10 @@ async fn pr_conversation(
     struct Comment {
         author: Option<Actor>,
         body: String,
+        /// GitHub's own rendering of `body`. Read for its signed attachment
+        /// links and then dropped — santree renders the markdown.
+        #[serde(rename = "bodyHTML", default)]
+        body_html: String,
         #[serde(rename = "createdAt")]
         created_at: String,
     }
@@ -2253,6 +2509,8 @@ async fn pr_conversation(
         viewer_did_author: bool,
         author: Option<Actor>,
         body: String,
+        #[serde(rename = "bodyHTML", default)]
+        body_html: String,
         #[serde(rename = "createdAt")]
         created_at: String,
     }
@@ -2320,6 +2578,30 @@ async fn pr_conversation(
     for thread in &mut pr.review_threads.nodes {
         drain_thread_comments(token, &thread.id, &mut thread.comments).await?;
     }
+
+    // Every page is in hand, so the prose and GitHub's rendering of it can be
+    // read side by side. Done here, before the mapping loops below consume the
+    // nodes — and once for the whole conversation, since an attachment posted in
+    // a comment is the same asset wherever else it is linked.
+    let attachments = {
+        let mut markdown: Vec<&str> = vec![pr.body.as_str()];
+        let mut html: Vec<&str> = vec![pr.body_html.as_str()];
+        for c in &pr.comments.nodes {
+            markdown.push(&c.body);
+            html.push(&c.body_html);
+        }
+        for r in &pr.reviews.nodes {
+            markdown.push(&r.body);
+            html.push(&r.body_html);
+        }
+        for t in &pr.review_threads.nodes {
+            for c in &t.comments.nodes {
+                markdown.push(&c.body);
+                html.push(&c.body_html);
+            }
+        }
+        attachment_links(&markdown, &html)
+    };
 
     // A deleted author decodes to `None`, and the `unwrap_or_default` reads that as
     // "not a bot" — which is right: an account GitHub has erased was a person often
@@ -2419,6 +2701,33 @@ async fn pr_conversation(
             comments: thread_comments,
         });
     }
+
+    // `commits(first:)` comes back oldest-first, which is the order the Commits
+    // tab lists them in, so nothing is re-sorted here.
+    let commits_truncated = pr.history.page_info.has_next_page;
+    let commits: Vec<PrCommit> = pr
+        .history
+        .nodes
+        .into_iter()
+        .map(|node| {
+            let c = node.commit;
+            let (login, avatar) = match c.author {
+                Some(GitActor { user: Some(u), .. }) => (u.login, u.avatar_url),
+                Some(a) => (a.name.unwrap_or_default(), a.avatar_url.unwrap_or_default()),
+                None => (String::new(), String::new()),
+            };
+            PrCommit {
+                oid: c.oid,
+                abbreviated_oid: c.abbreviated_oid,
+                message_headline: c.message_headline,
+                message_body: c.message_body,
+                author: login,
+                author_avatar_url: avatar,
+                committed_date: c.committed_date,
+                url: c.url,
+            }
+        })
+        .collect();
 
     // Collect the head commit's check contexts, paging through all of them.
     // GitHub caps a GraphQL connection at 100 nodes/page, but the aggregate
@@ -2563,9 +2872,12 @@ async fn pr_conversation(
 
     Ok(Conversation {
         body: pr.body,
+        attachments,
         labels,
         comments,
         threads,
+        commits,
+        commits_truncated,
         checks,
         base_sha: pr.base_ref_oid,
         head_sha: pr.head_ref_oid,
@@ -3217,25 +3529,88 @@ mod tests {
     }
 
     /// Splitting the inbox into [`personal_reviews`] + [`team_reviews`] moved these
-    /// queries; each still has to scope to the org (a bare `author:@me` would pull in
+    /// queries; each still has to scope to the orgs (a bare `author:@me` would pull in
     /// every PR the user has open anywhere) and share the open-PR filters, or a section
     /// would quietly list the wrong PRs.
     #[test]
     fn every_inbox_search_is_org_scoped_and_shares_the_open_pr_filters() {
+        let orgs = ["acme".to_string()];
         assert_eq!(
-            mine_query("acme"),
-            "is:open is:pr archived:false sort:updated-desc author:@me org:acme"
+            mine_queries(&orgs),
+            ["is:open is:pr archived:false sort:updated-desc author:@me org:acme"]
         );
         // Direct requests only — team-routed requests live in the team sections.
         assert_eq!(
-            requested_query("acme"),
-            "is:open is:pr archived:false sort:updated-desc user-review-requested:@me org:acme"
+            requested_queries(&orgs),
+            ["is:open is:pr archived:false sort:updated-desc user-review-requested:@me org:acme"]
         );
         // The team search is scoped by the `org/slug` handle itself.
         assert_eq!(
             team_query("acme", "core"),
             "is:open is:pr archived:false sort:updated-desc team-review-requested:acme/core"
         );
+    }
+
+    /// Several projects under one org must not each buy their own search — and the
+    /// orgs that *do* differ ride in one query while they fit, which is the whole
+    /// reason a registry-wide inbox costs about what a single-repo one did.
+    #[test]
+    fn orgs_share_one_query_until_the_length_limit_forces_another() {
+        let orgs = ["acme".to_string(), "other".to_string()];
+        assert_eq!(
+            mine_queries(&orgs),
+            ["is:open is:pr archived:false sort:updated-desc author:@me org:acme org:other"]
+        );
+
+        // 39 characters is GitHub's longest legal org name; enough of them overflow
+        // the limit, and the split has to happen *before* the query is too long to
+        // send, not after.
+        let many: Vec<String> = (0..8).map(|i| format!("{:0>38}{i}", "org")).collect();
+        let batches = mine_queries(&many);
+        assert!(batches.len() > 1, "eight max-length orgs need splitting");
+        assert!(batches.iter().all(|q| q.len() <= SEARCH_QUERY_LIMIT));
+        // Splitting must not lose one: every org still appears exactly once.
+        for org in &many {
+            let hits = batches.iter().filter(|q| q.contains(org)).count();
+            assert_eq!(hits, 1, "{org} appears in {hits} batches");
+        }
+    }
+
+    /// A single org too long to batch is still asked about. Dropping it would make
+    /// a project silently absent from an inbox that claims to span everything.
+    #[test]
+    fn an_oversized_org_is_still_asked_about_alone() {
+        let orgs = ["o".repeat(SEARCH_QUERY_LIMIT)];
+        let batches = mine_queries(&orgs);
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0].ends_with(&orgs[0]));
+        assert!(mine_queries(&[]).is_empty());
+    }
+
+    /// One org the token can't see, or one rate-limited batch, must not empty an
+    /// inbox that spans several — but a *total* failure has to stay an error, since
+    /// "everything failed" and "nothing is waiting on you" render identically.
+    #[test]
+    fn a_failed_batch_keeps_the_ones_that_answered() {
+        let queries = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let partial = keep_answered(
+            &queries,
+            vec![Err(anyhow!("403")), Ok(vec![1, 2]), Ok(vec![3])],
+        );
+        assert_eq!(partial.unwrap(), vec![1, 2, 3]);
+
+        // A batch that answered with nothing still counts as an answer.
+        let quiet = keep_answered(&queries, vec![Err(anyhow!("403")), Ok(vec![]), Ok(vec![7])]);
+        assert_eq!(quiet.unwrap(), vec![7]);
+
+        let total: Result<Vec<u8>> = keep_answered(
+            &queries[..2],
+            vec![Err(anyhow!("403")), Err(anyhow!("rate limited"))],
+        );
+        assert_eq!(total.unwrap_err().to_string(), "403");
+
+        // Nothing asked is not a failure — a registry with no GitHub origins.
+        assert!(keep_answered::<u8>(&[], vec![]).unwrap().is_empty());
     }
 
     #[test]
@@ -3298,6 +3673,69 @@ mod tests {
         assert_eq!(pages_of(&[7]).await, (7, false, vec![1]));
     }
 
+    /// The markdown GitHub hands back for a screenshot in a description. On a
+    /// private repo this URL 404s for anyone without a browser session, which is
+    /// every `<img>` santree renders.
+    const SHOT: &str =
+        "![](https://github.com/user-attachments/assets/1fd1135c-83a4-4933-959f-8ec2bb86c04e)";
+    /// GitHub's own rendering of it: same asset, a link that needs no credential.
+    const SIGNED: &str = "<img src=\"https://private-user-images.githubusercontent.com/5023589/642515346-1fd1135c-83a4-4933-959f-8ec2bb86c04e.png?jwt=abc\">";
+
+    #[test]
+    fn attachment_links_pairs_an_asset_with_its_signed_url() {
+        let links = attachment_links(&[SHOT], &[SIGNED]);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].id, "1fd1135c-83a4-4933-959f-8ec2bb86c04e");
+        assert_eq!(
+            reqwest::Url::parse(&links[0].url).unwrap().host_str(),
+            Some(ATTACHMENT_CDN)
+        );
+    }
+
+    /// The pairing is by the id appearing *in* the signed URL, never by order:
+    /// GitHub renders in document order today, and a body whose second image
+    /// failed to render would otherwise hand image two the link for image one.
+    #[test]
+    fn attachment_links_matches_by_id_not_by_position() {
+        let markdown = "https://github.com/user-attachments/assets/aaa \
+             https://github.com/user-attachments/assets/bbb";
+        let html = "<img src=\"https://private-user-images.githubusercontent.com/1/9-bbb.png\">";
+        let links = attachment_links(&[markdown], &[html]);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].id, "bbb");
+        assert!(links[0].url.ends_with("9-bbb.png"));
+    }
+
+    /// The signature *is* the credential on these links, so the host is checked
+    /// by parse. A PR author who writes their own `<img>` must not be able to
+    /// pass a URL off as GitHub's by putting the name in a prefix.
+    #[test]
+    fn attachment_links_refuses_a_host_that_merely_starts_the_same() {
+        let html = "<img src=\"https://private-user-images.githubusercontent.com.evil.test/1/9-1fd1135c-83a4-4933-959f-8ec2bb86c04e.png\">";
+        assert!(attachment_links(&[SHOT], &[html]).is_empty());
+    }
+
+    /// A body with no attachments never walks the HTML at all — and a PR whose
+    /// render dropped an image gets no entry, which the UI shows as its alt text
+    /// rather than as a broken icon.
+    #[test]
+    fn attachment_links_is_empty_without_a_pair() {
+        assert!(attachment_links(&["no images here"], &[SIGNED]).is_empty());
+        assert!(attachment_links(&[SHOT], &["<p>rendered without the image</p>"]).is_empty());
+    }
+
+    /// GitHub escapes the query string's separators in the rendered HTML; the
+    /// raw `&amp;` would reach the CDN as part of a parameter name and 403.
+    #[test]
+    fn attachment_links_unescapes_the_rendered_query_string() {
+        let html = "<img src=\"https://private-user-images.githubusercontent.com/1/9-aaa.png?jwt=x&amp;v=2\">";
+        let links = attachment_links(&["https://github.com/user-attachments/assets/aaa"], &[html]);
+        assert_eq!(
+            links[0].url,
+            "https://private-user-images.githubusercontent.com/1/9-aaa.png?jwt=x&v=2"
+        );
+    }
+
     /// A follow-up page decodes into the same struct as the first one, so the two
     /// selections have to stay identical — and the paged connections have to ask
     /// for the cursor that drives the drain at all.
@@ -3331,6 +3769,35 @@ mod tests {
                 .count(),
             5,
             "comments, reviews, reviewThreads, thread comments and check contexts all page"
+        );
+    }
+
+    /// The commit list and the check rollup select the *same* `commits` field with
+    /// different arguments, which GraphQL only allows under different response
+    /// keys. Un-aliasing the list would make the whole query a validation error —
+    /// i.e. every PR's detail read fails, not just its Commits tab.
+    #[test]
+    fn pr_conversation_aliases_the_commit_list_apart_from_the_check_rollup() {
+        assert!(
+            PR_CONVERSATION_QUERY.contains("history: commits(first: 100)"),
+            "the commit list must be aliased, not a second bare `commits` selection"
+        );
+        assert!(
+            PR_CONVERSATION_QUERY.contains("commits(last: 1)"),
+            "the check rollup still reads the head commit"
+        );
+        // Only one unaliased `commits(` selection may exist, or the two collide.
+        assert_eq!(
+            PR_CONVERSATION_QUERY.matches("commits(").count()
+                - PR_CONVERSATION_QUERY.matches("history: commits(").count(),
+            1,
+            "exactly one `commits` selection goes unaliased"
+        );
+        // `commits_truncated` is this flag; without it the list silently stops at
+        // 100 and a reviewer reads a cut history as the whole one.
+        assert!(
+            PR_CONVERSATION_QUERY.contains("pageInfo { hasNextPage }"),
+            "the commit list must ask whether it was cut short"
         );
     }
 

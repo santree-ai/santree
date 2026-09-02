@@ -17,7 +17,8 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, Context, Result};
 use minijinja::{context, Environment, Value};
 use santree_core::domain::{
-    Priority, PromptInfo, PromptKind, PromptPreview, PromptVar, TriageComment, TriageDetail,
+    Priority, PromptInfo, PromptKind, PromptPreview, PromptPreviewKind, PromptVar,
+    PromptWorkItemSample, ReviewWorkItemSource, TriageComment, TriageDetail,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +39,11 @@ struct PromptDef {
     label: &'static str,
     description: &'static str,
     kind: PromptKind,
+    /// False when the wording is part of a contract santree configures around the
+    /// prompt — the English tutor's hook and its `Edit` grant — so the editor
+    /// shows it and `set_prompt` refuses an override.
+    editable: bool,
+    preview: PromptPreviewKind,
     default: &'static str,
     variables: &'static [VarDoc],
 }
@@ -79,6 +85,8 @@ static PROMPT_DEFS: &[PromptDef] = &[
         label: "Triage investigation",
         description: "The agent's opening prompt when you Investigate a Triage issue. Unlike the other flows, the ticket's screenshots are kept (saved as local files the agent can Read), not stripped.",
         kind: PromptKind::Flow,
+        editable: true,
+        preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/triage.njk"),
         variables: &[
             VarDoc { name: "ticket_id", description: "The issue id, e.g. \"AK-165\"." },
@@ -94,6 +102,8 @@ static PROMPT_DEFS: &[PromptDef] = &[
         label: "Work / start task",
         description: "The agent's opening prompt when you start a task on a worktree.",
         kind: PromptKind::Flow,
+        editable: true,
+        preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/work.njk"),
         variables: &[
             VarDoc { name: "ticket_id", description: "The issue id, e.g. \"AK-165\"." },
@@ -111,6 +121,8 @@ static PROMPT_DEFS: &[PromptDef] = &[
         label: "Commit message",
         description: "Drafts a one-line commit message from the staged diff (headless).",
         kind: PromptKind::Flow,
+        editable: true,
+        preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/fill-commit.njk"),
         variables: &[
             VarDoc { name: "branch_name", description: "The worktree's git branch." },
@@ -123,6 +135,8 @@ static PROMPT_DEFS: &[PromptDef] = &[
         label: "PR description",
         description: "Fills the repo's PR template from the branch diff + commits (headless).",
         kind: PromptKind::Flow,
+        editable: true,
+        preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/fill-pr.njk"),
         variables: &[
             VarDoc { name: "pr_template", description: "The repo's PR template markdown." },
@@ -140,8 +154,11 @@ static PROMPT_DEFS: &[PromptDef] = &[
         label: "AI review",
         description: "The agent's opening prompt for an AI review — the session that writes the brief and the draft comments through santree's own tools. Its hard-rules block is what keeps everything it produces inside santree until you publish it.",
         kind: PromptKind::Flow,
+        editable: true,
+        preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/pr-review.njk"),
         variables: &[
+            VarDoc { name: "pr_repo", description: "The pull request's repository, as `owner/name`." },
             VarDoc { name: "pr_number", description: "The pull request number." },
             VarDoc { name: "pr_title", description: "The pull request title." },
             VarDoc { name: "pr_body", description: "The pull request description (markdown)." },
@@ -165,10 +182,44 @@ static PROMPT_DEFS: &[PromptDef] = &[
         ],
     },
     PromptDef {
+        name: "pr-fix",
+        label: "Work on queue items",
+        description: "The agent's opening prompt when you press Start work on a pull request's queue: every open item in it — a review thread, an AI draft, a failing check, a note of your own — with the live state of whatever raised it. The default explains each kind of item the queue holds, then lays the items out one by one inside a fence of untrusted data. Keep the fence.",
+        kind: PromptKind::Flow,
+        editable: true,
+        preview: PromptPreviewKind::Queue,
+        default: include_str!("../prompts/pr-fix.njk"),
+        variables: &[
+            VarDoc {
+                name: "work_items",
+                description: "The open items, structured — loop with `{% for item in work_items %}`, branch on `item.source` (`check`, `githubThread`, `aiDraft` or `manual`). Each has `id`, `description`, `path`, `line`, `startLine`, `latestSourceDiscussion` (the thread's comments as they read now — `author`, `body` — or the AI draft) and `latestCheckRun` (a failing check's `name`, `status`, `app`, `url`, `failingSteps`, `annotations`; `null` once it no longer runs). Every string in it has `<`, `>` and `&` escaped as `\\u003c`, `\\u003e`, `\\u0026`, so writing any field inside the `<untrusted-review-data>` fence is safe.",
+            },
+            VarDoc {
+                name: "work_items_json",
+                description: "The same items as one pretty-printed JSON blob, escaped the same way — for a template that would rather embed the queue whole.",
+            },
+            VarDoc { name: "pr_repo", description: "The pull request's repository, as `owner/name`." },
+            VarDoc { name: "pr_number", description: "The pull request number." },
+            VarDoc { name: "pr_title", description: "The pull request title." },
+            VarDoc { name: "pr_body", description: "The pull request description (markdown)." },
+            VarDoc { name: "pr_author", description: "The author's GitHub login." },
+            VarDoc { name: "base_ref", description: "The PR's base branch." },
+            VarDoc { name: "head_ref", description: "The PR's head branch." },
+            VarDoc { name: "head_sha", description: "The PR's head commit SHA." },
+            VarDoc { name: "diff_stat", description: "One-line summary of the changed files." },
+            VarDoc { name: "diff", description: "The PR's full diff (capped; see `truncated`)." },
+            VarDoc { name: "conversation", description: "The PR's existing comments and review threads." },
+            VarDoc { name: "ticket_content", description: "The rendered Issue block for the PR's linked ticket. Empty when it has none." },
+            VarDoc { name: "truncated", description: "True when the diff was cut to fit the budget." },
+        ],
+    },
+    PromptDef {
         name: "english-tutor",
         label: "English tutor",
-        description: "Injected into every Claude session santree launches while the English tutor is on (Settings → English tutor). It tells the agent to open with any corrections and append them to the practice log itself.",
+        description: "Injected into every Claude session santree launches while the English tutor is on (Settings → English tutor). It tells the agent to open with any corrections and append them to the practice log itself. Read-only: its wording is tied to the hook and the Edit grant santree configures around it, so a change here would break the append.",
         kind: PromptKind::Flow,
+        editable: false,
+        preview: PromptPreviewKind::Sample,
         default: include_str!("../prompts/english-tutor.njk"),
         variables: &[VarDoc {
             name: "log_path",
@@ -178,8 +229,10 @@ static PROMPT_DEFS: &[PromptDef] = &[
     PromptDef {
         name: "english-analysis",
         label: "English analysis",
-        description: "Turns the practice log into a priority list of habits to work on (headless). Runs only when you press Analyze.",
+        description: "Turns the practice log into a priority list of habits to work on (headless). Runs only when you press Analyze in Settings → English tutor. Read-only: that pane shows the result in the shape this prompt asks for.",
         kind: PromptKind::Flow,
+        editable: false,
+        preview: PromptPreviewKind::Sample,
         default: include_str!("../prompts/english-analysis.njk"),
         variables: &[
             VarDoc { name: "log", description: "The practice log, newest entries last (capped at ~400 KB, oldest cut first)." },
@@ -191,6 +244,8 @@ static PROMPT_DEFS: &[PromptDef] = &[
         label: "Issue context",
         description: "How a Linear issue (description + comment thread) is rendered. Embedded by the Work, Commit and PR prompts as `ticket_content`.",
         kind: PromptKind::Block,
+        editable: true,
+        preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/issue.njk"),
         variables: ISSUE_VARS,
     },
@@ -309,7 +364,7 @@ fn first_quoted(s: &str) -> Option<String> {
 /// The embedded defaults as a source set — the baseline the render path falls back
 /// to when nothing is overridden.
 #[cfg(test)]
-fn default_sources() -> Vec<(String, String)> {
+pub(crate) fn default_sources() -> Vec<(String, String)> {
     PROMPT_DEFS
         .iter()
         .map(|d| (d.name.to_string(), d.default.to_string()))
@@ -636,6 +691,8 @@ pub async fn list(db: &Db, scope: &str) -> Result<Vec<PromptInfo>> {
             description: d.description.to_string(),
             kind: d.kind,
             builtin: true,
+            editable: d.editable,
+            preview: d.preview,
             default: d.default.to_string(),
             override_source: settings::get(db, scope, &setting_key(d.name)).await?,
             variables: to_vars(d.variables),
@@ -652,6 +709,8 @@ pub async fn list(db: &Db, scope: &str) -> Result<Vec<PromptInfo>> {
                 "A custom shared block. Include it in any prompt with {% include \"…\" %}.".into(),
             kind: PromptKind::Block,
             builtin: false,
+            editable: true,
+            preview: PromptPreviewKind::Ticket,
             default: String::new(),
             override_source: settings::get(db, scope, &setting_key(&b.name)).await?,
             variables: all_variables(),
@@ -682,6 +741,11 @@ fn compile_check(name: &str, content: &str) -> Result<()> {
 pub async fn set_prompt(db: &Db, scope: &str, name: &str, content: Option<String>) -> Result<()> {
     if !is_known(db, name).await {
         return Err(anyhow!("unknown prompt: {name}"));
+    }
+    // The editor doesn't offer it, and the command line behind the editor
+    // mustn't either: the tutor's wording is part of the hook contract.
+    if let Some(d) = def(name).filter(|d| !d.editable) {
+        return Err(anyhow!("'{}' is read-only", d.label));
     }
     if let Some(c) = &content {
         compile_check(name, c)?;
@@ -741,9 +805,11 @@ pub async fn delete_block(db: &Db, name: &str) -> Result<()> {
 /// Render a *draft* `content` for `name` for the live editor preview. When the
 /// caller passes a real `detail` (the issue the editor already holds in cache) the
 /// preview renders against that ticket (description + comments); otherwise a
-/// built-in sample. Rendering here is pure — no fetch — so the editor can re-render
-/// on every keystroke. Git-derived vars (diff, log, …) stay sample. Compile/render
-/// errors are returned in [`PromptPreview::error`] rather than as a hard failure.
+/// built-in sample. `work_items` is the editor's sample queue for the `pr-fix`
+/// prompt — built in the UI, item by item — or a built-in one when it hasn't made
+/// one. Rendering here is pure — no fetch — so the editor can re-render on every
+/// keystroke. Git-derived vars (diff, log, …) stay sample. Compile/render errors
+/// are returned in [`PromptPreview::error`] rather than as a hard failure.
 /// Includes resolve against the effective sources at `repo`'s scope, draft
 /// substituted in.
 pub async fn preview(
@@ -752,6 +818,7 @@ pub async fn preview(
     content: &str,
     repo: Option<&str>,
     detail: Option<TriageDetail>,
+    work_items: Option<Vec<PromptWorkItemSample>>,
 ) -> Result<PromptPreview> {
     if !is_known(db, name).await {
         return Err(anyhow!("unknown prompt: {name}"));
@@ -769,6 +836,16 @@ pub async fn preview(
     // Pre-render the issue so `ticket_content` is populated; ignore its errors (an
     // invalid `issue` draft still surfaces via the main render below).
     let ticket_content = render_ticket_from(&sources, &detail).unwrap_or_default();
+    // The sample queue goes through the same builder as a real one, so the
+    // preview shows the JSON the agent gets and not an approximation of it.
+    let work_items = work_items.unwrap_or_else(sample_work_items);
+    let tasks = crate::review_ai::sample_fix_tasks(&work_items);
+    // `context!` takes one `..` spread beside keys, so the two merged blocks —
+    // the queue and the issue fields — are folded first.
+    let shared = context! {
+        ..crate::review_ai::fix_context(&tasks)?,
+        ..issue_context(&detail),
+    };
     let ctx = context! {
         ticket_id => &detail.id,
         title => &detail.title,
@@ -783,6 +860,10 @@ pub async fn preview(
         commit_log => "abc1234 [AK-123] add login throttling",
         pr_template => "## Summary\n\n## Test plan",
         log_content => "FAILED test_login\n##[error]make test exited with code 1",
+        log_path => "~/.config/santree/english-practice-log.md",
+        log => SAMPLE_PRACTICE_LOG,
+        entry_count => 3,
+        pr_repo => "acme/project",
         pr_number => 128,
         pr_title => "Throttle failed logins",
         pr_body => "Adds a per-account backoff after five failed attempts.",
@@ -794,7 +875,7 @@ pub async fn preview(
         workspace => true,
         truncated => false,
         existing_drafts => Vec::<minijinja::Value>::new(),
-        ..issue_context(&detail),
+        ..shared,
     };
 
     // `render_marked` so the editor can tint substituted values. `ticket_content`
@@ -827,6 +908,12 @@ fn sample_detail() -> TriageDetail {
         created_at_ms: 0.0,
         labels: vec!["bug".into(), "backend".into()],
         project: Some("Auth".into()),
+        project_milestone: None,
+        assignee: Some("Ada Lovelace".into()),
+        assignee_avatar_url: None,
+        estimate: Some(3.0),
+        cycle: None,
+        due_date: None,
         sla_breach_ms: None,
         snoozed_until_ms: None,
         description: "Repeated failed logins aren't throttled. Add a per-IP limiter and return 429 after N attempts.".into(),
@@ -850,6 +937,56 @@ fn sample_detail() -> TriageDetail {
 
 const SAMPLE_DIFF: &str =
     "diff --git a/src/auth.rs b/src/auth.rs\n@@\n-fn login() {}\n+fn login() { throttle(); }";
+
+/// A practice log the English analysis preview renders over: two days, three
+/// corrections, in the format the tutor appends.
+const SAMPLE_PRACTICE_LOG: &str = "## 2026-08-30\n\n- how we can do this -> how can we do this (question inversion)\n- the datas are -> the data is (uncountable noun)\n\n## 2026-09-01\n\n- I will explain you -> I will explain to you (explain takes \"to\")\n";
+
+/// The preview's stand-in work queue when the editor hasn't built one: one item
+/// of each kind, so every branch of the `pr-fix` template has something to show.
+fn sample_work_items() -> Vec<PromptWorkItemSample> {
+    let item =
+        |source, description: &str, line: Option<u32>, author: Option<&str>, body: Option<&str>| {
+            PromptWorkItemSample {
+                source,
+                description: description.into(),
+                path: line.map(|_| "src/auth.rs".into()),
+                line,
+                author: author.map(Into::into),
+                body: body.map(Into::into),
+            }
+        };
+    vec![
+        item(
+            ReviewWorkItemSource::Check,
+            "Fix failing check: test (ubuntu-latest)",
+            Some(42),
+            Some("test (ubuntu-latest)"),
+            Some("assertion failed: attempts <= 5"),
+        ),
+        item(
+            ReviewWorkItemSource::GithubThread,
+            "Reset the counter after a successful login",
+            Some(31),
+            Some("octocat"),
+            Some("The counter never resets after a success, so a slow typist locks themselves out."),
+        ),
+        item(
+            ReviewWorkItemSource::AiDraft,
+            "The limiter keys on a client-controlled header",
+            Some(18),
+            None,
+            Some("`X-Forwarded-For` is client-controlled; key on the peer address unless the app sits behind a trusted proxy."),
+        ),
+        item(
+            ReviewWorkItemSource::Manual,
+            "Add a test for the 429 response body",
+            None,
+            None,
+            None,
+        ),
+    ]
+}
 
 #[cfg(test)]
 mod tests {
@@ -1067,6 +1204,7 @@ mod tests {
                 "fill-commit",
                 "fill-pr",
                 "pr-review",
+                "pr-fix",
                 "english-tutor",
                 "english-analysis",
                 "issue",
@@ -1320,6 +1458,7 @@ mod tests {
             "Task {{ ticket_id }}: {{ title }}\n{{ ticket_content }}",
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1337,10 +1476,33 @@ mod tests {
         assert!(p.output.contains("Task "), "literal text stays unmarked");
     }
 
+    /// The tutor's wording is part of a contract (the hook, the `Edit` grant) and
+    /// the analysis's output shape is what its pane renders, so both are listed
+    /// read-only and an override is refused at the door.
+    #[tokio::test]
+    async fn a_read_only_prompt_refuses_an_override() {
+        let db = test_db().await;
+        let err = set_prompt(&db, "app", "english-tutor", Some("x".into()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("read-only"), "{err}");
+        let rows = list(&db, "app").await.unwrap();
+        let tutor = rows.iter().find(|p| p.name == "english-tutor").unwrap();
+        assert!(!tutor.editable);
+        assert_eq!(tutor.preview, PromptPreviewKind::Sample);
+        let analysis = rows.iter().find(|p| p.name == "english-analysis").unwrap();
+        assert!(!analysis.editable);
+        assert_eq!(analysis.preview, PromptPreviewKind::Sample);
+        assert!(rows
+            .iter()
+            .filter(|p| !p.name.starts_with("english-"))
+            .all(|p| p.editable));
+    }
+
     #[tokio::test]
     async fn preview_reports_render_error() {
         let db = test_db().await;
-        let p = preview(&db, "work", "{% for x in %}", None, None)
+        let p = preview(&db, "work", "{% for x in %}", None, None, None)
             .await
             .unwrap();
         assert!(p.error.is_some(), "broken draft surfaces an error");

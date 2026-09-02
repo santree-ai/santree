@@ -1,7 +1,13 @@
 import { render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { Markdown, MarkdownDocument, MarkdownTitle } from "./Markdown";
+import {
+  attachmentId,
+  Markdown,
+  MarkdownAttachments,
+  MarkdownDocument,
+  MarkdownTitle,
+} from "./Markdown";
 
 // Stand in for the real diagram renderer: mermaid is a ~1MB dynamic import that
 // these tests have no reason to load. What's under test is the routing — which
@@ -96,5 +102,63 @@ describe("MarkdownDocument", () => {
       render(<MarkdownDocument>{wrapped}</MarkdownDocument>).container.querySelector("br"),
     ).toBeNull();
     expect(render(<Markdown>{wrapped}</Markdown>).container.querySelector("br")).not.toBeNull();
+  });
+});
+
+/**
+ * Reported: screenshots that render on GitHub came up as broken icons in
+ * santree. A private repo's attachments are served only to a signed-in browser
+ * session — an API token gets the sign-in page and the webview gets a 404 — so
+ * the markdown URL is unusable to us. The backend reads GitHub's own pre-signed
+ * links out of the same PR query, and this is where they land.
+ */
+const SHOT = "https://github.com/user-attachments/assets/1fd1135c";
+const SIGNED = "https://private-user-images.githubusercontent.com/1/9-1fd1135c.png?jwt=x";
+
+describe("attachmentId", () => {
+  it("reads the asset id out of a GitHub attachment URL", () => {
+    expect(attachmentId(SHOT)).toBe("1fd1135c");
+  });
+
+  /** Matched on the parsed host, not a prefix — `github.com.evil.test` starts
+   *  with the same characters, and the id decides which signed link an image
+   *  gets. */
+  it("refuses a host that merely starts the same, and anything else", () => {
+    expect(attachmentId("https://github.com.evil.test/user-attachments/assets/1")).toBeNull();
+    expect(attachmentId("https://github.com/santree/santree/pull/1")).toBeNull();
+    expect(attachmentId("data:image/png;base64,AAAA")).toBeNull();
+    expect(attachmentId("not a url")).toBeNull();
+  });
+});
+
+describe("Markdown attachments", () => {
+  it("renders a GitHub attachment through its signed link", () => {
+    const { container } = render(
+      <MarkdownAttachments attachments={[{ id: "1fd1135c", url: SIGNED }]}>
+        <Markdown>{`![A screenshot](${SHOT})`}</Markdown>
+      </MarkdownAttachments>,
+    );
+    expect(container.querySelector("img")).toHaveAttribute("src", SIGNED);
+  });
+
+  /** No link, no broken icon: the alt text is what the author wrote the image to
+   *  say, and it is the honest thing to show while the substitution is missing. */
+  it("shows the alt text rather than an image that cannot load", () => {
+    const { container } = render(
+      <MarkdownAttachments attachments={[]}>
+        <Markdown>{`![A screenshot](${SHOT})`}</Markdown>
+      </MarkdownAttachments>,
+    );
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).toContain("A screenshot");
+  });
+
+  it("leaves every other image exactly as written", () => {
+    const { container } = render(
+      <MarkdownAttachments attachments={[]}>
+        <Markdown>{"![](data:image/png;base64,AAAA)"}</Markdown>
+      </MarkdownAttachments>,
+    );
+    expect(container.querySelector("img")).toHaveAttribute("src", "data:image/png;base64,AAAA");
   });
 });

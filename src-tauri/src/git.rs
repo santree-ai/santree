@@ -521,71 +521,80 @@ pub fn safe_branch(name: &str) -> Result<&str> {
 /// with `-` would be read as a **flag**, not a commit. Hex-only closes that and
 /// every other shape at once; the length band is git's own (a short SHA is at
 /// least 4, a full one 40, and SHA-256 repos use 64).
-fn safe_sha(sha: &str) -> Result<&str> {
+pub(crate) fn safe_sha(sha: &str) -> Result<&str> {
     if !(4..=64).contains(&sha.len()) || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
         bail!("'{sha}' is not a git object id");
     }
     Ok(sha)
 }
 
-/// Check out a PR's head commit, **detached**, in a throwaway worktree used only
-/// for reading the PR's code.
+/// The branch a pull request's worktree should land on, created locally when it
+/// has to be.
 ///
-/// Two deliberate differences from [`add_worktree_for_branch`], which exists to
-/// *work on* a PR:
+/// A PR's checkout is an ordinary worktree now, so it needs an ordinary branch —
+/// and which branch that is depends on where the PR's head lives:
 ///
-///  - It fetches `refs/pull/<number>/head` rather than the head branch. GitHub
-///    exposes that ref on the base repo for every PR, including **forks** — whose
-///    branch doesn't exist on `origin` at all, which is exactly the case
-///    `add_worktree_for_branch` has to bail on.
-///  - It checks out detached at the SHA, so no local branch is created and
-///    nothing done here can land on the PR's branch.
+///  - **Same repo.** `origin/<head_ref>` is the PR's head, so the worktree goes
+///    on `head_ref` itself and a commit made in it pushes back to the PR. That is
+///    the case worth having, and the reason this doesn't just always cut a local
+///    branch.
+///  - **A fork** (or a head that has moved on). `origin/<head_ref>` is absent or
+///    points somewhere else, so `refs/pull/<number>/head` — which GitHub exposes
+///    on the *base* repo for every PR, forks included — is fetched into a local
+///    `santree/pr-<number>`.
 ///
-/// Idempotent: an existing checkout is fast-forwarded to `head_sha` in place, so
-/// re-opening a PR after new commits costs a fetch rather than a re-clone.
-pub fn add_review_worktree(
-    repo: &Path,
-    worktree_path: &Path,
-    number: u32,
-    head_sha: &str,
-) -> Result<()> {
+/// The fork branch is santree-namespaced rather than named after the PR's own
+/// branch, because a fork's head ref is routinely `main` or `patch-1`: creating a
+/// local branch under that name would be checking out something that looks like
+/// the repo's own trunk and isn't. Matching `origin/<head_ref>` by **commit** and
+/// not by existence is the other half of that: a fork PR from a branch called
+/// `main` must not resolve to the base repo's `main`.
+pub fn pr_branch(repo: &Path, number: u32, head_ref: &str, head_sha: &str) -> Result<String> {
     let sha = safe_sha(head_sha)?;
-    if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let head_ref = safe_branch(head_ref)?;
+
+    // Best-effort: a branch that isn't on origin (the fork case) fails here, and
+    // the comparison below is what decides, not this.
+    let _ = git_capture(repo, &["fetch", "--no-tags", "origin", head_ref]);
+    let origin_ref = format!("origin/{head_ref}");
+    if let Ok(at) = git(
+        repo,
+        &["rev-parse", "--verify", &format!("{origin_ref}^{{commit}}")],
+    ) {
+        if at.trim() == sha {
+            return Ok(head_ref.to_string());
+        }
     }
 
-    // `--no-tags` keeps a big repo's tag list out of a fetch we only need one
-    // commit from. The ref is fetched into FETCH_HEAD; we check out the SHA
-    // itself, so nothing depends on a local ref surviving.
+    // The PR's head, wherever it lives. This ref exists on the base repo for every
+    // PR, which is the whole reason a fork is reviewable at all.
     let pull_ref = format!("refs/pull/{number}/head");
     let fetched = git(repo, &["fetch", "--no-tags", "origin", &pull_ref]);
-
-    if worktree_path.exists() {
-        // Already checked out — move it to the current head. If that fails the
-        // directory is unusable (interrupted create, manual deletion), so start over.
-        if git(worktree_path, &["checkout", "--detach", sha]).is_ok() {
-            return Ok(());
-        }
-        remove_review_worktree(repo, worktree_path);
+    if git(repo, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_err() {
+        let why = fetched
+            .err()
+            .map_or_else(|| "commit not found".into(), |e| e.to_string());
+        bail!("couldn't fetch PR #{number} from origin: {why}");
     }
 
-    // Only now does a failed fetch matter: without it the SHA may not be local.
-    // Reported as the cause rather than as a bare "invalid reference".
-    if let Err(e) = fetched {
-        if git(repo, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_err() {
-            bail!("couldn't fetch PR #{number} from origin: {e}");
-        }
-    }
-    let path = worktree_path.to_string_lossy();
-    git(repo, &["worktree", "add", "--detach", &path, sha])?;
-    Ok(())
+    let local = format!("santree/pr-{number}");
+    // `-f` so a re-review after new commits moves the branch instead of failing.
+    // Safe because the name is santree's own namespace, and because a branch that
+    // is checked out somewhere is refused by git rather than silently reset.
+    git(repo, &["branch", "-f", &local, sha])?;
+    Ok(local)
 }
 
-/// Tear down a review checkout. Best-effort by design — it holds nothing the user
-/// authored (it's detached, read-only, and re-creatable from origin), so a failure
-/// to remove it is never worth failing a caller over. No branch to delete, unlike
-/// [`remove_worktree`].
-pub fn remove_review_worktree(repo: &Path, worktree_path: &Path) {
+/// Unregister one of the detached checkouts earlier versions kept under
+/// `.santree/reviews/`.
+///
+/// Best-effort by design — it holds nothing the user authored (it was detached and
+/// read-only), so a failure to remove it costs disk rather than correctness. No
+/// branch to delete, unlike [`remove_worktree`]: those checkouts were on none.
+///
+/// Kept only for the one-time sweep in `reviews::sweep_legacy_checkouts`; nothing
+/// creates such a checkout any more.
+pub fn remove_legacy_review_checkout(repo: &Path, worktree_path: &Path) {
     let reviews_root = repo.join(".santree").join("reviews");
     let direct_child = worktree_path.parent() == Some(reviews_root.as_path())
         && worktree_path.file_name().is_some_and(|name| {
@@ -1725,6 +1734,40 @@ mod tests {
         );
     }
 
+    /// A PR's worktree id becomes a path component and a positional `git`
+    /// argument elsewhere in this codebase, so `review-` plus a length-prefixed
+    /// slug has to stay one safe component whatever the owner/name look like.
+    #[test]
+    fn a_review_worktree_id_is_a_safe_path_component() {
+        let cwd = Path::new("/repo/worktree");
+        for (owner, name, number) in [
+            ("acme", "web", 7u32),
+            ("a-b", "c", 1),
+            ("Acme", "kubernetes", 50868),
+            // A hyphen-heavy slug is where a naive prefix test breaks; the id
+            // still has to stay one component.
+            ("canary-technologies-corp", "canary", 50868),
+        ] {
+            let id = crate::reviews::review_worktree_id(owner, name, number).unwrap();
+            assert!(!id.starts_with('-'), "{id} would be read as a flag");
+            assert_eq!(
+                safe_path(cwd, &id).unwrap(),
+                cwd.join(&id),
+                "{id} must join as a single normal component"
+            );
+            // The one name a PR's checkout has, on both sides of the bridge:
+            // exactly what the frontend's `reviewTreeId` mints.
+            assert_eq!(
+                id,
+                format!(
+                    "review-{}-{owner}-{}-{name}-{number}",
+                    owner.len(),
+                    name.len()
+                )
+            );
+        }
+    }
+
     #[test]
     fn review_removal_refuses_paths_outside_its_checkout_root() {
         let base = std::env::temp_dir().join(format!(
@@ -1736,7 +1779,7 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("keep"), "safe").unwrap();
 
-        remove_review_worktree(&repo, &outside);
+        remove_legacy_review_checkout(&repo, &outside);
 
         assert!(outside.join("keep").is_file());
         let _ = std::fs::remove_dir_all(&base);

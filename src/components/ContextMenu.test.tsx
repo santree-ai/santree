@@ -66,6 +66,23 @@ describe("ContextMenu", () => {
     expect(menu()).toBeNull();
   });
 
+  /** A host whose rows hang on a read it doesn't want to make per row (the
+   *  review rail's checkout lookup) is told the moment someone asks. */
+  it("tells the host as it opens, by pointer or keyboard", () => {
+    const onOpen = vi.fn();
+    render(
+      <ContextMenu items={items()} onOpen={onOpen}>
+        <button type="button">A worktree</button>
+      </ContextMenu>,
+    );
+    const target = screen.getByText("A worktree");
+    fireEvent.contextMenu(target);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.keyDown(target, { key: "F10", shiftKey: true });
+    expect(onOpen).toHaveBeenCalledTimes(2);
+  });
+
   it("runs the item and closes", () => {
     const run = vi.fn();
     const target = open(items(run));

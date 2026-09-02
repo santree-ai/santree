@@ -414,11 +414,15 @@ export const commands = {
 	 */
 	worktreePrs: (repo: string) => typedError<WorktreePr[], CmdError>(__TAURI_INVOKE("worktree_prs", { repo })),
 	/**
-	 *  The Reviews dashboard inbox for the org the active `repo` belongs to: the
-	 *  viewer's open PRs, PRs individually requesting their review, and one section
-	 *  per team that has open requests. Empty when `gh` isn't authenticated.
+	 *  The Reviews dashboard inbox across every registered project: the viewer's open
+	 *  PRs, PRs individually requesting their review, and one section per team that
+	 *  has open requests. Empty when `gh` isn't authenticated.
+	 * 
+	 *  Takes no repo — the inbox spans the whole registry, so scoping it to the
+	 *  selected project is what made an empty answer routinely mean "you're looking
+	 *  at the wrong one".
 	 */
-	reviews: (repo: string) => typedError<ReviewInbox, CmdError>(__TAURI_INVOKE("reviews", { repo })),
+	reviews: () => typedError<ReviewInbox, CmdError>(__TAURI_INVOKE("reviews")),
 	/**
 	 *  Resolve Linear identifiers to `(project, title)` so the Reviews sidebar can
 	 *  group PRs by project. Empty when no Linear org is connected — the sidebar then
@@ -433,11 +437,71 @@ export const commands = {
 	 */
 	reviewWorkspace: (repo: string, target: ReviewTarget) => typedError<string | null, CmdError>(__TAURI_INVOKE("review_workspace", { repo, target })),
 	/**
+	 *  The AI review's checkout of a PR, when one exists — what the Reviews rail's
+	 *  Files / Changes / Session-history panes read for a pull request that has no
+	 *  worktree of its own. `None` before any review has run for it, or once its
+	 *  checkout has been pruned. Never creates one: that is [`review_workspace`],
+	 *  which is also how a stale checkout is moved to the PR's current head.
+	 */
+	reviewCheckout: (repo: string, prRepo: string, number: number) => typedError<{
+	/**
+	 *  The registered project whose clone holds it — the PR's own, which is
+	 *  routinely not the active repo, and what every pane's read is keyed by.
+	 */
+	repo: string,
+	/**
+	 *  `branch` carries the **commit** it is detached at rather than a branch
+	 *  name, because it is on no branch — and that commit is what "has the PR
+	 *  moved past this checkout?" compares against the PR's head.
+	 */
+	worktree: Worktree,
+} | null, CmdError>(__TAURI_INVOKE("review_checkout", { repo, prRepo, number })),
+	/**
 	 *  Delete a PR's review checkout. Idempotent. `pr_repo` names the checkout to
 	 *  delete, because it may live under a registered repo other than the active one
 	 *  — the same resolution `review_workspace` created it through.
 	 */
 	removeReviewWorkspace: (repo: string, prRepo: string, number: number) => typedError<null, CmdError>(__TAURI_INVOKE("remove_review_workspace", { repo, prRepo, number })),
+	/**
+	 *  Keep a PR's checkout as an ordinary worktree — it stops being filtered out of
+	 *  Trees and becomes work the user started.
+	 * 
+	 *  The identity is a `(repo, pr_repo, number)` triple, never a path or an id: the
+	 *  worktree it names is derived here exactly as `review_workspace` derived it, so
+	 *  the webview cannot ask for a different row to be unhidden.
+	 */
+	promoteReviewWorktree: (repo: string, prRepo: string, number: number) => typedError<null, CmdError>(__TAURI_INVOKE("promote_review_worktree", { repo, prRepo, number })),
+	/**
+	 *  Close one provider's AI review on a pull request.
+	 * 
+	 *  The tab is the session, so closing it forgets the stored conversation — the
+	 *  strip would otherwise put the tab straight back on the next launch, from the
+	 *  row that outlived it. What the review *wrote* is untouched: its drafts and
+	 *  brief live in santree's own tables, and the transcript stays on disk where
+	 *  Session history reads it, so the same review reopens from there.
+	 * 
+	 *  The term key is derived here from `(pr_repo, number)` rather than accepted
+	 *  whole: a key that crossed the bridge could name any surface's row, and the
+	 *  only one this command may reach is the AI review of the PR it was told about.
+	 */
+	closeReviewSession: (repo: string, prRepo: string, number: number, agent: AgentKind) => typedError<null, CmdError>(__TAURI_INVOKE("close_review_session", { repo, prRepo, number, agent })),
+	/**
+	 *  Close one provider's investigation of a triage ticket.
+	 * 
+	 *  The tab is the session, so closing it forgets the stored conversation — the
+	 *  strip would otherwise put the tab straight back from the row that outlived
+	 *  it. The transcript stays on disk where Session history reads it.
+	 * 
+	 *  That row is also what `session::started_investigations` lists (every
+	 *  `terminal_sessions` row keyed `triage:…`), so forgetting it drops the
+	 *  ticket's started investigation for this provider in the same stroke; the
+	 *  other providers' rows on the ticket are untouched.
+	 * 
+	 *  The term key is derived here from the ticket id rather than accepted whole:
+	 *  a key that crossed the bridge could name any surface's row. The id passes
+	 *  the same gate `investigate_prompt`'s path applies before it is used.
+	 */
+	closeInvestigationSession: (repo: string, ticketId: string, agent: AgentKind) => typedError<null, CmdError>(__TAURI_INVOKE("close_investigation_session", { repo, ticketId, agent })),
 	/**
 	 *  The cached AI review brief for a PR (summary, reading order, watch-outs), or
 	 *  `None` when none has been generated. A single row read — the panel renders its
@@ -533,8 +597,21 @@ export const commands = {
 	number: number,
 	title: string,
 	url: string,
-	/**  "owner/name" the PR lives in (the grouping axis for "My PRs"). */
+	/**
+	 *  "owner/name" the PR lives in — the slug half of the `(repo, number)`
+	 *  identity every PR command takes.
+	 */
 	repo: string,
+	/**
+	 *  The registered project [`Self::repo`] resolves to, by registry name.
+	 * 
+	 *  `None` when no registered checkout has this repo as its `origin` — an
+	 *  org-scoped inbox is full of repos the user never cloned — and always `None`
+	 *  on the by-number path that serves a worktree's own PR, whose caller already
+	 *  knows which project it asked about. Filled by the inbox alone, because the
+	 *  registry is the only thing that can answer it.
+	 */
+	project: string | null,
 	/**  The PR's head branch name (shown in the header, click-to-copy). */
 	headRef: string,
 	/**  Stable GitHub node id for the head ref. `None` after the branch is deleted. */
@@ -719,6 +796,18 @@ export const commands = {
 	createdAtMs: number | null,
 	labels: string[],
 	project: string | null,
+	/**  The issue's milestone inside its project, when assigned. */
+	projectMilestone: ProjectMilestoneRef | null,
+	/**  The assignee's display name, when the issue is assigned. */
+	assignee: string | null,
+	/**  The assignee's avatar URL, when present. */
+	assigneeAvatarUrl: string | null,
+	/**  Linear's issue estimate (points). `None` means the issue is not estimated. */
+	estimate: number | null,
+	/**  The cycle the issue is scheduled into, when it is in one. */
+	cycle: CycleRef | null,
+	/**  Linear's due date (`YYYY-MM-DD`), when set. */
+	dueDate: string | null,
 	/**  Absolute epoch ms the issue's SLA breaches, if it has one. */
 	slaBreachMs: number | null,
 	/**  Epoch ms the issue is snoozed until, if snoozed. */
@@ -734,10 +823,12 @@ export const commands = {
 	 */
 	triageSetState: (repo: string, ticketId: string, stateId: string) => typedError<null, CmdError>(__TAURI_INVOKE("triage_set_state", { repo, ticketId, stateId })),
 	/**
-	 *  Update a triage issue's canonical Linear manual rank. The sink verifies the
-	 *  issue still belongs to this repo's triage scope before sending the mutation.
+	 *  Snooze a triage issue until `until_ms` (epoch ms), or wake it with `None` —
+	 *  the sidebar row's right-click menu. `ticket_id` is used only as a GraphQL
+	 *  variable (never as a path or git arg). Requires a connected, write-scoped
+	 *  Linear org; errors when no org is connected.
 	 */
-	triageSetSortOrder: (repo: string, ticketId: string, sortOrder: number | null) => typedError<null, CmdError>(__TAURI_INVOKE("triage_set_sort_order", { repo, ticketId, sortOrder })),
+	triageSnooze: (repo: string, ticketId: string, untilMs: number | null) => typedError<null, CmdError>(__TAURI_INVOKE("triage_snooze", { repo, ticketId, untilMs })),
 	/**
 	 *  Post a comment on an issue — a top-level comment, or a reply when `parent_id`
 	 *  is the id of the comment being replied to. `ticket_id`/`parent_id` are used
@@ -952,6 +1043,18 @@ export const commands = {
 	createdAtMs: number | null,
 	labels: string[],
 	project: string | null,
+	/**  The issue's milestone inside its project, when assigned. */
+	projectMilestone: ProjectMilestoneRef | null,
+	/**  The assignee's display name, when the issue is assigned. */
+	assignee: string | null,
+	/**  The assignee's avatar URL, when present. */
+	assigneeAvatarUrl: string | null,
+	/**  Linear's issue estimate (points). `None` means the issue is not estimated. */
+	estimate: number | null,
+	/**  The cycle the issue is scheduled into, when it is in one. */
+	cycle: CycleRef | null,
+	/**  Linear's due date (`YYYY-MM-DD`), when set. */
+	dueDate: string | null,
 	/**  Absolute epoch ms the issue's SLA breaches, if it has one. */
 	slaBreachMs: number | null,
 	/**  Epoch ms the issue is snoozed until, if snoozed. */
@@ -959,7 +1062,7 @@ export const commands = {
 	/**  Markdown description — may contain inline images. */
 	description: string,
 	comments: TriageComment[],
-} | null) => typedError<PromptPreview, CmdError>(__TAURI_INVOKE("preview_prompt", { name, content, repo, detail })),
+} | null, workItems: PromptWorkItemSample[] | null) => typedError<PromptPreview, CmdError>(__TAURI_INVOKE("preview_prompt", { name, content, repo, detail, workItems })),
 	/**
 	 *  Create a user-defined shared block (a reusable partial any prompt can
 	 *  `{% include %}`). Validates the name and seeds a starter body.
@@ -1719,6 +1822,21 @@ export type CommentKind =
 /**  An inline comment anchored to a file in a review thread. */
 "ReviewThread";
 
+/**  The Linear cycle an issue is scheduled into. */
+export type CycleRef = {
+	/**  Linear's running cycle number — what its chip says. A float on the wire. */
+	number: number | null,
+	/**  The cycle's name, when the team names them. */
+	name: string | null,
+	/**  Epoch ms the cycle ends — raw, formatted live by the frontend. */
+	endsAtMs: number | null,
+	/**
+	 *  Epoch ms the cycle starts. With `ends_at_ms`, how far through the cycle
+	 *  now is — what the cycle mark's ring draws, computed live by the frontend.
+	 */
+	startsAtMs: number | null,
+};
+
 /**
  *  A stored analysis of the practice log: which habits to work on next, generated
  *  on demand rather than on session start.
@@ -1934,6 +2052,15 @@ export type MergeQueue = {
 	repo: string,
 	/**  The branch the queue merges into (its default branch). */
 	branch: string,
+	/**  The queue's own page on GitHub. */
+	url: string,
+	/**  GitHub's estimate for the entry at the front of the line, in seconds. */
+	nextEstimatedSecs: number | null,
+	/**
+	 *  Pull requests merged into the repo over the last 30 days — the queue's
+	 *  throughput, the number GitHub's own queue page leads with.
+	 */
+	mergedLast30Days: number | null,
 	entries: MergeQueueEntry[],
 };
 
@@ -1955,6 +2082,13 @@ export type MergeQueueEntry = {
 	 *  can spot their own place in line.
 	 */
 	isMine: boolean,
+	/**  ISO-8601 time the PR entered the queue. */
+	enqueuedAt: string,
+	/**
+	 *  GitHub's estimate of how long until this entry merges, in seconds —
+	 *  absent while the queue has no history to estimate from.
+	 */
+	estimatedSecs: number | null,
 };
 
 /**
@@ -2077,6 +2211,24 @@ export type Opener = {
 	available: boolean,
 };
 
+/**
+ *  The detail panel payload for a selected PR: body, conversation, diff, checks.
+ *  One `user-attachments` asset, paired with a link that will actually load.
+ */
+export type PrAttachment = {
+	/**
+	 *  The asset id as it appears in the markdown — the last path segment of
+	 *  `https://github.com/user-attachments/assets/<id>`.
+	 */
+	id: string,
+	/**
+	 *  GitHub's pre-signed CDN URL for it. Short-lived, and public while it
+	 *  lasts: the signature is the credential, so nothing else is needed to
+	 *  fetch it and nothing may be stored from it.
+	 */
+	url: string,
+};
+
 /**  One CI check on a PR's head commit (a GitHub check run or a status context). */
 export type PrCheck = {
 	name: string,
@@ -2144,9 +2296,56 @@ export type PrComment = {
 	isBot: boolean,
 };
 
-/**  The detail panel payload for a selected PR: body, conversation, diff, checks. */
+/**
+ *  One commit on a pull request, as GitHub's "Commits" tab lists them.
+ * 
+ *  The headline and the body are carried apart because they are read apart: the
+ *  headline is the row, and the body — the "why", when the author wrote one — is
+ *  what the row expands to show. Splitting them on the frontend would mean
+ *  re-deriving a boundary GitHub already draws.
+ */
+export type PrCommit = {
+	/**  Full 40-hex commit OID — the identity, and the key a list renders on. */
+	oid: string,
+	/**
+	 *  GitHub's own abbreviation of [`Self::oid`], shown in the row. Taken from
+	 *  the API rather than truncated here: the length GitHub picks grows with the
+	 *  repo, so a fixed 7 would collide in a repo where GitHub's doesn't.
+	 */
+	abbreviatedOid: string,
+	/**  The commit message's first line. */
+	messageHeadline: string,
+	/**  The rest of the commit message; empty when there is none. */
+	messageBody: string,
+	/**
+	 *  The commit author's GitHub login, falling back to the git author name when
+	 *  the commit's email matches no GitHub account (an unlinked local commit).
+	 */
+	author: string,
+	authorAvatarUrl: string,
+	/**  ISO-8601 commit date. */
+	committedDate: string,
+	/**  The commit's page on GitHub. */
+	url: string,
+};
+
 export type PrDetail = {
 	body: string,
+	/**
+	 *  Signed URLs for the attachments this PR's prose points at, keyed by the
+	 *  `github.com/user-attachments/assets/<id>` id that appears in the markdown.
+	 * 
+	 *  Those markdown URLs are useless to us: on a private repo GitHub serves
+	 *  them only to a browser session, and an API token gets the *web page*, not
+	 *  the image — so every screenshot in a description rendered as a broken
+	 *  icon. GitHub's own rendered HTML carries pre-signed CDN links instead,
+	 *  which need no credential at all, so `github.rs` reads them from the same
+	 *  query and hands over the substitution.
+	 * 
+	 *  **They expire in about five minutes.** They are a rendering detail of one
+	 *  read, never something to persist or pass on.
+	 */
+	attachments: PrAttachment[],
 	/**  The labels ("tags") currently assigned to the PR. */
 	labels: PrLabel[],
 	/**
@@ -2164,6 +2363,17 @@ export type PrDetail = {
 	 *  approved a diff they never saw.
 	 */
 	filesTruncated: boolean,
+	/**
+	 *  The PR's commits, **oldest first** — the order GitHub's Commits tab lists
+	 *  them, which is the order they will land in.
+	 */
+	commits: PrCommit[],
+	/**
+	 *  True when the PR has more commits than we fetched. Carried for the same
+	 *  reason as [`Self::files_truncated`]: a reviewer who believes they have seen
+	 *  every commit and has not is worse off than one who knows the list is cut.
+	 */
+	commitsTruncated: boolean,
 	checks: PrCheck[],
 	/**
 	 *  Merge-base commit anchoring GitHub's PR patches. Used to fetch full old-side
@@ -2324,6 +2534,12 @@ export type PromptInfo = {
 	 *  deleted (their content lives entirely in the DB).
 	 */
 	builtin: boolean,
+	/**
+	 *  False for a prompt whose wording is part of a contract santree configures
+	 *  around it (a hook, a permission grant) — shown in the editor, never edited.
+	 */
+	editable: boolean,
+	preview: PromptPreviewKind,
 	/**  The default template source (the reset target). Empty for custom blocks. */
 	default: string,
 	/**
@@ -2361,6 +2577,18 @@ export type PromptPreview = {
 	error: string | null,
 };
 
+/**  What the Prompts editor previews a template against. */
+export type PromptPreviewKind = 
+/**  A Linear issue: the built-in sample, or a real ticket the user picks. */
+"ticket" | 
+/**
+ *  A pull request's work queue, built row by row in the editor, beside the
+ *  ticket the PR is linked to.
+ */
+"queue" | 
+/**  Built-in sample data only — nothing in it is a ticket to pick. */
+"sample";
+
 /**
  *  One documented variable a prompt template receives, shown in the editor's
  *  variable palette so users know what they can reference.
@@ -2369,6 +2597,27 @@ export type PromptVar = {
 	/**  The reference name, e.g. `ticket_id` (used as `{{ ticket_id }}`). */
 	name: string,
 	description: string,
+};
+
+/**
+ *  One row of the Prompts editor's sample work queue — what the Start-work
+ *  prompt's preview renders in place of a real PR's open items. The editor
+ *  builds the list; the backend turns each row into the JSON the fixing agent
+ *  would see, through the same code that builds it for a real item.
+ */
+export type PromptWorkItemSample = {
+	source: ReviewWorkItemSource,
+	/**  The item's own wording — what its row in the queue says. */
+	description: string,
+	path: string | null,
+	line: number | null,
+	/**  Who wrote a thread comment; for a check, the check's name. */
+	author: string | null,
+	/**
+	 *  A thread comment's or an AI draft's body; for a check, the message of
+	 *  its one failing annotation.
+	 */
+	body: string | null,
 };
 
 /**
@@ -2531,6 +2780,30 @@ export type ReviewBrief = {
 	generatedAtMs: number | null,
 };
 
+/**
+ *  A pull request's **AI-review checkout**: the detached tree under
+ *  `.santree/reviews/` that an AI review session reads the PR's code in.
+ * 
+ *  It is registered in `worktree_links`, so the Reviews rail's Files, Changes and
+ *  Session-history panes can read it by id the way they read any other checkout —
+ *  but it is not work the user started, so it never appears in the worktree list.
+ *  A PR that has a worktree of its own is read from that instead; this is the
+ *  fallback for the many that don't.
+ */
+export type ReviewCheckout = {
+	/**
+	 *  The registered project whose clone holds it — the PR's own, which is
+	 *  routinely not the active repo, and what every pane's read is keyed by.
+	 */
+	repo: string,
+	/**
+	 *  `branch` carries the **commit** it is detached at rather than a branch
+	 *  name, because it is on no branch — and that commit is what "has the PR
+	 *  moved past this checkout?" compares against the PR's head.
+	 */
+	worktree: Worktree,
+};
+
 /**  GitHub's aggregate review decision for a PR. */
 export type ReviewDecision = "Approved" | "ChangesRequested" | 
 /**  A review is required but none satisfying it has been given yet. */
@@ -2592,21 +2865,35 @@ export type ReviewEvent =
 /**  Comment without a verdict. */
 "Comment" | "Approve" | "RequestChanges";
 
-/**  The categorized PR inbox for the Reviews tab, scoped to one org. */
+/**
+ *  The categorized PR inbox for the Reviews tab, across **every** registered
+ *  project.
+ * 
+ *  Deliberately not scoped to the active repo. One selected project answered for
+ *  a whole multi-project registry, so an empty inbox was routinely the correct
+ *  answer to the wrong question — the review waiting on you was in the project
+ *  you weren't looking at.
+ */
 export type ReviewInbox = {
 	/**  PRs the viewer authored (grouped by repo on the frontend). */
 	mine: ReviewPr[],
 	/**  PRs where the viewer is individually requested as a reviewer. */
 	requested: ReviewPr[],
-	/**  PRs requested via a team the viewer is on — one section per team. */
+	/**  PRs requested via a team the viewer is on — one section per team, per org. */
 	teams: TeamReviews[],
 	/**
-	 *  The GitHub org these searches were scoped to — the active repo's `origin`
-	 *  owner. Empty when it couldn't be resolved. An empty inbox has to name it:
-	 *  the merge queue sitting beside it is scoped to a single *repo*, so
+	 *  Every registered project and the GitHub repo it maps to — how a PR above
+	 *  is attributed back to a project, and the list a per-project count is
+	 *  rendered over (a project with nothing waiting still has a row).
+	 */
+	projects: ReviewProject[],
+	/**
+	 *  The distinct GitHub orgs these searches covered — the registry's `origin`
+	 *  owners, deduped. Empty when none resolved. An empty inbox has to name
+	 *  them: the merge queue sitting beside it is scoped to a single *repo*, so
 	 *  unnamed, the two read as contradictory answers to the same question.
 	 */
-	org: string,
+	orgs: string[],
 	/**
 	 *  `gh` had a token. Without it every search below returns nothing, which
 	 *  renders identically to a genuinely quiet morning — the one distinction
@@ -2626,8 +2913,21 @@ export type ReviewPr = {
 	number: number,
 	title: string,
 	url: string,
-	/**  "owner/name" the PR lives in (the grouping axis for "My PRs"). */
+	/**
+	 *  "owner/name" the PR lives in — the slug half of the `(repo, number)`
+	 *  identity every PR command takes.
+	 */
 	repo: string,
+	/**
+	 *  The registered project [`Self::repo`] resolves to, by registry name.
+	 * 
+	 *  `None` when no registered checkout has this repo as its `origin` — an
+	 *  org-scoped inbox is full of repos the user never cloned — and always `None`
+	 *  on the by-number path that serves a worktree's own PR, whose caller already
+	 *  knows which project it asked about. Filled by the inbox alone, because the
+	 *  registry is the only thing that can answer it.
+	 */
+	project: string | null,
 	/**  The PR's head branch name (shown in the header, click-to-copy). */
 	headRef: string,
 	/**  Stable GitHub node id for the head ref. `None` after the branch is deleted. */
@@ -2688,6 +2988,26 @@ export type ReviewPr = {
 	headCommittedAt: string,
 	/**  The viewer's own latest review, when they've submitted one. */
 	viewerReview: ViewerReview | null,
+};
+
+/**
+ *  One registered project's place in the aggregated inbox: the registry name the
+ *  rest of the app addresses it by, and the GitHub repo its `origin` resolves to.
+ * 
+ *  This is the whole attribution table. A [`ReviewPr`] carries GitHub's
+ *  `nameWithOwner`, so matching it against `slug` is what says which project a PR
+ *  belongs to — and it is shipped rather than re-derived on the frontend because
+ *  resolving it costs a `git remote` per checkout.
+ */
+export type ReviewProject = {
+	/**  The repo's registry name — what every other command means by `repo`. */
+	repo: string,
+	/**
+	 *  "owner/name" from the checkout's `origin`. `None` when there is no
+	 *  resolvable GitHub remote, which is a different fact from "no PRs": that
+	 *  project can never own a row here, however long you wait.
+	 */
+	slug: string | null,
 };
 
 /**  The draft a batch publish stopped on, and why. */
@@ -3110,6 +3430,10 @@ export type Task = {
 	priority: Priority,
 	/**  Linear's issue estimate. `None` means the issue is not estimated. */
 	estimate: number | null,
+	/**  The cycle the issue is scheduled into, when it is in one. */
+	cycle: CycleRef | null,
+	/**  Linear's due date (`YYYY-MM-DD`), when set. */
+	dueDate: string | null,
 	project: string,
 	/**
 	 *  The project's color (hex) as configured in Linear, when it has one. Falls
@@ -3165,6 +3489,12 @@ export type TaskStatus = "InReview" | "InProgress" | "Todo" | "Backlog" |
 
 /**  Review requests waiting on a specific team the viewer belongs to. */
 export type TeamReviews = {
+	/**
+	 *  The org the team lives in. Team slugs are only unique *within* an org, and
+	 *  the inbox now spans several — without this, `acme/core` and `other/core`
+	 *  would merge into one section naming the wrong people.
+	 */
+	org: string,
 	slug: string,
 	name: string,
 	prs: ReviewPr[],
@@ -3379,6 +3709,18 @@ export type TriageDetail = {
 	createdAtMs: number | null,
 	labels: string[],
 	project: string | null,
+	/**  The issue's milestone inside its project, when assigned. */
+	projectMilestone: ProjectMilestoneRef | null,
+	/**  The assignee's display name, when the issue is assigned. */
+	assignee: string | null,
+	/**  The assignee's avatar URL, when present. */
+	assigneeAvatarUrl: string | null,
+	/**  Linear's issue estimate (points). `None` means the issue is not estimated. */
+	estimate: number | null,
+	/**  The cycle the issue is scheduled into, when it is in one. */
+	cycle: CycleRef | null,
+	/**  Linear's due date (`YYYY-MM-DD`), when set. */
+	dueDate: string | null,
 	/**  Absolute epoch ms the issue's SLA breaches, if it has one. */
 	slaBreachMs: number | null,
 	/**  Epoch ms the issue is snoozed until, if snoozed. */
@@ -3409,13 +3751,20 @@ export type TriageSession = {
 	agentKind: AgentKind,
 };
 
-/**  A single on-call slot in a triage rotation. */
+/**
+ *  A single on-call slot in a triage rotation. The bounds are raw instants,
+ *  formatted live by the frontend: Linear hands a rotation over at a time of
+ *  day (a 4 PM Wednesday, say), not at midnight, so the shift's last day is the
+ *  day its end falls on — and which day that is depends on the viewer's zone.
+ */
 export type TriageShift = {
 	name: string,
 	/**  Avatar of the person on this shift, when Linear exposes one. */
 	avatarUrl: string | null,
-	/**  Human time range, e.g. "Mon–Wed". */
-	range: string,
+	/**  Epoch ms the shift begins, when the schedule says. */
+	startsAtMs: number | null,
+	/**  Epoch ms the shift hands over, when the schedule says. */
+	endsAtMs: number | null,
 	isCurrent: boolean,
 	isMe: boolean,
 };
@@ -3430,36 +3779,6 @@ export type TriageTicket = {
 	id: string,
 	title: string,
 	priority: Priority,
-	/**
-	 *  Linear's issue estimate. `None` means the workspace did not estimate it;
-	 *  the UI must not turn that absence into a fake difficulty.
-	 */
-	estimate: number | null,
-	project: string | null,
-	projectColor: string | null,
-	projectIcon: string | null,
-	/**  Linear project's target date (`YYYY-MM-DD`), when the project has one. */
-	projectTargetDate: string | null,
-	/**
-	 *  The issue's own Linear due date (`YYYY-MM-DD`). This is distinct from the
-	 *  containing project's target date and drives the queue's Due date order.
-	 */
-	dueDate: string | null,
-	/**
-	 *  Linear's canonical manual rank. `None` means the API did not supply one;
-	 *  Santree must not invent a local rank that disagrees with Linear.
-	 */
-	sortOrder: number | null,
-	/**
-	 *  Epoch ms the issue was created. Raw, not a pre-formatted "5m ago" label —
-	 *  with triage's multi-minute query staleTime, a label baked in at fetch
-	 *  time would freeze between refetches. The frontend formats (and ticks)
-	 *  it live; see `src/lib/relativeTime.ts`. `f64` (not `i64`) because Specta
-	 *  forbids exporting 64-bit ints to TypeScript; epoch-ms values are exact
-	 *  in an `f64` for millennia to come.
-	 */
-	createdAtMs: number | null,
-	meta: string,
 	/**
 	 *  The team key (e.g. "MSG"), used to group the queue when the viewer is on
 	 *  more than one team.
@@ -3476,8 +3795,9 @@ export type TriageTicket = {
 	 */
 	snoozedUntilMs: number | null,
 	/**
-	 *  Whether the issue is assigned to the viewer. The queue defaults to the
-	 *  viewer's own issues; others' are shown only when "be a good citizen" is on.
+	 *  Whether the issue is assigned to the viewer. The sidebar's Triage section
+	 *  defaults to the viewer's own issues; others' are shown when its Mine/All
+	 *  switch is on All.
 	 */
 	mine: boolean,
 };

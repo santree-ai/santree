@@ -153,11 +153,14 @@ describe("PrThreadCard", () => {
 describe("draftCount", () => {
   const detail = (threads: PrThread[]): PrDetail => ({
     body: "",
+    attachments: [],
     labels: [],
     comments: [],
     threads,
     files: [],
     filesTruncated: false,
+    commits: [],
+    commitsTruncated: false,
     checks: [],
     baseSha: "",
     headSha: "",

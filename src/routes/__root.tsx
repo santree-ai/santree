@@ -7,6 +7,7 @@ import { TerminalLayer } from "../features/terminal/TerminalLayer";
 import { AgentRunHost } from "../features/trees/AgentRunHost";
 import { useRepos, useUpdateWatcher } from "../lib/queries";
 import { useKeyboardShortcuts } from "../lib/useKeyboardShortcuts";
+import { useNativeContextMenu } from "../lib/useNativeContextMenu";
 import { AgentRunsProvider } from "../state/AgentRuns";
 import { LegacyMigrationProvider } from "../state/LegacyMigration";
 
@@ -31,6 +32,7 @@ export const Route = createRootRoute({
  */
 function RootLayout() {
   useKeyboardShortcuts();
+  useNativeContextMenu();
   useUpdateWatcher();
   const { data: repos } = useRepos();
   // Settings is a page, not a view: it takes the whole window and brings its

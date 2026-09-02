@@ -9,7 +9,7 @@
  *  flow, not merely transparent. A control that is invisible but still holds its
  *  column charges every row for something one row at a time can use, and in a
  *  240px panel that column is the file name's. */
-import { memo, type ReactNode, useCallback, useMemo, useState } from "react";
+import { memo, type ReactNode, useCallback, useMemo, useRef, useState } from "react";
 
 import type { ChangedFile } from "../../bindings";
 import {
@@ -23,6 +23,7 @@ import {
   UndoIcon,
 } from "../../components/icons";
 import { ConfirmDialog, ListSkeleton } from "../../components/primitives";
+import { BULK_TOGGLE_HINT, isBulkToggle, toggleDisclosure } from "../../lib/disclosure";
 import {
   TREES_CHANGES_VIEW_KEY,
   useSetSetting,
@@ -34,6 +35,7 @@ import {
   buildChangeTree,
   CHANGE_ROW_WINDOW,
   type ChangeTreeNode,
+  changeSubtreeDirs,
   dirFlagsOf,
   filesUnder,
   STATUS_META,
@@ -41,7 +43,7 @@ import {
 } from "./changeTree";
 import { fileIconUrl, folderIconUrl } from "./fileIcons";
 import { IndentGuides, ROW_MIN_H, TREE_GROUP } from "./IndentGuides";
-import { useTrees } from "./model";
+import type { FileScope } from "./model";
 
 /** One shared empty list rather than a fresh `[]` per render: it is the identity
  *  the memos below key on, and a new array every time re-runs all of them. */
@@ -51,14 +53,29 @@ const NO_FILES: ChangedFile[] = [];
  *  `[]`, which means it loaded and there's nothing to commit. `committed` is the
  *  branch's merge-base diff, loaded separately (undefined until it lands). */
 export function ChangesList({
+  repo,
+  worktreeId,
   files,
   committed,
+  selectedPath,
+  selectedScope,
+  onOpen,
 }: {
+  repo: string;
+  worktreeId: string;
   files: ChangedFile[] | undefined;
   committed?: ChangedFile[] | undefined;
+  /** The file the host has on screen, and in which of the two diffs — only the
+   *  row that is actually being shown may read as selected. */
+  selectedPath: string | null;
+  selectedScope: FileScope;
+  /** Open a file's diff. Optional for the same reason as {@link AllFilesList}'s:
+   *  a host with nowhere to render one leaves it out and the name stops being a
+   *  button. Staging and discard are unaffected — those act on the checkout, not
+   *  on the host. */
+  onOpen?: (path: string, scope: FileScope) => void;
 }) {
-  const { repo, activeId, selectedFile, selectedFileScope, selectFile } = useTrees();
-  const { mutate: act, mutateAsync: actAsync } = useStageAction(repo, activeId);
+  const { mutate: act, mutateAsync: actAsync } = useStageAction(repo, worktreeId);
   const loading = files === undefined;
   const list = files ?? NO_FILES;
   // One pass for the split and the counter: during a merge conflict this list is
@@ -111,10 +128,16 @@ export function ChangesList({
     (path: string, staged: boolean) => act({ action: staged ? "stage" : "unstage", path }),
     [act],
   );
-  const openWorking = useCallback((path: string) => selectFile(path, "working"), [selectFile]);
-  const openBranch = useCallback((path: string) => selectFile(path, "branch"), [selectFile]);
-  const workingSelected = selectedFileScope === "working" ? selectedFile : null;
-  const branchSelected = selectedFileScope === "branch" ? selectedFile : null;
+  const openWorking = useMemo(
+    () => (onOpen ? (path: string) => onOpen(path, "working") : undefined),
+    [onOpen],
+  );
+  const openBranch = useMemo(
+    () => (onOpen ? (path: string) => onOpen(path, "branch") : undefined),
+    [onOpen],
+  );
+  const workingSelected = selectedScope === "working" ? selectedPath : null;
+  const branchSelected = selectedScope === "branch" ? selectedPath : null;
 
   const nothing =
     !loading && list.length === 0 && committed !== undefined && committed.length === 0;
@@ -296,7 +319,9 @@ function FileRows({
   readOnly?: boolean;
   selectedFile: string | null;
   onToggle?: (f: ChangedFile) => void;
-  onOpen: (path: string) => void;
+  /** Absent when the host has nowhere to show a diff — the row's name is then
+   *  text rather than a button. */
+  onOpen?: (path: string) => void;
   onDiscard?: (f: ChangedFile) => void;
   onDiscardDir?: (path: string) => void;
   onStageDir?: (path: string, staged: boolean) => void;
@@ -411,21 +436,24 @@ function ChangesTree({
   limit: number;
   onShowMore: () => void;
   onToggle?: (f: ChangedFile) => void;
-  onOpen: (path: string) => void;
+  onOpen?: (path: string) => void;
   onDiscard?: (f: ChangedFile) => void;
   onDiscardDir?: (path: string) => void;
   onStageDir?: (path: string, staged: boolean) => void;
 }) {
   const tree = useMemo(() => buildChangeTree(files), [files]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Read at call time so `toggleDir` keeps one identity — the folder rows are
+  // memoized on it.
+  const treeRef = useRef(tree);
+  treeRef.current = tree;
   const toggleDir = useCallback(
-    (path: string) =>
-      setCollapsed((prev) => {
-        const next = new Set(prev);
-        if (next.has(path)) next.delete(path);
-        else next.add(path);
-        return next;
-      }),
+    (path: string, bulk: boolean) =>
+      // Scoped to this folder's own subtree, the same as the file browser: a
+      // ⌘-click says "everything below *this*", not "every folder there is".
+      setCollapsed((prev) =>
+        toggleDisclosure(prev, path, bulk ? changeSubtreeDirs(treeRef.current, path) : [], bulk),
+      ),
     [],
   );
 
@@ -527,7 +555,7 @@ const ChangeFolderRow = memo(function ChangeFolderRow({
   untracked?: boolean;
   /** Every file under it is already staged, so the action is to take it back. */
   allStaged?: boolean;
-  onToggle: (path: string) => void;
+  onToggle: (path: string, bulk: boolean) => void;
   /** Stage (or unstage) everything under it. Absent for a read-only section. */
   onStage?: (path: string, staged: boolean) => void;
   /** Absent for a read-only section (nothing to discard). */
@@ -540,7 +568,8 @@ const ChangeFolderRow = memo(function ChangeFolderRow({
       <IndentGuides depth={depth} />
       <button
         type="button"
-        onClick={() => onToggle(path)}
+        onClick={(e) => onToggle(path, isBulkToggle(e))}
+        title={`${path}\n${BULK_TOGGLE_HINT}`}
         className="flex min-w-0 flex-1 cursor-pointer items-center text-left"
       >
         {/* The real chevron, not a "▾" character: the guide lines are drawn down
@@ -593,6 +622,21 @@ const ChangeFolderRow = memo(function ChangeFolderRow({
   );
 });
 
+/** A row's name half: a button where the host can show the file's diff, plain
+ *  text where it can't (the Reviews rail — see {@link ChangesList.onOpen}). An
+ *  inert row is a div rather than a disabled button because nothing here becomes
+ *  clickable later; a pressable-looking name would be promising something. */
+function NameCell({ onOpen, children }: { onOpen?: () => void; children: ReactNode }) {
+  const className = "ml-0.5 flex min-w-0 flex-1 items-center gap-1.5 text-left";
+  return onOpen ? (
+    <button type="button" onClick={onOpen} className={`${className} cursor-pointer`}>
+      {children}
+    </button>
+  ) : (
+    <div className={className}>{children}</div>
+  );
+}
+
 /** One file row in the Changes browser (flat list or tree). Memoized so staging/
  *  selecting one file doesn't re-render every other row (the list re-renders on each
  *  optimistic patch). In tree mode it's indented and drops the dir suffix.
@@ -621,7 +665,7 @@ const ChangeRow = memo(function ChangeRow({
   /** Show the trailing directory path (flat list only — the tree implies it). */
   showDir?: boolean;
   onToggle?: (f: ChangedFile) => void;
-  onOpen: (path: string) => void;
+  onOpen?: (path: string) => void;
   onDiscard?: (f: ChangedFile) => void;
 }) {
   const meta = STATUS_META[f.status];
@@ -646,11 +690,7 @@ const ChangeRow = memo(function ChangeRow({
       >
         {staged ? "✓" : ""}
       </span>
-      <button
-        type="button"
-        onClick={() => onOpen(f.path)}
-        className="ml-0.5 flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left"
-      >
+      <NameCell onOpen={onOpen && (() => onOpen(f.path))}>
         {icon ? <img src={icon} alt="" className="h-4 w-4 flex-none" draggable={false} /> : null}
         {/* The name stays neutral. Status is already said twice at the trailing
             edge — in the counts and in the letter — and a list where every row's
@@ -672,7 +712,7 @@ const ChangeRow = memo(function ChangeRow({
         >
           {meta.letter}
         </span>
-      </button>
+      </NameCell>
       {!readOnly && (onDiscard || onToggle) && (
         <RowActions>
           {onDiscard && (

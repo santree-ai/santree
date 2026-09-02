@@ -36,6 +36,7 @@ import {
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed } from "../terminal/agentSeed";
 import { useHookInjection } from "../terminal/useHookInjection";
+import { REVIEW_CHECKOUT_NOTE } from "./checkoutSource";
 import { useReviewsModel } from "./model";
 import { ReviewFooter, reviewTargetFor } from "./ReviewSessionShared";
 import { ReviewTerminal } from "./ReviewTerminal";
@@ -237,6 +238,9 @@ function AiReviewFooter({
       pr={pr}
       agentKind={agentKind}
       hasWorkspace={hasWorkspace}
+      // Only once there is one: on a PR santree has no clone of, the session is
+      // diff-only and nothing was written to disk to warn about.
+      note={hasWorkspace ? REVIEW_CHECKOUT_NOTE : undefined}
       message={
         <>
           Writes drafts and a brief here. Nothing reaches GitHub until{" "}

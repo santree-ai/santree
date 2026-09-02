@@ -126,6 +126,8 @@ export function task(id: string, project: string, over: Partial<Task> = {}): Tas
     title: `Task ${id}`,
     priority: "None",
     estimate: null,
+    cycle: null,
+    dueDate: null,
     project,
     projectColor: null,
     projectIcon: null,
@@ -144,32 +146,15 @@ export function task(id: string, project: string, over: Partial<Task> = {}): Tas
   };
 }
 
-/**
- * A triage ticket.
- *
- * `createdAtMs` is a required parameter, not a default. Every triage order
- * except `created-newest` falls through to "oldest first" as its last tiebreak,
- * so a fixture that stamped every ticket with the same creation time collapsed
- * four of the six orderings onto the id tiebreak and made them untestable.
- */
-export function triageTicket(
-  id: string,
-  createdAtMs: number,
-  over: Partial<TriageTicket> = {},
-): TriageTicket {
+/** A triage ticket: what the queue rows and the workspace actually read. The
+ *  ticket carries no ordering of its own — the backend hands the queue over
+ *  active-first, soonest SLA — so a fixture needs no timestamps to be ordered
+ *  by. */
+export function triageTicket(id: string, over: Partial<TriageTicket> = {}): TriageTicket {
   return {
     id,
     title: id,
     priority: "None",
-    estimate: null,
-    project: null,
-    projectColor: null,
-    projectIcon: null,
-    projectTargetDate: null,
-    dueDate: null,
-    sortOrder: null,
-    createdAtMs,
-    meta: "unassigned",
     team: "SAN",
     slaBreachMs: null,
     snoozedUntilMs: null,

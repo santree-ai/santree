@@ -35,7 +35,6 @@ vi.mock("./sections/Agents", () => ({
   ClaudeAgentSection: () => <div>Claude Code pane</div>,
   CodexAgentSection: () => <div>Codex pane</div>,
 }));
-vi.mock("./sections/Appearance", () => ({ AppearanceSection: () => <div>Appearance pane</div> }));
 vi.mock("./sections/EnglishTutor", () => ({
   EnglishTutorSection: () => <div>English tutor pane</div>,
 }));

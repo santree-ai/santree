@@ -37,6 +37,9 @@ import type {
   PrDetail,
   PrLabel,
   PromptInfo,
+  PromptWorkItemSample,
+  Repo,
+  ReviewCheckout,
   ReviewDraft,
   ReviewEvent,
   ReviewInbox,
@@ -46,10 +49,11 @@ import type {
   ReviewWorkItem,
   ReviewWorkItemSource,
   ScriptInfo,
-  SessionState,
   Settings,
+  TicketRef,
   TriageComment,
   TriageDetail,
+  TriageSession,
   TriageTicket,
   UpdateProgress,
   ViewedMarks,
@@ -59,10 +63,10 @@ import type {
   WorktreeTab,
 } from "../bindings";
 import { commands, events } from "../bindings";
-// `useViewCounts` needs live PTY presence for its "N running" badge — the one
-// place this data layer reaches into a feature, since TerminalsContext is
-// mounted at the app root and is the single source of live-session state.
-import { useTerminals } from "../features/terminal/TerminalsContext";
+// A cycle (AppContext mounts the watchers defined here), and a safe one: the
+// only binding read is `useApp`, inside `useTriageOrgRepo`, never at module
+// evaluation — `openPr.ts` and `useKeyboardShortcuts.ts` lean the same way.
+import { useApp } from "../state/AppContext";
 import { type ToastOptions, toast } from "../state/toast";
 import { splitRepoSlug } from "./repo";
 
@@ -325,13 +329,18 @@ export const queryKeys = {
   prReviewers: (repo: string, id: string) => ["pr-reviewers", repo, id] as const,
   worktreeHasTranscripts: (repo: string, id: string) =>
     ["worktree-has-transcripts", repo, id] as const,
-  reviews: (repo: string) => ["reviews", repo] as const,
+  reviews: () => ["reviews"] as const,
   githubViewer: () => ["github-viewer"] as const,
   prTickets: (repo: string, ids: string[]) => ["pr-tickets", repo, ids] as const,
   /** Keyed on the head SHA: a PR that gains commits needs a fresh checkout, not
    *  the one an agent already read. */
   reviewWorkspace: (repo: string, prRepo: string, number: number, headSha: string) =>
     ["review-workspace", repo, prRepo, number, headSha] as const,
+  /** Not keyed on the head SHA, unlike the checkout's *creation*: this read asks
+   *  which commit the checkout is actually at, so keying it on the expected
+   *  answer would hide every case where the two disagree. */
+  reviewCheckout: (repo: string, prRepo: string, number: number) =>
+    ["review-checkout", repo, prRepo, number] as const,
   prReviewBrief: (prRepo: string, number: number) => ["pr-review-brief", prRepo, number] as const,
   prReviewBriefPrefix: ["pr-review-brief"] as const,
   aiReviewLaunch: (repo: string, prRepo: string, number: number) =>
@@ -400,7 +409,8 @@ export const queryKeys = {
     repo: string,
     issueId: string,
     issueHash: string,
-  ) => ["prompt-preview", name, draftHash, repo, issueId, issueHash] as const,
+    queueHash: string,
+  ) => ["prompt-preview", name, draftHash, repo, issueId, issueHash, queueHash] as const,
   /** Prefix for every repo's Linear connection status — invalidate this (not
    *  `linearStatus(repo)`) when a change (e.g. connect/disconnect) should
    *  refetch all repos' status at once. */
@@ -502,14 +512,45 @@ export const WORK_QUEUE_KEY = "work_queue";
 export const WORK_ASK_BASE_KEY = "work_ask_base";
 
 /**
- * Triage queue preference keys (app-scoped, string "true"/"false").
- * - good_citizen: show the whole team inbox (issues not assigned to you) too, so
- *   you can pitch in on anyone's tickets — on triage duty or not. Off = just
- *   yours. Surfaced as the Mine/All toggle in the Triage header.
- * - show_snoozed: include snoozed issues instead of hiding them.
+ * The triage queue's one preference (app-scoped, string "true"/"false"): show the
+ * whole team inbox (issues not assigned to you) too, so you can pitch in on
+ * anyone's tickets — on triage duty or not. Off = just yours. Surfaced as the
+ * Mine/All toggle. Snoozed issues have no switch: they are always fetched and
+ * come back as their own list (see {@link TriageQueue.snoozed}).
  */
 export const TRIAGE_GOOD_CITIZEN_KEY = "triage_good_citizen";
-export const TRIAGE_SNOOZED_KEY = "triage_show_snoozed";
+
+/**
+ * The project triage runs on unless a ticket picks its own (app-scoped; value =
+ * a registered repo name, absent = none). Two things hang off it, and they are
+ * the same setting on purpose:
+ *
+ *  - **Where investigations and terminals run.** An investigation is a real CLI
+ *    session on a checkout, so it needs one — and it runs on the project's main
+ *    checkout, never on a worktree of its own, because a ticket in triage is
+ *    being *read*, not worked.
+ *  - **Which Linear org the queue is read from.** The queue is org-scoped, and
+ *    `activeRepo` is not a stable answer to "which org": it flips whenever the
+ *    user clicks another project's worktree in the sidebar, and a section that
+ *    is always on screen must not flicker to another org's empty queue on every
+ *    such click. See {@link useTriageOrgRepo}.
+ */
+export const TRIAGE_DEFAULT_REPO_KEY = "triage_default_repo";
+
+/** The project a ticket is *started* in — and queued for — when more than one
+ *  registered project shares its Linear org and so could run it (app-scoped;
+ *  value = a registered repo name). Deliberately not
+ *  {@link TRIAGE_DEFAULT_REPO_KEY}: triage reads a ticket on a project's main
+ *  checkout, work creates a worktree, and the two need not be the same project.
+ *  Unset, the first such start asks and offers to remember the answer here; a
+ *  ticket only one project carries never asks. See `useWorkRepoGate`. */
+export const WORK_DEFAULT_REPO_KEY = "work_default_repo";
+
+/** A ticket's own project, when it has picked one over the default (app-scoped;
+ *  value = a registered repo name, absent = use the default). One row per ticket
+ *  is cheap — a handful of bytes — and a ticket that leaves triage leaves an
+ *  inert row nothing reads, which costs nothing either. */
+export const triageRepoKey = (ticketId: string) => `triage_repo:${ticketId}`;
 
 /**
  * How people's names are shown across the app (issues, triage, comments, the
@@ -540,6 +581,42 @@ export type LinearGroupBy = "none" | "project" | "milestone" | "project_mileston
  *  before this setting existed. Exported for testing. */
 export const parseLinearGroupBy = (raw: string | null | undefined): LinearGroupBy =>
   raw === "none" || raw === "project" || raw === "project_milestone" ? raw : "milestone";
+
+/**
+ * How the sidebar's per-project Reviews section nests the pull requests inside
+ * each of its blocks — not at all, by Linear project, by milestone, or
+ * project → milestone.
+ *
+ * The same four shapes as {@link LINEAR_GROUP_BY_KEY} and deliberately its own
+ * key: the two rails answer different questions (what am I building, what is
+ * waiting on me) and a review inbox is usually short enough that the nesting
+ * costs more than it explains. Which is also why this one defaults to **none**
+ * while Linear's defaults to milestone — turning it on is a choice, and until
+ * you make it the section keeps the flat list it shipped with.
+ */
+export const GITHUB_GROUP_BY_KEY = "github_group_by";
+
+/** The stored `github_group_by` value, or "none" for anything unset or unknown.
+ *  Exported for testing. */
+export const parseGithubGroupBy = (raw: string | null | undefined): LinearGroupBy =>
+  raw === "project" || raw === "milestone" || raw === "project_milestone" ? raw : "none";
+
+/**
+ * Whether a project with nothing waiting still draws its Reviews section.
+ *
+ * Off by default: the resting state of a quiet project is silence. On, every
+ * project with a GitHub remote keeps a folded section and a nought, which is
+ * what makes the feature's *absence* legible — one repo showing Reviews while
+ * the two beside it show nothing otherwise reads as santree only knowing about
+ * the first.
+ */
+export const REVIEWS_SHOW_EMPTY_KEY = "reviews_show_empty";
+
+/** A stored flag that defaults to **off**: anything but a literal `"true"` is
+ *  false, so an unset key and a bad value agree. (The opposite convention to
+ *  {@link CONFIRM_ON_QUIT_KEY}, which defaults on and reads `!== "false"` — the
+ *  default is the thing being chosen, and it differs per setting.) */
+export const isOptedIn = (raw: string | null | undefined): boolean => raw === "true";
 
 /** What santree asks Linear for when connecting: `"read"` or `"read_write"`.
  *  App-scoped, defaults to read-only. Read by Rust (`linear.rs`), so the two
@@ -692,9 +769,12 @@ export const useSaveSettings = () =>
     invalidate: () => [queryKeys.settings],
   });
 
-/** A single setting value for an exact scope (`"app"` or `"repo:<name>"`). */
-export const useSetting = (scope: string, key: string) =>
+/** A single setting value for an exact scope (`"app"` or `"repo:<name>"`).
+ *  `enabled: false` leaves the read off (for a key derived from something the
+ *  caller may not have yet, like a ticket id); `data` is then `undefined`. */
+export const useSetting = (scope: string, key: string, enabled = true) =>
   useUnwrappedQuery(queryKeys.setting(scope, key), () => commands.getSetting(scope, key), {
+    enabled,
     staleTime: SETTING_STALE_TIME,
   });
 
@@ -1334,6 +1414,22 @@ export const useLinearReadOnly = (repo: string) => {
   return data?.authenticated === true && data.canWrite === false;
 };
 
+/**
+ * A ticket's page in Linear, from the org the repo is bound to. The org's slug
+ * is its url key, so the address is `linear.app/<slug>/issue/<id>` — Linear
+ * routes that to the issue without the title slug its own links carry. A builder
+ * rather than one url, because a list hands the same repo's builder to every
+ * row; it answers `null` until the status read lands, or when no org is bound.
+ */
+export const useLinearIssueUrl = (repo: string): ((id: string) => string | null) => {
+  const { data } = useLinearStatus(repo);
+  const slug = data?.orgSlug ?? null;
+  return useCallback(
+    (id: string) => (slug ? `https://linear.app/${slug}/issue/${id}` : null),
+    [slug],
+  );
+};
+
 /** Run the Linear OAuth connect flow, refreshing status + orgs + tickets. */
 export const useLinearConnect = () => {
   const qc = useQueryClient();
@@ -1476,31 +1572,6 @@ export const useSessionStates = () =>
     refetchInterval: (query) =>
       query.state.data?.some((s) => UNSETTLED_STATES.has(s.state)) ? 10_000 : false,
   });
-
-/**
- * The live session for each worktree path (`cwd` — the directory Claude ran in),
- * newest wins. A worktree can host several Claude tabs, so the correlation has to
- * pick one: the most recently updated row, chosen explicitly rather than by
- * trusting the backend's `ORDER BY updated_at_ms DESC` (a first-seen-wins map
- * silently shows a stale session the day that ordering changes). Ties keep the
- * first row, preserving the backend's order. Exported for testing.
- */
-export function newestSessionByPath(states: SessionState[]): Map<string, SessionState> {
-  const map = new Map<string, SessionState>();
-  for (const s of states) {
-    const seen = map.get(s.cwd);
-    if (!seen || (s.updatedAtMs ?? 0) > (seen.updatedAtMs ?? 0)) map.set(s.cwd, s);
-  }
-  return map;
-}
-
-/** {@link newestSessionByPath} over the live session states — the "what is this
- *  worktree's agent doing" signal shared by the Trees sidebar and the all-agents
- *  grid (both key it by `worktree.path`). */
-export const useSessionByPath = (): Map<string, SessionState> => {
-  const { data } = useSessionStates();
-  return useMemo(() => newestSessionByPath(data ?? []), [data]);
-};
 
 /**
  * Which coding agent the process table says is in each pane's foreground —
@@ -2649,15 +2720,14 @@ export const usePrSummary = (prRepo: string | null, number: number) =>
     { enabled: !!prRepo && number > 0, staleTime: 60_000 },
   );
 
-/** The Reviews dashboard inbox (my PRs / review requests / per-team), scoped to
- *  the org of the active repo — which it names back, along with whether `gh` was
- *  connected, so an empty inbox can say what it searched. Cached a minute — PR
- *  state changes server-side and the user can refetch by revisiting. */
-export const useReviews = (repo: string) =>
-  useUnwrappedQuery(queryKeys.reviews(repo), () => commands.reviews(repo), {
-    enabled: !!repo,
-    staleTime: 60_000,
-  });
+/** The Reviews dashboard inbox (my PRs / review requests / per-team) across every
+ *  registered project — which it names back, with the orgs it searched and whether
+ *  `gh` was connected, so an empty inbox can say what it covered. Deliberately not
+ *  keyed by repo: the inbox spans the registry, so scoping it to the selected
+ *  project answered for one org and stayed silent about the rest. Cached a minute —
+ *  PR state changes server-side and the user can refetch by revisiting. */
+export const useReviews = () =>
+  useUnwrappedQuery(queryKeys.reviews(), () => commands.reviews(), { staleTime: 60_000 });
 
 /** Linear project/title for each of `ids` — what lets the Reviews sidebar group
  *  PRs by project. Empty when no Linear org is connected (the sidebar then just
@@ -2668,6 +2738,44 @@ export const usePrTickets = (repo: string, ids: string[], enabled = true) =>
     enabled: enabled && !!repo && ids.length > 0,
     staleTime: 10 * 60_000,
   });
+
+/**
+ * {@link usePrTickets} for several projects at once, keyed by project.
+ *
+ * One query per project rather than one big one, because the Linear org is a
+ * *per-repo* binding (Settings → Repo → Linear): two registered projects can
+ * resolve `AK-12` in two different workspaces, and asking one of them for both
+ * would answer confidently with the wrong ticket. The keys are the single-repo
+ * hook's own, so the sidebar and the Reviews view share one cache.
+ *
+ * `enabled` is the grouping switch: with the section flat there is nothing to
+ * resolve, and this should cost no Linear call at all.
+ */
+export const usePrTicketsByRepo = (
+  idsByRepo: Map<string, string[]>,
+  enabled = true,
+): Map<string, TicketRef[]> => {
+  const entries = [...idsByRepo];
+  const results = useQueries({
+    queries: entries.map(([repo, ids]) => ({
+      queryKey: queryKeys.prTickets(repo, ids),
+      queryFn: () => unwrap(commands.prTickets(repo, ids)),
+      enabled: enabled && ids.length > 0,
+      staleTime: 10 * 60_000,
+    })),
+  });
+  const signature = results.map((r) => r.dataUpdatedAt).join("|");
+  const repos = entries.map(([repo]) => repo).join("|");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the stamps and the repo list, not on `useQueries`' fresh-every-render identity (see `useResultsByRepo`).
+  return useMemo(() => {
+    const byRepo = new Map<string, TicketRef[]>();
+    entries.forEach(([repo], i) => {
+      const data = results[i]?.data;
+      if (data !== undefined) byRepo.set(repo, data);
+    });
+    return byRepo;
+  }, [repos, signature]);
+};
 
 /** The active repo's merge queue (its default branch's queue) — the ordered PRs
  *  waiting to merge, for the Reviews tab's merge-queue panel. Always resolves to
@@ -2802,13 +2910,13 @@ export const useSetPrThreadResolved = (prRepo: string, number: number) =>
 /** Submit the viewer's pending review — its draft comments become visible and the
  *  verdict (comment / approve / request changes) lands on the PR. Also refreshes
  *  the inbox: the sidebar buckets on whether you've reviewed a PR. */
-export const useSubmitPrReview = (repo: string, prRepo: string, number: number) =>
+export const useSubmitPrReview = (prRepo: string, number: number) =>
   useActionMutation<{ reviewId: string; event: ReviewEvent; body: string }, null>({
     mutationFn: (v) => unwrap(commands.submitPrReview(v.reviewId, v.event, v.body)),
     // The submit dialog shows GitHub's rejection inline and stays open to retry
     // ("Can not approve your own pull request"), so a toast would double it.
     silent: true,
-    invalidate: () => [prDetailKey(prRepo, number), queryKeys.reviews(repo)],
+    invalidate: () => [prDetailKey(prRepo, number), queryKeys.reviews()],
     success: (_d, v) =>
       v.event === "Approve"
         ? "Approved."
@@ -2952,8 +3060,8 @@ export const useSetSyncViewed = () =>
  * call is find-or-create: once a key has resolved, re-running it would only redo
  * a fetch that changed nothing.
  */
-export const useReviewWorkspace = (repo: string, target: ReviewTarget | null, enabled: boolean) =>
-  useUnwrappedQuery(
+export const useReviewWorkspace = (repo: string, target: ReviewTarget | null, enabled: boolean) => {
+  const query = useUnwrappedQuery(
     queryKeys.reviewWorkspace(
       repo,
       target?.prRepo ?? "",
@@ -2964,6 +3072,112 @@ export const useReviewWorkspace = (repo: string, target: ReviewTarget | null, en
     () => commands.reviewWorkspace(repo, target!),
     { enabled: enabled && !!repo && !!target?.headSha, staleTime: Number.POSITIVE_INFINITY },
   );
+  // Creating the checkout is what makes its worktree row exist, and the rail's
+  // panes are a sibling of whatever asked for it — so the row they read is
+  // announced here rather than left until something else happens to refetch.
+  const { data: path } = query;
+  const qc = useQueryClient();
+  const prRepo = target?.prRepo ?? "";
+  const number = target?.number ?? 0;
+  useEffect(() => {
+    if (path)
+      void qc.invalidateQueries({ queryKey: queryKeys.reviewCheckout(repo, prRepo, number) });
+  }, [path, qc, repo, prRepo, number]);
+  return query;
+};
+
+/** The AI review's checkout of a PR, when one exists — the fallback the rail's
+ *  branch panes read for a pull request with no worktree of its own. `null` until
+ *  a review has run for it. Never creates one; see `useReviewWorkspace`
+ *  for moving a stale one to the PR's current head. */
+export const useReviewCheckout = (repo: string, prRepo: string, number: number) =>
+  useUnwrappedQuery(
+    queryKeys.reviewCheckout(repo, prRepo, number),
+    () => commands.reviewCheckout(repo, prRepo, number),
+    { enabled: !!repo && !!prRepo && number > 0, staleTime: WORKTREE_STALE_TIME },
+  );
+
+/** Close one provider's AI review on a PR — the tab's ✕.
+ *
+ *  Forgets the stored conversation so the tab doesn't come back on the next
+ *  launch. The drafts it wrote and its transcript both outlive it, which is what
+ *  makes reopening from Session history the same review rather than a new one. */
+export const useCloseReviewSession = (repo: string) => {
+  return useActionMutation<{ prRepo: string; number: number; agent: AgentKind }, null>({
+    mutationFn: ({ prRepo, number, agent }) =>
+      unwrap(commands.closeReviewSession(repo, prRepo, number, agent)),
+    invalidate: ({ prRepo, number }) => [
+      queryKeys.sessionProviders(repo, `ai-review:${prRepo}#${number}`),
+    ],
+  });
+};
+
+/** Close one provider's investigation on a triage ticket — the tab's ✕.
+ *
+ *  Forgets the stored `triage:<ticketId>` conversation for that provider so the
+ *  tab doesn't come back on the next launch. The agent's own transcript is
+ *  untouched; only santree's record of where it left off goes. */
+export const useCloseInvestigationSession = (repo: string) =>
+  useOptimisticMutation<{ ticketId: string; agent: AgentKind }, null>({
+    mutationKey: ["close-investigation", repo],
+    mutationFn: ({ ticketId, agent }) =>
+      unwrap(commands.closeInvestigationSession(repo, ticketId, agent)),
+    // The tab is the stored row's presence, so the row leaves the cache on the
+    // click — otherwise a closed tab sits in the strip until the delete and the
+    // refetch both land, looking like the ✕ did nothing.
+    optimistic: (qc, { ticketId, agent }) => {
+      const startedKey = queryKeys.startedInvestigations(repo);
+      const providersKey = queryKeys.sessionProviders(repo, `triage:${ticketId}`);
+      const started = qc.getQueryData<TriageSession[]>(startedKey);
+      const providers = qc.getQueryData<AgentKind[]>(providersKey);
+      if (started) {
+        qc.setQueryData<TriageSession[]>(
+          startedKey,
+          started.filter((s) => !(s.refId === ticketId && s.agentKind === agent)),
+        );
+      }
+      if (providers) {
+        qc.setQueryData<AgentKind[]>(
+          providersKey,
+          providers.filter((kind) => kind !== agent),
+        );
+      }
+      return () => {
+        if (started) qc.setQueryData(startedKey, started);
+        if (providers) qc.setQueryData(providersKey, providers);
+      };
+    },
+    invalidate: ({ ticketId }) => [
+      queryKeys.startedInvestigations(repo),
+      queryKeys.sessionProviders(repo, `triage:${ticketId}`),
+    ],
+  });
+
+/** Keep a PR's checkout: it stops being labelled a review and appears in Trees
+ *  like any other worktree.
+ *
+ *  There is one checkout per pull request now, so "work on this PR" is a change
+ *  of label rather than a second directory — which is why this is a tiny mutation
+ *  and not another create. */
+export const usePromoteReviewWorktree = (repo: string) => {
+  const qc = useQueryClient();
+  return useActionMutation<{ prRepo: string; number: number }, null>({
+    mutationFn: ({ prRepo, number }) =>
+      unwrap(commands.promoteReviewWorktree(repo, prRepo, number)),
+    invalidate: ({ prRepo, number }) => {
+      const checkoutRepo = qc.getQueryData<ReviewCheckout | null>(
+        queryKeys.reviewCheckout(repo, prRepo, number),
+      )?.repo;
+      return [
+        queryKeys.reviewCheckout(repo, prRepo, number),
+        // It joins the worktree list it was being kept out of, so every read
+        // built on that list has to look again.
+        ...(checkoutRepo ? [queryKeys.worktrees(checkoutRepo), queryKeys.repos] : []),
+      ];
+    },
+    success: () => "Kept as a worktree — it's in Trees now.",
+  });
+};
 
 /** The cached AI review brief for a PR, or `null` when none exists yet. One row
  *  read — no model call — so the panel renders instantly and offers to generate. */
@@ -3345,28 +3559,42 @@ export const useTriageSetState = (repo: string) =>
     ],
   });
 
-/** Persist a drag reorder to Linear's shared manual rank. The cache receives the
- * new fractional rank immediately; the queue's Manual comparator supplies the
- * visual move while Linear reconciles in the background. */
-export const useTriageSetSortOrder = (repo: string) =>
+/**
+ * Snooze a triage ticket until `untilMs`, or wake it with `null` — the sidebar
+ * row's menu. Optimistically moves the row between the queue and its Snoozed
+ * lane (both are read off `snoozedUntilMs`) and stamps the open ticket's header.
+ */
+export const useTriageSnooze = (repo: string) =>
   useOptimisticMutation({
-    mutationKey: ["triage-set-sort-order", repo],
-    scope: { id: `triage-set-sort-order:${repo}` },
-    mutationFn: (args: { ticketId: string; sortOrder: number }) =>
-      unwrap(commands.triageSetSortOrder(repo, args.ticketId, args.sortOrder)),
+    mutationKey: ["triage-snooze", repo],
+    mutationFn: (args: { ticketId: string; untilMs: number | null }) =>
+      unwrap(commands.triageSnooze(repo, args.ticketId, args.untilMs)),
     optimistic: (qc, args) => {
-      const key = queryKeys.triageTickets(repo);
-      const previous = qc.getQueryData<TriageTicket[]>(key);
-      if (!previous) return;
-      qc.setQueryData<TriageTicket[]>(
-        key,
-        previous.map((ticket) =>
-          ticket.id === args.ticketId ? { ...ticket, sortOrder: args.sortOrder } : ticket,
-        ),
-      );
-      return () => qc.setQueryData(key, previous);
+      const queueKey = queryKeys.triageTickets(repo);
+      const detailKey = queryKeys.triageDetail(repo, args.ticketId);
+      const prevQueue = qc.getQueryData<TriageTicket[]>(queueKey);
+      const prevDetail = qc.getQueryData<TriageDetail | null>(detailKey);
+      if (prevQueue) {
+        qc.setQueryData<TriageTicket[]>(
+          queueKey,
+          prevQueue.map((t) =>
+            t.id === args.ticketId ? { ...t, snoozedUntilMs: args.untilMs } : t,
+          ),
+        );
+      }
+      if (prevDetail) {
+        qc.setQueryData<TriageDetail>(detailKey, { ...prevDetail, snoozedUntilMs: args.untilMs });
+      }
+      if (prevQueue === undefined && prevDetail === undefined) return;
+      return () => {
+        if (prevQueue !== undefined) qc.setQueryData(queueKey, prevQueue);
+        if (prevDetail !== undefined) qc.setQueryData(detailKey, prevDetail);
+      };
     },
-    invalidate: () => [queryKeys.triageTickets(repo)],
+    invalidate: (args) => [
+      queryKeys.triageTickets(repo),
+      queryKeys.triageDetail(repo, args.ticketId),
+    ],
   });
 
 /**
@@ -3443,55 +3671,154 @@ export const useStartedInvestigations = (repo: string) =>
   );
 
 export interface TriageQueue {
-  /** The issues actually shown, after the mine / good-citizen / snoozed filters. */
-  visible: TriageTicket[];
-  /** Others' active issues sitting in the team inbox (for the empty-state nudge). */
-  teamWaiting: number;
+  /** Not-snoozed tickets after the mine/all filter, in the backend's order
+   *  (soonest SLA first). */
+  active: TriageTicket[];
+  /** Snoozed tickets after the same filter, in the same order. */
+  snoozed: TriageTicket[];
+  /** The Mine/All switch: `true` is All (the whole team inbox), `false` is Mine. */
   goodCitizen: boolean;
-  showSnoozed: boolean;
-  /** The queue hasn't resolved yet — an empty `visible` means nothing at all. A
+  /** The queue hasn't resolved yet — an empty `active` means nothing at all. A
    *  view must render a skeleton (not "all caught up") while this holds. */
   loading: boolean;
 }
 
 /**
- * Pure mine/good-citizen/snoozed filter matrix for the triage queue. Extracted
- * out of `useTriageQueue` so it's testable without mounting the hook (no
- * QueryClient / settings reads needed) — see queries.test.ts.
+ * The mine/all filter and the snoozed split for the triage queue. Both lists keep
+ * the backend's order — it already sorted by SLA, and a second sort here is how
+ * two surfaces reading the same queue come to disagree on who is first.
+ * Extracted out of `useTriageQueue` so it's testable without mounting the hook
+ * (no QueryClient / settings reads needed) — see queries.test.ts.
  */
 export function filterTriageQueue(
   tickets: TriageTicket[],
-  opts: { goodCitizen: boolean; showSnoozed: boolean },
-): Pick<TriageQueue, "visible" | "teamWaiting"> {
-  const { goodCitizen, showSnoozed } = opts;
-  const mine = tickets.filter((t) => t.mine);
+  opts: { goodCitizen: boolean },
+): Pick<TriageQueue, "active" | "snoozed"> {
   // "Be a good citizen" widens to the whole team inbox (issues not assigned to
   // you included) so you can pitch in — unconditionally, on triage duty or not.
-  const base = goodCitizen ? tickets : mine;
+  const base = opts.goodCitizen ? tickets : tickets.filter((t) => t.mine);
   return {
-    visible: showSnoozed ? base : base.filter((t) => t.snoozedUntilMs == null),
-    teamWaiting: tickets.filter((t) => !t.mine && t.snoozedUntilMs == null).length,
+    active: base.filter((t) => t.snoozedUntilMs == null),
+    snoozed: base.filter((t) => t.snoozedUntilMs != null),
   };
 }
 
 /**
- * The resolved triage queue for a repo — the single source of truth for what's
- * shown and the tab count. Defaults to the viewer's own issues; "be a good
- * citizen" widens to the whole team inbox so you can help on anyone's tickets.
+ * The resolved triage queue for a repo — the single source of truth for what the
+ * sidebar's Triage section shows and counts. Defaults to the viewer's own issues;
+ * "be a good citizen" widens to the whole team inbox so you can help on anyone's
+ * tickets. Snoozed issues are never hidden, they come back as their own list:
+ * the section draws them under a collapsible "Snoozed" heading of their own.
  */
 export const useTriageQueue = (repo: string): TriageQueue => {
   const { data, isLoading } = useTriageTickets(repo);
-  const goodCitizen = useBoolSetting("app", TRIAGE_GOOD_CITIZEN_KEY).value;
-  const showSnoozed = useBoolSetting("app", TRIAGE_SNOOZED_KEY).value;
+  const { value: goodCitizen, isFetched: filterKnown } = useBoolSetting(
+    "app",
+    TRIAGE_GOOD_CITIZEN_KEY,
+  );
 
   return useMemo(() => {
-    const tickets = data ?? [];
-    const { visible, teamWaiting } = filterTriageQueue(tickets, { goodCitizen, showSnoozed });
+    const { active, snoozed } = filterTriageQueue(data ?? [], { goodCitizen });
     // A disconnected backend returns `Ok([])`, never an error or a pending
-    // read — so "still loading" is exactly "the first fetch hasn't landed".
-    return { visible, teamWaiting, goodCitizen, showSnoozed, loading: isLoading };
-  }, [data, goodCitizen, showSnoozed, isLoading]);
+    // read — so "still loading" is exactly "the first fetch hasn't landed". The
+    // filter is part of that: `goodCitizen` reads false until its row lands, so
+    // an "All" queue would otherwise show its Mine subset for a frame.
+    return { active, snoozed, goodCitizen, loading: isLoading || !filterKnown };
+  }, [data, goodCitizen, isLoading, filterKnown]);
 };
+
+/** The registered repo a stored name points at, or `null` when it names none —
+ *  a project removed from the registry must read as "nothing attached", not as
+ *  a name every launch would then fail on. */
+function registeredRepo(name: string | null | undefined, repos: Repo[] | undefined): string | null {
+  return name && repos?.some((r) => r.name === name) ? name : null;
+}
+
+/** The Work default project — {@link WORK_DEFAULT_REPO_KEY}, when it is set and
+ *  still registered — and its one writer. `loading` holds until both reads land. */
+export function useWorkDefaultRepo(): {
+  repo: string | null;
+  loading: boolean;
+  setRepo: (repo: string | null) => void;
+} {
+  const { data: repos, isFetched: reposKnown } = useRepos();
+  const { data: value, isFetched: valueKnown } = useSetting("app", WORK_DEFAULT_REPO_KEY);
+  const { mutate } = useSetSetting();
+  const setRepo = useCallback(
+    (next: string | null) => mutate({ scope: "app", key: WORK_DEFAULT_REPO_KEY, value: next }),
+    [mutate],
+  );
+  return { repo: registeredRepo(value, repos), loading: !reposKnown || !valueKnown, setRepo };
+}
+
+/**
+ * The project a triage ticket runs on: its own pick, else the triage-wide
+ * default, else nothing. Only registered repos count (see {@link registeredRepo}).
+ *
+ * `attached` says whether the ticket has a pick of its own — what the Project
+ * pane's "Use default" acts on — and `defaultRepo` is the default it would fall
+ * to, so that control can say whether clearing leaves anything attached.
+ * `setRepo(null)` clears the pick; `asDefault` writes the same name as the
+ * default too, so one dialog answer can settle both. Both go through
+ * {@link useSetSetting}, so they land in the cache before the round-trip and
+ * roll back if it fails.
+ *
+ * `loading` holds until the registry and both rows have been read. Until then
+ * `repo` is not an answer: the per-ticket row lands a frame after the default
+ * does, and a launch in that frame would run on the default when the ticket
+ * had picked otherwise.
+ */
+export function useTriageRepo(ticketId: string | null): {
+  repo: string | null;
+  attached: boolean;
+  defaultRepo: string | null;
+  loading: boolean;
+  setRepo: (repo: string | null, opts?: { asDefault?: boolean }) => void;
+} {
+  const { data: repos, isFetched: reposKnown } = useRepos();
+  const { data: fallback, isFetched: fallbackKnown } = useSetting("app", TRIAGE_DEFAULT_REPO_KEY);
+  // The key is minted from the ticket, so there is nothing to read without one.
+  const { data: own, isFetched: ownKnown } = useSetting(
+    "app",
+    triageRepoKey(ticketId ?? ""),
+    ticketId !== null,
+  );
+  const { mutate } = useSetSetting();
+
+  const ownRepo = registeredRepo(own, repos);
+  const defaultRepo = registeredRepo(fallback, repos);
+  const loading = !reposKnown || !fallbackKnown || (ticketId !== null && !ownKnown);
+
+  const setRepo = useCallback(
+    (next: string | null, opts?: { asDefault?: boolean }) => {
+      if (ticketId !== null) mutate({ scope: "app", key: triageRepoKey(ticketId), value: next });
+      if (opts?.asDefault) mutate({ scope: "app", key: TRIAGE_DEFAULT_REPO_KEY, value: next });
+    },
+    [mutate, ticketId],
+  );
+
+  return {
+    repo: ownRepo ?? defaultRepo,
+    attached: ownRepo !== null,
+    defaultRepo,
+    loading,
+    setRepo,
+  };
+}
+
+/**
+ * The repo whose Linear org the triage queue is read from: the default project
+ * when one is set, else the active repo. Both the sidebar section and the
+ * workspace read the queue through this, so the row you clicked and the ticket
+ * that opens can never come from two different orgs. Why the default and not
+ * `activeRepo` is under {@link TRIAGE_DEFAULT_REPO_KEY}.
+ */
+export function useTriageOrgRepo(): string {
+  const { activeRepo } = useApp();
+  const { data: repos } = useRepos();
+  const { data: fallback } = useSetting("app", TRIAGE_DEFAULT_REPO_KEY);
+  return registeredRepo(fallback, repos) ?? activeRepo;
+}
 
 // ── English tutor ────────────────────────────────────────────────────────────
 // The opt-in writing coach: the practice log agents append to, and the analysis
@@ -3583,6 +3910,7 @@ export function promptPreviewKey(
   repo: string | undefined,
   issueId: string | undefined,
   detail: TriageDetail | undefined,
+  workItems: PromptWorkItemSample[] | undefined,
 ): QueryKey {
   return queryKeys.promptPreview(
     name,
@@ -3590,6 +3918,7 @@ export function promptPreviewKey(
     repo ?? "",
     issueId ?? "",
     detail ? hashText(JSON.stringify(detail)) : "",
+    workItems ? hashText(JSON.stringify(workItems)) : "",
   );
 }
 
@@ -3600,6 +3929,9 @@ export function promptPreviewKey(
  *  Disabled while the draft is empty, or while a chosen issue's `detail` is still
  *  loading (so we never render it as the sample).
  *
+ *  `workItems` is the editor's sample work queue for the Start-work prompt;
+ *  `undefined` leaves the backend's own sample in place.
+ *
  *  A render is pure in its key (see {@link promptPreviewKey}), so an entry never
  *  goes stale — but the keystroke that minted it is gone the moment the next one
  *  lands, so the entry is collected shortly after nothing observes it. */
@@ -3609,10 +3941,11 @@ export const usePreviewPrompt = (
   repo: string | undefined,
   issueId: string | undefined,
   detail: TriageDetail | undefined,
+  workItems: PromptWorkItemSample[] | undefined,
 ) =>
   useUnwrappedQuery(
-    promptPreviewKey(name, content, repo, issueId, detail),
-    () => commands.previewPrompt(name, content, repo ?? null, detail ?? null),
+    promptPreviewKey(name, content, repo, issueId, detail, workItems),
+    () => commands.previewPrompt(name, content, repo ?? null, detail ?? null, workItems ?? null),
     {
       enabled: content.trim().length > 0 && (!issueId || detail !== undefined),
       staleTime: SETTING_STALE_TIME,
@@ -3641,59 +3974,204 @@ export const useDeletePromptBlock = () =>
 // The two things that read across every domain above: the sidebar's "needs you"
 // counts, and the one refresh that re-pulls everything sourced from Linear or GitHub.
 
-export interface ViewCounts {
-  tasks: number;
-  tasksReady: number;
-  worktrees: number;
-  worktreesRunning: number;
-  /** Unique PRs still awaiting this viewer's review. */
-  reviews: number;
-}
-
-/** Count unique direct/team requests whose current head has not been reviewed. */
-export function reviewAwaitingCount(inbox: ReviewInbox | undefined): number {
-  if (!inbox) return 0;
+/**
+ * The unique direct/team review requests whose current head this viewer has not
+ * reviewed — santree's one definition of a PR that still needs you.
+ *
+ * Every "needs your review" number comes through here — today that is the sidebar's
+ * per-project rows and the count their collapsed project header carries. A second
+ * filter that merely *looked* like this one is how two surfaces start disagreeing
+ * about what is waiting; counting raw open PRs instead is how a row claims work
+ * you already did.
+ */
+export function awaitingReviewPrs(inbox: ReviewInbox | undefined): ReviewPr[] {
+  if (!inbox) return [];
   const seen = new Set<string>();
   return [...inbox.requested, ...inbox.teams.flatMap((team) => team.prs)].filter((pr) => {
     if (seen.has(pr.id)) return false;
     seen.add(pr.id);
     return !pr.viewerReview || pr.headCommittedAt > pr.viewerReview.submittedAt;
-  }).length;
+  });
+}
+
+/** One project's share of the review requests waiting on you. */
+export interface ReviewProjectCounts {
+  /** Requested of you personally. */
+  direct: number;
+  /** Requested of a team you're on, and not of you directly. */
+  team: number;
+  /** `direct + team` — what a single badge shows. */
+  total: number;
+  /**
+   * The teams behind {@link ReviewProjectCounts.team}, as `org/slug`, in the order
+   * the inbox lists them.
+   *
+   * Org-qualified for the same reason the inbox's sections are: `acme/core` and
+   * `other/core` are different groups of people, and a row that named only "core"
+   * would send you asking the wrong ones. It rides on the counts rather than being
+   * looked up again at the row, because the row's whole job is to say *who* is
+   * waiting and a second lookup is a second chance to disagree.
+   */
+  teams: string[];
 }
 
 /**
- * The per-tab counts shown in the nav tabs and the header summary. Centralized so
- * both surfaces report the same numbers (they previously re-derived these filters
- * independently and could drift). Backed by the shared task/worktree query cache,
- * so calling it from two places doesn't double-fetch.
+ * The same count, per registered project — keyed by registry name, which is what
+ * the sidebar addresses a project by, and split the way the inbox itself is.
+ *
+ * The attribution is the backend's ({@link ReviewPr.project}, resolved from each
+ * checkout's `origin`); the rule for what counts is {@link awaitingReviewPrs},
+ * unchanged. Every registered project gets an entry, zero included: a project with
+ * nothing waiting has to render as a quiet row, not as a missing one. PRs from
+ * repos in the org that aren't registered have no project and are counted by
+ * nobody here — they still show in the inbox itself.
+ *
+ * A PR asked of you *and* of your team counts once, as direct: the personal ask is
+ * the stronger one, and it keeps `direct + team` equal to `total`.
+ *
+ * A Map rather than an object because the keys are registry names, and a registry
+ * name can be whatever the folder on disk is called.
  */
-export const useViewCounts = (repo: string): ViewCounts => {
-  // Default *inside* the memo, not in the destructuring: a `= []` default mints a
-  // fresh array on every render while the read is still loading, so the dep array
-  // would change identity every render — the memo would do nothing at exactly the
-  // moment (mount) it matters.
-  const { data: tasks } = useTasks(repo);
-  const { data: worktrees } = useWorktrees(repo);
-  const { data: reviews } = useReviews(repo);
-  // `Worktree.activity` from the backend is a constant (no session-signal source
-  // yet — see `worktree.rs`'s `build_worktree`), so "running" is derived here from
-  // an actual live PTY session instead, the same signal Trees uses for its own
-  // activity dots.
-  const { tabs: terminalTabs } = useTerminals();
-  return useMemo(() => {
-    const liveTermRefIds = new Set(
-      terminalTabs.filter((t) => t.source === "issue").map((t) => t.refId),
+export function reviewCountsByProject(
+  inbox: ReviewInbox | undefined,
+): Map<string, ReviewProjectCounts> {
+  const blank = (): ReviewProjectCounts => ({ direct: 0, team: 0, total: 0, teams: [] });
+  const counts = new Map<string, ReviewProjectCounts>();
+  for (const project of inbox?.projects ?? []) counts.set(project.repo, blank());
+
+  const askedDirectly = new Set((inbox?.requested ?? []).map((pr) => pr.id));
+  // Every team that asked for a given PR, not just the first: two teams you're on
+  // can both be on one review, and naming one of them is how a row sends you to
+  // the wrong standup.
+  const askedByTeams = new Map<string, string[]>();
+  for (const team of inbox?.teams ?? []) {
+    const key = `${team.org}/${team.slug}`;
+    for (const pr of team.prs) {
+      const named = askedByTeams.get(pr.id) ?? [];
+      if (!named.includes(key)) askedByTeams.set(pr.id, [...named, key]);
+    }
+  }
+
+  for (const pr of awaitingReviewPrs(inbox)) {
+    if (pr.project === null) continue;
+    // Always present: `project` is a registry name, and every one was seeded above.
+    const row = counts.get(pr.project) ?? blank();
+    if (askedDirectly.has(pr.id)) {
+      row.direct += 1;
+    } else {
+      row.team += 1;
+      for (const team of askedByTeams.get(pr.id) ?? []) {
+        if (!row.teams.includes(team)) row.teams.push(team);
+      }
+    }
+    row.total += 1;
+    counts.set(pr.project, row);
+  }
+  return counts;
+}
+
+/** One block of a project's Reviews section in the sidebar. */
+export interface ReviewGroup {
+  /** Stable React key, and what the section's persisted fold is keyed on. */
+  key: string;
+  label: string;
+  /** Hover text when the label alone is ambiguous — a team's org, which two
+   *  same-named teams need and a single team does not. */
+  title: string | null;
+  prs: ReviewPr[];
+}
+
+/** Oldest wait first: the same order the Reviews rail opens on, so a PR does not
+ *  change places when you cross from the sidebar into the view. */
+const byWaitingLongest = (a: ReviewPr, b: ReviewPr) =>
+  a.waitingSince.localeCompare(b.waitingSince) || a.id.localeCompare(b.id);
+
+/**
+ * A project's Reviews section, as the blocks the sidebar draws under it: what is
+ * asked of you personally, then one block per team that asked.
+ *
+ * Built beside {@link reviewCountsByProject} and over the same
+ * {@link awaitingReviewPrs} rule on purpose: the number on the folded heading and
+ * the rows under the open one are the same fact, and a list assembled by its own
+ * filter is how a "3" comes to sit above four rows.
+ *
+ * Your own PRs (`inbox.mine`) are not blocks here: a PR you opened is worked on
+ * beside its worktree, which already has a row in this rail. This section is
+ * only what is waiting on you.
+ *
+ * **The blocks are disjoint and sum to `counts.total`.** A PR asked of you *and*
+ * of your team appears once, under the personal ask (the stronger one, and the
+ * same tiebreak the counts use); a PR asked of two teams you're on appears under
+ * the first.
+ *
+ * Only registered projects get an entry (a project with nothing waiting gets an
+ * empty one): a PR from a repo you never cloned belongs to no project and has no
+ * row here to sit under. It is still in the Reviews view itself.
+ */
+export function reviewGroupsByProject(inbox: ReviewInbox | undefined): Map<string, ReviewGroup[]> {
+  const groups = new Map<string, ReviewGroup[]>();
+  for (const project of inbox?.projects ?? []) groups.set(project.repo, []);
+  if (!inbox) return groups;
+
+  const add = (project: string, group: Omit<ReviewGroup, "prs">, prs: ReviewPr[]) => {
+    if (prs.length === 0) return;
+    const rows = groups.get(project);
+    // Unregistered projects are deliberately absent: no row to hang a block on.
+    if (rows) rows.push({ ...group, prs });
+  };
+
+  const askedDirectly = new Set(inbox.requested.map((pr) => pr.id));
+  const awaiting = awaitingReviewPrs(inbox);
+  const awaitingIds = new Set(awaiting.map((pr) => pr.id));
+
+  for (const [project] of groups) {
+    const ofProject = (prs: ReviewPr[]) => prs.filter((pr) => pr.project === project);
+
+    add(
+      project,
+      { key: "direct", label: "Assigned to me", title: null },
+      ofProject(awaiting)
+        .filter((pr) => askedDirectly.has(pr.id))
+        .sort(byWaitingLongest),
     );
-    return {
-      tasks: tasks?.length ?? 0,
-      tasksReady: tasks?.filter((t) => t.ready).length ?? 0,
-      worktrees: worktrees?.length ?? 0,
-      worktreesRunning: worktrees?.filter((w) => liveTermRefIds.has(`tree:${w.id}`)).length ?? 0,
-      // The Reviews badge counts PRs awaiting *my* review (individual + team),
-      // not my own authored PRs.
-      reviews: reviewAwaitingCount(reviews),
-    };
-  }, [tasks, worktrees, reviews, terminalTabs]);
+
+    // One PR can reach you through two teams you're on. Claimed by the first, so
+    // the blocks stay disjoint and still add up to the heading's number.
+    const claimed = new Set(askedDirectly);
+    for (const team of inbox.teams) {
+      const prs = ofProject(team.prs).filter((pr) => {
+        if (!awaitingIds.has(pr.id) || claimed.has(pr.id)) return false;
+        claimed.add(pr.id);
+        return true;
+      });
+      add(
+        project,
+        {
+          key: `team:${team.org}/${team.slug}`,
+          label: `Team · ${team.name}`,
+          // Org-qualified in the hover for the reason the counts are: `acme/core`
+          // and `other/core` are different groups of people.
+          title: `Requested from @${team.org}/${team.slug}`,
+        },
+        prs.sort(byWaitingLongest),
+      );
+    }
+  }
+  return groups;
+}
+
+/** How many tickets the repo has, for the nav's Tickets row — the one count that
+ *  still hangs off a destination now that Reviews is per-project and Triage is a
+ *  section listing its own queue. Backed by the shared task cache, so the number
+ *  costs the rail nothing the views weren't already fetching. */
+export const useTaskCount = (repo: string): number => useTasks(repo).data?.length ?? 0;
+
+/** The "needs your review" counts for every registered project, for the sidebar's
+ *  per-project rows. Shares {@link useReviews}' cache with the badge above, so the
+ *  two numbers can never disagree and neither one costs a second fetch. */
+export const useReviewCountsByProject = (): Map<string, ReviewProjectCounts> => {
+  const { data: inbox } = useReviews();
+  return useMemo(() => reviewCountsByProject(inbox), [inbox]);
 };
 
 /** What {@link useRefreshExternal} re-pulls: every read sourced from Linear or

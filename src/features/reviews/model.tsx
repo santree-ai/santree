@@ -1,12 +1,25 @@
 /**
- * Reviews tab view-model: the org-scoped PR inbox plus the current selection.
+ * Reviews tab view-model: the registry-wide PR inbox plus the current selection.
  *
  * Mirrors `features/trees/model.tsx` — server data comes from the `useReviews`
  * query; this context only holds the ephemeral selection and exposes the inbox to
- * the sidebar and detail panel. A PR pill elsewhere in the app can deep-link here
- * by setting `reviewFocus` (the PR url) on AppContext, which we resolve to a
- * selection once the inbox is loaded.
+ * the detail panel. A PR pill elsewhere in the app, and every row of the app
+ * sidebar's Reviews sections, deep-links here by setting `reviewFocus` (the PR
+ * url) on AppContext, which we resolve to a selection once the inbox is loaded.
+ *
+ * **The scope comes from the route** (`?project=`), and is applied once, here.
+ * The sidebar's Reviews section is the way into this view, so the common case is
+ * one project — and putting the narrowing in the URL rather than in view state is
+ * what lets a reload land back on the same inbox. Unscoped is still a real state:
+ * a PR from a repo you never cloned belongs to no project, and the command
+ * palette's Reviews entry is deliberately the everything view.
+ *
+ * **Which pane is showing comes from the route too** — `?pr=` for a pull request,
+ * `?queue=` for the merge queue. Both are asked for from the sidebar, which is
+ * outside this provider and cannot set view state; holding either here left a rail
+ * row that opened nothing on a reload.
  */
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   createContext,
   type ReactNode,
@@ -20,9 +33,8 @@ import {
 import type { ReviewInbox, ReviewPr, TicketRef } from "../../bindings";
 import { usePrTickets, useReviews } from "../../lib/queries";
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
-import { usePersistedState } from "../../lib/usePersistedState";
 import { useApp, useAppUi } from "../../state/AppContext";
-import type { Grouping, SortMode } from "./grouping";
+import { inboxOfProject } from "./grouping";
 import { ticketIdFor } from "./ticket";
 
 /** Which file (and optionally line) the diff should scroll to and expand. */
@@ -33,17 +45,17 @@ export interface FileFocus {
 }
 
 interface ReviewsModel {
+  /** The santree project every repo-scoped read here keys off: the scope when
+   *  there is one, else whatever project the rest of the app is pointed at. */
   repo: string;
+  /** The registered project the route scoped this view to, or `null` for every
+   *  project. What decides whether the repo-scoped merge queue has a repo to be
+   *  about. */
+  scope: string | null;
   inbox: ReviewInbox | undefined;
   loading: boolean;
   /** Every PR across all categories, for selection lookup. */
   allPrs: ReviewPr[];
-  /** How the sidebar buckets rows, and what orders them. Sidebar chrome, so both
-   *  persist to localStorage rather than the settings table. */
-  grouping: Grouping;
-  setGrouping: (g: Grouping) => void;
-  sort: SortMode;
-  setSort: (s: SortMode) => void;
   /** The Linear ticket behind a PR, when it has one and Linear knows it — the
    *  project grouping's input. */
   ticketFor: (pr: ReviewPr) => TicketRef | undefined;
@@ -56,9 +68,9 @@ interface ReviewsModel {
    *  asking twice re-opens the tab instead of being a silent no-op. */
   aiReviewRequest: number;
   /** "Review this PR with AI" — opens the main panel's AI review tab, launching
-   *  the session on first open. Lives here because the ask comes from the rail's
-   *  brief section and the tab it opens is in the other column: the same gap
-   *  {@link ReviewsModel.fileFocus} crosses. */
+   *  the session on first open. Lives here because the ask comes from the info
+   *  rail's brief section and the tab it opens is in the other column: the same
+   *  gap {@link ReviewsModel.fileFocus} crosses. */
   openAiReview: () => void;
   activeId: string | null;
   setActive: (id: string | null) => void;
@@ -77,27 +89,34 @@ interface ReviewsModel {
 
 const ReviewsContext = createContext<ReviewsModel | null>(null);
 
-/** Sidebar chrome, so localStorage rather than the settings table (see the
- *  persistence split in CLAUDE.md). */
-const GROUPING_KEY = "santree-reviews-grouping";
-const SORT_KEY = "santree-reviews-sort";
-
 export function ReviewsProvider({ children }: { children: ReactNode }) {
-  const { activeRepo: repo } = useApp();
+  const { activeRepo } = useApp();
   const { reviewFocus, consumeReviewFocus } = useAppUi();
-  const { data: inbox, isLoading } = useReviews(repo);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [showMergeQueue, setShowMergeQueue] = useState(false);
+  // `strict: false` because this provider is also rendered in tests, where there
+  // is no matched route to read a typed search off.
+  const {
+    project,
+    pr: openPrUrl,
+    queue,
+  } = useSearch({ strict: false }) as {
+    project?: string;
+    pr?: string;
+    queue?: true;
+  };
+  const navigate = useNavigate();
+  const scope = project ?? null;
+  // The scoped project is a registry name, so it is a valid `repo` for every
+  // repo-scoped read below — and a truer one than the active project, which a
+  // reload restores independently of the URL.
+  const repo = scope ?? activeRepo;
+  const { data: allProjects, isLoading } = useReviews();
+  const inbox = useMemo(
+    () => (scope && allProjects ? inboxOfProject(allProjects, scope) : allProjects),
+    [allProjects, scope],
+  );
   const [infoCollapsed, setInfoCollapsed] = useState(false);
   const [infoWidth, setInfoWidth] = useState(400);
 
-  // Selecting a PR always returns to the PR detail view; opening the merge queue
-  // swaps the pane without disturbing which PR is selected underneath.
-  const setActive = useCallback((id: string | null) => {
-    setActiveId(id);
-    setShowMergeQueue(false);
-  }, []);
-  const openMergeQueue = useCallback(() => setShowMergeQueue(true), []);
   const toggleInfo = useCallback(() => setInfoCollapsed((c) => !c), []);
 
   // ⌘L toggles the info rail (mirrors the Trees file panel). Owned here so no
@@ -115,9 +134,6 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const [grouping, setGrouping] = usePersistedState<Grouping>(GROUPING_KEY, "category");
-  const [sort, setSort] = usePersistedState<SortMode>(SORT_KEY, "waiting");
-
   const allPrs = useMemo(() => {
     if (!inbox) return [];
     const seen = new Set<string>();
@@ -130,6 +146,46 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
     );
   }, [inbox]);
 
+  // The selection, read straight off the route — no second copy to keep in step
+  // with it. A PR that leaves the inbox simply stops resolving, and the view
+  // falls back to its landing surface without anything having to notice.
+  const active = allPrs.find((p) => p.url === openPrUrl) ?? null;
+  const activeId = active?.id ?? null;
+  const showMergeQueue = !!queue;
+
+  // The selection is written to the route rather than held here, so the sidebar
+  // can light up the row you are on (see the route's own comment). `replace`
+  // because picking through an inbox is browsing, not a trail of stops you would
+  // want to walk back one PR at a time.
+  //
+  // A PR and the merge queue are two states of one pane, so each of the two
+  // writers below clears the other. Leaving `?queue=` set behind a selected PR
+  // would put the queue back the next time the url was read, over the PR the
+  // sidebar is lighting up.
+  const setActive = useCallback(
+    (id: string | null) => {
+      const url = id ? (allPrs.find((p) => p.id === id)?.url ?? null) : null;
+      void navigate({
+        to: "/reviews",
+        search: (prev: { project?: string }) => ({
+          ...prev,
+          pr: url ?? undefined,
+          queue: undefined,
+        }),
+        replace: true,
+      });
+    },
+    [allPrs, navigate],
+  );
+
+  const openMergeQueue = useCallback(() => {
+    void navigate({
+      to: "/reviews",
+      search: (prev: { project?: string }) => ({ ...prev, queue: true as const, pr: undefined }),
+      replace: true,
+    });
+  }, [navigate]);
+
   // Resolve every PR's ticket in one batched Linear call. Sorted + deduped so the
   // query key is stable across refetches that return the same inbox in a different
   // order — otherwise every poll would look like a new key and refetch.
@@ -137,8 +193,8 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
     () => [...new Set(allPrs.map(ticketIdFor).filter((id): id is string => !!id))].sort(),
     [allPrs],
   );
-  // Category sections also use project + priority metadata, so one cached batch
-  // enriches both the default inbox and the explicit project grouping.
+  // The landing surface and the PR's own info rail both read project + priority
+  // metadata off this one cached batch.
   const { data: tickets } = usePrTickets(repo, ticketIds);
   const ticketsById = useMemo(
     () => new Map((tickets ?? []).map((t) => [t.identifier, t])),
@@ -171,16 +227,10 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
     setAiReviewRequest(0);
   }
 
-  // A missing selection is intentional: the home surface summarizes the inbox.
-  // Only clear an explicit selection that disappeared after a refresh or repo
-  // switch; never replace it with an unrelated PR.
-  useEffect(() => {
-    if (activeId && !allPrs.some((p) => p.id === activeId)) {
-      setActiveId(null);
-    }
-  }, [activeId, allPrs]);
-
-  // Resolve a cross-view deep-link (PR pill → Reviews) to a selection.
+  // Resolve a cross-view deep-link (a PR pill elsewhere in the app) into the
+  // route, which is where the selection lives. Nothing to reconcile afterwards:
+  // a PR that disappears from the inbox stops resolving and the view falls back
+  // to its landing surface on its own.
   useEffect(() => {
     if (!reviewFocus) return;
     const match = allPrs.find((p) => p.url === reviewFocus);
@@ -193,13 +243,10 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
   const value = useMemo<ReviewsModel>(
     () => ({
       repo,
+      scope,
       inbox,
       loading: isLoading,
       allPrs,
-      grouping,
-      setGrouping,
-      sort,
-      setSort,
       ticketFor,
       fileFocus,
       focusFile,
@@ -207,7 +254,7 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
       openAiReview,
       activeId,
       setActive,
-      active: allPrs.find((p) => p.id === activeId) ?? null,
+      active,
       showMergeQueue,
       openMergeQueue,
       infoCollapsed,
@@ -217,19 +264,17 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
     }),
     [
       repo,
+      scope,
       inbox,
       isLoading,
       allPrs,
-      grouping,
-      setGrouping,
-      sort,
-      setSort,
       ticketFor,
       fileFocus,
       focusFile,
       aiReviewRequest,
       openAiReview,
       activeId,
+      active,
       setActive,
       showMergeQueue,
       openMergeQueue,

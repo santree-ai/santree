@@ -7,21 +7,27 @@
  * have yet. These pin the two states apart.
  */
 import { fireEvent, render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChangedFile } from "../../bindings";
 import { ChangesList } from "./ChangesList";
 
-vi.mock("./model", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./model")>()),
-  useTrees: () => ({
-    repo: "/repo",
-    activeId: "AK-1",
-    selectedFile: null,
-    selectedFileScope: "working",
-    selectFile: vi.fn(),
-  }),
-}));
+/** The list under test with the host wiring every case here shares: which
+ *  worktree it is about, and a place for a click to land. */
+function List(props: Partial<ComponentProps<typeof ChangesList>>) {
+  return (
+    <ChangesList
+      repo="/repo"
+      worktreeId="AK-1"
+      files={undefined}
+      selectedPath={null}
+      selectedScope="working"
+      onOpen={vi.fn()}
+      {...props}
+    />
+  );
+}
 
 // The list/tree choice is a persisted setting, so the mock has to be able to
 // answer either way — the windowing has to hold in both layouts, and the tree is
@@ -58,13 +64,13 @@ const file = (path: string, staged: boolean, over: Partial<ChangedFile> = {}): C
 
 describe("ChangesList loading state", () => {
   it("shows a skeleton, not an empty state, while the status is unknown", () => {
-    render(<ChangesList files={undefined} />);
+    render(<List files={undefined} />);
     expect(screen.queryByText("No changes.")).not.toBeInTheDocument();
     expect(document.querySelector(".animate-pulse")).toBeInTheDocument();
   });
 
   it("shows the empty state once the status and the branch are both known to be empty", () => {
-    render(<ChangesList files={[]} committed={[]} />);
+    render(<List files={[]} committed={[]} />);
     expect(screen.getByText("No changes.")).toBeInTheDocument();
     expect(document.querySelector(".animate-pulse")).not.toBeInTheDocument();
   });
@@ -72,20 +78,20 @@ describe("ChangesList loading state", () => {
   /** The staged counter reads off real data, so it must stay hidden until there
    *  is some — "0/0 staged" next to a skeleton is the same false claim. */
   it("hides the staged counter while the status is unknown", () => {
-    render(<ChangesList files={undefined} />);
+    render(<List files={undefined} />);
     expect(screen.queryByText(/staged/)).not.toBeInTheDocument();
   });
 
   /** The branch list loads on its own; an empty working tree must not claim "No
    *  changes." while the committed files are still unknown. */
   it("keeps a skeleton for the branch list while only the status has landed", () => {
-    render(<ChangesList files={[]} committed={undefined} />);
+    render(<List files={[]} committed={undefined} />);
     expect(screen.queryByText("No changes.")).not.toBeInTheDocument();
     expect(document.querySelector(".animate-pulse")).toBeInTheDocument();
   });
 
   it("renders the rows and the counter once files arrive", () => {
-    render(<ChangesList files={[file("a.ts", true), file("b.ts", false)]} committed={[]} />);
+    render(<List files={[file("a.ts", true), file("b.ts", false)]} committed={[]} />);
     expect(screen.getByText("a.ts")).toBeInTheDocument();
     expect(screen.getByText("b.ts")).toBeInTheDocument();
     expect(screen.getByText("1/2 staged")).toBeInTheDocument();
@@ -97,7 +103,7 @@ describe("ChangesList loading state", () => {
    *  `status`, which the fixture pinned to `Modified` until now. */
   it("puts new files in their own section rather than among the changes", () => {
     render(
-      <ChangesList
+      <List
         files={[file("a.ts", true), file("new.ts", false, { status: "Untracked" })]}
         committed={[]}
       />,
@@ -122,20 +128,20 @@ describe("ChangesList windowing", () => {
   const showMore = () => screen.queryByText("Show more");
 
   it("draws every row of a normal-sized list, with no affordance", () => {
-    render(<ChangesList files={many(40, (i) => `src/f${i}.ts`)} committed={[]} />);
+    render(<List files={many(40, (i) => `src/f${i}.ts`)} committed={[]} />);
     expect(fileRows()).toBe(40);
     expect(showMore()).not.toBeInTheDocument();
   });
 
   it("caps a huge list and offers the rest behind one control", () => {
-    render(<ChangesList files={many(2500, (i) => `src/f${i}.ts`)} committed={[]} />);
+    render(<List files={many(2500, (i) => `src/f${i}.ts`)} committed={[]} />);
     expect(fileRows()).toBe(100);
     expect(showMore()).toBeInTheDocument();
     expect(screen.getByText("2,400 hidden")).toBeInTheDocument();
   });
 
   it("keeps the section header at the true total, not the drawn count", () => {
-    render(<ChangesList files={many(150, (i) => `src/f${i}.ts`)} committed={[]} />);
+    render(<List files={many(150, (i) => `src/f${i}.ts`)} committed={[]} />);
     // The only bare "150" on screen is the "Changes" header's count; the staged
     // counter renders as one "0/150 staged" string.
     expect(screen.getByText("150")).toBeInTheDocument();
@@ -143,7 +149,7 @@ describe("ChangesList windowing", () => {
   });
 
   it("reveals more rows on click and drops the control at the end of the list", () => {
-    render(<ChangesList files={many(150, (i) => `src/f${i}.ts`)} committed={[]} />);
+    render(<List files={many(150, (i) => `src/f${i}.ts`)} committed={[]} />);
     fireEvent.click(screen.getByText("Show more"));
     expect(fileRows()).toBe(150);
     expect(showMore()).not.toBeInTheDocument();
@@ -151,7 +157,7 @@ describe("ChangesList windowing", () => {
 
   it("windows each section on its own, so a huge one can't hide a small one", () => {
     render(
-      <ChangesList
+      <List
         files={[
           ...many(150, (i) => `src/f${i}.ts`),
           file("new.ts", false, { status: "Untracked" }),
@@ -165,12 +171,37 @@ describe("ChangesList windowing", () => {
 
   it("windows the tree layout too, counting its folder rows against the cap", () => {
     settings.view = "tree";
-    render(<ChangesList files={many(150, (i) => `src/d${i % 10}/f${i}.ts`)} committed={[]} />);
+    render(<List files={many(150, (i) => `src/d${i % 10}/f${i}.ts`)} committed={[]} />);
     // 150 files + 11 folder rows, windowed to 100 drawn rows in total — so fewer
     // than 100 of them are files.
     expect(fileRows()).toBeLessThan(100);
     expect(showMore()).toBeInTheDocument();
     // Both the section header and the `src` folder row still say 150.
     expect(screen.getAllByText("150")).toHaveLength(2);
+  });
+});
+
+/**
+ * The list's one host-dependent decision, the same one {@link AllFilesList}
+ * makes: a file name opens a diff where the host has somewhere to put one, and
+ * is plain text where it hasn't. Staging and discard are not part of that — they
+ * act on the checkout, so they hold in both rails.
+ */
+describe("ChangesList without a place to open a diff", () => {
+  it("renders the file name as text rather than a button that leads nowhere", () => {
+    render(<List files={[file("a.ts", false)]} committed={[]} onOpen={undefined} />);
+    expect(screen.getByText("a.ts").closest("button")).toBeNull();
+  });
+
+  it("keeps staging, which acts on the checkout and not on the host", () => {
+    render(<List files={[file("a.ts", false)]} committed={[]} onOpen={undefined} />);
+    expect(screen.getByRole("button", { name: "Stage a.ts" })).toBeInTheDocument();
+  });
+
+  it("still opens the name where the host asked for it", () => {
+    const onOpen = vi.fn();
+    render(<List files={[file("a.ts", false)]} committed={[]} onOpen={onOpen} />);
+    fireEvent.click(screen.getByText("a.ts"));
+    expect(onOpen).toHaveBeenCalledWith("a.ts", "working");
   });
 });

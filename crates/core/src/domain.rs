@@ -538,7 +538,7 @@ impl TaskStatus {
 }
 
 /// One Linear milestone assigned to an issue inside its project.
-#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectMilestoneRef {
     pub id: String,
@@ -547,6 +547,21 @@ pub struct ProjectMilestoneRef {
     pub target_date: Option<String>,
     /// Linear's manual order within the project.
     pub sort_order: f64,
+}
+
+/// The Linear cycle an issue is scheduled into.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CycleRef {
+    /// Linear's running cycle number — what its chip says. A float on the wire.
+    pub number: f64,
+    /// The cycle's name, when the team names them.
+    pub name: Option<String>,
+    /// Epoch ms the cycle ends — raw, formatted live by the frontend.
+    pub ends_at_ms: Option<f64>,
+    /// Epoch ms the cycle starts. With `ends_at_ms`, how far through the cycle
+    /// now is — what the cycle mark's ring draws, computed live by the frontend.
+    pub starts_at_ms: Option<f64>,
 }
 
 /// A ticket in the dependency graph. `x`/`y` are its canvas position.
@@ -558,6 +573,10 @@ pub struct Task {
     pub priority: Priority,
     /// Linear's issue estimate. `None` means the issue is not estimated.
     pub estimate: Option<f64>,
+    /// The cycle the issue is scheduled into, when it is in one.
+    pub cycle: Option<CycleRef>,
+    /// Linear's due date (`YYYY-MM-DD`), when set.
+    pub due_date: Option<String>,
     pub project: String,
     /// The project's color (hex) as configured in Linear, when it has one. Falls
     /// back to the frontend's per-name color map when absent.
@@ -793,7 +812,7 @@ pub struct WorktreePr {
     pub state: PrState,
 }
 
-// ── Reviews dashboard (org-scoped GitHub PR inbox) ──────────────────────────
+// ── Reviews dashboard (registry-wide GitHub PR inbox) ───────────────────────
 
 /// GitHub's aggregate review decision for a PR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
@@ -870,8 +889,17 @@ pub struct ReviewPr {
     pub number: u32,
     pub title: String,
     pub url: String,
-    /// "owner/name" the PR lives in (the grouping axis for "My PRs").
+    /// "owner/name" the PR lives in — the slug half of the `(repo, number)`
+    /// identity every PR command takes.
     pub repo: String,
+    /// The registered project [`Self::repo`] resolves to, by registry name.
+    ///
+    /// `None` when no registered checkout has this repo as its `origin` — an
+    /// org-scoped inbox is full of repos the user never cloned — and always `None`
+    /// on the by-number path that serves a worktree's own PR, whose caller already
+    /// knows which project it asked about. Filled by the inbox alone, because the
+    /// registry is the only thing that can answer it.
+    pub project: Option<String>,
     /// The PR's head branch name (shown in the header, click-to-copy).
     pub head_ref: String,
     /// Stable GitHub node id for the head ref. `None` after the branch is deleted.
@@ -926,12 +954,40 @@ pub struct ReviewPr {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamReviews {
+    /// The org the team lives in. Team slugs are only unique *within* an org, and
+    /// the inbox now spans several — without this, `acme/core` and `other/core`
+    /// would merge into one section naming the wrong people.
+    pub org: String,
     pub slug: String,
     pub name: String,
     pub prs: Vec<ReviewPr>,
 }
 
-/// The categorized PR inbox for the Reviews tab, scoped to one org.
+/// One registered project's place in the aggregated inbox: the registry name the
+/// rest of the app addresses it by, and the GitHub repo its `origin` resolves to.
+///
+/// This is the whole attribution table. A [`ReviewPr`] carries GitHub's
+/// `nameWithOwner`, so matching it against `slug` is what says which project a PR
+/// belongs to — and it is shipped rather than re-derived on the frontend because
+/// resolving it costs a `git remote` per checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewProject {
+    /// The repo's registry name — what every other command means by `repo`.
+    pub repo: String,
+    /// "owner/name" from the checkout's `origin`. `None` when there is no
+    /// resolvable GitHub remote, which is a different fact from "no PRs": that
+    /// project can never own a row here, however long you wait.
+    pub slug: Option<String>,
+}
+
+/// The categorized PR inbox for the Reviews tab, across **every** registered
+/// project.
+///
+/// Deliberately not scoped to the active repo. One selected project answered for
+/// a whole multi-project registry, so an empty inbox was routinely the correct
+/// answer to the wrong question — the review waiting on you was in the project
+/// you weren't looking at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewInbox {
@@ -939,17 +995,41 @@ pub struct ReviewInbox {
     pub mine: Vec<ReviewPr>,
     /// PRs where the viewer is individually requested as a reviewer.
     pub requested: Vec<ReviewPr>,
-    /// PRs requested via a team the viewer is on — one section per team.
+    /// PRs requested via a team the viewer is on — one section per team, per org.
     pub teams: Vec<TeamReviews>,
-    /// The GitHub org these searches were scoped to — the active repo's `origin`
-    /// owner. Empty when it couldn't be resolved. An empty inbox has to name it:
-    /// the merge queue sitting beside it is scoped to a single *repo*, so
+    /// Every registered project and the GitHub repo it maps to — how a PR above
+    /// is attributed back to a project, and the list a per-project count is
+    /// rendered over (a project with nothing waiting still has a row).
+    pub projects: Vec<ReviewProject>,
+    /// The distinct GitHub orgs these searches covered — the registry's `origin`
+    /// owners, deduped. Empty when none resolved. An empty inbox has to name
+    /// them: the merge queue sitting beside it is scoped to a single *repo*, so
     /// unnamed, the two read as contradictory answers to the same question.
-    pub org: String,
+    pub orgs: Vec<String>,
     /// `gh` had a token. Without it every search below returns nothing, which
     /// renders identically to a genuinely quiet morning — the one distinction
     /// the empty state can't make for itself.
     pub github_connected: bool,
+}
+
+/// A pull request's **AI-review checkout**: the detached tree under
+/// `.santree/reviews/` that an AI review session reads the PR's code in.
+///
+/// It is registered in `worktree_links`, so the Reviews rail's Files, Changes and
+/// Session-history panes can read it by id the way they read any other checkout —
+/// but it is not work the user started, so it never appears in the worktree list.
+/// A PR that has a worktree of its own is read from that instead; this is the
+/// fallback for the many that don't.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewCheckout {
+    /// The registered project whose clone holds it — the PR's own, which is
+    /// routinely not the active repo, and what every pane's read is keyed by.
+    pub repo: String,
+    /// `branch` carries the **commit** it is detached at rather than a branch
+    /// name, because it is on no branch — and that commit is what "has the PR
+    /// moved past this checkout?" compares against the PR's head.
+    pub worktree: Worktree,
 }
 
 /// Which pull request an AI review surface is working on.
@@ -1267,6 +1347,11 @@ pub struct MergeQueueEntry {
     /// True when the viewer authored this PR — highlighted in the panel so they
     /// can spot their own place in line.
     pub is_mine: bool,
+    /// ISO-8601 time the PR entered the queue.
+    pub enqueued_at: String,
+    /// GitHub's estimate of how long until this entry merges, in seconds —
+    /// absent while the queue has no history to estimate from.
+    pub estimated_secs: Option<u32>,
 }
 
 /// The merge queue for a repo's target branch — the ordered list of PRs waiting
@@ -1278,6 +1363,13 @@ pub struct MergeQueue {
     pub repo: String,
     /// The branch the queue merges into (its default branch).
     pub branch: String,
+    /// The queue's own page on GitHub.
+    pub url: String,
+    /// GitHub's estimate for the entry at the front of the line, in seconds.
+    pub next_estimated_secs: Option<u32>,
+    /// Pull requests merged into the repo over the last 30 days — the queue's
+    /// throughput, the number GitHub's own queue page leads with.
+    pub merged_last_30_days: Option<u32>,
     pub entries: Vec<MergeQueueEntry>,
 }
 
@@ -1535,11 +1627,66 @@ pub struct PrLabel {
     pub description: Option<String>,
 }
 
+/// One commit on a pull request, as GitHub's "Commits" tab lists them.
+///
+/// The headline and the body are carried apart because they are read apart: the
+/// headline is the row, and the body — the "why", when the author wrote one — is
+/// what the row expands to show. Splitting them on the frontend would mean
+/// re-deriving a boundary GitHub already draws.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PrCommit {
+    /// Full 40-hex commit OID — the identity, and the key a list renders on.
+    pub oid: String,
+    /// GitHub's own abbreviation of [`Self::oid`], shown in the row. Taken from
+    /// the API rather than truncated here: the length GitHub picks grows with the
+    /// repo, so a fixed 7 would collide in a repo where GitHub's doesn't.
+    pub abbreviated_oid: String,
+    /// The commit message's first line.
+    pub message_headline: String,
+    /// The rest of the commit message; empty when there is none.
+    pub message_body: String,
+    /// The commit author's GitHub login, falling back to the git author name when
+    /// the commit's email matches no GitHub account (an unlinked local commit).
+    pub author: String,
+    pub author_avatar_url: String,
+    /// ISO-8601 commit date.
+    pub committed_date: String,
+    /// The commit's page on GitHub.
+    pub url: String,
+}
+
 /// The detail panel payload for a selected PR: body, conversation, diff, checks.
+/// One `user-attachments` asset, paired with a link that will actually load.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PrAttachment {
+    /// The asset id as it appears in the markdown — the last path segment of
+    /// `https://github.com/user-attachments/assets/<id>`.
+    pub id: String,
+    /// GitHub's pre-signed CDN URL for it. Short-lived, and public while it
+    /// lasts: the signature is the credential, so nothing else is needed to
+    /// fetch it and nothing may be stored from it.
+    pub url: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PrDetail {
     pub body: String,
+    /// Signed URLs for the attachments this PR's prose points at, keyed by the
+    /// `github.com/user-attachments/assets/<id>` id that appears in the markdown.
+    ///
+    /// Those markdown URLs are useless to us: on a private repo GitHub serves
+    /// them only to a browser session, and an API token gets the *web page*, not
+    /// the image — so every screenshot in a description rendered as a broken
+    /// icon. GitHub's own rendered HTML carries pre-signed CDN links instead,
+    /// which need no credential at all, so `github.rs` reads them from the same
+    /// query and hands over the substitution.
+    ///
+    /// **They expire in about five minutes.** They are a rendering detail of one
+    /// read, never something to persist or pass on.
+    pub attachments: Vec<PrAttachment>,
     /// The labels ("tags") currently assigned to the PR.
     pub labels: Vec<PrLabel>,
     /// Top-level conversation: issue comments and review summaries, chronological.
@@ -1553,6 +1700,13 @@ pub struct PrDetail {
     /// reviewer who marks every listed file "Viewed" on a truncated list has
     /// approved a diff they never saw.
     pub files_truncated: bool,
+    /// The PR's commits, **oldest first** — the order GitHub's Commits tab lists
+    /// them, which is the order they will land in.
+    pub commits: Vec<PrCommit>,
+    /// True when the PR has more commits than we fetched. Carried for the same
+    /// reason as [`Self::files_truncated`]: a reviewer who believes they have seen
+    /// every commit and has not is worse off than one who knows the list is cut.
+    pub commits_truncated: bool,
     pub checks: Vec<PrCheck>,
     /// Merge-base commit anchoring GitHub's PR patches. Used to fetch full old-side
     /// content on demand so the diff can expand unchanged context. Empty when `gh`
@@ -1982,6 +2136,19 @@ pub enum PromptKind {
     Block,
 }
 
+/// What the Prompts editor previews a template against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum PromptPreviewKind {
+    /// A Linear issue: the built-in sample, or a real ticket the user picks.
+    Ticket,
+    /// A pull request's work queue, built row by row in the editor, beside the
+    /// ticket the PR is linked to.
+    Queue,
+    /// Built-in sample data only — nothing in it is a ticket to pick.
+    Sample,
+}
+
 /// An editable AI prompt for the Settings → Prompts composer: its identity, the
 /// default source, the user's override for the queried scope (if any), the
 /// variable catalog, and the live composition links (what it includes / is
@@ -1998,6 +2165,10 @@ pub struct PromptInfo {
     /// False for user-created blocks — they have no embedded default and can be
     /// deleted (their content lives entirely in the DB).
     pub builtin: bool,
+    /// False for a prompt whose wording is part of a contract santree configures
+    /// around it (a hook, a permission grant) — shown in the editor, never edited.
+    pub editable: bool,
+    pub preview: PromptPreviewKind,
     /// The default template source (the reset target). Empty for custom blocks.
     pub default: String,
     /// The user's stored override for the queried scope, or `None` when the
@@ -2019,6 +2190,25 @@ pub struct PromptPreview {
     pub output: String,
     /// The minijinja error when the draft doesn't compile/render, else `None`.
     pub error: Option<String>,
+}
+
+/// One row of the Prompts editor's sample work queue — what the Start-work
+/// prompt's preview renders in place of a real PR's open items. The editor
+/// builds the list; the backend turns each row into the JSON the fixing agent
+/// would see, through the same code that builds it for a real item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptWorkItemSample {
+    pub source: ReviewWorkItemSource,
+    /// The item's own wording — what its row in the queue says.
+    pub description: String,
+    pub path: Option<String>,
+    pub line: Option<u32>,
+    /// Who wrote a thread comment; for a check, the check's name.
+    pub author: Option<String>,
+    /// A thread comment's or an AI draft's body; for a check, the message of
+    /// its one failing annotation.
+    pub body: Option<String>,
 }
 
 /// An external app/location a worktree can be opened in (Conductor-style menu).
@@ -2053,28 +2243,6 @@ pub struct TriageTicket {
     pub id: String,
     pub title: String,
     pub priority: Priority,
-    /// Linear's issue estimate. `None` means the workspace did not estimate it;
-    /// the UI must not turn that absence into a fake difficulty.
-    pub estimate: Option<f64>,
-    pub project: Option<String>,
-    pub project_color: Option<String>,
-    pub project_icon: Option<String>,
-    /// Linear project's target date (`YYYY-MM-DD`), when the project has one.
-    pub project_target_date: Option<String>,
-    /// The issue's own Linear due date (`YYYY-MM-DD`). This is distinct from the
-    /// containing project's target date and drives the queue's Due date order.
-    pub due_date: Option<String>,
-    /// Linear's canonical manual rank. `None` means the API did not supply one;
-    /// Santree must not invent a local rank that disagrees with Linear.
-    pub sort_order: Option<f64>,
-    /// Epoch ms the issue was created. Raw, not a pre-formatted "5m ago" label —
-    /// with triage's multi-minute query staleTime, a label baked in at fetch
-    /// time would freeze between refetches. The frontend formats (and ticks)
-    /// it live; see `src/lib/relativeTime.ts`. `f64` (not `i64`) because Specta
-    /// forbids exporting 64-bit ints to TypeScript; epoch-ms values are exact
-    /// in an `f64` for millennia to come.
-    pub created_at_ms: f64,
-    pub meta: String,
     /// The team key (e.g. "MSG"), used to group the queue when the viewer is on
     /// more than one team.
     pub team: Option<String>,
@@ -2084,8 +2252,9 @@ pub struct TriageTicket {
     /// Epoch ms the issue is snoozed until, if snoozed; the UI greys it out and
     /// sinks it to the bottom of the queue.
     pub snoozed_until_ms: Option<f64>,
-    /// Whether the issue is assigned to the viewer. The queue defaults to the
-    /// viewer's own issues; others' are shown only when "be a good citizen" is on.
+    /// Whether the issue is assigned to the viewer. The sidebar's Triage section
+    /// defaults to the viewer's own issues; others' are shown when its Mine/All
+    /// switch is on All.
     pub mine: bool,
 }
 
@@ -2147,6 +2316,18 @@ pub struct TriageDetail {
     pub created_at_ms: f64,
     pub labels: Vec<String>,
     pub project: Option<String>,
+    /// The issue's milestone inside its project, when assigned.
+    pub project_milestone: Option<ProjectMilestoneRef>,
+    /// The assignee's display name, when the issue is assigned.
+    pub assignee: Option<String>,
+    /// The assignee's avatar URL, when present.
+    pub assignee_avatar_url: Option<String>,
+    /// Linear's issue estimate (points). `None` means the issue is not estimated.
+    pub estimate: Option<f64>,
+    /// The cycle the issue is scheduled into, when it is in one.
+    pub cycle: Option<CycleRef>,
+    /// Linear's due date (`YYYY-MM-DD`), when set.
+    pub due_date: Option<String>,
     /// Absolute epoch ms the issue's SLA breaches, if it has one.
     pub sla_breach_ms: Option<f64>,
     /// Epoch ms the issue is snoozed until, if snoozed.
@@ -2156,21 +2337,26 @@ pub struct TriageDetail {
     pub comments: Vec<TriageComment>,
 }
 
-/// A single on-call slot in a triage rotation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+/// A single on-call slot in a triage rotation. The bounds are raw instants,
+/// formatted live by the frontend: Linear hands a rotation over at a time of
+/// day (a 4 PM Wednesday, say), not at midnight, so the shift's last day is the
+/// day its end falls on — and which day that is depends on the viewer's zone.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TriageShift {
     pub name: String,
     /// Avatar of the person on this shift, when Linear exposes one.
     pub avatar_url: Option<String>,
-    /// Human time range, e.g. "Mon–Wed".
-    pub range: String,
+    /// Epoch ms the shift begins, when the schedule says.
+    pub starts_at_ms: Option<f64>,
+    /// Epoch ms the shift hands over, when the schedule says.
+    pub ends_at_ms: Option<f64>,
     pub is_current: bool,
     pub is_me: bool,
 }
 
 /// The team triage rotation surfaced from Linear's triage responsibility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TriageSchedule {
     pub team: String,

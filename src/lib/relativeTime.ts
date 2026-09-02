@@ -92,8 +92,65 @@ export function formatSla(breachMs: number | null | undefined, nowMs: number): s
   return `SLA in ${label}`;
 }
 
+/** A short duration from seconds — "45s", "5m 18s", "1h 12m", "2d 3h" — the
+ *  shape of GitHub's merge-queue estimates, which it gives in seconds. */
+export function formatDuration(secs: number): string {
+  const s = Math.max(0, Math.round(secs));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return s % 60 ? `${m}m ${s % 60}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
+}
+
+/** The day an instant falls on, in the viewer's zone — "Jun 30". */
+export function formatDay(ms: number): string {
+  return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 /** A short wake label for a snoozed issue, e.g. "Jun 30". An absolute future
  *  date, not a countdown, so it doesn't need to tick live. */
 export function formatSnoozeLabel(ms: number): string {
-  return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return formatDay(ms);
+}
+
+/** The day *and* time — "Aug 27, 4:00 PM". */
+function formatDayTime(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function joinRange(
+  startMs: number | null,
+  endMs: number | null,
+  format: (ms: number) => string,
+): string {
+  if (startMs != null && endMs != null) return `${format(startMs)} – ${format(endMs)}`;
+  if (startMs != null) return format(startMs);
+  if (endMs != null) return format(endMs);
+  return "";
+}
+
+/**
+ * A rotation's shift as the days it runs — "Aug 27 – Sep 3". Each bound is the
+ * day it falls on in the viewer's zone, and the end is shown as it is: Linear
+ * hands a rotation over at a time of day (a 4 PM Thursday), so the day the end
+ * falls on is a day of the shift, not the day after it. Treating the end as an
+ * exclusive midnight and stepping back a day, as the backend once did, put
+ * every shift a day short.
+ */
+export function formatShiftRange(startMs: number | null, endMs: number | null): string {
+  return joinRange(startMs, endMs, formatDay);
+}
+
+/** The same shift with its hand-over times — "Aug 27, 4:00 PM – Sep 3, 4:00 PM"
+ *  — for the tooltip that says exactly when it changes hands. */
+export function formatShiftTimes(startMs: number | null, endMs: number | null): string {
+  return joinRange(startMs, endMs, formatDayTime);
 }

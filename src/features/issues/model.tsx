@@ -49,6 +49,19 @@ import { toast } from "../../state/toast";
 import { PROJECT_FALLBACK } from "../../theme/colors";
 import { NO_PROJECT } from "../trees/model";
 
+/** The rail's two panes: the focused ticket, and the launch queue. */
+export type RailTab = "issue" | "queue";
+
+/** A run of additions to the queue: how many, and when the last landed. */
+export interface QueueBurst {
+  count: number;
+  at: number;
+}
+
+/** How long two adds count as one burst — and how long the queue tab's `+N`
+ *  bubble stays up after the last of them. */
+export const QUEUE_BURST_MS = 1800;
+
 /**
  * The shared visual state for a ticket, derived once from its task + real
  * worktree. The sidebar row and the graph node both build their view-models on
@@ -185,7 +198,17 @@ interface IssuesModel {
   selected: Record<string, boolean>;
   focusId: string;
   focusProject: string | null;
+  /** The configured Work agent — what a queued ticket runs with unless the
+   *  queue pane gave it a pick of its own (see `agentFor`). */
   launchAgent: AgentKind;
+  /** Per-ticket agent picks, only where one was made. */
+  queueAgents: Record<string, AgentKind>;
+  /** The agent a ticket will launch with: its own pick, else the configured one. */
+  agentFor: (id: string) => AgentKind;
+  /** Which of the rail's panes shows. */
+  railTab: RailTab;
+  /** The last burst of adds to the queue — the queue tab's `+N` for a moment. */
+  queueBurst: QueueBurst | null;
 
   /** The chain base ticket for a blocked task (first dependency with a worktree), or null. */
   baseFor: (task: Task) => string | null;
@@ -205,6 +228,12 @@ interface IssuesModel {
   rightWidth: number;
 
   toggle: (id: string) => void;
+  /** Put a ticket in the queue — the queue of `repo`, switching the app to it
+   *  first when it isn't the active repo. The list resolves `repo` the way it
+   *  resolves it for a Run (see `useWorkRepoGate`), so the two can't disagree;
+   *  across a switch the add waits for the new repo's tasks, since the switch
+   *  empties the selection on the way. */
+  enqueueIn: (repo: string, id: string) => void;
   setFocus: (id: string) => void;
   /** Focus a ticket and pan/zoom the graph to it (from the inspector's "Open in graph"). */
   revealInGraph: (id: string) => void;
@@ -217,7 +246,10 @@ interface IssuesModel {
   /** Add every ready (launchable) ticket to the selection — or clear them if
    *  they're all already selected (toggle). */
   selectReady: () => void;
-  setLaunchAgent: (agent: AgentKind) => void;
+  /** Pick the agent one queued ticket launches with; `null` returns it to the
+   *  configured one. */
+  setQueueAgent: (id: string, agent: AgentKind | null) => void;
+  setRailTab: (tab: RailTab) => void;
   toggleProjectFocus: (project: string) => void;
   launch: () => void;
   /** Whether the multi-select launch queue is enabled (Settings → Actions → Work).
@@ -281,7 +313,7 @@ export function IssuesProvider({
   children: ReactNode;
   actionable?: ActionableControl;
 }) {
-  const { settings, activeRepo } = useApp();
+  const { settings, activeRepo, setActiveRepo } = useApp();
   const {
     requestTreeLaunch,
     requestTreeFocus,
@@ -401,16 +433,22 @@ export function IssuesProvider({
     [focusTask, byId, setActionableOnly],
   );
 
-  // Launch agent: the configured Work agent (Settings → Actions → Work, resolved
-  // through any per-repo override), with a per-launch override from the tray. The
-  // model is deliberately NOT chosen here — every launch runs the model configured
-  // for its agent in Settings, resolved at launch by the Trees seed (useAgentTab).
-  // A second, tray-side model source drifted from Settings once the agent was
-  // switched (a Codex launch showed Claude's model), so there isn't one.
-  const [agentOverride, setAgentOverride] = useState<AgentKind | null>(null);
+  // The configured Work agent (Settings → Actions → Work, resolved through any
+  // per-repo override) is what every queued ticket launches with, unless the
+  // queue pane gave it a pick of its own. The model is deliberately NOT chosen
+  // anywhere here — every launch runs the model configured for its agent in
+  // Settings, resolved at launch by the Trees seed (useAgentTab). A second,
+  // tray-side model source drifted from Settings once the agent was switched
+  // (a Codex launch showed Claude's model), so there isn't one.
+  const [queueAgents, setQueueAgents] = useState<Record<string, AgentKind>>({});
   const { data: workAgent } = useResolvedSetting(activeRepo, WORK_AGENT_KEY);
-  const configuredAgent = (workAgent as AgentKind | null) ?? settings?.defaultAgent ?? "Claude";
-  const launchAgent = agentOverride ?? configuredAgent;
+  const launchAgent = (workAgent as AgentKind | null) ?? settings?.defaultAgent ?? "Claude";
+  const agentFor = useCallback(
+    (id: string) => queueAgents[id] ?? launchAgent,
+    [queueAgents, launchAgent],
+  );
+  const [railTab, setRailTab] = useState<RailTab>("issue");
+  const [queueBurst, setQueueBurst] = useState<QueueBurst | null>(null);
 
   // Resolve each project's color/icon once (first task wins). Live Linear values
   // take precedence; otherwise fall back to the per-name color map.
@@ -512,17 +550,73 @@ export function IssuesProvider({
     [tasks, selected, isEligible],
   );
 
+  // Adds within a beat of each other read as one "+N" on the queue tab, so
+  // filling the queue row by row shows a rising count, not a flicker of ones.
+  const noteAdded = useCallback((count: number) => {
+    const now = Date.now();
+    setQueueBurst((b) => ({
+      count: b && now - b.at < QUEUE_BURST_MS ? b.count + count : count,
+      at: now,
+    }));
+  }, []);
+
   const toggle = useCallback(
     (id: string) => {
       const task = byId.get(id);
       if (!task) return;
       focusTask(id);
-      if (isEligible(task)) {
-        setSelected((s) => ({ ...s, [id]: !s[id] }));
-      }
+      if (!isEligible(task)) return;
+      const adding = !selected[id];
+      setSelected((s) => ({ ...s, [id]: !s[id] }));
+      if (!adding) return;
+      noteAdded(1);
+      // The first add opens the rail if it is shut: a click that fills something
+      // out of sight reads as a click that did nothing.
+      if (selectedEligible.length === 0) setRightCollapsed(false);
     },
-    [byId, isEligible, focusTask],
+    [byId, isEligible, focusTask, selected, selectedEligible.length, noteAdded],
   );
+
+  /** Put `id` in — known not to be in already, so this never reads `selected`,
+   *  which is stale on the far side of a repo switch. `first` opens the rail,
+   *  the way the first add through `toggle` does. */
+  const add = useCallback(
+    (id: string, first: boolean) => {
+      focusTask(id);
+      setSelected((s) => ({ ...s, [id]: true }));
+      noteAdded(1);
+      if (first) setRightCollapsed(false);
+    },
+    [focusTask, noteAdded],
+  );
+
+  // An add waiting on a repo switch (see `enqueueIn`).
+  const [parkedAdd, setParkedAdd] = useState<{ repo: string; id: string } | null>(null);
+
+  const enqueueIn = useCallback(
+    (repo: string, id: string) => {
+      if (repo !== activeRepo) {
+        setActiveRepo(repo);
+        setParkedAdd({ repo, id });
+        return;
+      }
+      const task = byId.get(id);
+      if (!task || !isEligible(task) || selected[id]) return;
+      add(id, selectedEligible.length === 0);
+    },
+    [activeRepo, setActiveRepo, byId, isEligible, selected, selectedEligible.length, add],
+  );
+
+  // The parked add lands once the new repo's tasks have. Declared after the
+  // reset effect above, so in the commit where both fire the reset's empty
+  // selection is queued first and the add applies on top of it.
+  useEffect(() => {
+    if (!parkedAdd || parkedAdd.repo !== activeRepo) return;
+    const task = byId.get(parkedAdd.id);
+    if (!task) return;
+    setParkedAdd(null);
+    if (isEligible(task)) add(parkedAdd.id, true);
+  }, [parkedAdd, activeRepo, byId, isEligible, add]);
 
   // Start every queued ticket: jump to the Trees tab immediately and create a real
   // worktree per ticket *concurrently* in the background — never blocking the view
@@ -547,6 +641,7 @@ export function IssuesProvider({
   const startLaunch = useCallback(
     (targets: Task[], setup: boolean | null, stack: boolean) => {
       setSelected({});
+      setQueueAgents({});
       setPending(null);
       const projectOf = (task: Task) => (task.project === NO_PROJECT ? null : task.project);
       // A bulk launch suppresses the per-worktree toast and raises one summary once
@@ -566,7 +661,7 @@ export function IssuesProvider({
           id: task.id,
           title: task.title,
           project: projectOf(task),
-          agent: launchAgent,
+          agent: agentFor(task.id),
           // Nest the placeholder under its blocker right away, rather than leaving a
           // sub-task looking like a root until the worktree finishes creating.
           baseBranch: baseOf(task)?.branch,
@@ -584,7 +679,7 @@ export function IssuesProvider({
             launch: { type: "ticket", project: projectOf(task) },
             base: base?.branch ?? null,
             stackedOn: base?.ticket,
-            agent: launchAgent,
+            agent: agentFor(task.id),
             quiet: bulk,
           }).catch(() => {
             removePendingLaunch(task.id);
@@ -599,7 +694,7 @@ export function IssuesProvider({
       });
     },
     [
-      launchAgent,
+      agentFor,
       planSetup,
       createWorktree,
       stackOn,
@@ -629,7 +724,7 @@ export function IssuesProvider({
           id: task.id,
           title: task.title,
           project,
-          agent: launchAgent,
+          agent: agentFor(task.id),
           baseBranch: base?.branch,
         },
       ]);
@@ -640,7 +735,7 @@ export function IssuesProvider({
         launch: { type: "ticket", project },
         base: base?.branch ?? null,
         stackedOn: base?.ticket,
-        agent: launchAgent,
+        agent: agentFor(id),
         quiet,
       }).catch(() => {
         removePendingLaunch(task.id);
@@ -650,7 +745,7 @@ export function IssuesProvider({
     [
       byId,
       isEligible,
-      launchAgent,
+      agentFor,
       addPendingLaunches,
       removePendingLaunch,
       clearBackgroundLaunch,
@@ -732,20 +827,34 @@ export function IssuesProvider({
     [setActionableOnly, actionableOnly],
   );
   const toggleRightPanel = useCallback(() => setRightCollapsed((v) => !v), []);
-  const clearSelection = useCallback(() => setSelected({}), []);
+  const clearSelection = useCallback(() => {
+    setSelected({});
+    setQueueAgents({});
+  }, []);
   // Select every ready (launchable) ticket; if they're all already selected,
-  // clear them instead, so the button toggles.
+  // clear them instead, so the button toggles. A fill shows what it filled: the
+  // rail opens on the queue.
   const selectReady = useCallback(() => {
     const readyIds = tasks.filter((t) => t.ready && isEligible(t)).map((t) => t.id);
     if (readyIds.length === 0) return;
+    const allSelected = readyIds.every((id) => selected[id]);
     setSelected((s) => {
-      const allSelected = readyIds.every((id) => s[id]);
       const next = { ...s };
       for (const id of readyIds) next[id] = !allSelected;
       return next;
     });
-  }, [tasks, isEligible]);
-  const setLaunchAgent = useCallback((agent: AgentKind) => setAgentOverride(agent), []);
+    if (allSelected) return;
+    noteAdded(readyIds.filter((id) => !selected[id]).length);
+    setRightCollapsed(false);
+    setRailTab("queue");
+  }, [tasks, isEligible, selected, noteAdded]);
+  const setQueueAgent = useCallback((id: string, agent: AgentKind | null) => {
+    setQueueAgents((m) => {
+      if (agent !== null) return { ...m, [id]: agent };
+      const { [id]: _dropped, ...rest } = m;
+      return rest;
+    });
+  }, []);
   const toggleProjectFocus = useCallback(
     (project: string) => setFocusProject((p) => (p === project ? null : project)),
     [],
@@ -763,6 +872,10 @@ export function IssuesProvider({
       focusId,
       focusProject,
       launchAgent,
+      queueAgents,
+      agentFor,
+      railTab,
+      queueBurst,
       actionableOnly,
       reveal,
       projectReveal,
@@ -772,6 +885,7 @@ export function IssuesProvider({
       isEligible,
       selectedEligible,
       toggle,
+      enqueueIn,
       goToWorktree,
       setFocus: focusTask,
       revealInGraph,
@@ -781,7 +895,8 @@ export function IssuesProvider({
       setRightWidth,
       clearSelection,
       selectReady,
-      setLaunchAgent,
+      setQueueAgent,
+      setRailTab,
       toggleProjectFocus,
       launch,
       queueEnabled,
@@ -799,6 +914,10 @@ export function IssuesProvider({
       focusId,
       focusProject,
       launchAgent,
+      queueAgents,
+      agentFor,
+      railTab,
+      queueBurst,
       actionableOnly,
       reveal,
       projectReveal,
@@ -808,6 +927,7 @@ export function IssuesProvider({
       isEligible,
       selectedEligible,
       toggle,
+      enqueueIn,
       goToWorktree,
       focusTask,
       revealInGraph,
@@ -816,7 +936,7 @@ export function IssuesProvider({
       toggleRightPanel,
       clearSelection,
       selectReady,
-      setLaunchAgent,
+      setQueueAgent,
       toggleProjectFocus,
       launch,
       queueEnabled,

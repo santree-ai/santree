@@ -8,10 +8,11 @@ import {
   useLinearOrgs,
   useResolvedBoolSetting,
   useSetSetting,
+  WORK_DEFAULT_REPO_KEY,
   WORK_MOVE_IN_PROGRESS_KEY,
 } from "../../../lib/queries";
 import { Heading, ToggleRow } from "../widgets";
-import { WorkActionConfig } from "./Actions";
+import { DefaultProjectField, WorkActionConfig } from "./Actions";
 import { WorktreeSettings } from "./Trees";
 
 /** Toggle that moves the Linear issue to its started state when a worktree is
@@ -62,6 +63,14 @@ export function WorkSection({ repo, forRepo }: { repo: string; forRepo: boolean 
           a fragment of cards, which flatten in here as siblings — so the gap is
           uniform across all of them (App scope shows the defaults; repo the override). */}
       <div className="space-y-5">
+        {/* App-wide, like Triage's: which project a ticket starts in is not a
+            question one project can answer for the others. */}
+        {!forRepo && (
+          <DefaultProjectField
+            settingKey={WORK_DEFAULT_REPO_KEY}
+            hint="Where a ticket that more than one of your projects carries is started and queued. Unset, the first such start asks and offers to remember the answer here. A ticket only one project carries never asks."
+          />
+        )}
         <WorkActionConfig repo={scopeRepo} />
         <TrackingCard forRepo={scopeRepo} />
         <WorktreeSettings repo={repo} forRepo={scopeRepo} />

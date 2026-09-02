@@ -8,7 +8,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { useApp, useAppUi } from "../state/AppContext";
+import { useAppUi } from "../state/AppContext";
 import { SearchIcon } from "./icons";
 import { useModalA11y } from "./primitives";
 
@@ -23,9 +23,10 @@ interface Section {
 }
 
 /** Build the section list; the numbers follow the sidebar's destinations, top to
- *  bottom, so they match what's on screen (see `SidebarNav`). */
-function buildSections(triageEnabled: boolean): Section[] {
-  const tabLabels = [...(triageEnabled ? ["Triage"] : []), "Tickets", "Reviews"];
+ *  bottom, so they match what's on screen (see `SidebarNav`). Reviews and Triage
+ *  are sections of the tree, not destinations, so neither has a number. */
+function buildSections(): Section[] {
+  const tabLabels = ["Tickets"];
   return [
     {
       title: "General",
@@ -35,9 +36,6 @@ function buildSections(triageEnabled: boolean): Section[] {
         { label: "Settings", keys: ["⌘", ","] },
         { label: "Toggle sidebar", keys: ["⌘", "B"] },
         { label: "Refresh Linear and GitHub data", keys: ["⌘", "⇧", "R"] },
-        { label: "Bigger text", keys: ["⌘", "+"] },
-        { label: "Smaller text", keys: ["⌘", "−"] },
-        { label: "Reset text size", keys: ["⌘", "0"] },
         { label: "Leave Settings", keys: ["Esc"] },
       ],
     },
@@ -87,7 +85,6 @@ export function Kbd({ token }: { token: string }) {
 }
 
 export function ShortcutsOverlay() {
-  const { triageEnabled } = useApp();
   const { shortcutsOpen, setShortcutsOpen } = useAppUi();
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -109,13 +106,13 @@ export function ShortcutsOverlay() {
   });
 
   const sections = useMemo(() => {
-    const all = buildSections(triageEnabled);
+    const all = buildSections();
     const q = query.trim().toLowerCase();
     if (!q) return all;
     return all
       .map((s) => ({ ...s, items: s.items.filter((i) => i.label.toLowerCase().includes(q)) }))
       .filter((s) => s.items.length > 0);
-  }, [triageEnabled, query]);
+  }, [query]);
 
   if (!shortcutsOpen) return null;
 

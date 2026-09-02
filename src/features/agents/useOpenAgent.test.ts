@@ -28,13 +28,18 @@ vi.mock("../../state/AppContext", () => ({
   }),
 }));
 
+import type { AgentKind } from "../../bindings";
 import { parseTermKey } from "./registry";
 import { useOpenAgent } from "./useOpenAgent";
 
-function open(termKey: string, repo: string | null = "acme/app") {
+function open(
+  termKey: string,
+  repo: string | null = "acme/app",
+  agentKind: AgentKind | null = null,
+) {
   vi.clearAllMocks();
   const { result } = renderHook(() => useOpenAgent());
-  result.current({ repo, origin: parseTermKey(termKey) });
+  result.current({ repo, origin: parseTermKey(termKey), agentKind });
 }
 
 describe("useOpenAgent", () => {
@@ -70,11 +75,21 @@ describe("useOpenAgent", () => {
     expect(spies.setActiveRepo).not.toHaveBeenCalled();
   });
 
-  it("routes a triage session to triage", () => {
-    open("triage:AK-9");
-    expect(spies.requestTriageFocus).toHaveBeenCalledWith("AK-9");
-    expect(spies.navigate).toHaveBeenCalledWith({ to: "/triage" });
+  /** The ticket rides in the route (so the sidebar's row lights on arrival) and
+   *  the focus request names only the tab — the provider whose investigation
+   *  this session is. */
+  it("routes a triage session to its ticket's workspace, on the provider's tab", () => {
+    open("triage:AK-9", "acme/app", "Codex");
+    expect(spies.requestTriageFocus).toHaveBeenCalledWith("AK-9", "Codex");
+    expect(spies.navigate).toHaveBeenCalledWith({ to: "/triage", search: { ticket: "AK-9" } });
     expect(spies.requestTreeFocus).not.toHaveBeenCalled();
+  });
+
+  /** A session santree cannot attribute to a provider still opens its ticket —
+   *  on the Linear tab, rather than on a guessed agent's. */
+  it("names no agent tab for a triage session whose provider is unknown", () => {
+    open("triage:AK-9", "acme/app", null);
+    expect(spies.requestTriageFocus).toHaveBeenCalledWith("AK-9", undefined);
   });
 
   /** A session santree can't attribute to a surface must go nowhere at all,

@@ -22,12 +22,13 @@ use santree_core::{
         ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
         EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget, GithubStatus, LegacyCliMigration,
         LinearApiBudget, LinearOrg, LinearStatus, MergeQueueView, NewInlineComment, NewPr,
-        NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview, Repo,
-        RepoBranch, ResourceUsage, ReviewBrief, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
-        ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail,
-        SessionState, SessionSubagent, SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task,
-        TicketRef, TriageDetail, TriageSchedule, TriageSession, TriageTicket, UsageReport,
-        ViewedMarks, Worktree, WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
+        NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview,
+        PromptWorkItemSample, Repo, RepoBranch, ResourceUsage, ReviewBrief, ReviewCheckout,
+        ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr, ReviewPublishOutcome, ReviewTarget,
+        ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail, SessionState, SessionSubagent,
+        SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail,
+        TriageSchedule, TriageSession, TriageTicket, UsageReport, ViewedMarks, Worktree,
+        WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
     },
 };
 
@@ -778,7 +779,7 @@ pub async fn agent_session(
     // "santree derives its own paths"). Claude's frontend still passes
     // `--mcp-config` from the launch hand-off, so this is Codex-only.
     let review_mcp_config = match (agent, &context.review_pr) {
-        (AgentKind::Codex, Some(pr)) => Some(review_mcp_config(&app, pr)?),
+        (AgentKind::Codex, Some(pr)) => review_mcp_config(&app, pr)?,
         _ => None,
     };
     let (model_key, effort_key) = surface.setting_keys();
@@ -817,37 +818,65 @@ pub async fn agent_session(
 ///
 /// A path never crosses IPC for this: the webview may say *which* PR a review
 /// belongs to, and `session_context` checks that claim against the registered
-/// origin or the persisted tab, but the file is santree's answer to it. An `Err`
-/// stops the launch — a Codex review runs `--ask-for-approval never`, so a tool
-/// it cannot reach is rejected silently rather than prompted for, and a review
-/// with no way to record a finding must fail loudly instead.
+/// origin or the persisted tab, but the file is santree's answer to it.
+///
+/// **A file that simply isn't there is `Ok(None)`, not an error.** It used to
+/// stop the launch, on the argument that a review with no way to record a
+/// finding should fail loudly — but `review_ai::resolve_tab_launch` already
+/// warns and resumes without the tools when the same file is gone, so the two
+/// disagreed and the disagreement is what a user hit: the review tab drew, its
+/// launch line warned, and then starting the session died with a red toast and
+/// no way forward. Reported 2026-09-02, with the warning in the log to prove
+/// both halves ran. One rule now, and it is the lenient one — the conversation
+/// comes back, minus the draft tools.
+///
+/// Everything that would make the path *wrong* rather than absent is still an
+/// `Err`: an underivable stem, a symlink, a non-file, or a file that canonicalizes
+/// outside santree's own `mcp` directory. Those say something has been tampered
+/// with, which is not the same as something having been cleaned up.
 fn review_mcp_config(
     app: &AppHandle,
     (owner, name, number): &(String, String, u32),
-) -> Result<std::path::PathBuf, String> {
+) -> Result<Option<std::path::PathBuf>, String> {
     let stem = crate::hooks::mcp_stem(owner, name, *number).map_err(|error| error.to_string())?;
-    let expected_dir = app
+    let dir = app
         .path()
         .app_data_dir()
         .map_err(|_| "app data directory is unavailable".to_string())?
         .join("mcp");
-    let path = expected_dir.join(stem);
-    let missing = || {
-        format!(
-            "santree's review tools for {owner}/{name}#{number} are no longer on disk. \
-             Start the review again from the pull request."
-        )
+    let found = resolve_review_mcp_config(&dir, &stem)?;
+    if found.is_none() {
+        log::warn!(
+            "review session for {owner}/{name}#{number}: {} is gone, so it starts without \
+             santree's review tools",
+            dir.join(&stem).display()
+        );
+    }
+    Ok(found)
+}
+
+/// [`review_mcp_config`]'s decision, split from the `AppHandle` that answers
+/// "where is app data" — the same seam `hooks::resolve_tab_launch` is split
+/// along, and for the same reason: the rule is worth a test and the handle is
+/// not available to one.
+fn resolve_review_mcp_config(
+    dir: &std::path::Path,
+    stem: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let path = dir.join(stem);
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return Ok(None);
     };
-    let metadata = std::fs::symlink_metadata(&path).map_err(|_| missing())?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err("review configuration must be an app-owned file".into());
     }
-    let expected_dir = std::fs::canonicalize(expected_dir).map_err(|_| missing())?;
-    let actual = std::fs::canonicalize(path).map_err(|_| missing())?;
-    if actual.parent() != Some(expected_dir.as_path()) {
+    let (Ok(dir), Ok(actual)) = (std::fs::canonicalize(dir), std::fs::canonicalize(&path)) else {
+        return Ok(None);
+    };
+    if actual.parent() != Some(dir.as_path()) {
         return Err("review configuration is outside santree's app data".into());
     }
-    Ok(actual)
+    Ok(Some(actual))
 }
 
 /// The registered local path of the repo a session is being launched for. Every
@@ -1020,41 +1049,24 @@ async fn validate_agent_cwd(
         // PR's repo, which need not be the active one — the same resolution that
         // created it. Still santree's own answer, never the webview's: an
         // unregistered repo has no root here and the launch is refused.
-        let (root, owner, name) =
-            crate::reviews::repo_for_pr(db, repo, &format!("{requested_owner}/{requested_name}"))
-                .await
-                .map_err(|_| "registered repository origin is unavailable".to_string())?
-                .ok_or_else(|| {
-                    "review terminal repository is not a registered checkout".to_string()
-                })?;
-        let repo_root = std::fs::canonicalize(&root)
-            .map_err(|_| "registered repository path is unavailable".to_string())?;
-        let repo_root = repo_root.as_path();
-        let santree_dir = repo_root.join(".santree");
-        let reviews_dir = santree_dir.join(crate::reviews::REVIEWS_DIR);
-        let dir = crate::reviews::review_dir_name(&owner, &name, number)
+        let found = crate::reviews::project_for_pr(
+            db,
+            repo,
+            &format!("{requested_owner}/{requested_name}"),
+        )
+        .await
+        .map_err(|_| "registered repository origin is unavailable".to_string())?
+        .ok_or_else(|| "review terminal repository is not a registered checkout".to_string())?;
+        // The PR's worktree is an ordinary one now, so its cwd is checked the way
+        // every other worktree's is: against the path santree itself recorded,
+        // under the id santree itself derives from the PR. The old branch built a
+        // path out of `.santree/reviews/` and vetted it component by component;
+        // there is no second directory tree to vet any more, and the stored path
+        // is the stronger claim — it is what `worktree::create` actually made.
+        let id = crate::reviews::review_worktree_id(&found.owner, &found.name, number)
             .map_err(|error| error.to_string())?;
-        let expected = reviews_dir.join(dir);
-        for path in [&santree_dir, &reviews_dir, &expected] {
-            let metadata = std::fs::symlink_metadata(path)
-                .map_err(|_| "review checkout is not available".to_string())?;
-            if metadata.file_type().is_symlink() {
-                return Err("review checkout path cannot contain symlinks".into());
-            }
-        }
-        let reviews_dir = std::fs::canonicalize(&reviews_dir)
-            .map_err(|_| "review checkout is not available".to_string())?;
-        if !reviews_dir.starts_with(repo_root) {
-            return Err("review checkout directory escapes the repository".into());
-        }
-        let expected = std::fs::canonicalize(&expected)
-            .map_err(|_| "review checkout is not available".to_string())?;
-        let git = expected.join(".git");
-        let git_is_file =
-            std::fs::symlink_metadata(&git).is_ok_and(|metadata| metadata.file_type().is_file());
-        return (expected.parent() == Some(reviews_dir.as_path())
-            && cwd == expected
-            && git_is_file)
+        return stored_worktree_cwd(db, &found.root, &id, cwd)
+            .await?
             .then_some(())
             .ok_or_else(|| "review session cwd does not match the requested pull request".into());
     }
@@ -1070,19 +1082,34 @@ async fn validate_agent_cwd(
             .then_some(())
             .ok_or_else(|| "terminal cwd is not the repository root".into());
     }
+    stored_worktree_cwd(db, repo_db_path, issue_id, cwd)
+        .await?
+        .then_some(())
+        .ok_or_else(|| "terminal cwd is not the registered worktree".into())
+}
+
+/// Whether `cwd` is the worktree santree recorded for `(repo_path, issue_id)`.
+///
+/// The comparison is against the *stored* path, canonicalized — never against a
+/// path assembled from parts here, and never against one the webview sent. A row
+/// that is missing, or a directory that is gone, answers `false`.
+async fn stored_worktree_cwd(
+    db: &Db,
+    repo_path: &str,
+    issue_id: &str,
+    cwd: &std::path::Path,
+) -> Result<bool, String> {
     let stored: Option<String> = sqlx::query_scalar(
         "SELECT worktree_path FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
     )
-    .bind(repo_db_path)
+    .bind(repo_path)
     .bind(issue_id)
     .fetch_optional(db)
     .await
     .map_err(|error| error.to_string())?;
-    stored
+    Ok(stored
         .and_then(|path| std::fs::canonicalize(path).ok())
-        .is_some_and(|path| path == cwd)
-        .then_some(())
-        .ok_or_else(|| "terminal cwd is not the registered worktree".into())
+        .is_some_and(|path| path == cwd))
 }
 
 /// Stored Triage surfaces and their sticky providers. Drives resume affordances
@@ -1236,13 +1263,17 @@ pub async fn worktree_prs(repo: String, db: State<'_, Db>) -> CmdResult<Vec<Work
     Ok(pr::statuses(&db, &repo).await?)
 }
 
-/// The Reviews dashboard inbox for the org the active `repo` belongs to: the
-/// viewer's open PRs, PRs individually requesting their review, and one section
-/// per team that has open requests. Empty when `gh` isn't authenticated.
+/// The Reviews dashboard inbox across every registered project: the viewer's open
+/// PRs, PRs individually requesting their review, and one section per team that
+/// has open requests. Empty when `gh` isn't authenticated.
+///
+/// Takes no repo — the inbox spans the whole registry, so scoping it to the
+/// selected project is what made an empty answer routinely mean "you're looking
+/// at the wrong one".
 #[tauri::command]
 #[specta::specta]
-pub async fn reviews(repo: String, db: State<'_, Db>) -> CmdResult<ReviewInbox> {
-    Ok(reviews::inbox(&db, &repo).await?)
+pub async fn reviews(db: State<'_, Db>) -> CmdResult<ReviewInbox> {
+    Ok(reviews::inbox(&db).await?)
 }
 
 /// Resolve Linear identifiers to `(project, title)` so the Reviews sidebar can
@@ -1274,6 +1305,22 @@ pub async fn review_workspace(
     Ok(reviews::review_workspace(&db, &repo, &target).await?)
 }
 
+/// The AI review's checkout of a PR, when one exists — what the Reviews rail's
+/// Files / Changes / Session-history panes read for a pull request that has no
+/// worktree of its own. `None` before any review has run for it, or once its
+/// checkout has been pruned. Never creates one: that is [`review_workspace`],
+/// which is also how a stale checkout is moved to the PR's current head.
+#[tauri::command]
+#[specta::specta]
+pub async fn review_checkout(
+    repo: String,
+    pr_repo: String,
+    number: u32,
+    db: State<'_, Db>,
+) -> CmdResult<Option<ReviewCheckout>> {
+    Ok(reviews::review_checkout(&db, &repo, &pr_repo, number).await?)
+}
+
 /// Delete a PR's review checkout. Idempotent. `pr_repo` names the checkout to
 /// delete, because it may live under a registered repo other than the active one
 /// — the same resolution `review_workspace` created it through.
@@ -1286,6 +1333,81 @@ pub async fn remove_review_workspace(
     db: State<'_, Db>,
 ) -> CmdResult<()> {
     Ok(reviews::remove_review_workspace(&db, &repo, &pr_repo, number).await?)
+}
+
+/// Close one provider's AI review on a pull request.
+///
+/// The tab is the session, so closing it forgets the stored conversation — the
+/// strip would otherwise put the tab straight back on the next launch, from the
+/// row that outlived it. What the review *wrote* is untouched: its drafts and
+/// brief live in santree's own tables, and the transcript stays on disk where
+/// Session history reads it, so the same review reopens from there.
+///
+/// The term key is derived here from `(pr_repo, number)` rather than accepted
+/// whole: a key that crossed the bridge could name any surface's row, and the
+/// only one this command may reach is the AI review of the PR it was told about.
+#[tauri::command]
+#[specta::specta]
+pub async fn close_review_session(
+    repo: String,
+    pr_repo: String,
+    number: u32,
+    agent: AgentKind,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    let (owner, name) = github::split_slug(&pr_repo).map_err(|e| e.to_string())?;
+    if !crate::repo::valid_github_component(owner) || !crate::repo::valid_github_component(name) {
+        return Err("invalid review repository identity".into());
+    }
+    let term_key = format!("ai-review:{owner}/{name}#{number}");
+    Ok(session::forget_provider(&db, &repo, &term_key, agent).await?)
+}
+
+/// Close one provider's investigation of a triage ticket.
+///
+/// The tab is the session, so closing it forgets the stored conversation — the
+/// strip would otherwise put the tab straight back from the row that outlived
+/// it. The transcript stays on disk where Session history reads it.
+///
+/// That row is also what `session::started_investigations` lists (every
+/// `terminal_sessions` row keyed `triage:…`), so forgetting it drops the
+/// ticket's started investigation for this provider in the same stroke; the
+/// other providers' rows on the ticket are untouched.
+///
+/// The term key is derived here from the ticket id rather than accepted whole:
+/// a key that crossed the bridge could name any surface's row. The id passes
+/// the same gate `investigate_prompt`'s path applies before it is used.
+#[tauri::command]
+#[specta::specta]
+pub async fn close_investigation_session(
+    repo: String,
+    ticket_id: String,
+    agent: AgentKind,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    worktree::validate_issue_id(&ticket_id).map_err(|e| e.to_string())?;
+    let term_key = format!("triage:{ticket_id}");
+    // The id gate is a path gate; this keeps the key itself to the charset every
+    // other term-key surface in this file accepts.
+    validate_term_key(&term_key)?;
+    Ok(session::forget_provider(&db, &repo, &term_key, agent).await?)
+}
+
+/// Keep a PR's checkout as an ordinary worktree — it stops being filtered out of
+/// Trees and becomes work the user started.
+///
+/// The identity is a `(repo, pr_repo, number)` triple, never a path or an id: the
+/// worktree it names is derived here exactly as `review_workspace` derived it, so
+/// the webview cannot ask for a different row to be unhidden.
+#[tauri::command]
+#[specta::specta]
+pub async fn promote_review_worktree(
+    repo: String,
+    pr_repo: String,
+    number: u32,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(reviews::promote_review_worktree(&db, &repo, &pr_repo, number).await?)
 }
 
 /// The cached AI review brief for a PR (summary, reading order, watch-outs), or
@@ -1917,17 +2039,19 @@ pub async fn triage_set_state(
     Ok(())
 }
 
-/// Update a triage issue's canonical Linear manual rank. The sink verifies the
-/// issue still belongs to this repo's triage scope before sending the mutation.
+/// Snooze a triage issue until `until_ms` (epoch ms), or wake it with `None` —
+/// the sidebar row's right-click menu. `ticket_id` is used only as a GraphQL
+/// variable (never as a path or git arg). Requires a connected, write-scoped
+/// Linear org; errors when no org is connected.
 #[tauri::command]
 #[specta::specta]
-pub async fn triage_set_sort_order(
+pub async fn triage_snooze(
     repo: String,
     ticket_id: String,
-    sort_order: f64,
+    until_ms: Option<f64>,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
-    linear::set_issue_sort_order(&db, &repo, &ticket_id, sort_order)
+    linear::snooze_issue(&db, &repo, &ticket_id, until_ms.map(|ms| ms as i64))
         .await?
         .ok_or("no Linear org connected")?;
     Ok(())
@@ -2427,9 +2551,10 @@ pub async fn preview_prompt(
     content: String,
     repo: Option<String>,
     detail: Option<TriageDetail>,
+    work_items: Option<Vec<PromptWorkItemSample>>,
     db: State<'_, Db>,
 ) -> CmdResult<PromptPreview> {
-    Ok(crate::prompts::preview(&db, &name, &content, repo.as_deref(), detail).await?)
+    Ok(crate::prompts::preview(&db, &name, &content, repo.as_deref(), detail, work_items).await?)
 }
 
 /// Create a user-defined shared block (a reusable partial any prompt can
@@ -2603,6 +2728,66 @@ mod tests {
         }
     }
 
+    /// A scratch `mcp` directory, named for the case that owns it.
+    fn mcp_dir(case: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("santree-mcp-{case}"))
+            .join("mcp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /**
+    Reported 2026-09-02: a review tab drew fine and then died on start with
+    "santree's review tools … are no longer on disk", leaving a red toast and an
+    empty view. Two paths disagreed about the same missing file —
+    `review_ai::resolve_tab_launch` warns and resumes without the tools, this one
+    refused outright — so which answer you got depended on which half ran.
+
+    They agree now, on the lenient one: an absent file means the session starts
+    without the draft tools, never that it can't start.
+    */
+    #[test]
+    fn a_missing_review_config_starts_the_session_without_its_tools() {
+        let dir = mcp_dir("missing");
+        assert_eq!(
+            resolve_review_mcp_config(&dir, "review-abc.mcp.json"),
+            Ok(None)
+        );
+        // And a directory that was never written at all reads the same way.
+        assert_eq!(
+            resolve_review_mcp_config(&dir.join("never-written"), "review-abc.mcp.json"),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_review_config_that_is_there_is_used() {
+        let dir = mcp_dir("present");
+        let path = dir.join("review-abc.mcp.json");
+        std::fs::write(&path, "{}").unwrap();
+        assert_eq!(
+            resolve_review_mcp_config(&dir, "review-abc.mcp.json"),
+            Ok(Some(std::fs::canonicalize(&path).unwrap()))
+        );
+    }
+
+    /// Absent is not the same as tampered with. A symlink where an app-owned file
+    /// belongs points santree's own review tools at something it didn't write, so
+    /// it stays an error — the leniency above is only for a file that is gone.
+    #[test]
+    fn a_review_config_that_is_not_an_app_owned_file_is_still_refused() {
+        let dir = mcp_dir("tampered");
+        let target = dir.join("elsewhere.json");
+        std::fs::write(&target, "{}").unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("review-abc.mcp.json")).unwrap();
+        assert!(resolve_review_mcp_config(&dir, "review-abc.mcp.json").is_err());
+
+        std::fs::create_dir_all(dir.join("review-dir.mcp.json")).unwrap();
+        assert!(resolve_review_mcp_config(&dir, "review-dir.mcp.json").is_err());
+    }
+
     #[tokio::test]
     async fn session_context_scopes_tabs_and_uses_persisted_provider() {
         let (base, db) = test_db("session-context").await;
@@ -2706,13 +2891,25 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    /// A review session's cwd is checked exactly as every other worktree's is:
+    /// against the path santree itself recorded, under the id santree itself
+    /// derives from the PR the term key names. Nothing here is assembled from
+    /// what the webview sent.
+    ///
+    /// This replaces a stricter, path-shaped check (no symlinked component,
+    /// `.git` is a file) that existed because the old `.santree/reviews/`
+    /// location was *derived* at validation time rather than stored. It is now a
+    /// real worktree with a recorded path, so it gets the recorded-path check —
+    /// the same trust boundary `tree:` keys have always had.
     #[tokio::test]
-    async fn review_cwd_rejects_a_symlinked_checkout() {
-        let (base, db) = test_db("review-symlink").await;
+    async fn review_cwd_must_be_the_worktree_recorded_for_that_pull_request() {
+        let (base, db) = test_db("review-recorded-cwd").await;
         let repo = base.join("repo");
-        let reviews = repo.join(".santree/reviews");
+        let id = crate::reviews::review_worktree_id("acme", "project", 1).unwrap();
+        let checkout = repo.join(".santree/worktrees").join(&id);
         let outside = base.join("outside");
-        std::fs::create_dir_all(&reviews).unwrap();
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
         register_repo(
             &db,
             "registered",
@@ -2720,45 +2917,59 @@ mod tests {
             "https://github.com/acme/project.git",
         )
         .await;
-        std::fs::create_dir(&outside).unwrap();
-        std::fs::write(outside.join(".git"), "gitdir: elsewhere").unwrap();
-        std::os::unix::fs::symlink(
-            &outside,
-            reviews.join(crate::reviews::review_dir_name("acme", "project", 1).unwrap()),
+        sqlx::query(
+            "INSERT INTO worktree_links (repo_path, issue_id, branch, worktree_path, base_branch)
+             VALUES (?, ?, 'user/pr', ?, 'main')",
         )
+        .bind(repo.to_str().unwrap())
+        .bind(&id)
+        .bind(checkout.to_str().unwrap())
+        .execute(&db)
+        .await
         .unwrap();
-        let cwd = std::fs::canonicalize(&outside).unwrap();
         let repo_root = std::fs::canonicalize(&repo).unwrap();
 
-        let result = validate_agent_cwd(
-            &db,
-            "registered",
-            "review:acme/project#1",
-            &cwd,
-            &repo_root,
-            repo.to_str().unwrap(),
-        )
-        .await;
-        assert!(result.is_err());
+        let check = |cwd: std::path::PathBuf| {
+            let (db, repo_root, repo) = (&db, repo_root.clone(), repo.clone());
+            async move {
+                validate_agent_cwd(
+                    db,
+                    "registered",
+                    "ai-review:acme/project#1",
+                    &cwd,
+                    &repo_root,
+                    repo.to_str().unwrap(),
+                )
+                .await
+            }
+        };
+        assert!(check(std::fs::canonicalize(&checkout).unwrap())
+            .await
+            .is_ok());
+        assert!(check(std::fs::canonicalize(&outside).unwrap())
+            .await
+            .is_err());
+        assert!(check(repo_root.clone()).await.is_err());
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    /// `a-b/c` and `a/b-c` join to the same string without the length prefix, and
+    /// the ids are what a PR's checkout is addressed by — so one PR's session must
+    /// never validate against the other's worktree.
     #[tokio::test]
     async fn review_cwd_rejects_a_delimiter_collision_with_the_registered_origin() {
         let (base, db) = test_db("review-origin-collision").await;
         let repo = base.join("repo");
-        let checkout = repo
-            .join(".santree/reviews")
-            .join(crate::reviews::review_dir_name("a-b", "c", 7).unwrap());
+        let id = crate::reviews::review_worktree_id("a-b", "c", 7).unwrap();
+        let checkout = repo.join(".santree/worktrees").join(&id);
         std::fs::create_dir_all(&checkout).unwrap();
         register_repo(&db, "registered", &repo, "https://github.com/a-b/c.git").await;
-        std::fs::write(checkout.join(".git"), "gitdir: elsewhere").unwrap();
         let cwd = std::fs::canonicalize(&checkout).unwrap();
         let repo_root = std::fs::canonicalize(&repo).unwrap();
 
         assert_ne!(
-            crate::reviews::review_dir_name("a-b", "c", 7).unwrap(),
-            crate::reviews::review_dir_name("a", "b-c", 7).unwrap()
+            crate::reviews::review_worktree_id("a-b", "c", 7).unwrap(),
+            crate::reviews::review_worktree_id("a", "b-c", 7).unwrap()
         );
         let result = validate_agent_cwd(
             &db,
@@ -2771,8 +2982,8 @@ mod tests {
         .await;
         // `a/b-c` is a real slug that simply isn't in the registry, so that is what
         // it is refused as. Were it registered, it would resolve to *its own* root
-        // and its own directory name — which is exactly what the assertion above
-        // says can never be `a-b/c`'s.
+        // and its own worktree id — which is exactly what the assertion above says
+        // can never be `a-b/c`'s.
         assert_eq!(
             result.unwrap_err(),
             "review terminal repository is not a registered checkout"

@@ -1,8 +1,8 @@
 /**
  * The "Pull request" tab body: a wide, scrollable column of per-file diffs — each
  * a collapsible card with a GitHub-style "Viewed" checkbox — with review comments
- * anchored inline. The PR description and conversation live in the full-height
- * {@link PrInfoPanel} rail beside the whole detail area, not here.
+ * anchored inline. The PR description and conversation are the
+ * {@link PrConversationPane} tab beside this one, not here.
  *
  * Comments are written here too: every diff line carries GitHub's `+` button, and
  * anything left as a draft is held in the viewer's pending review until the
@@ -23,6 +23,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PrFile, PrThread, ReviewDraft, ReviewPr } from "../../bindings";
 import { AgentIcon, ChevronDownIcon, MessageSquareIcon, WarningIcon } from "../../components/icons";
 import { EmptyState, Skeleton } from "../../components/primitives";
+import { BULK_TOGGLE_HINT, isBulkToggle } from "../../lib/disclosure";
 import {
   usePrDetail,
   usePrFileSource,
@@ -56,12 +57,9 @@ const NO_DRAFTS: ReviewDraft[] = [];
 
 export function PrReviewPane({
   pr,
-  santreeRepo,
   fileFocus = null,
 }: {
   pr: ReviewPr;
-  /** The santree repo, for the submit bar's cache invalidation. */
-  santreeRepo: string;
   /** A jump request from the review brief. Passed in rather than read from the
    *  model so this pane stays renderable on its own (as its tests do). */
   fileFocus?: FileFocus | null;
@@ -131,6 +129,23 @@ export function PrReviewPane({
     [setReviewed],
   );
 
+  // Whose chevron has been clicked, and to what. A card's default is its viewed
+  // mark; this is only the *overrides*, so a file that gets marked viewed later
+  // still folds on its own. Lifted out of the cards because ⌘-click has to reach
+  // all of them at once, which local state can't do (see `lib/disclosure`).
+  const [folded, setFolded] = useState<Record<string, boolean>>({});
+  // What a ⌘-click on any chevron reaches. Read at call time so `onFold` keeps
+  // one identity — the cards are memoized on it.
+  const filesRef = useRef(files);
+  filesRef.current = files;
+  const onFold = useCallback((path: string, next: boolean, bulk: boolean) => {
+    setFolded((current) => {
+      const out = { ...current, [path]: next };
+      if (bulk) for (const f of filesRef.current) out[f.path] = next;
+      return out;
+    });
+  }, []);
+
   // A jump from the review brief: scroll that file's card into view and force it
   // open, even if it's marked viewed. `nonce` (not the path) is the dependency, so
   // clicking the same entry twice re-scrolls instead of being a silent no-op.
@@ -151,11 +166,19 @@ export function PrReviewPane({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* The one pane that does NOT take the page's reading column. The others
+          hold prose, which is unreadable run wide; this is a file list and a
+          diff, which are unreadable run narrow — an 880px cap on a maximised
+          window left a third of it empty beside code that was wrapping and
+          scrolling sideways to fit.
+          Full-bleed, with no page inset either: every row is a raised band, so
+          any margin around the stack draws two vertical edges the file list
+          then reads as a framed card floating in the pane. The rows keep their
+          own padding, so it is only the bands that reach the edges — the same
+          way the rule under the tab strip is the page's and spans it. */}
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         {isLoading ? (
-          <div className="px-4 py-4">
-            <PaneSkeleton />
-          </div>
+          <FilesSkeleton />
         ) : files.length > 0 ? (
           <>
             <div className="flex items-center gap-2 border-b border-hairline px-4 py-2 font-mono text-[10.5px] text-muted-3">
@@ -199,7 +222,9 @@ export function PrReviewPane({
                 drafts={draftsByPath.get(f.path) ?? NO_DRAFTS}
                 target={target}
                 reviewed={isViewed(f)}
+                folded={folded[f.path]}
                 forceOpen={forcedOpen === f.path}
+                onFold={onFold}
                 onToggle={onToggle}
               />
             ))}
@@ -215,21 +240,46 @@ export function PrReviewPane({
           number={pr.number}
           reviewId={detail.pendingReviewId}
           drafts={drafts}
-          santreeRepo={santreeRepo}
         />
       )}
     </div>
   );
 }
 
-function PaneSkeleton() {
+/**
+ * The file list in the shape a file list arrives in: the viewed counter with its
+ * progress track, then collapsed file rows — status letter, path, diffstat, the
+ * Viewed toggle.
+ *
+ * It used to be four paragraph bars over a tall grey block, which is what a
+ * *document* looks like loading. This pane has never held one, so the page
+ * rearranged itself the instant the read landed. Full-bleed like the rows it
+ * stands in for, or the placeholder would sit in a column the real list does
+ * not have.
+ */
+const FILE_ROWS = ["w-72", "w-96", "w-64", "w-80", "w-56", "w-40"];
+
+function FilesSkeleton() {
   return (
-    <div className="space-y-2.5">
-      <Skeleton className="h-3.5 w-1/3" />
-      <Skeleton className="h-3 w-full" />
-      <Skeleton className="h-3 w-11/12" />
-      <Skeleton className="h-3 w-4/5" />
-      <Skeleton className="mt-4 h-24 w-full rounded-lg" />
+    <div aria-hidden>
+      <div className="flex items-center gap-2 border-b border-hairline px-4 py-2">
+        <Skeleton className="h-2.5 w-28" />
+        <Skeleton className="h-[3px] w-16 rounded-full" />
+      </div>
+      {FILE_ROWS.map((width) => (
+        <div
+          key={width}
+          className="flex items-center gap-2 border-b border-line-2 bg-raised px-3 py-2"
+        >
+          {/* Chevron, status letter, path — then the diffstat and Viewed, which
+              sit at the row's trailing edge whatever the path's length. */}
+          <Skeleton className="h-3 w-3 flex-none rounded-sm" />
+          <Skeleton className="h-2.5 w-1.5 flex-none" />
+          <Skeleton className={`h-3 ${width} min-w-0`} />
+          <Skeleton className="ml-auto h-2.5 w-12 flex-none" />
+          <Skeleton className="h-2.5 w-14 flex-none" />
+        </div>
+      ))}
     </div>
   );
 }
@@ -248,7 +298,9 @@ const PrFileCard = memo(function PrFileCard({
   drafts,
   target,
   reviewed,
+  folded,
   forceOpen,
+  onFold,
   onToggle,
 }: {
   owner: string;
@@ -260,19 +312,19 @@ const PrFileCard = memo(function PrFileCard({
   drafts: ReviewDraft[];
   target: CommentTarget;
   reviewed: boolean;
+  /** This card's chevron has been clicked, and to what — `undefined` while it is
+   *  still following the viewed mark. Held by the pane so ⌘-click can move every
+   *  card at once. */
+  folded: boolean | undefined;
   /** The review brief jumped here — open regardless of the viewed mark, since
    *  landing on a collapsed card would defeat the jump. */
   forceOpen: boolean;
+  onFold: (path: string, collapsed: boolean, bulk: boolean) => void;
   onToggle: (file: PrFile, reviewed: boolean) => void;
 }) {
-  // Collapse follows the reviewed mark, but the chevron can override it. The
-  // effect re-syncs only when `reviewed` actually flips (e.g. a new commit clears
-  // the mark → the file re-expands), not on manual chevron toggles.
-  const [collapsed, setCollapsed] = useState(reviewed);
-  useEffect(() => setCollapsed(reviewed), [reviewed]);
-  useEffect(() => {
-    if (forceOpen) setCollapsed(false);
-  }, [forceOpen]);
+  // Collapse follows the reviewed mark until the chevron says otherwise, and a
+  // jump from the brief beats both — landing on a collapsed card would defeat it.
+  const collapsed = forceOpen ? false : (folded ?? reviewed);
 
   // Full file source powers context expansion — fetched only once the card is
   // expanded (and only for a text file), so collapsed/binary files cost nothing.
@@ -297,8 +349,8 @@ const PrFileCard = memo(function PrFileCard({
       <div className="sticky top-0 z-[5] flex items-center gap-2 border-b border-line-2 bg-raised px-3 py-1.5">
         <button
           type="button"
-          onClick={() => setCollapsed((c) => !c)}
-          title={collapsed ? "Expand file" : "Collapse file"}
+          onClick={(e) => onFold(file.path, !collapsed, isBulkToggle(e))}
+          title={`${collapsed ? "Expand file" : "Collapse file"}\n${BULK_TOGGLE_HINT}`}
           className="flex-none cursor-pointer text-muted-3 hover:text-fg-2"
         >
           <ChevronDownIcon

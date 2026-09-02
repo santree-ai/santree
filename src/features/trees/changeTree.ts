@@ -144,3 +144,28 @@ export function windowRows<T>(rows: T[], limit: number): { shown: T[]; hidden: n
   if (rows.length <= limit) return { shown: rows, hidden: 0 };
   return { shown: rows.slice(0, limit), hidden: rows.length - limit };
 }
+
+/** Every directory at or under `path` — what a ⌘-click on that folder reaches.
+ *  The mirror of `AllFilesList`'s `subtreeDirs`, over this tree's node shape:
+ *  the changes browser folds by the same rule the file browser does. */
+export function changeSubtreeDirs(tree: ChangeTreeNode[], path: string): string[] {
+  const out: string[] = [];
+  const collect = (nodes: ChangeTreeNode[]) => {
+    for (const node of nodes) {
+      if (node.kind !== "dir") continue;
+      out.push(node.path);
+      collect(node.children);
+    }
+  };
+  const find = (nodes: ChangeTreeNode[]): ChangeTreeNode | null => {
+    for (const node of nodes) {
+      if (node.path === path) return node;
+      // Only descend the branch that can hold it — `a/b` lives under `a`.
+      if (node.kind === "dir" && path.startsWith(`${node.path}/`)) return find(node.children);
+    }
+    return null;
+  };
+  const root = find(tree);
+  if (root?.kind === "dir") collect(root.children);
+  return out;
+}

@@ -15,12 +15,24 @@
  */
 import type { ReviewBrief } from "../../bindings";
 
+/**
+ * Whether something recorded at commit `at` has been overtaken by the PR's head.
+ *
+ * The brief is one such thing; the local checkout the panes read is another — a
+ * detached review checkout sits at the head it was cut from, and the PR moves on
+ * without it. Same comparison, so it is written once: either half being unknown
+ * says nothing, and "unknown" must never read as "stale".
+ */
+function movedPast(at: string | null | undefined, headSha: string | null | undefined): boolean {
+  return !!at && !!headSha && at !== headSha;
+}
+
 export function reviewBriefStale(
   brief: ReviewBrief | null | undefined,
   headSha: string | null | undefined,
 ): boolean {
   // A missing brief is not stale, it is absent — "outdated" has to mean the
   // review ran and has since been overtaken, or the signal cries wolf on every
-  // PR nobody has reviewed yet. An unknown head says nothing either way.
-  return !!brief && !!headSha && brief.headSha !== headSha;
+  // PR nobody has reviewed yet.
+  return !!brief && movedPast(brief.headSha, headSha);
 }
