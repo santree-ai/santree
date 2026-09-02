@@ -9,31 +9,31 @@ const STEPS = [
   {
     n: "01",
     title: "Triage",
-    body: "Pull tickets from Linear and decide what an agent should take.",
+    body: "The queue sits in the sidebar with its SLA clock. Open a ticket, hand it to an agent.",
     color: "#4493f8",
   },
   {
     n: "02",
     title: "Branch",
-    body: "One click creates an isolated worktree. Your checkout stays clean.",
+    body: "Run creates an isolated worktree per ticket. Your checkout stays clean.",
     color: "#a78bfa",
   },
   {
     n: "03",
     title: "Steer",
-    body: "Codex or Claude Code works in an embedded terminal. Watch it. Interrupt it. Redirect it.",
+    body: "Codex or Claude Code works in a real terminal. Watch it, interrupt it, redirect it. The sidebar tells you when it needs you.",
     color: "#2dd4a7",
   },
   {
     n: "04",
     title: "Review",
-    body: "Read the diff with an AI companion that already read it too.",
+    body: "An AI review drafts the comments; the work queue turns checks and reviews into the next task.",
     color: "#d29922",
   },
   {
     n: "05",
     title: "Ship",
-    body: "Open the PR. The worktree merges back. Next ticket.",
+    body: "Open the PR from the worktree. Merge it. Delete the tree. Next ticket.",
     color: "#3fb950",
   },
 ];

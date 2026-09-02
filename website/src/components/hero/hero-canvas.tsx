@@ -23,23 +23,23 @@ const BODY = [158, 196, 182] as const;
 const HEAD = [96, 224, 183] as const;
 
 const STRINGS = [
-  "git worktree add .santree/worktrees/san-142",
-  "⏺ Read src/auth/refresh.ts",
-  "santree/san-142-oauth-refresh",
-  "+186 −44 · 4 files",
-  "SAN-138 webhook retries duplicate on 429",
-  "⏺ Edit src/session/restore.ts",
-  "pnpm test auth · 14 passed",
-  'git commit -m "serialize refresh"',
-  "SAN-151 idempotency keys for deliveries",
+  "git worktree add .santree/worktrees/QK-142",
+  "⏺ Read src/pond/DuckLayer.tsx",
+  "sam/qk-142-ducks-render-upside-down-in-safari",
+  "+54 −1 · 3 files",
+  "QK-138 migrate quack events to pond_v2",
+  "⏺ Update src/pond/geometry.ts",
+  "pnpm vitest run src/pond · 7 passed",
+  'git commit -m "fix(pond): keep westward ducks upright"',
+  "QK-151 dispenser returns 402 for premium crumbs",
   "gh pr create --fill",
-  '⏺ Grep "refresh_token" src/',
-  "santree/san-127-session-restore",
-  "✓ regression test for concurrent refresh",
-  "SAN-160 ship session hardening",
+  '⏺ Search "rotate" src/pond',
+  "sam/qk-127-pond-dashboard-dark-mode",
+  "✓ regression test for the westward case",
+  "QK-203 · SLA in 1h · investigating",
   "git rebase origin/main",
-  "codex · gpt-5.6 · 42% context",
-  "claude code · opus · waiting on you",
+  "codex · gpt-5.6 · running a subagent",
+  "claude code · opus 5 · waiting on you",
 ] as const;
 
 interface Particle {

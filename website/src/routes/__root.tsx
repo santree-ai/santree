@@ -13,7 +13,7 @@ const loadMotionFeatures = () => import("~/lib/motion-features").then((mod) => m
 const SITE_URL = "https://santree.toscanini.me";
 const TITLE = "santree: your backlog, shipped in parallel";
 const DESCRIPTION =
-  "A desktop app for running Codex and Claude Code across your repo's tickets. Each agent gets an isolated git worktree you can watch, steer, and merge.";
+  "A desktop app for running Codex and Claude Code across your repo's tickets. Each agent gets an isolated git worktree you can watch, steer, and merge, and one sidebar shows you every one of them.";
 
 export const Route = createRootRoute({
   head: () => ({

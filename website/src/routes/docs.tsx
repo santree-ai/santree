@@ -1,11 +1,11 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
-/** The docs: one prerendered page, Conductor-style — a sticky section rail
- * beside short, honest sections. Deliberately not deep: each section says
- * what a thing is, how to reach it, and the one or two facts you'd
- * otherwise have to discover. Depth stays in the app (⌘/ lists every
- * shortcut; Settings explains itself) and in the repo for contributors. */
+/** The docs: one prerendered page, a sticky section rail beside short, honest
+ * sections. Deliberately not deep: each section says what a thing is, how to
+ * reach it, and the one or two facts you'd otherwise have to discover. Depth
+ * stays in the app (⌘/ lists every shortcut; Settings explains itself) and
+ * in the repo for contributors. */
 
 export const Route = createFileRoute("/docs")({
   component: DocsPage,
@@ -24,10 +24,13 @@ export const Route = createFileRoute("/docs")({
 const SECTIONS = [
   { id: "getting-started", label: "Getting started" },
   { id: "connect", label: "Connect your tools" },
-  { id: "triage", label: "Triage" },
-  { id: "issues", label: "Issues" },
+  { id: "sidebar", label: "The sidebar" },
+  { id: "tickets", label: "Tickets" },
   { id: "trees", label: "Trees" },
+  { id: "pull-requests", label: "Your pull request" },
   { id: "reviews", label: "Reviews" },
+  { id: "triage", label: "Triage" },
+  { id: "settings", label: "Settings" },
   { id: "shortcuts", label: "Keyboard shortcuts" },
   { id: "updates", label: "Updates" },
   { id: "privacy", label: "Privacy & security" },
@@ -87,27 +90,29 @@ const SHORTCUTS: { group: string; rows: { label: string; keys: string[] }[] }[] 
   {
     group: "General",
     rows: [
+      { label: "Command palette: anything, anywhere", keys: ["⌘", "K"] },
       { label: "Keyboard shortcuts overlay", keys: ["⌘", "/"] },
       { label: "Settings", keys: ["⌘", ","] },
-      { label: "Toggle sidebar", keys: ["⌘", "B"] },
+      { label: "Toggle the sidebar", keys: ["⌘", "B"] },
       { label: "Toggle the view's right panel", keys: ["⌘", "L"] },
+      { label: "New tab in the workspace", keys: ["⌘", "T"] },
       { label: "Refresh Linear and GitHub data", keys: ["⌘", "⇧", "R"] },
-      { label: "Go to the nth tab", keys: ["⌘", "1–9"] },
+      { label: "Go to Tickets", keys: ["⌘", "1"] },
+    ],
+  },
+  {
+    group: "Tickets",
+    rows: [
+      { label: "Add a ticket to the launch queue", keys: ["⌘", "Click"] },
+      { label: "Actionable tickets only", keys: ["⌘", "⇧", "."] },
     ],
   },
   {
     group: "Triage",
     rows: [
-      { label: "Next / previous issue", keys: ["J", "K"] },
-      { label: "Investigate issue", keys: ["⌘", "I"] },
-      { label: "Open issue in Linear", keys: ["⌘", "O"] },
-    ],
-  },
-  {
-    group: "Issues",
-    rows: [
-      { label: "Add ticket to the launch queue", keys: ["⌘", "Click"] },
-      { label: "Actionable tickets only", keys: ["⌘", "⇧", "."] },
+      { label: "Next / previous ticket", keys: ["J", "K"] },
+      { label: "Investigate the ticket", keys: ["⌘", "I"] },
+      { label: "Open the ticket in Linear", keys: ["⌘", "O"] },
     ],
   },
 ];
@@ -179,14 +184,15 @@ function DocsPage() {
             </p>
             <H3>First launch</H3>
             <p>
-              santree asks you to <B>open a repository</B>: pick any folder inside a git checkout.
-              That registers the repo and the tabs light up. Add more repos any time from the repo
-              switcher at the top of the sidebar; every setting can be overridden per repo.
+              santree asks you to <B>add a project</B>: pick any folder inside a git checkout. It
+              appears in the sidebar with its own checkout as the first row, and the views light up
+              as you connect things. Add more projects any time from the <B>+</B> beside{" "}
+              <B>Projects</B>; every setting can be overridden per project.
             </p>
             <H3>What you need</H3>
             <ul className="flex list-disc flex-col gap-2 pl-5 marker:text-muted-4">
               <li>
-                <B>git</B> — worktrees, diffs, and branches are real git.
+                <B>git</B>. Worktrees, diffs, and branches are real git.
               </li>
               <li>
                 At least one coding agent: <B>Codex</B> or <B>Claude Code</B>, installed and logged
@@ -194,11 +200,11 @@ function DocsPage() {
                 reads or stores either CLI&rsquo;s credentials.
               </li>
               <li>
-                <B>GitHub CLI</B> (<Code>gh</Code>), signed in. Optional; it powers Reviews and PR
-                chips.
+                <B>GitHub CLI</B> (<Code>gh</Code>), signed in. Optional; it powers Reviews, the PR
+                panes and the checks.
               </li>
               <li>
-                A <B>Linear</B> workspace. Optional; it powers Triage and the Issues graph.
+                A <B>Linear</B> workspace. Optional; it powers Tickets and Triage.
               </li>
             </ul>
             <p>
@@ -210,9 +216,9 @@ function DocsPage() {
           <Section id="connect" title="Connect your tools">
             <H3>Linear</H3>
             <p>
-              <B>Settings → Integrations → Connect.</B> You authorize in the browser; the token is
-              stored in the OS keychain, never in plaintext. If you belong to several orgs, each
-              repo picks which one it uses.
+              <B>Settings → General → Linear → Connect.</B> You authorize in the browser; the token
+              is stored in the OS keychain, never in plaintext. If you belong to several workspaces,
+              each project picks which one it reads from.
             </p>
             <H3>GitHub</H3>
             <p>
@@ -222,43 +228,58 @@ function DocsPage() {
             </p>
             <H3>Agents</H3>
             <p>
-              <B>Settings → Agents</B> connects Codex and Claude Code independently. Workflow
-              settings choose the default provider, model, effort, and launch mode for Triage, Work,
-              and Reviews. Existing sessions keep their original provider, and a worktree can hold
-              sessions from both.
+              <B>Settings → General</B> shows Claude Code and Codex side by side: whether each is
+              installed, logged in, and up to date. The <B>Triage</B>, <B>Work</B> and{" "}
+              <B>Reviews</B> tabs pick a provider, a model, an effort and a permission mode per
+              workflow, so an investigation can run on one agent and the work on another. A worktree
+              can hold sessions from both.
             </p>
             <H3>Environment</H3>
             <p>
               <B>Settings → Environment</B> holds variables (or <Code>.env</Code> file references)
-              injected into every terminal santree spawns — app-wide, with per-repo overrides.
+              injected into every terminal santree spawns, app-wide, with per-project overrides. A
+              project&rsquo;s <Code>.santree/init.sh</Code> runs when a worktree is created, so a
+              fresh checkout arrives with its dependencies installed.
             </p>
           </Section>
 
-          <Section id="triage" title="Triage">
+          <Section id="sidebar" title="The sidebar">
             <p>
-              Your team&rsquo;s untriaged Linear inbox, ranked so the queue is workable: priority
-              and SLA up top, snoozed tickets dimmed and sunk to the bottom. <B>Mine/All</B>{" "}
-              switches between your queue and the whole team&rsquo;s.
+              The sidebar is the app&rsquo;s index and it never leaves. Top to bottom: <B>Search</B>{" "}
+              (<Keys keys={["⌘", "K"]} />, the one search across tickets, worktrees, PRs and
+              destinations), <B>Tickets</B>, the <B>Triage</B> section, then every project with its
+              pull requests waiting on you, its own checkout, and its worktrees grouped the way
+              Linear groups them: project, then milestone.
             </p>
             <p>
-              Reading a ticket is half the job; <B>Investigate</B> (<Keys keys={["⌘", "I"]} />) is
-              the other half. It opens a real terminal in the repo with your agent already reading
-              the issue. Select several tickets and launch the batch. The status picker promotes an
-              issue without leaving the keyboard, and <Kbd>J</Kbd>/<Kbd>K</Kbd> walk the queue.
+              Under each worktree sit the agents running in it, and every one carries a dot:{" "}
+              <B>working</B>, <B>just finished</B>, or <B>needs you</B>, which is a permission
+              prompt or a question you haven&rsquo;t answered. The status bar counts them across
+              every project. A project&rsquo;s header and a worktree&rsquo;s row roll the most
+              urgent dot up, so a red dot on a folded section is a reason to open it.
+            </p>
+            <p>
+              A worktree&rsquo;s Linear and GitHub marks open the ticket and the pull request as
+              tabs. Right-click a worktree, a ticket or a pull request for everything you can do to
+              it, including deleting the tree once it has merged.
             </p>
           </Section>
 
-          <Section id="issues" title="Issues">
+          <Section id="tickets" title="Tickets">
             <p>
-              Tickets are a dependency graph, so santree draws one: blocked-by edges between cards,
-              translucent bands grouping each Linear project, and badges for state: <B>RDY</B> when
-              nothing blocks a ticket, <B>WIP</B> once a worktree exists for it.
+              Your Linear queue, as a list grouped by project and milestone or as the dependency
+              graph it is. Each row carries the ticket&rsquo;s priority, status, cycle, estimate,
+              due date and assignee, and one thing more: <B>Ready</B> when nothing blocks it, or the
+              ticket that does. A ticket already started shows its worktree and its pull request.
             </p>
             <p>
-              Queue tickets from the list or the graph (<Keys keys={["⌘", "Click"]} />, or{" "}
-              <B>Select Ready</B> for everything launchable), pick agent and model in the tray, and{" "}
-              <B>Launch</B>. Each ticket gets its own worktree and agent, in parallel. A dependent
-              ticket can chain its branch off its blocker&rsquo;s, so stacked work stays stacked.
+              <B>Run</B> starts a ticket: a new worktree, the agent configured for Work, and the
+              ticket&rsquo;s prompt already typed. <Keys keys={["⌘", "Click"]} /> queues tickets
+              instead; the <B>Queue</B> pane in the right panel holds them with a per-ticket agent
+              pick and notes, and <B>Launch</B> starts them all. A blocked ticket can chain its
+              branch off its blocker&rsquo;s, so stacked work stays stacked. When more than one
+              project shares a ticket&rsquo;s workspace, the first start asks which one and offers
+              to remember it (<B>Settings → Work</B>).
             </p>
           </Section>
 
@@ -266,34 +287,82 @@ function DocsPage() {
             <p>
               Trees is where you&rsquo;ll spend most of your time. Every task lives in its own{" "}
               <B>git worktree</B>, so five agents can run at once and never step on each
-              other&rsquo;s diff, and your own checkout stays clean. Sidebar cards show each
-              session&rsquo;s live state: <B>running</B>, <B>delegating</B> to a subagent, or{" "}
-              <B>waiting</B> on you.
+              other&rsquo;s diff, and your own checkout stays clean. Pick a worktree in the sidebar
+              and its workspace fills the window.
             </p>
             <p>
-              The terminal is a real PTY running the real CLI: interrupt it, answer it, run{" "}
-              <Code>vim</Code> in it. The <B>Issue</B> tab keeps the ticket beside the terminal, and{" "}
-              <B>Files</B> (<Keys keys={["⌘", "L"]} />) opens the diff and commit panel. From the
-              bottom bar you push, open a PR, or pull the base branch through the worktree.
+              The main area is a tab strip: one tab per agent or shell the worktree has open, plus
+              whatever you expand into it. <Keys keys={["⌘", "T"]} /> opens another Claude, Codex or
+              terminal. Every terminal is a real PTY running the real CLI: interrupt it, answer it,
+              run <Code>vim</Code> in it. Tabs survive a restart, and closing one ends its process.
             </p>
             <p>
-              When a PR merges, its card dims. <B>Select merged</B> cleans up finished worktrees and
-              their branches in one sweep.
+              The right panel (<Keys keys={["⌘", "L"]} />) is reference beside the work: the{" "}
+              <B>ticket</B>, the <B>files</B>, the branch&rsquo;s <B>changes</B> with staging and a
+              commit box that can draft the message, and <B>session history</B>, where any past
+              conversation resumes in a new tab, with what it cost. Once the branch has a pull
+              request, two more panes appear: the PR and its work queue.
+            </p>
+          </Section>
+
+          <Section id="pull-requests" title="Your pull request">
+            <p>
+              A PR you opened is worked on next to its worktree, not in the review inbox.{" "}
+              <B>Create PR</B> sits above the changes and can draft the title and body from the
+              branch. The <B>PR</B> pane shows its state, checks and conversation, and expands into
+              the full page: Conversation, Commits, Checks with their logs, Files changed.
+            </p>
+            <p>
+              The <B>AI work</B> pane is the queue. A failing check, a reviewer&rsquo;s comment, a
+              draft from an AI review, or a line you flag in the diff each land in it as one item.{" "}
+              <B>Start work</B> hands the open items to an agent in a new tab, with a prompt you can
+              edit in <B>Settings → Prompts</B>.
             </p>
           </Section>
 
           <Section id="reviews" title="Reviews">
             <p>
-              A pull-request inbox ordered by what you should pick up next: <B>Needs your review</B>{" "}
-              first, then team requests, then your own PRs by repo. Rows carry the review decision,
-              CI state, and how long a PR has waited.
+              Reviews is the inbox: other people&rsquo;s pull requests, per project, ordered by what
+              needs you. Each project&rsquo;s <B>Reviews</B> row in the sidebar lists what was asked
+              of you and what was asked of your teams; the number on it is what you haven&rsquo;t
+              answered since the author last pushed.
             </p>
             <p>
-              The detail pane is a full review surface: the diff with inline comment threads, the
-              linked ticket, and provider-aware <B>AI review</B> sessions beside the code instead of
-              on top of it. Codex and Claude Code reviews can coexist as separate tabs. The
-              <B>Checks</B> tab shows CI with logs inline, and <B>Fix CI with AI</B> hands a failing
-              run straight to an agent.
+              The <B>Pull Request</B> tab is the whole PR: the description and comments, the
+              commits, the checks with logs inline, and the files with review threads anchored to
+              GitHub&rsquo;s own diff. <B>Review with AI</B> checks the branch out into a worktree
+              and starts an agent that writes a <B>brief</B> (what changed, in what order to read
+              it, what to watch out for) and <B>draft comments</B> on the diff. Drafts stay on your
+              machine; you edit them, drop them, and publish the ones you keep into your pending
+              review. Nothing an agent writes reaches GitHub without your click.
+            </p>
+          </Section>
+
+          <Section id="triage" title="Triage">
+            <p>
+              Your team&rsquo;s triage queue lives in the sidebar: who is on rotation and until
+              when, the tickets waiting with their SLA clock, soonest first, and a folded{" "}
+              <B>Snoozed</B> group. <B>Mine / All</B> on the section&rsquo;s title switches between
+              your tickets and the whole team&rsquo;s. Right-click a ticket to snooze it.
+            </p>
+            <p>
+              Opening a ticket gives it a workspace: the <B>Linear</B> tab with the ticket and its
+              discussion, one tab per <B>Investigate</B> agent (<Keys keys={["⌘", "I"]} />
+              ), and a shell. Investigations run on a project you attach to the ticket, on that
+              project&rsquo;s main checkout; no worktree is created. The first thing that needs one
+              asks which project, with a default you can set in <B>Settings → Triage</B>.
+            </p>
+          </Section>
+
+          <Section id="settings" title="Settings">
+            <p>
+              <Keys keys={["⌘", ","]} /> opens Settings as a page. <B>General</B> has the theme,
+              updates, and the Linear, GitHub, Claude Code and Codex connections. <B>Triage</B>,{" "}
+              <B>Work</B> and <B>Reviews</B> each pick an agent, a model, an effort and a permission
+              mode. <B>Prompts</B> holds every prompt a launch renders (the investigation, the work
+              prompt, the AI review, the work queue) as Jinja templates you can edit and preview
+              against a real ticket. <B>Environment</B>, <B>Terminal</B> and <B>Usage</B> round it
+              out. Each setting is app-wide with a per-project override.
             </p>
           </Section>
 
@@ -326,8 +395,8 @@ function DocsPage() {
 
           <Section id="updates" title="Updates">
             <p>
-              santree updates itself. <B>Settings → Updates</B> shows your version, checks on
-              demand, and picks the release channel: <B>Stable</B> (the default) or <B>Beta</B>,
+              santree updates itself. <B>Settings → General → Updates</B> shows your version, checks
+              on demand, and picks the release channel: <B>Stable</B> (the default) or <B>Beta</B>,
               which gets every release as soon as it builds.
             </p>
             <p>
@@ -348,7 +417,11 @@ function DocsPage() {
                 never drives it unattended.
               </li>
               <li>
-                <B>Integration tokens live in the OS keychain</B> — Linear OAuth and GitHub PATs
+                <B>Nothing an agent writes reaches GitHub without a click.</B> An AI review&rsquo;s
+                drafts are rows on your machine until you publish them into your own pending review.
+              </li>
+              <li>
+                <B>Integration tokens live in the OS keychain</B>, Linear OAuth and GitHub tokens
                 alike, never plaintext.
               </li>
               <li>
@@ -372,9 +445,18 @@ function DocsPage() {
             <H3>A view is empty</H3>
             <p>
               That&rsquo;s the real state, not a bug. santree never fabricates data. No Linear
-              connection means an empty Triage; no <Code>gh</Code> auth means an empty Reviews.
-              Connect the tool and refresh (<Keys keys={["⌘", "⇧", "R"]} />
+              connection means no tickets; no <Code>gh</Code> auth means no reviews. Connect the
+              tool and refresh (<Keys keys={["⌘", "⇧", "R"]} />
               ).
+            </p>
+            <H3>An agent shows as idle while it&rsquo;s clearly working</H3>
+            <p>
+              The dot comes from the agent&rsquo;s own hooks, which santree adds to every launch. An
+              agent started outside santree, or a Codex tab that hasn&rsquo;t been prompted yet,
+              reports nothing until its first turn; the sidebar then reads the process itself. If a
+              hook write failed, the reason is in{" "}
+              <Code>~/Library/Application Support/com.santree.desktop/santree-hook-errors.log</Code>
+              .
             </p>
             <H3>Logs</H3>
             <p>

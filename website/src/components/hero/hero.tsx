@@ -1,14 +1,14 @@
 import { m, useScroll, useTransform } from "framer-motion";
-import { AppDemo } from "~/components/app-demo";
 import { DownloadButton } from "~/components/download-button";
 import { HeroCanvas } from "~/components/hero/hero-canvas";
 import { StatusLine } from "~/components/hero/status-line";
 import { GitHubLogo } from "~/components/icons";
+import { ScreensShowcase } from "~/components/screens";
 import { usePrefersReducedMotion } from "~/lib/use-reduced-motion";
 
 export function Hero() {
-  // As the demo docks (first ~300px of scroll), the headline drifts up and
-  // the background art dims — one light system handing off to the other.
+  // As the page scrolls past the showcase, the headline drifts up and the
+  // background art dims — one light system handing off to the other.
   // Ranges collapse to rest under reduced motion (state starts false, so
   // server and first client render agree).
   const reduced = usePrefersReducedMotion();
@@ -51,7 +51,8 @@ export function Hero() {
         </h1>
         <p className="rise rise-1 mx-auto mt-7 max-w-xl text-pretty text-[17px] leading-relaxed text-[#c9cad2]">
           santree runs Codex and Claude Code across your repo's tickets. Each agent gets an isolated
-          git worktree you can watch, steer, and merge. Triage in, PRs out.
+          git worktree you can watch, steer, and merge, and one sidebar shows you every one of them.
+          Triage in, PRs out.
         </p>
         <div className="rise rise-2 mt-10 flex flex-wrap items-center justify-center gap-3">
           <DownloadButton size="lg" />
@@ -65,9 +66,9 @@ export function Hero() {
         </div>
       </m.div>
 
-      {/* The hero demo: the app itself, live and driveable. */}
+      {/* The app, as it is: real captures of each view, one window. */}
       <div className="relative mx-auto max-w-6xl px-6 pb-28 pt-20">
-        <AppDemo />
+        <ScreensShowcase />
       </div>
     </section>
   );

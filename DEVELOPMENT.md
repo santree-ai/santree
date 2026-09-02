@@ -11,7 +11,8 @@ Linear (GraphQL + OAuth), a SQLite store, real `git`/GitHub, and real kernel
 PTYs. **There is no mock/sample data anywhere.** When a backend isn't
 connected (no Linear org, no `gh` auth, no repo path) commands return
 real-but-empty results and the view shows its empty state — the frontend
-never fabricates data.
+never fabricates data. (The one exception is the dev-only screenshot fixture
+mode, below, which never ships.)
 
 ```
 React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
@@ -88,7 +89,7 @@ The first `pnpm dev` compiles the Rust side and can take a few minutes; subseque
 
 The frontend never calls `invoke` directly and never hard-codes data. Follow the layers:
 
-1. **A view** (e.g. `src/features/issues/IssuesView.tsx`) consumes a typed query hook.
+1. **A view** (e.g. `src/features/tickets/TicketsView.tsx`) consumes a typed query hook.
 2. **`src/lib/queries.ts`** — TanStack Query hooks (`useTasks`, `useTriageTickets`, …) wrapping the generated client. Caching, loading states, and **optimistic mutations** live here (`useOptimisticMutation`: patch the cache, roll back on error, invalidate on settle).
 3. **`src/bindings.ts`** — **generated** by `tauri-specta`. The typed `commands.*` and every domain type, mirroring Rust exactly. _Never hand-edit this file._
 4. **`src-tauri/src/commands.rs`** — thin `#[tauri::command]` wrappers that forward to a live backend, e.g. `linear::…(db, repo).await?.unwrap_or_default()`. When a backend isn't connected the command returns a real-but-empty result (`Ok(vec![])`, `None`, …) — never sample data.
@@ -130,7 +131,7 @@ pnpm test         # Frontend: Vitest
 
 - **`crates/core`** — unit tests for Linear→domain mapping (`linear.rs`) and the dagre-free graph layout helpers (`layout.rs`).
 - **`src-tauri`** — `export_bindings_succeeds` guards that the command set always produces valid bindings.
-- **Frontend (Vitest)** — presentation helpers (`theme/colors`, `lib/format`), component behavior (`Markdown`, `ErrorBoundary`, `TerminalView`, `TaskNotes`, `ReviewsSidebarView`), and pure logic (`buildChangeTree`, Trees `model`, terminal agent seeding).
+- **Frontend (Vitest)** — presentation helpers (`theme/colors`, `lib/format`), component behavior (`Markdown`, `ErrorBoundary`, `TerminalView`, `TaskNotes`, `ReviewWorklist`), and pure logic (`buildChangeTree`, Trees `model`, terminal agent seeding).
 
 ---
 
@@ -236,6 +237,34 @@ with a fake backend/renderer.
 
 ---
 
+## Screenshots (fixture mode)
+
+The README and website screenshots are real captures of the app over an
+invented company (Mallard Labs, makers of QuackStack), served at the IPC
+boundary by `src/dev/fixtures/`. Nothing in the views knows about it: a Vite
+alias swaps `@tauri-apps/api/core` for a shim whose `invoke` answers the
+commands the fixture world owns and forwards the rest (settings, prompts,
+the agent catalog, the keychain statuses stay real). It only exists in a dev
+build with the flag set, so a production bundle contains none of it.
+
+```sh
+echo 'VITE_SANTREE_FIXTURES=1' > .env.development.local   # gitignored
+pnpm dev:alt
+```
+
+`src/dev/fixtures/scene.ts` picks the route, theme, selected worktree,
+right-panel pane and main tab; saving it reloads the window onto that scene.
+The dev build's window must look exactly like production for a capture, which
+is why `src-tauri/tauri.dev.conf.json` mirrors the whole `app.windows` entry
+(a `--config` overlay replaces the array, so a title-only entry would drop the
+overlay title bar). Capture the window itself with
+`screencapture -x -o -l <window id>` (`-o` omits the OS shadow, so the file is
+exactly the window's pixels); on a 2× display a 1520×950 window gives the
+3040×1900 masters the site's 2304-wide WebPs and the README PNGs were resized
+from. See `src/dev/fixtures/README.md` for what is fake and what is real.
+
+---
+
 ## Project layout
 
 ```
@@ -257,7 +286,7 @@ with a fake backend/renderer.
     ├── state/                 #   AppContext (repo, theme, settings) · toast.tsx
     ├── lib/                   #   query hooks · format helpers · useEdgeResize · shortcuts
     ├── theme/colors.ts        #   enum → color/label presentation maps
-    └── features/              #   one folder per view (issues, triage, trees, …)
+    └── features/              #   one folder per view (tickets, trees, reviews, triage, …)
         └── <view>/            #   its own model.tsx + presentational components
 ```
 

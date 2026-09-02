@@ -6,25 +6,25 @@ import { SpotlightCard } from "~/components/ui/spotlight-card";
 const INTEGRATIONS = [
   {
     name: "Linear",
-    line: "Tickets in. Triage straight from your team's queue.",
+    line: "Tickets in. Triage, planning structure and cycles, straight from your workspace.",
     color: "#5e6ad2",
     Icon: LinearLogo,
   },
   {
     name: "GitHub",
-    line: "PRs out. Checks, reviews, and merges without a browser tab.",
+    line: "PRs out. Checks, reviews, the merge queue, without a browser tab.",
     color: "#f2f2f4",
     Icon: GitHubLogo,
   },
   {
     name: "Codex",
-    line: "The default agent for new work, using your existing Codex login.",
+    line: "A first-class agent, using your existing Codex login. Pick it per workflow.",
     color: "#f2f2f4",
     Icon: CodexLogo,
   },
   {
     name: "Claude Code",
-    line: "Run alongside Codex, using your existing Claude subscription.",
+    line: "A first-class agent, using your existing Claude subscription. Mix them freely.",
     color: "#d97757",
     Icon: ClaudeLogo,
   },

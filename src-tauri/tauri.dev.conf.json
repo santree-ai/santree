@@ -5,7 +5,14 @@
   "app": {
     "windows": [
       {
-        "title": "santree (dev)"
+        "title": "santree (dev)",
+        "width": 1320,
+        "height": 830,
+        "minWidth": 1040,
+        "minHeight": 700,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "backgroundColor": "#0a0b0e"
       }
     ]
   }

@@ -1,12 +1,12 @@
 import { m, useScroll, useTransform } from "framer-motion";
 import { useRef } from "react";
-import { DemoWindow } from "~/components/app-demo";
 import { FadeUp } from "~/components/motion/fade-up";
+import { AppFrame, SCREENS } from "~/components/screens";
 import type { Feature } from "~/components/sections/features";
 import { usePrefersReducedMotion } from "~/lib/use-reduced-motion";
 
-/** One alternating feature row: copy on one side, a frozen frame of the
- * real demo window on the other, drifting a touch slower than the scroll. */
+/** One alternating feature row: copy on one side, a real capture of the view
+ * on the other, drifting a touch slower than the scroll. */
 export function FeatureRow({ feature, flip }: { feature: Feature; flip: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const reduced = usePrefersReducedMotion();
@@ -43,7 +43,7 @@ export function FeatureRow({ feature, flip }: { feature: Feature; flip: boolean 
       </FadeUp>
       <FadeUp delay={0.08} className={flip ? "lg:order-1" : ""}>
         <m.div style={{ y }}>
-          <DemoWindow view={feature.id} />
+          <AppFrame id={feature.id} alt={SCREENS.find((s) => s.id === feature.id)?.alt ?? ""} />
         </m.div>
       </FadeUp>
     </div>

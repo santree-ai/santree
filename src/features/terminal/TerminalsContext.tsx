@@ -5,6 +5,7 @@
  * persistent layer (see `TerminalLayer`), regardless of the active route.
  */
 import { createContext, type ReactNode, useContext, useEffect, useState } from "react";
+import { fixtureTerminalSpecs } from "./fixtureSeam";
 import { type TerminalTabs, useTerminalTabs } from "./orchestrator";
 import { PAGE_OWNER } from "./pageOwner";
 import { tauriBackend } from "./TauriBackend";
@@ -35,7 +36,8 @@ const EMPTY: Adopted = { sessions: new Map(), ready: false };
 const AdoptedContext = createContext<Adopted>(EMPTY);
 
 export function TerminalsProvider({ children }: { children: ReactNode }) {
-  const value = useTerminalTabs();
+  // Empty outside the dev screenshot fixture mode — see `fixtureSeam.ts`.
+  const value = useTerminalTabs(fixtureTerminalSpecs());
   const adopted = useAdoptSessions();
   return (
     <AdoptedContext.Provider value={adopted}>

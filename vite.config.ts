@@ -1,7 +1,7 @@
 import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
-import { createLogger } from "vite";
+import { createLogger, loadEnv } from "vite";
 import { defineConfig } from "vitest/config";
 
 // @ts-expect-error -- process is a Node global, not typed in the browser env.
@@ -21,8 +21,24 @@ viteLogger.info = (message, options) => {
 };
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   customLogger: viteLogger,
+  // The screenshot fixture mode (`VITE_SANTREE_FIXTURES=1 pnpm dev:alt`, see
+  // `src/dev/fixtures/README.md`): every generated binding imports `invoke`
+  // from `@tauri-apps/api/core`, and Tauri pins its own internals read-only, so
+  // the one place a fake backend can be seated is that import. Dev only, and
+  // only with the flag: without it there is no alias and the directory is dead.
+  resolve: {
+    alias:
+      mode === "development" && loadEnv(mode, ".", "VITE_").VITE_SANTREE_FIXTURES === "1"
+        ? [
+            {
+              find: /^@tauri-apps\/api\/core$/,
+              replacement: new URL("./src/dev/fixtures/tauriCore.ts", import.meta.url).pathname,
+            },
+          ]
+        : [],
+  },
   plugins: [
     // The router plugin must run before the React plugin so generated route
     // modules are transformed by React's Fast Refresh.
@@ -85,4 +101,4 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
   },
-});
+}));
