@@ -7,7 +7,7 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
-## Unreleased
+## 0.1.5-beta.6 — 2026-09-02
 
 - Triage moved into the sidebar. A Triage section lists who is on rotation (click it to see the shifts), the tickets waiting with their SLA, and a folded Snoozed group; the Mine / All switch sits on its title. Opening a ticket gives it a workspace of its own: a Linear tab with the ticket, one tab per investigating agent, and a terminal.
 - A triage ticket now runs on a project you attach to it, on that project's main branch, and no worktree is created. The first thing that needs one asks which project, with a default you can set in Settings. Its right panel carries the attachment, the project's files and the sessions that have run there.
