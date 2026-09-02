@@ -44,7 +44,7 @@ function renderRow(over: Partial<WorktreeNode> = {}) {
       indent={30}
       selected={false}
       onSelect={vi.fn()}
-      onOpenPane={vi.fn()}
+      onOpenPage={vi.fn()}
       onOpenAgent={vi.fn()}
     />,
   );
