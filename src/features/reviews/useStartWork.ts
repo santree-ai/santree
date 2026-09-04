@@ -208,7 +208,7 @@ export function useStartWorkFromReviews(
   const guard = useLaunchGuard();
   // Silent, and quiet below: this flow reports its own failure and goes straight
   // to the tree it made, so neither half of the create needs a toast of its own.
-  const { mutateAsync: createWorktree } = useCreateWorktree(santreeRepo, { silent: true });
+  const { mutateAsync: createWorktree } = useCreateWorktree({ silent: true });
   const askForWorktree = useWorktreeGate();
   const { mutateAsync: promote } = usePromoteReviewWorktree(santreeRepo);
   const agentRuns = useOptionalAgentRuns();
@@ -250,8 +250,10 @@ export function useStartWorkFromReviews(
         // No project: a PR isn't one, and the placeholder is merged straight into
         // the sidebar's worktree list, where a stand-in would open a band of its
         // own.
-        addPendingLaunches([{ id: issueId, title: pr.title, project: null, agent: "Claude" }]);
-        navigate({ to: "/trees" });
+        addPendingLaunches([
+          { repo: santreeRepo, id: issueId, title: pr.title, project: null, agent: "Claude" },
+        ]);
+        navigate({ to: "/trees", search: { project: santreeRepo, tree: issueId } });
         // Unlike the two Trees paths, the tab cannot be opened at the click: there
         // is no worktree to hang it on yet. The sidebar's pending row covers that
         // stretch, and the tab goes up the moment the create resolves — still
@@ -259,6 +261,7 @@ export function useStartWorkFromReviews(
         let seed: TabSeed | null = null;
         try {
           const worktree = await createWorktree({
+            repo: santreeRepo,
             issueId,
             title: pr.title,
             launch: { type: "pr", prRepo: pr.repo, branch: pr.headRef },
@@ -266,7 +269,7 @@ export function useStartWorkFromReviews(
             agent: "Claude",
             quiet: true,
           });
-          if (pendingSetup) agentRuns?.runSetup(worktree.id);
+          if (pendingSetup) agentRuns?.runSetup(santreeRepo, worktree.id);
           seed = {
             worktreeId: worktree.id,
             tabId: crypto.randomUUID(),

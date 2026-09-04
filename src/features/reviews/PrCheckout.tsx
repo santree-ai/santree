@@ -32,7 +32,7 @@ import {
   useWorktrees,
 } from "../../lib/queries";
 import { useOptionalAgentRuns } from "../../state/AgentRuns";
-import { useApp, useAppUi } from "../../state/AppContext";
+import { useAppUi } from "../../state/AppContext";
 import {
   type CheckoutSource,
   checkoutSource,
@@ -83,7 +83,6 @@ export interface PrCheckout {
  */
 export function usePrCheckout(pr: ReviewPr): PrCheckout {
   const navigate = useNavigate();
-  const { setActiveRepo } = useApp();
   const { addPendingLaunches, removePendingLaunch, requestTreeFocus } = useAppUi();
   // The PR's *own* project, never whichever one the app happens to be pointed at:
   // the inbox spans the registry, so the two are routinely different repos and
@@ -103,7 +102,7 @@ export function usePrCheckout(pr: ReviewPr): PrCheckout {
     "";
   const { data: worktrees = [] } = useWorktrees(repo);
   const { data: worktreePrs = [] } = useWorktreePrs(repo);
-  const createTree = useCreateWorktree(repo);
+  const createTree = useCreateWorktree();
   const askForWorktree = useWorktreeGate();
   const agentRuns = useOptionalAgentRuns();
   // Addressed through the *active* repo, the way every other review command is:
@@ -128,9 +127,11 @@ export function usePrCheckout(pr: ReviewPr): PrCheckout {
         { prRepo: pr.repo, number: pr.number },
         {
           onSuccess: () => {
-            setActiveRepo(review.repo);
-            requestTreeFocus(review.worktree.id);
-            navigate({ to: "/trees" });
+            navigate({
+              to: "/trees",
+              search: { project: review.repo, tree: review.worktree.id },
+            });
+            requestTreeFocus(review.repo, review.worktree.id);
           },
         },
       );
@@ -143,11 +144,11 @@ export function usePrCheckout(pr: ReviewPr): PrCheckout {
       // No project on the placeholder: a PR is not one, and the row is merged
       // straight into the sidebar's worktree list, where a stand-in would open a
       // band of its own.
-      addPendingLaunches([{ id: treeId, title: pr.title, project: null, agent: null }]);
-      setActiveRepo(repo);
-      navigate({ to: "/trees" });
+      addPendingLaunches([{ repo, id: treeId, title: pr.title, project: null, agent: null }]);
+      navigate({ to: "/trees", search: { project: repo, tree: treeId } });
       createTree.mutate(
         {
+          repo,
           issueId: treeId,
           title: pr.title,
           launch: { type: "pr", prRepo: pr.repo, branch: pr.headRef },
@@ -159,10 +160,10 @@ export function usePrCheckout(pr: ReviewPr): PrCheckout {
         {
           onSuccess: (tree) => {
             removePendingLaunch(treeId);
-            requestTreeFocus(tree.id);
+            requestTreeFocus(repo, tree.id);
             // The one thing the dialog asked about. Run after the create, never
             // as part of it: `init.sh` takes minutes and streams its own output.
-            if (choice.runSetup) agentRuns?.runSetup(tree.id);
+            if (choice.runSetup) agentRuns?.runSetup(repo, tree.id);
           },
           onError: () => removePendingLaunch(treeId),
         },

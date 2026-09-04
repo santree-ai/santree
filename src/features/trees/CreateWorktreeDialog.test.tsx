@@ -16,7 +16,7 @@ const onClose = vi.fn();
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
 
 vi.mock("../../state/AppContext", () => ({
-  useApp: () => ({ activeRepo: "acme/app", setActiveRepo: vi.fn(), settings: null }),
+  useApp: () => ({ settings: null }),
   useAppUi: () => ({ requestTreeFocus: vi.fn() }),
 }));
 

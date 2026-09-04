@@ -22,7 +22,6 @@ import { RelativeTime } from "../../components/RelativeTime";
 import { StatusGlyph } from "../../components/WorkSignals";
 import { WorktreeStats } from "../../components/WorktreeStats";
 import { useTriageDetail } from "../../lib/queries";
-import { useApp } from "../../state/AppContext";
 import { palette, raisedActiveStyle, statusColor, statusLabel } from "../../theme/colors";
 import { BlockerRow } from "./BlockerRow";
 import { useIssues } from "./model";
@@ -78,10 +77,10 @@ export function IssuePanel() {
     queueEnabled,
     run,
     runBackground,
+    repo,
   } = useIssues();
-  const { activeRepo } = useApp();
   const focus = (focusId ? byId.get(focusId) : undefined) ?? tasks[0];
-  const { data: detail } = useTriageDetail(activeRepo, focus?.id ?? null);
+  const { data: detail } = useTriageDetail(repo, focus?.id ?? null);
 
   // "Open in graph" from a dependency row: focus + pan, and scroll the sidebar row in.
   const openInGraph = useCallback(
@@ -260,13 +259,13 @@ export function IssuePanel() {
             />
           )
         ) : (
-          <DiscussionContent detail={ready} repo={activeRepo} />
+          <DiscussionContent detail={ready} repo={repo} />
         )}
       </div>
 
       {/* Pinned below the scroll area so it's always reachable, even with a long
           comment thread. */}
-      <TaskNotes key={focus.id} repo={activeRepo} taskId={focus.id} />
+      <TaskNotes key={focus.id} repo={repo} taskId={focus.id} />
     </div>
   );
 }

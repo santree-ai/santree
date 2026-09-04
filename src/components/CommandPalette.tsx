@@ -29,7 +29,7 @@ import {
   useWorktreesByRepo,
 } from "../lib/queries";
 import { shortRepoName } from "../lib/repoName";
-import { useApp, useAppUi } from "../state/AppContext";
+import { useAppUi } from "../state/AppContext";
 import { RepoAvatar } from "./chrome/RepoAvatar";
 import {
   AgentIcon,
@@ -93,7 +93,6 @@ export function CommandPalette() {
 
 function PaletteDialog({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
-  const { activeRepo, setActiveRepo } = useApp();
   const {
     requestIssueFocus,
     requestTreeFocus,
@@ -124,12 +123,6 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
   const items = useMemo<PaletteItem[]>(() => {
     const closeAnd = (fn: () => void) => () => {
       onClose();
-      fn();
-    };
-    // Trees and its rail are per active repo, so landing on another project's
-    // worktree switches to it first — the same hand-off `useOpenAgent` makes.
-    const inRepo = (repo: string | null, fn: () => void) => () => {
-      if (repo && repo !== activeRepo) setActiveRepo(repo);
       fn();
     };
     const manyRepos = repoNames.length > 1;
@@ -247,12 +240,10 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
           meta: manyRepos ? shortRepoName(repo) : (tree.project ?? undefined),
           keywords: `${tree.project ?? ""} ${tree.branch} ${repo}`,
           icon: <TreeIcon size={14} />,
-          run: closeAnd(
-            inRepo(repo, () => {
-              requestTreeFocus(tree.id);
-              navigate({ to: "/trees" });
-            }),
-          ),
+          run: closeAnd(() => {
+            navigate({ to: "/trees", search: { project: repo, tree: tree.id } });
+            requestTreeFocus(repo, tree.id);
+          }),
         });
       }
     }
@@ -284,11 +275,7 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
       meta: repo.name,
       keywords: repo.path ?? "",
       icon: <RepoAvatar repo={repo.name} size={14} bordered={false} />,
-      run: closeAnd(
-        inRepo(repo.name, () => {
-          navigate({ to: "/trees" });
-        }),
-      ),
+      run: closeAnd(() => navigate({ to: "/trees", search: { project: repo.name } })),
     }));
 
     const settingsItems = SETTINGS_SECTIONS.map<PaletteItem>((section) => ({
@@ -341,7 +328,6 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
       ...actions,
     ];
   }, [
-    activeRepo,
     agents,
     inbox,
     navigate,
@@ -354,7 +340,6 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
     requestReviewFocus,
     requestTreeFocus,
     requestTriageFocus,
-    setActiveRepo,
     tasksByRepo,
     toggleShortcuts,
     toggleSidebar,

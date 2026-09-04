@@ -47,7 +47,7 @@ vi.mock("../../state/AppContext", async (importOriginal) => ({
 vi.mock("../../lib/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/queries")>()),
   // The repo whose org the queue is read from — resolved by the data layer, so
-  // the section never reaches for `activeRepo` itself.
+  // the section never has to pick a project itself.
   useTriageOrgRepo: () => "acme/app",
   useTriageQueue: () => data.queue,
   useTriageSchedule: () => ({ data: data.schedules }),

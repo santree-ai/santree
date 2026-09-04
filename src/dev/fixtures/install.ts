@@ -35,11 +35,11 @@ function applyScene(scene: Scene) {
   const local = localStorage;
   const json = (v: unknown) => JSON.stringify(v);
   local.setItem("santree-theme", scene.theme);
-  local.setItem("santree-active-repo", scene.activeRepo);
   local.setItem("santree-sidebar-collapsed", "false");
   local.setItem("santree-sidebar-width", String(scene.sidebarWidth));
 
-  sessionStorage.setItem("santree-trees-active-id", json(scene.trees.activeId));
+  // The open project and worktree are not storage any more — they are the
+  // route's `?project=`/`?tree=`, carried by `scene.route` below.
   local.setItem("santree-trees-right-collapsed", json(false));
   local.setItem("santree-trees-right-width", json(scene.trees.rightWidth));
   local.setItem("santree-trees-file-tab-v5", json(scene.trees.pane));

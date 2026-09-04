@@ -149,9 +149,9 @@ function PrWorkspace({ pr, tabs }: { pr: ReviewPr; tabs: ReviewTabs }) {
   const { setVisibleWorktree } = useAgentRuns();
   const hosted = tabs.active.startsWith("tab:") ? tabs.checkout.worktreeId : "";
   useEffect(() => {
-    setVisibleWorktree(hosted || null);
+    setVisibleWorktree(hosted ? { repo, id: hosted } : null);
     return () => setVisibleWorktree(null);
-  }, [hosted, setVisibleWorktree]);
+  }, [hosted, repo, setVisibleWorktree]);
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">

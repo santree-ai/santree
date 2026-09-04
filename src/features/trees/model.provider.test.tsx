@@ -15,6 +15,37 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Worktree, WorktreePr, WorktreeTab } from "../../bindings";
 
+/** The route the provider reads its selection off, and the navigation that
+ *  writes it. A real store rather than a spy: `setActive` *is* a navigation now,
+ *  so a mock that dropped the write would leave every tab test selecting
+ *  nothing. */
+const route = vi.hoisted(() => ({
+  search: { project: "acme/app" } as { project?: string; tree?: string },
+  listeners: new Set<() => void>(),
+  go(next: { project?: string; tree?: string }) {
+    this.search = next;
+    for (const l of [...this.listeners]) l();
+  },
+}));
+
+vi.mock("@tanstack/react-router", async () => {
+  const { useEffect, useReducer } = await import("react");
+  return {
+    useSearch: () => {
+      const [, bump] = useReducer((n: number) => n + 1, 0);
+      useEffect(() => {
+        route.listeners.add(bump);
+        return () => void route.listeners.delete(bump);
+      }, []);
+      return route.search;
+    },
+    useNavigate:
+      () =>
+      ({ search }: { search: (prev: typeof route.search) => typeof route.search }) =>
+        route.go(typeof search === "function" ? search(route.search) : search),
+  };
+});
+
 const worktree = {
   id: "AK-1",
   title: "Task AK-1",
@@ -56,6 +87,9 @@ const rows = vi.hoisted(() => ({
 vi.mock("../../lib/queries", async () => {
   const { useEffect, useReducer } = await import("react");
   return {
+    useRepos: () => ({ data: [{ name: "acme/app", tracker: "Linear · Acme" }] }),
+    useResolvedBoolSetting: () => ({ value: false, isFetched: true }),
+    TREES_RUN_SETUP_KEY: "trees_run_setup",
     useWorktrees: () => ({ data: [worktree], isLoading: false }),
     useBaseWorktree: () => ({ data: null, isLoading: false }),
     useWorktreePrs: () => ({ data: [pr] }),
@@ -86,7 +120,6 @@ vi.mock("../../components/PrChip", () => ({
 }));
 
 vi.mock("../../state/AppContext", () => ({
-  useApp: () => ({ activeRepo: "acme/app" }),
   useAppUi: () => ({
     treeLaunch: null,
     consumeTreeLaunch: vi.fn(),
@@ -98,7 +131,6 @@ vi.mock("../../state/AppContext", () => ({
     removePendingLaunch: vi.fn(),
     pendingDeletes: new Set<string>(),
     removePendingDelete: vi.fn(),
-    setOpenWorktree: vi.fn(),
     setFocusedAgent: vi.fn(),
   }),
 }));
@@ -108,7 +140,6 @@ vi.mock("../../state/AgentRuns", () => ({
     beginRun: vi.fn(),
     runSetup: vi.fn(),
     isSettingUp: () => false,
-    runSetupOnStart: false,
     setVisibleWorktree: vi.fn(),
   }),
 }));
@@ -176,6 +207,7 @@ describe("TreesProvider · selectFile", () => {
     localStorage.clear();
     sessionStorage.clear();
     rows.tabs = [];
+    route.search = { project: "acme/app" };
   });
 
   it("opens the file in the main area and leaves the right panel where it is", () => {
@@ -195,6 +227,7 @@ describe("TreesProvider · tabs", () => {
     localStorage.clear();
     sessionStorage.clear();
     rows.tabs = [];
+    route.search = { project: "acme/app" };
   });
 
   // No tab is privileged, so a worktree nobody has opened a tab on is showing

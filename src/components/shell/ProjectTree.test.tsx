@@ -46,7 +46,10 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
     select({
       location: {
         pathname: route.reviewsProject === null ? "/trees" : "/reviews",
-        search: { project: route.reviewsProject ?? undefined, pr: route.openPrUrl },
+        search:
+          route.reviewsProject === null
+            ? { project: route.openTree?.repo, tree: route.openTree?.id }
+            : { project: route.reviewsProject, pr: route.openPrUrl },
       },
     }),
 }));
@@ -58,13 +61,15 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 const ui = vi.hoisted(() => ({
   treeFocus: null as TreeFocus | null,
   requestTreeFocus: vi.fn(),
-  openWorktree: null as { repo: string; id: string } | null,
 }));
 const model = vi.hoisted(() => ({ current: null as unknown }));
 
 /** The router state the tree reads: which project Reviews is open on, if any. */
 const route = vi.hoisted(() => ({
   reviewsProject: null as string | null,
+  /** The workspace the url has open — `?project=`/`?tree=` on `/trees`, which is
+   *  where the tree reads its lit row from now that no app state holds one. */
+  openTree: null as { repo: string; id: string } | null,
   /** The `?pr=` the Reviews route carries — the rail's own selection. */
   openPrUrl: undefined as string | undefined,
   navigate: vi.fn(),
@@ -85,7 +90,6 @@ const mergeQueue = vi.hoisted(() => ({ view: undefined as unknown }));
 
 vi.mock("../../state/AppContext", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../state/AppContext")>()),
-  useApp: () => ({ activeRepo: "acme/app", setActiveRepo: vi.fn() }),
   useAppUi: () => ui,
 }));
 // Real `reviewCountsByProject` on a stubbed read: the counts under test are the
@@ -941,7 +945,7 @@ describe("ProjectTree selection follows the visible destination", () => {
     route.openPrUrl = undefined;
     reviews.inbox = inbox({ requested: [waiting("a", PR_URL), waiting("b", `${PR_URL}0`)] });
     ui.treeFocus = null;
-    ui.openWorktree = { repo: REPO, id: "AK-1" };
+    route.openTree = { repo: REPO, id: "AK-1" };
     model.current = {
       projects: [
         {
@@ -1065,7 +1069,7 @@ describe("ProjectTree reveals a selection made elsewhere", () => {
 
   it("expands every ancestor of a worktree selected from another view", () => {
     collapseAll();
-    ui.treeFocus = { id: "AK-1", pane: "issue" };
+    ui.treeFocus = { repo: REPO, id: "AK-1", pane: "issue" };
     render(<ProjectTree />);
     expect(screen.getByRole("button", { name: "Collapse app" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Collapse project Core" })).toBeInTheDocument();
@@ -1076,7 +1080,7 @@ describe("ProjectTree reveals a selection made elsewhere", () => {
   // this request has no business undoing it.
   it("leaves the bands it did not have to open exactly as it found them", () => {
     collapseAll();
-    ui.treeFocus = { id: "AK-1", pane: "issue" };
+    ui.treeFocus = { repo: REPO, id: "AK-1", pane: "issue" };
     render(<ProjectTree />);
     expect(screen.getByRole("button", { name: "Expand project Infra" })).toBeInTheDocument();
   });
@@ -1085,7 +1089,7 @@ describe("ProjectTree reveals a selection made elsewhere", () => {
   // parents would move the rail under the pointer that just clicked it.
   it("expands nothing for a selection made by clicking in the tree itself", () => {
     collapseAll();
-    ui.treeFocus = { id: "AK-1", pane: "issue", fromSidebar: true };
+    ui.treeFocus = { repo: REPO, id: "AK-1", pane: "issue", fromSidebar: true };
     render(<ProjectTree />);
     expect(screen.getByRole("button", { name: "Expand app" })).toBeInTheDocument();
   });

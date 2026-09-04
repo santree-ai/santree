@@ -33,10 +33,12 @@ import {
   useBoolSetting,
   useCreateWorktree,
   useInitScript,
+  useOrgSiblings,
   useResolvedBoolSetting,
   useResolvedSetting,
   useSetting,
   useTasks,
+  useWorkScopeRepo,
   useWorktreePrs,
   useWorktrees,
   WORK_AGENT_KEY,
@@ -46,6 +48,7 @@ import {
 import { useAgentRuns } from "../../state/AgentRuns";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
+import { useWorkRepoGate } from "../../state/WorkRepoGate";
 import { PROJECT_FALLBACK } from "../../theme/colors";
 import { NO_PROJECT } from "../trees/model";
 
@@ -195,6 +198,11 @@ interface IssuesModel {
   worktreeById: Map<string, Worktree>;
   /** Live PR status keyed by issue id — for the graph node's PR badge. */
   prByTask: Map<string, WorktreePr[]>;
+  /** The project this page reads through — see {@link useWorkScopeRepo}. Read
+   *  scope only: it is never where a ticket starts (the gate answers that), and
+   *  a consumer using it as a launch target is the bug this split exists to
+   *  prevent. */
+  repo: string;
   selected: Record<string, boolean>;
   focusId: string;
   focusProject: string | null;
@@ -313,7 +321,14 @@ export function IssuesProvider({
   children: ReactNode;
   actionable?: ActionableControl;
 }) {
-  const { settings, activeRepo, setActiveRepo } = useApp();
+  const { settings } = useApp();
+  // Read scope, never a launch target. Which tickets the graph draws is one
+  // question; which project a ticket starts in is another, and `askRepo` below
+  // is the only thing that answers the second. Conflating them is what let a
+  // ticket land in whichever project the view happened to be pointed at.
+  const scopeRepo = useWorkScopeRepo();
+  const candidates = useOrgSiblings(scopeRepo);
+  const askRepo = useWorkRepoGate();
   const {
     requestTreeLaunch,
     requestTreeFocus,
@@ -325,13 +340,13 @@ export function IssuesProvider({
     removePendingLaunch,
   } = useAppUi();
   const navigate = useNavigate();
-  const { data: tasks = [] } = useTasks(activeRepo);
-  const { data: worktrees = [] } = useWorktrees(activeRepo);
+  const { data: tasks = [] } = useTasks(scopeRepo);
+  const { data: worktrees = [] } = useWorktrees(scopeRepo);
   // Only for naming the "don't stack" option in the launch dialog — the create
   // itself resolves the default branch backend-side from a null base.
-  const { data: baseWorktree } = useBaseWorktree(activeRepo);
-  const { data: worktreePrs = [] } = useWorktreePrs(activeRepo);
-  const { mutateAsync: createWorktree } = useCreateWorktree(activeRepo);
+  const { data: baseWorktree } = useBaseWorktree(scopeRepo);
+  const { data: worktreePrs = [] } = useWorktreePrs(scopeRepo);
+  const { mutateAsync: createWorktree } = useCreateWorktree();
   const { planSetup } = useAgentRuns();
   // When off (default), the launch queue is bypassed: the panel shows a "Run"
   // button that starts the single focused ticket immediately (⌘-click → background).
@@ -341,9 +356,9 @@ export function IssuesProvider({
   // in every new worktree, in none, or ask once for the whole batch. A single
   // launch ignores this and follows the plain "run setup on new worktrees"
   // preference — which is also what the ask-once dialog defaults to.
-  const { data: batchSetting } = useResolvedSetting(activeRepo, TREES_BATCH_SETUP_KEY);
-  const runSetupPref = useResolvedBoolSetting(activeRepo, TREES_RUN_SETUP_KEY).value;
-  const { data: initScript, isFetched: initScriptFetched } = useInitScript(activeRepo);
+  const { data: batchSetting } = useResolvedSetting(scopeRepo, TREES_BATCH_SETUP_KEY);
+  const runSetupPref = useResolvedBoolSetting(scopeRepo, TREES_RUN_SETUP_KEY).value;
+  const { data: initScript, isFetched: initScriptFetched } = useInitScript(scopeRepo);
   // Nothing to run ⇒ nothing to ask: a repo with no executable `.santree/init.sh`
   // never prompts, whatever the preference says. Until that read lands we fall
   // back to the setting, so a slow read can't silently skip a real setup script.
@@ -441,7 +456,10 @@ export function IssuesProvider({
   // tray-side model source drifted from Settings once the agent was switched
   // (a Codex launch showed Claude's model), so there isn't one.
   const [queueAgents, setQueueAgents] = useState<Record<string, AgentKind>>({});
-  const { data: workAgent } = useResolvedSetting(activeRepo, WORK_AGENT_KEY);
+  // Where each queued ticket will be created, as answered by the gate when it
+  // was queued — so Launch cannot send it somewhere else than Run would have.
+  const [queueRepos, setQueueRepos] = useState<Record<string, string>>({});
+  const { data: workAgent } = useResolvedSetting(scopeRepo, WORK_AGENT_KEY);
   const launchAgent = (workAgent as AgentKind | null) ?? settings?.defaultAgent ?? "Claude";
   const agentFor = useCallback(
     (id: string) => queueAgents[id] ?? launchAgent,
@@ -489,14 +507,15 @@ export function IssuesProvider({
   // and a stale selection would silently pre-queue tickets in the new repo. Reset
   // to "nothing focused" and let the default-focus effect above pick the new
   // repo's first task once its tasks land.
-  const loadedRepo = useRef(activeRepo);
+  const loadedRepo = useRef(scopeRepo);
   useEffect(() => {
-    if (loadedRepo.current === activeRepo) return;
-    loadedRepo.current = activeRepo;
+    if (loadedRepo.current === scopeRepo) return;
+    loadedRepo.current = scopeRepo;
     setFocusId("");
     setFocusProject(null);
     setSelected({});
-  }, [activeRepo]);
+    setQueueRepos({});
+  }, [scopeRepo]);
 
   const worktreeIds = useMemo(() => new Set(worktrees.map((w) => w.id)), [worktrees]);
 
@@ -520,10 +539,10 @@ export function IssuesProvider({
   // start — the work is already there).
   const goToWorktree = useCallback(
     (id: string) => {
-      requestTreeFocus(id);
-      navigate({ to: "/trees" });
+      navigate({ to: "/trees", search: { project: scopeRepo, tree: id } });
+      requestTreeFocus(scopeRepo, id);
     },
-    [requestTreeFocus, navigate],
+    [scopeRepo, requestTreeFocus, navigate],
   );
 
   /** What a launch of `task` branches from (see `stackBase`). */
@@ -590,33 +609,20 @@ export function IssuesProvider({
     [focusTask, noteAdded],
   );
 
-  // An add waiting on a repo switch (see `enqueueIn`).
-  const [parkedAdd, setParkedAdd] = useState<{ repo: string; id: string } | null>(null);
-
+  // A queued ticket carries the project it will start in, decided by the gate at
+  // the moment it was queued. It used to be implicit — the queue was "the active
+  // project's", so adding a ticket switched the whole app and an add across the
+  // switch had to be parked until the new project's tasks landed. Nothing is
+  // switched now, so nothing has to wait.
   const enqueueIn = useCallback(
     (repo: string, id: string) => {
-      if (repo !== activeRepo) {
-        setActiveRepo(repo);
-        setParkedAdd({ repo, id });
-        return;
-      }
       const task = byId.get(id);
       if (!task || !isEligible(task) || selected[id]) return;
+      setQueueRepos((r) => ({ ...r, [id]: repo }));
       add(id, selectedEligible.length === 0);
     },
-    [activeRepo, setActiveRepo, byId, isEligible, selected, selectedEligible.length, add],
+    [byId, isEligible, selected, selectedEligible.length, add],
   );
-
-  // The parked add lands once the new repo's tasks have. Declared after the
-  // reset effect above, so in the commit where both fire the reset's empty
-  // selection is queued first and the add applies on top of it.
-  useEffect(() => {
-    if (!parkedAdd || parkedAdd.repo !== activeRepo) return;
-    const task = byId.get(parkedAdd.id);
-    if (!task) return;
-    setParkedAdd(null);
-    if (isEligible(task)) add(parkedAdd.id, true);
-  }, [parkedAdd, activeRepo, byId, isEligible, add]);
 
   // Start every queued ticket: jump to the Trees tab immediately and create a real
   // worktree per ticket *concurrently* in the background — never blocking the view
@@ -639,17 +645,19 @@ export function IssuesProvider({
   // the answer to "branch off the blocker's work?" — false forks off the repo's
   // default branch instead, for every target in the launch.
   const startLaunch = useCallback(
-    (targets: Task[], setup: boolean | null, stack: boolean) => {
+    (targets: { repo: string; task: Task }[], setup: boolean | null, stack: boolean) => {
       setSelected({});
       setQueueAgents({});
+      setQueueRepos({});
       setPending(null);
       const projectOf = (task: Task) => (task.project === NO_PROJECT ? null : task.project);
+      const tasks = targets.map((t) => t.task);
       // A bulk launch suppresses the per-worktree toast and raises one summary once
       // every create settles; a single launch keeps its specific "Created … for X".
       const bulk = targets.length > 1;
       if (setup !== null)
         planSetup(
-          targets.map((t) => t.id),
+          tasks.map((t) => t.id),
           setup,
         );
       // One expression decides the base for both the placeholder and the create, so
@@ -657,7 +665,8 @@ export function IssuesProvider({
       // — the same "can't drift apart" rule `stackBase` documents.
       const baseOf = (task: Task) => (stack ? stackOn(task) : null);
       addPendingLaunches(
-        targets.map((task) => ({
+        targets.map(({ repo, task }) => ({
+          repo,
           id: task.id,
           title: task.title,
           project: projectOf(task),
@@ -667,13 +676,17 @@ export function IssuesProvider({
           baseBranch: baseOf(task)?.branch,
         })),
       );
-      if (bulk) for (const task of targets) requestBackgroundLaunch(task.id);
-      else requestTreeLaunch(targets[0].id);
-      navigate({ to: "/trees" });
+      if (bulk) for (const { repo, task } of targets) requestBackgroundLaunch(repo, task.id);
+      else requestTreeLaunch(targets[0].task.id);
+      navigate({
+        to: "/trees",
+        search: bulk ? {} : { project: targets[0].repo, tree: targets[0].task.id },
+      });
       void Promise.allSettled(
-        targets.map((task) => {
+        targets.map(({ repo, task }) => {
           const base = baseOf(task);
           return createWorktree({
+            repo,
             issueId: task.id,
             title: task.title,
             launch: { type: "ticket", project: projectOf(task) },
@@ -712,7 +725,7 @@ export function IssuesProvider({
   // `onCreated` wires up how the launch is consumed on the Trees side (focus +
   // navigate, or background) before the async create resolves.
   const startOne = useCallback(
-    (id: string, onCreated: (task: Task) => void, quiet: boolean, stack: boolean) => {
+    (repo: string, id: string, onCreated: (task: Task) => void, quiet: boolean, stack: boolean) => {
       const task = byId.get(id);
       if (!task || !isEligible(task)) return;
       setPending(null);
@@ -721,6 +734,7 @@ export function IssuesProvider({
       const base = stack ? stackOn(task) : null;
       addPendingLaunches([
         {
+          repo,
           id: task.id,
           title: task.title,
           project,
@@ -730,6 +744,7 @@ export function IssuesProvider({
       ]);
       onCreated(task);
       void createWorktree({
+        repo,
         issueId: task.id,
         title: task.title,
         launch: { type: "ticket", project },
@@ -774,28 +789,49 @@ export function IssuesProvider({
   );
 
   const launch = useCallback(() => {
-    beginLaunch(selectedEligible, (setup, stack) => startLaunch(selectedEligible, setup, stack));
-  }, [selectedEligible, beginLaunch, startLaunch]);
+    // Every queued ticket already has its answer, from the gate that let it in.
+    // A ticket queued before the queue remembered one falls back to the read
+    // scope rather than refusing to launch.
+    const targets = selectedEligible.map((task) => ({
+      repo: queueRepos[task.id] ?? scopeRepo,
+      task,
+    }));
+    beginLaunch(selectedEligible, (setup, stack) => startLaunch(targets, setup, stack));
+  }, [selectedEligible, queueRepos, scopeRepo, beginLaunch, startLaunch]);
+
+  /** Resolve the project, then start. The one door every single-ticket start in
+   *  this model goes through, so the rail's Run, the graph's menu and the
+   *  ⌘-click background run can't answer "where" three different ways — and
+   *  none of them can answer it with "wherever the view is pointed". */
+  const startResolved = useCallback(
+    (id: string, action: string, onCreated: (task: Task, repo: string) => void, quiet: boolean) => {
+      const task = byId.get(id);
+      if (!task) return;
+      void askRepo(candidates, action).then((repo) => {
+        if (!repo) return;
+        beginLaunch([task], (_setup, stack) =>
+          startOne(repo, id, (t) => onCreated(t, repo), quiet, stack),
+        );
+      });
+    },
+    [byId, candidates, askRepo, beginLaunch, startOne],
+  );
 
   // Run a single ticket now: create its worktree and jump to Trees, starting the
   // agent there — the queue-off equivalent of selecting one ticket and launching.
   const run = useCallback(
     (id: string) => {
-      const task = byId.get(id);
-      if (!task) return;
-      beginLaunch([task], (_setup, stack) =>
-        startOne(
-          id,
-          (t) => {
-            requestTreeLaunch(t.id);
-            navigate({ to: "/trees" });
-          },
-          false,
-          stack,
-        ),
+      startResolved(
+        id,
+        `Starting ${id}`,
+        (t, repo) => {
+          requestTreeLaunch(t.id);
+          navigate({ to: "/trees", search: { project: repo, tree: t.id } });
+        },
+        false,
       );
     },
-    [byId, beginLaunch, startOne, requestTreeLaunch, navigate],
+    [startResolved, requestTreeLaunch, navigate],
   );
 
   // Run a single ticket in the background: create its worktree and start the agent
@@ -803,21 +839,19 @@ export function IssuesProvider({
   // it off-screen — see BackgroundLaunch). The ⌘-click path of the "Run" button.
   const runBackground = useCallback(
     (id: string) => {
-      const task = byId.get(id);
-      if (!task) return;
-      beginLaunch([task], (_setup, stack) =>
-        startOne(
-          id,
-          (t) => {
-            requestBackgroundLaunch(t.id);
-            toast.success(`Running ${t.id} in the background…`);
-          },
-          true,
-          stack,
-        ),
+      startResolved(
+        id,
+        `Running ${id}`,
+        (t, repo) => {
+          // The launch host needs the project too: it is off-screen by
+          // definition, so there is no view to read it from.
+          requestBackgroundLaunch(repo, t.id);
+          toast.success(`Running ${t.id} in the background…`);
+        },
+        true,
       );
     },
-    [byId, beginLaunch, startOne, requestBackgroundLaunch],
+    [startResolved, requestBackgroundLaunch],
   );
 
   // Trivial setter handlers — stable across renders so the context value below
@@ -862,6 +896,7 @@ export function IssuesProvider({
 
   const value = useMemo<IssuesModel>(
     () => ({
+      repo: scopeRepo,
       tasks,
       byId,
       projectMeta,
@@ -904,6 +939,7 @@ export function IssuesProvider({
       runBackground,
     }),
     [
+      scopeRepo,
       tasks,
       byId,
       projectMeta,

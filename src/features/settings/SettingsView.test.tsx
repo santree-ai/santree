@@ -20,7 +20,7 @@ vi.mock("../../lib/queries", () => ({
 }));
 
 vi.mock("../../state/AppContext", () => ({
-  useApp: () => ({ activeRepo: "acme/app", accent: "#000000" }),
+  useApp: () => ({ accent: "#000000" }),
 }));
 
 vi.mock("../../components/shell/Sidebar", () => ({ TRAFFIC_LIGHTS_INSET: 78 }));

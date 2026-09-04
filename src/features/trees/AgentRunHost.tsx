@@ -17,8 +17,8 @@ import { useEffect } from "react";
 
 import type { Worktree } from "../../bindings";
 import { useAddWorktreeTab, useWorktrees, useWorktreeTabs } from "../../lib/queries";
-import { useAgentRuns } from "../../state/AgentRuns";
-import { useApp, useAppUi } from "../../state/AppContext";
+import { type QueuedLaunch, useAgentRuns, type VisibleWorktree } from "../../state/AgentRuns";
+import { useAppUi } from "../../state/AppContext";
 import { defaultTabTitle, remoteControlTab } from "./model";
 import { useAgentTab } from "./useAgentTab";
 import { useWorkLaunch } from "./useWorkLaunch";
@@ -27,20 +27,28 @@ import { WorktreeTerminal } from "./WorktreeTerminal";
 /** Which queued launches this host must start detached, each paired with the tab
  *  it launches into.
  *
- *  Excluded: the worktree Trees currently shows (its visible pane already hosts that
- *  terminal — two hosts for one session would fight over the single xterm overlay),
- *  and any launch whose worktree isn't real yet (a placeholder has no path to root a
- *  terminal in). Everything else runs here, which is what makes a launch survive both
- *  never opening Trees and navigating away from it. Exported for testing — see
- *  AgentRunHost.test.ts. */
+ *  Excluded: launches belonging to another project (each project has its own host
+ *  — see `RepoLaunches`), the worktree Trees currently shows (its visible pane
+ *  already hosts that terminal — two hosts for one session would fight over the
+ *  single xterm overlay), and any launch whose worktree isn't real yet (a
+ *  placeholder has no path to root a terminal in). "Currently shows" is matched on
+ *  project *and* id: two projects of one Linear org can hold a worktree for the
+ *  same ticket, and skipping the wrong one silently drops the launch. Everything
+ *  else runs here, which is what makes a launch survive both never opening Trees
+ *  and navigating away from it. Exported for testing — see AgentRunHost.test.ts. */
 export function launchesToHost(
-  launchAgents: ReadonlyMap<string, string>,
+  launchAgents: ReadonlyMap<string, QueuedLaunch>,
+  repo: string,
   worktrees: Worktree[],
-  visibleWorktree: string | null,
+  visibleWorktree: VisibleWorktree | null,
 ): { worktree: Worktree; tabId: string }[] {
   return [...launchAgents]
-    .filter(([id]) => id !== visibleWorktree)
-    .map(([id, tabId]) => ({ worktree: worktrees.find((w) => w.id === id), tabId }))
+    .filter(
+      ([id, launch]) =>
+        launch.repo === repo &&
+        !(visibleWorktree?.repo === launch.repo && visibleWorktree.id === id),
+    )
+    .map(([id, launch]) => ({ worktree: worktrees.find((w) => w.id === id), tabId: launch.tabId }))
     .filter((x): x is { worktree: Worktree; tabId: string } => !!x.worktree && !x.worktree.pending);
 }
 
@@ -53,13 +61,35 @@ export function AgentRunHost() {
   return <QueuedLaunches />;
 }
 
+/** One host per project with something queued in it. Split this way because
+ *  every read below is per-project (`useWorktrees`, `useWorktreeTabs`) and hooks
+ *  cannot be called in a loop — and because a queue that only ever looked at one
+ *  project is a queue that silently drops a launch started in another, which is
+ *  exactly what "run this in the background" must not do. */
 function QueuedLaunches() {
-  const { activeRepo } = useApp();
+  const { bgLaunches } = useAppUi();
+  const { launchAgents } = useAgentRuns();
+  const repos = [
+    ...new Set([
+      ...bgLaunches.map((l) => l.repo),
+      ...[...launchAgents.values()].map((l) => l.repo),
+    ]),
+  ];
+  return (
+    <>
+      {repos.map((repo) => (
+        <RepoLaunches key={repo} repo={repo} />
+      ))}
+    </>
+  );
+}
+
+function RepoLaunches({ repo }: { repo: string }) {
   const { bgLaunches, clearBackgroundLaunch } = useAppUi();
   const { launchAgents, visibleWorktree, beginRun } = useAgentRuns();
-  const { data: worktrees = [] } = useWorktrees(activeRepo);
-  const { data: tabs = [] } = useWorktreeTabs(activeRepo);
-  const { mutate: addTabRow } = useAddWorktreeTab(activeRepo);
+  const { data: worktrees = [] } = useWorktrees(repo);
+  const { data: tabs = [] } = useWorktreeTabs(repo);
+  const { mutate: addTabRow } = useAddWorktreeTab(repo);
 
   // A background launch is requested before its worktree exists, so wait for the
   // real one — a pending placeholder has no path to root a terminal in. Consuming
@@ -67,7 +97,8 @@ function QueuedLaunches() {
   // minted and persisted first, exactly as a foreground start does it — an agent
   // that ran in no tab would be invisible when the worktree is next opened.
   useEffect(() => {
-    for (const id of bgLaunches) {
+    for (const { repo: launchRepo, id } of bgLaunches) {
+      if (launchRepo !== repo) continue;
       const wt = worktrees.find((w) => w.id === id);
       if (!wt || wt.pending) continue;
       clearBackgroundLaunch(id);
@@ -85,14 +116,14 @@ function QueuedLaunches() {
         ),
         pr: null,
       });
-      beginRun(id, tabId);
+      beginRun(repo, id, tabId);
     }
-  }, [bgLaunches, worktrees, tabs, addTabRow, beginRun, clearBackgroundLaunch]);
+  }, [repo, bgLaunches, worktrees, tabs, addTabRow, beginRun, clearBackgroundLaunch]);
 
   return (
     <>
-      {launchesToHost(launchAgents, worktrees, visibleWorktree).map(({ worktree, tabId }) => (
-        <DetachedLaunch key={worktree.id} worktree={worktree} tabId={tabId} />
+      {launchesToHost(launchAgents, repo, worktrees, visibleWorktree).map(({ worktree, tabId }) => (
+        <DetachedLaunch key={worktree.id} repo={repo} worktree={worktree} tabId={tabId} />
       ))}
     </>
   );
@@ -100,8 +131,15 @@ function QueuedLaunches() {
 
 /** One detached agent session for a queued launch: spawned and seeded, rendered
  *  nowhere. `attach={false}` is what keeps it off the layer's inline slot. */
-function DetachedLaunch({ worktree, tabId }: { worktree: Worktree; tabId: string }) {
-  const { activeRepo: repo } = useApp();
+function DetachedLaunch({
+  repo,
+  worktree,
+  tabId,
+}: {
+  repo: string;
+  worktree: Worktree;
+  tabId: string;
+}) {
   const { clearAgentLaunch } = useAgentRuns();
   const { data: allTabs = [] } = useWorktreeTabs(repo);
   const tabs = allTabs.filter((t) => t.worktreeId === worktree.id);

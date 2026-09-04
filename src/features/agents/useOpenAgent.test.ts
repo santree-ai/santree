@@ -11,7 +11,6 @@ import { describe, expect, it, vi } from "vitest";
 
 const spies = vi.hoisted(() => ({
   navigate: vi.fn(),
-  setActiveRepo: vi.fn(),
   requestTreeFocus: vi.fn(),
   requestTriageFocus: vi.fn(),
   requestReviewFocus: vi.fn(),
@@ -20,7 +19,6 @@ const spies = vi.hoisted(() => ({
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => spies.navigate }));
 
 vi.mock("../../state/AppContext", () => ({
-  useApp: () => ({ activeRepo: "acme/app", setActiveRepo: spies.setActiveRepo }),
   useAppUi: () => ({
     requestTreeFocus: spies.requestTreeFocus,
     requestTriageFocus: spies.requestTriageFocus,
@@ -47,32 +45,46 @@ describe("useOpenAgent", () => {
    *  the model moves there rather than leaving whatever tab was last open. */
   it("names no tab for a session minted before tabs existed", () => {
     open("tree:AK-1");
-    expect(spies.requestTreeFocus).toHaveBeenCalledWith("AK-1", { tab: null });
-    expect(spies.navigate).toHaveBeenCalledWith({ to: "/trees" });
+    expect(spies.requestTreeFocus).toHaveBeenCalledWith("acme/app", "AK-1", { tab: null });
+    expect(spies.navigate).toHaveBeenCalledWith({
+      to: "/trees",
+      search: { project: "acme/app", tree: "AK-1" },
+    });
   });
 
   /** The bug this file exists for: the tab id must survive the handoff. */
   it("sends an extra tab's session to that tab, not to the first one", () => {
     open("tree:AK-373:tab:05242dca");
-    expect(spies.requestTreeFocus).toHaveBeenCalledWith("AK-373", { tab: "05242dca" });
+    expect(spies.requestTreeFocus).toHaveBeenCalledWith("acme/app", "AK-373", {
+      tab: "05242dca",
+    });
   });
 
   /** Opening an agent says nothing about which right-panel pane you wanted.
    *  Naming one here is how a click in the History pane jumped to the ticket. */
   it("never names a right-panel pane", () => {
     open("tree:AK-373:tab:05242dca");
-    const [, focus] = spies.requestTreeFocus.mock.calls[0];
+    const [, , focus] = spies.requestTreeFocus.mock.calls[0];
     expect(focus).not.toHaveProperty("pane");
   });
 
-  it("switches repo first when the session belongs to another one", () => {
+  /** The session's own project travels in the url. There is no app-wide "active
+   *  project" to switch any more, so this is the whole handoff — and a session in
+   *  a project you are not looking at opens without disturbing anything else. */
+  it("carries the session's project in the route", () => {
     open("tree:AK-1", "acme/other");
-    expect(spies.setActiveRepo).toHaveBeenCalledWith("acme/other");
+    expect(spies.navigate).toHaveBeenCalledWith({
+      to: "/trees",
+      search: { project: "acme/other", tree: "AK-1" },
+    });
+    expect(spies.requestTreeFocus).toHaveBeenCalledWith("acme/other", "AK-1", { tab: null });
   });
 
-  it("leaves the repo alone when the session is already in the active one", () => {
-    open("tree:AK-1", "acme/app");
-    expect(spies.setActiveRepo).not.toHaveBeenCalled();
+  /** A session santree cannot attribute to a project has nowhere to open: the
+   *  url would name no workspace, and the focus request no tree. */
+  it("asks for no worktree when the session belongs to no known project", () => {
+    open("tree:AK-1", null);
+    expect(spies.requestTreeFocus).not.toHaveBeenCalled();
   });
 
   /** The ticket rides in the route (so the sidebar's row lights on arrival) and

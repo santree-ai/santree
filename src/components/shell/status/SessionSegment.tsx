@@ -14,7 +14,7 @@
  *
  * **Scoped to the focused agent tab, and to nothing else.** It joined the open
  * *worktree* to its main terminal before, which is a claim the bar can't keep:
- * `openWorktree` deliberately survives a navigation, so the meter stayed up on
+ * the open worktree outlived the view showing it, so the meter stayed up on
  * Triage, Reviews and Settings, and inside Trees it showed the main terminal's
  * numbers while the user was reading a diff or a second agent's tab. A context
  * fill belongs to one session, so it renders only while that session's tab is on

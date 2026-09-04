@@ -1,14 +1,17 @@
 /**
  * Trees-tab state model.
  *
- * Owns which worktree (task) is active, the right panel's state
- * (collapsed/width, like the Issues panel), and which file is open in the main
- * area. The worktree list is real (DB-backed git worktrees for the active repo),
- * grouped by project in the sidebar. An empty `activeId` means the all-agents
- * overview is showing instead of a single task. A non-null `selectedFile` swaps
- * the main content from the live terminal to that file's diff/contents.
+ * Owns the right panel's state (collapsed/width, like the Issues panel) and
+ * which file is open in the main area. What it does *not* own is the selection:
+ * the project and the worktree both come from the route (`?project=`/`?tree=`,
+ * see `routes/trees.tsx`), because the permanent sidebar has to light the same
+ * row this view is showing and cannot read view state. An empty `activeId`
+ * means the welcome surface is showing instead of a single task. A non-null
+ * `selectedFile` swaps the main content from the live terminal to that file's
+ * diff/contents.
  */
 
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   createContext,
   type ReactNode,
@@ -31,10 +34,13 @@ import type {
 } from "../../bindings";
 import { primaryPr } from "../../components/PrChip";
 import {
+  TREES_RUN_SETUP_KEY,
   useAddWorktreeTab,
   useBaseWorktree,
   useRemoveWorktreeTab,
   useRenameWorktreeTab,
+  useRepos,
+  useResolvedBoolSetting,
   useTasks,
   useTriageDetail,
   useWorktreePrs,
@@ -44,7 +50,7 @@ import {
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { usePersistedState } from "../../lib/usePersistedState";
 import { useAgentRuns } from "../../state/AgentRuns";
-import { type FixCiLaunch, type PendingLaunch, useApp, useAppUi } from "../../state/AppContext";
+import { type FixCiLaunch, type PendingLaunch, useAppUi } from "../../state/AppContext";
 import { agentLabel } from "../../theme/colors";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useWorktreeDeletion } from "./useWorktreeDeletion";
@@ -542,7 +548,6 @@ interface TreesModel {
 
 /** localStorage keys for the view state above. Namespaced like the AppContext
  *  ones (`santree-*`) so everything the app persists is greppable from one place. */
-const ACTIVE_ID_KEY = "santree-trees-active-id";
 const RIGHT_COLLAPSED_KEY = "santree-trees-right-collapsed";
 const RIGHT_WIDTH_KEY = "santree-trees-right-width";
 // Bumped when the tab set changed (`all` → `files`, plus `history`); a stale
@@ -563,7 +568,17 @@ const ISSUE_VIEW_BY_WT_KEY = "santree-trees-issue-view-by-worktree";
 const TreesContext = createContext<TreesModel | null>(null);
 
 export function TreesProvider({ children }: { children: ReactNode }) {
-  const { activeRepo } = useApp();
+  const { project, tree } = useSearch({ from: "/trees" });
+  const navigate = useNavigate();
+  const { data: repos } = useRepos();
+  // The route names the project; the registry says whether it is one. An unknown
+  // `?project=` is not a scope — it must land on the welcome surface rather than
+  // fire every `enabled: !!repo` query at a repo the backend cannot answer for.
+  // Until the registry has loaded there is nothing to check it against, so the
+  // url is trusted for those frames (the same "still loading, don't clear a
+  // valid repo" rule the old active-repo validation followed).
+  const repo =
+    !project || (repos !== undefined && !repos.some((r) => r.name === project)) ? "" : project;
   const {
     treeLaunch,
     consumeTreeLaunch,
@@ -572,23 +587,24 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     fixCiLaunch,
     consumeFixCiLaunch,
     pendingLaunches,
-    removePendingLaunch,
     pendingDeletes,
     removePendingDelete,
-    setOpenWorktree,
     setFocusedAgent,
   } = useAppUi();
   // Setup runs and queued launches are owned by the app shell, not this route — a
   // run must survive navigating away from Trees (see AgentRuns).
-  const { beginRun, runSetup, isSettingUp, runSetupOnStart, setVisibleWorktree, launchAgents } =
-    useAgentRuns();
-  const { data: realWorktrees = [], isLoading: worktreesLoading } = useWorktrees(activeRepo);
-  const { data: baseWorktree = null, isLoading: baseWorktreeLoading } = useBaseWorktree(activeRepo);
-  const { data: worktreePrs = [] } = useWorktreePrs(activeRepo);
+  const { beginRun, runSetup, isSettingUp, setVisibleWorktree, launchAgents } = useAgentRuns();
+  // Read here rather than in `AgentRuns`, which has no project of its own: this
+  // is the preference for *this* workspace's project, and it only decides which
+  // tab a start opens on. The run resolves it imperatively (see `beginRun`).
+  const runSetupOnStart = useResolvedBoolSetting(repo, TREES_RUN_SETUP_KEY).value;
+  const { data: realWorktrees = [], isLoading: worktreesLoading } = useWorktrees(repo);
+  const { data: baseWorktree = null, isLoading: baseWorktreeLoading } = useBaseWorktree(repo);
+  const { data: worktreePrs = [] } = useWorktreePrs(repo);
   // Owned here (a stable provider) so optimistic delete's rollback still fires
   // after the deleted worktree's pane unmounts. Shared with the sidebar row's
   // right-click delete — see useWorktreeDeletion.
-  const { deleteWorktree, deleteWorktrees } = useWorktreeDeletion(activeRepo);
+  const { deleteWorktree, deleteWorktrees } = useWorktreeDeletion(repo);
 
   // The backend ships `status`/`activity` as null rather than guessing — fill them
   // from real signals here: `status` joins the linked Linear task's workflow state
@@ -596,7 +612,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // live PTY session exists for any of the worktree's panes. A worktree whose task
   // isn't in the current fetch (unassigned to the viewer) keeps a null status and
   // renders no chip.
-  const { data: tasks = [] } = useTasks(activeRepo);
+  const { data: tasks = [] } = useTasks(repo);
   const statusByTaskId = useMemo(() => new Map(tasks.map((t) => [t.id, t.status])), [tasks]);
   const { tabs: terminalTabs } = useTerminals();
   const liveTermRefIds = useMemo(
@@ -616,9 +632,22 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // Show "Creating workspace…" placeholders for in-flight launches; hide worktrees
   // being deleted. Both held as state (not query-cache patches) so the refetch this
   // tab's mount — or the filesystem watcher mid-delete — triggers can't wipe them.
+  //
+  // Only *this* project's launches. The register is app-wide, and it used to be
+  // implicitly single-project because a launch could only ever happen in the one
+  // the app was pointed at. A start now names its own project, so an unfiltered
+  // merge would show a workspace a placeholder for a worktree being created in
+  // another one — a row that never resolves, because its real worktree lands in
+  // a list this view never reads.
   const worktrees = useMemo(
-    () => mergeWorktrees(realWorktrees, pendingLaunches, pendingDeletes, withLiveStatus),
-    [realWorktrees, pendingLaunches, pendingDeletes, withLiveStatus],
+    () =>
+      mergeWorktrees(
+        realWorktrees,
+        pendingLaunches.filter((l) => l.repo === repo),
+        pendingDeletes,
+        withLiveStatus,
+      ),
+    [realWorktrees, repo, pendingLaunches, pendingDeletes, withLiveStatus],
   );
 
   // Live PR status keyed by worktree id (worktree.id == its issue id).
@@ -631,13 +660,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     }
     return map;
   }, [worktreePrs]);
-
-  // Once a real worktree lands for a pending launch, drop the placeholder.
-  useEffect(() => {
-    for (const w of realWorktrees) {
-      if (pendingLaunches.some((p) => p.id === w.id)) removePendingLaunch(w.id);
-    }
-  }, [realWorktrees, pendingLaunches, removePendingLaunch]);
 
   // Once a deleted worktree is actually gone from the real list, drop it from the
   // pending-delete set (a failed delete leaves it present → it stays/returns).
@@ -659,13 +681,11 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // whichever worktree was open when the app last quit. The per-worktree maps
   // below stay local — they are "what this worktree was showing", restored on an
   // explicit click rather than on a navigation.
-  const [activeId, setActiveId] = usePersistedState(ACTIVE_ID_KEY, "", "session");
-  // Tell the app shell which workspace is open, so the sidebar can mark its row.
-  // This provider is route-scoped and the tree is permanent, so the selection has
-  // to travel through AppUi rather than being read from here.
-  useEffect(() => {
-    setOpenWorktree(activeId ? { repo: activeRepo, id: activeId } : null);
-  }, [activeId, activeRepo, setOpenWorktree]);
+  // A worktree with no project to belong to is not a selection. Reading it from
+  // the route is also how the sidebar marks the open row: the tree is permanent
+  // and this provider is not, so both read the same url instead of the selection
+  // being published up through app state and back down.
+  const activeId = repo ? (tree ?? "") : "";
 
   // Does the active worktree's id name a real ticket? Only Linear can say: absence
   // from `tasks` above proves nothing (that fetch is the viewer's own issues), so
@@ -673,10 +693,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // the pane. `null` is Linear's definitive "no such issue"; `undefined` is "still
   // asking", and tickets usually exist, so the pane shows until told otherwise.
   // Skipped for the base entry, which has no ticket by construction.
-  const { data: activeTicket } = useTriageDetail(
-    activeRepo,
-    activeId === BASE_ID ? null : activeId,
-  );
+  const { data: activeTicket } = useTriageDetail(repo, activeId === BASE_ID ? null : activeId);
   const hasTicket = activeTicket !== null;
 
   const [rightCollapsed, setRightCollapsed] = usePersistedState(RIGHT_COLLAPSED_KEY, false);
@@ -742,7 +759,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // Persisted extra tabs (the "+" tab: Claude sessions / terminals), DB-backed so
   // they survive app restarts. Grouped by worktree id; mutations are optimistic
   // (the tab appears/renames/closes instantly, the row lands in the background).
-  const { data: allExtraTabs = [] } = useWorktreeTabs(activeRepo);
+  const { data: allExtraTabs = [] } = useWorktreeTabs(repo);
   const tabsByWt = useMemo(() => {
     const map = new Map<string, WorktreeTab[]>();
     for (const t of allExtraTabs) {
@@ -752,31 +769,38 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     }
     return map;
   }, [allExtraTabs]);
-  const { mutate: addTabRow } = useAddWorktreeTab(activeRepo);
-  const { mutate: renameTabRow } = useRenameWorktreeTab(activeRepo);
-  const { mutate: removeTabRow } = useRemoveWorktreeTab(activeRepo);
+  const { mutate: addTabRow } = useAddWorktreeTab(repo);
+  const { mutate: renameTabRow } = useRenameWorktreeTab(repo);
+  const { mutate: removeTabRow } = useRemoveWorktreeTab(repo);
 
   // The ONLY way `activeId` is written. It also publishes the selection to
   // `AgentRuns`, in the same batch — the off-screen launcher skips the worktree
   // Trees is showing, because that worktree's visible pane already hosts its
   // terminal and two hosts for one session would fight over the xterm overlay.
   // Splitting these two writes would open a window where both mount.
+  // `replace`, not a push: picking a worktree moves within one destination, and
+  // a Back that walks the last twenty worktrees instead of leaving Trees is not
+  // what the gesture means. Switching *destinations* still pushes normally.
   const select = useCallback(
     (id: string) => {
-      setActiveId(id);
-      setVisibleWorktree(id || null);
+      navigate({
+        to: "/trees",
+        search: (prev: { project?: string }) => ({ ...prev, tree: id || undefined }),
+        replace: true,
+      });
+      setVisibleWorktree(id ? { repo, id } : null);
     },
-    [setActiveId, setVisibleWorktree],
+    [repo, navigate, setVisibleWorktree],
   );
 
-  // `select` is what normally keeps `activeId` and AgentRuns' visible worktree in
-  // step, but a selection restored from storage lands in state without passing
-  // through it — publish it once on mount, or the off-screen launcher never learns
-  // Trees is already showing that worktree and mounts a second host for its
-  // session, two of which fight over the xterm overlay.
-  const restoredId = useRef(activeId);
+  // `select` is what normally keeps the url and AgentRuns' visible worktree in
+  // step, but a selection the route arrived with (a reload, a link, a sidebar
+  // click) never passes through it — publish it once on mount, or the off-screen
+  // launcher never learns Trees is already showing that worktree and mounts a
+  // second host for its session, two of which fight over the xterm overlay.
+  const restored = useRef({ repo, id: activeId });
   useEffect(() => {
-    setVisibleWorktree(restoredId.current || null);
+    setVisibleWorktree(restored.current.id ? restored.current : null);
     // Trees no longer has a worktree on screen — release it, so a launch queued for
     // it (a task the user started and then navigated away from) is picked up by the
     // off-screen launcher and actually runs.
@@ -824,9 +848,9 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       if (opts?.focus ?? true) select(id);
       setFileFor(id, null);
       setTabFor(id, startTabFor(runSetupOnStart, tabId));
-      beginRun(id, tabId);
+      beginRun(repo, id, tabId);
     },
-    [runSetupOnStart, beginRun, select, setFileFor, setTabFor, addTabRow],
+    [repo, runSetupOnStart, beginRun, select, setFileFor, setTabFor, addTabRow],
   );
 
   // The Setup tab is temporary: when a worktree's script finishes, *that* worktree
@@ -842,7 +866,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const wasSettingUp = useRef(settingUpIds);
   useEffect(() => {
     for (const id of finishedSetups(wasSettingUp.current, settingUpIds)) {
-      const tabId = launchAgents.get(id);
+      const tabId = launchAgents.get(id)?.tabId;
       if (tabId) setTabFor(id, extraTab(tabId));
     }
     wasSettingUp.current = settingUpIds;
@@ -910,7 +934,9 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     // the sidebar switches repo and then lands on whatever was open before.
     const { id, pane, tab, expand } = treeFocus;
     if (id !== BASE_ID && !worktrees.some((w) => w.id === id)) return;
-    select(id);
+    // The worktree itself arrived in the url (`?project=`/`?tree=`); what is left
+    // here is the part of a request that is an *instruction* rather than a
+    // location — which pane to show, which tab, whether to expand.
     setFileFor(id, null);
     // Only move what the caller named. A string is a tab id; `null` is a caller
     // that has no tab to name (a session minted before every agent lived in one),
@@ -937,7 +963,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     // sidebar's Linear and GitHub marks name theirs *expanded* — the page as a
     // main tab, remembered per worktree exactly as the pane's own expand control
     // remembers it (and dropped the same way when the worktree loses the thing
-    // it shows). Keyed by `id`, not `activeId`: the select above hasn't rendered.
+    // it shows). Keyed by `id`, not `activeId`: the navigation that selected it
+    // may not have re-rendered yet.
     if (pane !== undefined) {
       setFileTab(pane);
       if (expand) {
@@ -951,7 +978,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     treeFocus,
     worktrees,
     consumeTreeFocus,
-    select,
     setFileFor,
     setTabFor,
     setFileTab,
@@ -1047,7 +1073,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     });
     const activeTab = resolveActiveTab(activeTabByWt[activeId], openTabs);
     return {
-      repo: activeRepo,
+      repo,
       reopenTab,
       consumeReopenTab,
       worktrees,
@@ -1138,7 +1164,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       // A manual re-run opens the Setup tab alongside whatever's already open
       // (e.g. a File tab) — it doesn't replace it.
       runSetup: (id) => {
-        runSetup(id);
+        runSetup(repo, id);
         setTabFor(id, "setup");
       },
       // The on-disk CI-fix prompt file for a Fix-CI tab (from the Reviews hand-off),
@@ -1202,7 +1228,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     startAgent,
     runSetup,
     fixCiLaunchByTab,
-    activeRepo,
+    repo,
     prDialogFor,
     prSuggestFor,
     selectedWorktrees,
@@ -1227,8 +1253,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       activeId: value.activeId,
       tabs: value.tabs,
     });
-    setFocusedAgent(focus && activeRepo ? { repo: activeRepo, ...focus } : null);
-  }, [value, activeRepo, setFocusedAgent]);
+    setFocusedAgent(focus && repo ? { repo, ...focus } : null);
+  }, [value, repo, setFocusedAgent]);
 
   // Its own effect so the clear happens on *unmount only* — folding it into the
   // publish above would clear and re-set on every Trees state change. Leaving

@@ -138,7 +138,14 @@ describe("tabsToCloseForWorktree", () => {
 
 /** Minimal PendingLaunch fixture. */
 function pendingLaunch(id: string, overrides: Partial<PendingLaunch> = {}): PendingLaunch {
-  return { id, title: `Task ${id}`, project: null, agent: "Claude", ...overrides };
+  return {
+    repo: "acme/app",
+    id,
+    title: `Task ${id}`,
+    project: null,
+    agent: "Claude",
+    ...overrides,
+  };
 }
 
 describe("pendingWorktree", () => {

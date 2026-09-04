@@ -2,8 +2,8 @@
  * Global client state — the cross-cutting bits that several tabs share.
  *
  * Split into two contexts on purpose:
- *  - {@link useApp} — slow-changing *data* (active repo, settings, theme). Most
- *    consumers only need this, so they shouldn't re-render on a UI toggle.
+ *  - {@link useApp} — slow-changing *data* (settings, theme). Most consumers
+ *    only need this, so they shouldn't re-render on a UI toggle.
  *  - {@link useAppUi} — volatile UI state (help/shortcuts popovers, the sidebar
  *    collapse/width, the cross-view tree-launch hand-off). Toggling these only
  *    re-renders the few components that actually read them.
@@ -35,15 +35,10 @@ import {
   useSessionUsageWatcher,
   useSettings,
   useUsageWatcher,
-  useWorktreeWatcher,
 } from "../lib/queries";
 
 /** Slow-changing shared data — the part most `useApp()` consumers read. */
 interface AppData {
-  /** Currently selected repository (full name, e.g. `akamai/agent`). */
-  activeRepo: string;
-  setActiveRepo: (repo: string) => void;
-
   /** The theme accent, as a CSS value (`var(--accent)`) for inline styles.
    *  Deliberately NOT a hex: the accent inverts per theme (white on dark,
    *  near-black on light) and only the cascade knows which one is live. */
@@ -105,19 +100,11 @@ interface AppUi {
   addPendingDeletes: (ids: string[]) => void;
   removePendingDelete: (id: string) => void;
 
-  /** The worktree the Trees view currently has open, with its repo — published by
-   *  `TreesProvider` so the sidebar's project tree can mark the row the content
-   *  area is showing (the tree is permanent; that provider is route-scoped, so it
-   *  can't be read from there). Deliberately not cleared when Trees unmounts:
-   *  "which workspace am I in" stays true while you glance at Reviews. */
-  openWorktree: OpenWorktree | null;
-  setOpenWorktree: (open: OpenWorktree | null) => void;
-
   /** The agent session the main area is actually showing — published by
    *  `TreesProvider` so the status bar's session meter can scope itself to the
    *  tab under the user's eyes instead of to whichever tab is first.
    *
-   *  **Transient by design**, unlike {@link openWorktree} directly above: that
+   *  **Transient by design**, unlike the route's own `?tree=`: that
    *  one deliberately outlives a navigation, this one must not. "Which agent am
    *  I watching" stops being true the moment Trees is off screen or the tab on
    *  screen is a diff, so `TreesProvider` clears it on unmount and the meter
@@ -129,7 +116,7 @@ interface AppUi {
    *  — set by the Issues "Open in Trees" action for an existing worktree, and by
    *  the sidebar's Linear/GitHub marks, which also say which pane to land on. */
   treeFocus: TreeFocus | null;
-  requestTreeFocus: (id: string, focus?: Omit<TreeFocus, "id">) => void;
+  requestTreeFocus: (repo: string, id: string, focus?: Omit<TreeFocus, "id" | "repo">) => void;
   consumeTreeFocus: () => void;
 
   /** Worktrees the Trees tab should launch an agent in *in the background* —
@@ -137,8 +124,8 @@ interface AppUi {
    *  off-screen to spawn its PTY and seed the agent without stealing focus or
    *  switching the active worktree, then drops it here once launched (the live
    *  session persists in the TerminalLayer and re-attaches on a later open). */
-  bgLaunches: string[];
-  requestBackgroundLaunch: (id: string) => void;
+  bgLaunches: BackgroundLaunch[];
+  requestBackgroundLaunch: (repo: string, id: string) => void;
   clearBackgroundLaunch: (id: string) => void;
 
   /** A PR the Reviews tab should select — set (as the PR's url) by a PR pill
@@ -183,12 +170,6 @@ interface AppUi {
   setSidebarWidth: (width: number) => void;
 }
 
-/** Which worktree, in which repo, the workspace view has open. */
-export interface OpenWorktree {
-  repo: string;
-  id: string;
-}
-
 /** Which agent session the workspace view has *on screen*.
  *
  *  `termKey` is the logical terminal that owns the session (`tree:<id>`,
@@ -221,6 +202,10 @@ export type TreeFocusPane = "issue" | "pr";
  *  agent landed you on tab one, and a click in the History pane threw away the
  *  pane you were reading. A request now moves only what it names. */
 export interface TreeFocus {
+  /** The project the worktree belongs to. The url already carries it for the
+   *  view; the sidebar needs it too, to find the row's ancestors in a tree that
+   *  spans every project. */
+  repo: string;
   id: string;
   /** Right-panel pane to show; `undefined` leaves the panel where it is. */
   pane?: TreeFocusPane;
@@ -248,8 +233,19 @@ export interface TriageFocus {
   agent: AgentKind | null;
 }
 
+/** An agent asked to start off-screen — in a project the user may not be
+ *  looking at, which is the whole point of the request. */
+export interface BackgroundLaunch {
+  repo: string;
+  id: string;
+}
+
 /** A task whose worktree is mid-creation, enough to render a placeholder. */
 export interface PendingLaunch {
+  /** The project whose worktree is being created. The sidebar lists every
+   *  project, so a placeholder that didn't name one could only be shown under a
+   *  guess — which is what "the active project" was. */
+  repo: string;
   id: string;
   title: string;
   project: string | null;
@@ -298,7 +294,6 @@ export interface FixCiLaunch {
 export type Theme = "dark" | "light" | "auto";
 
 const THEME_KEY = "santree-theme";
-const REPO_KEY = "santree-active-repo";
 const SIDEBAR_COLLAPSED_KEY = "santree-sidebar-collapsed";
 const SIDEBAR_WIDTH_KEY = "santree-sidebar-width";
 
@@ -326,7 +321,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const { data: settings = null } = useSettings();
   const { data: repos } = useRepos();
   const { mutate: saveSettings } = useSaveSettings();
-  const [activeRepo, setActiveRepo] = useState(() => localStorage.getItem(REPO_KEY) ?? "");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
@@ -339,9 +333,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [treeLaunch, setTreeLaunch] = useState<string | null>(null);
   const [issueFocus, setIssueFocus] = useState<string | null>(null);
   const [treeFocus, setTreeFocus] = useState<TreeFocus | null>(null);
-  const [openWorktree, setOpenWorktree] = useState<OpenWorktree | null>(null);
   const [focusedAgent, setFocusedAgentState] = useState<FocusedAgent | null>(null);
-  const [bgLaunches, setBgLaunches] = useState<string[]>([]);
+  const [bgLaunches, setBgLaunches] = useState<BackgroundLaunch[]>([]);
   const [reviewFocus, setReviewFocus] = useState<string | null>(null);
   const [triageFocus, setTriageFocus] = useState<TriageFocus | null>(null);
   const [fixCiLaunch, setFixCiLaunch] = useState<FixCiLaunch | null>(null);
@@ -352,44 +345,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     () => (localStorage.getItem(THEME_KEY) as Theme | null) ?? "dark",
   );
 
-  // Default to (and stay on) a repo that actually exists. When the list empties (the
-  // last repo was removed) the active repo must be *cleared*, not left pointing at a
-  // repo the backend no longer knows — every `enabled: !!repo` query would keep
-  // firing against it.
-  useEffect(() => {
-    if (!repos) return; // still loading — don't clear a valid repo
-    if (repos.some((r) => r.name === activeRepo)) return;
-    setActiveRepo(repos[0]?.name ?? "");
-  }, [repos, activeRepo]);
-
   // Warm the GitHub avatar cache for every repo up front, so pickers/dropdowns
   // render their icons instantly instead of flashing a loading state on open.
   useEffect(() => {
     if (repos?.length) preloadRepoAvatars(repos);
   }, [repos]);
 
-  // Persist the active repo (and sidebar layout) across launches, same as theme.
-  // Keyed on the state itself rather than wrapping the exposed setters, since
-  // `activeRepo` and `sidebarCollapsed` are also written from other call sites
-  // above (the repo-validation fallback) and below (`toggleSidebar`).
-  //
-  // Clearing the repo must *remove* the key, not leave the last name behind: the
-  // initial state seeds straight from localStorage, so a stale name would fire
-  // every `enabled: !!repo` query against a repo the backend no longer knows on
-  // the next launch — before the validation effect above can clear it.
-  useEffect(() => {
-    if (activeRepo) localStorage.setItem(REPO_KEY, activeRepo);
-    else localStorage.removeItem(REPO_KEY);
-  }, [activeRepo]);
-
   useEffect(() => {
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
   }, [sidebarCollapsed]);
-
-  // Watch the active repo's worktrees app-wide (not just on the Trees tab) so
-  // on-disk changes invalidate the cache even while another view is showing —
-  // returning to Trees then renders fresh data, not a stale snapshot.
-  useWorktreeWatcher(activeRepo);
 
   // Keep live Claude session state flowing into the cache app-wide + in realtime:
   // the watchers push updates, and <SessionStatePoller/> keeps the query observed.
@@ -445,8 +409,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const dataValue = useMemo<AppData>(
     () => ({
-      activeRepo,
-      setActiveRepo,
       accent: "var(--accent)",
       settings,
       setAgentExec: (agent, exec) =>
@@ -477,7 +439,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setThemeState(next);
       },
     }),
-    [activeRepo, settings, applySettings, theme],
+    [settings, applySettings, theme],
   );
 
   // Handlers are stabilized with `useCallback` (all use functional setState, so
@@ -494,8 +456,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // meant; a caller that means something more specific — this pane, this tab —
   // says so, and everything it doesn't name is left as the user had it.
   const requestTreeFocus = useCallback(
-    (id: string, focus: Omit<TreeFocus, "id"> = { pane: "issue" }) =>
-      setTreeFocus({ id, ...focus }),
+    (repo: string, id: string, focus: Omit<TreeFocus, "id" | "repo"> = { pane: "issue" }) =>
+      setTreeFocus({ repo, id, ...focus }),
     [],
   );
   const consumeReviewFocus = useCallback(() => setReviewFocus(null), []);
@@ -541,11 +503,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const removePendingLaunch = useCallback((id: string) => {
     setPendingLaunches((prev) => prev.filter((p) => p.id !== id));
   }, []);
-  const requestBackgroundLaunch = useCallback((id: string) => {
-    setBgLaunches((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  const requestBackgroundLaunch = useCallback((repo: string, id: string) => {
+    setBgLaunches((prev) => (prev.some((l) => l.id === id) ? prev : [...prev, { repo, id }]));
   }, []);
   const clearBackgroundLaunch = useCallback((id: string) => {
-    setBgLaunches((prev) => prev.filter((x) => x !== id));
+    setBgLaunches((prev) => prev.filter((l) => l.id !== id));
   }, []);
   const addPendingDeletes = useCallback((ids: string[]) => {
     setPendingDeletes((prev) => {
@@ -577,8 +539,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       treeLaunch,
       requestTreeLaunch: setTreeLaunch,
       consumeTreeLaunch,
-      openWorktree,
-      setOpenWorktree,
       focusedAgent,
       setFocusedAgent,
       treeFocus,
@@ -617,7 +577,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       shortcutsOpen,
       treeLaunch,
       treeFocus,
-      openWorktree,
       focusedAgent,
       setFocusedAgent,
       bgLaunches,

@@ -54,10 +54,11 @@ function Flow() {
     toggle,
     setFocus,
     toggleProjectFocus,
+    repo,
   } = useIssues();
   const { setHover } = useIssueHover();
-  const { activeRepo, theme } = useApp();
-  const prefetchOnHover = usePrefetchOnHover(activeRepo);
+  const { theme } = useApp();
+  const prefetchOnHover = usePrefetchOnHover(repo);
   const { fitView } = useReactFlow();
 
   // A node's right-click menu. The canvas keeps only where it opened and for

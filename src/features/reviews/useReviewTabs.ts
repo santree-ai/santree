@@ -174,8 +174,8 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
   useEffect(() => {
     if (!pendingSetup.current || !worktreeId) return;
     pendingSetup.current = false;
-    agentRuns?.runSetup(worktreeId);
-  }, [worktreeId, agentRuns]);
+    agentRuns?.runSetup(checkout.repo, worktreeId);
+  }, [checkout.repo, worktreeId, agentRuns]);
 
   // Showing an AI review tab and starting its session are the same act: the tab
   // can exist (a stored session from a previous launch) with nothing mounted

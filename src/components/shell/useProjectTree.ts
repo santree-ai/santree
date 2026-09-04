@@ -17,7 +17,7 @@
  * relationship must not drag a row across its planning boundary, and neither
  * structure should outrank "this one is blocked on you".
  */
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
 import type { Task, Worktree, WorktreePr } from "../../bindings";
 import { type AgentEntry, agentKey } from "../../features/agents/registry";
@@ -47,7 +47,7 @@ import {
   useWorktreesByRepo,
 } from "../../lib/queries";
 import { shortRepoName } from "../../lib/repoName";
-import { useApp, useAppUi } from "../../state/AppContext";
+import { useAppUi } from "../../state/AppContext";
 import { PROJECT_FALLBACK } from "../../theme/colors";
 import {
   groupByMilestone,
@@ -555,14 +555,27 @@ export function useProjectTree(): ProjectTreeModel {
   // goes stale — so a decayed dot appears exactly then, and never costs a poll.
   const nowMs = useDecayClock(entries ?? EMPTY_ENTRIES);
   // Creating and deleting a worktree are both slow enough to need an answer
-  // before the filesystem has one. Both registers are app-scoped and belong to
-  // whichever repo is active, since that is the only one either action can be
-  // started from.
-  const { activeRepo } = useApp();
-  const { pendingLaunches, pendingDeletes } = useAppUi();
+  // before the filesystem has one. Both registers are app-scoped; a launch says
+  // which project it is happening in, so the placeholder appears in that
+  // project's section rather than under whichever one was being looked at.
+  const { pendingLaunches, pendingDeletes, removePendingLaunch } = useAppUi();
   // App-scoped: the tree is cross-repo, so one shape has to serve all of it.
   const { data: groupByRaw } = useSetting("app", LINEAR_GROUP_BY_KEY);
   const groupBy = parseLinearGroupBy(groupByRaw);
+
+  // Once a real worktree lands for a launch, drop its placeholder. Here rather
+  // than in the workspace that started it: the workspace only reads one
+  // project, so a launch the user navigated away from — or one started in a
+  // project they never opened, which "run in the background" makes routine —
+  // had nothing watching for its worktree and left a "Creating workspace…" row
+  // in the rail forever. This hook reads every project's list already.
+  useEffect(() => {
+    for (const launch of pendingLaunches) {
+      if (worktreesByRepo.get(launch.repo)?.some((w) => w.id === launch.id)) {
+        removePendingLaunch(launch.id);
+      }
+    }
+  }, [worktreesByRepo, pendingLaunches, removePendingLaunch]);
 
   const agentsByWorktree = useMemo(
     () => groupAgentsByWorktree(entries ?? EMPTY_ENTRIES, seen, nowMs),
@@ -576,13 +589,13 @@ export function useProjectTree(): ProjectTreeModel {
   const worktreesFor = useCallback(
     (repo: string): Worktree[] | undefined => {
       const real = worktreesByRepo.get(repo);
-      if (repo !== activeRepo) return real;
+      const launches = pendingLaunches.filter((l) => l.repo === repo);
       // A launch has to show up even before the first read lands, or starting a
       // task on a cold repo looks like it did nothing.
-      if (real === undefined && pendingLaunches.length === 0) return undefined;
-      return mergeWorktrees(real ?? [], pendingLaunches, pendingDeletes, (worktree) => worktree);
+      if (real === undefined && launches.length === 0) return undefined;
+      return mergeWorktrees(real ?? [], launches, pendingDeletes, (worktree) => worktree);
     },
-    [worktreesByRepo, activeRepo, pendingLaunches, pendingDeletes],
+    [worktreesByRepo, pendingLaunches, pendingDeletes],
   );
 
   const projects = useMemo(

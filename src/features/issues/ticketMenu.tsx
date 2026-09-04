@@ -14,14 +14,21 @@ import { BranchIcon, PlayIcon, QueueIcon } from "../../components/icons";
 import { linearTicketItems } from "../../components/menuRows";
 import type { ContextMenuItem } from "../../components/primitives";
 import { useLinearIssueUrl } from "../../lib/queries";
-import { useApp } from "../../state/AppContext";
 import { useIssues } from "./model";
 
 export function useTicketMenuItems(id: string | null): ContextMenuItem[] {
-  const { byId, isEligible, selected, worktreeIds, run, runBackground, toggle, goToWorktree } =
-    useIssues();
-  const { activeRepo } = useApp();
-  const linkFor = useLinearIssueUrl(activeRepo);
+  const {
+    byId,
+    isEligible,
+    selected,
+    worktreeIds,
+    run,
+    runBackground,
+    toggle,
+    goToWorktree,
+    repo,
+  } = useIssues();
+  const linkFor = useLinearIssueUrl(repo);
 
   return useMemo(() => {
     const task = id ? byId.get(id) : undefined;

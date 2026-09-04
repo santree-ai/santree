@@ -37,7 +37,7 @@ vi.mock("./ReviewHeader", () => ({
 
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
 vi.mock("../../state/AppContext", () => ({
-  useApp: () => ({ setActiveRepo: vi.fn() }),
+  useApp: () => ({}),
   useAppUi: () => ({
     addPendingLaunches: vi.fn(),
     removePendingLaunch: vi.fn(),

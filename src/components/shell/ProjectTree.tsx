@@ -44,7 +44,7 @@ import {
   useSetting,
 } from "../../lib/queries";
 import { usePersistedState } from "../../lib/usePersistedState";
-import { type TreeFocus, type TreeFocusPane, useApp, useAppUi } from "../../state/AppContext";
+import { type TreeFocus, type TreeFocusPane, useAppUi } from "../../state/AppContext";
 import { RepoAvatar } from "../chrome/RepoAvatar";
 import { BranchIcon, ChevronDownIcon, ChevronRightIcon, PlusIcon } from "../icons";
 import { Skeleton } from "../primitives";
@@ -183,8 +183,7 @@ function useReviewTickets(
 export function ProjectTree() {
   const { projects, loading, markSeen, agentsByPr } = useProjectTree();
   const navigate = useNavigate();
-  const { activeRepo, setActiveRepo } = useApp();
-  const { requestTreeFocus, openWorktree, treeFocus } = useAppUi();
+  const { requestTreeFocus, treeFocus } = useAppUi();
   const openAgent = useOpenAgent();
   const openPr = useOpenPr();
   // What the *visible* destination has open, so the rail carries one selection
@@ -197,7 +196,17 @@ export function ProjectTree() {
         ? ((s.location.search as { pr?: string }).pr ?? null)
         : null,
   });
-  const inTrees = useRouterState({ select: (s) => s.location.pathname.startsWith("/trees") });
+  // The workspace the content area is showing, straight off the route — the same
+  // read as `openPrUrl` above. It used to be published up through app state by
+  // the Trees provider and back down to here; the url is where it already lived
+  // for the pull request beside it, and one source cannot disagree with itself.
+  const openTree = useRouterState({
+    select: (s) => {
+      if (!s.location.pathname.startsWith("/trees")) return null;
+      const { project, tree } = s.location.search as { project?: string; tree?: string };
+      return project && tree ? { repo: project, id: tree } : null;
+    },
+  });
   const reviewsByProject = useProjectReviews();
   // The Reviews section's own nesting, its own setting: a review inbox is a
   // different question from "what am I building", and it is usually short enough
@@ -212,11 +221,8 @@ export function ProjectTree() {
     // pointing somewhere else. The project and the queue both ride in the route,
     // so a reload lands back on the same queue — the Reviews view holds no view
     // state the rail can't reach (see `routes/reviews.tsx`).
-    (repo: string) => {
-      setActiveRepo(repo);
-      navigate({ to: "/reviews", search: { project: repo, queue: true } });
-    },
-    [navigate, setActiveRepo],
+    (repo: string) => navigate({ to: "/reviews", search: { project: repo, queue: true } }),
+    [navigate],
   );
 
   // Which repo's "Create worktree" dialog is open, if any. Held here rather
@@ -272,18 +278,19 @@ export function ProjectTree() {
     // pull request, opened at reading width as a main tab. A plain row click
     // keeps the default — the ticket, in the rail.
     (repo: string, worktreeId: string, page?: TreeFocusPane) => {
-      setActiveRepo(repo);
-      // `fromSidebar` is what keeps the reveal effect below off a row the user
-      // just clicked — it is already in front of them.
+      navigate({ to: "/trees", search: { project: repo, tree: worktreeId } });
+      // What is left for the focus channel is the part of a click that is an
+      // instruction rather than a location. `fromSidebar` keeps the reveal effect
+      // below off a row the user just clicked — it is already in front of them.
       requestTreeFocus(
+        repo,
         worktreeId,
         page
           ? { pane: page, expand: true, fromSidebar: true }
           : { pane: "issue", fromSidebar: true },
       );
-      navigate({ to: "/trees" });
     },
-    [navigate, setActiveRepo, requestTreeFocus],
+    [navigate, requestTreeFocus],
   );
 
   // A worktree picked anywhere else — Issues, the graph, the palette, a
@@ -294,7 +301,7 @@ export function ProjectTree() {
   const revealed = useRef<TreeFocus | null>(null);
   useEffect(() => {
     if (!treeFocus || treeFocus.fromSidebar || treeFocus === revealed.current) return;
-    const keys = ancestorGroupKeys(projects, treeFocus.id, activeRepo);
+    const keys = ancestorGroupKeys(projects, treeFocus.id, treeFocus.repo);
     // Not in the tree yet — a worktree still being created, a repo whose read
     // hasn't landed. Leave the request unhandled so the next fold reveals it.
     if (keys.length === 0) return;
@@ -307,7 +314,7 @@ export function ProjectTree() {
       for (const key of keys) next[key] = false;
       return next;
     });
-  }, [treeFocus, projects, activeRepo, setCollapsed]);
+  }, [treeFocus, projects, setCollapsed]);
 
   const openAgentRow = useCallback(
     (agent: AgentNode) => {
@@ -345,7 +352,7 @@ export function ProjectTree() {
             isBandOpen={(key) => !collapsed[key]}
             onToggle={(bulk) => toggle(repoKey(project.repo), bulk)}
             onToggleBand={toggle}
-            openWorktreeId={inTrees && openWorktree?.repo === project.repo ? openWorktree.id : null}
+            openWorktreeId={openTree?.repo === project.repo ? openTree.id : null}
             onSelectWorktree={(worktreeId, pane) => selectWorktree(project.repo, worktreeId, pane)}
             onOpenAgent={openAgentRow}
             onCreateWorktree={() => setCreateFor(project.repo)}
@@ -366,10 +373,7 @@ export function ProjectTree() {
             }
             onOpenMergeQueue={() => openMergeQueue(project.repo)}
             prAgents={prAgents}
-            onOpenPrInInbox={(pr) => {
-              setActiveRepo(project.repo);
-              openPr(pr.url);
-            }}
+            onOpenPrInInbox={(pr) => openPr(pr.url)}
           />
         ))
       )}

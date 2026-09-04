@@ -61,7 +61,7 @@ const FIELD =
 
 export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose: () => void }) {
   const navigate = useNavigate();
-  const { activeRepo, setActiveRepo, settings } = useApp();
+  const { settings } = useApp();
   const { requestTreeFocus } = useAppUi();
 
   const [tab, setTab] = useState<SourceTab>("linear");
@@ -82,7 +82,7 @@ export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose:
   );
   const { data: worktrees = [] } = useWorktrees(repo);
   const { data: workAgent } = useResolvedSetting(repo, WORK_AGENT_KEY);
-  const { mutate: create, isPending } = useCreateWorktree(repo, { silent: true });
+  const { mutate: create, isPending } = useCreateWorktree({ silent: true });
   const guard = useLaunchGuard();
 
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -109,12 +109,11 @@ export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose:
     setError(null);
     const agent = (workAgent as AgentKind | null) ?? settings?.defaultAgent ?? "Claude";
     create(
-      { ...args, agent },
+      { ...args, repo, agent },
       {
         onSuccess: (wt) => {
-          if (repo !== activeRepo) setActiveRepo(repo);
-          requestTreeFocus(wt.id);
-          navigate({ to: "/trees" });
+          navigate({ to: "/trees", search: { project: repo, tree: wt.id } });
+          requestTreeFocus(repo, wt.id);
           onClose();
         },
         onError: (e) => {

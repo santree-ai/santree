@@ -12,7 +12,6 @@ import { worktree } from "../../test/fixtures";
 
 const nav = vi.hoisted(() => ({
   navigate: vi.fn(),
-  setActiveRepo: vi.fn(),
   requestTreeFocus: vi.fn(),
 }));
 const data = vi.hoisted(() => ({
@@ -26,7 +25,6 @@ const data = vi.hoisted(() => ({
 
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => nav.navigate }));
 vi.mock("../../state/AppContext", () => ({
-  useApp: () => ({ setActiveRepo: nav.setActiveRepo }),
   useAppUi: () => ({ requestTreeFocus: nav.requestTreeFocus }),
 }));
 vi.mock("../../lib/queries", () => ({
@@ -125,9 +123,11 @@ describe("ReviewPrMenu", () => {
     show(pr());
     open();
     fireEvent.click(screen.getByRole("menuitem", { name: "Open worktree" }));
-    expect(nav.setActiveRepo).toHaveBeenCalledWith("web");
-    expect(nav.requestTreeFocus).toHaveBeenCalledWith("AK-12", { fromSidebar: true });
-    expect(nav.navigate).toHaveBeenCalledWith({ to: "/trees" });
+    expect(nav.requestTreeFocus).toHaveBeenCalledWith("web", "AK-12", { fromSidebar: true });
+    expect(nav.navigate).toHaveBeenCalledWith({
+      to: "/trees",
+      search: { project: "web", tree: "AK-12" },
+    });
 
     open();
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete worktree" }));

@@ -3,7 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useCallback } from "react";
 
 import type { AgentKind } from "../../bindings";
-import { useApp, useAppUi } from "../../state/AppContext";
+import { useAppUi } from "../../state/AppContext";
 import type { AgentOrigin } from "./registry";
 
 /**
@@ -29,13 +29,10 @@ export interface AgentTarget {
 
 export function useOpenAgent(): (entry: AgentTarget) => void {
   const navigate = useNavigate();
-  const { activeRepo, setActiveRepo } = useApp();
   const { requestTreeFocus, requestTriageFocus, requestReviewFocus } = useAppUi();
 
   return useCallback(
     (entry: AgentTarget) => {
-      if (entry.repo && entry.repo !== activeRepo) setActiveRepo(entry.repo);
-
       switch (entry.origin.kind) {
         case "tree":
         case "tree-tab":
@@ -47,10 +44,16 @@ export function useOpenAgent(): (entry: AgentTarget) => void {
           // deliberately left unnamed too: opening an agent says nothing about
           // which right-panel pane you wanted, and forcing one is how a click in
           // the History pane used to jump you to the ticket.
-          if (entry.origin.ticket) {
-            requestTreeFocus(entry.origin.ticket, { tab: entry.origin.tabId });
+          // The worktree and its project ride in the url; only the *tab* is
+          // left for the focus channel, which is the part of this that is an
+          // instruction rather than a location.
+          navigate({
+            to: "/trees",
+            search: { project: entry.repo ?? undefined, tree: entry.origin.ticket ?? undefined },
+          });
+          if (entry.repo && entry.origin.ticket) {
+            requestTreeFocus(entry.repo, entry.origin.ticket, { tab: entry.origin.tabId });
           }
-          navigate({ to: "/trees" });
           return;
         case "triage":
           if (!entry.origin.ticket) {
@@ -85,6 +88,6 @@ export function useOpenAgent(): (entry: AgentTarget) => void {
         // unreachable from the UI — it stays exhaustive rather than silent.
       }
     },
-    [navigate, activeRepo, setActiveRepo, requestTreeFocus, requestTriageFocus, requestReviewFocus],
+    [navigate, requestTreeFocus, requestTriageFocus, requestReviewFocus],
   );
 }

@@ -31,9 +31,9 @@ const reviews = vi.hoisted(() => ({ inbox: undefined as unknown }));
 vi.mock("../../lib/queries", () => ({
   useReviews: () => ({ data: reviews.inbox, isLoading: false }),
   usePrTickets: () => ({ data: [] }),
+  useRepos: () => ({ data: [{ name: "acme/app", tracker: "Linear · Acme" }] }),
 }));
 vi.mock("../../state/AppContext", () => ({
-  useApp: () => ({ activeRepo: "acme/app" }),
   useAppUi: () => ({ reviewFocus: null, consumeReviewFocus: vi.fn() }),
 }));
 

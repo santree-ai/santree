@@ -30,7 +30,7 @@ export interface WorkLaunch {
 
 export function useWorkLaunch(repo: string, worktree: Worktree, tabId: string): WorkLaunch {
   const { launchAgents, isInitialSetup } = useAgentRuns();
-  const launching = launchAgents.get(worktree.id) === tabId;
+  const launching = launchAgents.get(worktree.id)?.tabId === tabId;
   const initialSetup = launching && isInitialSetup(worktree.id);
 
   // The opening prompt is rendered backend-side from the live ticket and written to

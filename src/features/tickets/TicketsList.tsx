@@ -20,12 +20,12 @@ import {
   showMilestoneGroups,
 } from "../../components/WorkSignals";
 import { toggleDisclosureMap } from "../../lib/disclosure";
-import { useApp, useAppUi } from "../../state/AppContext";
+import { useAppUi } from "../../state/AppContext";
+import { useWorkRepoGate } from "../../state/WorkRepoGate";
 import { useIssues } from "../issues/model";
 import { TicketRow } from "./TicketRow";
 import { useStartTicket } from "./useStartTicket";
 import type { TicketRow as Row, TicketProjectGroup } from "./useTickets";
-import { useWorkRepoGate } from "./WorkRepoGate";
 
 /** Where a row's words start under each heading: the heading's own label
  *  column (the constants beside the shared headings in `WorkSignals`), never
@@ -58,8 +58,7 @@ export function TicketsList({
   groups: TicketProjectGroup[];
   loading: boolean;
 }) {
-  const { activeRepo, setActiveRepo } = useApp();
-  const { requestIssueFocus, requestTreeFocus } = useAppUi();
+  const { requestTreeFocus } = useAppUi();
   const navigate = useNavigate();
   const {
     focusId,
@@ -85,36 +84,21 @@ export function TicketsList({
     [],
   );
 
-  // A click opens the ticket in the inspector beside the list. The inspector's
-  // model is scoped to the active repo, and a ticket isn't — so the repo it is
-  // read under is its home when it has one (its worktree lives there), else the
-  // active repo when that carries it, else the first that does. A different repo
-  // switches the app and hands the id over as a focus request, which the model
-  // commits once that repo's tasks have landed; the same repo focuses at once.
-  // The panel is expanded if it was collapsed, and turned to the ticket pane —
-  // a click that selects something the user can't see would read as a click
-  // that did nothing.
+  // A click opens the ticket in the inspector beside the list. It used to be a
+  // three-part hop — switch the app's project, hand the id over as a focus
+  // request, wait for that project's tasks to land — because the inspector was
+  // scoped to whichever project was active and a ticket is not scoped at all.
+  // The inspector reads through its own stable scope now, and a ticket read
+  // there is the same ticket, so a click just focuses it. The panel is expanded
+  // if it was collapsed, and turned to the ticket pane — a click that selects
+  // something the user can't see would read as a click that did nothing.
   const onOpen = useCallback(
     (row: Row) => {
-      const repo = row.worktree || !row.repos.includes(activeRepo) ? row.repo : activeRepo;
-      if (repo === activeRepo) {
-        setFocus(row.task.id);
-      } else {
-        setActiveRepo(repo);
-        requestIssueFocus(row.task.id);
-      }
+      setFocus(row.task.id);
       setRailTab("issue");
       if (rightCollapsed) toggleRightPanel();
     },
-    [
-      activeRepo,
-      setActiveRepo,
-      setFocus,
-      requestIssueFocus,
-      setRailTab,
-      rightCollapsed,
-      toggleRightPanel,
-    ],
+    [setFocus, setRailTab, rightCollapsed, toggleRightPanel],
   );
 
   // Which project a ticket starts in is the gate's answer — the one project
@@ -127,7 +111,7 @@ export function TicketsList({
         toggleQueued(row.task.id);
         return;
       }
-      void askRepo(row.repos, `Queueing ${row.task.id}`).then((repo) => {
+      void askRepo(row.repos, `Queueing ${row.task.id}`).then((repo: string | null) => {
         if (repo) enqueueIn(repo, row.task.id);
       });
     },
@@ -136,13 +120,15 @@ export function TicketsList({
 
   const onStart = useCallback(
     (row: Row, opts: { background: boolean; pick?: boolean }) => {
-      void askRepo(row.repos, `Starting ${row.task.id}`, { always: opts.pick }).then((repo) => {
-        if (!repo) return;
-        startTicket(
-          { repo, id: row.task.id, title: row.task.title, project: row.task.project },
-          { background: opts.background },
-        );
-      });
+      void askRepo(row.repos, `Starting ${row.task.id}`, { always: opts.pick }).then(
+        (repo: string | null) => {
+          if (!repo) return;
+          startTicket(
+            { repo, id: row.task.id, title: row.task.title, project: row.task.project },
+            { background: opts.background },
+          );
+        },
+      );
     },
     [askRepo, startTicket],
   );
@@ -154,11 +140,10 @@ export function TicketsList({
   const onOpenWorktree = useCallback(
     (row: Row) => {
       if (!row.worktree) return;
-      setActiveRepo(row.repo);
-      requestTreeFocus(row.worktree.id);
-      navigate({ to: "/trees" });
+      navigate({ to: "/trees", search: { project: row.repo, tree: row.worktree.id } });
+      requestTreeFocus(row.repo, row.worktree.id);
     },
-    [setActiveRepo, requestTreeFocus, navigate],
+    [requestTreeFocus, navigate],
   );
 
   if (loading && groups.length === 0) return <TicketSkeleton />;
@@ -175,11 +160,13 @@ export function TicketsList({
   /** What a group's tickets add up to, for its heading. */
   const points = (items: Row[]) => items.reduce((sum, row) => sum + (row.task.estimate ?? 0), 0);
 
-  // The queue is the active repo's — a launch creates worktrees there — so only
-  // the rows it carries offer the mark; the rest open like any other.
+  // Every row can be queued now: the queue remembers which project each ticket
+  // goes to (answered by the gate on the way in), so it is no longer "the active
+  // project's" and a ticket no project of the app's was pointed at is no longer
+  // silently unqueueable.
   const rows = (items: Row[], indent: number) =>
     items.map((row) => {
-      const home = row.repos.includes(activeRepo);
+      const home = row.repos.length > 0;
       return (
         <TicketRow
           key={row.task.id}

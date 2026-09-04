@@ -10,12 +10,11 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 vi.mock("../../state/AppContext", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../state/AppContext")>()),
-  useApp: () => ({ activeRepo: "acme/app" }),
   useAppUi: () => ({ toggleCommandPalette: vi.fn() }),
 }));
 vi.mock("../../lib/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/queries")>()),
-  useTaskCount: () => 4,
+  useTicketCount: () => 4,
 }));
 
 describe("SidebarNav", () => {

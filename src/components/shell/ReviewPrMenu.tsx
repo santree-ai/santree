@@ -27,14 +27,13 @@ import {
   useWorktreePrs,
   useWorktrees,
 } from "../../lib/queries";
-import { useApp, useAppUi } from "../../state/AppContext";
+import { useAppUi } from "../../state/AppContext";
 import { BranchIcon, CopyIcon, GitHubLogo, LinearLogo, LinkIcon, TrashIcon } from "../icons";
 import { copyText } from "../menuRows";
 import { ConfirmDialog, ContextMenu, type ContextMenuItem } from "../primitives";
 
 export function ReviewPrMenu({ pr, children }: { pr: ReviewPr; children: ReactNode }) {
   const navigate = useNavigate();
-  const { setActiveRepo } = useApp();
   const { requestTreeFocus } = useAppUi();
   // The registry's own answer, filled by the inbox that lists this row. A PR
   // from a repo never cloned has none, and nothing here can reach a checkout
@@ -124,9 +123,8 @@ export function ReviewPrMenu({ pr, children }: { pr: ReviewPr; children: ReactNo
                   label: "Open worktree",
                   icon: <BranchIcon size={12} />,
                   run: () => {
-                    setActiveRepo(repo);
-                    requestTreeFocus(worktree.id, { fromSidebar: true });
-                    navigate({ to: "/trees" });
+                    navigate({ to: "/trees", search: { project: repo, tree: worktree.id } });
+                    requestTreeFocus(repo, worktree.id, { fromSidebar: true });
                   },
                 },
               ] satisfies ContextMenuItem[])

@@ -26,8 +26,8 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
-import { useTaskCount } from "../../lib/queries";
-import { useApp, useAppUi } from "../../state/AppContext";
+import { useTicketCount } from "../../lib/queries";
+import { useAppUi } from "../../state/AppContext";
 import { LinearLogo, SearchIcon } from "../icons";
 
 interface NavItem {
@@ -44,10 +44,9 @@ interface NavItem {
 
 export function SidebarNav() {
   const navigate = useNavigate();
-  const { activeRepo } = useApp();
   const { toggleCommandPalette } = useAppUi();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const tasks = useTaskCount(activeRepo);
+  const tasks = useTicketCount();
 
   const items: NavItem[] = [
     { label: "Search", icon: <SearchIcon size={13} />, action: toggleCommandPalette, hint: "⌘K" },

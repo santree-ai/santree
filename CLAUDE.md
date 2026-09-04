@@ -163,7 +163,9 @@ src/
                    sidebar's `TriageSection`.
   lib/queries.ts   ALL data hooks (useUnwrappedQuery, useOptimisticMutation, …)
   lib/attention.ts what needs a human: level ladder, seen-gating, tree ordering
-  state/           AppContext (repo, theme, settings) · toast.tsx (notifications)
+  state/           AppContext (theme, settings, cross-view UI) · AgentRuns (runs
+                   that outlive their view) · WorkRepoGate (which project a
+                   ticket starts in) · toast.tsx (notifications)
   components/       shared chrome + primitives.tsx (Badge, EmptyState, ChevronSelect…)
                    · SidePanel (the one right-panel shell every view is built on)
                    · TabStrip (the one main-area tab strip every view draws)
@@ -217,7 +219,7 @@ src/
   lists the rotation (one row — who has it and until when; a click opens the
   whole schedule in `shell/RotationDialog`), the active tickets with their SLA,
   each ticket's investigation agents under it, and a folded Snoozed group — scoped
-  to the active repo and filtered by the header's scope menu — Mine/All, the
+  to `useTriageOrgRepo`'s project and filtered by the header's scope menu — Mine/All, the
   `triage_good_citizen` setting; that menu is its only control. A ticket opens
   `/triage?ticket=<id>`; selection lives in the route so the row lights from it,
   exactly as Reviews' `?pr=` does. There is no manual ordering: the order is the
@@ -228,8 +230,9 @@ src/
   `repo_write_session` regardless).
 - **A triage ticket runs on an attached project, never a worktree.** Two repos,
   deliberately: the queue and the ticket come from one Linear org
-  (`useTriageOrgRepo` — the triage default, else the active repo — read by both
-  the section and the workspace so a row and the ticket it opens can't disagree),
+  (`useTriageOrgRepo` — the triage default, else the first registered project —
+  read by both the section and the workspace so a row and the ticket it opens
+  can't disagree),
   while anything that *runs* uses the ticket's attached project (`useTriageRepo`:
   its own `triage_repo:<id>`, else `triage_default_repo`), on that project's MAIN
   checkout. An investigation, a terminal and the rail's file/history panes all
@@ -238,15 +241,33 @@ src/
   established) and every action goes through one `withRepo`. Nothing here creates
   a worktree, and the backend agrees: `validate_agent_cwd` refuses a `triage:`
   session anywhere but the registered repo root.
-- **Where a ticket starts is the Work gate's answer.** Several registered
-  projects can share a ticket's Linear org, so the Tickets list resolves the
-  project once, through `tickets/WorkRepoGate` — the one project that carries
-  the ticket (no question), else the Work default (`work_default_repo`, Settings
-  → Work; distinct from triage's on purpose), else `ProjectPickerDialog` over just
-  those projects, with a save-as-default switch. Run and the launch queue both
-  take that answer (`enqueueIn` switches the active repo and parks the add when
-  the answer isn't it), and the menu's "Run in another project…" is the one way
-  past it for a single run.
+- **Where a ticket starts is the Work gate's answer — for every start.**
+  Several registered projects can share a ticket's Linear org, so the project is
+  resolved through `state/WorkRepoGate` — the one project that carries the ticket
+  (no question), else the Work default (`work_default_repo`, Settings → Work;
+  distinct from triage's on purpose), else `ProjectPickerDialog` over just those
+  projects, with a save-as-default switch. The provider is mounted in
+  `routes/__root.tsx`, not under a view, because *every* way to start a ticket
+  goes through it: the Tickets list's Run and its queue, the rail's Run and
+  Run-in-background, the graph node's menu, Launch, and the workspace's own
+  "Start a task". A start that answers "where" for itself is the bug this exists
+  to prevent — it is how a ticket came to run in whichever project was on screen.
+  The menu's "Run in another project…" (`always`) is the one way past the gate's
+  first two answers for a single run.
+- **There is no "active project".** A project is a coordinate of the thing on
+  screen, never a mode the app is in: `/trees?project=&tree=` names the open
+  workspace, `/reviews?project=&pr=` the open inbox, `/triage?ticket=` the open
+  ticket. The permanent sidebar reads those params directly (`ProjectTree`), so
+  one url is both what the view shows and what the rail lights — a sidebar click
+  is one `navigate()`, not a switch-then-focus-then-navigate handoff. Reads that
+  need *some* project but are not scoped to one take a stable answer, never the
+  screen: `useWorkScopeRepo` (Tickets — the Work default, else the first
+  registered) and `useTriageOrgRepo`. `useOrgSiblings(repo)` is what turns a read
+  scope into the gate's candidate list. Anything that outlives the view that
+  started it carries its project explicitly: `PendingLaunch.repo`,
+  `BackgroundLaunch.repo`, `QueuedLaunch.repo`, `TreeFocus.repo`, and
+  `CreateWorktreeVars.repo` (a var, not a hook argument — the answer arrives at
+  click time).
 - **One right panel, four hosts.** `components/SidePanel` is the chrome — icon
   strip, underline, dots, drag region, edge resize, collapse-to-nothing — and each
   view supplies its own panes, dots and model (`trees/FilePickerPanel`,
@@ -258,9 +279,10 @@ src/
   blockers, body, notes) and the launch queue (`issues/QueuePane` — one card per
   queued ticket with its agent pick and notes, and the one Launch button; its
   tab wears the accent dot while anything is queued and a `+N` for a beat after
-  each add). The queue is in-memory and the active repo's; the per-ticket pick
-  is the *agent* only — model and effort come from Settings for that agent, by
-  the rule in `issues/model.tsx`. Collapsed, a rail draws
+  each add). The queue is in-memory and cross-project — each entry remembers the
+  project the gate gave it, so Launch cannot send a ticket somewhere Run would
+  not have; the per-ticket pick is the *agent* only — model and effort come from
+  Settings for that agent, by the rule in `issues/model.tsx`. Collapsed, a rail draws
   nothing and its host's top strip takes the `PanelToggle` over at the same
   right edge (Trees' tab bar, the Tickets header).
 - **One main tab strip, three hosts.** `components/TabStrip` is the chrome — fitting

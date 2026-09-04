@@ -10,15 +10,16 @@
 export type SceneRoute =
   | "/trees"
   | "/issues"
+  | `/trees?project=${string}&tree=${string}`
   | `/triage?ticket=${string}`
   | `/reviews?project=${string}&pr=${string}`;
 
 export interface Scene {
   theme: "dark" | "light";
   route: SceneRoute;
-  activeRepo: string;
   /** Trees: the selected worktree (a ticket id, or `__base__`), its right-panel
-   *  pane and the main tab showing. */
+   *  pane and the main tab showing. The project and the worktree ride in
+   *  {@link Scene.route} — they are url now, not stored view state. */
   trees: {
     activeId: string;
     pane: "issue" | "files" | "changes" | "history" | "pr" | "aiWork";
@@ -33,8 +34,7 @@ export interface Scene {
 
 export const SCENE: Scene = {
   theme: "dark",
-  route: "/trees",
-  activeRepo: "mallard-labs/quackstack",
+  route: "/trees?project=mallard-labs/quackstack&tree=QK-142",
   trees: { activeId: "QK-142", pane: "changes", tab: "tab:t-142a", rightWidth: 320 },
   tickets: { mode: "list" },
   sidebarWidth: 296,

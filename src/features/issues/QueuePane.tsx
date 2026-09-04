@@ -31,7 +31,6 @@ import {
   WORK_AGENT_KEY,
   WORK_MODEL_KEY,
 } from "../../lib/queries";
-import { useApp } from "../../state/AppContext";
 import { statusLabel } from "../../theme/colors";
 import { useIssues } from "./model";
 import { TaskNotes } from "./TaskNotes";
@@ -53,8 +52,8 @@ export function QueuePane() {
     toggle,
     setFocus,
     setRailTab,
+    repo,
   } = useIssues();
-  const { activeRepo } = useApp();
   const { data: agents = [] } = useAgents();
   // Only providers whose runtime adapter is registered.
   const options = useMemo<AgentOption[]>(
@@ -92,7 +91,7 @@ export function QueuePane() {
           <QueueCard
             key={task.id}
             task={task}
-            repo={activeRepo}
+            repo={repo}
             agent={agentFor(task.id)}
             options={options}
             chainBase={baseFor(task)}

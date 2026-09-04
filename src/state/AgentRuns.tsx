@@ -30,19 +30,13 @@ import {
 } from "react";
 
 import { commands, type StreamEvent } from "../bindings";
-import {
-  ensureResolvedSetting,
-  queryKeys,
-  TREES_RUN_SETUP_KEY,
-  useResolvedBoolSetting,
-} from "../lib/queries";
-import { useApp } from "./AppContext";
+import { ensureResolvedSetting, queryKeys, TREES_RUN_SETUP_KEY } from "../lib/queries";
 import { setupRunKey, startRun } from "./streamRuns";
 
 /** A setup script running for one worktree. */
 interface SetupRun {
-  /** The repo the run belongs to — captured at start, because the active repo can
-   *  change while `init.sh` is still streaming. */
+  /** The project the run belongs to, named by whoever started it. Runs outlive
+   *  the view that began them, so this can never be read back off the screen. */
   repo: string;
   /** The tab the agent launches into once the script finishes, or null for a
    *  manual "Run setup" re-run, which launches nothing and must not disturb the
@@ -58,13 +52,7 @@ interface AgentRuns {
    *  only the one the start minted may consume the prompt. Set when a task is
    *  started, cleared once that tab's terminal has consumed the seed. Survives
    *  navigation — that's the point of this provider. */
-  launchAgents: ReadonlyMap<string, string>;
-  /** Whether starting a task runs `.santree/init.sh` first (the user's preference,
-   *  resolved through any per-repo override). Presentational only — it tells Trees
-   *  which tab to open a start on. The run itself never reads it: {@link beginRun}
-   *  resolves the preference imperatively, because a false-while-loading read here
-   *  would skip the setup script outright. */
-  runSetupOnStart: boolean;
+  launchAgents: ReadonlyMap<string, QueuedLaunch>;
 
   /** Whether a setup script is running for this worktree right now. */
   isSettingUp: (id: string) => boolean;
@@ -80,34 +68,48 @@ interface AgentRuns {
    *  mints and persists `tabId` first — every agent runs in a tab, and the row has
    *  to exist before the launch can name it. Placement — which worktree is
    *  focused, which tab is shown — is the caller's business too. */
-  beginRun: (id: string, tabId: string) => void;
+  beginRun: (repo: string, id: string, tabId: string) => void;
   /** Answer "run setup?" once for a whole multi-task launch (Settings → Trees →
    *  "When starting several tasks at once"). Each worktree's run consumes the
    *  answer when it actually begins — which is later, and elsewhere: the creates
    *  are still in flight when the batch is planned. */
   planSetup: (ids: string[], runSetup: boolean) => void;
   /** Run the setup script on its own (the manual "Run setup" action). */
-  runSetup: (id: string) => void;
-  requestAgentLaunch: (id: string, tabId: string) => void;
+  runSetup: (repo: string, id: string) => void;
+  requestAgentLaunch: (repo: string, id: string, tabId: string) => void;
   clearAgentLaunch: (id: string) => void;
 
   /** The worktree Trees currently has selected, or null when it isn't showing one
    *  (another tab, or the all-agents overview). The off-screen launcher skips it:
    *  its visible pane already hosts that terminal, and two hosts for one session
    *  would fight over the single xterm overlay. */
-  visibleWorktree: string | null;
-  setVisibleWorktree: (id: string | null) => void;
+  visibleWorktree: VisibleWorktree | null;
+  setVisibleWorktree: (open: VisibleWorktree | null) => void;
+}
+
+/** A queued agent launch: the tab it opens in, and the project whose worktree
+ *  that tab belongs to. The project is carried rather than read off the screen
+ *  because the whole point of the queue is that it runs wherever the user is —
+ *  including in a project they are not looking at. */
+export interface QueuedLaunch {
+  repo: string;
+  tabId: string;
+}
+
+/** The worktree a view has on screen, qualified by its project: the sidebar
+ *  spans every project, and two of them can hold the same ticket id. */
+export interface VisibleWorktree {
+  repo: string;
+  id: string;
 }
 
 const AgentRunsContext = createContext<AgentRuns | null>(null);
 export function AgentRunsProvider({ children }: { children: ReactNode }) {
-  const { activeRepo } = useApp();
-  const runSetupOnStart = useResolvedBoolSetting(activeRepo, TREES_RUN_SETUP_KEY).value;
   const qc = useQueryClient();
 
-  const [launchAgents, setLaunchAgents] = useState<ReadonlyMap<string, string>>(new Map());
+  const [launchAgents, setLaunchAgents] = useState<ReadonlyMap<string, QueuedLaunch>>(new Map());
   const [setupRuns, setSetupRuns] = useState<Record<string, SetupRun>>({});
-  const [visibleWorktree, setVisibleWorktree] = useState<string | null>(null);
+  const [visibleWorktree, setVisibleWorktree] = useState<VisibleWorktree | null>(null);
 
   // Read from the stream callbacks, which outlive the render that created them (a
   // run keeps streaming across re-renders and route changes).
@@ -122,8 +124,12 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
     for (const id of ids) setupPlanRef.current[id] = runSetup;
   }, []);
 
-  const requestAgentLaunch = useCallback((id: string, tabId: string) => {
-    setLaunchAgents((m) => (m.get(id) === tabId ? m : new Map(m).set(id, tabId)));
+  const requestAgentLaunch = useCallback((repo: string, id: string, tabId: string) => {
+    setLaunchAgents((m) => {
+      const current = m.get(id);
+      if (current?.tabId === tabId && current.repo === repo) return m;
+      return new Map(m).set(id, { repo, tabId });
+    });
   }, []);
 
   const clearAgentLaunch = useCallback((id: string) => {
@@ -143,7 +149,7 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
       const run = runsRef.current[id];
       if (!run) return;
       qc.invalidateQueries({ queryKey: queryKeys.worktrees(run.repo) });
-      if (run.launchTab) requestAgentLaunch(id, run.launchTab);
+      if (run.launchTab) requestAgentLaunch(run.repo, id, run.launchTab);
       setSetupRuns((r) => {
         const { [id]: _, ...rest } = r;
         return rest;
@@ -158,9 +164,8 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
   // than sharing one slot, because concurrent runs for different worktrees now
   // genuinely happen — two background launches start together.
   const startSetup = useCallback(
-    (id: string, launchTab: string | null) => {
+    (repo: string, id: string, launchTab: string | null) => {
       if (runsRef.current[id]) return;
-      const repo = activeRepo;
       const run: SetupRun = { repo, launchTab };
       runsRef.current = { ...runsRef.current, [id]: run };
       setSetupRuns((r) => ({ ...r, [id]: run }));
@@ -176,7 +181,7 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
         () => finishSetup(id),
       );
     },
-    [activeRepo, finishSetup],
+    [finishSetup],
   );
 
   // Never decide from the *hook's* view of the preference: `useResolvedBoolSetting`
@@ -187,30 +192,32 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
   // So resolve it imperatively: cache-first (the common case, synchronous enough to
   // land in the same frame), fetching only when it truly isn't loaded yet.
   const beginRun = useCallback(
-    (id: string, tabId: string) => {
+    (repo: string, id: string, tabId: string) => {
       const start = (setup: boolean) =>
-        setup ? startSetup(id, tabId) : requestAgentLaunch(id, tabId);
+        setup ? startSetup(repo, id, tabId) : requestAgentLaunch(repo, id, tabId);
       const planned = setupPlanRef.current[id];
       if (planned !== undefined) {
         delete setupPlanRef.current[id];
         start(planned);
         return;
       }
-      ensureResolvedSetting(qc, activeRepo, TREES_RUN_SETUP_KEY).then(
+      ensureResolvedSetting(qc, repo, TREES_RUN_SETUP_KEY).then(
         (value) => start(value === "true"),
         // A failed settings read must never swallow the launch — start the agent.
         () => start(false),
       );
     },
-    [qc, activeRepo, startSetup, requestAgentLaunch],
+    [qc, startSetup, requestAgentLaunch],
   );
 
-  const runSetup = useCallback((id: string) => startSetup(id, null), [startSetup]);
+  const runSetup = useCallback(
+    (repo: string, id: string) => startSetup(repo, id, null),
+    [startSetup],
+  );
 
   const value = useMemo<AgentRuns>(
     () => ({
       launchAgents,
-      runSetupOnStart,
       isSettingUp: (id) => id in setupRuns,
       isInitialSetup: (id) => setupRuns[id]?.launchTab != null,
       beginRun,
@@ -223,7 +230,6 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
     }),
     [
       launchAgents,
-      runSetupOnStart,
       setupRuns,
       beginRun,
       planSetup,

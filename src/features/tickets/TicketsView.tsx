@@ -29,7 +29,6 @@ import { useIssuesShortcuts } from "../issues/shortcuts";
 import { TicketsGraph } from "./TicketsGraph";
 import { TicketsList } from "./TicketsList";
 import { type TicketProjectGroup, type TicketsSummary, useTickets } from "./useTickets";
-import { WorkRepoGateProvider } from "./WorkRepoGate";
 
 type Mode = "list" | "graph";
 
@@ -132,20 +131,16 @@ export function TicketsView() {
 
   return (
     <IssuesProvider actionable={actionable}>
-      {/* Which project a start runs in, asked once for the list's Run and its
-          queue alike — see the gate. */}
-      <WorkRepoGateProvider>
-        <TicketsShortcuts onToggleActionable={toggleActionable} />
-        <TicketsPage
-          mode={mode}
-          onMode={setMode}
-          actionableOnly={actionableOnly}
-          onToggleActionable={toggleActionable}
-          groups={groups}
-          summary={summary}
-          loading={loading}
-        />
-      </WorkRepoGateProvider>
+      <TicketsShortcuts onToggleActionable={toggleActionable} />
+      <TicketsPage
+        mode={mode}
+        onMode={setMode}
+        actionableOnly={actionableOnly}
+        onToggleActionable={toggleActionable}
+        groups={groups}
+        summary={summary}
+        loading={loading}
+      />
     </IssuesProvider>
   );
 }

@@ -63,13 +63,10 @@ vi.mock("../../lib/queries", () => ({
   useSetTaskNote: () => ({ mutate: vi.fn() }),
 }));
 
-vi.mock("../../state/AppContext", () => ({
-  useApp: () => ({ activeRepo: "acme/app" }),
-}));
-
 vi.mock("./model", () => ({
   useIssues: () => ({
     ...model,
+    repo: "acme/app",
     selectedEligible: queued,
     baseFor: () => null,
     launchAgent: "Claude",

@@ -15,7 +15,7 @@ const state = vi.hoisted(() => ({
    *  tree action is offering to check anything out at all. */
   reviewCheckout: undefined as unknown,
   mutate: vi.fn(),
-  setActiveRepo: vi.fn(),
+
   addPendingLaunches: vi.fn(),
   removePendingLaunch: vi.fn(),
   requestTreeFocus: vi.fn(),
@@ -34,7 +34,6 @@ vi.mock("../../lib/queries", () => ({
   usePromoteReviewWorktree: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 vi.mock("../../state/AppContext", () => ({
-  useApp: () => ({ setActiveRepo: state.setActiveRepo }),
   useAppUi: () => ({
     addPendingLaunches: state.addPendingLaunches,
     removePendingLaunch: state.removePendingLaunch,
@@ -275,8 +274,11 @@ describe("ReviewHeader tree action", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "View tree" }));
     expect(state.mutate).not.toHaveBeenCalled();
-    expect(state.requestTreeFocus).toHaveBeenCalledWith(existing.id);
-    expect(state.navigate).toHaveBeenCalledWith({ to: "/trees" });
+    expect(state.requestTreeFocus).toHaveBeenCalledWith("acme/app", existing.id);
+    expect(state.navigate).toHaveBeenCalledWith({
+      to: "/trees",
+      search: { project: "acme/app", tree: existing.id },
+    });
   });
 
   /** The other arm: someone checked the branch out before the PR was linked, so
@@ -288,7 +290,7 @@ describe("ReviewHeader tree action", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "View tree" }));
     expect(state.mutate).not.toHaveBeenCalled();
-    expect(state.requestTreeFocus).toHaveBeenCalledWith(existing.id);
+    expect(state.requestTreeFocus).toHaveBeenCalledWith("acme/app", existing.id);
   });
 
   /** Through the shared gate now: the header used to hold its own copy of this

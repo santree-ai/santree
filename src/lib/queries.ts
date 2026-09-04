@@ -63,10 +63,6 @@ import type {
   WorktreeTab,
 } from "../bindings";
 import { commands, events } from "../bindings";
-// A cycle (AppContext mounts the watchers defined here), and a safe one: the
-// only binding read is `useApp`, inside `useTriageOrgRepo`, never at module
-// evaluation — `openPr.ts` and `useKeyboardShortcuts.ts` lean the same way.
-import { useApp } from "../state/AppContext";
 import { type ToastOptions, toast } from "../state/toast";
 import { splitRepoSlug } from "./repo";
 
@@ -530,10 +526,10 @@ export const TRIAGE_GOOD_CITIZEN_KEY = "triage_good_citizen";
  *    checkout, never on a worktree of its own, because a ticket in triage is
  *    being *read*, not worked.
  *  - **Which Linear org the queue is read from.** The queue is org-scoped, and
- *    `activeRepo` is not a stable answer to "which org": it flips whenever the
- *    user clicks another project's worktree in the sidebar, and a section that
- *    is always on screen must not flicker to another org's empty queue on every
- *    such click. See {@link useTriageOrgRepo}.
+ *    "whatever project is on screen" is not a stable answer to "which org": a
+ *    section that is always visible must not flicker to another org's empty
+ *    queue every time the user opens a worktree elsewhere. See
+ *    {@link useTriageOrgRepo}.
  */
 export const TRIAGE_DEFAULT_REPO_KEY = "triage_default_repo";
 
@@ -2100,6 +2096,11 @@ export const useWorktreePrsByRepo = (repos: string[]) =>
  *  worktree's origin (see the Rust `WorktreeLaunch`) and decides both the branch
  *  and whether there is a Linear project behind it. */
 export interface CreateWorktreeVars {
+  /** The project to create it in. A var rather than a hook argument because the
+   *  answer arrives at click time: the Work gate resolves it per ticket, and a
+   *  hook bound at render can only ever hold the project the view was already
+   *  showing — which is how a ticket used to start in the wrong one. */
+  repo: string;
   issueId: string;
   title: string;
   launch: WorktreeLaunch;
@@ -2140,10 +2141,10 @@ function createdWorktreeMessage(worktree: Worktree, vars: CreateWorktreeVars): s
  * dialog stays open on an error, because a name git refuses is fixed where it
  * was typed, not read off a toast after the form has closed.
  */
-export const useCreateWorktree = (repo: string, opts?: { silent?: boolean }) =>
+export const useCreateWorktree = (opts?: { silent?: boolean }) =>
   useActionMutation({
     mutationFn: (a: CreateWorktreeVars) =>
-      unwrap(commands.createWorktree(repo, a.issueId, a.title, a.launch, a.base, a.agent)),
+      unwrap(commands.createWorktree(a.repo, a.issueId, a.title, a.launch, a.base, a.agent)),
     silent: opts?.silent,
     // The branch list as well as the worktree list, for every origin: each one
     // either creates a branch or takes an existing one into a checkout, and
@@ -2154,7 +2155,7 @@ export const useCreateWorktree = (repo: string, opts?: { silent?: boolean }) =>
     // stable (re-firing fitView mid-rebuild blanks the canvas), and a full graph
     // refetch on every launch is heavy. The WIP badge already signals "being
     // worked on"; a moved Linear status refreshes on the next natural refetch.
-    invalidate: () => [queryKeys.worktrees(repo), queryKeys.repoBranches(repo)],
+    invalidate: (vars) => [queryKeys.worktrees(vars.repo), queryKeys.repoBranches(vars.repo)],
     success: (worktree, vars) => (vars.quiet ? null : createdWorktreeMessage(worktree, vars)),
   });
 
@@ -3808,16 +3809,55 @@ export function useTriageRepo(ticketId: string | null): {
 
 /**
  * The repo whose Linear org the triage queue is read from: the default project
- * when one is set, else the active repo. Both the sidebar section and the
- * workspace read the queue through this, so the row you clicked and the ticket
- * that opens can never come from two different orgs. Why the default and not
- * `activeRepo` is under {@link TRIAGE_DEFAULT_REPO_KEY}.
+ * when one is set, else the first registered one. Both the sidebar section and
+ * the workspace read the queue through this, so the row you clicked and the
+ * ticket that opens can never come from two different orgs.
+ *
+ * The fallback is deliberately *stable* rather than "wherever you are looking".
+ * A queue that re-pointed itself as you moved around the app is a queue whose
+ * rows change under the cursor, and — since a repo with no explicit link
+ * resolves to the only connected org anyway (see `resolve_org_slug`) — the
+ * first project answers the org question as well as any other. Setting
+ * {@link TRIAGE_DEFAULT_REPO_KEY} is how you pick a different one.
  */
 export function useTriageOrgRepo(): string {
-  const { activeRepo } = useApp();
   const { data: repos } = useRepos();
   const { data: fallback } = useSetting("app", TRIAGE_DEFAULT_REPO_KEY);
-  return registeredRepo(fallback, repos) ?? activeRepo;
+  return registeredRepo(fallback, repos) ?? repos?.[0]?.name ?? "";
+}
+
+/**
+ * Every registered project a ticket read through `repo` could be started in —
+ * the ones resolving to the same Linear org, in registration order.
+ *
+ * A ticket belongs to an org, not to a project, and several projects routinely
+ * resolve to one org (a project with no explicit link takes the only connected
+ * one — see `resolve_org_slug`). So "which projects carry this ticket" has an
+ * answer wider than "the project whose list I read it from", and that answer is
+ * what {@link useWorkRepoGate} chooses between. Same rule as `useTickets`' fold,
+ * which keys a row by (org, id) for exactly this reason.
+ */
+export function useOrgSiblings(repo: string): string[] {
+  const { data: repos } = useRepos();
+  return useMemo(() => {
+    const org = repos?.find((r) => r.name === repo)?.tracker;
+    if (!repos || org === undefined) return repo ? [repo] : [];
+    return repos.filter((r) => r.tracker === org).map((r) => r.name);
+  }, [repos, repo]);
+}
+
+/**
+ * The project the Tickets page *reads* through — the graph's tickets, and the
+ * worktrees it marks as started. Read scope only: it never decides where
+ * anything runs, which is the whole point of separating it. Every start goes
+ * through {@link WORK_DEFAULT_REPO_KEY}'s gate instead, so the list you are
+ * looking at and the project a ticket lands in are two different questions with
+ * two different answers.
+ */
+export function useWorkScopeRepo(): string {
+  const { data: repos } = useRepos();
+  const { data: preferred } = useSetting("app", WORK_DEFAULT_REPO_KEY);
+  return registeredRepo(preferred, repos) ?? repos?.[0]?.name ?? "";
 }
 
 // ── English tutor ────────────────────────────────────────────────────────────
@@ -4160,11 +4200,24 @@ export function reviewGroupsByProject(inbox: ReviewInbox | undefined): Map<strin
   return groups;
 }
 
-/** How many tickets the repo has, for the nav's Tickets row — the one count that
- *  still hangs off a destination now that Reviews is per-project and Triage is a
- *  section listing its own queue. Backed by the shared task cache, so the number
- *  costs the rail nothing the views weren't already fetching. */
-export const useTaskCount = (repo: string): number => useTasks(repo).data?.length ?? 0;
+/** How many tickets the Tickets destination has to show — the count on its rail
+ *  row. Distinct by (org, id), which is the whole difference from asking one
+ *  project: several registered projects routinely resolve to the same Linear
+ *  org (see `resolve_org_slug`), so a per-project count counts the same ticket
+ *  once per project. The rail row is not scoped to a project, so its number
+ *  must not be either. Shares {@link useTasksByRepo}'s cache with the page. */
+export const useTicketCount = (): number => {
+  const { data: repos } = useRepos();
+  const names = useMemo(() => (repos ?? []).map((r) => r.name), [repos]);
+  const tasksByRepo = useTasksByRepo(names);
+  return useMemo(() => {
+    const seen = new Set<string>();
+    for (const repo of repos ?? []) {
+      for (const task of tasksByRepo.get(repo.name) ?? []) seen.add(`${repo.tracker}|${task.id}`);
+    }
+    return seen.size;
+  }, [repos, tasksByRepo]);
+};
 
 /** The "needs your review" counts for every registered project, for the sidebar's
  *  per-project rows. Shares {@link useReviews}' cache with the badge above, so the

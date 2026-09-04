@@ -234,7 +234,6 @@ function resolveSection(nodes: NavNode[], key: string | undefined): SectionDef {
 }
 
 export function SettingsView() {
-  const { activeRepo } = useApp();
   const { data: repos = [] } = useRepos();
   const router = useRouter();
   const canGoBack = useCanGoBack();
@@ -245,14 +244,16 @@ export function SettingsView() {
   const [scope, setScope] = useState<Scope>("app");
   const [section, setSection] = useState<string>(() => resolveSection(APP_NAV, initialSection).key);
 
-  // Which repo we're *editing* under the Repo scope — independent of the app's
-  // active repo, so you can tweak another project's settings from here without
-  // switching what the rest of the app is pointed at. Defaults to (and falls
-  // back to) the active repo whenever the current pick isn't a known repo.
-  const [settingsRepo, setSettingsRepo] = useState(activeRepo);
+  // Which repo we're *editing* under the Repo scope. Its own state, with its own
+  // picker: Settings is a page, reached from anywhere, and "whose settings am I
+  // editing" was never the same question as "what am I looking at". It falls
+  // back to the first registered project whenever the current pick isn't a known
+  // repo (removed from the registry, or nothing picked yet).
+  const [settingsRepo, setSettingsRepo] = useState("");
   useEffect(() => {
-    if (!settingsRepo || !repos.some((r) => r.name === settingsRepo)) setSettingsRepo(activeRepo);
-  }, [activeRepo, repos, settingsRepo]);
+    if (settingsRepo && repos.some((r) => r.name === settingsRepo)) return;
+    setSettingsRepo(repos[0]?.name ?? "");
+  }, [repos, settingsRepo]);
 
   const goBack = () => (canGoBack ? router.history.back() : navigate({ to: "/" }));
   const switchScope = (next: Scope) => {

@@ -39,7 +39,7 @@ import { MarkdownTitle } from "../../components/Markdown";
 import { Button, Pill } from "../../components/primitives";
 import { usePrDetail } from "../../lib/queries";
 import { splitRepoSlug } from "../../lib/repo";
-import { useApp, useAppUi } from "../../state/AppContext";
+import { useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
 import {
   mergeQueueMeta,
@@ -64,7 +64,6 @@ export function ReviewHeader({
    *  the viewer's own, worked on in Trees rather than checked out from here. */
   checkout?: PrCheckout;
 }) {
-  const { setActiveRepo } = useApp();
   const { requestTreeFocus } = useAppUi();
   const existingTree = checkout?.worktree ?? null;
   const navigate = useNavigate();
@@ -81,9 +80,8 @@ export function ReviewHeader({
 
   const viewTree = () => {
     if (!checkout?.repo || !existingTree) return;
-    setActiveRepo(checkout.repo);
-    requestTreeFocus(existingTree.id);
-    navigate({ to: "/trees" });
+    navigate({ to: "/trees", search: { project: checkout.repo, tree: existingTree.id } });
+    requestTreeFocus(checkout.repo, existingTree.id);
   };
 
   return (

@@ -13,7 +13,6 @@ import { useCallback, useState } from "react";
 
 import type { LinearOrg } from "../../bindings";
 import { useAddRepo, useLinearOrgs, useSetRepoLinearOrg } from "../../lib/queries";
-import { useApp } from "../../state/AppContext";
 import { useLegacyMigration } from "../../state/LegacyMigration";
 
 export interface AddProjectFlow {
@@ -30,7 +29,6 @@ export interface AddProjectFlow {
 }
 
 export function useAddProject(): AddProjectFlow {
-  const { setActiveRepo } = useApp();
   const { data: orgs = [] } = useLinearOrgs();
   const addRepo = useAddRepo();
   const setRepoOrg = useSetRepoLinearOrg();
@@ -44,13 +42,12 @@ export function useAddProject(): AddProjectFlow {
     if (typeof picked !== "string") return;
     try {
       const repo = await addRepo.mutateAsync(picked);
-      setActiveRepo(repo.name);
       const handledByCli = await offerCliMigration(repo.name);
       if (!handledByCli && orgs.length > 1) setPendingRepo(repo.name);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [addRepo, setActiveRepo, offerCliMigration, orgs.length]);
+  }, [addRepo, offerCliMigration, orgs.length]);
 
   const chooseOrg = useCallback(
     async (slug: string) => {

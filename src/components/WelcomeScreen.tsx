@@ -9,12 +9,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useState } from "react";
 
 import { useAddRepo } from "../lib/queries";
-import { useApp } from "../state/AppContext";
 import { useLegacyMigration } from "../state/LegacyMigration";
 import { Button, Spinner } from "./primitives";
 
 export function WelcomeScreen() {
-  const { setActiveRepo } = useApp();
   const { offer } = useLegacyMigration();
   const addRepo = useAddRepo();
   const [error, setError] = useState<string | null>(null);
@@ -25,7 +23,9 @@ export function WelcomeScreen() {
     if (typeof picked !== "string") return;
     try {
       const repo = await addRepo.mutateAsync(picked);
-      setActiveRepo(repo.name);
+      // Nothing to "switch to": the registry gaining its first project is what
+      // swaps this screen for the shell, and the shell opens on the welcome
+      // surface with the new project's section already in the rail.
       await offer(repo.name);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

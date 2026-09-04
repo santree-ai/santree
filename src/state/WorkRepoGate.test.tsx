@@ -11,7 +11,7 @@ const state = vi.hoisted(() => ({
   repo: null as string | null,
   setRepo: vi.fn(),
 }));
-vi.mock("../../lib/queries", () => ({
+vi.mock("../lib/queries", () => ({
   useRepos: () => ({
     data: [
       { name: "acme/app", path: "/src/app" },

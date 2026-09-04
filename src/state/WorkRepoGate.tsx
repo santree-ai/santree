@@ -19,8 +19,8 @@
  */
 import { createContext, type ReactNode, useCallback, useContext, useRef, useState } from "react";
 
-import { ProjectPickerDialog } from "../../components/ProjectPickerDialog";
-import { useWorkDefaultRepo } from "../../lib/queries";
+import { ProjectPickerDialog } from "../components/ProjectPickerDialog";
+import { useWorkDefaultRepo } from "../lib/queries";
 
 /** Resolve the project for `action` — named in the dialog, so it reads
  *  "Starting AK-1 needs a project." — out of `candidates`, the projects that

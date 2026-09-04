@@ -31,9 +31,9 @@ import {
 } from "react";
 
 import type { ReviewInbox, ReviewPr, TicketRef } from "../../bindings";
-import { usePrTickets, useReviews } from "../../lib/queries";
+import { usePrTickets, useRepos, useReviews } from "../../lib/queries";
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
-import { useApp, useAppUi } from "../../state/AppContext";
+import { useAppUi } from "../../state/AppContext";
 import { inboxOfProject } from "./grouping";
 import { ticketIdFor } from "./ticket";
 
@@ -90,8 +90,8 @@ interface ReviewsModel {
 const ReviewsContext = createContext<ReviewsModel | null>(null);
 
 export function ReviewsProvider({ children }: { children: ReactNode }) {
-  const { activeRepo } = useApp();
   const { reviewFocus, consumeReviewFocus } = useAppUi();
+  const { data: repos } = useRepos();
   // `strict: false` because this provider is also rendered in tests, where there
   // is no matched route to read a typed search off.
   const {
@@ -106,9 +106,13 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const scope = project ?? null;
   // The scoped project is a registry name, so it is a valid `repo` for every
-  // repo-scoped read below — and a truer one than the active project, which a
-  // reload restores independently of the URL.
-  const repo = scope ?? activeRepo;
+  // repo-scoped read below. Unscoped — the inbox spanning every project, which
+  // is what a PR belonging to none of them needs — the reads still have to key
+  // off something, and the first registered project is a stable answer. It used
+  // to be the active project: a value that changed as the user moved around, so
+  // the same unscoped inbox keyed off a different repo from one visit to the
+  // next.
+  const repo = scope ?? repos?.[0]?.name ?? "";
   const { data: allProjects, isLoading } = useReviews();
   const inbox = useMemo(
     () => (scope && allProjects ? inboxOfProject(allProjects, scope) : allProjects),
