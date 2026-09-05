@@ -5,7 +5,15 @@
  *  the built-in Issue context plus any you create). Right: a side-by-side editor
  *  + live preview. Prompts are minijinja templates — reference
  *  `{{ variables }}`, branch with `{% if %}`/`{% for %}`, and embed another prompt
- *  with `{% include "name" %}`. Overrides are per app (User scope) or per repo. */
+ *  with `{% include "name" %}`.
+ *
+ *  A prompt has layers: santree's default, the user's app-wide override (User
+ *  scope), and at repo scope two more — the **Project** file
+ *  (`.santree/prompts/<name>.njk`, committed, the team's) and the user's
+ *  **Personal** override over it. A layer either **extends** the one below by
+ *  filling the default's slots (the fields of `SlotEditor`, which keep
+ *  receiving every other change to the default) or **replaces** it with a
+ *  template of its own — `promptLayers.ts` is the line between the two. */
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -29,7 +37,9 @@ const Editor = ((EditorImport as unknown as { default?: typeof EditorImport }).d
 
 import type {
   PromptInfo,
+  PromptLayer,
   PromptPreviewKind,
+  PromptSlot,
   PromptWorkItemSample,
   ReviewWorkItemSource,
 } from "../../../bindings";
@@ -65,6 +75,7 @@ import {
   useDeletePromptBlock,
   usePreviewPrompt,
   usePrompts,
+  useSetProjectPrompt,
   useSetPrompt,
   useTasks,
   useTriageDetail,
@@ -72,6 +83,14 @@ import {
 import { shortRepoName } from "../../../lib/repoName";
 import { usePersistedState } from "../../../lib/usePersistedState";
 import { highlightJinja, highlightRendered, stripRenderMarks } from "../jinjaHighlight";
+import {
+  buildExtension,
+  hasFills,
+  parseExtension,
+  splitAtSlots,
+  takeoverIsStale,
+  withTakeoverMark,
+} from "../promptLayers";
 
 const EDITOR_STYLE = {
   fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
@@ -122,6 +141,18 @@ const PREVIEW_VIEWS: { value: PreviewView; label: string }[] = [
   { value: "markdown", label: "Markdown" },
   { value: "source", label: "Source" },
 ];
+
+/** Which layer the repo-scope editor is on. Persisted: a team member lives on
+ *  Project, a soloist on Personal, and neither wants to pick again per prompt. */
+const LAYER_KEY = "settings.prompts.layer";
+const LAYERS: { value: PromptLayer; label: string }[] = [
+  { value: "project", label: "Project" },
+  { value: "personal", label: "Personal" },
+];
+
+/** How a layer relates to the one below it: filling the default's slots and
+ *  inheriting the rest, or a template of its own. */
+type Mode = "extend" | "replace";
 
 type IconComponent = ComponentType<{ size?: number; className?: string }>;
 
@@ -326,15 +357,19 @@ function PromptsHeader({ repo, forRepo }: { repo: string; forRepo: boolean }) {
           Every prompt santree hands an agent, in one place.{" "}
           {forRepo ? (
             <>
-              These are the overrides for{" "}
-              <span className="font-medium text-fg-3">{shortRepoName(repo)}</span>; a prompt without
-              one inherits the User default.
+              These are the layers for{" "}
+              <span className="font-medium text-fg-3">{shortRepoName(repo)}</span>:{" "}
+              <span className="text-fg-3">Project</span> is <Code>.santree/prompts/</Code>,
+              committed with the code and shared by everyone who clones it;{" "}
+              <span className="text-fg-3">Personal</span> is yours alone, on top of it. A prompt
+              with neither inherits the User default.
             </>
           ) : (
-            <>These are the User defaults, used by every project without an override of its own.</>
+            <>These are the User defaults, used by every project without a layer of its own.</>
           )}{" "}
-          A change applies to the next launch, and Reset returns the built-in. They are Jinja
-          templates, rendered by minijinja: reference a <Code>{"{{ variable }}"}</Code>, branch with{" "}
+          Fill a prompt's fields to extend santree's text and keep receiving its updates, or take it
+          over to write your own. A change applies to the next launch. They are Jinja templates,
+          rendered by minijinja: reference a <Code>{"{{ variable }}"}</Code>, branch with{" "}
           <Code>{"{% if %}"}</Code>, loop with <Code>{"{% for %}"}</Code>, and embed a shared block
           with <Code>{'{% include "name" %}'}</Code>.
         </p>
@@ -422,13 +457,21 @@ function RailGroup({
                   <LockIcon size={10} />
                 </span>
               ) : (
-                p.overrideSource !== null && (
-                  <span
-                    className="h-1.5 w-1.5 flex-none rounded-full"
-                    style={{ background: "var(--accent)" }}
-                    title="Overridden in this scope"
-                  />
-                )
+                <>
+                  {p.projectSource !== null && (
+                    <span
+                      className="h-1.5 w-1.5 flex-none rounded-full border border-fg-3"
+                      title="Shared by the project"
+                    />
+                  )}
+                  {p.overrideSource !== null && (
+                    <span
+                      className="h-1.5 w-1.5 flex-none rounded-full"
+                      style={{ background: "var(--accent)" }}
+                      title="Overridden in this scope"
+                    />
+                  )}
+                </>
               )}
             </button>
           );
@@ -457,39 +500,92 @@ function PromptEditor({
   onPreviewWidth: (w: number) => void;
   onDeleted: () => void;
 }) {
-  const { mutate: setPrompt, isPending } = useSetPrompt(scope);
+  const [layerChoice, setLayerChoice] = usePersistedState<PromptLayer>(LAYER_KEY, "project");
+  const layer: PromptLayer = forRepo ? layerChoice : "personal";
+  const { mutate: setPrompt, isPending: pendingPersonal } = useSetPrompt(scope);
+  const { mutate: setProjectPrompt, isPending: pendingProject } = useSetProjectPrompt(repo);
+  const isPending = layer === "project" ? pendingProject : pendingPersonal;
   const { mutate: deleteBlock } = useDeletePromptBlock();
 
-  // What this scope inherits when it has no override of its own: the app override
-  // (repo scope) or the built-in default (app scope). Custom blocks have no
-  // embedded default, so their app value is the base.
-  const inheritedBase = forRepo ? (appPrompt?.overrideSource ?? prompt.default) : prompt.default;
-  const savedValue = prompt.overrideSource ?? inheritedBase;
+  // The layer's stored source, and the one write that changes it.
+  const saved = layer === "project" ? prompt.projectSource : prompt.overrideSource;
+  const save = (content: string | null, onSuccess?: () => void) => {
+    const vars = { name: prompt.name, content };
+    if (layer === "project") setProjectPrompt(vars, { onSuccess });
+    else setPrompt(vars, { onSuccess });
+  };
+  const overridden = saved !== null;
 
+  // What this layer `{% extends %}`: the project's file extends santree's
+  // default; a personal override at repo scope extends the project layer (its
+  // file, or what the repo uses without one); at app scope, the default.
+  const base =
+    layer === "personal" && forRepo ? `project/${prompt.name}` : `santree/${prompt.name}`;
+  // What replace mode edits from while the layer is empty: the text it inherits.
+  // A project file never seeds from the user's own override — it is the team's.
+  const inherited =
+    layer === "personal" && forRepo
+      ? (prompt.projectSource ?? appPrompt?.overrideSource ?? prompt.default)
+      : prompt.default;
+
+  // Slots to fill exist on a built-in with slots, and only while the layer below
+  // still has them: a project file that replaced the prompt wholesale left
+  // nothing to extend, so a personal layer over it can only replace too.
+  const belowReplaced =
+    layer === "personal" &&
+    forRepo &&
+    prompt.projectSource !== null &&
+    parseExtension(prompt.projectSource) === null;
+  const canExtend = prompt.builtin && prompt.slots.length > 0 && !belowReplaced;
+  const savedExtension = saved !== null ? parseExtension(saved) : null;
+  const savedMode: Mode =
+    canExtend && (saved === null || savedExtension !== null) ? "extend" : "replace";
+  const [modeChoice, setModeChoice] = useState<Mode | null>(null);
+  const mode = modeChoice ?? savedMode;
+
+  // Drafts: replace mode edits text, extend mode edits the slot fills. Both stay
+  // `null` until the user types, so a refetched saved value shows through.
   const [draft, setDraft] = useState<string | null>(null);
-  const value = draft ?? savedValue;
-  const dirty = draft !== null && draft !== savedValue;
-  const overridden = prompt.overrideSource !== null;
+  const [fills, setFills] = useState<Record<string, string> | null>(null);
+  const slotNames = prompt.slots.map((slot) => slot.name);
+  const currentFills = fills ?? savedExtension?.blocks ?? {};
+  const built = buildExtension(base, currentFills, slotNames);
+  const savedText = saved ?? inherited;
+  const value = draft ?? savedText;
+
+  // What the preview renders, what Save writes (`null` clears the layer), and
+  // whether there is anything to write.
+  const content = mode === "extend" ? built : value;
+  const toSave: string | null = mode === "extend" ? (hasFills(currentFills) ? built : null) : value;
+  const dirty =
+    mode === "extend" ? fills !== null && toSave !== saved : draft !== null && draft !== savedText;
+  const stale = mode === "replace" && prompt.builtin && takeoverIsStale(value, prompt.default);
   const isCustomAppScope = !prompt.builtin && !forRepo;
 
-  // Reset and Delete discard the draft on purpose, and both can unmount this
-  // editor before their write lands — mark it discarded so the unmount flush
+  // Reset, Discard and Delete drop the draft on purpose, and each can unmount
+  // this editor before its write lands — mark it discarded so the unmount flush
   // below can't resurrect it. Typing again re-arms the flush.
   const discarded = useRef(false);
   const edit = (next: string) => {
     discarded.current = false;
     setDraft(next);
   };
+  const fill = (name: string, next: string) => {
+    discarded.current = false;
+    setFills({ ...currentFills, [name]: next });
+  };
 
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmExtend, setConfirmExtend] = useState(false);
   const [issueId, setIssueId] = useState("");
+  const [focusedSlot, setFocusedSlot] = useState<string | null>(null);
 
-  const textareaId = `prompt-editor-${scope}-${prompt.name}`.replace(/[^\w-]/g, "_");
+  const textareaId = `prompt-editor-${scope}-${layer}-${prompt.name}`.replace(/[^\w-]/g, "_");
 
   // react-simple-code-editor doesn't forward these to its textarea, and WKWebView
   // otherwise applies macOS smart substitution — turning a typed `--` into an
   // em-dash or `"` into curly quotes, mangling template symbols. Set them once the
-  // textarea mounts.
+  // textarea mounts (the slot fields set theirs as attributes).
   useEffect(() => {
     const ta = document.getElementById(textareaId);
     if (!ta) return;
@@ -502,43 +598,73 @@ function PromptEditor({
   // Drop the draft only once the write lands: on failure the optimistic rollback
   // restores the *saved* text, so clearing it eagerly would destroy the edit the
   // user is about to retry.
+  const clearDrafts = () => {
+    setDraft(null);
+    setFills(null);
+    setModeChoice(null);
+  };
   const onSave = () => {
     if (!dirty) return;
-    setPrompt({ name: prompt.name, content: value }, { onSuccess: () => setDraft(null) });
+    save(toSave, clearDrafts);
   };
   const onReset = () => {
     discarded.current = true;
-    setPrompt({ name: prompt.name, content: null }, { onSuccess: () => setDraft(null) });
+    setConfirmExtend(false);
+    save(null, clearDrafts);
   };
   const onDelete = () => {
     discarded.current = true;
     deleteBlock(prompt.name);
     onDeleted();
   };
+  // Extend → replace: start from santree's own text, marked with the default it
+  // was copied from so the editor can say when that default moves on.
+  const takeOver = () => {
+    discarded.current = false;
+    setModeChoice("replace");
+    setDraft(withTakeoverMark(prompt.default));
+  };
+  // Replace → extend: the layer's text goes (confirmed just above), and the
+  // fields start empty — the layer that inherits everything.
+  const extendInstead = () => {
+    discarded.current = true;
+    setConfirmExtend(false);
+    setModeChoice("extend");
+    setDraft(null);
+    setFills(null);
+    save(null, () => setModeChoice(null));
+  };
 
   // Selecting another prompt in the rail remounts this editor (it's keyed per
   // prompt), and a ⌘-shortcut can navigate away mid-edit — neither fires a save.
   // Flush an unsaved draft on teardown so typing is never silently dropped (same
   // idiom as SkillEditor / TaskNotes). Refs so this doesn't re-fire per keystroke.
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
-  const savedRef = useRef(savedValue);
-  savedRef.current = savedValue;
-  const nameRef = useRef(prompt.name);
-  nameRef.current = prompt.name;
-  const setPromptRef = useRef(setPrompt);
-  setPromptRef.current = setPrompt;
+  const pendingRef = useRef<string | null | undefined>(undefined);
+  pendingRef.current = dirty ? toSave : undefined;
+  const saveRef = useRef(save);
+  saveRef.current = save;
   useEffect(
     () => () => {
-      const d = draftRef.current;
-      if (!discarded.current && d !== null && d !== savedRef.current) {
-        setPromptRef.current({ name: nameRef.current, content: d });
+      const pending = pendingRef.current;
+      if (!discarded.current && pending !== undefined) {
+        saveRef.current(pending);
       }
     },
     [],
   );
 
+  // The palette inserts at the caret of the code editor, or appends to the slot
+  // field last focused.
   const insert = (snippet: string) => {
+    if (mode === "extend") {
+      const target = focusedSlot ?? slotNames[0];
+      if (!target) return;
+      fill(target, (currentFills[target] ?? "") + snippet);
+      requestAnimationFrame(() =>
+        document.getElementById(slotFieldId(textareaId, target))?.focus(),
+      );
+      return;
+    }
     const ta = document.getElementById(textareaId) as HTMLTextAreaElement | null;
     const start = ta?.selectionStart ?? value.length;
     const end = ta?.selectionEnd ?? value.length;
@@ -550,6 +676,22 @@ function PromptEditor({
       ta.setSelectionRange(caret, caret);
     });
   };
+
+  const status = !prompt.editable
+    ? "Read-only."
+    : mode === "extend"
+      ? overridden
+        ? "Extends santree's prompt: your fields, its text."
+        : "Fill a field to extend santree's prompt; leave them all empty to inherit it whole."
+      : stale
+        ? "Replaces santree's prompt, which has changed since you took it over."
+        : overridden
+          ? "Replaces santree's prompt."
+          : layer === "personal" && forRepo
+            ? "Inherits the project's."
+            : forRepo
+              ? "Inherits the User default."
+              : "";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -563,31 +705,66 @@ function PromptEditor({
               Read-only
             </Badge>
           ) : prompt.builtin ? (
-            overridden && <Badge>Modified</Badge>
+            overridden && <Badge>{layer === "project" ? "Project" : "Modified"}</Badge>
           ) : (
-            <Badge color="var(--color-muted)">Custom block</Badge>
+            <Badge color="var(--color-muted)">
+              {prompt.projectSource !== null ? "Project block" : "Custom block"}
+            </Badge>
+          )}
+          {forRepo && prompt.editable && (
+            <Segmented
+              options={LAYERS}
+              value={layer}
+              onChange={setLayerChoice}
+              className="ml-auto w-[172px]"
+            />
           )}
         </div>
         <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
           {prompt.description}
         </div>
+        {forRepo && prompt.editable && (
+          <div className="mt-2 text-[11px] text-muted-3">
+            {layer === "project" ? (
+              <>
+                <span className="font-mono text-fg-3">.santree/prompts/{prompt.name}.njk</span> —
+                committed with the repo, so everyone who clones it gets the same prompt.
+              </>
+            ) : (
+              <>
+                Yours alone, on top of the project's
+                {prompt.projectSource === null ? " (it has none yet)" : ""} and the User default.
+              </>
+            )}
+          </div>
+        )}
         <CompositionLine includes={prompt.includes} usedBy={prompt.usedBy} />
       </div>
 
       {/* Editor | Preview */}
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col border-r border-line">
-          <div className="prompt-editor min-h-0 flex-1 overflow-auto bg-input">
-            <Editor
-              value={value}
-              onValueChange={prompt.editable ? edit : () => {}}
-              readOnly={!prompt.editable}
-              highlight={highlightJinja}
-              padding={14}
-              textareaId={textareaId}
-              style={EDITOR_STYLE}
+          {mode === "extend" ? (
+            <SlotEditor
+              prompt={prompt}
+              fills={currentFills}
+              onFill={fill}
+              onFocusSlot={setFocusedSlot}
+              idBase={textareaId}
             />
-          </div>
+          ) : (
+            <div className="prompt-editor min-h-0 flex-1 overflow-auto bg-input">
+              <Editor
+                value={value}
+                onValueChange={prompt.editable ? edit : () => {}}
+                readOnly={!prompt.editable}
+                highlight={highlightJinja}
+                padding={14}
+                textareaId={textareaId}
+                style={EDITOR_STYLE}
+              />
+            </div>
+          )}
           {/* Variable palette — or, for a prompt that can't be edited, the one
               line saying so and what it receives. */}
           {!prompt.editable ? (
@@ -637,8 +814,9 @@ function PromptEditor({
         <PreviewPane
           name={prompt.name}
           kind={prompt.preview}
-          content={value}
+          content={content}
           repo={repo}
+          layer={layer}
           issueId={issueId}
           onIssueChange={setIssueId}
           width={previewWidth}
@@ -648,14 +826,8 @@ function PromptEditor({
 
       {/* Actions */}
       <div className="flex flex-none items-center justify-between gap-2 border-t border-line px-5 py-3">
-        <div className="text-[11px] text-muted-3">
-          {!prompt.editable
-            ? "Read-only."
-            : forRepo && !overridden
-              ? "Inherits the User default."
-              : overridden && prompt.builtin
-                ? "Overridden."
-                : ""}
+        <div className={`text-[11px] ${stale ? "text-status-amber" : "text-muted-3"}`}>
+          {status}
         </div>
         <div className="flex items-center gap-2">
           {!prompt.editable ? null : isCustomAppScope ? (
@@ -673,17 +845,142 @@ function PromptEditor({
               </Button>
             )
           ) : (
-            <Button onClick={onReset} disabled={!overridden || isPending}>
-              {prompt.builtin ? "Reset to default" : "Reset override"}
-            </Button>
+            <>
+              {canExtend &&
+                (mode === "extend" ? (
+                  <Button
+                    onClick={takeOver}
+                    title="Copy santree's text into this layer and edit it freely. It stops receiving santree's updates."
+                  >
+                    Take over
+                  </Button>
+                ) : confirmExtend ? (
+                  <>
+                    <span className="text-[11px] text-muted-2">
+                      Discard this text and extend santree's prompt instead?
+                    </span>
+                    <Button onClick={() => setConfirmExtend(false)}>Cancel</Button>
+                    <Button variant="danger" onClick={extendInstead}>
+                      Discard
+                    </Button>
+                  </>
+                ) : (
+                  <Button onClick={() => setConfirmExtend(true)}>Extend instead</Button>
+                ))}
+              {!confirmExtend && (
+                <Button onClick={onReset} disabled={!overridden || isPending}>
+                  {layer === "project"
+                    ? "Remove from project"
+                    : prompt.builtin
+                      ? "Reset to default"
+                      : "Reset override"}
+                </Button>
+              )}
+            </>
           )}
-          {prompt.editable && (
+          {prompt.editable && !confirmExtend && (
             <Button variant="primary" onClick={onSave} disabled={!dirty || isPending}>
               Save
             </Button>
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+const slotFieldId = (idBase: string, slot: string) => `${idBase}-slot-${slot}`;
+
+/** Extend mode's editor: santree's default, read-only, with a field at each of
+ *  its slots — so what you add is seen where it lands, and everything around it
+ *  keeps updating with santree. */
+function SlotEditor({
+  prompt,
+  fills,
+  onFill,
+  onFocusSlot,
+  idBase,
+}: {
+  prompt: PromptInfo;
+  fills: Record<string, string>;
+  onFill: (name: string, value: string) => void;
+  onFocusSlot: (name: string) => void;
+  idBase: string;
+}) {
+  const parts = useMemo(
+    () =>
+      splitAtSlots(
+        prompt.default,
+        prompt.slots.map((slot) => slot.name),
+      ),
+    [prompt.default, prompt.slots],
+  );
+  const slotByName = (name: string): PromptSlot | undefined =>
+    prompt.slots.find((slot) => slot.name === name);
+  return (
+    <div className="prompt-slots min-h-0 flex-1 overflow-auto bg-input py-[14px]">
+      {parts.map((part, i) =>
+        part.kind === "text" ? (
+          <pre
+            // Fixed text has no identity of its own; its place in the sequence is it.
+            key={`text-${i}`}
+            className="whitespace-pre-wrap px-[14px] text-muted-3"
+            style={EDITOR_STYLE}
+            // biome-ignore lint/security/noDangerouslySetInnerHtml: highlightJinja escapes the source; only template delimiters become spans.
+            dangerouslySetInnerHTML={{ __html: highlightJinja(part.text) }}
+          />
+        ) : (
+          <SlotField
+            key={part.name}
+            id={slotFieldId(idBase, part.name)}
+            slot={slotByName(part.name) ?? { name: part.name, label: part.name, hint: "" }}
+            value={fills[part.name] ?? ""}
+            onChange={(next) => onFill(part.name, next)}
+            onFocus={() => onFocusSlot(part.name)}
+          />
+        ),
+      )}
+    </div>
+  );
+}
+
+/** One slot: its label, the question it asks, and the field. Empty means
+ *  inherited — the block isn't written at all. */
+function SlotField({
+  id,
+  slot,
+  value,
+  onChange,
+  onFocus,
+}: {
+  id: string;
+  slot: PromptSlot;
+  value: string;
+  onChange: (value: string) => void;
+  onFocus: () => void;
+}) {
+  const rows = Math.min(14, Math.max(2, value.split("\n").length + 1));
+  return (
+    <div className="mx-[14px] my-2 rounded-md border border-dashed border-accent/50 bg-app/40 p-2.5">
+      <label htmlFor={id} className="block text-[11.5px] font-medium text-fg-2">
+        {slot.label}
+      </label>
+      {slot.hint && (
+        <div className="mt-0.5 text-[11px] leading-[1.5] text-muted-3">{slot.hint}</div>
+      )}
+      <textarea
+        id={id}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={onFocus}
+        rows={rows}
+        placeholder="Empty — inherited as is."
+        spellCheck={false}
+        autoCorrect="off"
+        autoCapitalize="off"
+        autoComplete="off"
+        className="mt-2 block w-full resize-y rounded border border-line-3 bg-input px-2 py-1.5 font-mono text-[12px] leading-[1.6] text-fg-2 outline-none placeholder:text-muted-4 focus:border-line-strong"
+      />
     </div>
   );
 }
@@ -736,6 +1033,7 @@ function PreviewPane({
   kind,
   content,
   repo,
+  layer,
   issueId,
   onIssueChange,
   width,
@@ -747,6 +1045,8 @@ function PreviewPane({
   kind: PromptPreviewKind;
   content: string;
   repo: string;
+  /** Which stored layer the draft stands in for. */
+  layer: PromptLayer;
   issueId: string;
   onIssueChange: (id: string) => void;
   width: number;
@@ -771,6 +1071,7 @@ function PreviewPane({
     name,
     debounced,
     repo,
+    layer,
     issueId || undefined,
     // `null` is Linear's "no such issue" — the preview treats it like an
     // unresolved one and renders against the sample ticket instead.

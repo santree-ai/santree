@@ -134,6 +134,18 @@ pub async fn clear_all_scopes(db: &Db, key: &str) -> Result<()> {
 /// anyway: the two scopes merge per variable rather than one shadowing the other, in
 /// `env::resolve_env`.
 pub async fn resolve(db: &Db, repo: &str, key: &str) -> Result<Option<String>> {
+    let (repo_value, app_value) = resolve_both(db, repo, key).await?;
+    Ok(repo_value.or(app_value))
+}
+
+/// Both candidate rows of [`resolve`] as `(repo, app)`, for a reader that layers
+/// something of its own between them — the prompt engine puts a repo's committed
+/// file under the repo override and over the app one.
+pub async fn resolve_both(
+    db: &Db,
+    repo: &str,
+    key: &str,
+) -> Result<(Option<String>, Option<String>)> {
     let repo_scope = format!("repo:{repo}");
     let rows: Vec<(String, String)> =
         sqlx::query_as("SELECT scope, value FROM settings WHERE key = ? AND scope IN (?, 'app')")
@@ -146,7 +158,7 @@ pub async fn resolve(db: &Db, repo: &str, key: &str) -> Result<Option<String>> {
             .find(|(s, _)| s == scope)
             .map(|(_, v)| v.clone())
     };
-    Ok(pick(&repo_scope).or_else(|| pick("app")))
+    Ok((pick(&repo_scope), pick("app")))
 }
 
 pub fn provider_setting_key(key: &str, agent: santree_core::domain::AgentKind) -> String {

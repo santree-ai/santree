@@ -547,19 +547,27 @@ describe("promptPreviewKey", () => {
   const body = "Fix {{ issue.title }}";
 
   it("is stable for identical inputs (so a re-render doesn't refetch)", () => {
-    const a = promptPreviewKey("work", body, "acme", "ENG-1", detail(), undefined);
-    const b = promptPreviewKey("work", body, "acme", "ENG-1", detail(), undefined);
+    const a = promptPreviewKey("work", body, "acme", "personal", "ENG-1", detail(), undefined);
+    const b = promptPreviewKey("work", body, "acme", "personal", "ENG-1", detail(), undefined);
     expect(a).toEqual(b);
   });
 
   it("changes when the draft changes", () => {
-    const a = promptPreviewKey("work", body, "acme", "ENG-1", detail(), undefined);
-    const b = promptPreviewKey("work", `${body} now`, "acme", "ENG-1", detail(), undefined);
+    const a = promptPreviewKey("work", body, "acme", "personal", "ENG-1", detail(), undefined);
+    const b = promptPreviewKey(
+      "work",
+      `${body} now`,
+      "acme",
+      "personal",
+      "ENG-1",
+      detail(),
+      undefined,
+    );
     expect(a).not.toEqual(b);
   });
 
   it("changes when the sample issue changes — a refetched detail must re-render, not serve the stale preview", () => {
-    const a = promptPreviewKey("work", body, "acme", "ENG-1", detail(), undefined);
+    const a = promptPreviewKey("work", body, "acme", "personal", "ENG-1", detail(), undefined);
     const b = promptPreviewKey(
       "work",
       body,
@@ -580,8 +588,8 @@ describe("promptPreviewKey", () => {
       author: null,
       body: null,
     };
-    const a = promptPreviewKey("pr-fix", body, "acme", "", undefined, [item]);
-    const b = promptPreviewKey("pr-fix", body, "acme", "", undefined, [
+    const a = promptPreviewKey("pr-fix", body, "acme", "personal", "", undefined, [item]);
+    const b = promptPreviewKey("pr-fix", body, "acme", "personal", "", undefined, [
       { ...item, description: "Add two tests" },
     ]);
     expect(a).not.toEqual(b);
@@ -590,10 +598,18 @@ describe("promptPreviewKey", () => {
   });
 
   it("never carries the draft text itself — the cache must not retain a copy per keystroke", () => {
-    const key = promptPreviewKey("work", body, "acme", "ENG-1", detail(), undefined);
+    const key = promptPreviewKey("work", body, "acme", "personal", "ENG-1", detail(), undefined);
     expect(key).not.toContain(body);
     // Every part stays short regardless of how big the template gets.
-    const huge = promptPreviewKey("work", "x".repeat(50_000), "acme", "ENG-1", detail(), undefined);
+    const huge = promptPreviewKey(
+      "work",
+      "x".repeat(50_000),
+      "acme",
+      "personal",
+      "ENG-1",
+      detail(),
+      undefined,
+    );
     for (const part of huge as unknown[]) {
       expect(String(part).length).toBeLessThan(32);
     }

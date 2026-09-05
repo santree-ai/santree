@@ -1105,9 +1105,9 @@ mod tests {
         }
     }
 
-    /// Several projects under one org ask GitHub once. The user's own registry has
-    /// `canary` and `canary-kubernetes` side by side; a search per repo would buy
-    /// the same answer twice out of one rate limit.
+    /// Several projects under one org ask GitHub once. A registry with `acme/web`
+    /// and `acme/infra` side by side would otherwise buy the same answer twice
+    /// out of one rate limit.
     #[test]
     fn projects_sharing_an_org_collapse_to_one_search_scope() {
         let projects = [

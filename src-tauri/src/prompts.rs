@@ -1,35 +1,66 @@
 //! AI prompt templates, rendered with minijinja.
 //!
 //! Each prompt ships with a readable `.njk` **default** embedded at compile time,
-//! but the *effective* source is resolved at render time: a per-repo override,
-//! then an app-wide override (both stored in the `settings` table under
-//! `prompt.<name>`), then the embedded default. This lets users edit prompts from
-//! Settings → Prompts while the binary stays self-contained and always has a
-//! working fallback.
+//! but the *effective* source is resolved at render time from four layers, most
+//! specific first: the user's override for the repo, the repo's committed
+//! `.santree/prompts/<name>.njk`, the user's app-wide override (both overrides
+//! live in the `settings` table under `prompt.<name>`), then the embedded
+//! default. Users edit the two overrides from Settings → Prompts; the project
+//! file is the one a team commits, so a better prompt lands for everyone on the
+//! next pull. The binary stays self-contained and always has a working fallback.
+//!
+//! A layer can **extend** the one below it instead of replacing it, with
+//! standard Jinja inheritance: the render environment registers every prompt
+//! three times — `santree/<name>` (the embedded default), `project/<name>` (what
+//! the repo uses before the user's own repo override) and `<name>` (the
+//! effective one) — so `{% extends "santree/triage" %}` plus a `{% block %}` is
+//! the whole recipe. The defaults declare empty blocks (**slots**) where
+//! project-specific knowledge belongs, which the editor offers as fields; a
+//! layer that fills only those keeps receiving every other improvement to the
+//! default.
 //!
 //! Composition is by name: a prompt can embed another with `{% include "issue" %}`
-//! (all prompts are registered in the render environment, so includes honor
-//! overrides too), or receive a pre-rendered sub-prompt as a variable — the `work`
-//! and `fill-pr` defaults take the `issue` prompt rendered into `ticket_content`.
+//! (includes honor the same layering), or receive a pre-rendered sub-prompt as a
+//! variable — the `work` and `fill-pr` defaults take the `issue` prompt rendered
+//! into `ticket_content`.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use minijinja::{context, Environment, Value};
 use santree_core::domain::{
-    Priority, PromptInfo, PromptKind, PromptPreview, PromptPreviewKind, PromptVar,
-    PromptWorkItemSample, ReviewWorkItemSource, TriageComment, TriageDetail,
+    Priority, PromptInfo, PromptKind, PromptLayer, PromptPreview, PromptPreviewKind, PromptSlot,
+    PromptVar, PromptWorkItemSample, ReviewWorkItemSource, TriageComment, TriageDetail,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
-use crate::settings;
+use crate::{repo, santree_dir, settings};
 
 /// One documented variable a prompt receives (name + human blurb for the editor).
 struct VarDoc {
     name: &'static str,
     description: &'static str,
 }
+
+/// One extension point a default declares: an empty `{% block <name> %}` where
+/// project-specific knowledge belongs. The name is part of the prompt's contract
+/// — a layer fills it by name — so `every_slot_is_an_empty_block_in_its_default`
+/// pins each one to its template.
+struct SlotDoc {
+    name: &'static str,
+    label: &'static str,
+    hint: &'static str,
+}
+
+/// The one slot every editable flow ends with: whatever fits nowhere more
+/// specific, appended after the default's own instructions.
+const EXTRA_SLOT: SlotDoc = SlotDoc {
+    name: "extra",
+    label: "Anything else",
+    hint: "Project-specific guidance that fits nowhere above.",
+};
 
 /// Static definition of one built-in prompt: identity, embedded default, and the
 /// variable catalog surfaced to the editor. (Include links are computed live from
@@ -45,6 +76,8 @@ struct PromptDef {
     editable: bool,
     preview: PromptPreviewKind,
     default: &'static str,
+    /// The empty blocks the default declares, in document order.
+    slots: &'static [SlotDoc],
     variables: &'static [VarDoc],
 }
 
@@ -88,6 +121,24 @@ static PROMPT_DEFS: &[PromptDef] = &[
         editable: true,
         preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/triage.njk"),
+        slots: &[
+            SlotDoc {
+                name: "sources",
+                label: "Live-data sources",
+                hint: "Your observability and data tools, how to pick between them, and how to scope a query to the affected customer or tenant.",
+            },
+            SlotDoc {
+                name: "conventions",
+                label: "Ownership conventions",
+                hint: "Ticket prefixes and the teams they map to, routing rules, CODEOWNERS quirks, and who to name as a reviewer.",
+            },
+            SlotDoc {
+                name: "pitfalls",
+                label: "Known pitfalls",
+                hint: "What has burned an investigation before: tool quirks, deprecated systems, ids that look alike.",
+            },
+            EXTRA_SLOT,
+        ],
         variables: &[
             VarDoc { name: "ticket_id", description: "The issue id, e.g. \"AK-165\"." },
             VarDoc { name: "title", description: "The issue title." },
@@ -105,6 +156,7 @@ static PROMPT_DEFS: &[PromptDef] = &[
         editable: true,
         preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/work.njk"),
+        slots: &[EXTRA_SLOT],
         variables: &[
             VarDoc { name: "ticket_id", description: "The issue id, e.g. \"AK-165\"." },
             VarDoc { name: "title", description: "The worktree/issue title." },
@@ -124,6 +176,7 @@ static PROMPT_DEFS: &[PromptDef] = &[
         editable: true,
         preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/fill-commit.njk"),
+        slots: &[EXTRA_SLOT],
         variables: &[
             VarDoc { name: "branch_name", description: "The worktree's git branch." },
             VarDoc { name: "ticket_id", description: "The issue id, empty for the base worktree." },
@@ -138,6 +191,7 @@ static PROMPT_DEFS: &[PromptDef] = &[
         editable: true,
         preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/fill-pr.njk"),
+        slots: &[EXTRA_SLOT],
         variables: &[
             VarDoc { name: "pr_template", description: "The repo's PR template markdown." },
             VarDoc { name: "branch_name", description: "The worktree's git branch." },
@@ -157,6 +211,7 @@ static PROMPT_DEFS: &[PromptDef] = &[
         editable: true,
         preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/pr-review.njk"),
+        slots: &[EXTRA_SLOT],
         variables: &[
             VarDoc { name: "pr_repo", description: "The pull request's repository, as `owner/name`." },
             VarDoc { name: "pr_number", description: "The pull request number." },
@@ -189,6 +244,7 @@ static PROMPT_DEFS: &[PromptDef] = &[
         editable: true,
         preview: PromptPreviewKind::Queue,
         default: include_str!("../prompts/pr-fix.njk"),
+        slots: &[EXTRA_SLOT],
         variables: &[
             VarDoc {
                 name: "work_items",
@@ -221,6 +277,7 @@ static PROMPT_DEFS: &[PromptDef] = &[
         editable: false,
         preview: PromptPreviewKind::Sample,
         default: include_str!("../prompts/english-tutor.njk"),
+        slots: &[],
         variables: &[VarDoc {
             name: "log_path",
             description: "Absolute path of the practice log the agent appends corrections to. It has a matching `Edit` grant — point this somewhere else and the append will stop on a permission prompt.",
@@ -234,6 +291,7 @@ static PROMPT_DEFS: &[PromptDef] = &[
         editable: false,
         preview: PromptPreviewKind::Sample,
         default: include_str!("../prompts/english-analysis.njk"),
+        slots: &[],
         variables: &[
             VarDoc { name: "log", description: "The practice log, newest entries last (capped at ~400 KB, oldest cut first)." },
             VarDoc { name: "entry_count", description: "How many corrections the log holds." },
@@ -247,6 +305,7 @@ static PROMPT_DEFS: &[PromptDef] = &[
         editable: true,
         preview: PromptPreviewKind::Ticket,
         default: include_str!("../prompts/issue.njk"),
+        slots: &[],
         variables: ISSUE_VARS,
     },
 ];
@@ -268,8 +327,9 @@ async fn custom_blocks(db: &Db) -> Vec<CustomBlock> {
         .unwrap_or_default()
 }
 
-/// A prompt name is a single lowercase identifier — safe as both a template name
-/// and a settings key suffix. Enforced on block creation.
+/// A prompt name is a single lowercase identifier — safe as a template name, a
+/// settings key suffix, and (as `<name>.njk`) one normal path component under
+/// `.santree/prompts/`. Enforced on block creation and on every project write.
 fn is_valid_block_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 40
@@ -292,33 +352,283 @@ fn setting_key(name: &str) -> String {
 
 // ── Source resolution & rendering ────────────────────────────────────────────
 
-/// Resolve one prompt's effective source for a scope (repo override → app value →
-/// `fallback`).
-async fn resolve_one(db: &Db, repo: Option<&str>, name: &str, fallback: &str) -> Result<String> {
-    let key = setting_key(name);
-    let src = match repo {
-        Some(r) => settings::resolve(db, r, &key).await?,
-        None => settings::get(db, "app", &key).await?,
-    };
-    Ok(src.unwrap_or_else(|| fallback.to_string()))
+/// Template-name prefix of a prompt's embedded default in the render
+/// environment: `{% extends "santree/triage" %}` inherits the shipped prompt.
+pub const DEFAULT_NS: &str = "santree/";
+/// Template-name prefix of what the repo uses before the user's own repo
+/// override — its committed file when it has one, else the layer below.
+pub const PROJECT_NS: &str = "project/";
+
+/// The layers one prompt resolves through, most specific first. Any of the
+/// three overrides may be absent; only a built-in has a default.
+struct Layers<'a> {
+    personal_repo: Option<String>,
+    project: Option<String>,
+    personal_app: Option<String>,
+    default: Option<&'a str>,
 }
 
-/// Every prompt's effective source — built-ins (repo override → app override →
-/// embedded default) **plus** every user-created block (repo override → app
-/// definition → empty) — owned so the built [`Environment`] can borrow it.
+impl Layers<'_> {
+    /// The three templates the environment registers for this prompt:
+    /// `santree/<name>`, `project/<name>` and the effective `<name>`. A layer
+    /// that is absent resolves to the one below it, so an `{% extends %}` of
+    /// either namespace always finds a template.
+    fn sources(self, name: &str) -> [(String, String); 3] {
+        let default = self.default.unwrap_or("").to_string();
+        let below_project = self.personal_app.unwrap_or_else(|| default.clone());
+        let project = self.project.unwrap_or_else(|| below_project.clone());
+        let effective = self.personal_repo.unwrap_or_else(|| project.clone());
+        [
+            (format!("{DEFAULT_NS}{name}"), default),
+            (format!("{PROJECT_NS}{name}"), project),
+            (name.to_string(), effective),
+        ]
+    }
+}
+
+/// A draft the editor wants rendered in place of one stored layer.
+struct Draft<'a> {
+    layer: PromptLayer,
+    name: &'a str,
+    content: &'a str,
+}
+
+/// Every prompt's sources, all three names each (see [`Layers::sources`]) —
+/// built-ins, user-created blocks, and any block the repo's `.santree/prompts/`
+/// defines on its own — owned so the built [`Environment`] can borrow it.
 /// `repo == None` resolves against the app scope only.
 pub async fn resolve_sources(db: &Db, repo: Option<&str>) -> Result<Vec<(String, String)>> {
-    let mut out = Vec::with_capacity(PROMPT_DEFS.len());
-    for d in PROMPT_DEFS {
-        out.push((
-            d.name.to_string(),
-            resolve_one(db, repo, d.name, d.default).await?,
-        ));
-    }
+    resolve_sources_with(db, repo, None).await
+}
+
+/// [`resolve_sources`] with one layer of one prompt replaced by `draft`.
+async fn resolve_sources_with(
+    db: &Db,
+    repo: Option<&str>,
+    draft: Option<Draft<'_>>,
+) -> Result<Vec<(String, String)>> {
+    let project_files = match repo {
+        Some(r) => project_prompts(db, r).await,
+        None => HashMap::new(),
+    };
+    let mut names: Vec<(String, Option<&'static str>)> = PROMPT_DEFS
+        .iter()
+        .map(|d| (d.name.to_string(), Some(d.default)))
+        .collect();
     for b in custom_blocks(db).await {
-        out.push((b.name.clone(), resolve_one(db, repo, &b.name, "").await?));
+        if !names.iter().any(|(n, _)| *n == b.name) {
+            names.push((b.name, None));
+        }
+    }
+    let mut project_only: Vec<&String> = project_files
+        .keys()
+        .filter(|k| !names.iter().any(|(n, _)| n == *k))
+        .collect();
+    project_only.sort();
+    for k in project_only {
+        names.push((k.clone(), None));
+    }
+
+    let mut out = Vec::with_capacity(names.len() * 3);
+    for (name, default) in names {
+        let key = setting_key(&name);
+        let (personal_repo, personal_app) = match repo {
+            Some(r) => settings::resolve_both(db, r, &key).await?,
+            None => (None, settings::get(db, "app", &key).await?),
+        };
+        // A read-only prompt's wording is part of a hook contract; both write
+        // paths refuse it, and the read path must not admit it from a file.
+        let editable = def(&name).is_none_or(|d| d.editable);
+        let mut layers = Layers {
+            personal_repo,
+            project: editable
+                .then(|| project_files.get(&name).cloned())
+                .flatten(),
+            personal_app,
+            default,
+        };
+        if let Some(d) = &draft {
+            if d.name == name {
+                match d.layer {
+                    PromptLayer::Personal => match repo {
+                        Some(_) => layers.personal_repo = Some(d.content.to_string()),
+                        None => layers.personal_app = Some(d.content.to_string()),
+                    },
+                    PromptLayer::Project => layers.project = Some(d.content.to_string()),
+                }
+            }
+        }
+        out.extend(layers.sources(&name));
     }
     Ok(out)
+}
+
+// ── The repo's committed layer: .santree/prompts/<name>.njk ─────────────────
+
+/// A project prompt larger than this is ignored rather than handed to an agent:
+/// a prompt is prose, and anything past it is a file that landed there by
+/// mistake.
+const PROJECT_FILE_MAX: u64 = 256 * 1024;
+
+/// Where `name`'s project file lives under `repo_root`. `name` is validated as
+/// one path component, the join is checked once more at the sink, and neither
+/// the directory nor an existing file may be a symlink: a clone can commit one
+/// (git keeps them), and what it points at must never be read as a prompt or
+/// written over as one.
+fn project_file(repo_root: &Path, name: &str) -> Result<PathBuf> {
+    if !is_valid_block_name(name) {
+        bail!("prompt name must be lowercase letters, digits or dashes");
+    }
+    let dir = santree_dir::prompts_dir(repo_root);
+    if !dir_is_within(&dir, repo_root) {
+        bail!(".santree/prompts is a link outside the repo");
+    }
+    let path = crate::git::safe_path(&dir, &format!("{name}.njk"))?;
+    if is_symlink(&path) {
+        bail!("{} is a symlink", path.display());
+    }
+    Ok(path)
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Whether `dir`, once every link in it is resolved, still sits under `root`.
+/// A directory that doesn't exist yet is within (it will be created there).
+fn dir_is_within(dir: &Path, root: &Path) -> bool {
+    match (std::fs::canonicalize(dir), std::fs::canonicalize(root)) {
+        (Ok(real), Ok(real_root)) => real.starts_with(real_root),
+        (Err(e), _) if e.kind() == std::io::ErrorKind::NotFound => true,
+        _ => false,
+    }
+}
+
+/// The repo's committed prompt layers, keyed by name — every `<name>.njk` in
+/// `.santree/prompts/` of its **main checkout** whose stem is a valid prompt
+/// name. Read fresh on every resolve (a `git pull` is live on the next launch),
+/// and best-effort: a repo without a path, a missing directory or an unreadable
+/// file is simply not a layer.
+async fn project_prompts(db: &Db, repo: &str) -> HashMap<String, String> {
+    let Ok(Some(root)) = repo::path(db, repo).await else {
+        return HashMap::new();
+    };
+    tokio::task::spawn_blocking(move || read_project_prompts(Path::new(&root)))
+        .await
+        .unwrap_or_default()
+}
+
+fn read_project_prompts(repo_root: &Path) -> HashMap<String, String> {
+    let dir = santree_dir::prompts_dir(repo_root);
+    if !dir_is_within(&dir, repo_root) {
+        log::warn!("ignoring {}: a link outside the repo", dir.display());
+        return HashMap::new();
+    }
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("njk") {
+            continue;
+        }
+        // Only a real file: a symlink's target is whatever a commit chose.
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            log::warn!("ignoring {}: not a regular file", path.display());
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !is_valid_block_name(name) {
+            log::warn!("ignoring {}: not a valid prompt name", path.display());
+            continue;
+        }
+        if entry.metadata().map(|m| m.len()).unwrap_or(0) > PROJECT_FILE_MAX {
+            log::warn!(
+                "ignoring {}: larger than {PROJECT_FILE_MAX} bytes",
+                path.display()
+            );
+            continue;
+        }
+        if let Ok(src) = std::fs::read_to_string(&path) {
+            out.insert(name.to_string(), src);
+        }
+    }
+    out
+}
+
+/// Write (or, with `None`, delete) `name`'s project file for `repo`, after the
+/// same checks a stored override gets. Creates `.santree/` and its ignore file
+/// on the way, so the file is committable the moment it exists.
+pub async fn set_project_prompt(
+    db: &Db,
+    repo: &str,
+    name: &str,
+    content: Option<String>,
+) -> Result<()> {
+    if let Some(d) = def(name).filter(|d| !d.editable) {
+        return Err(anyhow!("'{}' is read-only", d.label));
+    }
+    let root = repo::path(db, repo)
+        .await?
+        .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
+    let path = project_file(Path::new(&root), name)?;
+    if let Some(c) = &content {
+        compile_check(name, c)?;
+        check_extends(&[name, &format!("{PROJECT_NS}{name}")], c)?;
+    }
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        match content {
+            Some(c) => {
+                santree_dir::ensure(Path::new(&root))?;
+                std::fs::create_dir_all(path.parent().expect("file has a parent"))?;
+                std::fs::write(&path, c)?;
+            }
+            None => match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            },
+        }
+        Ok(())
+    })
+    .await?
+}
+
+/// The template a source `{% extends %}`, if any — the same hand-scan as
+/// [`scan_includes`], for the one tag a file may carry once.
+fn scan_extends(source: &str) -> Option<String> {
+    let mut i = 0;
+    while let Some(open) = source[i..].find("{%") {
+        let start = i + open + 2;
+        let close_rel = source[start..].find("%}")?;
+        let close = start + close_rel;
+        let tag = source[start..close].trim();
+        let tag = tag.strip_prefix('-').unwrap_or(tag).trim_start();
+        if let Some(rest) = tag.strip_prefix("extends") {
+            if rest.starts_with(|c: char| c.is_whitespace()) {
+                return first_quoted(rest);
+            }
+        }
+        i = close + 2;
+    }
+    None
+}
+
+/// Refuse a layer that extends itself or anything above it in its own chain
+/// (`forbidden`: the effective name is the top of every chain, and the project
+/// name is the project file's own). minijinja would recurse until its depth
+/// limit and fail the launch with a message about nesting; the write is where
+/// the mistake is cheap to name.
+fn check_extends(forbidden: &[&str], content: &str) -> Result<()> {
+    match scan_extends(content) {
+        Some(target) if forbidden.contains(&target.as_str()) => Err(anyhow!(
+            "a prompt can't extend itself — extend \"{DEFAULT_NS}…\" or \"{PROJECT_NS}…\" instead"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Extract the template names a source `{% include %}`s, e.g.
@@ -367,7 +677,15 @@ fn first_quoted(s: &str) -> Option<String> {
 pub(crate) fn default_sources() -> Vec<(String, String)> {
     PROMPT_DEFS
         .iter()
-        .map(|d| (d.name.to_string(), d.default.to_string()))
+        .flat_map(|d| {
+            Layers {
+                personal_repo: None,
+                project: None,
+                personal_app: None,
+                default: Some(d.default),
+            }
+            .sources(d.name)
+        })
         .collect()
 }
 
@@ -660,11 +978,27 @@ fn all_variables() -> Vec<PromptVar> {
 /// palette, and the live composition links (includes / used-by) scanned from the
 /// effective sources at that scope.
 pub async fn list(db: &Db, scope: &str) -> Result<Vec<PromptInfo>> {
-    let sources = resolve_sources(db, scope_repo(scope)).await?;
-    // includes: name → what it includes; used_by: name → who includes it.
+    let repo = scope_repo(scope);
+    let sources = resolve_sources(db, repo).await?;
+    let (project_files, project_root) = match repo {
+        Some(r) => (
+            project_prompts(db, r).await,
+            repo::path(db, r).await?.map(PathBuf::from),
+        ),
+        None => (HashMap::new(), None),
+    };
+    let project_path = |name: &str| {
+        project_root
+            .as_deref()
+            .and_then(|root| project_file(root, name).ok())
+            .map(|p| p.to_string_lossy().into_owned())
+    };
+    // includes: name → what it includes; used_by: name → who includes it —
+    // over the effective sources only, so the links read as the editor's rail.
     let mut used_by: HashMap<String, Vec<String>> = HashMap::new();
     let includes: HashMap<String, Vec<String>> = sources
         .iter()
+        .filter(|(n, _)| !n.starts_with(DEFAULT_NS) && !n.starts_with(PROJECT_NS))
         .map(|(n, s)| (n.clone(), scan_includes(s)))
         .collect();
     for (from, incs) in &includes {
@@ -695,12 +1029,20 @@ pub async fn list(db: &Db, scope: &str) -> Result<Vec<PromptInfo>> {
             preview: d.preview,
             default: d.default.to_string(),
             override_source: settings::get(db, scope, &setting_key(d.name)).await?,
+            project_source: project_files.get(d.name).cloned(),
+            project_path: project_path(d.name),
+            slots: if d.editable {
+                to_slots(d.slots)
+            } else {
+                Vec::new()
+            },
             variables: to_vars(d.variables),
             includes: inc,
             used_by: used,
         });
     }
-    for b in custom_blocks(db).await {
+    let blocks = custom_blocks(db).await;
+    for b in &blocks {
         let (inc, used) = links(&b.name);
         out.push(PromptInfo {
             name: b.name.clone(),
@@ -713,6 +1055,36 @@ pub async fn list(db: &Db, scope: &str) -> Result<Vec<PromptInfo>> {
             preview: PromptPreviewKind::Ticket,
             default: String::new(),
             override_source: settings::get(db, scope, &setting_key(&b.name)).await?,
+            project_source: project_files.get(&b.name).cloned(),
+            project_path: project_path(&b.name),
+            slots: Vec::new(),
+            variables: all_variables(),
+            includes: inc,
+            used_by: used,
+        });
+    }
+    // Blocks the repo defines on its own — a file with no manifest entry — so
+    // the rail shows what a checked-out `.santree/prompts/` really carries.
+    let mut project_only: Vec<&String> = project_files
+        .keys()
+        .filter(|k| def(k).is_none() && !blocks.iter().any(|b| b.name == **k))
+        .collect();
+    project_only.sort();
+    for name in project_only {
+        let (inc, used) = links(name);
+        out.push(PromptInfo {
+            name: name.clone(),
+            label: name.clone(),
+            description: "A shared block from this project's .santree/prompts/. Include it in any prompt with {% include \"…\" %}.".into(),
+            kind: PromptKind::Block,
+            builtin: false,
+            editable: true,
+            preview: PromptPreviewKind::Ticket,
+            default: String::new(),
+            override_source: settings::get(db, scope, &setting_key(name)).await?,
+            project_source: project_files.get(name).cloned(),
+            project_path: project_path(name),
+            slots: Vec::new(),
             variables: all_variables(),
             includes: inc,
             used_by: used,
@@ -721,9 +1093,27 @@ pub async fn list(db: &Db, scope: &str) -> Result<Vec<PromptInfo>> {
     Ok(out)
 }
 
-/// Whether `name` is a known prompt: a built-in or a user-created block.
-async fn is_known(db: &Db, name: &str) -> bool {
-    def(name).is_some() || custom_blocks(db).await.iter().any(|b| b.name == name)
+fn to_slots(slots: &[SlotDoc]) -> Vec<PromptSlot> {
+    slots
+        .iter()
+        .map(|s| PromptSlot {
+            name: s.name.to_string(),
+            label: s.label.to_string(),
+            hint: s.hint.to_string(),
+        })
+        .collect()
+}
+
+/// Whether `name` is a known prompt: a built-in, a user-created block, or (at a
+/// repo's scope) a block that repo's `.santree/prompts/` defines.
+async fn is_known(db: &Db, repo: Option<&str>, name: &str) -> bool {
+    if def(name).is_some() || custom_blocks(db).await.iter().any(|b| b.name == name) {
+        return true;
+    }
+    match repo {
+        Some(r) => project_prompts(db, r).await.contains_key(name),
+        None => false,
+    }
 }
 
 /// Parse-check a single template's `content` (syntax only). Returns the minijinja
@@ -739,7 +1129,7 @@ fn compile_check(name: &str, content: &str) -> Result<()> {
 /// Store (or clear, when `content` is `None`) a prompt's override for `scope`,
 /// after validating that a non-empty override compiles.
 pub async fn set_prompt(db: &Db, scope: &str, name: &str, content: Option<String>) -> Result<()> {
-    if !is_known(db, name).await {
+    if !is_known(db, scope_repo(scope), name).await {
         return Err(anyhow!("unknown prompt: {name}"));
     }
     // The editor doesn't offer it, and the command line behind the editor
@@ -749,6 +1139,7 @@ pub async fn set_prompt(db: &Db, scope: &str, name: &str, content: Option<String
     }
     if let Some(c) = &content {
         compile_check(name, c)?;
+        check_extends(&[name], c)?;
     }
     settings::set(db, scope, &setting_key(name), content).await
 }
@@ -810,25 +1201,27 @@ pub async fn delete_block(db: &Db, name: &str) -> Result<()> {
 /// one. Rendering here is pure — no fetch — so the editor can re-render on every
 /// keystroke. Git-derived vars (diff, log, …) stay sample. Compile/render errors
 /// are returned in [`PromptPreview::error`] rather than as a hard failure.
-/// Includes resolve against the effective sources at `repo`'s scope, draft
-/// substituted in.
+/// Includes resolve against the effective sources at `repo`'s scope, with the
+/// draft standing in for the stored `layer` — so a project-file draft previews
+/// under the user's own override, exactly as it would render.
 pub async fn preview(
     db: &Db,
     name: &str,
     content: &str,
     repo: Option<&str>,
+    layer: PromptLayer,
     detail: Option<TriageDetail>,
     work_items: Option<Vec<PromptWorkItemSample>>,
 ) -> Result<PromptPreview> {
-    if !is_known(db, name).await {
+    if !is_known(db, repo, name).await && !is_valid_block_name(name) {
         return Err(anyhow!("unknown prompt: {name}"));
     }
-    let mut sources = resolve_sources(db, repo).await?;
-    for s in sources.iter_mut() {
-        if s.0 == name {
-            s.1 = content.to_string();
-        }
-    }
+    let draft = Draft {
+        layer,
+        name,
+        content,
+    };
+    let sources = resolve_sources_with(db, repo, Some(draft)).await?;
 
     // The caller-supplied ticket (already in the editor's cache) when present,
     // else the representative sample. No fetch on this path.
@@ -1457,6 +1850,7 @@ mod tests {
             "work",
             "Task {{ ticket_id }}: {{ title }}\n{{ ticket_content }}",
             None,
+            PromptLayer::Personal,
             None,
             None,
         )
@@ -1502,9 +1896,17 @@ mod tests {
     #[tokio::test]
     async fn preview_reports_render_error() {
         let db = test_db().await;
-        let p = preview(&db, "work", "{% for x in %}", None, None, None)
-            .await
-            .unwrap();
+        let p = preview(
+            &db,
+            "work",
+            "{% for x in %}",
+            None,
+            PromptLayer::Personal,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(p.error.is_some(), "broken draft surfaces an error");
         assert!(p.output.is_empty());
     }
@@ -1598,5 +2000,371 @@ mod tests {
             create_block(&db, "dup", "Dup").await.is_err(),
             "duplicate rejected"
         );
+    }
+
+    // ── Layers: the project file and Jinja inheritance ─────────────────────
+
+    /// The slot contract: every declared slot is an *empty* block in its
+    /// default, so filling one never replaces a word of ours — and every
+    /// editable flow ends with the `extra` slot.
+    #[test]
+    fn every_slot_is_an_empty_block_in_its_default() {
+        for d in PROMPT_DEFS {
+            for slot in d.slots {
+                let tag = format!("{{% block {} %}}{{% endblock %}}", slot.name);
+                assert!(
+                    d.default.contains(&tag),
+                    "{}: slot `{}` is not an empty block in its default",
+                    d.name,
+                    slot.name
+                );
+            }
+            if d.editable && d.kind == PromptKind::Flow {
+                assert!(
+                    d.slots.iter().any(|s| s.name == EXTRA_SLOT.name),
+                    "{}: every editable flow ends with the extra slot",
+                    d.name
+                );
+            }
+        }
+    }
+
+    /// A DB with one registered repo whose root is a fresh temp dir.
+    async fn db_with_repo() -> (Db, PathBuf) {
+        let db = test_db().await;
+        let root =
+            std::env::temp_dir().join(format!("santree-prompts-repo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        sqlx::query("INSERT INTO repos (name, tracker, path) VALUES ('acme','Local git',?)")
+            .bind(root.to_string_lossy().into_owned())
+            .execute(&db)
+            .await
+            .unwrap();
+        (db, root)
+    }
+
+    fn write_project(root: &Path, name: &str, content: &str) {
+        let dir = santree_dir::prompts_dir(root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.njk")), content).unwrap();
+    }
+
+    fn ctx() -> Value {
+        context! { ticket_id => "AK-1", title => "t", mode => "implement" }
+    }
+
+    #[tokio::test]
+    async fn project_file_sits_between_the_repo_override_and_the_app_override() {
+        let (db, root) = db_with_repo().await;
+        set_prompt(&db, "app", "work", Some("APP".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            render(&db, Some("acme"), "work", ctx()).await.unwrap(),
+            "APP"
+        );
+
+        // The committed file beats the user's app-wide override…
+        write_project(&root, "work", "PROJECT");
+        assert_eq!(
+            render(&db, Some("acme"), "work", ctx()).await.unwrap(),
+            "PROJECT"
+        );
+        // …and stays out of other repos and the app scope.
+        assert_eq!(render(&db, None, "work", ctx()).await.unwrap(), "APP");
+
+        // …but the user's override for this repo beats the file.
+        set_prompt(&db, "repo:acme", "work", Some("MINE".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            render(&db, Some("acme"), "work", ctx()).await.unwrap(),
+            "MINE"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_layer_extends_the_default_by_filling_a_slot_and_keeps_the_rest() {
+        let (db, root) = db_with_repo().await;
+        write_project(
+            &root,
+            "work",
+            "{% extends \"santree/work\" %}{% block extra %}RUN pnpm test{% endblock %}",
+        );
+        let out = render(&db, Some("acme"), "work", ctx()).await.unwrap();
+        assert!(
+            out.trim_end().ends_with("RUN pnpm test"),
+            "slot filled at its position: {out:?}"
+        );
+        assert!(
+            out.contains("Create an implementation plan, then implement the changes."),
+            "the default's own text survives"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_named_section_can_be_overridden_or_appended_to_with_super() {
+        let (db, root) = db_with_repo().await;
+        let ctx = || context! { ticket_id => "AK-1", title => "t", ticket_content => "T" };
+        write_project(
+            &root,
+            "triage",
+            "{% extends \"santree/triage\" %}{% block rules %}ONLY RULE{% endblock %}\
+             {% block gotchas %}{{ super() }}ALSO: ids are base36{% endblock %}",
+        );
+        let out = render(&db, Some("acme"), "triage", ctx()).await.unwrap();
+        assert!(out.contains("ONLY RULE"));
+        assert!(
+            !out.contains("## Critical rules"),
+            "the section was replaced"
+        );
+        assert!(
+            out.contains("## Execution notes & gotchas"),
+            "super() kept the section"
+        );
+        assert!(out.contains("ALSO: ids are base36"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_personal_override_extends_the_project_layer_and_survives_its_absence() {
+        let (db, root) = db_with_repo().await;
+        write_project(
+            &root,
+            "work",
+            "{% extends \"santree/work\" %}{% block extra %}TEAM{% endblock %}",
+        );
+        set_prompt(
+            &db,
+            "repo:acme",
+            "work",
+            Some(
+                "{% extends \"project/work\" %}{% block extra %}{{ super() }} + ME{% endblock %}"
+                    .into(),
+            ),
+        )
+        .await
+        .unwrap();
+        let out = render(&db, Some("acme"), "work", ctx()).await.unwrap();
+        assert!(out.trim_end().ends_with("TEAM + ME"), "{out:?}");
+
+        // The file goes away (a teammate deleted it): `project/work` now names
+        // the layer below, so the override still renders instead of failing.
+        std::fs::remove_file(santree_dir::prompts_dir(&root).join("work.njk")).unwrap();
+        let out = render(&db, Some("acme"), "work", ctx()).await.unwrap();
+        assert!(out.trim_end().ends_with(" + ME"), "{out:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_self_extending_layer_is_refused_at_write() {
+        let (db, root) = db_with_repo().await;
+        let err = set_project_prompt(
+            &db,
+            "acme",
+            "work",
+            Some("{% extends \"project/work\" %}".into()),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("can't extend itself"), "{err}");
+        let err = set_prompt(&db, "app", "work", Some("{%- extends 'work' -%}".into()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("can't extend itself"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn set_project_prompt_writes_the_file_and_the_ignore_then_deletes_it() {
+        let (db, root) = db_with_repo().await;
+        set_project_prompt(&db, "acme", "work", Some("P".into()))
+            .await
+            .unwrap();
+        let file = santree_dir::prompts_dir(&root).join("work.njk");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "P");
+        assert!(root.join(".santree").join(".gitignore").exists());
+        assert_eq!(render(&db, Some("acme"), "work", ctx()).await.unwrap(), "P");
+
+        // A block the repo defines on its own is listed and includable.
+        set_project_prompt(&db, "acme", "house-style", Some("HS".into()))
+            .await
+            .unwrap();
+        set_project_prompt(
+            &db,
+            "acme",
+            "work",
+            Some("{% include \"house-style\" %}!".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            render(&db, Some("acme"), "work", ctx()).await.unwrap(),
+            "HS!"
+        );
+        let listed = list(&db, "repo:acme").await.unwrap();
+        let hs = listed.iter().find(|p| p.name == "house-style").unwrap();
+        assert!(!hs.builtin);
+        assert_eq!(hs.project_source.as_deref(), Some("HS"));
+        assert!(hs
+            .project_path
+            .as_deref()
+            .unwrap()
+            .ends_with("house-style.njk"));
+        let work = listed.iter().find(|p| p.name == "work").unwrap();
+        assert_eq!(work.slots.len(), 1);
+        assert_eq!(work.slots[0].name, "extra");
+
+        set_project_prompt(&db, "acme", "work", None).await.unwrap();
+        assert!(!file.exists());
+        // Deleting what isn't there is fine.
+        set_project_prompt(&db, "acme", "work", None).await.unwrap();
+
+        for bad in ["../x", "Work", "a/b", "", "english-tutor"] {
+            assert!(
+                set_project_prompt(&db, "acme", bad, Some("x".into()))
+                    .await
+                    .is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        assert!(
+            set_project_prompt(&db, "acme", "work", Some("{% if %}".into()))
+                .await
+                .is_err(),
+            "a broken template never reaches the file"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_project_draft_previews_under_the_personal_override() {
+        let (db, root) = db_with_repo().await;
+        set_prompt(
+            &db,
+            "repo:acme",
+            "work",
+            Some(
+                "{% extends \"project/work\" %}{% block extra %}{{ super() }}|ME{% endblock %}"
+                    .into(),
+            ),
+        )
+        .await
+        .unwrap();
+        let draft = "{% extends \"santree/work\" %}{% block extra %}DRAFT{% endblock %}";
+        let out = preview(
+            &db,
+            "work",
+            draft,
+            Some("acme"),
+            PromptLayer::Project,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(out.error.is_none(), "{:?}", out.error);
+        assert!(
+            out.output.trim_end().ends_with("DRAFT|ME"),
+            "the draft stands in for the file, under the override: {:?}",
+            out.output
+        );
+        // A personal draft replaces the override instead.
+        let out = preview(
+            &db,
+            "work",
+            "JUST ME",
+            Some("acme"),
+            PromptLayer::Personal,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.output, "JUST ME");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_project_file_may_not_extend_the_effective_name() {
+        let (db, root) = db_with_repo().await;
+        // `work` is the top of the chain, so a file extending it would loop
+        // through any override that extends `project/work`.
+        let err = set_project_prompt(&db, "acme", "work", Some("{% extends \"work\" %}".into()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("can't extend itself"), "{err}");
+        set_project_prompt(
+            &db,
+            "acme",
+            "work",
+            Some("{% extends \"santree/work\" %}".into()),
+        )
+        .await
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_read_only_prompt_has_no_project_layer() {
+        let (db, root) = db_with_repo().await;
+        write_project(&root, "english-tutor", "NOT THE HOOK'S WORDING");
+        let sources = resolve_sources(&db, Some("acme")).await.unwrap();
+        let (_, effective) = sources.iter().find(|(n, _)| n == "english-tutor").unwrap();
+        assert_eq!(effective, def("english-tutor").unwrap().default);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_project_files_are_neither_read_nor_written() {
+        use std::os::unix::fs::symlink;
+        let (db, root) = db_with_repo().await;
+        // A file outside the repo, reachable only through a committed link.
+        let outside = std::env::temp_dir().join(format!("santree-secret-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&outside, "SECRET").unwrap();
+        let dir = santree_dir::prompts_dir(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        symlink(&outside, dir.join("work.njk")).unwrap();
+
+        // Not a layer…
+        let out = render(&db, Some("acme"), "work", ctx()).await.unwrap();
+        assert!(!out.contains("SECRET"), "{out:?}");
+        // …and not a write target.
+        let err = set_project_prompt(&db, "acme", "work", Some("P".into()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "SECRET");
+
+        // A linked prompts directory is refused whole.
+        std::fs::remove_file(dir.join("work.njk")).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        let elsewhere =
+            std::env::temp_dir().join(format!("santree-elsewhere-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("work.njk"), "ELSEWHERE").unwrap();
+        symlink(&elsewhere, &dir).unwrap();
+        let out = render(&db, Some("acme"), "work", ctx()).await.unwrap();
+        assert!(!out.contains("ELSEWHERE"), "{out:?}");
+        assert!(set_project_prompt(&db, "acme", "work", Some("P".into()))
+            .await
+            .is_err());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn scan_extends_finds_the_target_and_ignores_lookalikes() {
+        assert_eq!(
+            scan_extends("{%- extends 'santree/work' -%} x").as_deref(),
+            Some("santree/work")
+        );
+        assert_eq!(scan_extends("{% extendsx \"a\" %}"), None);
+        assert_eq!(scan_extends("{% include \"a\" %}"), None);
+        assert_eq!(scan_extends("prose"), None);
     }
 }

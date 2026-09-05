@@ -117,6 +117,11 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    them on GitHub — on a click, into the user's pending review)
                    · english_tutor.rs (opt-in writing coach: hook + practice log
                    + on-demand analysis)
+                   · prompts.rs (the prompt engine: embedded defaults, the four
+                   layers, Jinja inheritance — see "Prompt layers") ·
+                   santree_dir.rs (a managed repo's `.santree/`: what santree
+                   owns there vs what the repo commits, and the nested
+                   `.gitignore` that keeps them apart)
 src-tauri/migrations/  0001_init … (SQLite schema; applied on startup)
 src/
   main.tsx         QueryClient (+ global mutation→toast) · providers · router ·
@@ -215,6 +220,29 @@ src/
   draft/thread cards take their host's callbacks as props (see `useStartWork.ts`
   for the one thing the two hosts really differ on — whether the PR's worktree
   has to be created first).
+- **Prompt layers: a prompt resolves through four, most specific first** —
+  the user's override for the repo (DB, `repo:<slug>`), the repo's committed
+  `.santree/prompts/<name>.njk` (read from the **main checkout** on every
+  render, so a `git pull` is live on the next launch), the user's app-wide
+  override (DB, `app`), the embedded default (`src-tauri/prompts/<name>.njk`,
+  `include_str!`). The render env registers each prompt three times —
+  `santree/<name>` (default), `project/<name>` (the repo's file, else the
+  layer below it) and `<name>` (effective) — so a layer **extends** the one
+  below with plain Jinja (`{% extends "santree/triage" %}` + `{% block %}`)
+  or replaces it by not extending. Defaults declare empty **slots**
+  (`{% block sources %}{% endblock %}`; `PromptDef.slots`, pinned by
+  `every_slot_is_an_empty_block_in_its_default`) where project-specific
+  knowledge belongs; the editor fills those as fields (`SlotEditor`,
+  `promptLayers.ts` is the parse/build round trip) so a filled layer keeps
+  receiving every other change to the default. "Take over" copies the default
+  with a `{# santree-default: <hash> #}` mark, which is how the editor knows
+  to say the default moved on. **A shipped default must be generic**: company
+  facts (hosts, tool names, team prefixes, log fields) go in that company's
+  `.santree/prompts/`, never in `src-tauri/prompts/` — the triage prompt
+  shipped a whole internal runbook that way once, in a public repo. A
+  self-extending layer is refused at write (`check_extends`); the project
+  file name is validated as one path component and joined through
+  `safe_path`.
 - **Triage is a sidebar section, not a destination.** `shell/TriageSection`
   lists the rotation (one row — who has it and until when; a click opens the
   whole schedule in `shell/RotationDialog`), the active tickets with their SLA,

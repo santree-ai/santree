@@ -37,6 +37,7 @@ import type {
   PrDetail,
   PrLabel,
   PromptInfo,
+  PromptLayer,
   PromptWorkItemSample,
   Repo,
   ReviewCheckout,
@@ -3925,7 +3926,7 @@ export const useSetPrompt = (scope: string) =>
 
 /** Collapses a multi-KB string to a short token for a query key: FNV-1a (32-bit)
  *  tagged with the length, so two drafts that collide must also be the same size. */
-function hashText(text: string): string {
+export function hashText(text: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) {
     h ^= text.charCodeAt(i);
@@ -3948,6 +3949,7 @@ export function promptPreviewKey(
   name: string,
   content: string,
   repo: string | undefined,
+  layer: PromptLayer,
   issueId: string | undefined,
   detail: TriageDetail | undefined,
   workItems: PromptWorkItemSample[] | undefined,
@@ -3955,7 +3957,7 @@ export function promptPreviewKey(
   return queryKeys.promptPreview(
     name,
     hashText(content),
-    repo ?? "",
+    `${repo ?? ""}@${layer}`,
     issueId ?? "",
     detail ? hashText(JSON.stringify(detail)) : "",
     workItems ? hashText(JSON.stringify(workItems)) : "",
@@ -3970,7 +3972,9 @@ export function promptPreviewKey(
  *  loading (so we never render it as the sample).
  *
  *  `workItems` is the editor's sample work queue for the Start-work prompt;
- *  `undefined` leaves the backend's own sample in place.
+ *  `undefined` leaves the backend's own sample in place. `layer` is which stored
+ *  layer the draft stands in for — a project-file draft renders under the
+ *  user's own override, as a launch would.
  *
  *  A render is pure in its key (see {@link promptPreviewKey}), so an entry never
  *  goes stale — but the keystroke that minted it is gone the moment the next one
@@ -3979,13 +3983,15 @@ export const usePreviewPrompt = (
   name: string,
   content: string,
   repo: string | undefined,
+  layer: PromptLayer,
   issueId: string | undefined,
   detail: TriageDetail | undefined,
   workItems: PromptWorkItemSample[] | undefined,
 ) =>
   useUnwrappedQuery(
-    promptPreviewKey(name, content, repo, issueId, detail, workItems),
-    () => commands.previewPrompt(name, content, repo ?? null, detail ?? null, workItems ?? null),
+    promptPreviewKey(name, content, repo, layer, issueId, detail, workItems),
+    () =>
+      commands.previewPrompt(name, content, repo ?? null, layer, detail ?? null, workItems ?? null),
     {
       enabled: content.trim().length > 0 && (!issueId || detail !== undefined),
       staleTime: SETTING_STALE_TIME,
@@ -3993,6 +3999,28 @@ export const usePreviewPrompt = (
       placeholderData: keepPreviousData,
     },
   );
+
+/** Save (or delete, with `null`) a prompt's project layer — the repo's
+ *  committed `.santree/prompts/<name>.njk`. Optimistic on the repo scope's
+ *  `projectSource`, the same way {@link useSetPrompt} is on `overrideSource`. */
+export const useSetProjectPrompt = (repo: string) =>
+  useOptimisticMutation({
+    mutationKey: ["set-project-prompt", repo],
+    mutationFn: ({ name, content }: SetPromptVars) =>
+      unwrap(commands.setProjectPrompt(repo, name, content)),
+    optimistic: (qc, { name, content }) => {
+      const key = queryKeys.prompts(`repo:${repo}`);
+      const prev = qc.getQueryData<PromptInfo[]>(key);
+      if (prev) {
+        qc.setQueryData<PromptInfo[]>(
+          key,
+          prev.map((p) => (p.name === name ? { ...p, projectSource: content } : p)),
+        );
+      }
+      return () => qc.setQueryData(key, prev);
+    },
+    invalidate: () => [queryKeys.prompts(`repo:${repo}`)],
+  });
 
 /** Create a user-defined shared block; refreshes every scope's prompt list. */
 export const useCreatePromptBlock = () =>

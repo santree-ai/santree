@@ -22,13 +22,13 @@ use santree_core::{
         ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
         EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget, GithubStatus, LegacyCliMigration,
         LinearApiBudget, LinearOrg, LinearStatus, MergeQueueView, NewInlineComment, NewPr,
-        NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptPreview,
-        PromptWorkItemSample, Repo, RepoBranch, ResourceUsage, ReviewBrief, ReviewCheckout,
-        ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr, ReviewPublishOutcome, ReviewTarget,
-        ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail, SessionState, SessionSubagent,
-        SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail,
-        TriageSchedule, TriageSession, TriageTicket, UsageReport, ViewedMarks, Worktree,
-        WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
+        NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptLayer,
+        PromptPreview, PromptWorkItemSample, Repo, RepoBranch, ResourceUsage, ReviewBrief,
+        ReviewCheckout, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr, ReviewPublishOutcome,
+        ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail, SessionState,
+        SessionSubagent, SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task, TicketRef,
+        TriageDetail, TriageSchedule, TriageSession, TriageTicket, UsageReport, ViewedMarks,
+        Worktree, WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
     },
 };
 
@@ -2544,17 +2544,44 @@ pub async fn set_prompt(
 /// otherwise a built-in sample. Rendering is pure — no fetch — so the editor can
 /// re-render on every keystroke. Compile/render errors come back in
 /// `PromptPreview.error`, not as a failure, so the editor can show them inline.
+/// `layer` says which stored layer the draft stands in for, so a project-file
+/// draft renders under the user's own override exactly as a launch would.
 #[tauri::command]
 #[specta::specta]
 pub async fn preview_prompt(
     name: String,
     content: String,
     repo: Option<String>,
+    layer: PromptLayer,
     detail: Option<TriageDetail>,
     work_items: Option<Vec<PromptWorkItemSample>>,
     db: State<'_, Db>,
 ) -> CmdResult<PromptPreview> {
-    Ok(crate::prompts::preview(&db, &name, &content, repo.as_deref(), detail, work_items).await?)
+    Ok(crate::prompts::preview(
+        &db,
+        &name,
+        &content,
+        repo.as_deref(),
+        layer,
+        detail,
+        work_items,
+    )
+    .await?)
+}
+
+/// Write (or delete, when `content` is null) the repo's committed prompt layer,
+/// `.santree/prompts/<name>.njk` — the one a team shares through git. `name` is
+/// validated as a single path component before it becomes one; the content
+/// gets the same compile check a stored override does.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_project_prompt(
+    repo: String,
+    name: String,
+    content: Option<String>,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(crate::prompts::set_project_prompt(&db, &repo, &name, content).await?)
 }
 
 /// Create a user-defined shared block (a reusable partial any prompt can

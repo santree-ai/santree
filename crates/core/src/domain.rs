@@ -2125,6 +2125,34 @@ pub struct PromptVar {
     pub description: String,
 }
 
+/// An extension point a built-in prompt declares: an empty `{% block %}` at the
+/// place where project-specific knowledge belongs. The editor offers each one as
+/// a field to fill rather than a template to write, and turns the answers into
+/// a layer that `{% extends %}` the prompt below it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptSlot {
+    /// The block name, e.g. `sources` (the `{% block sources %}` in the default).
+    pub name: String,
+    /// Field label, e.g. "Live-data sources".
+    pub label: String,
+    /// What belongs in it — the question the field asks.
+    pub hint: String,
+}
+
+/// Which layer of a prompt a draft or a write addresses. A prompt's effective
+/// source is the most specific of: the user's override for the repo, the repo's
+/// committed `.santree/prompts/<name>.njk`, the user's app-wide override, the
+/// embedded default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum PromptLayer {
+    /// The user's own override, stored in santree's settings for the queried scope.
+    Personal,
+    /// The repo's shared file, committed with the code.
+    Project,
+}
+
 /// Whether an editable prompt runs a flow or is a reusable partial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -2172,8 +2200,16 @@ pub struct PromptInfo {
     /// The default template source (the reset target). Empty for custom blocks.
     pub default: String,
     /// The user's stored override for the queried scope, or `None` when the
-    /// scope inherits (app default or built-in).
+    /// scope inherits (the project's file, the app default, or the built-in).
     pub override_source: Option<String>,
+    /// The repo's committed `.santree/prompts/<name>.njk`, when the queried
+    /// scope is a repo and the file exists.
+    pub project_source: Option<String>,
+    /// Where that file is (or would be) — `None` at app scope.
+    pub project_path: Option<String>,
+    /// The extension points the default declares, in document order. Empty for
+    /// blocks and for prompts that can't be edited.
+    pub slots: Vec<PromptSlot>,
     pub variables: Vec<PromptVar>,
     /// Names of prompts this one currently `{% include %}`s (scanned from its
     /// effective source at the queried scope).

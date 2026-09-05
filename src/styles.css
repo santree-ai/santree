@@ -703,17 +703,21 @@ button:focus-visible,
 
 /* Jinja tokens for the Settings → Prompts editor: `{{ var }}`, `{% tag %}`,
    `{# comment #}` (see jinjaHighlight.ts). Dark defaults + light-mode overrides. */
-.prompt-editor .token.var {
+.prompt-editor .token.var,
+.prompt-slots .token.var {
   color: #e5a44b;
 }
-.prompt-editor .token.tag {
+.prompt-editor .token.tag,
+.prompt-slots .token.tag {
   color: #c678dd;
 }
-.prompt-editor .token.comment {
+.prompt-editor .token.comment,
+.prompt-slots .token.comment {
   color: var(--color-muted-3);
   font-style: italic;
 }
-:root[data-theme="light"] .prompt-editor .token.var {
+:root[data-theme="light"] .prompt-editor .token.var,
+:root[data-theme="light"] .prompt-slots .token.var {
   color: #b3711a;
 }
 

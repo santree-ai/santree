@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "'/Users/stoscanini/dev/personal/santree-app/.codex/hooks/bindings-reminder.py'",
+            "command": "\"$(git rev-parse --show-toplevel)/.codex/hooks/bindings-reminder.py\"",
             "timeout": 5
           }
         ]

@@ -42,6 +42,7 @@ mod review_drafts;
 mod review_work_items;
 mod reviewed;
 mod reviews;
+mod santree_dir;
 mod session;
 mod session_signal;
 mod settings;
@@ -221,6 +222,7 @@ fn specta_builder() -> AppBuilder {
             commands::list_prompts,
             commands::set_prompt,
             commands::preview_prompt,
+            commands::set_project_prompt,
             commands::create_prompt_block,
             commands::delete_prompt_block,
             commands::env_file_vars,

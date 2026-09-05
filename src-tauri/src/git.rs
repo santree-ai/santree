@@ -23,7 +23,7 @@ use santree_core::domain::{ChangedFile, FileSource, FileStatus, RepoBranch};
 /// This is a *lexical* check — enough for git ops, which confine themselves to
 /// the worktree via `-C <cwd>` + `--` pathspecs regardless. Raw `std::fs` ops
 /// must use [`safe_real_path`] instead (it also resolves symlinks).
-fn safe_path(cwd: &Path, rel: &str) -> Result<PathBuf> {
+pub(crate) fn safe_path(cwd: &Path, rel: &str) -> Result<PathBuf> {
     let candidate = Path::new(rel);
     if candidate.is_absolute() {
         bail!("path '{rel}' must be relative to the worktree");
@@ -1746,7 +1746,7 @@ mod tests {
             ("Acme", "kubernetes", 50868),
             // A hyphen-heavy slug is where a naive prefix test breaks; the id
             // still has to stay one component.
-            ("canary-technologies-corp", "canary", 50868),
+            ("acme-holdings-corp", "acme", 50868),
         ] {
             let id = crate::reviews::review_worktree_id(owner, name, number).unwrap();
             assert!(!id.starts_with('-'), "{id} would be read as a flag");

@@ -34,8 +34,8 @@ use crate::db::Db;
 /// Claude stores each session's transcript at
 /// `~/.claude/projects/<escaped-cwd>/<session-id>.jsonl`, escaping the working
 /// directory by replacing every non-alphanumeric character with `-` (verified
-/// against real transcripts, e.g. `…/canary/.santree/worktrees/AK-1` becomes
-/// `…-canary--santree-worktrees-AK-1`, and `…/dev/my_repo` becomes
+/// against real transcripts, e.g. `…/acme/.santree/worktrees/AK-1` becomes
+/// `…-acme--santree-worktrees-AK-1`, and `…/dev/my_repo` becomes
 /// `…-dev-my-repo`).
 fn transcript_path(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
     home.join(".claude/projects")

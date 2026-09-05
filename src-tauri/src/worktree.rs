@@ -600,6 +600,9 @@ pub async fn create(
                 Some(b) => b,
                 None => git::default_branch(root_path),
             };
+            // First contact with the repo's `.santree/` also writes its ignore
+            // file, so the checkout about to land under it is never content.
+            crate::santree_dir::ensure(root_path)?;
             let wt_path = root_path.join(".santree").join("worktrees").join(&issue_id);
             // Only a *registered* worktree may be adopted. A directory git doesn't know
             // as one (an interrupted delete, a pruned admin entry, a hand-made dir) sits
@@ -1626,9 +1629,7 @@ pub async fn set_init_script(db: &Db, repo: &str, content: &str) -> Result<()> {
     let path = init_script_path(&root);
     let content = content.to_string();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+        crate::santree_dir::ensure(Path::new(&root))?;
         std::fs::write(&path, content)?;
         Ok(())
     })

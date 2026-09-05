@@ -1023,8 +1023,10 @@ export const commands = {
 	 *  otherwise a built-in sample. Rendering is pure — no fetch — so the editor can
 	 *  re-render on every keystroke. Compile/render errors come back in
 	 *  `PromptPreview.error`, not as a failure, so the editor can show them inline.
+	 *  `layer` says which stored layer the draft stands in for, so a project-file
+	 *  draft renders under the user's own override exactly as a launch would.
 	 */
-	previewPrompt: (name: string, content: string, repo: string | null, detail: {
+	previewPrompt: (name: string, content: string, repo: string | null, layer: PromptLayer, detail: {
 	id: string,
 	title: string,
 	priority: Priority,
@@ -1062,7 +1064,14 @@ export const commands = {
 	/**  Markdown description — may contain inline images. */
 	description: string,
 	comments: TriageComment[],
-} | null, workItems: PromptWorkItemSample[] | null) => typedError<PromptPreview, CmdError>(__TAURI_INVOKE("preview_prompt", { name, content, repo, detail, workItems })),
+} | null, workItems: PromptWorkItemSample[] | null) => typedError<PromptPreview, CmdError>(__TAURI_INVOKE("preview_prompt", { name, content, repo, layer, detail, workItems })),
+	/**
+	 *  Write (or delete, when `content` is null) the repo's committed prompt layer,
+	 *  `.santree/prompts/<name>.njk` — the one a team shares through git. `name` is
+	 *  validated as a single path component before it becomes one; the content
+	 *  gets the same compile check a stored override does.
+	 */
+	setProjectPrompt: (repo: string, name: string, content: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_project_prompt", { repo, name, content })),
 	/**
 	 *  Create a user-defined shared block (a reusable partial any prompt can
 	 *  `{% include %}`). Validates the name and seeds a starter body.
@@ -2544,9 +2553,21 @@ export type PromptInfo = {
 	default: string,
 	/**
 	 *  The user's stored override for the queried scope, or `None` when the
-	 *  scope inherits (app default or built-in).
+	 *  scope inherits (the project's file, the app default, or the built-in).
 	 */
 	overrideSource: string | null,
+	/**
+	 *  The repo's committed `.santree/prompts/<name>.njk`, when the queried
+	 *  scope is a repo and the file exists.
+	 */
+	projectSource: string | null,
+	/**  Where that file is (or would be) — `None` at app scope. */
+	projectPath: string | null,
+	/**
+	 *  The extension points the default declares, in document order. Empty for
+	 *  blocks and for prompts that can't be edited.
+	 */
+	slots: PromptSlot[],
 	variables: PromptVar[],
 	/**
 	 *  Names of prompts this one currently `{% include %}`s (scanned from its
@@ -2566,6 +2587,18 @@ export type PromptKind =
  *  `issue` context or a user-created block.
  */
 "block";
+
+/**
+ *  Which layer of a prompt a draft or a write addresses. A prompt's effective
+ *  source is the most specific of: the user's override for the repo, the repo's
+ *  committed `.santree/prompts/<name>.njk`, the user's app-wide override, the
+ *  embedded default.
+ */
+export type PromptLayer = 
+/**  The user's own override, stored in santree's settings for the queried scope. */
+"personal" | 
+/**  The repo's shared file, committed with the code. */
+"project";
 
 /**
  *  The result of rendering a draft prompt against representative sample data —
@@ -2588,6 +2621,21 @@ export type PromptPreviewKind =
 "queue" | 
 /**  Built-in sample data only — nothing in it is a ticket to pick. */
 "sample";
+
+/**
+ *  An extension point a built-in prompt declares: an empty `{% block %}` at the
+ *  place where project-specific knowledge belongs. The editor offers each one as
+ *  a field to fill rather than a template to write, and turns the answers into
+ *  a layer that `{% extends %}` the prompt below it.
+ */
+export type PromptSlot = {
+	/**  The block name, e.g. `sources` (the `{% block sources %}` in the default). */
+	name: string,
+	/**  Field label, e.g. "Live-data sources". */
+	label: string,
+	/**  What belongs in it — the question the field asks. */
+	hint: string,
+};
 
 /**
  *  One documented variable a prompt template receives, shown in the editor's
