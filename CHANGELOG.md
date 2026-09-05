@@ -7,6 +7,15 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.6 — 2026-09-05
+
+- Prompts can be shared through the repo. A project's prompts live in `.santree/prompts/<name>.njk`, committed with the code, so everyone who clones it gets the same triage, work and review prompts on the next pull. Settings → Prompts has a Project / Personal switch for each project: Project is the shared file, Personal is yours alone, on top of it. Santree now writes a `.santree/.gitignore` so those files can be committed while worktrees stay out of git.
+- Extend a prompt instead of replacing it. Each prompt has fields at the points where your own knowledge belongs — for triage, your live-data sources, ownership conventions and known pitfalls; for the others, anything else — shown in place in Santree's text, so you see where what you add lands. Fill a field and you keep receiving Santree's updates to everything around it. "Take over" copies the text to edit freely and tells you when Santree's version has changed since; "Extend instead" goes back.
+- The built-in triage prompt is generic now. It used to carry one company's tools, hostnames and team names; those belong in that company's project prompts, which is exactly where they can go.
+- A ticket starts in the project the Work default names, every time: from the Tickets list, the launch queue, a ticket's Run, the graph, and the workspace's own "Start a task". A ticket that only one of your projects carries never asks; otherwise the picker offers just the projects that share its Linear workspace. Before this, a start could land in whichever project was on screen.
+- The url names the open workspace (`/trees?project=&tree=`), so a sidebar click is one navigation, a reload returns exactly there, and the rail lights the same row the view shows.
+- Two launches that never happened now do: a background launch in a project other than the one on screen silently never started, and a launch in a project you had not opened left a permanent "Creating workspace…" row.
+
 ## 0.1.5 — 2026-09-04
 
 - Triage lives in the sidebar. A Triage section lists who is on rotation (click it to see the shifts), the tickets waiting with their SLA, and a folded Snoozed group, with a Mine / All switch on its title. The queue is always soonest SLA first. Opening a ticket gives it a workspace of its own: a Linear tab with the ticket, one tab per investigating agent, and a terminal.
