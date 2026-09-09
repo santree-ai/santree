@@ -3509,6 +3509,11 @@ export type Task = {
 	id: string,
 	title: string,
 	priority: Priority,
+	/**
+	 *  The team the issue belongs to. `None` only for an identifier that isn't
+	 *  Linear's `<KEY>-<number>` shape, since the key is always in the id.
+	 */
+	team: TeamRef | null,
 	/**  Linear's issue estimate. `None` means the issue is not estimated. */
 	estimate: number | null,
 	/**  The cycle the issue is scheduled into, when it is in one. */
@@ -3567,6 +3572,21 @@ export type TaskStatus = "InReview" | "InProgress" | "Todo" | "Backlog" |
  *  nodes — the viewer's own assigned issues never include done work.
  */
 "Done";
+
+/**  The Linear team an issue belongs to. */
+export type TeamRef = {
+	/**
+	 *  Linear's team key — the identifier's prefix ("MSG" in "MSG-12"), and
+	 *  what the Tickets page groups and switches on.
+	 */
+	key: string,
+	/**
+	 *  The team's display name, when the read fetched it. A blocker reached
+	 *  through a relation carries only its key: a field on a relation node
+	 *  costs eight times what it costs on the issue (see `ASSIGNED_ISSUES_QUERY`).
+	 */
+	name: string | null,
+};
 
 /**  Review requests waiting on a specific team the viewer belongs to. */
 export type TeamReviews = {
@@ -3811,9 +3831,22 @@ export type TriageDetail = {
 	comments: TriageComment[],
 };
 
-/**  The team triage rotation surfaced from Linear's triage responsibility. */
+/**
+ *  The team triage rotation surfaced from Linear's triage responsibility.
+ * 
+ *  One per team in the viewer's Triage scope, whether or not the team runs a
+ *  rotation: a team the viewer is in only through a ticket assigned to them has
+ *  a schedule too, with no `shifts` when it has no rotation — the sidebar hangs
+ *  that team's tickets under it all the same.
+ */
 export type TriageSchedule = {
+	/**  The team's display name. */
 	team: string,
+	/**
+	 *  The team's key ("MSG") — what a [`TriageTicket::team`] names, so the
+	 *  frontend can hang each ticket under its team's rotation.
+	 */
+	teamKey: string,
 	scheduleName: string,
 	currentName: string | null,
 	/**  Avatar of whoever is currently on triage, when available. */

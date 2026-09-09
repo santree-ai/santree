@@ -1,19 +1,28 @@
 /**
- * The sidebar's Triage section: who is on rotation, then the queue, then what is
- * snoozed — each ticket a row with its investigations underneath.
+ * The sidebar's Triage section: the queue by team — each team a folding row
+ * with who is on its rotation at the trailing edge, its tickets under it, then
+ * what is snoozed there; each ticket a row with its investigations underneath.
  *
  * Triage used to be a destination with a rail of its own. The rail listed the
  * same tickets this section does, one click away from a permanent sidebar that
  * could have shown them all along — so the queue moved here, and `/triage` is
  * now only the workspace for the ticket you picked (`/triage?ticket=`).
  *
- * It speaks the tree's own vocabulary: the header is the PROJECTS register, the
- * Snoozed lane is a `.tree-band` container (it folds, it opens nothing), the
- * rotation is one row that opens its schedule in a dialog, and every ticket is
- * a `.tree-card` — a destination, lit while the workspace shows it, with the
- * ticket's own menu on a right-click (`TriageTicketMenu`). Selection follows
- * the route and nothing else, the same rule the project tree's worktree rows
- * follow.
+ * A person is often in more than one rotation, and holds triage tickets on
+ * teams whose rotation they are not in at all — so the section is organised by
+ * team, the way the tree is organised by project. The teams are the backend's
+ * scope (`triage_schedule` and the queue share it): the rotations you are in
+ * first, then the teams that hold a ticket of yours (see `triageTeams`).
+ *
+ * It speaks the tree's own vocabulary: the header is the PROJECTS register, a
+ * team row is the repo-header register (a fold toggle with a real control at
+ * its trailing edge — the rotation chip, which opens the schedule in a
+ * dialog), the Snoozed lane is a `.tree-band` container (it folds, it opens
+ * nothing), and
+ * every ticket is a `.tree-card` — a destination, lit while the workspace
+ * shows it, with the ticket's own menu on a right-click (`TriageTicketMenu`).
+ * Selection follows the route and nothing else, the same rule the project
+ * tree's worktree rows follow.
  *
  * It scrolls with the sidebar, not inside it: the queue is a section of the
  * rail like the projects under it, and folding the section is how you stop
@@ -21,7 +30,7 @@
  * read as a widget dropped into the sidebar rather than a part of it.
  */
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import type { TriageSchedule, TriageTicket } from "../../bindings";
 import { agentKey } from "../../features/agents/registry";
@@ -46,18 +55,19 @@ import { BAND_LABEL_X, CARD_GLYPH, CARD_INSET, CARD_LABEL_X, PriorityBars } from
 import { AgentRow } from "./AgentRow";
 import { RotationDialog } from "./RotationDialog";
 import { TriageTicketMenu } from "./TriageTicketMenu";
+import { groupTriageByTeam, type TriageTeamGroup } from "./triageTeams";
 import { type AgentNode, useTicketAgents } from "./useProjectTree";
 
-/** The section's own fold, and the Snoozed band inside it. Each holds "not the
- *  default" — open, closed — so neither needs seeding. */
+/** The section's own fold, each team's row inside it, and each team's Snoozed
+ *  band, the last two by team key. Each holds "not the default" — open, open,
+ *  closed — so none needs seeding. */
 const COLLAPSED_KEY = "santree.shell.triage.collapsed";
-const SNOOZED_OPEN_KEY = "santree.shell.triage.snoozedOpen";
-
-/** One rotation's identity — the key its row and its dialog agree on. */
-const rotationKey = (schedule: TriageSchedule) => `${schedule.team}-${schedule.scheduleName}`;
+const FOLDED_TEAMS_KEY = "santree.shell.triage.foldedTeams";
+const SNOOZED_OPEN_KEY = "santree.shell.triage.snoozedOpenByTeam";
 
 /** Where the section's rows hang from: the header label's own column (`px-4`),
- *  the same rule the Projects label and its repo headers follow. */
+ *  the same rule the Projects label and its repo headers follow. A team row
+ *  sits here too, and so do its tickets — see `team` below. */
 const SECTION_GUTTER = 16;
 
 /** A band heading brings its own `px-2`, so its wrapper makes up the difference
@@ -72,6 +82,10 @@ const BAND_ROW_GUTTER = BAND_GUTTER + BAND_LABEL_X;
  *  not re-rendered for a fresh `[]`. */
 const NO_AGENTS: AgentNode[] = [];
 
+/** A schedule read that hasn't landed grouping as no schedules: the same
+ *  array each render, so the grouping memo holds. */
+const NO_SCHEDULES: TriageSchedule[] = [];
+
 export function TriageSection() {
   const { triageEnabled } = useApp();
   const navigate = useNavigate();
@@ -81,17 +95,28 @@ export function TriageSection() {
   // blanked — never the hook call, which has to run on every render.
   const orgRepo = useTriageOrgRepo();
   const repo = triageEnabled ? orgRepo : "";
-  const { active, snoozed, goodCitizen, loading } = useTriageQueue(repo);
-  const { data: schedules = [] } = useTriageSchedule(repo);
+  const queue = useTriageQueue(repo);
+  const { active, snoozed, goodCitizen } = queue;
+  const { data: schedules = NO_SCHEDULES, isLoading: schedulesLoading } = useTriageSchedule(repo);
+  // Both reads shape the section — a ticket lands under its team's row — so
+  // it is loading until both have landed, and skeletons stand in for the pair.
+  const loading = queue.loading || schedulesLoading;
   const setSetting = useSetSetting();
   const onHover = usePrefetchOnHover(repo);
   const { agentsByTicket, markSeen } = useTicketAgents();
   const openAgent = useOpenAgent();
   const [collapsed, setCollapsed] = usePersistedState(COLLAPSED_KEY, false);
-  // The rotation whose schedule is open in the dialog, by key. View state, not
+  const [foldedTeams, setFoldedTeams] = usePersistedState<Record<string, boolean>>(
+    FOLDED_TEAMS_KEY,
+    {},
+  );
+  // The team whose schedule is open in the dialog, by key. View state, not
   // persisted: a dialog that reopened itself on relaunch would be a surprise.
   const [rotationFor, setRotationFor] = useState<string | null>(null);
-  const [snoozedOpen, setSnoozedOpen] = usePersistedState(SNOOZED_OPEN_KEY, false);
+  const [snoozedOpen, setSnoozedOpen] = usePersistedState<Record<string, boolean>>(
+    SNOOZED_OPEN_KEY,
+    {},
+  );
   // The ticket the workspace has open — the rail's one selection, read off the
   // route so it can't disagree with what the content area shows. A plain string,
   // so an unrelated navigation doesn't re-render the section on a fresh identity.
@@ -101,6 +126,11 @@ export function TriageSection() {
         ? ((s.location.search as { ticket?: string }).ticket ?? null)
         : null,
   });
+
+  const groups = useMemo(
+    () => groupTriageByTeam(active, snoozed, schedules),
+    [active, snoozed, schedules],
+  );
 
   const select = useCallback(
     (id: string) => navigate({ to: "/triage", search: { ticket: id } }),
@@ -115,7 +145,9 @@ export function TriageSection() {
     [markSeen, openAgent],
   );
   // The Mine/All switch *is* the "be a good citizen" setting — All widens to the
-  // whole team inbox (issues not assigned to you included).
+  // whole inbox of every team you are on call for (issues not assigned to you
+  // included). A team you are in only through a ticket of yours never widens:
+  // the backend hands over just your tickets there.
   const setGoodCitizen = (next: boolean) =>
     setSetting.mutate({ scope: "app", key: TRIAGE_GOOD_CITIZEN_KEY, value: next ? "true" : null });
 
@@ -124,10 +156,7 @@ export function TriageSection() {
   const open = !collapsed;
   const Chevron = open ? ChevronDownIcon : ChevronRightIcon;
   const empty = !loading && active.length === 0 && snoozed.length === 0;
-  // A team tag on every row says nothing until there are two teams to tell apart.
-  const teams = new Set([...active, ...snoozed].map((t) => t.team).filter(Boolean));
-  const showTeam = teams.size > 1;
-  const openRotation = schedules.find((s) => rotationKey(s) === rotationFor) ?? null;
+  const openRotation = groups.find((g) => g.key === rotationFor)?.schedule ?? null;
 
   const row = (ticket: TriageTicket, indent: number, isSnoozed: boolean) => (
     <TicketRow
@@ -137,13 +166,79 @@ export function TriageSection() {
       indent={indent}
       active={openTicket === ticket.id}
       snoozed={isSnoozed}
-      showTeam={showTeam}
       agents={agentsByTicket.get(ticket.id) ?? NO_AGENTS}
       onSelect={() => select(ticket.id)}
       onHover={() => onHover(ticket.id)}
       onOpenAgent={openAgentRow}
     />
   );
+
+  /** One team: its row, its queue, then its snoozed lane. A team with nothing
+   *  in it is still drawn — a rotation you are in is worth a line whether or
+   *  not it is busy — and so is the row of the only team, since it is what
+   *  names the team and what folds it. The tickets keep the section's own
+   *  gutter: the team row is a divider over a flat list of like rows, and
+   *  folding is what says "these are its", not an indent. */
+  const team = (group: TriageTeamGroup) => {
+    const folded = !!foldedTeams[group.key];
+    const lane = group.key;
+    const laneOpen = !!snoozedOpen[lane];
+    const rotation =
+      group.schedule && group.schedule.shifts.length > 0
+        ? () => setRotationFor(group.key)
+        : undefined;
+    return (
+      <div key={group.key}>
+        {group.key && (
+          <TeamRow
+            name={group.name}
+            count={group.active.length}
+            open={!folded}
+            onToggle={() => setFoldedTeams((m) => ({ ...m, [group.key]: !m[group.key] }))}
+            schedule={group.schedule}
+            onOpenRotation={rotation}
+          />
+        )}
+
+        {!folded && group.active.map((ticket) => row(ticket, SECTION_GUTTER, false))}
+
+        {!folded && group.snoozed.length > 0 && (
+          <>
+            {/* A lane, not a destination: it folds, so it wears the band register
+                and no selection fill. Closed by default — a parked ticket is
+                parked precisely so it stops taking up the queue's room. */}
+            <div
+              className="tree-band relative flex items-center gap-1.5 px-2 py-(--density-compact)"
+              style={{ marginLeft: BAND_GUTTER, marginRight: CARD_INSET }}
+            >
+              <button
+                type="button"
+                onClick={() => setSnoozedOpen((o) => ({ ...o, [lane]: !o[lane] }))}
+                aria-expanded={laneOpen}
+                aria-label={`${laneOpen ? "Collapse" : "Expand"} snoozed tickets${
+                  group.key ? ` for ${group.name}` : ""
+                }`}
+                className="absolute inset-0 cursor-pointer"
+              />
+              {laneOpen ? (
+                <ChevronDownIcon size={9} className="pointer-events-none flex-none text-muted-4" />
+              ) : (
+                <ChevronRightIcon size={9} className="pointer-events-none flex-none text-muted-4" />
+              )}
+              <SnoozeIcon size={11} className="pointer-events-none flex-none text-muted-4" />
+              <span className="pointer-events-none min-w-0 flex-1 truncate text-[12px] leading-4 text-muted-2">
+                Snoozed
+              </span>
+              <span className="pointer-events-none flex-none font-mono text-[10px] text-muted-4 tabular-nums">
+                {group.snoozed.length}
+              </span>
+            </div>
+            {laneOpen && group.snoozed.map((ticket) => row(ticket, BAND_ROW_GUTTER, true))}
+          </>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="flex flex-none flex-col">
@@ -186,16 +281,7 @@ export function TriageSection() {
 
       {open && (
         <div className="pb-1">
-          {schedules.map((schedule) => (
-            <RotationRow
-              key={rotationKey(schedule)}
-              schedule={schedule}
-              showTeam={schedules.length > 1}
-              onOpen={() => setRotationFor(rotationKey(schedule))}
-            />
-          ))}
-
-          {loading && <TicketSkeleton />}
+          {loading ? <TicketSkeleton /> : groups.map(team)}
 
           {empty && (
             <div
@@ -204,47 +290,6 @@ export function TriageSection() {
             >
               Nothing in triage
             </div>
-          )}
-
-          {active.map((ticket) => row(ticket, SECTION_GUTTER, false))}
-
-          {snoozed.length > 0 && (
-            <>
-              {/* A lane, not a destination: it folds, so it wears the band register
-                  and no selection fill. Closed by default — a parked ticket is
-                  parked precisely so it stops taking up the queue's room. */}
-              <div
-                className="tree-band relative flex items-center gap-1.5 px-2 py-(--density-compact)"
-                style={{ marginLeft: BAND_GUTTER, marginRight: CARD_INSET }}
-              >
-                <button
-                  type="button"
-                  onClick={() => setSnoozedOpen((o) => !o)}
-                  aria-expanded={snoozedOpen}
-                  aria-label={`${snoozedOpen ? "Collapse" : "Expand"} snoozed tickets`}
-                  className="absolute inset-0 cursor-pointer"
-                />
-                {snoozedOpen ? (
-                  <ChevronDownIcon
-                    size={9}
-                    className="pointer-events-none flex-none text-muted-4"
-                  />
-                ) : (
-                  <ChevronRightIcon
-                    size={9}
-                    className="pointer-events-none flex-none text-muted-4"
-                  />
-                )}
-                <SnoozeIcon size={11} className="pointer-events-none flex-none text-muted-4" />
-                <span className="pointer-events-none min-w-0 flex-1 truncate text-[12px] leading-4 text-muted-2">
-                  Snoozed
-                </span>
-                <span className="pointer-events-none flex-none font-mono text-[10px] text-muted-4 tabular-nums">
-                  {snoozed.length}
-                </span>
-              </div>
-              {snoozedOpen && snoozed.map((ticket) => row(ticket, BAND_ROW_GUTTER, true))}
-            </>
           )}
         </div>
       )}
@@ -325,59 +370,119 @@ function ScopeMenu({
 }
 
 /**
- * One triage rotation — who has it now, and until when — as a row that opens
- * the whole schedule in a dialog ({@link RotationDialog}).
- *
- * It used to fold open in place to every shift, which put seven avatars and
- * seven date ranges in a rail whose other rows are tickets. The row keeps the
- * one fact worth a glance — who, and the hand-off date — and a click brings the
- * rest. "You" when it is you, and an uncovered rotation says so in muted ink
- * rather than pretending someone holds it.
+ * One team's row — the repo-header register:
+ * the name at the section's gutter, its queue count, the fold chevron inline
+ * after them (on hover, or while folded), the whole row a fold toggle, and at
+ * the trailing edge a real control beside it: the rotation chip, who has it
+ * now, which opens the whole schedule ({@link RotationDialog}). Its tickets
+ * sit at the same gutter; folding, not an indent, is what makes them its.
  */
-function RotationRow({
+function TeamRow({
+  name,
+  count,
+  open,
+  onToggle,
   schedule,
-  showTeam,
-  onOpen,
+  onOpenRotation,
 }: {
-  schedule: TriageSchedule;
-  /** More than one rotation is on screen, so each names its team. */
-  showTeam: boolean;
-  onOpen: () => void;
+  name: string;
+  /** Active tickets under the row. */
+  count: number;
+  open: boolean;
+  onToggle: () => void;
+  /** The team's rotation card, when the schedule read has it. */
+  schedule: TriageSchedule | null;
+  /** Absent when there is no schedule to show. */
+  onOpenRotation?: () => void;
 }) {
-  const who = schedule.currentIsMe ? "You" : schedule.currentName;
-  const current = schedule.shifts.find((shift) => shift.isCurrent);
+  const Chevron = open ? ChevronDownIcon : ChevronRightIcon;
   return (
     <div
-      className="tree-row relative flex items-center gap-1.5 px-2 py-(--density-compact)"
-      style={{ marginLeft: BAND_GUTTER, marginRight: CARD_INSET }}
+      className="group relative flex items-center gap-1.5 py-(--density-compact) pr-1.5"
+      style={{ paddingLeft: SECTION_GUTTER, marginRight: CARD_INSET }}
     >
       <button
         type="button"
-        onClick={onOpen}
-        aria-label={`Show the ${schedule.team} triage rotation`}
-        title={`${schedule.scheduleName} — who is on triage, and when it changes hands`}
+        onClick={onToggle}
+        aria-expanded={open}
+        aria-label={`${open ? "Collapse" : "Expand"} ${name}`}
         className="absolute inset-0 cursor-pointer"
       />
-      {schedule.currentName ? (
-        <Avatar name={schedule.currentName} src={schedule.currentAvatarUrl} size={14} />
-      ) : (
-        <span
-          aria-hidden
-          className="flex size-3.5 flex-none items-center justify-center rounded-full border border-line-strong font-mono text-[8px] text-muted-4"
-        >
-          ?
+      <span className="pointer-events-none min-w-0 truncate text-[12px] font-semibold text-fg-2">
+        {name}
+      </span>
+      {count > 0 && (
+        <span className="pointer-events-none font-mono text-[10px] text-muted-4 tabular-nums">
+          {count}
+          <span className="sr-only"> in the queue</span>
         </span>
       )}
-      <span className="pointer-events-none min-w-0 flex-1 truncate text-[12px] leading-4 text-muted-2">
-        {who ?? <span className="text-muted-4">uncovered</span>}
-      </span>
-      {showTeam && <span className="tree-tag pointer-events-none">{schedule.team}</span>}
-      {current && (
-        <span className="pointer-events-none flex-none font-mono text-[10px] whitespace-nowrap text-muted-4">
-          {formatShiftRange(current.startsAtMs, current.endsAtMs)}
+      <Chevron
+        size={10}
+        className={`pointer-events-none -ml-0.5 flex-none text-muted-4 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 ${
+          open ? "opacity-0" : "opacity-100"
+        }`}
+      />
+      {schedule && (
+        <span className="relative ml-auto flex min-w-0 items-center">
+          <RotationChip schedule={schedule} onOpen={onOpenRotation} />
         </span>
       )}
     </div>
+  );
+}
+
+/** Who has a team's rotation, as a chip on its row: an avatar and "You" or the
+ *  name, the hand-off date in the hover text, the whole schedule a click away.
+ *  The date used to sit on the row itself; beside the team's name it no longer
+ *  fits a rail this narrow, and the name is the fact the row exists for.
+ *  An uncovered rotation says so in muted ink rather than pretending someone
+ *  holds it; a team with no rotation — one you are in only through a ticket of
+ *  yours — says that, and opens nothing. */
+function RotationChip({ schedule, onOpen }: { schedule: TriageSchedule; onOpen?: () => void }) {
+  const hasRotation = schedule.shifts.length > 0;
+  const who = schedule.currentIsMe ? "You" : schedule.currentName;
+  const current = schedule.shifts.find((shift) => shift.isCurrent);
+  const body = (
+    <>
+      {hasRotation &&
+        (schedule.currentName ? (
+          <Avatar name={schedule.currentName} src={schedule.currentAvatarUrl} size={14} />
+        ) : (
+          <span
+            aria-hidden
+            className="flex size-3.5 flex-none items-center justify-center rounded-full border border-line-strong font-mono text-[8px] text-muted-4"
+          >
+            ?
+          </span>
+        ))}
+      <span className={`min-w-0 truncate text-[11px] ${who ? "text-muted-2" : "text-muted-4"}`}>
+        {hasRotation ? (who ?? "uncovered") : "no rotation"}
+      </span>
+    </>
+  );
+  if (!onOpen) {
+    return (
+      <span
+        className="flex min-w-0 items-center gap-1 px-1"
+        title={`${schedule.team} has no triage rotation`}
+      >
+        {body}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label={`Show the ${schedule.team} triage rotation`}
+      title={`${schedule.scheduleName}${
+        current ? ` · ${formatShiftRange(current.startsAtMs, current.endsAtMs)}` : ""
+      }\nWho is on triage, and when it changes hands`}
+      className="flex min-w-0 cursor-pointer items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-hover"
+    >
+      {body}
+    </button>
   );
 }
 
@@ -399,7 +504,6 @@ function TicketRow({
   indent,
   active,
   snoozed,
-  showTeam,
   agents,
   onSelect,
   onHover,
@@ -414,7 +518,6 @@ function TicketRow({
   active: boolean;
   /** Dimmed, and labelled with its wake date instead of its SLA. */
   snoozed: boolean;
-  showTeam: boolean;
   agents: AgentNode[];
   onSelect: () => void;
   onHover: () => void;
@@ -451,7 +554,6 @@ function TicketRow({
             </span>
             <span className="tree-tag font-mono tabular-nums">{ticket.id}</span>
             {ticket.priority !== "None" && <PriorityBars priority={ticket.priority} />}
-            {showTeam && ticket.team && <span className="tree-tag">{ticket.team}</span>}
             <span className="ml-auto flex flex-none items-center">
               {snoozed && ticket.snoozedUntilMs != null ? (
                 <span

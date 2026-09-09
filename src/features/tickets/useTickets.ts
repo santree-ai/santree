@@ -16,7 +16,7 @@
  */
 import { useMemo } from "react";
 
-import type { Task, Worktree, WorktreePr } from "../../bindings";
+import type { Task, TeamRef, Worktree, WorktreePr } from "../../bindings";
 import { groupByMilestone, type MilestoneGroup } from "../../components/WorkSignals";
 import {
   type Attention,
@@ -61,10 +61,21 @@ export interface TicketRow {
   blockedBy: string | null;
 }
 
+/** One of the page's teams, as the switcher offers it. */
+export interface TicketTeam extends TeamRef {
+  /** Its rows after the actionable filter — tallied before the team pick, so a
+   *  team keeps its count while another one is showing. */
+  count: number;
+}
+
 /** A project's tickets, split into its milestones. */
 export interface TicketProjectGroup {
-  /** Stable list key: the project name, qualified by its org when several are connected. */
+  /** Stable list key: the project name, qualified by its team and its org when
+   *  the page has more than one of either. */
   key: string;
+  /** The team whose section the group sits in. A project spanning two teams
+   *  is two groups, one under each; `null` for a ticket with no team at all. */
+  team: TeamRef | null;
   project: string;
   color: string;
   icon: string | null;
@@ -82,7 +93,13 @@ export interface TicketsSummary {
 }
 
 export interface TicketsData {
+  /** The groups on the page — the picked team's, or every team's, in team order. */
   groups: TicketProjectGroup[];
+  /** Every team with a row on the page, by name, whatever the pick. */
+  teams: TicketTeam[];
+  /** The team pick in force: keys from `teams`, or `[]` for all of them — which
+   *  is what a pick naming no team on the page falls back to. */
+  picked: string[];
   summary: TicketsSummary;
   /** At least one repo's tickets are still in flight — render skeletons. */
   loading: boolean;
@@ -122,6 +139,8 @@ export interface TicketFoldInput {
   /** On, the page is the viewer's own queue; off, it also shows the context
    *  tickets — someone else's work, or work already done — the queue depends on. */
   actionableOnly: boolean;
+  /** The teams to show, by key; empty (or keys no row carries) shows every team. */
+  teams?: string[];
 }
 
 /**
@@ -135,6 +154,8 @@ export interface TicketFoldInput {
  */
 export function buildTicketGroups(input: TicketFoldInput): {
   groups: TicketProjectGroup[];
+  teams: TicketTeam[];
+  picked: string[];
   summary: TicketsSummary;
 } {
   const orgOf = (repo: string) => input.orgOf?.get(repo) ?? "";
@@ -213,13 +234,39 @@ export function buildTicketGroups(input: TicketFoldInput): {
         : IDLE;
   }
 
+  // The teams on the page, tallied over every row before the pick is applied —
+  // the switcher names them all, with a count each, whichever one is showing.
+  // A team's name comes from the first row that carried one: a blocker reached
+  // through a relation knows only its key.
+  const teamsByKey = new Map<string, TicketTeam>();
+  for (const row of rows.values()) {
+    const ref = row.task.team;
+    if (!ref) continue;
+    const team = teamsByKey.get(ref.key) ?? { key: ref.key, name: null, count: 0 };
+    team.count += 1;
+    team.name ??= ref.name;
+    teamsByKey.set(ref.key, team);
+  }
+  const teams = [...teamsByKey.values()].sort((a, b) =>
+    (a.name ?? a.key).localeCompare(b.name ?? b.key, undefined, { sensitivity: "base" }),
+  );
+  // A pick that names no team here shows every team rather than nothing: the
+  // stored pick outlives the tickets that made it, and "no tickets" would be a
+  // wrong answer to give for a team that has simply gone quiet. A key that has
+  // gone quiet drops out of the pick the same way, and comes back with its rows.
+  const picked = (input.teams ?? []).filter((key) => teamsByKey.has(key));
+  const shown = new Set(picked);
+  const teamRank = new Map(teams.map((t, i) => [t.key, i]));
+
   // Projects keep their first-seen order (the backend's ticket order), which is
-  // the ordering the graph's bands and the old rail both used.
+  // the ordering the graph's bands and the old rail both used; team sections
+  // take the switcher's order, applied below.
   const byProject = new Map<string, TicketRow[]>();
   const summary: TicketsSummary = { total: 0, projects: 0, ready: 0, blocked: 0 };
   for (const [key, row] of rows) {
+    if (shown.size > 0 && !(row.task.team && shown.has(row.task.team.key))) continue;
     const org = key.slice(0, key.indexOf("|"));
-    const groupKey = org ? `${org} ${row.task.project}` : row.task.project;
+    const groupKey = [row.task.team?.key, org, row.task.project].filter(Boolean).join(" ");
     byProject.set(groupKey, [...(byProject.get(groupKey) ?? []), row]);
 
     summary.total += 1;
@@ -230,8 +277,10 @@ export function buildTicketGroups(input: TicketFoldInput): {
   const groups: TicketProjectGroup[] = [];
   for (const [key, items] of byProject) {
     const meta = items[0].task;
+    const ref = meta.team;
     groups.push({
       key,
+      team: ref ? { key: ref.key, name: teamsByKey.get(ref.key)?.name ?? null } : null,
       project: meta.project,
       color: meta.projectColor ?? PROJECT_FALLBACK,
       icon: meta.projectIcon ?? null,
@@ -241,20 +290,26 @@ export function buildTicketGroups(input: TicketFoldInput): {
     });
   }
 
+  // A team's groups sit together, teams in the switcher's order, and a ticket
+  // with no team goes last. Stable, so first-seen project order holds within.
+  const rank = (g: TicketProjectGroup) => (g.team ? (teamRank.get(g.team.key) ?? 0) : teams.length);
+  groups.sort((a, b) => rank(a) - rank(b));
+
   // Projects are counted by name: the number answers "how much of my work is
   // in play", and the same project name in two orgs is still one line of work.
   summary.projects = new Set(groups.map((g) => g.project)).size;
-  return { groups, summary };
+  return { groups, teams, picked, summary };
 }
 
 /**
  * Every ticket across every registered repo, listed once and grouped
- * project → milestone.
+ * team → project → milestone.
  *
  * `actionableOnly` mirrors the graph's filter: on (the default) the page is the
  * viewer's own queue, off it also shows the context tickets the queue depends on.
+ * `teams` is the menu's pick — team keys, or `[]` for every team.
  */
-export function useTickets(actionableOnly: boolean): TicketsData {
+export function useTickets(actionableOnly: boolean, teams: string[]): TicketsData {
   const { data: repoList } = useRepos();
   const repos = useMemo(() => (repoList ?? []).map((r) => r.name), [repoList]);
   // `tracker` names the org the repo's queries actually go to (see repo.rs), so
@@ -275,33 +330,34 @@ export function useTickets(actionableOnly: boolean): TicketsData {
   // instant it decays there rather than at the next unrelated re-render.
   const nowMs = useDecayClock(entries ?? EMPTY_ENTRIES);
 
-  return useMemo(() => {
-    const { groups, summary } = buildTicketGroups({
+  return useMemo(
+    () => ({
+      ...buildTicketGroups({
+        repos,
+        orgOf,
+        tasks: tasksByRepo,
+        worktrees: worktreesByRepo,
+        prs: prsByRepo,
+        agents: entries ?? EMPTY_ENTRIES,
+        seen,
+        nowMs,
+        actionableOnly,
+        teams,
+      }),
+      loading: repoList === undefined || repos.some((repo) => !tasksByRepo.has(repo)),
+    }),
+    [
+      repoList,
       repos,
       orgOf,
-      tasks: tasksByRepo,
-      worktrees: worktreesByRepo,
-      prs: prsByRepo,
-      agents: entries ?? EMPTY_ENTRIES,
+      tasksByRepo,
+      worktreesByRepo,
+      prsByRepo,
+      entries,
       seen,
       nowMs,
       actionableOnly,
-    });
-    return {
-      groups,
-      summary,
-      loading: repoList === undefined || repos.some((repo) => !tasksByRepo.has(repo)),
-    };
-  }, [
-    repoList,
-    repos,
-    orgOf,
-    tasksByRepo,
-    worktreesByRepo,
-    prsByRepo,
-    entries,
-    seen,
-    nowMs,
-    actionableOnly,
-  ]);
+      teams,
+    ],
+  );
 }

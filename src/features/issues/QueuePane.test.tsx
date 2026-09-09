@@ -22,6 +22,7 @@ function task(id: string, over: Partial<Task> = {}): Task {
   return {
     id,
     title: `Do ${id}`,
+    team: null,
     project: "Ingest",
     projectMilestone: null,
     projectColor: null,

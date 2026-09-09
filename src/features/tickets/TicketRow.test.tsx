@@ -14,6 +14,7 @@ vi.mock("../../lib/queries", () => ({
 const task: Task = {
   id: "AK-276",
   title: "Preserve `content.metadata` during re-ingest",
+  team: { key: "AK", name: "App" },
   project: "Ingest",
   projectMilestone: null,
   projectColor: null,

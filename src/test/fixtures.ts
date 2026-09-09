@@ -125,6 +125,7 @@ export function task(id: string, project: string, over: Partial<Task> = {}): Tas
     id,
     title: `Task ${id}`,
     priority: "None",
+    team: null,
     estimate: null,
     cycle: null,
     dueDate: null,

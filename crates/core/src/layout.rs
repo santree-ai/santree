@@ -129,6 +129,7 @@ mod tests {
             id: id.into(),
             title: id.into(),
             priority: crate::domain::Priority::None,
+            team: None,
             estimate: None,
             cycle: None,
             due_date: None,

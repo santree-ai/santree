@@ -564,6 +564,19 @@ pub struct CycleRef {
     pub starts_at_ms: Option<f64>,
 }
 
+/// The Linear team an issue belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamRef {
+    /// Linear's team key — the identifier's prefix ("MSG" in "MSG-12"), and
+    /// what the Tickets page groups and switches on.
+    pub key: String,
+    /// The team's display name, when the read fetched it. A blocker reached
+    /// through a relation carries only its key: a field on a relation node
+    /// costs eight times what it costs on the issue (see `ASSIGNED_ISSUES_QUERY`).
+    pub name: Option<String>,
+}
+
 /// A ticket in the dependency graph. `x`/`y` are its canvas position.
 #[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -571,6 +584,9 @@ pub struct Task {
     pub id: String,
     pub title: String,
     pub priority: Priority,
+    /// The team the issue belongs to. `None` only for an identifier that isn't
+    /// Linear's `<KEY>-<number>` shape, since the key is always in the id.
+    pub team: Option<TeamRef>,
     /// Linear's issue estimate. `None` means the issue is not estimated.
     pub estimate: Option<f64>,
     /// The cycle the issue is scheduled into, when it is in one.
@@ -2407,10 +2423,19 @@ pub struct TriageShift {
 }
 
 /// The team triage rotation surfaced from Linear's triage responsibility.
+///
+/// One per team in the viewer's Triage scope, whether or not the team runs a
+/// rotation: a team the viewer is in only through a ticket assigned to them has
+/// a schedule too, with no `shifts` when it has no rotation — the sidebar hangs
+/// that team's tickets under it all the same.
 #[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TriageSchedule {
+    /// The team's display name.
     pub team: String,
+    /// The team's key ("MSG") — what a [`TriageTicket::team`] names, so the
+    /// frontend can hang each ticket under its team's rotation.
+    pub team_key: String,
     pub schedule_name: String,
     pub current_name: Option<String>,
     /// Avatar of whoever is currently on triage, when available.

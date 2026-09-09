@@ -5,11 +5,13 @@
  * the question it answers is "what is there to pick up", which is a reading
  * question, not a navigation one. Grouping is project → milestone, the same
  * shape (and the same helpers) the graph's bands and the Trees rail use, so a
- * project reads the same wherever it appears.
+ * project reads the same wherever it appears — under a team heading when the
+ * page spans more than one team, the switcher's "All".
  */
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
+import { ChevronDownIcon, ChevronRightIcon } from "../../components/icons";
 import { EmptyState, Skeleton } from "../../components/primitives";
 import {
   BAND_LABEL_X,
@@ -19,7 +21,7 @@ import {
   ProjectHeading,
   showMilestoneGroups,
 } from "../../components/WorkSignals";
-import { toggleDisclosureMap } from "../../lib/disclosure";
+import { BULK_TOGGLE_HINT, isBulkToggle, toggleDisclosureMap } from "../../lib/disclosure";
 import { useAppUi } from "../../state/AppContext";
 import { useWorkRepoGate } from "../../state/WorkRepoGate";
 import { useIssues } from "../issues/model";
@@ -34,6 +36,73 @@ import type { TicketRow as Row, TicketProjectGroup } from "./useTickets";
  *  from *its* label. */
 const PROJECT_ROW_X = PROJECT_LABEL_X;
 const MILESTONE_ROW_X = INDENT_PX + BAND_LABEL_X;
+
+/**
+ * A team's section on the page, one register louder than the project headings
+ * under it — the page's top level when it spans teams, and absent otherwise.
+ * The label is the team's name; the key rides in the hover text for the case
+ * where a blocker knows only its key. Folds like every other heading, with
+ * ⌘-click reaching every project and milestone under it.
+ */
+function TeamHeading({
+  label,
+  title,
+  count,
+  open,
+  onToggle,
+}: {
+  label: string;
+  title: string;
+  count: number;
+  open: boolean;
+  onToggle: (bulk: boolean) => void;
+}) {
+  const Chevron = open ? ChevronDownIcon : ChevronRightIcon;
+  return (
+    <button
+      type="button"
+      onClick={(e) => onToggle(isBulkToggle(e))}
+      aria-expanded={open}
+      aria-label={`${open ? "Collapse" : "Expand"} team ${label}`}
+      title={`${title}\n${BULK_TOGGLE_HINT}`}
+      className="tree-band flex w-full cursor-pointer items-center gap-1.5 px-2 pt-4 pb-1 text-left text-[12px] font-semibold text-fg-2 hover:text-fg"
+    >
+      <Chevron size={9} className="flex-none" />
+      <span className="truncate">{label}</span>
+      <span className="font-mono text-[10px] font-normal text-muted-4 tabular-nums">{count}</span>
+    </button>
+  );
+}
+
+/** The page's groups under their team headings. One section, unheaded, when
+ *  every group is one team's (or none has a team): the heading would repeat
+ *  what the switcher already says. */
+interface TeamSection {
+  /** The team's key, or `""` for the groups with no team. */
+  key: string;
+  label: string;
+  title: string;
+  groups: TicketProjectGroup[];
+}
+
+function sectionsOf(groups: TicketProjectGroup[]): { sections: TeamSection[]; headed: boolean } {
+  const sections: TeamSection[] = [];
+  for (const group of groups) {
+    const key = group.team?.key ?? "";
+    const last = sections[sections.length - 1];
+    if (last && last.key === key) {
+      last.groups.push(group);
+      continue;
+    }
+    sections.push({
+      key,
+      label: group.team?.name ?? key,
+      title: group.team ? `Team ${group.team.key}` : "No team",
+      groups: [group],
+    });
+  }
+  return { sections, headed: sections.length > 1 };
+}
 
 /** Placeholder rows while the per-repo reads are in flight. "We haven't looked
  *  yet" must not render as "there is nothing" — see {@link EmptyState}'s callers. */
@@ -74,10 +143,12 @@ export function TicketsList({
   const startTicket = useStartTicket();
   const askRepo = useWorkRepoGate();
 
-  // Folded groups, keyed by the group key (and `${key}:${milestone}` below).
-  // `scope` is what a ⌘-click reaches — a project's milestones — per the one
+  // Folded groups, keyed by the group key (and `${key}:${milestone}` below, and
+  // `team:${key}` for a team section). `scope` is what a ⌘-click reaches — a
+  // project's milestones, a team's projects and their milestones — per the one
   // disclosure rule every folding heading in the app follows.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const { sections, headed } = useMemo(() => sectionsOf(groups), [groups]);
   const toggle = useCallback(
     (key: string, scope: readonly string[], bulk: boolean) =>
       setCollapsed((c) => toggleDisclosureMap(c, key, scope, bulk)),
@@ -182,53 +253,80 @@ export function TicketsList({
       );
     });
 
+  const milestoneKeysOf = (group: TicketProjectGroup) =>
+    group.milestones.map((m) => `${group.key}:${m.key}`);
+
+  const projectGroup = (group: TicketProjectGroup) => {
+    const open = !collapsed[group.key];
+    return (
+      <div key={group.key}>
+        <ProjectHeading
+          label={group.project}
+          count={group.count}
+          color={group.color}
+          icon={group.icon}
+          targetDate={group.targetDate}
+          points={points(group.milestones.flatMap((m) => m.items))}
+          open={open}
+          onToggle={(bulk) => toggle(group.key, milestoneKeysOf(group), bulk)}
+        />
+        {open &&
+          (showMilestoneGroups(group.milestones)
+            ? group.milestones.map((milestone) => {
+                const key = `${group.key}:${milestone.key}`;
+                const milestoneOpen = !collapsed[key];
+                return (
+                  <div key={milestone.key}>
+                    {/* Only the heading steps in; its rows stay full width
+                        so every row's fill starts at the same edge. */}
+                    <div style={{ paddingLeft: INDENT_PX }}>
+                      <MilestoneHeading
+                        label={milestone.label}
+                        count={milestone.items.length}
+                        targetDate={milestone.targetDate}
+                        points={points(milestone.items)}
+                        open={milestoneOpen}
+                        onToggle={(bulk) => toggle(key, [], bulk)}
+                      />
+                    </div>
+                    {milestoneOpen && rows(milestone.items, MILESTONE_ROW_X)}
+                  </div>
+                );
+              })
+            : rows(group.milestones[0]?.items ?? [], PROJECT_ROW_X))}
+      </div>
+    );
+  };
+
   return (
     // `px-2`: every row's fill is a rounded object inset from the panel's
     // edges, not a band that runs into the borders on either side. The headings
     // bring their own `px-2` and so start one step in from the fills.
     <div className="flex-1 overflow-y-auto px-2 pb-6">
-      {groups.map((group) => {
-        const open = !collapsed[group.key];
-        const milestoneKeys = group.milestones.map((m) => `${group.key}:${m.key}`);
-        return (
-          <div key={group.key}>
-            <ProjectHeading
-              label={group.project}
-              count={group.count}
-              color={group.color}
-              icon={group.icon}
-              targetDate={group.targetDate}
-              points={points(group.milestones.flatMap((m) => m.items))}
-              open={open}
-              onToggle={(bulk) => toggle(group.key, milestoneKeys, bulk)}
-            />
-            {open &&
-              (showMilestoneGroups(group.milestones)
-                ? group.milestones.map((milestone) => {
-                    const key = `${group.key}:${milestone.key}`;
-                    const milestoneOpen = !collapsed[key];
-                    return (
-                      <div key={milestone.key}>
-                        {/* Only the heading steps in; its rows stay full width
-                            so every row's fill starts at the same edge. */}
-                        <div style={{ paddingLeft: INDENT_PX }}>
-                          <MilestoneHeading
-                            label={milestone.label}
-                            count={milestone.items.length}
-                            targetDate={milestone.targetDate}
-                            points={points(milestone.items)}
-                            open={milestoneOpen}
-                            onToggle={(bulk) => toggle(key, [], bulk)}
-                          />
-                        </div>
-                        {milestoneOpen && rows(milestone.items, MILESTONE_ROW_X)}
-                      </div>
-                    );
-                  })
-                : rows(group.milestones[0]?.items ?? [], PROJECT_ROW_X))}
-          </div>
-        );
-      })}
+      {!headed && groups.map(projectGroup)}
+      {headed &&
+        sections.map((section) => {
+          const key = `team:${section.key}`;
+          const open = !collapsed[key];
+          return (
+            <div key={key}>
+              <TeamHeading
+                label={section.label}
+                title={section.title}
+                count={section.groups.reduce((sum, g) => sum + g.count, 0)}
+                open={open}
+                onToggle={(bulk) =>
+                  toggle(
+                    key,
+                    section.groups.flatMap((g) => [g.key, ...milestoneKeysOf(g)]),
+                    bulk,
+                  )
+                }
+              />
+              {open && section.groups.map(projectGroup)}
+            </div>
+          );
+        })}
     </div>
   );
 }

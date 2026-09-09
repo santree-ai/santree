@@ -3649,7 +3649,8 @@ export const useAddComment = (repo: string) =>
     invalidate: (args) => [queryKeys.triageDetail(repo, args.ticketId)],
   });
 
-/** The team triage rotations — one per team the viewer is on. */
+/** The team triage rotations — one per team in the viewer's Triage: the teams
+ *  they are on call for, then the teams holding a triage ticket of theirs. */
 export const useTriageSchedule = (repo: string) =>
   useUnwrappedQuery(queryKeys.triageSchedule(repo), () => commands.triageSchedule(repo), {
     enabled: !!repo,

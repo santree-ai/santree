@@ -20,8 +20,8 @@ use sha2::{Digest, Sha256};
 
 use santree_core::domain::{
     ApiBudgetKind, ApiBudgetWindow, CycleRef, LinearApiBudget, LinearOrg, LinearStatus,
-    ProjectMilestoneRef, Task, TaskStatus, TicketRef, TriageComment, TriageDetail, TriageSchedule,
-    TriageShift, TriageTicket, WorkflowState,
+    ProjectMilestoneRef, Task, TaskStatus, TeamRef, TicketRef, TriageComment, TriageDetail,
+    TriageSchedule, TriageShift, TriageTicket, WorkflowState,
 };
 use santree_core::{layout, linear as core_linear};
 
@@ -562,7 +562,10 @@ async fn rotate(db: &Db, row: OrgRow, tokens: Tokens) -> Result<String> {
 // `dueDate` and `cycle { number name startsAt endsAt }` (2026-09-02) are on the top-level
 // nodes only — a handful of scalars per issue, a few hundred against the ~1400
 // of headroom, and deliberately not on the relation nodes, where every field is
-// paid for eight times per issue.
+// paid for eight times per issue. `team { key name }` (2026-09-09) follows the
+// same rule: on the issue only, another ~300 by the per-field arithmetic above.
+// A relation node's team is derived from its identifier instead (`team_ref`),
+// which is why `TeamRef::name` is optional.
 //
 // The blocker level carries the project's `targetDate` and its `projectMilestone`
 // for a reason that isn't cosmetic: a ticket the viewer isn't assigned reaches the
@@ -588,6 +591,7 @@ query AssignedIssues {
         projectMilestone { id name targetDate sortOrder }
         parent { identifier }
         assignee { name displayName avatarUrl }
+        team { key name }
         inverseRelations(first: 8) {
           nodes {
             type
@@ -708,6 +712,8 @@ struct IssueNode {
     #[serde(default)]
     assignee: Option<UserNode>,
     #[serde(default)]
+    team: Option<TeamRefNode>,
+    #[serde(default)]
     inverse_relations: Connection<RelationNode>,
 }
 
@@ -776,6 +782,22 @@ struct CycleNode {
     starts_at: Option<String>,
 }
 
+/// An issue's team: the wire's `team { key name }` when the read fetched it, else
+/// the key alone, read off the identifier — Linear's ids are `<KEY>-<number>`, so
+/// a blocker whose relation node carries no team still groups under the right one.
+fn team_ref(node: Option<TeamRefNode>, identifier: &str) -> Option<TeamRef> {
+    match node {
+        Some(t) => Some(TeamRef {
+            key: t.key,
+            name: t.name,
+        }),
+        None => split_identifier(identifier).map(|(key, _)| TeamRef {
+            key: key.into(),
+            name: None,
+        }),
+    }
+}
+
 fn cycle_ref(node: Option<CycleNode>) -> Option<CycleRef> {
     node.map(|node| CycleRef {
         number: node.number,
@@ -820,10 +842,12 @@ fn map_issue(node: IssueNode) -> (Task, Vec<RelatedIssue>) {
     let project_milestone = project_milestone_ref(node.project_milestone);
     let parent_id = node.parent.map(|parent| parent.identifier);
     let (assignee, assignee_avatar_url) = assignee_fields(node.assignee);
+    let team = team_ref(node.team, &node.identifier);
     let task = Task {
         id: node.identifier,
         title: node.title,
         priority: core_linear::map_priority(node.priority),
+        team,
         estimate: node.estimate,
         cycle: cycle_ref(node.cycle),
         due_date: node.due_date,
@@ -853,10 +877,12 @@ fn map_related(issue: RelatedIssue) -> Task {
     let state = issue.state.unwrap_or_default();
     let (project, project_color, project_icon, project_target_date) = project_fields(issue.project);
     let (assignee, assignee_avatar_url) = assignee_fields(issue.assignee);
+    let team = team_ref(None, &issue.identifier);
     Task {
         id: issue.identifier,
         title: issue.title,
         priority: core_linear::map_priority(0),
+        team,
         estimate: None,
         // Not fetched at the blocker level: neither groups anything, and a field
         // on a relation node costs eight times what it costs on the issue.
@@ -1560,13 +1586,16 @@ fn actor(
     ("Unknown".into(), None)
 }
 
-// The triage queue is the on-call inbox for the teams the viewer belongs to that
-// run a triage rotation — issues in a `triage` workflow state, regardless of
-// assignee (most triage items are unassigned until someone picks them up). We
-// scope to *rotation* teams only: a team without a triage rotation has no on-call
-// owner, so its triage state isn't anyone's responsibility and would just be
-// noise here. This mirrors the schedule strips (build via `triage_schedule`), so
-// the teams shown there are exactly the teams whose issues land in this queue.
+// The triage queue is the viewer's on-call inbox: every issue in a `triage`
+// workflow state on a team whose rotation they are in, regardless of assignee
+// (most triage items are unassigned until someone picks them up) — plus the
+// triage issues assigned to them anywhere else. The first half is scoped to
+// *rotation* teams only: a team without a triage rotation has no on-call owner,
+// so its triage state isn't anyone's responsibility and would just be noise
+// here. The second half is what brings a ticket in from a team the viewer is
+// not on call for, and only that ticket. The schedule cards (`triage_schedule`)
+// come from the same [`TeamScope`], so every team whose issues land here has a
+// card to land under.
 
 const TRIAGE_INBOX_QUERY: &str = r#"
 query TriageInbox($filter: IssueFilter, $after: String) {
@@ -1582,9 +1611,13 @@ query TriageInbox($filter: IssueFilter, $after: String) {
 }
 "#;
 
+/// A team as the issue reads carry it: the key always, the name when the query
+/// asked for it.
 #[derive(Deserialize)]
-struct TeamKeyNode {
+struct TeamRefNode {
     key: String,
+    #[serde(default)]
+    name: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1598,7 +1631,7 @@ struct TriageRow {
     #[serde(default)]
     snoozed_until_at: Option<String>,
     #[serde(default)]
-    team: Option<TeamKeyNode>,
+    team: Option<TeamRefNode>,
     #[serde(default)]
     assignee: Option<UserNode>,
 }
@@ -1613,23 +1646,18 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
     let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
-    // The viewer (for "mine") and their *rotation* teams (to scope the inbox). Propagate
-    // a failure here rather than swallowing it into an empty scope — that used to render
+    // The viewer (for "mine") and the teams that scope the inbox. Propagate a
+    // failure here rather than swallowing it into an empty scope — that used to render
     // a transient network/auth error as the positive "All caught up" empty state. A
-    // genuinely empty scope (no rotation team configured) is the only legitimate
+    // genuinely empty scope (no rotation team, no viewer) is the only legitimate
     // empty-inbox path.
     let scope = team_scope(&session).await?;
-    // No rotation team → no on-call inbox. Show an empty queue rather than
-    // flooding the list with the whole workspace's (un-owned) triage issues.
-    if scope.teams.is_empty() {
+    // Nothing to scope by → no inbox. Show an empty queue rather than flooding
+    // the list with the whole workspace's (un-owned) triage issues.
+    let Some(filter) = inbox_filter(&scope) else {
         return Ok(Some(Vec::new()));
-    }
+    };
     let me = scope.viewer_id.as_deref();
-    let keys: Vec<&str> = scope.teams.iter().map(|t| t.key.as_str()).collect();
-    let filter = serde_json::json!({
-        "state": { "type": { "eq": "triage" } },
-        "team": { "key": { "in": keys } },
-    });
     // A busy org's triage inbox can exceed one page; this filtered query is cheap
     // relative to the complexity budget (unlike assignedIssues), so loop the
     // cursor rather than silently truncating at 100.
@@ -1683,7 +1711,36 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
 
     // Active first, snoozed last; within each, soonest SLA breach first.
     rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
+    log::info!(
+        "fetched {} triage tickets for {repo} ({} on-call teams, {} by assignment)",
+        rows.len(),
+        scope.on_call.len(),
+        scope.assigned.len()
+    );
     Ok(Some(rows.into_iter().map(|(t, _, _)| t).collect()))
+}
+
+/// The inbox query's `IssueFilter` for a scope: triage-state issues on any team
+/// the viewer is on call for, or assigned to the viewer wherever they are. The
+/// two halves are `or`ed, so a team the viewer joined only through an assigned
+/// ticket contributes exactly that ticket — never its whole inbox, whatever the
+/// Mine/All switch says. `None` when neither half has anything to match.
+fn inbox_filter(scope: &TeamScope) -> Option<serde_json::Value> {
+    let mut any: Vec<serde_json::Value> = Vec::new();
+    if !scope.on_call.is_empty() {
+        let keys: Vec<&str> = scope.on_call.iter().map(|t| t.key.as_str()).collect();
+        any.push(serde_json::json!({ "team": { "key": { "in": keys } } }));
+    }
+    if let Some(me) = scope.viewer_id.as_deref() {
+        any.push(serde_json::json!({ "assignee": { "id": { "eq": me } } }));
+    }
+    if any.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "state": { "type": { "eq": "triage" } },
+        "or": any,
+    }))
 }
 
 // The nested `children` connections below are pinned to `first: 50` — Linear's
@@ -2399,25 +2456,53 @@ pub async fn move_issue_to_started(db: &Db, repo: &str, issue_id: &str) -> Resul
     set_state(&session, issue_id, &target.id).await.map(Some)
 }
 
-const TRIAGE_SCHEDULES_QUERY: &str = r#"
+/// A team with its triage responsibility — the shape both scope queries read a
+/// team in, as a fragment so the two can't drift.
+macro_rules! triage_team_fragment {
+    () => {
+        r#"
+fragment TriageTeam on Team {
+  key name
+  triageResponsibility {
+    currentUser { id }
+    timeSchedule { name entries { startsAt endsAt userId userEmail } }
+  }
+}
+"#
+    };
+}
+
+const TRIAGE_SCHEDULES_QUERY: &str = concat!(
+    r#"
 query TriageSchedules($after: String) {
   viewer {
     id
     teamMemberships(first: 100, after: $after) {
-      nodes {
-        team {
-          key name
-          triageResponsibility {
-            currentUser { id }
-            timeSchedule { name entries { startsAt endsAt userId userEmail } }
-          }
-        }
-      }
+      nodes { team { ...TriageTeam } }
       pageInfo { hasNextPage endCursor }
     }
   }
 }
-"#;
+"#,
+    triage_team_fragment!()
+);
+
+/// The teams of the triage issues assigned to the viewer, each with its rotation,
+/// so a team the viewer is not on call for still gets a schedule card when one of
+/// its tickets is theirs. One page: a person holds a handful of triage tickets,
+/// not fifty, and the query's cost is the nested schedule per issue.
+const ASSIGNED_TRIAGE_TEAMS_QUERY: &str = concat!(
+    r#"
+query AssignedTriageTeams {
+  viewer {
+    assignedIssues(filter: { state: { type: { eq: "triage" } } }, first: 50) {
+      nodes { team { ...TriageTeam } }
+    }
+  }
+}
+"#,
+    triage_team_fragment!()
+);
 
 #[derive(Deserialize, Clone)]
 struct IdRef {
@@ -2505,6 +2590,29 @@ struct SchedQueryData {
     viewer: Option<SchedViewer>,
 }
 
+#[derive(Deserialize)]
+struct AssignedTriageIssue {
+    #[serde(default)]
+    team: Option<TeamNode>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssignedTriageViewer {
+    #[serde(default)]
+    assigned_issues: Connection<AssignedTriageIssue>,
+}
+#[derive(Deserialize)]
+struct AssignedTriageData {
+    viewer: Option<AssignedTriageViewer>,
+}
+
+/// The teams of the viewer's assigned triage issues — see [`ASSIGNED_TRIAGE_TEAMS_QUERY`].
+async fn fetch_assigned_triage_teams(session: &Session<'_>) -> Result<AssignedTriageData> {
+    session
+        .query(ASSIGNED_TRIAGE_TEAMS_QUERY, serde_json::json!({}))
+        .await
+}
+
 /// Fetch every page of the viewer's team memberships. A user rarely belongs to
 /// more than a handful of teams, so unlike `assignedIssues` this is cheap to loop
 /// in full rather than truncate — a team past the first 100 would otherwise drop
@@ -2538,40 +2646,66 @@ async fn fetch_all_team_memberships(session: &Session<'_>) -> Result<SchedQueryD
     Ok(data)
 }
 
-/// The viewer and the teams they're on call for — everything both Triage reads derive
-/// from the memberships query: the queue scopes itself to `teams`' keys and marks its
-/// own tickets with `viewer_id`; the schedule strips render `teams`' rotations.
+/// The viewer and the teams in their Triage — everything both Triage reads derive
+/// from the two scope queries: the queue's filter is built from it ([`inbox_filter`])
+/// and marks its own tickets with `viewer_id`; the schedule cards are one per team
+/// in it, `on_call` first.
 struct TeamScope {
     viewer_id: Option<String>,
-    /// Only teams that run a triage rotation (see [`is_rotation_team`]) — a team without
-    /// one has no on-call owner, so its triage issues aren't anyone's responsibility.
-    teams: Vec<TeamNode>,
+    /// Teams whose triage rotation the viewer is in (see [`is_rotation_team`] and
+    /// [`viewer_participates`]) — their whole triage inbox is the viewer's.
+    on_call: Vec<TeamNode>,
+    /// Teams the viewer is in only through a triage issue assigned to them — the
+    /// inbox carries just those issues, and the card shows whose rotation it is
+    /// (or that there is none). Never overlaps `on_call`.
+    assigned: Vec<TeamNode>,
 }
 
-/// Reduce the raw memberships payload to the [`TeamScope`] both reads want.
-fn scope_of(data: SchedQueryData) -> TeamScope {
-    let Some(viewer) = data.viewer else {
+impl TeamScope {
+    /// Every team in scope, the ones the viewer is on call for first.
+    fn teams(&self) -> impl Iterator<Item = &TeamNode> {
+        self.on_call.iter().chain(self.assigned.iter())
+    }
+}
+
+/// Reduce the two raw scope payloads to the [`TeamScope`] both reads want.
+fn scope_of(memberships: SchedQueryData, assigned: AssignedTriageData) -> TeamScope {
+    let Some(viewer) = memberships.viewer else {
         return TeamScope {
             viewer_id: None,
-            teams: Vec::new(),
+            on_call: Vec::new(),
+            assigned: Vec::new(),
         };
     };
     let viewer_id = viewer.id;
+    let on_call: Vec<TeamNode> = viewer
+        .team_memberships
+        .map(|c| c.nodes)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| m.team)
+        .filter(|team| {
+            is_rotation_team(team)
+                && viewer_id
+                    .as_deref()
+                    .is_some_and(|id| viewer_participates(team, id))
+        })
+        .collect();
+    // A team reached through an assigned ticket, unless it is already an on-call
+    // team — and once, however many of its tickets are the viewer's.
+    let mut seen: HashSet<String> = on_call.iter().map(|t| t.key.clone()).collect();
+    let assigned: Vec<TeamNode> = assigned
+        .viewer
+        .map(|v| v.assigned_issues.nodes)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|issue| issue.team)
+        .filter(|team| seen.insert(team.key.clone()))
+        .collect();
     TeamScope {
-        viewer_id: viewer_id.clone(),
-        teams: viewer
-            .team_memberships
-            .map(|c| c.nodes)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|m| m.team)
-            .filter(|team| {
-                is_rotation_team(team)
-                    && viewer_id
-                        .as_deref()
-                        .is_some_and(|id| viewer_participates(team, id))
-            })
-            .collect(),
+        viewer_id,
+        on_call,
+        assigned,
     }
 }
 
@@ -2598,10 +2732,14 @@ where
     Ok(TEAM_SCOPES.get_or_fetch(slug, fetch).await?.0)
 }
 
-/// The [`TeamScope`] for this session's org.
+/// The [`TeamScope`] for this session's org — its two queries in flight together.
 async fn team_scope(session: &Session<'_>) -> Result<std::sync::Arc<TeamScope>> {
     cached_team_scope(&session.slug, || async {
-        Ok(scope_of(fetch_all_team_memberships(session).await?))
+        let (memberships, assigned) = tokio::try_join!(
+            fetch_all_team_memberships(session),
+            fetch_assigned_triage_teams(session)
+        )?;
+        Ok(scope_of(memberships, assigned))
     })
     .await
 }
@@ -2617,22 +2755,22 @@ struct UsersData {
     users: Connection<UserNode>,
 }
 
-/// The viewer's triage on-call rotations — one per team that has a
-/// time-schedule-backed triage responsibility (empty when none do). Rotations
-/// the viewer participates in are surfaced first.
+/// The viewer's triage rotations — one per team in their Triage scope: the teams
+/// they are on call for (first), then the teams that hold a triage ticket of
+/// theirs, which may run a rotation they are not in, or none at all (no shifts).
 pub async fn triage_schedule(db: &Db, repo: &str) -> Result<Option<Vec<TriageSchedule>>> {
     let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
     // Shared with the queue (which mounts alongside this one) — see [`cached_team_scope`].
     let scope = team_scope(&session).await?;
-    if scope.teams.is_empty() {
+    if scope.on_call.is_empty() && scope.assigned.is_empty() {
         return Ok(Some(Vec::new()));
     }
 
     // Resolve all referenced user ids → display names in one batch.
     let mut ids: Vec<String> = Vec::new();
-    for t in &scope.teams {
+    for t in scope.teams() {
         if let Some(r) = &t.triage_responsibility {
             if let Some(cu) = r.current_user.as_ref().and_then(|c| c.id.clone()) {
                 ids.push(cu);
@@ -2653,13 +2791,22 @@ pub async fn triage_schedule(db: &Db, repo: &str) -> Result<Option<Vec<TriageSch
     let now = now_ms();
 
     let mut schedules: Vec<TriageSchedule> = scope
-        .teams
-        .iter()
+        .teams()
         .cloned()
         .map(|t| build_schedule(t, scope.viewer_id.as_deref(), &names, now))
         .collect();
-    // Surface rotations the viewer is part of first.
+    // Surface rotations the viewer is part of first (stable, so the scope's own
+    // order holds within each half).
     schedules.sort_by_key(|s| !s.shifts.iter().any(|sh| sh.is_me));
+    log::info!(
+        "built {} triage schedules for {repo}: {}",
+        schedules.len(),
+        schedules
+            .iter()
+            .map(|s| format!("{} ({} shifts)", s.team_key, s.shifts.len()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     Ok(Some(schedules))
 }
 
@@ -2730,6 +2877,7 @@ fn build_schedule(
 
     TriageSchedule {
         team: team.name,
+        team_key: team.key,
         schedule_name,
         current_name,
         current_avatar_url,
@@ -3304,13 +3452,14 @@ fn urlencode(s: &str) -> String {
 mod tests {
     use super::{
         accept_code, apply_subtask_dependencies, cached_team_scope, cycle_ref, decode_tokens,
-        encode_tokens, entity_not_found, header_window, image_spans, map_issue, map_related,
-        migrate_tokens_to_keychain, parse_callback, parse_ms, record_budget, refresh_lock,
-        resolve_org_slug, resolved_org, scope_from_setting, scope_of, splice_images,
-        split_identifier, usable_at, CommentNode, CycleNode, ImageCache, IssueDetailNode,
-        IssueNode, ParentIssueNode, ProjectMilestoneNode, ProjectNode, RelatedIssue, RelationNode,
-        SchedQueryData, StateNode, TeamScope, TicketLookupNode, Tokens, TriageRow, TtlCache,
-        UserNode, BUDGETS, IMAGE_HOST, REFRESH_SKEW_MS,
+        encode_tokens, entity_not_found, header_window, image_spans, inbox_filter, map_issue,
+        map_related, migrate_tokens_to_keychain, parse_callback, parse_ms, record_budget,
+        refresh_lock, resolve_org_slug, resolved_org, scope_from_setting, scope_of, splice_images,
+        split_identifier, usable_at, AssignedTriageData, CommentNode, CycleNode, ImageCache,
+        IssueDetailNode, IssueNode, ParentIssueNode, ProjectMilestoneNode, ProjectNode,
+        RelatedIssue, RelationNode, SchedQueryData, StateNode, TeamRefNode, TeamScope,
+        TicketLookupNode, Tokens, TriageRow, TtlCache, UserNode, BUDGETS, IMAGE_HOST,
+        REFRESH_SKEW_MS,
     };
     use crate::gql::{Connection, GqlError, GraphQlErrors, PageInfo};
     use anyhow::anyhow;
@@ -3537,6 +3686,38 @@ mod tests {
 
     // ── Triage team scope ─────────────────────────────────────────────────
 
+    /// A team as the scope queries return it, with `entries` as its rotation.
+    fn team_json(key: &str, name: &str, entries: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "key": key, "name": name, "triageResponsibility": {
+            "currentUser": null,
+            "timeSchedule": { "name": format!("{name} on-call"), "entries": entries }
+        } })
+    }
+
+    fn shift(user: &str) -> serde_json::Value {
+        serde_json::json!({ "startsAt": "2024-01-01T00:00:00Z", "endsAt": "2024-01-08T00:00:00Z", "userId": user })
+    }
+
+    /// The assigned-triage-issues payload, one issue per team given.
+    fn assigned_json(teams: Vec<serde_json::Value>) -> AssignedTriageData {
+        let nodes: Vec<serde_json::Value> = teams
+            .into_iter()
+            .map(|team| serde_json::json!({ "team": team }))
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "viewer": { "assignedIssues": { "nodes": nodes } }
+        }))
+        .unwrap()
+    }
+
+    fn no_assigned() -> AssignedTriageData {
+        assigned_json(Vec::new())
+    }
+
+    fn keys(teams: &[super::TeamNode]) -> Vec<&str> {
+        teams.iter().map(|t| t.key.as_str()).collect()
+    }
+
     /// The scope both Triage reads share is derived from the raw memberships payload:
     /// the viewer's id, and only rotations the viewer actually participates in.
     #[test]
@@ -3571,15 +3752,39 @@ mod tests {
         }))
         .unwrap();
 
-        let scope = scope_of(data);
+        let scope = scope_of(data, no_assigned());
         assert_eq!(scope.viewer_id.as_deref(), Some("u1"));
+        assert_eq!(keys(&scope.on_call), ["ENG"]);
+        assert!(scope.assigned.is_empty());
+    }
+
+    /// A triage ticket assigned to the viewer brings its team in — once, whether it
+    /// runs a rotation the viewer is not in or no rotation at all — unless the team
+    /// is already one the viewer is on call for, which keeps it on that side.
+    #[test]
+    fn a_team_holding_a_ticket_assigned_to_the_viewer_joins_the_scope_by_assignment() {
+        let memberships: SchedQueryData = serde_json::from_value(serde_json::json!({
+            "viewer": { "id": "u1", "teamMemberships": { "nodes": [
+                { "team": team_json("ENG", "Engineering", serde_json::json!([shift("u1")])) },
+            ] } }
+        }))
+        .unwrap();
+        let assigned = assigned_json(vec![
+            // Already on call for it → stays an on-call team, not listed twice.
+            team_json("ENG", "Engineering", serde_json::json!([shift("u1")])),
+            // Someone else's rotation, two tickets of ours → in once, by assignment.
+            team_json("MSG", "Messaging", serde_json::json!([shift("u2")])),
+            team_json("MSG", "Messaging", serde_json::json!([shift("u2")])),
+            // No rotation at all → still in: the ticket is ours.
+            team_json("DES", "Design", serde_json::json!([])),
+        ]);
+
+        let scope = scope_of(memberships, assigned);
+        assert_eq!(keys(&scope.on_call), ["ENG"]);
+        assert_eq!(keys(&scope.assigned), ["MSG", "DES"]);
         assert_eq!(
-            scope
-                .teams
-                .iter()
-                .map(|t| t.key.as_str())
-                .collect::<Vec<_>>(),
-            ["ENG"]
+            scope.teams().map(|t| t.key.as_str()).collect::<Vec<_>>(),
+            ["ENG", "MSG", "DES"]
         );
     }
 
@@ -3587,15 +3792,67 @@ mod tests {
     fn an_absent_viewer_scopes_to_nothing() {
         let data: SchedQueryData =
             serde_json::from_value(serde_json::json!({ "viewer": null })).unwrap();
-        let scope = scope_of(data);
+        let scope = scope_of(data, no_assigned());
         assert!(scope.viewer_id.is_none());
-        assert!(scope.teams.is_empty());
+        assert!(scope.on_call.is_empty());
+        assert!(scope.assigned.is_empty());
+    }
+
+    /// The inbox is the on-call teams' whole triage state OR whatever is assigned
+    /// to the viewer — so an assignment-only team never contributes more than the
+    /// viewer's own tickets, and a scope with nothing to match has no filter.
+    #[test]
+    fn the_inbox_filter_ors_on_call_teams_with_the_viewers_own_assignments() {
+        let on_call: super::TeamNode = serde_json::from_value(team_json(
+            "ENG",
+            "Engineering",
+            serde_json::json!([shift("u1")]),
+        ))
+        .unwrap();
+        let by_ticket: super::TeamNode =
+            serde_json::from_value(team_json("MSG", "Messaging", serde_json::json!([]))).unwrap();
+
+        let both = TeamScope {
+            viewer_id: Some("u1".into()),
+            on_call: vec![on_call.clone()],
+            assigned: vec![by_ticket.clone()],
+        };
+        assert_eq!(
+            inbox_filter(&both).unwrap(),
+            serde_json::json!({
+                "state": { "type": { "eq": "triage" } },
+                "or": [
+                    { "team": { "key": { "in": ["ENG"] } } },
+                    { "assignee": { "id": { "eq": "u1" } } },
+                ],
+            })
+        );
+
+        // No rotation anywhere: only the viewer's own tickets are in.
+        let assignments_only = TeamScope {
+            viewer_id: Some("u1".into()),
+            on_call: Vec::new(),
+            assigned: vec![by_ticket],
+        };
+        assert_eq!(
+            inbox_filter(&assignments_only).unwrap()["or"],
+            serde_json::json!([{ "assignee": { "id": { "eq": "u1" } } }])
+        );
+
+        // No viewer, no rotation: nothing to ask for.
+        let nothing = TeamScope {
+            viewer_id: None,
+            on_call: Vec::new(),
+            assigned: Vec::new(),
+        };
+        assert!(inbox_filter(&nothing).is_none());
     }
 
     fn empty_scope() -> TeamScope {
         TeamScope {
             viewer_id: Some("u1".into()),
-            teams: Vec::new(),
+            on_call: Vec::new(),
+            assigned: Vec::new(),
         }
     }
 
@@ -3909,6 +4166,7 @@ mod tests {
             id: id.into(),
             title: id.into(),
             priority: santree_core::domain::Priority::None,
+            team: None,
             estimate: None,
             cycle: None,
             due_date: None,
@@ -4206,6 +4464,10 @@ mod tests {
                 display_name: Some("ada".into()),
                 avatar_url: Some("https://example.com/a.png".into()),
             }),
+            team: Some(TeamRefNode {
+                key: "ENG".into(),
+                name: Some("Engineering".into()),
+            }),
             inverse_relations: Connection {
                 nodes: vec![
                     RelationNode {
@@ -4230,6 +4492,9 @@ mod tests {
 
         assert_eq!(task.id, "ENG-10");
         assert_eq!(task.priority, santree_core::domain::Priority::High);
+        let team = task.team.as_ref().expect("team");
+        assert_eq!(team.key, "ENG");
+        assert_eq!(team.name.as_deref(), Some("Engineering"));
         assert_eq!(task.estimate, Some(3.0));
         assert_eq!(task.due_date.as_deref(), Some("2026-09-05"));
         let cycle = task.cycle.as_ref().expect("cycle");
@@ -4274,6 +4539,7 @@ mod tests {
             project_milestone: None,
             parent: None,
             assignee: None,
+            team: None,
             inverse_relations: Connection {
                 nodes: vec![RelationNode {
                     type_: "blocks".into(),
@@ -4286,6 +4552,11 @@ mod tests {
         assert!(task.ready);
         assert_eq!(task.project, "No Project");
         assert_eq!(task.assignee, None);
+        // No team on the wire: the key is still read off the identifier, the
+        // name is honestly unknown.
+        let team = task.team.as_ref().expect("team");
+        assert_eq!(team.key, "ENG");
+        assert_eq!(team.name, None);
     }
 
     #[test]
@@ -4304,6 +4575,7 @@ mod tests {
             project_milestone: None,
             parent: None,
             assignee: None,
+            team: None,
             inverse_relations: Connection::default(),
         };
         let (task, _) = map_issue(node);
@@ -4324,6 +4596,7 @@ mod tests {
             project_milestone: None,
             parent: None,
             assignee: None,
+            team: None,
             inverse_relations: Connection::default(),
         };
         let (task, _) = map_issue(node);
@@ -4368,6 +4641,10 @@ mod tests {
         assert_eq!(milestone.sort_order, 1.5);
         // A blocker is context, never the viewer's own work.
         assert!(!task.actionable);
+        // The relation node carries no team; the key comes off the identifier.
+        let team = task.team.as_ref().expect("team");
+        assert_eq!(team.key, "ENG");
+        assert_eq!(team.name, None);
     }
 
     #[test]

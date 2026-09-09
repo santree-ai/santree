@@ -273,6 +273,11 @@ interface IssuesModel {
 
 const IssuesContext = createContext<IssuesModel | null>(null);
 
+/** One `[]` for every render before the tasks land, so the memos keyed on
+ *  `tasks` don't re-run for a fresh empty array each time. */
+const NO_TASKS: Task[] = [];
+const NO_TEAMS: string[] = [];
+
 /** Hover highlight, split into its own context so moving the pointer between rows
  *  / graph nodes only re-renders hover-sensitive views (the nodes and sidebar
  *  rows) — not every `useIssues` consumer (the inspector's Markdown, the launch
@@ -317,9 +322,14 @@ export interface ActionableControl {
 export function IssuesProvider({
   children,
   actionable,
+  teams = NO_TEAMS,
 }: {
   children: ReactNode;
   actionable?: ActionableControl;
+  /** The Tickets page's team pick (team keys; empty is every team): the graph
+   *  and the inspector read the same slice the list shows. The page resolves
+   *  the pick against the teams it has, so a stale key never arrives here. */
+  teams?: string[];
 }) {
   const { settings } = useApp();
   // Read scope, never a launch target. Which tickets the graph draws is one
@@ -340,7 +350,14 @@ export function IssuesProvider({
     removePendingLaunch,
   } = useAppUi();
   const navigate = useNavigate();
-  const { data: tasks = [] } = useTasks(scopeRepo);
+  const { data: allTasks = NO_TASKS } = useTasks(scopeRepo);
+  const tasks = useMemo(
+    () =>
+      teams.length > 0
+        ? allTasks.filter((t) => t.team !== null && teams.includes(t.team.key))
+        : allTasks,
+    [allTasks, teams],
+  );
   const { data: worktrees = [] } = useWorktrees(scopeRepo);
   // Only for naming the "don't stack" option in the launch dialog — the create
   // itself resolves the default branch backend-side from a null base.

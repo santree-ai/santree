@@ -8,6 +8,7 @@ function task(id: string, ready = true): Task {
     id,
     title: `Task ${id}`,
     priority: "None",
+    team: null,
     estimate: null,
     cycle: null,
     dueDate: null,

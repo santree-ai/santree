@@ -12,13 +12,22 @@
  * is mounted for the page, so the focused ticket, the inspector on the right and
  * the launch queue all survive a mode switch — clicking a ticket in either mode
  * opens it in the inspector, and the segmented control only changes how the
- * tickets are laid out. The page also owns the "Actionable only" filter, which
- * both modes and their chords share.
+ * tickets are laid out. The page also owns the "Actionable only" filter and
+ * the team pick, which both modes and their chords share: the list groups by
+ * team when every team is showing, and the graph draws the picked team's
+ * tickets through the same provider.
  */
 import { useCallback, useMemo } from "react";
 
-import { BranchIcon, ListIcon } from "../../components/icons";
-import { Button, Dot, Segmented, SwitchTrack } from "../../components/primitives";
+import { BranchIcon, CheckIcon, ChevronDownIcon, ListIcon } from "../../components/icons";
+import {
+  Button,
+  Dot,
+  Dropdown,
+  MENU_ITEM,
+  Segmented,
+  SwitchTrack,
+} from "../../components/primitives";
 import { PanelToggle } from "../../components/SidePanel";
 import { usePersistedState } from "../../lib/usePersistedState";
 import { CHROME } from "../../state/AppContext";
@@ -28,12 +37,20 @@ import { RightPanel } from "../issues/RightPanel";
 import { useIssuesShortcuts } from "../issues/shortcuts";
 import { TicketsGraph } from "./TicketsGraph";
 import { TicketsList } from "./TicketsList";
-import { type TicketProjectGroup, type TicketsSummary, useTickets } from "./useTickets";
+import {
+  type TicketProjectGroup,
+  type TicketsSummary,
+  type TicketTeam,
+  useTickets,
+} from "./useTickets";
 
 type Mode = "list" | "graph";
 
 const MODE_KEY = "santree.tickets.mode";
 const ACTIONABLE_KEY = "santree.tickets.actionableOnly";
+/** The team pick — team keys, or `[]` for every team. Persisted as picked;
+ *  the fold drops a key while it has no tickets and takes it back with them. */
+const TEAMS_KEY = "santree.tickets.teams";
 
 const MODE_OPTIONS = [
   { value: "list" as const, label: "List", icon: <ListIcon size={11} /> },
@@ -44,6 +61,106 @@ const MODE_OPTIONS = [
 function summaryLine({ total, projects, ready, blocked }: TicketsSummary): string {
   const scope = `${total} across ${projects} project${projects === 1 ? "" : "s"}`;
   return `${scope} · ${ready} ready · ${blocked} blocked`;
+}
+
+/**
+ * Which teams the page shows, as a menu on the strip: the trigger names the
+ * pick — every team, one team, or how many — in the chip family of the
+ * controls beside it, and the menu lists every team with its tally, each a
+ * checkbox, so any set of them can be shown together. "All teams" clears the
+ * pick and closes; a team toggles and stays open, since a set is built one
+ * check at a time. It replaced a segmented control that spent a segment per
+ * team on a strip that also has to hold the summary, the filter and the mode.
+ * Drawn only once there are two teams to tell apart; with one, the page is
+ * that team's and the control would name a choice that isn't there. Labels
+ * are the team's name, falling back to its key (a blocker from a team you're
+ * not on knows only its key).
+ */
+function TeamMenu({
+  teams,
+  picked,
+  onChange,
+}: {
+  teams: TicketTeam[];
+  picked: string[];
+  onChange: (keys: string[]) => void;
+}) {
+  if (teams.length < 2) return null;
+  const all = picked.length === 0;
+  const nameOf = (key: string) => teams.find((t) => t.key === key)?.name ?? key;
+  const label = all
+    ? "All teams"
+    : picked.length === 1
+      ? nameOf(picked[0])
+      : `${picked.length} teams`;
+  const toggleTeam = (key: string) =>
+    onChange(picked.includes(key) ? picked.filter((k) => k !== key) : [...picked, key]);
+  return (
+    <Dropdown
+      menuClassName="w-60 overflow-hidden"
+      trigger={(toggle) => (
+        <button
+          type="button"
+          onClick={toggle}
+          aria-label={`Teams: ${label}`}
+          title="Which teams' tickets to show"
+          className="flex h-6 max-w-48 flex-none cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 text-[11px] whitespace-nowrap text-fg-2 transition-colors hover:border-line-strong"
+        >
+          <span className="min-w-0 truncate">{label}</span>
+          <ChevronDownIcon size={9} className="flex-none text-muted-3" />
+        </button>
+      )}
+    >
+      {(close) => (
+        <>
+          <button
+            type="button"
+            role="menuitemradio"
+            aria-checked={all}
+            onClick={() => {
+              onChange([]);
+              close();
+            }}
+            className={MENU_ITEM}
+          >
+            {/* The check keeps its column whether or not it is drawn, so the
+                rows' labels line up. */}
+            <span className="flex h-4 w-3 flex-none items-center text-fg">
+              {all && <CheckIcon size={11} />}
+            </span>
+            <span className={`min-w-0 flex-1 truncate ${all ? "text-fg" : ""}`}>All teams</span>
+            <span className="font-mono text-[10px] text-muted-4 tabular-nums">
+              {teams.reduce((sum, t) => sum + t.count, 0)}
+            </span>
+          </button>
+          {teams.map((team) => {
+            const checked = picked.includes(team.key);
+            return (
+              <button
+                key={team.key}
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={checked}
+                onClick={() => toggleTeam(team.key)}
+                title={`Team ${team.key}`}
+                className={MENU_ITEM}
+              >
+                <span className="flex h-4 w-3 flex-none items-center text-fg">
+                  {checked && <CheckIcon size={11} />}
+                </span>
+                <span className={`min-w-0 flex-1 truncate ${checked ? "text-fg" : ""}`}>
+                  {team.name ?? team.key}
+                </span>
+                <span className="font-mono text-[10px] text-muted-4 tabular-nums">
+                  {team.count}
+                </span>
+              </button>
+            );
+          })}
+        </>
+      )}
+    </Dropdown>
+  );
 }
 
 /** The filter, as the switch it is — drawn as one chip of the same family as
@@ -118,7 +235,10 @@ function TicketsShortcuts({ onToggleActionable }: { onToggleActionable: () => vo
 export function TicketsView() {
   const [mode, setMode] = usePersistedState<Mode>(MODE_KEY, "list");
   const [actionableOnly, setActionableOnly] = usePersistedState(ACTIONABLE_KEY, true);
-  const { groups, summary, loading } = useTickets(actionableOnly);
+  const [teamPick, setTeamPick] = usePersistedState<string[]>(TEAMS_KEY, []);
+  // `picked` is the pick in force: the stored keys that name a team with
+  // tickets on the page — the provider and the menu both read it.
+  const { groups, teams, picked, summary, loading } = useTickets(actionableOnly, teamPick);
 
   const toggleActionable = useCallback(() => setActionableOnly((v) => !v), [setActionableOnly]);
 
@@ -130,13 +250,16 @@ export function TicketsView() {
   );
 
   return (
-    <IssuesProvider actionable={actionable}>
+    <IssuesProvider actionable={actionable} teams={picked}>
       <TicketsShortcuts onToggleActionable={toggleActionable} />
       <TicketsPage
         mode={mode}
         onMode={setMode}
         actionableOnly={actionableOnly}
         onToggleActionable={toggleActionable}
+        teams={teams}
+        picked={picked}
+        onTeams={setTeamPick}
         groups={groups}
         summary={summary}
         loading={loading}
@@ -152,6 +275,9 @@ function TicketsPage({
   onMode,
   actionableOnly,
   onToggleActionable,
+  teams,
+  picked,
+  onTeams,
   groups,
   summary,
   loading,
@@ -160,6 +286,9 @@ function TicketsPage({
   onMode: (mode: Mode) => void;
   actionableOnly: boolean;
   onToggleActionable: () => void;
+  teams: TicketTeam[];
+  picked: string[];
+  onTeams: (keys: string[]) => void;
   groups: TicketProjectGroup[];
   summary: TicketsSummary;
   loading: boolean;
@@ -179,6 +308,7 @@ function TicketsPage({
           className={`flex ${CHROME.subBar} flex-none items-center gap-2.5 border-b border-line bg-deep pr-2 pl-3`}
         >
           <span className="flex-none text-[13px] font-semibold text-fg">Tickets</span>
+          <TeamMenu teams={teams} picked={picked} onChange={onTeams} />
           <span className="min-w-0 truncate text-[11px] text-muted-4">{summaryLine(summary)}</span>
           <div className="ml-auto flex flex-none items-center gap-2">
             <SelectReadyButton />

@@ -1,9 +1,10 @@
 /**
- * The sidebar's Triage section: the queue as rows, the rotation and the snoozed
- * lane as bands, and the one selection — which follows the route, as every
- * other selection in this rail does.
+ * The sidebar's Triage section: the queue as rows, under a folding row per
+ * team once there are two, the rotation and the snoozed lane, and the one
+ * selection — which follows the route, as every other selection in this rail
+ * does.
  */
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TriageSchedule, TriageTicket } from "../../bindings";
@@ -50,7 +51,7 @@ vi.mock("../../lib/queries", async (importOriginal) => ({
   // the section never has to pick a project itself.
   useTriageOrgRepo: () => "acme/app",
   useTriageQueue: () => data.queue,
-  useTriageSchedule: () => ({ data: data.schedules }),
+  useTriageSchedule: () => ({ data: data.schedules, isLoading: false }),
   useSetSetting: () => ({ mutate: data.setSetting }),
   usePrefetchOnHover: () => data.hover,
   // The row's menu: its Linear address, and the snooze write and its gate.
@@ -77,7 +78,8 @@ function queue(over: Partial<TriageQueue>) {
 
 function schedule(over: Partial<TriageSchedule> = {}): TriageSchedule {
   return {
-    team: "SAN",
+    team: "Santree",
+    teamKey: "SAN",
     scheduleName: "SAN triage",
     currentName: "Sam Ortiz",
     currentAvatarUrl: null,
@@ -176,7 +178,10 @@ describe("TriageSection", () => {
   it("counts the active queue on the header, not the snoozed lane", () => {
     queue({ active: [ticket("AK-1"), ticket("AK-2")], snoozed: [ticket("AK-9")] });
     render(<TriageSection />);
-    const count = screen.getByText("2");
+    // The team row counts its own queue too; this is the header's number.
+    const header = screen.getByRole("button", { name: "Collapse triage" })
+      .parentElement as HTMLElement;
+    const count = within(header).getByText("2");
     // Reference in the Reviews band's own muted register — not a tinted pill,
     // which read as an alarm on a rail that is open all day.
     expect(count.className).toContain("text-muted-4");
@@ -227,13 +232,14 @@ describe("TriageSection", () => {
    *  starts folded, and inside it the row wears its wake date, not an SLA. */
   it("folds the snoozed lane by default and lists its tickets with their wake date", () => {
     const wake = Date.now() + 3 * 24 * HOUR;
+    data.schedules = [schedule()];
     queue({
       active: [ticket("AK-1")],
       snoozed: [ticket("AK-9", { snoozedUntilMs: wake, slaBreachMs: Date.now() + HOUR })],
     });
     render(<TriageSection />);
 
-    const lane = screen.getByRole("button", { name: "Expand snoozed tickets" });
+    const lane = screen.getByRole("button", { name: "Expand snoozed tickets for Santree" });
     expect(lane).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("AK-9")).toBeNull();
 
@@ -277,17 +283,87 @@ describe("TriageSection", () => {
     );
   });
 
-  /** A team tag on every row says nothing until there are two teams to tell
-   *  apart. */
-  it("tags rows with their team only when the queue spans more than one", () => {
-    queue({ active: [ticket("AK-1", { team: "SAN" })] });
-    const { rerender } = render(<TriageSection />);
-    expect(screen.queryByText("SAN")).toBeNull();
+  /** From two teams up the section is organised by team: each ticket hangs
+   *  under its team's row, in the order the schedules came — and a row with
+   *  nothing under it is still drawn, since a rotation you are in is worth a
+   *  line either way. The rows keep the section's gutter: no indent. */
+  it("hangs each ticket under its team's row, and keeps an empty row", () => {
+    data.schedules = [
+      schedule(),
+      schedule({ team: "Messaging", teamKey: "MSG", scheduleName: "MSG triage" }),
+      schedule({ team: "Ops", teamKey: "OPS", scheduleName: "OPS triage" }),
+    ];
+    queue({ active: [ticket("MS-2", { team: "MSG" }), ticket("AK-1", { team: "SAN" })] });
+    render(<TriageSection />);
 
+    // Santree's row, its ticket, then Messaging's row and its ticket, then
+    // the empty Ops row.
+    const [santree, ak1, messaging, ms2, ops] = ["Santree", "AK-1", "Messaging", "MS-2", "Ops"].map(
+      (text) => screen.getByText(text),
+    );
+    const precedes = (a: Element, b: Element) =>
+      !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(precedes(santree, ak1)).toBe(true);
+    expect(precedes(ak1, messaging)).toBe(true);
+    expect(precedes(messaging, ms2)).toBe(true);
+    expect(precedes(ms2, ops)).toBe(true);
+    // The row counts its own queue; the header counts the whole.
+    expect(screen.getByText("Santree").parentElement).toHaveTextContent("1");
+    // No team tag on the tickets: the row already names the team.
+    expect(screen.queryByText("SAN")).toBeNull();
+    expect(screen.queryByText("MSG")).toBeNull();
+    // No indent either: a ticket sits where it sits with one team.
+    expect((card("AK-1") as HTMLElement).style.marginLeft).toBe("10px");
+  });
+
+  /** Each team's row folds its own tickets and remembers it; its chip opens
+   *  that team's schedule without folding anything. */
+  it("folds a team from its row, and opens its schedule from the chip", () => {
+    data.schedules = [
+      schedule(),
+      schedule({ team: "Messaging", teamKey: "MSG", scheduleName: "MSG triage" }),
+    ];
     queue({ active: [ticket("AK-1", { team: "SAN" }), ticket("MS-2", { team: "MSG" })] });
-    rerender(<TriageSection />);
-    expect(screen.getByText("SAN")).toBeInTheDocument();
+    render(<TriageSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse Santree" }));
+    expect(screen.queryByText("AK-1")).toBeNull();
+    expect(screen.getByText("MS-2")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Expand Santree" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Show the Messaging triage rotation" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("MSG triage");
+    expect(screen.getByText("MS-2")).toBeInTheDocument();
+  });
+
+  /** The schedule read can land after the queue's: a ticket whose team has no
+   *  row yet still hangs under its key, rather than nowhere. */
+  it("heads a ticket whose team has no schedule with the team's key", () => {
+    data.schedules = [schedule()];
+    queue({ active: [ticket("AK-1", { team: "SAN" }), ticket("MS-2", { team: "MSG" })] });
+    render(<TriageSection />);
     expect(screen.getByText("MSG")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Messaging|MSG triage rotation/ })).toBeNull();
+  });
+
+  /** One team needs no row: the section header is its header, and its
+   *  rotation is the plain one-line row. */
+  /** The only team gets a row too: it is what names the team, and what folds
+   *  it — a rotation row alone said "You" over a list with no team on it. */
+  it("draws the team row for a single team, and folds it", () => {
+    data.schedules = [schedule()];
+    queue({ active: [ticket("AK-1", { team: "SAN" })] });
+    render(<TriageSection />);
+    expect(screen.getByText("Santree")).toBeInTheDocument();
+    expect(screen.getByText("Sam Ortiz")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse Santree" }));
+    expect(screen.queryByText("AK-1")).toBeNull();
+    // The fold outlives a remount: it is a preference, not view state.
+    expect(localStorage.getItem("santree.shell.triage.foldedTeams")).toContain("SAN");
   });
 
   /** An investigation hangs under its ticket the way a worktree's agents hang
@@ -337,11 +413,14 @@ describe("TriageSection", () => {
       data.schedules = [schedule()];
       render(<TriageSection />);
 
-      expect(screen.getByText("Aug 27 – Sep 3")).toBeInTheDocument();
+      // The hand-off date rides on the chip's hover text; the row is the team's.
+      expect(
+        screen.getByRole("button", { name: "Show the Santree triage rotation" }),
+      ).toHaveAttribute("title", expect.stringContaining("Aug 27 – Sep 3"));
       expect(screen.queryByText("Sep 3 – Sep 10")).toBeNull();
       expect(screen.queryByRole("dialog")).toBeNull();
 
-      fireEvent.click(screen.getByRole("button", { name: "Show the SAN triage rotation" }));
+      fireEvent.click(screen.getByRole("button", { name: "Show the Santree triage rotation" }));
       const dialog = screen.getByRole("dialog", { name: "Sam Ortiz is on triage" });
       expect(dialog).toHaveTextContent("SAN triage");
       expect(dialog).toHaveTextContent("Sep 3 – Sep 10");
@@ -354,15 +433,28 @@ describe("TriageSection", () => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
 
-    it("names the team only when more than one rotation is on screen", () => {
-      data.schedules = [schedule()];
+    /** A team you hold a ticket on but whose rotation you are not in still
+     *  gets a card — whose rotation it is, or that there is none — and a team
+     *  with no rotation opens no dialog: there is no schedule to show. */
+    it("says a team without a rotation has none, and opens nothing for it", () => {
+      data.schedules = [
+        schedule({ team: "Design", teamKey: "DES", currentName: null, shifts: [] }),
+      ];
+      queue({ active: [ticket("DES-4", { team: "DES" })] });
       const { rerender } = render(<TriageSection />);
-      expect(screen.queryByText("SAN")).toBeNull();
 
-      data.schedules = [schedule(), schedule({ team: "MSG", scheduleName: "MSG triage" })];
+      expect(screen.getByText("Design")).toBeInTheDocument();
+      expect(screen.getByText("no rotation")).toBeInTheDocument();
+      expect(screen.queryByText("uncovered")).toBeNull();
+      expect(screen.queryByRole("button", { name: /triage rotation/ })).toBeNull();
+
+      // Beside a team with a rotation, only that team's chip is a button.
+      data.schedules = [schedule(), ...data.schedules];
       rerender(<TriageSection />);
-      expect(screen.getByText("SAN")).toBeInTheDocument();
-      expect(screen.getByText("MSG")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Show the Design triage rotation" })).toBeNull();
+      expect(
+        screen.getByRole("button", { name: "Show the Santree triage rotation" }),
+      ).toBeInTheDocument();
     });
   });
 
@@ -397,7 +489,7 @@ describe("TriageSection", () => {
     it("wakes a snoozed ticket instead", () => {
       queue({ snoozed: [ticket("AK-2", { snoozedUntilMs: Date.now() + 3 * HOUR })] });
       render(<TriageSection />);
-      fireEvent.click(screen.getByRole("button", { name: "Expand snoozed tickets" }));
+      fireEvent.click(screen.getByRole("button", { name: /Expand snoozed tickets/ }));
       fireEvent.contextMenu(card("AK-2") as HTMLElement);
       expect(rows()).toContain("Wake up now");
       expect(rows()).not.toContain("Snooze for a week");

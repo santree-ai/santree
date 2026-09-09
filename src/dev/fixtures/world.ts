@@ -401,6 +401,19 @@ const SEEDS: Record<string, TicketSeed[]> = {
 
 const seedsOf = (repo: string) => SEEDS[repo] ?? [];
 
+/** The company's Linear teams, by key — the prefix every ticket id carries. */
+const TEAMS: Record<string, string> = {
+  QK: "QuackStack",
+  INF: "Pond Infra",
+  BK: "Beak",
+};
+
+/** A ticket's team, read off its id the way the backend reads it. */
+const teamOf = (id: string): Task["team"] => {
+  const key = id.slice(0, id.indexOf("-"));
+  return { key, name: TEAMS[key] ?? null };
+};
+
 function toTask(seed: TicketSeed, all: TicketSeed[], now: number): Task {
   const done = new Set(all.filter((t) => t.status === "Done").map((t) => t.id));
   const blockedBy = (seed.blockedBy ?? []).filter((id) => !done.has(id));
@@ -409,6 +422,7 @@ function toTask(seed: TicketSeed, all: TicketSeed[], now: number): Task {
     id: seed.id,
     title: seed.title,
     priority: seed.priority,
+    team: teamOf(seed.id),
     estimate: seed.estimate ?? null,
     cycle: seed.inCycle ? cycle(now) : null,
     dueDate: seed.dueDays === undefined ? null : dateIn(now, seed.dueDays),
@@ -1290,7 +1304,7 @@ export const triageTickets = (repo: string, now: number): TriageTicket[] =>
         id: t.id,
         title: t.title,
         priority: t.priority,
-        team: "QuackStack",
+        team: "QK",
         slaBreachMs: now + t.slaMs,
         snoozedUntilMs: t.snoozeMs === undefined ? null : now + t.snoozeMs,
         mine: t.mine,
@@ -1348,7 +1362,8 @@ export function triageSchedule(repo: string, now: number): TriageSchedule[] {
   });
   return [
     {
-      team: "QuackStack",
+      team: TEAMS.QK,
+      teamKey: "QK",
       scheduleName: "Pond duty",
       currentName: PEOPLE.ada,
       currentAvatarUrl: avatar(PEOPLE.ada),

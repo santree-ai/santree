@@ -144,6 +144,121 @@ describe("buildTicketGroups", () => {
     expect(summary).toMatchObject({ ready: 1, blocked: 1 });
   });
 
+  describe("teams", () => {
+    const team = (key: string, name: string | null = null) => ({ team: { key, name } });
+
+    /** The switcher's entries are tallied over every row, in name order, with
+     *  the name taken from whichever row carried one — a blocker knows only
+     *  its key. */
+    it("lists every team on the page by name, with a count each", () => {
+      const { teams } = fold({
+        repos: ["one"],
+        tasks: new Map([
+          [
+            "one",
+            [
+              task("MS-1", "Alpha", team("MSG", "Messaging")),
+              task("AK-1", "Alpha", team("AK")),
+              task("AK-2", "Beta", team("AK", "App")),
+              task("MS-2", "Beta", team("MSG")),
+            ],
+          ],
+        ]),
+      });
+      expect(teams).toEqual([
+        { key: "AK", name: "App", count: 2 },
+        { key: "MSG", name: "Messaging", count: 2 },
+      ]);
+    });
+
+    /** "All": a team's groups sit together, teams in the switcher's order, and
+     *  a project spanning two teams is one group under each. */
+    it("orders the groups by team, splitting a project that spans two", () => {
+      const { groups, picked } = fold({
+        repos: ["one"],
+        tasks: new Map([
+          [
+            "one",
+            [
+              task("MS-1", "Alpha", team("MSG", "Messaging")),
+              task("AK-1", "Alpha", team("AK", "App")),
+              task("MS-2", "Beta", team("MSG", "Messaging")),
+              task("X-1", "Alpha"),
+            ],
+          ],
+        ]),
+      });
+      expect(picked).toEqual([]);
+      expect(groups.map((g) => [g.team?.key ?? null, g.project])).toEqual([
+        ["AK", "Alpha"],
+        ["MSG", "Alpha"],
+        ["MSG", "Beta"],
+        [null, "Alpha"],
+      ]);
+      expect(groups[1].team).toEqual({ key: "MSG", name: "Messaging" });
+    });
+
+    it("keeps only the picked teams' rows, and tallies the others all the same", () => {
+      const { groups, teams, picked, summary } = fold({
+        repos: ["one"],
+        tasks: new Map([
+          [
+            "one",
+            [
+              task("MS-1", "Alpha", team("MSG", "Messaging")),
+              task("AK-1", "Alpha", team("AK", "App")),
+              task("AK-2", "Beta", team("AK", "App")),
+            ],
+          ],
+        ]),
+        teams: ["MSG"],
+      });
+      expect(picked).toEqual(["MSG"]);
+      expect(groups.map((g) => g.milestones.flatMap((m) => m.items.map((r) => r.task.id)))).toEqual(
+        [["MS-1"]],
+      );
+      expect(summary).toMatchObject({ total: 1, projects: 1 });
+      expect(teams.map((t) => [t.key, t.count])).toEqual([
+        ["AK", 2],
+        ["MSG", 1],
+      ]);
+    });
+
+    /** The pick outlives the tickets that made it: a stored team with nothing
+     *  on the page shows every team, not an empty page. */
+    it("falls back to every team when the pick names none on the page", () => {
+      const { groups, picked } = fold({
+        repos: ["one"],
+        tasks: new Map([["one", [task("AK-1", "Alpha", team("AK", "App"))]]]),
+        teams: ["MSG"],
+      });
+      expect(picked).toEqual([]);
+      expect(groups).toHaveLength(1);
+    });
+
+    /** The pick is a set: two of three teams show, in team order, the third
+     *  gone; a picked key with no rows drops out and the rest still applies. */
+    it("shows any set of teams together, dropping a picked key that has no rows", () => {
+      const rows = new Map([
+        [
+          "one",
+          [
+            task("MS-1", "Alpha", team("MSG", "Messaging")),
+            task("AK-1", "Alpha", team("AK", "App")),
+            task("OP-1", "Beta", team("OPS", "Ops")),
+          ],
+        ],
+      ]);
+      const two = fold({ repos: ["one"], tasks: rows, teams: ["OPS", "MSG"] });
+      expect(two.picked).toEqual(["OPS", "MSG"]);
+      expect(two.groups.map((g) => g.team?.key)).toEqual(["MSG", "OPS"]);
+
+      const stale = fold({ repos: ["one"], tasks: rows, teams: ["DES", "AK"] });
+      expect(stale.picked).toEqual(["AK"]);
+      expect(stale.groups.map((g) => g.team?.key)).toEqual(["AK"]);
+    });
+  });
+
   it("drops context tickets only while the actionable filter is on", () => {
     const tasks = new Map([
       ["one", [task("A-1", "Alpha"), task("A-2", "Alpha", { actionable: false })]],

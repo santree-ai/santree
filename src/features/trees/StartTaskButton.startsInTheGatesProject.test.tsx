@@ -33,6 +33,7 @@ function task(id: string): Task {
     id,
     title: `Task ${id}`,
     priority: "None",
+    team: null,
     estimate: null,
     cycle: null,
     dueDate: null,
