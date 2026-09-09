@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.8 — 2026-09-09
+
+- Starting a ticket no longer loses its agent. If you started one in a project while looking at a different one, Santree could create the worktree and then run nothing in it: no agent, no tab, nothing in Session history, and no error to say so. A launch now belongs to the project it was started for, so the workspace you happen to be watching can't cancel it.
+- An agent queued for a worktree could also be left with nowhere to run once you clicked through to a different worktree. It starts either way now.
+- A worktree being created shows itself in the sidebar. If the project or milestone it lands in was folded, it opens, and the new row is the selected one, so you can watch it being made instead of going to look for it.
+- Text size is back, after 0.1.5 removed it. Cmd and plus or minus scale the whole app, terminals included, and cmd-0 puts it back to 100%. The same control is in Settings, General, under Appearance. It works while a terminal has focus, and the numpad's own plus and minus step it too.
+
 ## 0.1.7 — 2026-09-08
 
 - Send your logs in one press. Settings → General → Diagnostics writes every Santree log, plus the version and system it ran on, into a single text file in your downloads folder, and shows you the path to copy. It's what to attach when something goes wrong. The file holds project and branch names, ticket ids and file paths, so give it a read before sharing it outside your team.
