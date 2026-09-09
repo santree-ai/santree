@@ -272,67 +272,67 @@ function TicketWorkspace({
   const [rail, setRailTab] = useState<TriageRailTab>("files");
   const ready = !repoLoading && repo !== null && cwd !== null;
 
+  // A row, with the tab strip *inside* the content column rather than spanning
+  // the whole view — the same shape Trees and Reviews have. Both strips are
+  // `CHROME.subBar` tall and are meant to sit side by side on one baseline (see
+  // `CHROME`); a tab bar stretched over the rail as well pushed the rail's own
+  // strip onto a second row, so the two never lined up here.
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
-      <TriageTabBar
-        ticket={ticket}
-        tabs={gatedTabs}
-        rightCollapsed={rightCollapsed}
-        onToggleRight={onToggleRight}
-      />
-      <div className="flex min-h-0 flex-1">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className={activeAgent || showShell ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
-            <IssuePage
-              repo={orgRepo}
-              ticketId={ticket.id}
-              summary={ticket}
-              actions={
-                <InvestigateButton
-                  agentKind={agentKind}
-                  onClick={() => investigateWith(agentKind)}
-                />
-              }
-            />
-          </div>
-          {activeAgent &&
-            (ready ? (
-              <InvestigatePane
-                key={`${ticket.id}:${activeAgent}`}
-                repo={repo}
-                ticketId={ticket.id}
-                cwd={cwd}
-                agentKind={activeAgent}
-                hasStartedSession={tabs.hasStored(activeAgent)}
-                // A plain shell (no repo path) has nothing to resume when it
-                // exits, so it falls back to the ticket; a real investigation
-                // keeps its tab.
-                onExited={() => select("linear")}
-              />
-            ) : (
-              <Attaching />
-            ))}
-          {showShell &&
-            (ready ? (
-              <TriageTerminal ticketId={ticket.id} cwd={cwd} onExited={closeShell} />
-            ) : (
-              <Attaching />
-            ))}
-        </div>
-        <TriageSidePanel
-          repo={repo}
-          attached={attached}
-          defaultRepo={defaultRepo}
-          onPickProject={pickProject}
-          onDetach={() => setRepo(null)}
-          tab={rail}
-          onTabChange={setRailTab}
-          collapsed={rightCollapsed}
-          onToggle={onToggleRight}
-          width={rightWidth}
-          onWidth={onRightWidth}
+    <div className="flex min-h-0 min-w-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
+        <TriageTabBar
+          ticket={ticket}
+          tabs={gatedTabs}
+          rightCollapsed={rightCollapsed}
+          onToggleRight={onToggleRight}
         />
+        <div className={activeAgent || showShell ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
+          <IssuePage
+            repo={orgRepo}
+            ticketId={ticket.id}
+            summary={ticket}
+            actions={
+              <InvestigateButton agentKind={agentKind} onClick={() => investigateWith(agentKind)} />
+            }
+          />
+        </div>
+        {activeAgent &&
+          (ready ? (
+            <InvestigatePane
+              key={`${ticket.id}:${activeAgent}`}
+              repo={repo}
+              ticketId={ticket.id}
+              cwd={cwd}
+              agentKind={activeAgent}
+              hasStartedSession={tabs.hasStored(activeAgent)}
+              // A plain shell (no repo path) has nothing to resume when it
+              // exits, so it falls back to the ticket; a real investigation
+              // keeps its tab.
+              onExited={() => select("linear")}
+            />
+          ) : (
+            <Attaching />
+          ))}
+        {showShell &&
+          (ready ? (
+            <TriageTerminal ticketId={ticket.id} cwd={cwd} onExited={closeShell} />
+          ) : (
+            <Attaching />
+          ))}
       </div>
+      <TriageSidePanel
+        repo={repo}
+        attached={attached}
+        defaultRepo={defaultRepo}
+        onPickProject={pickProject}
+        onDetach={() => setRepo(null)}
+        tab={rail}
+        onTabChange={setRailTab}
+        collapsed={rightCollapsed}
+        onToggle={onToggleRight}
+        width={rightWidth}
+        onWidth={onRightWidth}
+      />
     </div>
   );
 }

@@ -211,6 +211,27 @@ describe("TriageView", () => {
     expect(state.openAgent).toHaveBeenCalledWith("Codex");
   });
 
+  /** The main tab strip and the rail's own icon strip are both `CHROME.subBar`
+   *  tall and are meant to sit side by side on one baseline — see `CHROME`,
+   *  which says so. That only holds if they are siblings in a row. Triage put
+   *  the strip in a column *above* the row that held the rail, so the strip
+   *  stretched across the rail as well and pushed the rail's icons onto a
+   *  second line; the two never lined up, unlike Trees and Reviews.
+   *
+   *  Asserted structurally rather than visually because jsdom computes no
+   *  layout — and structure is what was actually wrong: in the broken shape the
+   *  strip's own parent contains the rail. */
+  it("keeps the tab strip beside the rail, not stretched over it", () => {
+    state.search = "AK-1";
+    render(<TriageView />);
+    const strip = screen.getByTestId("tab-bar");
+    const rail = screen.getByTestId("rail");
+    // The strip's column is the content area only — the rail is outside it…
+    expect(strip.parentElement).not.toContainElement(rail);
+    // …and beside it, in the row they share.
+    expect(strip.parentElement?.parentElement).toContainElement(rail);
+  });
+
   /** A pane that spawned before the project's path was known would spawn a
    *  cwd-less shell, and the orchestrator would then hand every later mount
    *  that same pane instead of the agent. */
