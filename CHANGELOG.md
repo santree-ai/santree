@@ -7,6 +7,11 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.7 — 2026-09-08
+
+- Send your logs in one press. Settings → General → Diagnostics writes every Santree log, plus the version and system it ran on, into a single text file in your downloads folder, and shows you the path to copy. It's what to attach when something goes wrong. The file holds project and branch names, ticket ids and file paths, so give it a read before sharing it outside your team.
+- In Triage, the panel on the right lines up with the tabs again instead of starting a row below them.
+
 ## 0.1.6 — 2026-09-05
 
 - Prompts can be shared through the repo. A project's prompts live in `.santree/prompts/<name>.njk`, committed with the code, so everyone who clones it gets the same triage, work and review prompts on the next pull. Settings → Prompts has a Project / Personal switch for each project: Project is the shared file, Personal is yours alone, on top of it. Santree now writes a `.santree/.gitignore` so those files can be committed while worktrees stay out of git.
