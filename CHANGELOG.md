@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.10 — 2026-09-09
+
+- Triage lets you choose which teams it shows. Settings, Triage, Teams has three rules you can combine, teams whose rotation you are in, teams that assigned you a triage ticket, and teams you belong to, plus a list of every team in your Linear workspace where any team can be set to always or never show. The sidebar's Triage menu has a shortcut to it.
+- Mine or All is now per team. The switch on the Triage header sets the default, and hovering a team's row shows a switch for that team alone, so one team can show its whole inbox while another shows only your tickets. A team that differs from the default keeps its switch visible.
+- A team that assigned you a ticket no longer hides the rest of its inbox: set it to All and the whole inbox shows.
+- A pull request's approvals now appear in its conversation, with who approved and when, and requested changes likewise. Before, an approval without a comment was left out entirely.
+
 ## 0.1.9 — 2026-09-09
 
 - Tickets knows your teams. When your tickets span more than one team, a menu on the Tickets strip shows every team with its count, and you can show all of them, one, or any set. With every team showing, the list groups by team first. The graph and the ticket panel follow the same pick.
