@@ -109,7 +109,17 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
 
   const [launchAgents, setLaunchAgents] = useState<ReadonlyMap<string, QueuedLaunch>>(new Map());
   const [setupRuns, setSetupRuns] = useState<Record<string, SetupRun>>({});
-  const [visibleWorktree, setVisibleWorktree] = useState<VisibleWorktree | null>(null);
+  const [visibleWorktree, setVisibleWorktreeState] = useState<VisibleWorktree | null>(null);
+  // Idempotent: Trees publishes the selection both as it writes it and again from
+  // the route it lands on (see its `select`), so the same answer arrives twice.
+  // Re-seating an equal value would re-render every launch host for nothing.
+  const setVisibleWorktree = useCallback(
+    (next: VisibleWorktree | null) =>
+      setVisibleWorktreeState((prev) =>
+        prev?.repo === next?.repo && prev?.id === next?.id ? prev : next,
+      ),
+    [],
+  );
 
   // Read from the stream callbacks, which outlive the render that created them (a
   // run keeps streaming across re-renders and route changes).
@@ -237,6 +247,7 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
       requestAgentLaunch,
       clearAgentLaunch,
       visibleWorktree,
+      setVisibleWorktree,
     ],
   );
 

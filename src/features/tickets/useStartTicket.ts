@@ -68,7 +68,7 @@ export function useStartTicket(): (target: StartTarget, opts?: { background?: bo
         requestBackgroundLaunch(target.repo, target.id);
         toast.success(`Running ${target.id} in the background…`);
       } else {
-        requestTreeLaunch(target.id);
+        requestTreeLaunch(target.repo, target.id);
         navigate({ to: "/trees", search: { project: target.repo, tree: target.id } });
       }
       create(

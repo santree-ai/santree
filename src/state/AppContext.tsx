@@ -77,10 +77,10 @@ interface AppUi {
   setShortcutsOpen: (open: boolean) => void;
   toggleShortcuts: () => void;
 
-  /** A worktree the Trees tab should open and launch the agent in — set by the
-   *  Issues "launch" action before navigating to Trees, consumed once there. */
-  treeLaunch: string | null;
-  requestTreeLaunch: (id: string) => void;
+  /** A worktree the Trees workspace should open and launch the agent in — set by
+   *  a start action before navigating to Trees, consumed once there. */
+  treeLaunch: TreeLaunch | null;
+  requestTreeLaunch: (repo: string, id: string) => void;
   consumeTreeLaunch: () => void;
 
   /** Tasks whose worktree is being created right now. The Trees tab merges these
@@ -233,6 +233,21 @@ export interface TriageFocus {
   agent: AgentKind | null;
 }
 
+/**
+ * A ticket asked to start *here* — open its workspace and run the agent in it.
+ *
+ * It carries its project for the same reason every other request that outlives
+ * its view does (`PendingLaunch.repo`, `BackgroundLaunch.repo`, `TreeFocus.repo`):
+ * the workspace that honours it is scoped to one project and can only see that
+ * project's worktrees. Named by id alone, a launch into project B looked to
+ * project A's workspace like a launch of its own whose worktree had vanished —
+ * so it cancelled it, and the ticket's agent never ran anywhere.
+ */
+export interface TreeLaunch {
+  repo: string;
+  id: string;
+}
+
 /** An agent asked to start off-screen — in a project the user may not be
  *  looking at, which is the whole point of the request. */
 export interface BackgroundLaunch {
@@ -330,7 +345,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
     return stored >= SIDEBAR.min && stored <= SIDEBAR.max ? stored : SIDEBAR.default;
   });
-  const [treeLaunch, setTreeLaunch] = useState<string | null>(null);
+  const [treeLaunch, setTreeLaunch] = useState<TreeLaunch | null>(null);
   const [issueFocus, setIssueFocus] = useState<string | null>(null);
   const [treeFocus, setTreeFocus] = useState<TreeFocus | null>(null);
   const [focusedAgent, setFocusedAgentState] = useState<FocusedAgent | null>(null);
@@ -451,6 +466,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const toggleCommandPalette = useCallback(() => setCommandPaletteOpen((o) => !o), []);
   const consumeIssueFocus = useCallback(() => setIssueFocus(null), []);
   const consumeTreeLaunch = useCallback(() => setTreeLaunch(null), []);
+  const requestTreeLaunch = useCallback(
+    (repo: string, id: string) => setTreeLaunch({ repo, id }),
+    [],
+  );
   const consumeTreeFocus = useCallback(() => setTreeFocus(null), []);
   // Defaults to the ticket, which is what "just open this worktree" has always
   // meant; a caller that means something more specific — this pane, this tab —
@@ -537,7 +556,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setShortcutsOpen,
       toggleShortcuts,
       treeLaunch,
-      requestTreeLaunch: setTreeLaunch,
+      requestTreeLaunch,
       consumeTreeLaunch,
       focusedAgent,
       setFocusedAgent,
@@ -592,6 +611,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       toggleShortcuts,
       toggleCommandPalette,
       consumeIssueFocus,
+      requestTreeLaunch,
       consumeTreeLaunch,
       consumeTreeFocus,
       requestTreeFocus,

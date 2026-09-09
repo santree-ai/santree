@@ -677,7 +677,7 @@ export function IssuesProvider({
         })),
       );
       if (bulk) for (const { repo, task } of targets) requestBackgroundLaunch(repo, task.id);
-      else requestTreeLaunch(targets[0].task.id);
+      else requestTreeLaunch(targets[0].repo, targets[0].task.id);
       navigate({
         to: "/trees",
         search: bulk ? {} : { project: targets[0].repo, tree: targets[0].task.id },
@@ -825,7 +825,7 @@ export function IssuesProvider({
         id,
         `Starting ${id}`,
         (t, repo) => {
-          requestTreeLaunch(t.id);
+          requestTreeLaunch(repo, t.id);
           navigate({ to: "/trees", search: { project: repo, tree: t.id } });
         },
         false,

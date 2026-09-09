@@ -83,7 +83,7 @@ export function StartTaskButton({
       const agent = (workAgent as AgentKind | null) ?? settings?.defaultAgent ?? "Claude";
       const project = t.project === NO_PROJECT ? null : t.project;
       addPendingLaunches([{ repo, id: t.id, title: t.title, project, agent }]);
-      requestTreeLaunch(t.id);
+      requestTreeLaunch(repo, t.id);
       // Open the workspace the ticket is landing in before the create resolves —
       // it may not be the one on screen, and the pending row is there waiting.
       navigate({ to: "/trees", search: { project: repo, tree: t.id } });

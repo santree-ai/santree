@@ -773,11 +773,14 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const { mutate: renameTabRow } = useRenameWorktreeTab(repo);
   const { mutate: removeTabRow } = useRemoveWorktreeTab(repo);
 
-  // The ONLY way `activeId` is written. It also publishes the selection to
-  // `AgentRuns`, in the same batch — the off-screen launcher skips the worktree
-  // Trees is showing, because that worktree's visible pane already hosts its
-  // terminal and two hosts for one session would fight over the xterm overlay.
-  // Splitting these two writes would open a window where both mount.
+  // This view's own way of writing the selection — not the only one, since the
+  // selection *is* the url (see `activeId`) and everything outside this view
+  // reaches it by navigating. It also publishes to `AgentRuns` in the same batch
+  // — the off-screen launcher skips the worktree Trees is showing, because that
+  // worktree's visible pane already hosts its terminal and two hosts for one
+  // session would fight over the xterm overlay. Splitting these two writes would
+  // open a window where both mount; the effect below is the catch-up for the
+  // selections that never come through here, and costs nothing when they do.
   // `replace`, not a push: picking a worktree moves within one destination, and
   // a Back that walks the last twenty worktrees instead of leaving Trees is not
   // what the gesture means. Switching *destinations* still pushes normally.
@@ -793,19 +796,23 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     [repo, navigate, setVisibleWorktree],
   );
 
-  // `select` is what normally keeps the url and AgentRuns' visible worktree in
-  // step, but a selection the route arrived with (a reload, a link, a sidebar
-  // click) never passes through it — publish it once on mount, or the off-screen
-  // launcher never learns Trees is already showing that worktree and mounts a
-  // second host for its session, two of which fight over the xterm overlay.
-  const restored = useRef({ repo, id: activeId });
+  // `select` publishes the selection as it writes it, which is what closes the
+  // window where both hosts could mount — but it is not the only writer. The url
+  // is the selection now (`activeId` reads straight off the route), and a sidebar
+  // click, a launch's own navigate, a link and a reload all reach it without
+  // passing through `select`. Publishing only at mount left the launcher believing
+  // Trees still showed the worktree that was open before the last sidebar click:
+  // it skips *that* worktree's queued launch — whose pane is long gone, so nobody
+  // hosts it and the agent never spawns — and gives the one actually on screen a
+  // second host. So publish whatever the route says, every time it changes; the
+  // setter ignores an answer it already holds.
   useEffect(() => {
-    setVisibleWorktree(restored.current.id ? restored.current : null);
+    setVisibleWorktree(activeId ? { repo, id: activeId } : null);
     // Trees no longer has a worktree on screen — release it, so a launch queued for
     // it (a task the user started and then navigated away from) is picked up by the
     // off-screen launcher and actually runs.
     return () => setVisibleWorktree(null);
-  }, [setVisibleWorktree]);
+  }, [repo, activeId, setVisibleWorktree]);
 
   // Read at call time rather than captured, so `startAgent` keeps a stable
   // identity: the effects that depend on it would otherwise re-run on every
@@ -892,13 +899,27 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // worktree — is still focused fresh.
   const focusedLaunchRef = useRef<string | null>(null);
 
-  // Consume a cross-view launch request (from the Issues "launch" action). Land
-  // on the task as soon as its optimistic placeholder appears so its "Creating
-  // workspace…" state is visible; only begin the agent once the *real* worktree
-  // exists (the placeholder has no branch/path yet).
+  // Consume a cross-view launch request (from a ticket's Run, "Start a task", the
+  // launch queue). Land on the task as soon as its optimistic placeholder appears
+  // so its "Creating workspace…" state is visible; only begin the agent once the
+  // *real* worktree exists (the placeholder has no branch/path yet).
   useEffect(() => {
     if (!treeLaunch) return;
-    if (isTreeLaunchDead(treeLaunch, worktrees, pendingLaunches)) {
+    // Only this project's launches are this workspace's to run — or to cancel.
+    // Every read here is scoped to `repo`, so a launch into another project looks
+    // exactly like one of ours whose worktree never arrived; the liveness check
+    // below would then declare it dead and the ticket's agent would never run
+    // anywhere. Reported as "the worktree is created but nothing starts in it":
+    // the launch was started while the workspace was open on another project, and
+    // the register that keeps it alive is cleared cross-repo by the sidebar the
+    // moment the real worktree lands. Left alone, the launch waits for the
+    // workspace it named.
+    if (treeLaunch.repo !== repo) return;
+    const launchId = treeLaunch.id;
+    // This project's placeholders, for the same reason: the register is app-wide,
+    // and a launch is only alive here if this project is still making it.
+    const ours = pendingLaunches.filter((l) => l.repo === repo);
+    if (isTreeLaunchDead(launchId, worktrees, ours)) {
       // createWorktree failed (or the pending launch was otherwise dropped)
       // before a real worktree could land for this id — the launch is dead.
       // Clear it so a worktree that appears later for the same id (e.g. a
@@ -908,20 +929,20 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       focusedLaunchRef.current = null;
       return;
     }
-    const wt = worktrees.find((w) => w.id === treeLaunch);
+    const wt = worktrees.find((w) => w.id === launchId);
     if (!wt) return;
-    if (focusedLaunchRef.current !== treeLaunch) {
-      focusedLaunchRef.current = treeLaunch;
-      select(treeLaunch);
+    if (focusedLaunchRef.current !== launchId) {
+      focusedLaunchRef.current = launchId;
+      select(launchId);
     }
     // Nothing to pre-arm while the worktree is still being created: it has no
     // tabs yet, so nothing can mount and spawn a bare shell ahead of setup. The
     // run begins — and mints its tab — once the real worktree exists.
     if (wt.pending) return;
-    startAgent(treeLaunch, { agent: wt.agent });
+    startAgent(launchId, { agent: wt.agent });
     consumeTreeLaunch();
     focusedLaunchRef.current = null;
-  }, [treeLaunch, worktrees, pendingLaunches, consumeTreeLaunch, startAgent, select]);
+  }, [treeLaunch, repo, worktrees, pendingLaunches, consumeTreeLaunch, startAgent, select]);
 
   // Consume a cross-view "open" request (from the Issues graph/"Open in Trees"):
   // select the existing worktree and open the ticket beside it — no agent start,
