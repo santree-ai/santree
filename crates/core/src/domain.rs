@@ -779,6 +779,21 @@ pub struct PrDraft {
     pub base_branch: String,
 }
 
+/// Where an exported diagnostics bundle landed, so the UI can name it rather
+/// than leave the user hunting for a file it just wrote.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LogExport {
+    /// Absolute path of the written file.
+    pub path: String,
+    /// `f64` for the same reason the usage counts are — specta cannot export a
+    /// 64-bit integer, so the frontend reads it as `number | null`.
+    pub bytes: f64,
+    /// The logs it actually carries — a machine with no hook failures has no
+    /// hook-error log, and saying so beats an empty section.
+    pub files: Vec<String>,
+}
+
 /// The result of creating a PR: its number and web URL (to open in the browser).
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]

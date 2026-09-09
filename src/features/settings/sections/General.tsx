@@ -6,6 +6,7 @@
 import { CONFIRM_ON_QUIT_KEY, useSetSetting, useSetting } from "../../../lib/queries";
 import { Heading, ToggleRow } from "../widgets";
 import { AppearanceSection } from "./Appearance";
+import { DiagnosticsSection } from "./Diagnostics";
 import { UpdatesSection } from "./Updates";
 
 export function GeneralSection() {
@@ -41,6 +42,13 @@ export function GeneralSection() {
         <div className="mt-0.5 text-[11.5px] text-muted-3">Release channel and app version.</div>
       </div>
       <UpdatesSection embedded />
+      <div className="mt-5 mb-2.5 px-1">
+        <div className="text-[13px] font-semibold text-fg-bright">Diagnostics</div>
+        <div className="mt-0.5 text-[11.5px] text-muted-3">
+          What to send when something goes wrong.
+        </div>
+      </div>
+      <DiagnosticsSection />
     </>
   );
 }

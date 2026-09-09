@@ -21,8 +21,8 @@ use santree_core::{
         AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
         ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
         EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget, GithubStatus, LegacyCliMigration,
-        LinearApiBudget, LinearOrg, LinearStatus, MergeQueueView, NewInlineComment, NewPr,
-        NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptLayer,
+        LinearApiBudget, LinearOrg, LinearStatus, LogExport, MergeQueueView, NewInlineComment,
+        NewPr, NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptLayer,
         PromptPreview, PromptWorkItemSample, Repo, RepoBranch, ResourceUsage, ReviewBrief,
         ReviewCheckout, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr, ReviewPublishOutcome,
         ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail, SessionState,
@@ -37,6 +37,7 @@ use crate::codex_cli;
 use crate::codex_rollouts;
 use crate::commit_draft;
 use crate::db::Db;
+use crate::diagnostics;
 use crate::english_tutor;
 use crate::error::CmdResult;
 use crate::git_watch::WorktreeWatcher;
@@ -2661,6 +2662,60 @@ pub async fn linear_list_issues(repo: String, db: State<'_, Db>) -> CmdResult<Ve
             Err(e.into())
         }
     }
+}
+
+/// Write every santree log into one file the user can attach to a bug report,
+/// and say where it went.
+///
+/// **The destination is chosen here, not passed in.** Every other IPC value that
+/// becomes a path is validated against something the app already knows (see
+/// `env_file_vars`, which checks its argument against the files the user added
+/// in Settings → Environment). A *write* destination has no such allowlist, and
+/// a caller-supplied one would make this "write a few MB anywhere you like" —
+/// so the command resolves the OS download directory itself and there is no
+/// caller path to validate. The trade is that the user does not pick the folder;
+/// the returned path is what the UI shows them instead.
+#[tauri::command]
+#[specta::specta]
+pub async fn export_logs(app: AppHandle) -> CmdResult<LogExport> {
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|_| anyhow::anyhow!("the log directory is unavailable"))?;
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| anyhow::anyhow!("the app data directory is unavailable"))?;
+    let dest_dir = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().home_dir())
+        .map_err(|_| anyhow::anyhow!("no folder to save into"))?;
+    let version = app.package_info().version.to_string();
+    let now = chrono::Local::now().to_rfc3339();
+
+    let export = tokio::task::spawn_blocking(move || {
+        let dest = dest_dir.join(diagnostics::file_name(&now));
+        diagnostics::write_bundle(
+            &dest,
+            &version,
+            &now,
+            &diagnostics::log_paths(&log_dir, &data_dir),
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("export panicked: {e}"))??;
+
+    log::info!(
+        "exported {} log file(s) to {}",
+        export.files.len(),
+        export.path.display()
+    );
+    Ok(LogExport {
+        path: export.path.display().to_string(),
+        bytes: export.bytes as f64,
+        files: export.files,
+    })
 }
 
 /// Forget every Linear read cache, so the refetch the frontend issues right

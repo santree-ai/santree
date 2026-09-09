@@ -2189,6 +2189,17 @@ export const useCancelSetup = (repo: string) =>
     invalidate: () => [],
   });
 
+/** Write every santree log into one file the user can attach to a bug report.
+ *  The backend picks the destination (the download folder) and hands back the
+ *  path — there is no folder picker, deliberately: a caller-supplied write
+ *  destination is an IPC path with nothing to validate it against. Nothing to
+ *  invalidate; the result is a file on disk, not app state. */
+export const useExportLogs = () =>
+  useActionMutation({
+    mutationFn: () => unwrap(commands.exportLogs()),
+    invalidate: () => [],
+  });
+
 /** A bulk delete where only *some* worktrees failed. Carries the survivors so the
  *  caller can un-hide exactly those and leave the genuinely-deleted ones hidden. */
 export class BulkDeleteError extends Error {

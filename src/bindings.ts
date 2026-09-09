@@ -1096,6 +1096,20 @@ export const commands = {
 	 *  keeping — an unreadable env file isn't an error the UI should toast.
 	 */
 	envFileVars: (path: string) => __TAURI_INVOKE<string[]>("env_file_vars", { path }),
+	/**
+	 *  Write every santree log into one file the user can attach to a bug report,
+	 *  and say where it went.
+	 * 
+	 *  **The destination is chosen here, not passed in.** Every other IPC value that
+	 *  becomes a path is validated against something the app already knows (see
+	 *  `env_file_vars`, which checks its argument against the files the user added
+	 *  in Settings → Environment). A *write* destination has no such allowlist, and
+	 *  a caller-supplied one would make this "write a few MB anywhere you like" —
+	 *  so the command resolves the OS download directory itself and there is no
+	 *  caller path to validate. The trade is that the user does not pick the folder;
+	 *  the returned path is what the UI shows them instead.
+	 */
+	exportLogs: () => typedError<LogExport, CmdError>(__TAURI_INVOKE("export_logs")),
 	/**  Connection status for a repo: whether any org is connected, and which one it uses. */
 	linearAuthStatus: (repo: string) => typedError<LinearStatus, CmdError>(__TAURI_INVOKE("linear_auth_status", { repo })),
 	/**  Every connected Linear organization. */
@@ -2050,6 +2064,25 @@ export type LinearStatus = {
 	 *  read-only" are different things to say to a user.
 	 */
 	canWrite: boolean,
+};
+
+/**
+ *  Where an exported diagnostics bundle landed, so the UI can name it rather
+ *  than leave the user hunting for a file it just wrote.
+ */
+export type LogExport = {
+	/**  Absolute path of the written file. */
+	path: string,
+	/**
+	 *  `f64` for the same reason the usage counts are — specta cannot export a
+	 *  64-bit integer, so the frontend reads it as `number | null`.
+	 */
+	bytes: number | null,
+	/**
+	 *  The logs it actually carries — a machine with no hook failures has no
+	 *  hook-error log, and saying so beats an empty section.
+	 */
+	files: string[],
 };
 
 /**

@@ -17,6 +17,7 @@ mod commit_draft;
 #[cfg(test)]
 mod compliance;
 mod db;
+mod diagnostics;
 mod english_tutor;
 mod env;
 mod error;
@@ -226,6 +227,7 @@ fn specta_builder() -> AppBuilder {
             commands::create_prompt_block,
             commands::delete_prompt_block,
             commands::env_file_vars,
+            commands::export_logs,
             commands::linear_auth_status,
             commands::linear_orgs,
             commands::linear_api_budget,
