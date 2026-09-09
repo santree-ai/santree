@@ -2,11 +2,11 @@
  * Triage Investigation and Issues Work today (Plan / Review later). Per-scope —
  * app defaults or repo override. */
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
-import type { AgentKind, CodexModel } from "../../../bindings";
-import { AgentIcon } from "../../../components/icons";
-import { ChevronSelect, Skeleton, Tabs, Toggle } from "../../../components/primitives";
+import type { AgentKind, CodexModel, LinearTeam } from "../../../bindings";
+import { AgentIcon, CheckIcon, CloseIcon, PlusIcon } from "../../../components/icons";
+import { ChevronSelect, Dropdown, MENU_ITEM, Tabs, Toggle } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
 import {
   COMMIT_MESSAGE_AGENT_KEY,
@@ -26,7 +26,6 @@ import {
   REVIEW_MODEL_KEY,
   REVIEW_PERMISSION_MODE_KEY,
   TRIAGE_DEFAULT_REPO_KEY,
-  type TriageTeamRules,
   useAgents,
   useBoolSetting,
   useClaudeModels,
@@ -46,7 +45,7 @@ import {
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
 import { agentProvider } from "../../terminal/agentProvider";
-import { CardRow, Field, Heading, OverrideSelect, SELECT_CLASS, ToggleRow } from "../widgets";
+import { Field, Heading, OverrideSelect, SELECT_CLASS, ToggleRow } from "../widgets";
 import { ViewedMarksCard } from "./ViewedMarks";
 
 /** Describes one configurable workflow: its default provider and each provider's
@@ -257,45 +256,28 @@ function AppTriagePanel() {
   );
 }
 
-/** How one team stands to the rules: shown when they admit it, always, or never. */
-type TeamStanding = "rules" | "always" | "never";
-
-function standingOf(rules: TriageTeamRules, key: string): TeamStanding {
-  if (rules.hidden.includes(key)) return "never";
-  if (rules.picked.includes(key)) return "always";
-  return "rules";
-}
-
-/** Move a team between the lists: out of both, then into the one picked. */
-function withStanding(
-  rules: TriageTeamRules,
-  key: string,
-  standing: TeamStanding,
-): TriageTeamRules {
-  const picked = rules.picked.filter((k) => k !== key);
-  const hidden = rules.hidden.filter((k) => k !== key);
-  return {
-    ...rules,
-    picked: standing === "always" ? [...picked, key] : picked,
-    hidden: standing === "never" ? [...hidden, key] : hidden,
-  };
-}
-
 /**
- * Which teams Triage shows: three rules, unioned, and then every team the org
- * exposes with where it stands — by the rules, always, or never — so any team
- * can be added or taken away whatever the rules say. The list carries what you
- * are to each team (its rotation, its roster, a ticket of yours), which is what
- * the rules read, so a rule's effect is legible against the same list. The
- * backend applies these rules to the same facts (`scope_of`), so the sidebar's
- * inbox and its rows always agree with this card.
+ * Which teams Triage shows: three rules, unioned, then two lists over every
+ * team the org exposes — the teams always shown, and the teams never shown —
+ * so any team can be added or taken away whatever the rules say. Each list is
+ * its chosen teams as chips and a searchable picker to add to it; the org's
+ * whole team list is never laid out on the page (a workspace has dozens, and
+ * almost all of them are nobody's). The picker says what you are to each team
+ * (its rotation, its roster, a ticket of yours), which is what the rules read.
+ * The backend applies these rules to the same facts (`scope_of`), so the
+ * sidebar's inbox and its rows always agree with this card.
  */
 function TriageTeamsCard({ disabled }: { disabled: boolean }) {
   const repo = useTriageOrgRepo();
-  const { data: teams, isLoading } = useLinearTeams(repo);
+  const { data: teams = [] } = useLinearTeams(repo);
   const { rules, setRules } = useTriageTeamRules();
   const rule = (key: "rotation" | "assigned" | "member") => (on: boolean) =>
     setRules({ ...rules, [key]: on });
+  // A key moves between the lists, never sits in both.
+  const setList = (list: "picked" | "hidden", keys: string[]) => {
+    const other = list === "picked" ? "hidden" : "picked";
+    setRules({ ...rules, [list]: keys, [other]: rules[other].filter((k) => !keys.includes(k)) });
+  };
 
   return (
     <div className="space-y-3.5">
@@ -323,48 +305,200 @@ function TriageTeamsCard({ disabled }: { disabled: boolean }) {
         />
       </div>
       <div className="rounded-xl border border-line-2 bg-raised">
-        {isLoading && (
-          <div className="space-y-3 px-4 py-3.5" aria-hidden>
-            <Skeleton className="h-3 w-2/5" />
-            <Skeleton className="h-3 w-1/3" />
-          </div>
-        )}
-        {!isLoading && (teams ?? []).length === 0 && (
-          <div className="px-4 py-3.5 text-[11.5px] text-muted-3">
-            No teams to list. Connect Linear and pick a triage project above.
-          </div>
-        )}
-        {(teams ?? []).map((team) => {
-          const facts = [
-            team.inRotation ? "in its rotation" : team.hasRotation ? "has a rotation" : null,
-            team.member ? "member" : null,
-            team.hasAssigned ? "a ticket of yours" : null,
-          ].filter((f): f is string => f !== null);
-          return (
-            <CardRow
-              key={team.key}
-              label={`${team.name} · ${team.key}`}
-              hint={facts.length > 0 ? facts.join(" · ") : "Nothing of yours here"}
-            >
-              {(labelId) => (
-                <ChevronSelect
-                  value={standingOf(rules, team.key)}
-                  onChange={(v) => setRules(withStanding(rules, team.key, v as TeamStanding))}
-                  disabled={disabled}
-                  aria-labelledby={labelId}
-                  className={`${SELECT_CLASS} w-auto`}
-                  wrapperClassName="flex-none"
-                >
-                  <option value="rules">By the rules</option>
-                  <option value="always">Always show</option>
-                  <option value="never">Never show</option>
-                </ChevronSelect>
-              )}
-            </CardRow>
-          );
-        })}
+        <TeamListRow
+          label="Always show"
+          hint="Whatever the rules say."
+          teams={teams}
+          keys={rules.picked}
+          onChange={(keys) => setList("picked", keys)}
+          disabled={disabled}
+        />
+        <TeamListRow
+          label="Never show"
+          hint="Even when a rule admits them."
+          teams={teams}
+          keys={rules.hidden}
+          onChange={(keys) => setList("hidden", keys)}
+          disabled={disabled}
+        />
       </div>
     </div>
+  );
+}
+
+/** What you are to a team, in the picker's words — or that you are nothing to it. */
+function teamFacts(team: LinearTeam): string {
+  const facts = [
+    team.inRotation ? "in its rotation" : team.hasRotation ? "has a rotation" : null,
+    team.member ? "member" : null,
+    team.hasAssigned ? "a ticket of yours" : null,
+  ].filter((f): f is string => f !== null);
+  return facts.length > 0 ? facts.join(" · ") : "Nothing of yours here";
+}
+
+/** One of the card's two lists: its teams as chips, each with a remove, and
+ *  the picker that adds to it. A key the org no longer lists still shows, by
+ *  its key, so it can be removed. */
+function TeamListRow({
+  label,
+  hint,
+  teams,
+  keys,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  hint: string;
+  teams: LinearTeam[];
+  keys: string[];
+  onChange: (keys: string[]) => void;
+  disabled: boolean;
+}) {
+  const labelId = useId();
+  const nameOf = (key: string) => teams.find((t) => t.key === key)?.name ?? key;
+  return (
+    <div className="flex items-start gap-4 border-t border-line px-4 py-3 first:border-t-0">
+      <div className="min-w-0 flex-none basis-40">
+        <div id={labelId} className="mb-[3px] text-[12.5px] font-medium text-fg-3">
+          {label}
+        </div>
+        <div className="text-[11.5px] text-muted-3">{hint}</div>
+      </div>
+      {/* biome-ignore lint/a11y/useSemanticElements: a fieldset's own box breaks the row's flex layout; the role is all this needs. */}
+      <div
+        role="group"
+        aria-labelledby={labelId}
+        className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5"
+      >
+        {keys.length === 0 && <span className="text-[11.5px] text-muted-4">None</span>}
+        {keys.map((key) => (
+          <span
+            key={key}
+            className="flex h-6 items-center gap-1 rounded-md border border-line-2 bg-input pr-1 pl-2 text-[11.5px] text-fg-2"
+            title={key}
+          >
+            <span className="max-w-40 truncate">{nameOf(key)}</span>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onChange(keys.filter((k) => k !== key))}
+              aria-label={`Remove ${nameOf(key)}`}
+              className="flex h-4 w-4 cursor-pointer items-center justify-center rounded text-muted-4 hover:bg-hover hover:text-fg-2 disabled:cursor-default"
+            >
+              <CloseIcon size={10} />
+            </button>
+          </span>
+        ))}
+        <TeamPicker
+          label={label}
+          teams={teams}
+          chosen={keys}
+          onChange={onChange}
+          disabled={disabled}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** A searchable multi-select over the org's teams: an "Add team…" chip that
+ *  opens a menu with a filter box and one checkbox row per team, its facts
+ *  under its name. Ticking stays open, since a list is built one team at a
+ *  time; the filter is what makes forty teams navigable. */
+function TeamPicker({
+  label,
+  teams,
+  chosen,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  teams: LinearTeam[];
+  chosen: string[];
+  onChange: (keys: string[]) => void;
+  disabled: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  // Owned here, not by the menu: the filter is cleared as it closes, and
+  // `Dropdown` hands control to whoever passes `onOpenChange`.
+  const [open, setOpen] = useState(false);
+  const needle = query.trim().toLowerCase();
+  const matches = needle
+    ? teams.filter(
+        (t) => t.name.toLowerCase().includes(needle) || t.key.toLowerCase().includes(needle),
+      )
+    : teams;
+  const toggle = (key: string) =>
+    onChange(chosen.includes(key) ? chosen.filter((k) => k !== key) : [...chosen, key]);
+  return (
+    <Dropdown
+      menuClassName="w-72 overflow-hidden"
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) setQuery("");
+      }}
+      trigger={(toggleMenu) => (
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={toggleMenu}
+          aria-label={`Add a team to ${label}`}
+          className="flex h-6 cursor-pointer items-center gap-1 rounded-md border border-dashed border-line-3 px-2 text-[11.5px] text-muted-3 transition-colors hover:border-line-strong hover:text-fg-2 disabled:cursor-default disabled:opacity-50"
+        >
+          <PlusIcon size={10} />
+          Add team
+        </button>
+      )}
+    >
+      {() => (
+        <>
+          <div className="border-b border-line px-2 py-1.5">
+            <input
+              // biome-ignore lint/a11y/noAutofocus: the menu just opened on a click; the filter is what it is for.
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Filter teams"
+              aria-label={`Filter teams for ${label}`}
+              spellCheck={false}
+              className="w-full rounded bg-input px-2 py-1 text-[12px] text-fg-2 placeholder:text-muted-4"
+            />
+          </div>
+          <div className="max-h-64 overflow-y-auto py-1">
+            {matches.length === 0 && (
+              <div className="px-3 py-2 text-[11.5px] text-muted-4">
+                {teams.length === 0 ? "No teams. Connect Linear first." : "No team matches."}
+              </div>
+            )}
+            {matches.map((team) => {
+              const checked = chosen.includes(team.key);
+              return (
+                <button
+                  key={team.key}
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={checked}
+                  onClick={() => toggle(team.key)}
+                  className={`${MENU_ITEM} items-start`}
+                >
+                  <span className="flex h-4 w-3 flex-none items-center text-fg">
+                    {checked && <CheckIcon size={11} />}
+                  </span>
+                  <span className="flex min-w-0 flex-col">
+                    <span className={checked ? "text-fg" : undefined}>
+                      {team.name}{" "}
+                      <span className="font-mono text-[10px] text-muted-4">{team.key}</span>
+                    </span>
+                    <span className="text-[11px] text-muted-3">{teamFacts(team)}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </Dropdown>
   );
 }
 

@@ -151,19 +151,27 @@ describe("app-scope Triage settings", () => {
     fireEvent.click(screen.getByRole("switch", { name: "Teams you are a member of" }));
     expect(setRules).toHaveBeenLastCalledWith({ ...teamRules, member: true });
 
-    // The list says what you are to each team — what the rules read.
-    expect(screen.getByText("in its rotation · member")).toBeInTheDocument();
-    expect(screen.getByText("has a rotation · a ticket of yours")).toBeInTheDocument();
+    // The org's teams are never laid out on the page: a chip per chosen team,
+    // and a picker that filters the rest.
+    const always = screen.getByRole("group", { name: "Always show" });
+    const never = screen.getByRole("group", { name: "Never show" });
+    expect(within(always).getByText("Messaging")).toBeInTheDocument();
+    expect(within(never).getByText("None")).toBeInTheDocument();
+    expect(screen.queryByText("App")).toBeNull();
 
-    const messaging = screen.getByRole("combobox", { name: "Messaging · MSG" });
-    expect(messaging).toHaveValue("always");
-    fireEvent.change(messaging, { target: { value: "never" } });
+    fireEvent.click(within(never).getByRole("button", { name: "Add a team to Never show" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Filter teams for Never show" }), {
+      target: { value: "mess" },
+    });
+    // The picker says what you are to each team — what the rules read.
+    expect(screen.getByText("has a rotation · a ticket of yours")).toBeInTheDocument();
+    expect(screen.queryByText("in its rotation · member")).toBeNull();
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: /Messaging/ }));
+    // Hiding a team takes it out of the always list: a key sits in one list.
     expect(setRules).toHaveBeenLastCalledWith({ ...teamRules, picked: [], hidden: ["MSG"] });
 
-    const app = screen.getByRole("combobox", { name: "App · AK" });
-    expect(app).toHaveValue("rules");
-    fireEvent.change(app, { target: { value: "always" } });
-    expect(setRules).toHaveBeenLastCalledWith({ ...teamRules, picked: ["MSG", "AK"] });
+    fireEvent.click(within(always).getByRole("button", { name: "Remove Messaging" }));
+    expect(setRules).toHaveBeenLastCalledWith({ ...teamRules, picked: [] });
   });
 
   /** The queue's Mine/All switch lives on the sidebar's Triage section, and the
