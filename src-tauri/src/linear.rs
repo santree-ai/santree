@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use santree_core::domain::{
-    ApiBudgetKind, ApiBudgetWindow, CycleRef, LinearApiBudget, LinearOrg, LinearStatus,
+    ApiBudgetKind, ApiBudgetWindow, CycleRef, LinearApiBudget, LinearOrg, LinearStatus, LinearTeam,
     ProjectMilestoneRef, Task, TaskStatus, TeamRef, TicketRef, TriageComment, TriageDetail,
     TriageSchedule, TriageShift, TriageTicket, WorkflowState,
 };
@@ -1044,7 +1044,7 @@ fn issues_changed(slug: &str) {
 /// viewer behind the slug may be a different user now.
 fn invalidate_org_caches(slug: &str) {
     ASSIGNED_ISSUES.invalidate(slug);
-    TEAM_SCOPES.invalidate(slug);
+    TEAM_FACTS.invalidate(slug);
 }
 
 /// Drop every org's caches. The manual refresh (⌘⇧R) calls this before it
@@ -1052,7 +1052,7 @@ fn invalidate_org_caches(slug: &str) {
 /// the very list the user is refreshing to get past.
 pub fn invalidate_all_caches() {
     ASSIGNED_ISSUES.clear();
-    TEAM_SCOPES.clear();
+    TEAM_FACTS.clear();
 }
 
 /// The assigned issues for `repo`'s org laid out as a graph, or `None` when no org is
@@ -1586,16 +1586,14 @@ fn actor(
     ("Unknown".into(), None)
 }
 
-// The triage queue is the viewer's on-call inbox: every issue in a `triage`
-// workflow state on a team whose rotation they are in, regardless of assignee
-// (most triage items are unassigned until someone picks them up) — plus the
-// triage issues assigned to them anywhere else. The first half is scoped to
-// *rotation* teams only: a team without a triage rotation has no on-call owner,
-// so its triage state isn't anyone's responsibility and would just be noise
-// here. The second half is what brings a ticket in from a team the viewer is
-// not on call for, and only that ticket. The schedule cards (`triage_schedule`)
-// come from the same [`TeamScope`], so every team whose issues land here has a
-// card to land under.
+// The triage queue is the viewer's inbox: every issue in a `triage` workflow
+// state on a team in their Triage scope, regardless of assignee (most triage
+// items are unassigned until someone picks them up) — plus the triage issues
+// assigned to them anywhere else. Which teams are in scope is the user's
+// `triage_teams` rules over what Linear says ([`scope_of`]); by default the
+// rotations they are in and the teams holding a ticket of theirs. The schedule
+// cards (`triage_schedule`) come from the same scope, so every team whose
+// issues land here has a row to land under.
 
 const TRIAGE_INBOX_QUERY: &str = r#"
 query TriageInbox($filter: IssueFilter, $after: String) {
@@ -1651,7 +1649,7 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
     // a transient network/auth error as the positive "All caught up" empty state. A
     // genuinely empty scope (no rotation team, no viewer) is the only legitimate
     // empty-inbox path.
-    let scope = team_scope(&session).await?;
+    let scope = team_scope(db, &session).await?;
     // Nothing to scope by → no inbox. Show an empty queue rather than flooding
     // the list with the whole workspace's (un-owned) triage issues.
     let Some(filter) = inbox_filter(&scope) else {
@@ -1712,23 +1710,22 @@ pub async fn triage_tickets(db: &Db, repo: &str) -> Result<Option<Vec<TriageTick
     // Active first, snoozed last; within each, soonest SLA breach first.
     rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
     log::info!(
-        "fetched {} triage tickets for {repo} ({} on-call teams, {} by assignment)",
+        "fetched {} triage tickets for {repo} across {} teams",
         rows.len(),
-        scope.on_call.len(),
-        scope.assigned.len()
+        scope.teams.len()
     );
     Ok(Some(rows.into_iter().map(|(t, _, _)| t).collect()))
 }
 
 /// The inbox query's `IssueFilter` for a scope: triage-state issues on any team
-/// the viewer is on call for, or assigned to the viewer wherever they are. The
-/// two halves are `or`ed, so a team the viewer joined only through an assigned
-/// ticket contributes exactly that ticket — never its whole inbox, whatever the
-/// Mine/All switch says. `None` when neither half has anything to match.
+/// in it, or assigned to the viewer wherever they are. The two halves are
+/// `or`ed and the whole of each team comes back: which teams show only the
+/// viewer's own tickets is the frontend's per-team Mine/All, applied without a
+/// refetch. `None` when neither half has anything to match.
 fn inbox_filter(scope: &TeamScope) -> Option<serde_json::Value> {
     let mut any: Vec<serde_json::Value> = Vec::new();
-    if !scope.on_call.is_empty() {
-        let keys: Vec<&str> = scope.on_call.iter().map(|t| t.key.as_str()).collect();
+    if !scope.teams.is_empty() {
+        let keys: Vec<&str> = scope.teams.iter().map(|t| t.key.as_str()).collect();
         any.push(serde_json::json!({ "team": { "key": { "in": keys } } }));
     }
     if let Some(me) = scope.viewer_id.as_deref() {
@@ -2646,102 +2643,278 @@ async fn fetch_all_team_memberships(session: &Session<'_>) -> Result<SchedQueryD
     Ok(data)
 }
 
-/// The viewer and the teams in their Triage — everything both Triage reads derive
-/// from the two scope queries: the queue's filter is built from it ([`inbox_filter`])
-/// and marks its own tickets with `viewer_id`; the schedule cards are one per team
-/// in it, `on_call` first.
-struct TeamScope {
-    viewer_id: Option<String>,
-    /// Teams whose triage rotation the viewer is in (see [`is_rotation_team`] and
-    /// [`viewer_participates`]) — their whole triage inbox is the viewer's.
-    on_call: Vec<TeamNode>,
-    /// Teams the viewer is in only through a triage issue assigned to them — the
-    /// inbox carries just those issues, and the card shows whose rotation it is
-    /// (or that there is none). Never overlaps `on_call`.
-    assigned: Vec<TeamNode>,
+/// Every team the org exposes, each with its rotation — what the picked and
+/// member rules of [`TriageTeamRules`] resolve against, and the list Settings
+/// offers. Paged: an org can have more teams than one page holds.
+const ALL_TEAMS_QUERY: &str = concat!(
+    r#"
+query TriageTeams($after: String) {
+  teams(first: 100, after: $after) {
+    nodes { ...TriageTeam }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"#,
+    triage_team_fragment!()
+);
+
+#[derive(Deserialize)]
+struct AllTeamsData {
+    teams: Connection<TeamNode>,
 }
 
-impl TeamScope {
-    /// Every team in scope, the ones the viewer is on call for first.
-    fn teams(&self) -> impl Iterator<Item = &TeamNode> {
-        self.on_call.iter().chain(self.assigned.iter())
+/// Fetch every page of the org's teams.
+async fn fetch_all_teams(session: &Session<'_>) -> Result<Vec<TeamNode>> {
+    let mut nodes: Vec<TeamNode> = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let data: AllTeamsData = session
+            .query(ALL_TEAMS_QUERY, serde_json::json!({ "after": after }))
+            .await?;
+        let page_info = data.teams.page_info;
+        nodes.extend(data.teams.nodes);
+        if !page_info.has_next_page {
+            break;
+        }
+        let Some(cursor) = page_info.end_cursor else {
+            break;
+        };
+        after = Some(cursor);
+    }
+    Ok(nodes)
+}
+
+/// Everything Linear says about the viewer and the org's teams that Triage's
+/// scope is decided from — fetched once and cached ([`team_facts`]), then read
+/// through [`scope_of`] under whatever rules the user has set. Facts, not a
+/// scope: the rules can change without a refetch.
+struct TeamFacts {
+    viewer_id: Option<String>,
+    /// Every team, by key, in the org's order — the memberships folded in, since
+    /// a team the viewer belongs to but the `teams` list omits is still theirs.
+    teams: Vec<TeamNode>,
+    /// Keys of the teams the viewer is a member of.
+    member: HashSet<String>,
+    /// Keys of the teams holding a triage issue assigned to the viewer.
+    assigned: HashSet<String>,
+}
+
+impl TeamFacts {
+    fn in_rotation(&self, team: &TeamNode) -> bool {
+        is_rotation_team(team)
+            && self
+                .viewer_id
+                .as_deref()
+                .is_some_and(|id| viewer_participates(team, id))
     }
 }
 
-/// Reduce the two raw scope payloads to the [`TeamScope`] both reads want.
-fn scope_of(memberships: SchedQueryData, assigned: AssignedTriageData) -> TeamScope {
-    let Some(viewer) = memberships.viewer else {
-        return TeamScope {
-            viewer_id: None,
-            on_call: Vec::new(),
-            assigned: Vec::new(),
-        };
+/// Fold the three raw payloads into [`TeamFacts`].
+fn facts_of(
+    all_teams: Vec<TeamNode>,
+    memberships: SchedQueryData,
+    assigned: AssignedTriageData,
+) -> TeamFacts {
+    let (viewer_id, member_teams) = match memberships.viewer {
+        Some(v) => (
+            v.id,
+            v.team_memberships
+                .map(|c| c.nodes)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|m| m.team)
+                .collect::<Vec<_>>(),
+        ),
+        None => (None, Vec::new()),
     };
-    let viewer_id = viewer.id;
-    let on_call: Vec<TeamNode> = viewer
-        .team_memberships
-        .map(|c| c.nodes)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|m| m.team)
-        .filter(|team| {
-            is_rotation_team(team)
-                && viewer_id
-                    .as_deref()
-                    .is_some_and(|id| viewer_participates(team, id))
-        })
-        .collect();
-    // A team reached through an assigned ticket, unless it is already an on-call
-    // team — and once, however many of its tickets are the viewer's.
-    let mut seen: HashSet<String> = on_call.iter().map(|t| t.key.clone()).collect();
-    let assigned: Vec<TeamNode> = assigned
+    let member: HashSet<String> = member_teams.iter().map(|t| t.key.clone()).collect();
+    let assigned_teams: Vec<TeamNode> = assigned
         .viewer
         .map(|v| v.assigned_issues.nodes)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|issue| issue.team)
-        .filter(|team| seen.insert(team.key.clone()))
         .collect();
-    TeamScope {
+    let assigned: HashSet<String> = assigned_teams.iter().map(|t| t.key.clone()).collect();
+    // The org's list first, then anything the other two reads know that it
+    // didn't — once each.
+    let mut seen: HashSet<String> = HashSet::new();
+    let teams: Vec<TeamNode> = all_teams
+        .into_iter()
+        .chain(member_teams)
+        .chain(assigned_teams)
+        .filter(|t| seen.insert(t.key.clone()))
+        .collect();
+    TeamFacts {
         viewer_id,
-        on_call,
+        teams,
+        member,
         assigned,
     }
 }
 
-/// How long a fetched [`TeamScope`] is reused. Triage's queue and its schedule strips are
-/// separate commands that mount together and both need this paginated query — the window
-/// only has to outlive that pair. Rotations change on a human timescale and the
-/// frontend's own triage cache is minutes long, so nothing observable goes stale.
-const TEAM_SCOPE_TTL: Duration = Duration::from_secs(60);
-
-/// Per-org [`TeamScope`] cache — a [`TtlCache`], so the second of the two concurrent
-/// Triage loads waits on the first's result instead of issuing its own copy of the
-/// same query.
-static TEAM_SCOPES: std::sync::LazyLock<TtlCache<TeamScope>> =
-    std::sync::LazyLock::new(|| TtlCache::new(TEAM_SCOPE_TTL));
-
-/// The org's [`TeamScope`], fetched at most once per [`TEAM_SCOPE_TTL`] — and exactly
-/// once when both Triage commands ask at the same time. `fetch` is a parameter so the
-/// coalescing is unit-testable without a network.
-async fn cached_team_scope<F, Fut>(slug: &str, fetch: F) -> Result<std::sync::Arc<TeamScope>>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<TeamScope>>,
-{
-    Ok(TEAM_SCOPES.get_or_fetch(slug, fetch).await?.0)
+/// Which teams Triage shows — the `triage_teams` setting. Rules are unioned:
+/// a team is in when any rule that is on admits it, or when it is picked; a
+/// hidden team is out whatever the rules say. Missing fields take the default,
+/// so a setting written before a rule existed keeps meaning what it meant.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TriageTeamRules {
+    /// Teams whose triage rotation the viewer is in.
+    pub rotation: bool,
+    /// Teams holding a triage issue assigned to the viewer.
+    pub assigned: bool,
+    /// Teams the viewer is a member of. Off by default: Linear keeps people on
+    /// a team long after they've left its work.
+    pub member: bool,
+    /// Team keys always shown.
+    pub picked: Vec<String>,
+    /// Team keys never shown.
+    pub hidden: Vec<String>,
 }
 
-/// The [`TeamScope`] for this session's org — its two queries in flight together.
-async fn team_scope(session: &Session<'_>) -> Result<std::sync::Arc<TeamScope>> {
-    cached_team_scope(&session.slug, || async {
-        let (memberships, assigned) = tokio::try_join!(
+impl Default for TriageTeamRules {
+    fn default() -> Self {
+        Self {
+            rotation: true,
+            assigned: true,
+            member: false,
+            picked: Vec::new(),
+            hidden: Vec::new(),
+        }
+    }
+}
+
+/// The `triage_teams` setting: unset or unreadable means the defaults, never
+/// nothing — an empty Triage over a typo would read as "all caught up".
+pub const TRIAGE_TEAMS_KEY: &str = "triage_teams";
+
+async fn triage_team_rules(db: &Db) -> TriageTeamRules {
+    match settings::get(db, "app", TRIAGE_TEAMS_KEY).await {
+        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_else(|err| {
+            log::warn!("ignoring an unreadable {TRIAGE_TEAMS_KEY} setting: {err}");
+            TriageTeamRules::default()
+        }),
+        _ => TriageTeamRules::default(),
+    }
+}
+
+/// The viewer and the teams in their Triage — what both Triage reads derive
+/// from: the queue's filter ([`inbox_filter`]) and its "mine" marks, and one
+/// schedule per team.
+struct TeamScope {
+    viewer_id: Option<String>,
+    /// In display order: the rotations the viewer is in, then teams holding a
+    /// ticket of theirs, then teams they belong to, then the picked ones — each
+    /// once, and never a hidden one.
+    teams: Vec<TeamNode>,
+}
+
+/// Apply the rules to the facts.
+fn scope_of(facts: &TeamFacts, rules: &TriageTeamRules) -> TeamScope {
+    let hidden: HashSet<&str> = rules.hidden.iter().map(String::as_str).collect();
+    let picked: HashSet<&str> = rules.picked.iter().map(String::as_str).collect();
+    // The rules in display order; each pass admits what it admits, once.
+    enum Rule {
+        Rotation,
+        Assigned,
+        Member,
+        Picked,
+    }
+    let passes = [
+        (Rule::Rotation, rules.rotation),
+        (Rule::Assigned, rules.assigned),
+        (Rule::Member, rules.member),
+        (Rule::Picked, true),
+    ];
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut teams: Vec<TeamNode> = Vec::new();
+    for (rule, on) in passes {
+        if !on {
+            continue;
+        }
+        for t in &facts.teams {
+            let admitted = match rule {
+                Rule::Rotation => facts.in_rotation(t),
+                Rule::Assigned => facts.assigned.contains(&t.key),
+                Rule::Member => facts.member.contains(&t.key),
+                Rule::Picked => picked.contains(t.key.as_str()),
+            };
+            if admitted && !hidden.contains(t.key.as_str()) && seen.insert(t.key.clone()) {
+                teams.push(t.clone());
+            }
+        }
+    }
+    TeamScope {
+        viewer_id: facts.viewer_id.clone(),
+        teams,
+    }
+}
+
+/// How long fetched [`TeamFacts`] are reused. Triage's queue and its schedule cards are
+/// separate commands that mount together and both need these paginated queries — the
+/// window only has to outlive that pair. Rotations change on a human timescale and the
+/// frontend's own triage cache is minutes long, so nothing observable goes stale.
+const TEAM_FACTS_TTL: Duration = Duration::from_secs(60);
+
+/// Per-org [`TeamFacts`] cache — a [`TtlCache`], so the second of the two concurrent
+/// Triage loads waits on the first's result instead of issuing its own copy of the
+/// same queries.
+static TEAM_FACTS: std::sync::LazyLock<TtlCache<TeamFacts>> =
+    std::sync::LazyLock::new(|| TtlCache::new(TEAM_FACTS_TTL));
+
+/// The org's [`TeamFacts`], fetched at most once per [`TEAM_FACTS_TTL`] — and exactly
+/// once when both Triage commands ask at the same time. `fetch` is a parameter so the
+/// coalescing is unit-testable without a network.
+async fn cached_team_facts<F, Fut>(slug: &str, fetch: F) -> Result<std::sync::Arc<TeamFacts>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<TeamFacts>>,
+{
+    Ok(TEAM_FACTS.get_or_fetch(slug, fetch).await?.0)
+}
+
+/// The [`TeamFacts`] for this session's org — its three queries in flight together.
+async fn team_facts(session: &Session<'_>) -> Result<std::sync::Arc<TeamFacts>> {
+    cached_team_facts(&session.slug, || async {
+        let (all_teams, memberships, assigned) = tokio::try_join!(
+            fetch_all_teams(session),
             fetch_all_team_memberships(session),
             fetch_assigned_triage_teams(session)
         )?;
-        Ok(scope_of(memberships, assigned))
+        Ok(facts_of(all_teams, memberships, assigned))
     })
     .await
+}
+
+/// The [`TeamScope`] for this session's org under the user's rules.
+async fn team_scope(db: &Db, session: &Session<'_>) -> Result<TeamScope> {
+    let facts = team_facts(session).await?;
+    let rules = triage_team_rules(db).await;
+    Ok(scope_of(&facts, &rules))
+}
+
+/// Every team the org exposes, with what the viewer is to it — the list the
+/// Triage teams setting is picked from. `None` when no org is connected.
+pub async fn linear_teams(db: &Db, repo: &str) -> Result<Option<Vec<LinearTeam>>> {
+    let Some(session) = repo_session(db, repo).await? else {
+        return Ok(None);
+    };
+    let facts = team_facts(&session).await?;
+    Ok(Some(
+        facts
+            .teams
+            .iter()
+            .map(|t| LinearTeam {
+                key: t.key.clone(),
+                name: t.name.clone(),
+                member: facts.member.contains(&t.key),
+                in_rotation: facts.in_rotation(t),
+                has_rotation: is_rotation_team(t),
+                has_assigned: facts.assigned.contains(&t.key),
+            })
+            .collect(),
+    ))
 }
 
 /// A user's display name + avatar, keyed by id in the resolved name map.
@@ -2755,22 +2928,21 @@ struct UsersData {
     users: Connection<UserNode>,
 }
 
-/// The viewer's triage rotations — one per team in their Triage scope: the teams
-/// they are on call for (first), then the teams that hold a triage ticket of
-/// theirs, which may run a rotation they are not in, or none at all (no shifts).
+/// The viewer's triage rotations — one per team in their Triage scope, in the
+/// scope's order; a team without a rotation has no shifts.
 pub async fn triage_schedule(db: &Db, repo: &str) -> Result<Option<Vec<TriageSchedule>>> {
     let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
-    // Shared with the queue (which mounts alongside this one) — see [`cached_team_scope`].
-    let scope = team_scope(&session).await?;
-    if scope.on_call.is_empty() && scope.assigned.is_empty() {
+    // Shared with the queue (which mounts alongside this one) — see [`cached_team_facts`].
+    let scope = team_scope(db, &session).await?;
+    if scope.teams.is_empty() {
         return Ok(Some(Vec::new()));
     }
 
     // Resolve all referenced user ids → display names in one batch.
     let mut ids: Vec<String> = Vec::new();
-    for t in scope.teams() {
+    for t in &scope.teams {
         if let Some(r) = &t.triage_responsibility {
             if let Some(cu) = r.current_user.as_ref().and_then(|c| c.id.clone()) {
                 ids.push(cu);
@@ -2790,14 +2962,11 @@ pub async fn triage_schedule(db: &Db, repo: &str) -> Result<Option<Vec<TriageSch
         .unwrap_or_default();
     let now = now_ms();
 
-    let mut schedules: Vec<TriageSchedule> = scope
-        .teams()
-        .cloned()
+    let schedules: Vec<TriageSchedule> = scope
+        .teams
+        .into_iter()
         .map(|t| build_schedule(t, scope.viewer_id.as_deref(), &names, now))
         .collect();
-    // Surface rotations the viewer is part of first (stable, so the scope's own
-    // order holds within each half).
-    schedules.sort_by_key(|s| !s.shifts.iter().any(|sh| sh.is_me));
     log::info!(
         "built {} triage schedules for {repo}: {}",
         schedules.len(),
@@ -3451,20 +3620,20 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        accept_code, apply_subtask_dependencies, cached_team_scope, cycle_ref, decode_tokens,
-        encode_tokens, entity_not_found, header_window, image_spans, inbox_filter, map_issue,
-        map_related, migrate_tokens_to_keychain, parse_callback, parse_ms, record_budget,
-        refresh_lock, resolve_org_slug, resolved_org, scope_from_setting, scope_of, splice_images,
-        split_identifier, usable_at, AssignedTriageData, CommentNode, CycleNode, ImageCache,
-        IssueDetailNode, IssueNode, ParentIssueNode, ProjectMilestoneNode, ProjectNode,
-        RelatedIssue, RelationNode, SchedQueryData, StateNode, TeamRefNode, TeamScope,
-        TicketLookupNode, Tokens, TriageRow, TtlCache, UserNode, BUDGETS, IMAGE_HOST,
-        REFRESH_SKEW_MS,
+        accept_code, apply_subtask_dependencies, cached_team_facts, cycle_ref, decode_tokens,
+        encode_tokens, entity_not_found, facts_of, header_window, image_spans, inbox_filter,
+        map_issue, map_related, migrate_tokens_to_keychain, parse_callback, parse_ms,
+        record_budget, refresh_lock, resolve_org_slug, resolved_org, scope_from_setting, scope_of,
+        splice_images, split_identifier, usable_at, AssignedTriageData, CommentNode, CycleNode,
+        ImageCache, IssueDetailNode, IssueNode, ParentIssueNode, ProjectMilestoneNode, ProjectNode,
+        RelatedIssue, RelationNode, SchedQueryData, StateNode, TeamFacts, TeamRefNode, TeamScope,
+        TicketLookupNode, Tokens, TriageRow, TriageTeamRules, TtlCache, UserNode, BUDGETS,
+        IMAGE_HOST, REFRESH_SKEW_MS,
     };
     use crate::gql::{Connection, GqlError, GraphQlErrors, PageInfo};
     use anyhow::anyhow;
     use santree_core::domain::{ApiBudgetKind, Task, TaskStatus};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -3698,6 +3867,25 @@ mod tests {
         serde_json::json!({ "startsAt": "2024-01-01T00:00:00Z", "endsAt": "2024-01-08T00:00:00Z", "userId": user })
     }
 
+    fn team_node(v: serde_json::Value) -> super::TeamNode {
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// The memberships payload: the viewer, on the teams given.
+    fn memberships_json(viewer: Option<&str>, teams: Vec<serde_json::Value>) -> SchedQueryData {
+        let nodes: Vec<serde_json::Value> = teams
+            .into_iter()
+            .map(|team| serde_json::json!({ "team": team }))
+            .collect();
+        serde_json::from_value(match viewer {
+            Some(id) => {
+                serde_json::json!({ "viewer": { "id": id, "teamMemberships": { "nodes": nodes } } })
+            }
+            None => serde_json::json!({ "viewer": null }),
+        })
+        .unwrap()
+    }
+
     /// The assigned-triage-issues payload, one issue per team given.
     fn assigned_json(teams: Vec<serde_json::Value>) -> AssignedTriageData {
         let nodes: Vec<serde_json::Value> = teams
@@ -3710,112 +3898,146 @@ mod tests {
         .unwrap()
     }
 
-    fn no_assigned() -> AssignedTriageData {
-        assigned_json(Vec::new())
-    }
-
     fn keys(teams: &[super::TeamNode]) -> Vec<&str> {
         teams.iter().map(|t| t.key.as_str()).collect()
     }
 
-    /// The scope both Triage reads share is derived from the raw memberships payload:
-    /// the viewer's id, and only rotations the viewer actually participates in.
-    #[test]
-    fn the_scope_keeps_rotation_teams_and_drops_the_rest() {
-        let data: SchedQueryData = serde_json::from_value(serde_json::json!({
-            "viewer": {
-                "id": "u1",
-                "teamMemberships": { "nodes": [
-                    { "team": { "key": "ENG", "name": "Engineering", "triageResponsibility": {
-                        "currentUser": { "id": "u1" },
-                        "timeSchedule": { "name": "Eng on-call", "entries": [
-                            { "startsAt": "2024-01-01T00:00:00Z", "endsAt": "2024-01-08T00:00:00Z", "userId": "u1" }
-                        ] }
-                    } } },
-                    // No triage responsibility at all → no on-call owner.
-                    { "team": { "key": "DES", "name": "Design", "triageResponsibility": null } },
-                    // Responsibility, but its schedule has no shifts → still no owner.
-                    { "team": { "key": "OPS", "name": "Ops", "triageResponsibility": {
-                        "currentUser": null,
-                        "timeSchedule": { "name": "unused", "entries": [] }
-                    } } },
-                    // A real rotation on a team the viewer belongs to, but the
-                    // viewer was removed from its schedule → out of their Triage.
-                    { "team": { "key": "MSG", "name": "Messaging", "triageResponsibility": {
-                        "currentUser": { "id": "u2" },
-                        "timeSchedule": { "name": "Messaging on-call", "entries": [
-                            { "startsAt": "2024-01-01T00:00:00Z", "endsAt": "2024-01-08T00:00:00Z", "userId": "u2" }
-                        ] }
-                    } } },
-                ] }
-            }
-        }))
-        .unwrap();
-
-        let scope = scope_of(data, no_assigned());
-        assert_eq!(scope.viewer_id.as_deref(), Some("u1"));
-        assert_eq!(keys(&scope.on_call), ["ENG"]);
-        assert!(scope.assigned.is_empty());
+    /// An org of four teams: ENG runs a rotation the viewer is in; DES has no
+    /// rotation and the viewer is a member; OPS runs a rotation without them,
+    /// and holds a triage ticket of theirs; MSG runs a rotation without them,
+    /// and they are on neither its roster nor its tickets.
+    fn facts() -> TeamFacts {
+        let eng = team_json("ENG", "Engineering", serde_json::json!([shift("u1")]));
+        let des = team_json("DES", "Design", serde_json::json!([]));
+        let ops = team_json("OPS", "Ops", serde_json::json!([shift("u2")]));
+        let msg = team_json("MSG", "Messaging", serde_json::json!([shift("u2")]));
+        facts_of(
+            vec![
+                team_node(eng.clone()),
+                team_node(des.clone()),
+                team_node(ops.clone()),
+                team_node(msg),
+            ],
+            memberships_json(Some("u1"), vec![eng, des]),
+            assigned_json(vec![ops.clone(), ops]),
+        )
     }
 
-    /// A triage ticket assigned to the viewer brings its team in — once, whether it
-    /// runs a rotation the viewer is not in or no rotation at all — unless the team
-    /// is already one the viewer is on call for, which keeps it on that side.
     #[test]
-    fn a_team_holding_a_ticket_assigned_to_the_viewer_joins_the_scope_by_assignment() {
-        let memberships: SchedQueryData = serde_json::from_value(serde_json::json!({
-            "viewer": { "id": "u1", "teamMemberships": { "nodes": [
-                { "team": team_json("ENG", "Engineering", serde_json::json!([shift("u1")])) },
-            ] } }
-        }))
-        .unwrap();
-        let assigned = assigned_json(vec![
-            // Already on call for it → stays an on-call team, not listed twice.
-            team_json("ENG", "Engineering", serde_json::json!([shift("u1")])),
-            // Someone else's rotation, two tickets of ours → in once, by assignment.
-            team_json("MSG", "Messaging", serde_json::json!([shift("u2")])),
-            team_json("MSG", "Messaging", serde_json::json!([shift("u2")])),
-            // No rotation at all → still in: the ticket is ours.
-            team_json("DES", "Design", serde_json::json!([])),
-        ]);
+    fn the_facts_fold_the_three_reads_by_team_key() {
+        let f = facts();
+        assert_eq!(f.viewer_id.as_deref(), Some("u1"));
+        assert_eq!(keys(&f.teams), ["ENG", "DES", "OPS", "MSG"]);
+        assert_eq!(f.member.len(), 2);
+        // Two tickets on OPS make one team.
+        assert_eq!(f.assigned.iter().collect::<Vec<_>>(), ["OPS"]);
+        // Rotation membership is participation, never team membership.
+        assert!(f.in_rotation(&f.teams[0]));
+        assert!(!f.in_rotation(&f.teams[1]));
+        assert!(!f.in_rotation(&f.teams[2]));
+    }
 
-        let scope = scope_of(memberships, assigned);
-        assert_eq!(keys(&scope.on_call), ["ENG"]);
-        assert_eq!(keys(&scope.assigned), ["MSG", "DES"]);
-        assert_eq!(
-            scope.teams().map(|t| t.key.as_str()).collect::<Vec<_>>(),
-            ["ENG", "MSG", "DES"]
+    /// A team the org list omits but a membership names is still the viewer's.
+    #[test]
+    fn a_member_team_missing_from_the_org_list_is_folded_in() {
+        let sec = team_json("SEC", "Security", serde_json::json!([]));
+        let f = facts_of(
+            Vec::new(),
+            memberships_json(Some("u1"), vec![sec]),
+            assigned_json(Vec::new()),
         );
+        assert_eq!(keys(&f.teams), ["SEC"]);
+        assert!(f.member.contains("SEC"));
+    }
+
+    /// The default rules are today's behaviour: rotations you're in, then teams
+    /// holding a ticket of yours. Membership alone admits nothing.
+    #[test]
+    fn the_default_rules_scope_to_rotations_and_assignments() {
+        let scope = scope_of(&facts(), &TriageTeamRules::default());
+        assert_eq!(scope.viewer_id.as_deref(), Some("u1"));
+        assert_eq!(keys(&scope.teams), ["ENG", "OPS"]);
+    }
+
+    /// Rules union in a fixed order; a pick admits any team; hidden wins over
+    /// everything; nothing is listed twice.
+    #[test]
+    fn the_rules_union_in_order_and_hidden_wins() {
+        let f = facts();
+        let with_member = TriageTeamRules {
+            member: true,
+            ..TriageTeamRules::default()
+        };
+        assert_eq!(
+            keys(&scope_of(&f, &with_member).teams),
+            ["ENG", "OPS", "DES"]
+        );
+
+        let picked = TriageTeamRules {
+            rotation: false,
+            assigned: false,
+            picked: vec!["MSG".into(), "ENG".into(), "NOPE".into()],
+            ..TriageTeamRules::default()
+        };
+        // Picks come in the org's order, and an unknown key admits nothing.
+        assert_eq!(keys(&scope_of(&f, &picked).teams), ["ENG", "MSG"]);
+
+        let hidden = TriageTeamRules {
+            picked: vec!["MSG".into()],
+            hidden: vec!["OPS".into(), "MSG".into()],
+            ..TriageTeamRules::default()
+        };
+        assert_eq!(keys(&scope_of(&f, &hidden).teams), ["ENG"]);
+
+        let nothing = TriageTeamRules {
+            rotation: false,
+            assigned: false,
+            ..TriageTeamRules::default()
+        };
+        assert!(scope_of(&f, &nothing).teams.is_empty());
+    }
+
+    /// The setting is read fail-safe: a missing field takes its default and an
+    /// unreadable value is the defaults, so a typo can't empty Triage.
+    #[test]
+    fn the_rules_setting_defaults_every_missing_field() {
+        let rules: TriageTeamRules =
+            serde_json::from_str(r#"{"member":true,"picked":["X"]}"#).unwrap();
+        assert!(rules.rotation && rules.assigned && rules.member);
+        assert_eq!(rules.picked, ["X"]);
+        assert!(rules.hidden.is_empty());
+        assert!(serde_json::from_str::<TriageTeamRules>("{").is_err());
     }
 
     #[test]
     fn an_absent_viewer_scopes_to_nothing() {
-        let data: SchedQueryData =
-            serde_json::from_value(serde_json::json!({ "viewer": null })).unwrap();
-        let scope = scope_of(data, no_assigned());
+        let f = facts_of(
+            vec![team_node(team_json(
+                "ENG",
+                "Engineering",
+                serde_json::json!([shift("u1")]),
+            ))],
+            memberships_json(None, Vec::new()),
+            assigned_json(Vec::new()),
+        );
+        let scope = scope_of(&f, &TriageTeamRules::default());
         assert!(scope.viewer_id.is_none());
-        assert!(scope.on_call.is_empty());
-        assert!(scope.assigned.is_empty());
+        assert!(scope.teams.is_empty());
     }
 
-    /// The inbox is the on-call teams' whole triage state OR whatever is assigned
-    /// to the viewer — so an assignment-only team never contributes more than the
-    /// viewer's own tickets, and a scope with nothing to match has no filter.
+    /// The inbox is every scoped team's whole triage state OR whatever is
+    /// assigned to the viewer, so the frontend can narrow a team to "mine"
+    /// without a refetch — and a scope with nothing to match has no filter.
     #[test]
-    fn the_inbox_filter_ors_on_call_teams_with_the_viewers_own_assignments() {
-        let on_call: super::TeamNode = serde_json::from_value(team_json(
+    fn the_inbox_filter_ors_the_scoped_teams_with_the_viewers_own_assignments() {
+        let eng = team_node(team_json(
             "ENG",
             "Engineering",
             serde_json::json!([shift("u1")]),
-        ))
-        .unwrap();
-        let by_ticket: super::TeamNode =
-            serde_json::from_value(team_json("MSG", "Messaging", serde_json::json!([]))).unwrap();
-
+        ));
         let both = TeamScope {
             viewer_id: Some("u1".into()),
-            on_call: vec![on_call.clone()],
-            assigned: vec![by_ticket.clone()],
+            teams: vec![eng],
         };
         assert_eq!(
             inbox_filter(&both).unwrap(),
@@ -3828,31 +4050,30 @@ mod tests {
             })
         );
 
-        // No rotation anywhere: only the viewer's own tickets are in.
+        // No team in scope: only the viewer's own tickets are in.
         let assignments_only = TeamScope {
             viewer_id: Some("u1".into()),
-            on_call: Vec::new(),
-            assigned: vec![by_ticket],
+            teams: Vec::new(),
         };
         assert_eq!(
             inbox_filter(&assignments_only).unwrap()["or"],
             serde_json::json!([{ "assignee": { "id": { "eq": "u1" } } }])
         );
 
-        // No viewer, no rotation: nothing to ask for.
+        // No viewer, no team: nothing to ask for.
         let nothing = TeamScope {
             viewer_id: None,
-            on_call: Vec::new(),
-            assigned: Vec::new(),
+            teams: Vec::new(),
         };
         assert!(inbox_filter(&nothing).is_none());
     }
 
-    fn empty_scope() -> TeamScope {
-        TeamScope {
+    fn empty_facts() -> TeamFacts {
+        TeamFacts {
             viewer_id: Some("u1".into()),
-            on_call: Vec::new(),
-            assigned: Vec::new(),
+            teams: Vec::new(),
+            member: HashSet::new(),
+            assigned: HashSet::new(),
         }
     }
 
@@ -3868,11 +4089,11 @@ mod tests {
             fetches.fetch_add(1, Ordering::SeqCst);
             // Long enough that the second caller is guaranteed to arrive mid-flight.
             tokio::time::sleep(Duration::from_millis(50)).await;
-            Ok(empty_scope())
+            Ok(empty_facts())
         };
         let (queue, strips) = tokio::join!(
-            cached_team_scope(slug, fetch),
-            cached_team_scope(slug, fetch),
+            cached_team_facts(slug, fetch),
+            cached_team_facts(slug, fetch),
         );
 
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
@@ -3887,13 +4108,13 @@ mod tests {
         let fetches = AtomicUsize::new(0);
         let fetch = || async {
             fetches.fetch_add(1, Ordering::SeqCst);
-            Ok(empty_scope())
+            Ok(empty_facts())
         };
-        cached_team_scope("scope-org-a", fetch).await.unwrap();
-        cached_team_scope("scope-org-a", fetch).await.unwrap();
+        cached_team_facts("scope-org-a", fetch).await.unwrap();
+        cached_team_facts("scope-org-a", fetch).await.unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
 
-        cached_team_scope("scope-org-b", fetch).await.unwrap();
+        cached_team_facts("scope-org-b", fetch).await.unwrap();
         assert_eq!(
             fetches.load(Ordering::SeqCst),
             2,
@@ -3907,15 +4128,15 @@ mod tests {
     async fn a_failed_fetch_is_not_cached() {
         let slug = "scope-failure";
         assert!(
-            cached_team_scope(slug, || async { anyhow::bail!("network down") })
+            cached_team_facts(slug, || async { anyhow::bail!("network down") })
                 .await
                 .is_err()
         );
 
         let fetches = AtomicUsize::new(0);
-        cached_team_scope(slug, || async {
+        cached_team_facts(slug, || async {
             fetches.fetch_add(1, Ordering::SeqCst);
-            Ok(empty_scope())
+            Ok(empty_facts())
         })
         .await
         .unwrap();

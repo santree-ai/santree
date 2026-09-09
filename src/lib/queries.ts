@@ -388,6 +388,7 @@ export const queryKeys = {
   triageTickets: (repo: string) => ["triage-tickets", repo] as const,
   triageDetail: (repo: string, id: string) => ["triage-detail", repo, id] as const,
   triageSchedule: (repo: string) => ["triage-schedule", repo] as const,
+  linearTeams: (repo: string) => ["linear-teams", repo] as const,
   settings: ["settings"] as const,
   setting: (scope: string, key: string) => ["setting", scope, key] as const,
   resolvedSetting: (repo: string, key: string) => ["resolved-setting", repo, key] as const,
@@ -516,6 +517,75 @@ export const WORK_ASK_BASE_KEY = "work_ask_base";
  * come back as their own list (see {@link TriageQueue.snoozed}).
  */
 export const TRIAGE_GOOD_CITIZEN_KEY = "triage_good_citizen";
+
+/**
+ * Which teams Triage shows (app-scoped, JSON — see {@link TriageTeamRules}).
+ * Rules are unioned, then the picks added and the hidden taken away; the
+ * backend applies the same rules to what Linear says (`linear.rs` `scope_of`),
+ * so the sidebar's teams and its inbox always agree. Unset means the defaults.
+ */
+export const TRIAGE_TEAMS_KEY = "triage_teams";
+
+/**
+ * Per-team Mine/All (app-scoped, JSON: `{ [teamKey]: "mine" | "all" }`). A
+ * team without an entry follows {@link TRIAGE_GOOD_CITIZEN_KEY}, the default
+ * the header's menu sets; the switch on a team's row writes its entry.
+ */
+export const TRIAGE_TEAM_SCOPES_KEY = "triage_team_scopes";
+
+/** The `triage_teams` rules, as the backend reads them. */
+export interface TriageTeamRules {
+  /** Teams whose triage rotation you are in. */
+  rotation: boolean;
+  /** Teams holding a triage ticket assigned to you. */
+  assigned: boolean;
+  /** Teams you are a member of. Off by default: Linear keeps people on a team
+   *  long after they've left its work. */
+  member: boolean;
+  /** Team keys always shown. */
+  picked: string[];
+  /** Team keys never shown. */
+  hidden: string[];
+}
+
+export const DEFAULT_TRIAGE_TEAM_RULES: TriageTeamRules = {
+  rotation: true,
+  assigned: true,
+  member: false,
+  picked: [],
+  hidden: [],
+};
+
+/** Read the rules the way the backend does: a missing field takes its default
+ *  and an unreadable value is the defaults, so a typo can't empty Triage. */
+export function parseTriageTeamRules(raw: string | null | undefined): TriageTeamRules {
+  const parsed = parseJsonSetting<Partial<TriageTeamRules> | null>(raw, null);
+  if (!parsed || typeof parsed !== "object") return DEFAULT_TRIAGE_TEAM_RULES;
+  const list = (v: unknown) =>
+    Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : [];
+  return {
+    rotation: typeof parsed.rotation === "boolean" ? parsed.rotation : true,
+    assigned: typeof parsed.assigned === "boolean" ? parsed.assigned : true,
+    member: typeof parsed.member === "boolean" ? parsed.member : false,
+    picked: list(parsed.picked),
+    hidden: list(parsed.hidden),
+  };
+}
+
+export type TriageTeamScope = "mine" | "all";
+
+/** The per-team scopes, dropping anything that isn't one of the two words. */
+export function parseTriageTeamScopes(
+  raw: string | null | undefined,
+): Record<string, TriageTeamScope> {
+  const parsed = parseJsonSetting<Record<string, unknown> | null>(raw, null);
+  if (!parsed || typeof parsed !== "object") return {};
+  const out: Record<string, TriageTeamScope> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (value === "mine" || value === "all") out[key] = value;
+  }
+  return out;
+}
 
 /**
  * The project triage runs on unless a ticket picks its own (app-scoped; value =
@@ -964,6 +1034,11 @@ export const useSetSetting = () =>
       // the status has to be re-read for the write controls to gray out at once
       // — the whole point of the switch is that it applies without reconnecting.
       ...(a.key === LINEAR_SCOPE_KEY ? [queryKeys.linearStatusPrefix, queryKeys.linearOrgs] : []),
+      // The backend scopes the inbox and the schedules by these rules, so a
+      // change is a different queue: refetch both, for every repo.
+      ...(a.key === TRIAGE_TEAMS_KEY
+        ? [queryKeys.triageTicketsPrefix, queryKeys.triageSchedulePrefix]
+        : []),
     ],
   });
 
@@ -3685,16 +3760,28 @@ export const useStartedInvestigations = (repo: string) =>
   );
 
 export interface TriageQueue {
-  /** Not-snoozed tickets after the mine/all filter, in the backend's order
-   *  (soonest SLA first). */
+  /** Not-snoozed tickets after the per-team mine/all filter, in the backend's
+   *  order (soonest SLA first). */
   active: TriageTicket[];
   /** Snoozed tickets after the same filter, in the same order. */
   snoozed: TriageTicket[];
-  /** The Mine/All switch: `true` is All (the whole team inbox), `false` is Mine. */
+  /** The default Mine/All: `true` is All (the whole team inbox), `false` is
+   *  Mine — what a team without a scope of its own follows. */
   goodCitizen: boolean;
+  /** Each team's own scope, where one is set (see {@link TRIAGE_TEAM_SCOPES_KEY}). */
+  teamScopes: Record<string, TriageTeamScope>;
   /** The queue hasn't resolved yet — an empty `active` means nothing at all. A
    *  view must render a skeleton (not "all caught up") while this holds. */
   loading: boolean;
+}
+
+/** Whether a team shows its whole inbox: its own scope, else the default. */
+export function teamShowsAll(
+  team: string | null,
+  opts: { goodCitizen: boolean; teamScopes?: Record<string, TriageTeamScope> },
+): boolean {
+  const own = team ? opts.teamScopes?.[team] : undefined;
+  return own ? own === "all" : opts.goodCitizen;
 }
 
 /**
@@ -3706,11 +3793,13 @@ export interface TriageQueue {
  */
 export function filterTriageQueue(
   tickets: TriageTicket[],
-  opts: { goodCitizen: boolean },
+  opts: { goodCitizen: boolean; teamScopes?: Record<string, TriageTeamScope> },
 ): Pick<TriageQueue, "active" | "snoozed"> {
-  // "Be a good citizen" widens to the whole team inbox (issues not assigned to
-  // you included) so you can pitch in — unconditionally, on triage duty or not.
-  const base = opts.goodCitizen ? tickets : tickets.filter((t) => t.mine);
+  // "Be a good citizen" widens a team to its whole inbox (issues not assigned to
+  // you included) so you can pitch in — per team, each following the default
+  // unless it has a scope of its own. The backend hands every scoped team's
+  // whole inbox over, so this is a filter and never a refetch.
+  const base = tickets.filter((t) => t.mine || teamShowsAll(t.team, opts));
   return {
     active: base.filter((t) => t.snoozedUntilMs == null),
     snoozed: base.filter((t) => t.snoozedUntilMs != null),
@@ -3730,16 +3819,75 @@ export const useTriageQueue = (repo: string): TriageQueue => {
     "app",
     TRIAGE_GOOD_CITIZEN_KEY,
   );
+  const { data: scopesRaw, isFetched: scopesKnown } = useSetting("app", TRIAGE_TEAM_SCOPES_KEY);
 
   return useMemo(() => {
-    const { active, snoozed } = filterTriageQueue(data ?? [], { goodCitizen });
+    const teamScopes = parseTriageTeamScopes(scopesRaw);
+    const { active, snoozed } = filterTriageQueue(data ?? [], { goodCitizen, teamScopes });
     // A disconnected backend returns `Ok([])`, never an error or a pending
     // read — so "still loading" is exactly "the first fetch hasn't landed". The
     // filter is part of that: `goodCitizen` reads false until its row lands, so
     // an "All" queue would otherwise show its Mine subset for a frame.
-    return { active, snoozed, goodCitizen, loading: isLoading || !filterKnown };
-  }, [data, goodCitizen, isLoading, filterKnown]);
+    return {
+      active,
+      snoozed,
+      goodCitizen,
+      teamScopes,
+      loading: isLoading || !filterKnown || !scopesKnown,
+    };
+  }, [data, goodCitizen, scopesRaw, isLoading, filterKnown, scopesKnown]);
 };
+
+/** The per-team Mine/All map and its one writer: `setScope(team, null)` returns
+ *  a team to the default. */
+export function useTriageTeamScopes(): {
+  scopes: Record<string, TriageTeamScope>;
+  setScope: (team: string, scope: TriageTeamScope | null) => void;
+} {
+  const { data: raw } = useSetting("app", TRIAGE_TEAM_SCOPES_KEY);
+  const { mutate } = useSetSetting();
+  const scopes = useMemo(() => parseTriageTeamScopes(raw), [raw]);
+  const setScope = useCallback(
+    (team: string, scope: TriageTeamScope | null) => {
+      const next = { ...scopes };
+      if (scope) next[team] = scope;
+      else delete next[team];
+      mutate({
+        scope: "app",
+        key: TRIAGE_TEAM_SCOPES_KEY,
+        value: Object.keys(next).length > 0 ? JSON.stringify(next) : null,
+      });
+    },
+    [scopes, mutate],
+  );
+  return { scopes, setScope };
+}
+
+/** The `triage_teams` rules and their one writer. */
+export function useTriageTeamRules(): {
+  rules: TriageTeamRules;
+  loading: boolean;
+  setRules: (next: TriageTeamRules) => void;
+} {
+  const { data: raw, isLoading } = useSetting("app", TRIAGE_TEAMS_KEY);
+  const { mutate } = useSetSetting();
+  const rules = useMemo(() => parseTriageTeamRules(raw), [raw]);
+  const setRules = useCallback(
+    (next: TriageTeamRules) =>
+      mutate({ scope: "app", key: TRIAGE_TEAMS_KEY, value: JSON.stringify(next) }),
+    [mutate],
+  );
+  return { rules, loading: isLoading, setRules };
+}
+
+/** Every team the org exposes, with what you are to it — the list the Triage
+ *  teams setting is picked from. Empty when no org is connected. */
+export const useLinearTeams = (repo: string) =>
+  useUnwrappedQuery(queryKeys.linearTeams(repo), () => commands.linearTeams(repo), {
+    enabled: !!repo,
+    staleTime: TRIAGE_STALE_TIME,
+    gcTime: TRIAGE_GC_TIME,
+  });
 
 /** The registered repo a stored name points at, or `null` when it names none —
  *  a project removed from the registry must read as "nothing attached", not as

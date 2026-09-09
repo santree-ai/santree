@@ -22,7 +22,14 @@ const route = vi.hoisted(() => ({
 }));
 const app = vi.hoisted(() => ({ triageEnabled: true }));
 const data = vi.hoisted(() => ({
-  queue: { active: [], snoozed: [], goodCitizen: false, loading: false } as TriageQueue,
+  queue: {
+    active: [],
+    snoozed: [],
+    goodCitizen: false,
+    teamScopes: {},
+    loading: false,
+  } as TriageQueue,
+  setScope: vi.fn(),
   schedules: [] as TriageSchedule[],
   setSetting: vi.fn(),
   hover: vi.fn(),
@@ -51,6 +58,7 @@ vi.mock("../../lib/queries", async (importOriginal) => ({
   // the section never has to pick a project itself.
   useTriageOrgRepo: () => "acme/app",
   useTriageQueue: () => data.queue,
+  useTriageTeamScopes: () => ({ scopes: data.queue.teamScopes, setScope: data.setScope }),
   useTriageSchedule: () => ({ data: data.schedules, isLoading: false }),
   useSetSetting: () => ({ mutate: data.setSetting }),
   usePrefetchOnHover: () => data.hover,
@@ -73,7 +81,14 @@ const ticket = (id: string, over: Partial<TriageTicket> = {}) =>
   triageTicket(id, { title: `Fix ${id}`, ...over });
 
 function queue(over: Partial<TriageQueue>) {
-  data.queue = { active: [], snoozed: [], goodCitizen: false, loading: false, ...over };
+  data.queue = {
+    active: [],
+    snoozed: [],
+    goodCitizen: false,
+    teamScopes: {},
+    loading: false,
+    ...over,
+  };
 }
 
 function schedule(over: Partial<TriageSchedule> = {}): TriageSchedule {
@@ -337,6 +352,46 @@ describe("TriageSection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show the Messaging triage rotation" }));
     expect(screen.getByRole("dialog")).toHaveTextContent("MSG triage");
     expect(screen.getByText("MS-2")).toBeInTheDocument();
+  });
+
+  /** Each team's row carries its own Mine/All: the header's default until the
+   *  row says otherwise, written per team, and the header's menu leads to the
+   *  Settings card that decides which teams are here at all. */
+  it("switches a team's scope from its row, and opens the teams settings from the menu", () => {
+    data.schedules = [
+      schedule(),
+      schedule({ team: "Messaging", teamKey: "MSG", scheduleName: "MSG triage" }),
+    ];
+    queue({
+      active: [ticket("AK-1", { team: "SAN" })],
+      goodCitizen: true,
+      teamScopes: { MSG: "mine" },
+    });
+    render(<TriageSection />);
+
+    const santree = screen.getByRole("group", { name: "Santree tickets" });
+    const messaging = screen.getByRole("group", { name: "Messaging tickets" });
+    // Santree follows the default (All); Messaging has its own (Mine), and
+    // says so at rest rather than only on hover.
+    expect(within(santree).getByRole("button", { name: /^All/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(santree.className).toContain("opacity-0");
+    expect(within(messaging).getByRole("button", { name: /^Mine/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(messaging.className).not.toContain("opacity-0");
+
+    fireEvent.click(within(santree).getByRole("button", { name: /^Mine/ }));
+    expect(data.setScope).toHaveBeenCalledWith("SAN", "mine");
+    // The switch is not the fold.
+    expect(screen.getByText("AK-1")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Triage scope: All" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Teams…/ }));
+    expect(route.navigate).toHaveBeenCalledWith({ to: "/settings", search: { section: "triage" } });
   });
 
   /** The schedule read can land after the queue's: a ticket whose team has no

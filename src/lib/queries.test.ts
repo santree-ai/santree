@@ -67,12 +67,15 @@ vi.mock("../bindings", () => ({
 import {
   applyStage,
   awaitingReviewPrs,
+  DEFAULT_TRIAGE_TEAM_RULES,
   filterTriageQueue,
   isOptedIn,
   parseBatchSetup,
   parseGithubGroupBy,
   parseLinearGroupBy,
   parseLinearScope,
+  parseTriageTeamRules,
+  parseTriageTeamScopes,
   patchSettingCache,
   promptPreviewKey,
   queryKeys,
@@ -968,12 +971,15 @@ describe("patchSettingCache", () => {
 });
 
 describe("filterTriageQueue", () => {
-  function ticket(id: string, opts: { mine: boolean; snoozed?: boolean }): TriageTicket {
+  function ticket(
+    id: string,
+    opts: { mine: boolean; snoozed?: boolean; team?: string },
+  ): TriageTicket {
     return {
       id,
       title: id,
       priority: "Medium",
-      team: null,
+      team: opts.team ?? null,
       slaBreachMs: null,
       snoozedUntilMs: opts.snoozed ? Date.now() + 60_000 : null,
       mine: opts.mine,
@@ -1009,6 +1015,46 @@ describe("filterTriageQueue", () => {
     const result = filterTriageQueue(shuffled, { goodCitizen: true });
     expect(ids(result.active)).toEqual([theirs.id, mine.id]);
     expect(ids(result.snoozed)).toEqual([theirsSnoozed.id, mineSnoozed.id]);
+  });
+
+  /** A team's own scope wins over the default, either way; a team without one
+   *  follows the default; the viewer's own tickets show whatever the scope. */
+  it("scopes each team on its own, falling back to the default", () => {
+    const akMine = ticket("AK-1", { mine: true, team: "AK" });
+    const akTheirs = ticket("AK-2", { mine: false, team: "AK" });
+    const msgTheirs = ticket("MSG-1", { mine: false, team: "MSG" });
+    const opsTheirs = ticket("OPS-1", { mine: false, team: "OPS" });
+    const all = [akMine, akTheirs, msgTheirs, opsTheirs];
+
+    const scoped = { AK: "mine", MSG: "all" } as const;
+    expect(ids(filterTriageQueue(all, { goodCitizen: true, teamScopes: scoped }).active)).toEqual([
+      akMine.id,
+      msgTheirs.id,
+      opsTheirs.id,
+    ]);
+    expect(ids(filterTriageQueue(all, { goodCitizen: false, teamScopes: scoped }).active)).toEqual([
+      akMine.id,
+      msgTheirs.id,
+    ]);
+  });
+
+  it("reads the per-team scopes and the rules fail-safe", () => {
+    expect(parseTriageTeamScopes('{"AK":"mine","MSG":"all","X":"loud"}')).toEqual({
+      AK: "mine",
+      MSG: "all",
+    });
+    expect(parseTriageTeamScopes("{")).toEqual({});
+    expect(parseTriageTeamScopes(null)).toEqual({});
+
+    expect(parseTriageTeamRules(null)).toEqual(DEFAULT_TRIAGE_TEAM_RULES);
+    expect(parseTriageTeamRules("nope")).toEqual(DEFAULT_TRIAGE_TEAM_RULES);
+    expect(parseTriageTeamRules('{"member":true,"picked":["X",3],"hidden":"AK"}')).toEqual({
+      rotation: true,
+      assigned: true,
+      member: true,
+      picked: ["X"],
+      hidden: [],
+    });
   });
 });
 

@@ -14,6 +14,7 @@ import type {
   AgentState,
   ChangedFile,
   FileSource,
+  LinearTeam,
   Repo,
   SessionDetail,
   SessionState,
@@ -1344,6 +1345,38 @@ function triageDetail(t: TriageSeed, now: number): TriageDetail {
     })),
   };
 }
+
+/** The org's teams, as the Triage teams setting lists them. Mallard's one
+ *  rotation is QuackStack's; the viewer belongs to it and to Beak. */
+export const linearTeams = (repo: string): LinearTeam[] =>
+  repo === QUACK
+    ? [
+        {
+          key: "QK",
+          name: TEAMS.QK,
+          member: true,
+          inRotation: true,
+          hasRotation: true,
+          hasAssigned: true,
+        },
+        {
+          key: "INF",
+          name: TEAMS.INF,
+          member: false,
+          inRotation: false,
+          hasRotation: true,
+          hasAssigned: false,
+        },
+        {
+          key: "BK",
+          name: TEAMS.BK,
+          member: true,
+          inRotation: false,
+          hasRotation: false,
+          hasAssigned: false,
+        },
+      ]
+    : [];
 
 export function triageSchedule(repo: string, now: number): TriageSchedule[] {
   if (repo !== QUACK) return [];

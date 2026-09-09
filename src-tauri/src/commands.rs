@@ -21,14 +21,14 @@ use santree_core::{
         AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
         ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
         EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget, GithubStatus, LegacyCliMigration,
-        LinearApiBudget, LinearOrg, LinearStatus, LogExport, MergeQueueView, NewInlineComment,
-        NewPr, NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptLayer,
-        PromptPreview, PromptWorkItemSample, Repo, RepoBranch, ResourceUsage, ReviewBrief,
-        ReviewCheckout, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr, ReviewPublishOutcome,
-        ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail, SessionState,
-        SessionSubagent, SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task, TicketRef,
-        TriageDetail, TriageSchedule, TriageSession, TriageTicket, UsageReport, ViewedMarks,
-        Worktree, WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
+        LinearApiBudget, LinearOrg, LinearStatus, LinearTeam, LogExport, MergeQueueView,
+        NewInlineComment, NewPr, NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo,
+        PromptLayer, PromptPreview, PromptWorkItemSample, Repo, RepoBranch, ResourceUsage,
+        ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
+        ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail,
+        SessionState, SessionSubagent, SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task,
+        TicketRef, TriageDetail, TriageSchedule, TriageSession, TriageTicket, UsageReport,
+        ViewedMarks, Worktree, WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
     },
 };
 
@@ -1994,6 +1994,14 @@ pub async fn list_triage_tickets(repo: String, db: State<'_, Db>) -> CmdResult<V
     Ok(linear::triage_tickets(&db, &repo)
         .await?
         .unwrap_or_default())
+}
+
+/// Every team the org exposes, with what the viewer is to it — for the Triage
+/// teams setting. Empty when no Linear org is connected.
+#[tauri::command]
+#[specta::specta]
+pub async fn linear_teams(repo: String, db: State<'_, Db>) -> CmdResult<Vec<LinearTeam>> {
+    Ok(linear::linear_teams(&db, &repo).await?.unwrap_or_default())
 }
 
 /// The full triage issue (description + comments) for the discussion pane.

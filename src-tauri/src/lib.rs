@@ -211,6 +211,7 @@ fn specta_builder() -> AppBuilder {
             commands::resource_usage,
             commands::agent_processes,
             commands::triage_schedule,
+            commands::linear_teams,
             commands::get_settings,
             commands::set_settings,
             commands::quit_app,

@@ -244,20 +244,24 @@ src/
   file name is validated as one path component and joined through
   `safe_path`.
 - **Triage is a sidebar section, not a destination.** `shell/TriageSection`
-  is organised by team: from two teams up, one folding row per team in the
+  is organised by team: one folding row per team in the
   viewer's scope (the repo-header register — name, count, and at the trailing
   edge a chip for who has its rotation, which opens the whole schedule in
   `shell/RotationDialog`), the only team included: the row is what names it
   and folds it. The team's active tickets sit under it at the section's own
   gutter — no indent; folding is what makes them its — each ticket's investigation agents
-  under the ticket, and a folded Snoozed group per team. The scope is the backend's (`linear.rs` `TeamScope`, shared by the
-  queue and the schedules): the rotations the viewer is *in*
-  (`viewer_participates`, not team membership) first, then any team holding a
-  triage ticket assigned to them — and for those the inbox carries only the
-  viewer's own tickets, whatever the scope menu says (`inbox_filter`). The
-  grouping is `shell/triageTeams`. Scoped to `useTriageOrgRepo`'s project and
-  filtered by the header's scope menu — Mine/All, the `triage_good_citizen`
-  setting; that menu is its only control. A ticket opens
+  under the ticket, and a folded Snoozed group per team. **Which teams** is the
+  `triage_teams` setting (Settings → Triage → Teams): three unioned rules —
+  rotations the viewer is *in* (`viewer_participates`, not team membership),
+  teams holding a triage ticket assigned to them, teams they are a member of
+  (off by default) — plus per-team always/never picks. The backend applies the
+  same rules (`linear.rs` `scope_of` over cached `TeamFacts`, shared by the queue
+  and the schedules) and fetches every scoped team's whole inbox OR the viewer's
+  own tickets (`inbox_filter`). **Mine/All is per team**: the header's menu sets
+  the default (`triage_good_citizen`), each team's row carries a hover switch
+  that writes its own entry (`triage_team_scopes`), and `filterTriageQueue`
+  applies both without a refetch. The grouping is `shell/triageTeams`. Scoped to
+  `useTriageOrgRepo`'s project; the header menu's last row leads to the Teams card. A ticket opens
   `/triage?ticket=<id>`; selection lives in the route so the row lights from it,
   exactly as Reviews' `?pr=` does. There is no manual ordering: the order is the
   backend's (active first, soonest SLA). `useTriageQueue` is the one source for

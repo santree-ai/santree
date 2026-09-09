@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 
 import type { AgentKind, CodexModel } from "../../../bindings";
 import { AgentIcon } from "../../../components/icons";
-import { ChevronSelect, Tabs, Toggle } from "../../../components/primitives";
+import { ChevronSelect, Skeleton, Tabs, Toggle } from "../../../components/primitives";
 import { agentAvailable } from "../../../lib/format";
 import {
   COMMIT_MESSAGE_AGENT_KEY,
@@ -26,13 +26,17 @@ import {
   REVIEW_MODEL_KEY,
   REVIEW_PERMISSION_MODE_KEY,
   TRIAGE_DEFAULT_REPO_KEY,
+  type TriageTeamRules,
   useAgents,
   useBoolSetting,
   useClaudeModels,
   useCodexModels,
+  useLinearTeams,
   useRepos,
   useSetSetting,
   useSetting,
+  useTriageOrgRepo,
+  useTriageTeamRules,
   WORK_AGENT_KEY,
   WORK_ASK_BASE_KEY,
   WORK_EFFORT_KEY,
@@ -42,7 +46,7 @@ import {
 } from "../../../lib/queries";
 import { useApp } from "../../../state/AppContext";
 import { agentProvider } from "../../terminal/agentProvider";
-import { Field, Heading, OverrideSelect, SELECT_CLASS, ToggleRow } from "../widgets";
+import { CardRow, Field, Heading, OverrideSelect, SELECT_CLASS, ToggleRow } from "../widgets";
 import { ViewedMarksCard } from "./ViewedMarks";
 
 /** Describes one configurable workflow: its default provider and each provider's
@@ -236,12 +240,129 @@ function AppTriagePanel() {
         </div>
         <div>
           <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
+            Teams
+          </div>
+          <TriageTeamsCard disabled={!enabled} />
+        </div>
+        <div>
+          <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
             Investigation
           </div>
           <div className="space-y-3.5">
             <ActionConfig descriptor={INVESTIGATE} disabled={!enabled} />
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** How one team stands to the rules: shown when they admit it, always, or never. */
+type TeamStanding = "rules" | "always" | "never";
+
+function standingOf(rules: TriageTeamRules, key: string): TeamStanding {
+  if (rules.hidden.includes(key)) return "never";
+  if (rules.picked.includes(key)) return "always";
+  return "rules";
+}
+
+/** Move a team between the lists: out of both, then into the one picked. */
+function withStanding(
+  rules: TriageTeamRules,
+  key: string,
+  standing: TeamStanding,
+): TriageTeamRules {
+  const picked = rules.picked.filter((k) => k !== key);
+  const hidden = rules.hidden.filter((k) => k !== key);
+  return {
+    ...rules,
+    picked: standing === "always" ? [...picked, key] : picked,
+    hidden: standing === "never" ? [...hidden, key] : hidden,
+  };
+}
+
+/**
+ * Which teams Triage shows: three rules, unioned, and then every team the org
+ * exposes with where it stands — by the rules, always, or never — so any team
+ * can be added or taken away whatever the rules say. The list carries what you
+ * are to each team (its rotation, its roster, a ticket of yours), which is what
+ * the rules read, so a rule's effect is legible against the same list. The
+ * backend applies these rules to the same facts (`scope_of`), so the sidebar's
+ * inbox and its rows always agree with this card.
+ */
+function TriageTeamsCard({ disabled }: { disabled: boolean }) {
+  const repo = useTriageOrgRepo();
+  const { data: teams, isLoading } = useLinearTeams(repo);
+  const { rules, setRules } = useTriageTeamRules();
+  const rule = (key: "rotation" | "assigned" | "member") => (on: boolean) =>
+    setRules({ ...rules, [key]: on });
+
+  return (
+    <div className="space-y-3.5">
+      <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
+        <ToggleRow
+          label="Teams whose triage rotation you are in"
+          hint="Their whole triage inbox is yours to watch."
+          on={rules.rotation}
+          onChange={rule("rotation")}
+          disabled={disabled}
+        />
+        <ToggleRow
+          label="Teams that assigned you a triage ticket"
+          hint="Whether or not you are in their rotation."
+          on={rules.assigned}
+          onChange={rule("assigned")}
+          disabled={disabled}
+        />
+        <ToggleRow
+          label="Teams you are a member of"
+          hint="Off by default: Linear keeps people on a team long after they've left its work."
+          on={rules.member}
+          onChange={rule("member")}
+          disabled={disabled}
+        />
+      </div>
+      <div className="rounded-xl border border-line-2 bg-raised">
+        {isLoading && (
+          <div className="space-y-3 px-4 py-3.5" aria-hidden>
+            <Skeleton className="h-3 w-2/5" />
+            <Skeleton className="h-3 w-1/3" />
+          </div>
+        )}
+        {!isLoading && (teams ?? []).length === 0 && (
+          <div className="px-4 py-3.5 text-[11.5px] text-muted-3">
+            No teams to list. Connect Linear and pick a triage project above.
+          </div>
+        )}
+        {(teams ?? []).map((team) => {
+          const facts = [
+            team.inRotation ? "in its rotation" : team.hasRotation ? "has a rotation" : null,
+            team.member ? "member" : null,
+            team.hasAssigned ? "a ticket of yours" : null,
+          ].filter((f): f is string => f !== null);
+          return (
+            <CardRow
+              key={team.key}
+              label={`${team.name} · ${team.key}`}
+              hint={facts.length > 0 ? facts.join(" · ") : "Nothing of yours here"}
+            >
+              {(labelId) => (
+                <ChevronSelect
+                  value={standingOf(rules, team.key)}
+                  onChange={(v) => setRules(withStanding(rules, team.key, v as TeamStanding))}
+                  disabled={disabled}
+                  aria-labelledby={labelId}
+                  className={`${SELECT_CLASS} w-auto`}
+                  wrapperClassName="flex-none"
+                >
+                  <option value="rules">By the rules</option>
+                  <option value="always">Always show</option>
+                  <option value="never">Never show</option>
+                </ChevronSelect>
+              )}
+            </CardRow>
+          );
+        })}
       </div>
     </div>
   );

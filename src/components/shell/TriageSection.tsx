@@ -37,11 +37,13 @@ import { agentKey } from "../../features/agents/registry";
 import { useOpenAgent } from "../../features/agents/useOpenAgent";
 import {
   TRIAGE_GOOD_CITIZEN_KEY,
+  type TriageTeamScope,
   usePrefetchOnHover,
   useSetSetting,
   useTriageOrgRepo,
   useTriageQueue,
   useTriageSchedule,
+  useTriageTeamScopes,
 } from "../../lib/queries";
 import { formatShiftRange, formatSnoozeLabel } from "../../lib/relativeTime";
 import { usePersistedState } from "../../lib/usePersistedState";
@@ -96,7 +98,8 @@ export function TriageSection() {
   const orgRepo = useTriageOrgRepo();
   const repo = triageEnabled ? orgRepo : "";
   const queue = useTriageQueue(repo);
-  const { active, snoozed, goodCitizen } = queue;
+  const { active, snoozed, goodCitizen, teamScopes } = queue;
+  const { setScope } = useTriageTeamScopes();
   const { data: schedules = NO_SCHEDULES, isLoading: schedulesLoading } = useTriageSchedule(repo);
   // Both reads shape the section — a ticket lands under its team's row — so
   // it is loading until both have landed, and skeletons stand in for the pair.
@@ -144,12 +147,12 @@ export function TriageSection() {
     },
     [markSeen, openAgent],
   );
-  // The Mine/All switch *is* the "be a good citizen" setting — All widens to the
-  // whole inbox of every team you are on call for (issues not assigned to you
-  // included). A team you are in only through a ticket of yours never widens:
-  // the backend hands over just your tickets there.
+  // The header's Mine/All *is* the "be a good citizen" setting — the default
+  // every team follows until its own row says otherwise. All widens a team to
+  // its whole inbox (issues not assigned to you included).
   const setGoodCitizen = (next: boolean) =>
     setSetting.mutate({ scope: "app", key: TRIAGE_GOOD_CITIZEN_KEY, value: next ? "true" : null });
+  const openTeamSettings = () => navigate({ to: "/settings", search: { section: "triage" } });
 
   if (!triageEnabled) return null;
 
@@ -195,6 +198,9 @@ export function TriageSection() {
             count={group.active.length}
             open={!folded}
             onToggle={() => setFoldedTeams((m) => ({ ...m, [group.key]: !m[group.key] }))}
+            scope={teamScopes[group.key] ?? (goodCitizen ? "all" : "mine")}
+            overridden={group.key in teamScopes}
+            onScope={(next) => setScope(group.key, next)}
             schedule={group.schedule}
             onOpenRotation={rotation}
           />
@@ -275,7 +281,11 @@ export function TriageSection() {
           }`}
         />
         <span className="relative ml-auto flex items-center">
-          <ScopeMenu goodCitizen={goodCitizen} onChange={setGoodCitizen} />
+          <ScopeMenu
+            goodCitizen={goodCitizen}
+            onChange={setGoodCitizen}
+            onOpenTeams={openTeamSettings}
+          />
         </span>
       </div>
 
@@ -307,17 +317,21 @@ const SCOPES = [
   { value: true, label: "All", hint: "The whole team's inbox" },
 ] as const;
 
-/** Whose tickets the queue shows, as a menu on the header: the trigger is the
- *  current scope in the header's own register, and the menu names both scopes
- *  with what each one shows. It replaced a Mine/All pair whose pressed half wore
+/** Whose tickets the queue shows by default, as a menu on the header: the
+ *  trigger is the current default in the header's own register, and the menu
+ *  names both scopes with what each one shows — a team's own row can say
+ *  otherwise for that team — then the way to Settings, where which teams are
+ *  here at all is decided. It replaced a Mine/All pair whose pressed half wore
  *  a fill — at ten pixels, on a rail that is open all day, that read as a hover
  *  that never cleared, beside a word too dim to read as the other choice. */
 function ScopeMenu({
   goodCitizen,
   onChange,
+  onOpenTeams,
 }: {
   goodCitizen: boolean;
   onChange: (next: boolean) => void;
+  onOpenTeams: () => void;
 }) {
   const current = SCOPES.find((scope) => scope.value === goodCitizen) ?? SCOPES[0];
   return (
@@ -337,35 +351,104 @@ function ScopeMenu({
         </button>
       )}
     >
-      {(close) =>
-        SCOPES.map((scope) => {
-          const checked = scope.value === goodCitizen;
-          return (
-            <button
-              key={scope.label}
-              type="button"
-              role="menuitemradio"
-              aria-checked={checked}
-              onClick={() => {
-                close();
-                onChange(scope.value);
-              }}
-              className={`${MENU_ITEM} items-start`}
-            >
-              {/* The check keeps its column whether or not it is drawn, so the
+      {(close) => (
+        <>
+          {SCOPES.map((scope) => {
+            const checked = scope.value === goodCitizen;
+            return (
+              <button
+                key={scope.label}
+                type="button"
+                role="menuitemradio"
+                aria-checked={checked}
+                onClick={() => {
+                  close();
+                  onChange(scope.value);
+                }}
+                className={`${MENU_ITEM} items-start`}
+              >
+                {/* The check keeps its column whether or not it is drawn, so the
                   two rows' labels line up. */}
-              <span className="flex h-4 w-3 flex-none items-center text-fg">
-                {checked && <CheckIcon size={11} />}
-              </span>
-              <span className="flex min-w-0 flex-col">
-                <span className={checked ? "text-fg" : undefined}>{scope.label}</span>
-                <span className="text-[11px] text-muted-3">{scope.hint}</span>
-              </span>
-            </button>
-          );
-        })
-      }
+                <span className="flex h-4 w-3 flex-none items-center text-fg">
+                  {checked && <CheckIcon size={11} />}
+                </span>
+                <span className="flex min-w-0 flex-col">
+                  <span className={checked ? "text-fg" : undefined}>{scope.label}</span>
+                  <span className="text-[11px] text-muted-3">{scope.hint}</span>
+                </span>
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              close();
+              onOpenTeams();
+            }}
+            className={`${MENU_ITEM} border-t border-line`}
+          >
+            <span className="w-3 flex-none" />
+            <span className="flex min-w-0 flex-col">
+              <span>Teams…</span>
+              <span className="text-[11px] text-muted-3">Which teams show up here</span>
+            </span>
+          </button>
+        </>
+      )}
     </Dropdown>
+  );
+}
+
+/** A team's own Mine/All, on its row: two words, the one in force lit. Shown
+ *  on hover, or always once the team has left the header's default, so a team
+ *  that differs from the rest says so at rest. Sits beside the rotation chip,
+ *  above the row's stretched fold button, so a click here sets the scope and
+ *  folds nothing. */
+function ScopeSwitch({
+  team,
+  scope,
+  overridden,
+  onChange,
+}: {
+  team: string;
+  scope: TriageTeamScope;
+  overridden: boolean;
+  onChange: (next: TriageTeamScope) => void;
+}) {
+  return (
+    // biome-ignore lint/a11y/useSemanticElements: a fieldset brings a block box and a border reset the row's inline layout can't take; the role is the whole of what it needs.
+    <span
+      role="group"
+      aria-label={`${team} tickets`}
+      className={`relative flex flex-none items-center gap-px rounded transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 ${
+        overridden ? "opacity-100" : "opacity-0"
+      }`}
+    >
+      {(
+        [
+          ["mine", "Mine", "Only the tickets assigned to you"],
+          ["all", "All", "The whole team's inbox"],
+        ] as const
+      ).map(([value, label, hint]) => {
+        const on = value === scope;
+        return (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={on}
+            aria-label={`${label}: ${hint}`}
+            title={hint}
+            onClick={() => onChange(value)}
+            className={`cursor-pointer rounded px-1 py-px font-mono text-[9px] uppercase tracking-[0.06em] transition-colors ${
+              on ? "bg-(--tree-tag-fill) text-fg-2" : "text-muted-4 hover:text-fg-2"
+            }`}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </span>
   );
 }
 
@@ -382,6 +465,9 @@ function TeamRow({
   count,
   open,
   onToggle,
+  scope,
+  overridden,
+  onScope,
   schedule,
   onOpenRotation,
 }: {
@@ -390,6 +476,11 @@ function TeamRow({
   count: number;
   open: boolean;
   onToggle: () => void;
+  /** The team's Mine/All in force — its own, else the header's default. */
+  scope: TriageTeamScope;
+  /** The team has a scope of its own. */
+  overridden: boolean;
+  onScope: (next: TriageTeamScope) => void;
   /** The team's rotation card, when the schedule read has it. */
   schedule: TriageSchedule | null;
   /** Absent when there is no schedule to show. */
@@ -423,11 +514,10 @@ function TeamRow({
           open ? "opacity-0" : "opacity-100"
         }`}
       />
-      {schedule && (
-        <span className="relative ml-auto flex min-w-0 items-center">
-          <RotationChip schedule={schedule} onOpen={onOpenRotation} />
-        </span>
-      )}
+      <span className="relative ml-auto flex min-w-0 items-center gap-1.5">
+        <ScopeSwitch team={name} scope={scope} overridden={overridden} onChange={onScope} />
+        {schedule && <RotationChip schedule={schedule} onOpen={onOpenRotation} />}
+      </span>
     </div>
   );
 }

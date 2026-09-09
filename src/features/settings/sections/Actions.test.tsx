@@ -16,6 +16,26 @@ let triageOn = false;
 let linearOn = true;
 let settingValues: Record<string, string | null> = {};
 const setSetting = vi.hoisted(() => vi.fn());
+const setRules = vi.hoisted(() => vi.fn());
+/** The org's teams, as the Teams card lists them. */
+const linearTeams = vi.hoisted(() => [
+  { key: "AK", name: "App", member: true, inRotation: true, hasRotation: true, hasAssigned: false },
+  {
+    key: "MSG",
+    name: "Messaging",
+    member: false,
+    inRotation: false,
+    hasRotation: true,
+    hasAssigned: true,
+  },
+]);
+let teamRules = {
+  rotation: true,
+  assigned: true,
+  member: false,
+  picked: [] as string[],
+  hidden: [] as string[],
+};
 
 vi.mock("../../../lib/queries", () => ({
   TRIAGE_DEFAULT_REPO_KEY: "triage.defaultRepo",
@@ -76,6 +96,9 @@ vi.mock("../../../lib/queries", () => ({
   useSetSetting: () => ({ mutate: setSetting }),
   useSetSyncViewed: () => ({ mutate: vi.fn() }),
   useSetting: (_scope: string, key: string) => ({ data: settingValues[key] ?? null }),
+  useTriageOrgRepo: () => "acme/app",
+  useLinearTeams: () => ({ data: linearTeams, isLoading: false }),
+  useTriageTeamRules: () => ({ rules: teamRules, loading: false, setRules }),
 }));
 
 vi.mock("../../../state/AppContext", () => ({
@@ -97,6 +120,8 @@ describe("app-scope Triage settings", () => {
     triageOn = false;
     linearOn = true;
     settingValues = {};
+    teamRules = { rotation: true, assigned: true, member: false, picked: [], hidden: [] };
+    setRules.mockClear();
   });
 
   it("really disables every control in the panel while triage is off", () => {
@@ -106,10 +131,39 @@ describe("app-scope Triage settings", () => {
     // `disabled` a keyboard user tabs straight in and mutates a setting the UI
     // shows as off.
     for (const select of screen.getAllByRole("combobox")) expect(select).toBeDisabled();
-    // The master toggle stays live — it's what turns triage back on.
-    const switches = screen.getAllByRole("switch");
-    expect(switches).toHaveLength(1);
-    expect(switches[0]).toBeEnabled();
+    // The master toggle stays live — it's what turns triage back on; the team
+    // rules under it are switches too, and take the real attribute.
+    const [master, ...rest] = screen.getAllByRole("switch");
+    expect(master).toBeEnabled();
+    expect(rest).toHaveLength(3);
+    for (const rule of rest) expect(rule).toBeDisabled();
+  });
+
+  /** Which teams Triage shows: three unioned rules, then every team with where
+   *  it stands to them — by the rules, always, or never — so any team can be
+   *  added or taken away. Each write is the whole rules object, the shape the
+   *  backend reads. */
+  it("edits the team rules, and moves a team between the picked and hidden lists", () => {
+    triageOn = true;
+    teamRules = { ...teamRules, picked: ["MSG"] };
+    render(<TriageActionSection />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "Teams you are a member of" }));
+    expect(setRules).toHaveBeenLastCalledWith({ ...teamRules, member: true });
+
+    // The list says what you are to each team — what the rules read.
+    expect(screen.getByText("in its rotation · member")).toBeInTheDocument();
+    expect(screen.getByText("has a rotation · a ticket of yours")).toBeInTheDocument();
+
+    const messaging = screen.getByRole("combobox", { name: "Messaging · MSG" });
+    expect(messaging).toHaveValue("always");
+    fireEvent.change(messaging, { target: { value: "never" } });
+    expect(setRules).toHaveBeenLastCalledWith({ ...teamRules, picked: [], hidden: ["MSG"] });
+
+    const app = screen.getByRole("combobox", { name: "App · AK" });
+    expect(app).toHaveValue("rules");
+    fireEvent.change(app, { target: { value: "always" } });
+    expect(setRules).toHaveBeenLastCalledWith({ ...teamRules, picked: ["MSG", "AK"] });
   });
 
   /** The queue's Mine/All switch lives on the sidebar's Triage section, and the
