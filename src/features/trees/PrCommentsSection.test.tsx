@@ -40,6 +40,7 @@ function comment(over: Partial<PrComment> = {}): PrComment {
     body: BODY,
     createdAt: "2026-08-01T10:00:00Z",
     kind: "Issue",
+    reviewState: null,
     path: null,
     isPending: false,
     isBot: true,

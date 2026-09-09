@@ -11,7 +11,7 @@
  * Inline review threads are not here either: they belong to lines of code and
  * render in the diff.
  */
-import type { PrComment } from "../../bindings";
+import type { PrComment, ViewerReviewState } from "../../bindings";
 
 export interface TimelineEntry {
   /** Stable within one PR's render. */
@@ -24,8 +24,24 @@ export interface TimelineEntry {
   createdAt: string;
   /** Whether GitHub classifies the author as a `Bot` actor. */
   isBot: boolean;
-  /** How GitHub words the entry: "commented" or "reviewed". */
-  verb: "commented" | "reviewed";
+  /** How GitHub words the entry: what a review's verdict was, else
+   *  "commented"/"reviewed". */
+  verb: "commented" | "reviewed" | "approved" | "requested changes";
+  /** The review's verdict, for the card's colour; `null` off a review. */
+  reviewState: ViewerReviewState | null;
+}
+
+/** GitHub's wording for a review event. A plain-comment review still reads as
+ *  "reviewed": it is a summary over the inline comments, not a reply. */
+function reviewVerb(state: ViewerReviewState | null): TimelineEntry["verb"] {
+  switch (state) {
+    case "Approved":
+      return "approved";
+    case "ChangesRequested":
+      return "requested changes";
+    default:
+      return "reviewed";
+  }
 }
 
 /** The top-level conversation, in the order the backend sorted it
@@ -40,6 +56,7 @@ export function timelineEntries(comments: PrComment[]): TimelineEntry[] {
     body: c.body,
     createdAt: c.createdAt,
     isBot: c.isBot,
-    verb: (c.kind === "Review" ? "reviewed" : "commented") as TimelineEntry["verb"],
+    verb: c.kind === "Review" ? reviewVerb(c.reviewState) : "commented",
+    reviewState: c.kind === "Review" ? c.reviewState : null,
   }));
 }

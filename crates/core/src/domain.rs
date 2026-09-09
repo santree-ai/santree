@@ -1441,6 +1441,11 @@ pub struct PrComment {
     pub body: String,
     pub created_at: String,
     pub kind: CommentKind,
+    /// The verdict a [`CommentKind::Review`] carried — approved, changes
+    /// requested, or just a comment. `None` for every other kind. This is how a
+    /// bare approval (no body) still has something to show: who, when, and that
+    /// they approved.
+    pub review_state: Option<ViewerReviewState>,
     /// File path for inline (`ReviewThread`) comments; `None` otherwise.
     pub path: Option<String>,
     /// Part of the viewer's own unsubmitted review — drafted, not posted. Only
@@ -2420,6 +2425,23 @@ pub struct TriageShift {
     pub ends_at_ms: Option<f64>,
     pub is_current: bool,
     pub is_me: bool,
+}
+
+/// One of the org's Linear teams, with what the viewer is to it — the list the
+/// Triage teams setting is picked from (Settings → Triage).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearTeam {
+    pub key: String,
+    pub name: String,
+    /// The viewer is on the team's roster.
+    pub member: bool,
+    /// The viewer is in the team's triage rotation.
+    pub in_rotation: bool,
+    /// The team runs a triage rotation at all.
+    pub has_rotation: bool,
+    /// The team holds a triage issue assigned to the viewer.
+    pub has_assigned: bool,
 }
 
 /// The team triage rotation surfaced from Linear's triage responsibility.

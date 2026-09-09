@@ -15,6 +15,7 @@ function comment(author: string, isBot: boolean): PrComment {
     body: "",
     createdAt: "2026-08-27T00:00:00Z",
     kind: "Issue",
+    reviewState: null,
     path: null,
     isPending: false,
     isBot,

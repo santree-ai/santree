@@ -46,7 +46,7 @@ import { RelativeTime } from "../../components/RelativeTime";
 import { useAddPrConversationComment, usePrDetail, useReviewDrafts } from "../../lib/queries";
 import { isoMs } from "../../lib/relativeTime";
 import { splitRepoSlug } from "../../lib/repo";
-import { palette } from "../../theme/colors";
+import { palette, successColor } from "../../theme/colors";
 import { anchoredFeedback } from "./anchoredFeedback";
 import { CommentComposer } from "./CommentComposer";
 import { anchorLabel } from "./InlineCommentBox";
@@ -380,16 +380,35 @@ function SectionLabel({
   );
 }
 
+/** The verb's colour, where the entry is a verdict: GitHub's green for an
+ *  approval and red for changes requested — the one place the conversation
+ *  borrows the review-decision vocabulary the header speaks. */
+function verdictColor(state: TimelineEntry["reviewState"]): string | undefined {
+  if (state === "Approved") return successColor;
+  if (state === "ChangesRequested") return palette.red;
+  return undefined;
+}
+
 /** One comment: avatar in the gutter, a header strip saying who wrote it and
- *  when, and the body under it. */
+ *  when, and the body under it — or no body at all, for a bare approval, where
+ *  the header is the whole event. */
 function TimelineCard({ entry }: { entry: TimelineEntry }) {
+  const body = entry.body.trim();
+  const color = verdictColor(entry.reviewState);
   return (
     <div className="flex gap-2.5">
       <Avatar name={entry.author} src={entry.authorAvatarUrl} size={26} />
       <div className="min-w-0 flex-1 overflow-hidden rounded-lg border border-line-2 bg-raised">
-        <div className="flex items-center gap-2 border-b border-line-2 px-3 py-1.5 text-[11px]">
+        <div
+          className={`flex items-center gap-2 px-3 py-1.5 text-[11px] ${body ? "border-b border-line-2" : ""}`}
+        >
           <span className="min-w-0 truncate font-medium text-fg-2">{entry.author}</span>
-          <span className="flex-none text-muted-4">{entry.verb}</span>
+          <span
+            className={`flex-none ${color ? "font-medium" : "text-muted-4"}`}
+            style={color ? { color } : undefined}
+          >
+            {entry.verb}
+          </span>
           {entry.isBot && (
             <Pill color={palette.slate} className="px-1 py-px text-[8.5px] font-medium uppercase">
               bot
@@ -400,9 +419,11 @@ function TimelineCard({ entry }: { entry: TimelineEntry }) {
             className="ml-auto flex-none font-mono text-[9.5px] text-muted-4"
           />
         </div>
-        <div className="px-3 py-2.5">
-          <Markdown>{entry.body}</Markdown>
-        </div>
+        {body && (
+          <div className="px-3 py-2.5">
+            <Markdown>{entry.body}</Markdown>
+          </div>
+        )}
       </div>
     </div>
   );

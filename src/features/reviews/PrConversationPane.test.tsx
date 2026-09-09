@@ -176,6 +176,7 @@ describe("PrConversationPane's description", () => {
     body: "looks good",
     createdAt: "2026-08-25T10:00:00Z",
     kind: "Issue",
+    reviewState: null,
     path: null,
     isPending: false,
     isBot: false,

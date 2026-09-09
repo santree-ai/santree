@@ -966,6 +966,11 @@ export const commands = {
 	 */
 	triageSchedule: (repo: string) => typedError<TriageSchedule[], CmdError>(__TAURI_INVOKE("triage_schedule", { repo })),
 	/**
+	 *  Every team the org exposes, with what the viewer is to it — for the Triage
+	 *  teams setting. Empty when no Linear org is connected.
+	 */
+	linearTeams: (repo: string) => typedError<LinearTeam[], CmdError>(__TAURI_INVOKE("linear_teams", { repo })),
+	/**
 	 *  User settings, persisted in the database (seeded from defaults on first run).
 	 *  Each agent's `exec` is the user's *override* (empty by default); the executable
 	 *  detected on PATH is reported separately via [`agent_auth`] and shown as the
@@ -2067,6 +2072,23 @@ export type LinearStatus = {
 };
 
 /**
+ *  One of the org's Linear teams, with what the viewer is to it — the list the
+ *  Triage teams setting is picked from (Settings → Triage).
+ */
+export type LinearTeam = {
+	key: string,
+	name: string,
+	/**  The viewer is on the team's roster. */
+	member: boolean,
+	/**  The viewer is in the team's triage rotation. */
+	inRotation: boolean,
+	/**  The team runs a triage rotation at all. */
+	hasRotation: boolean,
+	/**  The team holds a triage issue assigned to the viewer. */
+	hasAssigned: boolean,
+};
+
+/**
  *  Where an exported diagnostics bundle landed, so the UI can name it rather
  *  than leave the user hunting for a file it just wrote.
  */
@@ -2316,6 +2338,13 @@ export type PrComment = {
 	body: string,
 	createdAt: string,
 	kind: CommentKind,
+	/**
+	 *  The verdict a [`CommentKind::Review`] carried — approved, changes
+	 *  requested, or just a comment. `None` for every other kind. This is how a
+	 *  bare approval (no body) still has something to show: who, when, and that
+	 *  they approved.
+	 */
+	reviewState: ViewerReviewState | null,
 	/**  File path for inline (`ReviewThread`) comments; `None` otherwise. */
 	path: string | null,
 	/**

@@ -302,6 +302,7 @@ const comment = (
   body,
   createdAt,
   kind,
+  reviewState: kind === "Review" ? "Commented" : null,
   path,
   isPending: false,
   isBot: false,

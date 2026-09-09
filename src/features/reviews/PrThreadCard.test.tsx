@@ -21,6 +21,7 @@ function comment(over: Partial<PrComment> = {}): PrComment {
     body: "This drops the retry budget.",
     createdAt: "2026-08-01T10:00:00Z",
     kind: "ReviewThread",
+    reviewState: null,
     path: "src/retry.ts",
     isPending: false,
     isBot: false,

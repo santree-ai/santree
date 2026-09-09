@@ -74,6 +74,7 @@ function comment(over: Partial<PrComment> & { author: string }): PrComment {
     body: "",
     createdAt: "2026-06-28T12:00:00Z",
     kind: "ReviewThread",
+    reviewState: null,
     path: null,
     isPending: false,
     isBot: false,

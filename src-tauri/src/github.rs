@@ -969,12 +969,7 @@ fn to_review_pr(n: PrNode, viewer: &ViewerCtx) -> ReviewPr {
         .viewer_latest_review
         .and_then(|r| Some((r.state?, r.submitted_at?)))
         .map(|(state, submitted_at)| ViewerReview {
-            state: match state.as_str() {
-                "APPROVED" => ViewerReviewState::Approved,
-                "CHANGES_REQUESTED" => ViewerReviewState::ChangesRequested,
-                "COMMENTED" => ViewerReviewState::Commented,
-                _ => ViewerReviewState::Other,
-            },
+            state: review_state_of(&state),
             submitted_at,
         });
     let waiting_since = viewer_requested_at(&n.timeline_items.nodes, viewer)
@@ -2301,6 +2296,28 @@ async fn drain_thread_comments<T: DeserializeOwned>(
     Ok(())
 }
 
+/// Whether a submitted review belongs in the conversation. A verdict is an event
+/// worth a line even with nothing written under it: "approved", by whom and
+/// when, is what a reader of an approved PR is looking for. A wordless COMMENTED
+/// review is the shell GitHub creates around inline comments, and a DISMISSED one
+/// is a verdict withdrawn — neither says anything the conversation doesn't already.
+fn review_earns_a_line(state: ViewerReviewState, body: &str) -> bool {
+    matches!(
+        state,
+        ViewerReviewState::Approved | ViewerReviewState::ChangesRequested
+    ) || !body.trim().is_empty()
+}
+
+/// GitHub's `PullRequestReviewState` string as the state we model.
+fn review_state_of(state: &str) -> ViewerReviewState {
+    match state {
+        "APPROVED" => ViewerReviewState::Approved,
+        "CHANGES_REQUESTED" => ViewerReviewState::ChangesRequested,
+        "COMMENTED" => ViewerReviewState::Commented,
+        _ => ViewerReviewState::Other,
+    }
+}
+
 /// Everything [`pr_conversation`] reads off one PR — the half of [`PrDetail`] that
 /// isn't the changed-file list. A struct rather than a tuple because it has long
 /// since outgrown one: seven of these are `String`/`Vec`, and a mis-ordered pair
@@ -2622,6 +2639,7 @@ async fn pr_conversation(
             body: c.body,
             created_at: c.created_at,
             kind: CommentKind::Issue,
+            review_state: None,
             path: None,
             is_pending: false,
             is_bot,
@@ -2639,8 +2657,8 @@ async fn pr_conversation(
             // conversation would read as a review the author can already see.
             continue;
         }
-        // Skip empty-body reviews (bare approvals add no conversation).
-        if r.body.trim().is_empty() {
+        let review_state = review_state_of(&r.state);
+        if !review_earns_a_line(review_state, &r.body) {
             continue;
         }
         let (author, author_avatar_url, is_bot) = actor(r.author);
@@ -2650,6 +2668,7 @@ async fn pr_conversation(
             body: r.body,
             created_at: r.created_at,
             kind: CommentKind::Review,
+            review_state: Some(review_state),
             path: None,
             is_pending: false,
             is_bot,
@@ -2679,6 +2698,7 @@ async fn pr_conversation(
                 body: c.body,
                 created_at: c.created_at,
                 kind: CommentKind::ReviewThread,
+                review_state: None,
                 path: Some(t.path.clone()),
                 is_pending: c.state.as_deref() == Some("PENDING"),
                 is_bot,
@@ -3739,6 +3759,21 @@ mod tests {
     /// A follow-up page decodes into the same struct as the first one, so the two
     /// selections have to stay identical — and the paged connections have to ask
     /// for the cursor that drives the drain at all.
+    /// An approved PR used to show no approval: a bare approval has no body, and
+    /// every empty-bodied review was dropped as noise.
+    #[test]
+    fn a_bare_verdict_stays_in_the_conversation_and_a_bare_comment_review_does_not() {
+        use ViewerReviewState::*;
+        assert!(review_earns_a_line(Approved, ""));
+        assert!(review_earns_a_line(ChangesRequested, "  "));
+        assert!(!review_earns_a_line(Commented, ""));
+        assert!(!review_earns_a_line(Other, ""));
+        assert!(review_earns_a_line(Commented, "one nit"));
+        assert!(review_earns_a_line(Other, "withdrawing this"));
+        assert_eq!(review_state_of("APPROVED"), Approved);
+        assert_eq!(review_state_of("DISMISSED"), Other);
+    }
+
     #[test]
     fn pr_conversation_selects_the_shared_fields() {
         // Each connection's first page (spelled out in the query) and its

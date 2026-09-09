@@ -23,7 +23,7 @@ import { RelativeTime } from "../../components/RelativeTime";
 import { usePrDetail, useReviewDrafts, useReviewWorkItems } from "../../lib/queries";
 import { isoMs } from "../../lib/relativeTime";
 import { splitRepoSlug } from "../../lib/repo";
-import { palette } from "../../theme/colors";
+import { palette, successColor } from "../../theme/colors";
 import {
   audienceCounts,
   audienceLabel,
@@ -197,7 +197,7 @@ function CommentCard({ comment, pr }: { comment: PrComment; pr: ReviewPr }) {
             bot
           </Pill>
         )}
-        {comment.kind === "Review" && <span className="text-[10px] text-muted-4">reviewed</span>}
+        {comment.kind === "Review" && <ReviewVerb state={comment.reviewState} />}
         {/* In the header, not under the body: a button on its own row leaves a
             band of dead space at the foot of every card, and these cards are
             stacked.
@@ -239,9 +239,29 @@ function CommentCard({ comment, pr }: { comment: PrComment; pr: ReviewPr }) {
           </span>
         </span>
       </div>
-      <div className="text-[11.5px]">
-        <Markdown>{comment.body}</Markdown>
-      </div>
+      {/* A bare verdict has nothing under its header, and draws nothing. */}
+      {body && (
+        <div className="text-[11.5px]">
+          <Markdown>{comment.body}</Markdown>
+        </div>
+      )}
     </div>
+  );
+}
+
+/** A review's verdict, in the same words and colours the Reviews timeline
+ *  uses: approved in green, changes requested in red, a plain review muted. */
+function ReviewVerb({ state }: { state: PrComment["reviewState"] }) {
+  const verdict =
+    state === "Approved"
+      ? { label: "approved", color: successColor }
+      : state === "ChangesRequested"
+        ? { label: "requested changes", color: palette.red }
+        : null;
+  if (!verdict) return <span className="text-[10px] text-muted-4">reviewed</span>;
+  return (
+    <span className="text-[10px] font-medium" style={{ color: verdict.color }}>
+      {verdict.label}
+    </span>
   );
 }
