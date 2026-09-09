@@ -7,6 +7,12 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.9 — 2026-09-09
+
+- Tickets knows your teams. When your tickets span more than one team, a menu on the Tickets strip shows every team with its count, and you can show all of them, one, or any set. With every team showing, the list groups by team first. The graph and the ticket panel follow the same pick.
+- Triage is organised by team. Each team in your triage is a row in the sidebar that names it and folds its tickets, with whoever holds the rotation at the row's edge. Click them for the whole schedule.
+- Triage also shows a team that assigned you a ticket, even when you are not in its rotation. Only your own tickets appear for such a team, whatever the Mine/All switch says.
+
 ## 0.1.8 — 2026-09-09
 
 - Starting a ticket no longer loses its agent. If you started one in a project while looking at a different one, Santree could create the worktree and then run nothing in it: no agent, no tab, nothing in Session history, and no error to say so. A launch now belongs to the project it was started for, so the workspace you happen to be watching can't cancel it.
