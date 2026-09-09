@@ -572,6 +572,7 @@ describe("promptPreviewKey", () => {
       "work",
       body,
       "acme",
+      "personal",
       "ENG-1",
       detail({ description: "edited" }),
       undefined,
