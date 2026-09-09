@@ -1063,8 +1063,17 @@ describe("ProjectTree reveals a selection made elsewhere", () => {
 
   beforeEach(() => {
     localStorage.clear();
+    rendered.worktrees = [];
     model.current = tree;
     ui.treeFocus = null;
+    // Trees is the visible destination and nothing is open in it: both halves
+    // matter, since `openTree` reads the pathname before the search params, and
+    // a `/reviews` left over from the block above makes every one of these
+    // route-driven cases pass for the wrong reason.
+    route.reviewsProject = null;
+    route.openPrUrl = undefined;
+    reviews.inbox = undefined;
+    route.openTree = null;
   });
 
   it("expands every ancestor of a worktree selected from another view", () => {
@@ -1090,6 +1099,33 @@ describe("ProjectTree reveals a selection made elsewhere", () => {
   it("expands nothing for a selection made by clicking in the tree itself", () => {
     collapseAll();
     ui.treeFocus = { repo: REPO, id: "AK-1", pane: "issue", fromSidebar: true };
+    render(<ProjectTree />);
+    expect(screen.getByRole("button", { name: "Expand app" })).toBeInTheDocument();
+  });
+
+  /** Every launch that creates a worktree — "Start a task", a ticket's Run, the
+   *  Create-worktree dialog — points the route at the new workspace and nothing
+   *  else: no focus request is ever published, and the "Creating workspace…"
+   *  placeholder is the only sign the create is under way. Folded away, it was
+   *  reachable only by unfolding the project by hand. */
+  it("expands every ancestor of a worktree the route has just opened", () => {
+    collapseAll();
+    const { rerender } = render(<ProjectTree />);
+    route.openTree = { repo: REPO, id: "AK-1" };
+    rerender(<ProjectTree />);
+    expect(screen.getByRole("button", { name: "Collapse app" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse project Core" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse milestone M1" })).toBeInTheDocument();
+    // …and it is the lit row when it gets there, not merely a visible one.
+    expect(rendered.worktrees).toContainEqual({ id: "AK-1", selected: true });
+  });
+
+  /** A launch restores the workspace the app was last closed on. Revealing it
+   *  would undo the one fold the user actually left around it, on every start —
+   *  so only a *change* of selection reveals, never the one already in the url. */
+  it("leaves the bands folded around the workspace the app started on", () => {
+    collapseAll();
+    route.openTree = { repo: REPO, id: "AK-1" };
     render(<ProjectTree />);
     expect(screen.getByRole("button", { name: "Expand app" })).toBeInTheDocument();
   });

@@ -69,6 +69,7 @@ import {
   repoKey,
   reviewGroupKey,
   useProjectTree,
+  worktreeKey,
 } from "./useProjectTree";
 import { WorktreeRow } from "./WorktreeRow";
 
@@ -293,28 +294,57 @@ export function ProjectTree() {
     [navigate, requestTreeFocus],
   );
 
+  // Unfold whatever is hiding one worktree's row, so a selection this tree did
+  // not make is actually on screen. Expanding only: a fold the user chose
+  // elsewhere in the tree is not this request's to undo. `false` says the row
+  // isn't in the tree yet — a worktree still being created, a repo whose read
+  // hasn't landed — so the caller leaves the request unhandled and asks again
+  // on the next fold rather than counting it as done.
+  const reveal = useCallback(
+    (nodes: ProjectNode[], repo: string, worktreeId: string): boolean => {
+      const keys = ancestorGroupKeys(nodes, worktreeId, repo);
+      if (keys.length === 0) return false;
+      setCollapsed((current) => {
+        // Nothing folded: return the same record rather than minting one, so a
+        // selection that needed no reveal costs no re-render and no write.
+        if (keys.every((key) => !current[key])) return current;
+        const next = { ...current };
+        for (const key of keys) next[key] = false;
+        return next;
+      });
+      return true;
+    },
+    [setCollapsed],
+  );
+
   // A worktree picked anywhere else — Issues, the graph, the palette, a
   // session-history row — lands on a row this tree may have folded away, which
-  // reads as nothing having happened. Expand its ancestors so the selection is
-  // visible. Expanding only: a fold the user chose elsewhere in the tree is not
-  // this request's to undo.
-  const revealed = useRef<TreeFocus | null>(null);
+  // reads as nothing having happened.
+  const revealedFocus = useRef<TreeFocus | null>(null);
   useEffect(() => {
-    if (!treeFocus || treeFocus.fromSidebar || treeFocus === revealed.current) return;
-    const keys = ancestorGroupKeys(projects, treeFocus.id, treeFocus.repo);
-    // Not in the tree yet — a worktree still being created, a repo whose read
-    // hasn't landed. Leave the request unhandled so the next fold reveals it.
-    if (keys.length === 0) return;
-    revealed.current = treeFocus;
-    setCollapsed((current) => {
-      // Nothing folded: return the same record rather than minting one, so a
-      // selection that needed no reveal costs no re-render and no write.
-      if (keys.every((key) => !current[key])) return current;
-      const next = { ...current };
-      for (const key of keys) next[key] = false;
-      return next;
-    });
-  }, [treeFocus, projects, setCollapsed]);
+    if (!treeFocus || treeFocus.fromSidebar || treeFocus === revealedFocus.current) return;
+    if (reveal(projects, treeFocus.repo, treeFocus.id)) revealedFocus.current = treeFocus;
+  }, [treeFocus, projects, reveal]);
+
+  // The same rule for a selection that arrives as a navigation and nothing else.
+  // Starting a ticket is the one that matters: it plants its "Creating
+  // workspace…" placeholder in the project the work is landing in and points
+  // the route at it, without ever publishing a focus request — so the one row
+  // that says the create is under way could only be found by unfolding the
+  // project by hand. Remembered by the selection rather than by a request
+  // object, so folding a band with the open worktree inside it stays folded —
+  // and seeded from the route at mount for the same reason, since a launch
+  // restores the last workspace and must not unfold the band the user left
+  // folded around it. Only a *change* of selection reveals.
+  const revealedTree = useRef<string | null>(
+    openTree ? worktreeKey(openTree.repo, openTree.id) : null,
+  );
+  useEffect(() => {
+    if (!openTree) return;
+    const key = worktreeKey(openTree.repo, openTree.id);
+    if (key === revealedTree.current) return;
+    if (reveal(projects, openTree.repo, openTree.id)) revealedTree.current = key;
+  }, [openTree, projects, reveal]);
 
   const openAgentRow = useCallback(
     (agent: AgentNode) => {
