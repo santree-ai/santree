@@ -3,7 +3,8 @@
  *
  * ⌘; / ⌘, → Settings · ⌘1…⌘N → the sidebar's destinations in `SidebarNav` order
  * (Tickets, today the only one) · ⌘B → sidebar · ⌘⇧R → re-pull Linear and
- * GitHub · Esc → back to the view Settings was opened from.
+ * GitHub · ⌘+ / ⌘− / ⌘0 → text size · Esc → back to the view Settings was
+ * opened from.
  *
  * Also home to {@link targetOwnsKey}, the guard the view-local shortcut
  * listeners share so they all treat text fields and terminals the same way.
@@ -13,6 +14,7 @@ import { useEffect, useRef } from "react";
 
 import { useAppUiOptional } from "../state/AppContext";
 import { useRefreshExternal } from "./queries";
+import { applyZoom, DEFAULT_ZOOM, loadZoom, step } from "./zoom";
 
 /** True when focus is in a field where keystrokes should be left alone. */
 export function inEditable(target: EventTarget | null): boolean {
@@ -23,6 +25,20 @@ export function inEditable(target: EventTarget | null): boolean {
   if (!el) return false;
   const tag = el.tagName;
   return tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable === true;
+}
+
+/**
+ * Which way a ⌘-chord steps the text size, or `0` when it isn't one.
+ *
+ * Matched on the character the layout *produced*, not the physical key: ⌘+ is
+ * ⌘⇧= on a US layout and its own key on many others, and `-`/`_` are the same
+ * key shifted. The numpad's own +/− report those characters too, but its codes
+ * are checked as well so a layout that labels them differently still steps.
+ */
+export function zoomDirection(e: KeyboardEvent): 1 | -1 | 0 {
+  if (e.key === "+" || e.key === "=" || e.code === "NumpadAdd") return 1;
+  if (e.key === "-" || e.key === "_" || e.code === "NumpadSubtract") return -1;
+  return 0;
 }
 
 /** True when focus is inside a terminal — xterm's hidden helper textarea, which
@@ -102,7 +118,21 @@ export function useKeyboardShortcuts() {
 
       const mod = e.metaKey || e.ctrlKey;
 
+      // Text size. Checked before the shift guard below, because ⌘+ *is* a shifted
+      // chord on most layouts (⌘⇧=) — and handled even inside a focused terminal,
+      // since scaling the app is chrome, not something a shell can mean.
       if (mod && !e.altKey) {
+        const dir = zoomDirection(e);
+        if (dir !== 0) {
+          e.preventDefault();
+          applyZoom(step(loadZoom(), dir));
+          return;
+        }
+        if (e.key === "0" || e.code === "Numpad0") {
+          e.preventDefault();
+          applyZoom(DEFAULT_ZOOM);
+          return;
+        }
         // ⌘⇧R — re-pull Linear + GitHub. Shifted on purpose (plain ⌘R is the
         // webview's own reload), which is also why it's handled up here, above
         // the guard below that drops every shifted chord. `e.key` is the shifted
@@ -147,8 +177,8 @@ export function useKeyboardShortcuts() {
       // and Triage both left the nav (each is a section of the tree now, reached
       // by picking a row), so they left the numbers with them rather than
       // becoming shortcuts to rows nobody can see. The workspace (`/trees`) is
-      // deliberately unnumbered — it is reached by picking a worktree. ⌘0 falls
-      // through to nothing: the ladder is 1-based, so index −1 matches no path.
+      // deliberately unnumbered — it is reached by picking a worktree, and ⌘0 is
+      // the zoom reset handled above.
       const paths = ["/issues"];
       const idx = Number(e.key) - 1;
       const to = Number.isInteger(idx) && idx >= 0 ? paths[idx] : undefined;

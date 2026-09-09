@@ -8,6 +8,7 @@ import { QuitGuard } from "./components/QuitGuard";
 import { TerminalsProvider } from "./features/terminal/TerminalsContext";
 import { initFocusModality } from "./lib/focusModality";
 import { forwardConsoleToLog } from "./lib/logging";
+import { applyZoom, loadZoom } from "./lib/zoom";
 import { routeTree } from "./routeTree.gen";
 import { AppProvider } from "./state/AppContext";
 import { ToastViewport, toast } from "./state/toast";
@@ -15,6 +16,11 @@ import "./styles.css";
 
 // Mirror console.* into the shared on-disk log file (no-op outside Tauri).
 forwardConsoleToLog();
+
+// Restore the chosen text size. The webview always starts at 1×, so this has to
+// run every launch — and before first paint, or the app renders at normal size
+// and visibly jumps.
+applyZoom(loadZoom());
 
 // Track pointer vs keyboard so focus rings only show for keyboard navigation.
 initFocusModality();

@@ -19,6 +19,12 @@ const app = vi.hoisted(() => ({
   toggleShortcuts: vi.fn(),
   toggleCommandPalette: vi.fn(),
 }));
+const zoom = vi.hoisted(() => ({ apply: vi.fn(), level: 1 }));
+// The ladder itself stays real — these cases are about which chords reach it.
+vi.mock("./zoom", async (orig) => {
+  const real = (await orig()) as typeof import("./zoom");
+  return { ...real, applyZoom: zoom.apply, loadZoom: () => zoom.level };
+});
 
 // Stubbed like the app context above: this file tests the window handler, not
 // the query cache — and the real hook needs a QueryClientProvider the bare
@@ -335,6 +341,68 @@ describe("useDigitShortcuts", () => {
     press("1");
 
     expect(rows[0]).not.toHaveBeenCalled();
+  });
+});
+
+describe("text size shortcuts", () => {
+  beforeEach(() => {
+    zoom.apply.mockClear();
+    zoom.level = 1;
+  });
+
+  it("steps up on ⌘+ and ⌘=, down on ⌘-", () => {
+    renderHook(() => useKeyboardShortcuts());
+
+    // ⌘+ is a *shifted* chord on most layouts (⌘⇧=), so it has to be handled
+    // before the guard that drops every shifted combo.
+    press("+", { metaKey: true, shiftKey: true });
+    expect(zoom.apply).toHaveBeenLastCalledWith(1.1);
+
+    // The unshifted key on the same physical button, which is what browsers bind.
+    press("=", { metaKey: true });
+    expect(zoom.apply).toHaveBeenLastCalledWith(1.1);
+
+    press("-", { metaKey: true });
+    expect(zoom.apply).toHaveBeenLastCalledWith(0.9);
+  });
+
+  // Ctrl is the same binding off macOS, and the numpad's own keys are the pair
+  // people reach for when they have them.
+  it("takes ⌃+ and the numpad's own +/− too", () => {
+    renderHook(() => useKeyboardShortcuts());
+
+    press("+", { ctrlKey: true, code: "NumpadAdd" });
+    expect(zoom.apply).toHaveBeenLastCalledWith(1.1);
+
+    press("Unidentified", { metaKey: true, code: "NumpadSubtract" });
+    expect(zoom.apply).toHaveBeenLastCalledWith(0.9);
+  });
+
+  it("resets to 100% on ⌘0 without hitting tab navigation", () => {
+    renderHook(() => useKeyboardShortcuts());
+
+    press("0", { metaKey: true });
+    expect(zoom.apply).toHaveBeenLastCalledWith(1);
+    expect(router.navigate).not.toHaveBeenCalled();
+  });
+
+  it("still zooms while a terminal has focus", () => {
+    const term = document.createElement("div");
+    term.className = "xterm";
+    document.body.append(term);
+    renderHook(() => useKeyboardShortcuts());
+
+    // Scaling the app is chrome — a shell can't mean anything by ⌘-, so the
+    // terminal must not swallow it the way it does unmodified keys.
+    press("-", { metaKey: true, on: term });
+    expect(zoom.apply).toHaveBeenLastCalledWith(0.9);
+    term.remove();
+  });
+
+  it("leaves ⌥⌘- alone so it can't collide with a system binding", () => {
+    renderHook(() => useKeyboardShortcuts());
+    press("-", { metaKey: true, altKey: true });
+    expect(zoom.apply).not.toHaveBeenCalled();
   });
 });
 

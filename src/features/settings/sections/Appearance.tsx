@@ -1,16 +1,67 @@
-/** The Appearance section: color theme + how people's display names are shown.
+/** The Appearance section: color theme, text size, and how people's display
+ *  names are shown.
  *
- *  Lives inside Settings → General rather than owning a nav item: two controls
+ *  Lives inside Settings → General rather than owning a nav item: three controls
  *  is not a destination, and "make this readable" is the same errand as the rest
  *  of General. `embedded` drops its own heading so the host can title it — the
  *  arrangement {@link UpdatesSection} already uses. */
 
+import { useState } from "react";
+
 import { MonitorIcon, MoonIcon, SunIcon } from "../../../components/icons";
-import { ChevronSelect, Segmented } from "../../../components/primitives";
+import { Button, ChevronSelect, Segmented } from "../../../components/primitives";
 import type { DisplayNames } from "../../../lib/queries";
 import { useDisplayNames } from "../../../lib/queries";
+import { applyZoom, DEFAULT_ZOOM, loadZoom, step, ZOOM_STEPS } from "../../../lib/zoom";
 import { type Theme, useApp } from "../../../state/AppContext";
 import { Heading } from "../widgets";
+
+/** Text size, mirroring ⌘+ / ⌘- / ⌘0 — the same ladder, so the two controls can't
+ *  disagree. Kept beside Theme because that's where people look for "make this
+ *  readable", and a shortcut nobody discovers isn't a feature. */
+function TextSizeRow() {
+  const [level, setLevel] = useState(loadZoom);
+  const set = (next: number) => {
+    setLevel(next);
+    applyZoom(next);
+  };
+  return (
+    <div className="mt-3 flex items-center gap-4 rounded-xl border border-line-2 bg-raised p-4">
+      <div className="min-w-0 flex-1">
+        <div className="mb-[3px] text-[12.5px] font-medium text-fg-3">Text size</div>
+        <div className="text-[11.5px] text-muted-3">
+          Scales the whole app, terminals included. Also ⌘+ and ⌘− anywhere, ⌘0 to reset.
+        </div>
+      </div>
+      <div className="flex flex-none items-center gap-1.5">
+        <Button
+          size="sm"
+          onClick={() => set(step(level, -1))}
+          disabled={level <= ZOOM_STEPS[0]}
+          aria-label="Decrease text size"
+        >
+          −
+        </Button>
+        <button
+          type="button"
+          onClick={() => set(DEFAULT_ZOOM)}
+          title="Reset to 100%"
+          className="w-[52px] cursor-pointer rounded-lg px-1 py-1 text-center font-mono text-[11.5px] text-fg-3 hover:bg-hover"
+        >
+          {Math.round(level * 100)}%
+        </button>
+        <Button
+          size="sm"
+          onClick={() => set(step(level, 1))}
+          disabled={level >= ZOOM_STEPS[ZOOM_STEPS.length - 1]}
+          aria-label="Increase text size"
+        >
+          +
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 export function AppearanceSection({ embedded = false }: { embedded?: boolean }) {
   const { theme, setTheme } = useApp();
@@ -38,6 +89,7 @@ export function AppearanceSection({ embedded = false }: { embedded?: boolean }) 
           onChange={setTheme}
         />
       </div>
+      <TextSizeRow />
       <div className="mt-3 flex items-center gap-4 rounded-xl border border-line-2 bg-raised p-4">
         <div className="min-w-0 flex-1">
           <div className="mb-[3px] text-[12.5px] font-medium text-fg-3">Display names</div>

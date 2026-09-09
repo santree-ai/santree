@@ -31,7 +31,7 @@ export function GeneralSection() {
       <div className="mb-2.5 px-1">
         <div className="text-[13px] font-semibold text-fg-bright">Appearance</div>
         <div className="mt-0.5 text-[11.5px] text-muted-3">
-          Color theme and how people's names are shown.
+          Color theme, text size, and how people's names are shown.
         </div>
       </div>
       <div className="mb-5">
