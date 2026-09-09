@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.11 — 2026-09-09
+
+- The Triage teams setting no longer lists every team in your workspace. Always show and Never show are two short rows of the teams you chose, and an Add team button opens a searchable picker to add more.
+
 ## 0.1.10 — 2026-09-09
 
 - Triage lets you choose which teams it shows. Settings, Triage, Teams has three rules you can combine, teams whose rotation you are in, teams that assigned you a triage ticket, and teams you belong to, plus a list of every team in your Linear workspace where any team can be set to always or never show. The sidebar's Triage menu has a shortcut to it.
