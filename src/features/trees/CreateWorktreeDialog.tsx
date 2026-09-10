@@ -1,6 +1,6 @@
 /**
- * "Create worktree" — the sidebar's manual way into a worktree, for work that
- * isn't a Linear ticket.
+ * "Create worktree" — the sidebar's manual way into a worktree: a branch, or a
+ * ticket picked by hand.
  *
  * Everything on it is one of two questions: **what does this worktree start
  * from**, and **what does it stack on**.
@@ -10,7 +10,12 @@
  *    out of context; making it a control would be a choice with one option.
  *  - *Source* is a ticket or a branch. Branch covers both halves of the same
  *    gesture — pick one that exists, or type a name that doesn't and create it —
- *    because to the user that is one search box, not two modes.
+ *    because to the user that is one search box, not two modes. A ticket is a
+ *    **started task**, exactly as it is from the Tickets list and the welcome
+ *    surface's "Start a task": the agent runs in the new worktree, handed over
+ *    through the same launch channel those use. This dialog used to only
+ *    navigate to the worktree, and a ticket started here got no agent, no tab
+ *    and no session — reported twice as "nothing starts in it".
  *  - *Parent worktree* is santree's existing **stacked worktree**: the new tree's
  *    base becomes the parent's branch instead of the repo's default. No second
  *    notion of nesting, just the base (see `createArgsFor`).
@@ -62,7 +67,7 @@ const FIELD =
 export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose: () => void }) {
   const navigate = useNavigate();
   const { settings } = useApp();
-  const { requestTreeFocus } = useAppUi();
+  const { requestTreeFocus, requestLaunch, addPendingLaunches } = useAppUi();
 
   const [tab, setTab] = useState<SourceTab>("linear");
   const [query, setQuery] = useState("");
@@ -105,15 +110,34 @@ export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose:
   const args = choice ? createArgsFor(choice, parent?.branch ?? null) : null;
 
   const onCreate = () => {
-    if (!args || isPending || !guard.take()) return;
+    if (!args || !choice || isPending || !guard.take()) return;
     setError(null);
     const agent = (workAgent as AgentKind | null) ?? settings?.defaultAgent ?? "Claude";
     create(
       { ...args, repo, agent },
       {
         onSuccess: (wt) => {
+          if (choice.kind === "ticket") {
+            // Begin the task through the launch register, as every other start
+            // does: the app shell's launcher mints the tab and runs the agent
+            // once the refetched list carries the worktree. The placeholder is
+            // the "Creating workspace…" row until then — the create's
+            // invalidation is fire-and-forget, so the list lags this callback.
+            addPendingLaunches([
+              {
+                repo,
+                id: wt.id,
+                title: wt.title,
+                project: choice.project,
+                agent,
+                baseBranch: args.base ?? undefined,
+              },
+            ]);
+            requestLaunch(repo, wt.id);
+          } else {
+            requestTreeFocus(repo, wt.id);
+          }
           navigate({ to: "/trees", search: { project: repo, tree: wt.id } });
-          requestTreeFocus(repo, wt.id);
           onClose();
         },
         onError: (e) => {

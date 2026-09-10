@@ -340,12 +340,11 @@ export function IssuesProvider({
   const candidates = useOrgSiblings(scopeRepo);
   const askRepo = useWorkRepoGate();
   const {
-    requestTreeLaunch,
     requestTreeFocus,
     issueFocus,
     consumeIssueFocus,
-    requestBackgroundLaunch,
-    clearBackgroundLaunch,
+    requestLaunch,
+    clearLaunch,
     addPendingLaunches,
     removePendingLaunch,
   } = useAppUi();
@@ -648,14 +647,11 @@ export function IssuesProvider({
   // real worktree lands). A failed create drops its placeholder (the global mutation
   // cache still surfaces the error as a toast).
   //
-  // How each ticket's agent starts differs by size, and it has to:
-  //  - one ticket → Trees opens it and starts the agent in the visible pane;
-  //  - several → every ticket goes through the off-screen launcher, because Trees
-  //    can only show one worktree and the visible pane is the *only* host that's
-  //    skipped by `AgentRunHost`. Handing it the first one and leaving the rest to
-  //    the (never-mounted) panes of unopened worktrees is what left "Launch 5
-  //    agents" creating five worktrees and starting exactly one agent. With none of
-  //    them selected, Trees lands on the all-agents overview — all five, running.
+  // Every ticket's agent starts through the app shell's launcher, whatever is on
+  // screen; the only difference by size is where the view goes: one ticket opens
+  // its workspace, several land on Trees with none selected. (Handing the single
+  // case to the visible pane instead is what once left "Launch 5 agents"
+  // creating five worktrees and starting exactly one agent.)
   //
   // `setup` is the batch's one answer to "run `.santree/init.sh` first?" (null for a
   // single launch, which just follows the preference inside `beginRun`). `stack` is
@@ -693,8 +689,7 @@ export function IssuesProvider({
           baseBranch: baseOf(task)?.branch,
         })),
       );
-      if (bulk) for (const { repo, task } of targets) requestBackgroundLaunch(repo, task.id);
-      else requestTreeLaunch(targets[0].repo, targets[0].task.id);
+      for (const { repo, task } of targets) requestLaunch(repo, task.id);
       navigate({
         to: "/trees",
         search: bulk ? {} : { project: targets[0].repo, tree: targets[0].task.id },
@@ -713,7 +708,7 @@ export function IssuesProvider({
             quiet: bulk,
           }).catch(() => {
             removePendingLaunch(task.id);
-            clearBackgroundLaunch(task.id);
+            clearLaunch(task.id);
             return null;
           });
         }),
@@ -728,9 +723,8 @@ export function IssuesProvider({
       planSetup,
       createWorktree,
       stackOn,
-      requestTreeLaunch,
-      requestBackgroundLaunch,
-      clearBackgroundLaunch,
+      requestLaunch,
+      clearLaunch,
       addPendingLaunches,
       removePendingLaunch,
       navigate,
@@ -771,7 +765,7 @@ export function IssuesProvider({
         quiet,
       }).catch(() => {
         removePendingLaunch(task.id);
-        clearBackgroundLaunch(task.id);
+        clearLaunch(task.id);
       });
     },
     [
@@ -780,7 +774,7 @@ export function IssuesProvider({
       agentFor,
       addPendingLaunches,
       removePendingLaunch,
-      clearBackgroundLaunch,
+      clearLaunch,
       createWorktree,
       stackOn,
     ],
@@ -842,18 +836,18 @@ export function IssuesProvider({
         id,
         `Starting ${id}`,
         (t, repo) => {
-          requestTreeLaunch(repo, t.id);
+          requestLaunch(repo, t.id);
           navigate({ to: "/trees", search: { project: repo, tree: t.id } });
         },
         false,
       );
     },
-    [startResolved, requestTreeLaunch, navigate],
+    [startResolved, requestLaunch, navigate],
   );
 
   // Run a single ticket in the background: create its worktree and start the agent
-  // without leaving the current view or switching the active worktree (Trees mounts
-  // it off-screen — see BackgroundLaunch). The ⌘-click path of the "Run" button.
+  // without leaving the current view or switching the active worktree (the launcher
+  // hosts it off-screen — see LaunchRequest). The ⌘-click path of the "Run" button.
   const runBackground = useCallback(
     (id: string) => {
       startResolved(
@@ -862,13 +856,13 @@ export function IssuesProvider({
         (t, repo) => {
           // The launch host needs the project too: it is off-screen by
           // definition, so there is no view to read it from.
-          requestBackgroundLaunch(repo, t.id);
+          requestLaunch(repo, t.id);
           toast.success(`Running ${t.id} in the background…`);
         },
         true,
       );
     },
-    [startResolved, requestBackgroundLaunch],
+    [startResolved, requestLaunch],
   );
 
   // Trivial setter handlers — stable across renders so the context value below

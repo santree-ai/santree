@@ -2,9 +2,9 @@
  * Starting a ticket from the cross-repo list.
  *
  * The launch itself is the established one — register a pending launch so Trees
- * shows "Creating workspace…" immediately, create the worktree, then let Trees
- * start the agent (`requestTreeLaunch`) or spawn it off-screen
- * (`requestBackgroundLaunch`, the ⌘-click path).
+ * shows "Creating workspace…" immediately, request the launch (the app shell's
+ * launcher runs the agent once the worktree exists, whatever is on screen), and
+ * create the worktree. Run opens the workspace too; ⌘-click Run stays put.
  *
  * What this used to add was a repo hop: `createWorktree` was bound to the app's
  * active project, so a start elsewhere had to switch the whole app and park the
@@ -41,13 +41,7 @@ export interface StartTarget {
  */
 export function useStartTicket(): (target: StartTarget, opts?: { background?: boolean }) => void {
   const { settings } = useApp();
-  const {
-    addPendingLaunches,
-    removePendingLaunch,
-    requestTreeLaunch,
-    requestBackgroundLaunch,
-    clearBackgroundLaunch,
-  } = useAppUi();
+  const { addPendingLaunches, removePendingLaunch, requestLaunch, clearLaunch } = useAppUi();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { mutate: create } = useCreateWorktree();
@@ -62,15 +56,12 @@ export function useStartTicket(): (target: StartTarget, opts?: { background?: bo
       addPendingLaunches([
         { repo: target.repo, id: target.id, title: target.title, project, agent },
       ]);
-      // Hand the launch to Trees before the git create resolves — the placeholder
-      // is what makes the multi-second create feel immediate.
-      if (background) {
-        requestBackgroundLaunch(target.repo, target.id);
-        toast.success(`Running ${target.id} in the background…`);
-      } else {
-        requestTreeLaunch(target.repo, target.id);
-        navigate({ to: "/trees", search: { project: target.repo, tree: target.id } });
-      }
+      // Request the launch before the git create resolves — the placeholder is
+      // what makes the multi-second create feel immediate, and the launcher waits
+      // for the real worktree.
+      requestLaunch(target.repo, target.id);
+      if (background) toast.success(`Running ${target.id} in the background…`);
+      else navigate({ to: "/trees", search: { project: target.repo, tree: target.id } });
       create(
         {
           repo: target.repo,
@@ -85,20 +76,12 @@ export function useStartTicket(): (target: StartTarget, opts?: { background?: bo
         {
           onError: () => {
             removePendingLaunch(target.id);
-            clearBackgroundLaunch(target.id);
+            clearLaunch(target.id);
           },
         },
       );
     },
-    [
-      create,
-      addPendingLaunches,
-      removePendingLaunch,
-      requestTreeLaunch,
-      requestBackgroundLaunch,
-      clearBackgroundLaunch,
-      navigate,
-    ],
+    [create, addPendingLaunches, removePendingLaunch, requestLaunch, clearLaunch, navigate],
   );
 
   return useCallback(

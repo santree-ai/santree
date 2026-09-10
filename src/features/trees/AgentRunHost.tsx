@@ -1,18 +1,22 @@
-/** Turns queued agent launches into running agents, wherever the user happens to be.
+/** Turns launch requests into running agents, wherever the user happens to be.
  *
- *  Mounted at the app shell (`__root.tsx`), not in the Trees route: a "Run in
- *  background" launch from Issues never opens Trees, and a launch queued behind a
- *  setup run must survive navigating away. Two jobs:
+ *  Mounted at the app shell (`__root.tsx`), not in the Trees route, because a
+ *  start must not depend on what is on screen: a ⌘-click Run from the Tickets
+ *  list never opens Trees, a launch queued behind a setup run must survive
+ *  navigating away, and a task started while looking at another project — or
+ *  at the new worktree's own empty surface — has to run all the same. Every
+ *  start comes through here (see `LaunchRequest`). Two jobs:
  *
- *  1. Consume Issues' background-launch requests once their worktree actually exists
- *     (the create runs in parallel with the request).
- *  2. Start a *detached* session for every queued launch Trees isn't already showing:
- *     the PTY spawns and the agent seeds, but the session is never displayed. It is
+ *  1. Consume each request once its worktree actually exists (the create runs in
+ *     parallel with the request): mint the tab the agent runs in and begin the
+ *     run. Trees, when it shows that worktree, follows the run onto that tab.
+ *  2. Start a *detached* session for every queued launch no view is hosting: the
+ *     PTY spawns and the agent seeds, but the session is never displayed. It is
  *     rendered — at a real size, like every other pane — inside the persistent
  *     `TerminalLayer`, so it needs no host of its own; claiming the layer's single
  *     inline slot would blank whatever terminal the user is currently watching.
  *     Once the agent has launched the flag clears and this unmounts; the session
- *     lives on in the layer and shows up when the worktree is next opened. */
+ *     lives on in the layer and shows up when its tab is next opened. */
 import { useEffect } from "react";
 
 import type { Worktree } from "../../bindings";
@@ -28,14 +32,17 @@ import { WorktreeTerminal } from "./WorktreeTerminal";
  *  it launches into.
  *
  *  Excluded: launches belonging to another project (each project has its own host
- *  — see `RepoLaunches`), the worktree Trees currently shows (its visible pane
- *  already hosts that terminal — two hosts for one session would fight over the
+ *  — see `RepoLaunches`), the launch whose *tab* a view has on screen (that pane
+ *  already hosts the terminal — two hosts for one session would fight over the
  *  single xterm overlay), and any launch whose worktree isn't real yet (a
- *  placeholder has no path to root a terminal in). "Currently shows" is matched on
- *  project *and* id: two projects of one Linear org can hold a worktree for the
- *  same ticket, and skipping the wrong one silently drops the launch. Everything
- *  else runs here, which is what makes a launch survive both never opening Trees
- *  and navigating away from it. Exported for testing — see AgentRunHost.test.ts. */
+ *  placeholder has no path to root a terminal in). "On screen" is matched on
+ *  project, id *and* tab: two projects of one Linear org can hold a worktree for
+ *  the same ticket, and a worktree showing another of its tabs — or its empty
+ *  surface, as a freshly created one does — mounts no pane for this launch, so
+ *  skipping it is how a start ran nowhere until its tab was opened by hand.
+ *  Everything else runs here, which is what makes a launch survive never opening
+ *  Trees, navigating away from it, and looking at the wrong tab. Exported for
+ *  testing — see AgentRunHost.test.ts. */
 export function launchesToHost(
   launchAgents: ReadonlyMap<string, QueuedLaunch>,
   repo: string,
@@ -46,7 +53,11 @@ export function launchesToHost(
     .filter(
       ([id, launch]) =>
         launch.repo === repo &&
-        !(visibleWorktree?.repo === launch.repo && visibleWorktree.id === id),
+        !(
+          visibleWorktree?.repo === launch.repo &&
+          visibleWorktree.id === id &&
+          visibleWorktree.tab === launch.tabId
+        ),
     )
     .map(([id, launch]) => ({ worktree: worktrees.find((w) => w.id === id), tabId: launch.tabId }))
     .filter((x): x is { worktree: Worktree; tabId: string } => !!x.worktree && !x.worktree.pending);
@@ -54,10 +65,10 @@ export function launchesToHost(
 
 export function AgentRunHost() {
   const { launchAgents } = useAgentRuns();
-  const { bgLaunches } = useAppUi();
+  const { launches } = useAppUi();
   // Nothing queued is the overwhelmingly common case — don't even observe the
   // worktrees query until there's a launch to host.
-  if (launchAgents.size === 0 && bgLaunches.length === 0) return null;
+  if (launchAgents.size === 0 && launches.length === 0) return null;
   return <QueuedLaunches />;
 }
 
@@ -67,13 +78,10 @@ export function AgentRunHost() {
  *  project is a queue that silently drops a launch started in another, which is
  *  exactly what "run this in the background" must not do. */
 function QueuedLaunches() {
-  const { bgLaunches } = useAppUi();
+  const { launches } = useAppUi();
   const { launchAgents } = useAgentRuns();
   const repos = [
-    ...new Set([
-      ...bgLaunches.map((l) => l.repo),
-      ...[...launchAgents.values()].map((l) => l.repo),
-    ]),
+    ...new Set([...launches.map((l) => l.repo), ...[...launchAgents.values()].map((l) => l.repo)]),
   ];
   return (
     <>
@@ -85,23 +93,23 @@ function QueuedLaunches() {
 }
 
 function RepoLaunches({ repo }: { repo: string }) {
-  const { bgLaunches, clearBackgroundLaunch } = useAppUi();
+  const { launches, clearLaunch } = useAppUi();
   const { launchAgents, visibleWorktree, beginRun } = useAgentRuns();
   const { data: worktrees = [] } = useWorktrees(repo);
   const { data: tabs = [] } = useWorktreeTabs(repo);
   const { mutate: addTabRow } = useAddWorktreeTab(repo);
 
-  // A background launch is requested before its worktree exists, so wait for the
-  // real one — a pending placeholder has no path to root a terminal in. Consuming
-  // the request is one-shot: the launch/setup flags carry it from here. The tab is
-  // minted and persisted first, exactly as a foreground start does it — an agent
-  // that ran in no tab would be invisible when the worktree is next opened.
+  // A launch is requested before its worktree exists, so wait for the real one —
+  // a pending placeholder has no path to root a terminal in. Consuming the
+  // request is one-shot: the launch/setup flags carry it from here. The tab is
+  // minted and persisted first — the run names it, and an agent that ran in no
+  // tab would be invisible when the worktree is next opened.
   useEffect(() => {
-    for (const { repo: launchRepo, id } of bgLaunches) {
+    for (const { repo: launchRepo, id } of launches) {
       if (launchRepo !== repo) continue;
       const wt = worktrees.find((w) => w.id === id);
       if (!wt || wt.pending) continue;
-      clearBackgroundLaunch(id);
+      clearLaunch(id);
       const tabId = crypto.randomUUID();
       const agent = wt.agent ?? "Claude";
       addTabRow({
@@ -118,7 +126,7 @@ function RepoLaunches({ repo }: { repo: string }) {
       });
       beginRun(repo, id, tabId);
     }
-  }, [repo, bgLaunches, worktrees, tabs, addTabRow, beginRun, clearBackgroundLaunch]);
+  }, [repo, launches, worktrees, tabs, addTabRow, beginRun, clearLaunch]);
 
   return (
     <>

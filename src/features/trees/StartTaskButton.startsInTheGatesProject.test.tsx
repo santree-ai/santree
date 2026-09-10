@@ -27,6 +27,7 @@ const ON_SCREEN = "acme/other";
 const create = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
 const addPendingLaunches = vi.hoisted(() => vi.fn());
+const requestLaunch = vi.hoisted(() => vi.fn());
 
 function task(id: string): Task {
   return {
@@ -77,7 +78,7 @@ vi.mock("../../state/AppContext", () => ({
   useAppUi: () => ({
     addPendingLaunches,
     removePendingLaunch: vi.fn(),
-    requestTreeLaunch: vi.fn(),
+    requestLaunch,
     pendingDeletes: new Set<string>(),
   }),
 }));
@@ -116,6 +117,7 @@ describe("StartTaskButton", () => {
     expect(addPendingLaunches).toHaveBeenCalledWith([
       expect.objectContaining({ repo: WORK_DEFAULT, id: "AK-411" }),
     ]);
+    expect(requestLaunch).toHaveBeenCalledWith(WORK_DEFAULT, "AK-411");
     expect(navigate).toHaveBeenCalledWith({
       to: "/trees",
       search: { project: WORK_DEFAULT, tree: "AK-411" },

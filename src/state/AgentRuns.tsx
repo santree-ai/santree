@@ -79,10 +79,11 @@ interface AgentRuns {
   requestAgentLaunch: (repo: string, id: string, tabId: string) => void;
   clearAgentLaunch: (id: string) => void;
 
-  /** The worktree Trees currently has selected, or null when it isn't showing one
-   *  (another tab, or the all-agents overview). The off-screen launcher skips it:
-   *  its visible pane already hosts that terminal, and two hosts for one session
-   *  would fight over the single xterm overlay. */
+  /** The worktree a view has on screen and which of its tabs, or null when no
+   *  view is showing one. The off-screen launcher skips a launch whose *tab* is
+   *  the one on screen: that pane hosts the terminal itself, and two hosts for
+   *  one session would fight over the single xterm overlay. Any other tab of the
+   *  same worktree — or none at all — hosts nothing, so the launcher runs it. */
   visibleWorktree: VisibleWorktree | null;
   setVisibleWorktree: (open: VisibleWorktree | null) => void;
 }
@@ -96,11 +97,14 @@ export interface QueuedLaunch {
   tabId: string;
 }
 
-/** The worktree a view has on screen, qualified by its project: the sidebar
- *  spans every project, and two of them can hold the same ticket id. */
+/** The worktree a view has on screen, qualified by its project (the sidebar
+ *  spans every project, and two of them can hold the same ticket id), and the
+ *  tab row whose pane is showing — `null` when the main area shows something
+ *  else: a file, the PR page, the empty surface. */
 export interface VisibleWorktree {
   repo: string;
   id: string;
+  tab: string | null;
 }
 
 const AgentRunsContext = createContext<AgentRuns | null>(null);
@@ -116,7 +120,7 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
   const setVisibleWorktree = useCallback(
     (next: VisibleWorktree | null) =>
       setVisibleWorktreeState((prev) =>
-        prev?.repo === next?.repo && prev?.id === next?.id ? prev : next,
+        prev?.repo === next?.repo && prev?.id === next?.id && prev?.tab === next?.tab ? prev : next,
       ),
     [],
   );

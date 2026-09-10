@@ -34,13 +34,11 @@ import type {
 } from "../../bindings";
 import { primaryPr } from "../../components/PrChip";
 import {
-  TREES_RUN_SETUP_KEY,
   useAddWorktreeTab,
   useBaseWorktree,
   useRemoveWorktreeTab,
   useRenameWorktreeTab,
   useRepos,
-  useResolvedBoolSetting,
   useTasks,
   useTriageDetail,
   useWorktreePrs,
@@ -49,7 +47,7 @@ import {
 } from "../../lib/queries";
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { usePersistedState } from "../../lib/usePersistedState";
-import { useAgentRuns } from "../../state/AgentRuns";
+import { type QueuedLaunch, useAgentRuns } from "../../state/AgentRuns";
 import { type FixCiLaunch, type PendingLaunch, useAppUi } from "../../state/AppContext";
 import { agentLabel } from "../../theme/colors";
 import { useTerminals } from "../terminal/TerminalsContext";
@@ -154,24 +152,6 @@ export function mergeWorktrees(
   const placeholders = pendingLaunches.filter((p) => !realIds.has(p.id)).map(pendingWorktree);
   const visible = realWorktrees.filter((w) => !pendingDeletes.has(w.id)).map(withLiveStatus);
   return [...placeholders, ...visible];
-}
-
-/** A cross-view launch (`treeLaunch`) is "dead" once neither a real worktree
- *  nor its pending placeholder exists for its id — e.g. `createWorktree`
- *  failed in the Issues model and the placeholder was dropped before a real
- *  worktree ever landed. A worktree that later reuses the same id (a manual
- *  retry via "Start a task", or the same ticket launched again much later)
- *  must not be mistaken for this stale request and auto-start an agent the
- *  user isn't asking for right now — see the #37 fix this backs. Exported for
- *  testing — see model.test.ts. */
-export function isTreeLaunchDead(
-  treeLaunch: string,
-  worktrees: Worktree[],
-  pendingLaunches: PendingLaunch[],
-): boolean {
-  const stillReferenced =
-    worktrees.some((w) => w.id === treeLaunch) || pendingLaunches.some((p) => p.id === treeLaunch);
-  return !stillReferenced;
 }
 
 /** The right panel's panes. The ticket leads: a worktree exists *for* an issue,
@@ -401,21 +381,17 @@ export function shouldHoldTerminal(opts: {
   return launching && !initialSetup && !promptFetched;
 }
 
-/** Which main tab "begin a task" opens: the Setup tab when the script runs first
- *  (the agent launches into `tabId` once it finishes), otherwise straight to the
- *  tab the agent is starting in — per the "run setup on new worktrees"
- *  preference. Exported for testing — see model.test.ts. */
-export function startTabFor(runSetupPref: boolean, tabId: string): MainTab {
-  return runSetupPref ? "setup" : extraTab(tabId);
-}
-
-/** The worktrees whose setup script has just finished — each lands on the tab its
- *  agent is starting in. Tracked per worktree rather than as one "was setting up"
- *  flag, which conflates them: switching away mid-setup would drop the *new*
- *  worktree onto a tab it never asked for while the one that actually finished
- *  never gets switched. Exported for testing — see model.test.ts. */
-export function finishedSetups(prev: Set<string>, now: Set<string>): string[] {
-  return [...prev].filter((id) => !now.has(id));
+/** Which main tab a worktree's run puts on screen: the Setup tab while the
+ *  script that precedes the agent is running, the agent's own tab once its
+ *  launch is queued, and nothing (`null`) when the worktree has no run — a
+ *  manual "Run setup" re-run launches nothing and must not move the selection.
+ *
+ *  The run is the launcher's (`AgentRunHost`), which begins it wherever the
+ *  user is; Trees only *follows* it, and this is the one rule for where to.
+ *  Exported for testing — see model.test.ts. */
+export function tabForRun(launch: QueuedLaunch | undefined, initialSetup: boolean): MainTab | null {
+  if (launch) return extraTab(launch.tabId);
+  return initialSetup ? "setup" : null;
 }
 
 interface TreesModel {
@@ -502,11 +478,6 @@ interface TreesModel {
   /** Rename a tab (blank titles are ignored). */
   renameTab: (id: string, title: string) => void;
 
-  /** Begin a task: mint its tab, open the worktree and hand the run to
-   *  `AgentRuns` (setup first, then the agent — or straight to the agent, per the
-   *  preference). `agent` names the provider for a worktree that was created a
-   *  moment ago and isn't in the worktrees read yet. */
-  startAgent: (id: string, opts?: { agent?: AgentKind | null }) => void;
   /** Open the Setup tab and run the script (the manual "Run setup" action). */
   runSetup: (id: string) => void;
 
@@ -580,8 +551,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const repo =
     !project || (repos !== undefined && !repos.some((r) => r.name === project)) ? "" : project;
   const {
-    treeLaunch,
-    consumeTreeLaunch,
     treeFocus,
     consumeTreeFocus,
     fixCiLaunch,
@@ -593,11 +562,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   } = useAppUi();
   // Setup runs and queued launches are owned by the app shell, not this route — a
   // run must survive navigating away from Trees (see AgentRuns).
-  const { beginRun, runSetup, isSettingUp, setVisibleWorktree, launchAgents } = useAgentRuns();
-  // Read here rather than in `AgentRuns`, which has no project of its own: this
-  // is the preference for *this* workspace's project, and it only decides which
-  // tab a start opens on. The run resolves it imperatively (see `beginRun`).
-  const runSetupOnStart = useResolvedBoolSetting(repo, TREES_RUN_SETUP_KEY).value;
+  const { runSetup, isSettingUp, isInitialSetup, setVisibleWorktree, launchAgents } =
+    useAgentRuns();
   const { data: realWorktrees = [], isLoading: worktreesLoading } = useWorktrees(repo);
   const { data: baseWorktree = null, isLoading: baseWorktreeLoading } = useBaseWorktree(repo);
   const { data: worktreePrs = [] } = useWorktreePrs(repo);
@@ -791,93 +757,46 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         search: (prev: { project?: string }) => ({ ...prev, tree: id || undefined }),
         replace: true,
       });
-      setVisibleWorktree(id ? { repo, id } : null);
     },
-    [repo, navigate, setVisibleWorktree],
+    [navigate],
   );
 
-  // `select` publishes the selection as it writes it, which is what closes the
-  // window where both hosts could mount — but it is not the only writer. The url
-  // is the selection now (`activeId` reads straight off the route), and a sidebar
-  // click, a launch's own navigate, a link and a reload all reach it without
-  // passing through `select`. Publishing only at mount left the launcher believing
-  // Trees still showed the worktree that was open before the last sidebar click:
-  // it skips *that* worktree's queued launch — whose pane is long gone, so nobody
-  // hosts it and the agent never spawns — and gives the one actually on screen a
-  // second host. So publish whatever the route says, every time it changes; the
-  // setter ignores an answer it already holds.
-  useEffect(() => {
-    setVisibleWorktree(activeId ? { repo, id: activeId } : null);
-    // Trees no longer has a worktree on screen — release it, so a launch queued for
-    // it (a task the user started and then navigated away from) is picked up by the
-    // off-screen launcher and actually runs.
-    return () => setVisibleWorktree(null);
-  }, [repo, activeId, setVisibleWorktree]);
-
-  // Read at call time rather than captured, so `startAgent` keeps a stable
-  // identity: the effects that depend on it would otherwise re-run on every
-  // worktrees or tabs refetch.
   // A closed tab someone asked to be taken to. Held rather than acted on here:
   // reopening it means resuming its conversation into a *new* tab, which needs
   // the worktree to be active first — see `useReopenClosedTab`.
   const [reopenTab, setReopenTab] = useState<{ worktreeId: string; tabId: string } | null>(null);
   const consumeReopenTab = useCallback(() => setReopenTab(null), []);
 
-  const worktreesRef = useRef(worktrees);
-  worktreesRef.current = worktrees;
   const tabsByWtRef = useRef(tabsByWt);
   tabsByWtRef.current = tabsByWt;
 
-  // Begin a task: mint the tab the agent will run in, open it, and hand the run to
-  // AgentRuns. The row is written before the run begins because the launch names
-  // the tab — a start that only set a flag on the worktree could be consumed by
-  // whichever agent tab happened to mount first, and the *work prompt* would open
-  // someone else's conversation. `focus` (default true) makes the worktree active;
-  // a launch that shouldn't steal the view passes false.
-  const startAgent = useCallback(
-    (id: string, opts?: { focus?: boolean; agent?: AgentKind | null }) => {
-      const tabId = crypto.randomUUID();
-      // The worktree's configured provider. A start that follows a create races the
-      // worktrees read, so the caller passes the provider it just created the
-      // worktree with rather than letting the lookup miss and fall back — that
-      // fallback would run Claude in a tab the user asked Codex for. "Claude" is
-      // the same last resort `useAgentTab` applies to a worktree with no provider
-      // recorded at all.
-      const agent = opts?.agent ?? worktreesRef.current.find((w) => w.id === id)?.agent ?? "Claude";
-      addTabRow({
-        id: tabId,
-        worktreeId: id,
-        kind: "agent",
-        agentKind: agent,
-        title: defaultTabTitle("agent", agent, tabsByWtRef.current.get(id) ?? []),
-        pr: null,
-      });
-      if (opts?.focus ?? true) select(id);
-      setFileFor(id, null);
-      setTabFor(id, startTabFor(runSetupOnStart, tabId));
-      beginRun(repo, id, tabId);
-    },
-    [repo, runSetupOnStart, beginRun, select, setFileFor, setTabFor, addTabRow],
-  );
-
-  // The Setup tab is temporary: when a worktree's script finishes, *that* worktree
-  // lands on the tab its agent is starting in — even if the user has since
-  // switched to another one. The runs are owned by AgentRuns; this just follows
-  // them in the UI. A manual re-run launches nothing, so it names no tab and this
+  // A run is the launcher's, begun wherever the user is (`AgentRunHost`): it mints
+  // the tab and runs setup and the agent. This workspace only *follows* it — a
+  // started task lands on its Setup tab while the script runs, then on the tab
+  // its agent is starting in, and stays there when that worktree is next opened
+  // even if the user has since switched to another one. Each step is followed
+  // once per worktree, so a run that has already been followed doesn't yank the
+  // user back every time these inputs re-render; a run ending (the launch flag
+  // clears once the agent has consumed its seed) forgets it, so the next start
+  // in the same worktree is followed afresh. A manual re-run names no tab and
   // leaves the selection alone.
   const settingUpActive = isSettingUp(activeId);
-  const settingUpIds = useMemo(
-    () => new Set([BASE_ID, ...worktrees.map((w) => w.id)].filter((id) => isSettingUp(id))),
-    [worktrees, isSettingUp],
-  );
-  const wasSettingUp = useRef(settingUpIds);
+  const followedRuns = useRef(new Map<string, MainTab>());
   useEffect(() => {
-    for (const id of finishedSetups(wasSettingUp.current, settingUpIds)) {
-      const tabId = launchAgents.get(id)?.tabId;
-      if (tabId) setTabFor(id, extraTab(tabId));
+    const ids = new Set([...launchAgents.keys(), ...worktrees.map((w) => w.id)]);
+    for (const id of ids) {
+      const tab = tabForRun(launchAgents.get(id), isInitialSetup(id));
+      const followed = followedRuns.current.get(id);
+      if (tab === null) {
+        followedRuns.current.delete(id);
+        continue;
+      }
+      if (followed === tab) continue;
+      followedRuns.current.set(id, tab);
+      setFileFor(id, null);
+      setTabFor(id, tab);
     }
-    wasSettingUp.current = settingUpIds;
-  }, [settingUpIds, setTabFor, launchAgents]);
+  }, [launchAgents, worktrees, isInitialSetup, setFileFor, setTabFor]);
 
   // Clear the selection if the active worktree vanished (e.g. it was deleted).
   // The base entry isn't in `worktrees`, so it's never cleared here.
@@ -889,60 +808,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     if (worktreesLoading) return;
     if (activeId && !worktrees.some((w) => w.id === activeId)) select("");
   }, [worktrees, activeId, select, worktreesLoading]);
-
-  // Tracks which treeLaunch id has already been focused (setActiveId called for
-  // it), so a worktrees refetch while the real worktree hasn't landed yet
-  // doesn't re-run setActiveId on every render and yank the user back to this
-  // tab if they've since navigated elsewhere (finding #37). Reset once the
-  // launch is consumed (agent started, or the launch died) so a later launch
-  // for the same id — e.g. relaunching the same ticket after deleting its
-  // worktree — is still focused fresh.
-  const focusedLaunchRef = useRef<string | null>(null);
-
-  // Consume a cross-view launch request (from a ticket's Run, "Start a task", the
-  // launch queue). Land on the task as soon as its optimistic placeholder appears
-  // so its "Creating workspace…" state is visible; only begin the agent once the
-  // *real* worktree exists (the placeholder has no branch/path yet).
-  useEffect(() => {
-    if (!treeLaunch) return;
-    // Only this project's launches are this workspace's to run — or to cancel.
-    // Every read here is scoped to `repo`, so a launch into another project looks
-    // exactly like one of ours whose worktree never arrived; the liveness check
-    // below would then declare it dead and the ticket's agent would never run
-    // anywhere. Reported as "the worktree is created but nothing starts in it":
-    // the launch was started while the workspace was open on another project, and
-    // the register that keeps it alive is cleared cross-repo by the sidebar the
-    // moment the real worktree lands. Left alone, the launch waits for the
-    // workspace it named.
-    if (treeLaunch.repo !== repo) return;
-    const launchId = treeLaunch.id;
-    // This project's placeholders, for the same reason: the register is app-wide,
-    // and a launch is only alive here if this project is still making it.
-    const ours = pendingLaunches.filter((l) => l.repo === repo);
-    if (isTreeLaunchDead(launchId, worktrees, ours)) {
-      // createWorktree failed (or the pending launch was otherwise dropped)
-      // before a real worktree could land for this id — the launch is dead.
-      // Clear it so a worktree that appears later for the same id (e.g. a
-      // manual retry via "Start a task") isn't mistaken for this stale
-      // request and doesn't unexpectedly auto-start an agent (finding #37).
-      consumeTreeLaunch();
-      focusedLaunchRef.current = null;
-      return;
-    }
-    const wt = worktrees.find((w) => w.id === launchId);
-    if (!wt) return;
-    if (focusedLaunchRef.current !== launchId) {
-      focusedLaunchRef.current = launchId;
-      select(launchId);
-    }
-    // Nothing to pre-arm while the worktree is still being created: it has no
-    // tabs yet, so nothing can mount and spawn a bare shell ahead of setup. The
-    // run begins — and mints its tab — once the real worktree exists.
-    if (wt.pending) return;
-    startAgent(launchId, { agent: wt.agent });
-    consumeTreeLaunch();
-    focusedLaunchRef.current = null;
-  }, [treeLaunch, repo, worktrees, pendingLaunches, consumeTreeLaunch, startAgent, select]);
 
   // Consume a cross-view "open" request (from the Issues graph/"Open in Trees"):
   // select the existing worktree and open the ticket beside it — no agent start,
@@ -1181,7 +1046,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         const trimmed = title.trim();
         if (trimmed) renameTabRow({ id, title: trimmed });
       },
-      startAgent,
       // A manual re-run opens the Setup tab alongside whatever's already open
       // (e.g. a File tab) — it doesn't replace it.
       runSetup: (id) => {
@@ -1246,7 +1110,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     setTabFor,
     setFileFor,
     select,
-    startAgent,
     runSetup,
     fixCiLaunchByTab,
     repo,
@@ -1281,6 +1144,24 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // publish above would clear and re-set on every Trees state change. Leaving
   // Trees means no agent is on screen, and the meter must go with it.
   useEffect(() => () => setFocusedAgent(null), [setFocusedAgent]);
+
+  // What this view has on screen, for the off-screen launcher: the worktree and
+  // which of its tab rows is showing. From the *resolved* tab, so the launcher
+  // and this view agree on which pane exists — a remembered tab that is gone
+  // resolves to another, and only the pane actually mounted hosts a terminal.
+  // Read off the route rather than published from `select`: a sidebar click, a
+  // launch's own navigate, a link and a reload all change the selection without
+  // passing through it, and publishing only at mount once left the launcher
+  // skipping a worktree whose pane was long gone. The setter ignores an answer
+  // it already holds. Unmounting releases it, so a launch for the worktree that
+  // was open runs off-screen once Trees is gone.
+  const visibleTab = value.activeTab?.startsWith("tab:")
+    ? value.activeTab.slice("tab:".length)
+    : null;
+  useEffect(() => {
+    setVisibleWorktree(activeId ? { repo, id: activeId, tab: visibleTab } : null);
+    return () => setVisibleWorktree(null);
+  }, [repo, activeId, visibleTab, setVisibleWorktree]);
 
   return <TreesContext.Provider value={value}>{children}</TreesContext.Provider>;
 }

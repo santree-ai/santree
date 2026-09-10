@@ -33,8 +33,9 @@ describe("launchesToHost", () => {
   /** Queued launches, each naming the project and the tab its agent runs in. */
   const queued = (...ids: string[]) =>
     new Map(ids.map((id) => [id, { repo: REPO, tabId: `tab-${id}` }]));
-  /** What the workspace has on screen, qualified by its project. */
-  const open = (id: string, repo = REPO) => ({ repo, id });
+  /** What the workspace has on screen — the worktree, its project, and the tab
+   *  row whose pane is showing (by default the launch's own). */
+  const open = (id: string, repo = REPO, tab: string | null = `tab-${id}`) => ({ repo, id, tab });
   const hostedIds = (hosted: { worktree: { id: string } }[]) => hosted.map((h) => h.worktree.id);
 
   // The whole point of lifting this out of TreesProvider: a "Run in background"
@@ -54,8 +55,20 @@ describe("launchesToHost", () => {
 
   // Two hosts for one refId would attach two xterm embeds to the same session and
   // fight over the single overlay.
-  it("never hosts the worktree whose visible pane already owns that terminal", () => {
+  it("never hosts the launch whose visible pane already owns that terminal", () => {
     expect(launchesToHost(queued("AK-1"), REPO, wts, open("AK-1"))).toEqual([]);
+  });
+
+  // The bug: a worktree on screen was skipped whatever it showed — and a freshly
+  // created one shows its empty surface, so its start ran nowhere until the tab
+  // was opened by hand. Only the launch's own pane hosts it.
+  it("hosts the open worktree's launch when the pane on screen is not its own", () => {
+    expect(hostedIds(launchesToHost(queued("AK-1"), REPO, wts, open("AK-1", REPO, null)))).toEqual([
+      "AK-1",
+    ]);
+    expect(
+      hostedIds(launchesToHost(queued("AK-1"), REPO, wts, open("AK-1", REPO, "tab-other"))),
+    ).toEqual(["AK-1"]);
   });
 
   it("waits for the real worktree — a placeholder has no path to root a terminal in", () => {

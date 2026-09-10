@@ -13,11 +13,29 @@ import { describe, expect, it, vi } from "vitest";
 
 const onClose = vi.fn();
 
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
+const spies = vi.hoisted(() => ({
+  navigate: vi.fn(),
+  requestTreeFocus: vi.fn(),
+  requestLaunch: vi.fn(),
+  addPendingLaunches: vi.fn(),
+  /** The create mutation: resolves at once with the worktree it was asked for. */
+  create: vi.fn(
+    (
+      vars: { issueId: string; title: string },
+      opts: { onSuccess: (wt: { id: string; title: string }) => void },
+    ) => opts.onSuccess({ id: vars.issueId, title: vars.title }),
+  ),
+}));
+
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => spies.navigate }));
 
 vi.mock("../../state/AppContext", () => ({
   useApp: () => ({ settings: null }),
-  useAppUi: () => ({ requestTreeFocus: vi.fn() }),
+  useAppUi: () => ({
+    requestTreeFocus: spies.requestTreeFocus,
+    requestLaunch: spies.requestLaunch,
+    addPendingLaunches: spies.addPendingLaunches,
+  }),
 }));
 
 vi.mock("../../lib/queries", () => ({
@@ -45,7 +63,7 @@ vi.mock("../../lib/queries", () => ({
     ],
   }),
   useResolvedSetting: () => ({ data: null }),
-  useCreateWorktree: () => ({ mutate: vi.fn(), isPending: false }),
+  useCreateWorktree: () => ({ mutate: spies.create, isPending: false }),
 }));
 
 import { CreateWorktreeDialog } from "./CreateWorktreeDialog";
@@ -55,6 +73,36 @@ const open = () => {
   render(<CreateWorktreeDialog repo="acme/app" onClose={onClose} />);
   return screen.getByRole("combobox", { name: /search tickets/i });
 };
+
+/**
+ * A ticket picked here is a started task, and starts the way every other start
+ * does — through the launch channel, with a placeholder to keep it alive until
+ * the worktree list catches up. The dialog used to only navigate: the worktree
+ * appeared, and no agent, tab or session ever did.
+ */
+describe("CreateWorktreeDialog creating", () => {
+  it("starts the task when the source is a ticket", () => {
+    const field = open();
+    fireEvent.click(field);
+    fireEvent.click(screen.getByText("Tighten the rate limiter"));
+    fireEvent.click(screen.getByRole("button", { name: "Create worktree" }));
+
+    expect(spies.create).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: "acme/app", issueId: "AK-1" }),
+      expect.anything(),
+    );
+    expect(spies.addPendingLaunches).toHaveBeenCalledWith([
+      expect.objectContaining({ repo: "acme/app", id: "AK-1", project: "Platform" }),
+    ]);
+    expect(spies.requestLaunch).toHaveBeenCalledWith("acme/app", "AK-1");
+    expect(spies.requestTreeFocus).not.toHaveBeenCalled();
+    expect(spies.navigate).toHaveBeenCalledWith({
+      to: "/trees",
+      search: { project: "acme/app", tree: "AK-1" },
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("CreateWorktreeDialog source picker", () => {
   /** The regression this file exists for: closed, the list occupies nothing. */

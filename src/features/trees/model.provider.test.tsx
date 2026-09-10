@@ -121,8 +121,6 @@ vi.mock("../../components/PrChip", () => ({
 
 vi.mock("../../state/AppContext", () => ({
   useAppUi: () => ({
-    treeLaunch: null,
-    consumeTreeLaunch: vi.fn(),
     treeFocus: null,
     consumeTreeFocus: vi.fn(),
     fixCiLaunch: null,
@@ -137,6 +135,8 @@ vi.mock("../../state/AppContext", () => ({
 
 vi.mock("../../state/AgentRuns", () => ({
   useAgentRuns: () => ({
+    launchAgents: new Map(),
+    isInitialSetup: () => false,
     beginRun: vi.fn(),
     runSetup: vi.fn(),
     isSettingUp: () => false,

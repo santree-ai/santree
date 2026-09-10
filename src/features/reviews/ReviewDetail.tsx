@@ -144,14 +144,15 @@ function PrWorkspace({ pr, tabs }: { pr: ReviewPr; tabs: ReviewTabs }) {
 
   // A checkout tab hosts that worktree's session right here, so the off-screen
   // launcher has to skip it — two hosts for one session fight over the single
-  // xterm overlay. Only while such a tab is showing: with the pull request on
+  // xterm overlay. Only that tab: with the pull request or another tab on
   // screen there is no host here, and a queued launch should still run.
   const { setVisibleWorktree } = useAgentRuns();
-  const hosted = tabs.active.startsWith("tab:") ? tabs.checkout.worktreeId : "";
+  const hostedTab = tabs.active.startsWith("tab:") ? tabs.active.slice("tab:".length) : null;
+  const hosted = hostedTab ? tabs.checkout.worktreeId : "";
   useEffect(() => {
-    setVisibleWorktree(hosted ? { repo, id: hosted } : null);
+    setVisibleWorktree(hosted ? { repo, id: hosted, tab: hostedTab } : null);
     return () => setVisibleWorktree(null);
-  }, [hosted, repo, setVisibleWorktree]);
+  }, [hosted, hostedTab, repo, setVisibleWorktree]);
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">

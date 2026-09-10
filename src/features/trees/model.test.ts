@@ -17,10 +17,8 @@ import {
   availableFileTabs,
   defaultTabTitle,
   effectiveSessionState,
-  finishedSetups,
   focusedAgentFor,
   hasLivePane,
-  isTreeLaunchDead,
   type MainTab,
   mergeWorktrees,
   openMainTabs,
@@ -30,7 +28,7 @@ import {
   resolveActiveTab,
   resolveFileTab,
   shouldHoldTerminal,
-  startTabFor,
+  tabForRun,
   withLiveWorktreeStatus,
 } from "./model";
 import { tabsToCloseForWorktree } from "./useWorktreeDeletion";
@@ -214,62 +212,20 @@ describe("mergeWorktrees", () => {
   });
 });
 
-describe("isTreeLaunchDead", () => {
-  it("is not dead while its pending placeholder is still around", () => {
-    const worktrees = [pendingWorktree(pendingLaunch("AK-1"))];
-    expect(isTreeLaunchDead("AK-1", worktrees, [pendingLaunch("AK-1")])).toBe(false);
+describe("tabForRun", () => {
+  it("names the agent's tab once its launch is queued", () => {
+    expect(tabForRun({ repo: "acme/app", tabId: "t1" }, false)).toBe("tab:t1");
+    // The launch outranks a setup still reported: the agent is what runs next.
+    expect(tabForRun({ repo: "acme/app", tabId: "t1" }, true)).toBe("tab:t1");
   });
 
-  it("is not dead once the real worktree has landed (even after the placeholder is gone)", () => {
-    expect(isTreeLaunchDead("AK-1", [worktree("AK-1")], [])).toBe(false);
+  it("names the Setup tab while the initial setup runs", () => {
+    expect(tabForRun(undefined, true)).toBe("setup");
   });
 
-  // Regression guard for finding #37: a failed createWorktree drops the pending
-  // placeholder (see IssuesModel.launch's .catch) without ever producing a real
-  // worktree — the launch must be recognized as dead so it doesn't stay armed
-  // and auto-start an agent for an unrelated worktree that later reuses the id.
-  it("is dead once neither a real worktree nor its pending placeholder exists for the id (#37)", () => {
-    expect(isTreeLaunchDead("AK-1", [], [])).toBe(true);
-    // Some *other* launch is still pending — AK-1 itself is still dead.
-    const otherLaunch = [pendingLaunch("AK-2")];
-    const otherWorktrees = [pendingWorktree(pendingLaunch("AK-2"))];
-    expect(isTreeLaunchDead("AK-1", otherWorktrees, otherLaunch)).toBe(true);
-  });
-});
-
-describe("startTabFor", () => {
-  it("opens the Setup tab when the run-setup preference is on", () => {
-    expect(startTabFor(true, "t1")).toBe("setup");
-  });
-
-  it("opens the tab the agent is starting in when the preference is off", () => {
-    expect(startTabFor(false, "t1")).toBe("tab:t1");
-  });
-});
-
-describe("finishedSetups", () => {
-  it("reports the worktree whose setup just ended", () => {
-    expect(finishedSetups(new Set(["AK-1"]), new Set())).toEqual(["AK-1"]);
-  });
-
-  it("reports nothing while the setup is still running", () => {
-    expect(finishedSetups(new Set(["AK-1"]), new Set(["AK-1"]))).toEqual([]);
-  });
-
-  // The bug this replaces latched a bare "was setting up" boolean: switching away
-  // from a setting-up worktree read as "setup finished" for the *newly* selected
-  // one — dropping it onto its terminal tab (spawning a shell nobody asked for) —
-  // while the worktree that actually finished never got switched.
-  it("ignores a worktree that was never setting up, and still fires for the one that was", () => {
-    // AK-1 is mid-setup; the user switches to AK-2. Nothing finished.
-    expect(finishedSetups(new Set(["AK-1"]), new Set(["AK-1"]))).toEqual([]);
-    // AK-1's script then finishes while AK-2 is on screen — AK-1 is the one that
-    // lands on its terminal, not AK-2.
-    expect(finishedSetups(new Set(["AK-1"]), new Set())).toEqual(["AK-1"]);
-  });
-
-  it("reports every worktree that finished since the last check", () => {
-    expect(finishedSetups(new Set(["AK-1", "AK-2"]), new Set(["AK-2"]))).toEqual(["AK-1"]);
+  // A manual "Run setup" re-run launches nothing and must not move the selection.
+  it("names nothing for a worktree with no run", () => {
+    expect(tabForRun(undefined, false)).toBeNull();
   });
 });
 

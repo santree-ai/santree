@@ -1,22 +1,21 @@
 /**
- * A launch belongs to the project it was started for, not to the project the
- * workspace happens to be showing.
+ * A run is the launcher's; Trees follows it.
  *
- * Reported: "Start a task" created the worktree and no agent ever ran in it —
- * no tab, no session, nothing in Session history. The launch had been started
- * into one project while Trees was open on another, and the register that keeps
- * it alive is cleared cross-repo by the sidebar. The provider, scoped to the
- * project on screen, then saw neither a worktree nor a placeholder for it and
- * declared the launch dead.
+ * Reported twice as "the worktree is created and nothing starts in it": a start
+ * handed to the Trees workspace only ran once that workspace was on screen for
+ * that project, and its pane was only hosted while its tab was the active one.
+ * Now every start goes to the app shell's launcher, which mints the tab and
+ * begins the run wherever the user is — and this workspace's whole part is to
+ * land on the right tab when it shows that worktree, and to tell the launcher
+ * which pane it is actually hosting.
  */
 import { render } from "@testing-library/react";
 import { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Worktree } from "../../bindings";
+import type { Worktree, WorktreeTab } from "../../bindings";
 
 const A = "acme/app";
-const B = "acme/api";
 
 const wt = (id: string, over: Partial<Worktree> = {}): Worktree => ({
   id,
@@ -41,9 +40,18 @@ const wt = (id: string, over: Partial<Worktree> = {}): Worktree => ({
   ...over,
 });
 
+const row = (id: string, worktreeId: string): WorktreeTab => ({
+  id,
+  worktreeId,
+  kind: "agent",
+  agentKind: "Codex",
+  title: "Codex",
+  pr: null,
+});
+
 /** The route the provider reads its project and selection off. */
 const route = vi.hoisted(() => ({
-  search: { project: "acme/app", tree: "__base__" } as { project?: string; tree?: string },
+  search: { project: "acme/app", tree: "AK-1" } as { project?: string; tree?: string },
   listeners: new Set<() => void>(),
   go(next: { project?: string; tree?: string }) {
     this.search = next;
@@ -69,20 +77,17 @@ vi.mock("@tanstack/react-router", async () => {
   };
 });
 
-/** Every project's worktrees, as the shared query cache holds them. */
+/** The query cache and the app shell's run state, mutable so a test can play
+ *  out a sequence; every mocked hook re-renders on `notify`. */
 const store = vi.hoisted(() => ({
-  worktrees: new Map<string, unknown[]>(),
+  worktrees: [] as unknown[],
+  tabs: [] as unknown[],
+  launchAgents: new Map<string, { repo: string; tabId: string }>(),
+  settingUp: new Set<string>(),
   listeners: new Set<() => void>(),
   notify() {
     for (const l of [...this.listeners]) l();
   },
-}));
-
-/** The app-wide launch registers, mutable so a test can play out the sequence. */
-const ui = vi.hoisted(() => ({
-  treeLaunch: null as unknown,
-  pendingLaunches: [] as unknown[],
-  consumeTreeLaunch: vi.fn(),
 }));
 
 vi.mock("../../lib/queries", async () => {
@@ -95,62 +100,62 @@ vi.mock("../../lib/queries", async () => {
     }, []);
   };
   return {
-    useRepos: () => ({ data: [{ name: A }, { name: B }] }),
-    useResolvedBoolSetting: () => ({ value: false, isFetched: true }),
-    TREES_RUN_SETUP_KEY: "trees_run_setup",
-    useWorktrees: (repo: string) => {
+    useRepos: () => ({ data: [{ name: A }] }),
+    useWorktrees: () => {
       subscribe();
-      return { data: store.worktrees.get(repo) ?? [], isLoading: false };
+      return { data: store.worktrees, isLoading: false };
     },
     useBaseWorktree: () => ({ data: null, isLoading: false }),
     useWorktreePrs: () => ({ data: [] }),
     useTasks: () => ({ data: [] }),
     useTriageDetail: () => ({ data: undefined }),
-    useWorktreeTabs: () => ({ data: [] }),
-    useAddWorktreeTab: () => ({ mutate: addTabRow }),
+    useWorktreeTabs: () => {
+      subscribe();
+      return { data: store.tabs };
+    },
+    useAddWorktreeTab: () => ({ mutate: vi.fn() }),
     useRenameWorktreeTab: () => ({ mutate: vi.fn() }),
     useRemoveWorktreeTab: () => ({ mutate: vi.fn() }),
   };
 });
 
-const addTabRow = vi.hoisted(() => vi.fn());
-const beginRun = vi.hoisted(() => vi.fn());
 const setVisibleWorktree = vi.hoisted(() => vi.fn());
 
-vi.mock("../../state/AppContext", async () => {
+vi.mock("../../state/AppContext", () => ({
+  useAppUi: () => ({
+    treeFocus: null,
+    consumeTreeFocus: vi.fn(),
+    fixCiLaunch: null,
+    consumeFixCiLaunch: vi.fn(),
+    pendingLaunches: [],
+    pendingDeletes: new Set<string>(),
+    removePendingDelete: vi.fn(),
+    setFocusedAgent: vi.fn(),
+  }),
+}));
+
+vi.mock("../../state/AgentRuns", async () => {
   const { useEffect, useReducer } = await import("react");
+  const subscribe = () => {
+    const [, bump] = useReducer((n: number) => n + 1, 0);
+    useEffect(() => {
+      store.listeners.add(bump);
+      return () => void store.listeners.delete(bump);
+    }, []);
+  };
   return {
-    useAppUi: () => {
-      const [, bump] = useReducer((n: number) => n + 1, 0);
-      useEffect(() => {
-        store.listeners.add(bump);
-        return () => void store.listeners.delete(bump);
-      }, []);
+    useAgentRuns: () => {
+      subscribe();
       return {
-        treeLaunch: ui.treeLaunch,
-        consumeTreeLaunch: ui.consumeTreeLaunch,
-        treeFocus: null,
-        consumeTreeFocus: vi.fn(),
-        fixCiLaunch: null,
-        consumeFixCiLaunch: vi.fn(),
-        pendingLaunches: ui.pendingLaunches,
-        pendingDeletes: new Set<string>(),
-        removePendingDelete: vi.fn(),
-        setFocusedAgent: vi.fn(),
+        runSetup: vi.fn(),
+        isSettingUp: (id: string) => store.settingUp.has(id),
+        isInitialSetup: (id: string) => store.settingUp.has(id),
+        setVisibleWorktree,
+        launchAgents: store.launchAgents,
       };
     },
   };
 });
-
-vi.mock("../../state/AgentRuns", () => ({
-  useAgentRuns: () => ({
-    beginRun,
-    runSetup: vi.fn(),
-    isSettingUp: () => false,
-    setVisibleWorktree,
-    launchAgents: new Map(),
-  }),
-}));
 
 vi.mock("../terminal/TerminalsContext", () => ({ useTerminals: () => ({ tabs: [] }) }));
 vi.mock("./useWorktreeDeletion", () => ({
@@ -158,71 +163,108 @@ vi.mock("./useWorktreeDeletion", () => ({
 }));
 vi.mock("../../components/PrChip", () => ({ primaryPr: (list: unknown[]) => list[0] ?? null }));
 
-import { TreesProvider } from "./model";
+import { TreesProvider, useTrees } from "./model";
 
-describe("TreesProvider · a launch into another project", () => {
+let model: ReturnType<typeof useTrees>;
+function Probe() {
+  model = useTrees();
+  return null;
+}
+const mount = () =>
+  render(
+    <TreesProvider>
+      <Probe />
+    </TreesProvider>,
+  );
+
+/** The launcher minted the run's tab and queued the agent for it. */
+function runBegins(id: string, tabId: string) {
+  act(() => {
+    store.tabs = [...store.tabs, row(tabId, id)];
+    store.launchAgents = new Map(store.launchAgents).set(id, { repo: A, tabId });
+    store.notify();
+  });
+}
+
+describe("TreesProvider · following a run", () => {
   beforeEach(() => {
     localStorage.clear();
     sessionStorage.clear();
     vi.clearAllMocks();
-    // The real consume clears the register; a spy that only records would let
-    // the effect start the same launch again on the next render, forever.
-    ui.consumeTreeLaunch.mockImplementation(() => {
-      ui.treeLaunch = null;
-      store.notify();
-    });
-    store.worktrees = new Map([
-      [A, [wt("__base__"), wt("AK-1")]],
-      [B, []],
-    ]);
-    // Trees is open on project A; the launch is for project B.
     route.search = { project: A, tree: "AK-1" };
-    ui.treeLaunch = { repo: B, id: "AK-9" };
-    ui.pendingLaunches = [{ repo: B, id: "AK-9", title: "AK-9", project: null, agent: "Codex" }];
+    store.worktrees = [wt("AK-1"), wt("AK-2")];
+    store.tabs = [row("t1", "AK-1")];
+    store.launchAgents = new Map();
+    store.settingUp = new Set();
   });
 
-  /** The sidebar clears the placeholder register cross-repo the moment the real
-   *  worktree lands — it reads every project, this provider reads one. */
-  function worktreeLandsInB() {
+  it("lands on the tab a run begins in, for the worktree on screen", () => {
+    mount();
+    expect(model.activeTab).toBe("tab:t1");
+
+    runBegins("AK-1", "t9");
+
+    expect(model.activeTab).toBe("tab:t9");
+  });
+
+  /** The setup script runs before the agent: the Setup tab first, then the
+   *  agent's tab once its launch is queued — with nothing more from the user. */
+  it("shows the Setup tab while the initial setup runs, then the agent's tab", () => {
+    mount();
     act(() => {
-      store.worktrees.set(B, [wt("AK-9")]);
-      ui.pendingLaunches = [];
+      store.settingUp = new Set(["AK-1"]);
       store.notify();
     });
-  }
+    expect(model.activeTab).toBe("setup");
 
-  it("does not kill it while the workspace is showing a different project", () => {
-    render(<TreesProvider>{null}</TreesProvider>);
-
-    worktreeLandsInB();
-
-    expect(ui.consumeTreeLaunch).not.toHaveBeenCalled();
+    act(() => {
+      store.settingUp = new Set();
+    });
+    runBegins("AK-1", "t9");
+    expect(model.activeTab).toBe("tab:t9");
   });
 
-  /** The off-screen launcher skips whatever Trees is showing, because that
-   *  worktree's own pane hosts its terminal. Told once at mount, it kept skipping
-   *  the worktree open *before* the click — whose pane is gone, so nobody hosts
-   *  its queued launch and the agent never spawns. */
-  it("publishes the selection the route arrived at, not only the one it mounted on", () => {
-    render(<TreesProvider>{null}</TreesProvider>);
-    expect(setVisibleWorktree).toHaveBeenLastCalledWith({ repo: A, id: "AK-1" });
+  /** A run followed once stays followed: the user's own tab pick afterwards is
+   *  not undone by the next re-render of the same inputs. */
+  it("follows a run once, and leaves a later manual pick alone", () => {
+    mount();
+    runBegins("AK-1", "t9");
+    act(() => model.setActiveTab("tab:t1"));
+    expect(model.activeTab).toBe("tab:t1");
+
+    act(() => store.notify());
+
+    expect(model.activeTab).toBe("tab:t1");
+  });
+
+  /** The launcher runs a task in a worktree the user isn't looking at; when they
+   *  next open that worktree it is on the agent's tab, not whatever it had. */
+  it("follows a run in a worktree that is not on screen, so opening it lands on the tab", () => {
+    mount();
+    runBegins("AK-2", "t9");
+    expect(model.activeTab).toBe("tab:t1");
+
+    act(() => route.go({ project: A, tree: "AK-2" }));
+
+    expect(model.activeTab).toBe("tab:t9");
+  });
+
+  /** The launcher hosts every queued launch except the one whose pane is on
+   *  screen — which is a *tab*, not a worktree: a worktree showing another tab,
+   *  or nothing at all, hosts nothing. That distinction is the bug this fixes. */
+  it("tells the launcher which tab it is hosting, and none when the main area is empty", () => {
+    mount();
+    expect(setVisibleWorktree).toHaveBeenLastCalledWith({ repo: A, id: "AK-1", tab: "t1" });
+
+    act(() => {
+      store.tabs = [];
+      store.notify();
+    });
+    expect(setVisibleWorktree).toHaveBeenLastCalledWith({ repo: A, id: "AK-1", tab: null });
 
     // A sidebar click: the url changes without passing through the view's own
     // `select`, which is the only writer the launcher used to hear from.
-    act(() => route.go({ project: A, tree: "__base__" }));
-
-    expect(setVisibleWorktree).toHaveBeenLastCalledWith({ repo: A, id: "__base__" });
-  });
-
-  it("starts the agent when the workspace reaches the launch's project", () => {
-    render(<TreesProvider>{null}</TreesProvider>);
-    worktreeLandsInB();
-
-    act(() => route.go({ project: B, tree: "AK-9" }));
-
-    expect(addTabRow).toHaveBeenCalledWith(
-      expect.objectContaining({ worktreeId: "AK-9", kind: "agent", agentKind: "Codex" }),
-    );
-    expect(beginRun).toHaveBeenCalledWith(B, "AK-9", expect.any(String));
+    act(() => route.go({ project: A, tree: "AK-2" }));
+    expect(setVisibleWorktree).toHaveBeenLastCalledWith({ repo: A, id: "AK-2", tab: null });
   });
 });

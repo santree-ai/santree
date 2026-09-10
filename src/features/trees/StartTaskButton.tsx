@@ -55,7 +55,7 @@ export function StartTaskButton({
   const { worktrees } = useTrees();
   const { settings } = useApp();
   const navigate = useNavigate();
-  const { addPendingLaunches, removePendingLaunch, requestTreeLaunch, pendingDeletes } = useAppUi();
+  const { addPendingLaunches, removePendingLaunch, requestLaunch, pendingDeletes } = useAppUi();
   // Read scope: which tickets there are to offer. With a project open it is that
   // project's org; with none — the welcome surface — the Work default's. Either
   // way it names an org, never a destination.
@@ -83,7 +83,7 @@ export function StartTaskButton({
       const agent = (workAgent as AgentKind | null) ?? settings?.defaultAgent ?? "Claude";
       const project = t.project === NO_PROJECT ? null : t.project;
       addPendingLaunches([{ repo, id: t.id, title: t.title, project, agent }]);
-      requestTreeLaunch(repo, t.id);
+      requestLaunch(repo, t.id);
       // Open the workspace the ticket is landing in before the create resolves —
       // it may not be the one on screen, and the pending row is there waiting.
       navigate({ to: "/trees", search: { project: repo, tree: t.id } });
@@ -99,12 +99,9 @@ export function StartTaskButton({
           agent,
         },
         {
-          // Begin the task through the launch channel rather than by calling the
-          // workspace's own `startAgent`: the create resolves after the
-          // navigation, and a `startAgent` captured at the click belongs to
-          // whichever project was open *then* — it would mint the tab row in the
-          // wrong one. The channel is read by whichever workspace is mounted,
-          // which by now is the ticket's.
+          // The run itself is the launcher's (`AgentRunHost`), which waits for the
+          // real worktree: nothing here depends on which workspace is mounted
+          // when the create lands.
           onError: () => removePendingLaunch(t.id),
         },
       );
