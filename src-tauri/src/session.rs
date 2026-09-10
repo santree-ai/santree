@@ -343,6 +343,10 @@ pub async fn started_investigations(db: &Db, repo: &str) -> Result<Vec<TriageSes
                 // Sentinel keys from the removed repo-wide Triage desk are still in
                 // the table, and no ticket will ever match them again.
                 .filter(|ref_id| !ref_id.starts_with("__"))
+                // A ticket's plain tabs (`triage:<ticket>:tab:<id>`) share the
+                // prefix but are not investigations: they come back as
+                // `worktree_tabs` rows, not as a resume offer on the ticket.
+                .filter(|ref_id| !ref_id.contains(":tab:"))
                 .map(|ref_id| (ref_id.to_string(), kind))
         })
         .map(|(ref_id, kind)| {
@@ -1542,6 +1546,16 @@ mod tests {
         sqlx::query(
             "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
              VALUES ('repo', 'triage:__repo__:repo', ?, 'desk', 'Claude')",
+        )
+        .bind(cwd)
+        .execute(&db)
+        .await
+        .unwrap();
+        // A plain agent tab opened beside AK-1's investigation: a `worktree_tabs`
+        // row, not an investigation of the ticket.
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', 'triage:AK-1:tab:side', ?, 'side-chat', 'Claude')",
         )
         .bind(cwd)
         .execute(&db)

@@ -92,7 +92,7 @@ describe("useOpenAgent", () => {
    *  this session is. */
   it("routes a triage session to its ticket's workspace, on the provider's tab", () => {
     open("triage:AK-9", "acme/app", "Codex");
-    expect(spies.requestTriageFocus).toHaveBeenCalledWith("AK-9", "Codex");
+    expect(spies.requestTriageFocus).toHaveBeenCalledWith("AK-9", { agent: "Codex" });
     expect(spies.navigate).toHaveBeenCalledWith({ to: "/triage", search: { ticket: "AK-9" } });
     expect(spies.requestTreeFocus).not.toHaveBeenCalled();
   });
@@ -101,7 +101,16 @@ describe("useOpenAgent", () => {
    *  on the Linear tab, rather than on a guessed agent's. */
   it("names no agent tab for a triage session whose provider is unknown", () => {
     open("triage:AK-9", "acme/app", null);
-    expect(spies.requestTriageFocus).toHaveBeenCalledWith("AK-9", undefined);
+    expect(spies.requestTriageFocus).toHaveBeenCalledWith("AK-9", { agent: undefined });
+  });
+
+  /** One of the ticket's own tabs is named by its row, not by a provider: the
+   *  workspace selects the row the session lives in, exactly as a worktree's
+   *  extra tab is named for Trees. */
+  it("routes a triage tab's session to its ticket, on that row", () => {
+    open("triage:AK-9:tab:6f9a", "acme/app", "Claude");
+    expect(spies.requestTriageFocus).toHaveBeenCalledWith("AK-9", { tab: "6f9a" });
+    expect(spies.navigate).toHaveBeenCalledWith({ to: "/triage", search: { ticket: "AK-9" } });
   });
 
   /** A session santree can't attribute to a surface must go nowhere at all,

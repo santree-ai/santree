@@ -936,14 +936,81 @@ impl SessionContext {
     }
 }
 
+/// A persisted tab's launch identity, from its own `worktree_tabs` row: its
+/// kind, the provider it was opened with, and — for the review kinds — the PR
+/// its tools are scoped by. `owner` is the row's surface (a worktree id, or a
+/// triage ticket's `triage:<ticket>`), exactly as [`tabs::term_key`] keys it.
+async fn persisted_tab(
+    db: &Db,
+    repo: &str,
+    owner: &str,
+    tab_id: &str,
+) -> Result<(TabKind, AgentKind, Option<(String, String, u32)>), String> {
+    if owner.is_empty() || tab_id.is_empty() || tab_id.contains(':') {
+        return Err("invalid worktree tab terminal key".into());
+    }
+    /// `(kind, agent_kind, pr_repo, pr_number)` as `worktree_tabs` stores it —
+    /// every column but `kind` is nullable, because a plain terminal tab has
+    /// no agent and only a review tab carries a PR.
+    type TabRow = (String, Option<String>, Option<String>, Option<u32>);
+    let row: Option<TabRow> = sqlx::query_as(
+        "SELECT kind, agent_kind, pr_repo, pr_number FROM worktree_tabs
+         WHERE repo = ? AND worktree_id = ? AND id = ?",
+    )
+    .bind(repo)
+    .bind(owner)
+    .bind(tab_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| error.to_string())?;
+    let (kind, agent, pr_repo, pr_number) =
+        row.ok_or_else(|| "worktree tab does not exist".to_string())?;
+    if kind == "terminal" {
+        return Err("plain terminal tabs cannot start an agent session".into());
+    }
+    let agent = agent
+        .ok_or_else(|| "agent tab has no persisted provider".to_string())?
+        .parse::<AgentKind>()
+        .map_err(|error| error.to_string())?;
+    // The two review kinds are the ones that launch with the review deny list
+    // and santree's review tools, and `TabKind` is where that is decided —
+    // reading the column through it keeps this from drifting the way it did
+    // when `ai_review` was added and only `fixci` was matched here.
+    let kind = TabKind::from_db_str(&kind);
+    let review_pr = kind
+        .is_review()
+        .then(|| pr_repo.zip(pr_number))
+        .flatten()
+        .map(|(slug, number)| {
+            crate::github::split_slug(&slug)
+                .map(|(owner, name)| (owner.to_string(), name.to_string(), number))
+                .map_err(|error| error.to_string())
+        })
+        .transpose()?;
+    Ok((kind, agent, review_pr))
+}
+
 async fn session_context(
     db: &Db,
     repo: &str,
     repo_db_path: &str,
     term_key: &str,
 ) -> Result<SessionContext, String> {
-    if term_key.starts_with("triage:") {
-        return Ok(SessionContext::new(SessionSurface::Investigate, None));
+    if let Some(rest) = term_key.strip_prefix("triage:") {
+        // Both shapes run on the main checkout, so both are the Investigate
+        // surface. The investigation itself (`triage:<ticket>`) has no row — its
+        // provider rides beside the key. A ticket's own tab
+        // (`triage:<ticket>:tab:<id>`) is a persisted row like a worktree's, and
+        // the provider is the row's, not the webview's.
+        let agent = match rest.split_once(":tab:") {
+            Some((ticket, tab_id)) => {
+                let (_, agent, _) =
+                    persisted_tab(db, repo, &format!("triage:{ticket}"), tab_id).await?;
+                Some(agent)
+            }
+            None => None,
+        };
+        return Ok(SessionContext::new(SessionSurface::Investigate, agent));
     }
     if term_key.starts_with("review:") {
         return Ok(SessionContext::new(SessionSurface::AskAi, None));
@@ -959,47 +1026,7 @@ async fn session_context(
         .strip_prefix("tree:")
         .ok_or_else(|| "unknown terminal surface".to_string())?;
     if let Some((worktree_id, tab_id)) = tree.split_once(":tab:") {
-        if worktree_id.is_empty() || tab_id.is_empty() || tab_id.contains(':') {
-            return Err("invalid worktree tab terminal key".into());
-        }
-        /// `(kind, agent_kind, pr_repo, pr_number)` as `worktree_tabs` stores it —
-        /// every column but `kind` is nullable, because a plain terminal tab has
-        /// no agent and only a review tab carries a PR.
-        type TabRow = (String, Option<String>, Option<String>, Option<u32>);
-        let row: Option<TabRow> = sqlx::query_as(
-            "SELECT kind, agent_kind, pr_repo, pr_number FROM worktree_tabs
-             WHERE repo = ? AND worktree_id = ? AND id = ?",
-        )
-        .bind(repo)
-        .bind(worktree_id)
-        .bind(tab_id)
-        .fetch_optional(db)
-        .await
-        .map_err(|error| error.to_string())?;
-        let (kind, agent, pr_repo, pr_number) =
-            row.ok_or_else(|| "worktree tab does not exist".to_string())?;
-        if kind == "terminal" {
-            return Err("plain terminal tabs cannot start an agent session".into());
-        }
-        let agent = agent
-            .ok_or_else(|| "agent tab has no persisted provider".to_string())?
-            .parse::<AgentKind>()
-            .map_err(|error| error.to_string())?;
-        // The two review kinds are the ones that launch with the review deny list
-        // and santree's review tools, and `TabKind` is where that is decided —
-        // reading the column through it keeps this from drifting the way it did
-        // when `ai_review` was added and only `fixci` was matched here.
-        let kind = TabKind::from_db_str(&kind);
-        let review_pr = kind
-            .is_review()
-            .then(|| pr_repo.zip(pr_number))
-            .flatten()
-            .map(|(slug, number)| {
-                crate::github::split_slug(&slug)
-                    .map(|(owner, name)| (owner.to_string(), name.to_string(), number))
-                    .map_err(|error| error.to_string())
-            })
-            .transpose()?;
+        let (kind, agent, review_pr) = persisted_tab(db, repo, worktree_id, tab_id).await?;
         return Ok(SessionContext {
             surface: match kind {
                 TabKind::FixCi => SessionSurface::FixCi,
@@ -2898,6 +2925,50 @@ mod tests {
         assert_eq!(context.agent, Some(AgentKind::Codex));
         assert!(
             session_context(&db, "repo-b", "/repo/b", "tree:AK-1:tab:shared")
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A triage ticket's own tab is a persisted row on the ticket's surface, and
+    /// launches as the investigation does — on the main checkout, so the
+    /// Investigate surface — with the provider the row was opened with. The
+    /// investigation itself has no row, and its provider rides beside the key.
+    #[tokio::test]
+    async fn a_triage_tab_is_an_investigate_surface_with_its_rows_provider() {
+        let (base, db) = test_db("session-context-triage").await;
+        sqlx::query(
+            "INSERT INTO worktree_tabs
+             (id, repo, worktree_id, kind, agent_kind, title, position)
+             VALUES ('side', 'repo-a', 'triage:AK-1', 'agent', 'Claude', 'Claude Code', 0),
+                    ('sh', 'repo-a', 'triage:AK-1', 'terminal', NULL, 'Terminal', 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let tab = session_context(&db, "repo-a", "/repo/a", "triage:AK-1:tab:side")
+            .await
+            .unwrap();
+        assert_eq!(tab.surface, SessionSurface::Investigate);
+        assert_eq!(tab.agent, Some(AgentKind::Claude));
+        assert_eq!(tab.review_pr, None);
+
+        let investigation = session_context(&db, "repo-a", "/repo/a", "triage:AK-1")
+            .await
+            .unwrap();
+        assert_eq!(investigation.surface, SessionSurface::Investigate);
+        assert_eq!(investigation.agent, None);
+
+        // A shell row starts no agent, and a tab with no row is nobody's.
+        assert!(
+            session_context(&db, "repo-a", "/repo/a", "triage:AK-1:tab:sh")
+                .await
+                .is_err()
+        );
+        assert!(
+            session_context(&db, "repo-a", "/repo/a", "triage:AK-1:tab:nope")
                 .await
                 .is_err()
         );

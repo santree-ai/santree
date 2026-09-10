@@ -42,6 +42,9 @@ const backend = vi.hoisted(() => ({
   /** Every `useAgentSession(…)` call, so a test can assert whether the hook is
    *  still asking the backend to resolve a (re)launch. */
   sessionCalls: [] as { allowFresh: boolean; enabled: boolean }[],
+  /** Every provider-setting read, as `<key>@<agent key>` — which surface's
+   *  settings a launch resolved. */
+  settingReads: [] as string[],
 }));
 
 vi.mock("../../lib/queries", () => ({
@@ -51,6 +54,10 @@ vi.mock("../../lib/queries", () => ({
   WORK_EFFORT_KEY: "work_effort",
   WORK_MODEL_KEY: "work_model",
   WORK_PERMISSION_MODE_KEY: "work_permission_mode",
+  INVESTIGATE_AGENT_KEY: "investigate_agent",
+  INVESTIGATE_EFFORT_KEY: "investigate_effort",
+  INVESTIGATE_MODEL_KEY: "investigate_model",
+  INVESTIGATE_PERMISSION_MODE_KEY: "investigate_permission_mode",
   queryKeys: {
     // Mirrors the real builder's arity (lib/queries.ts `agentSessionPrefix`).
     // Dropping the agent argument here made both assertions below check a
@@ -75,15 +82,18 @@ vi.mock("../../lib/queries", () => ({
       isFetching: enabled && backend.sessionFetching,
     };
   },
-  useResolvedProviderSetting: (_repo: string, key: string) => ({
-    data:
-      key === "work_model"
-        ? backend.model
-        : key === "work_effort"
-          ? backend.effort
-          : backend.permissionMode,
-    isFetched: backend.flagsFetched,
-  }),
+  useResolvedProviderSetting: (_repo: string, key: string, _agent: string, agentKey: string) => {
+    backend.settingReads.push(`${key}@${agentKey}`);
+    return {
+      data:
+        key === "work_model" || key === "investigate_model"
+          ? backend.model
+          : key === "work_effort" || key === "investigate_effort"
+            ? backend.effort
+            : backend.permissionMode,
+      isFetched: backend.flagsFetched,
+    };
+  },
   useBoolSetting: () => ({ value: backend.chrome, isFetched: backend.flagsFetched }),
   useSetting: () => ({
     data: backend.remoteControl ? null : "false",
@@ -167,6 +177,7 @@ beforeEach(() => {
   backend.chrome = true;
   backend.remoteControl = true;
   backend.sessionCalls = [];
+  backend.settingReads = [];
 });
 
 describe("useAgentTab", () => {
@@ -331,6 +342,49 @@ describe("useAgentTab", () => {
       t.spawn();
 
       expect(t.tab().preparing).toBe(false);
+    });
+  });
+
+  /** A triage ticket's tab is found on the `triage` surface (a worktree pane on
+   *  the same key is not it) and launches with the Investigate settings, which
+   *  is what the backend resolves for the same key prefix. */
+  describe("the triage surface", () => {
+    it("finds its pane by the triage source and resolves the Investigate settings", () => {
+      const t = mount(opts({ surface: "triage", refId: "triage:AK-1:tab:t1", cwd: "/repo" }));
+      expect(backend.settingReads).toEqual([
+        "investigate_model@investigate_agent",
+        "investigate_effort@investigate_agent",
+        "investigate_permission_mode@investigate_agent",
+      ]);
+
+      // A pane on the worktree surface under the same key is another pane.
+      act(() => {
+        t.result.current.terminals.open({
+          title: "wt",
+          source: "issue",
+          refId: "triage:AK-1:tab:t1",
+          agent: { kind: "Claude", repo: "acme/app", termKey: "triage:AK-1:tab:t1" },
+        });
+      });
+      expect(t.tab().live).toBe(false);
+      act(() => {
+        t.result.current.terminals.open({
+          title: "triage",
+          source: "triage",
+          refId: "triage:AK-1:tab:t1",
+          agent: { kind: "Claude", repo: "acme/app", termKey: "triage:AK-1:tab:t1" },
+        });
+      });
+      expect(t.tab().live).toBe(true);
+    });
+
+    it("reads the Work settings by default", () => {
+      mount();
+      expect(backend.settingReads).toEqual([
+        "work_model@work_agent",
+        "work_effort@work_agent",
+        "work_permission_mode@work_agent",
+      ]);
     });
   });
 

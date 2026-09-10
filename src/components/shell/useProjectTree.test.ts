@@ -291,6 +291,20 @@ describe("groupAgentsByTicket", () => {
     expect(grouped.get("AK-1")?.map((n) => n.entry.sessionId)).toEqual(["s1"]);
   });
 
+  // The ticket's own tabs (a session opened beside the investigation) key
+  // under the ticket too: they run on its behalf, from its workspace.
+  it("files a ticket's own tab under the ticket beside its investigation", () => {
+    const grouped = groupAgentsByTicket(
+      [
+        investigation("s1", "working"),
+        investigation("s2", "working", "AK-1", { termKey: "triage:AK-1:tab:6f9a" }),
+      ],
+      noSeen,
+      NOW,
+    );
+    expect(grouped.get("AK-1")?.map((n) => n.entry.sessionId)).toEqual(["s1", "s2"]);
+  });
+
   // The row is the Linear issue, not a checkout of it: the same ticket
   // investigated from two registered repos is one ticket with two agents.
   it("keys by the ticket alone, across repos", () => {

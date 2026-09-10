@@ -1,9 +1,14 @@
-//! Persisted extra main-area tabs for Trees (the "+" menu): Claude agent tabs
-//! and plain terminal tabs, stored in `worktree_tabs` so they come back after
-//! an app restart. A Claude tab's conversation lives in the shared session
-//! registry (`terminal_sessions`) under [`term_key`], so reopening it resumes
-//! the same conversation; a terminal tab just reopens a fresh shell (a dead
-//! shell's history can't be restored).
+//! Persisted extra main-area tabs (the "+" menu): agent tabs and plain terminal
+//! tabs, stored in `worktree_tabs` so they come back after an app restart. An
+//! agent tab's conversation lives in the shared session registry
+//! (`terminal_sessions`) under [`term_key`], so reopening it resumes the same
+//! conversation; a terminal tab just reopens a fresh shell (a dead shell's
+//! history can't be restored).
+//!
+//! The `worktree_id` column names the surface a tab hangs off, which is a
+//! worktree for Trees and Reviews, and a triage ticket's own surface key
+//! (`triage:<ticket>`) for the Triage workspace — the same rows, the same
+//! persistence, on a workspace that has no worktree.
 
 use anyhow::{bail, Result};
 use santree_core::domain::{AgentKind, TabKind, TabPr, WorktreeTab};
@@ -24,11 +29,21 @@ pub struct NewTab<'a> {
     pub pr: Option<TabPr>,
 }
 
-/// The session-registry key for a Claude tab — the same key the frontend uses
-/// as the PTY `refId`, so the two sides always name one logical terminal the
-/// same way.
-pub fn term_key(worktree_id: &str, tab_id: &str) -> String {
-    format!("tree:{worktree_id}:tab:{tab_id}")
+/// The session-registry key for an agent tab — the same key the frontend uses
+/// as the PTY `refId` (`tabRefId`), so the two sides always name one logical
+/// terminal the same way.
+///
+/// `owner` is the surface the tab hangs off. A worktree's tabs key as
+/// `tree:<id>:tab:<tab>`; a triage ticket's key under the ticket's own surface,
+/// `triage:<ticket>:tab:<tab>`, so they keep the prefix every `triage:` rule is
+/// keyed on — the main-checkout cwd check, the Investigate surface, the sidebar's
+/// ticket attribution — and never read as a worktree's.
+pub fn term_key(owner: &str, tab_id: &str) -> String {
+    if owner.starts_with("triage:") {
+        format!("{owner}:tab:{tab_id}")
+    } else {
+        format!("tree:{owner}:tab:{tab_id}")
+    }
 }
 
 /// The columns every read selects, in the order [`row_to_tab`] destructures them.
@@ -501,6 +516,44 @@ mod tests {
                 .await
                 .unwrap();
         assert!(leftovers.is_empty(), "0030 left {leftovers:?} behind");
+    }
+
+    /// A triage ticket's tabs key under the ticket's own surface, not a
+    /// worktree's: the prefix is what every `triage:` rule matches on.
+    #[test]
+    fn a_triage_tab_keys_under_its_ticket_surface() {
+        assert_eq!(term_key("AK-1", "t1"), "tree:AK-1:tab:t1");
+        assert_eq!(term_key("triage:AK-1", "t1"), "triage:AK-1:tab:t1");
+    }
+
+    /// The same forget as for a worktree's tab, under the key a triage tab
+    /// actually launches with — a `tree:`-shaped key would delete nothing and
+    /// leave the conversation waiting to be resumed by the next tab.
+    #[tokio::test]
+    async fn removing_a_triage_tab_forgets_the_session_under_its_ticket_key() {
+        let db = test_db("triage-session").await;
+        add(&db, "repo", agent("triage:AK-1", "tab-t", "Claude Code"))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)",
+        )
+        .bind("repo")
+        .bind("triage:AK-1:tab:tab-t")
+        .bind("/tmp/repo")
+        .bind("sess-t")
+        .execute(&db)
+        .await
+        .unwrap();
+
+        remove(&db, "repo", "tab-t").await.unwrap();
+
+        let left: Option<(String,)> =
+            sqlx::query_as("SELECT session_id FROM terminal_sessions WHERE repo = 'repo'")
+                .fetch_optional(&db)
+                .await
+                .unwrap();
+        assert_eq!(left, None);
     }
 
     #[tokio::test]

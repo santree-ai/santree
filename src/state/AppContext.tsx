@@ -140,7 +140,7 @@ interface AppUi {
    *  a pull request rides in Reviews' url. Set by `useOpenAgent` (and ⌘I) before
    *  navigating, consumed by the workspace for that ticket. */
   triageFocus: TriageFocus | null;
-  requestTriageFocus: (ticket: string, agent?: AgentKind) => void;
+  requestTriageFocus: (ticket: string, target?: TriageFocusTarget) => void;
   consumeTriageFocus: () => void;
 
   /** A "Fix CI with AI" launch handed off from Reviews to Trees: open a new
@@ -227,10 +227,18 @@ export interface TreeFocus {
 }
 
 /** Where the Triage workspace should land for one ticket: the provider's
- *  investigation tab, or the Linear tab when `agent` is null. */
+ *  investigation tab, one of the ticket's own tabs (a `worktree_tabs` row), or
+ *  the Linear tab when neither is named. */
 export interface TriageFocus {
   ticket: string;
   agent: AgentKind | null;
+  tab: string | null;
+}
+
+/** What a focus request names beyond the ticket — at most one of the two. */
+export interface TriageFocusTarget {
+  agent?: AgentKind;
+  tab?: string;
 }
 
 /**
@@ -482,7 +490,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const consumeReviewFocus = useCallback(() => setReviewFocus(null), []);
   const consumeTriageFocus = useCallback(() => setTriageFocus(null), []);
   const requestTriageFocus = useCallback(
-    (ticket: string, agent?: AgentKind) => setTriageFocus({ ticket, agent: agent ?? null }),
+    (ticket: string, target: TriageFocusTarget = {}) =>
+      setTriageFocus({ ticket, agent: target.agent ?? null, tab: target.tab ?? null }),
     [],
   );
   const consumeFixCiLaunch = useCallback(() => setFixCiLaunch(null), []);

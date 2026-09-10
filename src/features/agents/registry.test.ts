@@ -95,6 +95,12 @@ describe("parseTermKey", () => {
       tabId: null,
       pr: null,
     });
+    expect(parseTermKey("triage:AK-9:tab:6f9a")).toEqual({
+      kind: "triage-tab",
+      ticket: "AK-9",
+      tabId: "6f9a",
+      pr: null,
+    });
     expect(parseTermKey("review:acme/web#4821")).toEqual({
       kind: "review",
       ticket: null,

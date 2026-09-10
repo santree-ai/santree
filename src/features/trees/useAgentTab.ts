@@ -17,6 +17,10 @@ import type { AgentKind, AgentSession } from "../../bindings";
 import {
   CLAUDE_REMOTE_CONTROL_KEY,
   CLAUDE_START_WITH_CHROME_KEY,
+  INVESTIGATE_AGENT_KEY,
+  INVESTIGATE_EFFORT_KEY,
+  INVESTIGATE_MODEL_KEY,
+  INVESTIGATE_PERMISSION_MODE_KEY,
   queryKeys,
   useAgentSession,
   useBoolSetting,
@@ -29,7 +33,47 @@ import {
 } from "../../lib/queries";
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed } from "../terminal/agentSeed";
-import type { AgentTabIdentity } from "../terminal/orchestrator";
+import type { AgentTabIdentity, TerminalSource } from "../terminal/orchestrator";
+
+/** Which surface a tab runs on, which decides the pane it is found by and the
+ *  settings its launch resolves — the frontend half of the backend's
+ *  `SessionSurface`, keyed the same way (by the `term_key` prefix). */
+export type AgentTabSurface = "work" | "triage";
+
+/** The surface's source and setting keys. Resolved at call time, not at
+ *  module load: a host that never runs the hook (a test mocking the query
+ *  module without these keys) must not pay for it on import. */
+function surfaceOf(surface: AgentTabSurface): {
+  source: TerminalSource;
+  agentKey: string;
+  modelKey: string;
+  effortKey: string;
+  permissionModeKey: string;
+} {
+  switch (surface) {
+    case "work":
+      return {
+        source: "issue",
+        agentKey: WORK_AGENT_KEY,
+        modelKey: WORK_MODEL_KEY,
+        effortKey: WORK_EFFORT_KEY,
+        permissionModeKey: WORK_PERMISSION_MODE_KEY,
+      };
+    // A triage ticket's tab runs on the project's main checkout, like its
+    // investigation, so it launches the way the investigation does: the
+    // Investigate settings, and — backend-side, off the same prefix — Codex's
+    // read-only sandbox.
+    case "triage":
+      return {
+        source: "triage",
+        agentKey: INVESTIGATE_AGENT_KEY,
+        modelKey: INVESTIGATE_MODEL_KEY,
+        effortKey: INVESTIGATE_EFFORT_KEY,
+        permissionModeKey: INVESTIGATE_PERMISSION_MODE_KEY,
+      };
+  }
+}
+
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useHookInjection } from "../terminal/useHookInjection";
 
@@ -37,8 +81,10 @@ export interface AgentTabOptions {
   repo: string;
   /** The terminal registry key — this session's identity (`tree:<id>[:tab:<id>]`). */
   refId: string;
-  /** Working directory: the worktree path. */
+  /** Working directory: the worktree path, or a triage tab's main checkout. */
   cwd: string;
+  /** The surface the tab runs on (default `work`) — see {@link AgentTabSurface}. */
+  surface?: AgentTabSurface;
   /** Which agent binary to run. `null` (the base worktree) means a plain shell. */
   agent: AgentKind | null;
   /** Whether opening this tab may mint a *fresh* session, or only resume one. An
@@ -86,6 +132,7 @@ export interface AgentTab {
 
 export function useAgentTab(opts: AgentTabOptions): AgentTab {
   const { repo, refId, cwd, agent, allowFresh, hold, noGit } = opts;
+  const surface = surfaceOf(opts.surface ?? "work");
   const qc = useQueryClient();
 
   // Whether a live PTY already exists for this session. We only resolve a (re)launch
@@ -96,7 +143,7 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   // whatever provider it runs: a worktree terminal is one pane per surface, and
   // the point of holding the tab (rather than a boolean) is that its provider is
   // the one actually running — see `resolvedAgent` below.
-  const liveTab = tabs.find((t) => t.source === "issue" && t.refId === refId);
+  const liveTab = tabs.find((t) => t.source === surface.source && t.refId === refId);
   const live = liveTab !== undefined;
   const [liveSeen, setLiveSeen] = useState(false);
   useEffect(() => {
@@ -116,13 +163,23 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   // worktree, silently, while the first one kept working.
   const resolvedAgent = liveTab?.agent?.kind ?? sessionAgent(session.data, requestedAgent);
   const provider = agentProvider(resolvedAgent);
-  const model = useResolvedProviderSetting(repo, WORK_MODEL_KEY, requestedAgent, WORK_AGENT_KEY);
-  const effort = useResolvedProviderSetting(repo, WORK_EFFORT_KEY, requestedAgent, WORK_AGENT_KEY);
+  const model = useResolvedProviderSetting(
+    repo,
+    surface.modelKey,
+    requestedAgent,
+    surface.agentKey,
+  );
+  const effort = useResolvedProviderSetting(
+    repo,
+    surface.effortKey,
+    requestedAgent,
+    surface.agentKey,
+  );
   const permissionMode = useResolvedProviderSetting(
     repo,
-    WORK_PERMISSION_MODE_KEY,
+    surface.permissionModeKey,
     requestedAgent,
-    WORK_AGENT_KEY,
+    surface.agentKey,
   );
   // Whatever this provider's hooks ride in on — a `--settings` file, `-c` config
   // overrides — lands in `hookFlag`, because to the launch builder they are the

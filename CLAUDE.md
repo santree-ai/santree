@@ -159,7 +159,15 @@ src/
   features/triage/ the ticket workspace at `/triage?ticket=` — a third tab-strip
                    host (`TriageTabBar`): a non-closable **Linear** tab
                    (`components/IssuePage`), one closable tab per investigation
-                   agent, and a shell. Beside it a `TriageSidePanel` rail of
+                   agent (started from the ticket page's "Investigate with"
+                   and its provider chooser, never from the "+"), and the
+                   ticket's own tabs — sessions and shells, as many as you
+                   like: `worktree_tabs` rows whose owner is the ticket's
+                   surface key `triage:<ticket>`, keyed
+                   `triage:<ticket>:tab:<id>` (`tabs::term_key` / `tabRefId`
+                   branch on the prefix), launched on the Investigate surface
+                   (`TriageTabPane`, `useAgentTab({ surface: "triage" })`)
+                   because they run on the main checkout. Beside it a `TriageSidePanel` rail of
                    Files · Session history, both reading the attached project's
                    MAIN checkout and naming it (with its Change control) on
                    their header line; with nothing attached each pane is the
@@ -330,12 +338,17 @@ src/
   and overflow, rename-in-place, the close ×, the "+" and its ⌘T, the drag region —
   and each host supplies its tabs, its menu rows and its trailing controls
   (`trees/MainTabBar`, `reviews/ReviewTabBar`, `triage/TriageTabBar`). A tab is a
-  `worktree_tabs` row, or one of two other things: the tab that *is* the view
-  (Reviews' "Pull Request", Triage's "Linear" — always there, never closes), or a
+  `worktree_tabs` row, or one of three other things: the tab that *is* the view
+  (Reviews' "Pull Request", Triage's "Linear" — always there, never closes), a
   transient view that appears with what it shows (a picked file, setup logs, a
   check log, the PR page, the ticket page — ephemeral `MainTab` literals, never
-  rows, closable). Closing a row tears its PTY down and a dead process closes its
-  row — both from `trees/useTabSessions`, once, for every strip.
+  rows, closable), or a session that hangs off the view's own surface rather
+  than a row (an AI review on `ai-review:<pr>`, a triage investigation on
+  `triage:<ticket>` — one per provider). A row's owner (`worktree_id`) is a
+  worktree id, or a triage ticket's `triage:<ticket>` — Triage has no
+  worktree, and its "+" opens the same rows anyway. Closing a row tears its
+  PTY down and a dead process closes its row — both from
+  `trees/useTabSessions`, once, for every strip.
 - **One place renders a diff.** `features/trees/DiffPane` picks the source with
   `prDiffModeFor`: GitHub's own patch when the file is in the PR (its line numbers
   are what the comments anchor to), the local branch-vs-base diff otherwise, and

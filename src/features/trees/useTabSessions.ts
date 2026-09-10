@@ -10,12 +10,19 @@ import { useEffect, useRef } from "react";
 import type { WorktreeTab } from "../../bindings";
 import { useTerminals } from "../terminal/TerminalsContext";
 
-/** The terminal-registry name a worktree tab's session is keyed by. */
-export function tabRefId(worktreeId: string, tabId: string): string {
-  return `tree:${worktreeId}:tab:${tabId}`;
+/** The terminal-registry name a tab's session is keyed by — the frontend half of
+ *  `tabs::term_key`, and the two must agree or a tab and its process never meet.
+ *
+ *  `owner` is the surface the row hangs off: a worktree id keys as
+ *  `tree:<id>:tab:<tab>`; a triage ticket's own surface (`triage:<ticket>`) keeps
+ *  its prefix, `triage:<ticket>:tab:<tab>`, because every `triage:` rule — the
+ *  main-checkout cwd check, the sidebar's ticket attribution — is keyed on it. */
+export function tabRefId(owner: string, tabId: string): string {
+  return owner.startsWith("triage:") ? `${owner}:tab:${tabId}` : `tree:${owner}:tab:${tabId}`;
 }
 
 export function useTabSessions(
+  /** The rows' surface — see {@link tabRefId}. */
   worktreeId: string,
   tabs: WorktreeTab[],
   closeTab: (id: string) => void,

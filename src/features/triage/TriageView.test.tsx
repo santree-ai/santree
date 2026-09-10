@@ -14,13 +14,14 @@ const state = vi.hoisted(() => ({
   search: undefined as string | undefined,
   queue: [] as TriageTicket[],
   loading: false,
-  focus: null as { ticket: string; agent?: AgentKind } | null,
+  focus: null as { ticket: string; agent?: AgentKind; tab?: string } | null,
   consumeTriageFocus: vi.fn(),
   requestTriageFocus: vi.fn(),
   repo: "acme/app" as string | null,
   repoLoading: false,
   setRepo: vi.fn(),
   openAgent: vi.fn(),
+  select: vi.fn(),
   active: "linear" as string,
 }));
 
@@ -38,6 +39,9 @@ vi.mock("../../state/AppContext", () => ({
 }));
 vi.mock("../../lib/queries", () => ({
   INVESTIGATE_AGENT_KEY: "investigate.agent",
+  useAgentAuth: () => ({ data: { connected: true } }),
+  useCodexAccount: () => ({ data: { connected: true } }),
+  useCodexHealth: () => ({ data: { available: true } }),
   useTriageOrgRepo: () => "acme/app",
   useTriageQueue: () => ({
     active: state.queue,
@@ -71,6 +75,7 @@ vi.mock("./InvestigatePane", () => ({
   ),
 }));
 vi.mock("./TriageTerminal", () => ({ TriageTerminal: () => <div data-testid="shell" /> }));
+vi.mock("./TriageTabPane", () => ({ TriageTabPane: () => <div data-testid="tab-pane" /> }));
 vi.mock("./TriageSidePanel", () => ({
   DEFAULT_W: 400,
   TriageSidePanel: () => <aside data-testid="rail" />,
@@ -78,16 +83,19 @@ vi.mock("./TriageSidePanel", () => ({
 vi.mock("./TriageTabBar", () => ({ TriageTabBar: () => <div data-testid="tab-bar" /> }));
 vi.mock("./useTriageTabs", () => ({
   agentTabKind: (tab: string) => (tab.startsWith("agent:") ? tab.slice("agent:".length) : null),
+  rowTab: (id: string) => `tab:${id}`,
+  rowTabId: (tab: string) => (tab.startsWith("tab:") ? tab.slice("tab:".length) : null),
   useTriageTabs: () => ({
     active: state.active,
-    select: vi.fn(),
+    select: state.select,
     providers: [],
     hasStored: () => false,
     openAgent: state.openAgent,
     closeAgent: vi.fn(),
-    hasShell: false,
-    openShell: vi.fn(),
-    closeShell: vi.fn(),
+    rows: [],
+    addTab: vi.fn(),
+    closeTab: vi.fn(),
+    renameTab: vi.fn(),
   }),
 }));
 
@@ -108,6 +116,7 @@ describe("TriageView", () => {
     state.requestTriageFocus.mockClear();
     state.setRepo.mockClear();
     state.openAgent.mockClear();
+    state.select.mockClear();
   });
 
   it("opens the ticket the route names", () => {
@@ -149,6 +158,18 @@ describe("TriageView", () => {
     rerender(<TriageView />);
 
     await waitFor(() => expect(state.openAgent).toHaveBeenCalledWith("Codex"));
+    expect(state.consumeTriageFocus).toHaveBeenCalledTimes(1);
+  });
+
+  /** A sidebar row for one of the ticket's own tabs names the row, not a
+   *  provider: it is selected, never launched — the row is stored, and the
+   *  strip resolves to it once the rows land. */
+  it("lands a focus that names a row on that row", async () => {
+    state.search = "AK-1";
+    state.focus = { ticket: "AK-1", tab: "6f9a" };
+    render(<TriageView />);
+    await waitFor(() => expect(state.select).toHaveBeenCalledWith("tab:6f9a"));
+    expect(state.openAgent).not.toHaveBeenCalled();
     expect(state.consumeTriageFocus).toHaveBeenCalledTimes(1);
   });
 

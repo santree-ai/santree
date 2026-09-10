@@ -56,14 +56,21 @@ export function useOpenAgent(): (entry: AgentTarget) => void {
           }
           return;
         case "triage":
+        case "triage-tab":
           if (!entry.origin.ticket) {
             navigate({ to: "/triage" });
             return;
           }
-          // The focus names only the tab. The ticket rides in the route so the
-          // sidebar's Triage row lights on arrival rather than a frame later —
-          // the same reason the review case below puts the PR in the url.
-          requestTriageFocus(entry.origin.ticket, entry.agentKind ?? undefined);
+          // The focus names only the tab — the provider's investigation, or the
+          // ticket's own tab the session lives in. The ticket rides in the route
+          // so the sidebar's Triage row lights on arrival rather than a frame
+          // later — the same reason the review case below puts the PR in the url.
+          requestTriageFocus(
+            entry.origin.ticket,
+            entry.origin.kind === "triage-tab"
+              ? { tab: entry.origin.tabId ?? undefined }
+              : { agent: entry.agentKind ?? undefined },
+          );
           navigate({ to: "/triage", search: { ticket: entry.origin.ticket } });
           return;
         case "review":

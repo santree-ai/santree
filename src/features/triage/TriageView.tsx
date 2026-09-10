@@ -26,13 +26,22 @@
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import type { AgentKind, TriageTicket } from "../../bindings";
+import type { AgentKind, TabKind, TriageTicket } from "../../bindings";
 import { DiscussionSkeleton } from "../../components/IssueDiscussion";
 import { IssuePage } from "../../components/IssuePage";
-import { AgentIcon } from "../../components/icons";
-import { Button, EmptyState, TerminalActivity } from "../../components/primitives";
+import { AgentIcon, ChevronDownIcon } from "../../components/icons";
+import {
+  Button,
+  Dropdown,
+  EmptyState,
+  MENU_ITEM,
+  TerminalActivity,
+} from "../../components/primitives";
 import {
   INVESTIGATE_AGENT_KEY,
+  useAgentAuth,
+  useCodexAccount,
+  useCodexHealth,
   useRepos,
   useResolvedSetting,
   useSetting,
@@ -44,13 +53,16 @@ import {
 import { usePersistedState } from "../../lib/usePersistedState";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { agentProvider } from "../terminal/agentProvider";
+import { tabRefId } from "../trees/useTabSessions";
 import { useTriageKeyboard } from "./hooks";
 import { InvestigatePane } from "./InvestigatePane";
+import { INTERACTIVE_AGENTS, triageTermKey } from "./providerSessions";
 import { TriageRepoGateProvider, useTriageRepoGate } from "./TriageRepoGate";
 import { DEFAULT_W, type TriageRailTab, TriageSidePanel } from "./TriageSidePanel";
 import { TriageTabBar } from "./TriageTabBar";
+import { TriageTabPane } from "./TriageTabPane";
 import { TriageTerminal } from "./TriageTerminal";
-import { agentTabKind, type TriageTabs, useTriageTabs } from "./useTriageTabs";
+import { agentTabKind, rowTab, rowTabId, type TriageTabs, useTriageTabs } from "./useTriageTabs";
 
 const RIGHT_COLLAPSED_KEY = "santree.triage.right.collapsed";
 const RIGHT_WIDTH_KEY = "santree.triage.right.width";
@@ -113,7 +125,7 @@ export function TriageView() {
   // ⌘I takes the same handoff an agent row in the sidebar does: the workspace
   // for this ticket consumes it and opens the tab.
   const investigate = useCallback(() => {
-    if (ticket) requestTriageFocus(ticket.id, agentKind);
+    if (ticket) requestTriageFocus(ticket.id, { agent: agentKind });
   }, [ticket, agentKind, requestTriageFocus]);
 
   useTriageKeyboard({
@@ -172,15 +184,15 @@ export function TriageView() {
 
 /**
  * One ticket's workspace: the tab strip, the ticket page, whichever
- * investigation or shell is in front, and the rail beside them.
+ * investigation or row is in front, and the rail beside them.
  *
  * The ticket page stays mounted behind an agent tab (markdown and inline images
- * are expensive to re-parse); an investigation pane and the shell mount only
+ * are expensive to re-parse); an investigation pane and a row's pane mount only
  * while showing — their PTYs live in the global terminal layer, and each pane
- * launches on mount, so it must be mounted exactly once per (ticket, provider)
- * while in front. Neither mounts before the attached project's path is known:
- * a pane that spawned first would spawn a cwd-less shell, and the orchestrator
- * would then hand every later mount that same pane instead of the agent.
+ * launches on mount, so it must be mounted exactly once per tab while in front.
+ * None mounts before the attached project's path is known: a pane that spawned
+ * first would spawn a cwd-less shell, and the orchestrator would then hand
+ * every later mount that same pane instead of the agent.
  */
 function TicketWorkspace({
   orgRepo,
@@ -215,8 +227,9 @@ function TicketWorkspace({
   // frontend could get wrong quietly.
   const cwd = (repo && repos.find((r) => r.name === repo)?.path) || null;
   const activeAgent = agentTabKind(tabs.active);
-  const showShell = tabs.active === "shell";
-  const { openAgent, openShell, closeShell, select } = tabs;
+  const activeRowId = rowTabId(tabs.active);
+  const activeRow = activeRowId ? tabs.rows.find((t) => t.id === activeRowId) : undefined;
+  const { openAgent, addTab, select } = tabs;
 
   /** Run something on the ticket's project, asking for one first when there is
    *  none. The one gate every launch goes through: the Investigate button, the
@@ -241,9 +254,15 @@ function TicketWorkspace({
       withRepo(`Investigating with ${agentProvider(agent).label}`, () => openAgent(agent)),
     [withRepo, openAgent],
   );
-  const openTerminal = useCallback(
-    () => withRepo("Opening a terminal", openShell),
-    [withRepo, openShell],
+  const openTab = useCallback(
+    (kind: TabKind, agent?: AgentKind) =>
+      withRepo(
+        kind === "terminal"
+          ? "Opening a terminal"
+          : `Opening a ${agentProvider(agent ?? "Codex").label} session`,
+        () => addTab(kind, agent),
+      ),
+    [withRepo, addTab],
   );
   // The rail's own way in. Not through `withRepo`: it has nothing to run, and
   // with a project already attached it is a change, not a first attachment.
@@ -252,18 +271,21 @@ function TicketWorkspace({
   }, [ask]);
   // The strip gets the gated model: its rows open tabs, and a tab is a launch.
   const gatedTabs = useMemo<TriageTabs>(
-    () => ({ ...tabs, openAgent: investigateWith, openShell: openTerminal }),
-    [tabs, investigateWith, openTerminal],
+    () => ({ ...tabs, openAgent: investigateWith, addTab: openTab }),
+    [tabs, investigateWith, openTab],
   );
 
-  // A handoff from elsewhere ("open this investigation", ⌘I): land on the tab
-  // it names once and drop the request, so a later manual pick sticks. Only
-  // this ticket's — the route already carries the ticket, so a request for
-  // another one is not ours — and only once the project is known, or the
-  // launch would land on the default when the ticket had picked otherwise.
+  // A handoff from elsewhere ("open this investigation", ⌘I, a row in the
+  // sidebar): land on the tab it names once and drop the request, so a later
+  // manual pick sticks. Only this ticket's — the route already carries the
+  // ticket, so a request for another one is not ours — and only once the
+  // project is known, or the launch would land on the default when the ticket
+  // had picked otherwise. A named row is selected, not opened: it is a stored
+  // row, and `active` resolves to it once the rows land.
   useEffect(() => {
     if (!triageFocus || triageFocus.ticket !== ticket.id || repoLoading) return;
-    if (triageFocus.agent) investigateWith(triageFocus.agent);
+    if (triageFocus.tab) select(rowTab(triageFocus.tab));
+    else if (triageFocus.agent) investigateWith(triageFocus.agent);
     else select("linear");
     consumeTriageFocus();
   }, [triageFocus, ticket.id, repoLoading, investigateWith, select, consumeTriageFocus]);
@@ -286,14 +308,12 @@ function TicketWorkspace({
           rightCollapsed={rightCollapsed}
           onToggleRight={onToggleRight}
         />
-        <div className={activeAgent || showShell ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
+        <div className={activeAgent || activeRow ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
           <IssuePage
             repo={orgRepo}
             ticketId={ticket.id}
             summary={ticket}
-            actions={
-              <InvestigateButton agentKind={agentKind} onClick={() => investigateWith(agentKind)} />
-            }
+            actions={<InvestigateActions agentKind={agentKind} onInvestigate={investigateWith} />}
           />
         </div>
         {activeAgent &&
@@ -313,9 +333,27 @@ function TicketWorkspace({
           ) : (
             <Attaching />
           ))}
-        {showShell &&
+        {activeRow &&
           (ready ? (
-            <TriageTerminal ticketId={ticket.id} cwd={cwd} onExited={closeShell} />
+            // A shell row's process ending is what closes the row — the strip's
+            // `useTabSessions` sees the session go — so the pane has nothing
+            // to do on exit.
+            activeRow.kind === "terminal" ? (
+              <TriageTerminal
+                key={activeRow.id}
+                refId={tabRefId(triageTermKey(ticket.id), activeRow.id)}
+                title={activeRow.title}
+                cwd={cwd}
+              />
+            ) : (
+              <TriageTabPane
+                key={activeRow.id}
+                repo={repo}
+                ticketId={ticket.id}
+                cwd={cwd}
+                tab={activeRow}
+              />
+            )
           ) : (
             <Attaching />
           ))}
@@ -348,13 +386,80 @@ function Attaching() {
 }
 
 /** The ticket page's one host action: open (or switch to) the default
- *  provider's investigation tab. */
-function InvestigateButton({ agentKind, onClick }: { agentKind: AgentKind; onClick: () => void }) {
+ *  provider's investigation tab. The chevron beside it offers the other
+ *  providers — an investigation is one per provider, and this is the only
+ *  place one starts, so the non-default one needs a way in here too. Each is
+ *  gated on being signed in, as the strip's "+" gates its sessions. */
+function InvestigateActions({
+  agentKind,
+  onInvestigate,
+}: {
+  agentKind: AgentKind;
+  onInvestigate: (agent: AgentKind) => void;
+}) {
   const label = agentProvider(agentKind).label;
+  const others = INTERACTIVE_AGENTS.filter((agent) => agent !== agentKind);
   return (
-    <Button variant="tinted" size="sm" onClick={onClick} title={`Investigate with ${label}`}>
-      <AgentIcon kind={agentKind} size={12} />
-      Investigate with {label}
-    </Button>
+    <div className="flex items-center gap-px">
+      <Button
+        variant="tinted"
+        size="sm"
+        onClick={() => onInvestigate(agentKind)}
+        title={`Investigate with ${label}`}
+      >
+        <AgentIcon kind={agentKind} size={12} />
+        Investigate with {label}
+      </Button>
+      <Dropdown
+        align="right"
+        trigger={(toggle) => (
+          <Button
+            variant="tinted"
+            size="sm"
+            onClick={toggle}
+            aria-label="Choose the investigating provider"
+            title="Investigate with another provider"
+            className="px-1.5"
+          >
+            <ChevronDownIcon size={10} />
+          </Button>
+        )}
+      >
+        {(close) =>
+          others.map((agent) => (
+            <ProviderRow
+              key={agent}
+              agent={agent}
+              onPick={() => {
+                onInvestigate(agent);
+                close();
+              }}
+            />
+          ))
+        }
+      </Dropdown>
+    </div>
+  );
+}
+
+function ProviderRow({ agent, onPick }: { agent: AgentKind; onPick: () => void }) {
+  const claudeReady = !!useAgentAuth("Claude").data?.connected;
+  const codexHealth = useCodexHealth().data;
+  const codexAccount = useCodexAccount(codexHealth?.available === true).data;
+  const ready =
+    agent === "Codex" ? !!codexHealth?.available && !!codexAccount?.connected : claudeReady;
+  const label = agentProvider(agent).label;
+  return (
+    <button
+      type="button"
+      disabled={!ready}
+      aria-label={`Investigate with ${label}`}
+      title={ready ? undefined : `Connect ${label} in Settings first`}
+      onClick={onPick}
+      className={MENU_ITEM}
+    >
+      <AgentIcon kind={agent} size={13} />
+      {label}
+    </button>
   );
 }

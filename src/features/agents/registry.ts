@@ -23,14 +23,21 @@ import { paneAddress } from "../terminal/paneAddress";
 export const BASE_TICKET = "__base__";
 
 /** Which surface a session belongs to, parsed from its `term_key`. */
-export type AgentOriginKind = "tree" | "tree-tab" | "triage" | "review" | "ai-review" | "unknown";
+export type AgentOriginKind =
+  | "tree"
+  | "tree-tab"
+  | "triage"
+  | "triage-tab"
+  | "review"
+  | "ai-review"
+  | "unknown";
 
 export interface AgentOrigin {
   kind: AgentOriginKind;
-  /** Ticket id for `tree`/`tree-tab`/`triage` ({@link BASE_TICKET} for the base
-   *  entry); `null` for the review kinds and `unknown`. */
+  /** Ticket id for `tree`/`tree-tab`/`triage`/`triage-tab` ({@link BASE_TICKET}
+   *  for the base entry); `null` for the review kinds and `unknown`. */
   ticket: string | null;
-  /** The persisted extra tab's id, for `tree-tab` only. */
+  /** The persisted extra tab's id, for `tree-tab` and `triage-tab` only. */
   tabId: string | null;
   /** `owner/name#number` for `review`/`ai-review` — which PR the session is on. */
   pr: string | null;
@@ -41,7 +48,8 @@ const UNKNOWN_ORIGIN: AgentOrigin = { kind: "unknown", ticket: null, tabId: null
 /**
  * Parse a `terminal_sessions.term_key` into its owning surface. The conventions
  * are minted by the launch sites — `useAgentTab` (`tree:<id>`,
- * `tree:<id>:tab:<n>`), `InvestigatePane` (`triage:<id>`), the retired read-only
+ * `tree:<id>:tab:<n>`), `InvestigatePane` (`triage:<id>`), the Triage
+ * workspace's own tabs (`triage:<id>:tab:<n>`), the retired read-only
  * review pane (`review:<owner>/<name>#<number>`), `AiReviewSessionPane`
  * (`ai-review:<owner>/<name>#<number>`) and `DevView` (`dev:<path>`) — and
  * mirrored here rather than imported, so this panel doesn't take a dependency on
@@ -50,7 +58,15 @@ const UNKNOWN_ORIGIN: AgentOrigin = { kind: "unknown", ticket: null, tabId: null
 export function parseTermKey(termKey: string | null | undefined): AgentOrigin {
   if (!termKey) return UNKNOWN_ORIGIN;
   if (termKey.startsWith("triage:")) {
-    return { ...UNKNOWN_ORIGIN, kind: "triage", ticket: termKey.slice("triage:".length) };
+    const rest = termKey.slice("triage:".length);
+    const sep = rest.indexOf(":tab:");
+    if (sep === -1) return { ...UNKNOWN_ORIGIN, kind: "triage", ticket: rest };
+    return {
+      ...UNKNOWN_ORIGIN,
+      kind: "triage-tab",
+      ticket: rest.slice(0, sep),
+      tabId: rest.slice(sep + ":tab:".length),
+    };
   }
   // Before `review:`, since one prefix isn't a prefix of the other but the two
   // read as siblings and belong together.
@@ -476,6 +492,8 @@ function sessionIdentity(
         : { project, ...projectMeta, purpose: "Worktree tab" };
     case "triage":
       return { project, ...projectMeta, purpose: "Investigation" };
+    case "triage-tab":
+      return { project, ...projectMeta, purpose: "Triage tab" };
     case "review":
       return { project: "Reviews", projectColor: null, projectIcon: null, purpose: "PR session" };
     case "ai-review":
@@ -512,6 +530,11 @@ function label(
     }
     case "triage":
       return { title: origin.ticket ?? basename(cwd), subtitle: summary ?? "investigation" };
+    case "triage-tab":
+      return {
+        title: origin.ticket ?? basename(cwd),
+        subtitle: ["extra tab", summary].filter(Boolean).join(" · "),
+      };
     case "review":
       return { title: origin.pr ?? basename(cwd), subtitle: "asking about a PR" };
     case "ai-review":

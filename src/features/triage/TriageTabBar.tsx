@@ -1,23 +1,27 @@
-/** Triage's main tab bar: the ticket, the investigations open beside it and its
- *  shell, on the same {@link TabStrip} Trees and Reviews draw.
+/** Triage's main tab bar: the ticket, the investigations open beside it and the
+ *  ticket's own tabs, on the same {@link TabStrip} Trees and Reviews draw.
  *
  *  **The first tab is the workspace itself.** "Linear" is the ticket — not a
  *  stored row, so it always exists and carries no close ×. Everything after it
  *  closes like any other tab: an investigation's ✕ ends the process and forgets
  *  the stored session (the transcript on disk is what lets Session history
- *  reopen it), and the shell's ✕ ends its process, which is all a shell has.
+ *  reopen it), and a row's ✕ ends its process and drops the row — the same
+ *  `worktree_tabs` rows, closed by the same rule (`useTabSessions`), that the
+ *  other two strips draw.
  *
- *  The "+" offers the providers that don't have a tab yet, gated on each one
- *  being signed in — an investigation is a real CLI session, and a row that
- *  opened a pane the provider would immediately refuse is worse than a disabled
- *  one that says why — and then a terminal, when the ticket has none. Every row
- *  runs on the ticket's attached project; the model this bar is handed is
- *  already gated on there being one (see `TriageView`), so nothing here asks.
+ *  The "+" opens the ticket's own tabs — a Codex or Claude Code session to ask
+ *  things in, or a terminal, as many as you like — gated on each provider being
+ *  signed in, because a row that opened a pane the provider would immediately
+ *  refuse is worse than a disabled one that says why. It never opens an
+ *  investigation: that is the ticket page's action, one per provider, and the
+ *  strip is not where the ticket is read. Every row runs on the ticket's
+ *  attached project; the model this bar is handed is already gated on there
+ *  being one (see `TriageView`), so nothing here asks.
  *
  *  The trailing cluster is not part of the tablist: the right rail's expand
  *  control, here only while the rail is hidden — the same hand-off Trees and
  *  Reviews make, so the button stays put across the toggle. */
-import type { AgentKind, TriageTicket } from "../../bindings";
+import type { AgentKind, TabKind, TriageTicket } from "../../bindings";
 import { AgentIcon, LinearLogo, TerminalIcon } from "../../components/icons";
 import { MENU_ITEM } from "../../components/primitives";
 import { PanelToggle } from "../../components/SidePanel";
@@ -27,8 +31,9 @@ import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { liveTabFor } from "../agents/registry";
 import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
-import { INTERACTIVE_AGENTS, triageTermKey } from "./providerSessions";
-import { agentTab, liveShellFor, type TriageMainTab, type TriageTabs } from "./useTriageTabs";
+import { useTabSessions } from "../trees/useTabSessions";
+import { triageTermKey } from "./providerSessions";
+import { agentTab, rowTab, type TriageMainTab, type TriageTabs } from "./useTriageTabs";
 
 export function TriageTabBar({
   ticket,
@@ -41,20 +46,17 @@ export function TriageTabBar({
   rightCollapsed: boolean;
   onToggleRight: () => void;
 }) {
-  // A tab is its process, so the ✕ ends the PTY before the tab is forgotten —
-  // the strip's half of closing, as `useTabSessions` does for a worktree's rows
-  // and `ReviewTabBar` for an AI review's.
-  const { tabs: sessions, close: endSession } = useTerminals();
   const termKey = triageTermKey(ticket.id);
+  // A tab is its process, so the ✕ ends the PTY before the tab is forgotten.
+  // The rows get that from `useTabSessions`, exactly as a worktree's do; an
+  // investigation hangs off the ticket's own surface rather than a row, which
+  // is the only reason the same hook can't do it for those too.
+  const { closeWithSession } = useTabSessions(termKey, tabs.rows, tabs.closeTab);
+  const { tabs: sessions, close: endSession } = useTerminals();
   const closeAgent = (agent: AgentKind) => {
     const live = liveTabFor(termKey, agent, sessions);
     if (live) endSession(live.key);
     tabs.closeAgent(agent);
-  };
-  const closeShell = () => {
-    const live = liveShellFor(termKey, sessions);
-    if (live) endSession(live.key);
-    tabs.closeShell();
   };
 
   const items: StripTab<TriageMainTab>[] = [
@@ -65,20 +67,19 @@ export function TriageTabBar({
       icon: <AgentIcon kind={agent} size={11} className="text-muted-3" />,
       onClose: () => closeAgent(agent),
     })),
-    ...(tabs.hasShell
-      ? [
-          {
-            tab: "shell" as const,
-            label: "Terminal",
-            icon: <TerminalIcon size={11} className="text-muted-3" />,
-            onClose: closeShell,
-          },
-        ]
-      : []),
+    ...tabs.rows.map((t) => ({
+      tab: rowTab(t.id),
+      label: t.title,
+      icon:
+        t.kind === "terminal" ? (
+          <TerminalIcon size={11} className="text-muted-3" />
+        ) : (
+          <AgentIcon kind={t.agentKind ?? "Claude"} size={11} className="text-muted-3" />
+        ),
+      onClose: () => closeWithSession(t),
+      onRename: (title: string) => tabs.renameTab(t.id, title),
+    })),
   ];
-  const addable = INTERACTIVE_AGENTS.filter((agent) => !tabs.providers.includes(agent));
-  // Every provider has a tab and so does the shell: nothing to offer, so no "+".
-  const canAdd = addable.length > 0 || !tabs.hasShell;
 
   return (
     <TabStrip
@@ -86,23 +87,23 @@ export function TriageTabBar({
       active={tabs.active}
       onSelect={tabs.select}
       ariaLabel="Ticket tabs"
-      newTabMenu={
-        canAdd ? (close) => <NewTabMenu tabs={tabs} addable={addable} close={close} /> : undefined
-      }
+      newTabMenu={(close) => <NewTabMenu onAdd={tabs.addTab} close={close} />}
+      newTabMenuClassName="w-40 overflow-hidden"
       trailing={rightCollapsed ? <PanelToggle collapsed onToggle={onToggleRight} /> : null}
     />
   );
 }
 
-/** New-tab menu rows. Mounted only while the menu is open, so its digit-key
- *  listener is live exactly when the menu is visible. */
+/** New-tab menu rows: a new Codex or Claude Code session, or a terminal — the
+ *  same three Trees offers, in the same order, so the digits mean the same
+ *  thing on every strip (1 → Codex, 2 → Claude Code, 3 → Terminal). Mounted only
+ *  while the menu is open, so its digit-key listener is live exactly when the
+ *  menu is visible. */
 function NewTabMenu({
-  tabs,
-  addable,
+  onAdd,
   close,
 }: {
-  tabs: TriageTabs;
-  addable: AgentKind[];
+  onAdd: (kind: TabKind, agentKind?: AgentKind) => void;
   close: () => void;
 }) {
   const claudeReady = !!useAgentAuth("Claude").data?.connected;
@@ -111,40 +112,32 @@ function NewTabMenu({
   const codexReady = !!codexHealth?.available && !!codexAccount?.connected;
   const ready = (agent: AgentKind) => (agent === "Codex" ? codexReady : claudeReady);
 
-  const investigate = (agent: AgentKind) => {
-    if (!ready(agent)) return;
-    tabs.openAgent(agent);
-    close();
-  };
-  const openTerminal = () => {
-    tabs.openShell();
+  const add = (kind: TabKind, agentKind?: AgentKind) => {
+    if (agentKind && !ready(agentKind)) return;
+    if (agentKind) onAdd(kind, agentKind);
+    else onAdd(kind);
     close();
   };
 
-  // Digits follow the rows: the providers first, then the terminal.
   useDigitShortcuts([
-    ...addable.map((agent) => (ready(agent) ? () => investigate(agent) : null)),
-    ...(tabs.hasShell ? [] : [openTerminal]),
+    () => add("agent", "Codex"),
+    () => add("agent", "Claude"),
+    () => add("terminal"),
   ]);
 
   return (
     <>
-      {addable.length > 0 && (
-        <div className="px-3 pt-2 pb-1 font-mono text-[9px] tracking-[.06em] text-muted-4 uppercase">
-          Investigate with
-        </div>
-      )}
-      {addable.map((agent, i) => (
+      {(["Codex", "Claude"] as const).map((agent, i) => (
         <button
           key={agent}
           type="button"
           disabled={!ready(agent)}
-          // The heading above is not read out, so the name carries the verb.
-          aria-label={`Investigate with ${agentProvider(agent).label}`}
+          // The row is a session of that provider, and the name says so.
+          aria-label={`Open a ${agentProvider(agent).label} session`}
           title={
             ready(agent) ? undefined : `Connect ${agentProvider(agent).label} in Settings first`
           }
-          onClick={() => investigate(agent)}
+          onClick={() => add("agent", agent)}
           className={MENU_ITEM}
         >
           <AgentIcon kind={agent} size={13} />
@@ -152,22 +145,17 @@ function NewTabMenu({
           <span className="ml-auto text-[10px] text-muted-4">{i + 1}</span>
         </button>
       ))}
-      {!tabs.hasShell && (
-        <>
-          {addable.length > 0 && <div className="my-1 border-t border-line" />}
-          <button
-            type="button"
-            aria-label="Open a terminal"
-            title="A login shell on the project's main checkout"
-            onClick={openTerminal}
-            className={MENU_ITEM}
-          >
-            <TerminalIcon size={13} />
-            Terminal
-            <span className="ml-auto text-[10px] text-muted-4">{addable.length + 1}</span>
-          </button>
-        </>
-      )}
+      <button
+        type="button"
+        aria-label="Open a terminal"
+        title="A login shell on the project's main checkout"
+        onClick={() => add("terminal")}
+        className={MENU_ITEM}
+      >
+        <TerminalIcon size={13} />
+        Terminal
+        <span className="ml-auto text-[10px] text-muted-4">3</span>
+      </button>
     </>
   );
 }

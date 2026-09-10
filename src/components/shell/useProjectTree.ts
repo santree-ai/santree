@@ -352,7 +352,8 @@ export function groupAgentsByPr(
 }
 
 /**
- * The same fold again, for triage investigations, keyed by the ticket alone.
+ * The same fold again, for a triage ticket's agents — its investigations and
+ * the tabs opened beside them — keyed by the ticket alone.
  *
  * Not repo-qualified the way {@link worktreeKey} is: the row these hang under is
  * the Linear issue itself, not a checkout of it, and an investigation of AK-1
@@ -368,7 +369,7 @@ export function groupAgentsByTicket(
   const byTicket = new Map<string, AgentNode[]>();
   for (const entry of entries) {
     const { kind, ticket } = entry.origin;
-    if (kind !== "triage" || !ticket) continue;
+    if ((kind !== "triage" && kind !== "triage-tab") || !ticket) continue;
     const node: AgentNode = {
       entry,
       unseen: isUnseen(entry, seen),
