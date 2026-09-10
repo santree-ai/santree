@@ -7,6 +7,12 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.12 — 2026-09-10
+
+- The "+" on a triage ticket opens a Codex session, a Claude Code session or a terminal, as many as you like. They come back after a restart, and an agent tab resumes its conversation.
+- Investigations start from the ticket page. The Investigate button has a chevron beside it to pick the other provider.
+- A session opened from a triage ticket shows under that ticket in the sidebar, and clicking it lands on its tab.
+
 ## 0.1.11 — 2026-09-09
 
 - The Triage teams setting no longer lists every team in your workspace. Always show and Never show are two short rows of the teams you chose, and an Add team button opens a searchable picker to add more.
