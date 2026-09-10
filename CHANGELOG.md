@@ -7,6 +7,12 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.13 — 2026-09-10
+
+- Starting a ticket always runs its agent, whatever you are looking at. The agent starts as soon as the worktree exists, even while you are on another project, and the worktree lands on the agent's tab when you open it.
+- Creating a worktree for a ticket from a project's + in the sidebar now starts the task too. It used to create the worktree and stop.
+- A task started while its new worktree was on screen with nothing open no longer waits for you to open a tab.
+
 ## 0.1.12 — 2026-09-10
 
 - The "+" on a triage ticket opens a Codex session, a Claude Code session or a terminal, as many as you like. They come back after a restart, and an agent tab resumes its conversation.
