@@ -257,6 +257,15 @@ export function EstimateTag({
   );
 }
 
+/** A pull request that isn't ready for review yet, as a chip beside its title.
+ *  Quiet and lowercase like the list register's other state chips: most rows never
+ *  carry one, and the one that does only needs to be noticed. */
+export function DraftTag() {
+  return (
+    <span className="flex-none rounded bg-input px-1 py-px text-[9px] text-muted-4">draft</span>
+  );
+}
+
 /** The points a group adds up to — Linear's mark and the sum, the way its own
  *  group headers carry it. Nothing when nothing under it is estimated. */
 export function PointsSum({ points }: { points: number }) {

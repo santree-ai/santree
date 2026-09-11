@@ -62,6 +62,7 @@ import {
   CARD_GLYPH,
   CARD_INSET,
   CARD_LABEL_X,
+  DraftTag,
   groupByMilestone,
   groupByProject,
   INDENT_PX,
@@ -643,9 +644,11 @@ function StackedRows({
  * names a ticket and **no GitHub mark at all** — the row itself opens the pull
  * request, so a mark for it would be a second button to the place you already are.
  *
- * Nothing here is a status: how a PR is doing (checks, draft, decision) is what
+ * Nearly nothing here is a status: how a PR is doing (checks, decision) is what
  * the Reviews view is for, and a rail that tried to say it would spend its width
- * on five glyphs and leave the title truncated to a verb.
+ * on five glyphs and leave the title truncated to a verb. The exception is a
+ * draft. It is rare in an inbox, and it changes what the row asks of you (the
+ * author hasn't asked for a review yet), so it earns a {@link DraftTag}.
  *
  * **Line two is the AI review sessions**, exactly as a worktree card carries the
  * agents running in it — one row each, or a fold once there are several. A review
@@ -687,6 +690,7 @@ function ReviewPrRow({
   const title = [
     pr.title,
     `${pr.repo}#${pr.number}`,
+    pr.isDraft ? "Draft" : null,
     depth > 0 ? `Stacked on ${pr.baseRef}` : null,
     ticket ? `Linear · ${ticket}` : null,
   ]
@@ -710,7 +714,7 @@ function ReviewPrRow({
             <button
               type="button"
               onClick={onOpen}
-              aria-label={`Open ${pr.title}`}
+              aria-label={`Open ${pr.title}${pr.isDraft ? " (draft)" : ""}`}
               title={title}
               className="absolute inset-0 cursor-pointer"
             />
@@ -725,6 +729,13 @@ function ReviewPrRow({
             <MarkdownTitle className="min-w-0 flex-1 truncate text-[13px] leading-5 font-medium text-fg-2">
               {pr.title}
             </MarkdownTitle>
+            {/* Decorative, like the Linear mark beside it: the row's name and
+              tooltip already say it's a draft. */}
+            {pr.isDraft && (
+              <span aria-hidden className="flex flex-none items-center">
+                <DraftTag />
+              </span>
+            )}
             {/* Decorative: it says "this one has a ticket", and which ticket is in
               the row's own tooltip — under the stretched action a tooltip of its
               own would never open. */}

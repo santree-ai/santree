@@ -29,6 +29,7 @@ import {
 } from "../../components/icons";
 import { Markdown, MarkdownAttachments, MarkdownTitle } from "../../components/Markdown";
 import { Dropdown, MENU_ITEM, Pill, Skeleton } from "../../components/primitives";
+import { DraftTag } from "../../components/WorkSignals";
 import { queryKeys, usePrDetail, usePrSummary } from "../../lib/queries";
 import { splitRepoSlug } from "../../lib/repo";
 import { toast } from "../../state/toast";
@@ -107,9 +108,7 @@ function PrHeader({ pr, onExpand }: { pr: ReviewPr; onExpand?: () => void }) {
       <Pill color={state.color} className="px-1.5 py-px text-[9px] font-semibold uppercase">
         {state.label}
       </Pill>
-      {pr.isDraft && (
-        <span className="rounded bg-input px-1 py-px text-[9px] text-muted-4">draft</span>
-      )}
+      {pr.isDraft && <DraftTag />}
       <span className="min-w-1 flex-1" />
       {onExpand && (
         <button

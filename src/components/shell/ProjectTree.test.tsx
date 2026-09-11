@@ -489,6 +489,28 @@ describe("ProjectSection reviews section", () => {
     expect(onOpenPrInInbox).toHaveBeenCalled();
     expect(onSelectWorktree).not.toHaveBeenCalled();
   });
+
+  /** A draft is rare in an inbox and changes what the row asks of you, so it is the
+   *  one state a row carries: a tag the eye catches, and the word in the row's name
+   *  for anyone who can't see the tag. A ready PR carries neither. */
+  it("tags a draft pull request, and names it one", () => {
+    const direct = group("direct", "Assigned to me", 2);
+    const [ready, draft] = direct.prs;
+    renderSection(
+      {},
+      {
+        reviewsOpen: true,
+        reviews: reviewsFor({ direct: 2, total: 2 }, [
+          { ...direct, prs: [ready, { ...draft, isDraft: true }] },
+        ]),
+      },
+    );
+
+    const draftRow = screen.getByRole("button", { name: "Open Assigned to me 2 (draft)" });
+    expect(band(draftRow)).toHaveTextContent("draft");
+    const readyRow = screen.getByRole("button", { name: "Open Assigned to me 1" });
+    expect(band(readyRow)).not.toHaveTextContent("draft");
+  });
 });
 
 /**
