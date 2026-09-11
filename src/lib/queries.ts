@@ -1474,6 +1474,16 @@ export const useLinearOrgs = () =>
   });
 
 /**
+ * Whether any Linear workspace is connected, or `null` until the org read has
+ * answered — an unknown is not a no. The chrome's one reading of it (the rail's
+ * connect prompt, Triage's disabled state), by the rule Settings' Linear card uses.
+ */
+export const useLinearConnected = (): boolean | null => {
+  const { data } = useLinearOrgs();
+  return data === undefined ? null : data.length > 0;
+};
+
+/**
  * True only when Linear is connected *and* the grant is read-only.
  *
  * Deliberately not `!canWrite`: "nothing connected" and "connected read-only"

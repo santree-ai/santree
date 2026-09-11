@@ -276,7 +276,10 @@ src/
   what the section shows. A row's right-click menu (`shell/TriageTicketMenu`)
   snoozes it — the one Linear write offered from the rail, gated like the
   status picker (disabled with `LINEAR_READ_ONLY_HINT`, refused by
-  `repo_write_session` regardless).
+  `repo_write_session` regardless). With no Linear workspace connected the section
+  draws greyed out rather than as an empty queue, and the rail's
+  `shell/LinearConnectPrompt` (off `useLinearConnected`, `null` until the org read
+  answers) links to Settings → Linear.
 - **A triage ticket runs on an attached project, never a worktree.** Two repos,
   deliberately: the queue and the ticket come from one Linear org
   (`useTriageOrgRepo` — the triage default, else the first registered project —

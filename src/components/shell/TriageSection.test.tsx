@@ -38,6 +38,8 @@ const data = vi.hoisted(() => ({
   openAgent: vi.fn(),
   readOnly: false,
   snooze: vi.fn(),
+  /** Whether a Linear workspace is connected; `null` is the read in flight. */
+  linearConnected: true as boolean | null,
 }));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
@@ -54,6 +56,7 @@ vi.mock("../../state/AppContext", async (importOriginal) => ({
 }));
 vi.mock("../../lib/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/queries")>()),
+  useLinearConnected: () => data.linearConnected,
   // The repo whose org the queue is read from — resolved by the data layer, so
   // the section never has to pick a project itself.
   useTriageOrgRepo: () => "acme/app",
@@ -135,7 +138,41 @@ beforeEach(() => {
   data.schedules = [];
   data.agentsByTicket = new Map();
   data.readOnly = false;
+  data.linearConnected = true;
   queue({});
+});
+
+describe("TriageSection without Linear", () => {
+  /** With no workspace connected, "Nothing in triage" would be a claim about a
+   *  queue the section had no way to ask for. It stays on the rail instead,
+   *  greyed out with nothing to operate, and says what it is missing. */
+  it("draws a disabled section that names what it needs, never an empty queue", () => {
+    data.linearConnected = false;
+    render(<TriageSection />);
+
+    expect(screen.getByText("Triage")).toBeInTheDocument();
+    expect(screen.getByText("Needs a Linear workspace")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing in triage")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  /** An unknown is not a no: while the org read is in flight the section is its
+   *  usual self, so a connected install never flickers grey on launch. */
+  it("stays its usual self while the connection is still unknown", () => {
+    data.linearConnected = null;
+    render(<TriageSection />);
+
+    expect(screen.queryByText("Needs a Linear workspace")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse triage" })).toBeInTheDocument();
+  });
+
+  /** Disabled is for "can't", not "don't want": triage turned off stays hidden. */
+  it("still draws nothing while triage is turned off", () => {
+    data.linearConnected = false;
+    app.triageEnabled = false;
+    const { container } = render(<TriageSection />);
+    expect(container).toBeEmptyDOMElement();
+  });
 });
 
 describe("TriageSection", () => {

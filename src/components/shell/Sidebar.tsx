@@ -17,6 +17,7 @@ import { ChevronLeftIcon, PlusIcon } from "../icons";
 import { EdgeResizeHandle, Spinner } from "../primitives";
 import { SidebarFooter } from "../SidebarFooter";
 import { AddProjectPrompt } from "./AddProjectPrompt";
+import { LinearConnectPrompt } from "./LinearConnectPrompt";
 import { ProjectTree } from "./ProjectTree";
 import { SidebarNav } from "./SidebarNav";
 import { TriageSection } from "./TriageSection";
@@ -85,13 +86,18 @@ export function Sidebar() {
         </button>
       </div>
       <SidebarNav />
+      {/* Above the scroll area, not in it: without Linear there are no tickets and
+          no triage, so the way to connect stays in view however far the tree is
+          scrolled. Nothing once a workspace is connected. */}
+      <LinearConnectPrompt />
       {/* One viewport for everything below the destinations. Triage, the Projects
           label and the tree scroll together rather than each inside a box of its
           own, so a long queue is scrolled past — or folded away — like any other
           section of the rail, never scrolled *within*. Triage leads because it is
           *incoming* work, the same reading order a project's Reviews section
-          follows inside its own section; it draws nothing while triage is off
-          (see `TriageSection`). The OS's overlay scrollbar, not the app's
+          follows inside its own section; it draws nothing while triage is off,
+          and a greyed-out heading while Linear isn't connected (see
+          `TriageSection`). The OS's overlay scrollbar, not the app's
           classic one (`scrollbar-native` in styles.css): the rail's rows run
           to its edge, and a scrollbar that took a gutter narrowed every one of
           them the moment the queue ran long. */}

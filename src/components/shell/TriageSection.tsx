@@ -38,6 +38,7 @@ import { useOpenAgent } from "../../features/agents/useOpenAgent";
 import {
   TRIAGE_GOOD_CITIZEN_KEY,
   type TriageTeamScope,
+  useLinearConnected,
   usePrefetchOnHover,
   useSetSetting,
   useTriageOrgRepo,
@@ -90,13 +91,17 @@ const NO_SCHEDULES: TriageSchedule[] = [];
 
 export function TriageSection() {
   const { triageEnabled } = useApp();
+  // `null` while the org read is in flight: an unknown is not a "no", so the
+  // section only goes grey once Linear has said nothing is connected.
+  const linearConnected = useLinearConnected();
   const navigate = useNavigate();
   // The queue is read from the triage org's repo, which the workspace resolves
   // through the same hook, so the two can never show different queues. Two
-  // Linear calls ride on it, so while the section isn't drawn the *repo* is
-  // blanked — never the hook call, which has to run on every render.
+  // Linear calls ride on it, so while the section isn't drawn, or has no
+  // workspace to ask, the *repo* is blanked — never the hook call, which has to
+  // run on every render.
   const orgRepo = useTriageOrgRepo();
-  const repo = triageEnabled ? orgRepo : "";
+  const repo = triageEnabled && linearConnected !== false ? orgRepo : "";
   const queue = useTriageQueue(repo);
   const { active, snoozed, goodCitizen, teamScopes } = queue;
   const { setScope } = useTriageTeamScopes();
@@ -155,6 +160,26 @@ export function TriageSection() {
   const openTeamSettings = () => navigate({ to: "/settings", search: { section: "triage" } });
 
   if (!triageEnabled) return null;
+
+  // Not connected is not empty. The queue can't be asked for, and "Nothing in
+  // triage" would say it had been, so the section stays: greyed out, with nothing
+  // to fold or scope, naming what it is missing. The way to connect is the rail's
+  // prompt above it (`LinearConnectPrompt`).
+  if (linearConnected === false) {
+    return (
+      <div className="flex flex-none flex-col pb-1 opacity-60">
+        <div className="mt-2 flex h-8 flex-none items-center px-4 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-5">
+          Triage
+        </div>
+        <div
+          className="py-(--density-compact) text-[11px] text-muted-4"
+          style={{ paddingLeft: SECTION_GUTTER }}
+        >
+          Needs a Linear workspace
+        </div>
+      </div>
+    );
+  }
 
   const open = !collapsed;
   const Chevron = open ? ChevronDownIcon : ChevronRightIcon;
