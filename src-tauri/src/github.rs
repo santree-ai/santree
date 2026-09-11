@@ -69,16 +69,13 @@ async fn get_json<T: DeserializeOwned>(
     query: &[(&str, &str)],
     token: &str,
 ) -> Result<T> {
-    let res = rest(gql::client().get(url).query(query), token)
-        .send()
-        .await?;
+    let res = gql::send(rest(gql::client().get(url).query(query), token), "GitHub").await?;
     if !res.status().is_success() {
         let status = res.status();
         // A 403 carries rate-limit details in the body; surface them instead
         // of a bare status code.
         let body = res.text().await.unwrap_or_default();
-        let snippet: String = body.chars().take(300).collect();
-        bail!("GitHub returned {status}: {snippet}");
+        bail!(gql::status_message("GitHub", status, &body));
     }
     Ok(res.json().await?)
 }
@@ -2956,12 +2953,11 @@ pub async fn check_log(token: &str, owner: &str, name: &str, job_id: u64) -> Res
         &job_id.to_string(),
         "logs",
     ])?;
-    let res = rest(gql::client().get(url), token).send().await?;
+    let res = gql::send(rest(gql::client().get(url), token), "GitHub").await?;
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        let snippet: String = body.chars().take(200).collect();
-        bail!("GitHub returned {status}: {snippet}");
+        bail!(gql::status_message("GitHub", status, &body));
     }
     Ok(parse_job_log(&res.text().await?))
 }
@@ -3389,22 +3385,23 @@ async fn file_content(
     r#ref: &str,
     path: &str,
 ) -> Result<String> {
-    let res = gql::client()
-        .get(api_url(&["repos", owner, name, "contents", path])?)
-        .query(&[("ref", r#ref)])
-        .bearer_auth(token)
-        .header("Accept", "application/vnd.github.raw")
-        .header("User-Agent", "santree")
-        .send()
-        .await?;
+    let res = gql::send(
+        gql::client()
+            .get(api_url(&["repos", owner, name, "contents", path])?)
+            .query(&[("ref", r#ref)])
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github.raw")
+            .header("User-Agent", "santree"),
+        "GitHub",
+    )
+    .await?;
     let status = res.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         return Ok(String::new());
     }
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
-        let snippet: String = body.chars().take(300).collect();
-        bail!("GitHub returned {status}: {snippet}");
+        bail!(gql::status_message("GitHub", status, &body));
     }
     Ok(res.text().await?)
 }

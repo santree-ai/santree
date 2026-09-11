@@ -358,8 +358,12 @@ src/
 - **Data:** every read is a hook in `lib/queries.ts`. Result-typed commands go through
   `useUnwrappedQuery`; raw-value commands use plain `useQuery`. Writes use
   `useOptimisticMutation` (cancel → patch → rollback-on-error → invalidate-on-settle).
-- **Errors & background events:** failed mutations auto-surface as red toasts (wired in
-  `main.tsx`); raise green ones with `toast.success(...)` from `state/toast.tsx`.
+- **Errors & background events:** every failed read and write is logged under its
+  key and surfaces as a red toast — one policy, `lib/queryFailures.ts`, wired in
+  `main.tsx` — except the first failed refresh of data still on screen, which only
+  logs (a second in a row toasts). A read that meets a gateway failure (502/503/504)
+  is sent once more by `gql::send` before it fails; a write never is. Raise green
+  toasts with `toast.success(...)` from `state/toast.tsx`.
 - **Feature state:** ephemeral view state lives in `features/<view>/model.tsx` (a
   context); shared cross-view state in `AppContext`; server data only via query hooks.
 - **Shared UI:** `primitives.tsx` (Badge, Dot, Toggle, Tabs, Segmented, EmptyState,

@@ -1,7 +1,8 @@
-//! Shared GraphQL plumbing for the Linear and GitHub clients: the
-//! `{ nodes: [...] }` connection wrapper, the response envelope, and the
-//! POST → decode → error-check helper. Each client keeps its own request wiring
-//! (URL, auth, headers); only the shape of the response is shared.
+//! Shared HTTP plumbing for the Linear and GitHub clients: the one client, the
+//! send that repeats a read once when a service's edge fails, the message a failed
+//! response turns into, and for GraphQL the `{ nodes: [...] }` connection wrapper,
+//! the response envelope and the POST → decode → error-check helper. Each client
+//! keeps its own request wiring (URL, auth, headers).
 
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
@@ -140,15 +141,107 @@ pub fn status_of(err: &anyhow::Error) -> Option<reqwest::StatusCode> {
     err.downcast_ref::<HttpError>().map(|e| e.status)
 }
 
-/// The error for a non-success GraphQL response: the service's own body (Linear
-/// explains a complexity overflow there, GitHub a rate limit) rather than a bare
-/// status code, with the status attached for [`status_of`].
-fn status_error(service: &str, status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+/// How long a read waits before it is sent the second time. A gateway failure is
+/// usually a moment of the service being unreachable rather than an outage, and
+/// the frontend's own retry still comes after this one.
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A status a service's edge answers with when the service behind it didn't. It is
+/// about a moment, not about the request, which makes it the one failure worth a
+/// retry and the one whose body (a proxy's HTML page) is never worth showing.
+fn is_gateway_failure(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::BAD_GATEWAY
+            | reqwest::StatusCode::SERVICE_UNAVAILABLE
+            | reqwest::StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+/// What a user reads about a failed response from `service`.
+///
+/// The service's own body is kept, because that is where the reason is (Linear
+/// explains a complexity overflow there, GitHub a rate limit) — unless it is an
+/// HTML page, which a toast shows as raw markup and which says nothing the status
+/// doesn't. A gateway failure says in words that it's the service, not the request.
+pub fn status_message(service: &str, status: reqwest::StatusCode, body: &str) -> String {
+    if is_gateway_failure(status) {
+        return format!("{service} is temporarily unavailable ({status}). Try again in a moment.");
+    }
+    let body = body.trim();
+    if body.is_empty() || body.starts_with('<') {
+        return format!("{service} returned {status}");
+    }
     let snippet: String = body.chars().take(300).collect();
+    format!("{service} returned {status}: {snippet}")
+}
+
+/// The error for a non-success GraphQL response, with the status attached for
+/// [`status_of`].
+fn status_error(service: &str, status: reqwest::StatusCode, body: &str) -> anyhow::Error {
     anyhow::Error::new(HttpError {
         status,
-        message: format!("{service} GraphQL returned {status}: {snippet}"),
+        message: status_message(&format!("{service} GraphQL"), status, body),
     })
+}
+
+/// Whether a GraphQL document is a read: no `mutation` or `subscription` in it.
+///
+/// Every write starts with the `mutation` keyword, so no write passes. A read can
+/// fail it — a field or a comment that happens to use the word — and the only cost
+/// of that is one retry not taken, which is why this is a word match and not a parser.
+fn is_query_document(document: &str) -> bool {
+    !document
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|word| word == "mutation" || word == "subscription")
+}
+
+/// Whether sending `request` a second time can't change anything the first
+/// didn't: a GET, or a GraphQL POST whose document is a read.
+fn is_repeatable(request: &reqwest::Request) -> bool {
+    match *request.method() {
+        reqwest::Method::GET | reqwest::Method::HEAD => true,
+        reqwest::Method::POST => request
+            .body()
+            .and_then(|body| body.as_bytes())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+            .and_then(|json| json.get("query")?.as_str().map(is_query_document))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Send a prepared request, and send it once more when the service's edge answers
+/// with a gateway failure (502/503/504) and the request is a read.
+///
+/// A write is never sent twice: a gateway failure doesn't say whether the service
+/// applied the write before its edge gave up, and a second send could post the same
+/// review comment twice. `service` names the backend in the error context and in
+/// the log line a retry leaves — the only trace a blip the retry absorbed has.
+pub async fn send(req: reqwest::RequestBuilder, service: &str) -> Result<reqwest::Response> {
+    let (client, request) = req.build_split();
+    let request = request.with_context(|| format!("{service} request"))?;
+    let again = if is_repeatable(&request) {
+        request.try_clone()
+    } else {
+        None
+    };
+    let res = client
+        .execute(request)
+        .await
+        .with_context(|| format!("{service} request"))?;
+    let Some(again) = again.filter(|_| is_gateway_failure(res.status())) else {
+        return Ok(res);
+    };
+    log::warn!(
+        "{service} answered {}; sending the read once more",
+        res.status()
+    );
+    tokio::time::sleep(RETRY_DELAY).await;
+    client
+        .execute(again)
+        .await
+        .with_context(|| format!("{service} request"))
 }
 
 #[derive(Deserialize)]
@@ -164,7 +257,8 @@ struct Envelope<T> {
 /// Send a prepared GraphQL POST and decode its typed `data` payload, turning a
 /// populated `errors` array (even on HTTP 200) into an error. `service` names the
 /// backend for the error messages (e.g. "Linear", "GitHub"). The caller builds
-/// the request (URL, auth, headers, JSON body) so each client keeps its wiring.
+/// the request (URL, auth, headers, JSON body) so each client keeps its wiring;
+/// a read is sent once more on a gateway failure (see [`send`]).
 pub async fn post<T: DeserializeOwned>(req: reqwest::RequestBuilder, service: &str) -> Result<T> {
     post_observed(req, service, |_| {}).await
 }
@@ -176,16 +270,14 @@ pub async fn post<T: DeserializeOwned>(req: reqwest::RequestBuilder, service: &s
 /// GitHub's `/rate_limit` — so reading it means observing calls the app was
 /// making anyway. `observe` runs on the rejections too, since a 429 is when the
 /// numbers matter most, and it must not fail: it is a side-channel on the way
-/// past, never a reason a query fails.
+/// past, never a reason a query fails. After a retry it sees the response that
+/// answered, which is the newer budget anyway.
 pub async fn post_observed<T: DeserializeOwned>(
     req: reqwest::RequestBuilder,
     service: &str,
     observe: impl FnOnce(&reqwest::header::HeaderMap),
 ) -> Result<T> {
-    let res = req
-        .send()
-        .await
-        .with_context(|| format!("{service} GraphQL request"))?;
+    let res = send(req, &format!("{service} GraphQL")).await?;
     observe(res.headers());
     if !res.status().is_success() {
         let status = res.status();
@@ -333,6 +425,194 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(data["viewer"]["id"], "u1");
+    }
+
+    // ── A gateway failure ─────────────────────────────────────────────────
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const READ: &str = r#"{"query":"query Viewer { viewer { login } }","variables":{}}"#;
+    const WRITE: &str = r#"{"query":"mutation Resolve($id: ID!) { resolveReviewThread(input: {threadId: $id}) { clientMutationId } }","variables":{"id":"T1"}}"#;
+    /// What GitHub's edge actually answered with, byte for byte the page a toast
+    /// once showed as markup.
+    const NGINX_502: &str = "<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n";
+
+    fn gql_post(url: &str, body: &'static str) -> reqwest::RequestBuilder {
+        client()
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(body)
+    }
+
+    /// Read one whole request off `stream`: its headers, then the body bytes they
+    /// announce. Closing a socket with input still unread resets it, which can throw
+    /// away a response the client hasn't read yet.
+    fn read_request(stream: &mut std::net::TcpStream) {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let Ok(n) = stream.read(&mut chunk) else {
+                return;
+            };
+            if n == 0 {
+                return;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+            let len = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if buf.len() >= end + 4 + len {
+                return;
+            }
+        }
+    }
+
+    /// Serve `responses` in order, one per connection, counting the requests that
+    /// arrive — how a test tells a request sent twice from one sent once.
+    fn serve_each(responses: Vec<(&'static str, &'static str)>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let served = Arc::new(AtomicUsize::new(0));
+        let count = served.clone();
+        std::thread::spawn(move || {
+            for (status_line, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                read_request(&mut stream);
+                count.fetch_add(1, Ordering::SeqCst);
+                // `Connection: close`, so a retry opens a connection of its own
+                // instead of racing this one's shutdown.
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (url, served)
+    }
+
+    #[tokio::test]
+    async fn a_read_the_edge_failed_is_sent_once_more() {
+        let (url, served) = serve_each(vec![
+            ("502 Bad Gateway", NGINX_502),
+            ("200 OK", r#"{"data":{"viewer":{"login":"octocat"}}}"#),
+        ]);
+        let data: serde_json::Value = post(gql_post(&url, READ), "GitHub").await.unwrap();
+        assert_eq!(data["viewer"]["login"], "octocat");
+        assert_eq!(served.load(Ordering::SeqCst), 2);
+    }
+
+    /// The toast that started this: a proxy's HTML page, shown as markup. Failing
+    /// twice now says what happened in words, and keeps the status for callers.
+    #[tokio::test]
+    async fn a_read_the_edge_fails_twice_says_so_in_words() {
+        let (url, served) = serve_each(vec![
+            ("502 Bad Gateway", NGINX_502),
+            ("502 Bad Gateway", NGINX_502),
+        ]);
+        let err = post::<serde_json::Value>(gql_post(&url, READ), "GitHub")
+            .await
+            .unwrap_err();
+        assert_eq!(served.load(Ordering::SeqCst), 2);
+        assert_eq!(status_of(&err), Some(reqwest::StatusCode::BAD_GATEWAY));
+        assert_eq!(
+            err.to_string(),
+            "GitHub GraphQL is temporarily unavailable (502 Bad Gateway). Try again in a moment."
+        );
+    }
+
+    /// A gateway failure doesn't say whether the write landed behind it, so a
+    /// second send could apply it twice.
+    #[tokio::test]
+    async fn a_write_the_edge_failed_is_not_sent_again() {
+        let (url, served) = serve_each(vec![
+            ("502 Bad Gateway", NGINX_502),
+            ("200 OK", r#"{"data":{}}"#),
+        ]);
+        let err = post::<serde_json::Value>(gql_post(&url, WRITE), "GitHub")
+            .await
+            .unwrap_err();
+        assert_eq!(status_of(&err), Some(reqwest::StatusCode::BAD_GATEWAY));
+        assert_eq!(
+            served.load(Ordering::SeqCst),
+            1,
+            "the write reached the server once"
+        );
+    }
+
+    #[tokio::test]
+    async fn any_other_failure_is_sent_once_and_drops_an_html_body() {
+        let (url, served) = serve_each(vec![
+            (
+                "500 Internal Server Error",
+                "<html><body>oops</body></html>",
+            ),
+            ("200 OK", r#"{"data":{}}"#),
+        ]);
+        let err = post::<serde_json::Value>(gql_post(&url, READ), "GitHub")
+            .await
+            .unwrap_err();
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            err.to_string(),
+            "GitHub GraphQL returned 500 Internal Server Error"
+        );
+    }
+
+    /// The retry's guard. Its one allowed mistake is calling a read a write.
+    #[test]
+    fn only_a_document_without_a_mutation_is_a_read() {
+        assert!(is_query_document("query Viewer { viewer { login } }"));
+        assert!(is_query_document("{ viewer { login } }"));
+        assert!(is_query_document(
+            "query { repository { viewerSubscription } }"
+        ));
+        // Linear's scope queries carry their fragment after the operation.
+        assert!(is_query_document(
+            "query T { teams { nodes { ...TriageTeam } } }\nfragment TriageTeam on Team { key }"
+        ));
+        assert!(!is_query_document(
+            "mutation Resolve($id: ID!) { resolveReviewThread(input: {threadId: $id}) { clientMutationId } }"
+        ));
+        assert!(!is_query_document("subscription { issueUpdated { id } }"));
+        // The safe direction of a word match: a read that mentions it isn't retried.
+        assert!(!is_query_document(
+            "query { viewer { login } } # no mutation here"
+        ));
+    }
+
+    #[test]
+    fn a_get_is_repeatable_and_a_post_only_when_it_carries_a_read() {
+        let url: reqwest::Url = "http://127.0.0.1/".parse().unwrap();
+        assert!(is_repeatable(&reqwest::Request::new(
+            reqwest::Method::GET,
+            url.clone()
+        )));
+        assert!(
+            !is_repeatable(&reqwest::Request::new(reqwest::Method::POST, url.clone())),
+            "a POST with no body says nothing about what it does"
+        );
+        assert!(is_repeatable(
+            &gql_post(url.as_str(), READ).build().unwrap()
+        ));
+        assert!(!is_repeatable(
+            &gql_post(url.as_str(), WRITE).build().unwrap()
+        ));
+        assert!(!is_repeatable(&reqwest::Request::new(
+            reqwest::Method::PUT,
+            url
+        )));
     }
 
     // ── The pagination cursor ─────────────────────────────────────────────
