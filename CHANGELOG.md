@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.14 — 2026-09-11
+
+- Pull requests waiting on your review show a small draft tag in the sidebar when their author hasn't marked them ready yet.
+- When no Linear workspace is connected, the sidebar says so, and a Connect Linear button takes you straight to its settings. Triage stays in the sidebar greyed out instead of saying there is nothing in triage.
+- A brief GitHub or Linear outage no longer shows a raw HTML error page. santree tries the read once more, says the service is temporarily unavailable if it still fails, and a refresh that fails while its data is on screen only warns you if it fails again.
+- Failed reads and actions are written to the log file along with what failed, so a problem is easier to track down and report.
+
 ## 0.1.13 — 2026-09-10
 
 - Starting a ticket always runs its agent, whatever you are looking at. The agent starts as soon as the worktree exists, even while you are on another project, and the worktree lands on the agent's tab when you open it.
