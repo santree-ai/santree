@@ -723,7 +723,10 @@ function ReviewPrRow({
               the title lands. Always the open-PR mark: the inbox is searched
               `is:open`, so nothing merged or closed reaches this rail. Decorative
               — the row's tooltip names the PR in full. */}
-            <span aria-hidden className="flex flex-none items-center text-muted-3">
+            <span
+              aria-hidden
+              className={`flex flex-none items-center ${pr.isDraft ? "text-muted-3" : "text-status-green"}`}
+            >
               <PrIcon size={CARD_GLYPH} />
             </span>
             <MarkdownTitle className="min-w-0 flex-1 truncate text-[13px] leading-5 font-medium text-fg-2">
