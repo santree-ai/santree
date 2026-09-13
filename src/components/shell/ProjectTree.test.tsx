@@ -217,6 +217,9 @@ function group(key: string, label: string, n: number): ProjectReviews["groups"][
       url: `https://github.com/acme/app/pull/${key}-${i + 1}`,
       repo: "acme/app",
       headRef: "feature",
+      additions: 10,
+      deletions: 2,
+      changedFiles: 1,
     })) as ProjectReviews["groups"][number]["prs"],
   };
 }
@@ -429,8 +432,12 @@ describe("ProjectSection reviews section", () => {
     expect(
       screen.getByRole("button", { name: "Collapse review group Assigned to me" }),
     ).toHaveTextContent("2");
-    expect(screen.getByRole("button", { name: "Open Assigned to me 1" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open Team · Engineering 1" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open Assigned to me 1, small change" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open Team · Engineering 1, small change" }),
+    ).toBeInTheDocument();
   });
 
   /** Connected and quiet is a real answer, and better said than left as an empty
@@ -485,7 +492,7 @@ describe("ProjectSection reviews section", () => {
       },
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Open Assigned to me 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open Assigned to me 1, small change" }));
     expect(onOpenPrInInbox).toHaveBeenCalled();
     expect(onSelectWorktree).not.toHaveBeenCalled();
   });
@@ -506,10 +513,48 @@ describe("ProjectSection reviews section", () => {
       },
     );
 
-    const draftRow = screen.getByRole("button", { name: "Open Assigned to me 2 (draft)" });
+    const draftRow = screen.getByRole("button", {
+      name: "Open Assigned to me 2 (draft), small change",
+    });
     expect(band(draftRow)).toHaveTextContent("draft");
-    const readyRow = screen.getByRole("button", { name: "Open Assigned to me 1" });
+    const readyRow = screen.getByRole("button", { name: "Open Assigned to me 1, small change" });
     expect(band(readyRow)).not.toHaveTextContent("draft");
+  });
+
+  /** Size leads the row, because how much reading a review is decides whether it
+   *  fits the time you have. The bars say it at a glance; the row's name and
+   *  tooltip say it in words, since a tooltip on the bars would never open under
+   *  the row's stretched action. */
+  it("leads each row with its size, and says it in words", () => {
+    const direct = group("direct", "Assigned to me", 2);
+    const [small, large] = direct.prs;
+    renderSection(
+      {},
+      {
+        reviewsOpen: true,
+        reviews: reviewsFor({ direct: 2, total: 2 }, [
+          {
+            ...direct,
+            prs: [small, { ...large, additions: 3000, deletions: 300, changedFiles: 40 }],
+          },
+        ]),
+      },
+    );
+
+    const largeRow = screen.getByRole("button", { name: "Open Assigned to me 2, large change" });
+    expect(largeRow).toHaveAttribute(
+      "title",
+      expect.stringContaining("Large change · 40 files, 3,000 additions and 300 deletions"),
+    );
+    const bars = band(largeRow).querySelector("[role='img']");
+    expect(bars).toHaveAttribute("aria-label", "Large change");
+    expect(bars?.parentElement).toHaveAttribute("aria-hidden", "true");
+
+    const smallRow = screen.getByRole("button", { name: "Open Assigned to me 1, small change" });
+    expect(smallRow).toHaveAttribute(
+      "title",
+      expect.stringContaining("Small change · 1 file, 10 additions and 2 deletions"),
+    );
   });
 });
 
@@ -628,7 +673,9 @@ describe("ProjectSection reviews nesting", () => {
     );
     expect(screen.queryByRole("button", { name: /project Platform/ })).not.toBeInTheDocument();
     // …and the rows are still there, at the gutter the heading would have used.
-    expect(screen.getByRole("button", { name: "Open AK-1 Assigned to me 1" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open AK-1 Assigned to me 1, small change" }),
+    ).toBeInTheDocument();
   });
 
   /** The milestone level is the same rule one step in: a lone "No milestone"
@@ -772,10 +819,9 @@ describe("ProjectSection stacked PRs", () => {
     expect(rows[0].previousElementSibling).toBeNull();
     expect(rows[1].previousElementSibling?.getAttribute("aria-hidden")).toBe("true");
 
-    expect(screen.getByRole("button", { name: "Open Assigned to me 2" })).toHaveAttribute(
-      "title",
-      expect.stringContaining("Stacked on user/parent"),
-    );
+    expect(
+      screen.getByRole("button", { name: "Open Assigned to me 2, small change" }),
+    ).toHaveAttribute("title", expect.stringContaining("Stacked on user/parent"));
   });
 });
 
@@ -830,11 +876,12 @@ describe("ProjectSection review agents", () => {
     const card = container.querySelector(".tree-card") as HTMLElement;
     const title = card.firstElementChild as HTMLElement;
     const session = card.querySelector(".tree-row") as HTMLElement;
-    const glyph = title.querySelector("svg") as SVGElement;
+    // The leading slot: the first thing on the title line hidden from a reader.
+    const glyph = title.querySelector("[aria-hidden]") as HTMLElement;
     expect(session.style.paddingLeft).toBe(`${CARD_LABEL_X}px`);
     // The title's own text column is what that number is: the card's inset, the
     // leading glyph's box, and the gap after it.
-    expect(Number(glyph.getAttribute("width"))).toBe(CARD_GLYPH);
+    expect(glyph.style.width).toBe(`${CARD_GLYPH}px`);
     expect(CARD_LABEL_X).toBe(CARD_INSET + CARD_GLYPH + 6);
   });
 });
@@ -858,6 +905,9 @@ describe("ProjectTree reviews rows", () => {
       project: REPO,
       viewerReview: null,
       headCommittedAt: "2026-08-24T10:00:00Z",
+      additions: 10,
+      deletions: 2,
+      changedFiles: 1,
       // The section orders its blocks, so a row without these sorts nothing —
       // and the cast above would let it through to a crash at runtime.
       waitingSince: "2026-08-24T09:00:00Z",
@@ -946,6 +996,9 @@ describe("ProjectTree selection follows the visible destination", () => {
       headRef: "feature",
       viewerReview: null,
       headCommittedAt: "2026-08-24T10:00:00Z",
+      additions: 10,
+      deletions: 2,
+      changedFiles: 1,
       waitingSince: "2026-08-24T09:00:00Z",
       updatedAt: "2026-08-24T10:00:00Z",
     }) as ReviewInbox["requested"][number];

@@ -38,6 +38,7 @@ import { type ReactNode, useState } from "react";
 
 import type { ReviewPr, TicketRef } from "../../bindings";
 import { agentKey } from "../../features/agents/registry";
+import { diffStatLabel } from "../../features/reviews/DiffStat";
 import { stackGuides, stackPrs } from "../../features/reviews/grouping";
 import { ticketIdFor } from "../../features/reviews/ticket";
 import { BULK_TOGGLE_HINT, isBulkToggle } from "../../lib/disclosure";
@@ -53,7 +54,6 @@ import {
   GitHubLogo,
   LinearLogo,
   MergeQueueIcon,
-  PrIcon,
 } from "../icons";
 import { MarkdownTitle } from "../Markdown";
 import {
@@ -62,6 +62,8 @@ import {
   CARD_GLYPH,
   CARD_INSET,
   CARD_LABEL_X,
+  ChangeSizeBars,
+  changeSizeOf,
   DraftTag,
   groupByMilestone,
   groupByProject,
@@ -650,6 +652,11 @@ function StackedRows({
  * draft. It is rare in an inbox, and it changes what the row asks of you (the
  * author hasn't asked for a review yet), so it earns a {@link DraftTag}.
  *
+ * What it leads with is size ({@link ChangeSizeBars}), in the slot a worktree's
+ * branch mark takes. Not a status either: it is the fact that decides which
+ * review fits the time you have, and since every row here is an open PR, the PR
+ * icon that used to sit there said nothing.
+ *
  * **Line two is the AI review sessions**, exactly as a worktree card carries the
  * agents running in it — one row each, or a fold once there are several. A review
  * is work with an agent on it, and the rail says so in one vocabulary rather than
@@ -684,12 +691,17 @@ function ReviewPrRow({
   // Local, not persisted — the same "let me look" gesture a worktree card's fold
   // is, and a rail that reopened yesterday's expansions on launch is noisier.
   const [expanded, setExpanded] = useState(false);
+  const size = changeSizeOf(pr.additions, pr.deletions, pr.changedFiles);
+  const files = `${pr.changedFiles.toLocaleString()} file${pr.changedFiles === 1 ? "" : "s"}`;
   // Everything the row can't spare a column for lives here, the way `WorktreeRow`
   // keeps its branch name one hover away. The base branch earns a line only on a
   // stacked PR, where "what did this come off" is the question the elbow raises.
   const title = [
     pr.title,
     `${pr.repo}#${pr.number}`,
+    // Words, not `+3,000 −300`: the tooltip is also the row's accessible
+    // description, and the signs don't survive a screen reader.
+    `${size} change · ${files}, ${diffStatLabel(pr.additions, pr.deletions)}`,
     pr.isDraft ? "Draft" : null,
     depth > 0 ? `Stacked on ${pr.baseRef}` : null,
     ticket ? `Linear · ${ticket}` : null,
@@ -714,17 +726,20 @@ function ReviewPrRow({
             <button
               type="button"
               onClick={onOpen}
-              aria-label={`Open ${pr.title}${pr.isDraft ? " (draft)" : ""}`}
+              aria-label={`Open ${pr.title}${pr.isDraft ? " (draft)" : ""}, ${size.toLowerCase()} change`}
               title={title}
               className="absolute inset-0 cursor-pointer"
             />
-            {/* Leads the line, the way the branch glyph leads a worktree's: read
-              left to right, the glyph says what kind of thing this row is before
-              the title lands. Always the open-PR mark: the inbox is searched
-              `is:open`, so nothing merged or closed reaches this rail. Decorative
-              — the row's tooltip names the PR in full. */}
-            <span aria-hidden className="flex flex-none items-center text-muted-3">
-              <PrIcon size={CARD_GLYPH} />
+            {/* Leads the line where a worktree's branch mark leads its own. Every row
+              here is an open PR, so the kind of row is no news; how much reading it
+              is decides which review fits the time you have. Decorative: the row's
+              name and tooltip say the size in words. */}
+            <span
+              aria-hidden
+              className="flex flex-none items-center justify-center"
+              style={{ width: CARD_GLYPH }}
+            >
+              <ChangeSizeBars size={size} />
             </span>
             <MarkdownTitle className="min-w-0 flex-1 truncate text-[13px] leading-5 font-medium text-fg-2">
               {pr.title}
