@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ProjectMilestoneRef } from "../bindings";
-import { groupByMilestone, groupByProject, showProjectGroups } from "./WorkSignals";
+import { changeSizeOf, groupByMilestone, groupByProject, showProjectGroups } from "./WorkSignals";
 
 const milestone = (id: string, name: string, sortOrder: number | null): ProjectMilestoneRef => ({
   id,
@@ -106,5 +106,27 @@ describe("showProjectGroups", () => {
     expect(showProjectGroups([{ key: "Core" }])).toBe(false);
     expect(showProjectGroups([{ key: "No Project" }])).toBe(false);
     expect(showProjectGroups([{ key: "Core" }, { key: "No Project" }])).toBe(true);
+  });
+});
+
+describe("changeSizeOf", () => {
+  it("steps at 500 and 2,500", () => {
+    expect(changeSizeOf(479, 0, 1)).toBe("Small");
+    expect(changeSizeOf(480, 0, 1)).toBe("Medium");
+    expect(changeSizeOf(2479, 0, 1)).toBe("Medium");
+    expect(changeSizeOf(2480, 0, 1)).toBe("Large");
+  });
+
+  // The same 300 lines: in one file it's a read, across thirty it's thirty
+  // context switches.
+  it("counts every file as reading, not just the lines", () => {
+    expect(changeSizeOf(300, 0, 1)).toBe("Small");
+    expect(changeSizeOf(300, 0, 30)).toBe("Medium");
+  });
+
+  // Checking that removed code has no callers left is quicker than reading new code.
+  it("counts a deletion as a third of an addition", () => {
+    expect(changeSizeOf(0, 1200, 3)).toBe("Small");
+    expect(changeSizeOf(1200, 0, 3)).toBe("Medium");
   });
 });
