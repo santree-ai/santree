@@ -35,13 +35,13 @@ import {
   AgentIcon,
   GearIcon,
   KbdIcon,
-  LinearLogo,
   ListIcon,
   PanelIcon,
   PrIcon,
   RefreshIcon,
   SearchIcon,
   TerminalIcon,
+  TrackerLogo,
   TreeIcon,
 } from "./icons";
 import { rankItems, type Searchable } from "./paletteSearch";
@@ -72,6 +72,7 @@ interface PaletteItem extends Searchable {
 const SETTINGS_SECTIONS: { key: string; label: string; keywords?: string }[] = [
   { key: "general", label: "General", keywords: "appearance theme accent" },
   { key: "linear", label: "Linear", keywords: "org token connect" },
+  { key: "jira", label: "Jira", keywords: "atlassian site connect" },
   { key: "github", label: "GitHub", keywords: "gh auth" },
   { key: "agent-claude", label: "Claude Code", keywords: "agent model" },
   { key: "agent-codex", label: "Codex", keywords: "agent model openai" },
@@ -110,7 +111,8 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
   const worktreesByRepo = useWorktreesByRepo(repoNames);
   const agents = useAgentEntries(repoNames, repoNames);
   const { data: inbox } = useReviews();
-  const { data: triage = [] } = useTriageTickets(useTriageOrgRepo());
+  const triageRepo = useTriageOrgRepo();
+  const { data: triage = [] } = useTriageTickets(triageRepo);
 
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
@@ -126,6 +128,8 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
       fn();
     };
     const manyRepos = repoNames.length > 1;
+    // A ticket wears its own project's tracker mark, the way its sidebar row does.
+    const providerOf = (repo: string) => repos.find((r) => r.name === repo)?.provider ?? "Linear";
 
     const navigation: PaletteItem[] = [
       {
@@ -177,7 +181,7 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
           label: task.title,
           meta: task.project,
           keywords: `${task.status} ${repo} ${task.assignee ?? ""}`,
-          icon: <LinearLogo size={13} />,
+          icon: <TrackerLogo provider={providerOf(repo)} size={13} />,
           run: closeAnd(() => {
             requestIssueFocus(task.id);
             navigate({ to: "/issues" });
@@ -186,6 +190,7 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
       }
     }
 
+    const triageProvider = providerOf(triageRepo);
     const triageItems = triage.map<PaletteItem>((ticket) => ({
       key: `triage-${ticket.id}`,
       group: "Triage",
@@ -193,7 +198,7 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
       label: ticket.title,
       meta: ticket.team ?? undefined,
       keywords: ticket.mine ? "mine" : "",
-      icon: <LinearLogo size={13} />,
+      icon: <TrackerLogo provider={triageProvider} size={13} />,
       run: closeAnd(() => {
         requestTriageFocus(ticket.id);
         navigate({ to: "/triage", search: { ticket: ticket.id } });
@@ -291,9 +296,9 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
       {
         key: "act-refresh",
         group: "Actions",
-        label: "Refresh Linear and GitHub",
+        label: "Refresh tickets and GitHub",
         meta: "⌘⇧R",
-        keywords: "reload sync fetch",
+        keywords: "reload sync fetch linear jira",
         icon: <RefreshIcon size={13} />,
         run: closeAnd(refresh),
       },
@@ -344,6 +349,7 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
     toggleShortcuts,
     toggleSidebar,
     triage,
+    triageRepo,
     worktreesByRepo,
   ]);
 

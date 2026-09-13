@@ -75,6 +75,7 @@ const world = vi.hoisted(() => ({
   pulls: [] as string[],
 }));
 vi.mock("../../lib/queries", () => ({
+  useTicketProvider: () => "Linear",
   useReviewWorkItems: () => ({ data: [] }),
   usePrReviewBrief: () => ({ data: undefined }),
   // Both reads are `enabled: !!repo` in the real hooks, and that gate is what a

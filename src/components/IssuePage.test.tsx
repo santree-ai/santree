@@ -18,7 +18,8 @@ vi.mock("../lib/queries", () => ({
   useTriageDetail: () => ({ data: linear.detail }),
   useRefreshTriage: () => ({ refresh: linear.refresh, fetching: false }),
   useTriageSetState: () => ({ mutate: linear.setState }),
-  useLinearReadOnly: () => false,
+  useTrackerReadOnly: () => false,
+  useTicketProvider: () => "Linear",
 }));
 vi.mock("./IssueDiscussion", () => ({
   DiscussionPane: () => <div data-testid="discussion" />,

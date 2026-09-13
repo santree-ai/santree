@@ -14,6 +14,8 @@ vi.mock("../../state/AppContext", async (importOriginal) => ({
 }));
 vi.mock("../../lib/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/queries")>()),
+  useWorkScopeRepo: () => "acme/app",
+  useTicketProvider: () => "Linear",
   useTicketCount: () => 4,
 }));
 

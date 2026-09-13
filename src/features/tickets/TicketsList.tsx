@@ -131,7 +131,7 @@ export function TicketsList({
   const navigate = useNavigate();
   const {
     focusId,
-    setFocus,
+    openTicket,
     rightCollapsed,
     toggleRightPanel,
     selected,
@@ -159,17 +159,18 @@ export function TicketsList({
   // three-part hop — switch the app's project, hand the id over as a focus
   // request, wait for that project's tasks to land — because the inspector was
   // scoped to whichever project was active and a ticket is not scoped at all.
-  // The inspector reads through its own stable scope now, and a ticket read
-  // there is the same ticket, so a click just focuses it. The panel is expanded
+  // A click hands the inspector the row itself, the ticket and the project it
+  // was read through: a ticket from another project, or another tracker, is
+  // not one the inspector's own scope holds. The panel is expanded
   // if it was collapsed, and turned to the ticket pane — a click that selects
   // something the user can't see would read as a click that did nothing.
   const onOpen = useCallback(
     (row: Row) => {
-      setFocus(row.task.id);
+      openTicket(row);
       setRailTab("issue");
       if (rightCollapsed) toggleRightPanel();
     },
-    [setFocus, setRailTab, rightCollapsed, toggleRightPanel],
+    [openTicket, setRailTab, rightCollapsed, toggleRightPanel],
   );
 
   // Which project a ticket starts in is the gate's answer — the one project

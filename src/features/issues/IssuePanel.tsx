@@ -14,7 +14,7 @@ import type { Worktree, WorktreePr } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { DiscussionContent } from "../../components/IssueDiscussion";
 import { factsOfTask, IssueProperties } from "../../components/IssueProperties";
-import { BlockedIcon, BranchIcon, CheckIcon, LinearLogo, PlusIcon } from "../../components/icons";
+import { BlockedIcon, BranchIcon, CheckIcon, PlusIcon, TrackerLogo } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
 import { Button, EmptyState, Skeleton } from "../../components/primitives";
@@ -22,6 +22,7 @@ import { RelativeTime } from "../../components/RelativeTime";
 import { StatusGlyph } from "../../components/WorkSignals";
 import { WorktreeStats } from "../../components/WorktreeStats";
 import { useTriageDetail } from "../../lib/queries";
+import { trackerOf } from "../../lib/tracker";
 import { palette, raisedActiveStyle, statusColor, statusLabel } from "../../theme/colors";
 import { BlockerRow } from "./BlockerRow";
 import { useIssues } from "./model";
@@ -65,7 +66,7 @@ export function IssuePanel() {
   const {
     tasks,
     byId,
-    focusId,
+    focused,
     selected,
     isEligible,
     baseFor,
@@ -77,9 +78,11 @@ export function IssuePanel() {
     queueEnabled,
     run,
     runBackground,
-    repo,
+    focusRepo: repo,
   } = useIssues();
-  const focus = (focusId ? byId.get(focusId) : undefined) ?? tasks[0];
+  // Only ever the ticket that was picked. Standing the first ticket in for one
+  // this model couldn't find is how a click on one ticket showed another.
+  const focus = focused ?? undefined;
   const { data: detail } = useTriageDetail(repo, focus?.id ?? null);
 
   // "Open in graph" from a dependency row: focus + pan, and scroll the sidebar row in.
@@ -153,10 +156,10 @@ export function IssuePanel() {
             <button
               type="button"
               onClick={() => openUrl(ready.url)}
-              title="Open in Linear"
+              title={`Open in ${trackerOf(ready.trackerName)}`}
               className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 py-1 text-[10.5px] text-muted-2 hover:text-fg-2"
             >
-              <LinearLogo size={11} className="text-[color:var(--linear-brand)]" />
+              <TrackerLogo provider={trackerOf(ready.trackerName)} size={11} branded />
               Open
             </button>
           )}

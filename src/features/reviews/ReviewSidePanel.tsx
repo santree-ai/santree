@@ -34,7 +34,8 @@ import type { ReactNode } from "react";
 
 import type { AgentKind, ReviewPr } from "../../bindings";
 import { IssuePane } from "../../components/IssuePane";
-import { BranchIcon, ClockIcon, FilesIcon, LinearLogo, SparklesIcon } from "../../components/icons";
+import { BranchIcon, ClockIcon, FilesIcon, SparklesIcon } from "../../components/icons";
+import { RepoTrackerLogo } from "../../components/RepoTrackerLogo";
 import { SidePanel, type SidePanelTab } from "../../components/SidePanel";
 import { usePrReviewBrief, useReviewWorkItems, useWorktreeStatus } from "../../lib/queries";
 import { AllFilesList } from "../trees/AllFilesList";
@@ -55,8 +56,14 @@ const DEFAULT_W = 400;
 const MIN_W = 300;
 const MAX_W = 720;
 
+/** The Issue tab's mark: the tracker of the project the inbox is read through. */
+function IssueGlyph() {
+  const { repo } = useReviewsModel();
+  return <RepoTrackerLogo repo={repo} size={14} />;
+}
+
 const TABS: SidePanelTab<RailTab>[] = [
-  { tab: "issue", label: "Issue", icon: <LinearLogo size={14} /> },
+  { tab: "issue", label: "Issue", icon: <IssueGlyph /> },
   { tab: "files", label: "Files", icon: <FilesIcon size={15} /> },
   { tab: "changes", label: "Changes", icon: <BranchIcon size={15} /> },
   { tab: "history", label: "Session history", icon: <ClockIcon size={15} /> },

@@ -624,6 +624,43 @@ export function LinearLogo({ size = 18, className }: IconProps) {
   );
 }
 
+/** The Jira logomark (fills with `currentColor`). */
+export function JiraLogo({ size = 18, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+    >
+      <path d="M11.571 11.513H0a5.218 5.218 0 0 0 5.232 5.215h2.13v2.057A5.215 5.215 0 0 0 12.575 24V12.518a1.005 1.005 0 0 0-1.005-1.005zm5.723-5.756H5.736a5.215 5.215 0 0 0 5.215 5.214h2.129v2.058a5.218 5.218 0 0 0 5.215 5.214V6.758a1.001 1.001 0 0 0-1.001-1.001zM23.013 0H11.455a5.215 5.215 0 0 0 5.215 5.215h2.129v2.057A5.215 5.215 0 0 0 24 12.483V1.005A1.001 1.001 0 0 0 23.013 0Z" />
+    </svg>
+  );
+}
+
+/** The mark of the tracker a ticket comes from. `branded` tints it in that
+ *  tracker's colour, for the controls that leave santree for it. */
+export function TrackerLogo({
+  provider,
+  size,
+  className = "",
+  branded = false,
+}: IconProps & { provider: "Linear" | "Jira"; branded?: boolean }) {
+  const tint = branded
+    ? provider === "Jira"
+      ? "text-[color:var(--jira-brand)]"
+      : "text-[color:var(--linear-brand)]"
+    : "";
+  const cls = `${tint} ${className}`.trim() || undefined;
+  return provider === "Jira" ? (
+    <JiraLogo size={size} className={cls} />
+  ) : (
+    <LinearLogo size={size} className={cls} />
+  );
+}
+
 /**
  * santree's own logomark — the two stacked triangles from the app icon, filled
  * with `currentColor` so it tints like every other glyph.

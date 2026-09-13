@@ -5,15 +5,15 @@
  * arrives as a canvas event with coordinates — so the rows are built here from
  * the model and the canvas opens them through `PositionedMenu`. They are the
  * inspector's own actions (run, run in the background, the queue, the worktree
- * already on a started ticket) followed by the Linear rows every ticket menu
+ * already on a started ticket) followed by the tracker rows every ticket menu
  * shares, so a node and a list row offer the same things in the same words.
  */
 import { useMemo } from "react";
 
 import { BranchIcon, PlayIcon, QueueIcon } from "../../components/icons";
-import { linearTicketItems } from "../../components/menuRows";
+import { ticketItems } from "../../components/menuRows";
 import type { ContextMenuItem } from "../../components/primitives";
-import { useLinearIssueUrl } from "../../lib/queries";
+import { useTicketIssueUrl, useTicketProvider } from "../../lib/queries";
 import { useIssues } from "./model";
 
 export function useTicketMenuItems(id: string | null): ContextMenuItem[] {
@@ -28,7 +28,8 @@ export function useTicketMenuItems(id: string | null): ContextMenuItem[] {
     goToWorktree,
     repo,
   } = useIssues();
-  const linkFor = useLinearIssueUrl(repo);
+  const linkFor = useTicketIssueUrl(repo);
+  const provider = useTicketProvider(repo);
 
   return useMemo(() => {
     const task = id ? byId.get(id) : undefined;
@@ -68,8 +69,8 @@ export function useTicketMenuItems(id: string | null): ContextMenuItem[] {
         run: () => goToWorktree(task.id),
       });
     }
-    if (items.length > 0) items.push({ kind: "rule", key: "rule-linear" });
-    items.push(...linearTicketItems(task.id, linkFor(task.id)));
+    if (items.length > 0) items.push({ kind: "rule", key: "rule-tracker" });
+    items.push(...ticketItems(task.id, linkFor(task.id), provider));
     return items;
   }, [
     id,
@@ -82,5 +83,6 @@ export function useTicketMenuItems(id: string | null): ContextMenuItem[] {
     toggle,
     goToWorktree,
     linkFor,
+    provider,
   ]);
 }

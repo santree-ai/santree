@@ -35,6 +35,7 @@ vi.mock("./model", async (importOriginal) => ({
 }));
 
 vi.mock("../../lib/queries", () => ({
+  useTicketProvider: () => "Linear",
   useAgentAuth: () => ({ data: { connected: true } }),
   useCodexAccount: () => ({ data: { connected: true } }),
   useCodexHealth: () => ({ data: { available: true } }),

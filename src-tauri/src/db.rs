@@ -325,6 +325,7 @@ mod tests {
     (29, "review work items check source", "6d0aa9c4560e7f5715a50798033b74849d0ca197b371f7cd2357f5558ca2e3d5e91fb84a4023cbe50f26b5a961f011c0"),
     (30, "worktree tabs review identity", "f5db006bd8efb71cfcfcc4873560c48b2fd6a1c060130d8028fd26e1d0641b13107eeb0d27367f93f627f32de83aea34"),
     (31, "review worktrees", "ef7671bf655d4db172cc37eaf141fb0119992360efdafab0e4b98beee79b93cfc5965d1d557c62b0059857736f0ca7c8"),
+    (32, "jira sites", "8ab36f1e5c61fd0b7a7fd1dba2e75c36fa02743ffdcc5ee2933f6105c51f1a576d2fb8a5e16bafbc5ab93f8d8740c879"),
     ];
 
     /// See [`SHIPPED_MIGRATIONS`]. Checked against the embedded set, so it fails at

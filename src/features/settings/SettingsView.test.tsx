@@ -44,8 +44,11 @@ vi.mock("./sections/Environment", () => ({
 vi.mock("./sections/General", () => ({ GeneralSection: () => <div>General pane</div> }));
 vi.mock("./sections/GitHub", () => ({ GitHubSection: () => <div>GitHub pane</div> }));
 vi.mock("./sections/Linear", () => ({ LinearSection: () => <div>Linear pane</div> }));
+vi.mock("./sections/Jira", () => ({ JiraSection: () => <div>Jira pane</div> }));
 vi.mock("./sections/Prompts", () => ({ PromptsSection: () => <div>Prompts pane</div> }));
-vi.mock("./sections/RepoLinear", () => ({ RepoLinearSection: () => <div>Repo Linear pane</div> }));
+vi.mock("./sections/RepoTracker", () => ({
+  RepoTrackerSection: () => <div>Repo tracker pane</div>,
+}));
 vi.mock("./sections/Terminal", () => ({ TerminalSection: () => <div>Terminal pane</div> }));
 vi.mock("./sections/Usage", () => ({ UsageSection: () => <div>Usage pane</div> }));
 vi.mock("./sections/Work", () => ({ WorkSection: () => <div>Work pane</div> }));
@@ -65,9 +68,9 @@ describe("Settings → nav", () => {
     searchParams = {};
   });
 
-  it("groups the two integrations under an Integrations heading", () => {
+  it("groups the integrations under an Integrations heading", () => {
     render(<SettingsView />);
-    expect(groupItems("Integrations")).toEqual(["Linear", "GitHub"]);
+    expect(groupItems("Integrations")).toEqual(["Linear", "Jira", "GitHub"]);
   });
 
   it("groups the two harnesses under an Agents heading", () => {
@@ -112,8 +115,8 @@ describe("Settings → nav", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Repo" }));
 
     // The repo scope keeps its own, shorter list — no app-level integrations or
-    // harnesses, and the Linear item is the per-repo org picker.
-    expect(screen.getByText("Repo Linear pane")).toBeInTheDocument();
+    // harnesses, and the tracker item picks where its tickets come from.
+    expect(screen.getByText("Repo tracker pane")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "GitHub" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Agents", level: 2 })).toBeNull();
     expect(groupItems("Workflow defaults")).toEqual(["Triage", "Work", "Reviews"]);

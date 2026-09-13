@@ -34,7 +34,8 @@ vi.mock("../../lib/queries", () => ({
     data.checkoutAskedFor.push(repo);
     return { data: repo ? data.review : undefined };
   },
-  useLinearIssueUrl: () => (id: string) => `https://linear.app/acme/issue/${id}`,
+  useTicketIssueUrl: () => (id: string) => `https://linear.app/acme/issue/${id}`,
+  useTicketProvider: () => "Linear",
   useRemoveReviewWorkspace: () => ({ mutate: data.removeReview }),
 }));
 vi.mock("../../features/trees/useWorktreeDeletion", () => ({

@@ -781,6 +781,11 @@ export const commands = {
 	id: string,
 	title: string,
 	priority: Priority,
+	/**
+	 *  Which provider this issue came from — drives the logo, URL format, and
+	 *  `{{ tracker_name }}` in prompt templates.
+	 */
+	trackerName?: string,
 	/**  Workflow state name (e.g. "Triage"). */
 	state: string,
 	/**  Id of the current workflow state (for the status picker's selection). */
@@ -1035,6 +1040,11 @@ export const commands = {
 	id: string,
 	title: string,
 	priority: Priority,
+	/**
+	 *  Which provider this issue came from — drives the logo, URL format, and
+	 *  `{{ tracker_name }}` in prompt templates.
+	 */
+	trackerName?: string,
 	/**  Workflow state name (e.g. "Triage"). */
 	state: string,
 	/**  Id of the current workflow state (for the status picker's selection). */
@@ -1139,6 +1149,14 @@ export const commands = {
 	linearInvalidateCaches: () => __TAURI_INVOKE<void>("linear_invalidate_caches"),
 	/**  Run the Linear OAuth flow; returns the updated org list. */
 	linearConnect: () => typedError<LinearOrg[], CmdError>(__TAURI_INVOKE("linear_connect")),
+	/**  Connection status for a repo's Jira site. */
+	jiraAuthStatus: (repo: string) => typedError<JiraStatus, CmdError>(__TAURI_INVOKE("jira_auth_status", { repo })),
+	/**  Every connected Jira Cloud site. */
+	jiraSites: () => typedError<JiraSite[], CmdError>(__TAURI_INVOKE("jira_sites")),
+	/**  Bind (or clear) the Jira site a repo uses. */
+	setRepoJiraSite: (repo: string, cloudId: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_repo_jira_site", { repo, cloudId })),
+	/**  Run the Jira OAuth flow; returns the updated site list. */
+	jiraConnect: () => typedError<JiraSite[], CmdError>(__TAURI_INVOKE("jira_connect")),
 	/**
 	 *  santree-CLI configuration detected in a registered repo that the app could
 	 *  adopt — `None` when there's nothing actionable. Detection only; tokens stay
@@ -1992,6 +2010,24 @@ export type Integrations = {
 	triage?: boolean,
 };
 
+/**  A connected Jira Cloud site (the Jira counterpart of [`LinearOrg`]). */
+export type JiraSite = {
+	cloudId: string,
+	siteName: string,
+	siteUrl: string,
+	canWrite: boolean,
+};
+
+/**  Jira connection status surfaced to the UI for a given repo. */
+export type JiraStatus = {
+	authenticated: boolean,
+	siteName: string | null,
+	/**  The site's base address — what a ticket's `/browse/<key>` link hangs off. */
+	siteUrl: string | null,
+	cloudId: string | null,
+	canWrite: boolean,
+};
+
 /**
  *  The current keep-awake state, as the chrome needs it: `supported` decides
  *  whether the toggle renders at all, `active` its on/off look.
@@ -2757,6 +2793,11 @@ export type ReadingStep = {
 export type Repo = {
 	name: string,
 	tracker: string,
+	/**
+	 *  The ticket tracker this repo's tickets come from; `None` when nothing is
+	 *  connected. The same resolution the backend dispatches reads through.
+	 */
+	provider: TicketProvider | null,
 	/**  Number of agents currently active on this repo. */
 	agents: number,
 	/**
@@ -3774,6 +3815,9 @@ export type TerminalUsage = {
 	live: boolean,
 };
 
+/**  Which ticket provider a repo uses. */
+export type TicketProvider = "Linear" | "Jira";
+
 /**
  *  The handful of tracker fields the Reviews sidebar needs to group PRs by Linear
  *  project. Deliberately not a [`Task`]: these are *other people's* issues (the
@@ -3824,6 +3868,11 @@ export type TriageDetail = {
 	id: string,
 	title: string,
 	priority: Priority,
+	/**
+	 *  Which provider this issue came from — drives the logo, URL format, and
+	 *  `{{ tracker_name }}` in prompt templates.
+	 */
+	trackerName?: string,
 	/**  Workflow state name (e.g. "Triage"). */
 	state: string,
 	/**  Id of the current workflow state (for the status picker's selection). */

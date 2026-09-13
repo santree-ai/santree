@@ -43,6 +43,7 @@ vi.mock("./model", async (importOriginal) => ({
 }));
 
 vi.mock("../../lib/queries", () => ({
+  useTicketProvider: () => "Linear",
   usePrSummary: () => ({ data: undefined }),
   usePrReviewBrief: () => ({ data: undefined }),
   useReviewWorkItems: () => ({ data: [] }),

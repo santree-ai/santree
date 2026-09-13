@@ -37,9 +37,10 @@ import { createPortal } from "react-dom";
 
 import type { AgentKind, Task, Worktree } from "../../bindings";
 import { RepoAvatar } from "../../components/chrome/RepoAvatar";
-import { BranchIcon, LinearLogo, SearchIcon } from "../../components/icons";
+import { BranchIcon, SearchIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import { Button, Segmented, Spinner, useModalA11y } from "../../components/primitives";
+import { RepoTrackerLogo } from "../../components/RepoTrackerLogo";
 import {
   useCreateWorktree,
   useRepoBranches,
@@ -190,7 +191,11 @@ export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose:
               value={tab}
               onChange={switchTab}
               options={[
-                { value: "linear", label: "Linear", icon: <LinearLogo size={11} /> },
+                {
+                  value: "linear",
+                  label: "Ticket",
+                  icon: <RepoTrackerLogo repo={repo} size={11} />,
+                },
                 { value: "branch", label: "Branch", icon: <BranchIcon size={11} /> },
               ]}
             />

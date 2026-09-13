@@ -22,11 +22,17 @@
  *  control, here only while the rail is hidden — the same hand-off Trees and
  *  Reviews make, so the button stays put across the toggle. */
 import type { AgentKind, TabKind, TriageTicket } from "../../bindings";
-import { AgentIcon, LinearLogo, TerminalIcon } from "../../components/icons";
+import { AgentIcon, TerminalIcon, TrackerLogo } from "../../components/icons";
 import { MENU_ITEM } from "../../components/primitives";
 import { PanelToggle } from "../../components/SidePanel";
 import { type StripTab, TabStrip } from "../../components/TabStrip";
-import { useAgentAuth, useCodexAccount, useCodexHealth } from "../../lib/queries";
+import {
+  useAgentAuth,
+  useCodexAccount,
+  useCodexHealth,
+  useTicketProvider,
+  useTriageOrgRepo,
+} from "../../lib/queries";
 import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { liveTabFor } from "../agents/registry";
 import { agentProvider } from "../terminal/agentProvider";
@@ -47,6 +53,9 @@ export function TriageTabBar({
   onToggleRight: () => void;
 }) {
   const termKey = triageTermKey(ticket.id);
+  // The ticket came from the triage org's project, so that project's tracker
+  // names the tab.
+  const provider = useTicketProvider(useTriageOrgRepo());
   // A tab is its process, so the ✕ ends the PTY before the tab is forgotten.
   // The rows get that from `useTabSessions`, exactly as a worktree's do; an
   // investigation hangs off the ticket's own surface rather than a row, which
@@ -60,7 +69,11 @@ export function TriageTabBar({
   };
 
   const items: StripTab<TriageMainTab>[] = [
-    { tab: "linear", label: "Linear", icon: <LinearLogo size={11} className="text-muted-3" /> },
+    {
+      tab: "linear",
+      label: provider,
+      icon: <TrackerLogo provider={provider} size={11} className="text-muted-3" />,
+    },
     ...tabs.providers.map((agent) => ({
       tab: agentTab(agent),
       label: agentProvider(agent).label,

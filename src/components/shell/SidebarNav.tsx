@@ -10,8 +10,9 @@
  * Counts are the standing "how much is waiting" signal now that no view carries a
  * header summary of its own; they are plain totals.
  *
- * Tickets wears the Linear mark: it is the Linear queue, and the mark is what
- * every ticket row further down the rail already leads with.
+ * Tickets wears its tracker's mark — Linear's or Jira's, whichever the project the
+ * list reads through uses: it is that tracker's queue, and the mark is what every
+ * ticket row further down the rail already leads with.
  *
  * **Reviews and Triage are deliberately absent.** One global Reviews entry could
  * only ever show one number for every project at once, which is the wrong shape
@@ -26,9 +27,9 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
-import { useTicketCount } from "../../lib/queries";
+import { useTicketCount, useTicketProvider, useWorkScopeRepo } from "../../lib/queries";
 import { useAppUi } from "../../state/AppContext";
-import { LinearLogo, SearchIcon } from "../icons";
+import { SearchIcon, TrackerLogo } from "../icons";
 
 interface NavItem {
   label: string;
@@ -47,10 +48,16 @@ export function SidebarNav() {
   const { toggleCommandPalette } = useAppUi();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const tasks = useTicketCount();
+  const provider = useTicketProvider(useWorkScopeRepo());
 
   const items: NavItem[] = [
     { label: "Search", icon: <SearchIcon size={13} />, action: toggleCommandPalette, hint: "⌘K" },
-    { label: "Tickets", path: "/issues", icon: <LinearLogo size={12} />, count: tasks },
+    {
+      label: "Tickets",
+      path: "/issues",
+      icon: <TrackerLogo provider={provider} size={12} />,
+      count: tasks,
+    },
   ];
 
   return (

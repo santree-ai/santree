@@ -24,14 +24,8 @@ import { type ReactNode, useCallback, useRef } from "react";
 
 import type { ChangedFile } from "../../bindings";
 import { IssuePane } from "../../components/IssuePane";
-import {
-  BranchIcon,
-  ClockIcon,
-  FilesIcon,
-  GitHubLogo,
-  LinearLogo,
-  SparklesIcon,
-} from "../../components/icons";
+import { BranchIcon, ClockIcon, FilesIcon, GitHubLogo, SparklesIcon } from "../../components/icons";
+import { RepoTrackerLogo } from "../../components/RepoTrackerLogo";
 import { SidePanel, type SidePanelTab } from "../../components/SidePanel";
 import {
   usePrReviewBrief,
@@ -69,8 +63,14 @@ const MIN_W = 256;
 const MAX_W = 680;
 const DEFAULT_W = 340;
 
+/** The Issue tab's mark: the tracker of the project whose worktree is open. */
+function IssueGlyph() {
+  const { repo } = useTrees();
+  return <RepoTrackerLogo repo={repo} size={14} />;
+}
+
 const TABS: SidePanelTab<FileTab>[] = [
-  { tab: "issue", label: "Issue", icon: <LinearLogo size={14} /> },
+  { tab: "issue", label: "Issue", icon: <IssueGlyph /> },
   { tab: "files", label: "Files", icon: <FilesIcon size={15} /> },
   { tab: "changes", label: "Changes", icon: <BranchIcon size={15} /> },
   { tab: "history", label: "Session history", icon: <ClockIcon size={15} /> },

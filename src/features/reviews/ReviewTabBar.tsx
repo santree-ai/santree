@@ -19,13 +19,19 @@ import {
   AgentIcon,
   BranchIcon,
   GitHubLogo,
-  LinearLogo,
   TerminalIcon,
+  TrackerLogo,
 } from "../../components/icons";
 import { MENU_ITEM } from "../../components/primitives";
 import { PanelToggle } from "../../components/SidePanel";
 import { type StripTab, TabStrip } from "../../components/TabStrip";
-import { useAgentAuth, useCodexAccount, useCodexHealth, useReviewDrafts } from "../../lib/queries";
+import {
+  useAgentAuth,
+  useCodexAccount,
+  useCodexHealth,
+  useReviewDrafts,
+  useTicketProvider,
+} from "../../lib/queries";
 import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { palette } from "../../theme/colors";
 import { liveTabFor } from "../agents/registry";
@@ -45,7 +51,8 @@ import {
 import { useWorktreeGate } from "./WorktreeGate";
 
 export function ReviewTabBar({ pr, tabs }: { pr: ReviewPr; tabs: ReviewTabs }) {
-  const { infoCollapsed, toggleInfo } = useReviewsModel();
+  const { infoCollapsed, toggleInfo, repo } = useReviewsModel();
+  const provider = useTicketProvider(repo);
   const { data: drafts } = useReviewDrafts(pr.repo, pr.number);
   const { closeWithSession } = useTabSessions(tabs.checkout.worktreeId, tabs.rows, tabs.closeTab);
   // The AI review tabs' half of the same rule: a tab is its process, so the ✕
@@ -80,8 +87,8 @@ export function ReviewTabBar({ pr, tabs }: { pr: ReviewPr; tabs: ReviewTabs }) {
       ? [
           {
             tab: "issueView" as const,
-            label: "Linear",
-            icon: <LinearLogo size={11} className="text-muted-3" />,
+            label: provider,
+            icon: <TrackerLogo provider={provider} size={11} className="text-muted-3" />,
             onClose: tabs.closeIssueView,
           },
         ]

@@ -7,16 +7,16 @@ it, and how releases ship. For what santree *is*, read the
 
 santree is **Tauri 2 + React 19 + TanStack** with a **fully-typed
 Rust ↔ TypeScript bridge** (tauri-specta). Every view is backed by live data:
-Linear (GraphQL + OAuth), a SQLite store, real `git`/GitHub, and real kernel
+Linear (GraphQL) and Jira Cloud (REST) over OAuth, a SQLite store, real `git`/GitHub, and real kernel
 PTYs. **There is no mock/sample data anywhere.** When a backend isn't
-connected (no Linear org, no `gh` auth, no repo path) commands return
+connected (no Linear workspace or Jira site, no `gh` auth, no repo path) commands return
 real-but-empty results and the view shows its empty state — the frontend
 never fabricates data. (The one exception is the dev-only screenshot fixture
 mode, below, which never ships.)
 
 ```
 React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
-          → #[tauri::command] → live backend (Linear / SQLite / git / GitHub / PTY)
+          → #[tauri::command] → live backend (Linear or Jira / SQLite / git / GitHub / PTY)
             └─ when not connected: real-but-empty result → view renders its empty state
 ```
 
@@ -92,8 +92,8 @@ The frontend never calls `invoke` directly and never hard-codes data. Follow the
 1. **A view** (e.g. `src/features/tickets/TicketsView.tsx`) consumes a typed query hook.
 2. **`src/lib/queries.ts`** — TanStack Query hooks (`useTasks`, `useTriageTickets`, …) wrapping the generated client. Caching, loading states, and **optimistic mutations** live here (`useOptimisticMutation`: patch the cache, roll back on error, invalidate on settle).
 3. **`src/bindings.ts`** — **generated** by `tauri-specta`. The typed `commands.*` and every domain type, mirroring Rust exactly. _Never hand-edit this file._
-4. **`src-tauri/src/commands.rs`** — thin `#[tauri::command]` wrappers that forward to a live backend, e.g. `linear::…(db, repo).await?.unwrap_or_default()`. When a backend isn't connected the command returns a real-but-empty result (`Ok(vec![])`, `None`, …) — never sample data.
-5. **Live backends** — `src-tauri/src/{linear,db,repo,settings,terminal,github,worktree,git,reviews}.rs` (Linear GraphQL + OAuth + token store, the sqlx pool, repo registry, settings, PTY, GitHub API, git worktree management, PR reviews). Domain types live in `crates/core/src/domain.rs` and derive `specta::Type`, which is how their shapes reach `bindings.ts`. `crates/core/src/config.rs` holds the only static data in the app — real canonical config (agent catalog, stage metadata, default settings), not samples.
+4. **`src-tauri/src/commands.rs`** — thin `#[tauri::command]` wrappers that forward to a live backend, e.g. `tracker::…(db, repo).await?.unwrap_or_default()`. When a backend isn't connected the command returns a real-but-empty result (`Ok(vec![])`, `None`, …) — never sample data.
+5. **Live backends** — `src-tauri/src/{tracker,linear,jira,oauth,db,repo,settings,terminal,github,worktree,git,reviews}.rs` (the tracker dispatch, Linear GraphQL, Jira Cloud REST, the OAuth flow + keychain token store they share, the sqlx pool, repo registry, settings, PTY, GitHub API, git worktree management, PR reviews). Domain types live in `crates/core/src/domain.rs` and derive `specta::Type`, which is how their shapes reach `bindings.ts`. `crates/core/src/config.rs` holds the only static data in the app — real canonical config (agent catalog, stage metadata, default settings), not samples.
 
 Presentation (colors, labels) is the frontend's job: `src/theme/colors.ts` maps the plain Rust enums (`TaskStatus`, `Tone`, …) to concrete colors. The accent color is a runtime CSS variable so the Appearance setting re-themes everything.
 
@@ -129,7 +129,7 @@ cargo test        # Rust: core logic + bindings export
 pnpm test         # Frontend: Vitest
 ```
 
-- **`crates/core`** — unit tests for Linear→domain mapping (`linear.rs`) and the dagre-free graph layout helpers (`layout.rs`).
+- **`crates/core`** — unit tests for Linear→domain and Jira→domain mapping (`linear.rs`, `jira.rs`) and the dagre-free graph layout helpers (`layout.rs`).
 - **`src-tauri`** — `export_bindings_succeeds` guards that the command set always produces valid bindings.
 - **Frontend (Vitest)** — presentation helpers (`theme/colors`, `lib/format`), component behavior (`Markdown`, `ErrorBoundary`, `TerminalView`, `TaskNotes`, `ReviewWorklist`), and pure logic (`buildChangeTree`, Trees `model`, terminal agent seeding).
 
@@ -270,11 +270,11 @@ from. See `src/dev/fixtures/README.md` for what is fake and what is real.
 ```
 .
 ├── crates/core/               # pure domain + static config — NO Tauri dep, unit-testable
-│   └── src/{domain,config,linear,layout}.rs  # types · canonical config/defaults · Linear→domain mapping · dagre-free graph helpers
+│   └── src/{domain,config,linear,jira,layout}.rs  # types · canonical config/defaults · tracker→domain mapping · dagre-free graph helpers
 ├── crates/pty/                # PtyManager: real process behind a real PTY (Tauri-agnostic)
 ├── src-tauri/                 # THIN Tauri adapter (wiring + commands + live backends)
 │   ├── src/{lib,commands}.rs  #   builder + registration + #[tauri::command] wrappers
-│   ├── src/{linear,db,repo,settings,terminal,github,worktree,git,reviews}.rs  # live backends (GraphQL/OAuth, sqlx, PTY, GitHub API, worktrees, PR reviews)
+│   ├── src/{tracker,linear,jira,oauth,db,repo,settings,terminal,github,worktree,git,reviews}.rs  # live backends (tracker dispatch, Linear/Jira, OAuth, sqlx, PTY, GitHub API, worktrees, PR reviews)
 │   └── migrations/            #   SQLite schema, applied on startup
 ├── website/                   # the landing page + docs (TanStack Start, prerendered to GitHub Pages)
 └── src/                       # React frontend (SPA)

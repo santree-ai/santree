@@ -1,6 +1,6 @@
 /**
- * The rail's prompt to connect Linear: drawn only once Linear has said nothing is
- * connected, and it goes to the one place a workspace is connected.
+ * The rail's prompt to connect a tracker: drawn only once both trackers have said
+ * nothing is connected, and it goes to the place each one is connected.
  */
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,39 +13,44 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 vi.mock("../../lib/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/queries")>()),
-  useLinearConnected: () => state.connected,
+  useTrackerConnected: () => state.connected,
 }));
 
-import { LinearConnectPrompt } from "./LinearConnectPrompt";
+import { TrackerConnectPrompt } from "./TrackerConnectPrompt";
 
 beforeEach(() => {
   state.navigate.mockClear();
 });
 
-describe("LinearConnectPrompt", () => {
+describe("TrackerConnectPrompt", () => {
   /** An unknown is not a no: a cold start must not flash a warning at an install
    *  that is connected. */
-  it("draws nothing while the org read is in flight", () => {
+  it("draws nothing while the connection reads are in flight", () => {
     state.connected = null;
-    const { container } = render(<LinearConnectPrompt />);
+    const { container } = render(<TrackerConnectPrompt />);
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("draws nothing once a workspace is connected", () => {
+  it("draws nothing once a tracker is connected", () => {
     state.connected = true;
-    const { container } = render(<LinearConnectPrompt />);
+    const { container } = render(<TrackerConnectPrompt />);
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("says Linear isn't connected, and takes you to its settings", () => {
+  it("says nothing is connected, and takes you to either tracker's settings", () => {
     state.connected = false;
-    render(<LinearConnectPrompt />);
+    render(<TrackerConnectPrompt />);
 
-    expect(screen.getByText("Linear isn't connected")).toBeInTheDocument();
+    expect(screen.getByText("No ticket tracker connected")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
-    expect(state.navigate).toHaveBeenCalledWith({
+    expect(state.navigate).toHaveBeenLastCalledWith({
       to: "/settings",
       search: { section: "linear" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect Jira" }));
+    expect(state.navigate).toHaveBeenLastCalledWith({
+      to: "/settings",
+      search: { section: "jira" },
     });
   });
 });

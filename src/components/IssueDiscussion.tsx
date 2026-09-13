@@ -1,14 +1,19 @@
 /**
  * Shared issue "discussion" rendering: the markdown description plus the
  * threaded comment list, with inline images. Used by the Triage view's main
- * pane and the Issues view's Description tab so both render Linear issues
+ * pane and the Issues view's Description tab so both render tickets
  * identically. Memoized on `detail` so toggling visibility never re-parses the
  * markdown — only genuinely new detail data does.
  */
 import { memo, useState } from "react";
 
 import type { TriageComment, TriageDetail } from "../bindings";
-import { LINEAR_READ_ONLY_HINT, useAddComment, useLinearReadOnly } from "../lib/queries";
+import {
+  TRACKER_READ_ONLY_HINT,
+  useAddComment,
+  useTicketProvider,
+  useTrackerReadOnly,
+} from "../lib/queries";
 import { Avatar } from "./Avatar";
 import { Markdown } from "./Markdown";
 import { Button, Skeleton } from "./primitives";
@@ -43,7 +48,7 @@ function CommentComposer({
 }) {
   const [body, setBody] = useState("");
   const add = useAddComment(repo);
-  const readOnly = useLinearReadOnly(repo);
+  const readOnly = useTrackerReadOnly(repo);
   const trimmed = body.trim();
 
   const submit = () => {
@@ -80,14 +85,14 @@ function CommentComposer({
             onClose();
           }
         }}
-        placeholder={readOnly ? "Linear is connected read-only" : placeholder}
+        placeholder={readOnly ? "Connected read-only" : placeholder}
         disabled={readOnly}
         rows={parentId ? 2 : 3}
         className="w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] leading-[1.55] text-fg-2 placeholder:text-muted-4 focus:border-line-strong focus:outline-none"
       />
       <div className="mt-1.5 flex items-center justify-end gap-2">
         <span className="mr-auto text-[9.5px] text-muted-4">
-          {readOnly ? LINEAR_READ_ONLY_HINT : <span className="font-mono">⌘⏎ to send</span>}
+          {readOnly ? TRACKER_READ_ONLY_HINT : <span className="font-mono">⌘⏎ to send</span>}
         </span>
         {onClose && (
           <Button variant="ghost" size="sm" onClick={onClose}>
@@ -127,7 +132,9 @@ function CommentItem({
   ticketId: string;
 }) {
   const [replying, setReplying] = useState(false);
-  const readOnly = useLinearReadOnly(repo);
+  const readOnly = useTrackerReadOnly(repo);
+  // Jira comments are flat, so a Jira ticket offers no Reply to post into one.
+  const threaded = useTicketProvider(repo) !== "Jira";
   return (
     <div
       className="rounded-[10px] border border-hairline bg-panel px-3.5 py-3"
@@ -149,8 +156,10 @@ function CommentItem({
       )}
 
       {/* Reply targets this thread's root (Linear threads are one level deep).
-          Hidden for optimistic comments — there's no real id to reply to yet. */}
-      {!isPending(comment) &&
+          Hidden for optimistic comments — there's no real id to reply to yet —
+          and on a Jira ticket, whose comments have no threads. */}
+      {threaded &&
+        !isPending(comment) &&
         (replying ? (
           <div className="mt-3 border-l-2 border-line-2 pl-3.5">
             <CommentComposer
@@ -167,7 +176,7 @@ function CommentItem({
             type="button"
             onClick={() => setReplying(true)}
             disabled={readOnly}
-            title={readOnly ? LINEAR_READ_ONLY_HINT : undefined}
+            title={readOnly ? TRACKER_READ_ONLY_HINT : undefined}
             className="mt-2.5 cursor-pointer text-[11px] font-medium text-muted-3 hover:text-fg-2 disabled:cursor-default disabled:opacity-50 disabled:hover:text-muted-3"
           >
             Reply

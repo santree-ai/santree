@@ -142,7 +142,7 @@ fn render_conversation(detail: &PrDetail) -> String {
 /// run beside the GitHub one instead of behind it.
 async fn ticket_detail(db: &Db, repo: &str, ticket_id: Option<&str>) -> Option<TriageDetail> {
     let id = ticket_id?;
-    crate::linear::triage_detail(db, repo, id).await.ok()?
+    crate::tracker::triage_detail(db, repo, id).await.ok()?
 }
 
 // ── The review sessions' opening prompts ─────────────────────────────────────

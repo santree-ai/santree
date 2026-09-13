@@ -22,14 +22,19 @@ import {
   AgentIcon,
   GitHubLogo,
   GlobeIcon,
-  LinearLogo,
   PlayIcon,
   TerminalIcon,
+  TrackerLogo,
 } from "../../components/icons";
 import { MENU_ITEM } from "../../components/primitives";
 import { PanelToggle } from "../../components/SidePanel";
 import { type StripTab, TabStrip } from "../../components/TabStrip";
-import { useAgentAuth, useCodexAccount, useCodexHealth } from "../../lib/queries";
+import {
+  useAgentAuth,
+  useCodexAccount,
+  useCodexHealth,
+  useTicketProvider,
+} from "../../lib/queries";
 import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { BASE_ID, extraTab, type MainTab, useTrees } from "./model";
 import { useTabSessions } from "./useTabSessions";
@@ -56,7 +61,9 @@ export function MainTabBar() {
     runSetup,
     rightCollapsed,
     toggleRightPanel,
+    repo,
   } = useTrees();
+  const provider = useTicketProvider(repo);
   const { closeWithSession } = useTabSessions(activeId, tabs, closeTab);
   const isBase = activeId === BASE_ID;
 
@@ -91,8 +98,8 @@ export function MainTabBar() {
       ? [
           {
             tab: "issueView" as const,
-            label: "Linear",
-            icon: <LinearLogo size={11} className="text-muted-3" />,
+            label: provider,
+            icon: <TrackerLogo provider={provider} size={11} className="text-muted-3" />,
             onClose: closeIssueView,
           },
         ]

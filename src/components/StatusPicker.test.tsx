@@ -6,7 +6,7 @@ import { StatusPicker } from "./StatusPicker";
 // The picker only pulls the shared copy out of the queries module; mocking it
 // keeps the test off the Tauri bridge that module imports.
 vi.mock("../lib/queries", () => ({
-  LINEAR_READ_ONLY_HINT: "Linear is connected read-only.",
+  TRACKER_READ_ONLY_HINT: "Linear is connected read-only.",
 }));
 
 const detail = {

@@ -47,15 +47,9 @@ import {
   type ReviewProjectCounts,
   useMergeQueue,
 } from "../../lib/queries";
-import {
-  ChevronDownIcon,
-  ChevronRightIcon,
-  GitHubLogo,
-  LinearLogo,
-  MergeQueueIcon,
-  PrIcon,
-} from "../icons";
+import { ChevronDownIcon, ChevronRightIcon, GitHubLogo, MergeQueueIcon, PrIcon } from "../icons";
 import { MarkdownTitle } from "../Markdown";
+import { RepoTrackerLogo } from "../RepoTrackerLogo";
 import {
   BAND_LABEL_X,
   BandHeading,
@@ -692,7 +686,7 @@ function ReviewPrRow({
     `${pr.repo}#${pr.number}`,
     pr.isDraft ? "Draft" : null,
     depth > 0 ? `Stacked on ${pr.baseRef}` : null,
-    ticket ? `Linear · ${ticket}` : null,
+    ticket ? `Ticket ${ticket}` : null,
   ]
     .filter(Boolean)
     .join("\n");
@@ -729,7 +723,7 @@ function ReviewPrRow({
             <MarkdownTitle className="min-w-0 flex-1 truncate text-[13px] leading-5 font-medium text-fg-2">
               {pr.title}
             </MarkdownTitle>
-            {/* Decorative, like the Linear mark beside it: the row's name and
+            {/* Decorative, like the ticket mark beside it: the row's name and
               tooltip already say it's a draft. */}
             {pr.isDraft && (
               <span aria-hidden className="flex flex-none items-center">
@@ -741,7 +735,7 @@ function ReviewPrRow({
               own would never open. */}
             {ticket && (
               <span aria-hidden className="flex flex-none items-center text-muted-4">
-                <LinearLogo size={11} />
+                <RepoTrackerLogo repo={pr.project ?? ""} size={11} />
               </span>
             )}
           </div>

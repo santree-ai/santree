@@ -144,6 +144,18 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
       return override === undefined ? real("resolve_setting", a) : override;
     },
 
+    // ── Jira ──────────────────────────────────────────────────────────────
+    // The fixture company is a Linear shop; answering here keeps a real
+    // connected Jira site from leaking into a capture.
+    jira_sites: () => [],
+    jira_auth_status: () => ({
+      authenticated: false,
+      siteName: null,
+      siteUrl: null,
+      cloudId: null,
+      canWrite: false,
+    }),
+
     // ── Linear ────────────────────────────────────────────────────────────
     linear_auth_status: (): LinearStatus => ({
       authenticated: true,

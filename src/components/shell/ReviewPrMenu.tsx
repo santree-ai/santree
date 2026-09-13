@@ -21,14 +21,15 @@ import { reviewTreeId } from "../../features/reviews/checkoutSource";
 import { ticketIdFor } from "../../features/reviews/ticket";
 import { useWorktreeDeletion } from "../../features/trees/useWorktreeDeletion";
 import {
-  useLinearIssueUrl,
   useRemoveReviewWorkspace,
   useReviewCheckout,
+  useTicketIssueUrl,
+  useTicketProvider,
   useWorktreePrs,
   useWorktrees,
 } from "../../lib/queries";
 import { useAppUi } from "../../state/AppContext";
-import { BranchIcon, CopyIcon, GitHubLogo, LinearLogo, LinkIcon, TrashIcon } from "../icons";
+import { BranchIcon, CopyIcon, GitHubLogo, LinkIcon, TrackerLogo, TrashIcon } from "../icons";
 import { copyText } from "../menuRows";
 import { ConfirmDialog, ContextMenu, type ContextMenuItem } from "../primitives";
 
@@ -44,7 +45,8 @@ export function ReviewPrMenu({ pr, children }: { pr: ReviewPr; children: ReactNo
   const { data: worktrees = [] } = useWorktrees(repo);
   const { data: worktreePrs = [] } = useWorktreePrs(repo);
   const { data: review } = useReviewCheckout(armed ? repo : "", pr.repo, pr.number);
-  const linkFor = useLinearIssueUrl(repo);
+  const linkFor = useTicketIssueUrl(repo);
+  const provider = useTicketProvider(repo);
   const { deleteWorktree } = useWorktreeDeletion(repo);
   const removeReview = useRemoveReviewWorkspace(repo);
 
@@ -93,9 +95,9 @@ export function ReviewPrMenu({ pr, children }: { pr: ReviewPr; children: ReactNo
           { kind: "rule", key: "rule-ticket" },
           {
             kind: "action",
-            key: "open-linear",
-            label: "Open ticket in Linear",
-            icon: <LinearLogo size={12} />,
+            key: "open-tracker",
+            label: `Open ticket in ${provider}`,
+            icon: <TrackerLogo provider={provider} size={12} />,
             disabled: ticketUrl === null,
             run: () => {
               if (ticketUrl) void openUrl(ticketUrl);

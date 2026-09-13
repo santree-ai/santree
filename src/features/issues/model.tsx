@@ -185,6 +185,14 @@ export function countLaunchSuccesses<T>(results: PromiseSettledResult<T | null>[
   return results.filter((r) => r.status === "fulfilled" && r.value !== null).length;
 }
 
+/** A ticket as the cross-project list hands it over: the ticket, the project it
+ *  was read through, and every project that could start it. */
+export interface OpenedTicket {
+  repo: string;
+  repos: string[];
+  task: Task;
+}
+
 interface IssuesModel {
   tasks: Task[];
   /** Tasks indexed by id — shared so consumers don't each rebuild the map. */
@@ -205,6 +213,14 @@ interface IssuesModel {
   repo: string;
   selected: Record<string, boolean>;
   focusId: string;
+  /** The focused ticket, wherever it was read. A list row can come from any
+   *  project while `tasks` holds only the Work scope's, so a ticket opened from
+   *  another project is known from its row. Null while nothing is focused. */
+  focused: Task | null;
+  /** The project the focused ticket is read through: its row's project when it
+   *  was opened from the list, else the scope. Its detail and notes are read
+   *  here — never through a project that merely has a ticket with the same id. */
+  focusRepo: string;
   focusProject: string | null;
   /** The configured Work agent — what a queued ticket runs with unless the
    *  queue pane gave it a pick of its own (see `agentFor`). */
@@ -243,6 +259,9 @@ interface IssuesModel {
    *  empties the selection on the way. */
   enqueueIn: (repo: string, id: string) => void;
   setFocus: (id: string) => void;
+  /** Focus a ticket opened from the cross-project list, keeping the project it
+   *  came from (see {@link OpenedTicket}). */
+  openTicket: (row: OpenedTicket) => void;
   /** Focus a ticket and pan/zoom the graph to it (from the inspector's "Open in graph"). */
   revealInGraph: (id: string) => void;
   /** Focus a project and pan the graph to its band (from the sidebar project header). */
@@ -450,6 +469,32 @@ export function IssuesProvider({
       });
     },
     [byId],
+  );
+
+  // The list spans every project while `tasks` holds the scope's alone, so a
+  // ticket opened from the list is remembered with the project it was read
+  // through. The inspector then shows *that* ticket — never the scope's first
+  // one in its place, nor a same-id ticket from another tracker.
+  const [opened, setOpened] = useState<OpenedTicket | null>(null);
+  const openTicket = useCallback(
+    (row: OpenedTicket) => {
+      setOpened(row);
+      focusTask(row.task.id);
+    },
+    [focusTask],
+  );
+  const openedRow = opened !== null && opened.task.id === focusId ? opened : null;
+  const focused = openedRow?.task ?? byId.get(focusId) ?? null;
+  const focusRepo = openedRow?.repo ?? scopeRepo;
+  /** A ticket by id: the opened row's when it is that ticket, else the scope's. */
+  const taskOf = useCallback(
+    (id: string) => (openedRow?.task.id === id ? openedRow.task : byId.get(id)),
+    [openedRow, byId],
+  );
+  /** Where a ticket may start: an opened row's own projects, else the scope's org. */
+  const candidatesFor = useCallback(
+    (id: string) => (openedRow?.task.id === id ? openedRow.repos : candidates),
+    [openedRow, candidates],
   );
 
   const revealInGraph = useCallback(
@@ -737,7 +782,7 @@ export function IssuesProvider({
   // navigate, or background) before the async create resolves.
   const startOne = useCallback(
     (repo: string, id: string, onCreated: (task: Task) => void, quiet: boolean, stack: boolean) => {
-      const task = byId.get(id);
+      const task = taskOf(id);
       if (!task || !isEligible(task)) return;
       setPending(null);
       const project = task.project === NO_PROJECT ? null : task.project;
@@ -769,7 +814,7 @@ export function IssuesProvider({
       });
     },
     [
-      byId,
+      taskOf,
       isEligible,
       agentFor,
       addPendingLaunches,
@@ -816,16 +861,16 @@ export function IssuesProvider({
    *  none of them can answer it with "wherever the view is pointed". */
   const startResolved = useCallback(
     (id: string, action: string, onCreated: (task: Task, repo: string) => void, quiet: boolean) => {
-      const task = byId.get(id);
+      const task = taskOf(id);
       if (!task) return;
-      void askRepo(candidates, action).then((repo) => {
+      void askRepo(candidatesFor(id), action).then((repo) => {
         if (!repo) return;
         beginLaunch([task], (_setup, stack) =>
           startOne(repo, id, (t) => onCreated(t, repo), quiet, stack),
         );
       });
     },
-    [byId, candidates, askRepo, beginLaunch, startOne],
+    [taskOf, candidatesFor, askRepo, beginLaunch, startOne],
   );
 
   // Run a single ticket now: create its worktree and jump to Trees, starting the
@@ -916,6 +961,8 @@ export function IssuesProvider({
       prByTask,
       selected,
       focusId,
+      focused,
+      focusRepo,
       focusProject,
       launchAgent,
       queueAgents,
@@ -934,6 +981,7 @@ export function IssuesProvider({
       enqueueIn,
       goToWorktree,
       setFocus: focusTask,
+      openTicket,
       revealInGraph,
       revealProject,
       toggleActionableOnly,
@@ -959,6 +1007,8 @@ export function IssuesProvider({
       prByTask,
       selected,
       focusId,
+      focused,
+      focusRepo,
       focusProject,
       launchAgent,
       queueAgents,
@@ -977,6 +1027,7 @@ export function IssuesProvider({
       enqueueIn,
       goToWorktree,
       focusTask,
+      openTicket,
       revealInGraph,
       revealProject,
       toggleActionableOnly,

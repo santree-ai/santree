@@ -20,15 +20,16 @@ use santree_core::{
         AgentAuth, AgentDef, AgentKind, AgentProcess, AgentSession, AgentVersionStatus,
         AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
         ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
-        EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget, GithubStatus, LegacyCliMigration,
-        LinearApiBudget, LinearOrg, LinearStatus, LinearTeam, LogExport, MergeQueueView,
-        NewInlineComment, NewPr, NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo,
-        PromptLayer, PromptPreview, PromptWorkItemSample, Repo, RepoBranch, ResourceUsage,
-        ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
-        ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail,
-        SessionState, SessionSubagent, SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task,
-        TicketRef, TriageDetail, TriageSchedule, TriageSession, TriageTicket, UsageReport,
-        ViewedMarks, Worktree, WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
+        EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget, GithubStatus, JiraSite,
+        JiraStatus, LegacyCliMigration, LinearApiBudget, LinearOrg, LinearStatus, LinearTeam,
+        LogExport, MergeQueueView, NewInlineComment, NewPr, NewReviewWorkItem, Opener, PrDetail,
+        PrDraft, PrLabel, PromptInfo, PromptLayer, PromptPreview, PromptWorkItemSample, Repo,
+        RepoBranch, ResourceUsage, ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent,
+        ReviewInbox, ReviewPr, ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer,
+        ScriptInfo, SessionDetail, SessionState, SessionSubagent, SessionUsageLive, Settings,
+        TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail, TriageSchedule, TriageSession,
+        TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreeLaunch, WorktreePr,
+        WorktreeSession, WorktreeTab,
     },
 };
 
@@ -42,6 +43,7 @@ use crate::english_tutor;
 use crate::error::CmdResult;
 use crate::git_watch::WorktreeWatcher;
 use crate::github;
+use crate::jira;
 use crate::legacy;
 use crate::linear;
 use crate::notes;
@@ -58,6 +60,7 @@ use crate::reviews;
 use crate::session;
 use crate::settings;
 use crate::tabs;
+use crate::tracker;
 use crate::usage;
 use crate::worktree;
 use santree_pty::PtyManager;
@@ -1314,7 +1317,7 @@ pub async fn pr_tickets(
     ids: Vec<String>,
     db: State<'_, Db>,
 ) -> CmdResult<Vec<TicketRef>> {
-    Ok(linear::tickets_by_identifier(&db, &repo, &ids)
+    Ok(tracker::tickets_by_id(&db, &repo, &ids)
         .await?
         .unwrap_or_default())
 }
@@ -2018,7 +2021,7 @@ pub async fn open_in_app(path: String, opener: String) -> CmdResult<()> {
 #[tauri::command]
 #[specta::specta]
 pub async fn list_triage_tickets(repo: String, db: State<'_, Db>) -> CmdResult<Vec<TriageTicket>> {
-    Ok(linear::triage_tickets(&db, &repo)
+    Ok(tracker::triage_tickets(&db, &repo)
         .await?
         .unwrap_or_default())
 }
@@ -2045,7 +2048,7 @@ pub async fn triage_detail(
     ticket_id: String,
     db: State<'_, Db>,
 ) -> CmdResult<Option<TriageDetail>> {
-    Ok(linear::triage_detail(&db, &repo, &ticket_id).await?)
+    Ok(tracker::triage_detail(&db, &repo, &ticket_id).await?)
 }
 
 /// The team triage rotations (who is on-call now), from Linear's responsibility
@@ -2053,7 +2056,7 @@ pub async fn triage_detail(
 #[tauri::command]
 #[specta::specta]
 pub async fn triage_schedule(repo: String, db: State<'_, Db>) -> CmdResult<Vec<TriageSchedule>> {
-    Ok(linear::triage_schedule(&db, &repo)
+    Ok(tracker::triage_schedule(&db, &repo)
         .await?
         .unwrap_or_default())
 }
@@ -2069,9 +2072,9 @@ pub async fn triage_set_state(
     state_id: String,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
-    linear::set_issue_state(&db, &repo, &ticket_id, &state_id)
+    tracker::set_issue_state(&db, &repo, &ticket_id, &state_id)
         .await?
-        .ok_or("no Linear org connected")?;
+        .ok_or("no ticket tracker connected")?;
     Ok(())
 }
 
@@ -2087,9 +2090,14 @@ pub async fn triage_snooze(
     until_ms: Option<f64>,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
+    // Jira has no snooze of its own; without this the call would fall through to
+    // whichever Linear org the repo would otherwise resolve to.
+    if tracker::provider(&db, &repo).await? == Some(santree_core::domain::TicketProvider::Jira) {
+        return Err("Jira tickets can't be snoozed from santree".into());
+    }
     linear::snooze_issue(&db, &repo, &ticket_id, until_ms.map(|ms| ms as i64))
         .await?
-        .ok_or("no Linear org connected")?;
+        .ok_or("no ticket tracker connected")?;
     Ok(())
 }
 
@@ -2110,9 +2118,9 @@ pub async fn triage_add_comment(
     if body.is_empty() {
         return Err("comment body is empty".into());
     }
-    linear::create_comment(&db, &repo, &ticket_id, parent_id.as_deref(), body)
+    tracker::create_comment(&db, &repo, &ticket_id, parent_id.as_deref(), body)
         .await?
-        .ok_or("no Linear org connected")?;
+        .ok_or("no ticket tracker connected")?;
     Ok(())
 }
 
@@ -2689,11 +2697,11 @@ pub async fn set_repo_linear_org(
 #[tauri::command]
 #[specta::specta]
 pub async fn linear_list_issues(repo: String, db: State<'_, Db>) -> CmdResult<Vec<Task>> {
-    match linear::list_issues(&db, &repo).await {
+    match tracker::list_issues(&db, &repo).await {
         Ok(Some(tasks)) => Ok(tasks),
         Ok(None) => Ok(vec![]),
         Err(e) => {
-            log::warn!("Linear issue fetch failed for {repo}: {e}");
+            log::warn!("issue fetch failed for {repo}: {e}");
             Err(e.into())
         }
     }
@@ -2758,7 +2766,7 @@ pub async fn export_logs(app: AppHandle) -> CmdResult<LogExport> {
 #[tauri::command]
 #[specta::specta]
 pub fn linear_invalidate_caches() {
-    linear::invalidate_all_caches();
+    tracker::invalidate_all_caches();
 }
 
 /// Run the Linear OAuth flow; returns the updated org list.
@@ -2766,6 +2774,40 @@ pub fn linear_invalidate_caches() {
 #[specta::specta]
 pub async fn linear_connect(db: State<'_, Db>) -> CmdResult<Vec<LinearOrg>> {
     Ok(linear::connect(&db).await?)
+}
+
+// ── Jira integration ────────────────────────────────────────────────────────
+
+/// Connection status for a repo's Jira site.
+#[tauri::command]
+#[specta::specta]
+pub async fn jira_auth_status(repo: String, db: State<'_, Db>) -> CmdResult<JiraStatus> {
+    Ok(jira::auth_status(&db, &repo).await?)
+}
+
+/// Every connected Jira Cloud site.
+#[tauri::command]
+#[specta::specta]
+pub async fn jira_sites(db: State<'_, Db>) -> CmdResult<Vec<JiraSite>> {
+    Ok(jira::list_sites(&db).await?)
+}
+
+/// Bind (or clear) the Jira site a repo uses.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_repo_jira_site(
+    repo: String,
+    cloud_id: Option<String>,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(jira::set_repo_site(&db, &repo, cloud_id).await?)
+}
+
+/// Run the Jira OAuth flow; returns the updated site list.
+#[tauri::command]
+#[specta::specta]
+pub async fn jira_connect(db: State<'_, Db>) -> CmdResult<Vec<JiraSite>> {
+    Ok(jira::connect(&db).await?)
 }
 
 // ── Updates ──────────────────────────────────────────────────────────────────

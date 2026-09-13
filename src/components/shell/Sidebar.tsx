@@ -17,9 +17,9 @@ import { ChevronLeftIcon, PlusIcon } from "../icons";
 import { EdgeResizeHandle, Spinner } from "../primitives";
 import { SidebarFooter } from "../SidebarFooter";
 import { AddProjectPrompt } from "./AddProjectPrompt";
-import { LinearConnectPrompt } from "./LinearConnectPrompt";
 import { ProjectTree } from "./ProjectTree";
 import { SidebarNav } from "./SidebarNav";
+import { TrackerConnectPrompt } from "./TrackerConnectPrompt";
 import { TriageSection } from "./TriageSection";
 import { useAddProject } from "./useAddProject";
 
@@ -86,10 +86,10 @@ export function Sidebar() {
         </button>
       </div>
       <SidebarNav />
-      {/* Above the scroll area, not in it: without Linear there are no tickets and
-          no triage, so the way to connect stays in view however far the tree is
-          scrolled. Nothing once a workspace is connected. */}
-      <LinearConnectPrompt />
+      {/* Above the scroll area, not in it: without a tracker there are no tickets
+          and no triage, so the way to connect stays in view however far the tree
+          is scrolled. Nothing once a Linear workspace or Jira site is connected. */}
+      <TrackerConnectPrompt />
       {/* One viewport for everything below the destinations. Triage, the Projects
           label and the tree scroll together rather than each inside a box of its
           own, so a long queue is scrolled past — or folded away — like any other
