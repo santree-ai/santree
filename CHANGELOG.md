@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.15 — 2026-09-12
+
+- Pull requests waiting on your review start with one to three bars showing how big the change is, so you can pick a review that fits the time you have. Hovering a row shows how many files and lines it changes.
+
 ## 0.1.14 — 2026-09-11
 
 - Pull requests waiting on your review show a small draft tag in the sidebar when their author hasn't marked them ready yet.
