@@ -38,9 +38,9 @@ import { useOpenAgent } from "../../features/agents/useOpenAgent";
 import {
   TRIAGE_GOOD_CITIZEN_KEY,
   type TriageTeamScope,
-  useLinearConnected,
   usePrefetchOnHover,
   useSetSetting,
+  useTrackerConnected,
   useTriageOrgRepo,
   useTriageQueue,
   useTriageSchedule,
@@ -50,10 +50,11 @@ import { formatShiftRange, formatSnoozeLabel } from "../../lib/relativeTime";
 import { usePersistedState } from "../../lib/usePersistedState";
 import { useApp } from "../../state/AppContext";
 import { Avatar } from "../Avatar";
-import { CheckIcon, ChevronDownIcon, ChevronRightIcon, LinearLogo, SnoozeIcon } from "../icons";
+import { CheckIcon, ChevronDownIcon, ChevronRightIcon, SnoozeIcon } from "../icons";
 import { MarkdownTitle } from "../Markdown";
 import { Dropdown, MENU_ITEM, Skeleton } from "../primitives";
 import { SlaSignal } from "../RelativeTime";
+import { RepoTrackerLogo } from "../RepoTrackerLogo";
 import { BAND_LABEL_X, CARD_GLYPH, CARD_INSET, CARD_LABEL_X, PriorityBars } from "../WorkSignals";
 import { AgentRow } from "./AgentRow";
 import { RotationDialog } from "./RotationDialog";
@@ -91,17 +92,18 @@ const NO_SCHEDULES: TriageSchedule[] = [];
 
 export function TriageSection() {
   const { triageEnabled } = useApp();
-  // `null` while the org read is in flight: an unknown is not a "no", so the
-  // section only goes grey once Linear has said nothing is connected.
-  const linearConnected = useLinearConnected();
+  // `null` while the connection reads are in flight: an unknown is not a "no",
+  // so the section only goes grey once both trackers have said nothing is
+  // connected.
+  const trackerConnected = useTrackerConnected();
   const navigate = useNavigate();
   // The queue is read from the triage org's repo, which the workspace resolves
   // through the same hook, so the two can never show different queues. Two
-  // Linear calls ride on it, so while the section isn't drawn, or has no
+  // tracker calls ride on it, so while the section isn't drawn, or has no
   // workspace to ask, the *repo* is blanked — never the hook call, which has to
   // run on every render.
   const orgRepo = useTriageOrgRepo();
-  const repo = triageEnabled && linearConnected !== false ? orgRepo : "";
+  const repo = triageEnabled && trackerConnected !== false ? orgRepo : "";
   const queue = useTriageQueue(repo);
   const { active, snoozed, goodCitizen, teamScopes } = queue;
   const { setScope } = useTriageTeamScopes();
@@ -164,8 +166,8 @@ export function TriageSection() {
   // Not connected is not empty. The queue can't be asked for, and "Nothing in
   // triage" would say it had been, so the section stays: greyed out, with nothing
   // to fold or scope, naming what it is missing. The way to connect is the rail's
-  // prompt above it (`LinearConnectPrompt`).
-  if (linearConnected === false) {
+  // prompt above it (`TrackerConnectPrompt`).
+  if (trackerConnected === false) {
     return (
       <div className="flex flex-none flex-col pb-1 opacity-60">
         <div className="mt-2 flex h-8 flex-none items-center px-4 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-5">
@@ -175,7 +177,7 @@ export function TriageSection() {
           className="py-(--density-compact) text-[11px] text-muted-4"
           style={{ paddingLeft: SECTION_GUTTER }}
         >
-          Needs a Linear workspace
+          Needs a Linear or Jira connection
         </div>
       </div>
     );
@@ -665,7 +667,7 @@ function TicketRow({
           />
           <div className="flex items-center gap-1.5">
             <span aria-hidden className="flex flex-none items-center text-muted-4">
-              <LinearLogo size={CARD_GLYPH} />
+              <RepoTrackerLogo repo={repo} size={CARD_GLYPH} />
             </span>
             <span className="tree-tag font-mono tabular-nums">{ticket.id}</span>
             {ticket.priority !== "None" && <PriorityBars priority={ticket.priority} />}

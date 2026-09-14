@@ -4,7 +4,7 @@
  * strip, its toggle, its edge resize and its collapse-by-shove.
  *
  * Two panes. The ticket ({@link IssuePanel}) is the ticket as a whole: header,
- * run control, blockers, the Linear body and thread, the notes. The queue
+ * run control, blockers, the tracker's body and thread, the notes. The queue
  * ({@link QueuePane}) is what will launch and how. The queue's tab carries the
  * shell's accent dot while there is anything in it — the strip's rule for a
  * count — and, for a beat after each add, a `+N` in the dot's place, so filling
@@ -15,8 +15,9 @@
  */
 import { useEffect, useState } from "react";
 
-import { LinearLogo, QueueIcon } from "../../components/icons";
+import { QueueIcon, TrackerLogo } from "../../components/icons";
 import { SidePanel, type SidePanelTab } from "../../components/SidePanel";
+import { useTicketProvider } from "../../lib/queries";
 import { IssuePanel } from "./IssuePanel";
 import { QUEUE_BURST_MS, type RailTab, useIssues } from "./model";
 import { QueuePane } from "./QueuePane";
@@ -51,11 +52,17 @@ export function RightPanel() {
     railTab,
     setRailTab,
     selectedEligible,
+    focusRepo,
   } = useIssues();
   const burst = useBurstLabel();
+  const provider = useTicketProvider(focusRepo);
 
   const tabs: SidePanelTab<RailTab>[] = [
-    { tab: "issue", label: "Linear ticket", icon: <LinearLogo size={13} /> },
+    {
+      tab: "issue",
+      label: `${provider} ticket`,
+      icon: <TrackerLogo provider={provider} size={13} />,
+    },
     {
       tab: "queue",
       label: "Launch queue",

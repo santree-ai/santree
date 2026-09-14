@@ -5,18 +5,14 @@
 //! layout live in `santree_core`.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use futures::future::join_all;
 use futures::StreamExt;
-use rand::RngCore;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Deserialize;
 
 use santree_core::domain::{
     ApiBudgetKind, ApiBudgetWindow, CycleRef, LinearApiBudget, LinearOrg, LinearStatus, LinearTeam,
@@ -27,14 +23,13 @@ use santree_core::{layout, linear as core_linear};
 
 use crate::db::{now_ms, Db};
 use crate::gql::{self, Connection};
+use crate::oauth::{self, GrantedScope, Tokens};
 use crate::settings;
 
 const CLIENT_ID: &str = "4be2738749371d7d3401061aabe2d11b";
 const AUTHORIZE_URL: &str = "https://linear.app/oauth/authorize";
 const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
 const GRAPHQL_URL: &str = "https://api.linear.app/graphql";
-const OAUTH_PORT: u16 = 8420;
-const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
 
 /// The `settings` row (scope `"app"`) choosing what santree *asks* Linear for.
 /// Absent = read-only. Write access must be an explicit user choice.
@@ -94,19 +89,7 @@ async fn read_only_mode(db: &Db) -> Result<bool> {
 // Linear tokens therefore live in the OS keychain (macOS Keychain / freedesktop
 // Secret Service), never on disk. SQLite keeps only non-secret metadata.
 
-/// Keychain service name (the app's bundle id).
-const KEYCHAIN_SERVICE: &str = "com.santree.desktop";
-
-/// One keychain entry per org, holding *both* tokens as a single JSON blob:
-/// Linear rotates the refresh token on every use, so the pair has to be written
-/// atomically — and one entry means one keychain prompt instead of two.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-struct Tokens {
-    access: String,
-    refresh: String,
-}
-
-/// An org's non-secret metadata. The tokens are *not* here — see [`Tokens`].
+/// An org's non-secret metadata. The tokens are *not* here — see [`oauth::Tokens`].
 #[derive(sqlx::FromRow)]
 struct OrgRow {
     slug: String,
@@ -116,56 +99,12 @@ struct OrgRow {
     scopes: String,
 }
 
-fn keychain_entry(slug: &str) -> Result<keyring::Entry> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, &format!("linear:{slug}")).map_err(keychain_err)
-}
-
-/// A keychain failure (locked keychain, no Secret Service on a headless box) must
-/// surface as a real error — degrading it into "no tokens" would read as a
-/// disconnected org, and falling back to plaintext storage is exactly what this
-/// store exists to prevent.
-fn keychain_err(e: keyring::Error) -> anyhow::Error {
-    anyhow::Error::new(e)
-        .context("the OS keychain is unavailable (santree keeps Linear tokens there)")
-}
-
-fn read_tokens_blocking(slug: &str) -> Result<Option<Tokens>> {
-    match keychain_entry(slug)?.get_password() {
-        Ok(blob) => decode_tokens(&blob).map(Some),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(keychain_err(e)),
-    }
-}
-
-fn write_tokens_blocking(slug: &str, tokens: &Tokens) -> Result<()> {
-    keychain_entry(slug)?
-        .set_password(&encode_tokens(tokens)?)
-        .map_err(keychain_err)
-}
-
-fn encode_tokens(tokens: &Tokens) -> Result<String> {
-    serde_json::to_string(tokens).context("encoding the Linear credential")
-}
-
-fn decode_tokens(blob: &str) -> Result<Tokens> {
-    serde_json::from_str(blob)
-        .context("the stored Linear credential isn't in the expected format — reconnect the org")
-}
-
-/// The org's stored token pair, or `None` when the keychain has no entry for it.
-/// Keychain calls block (they can even prompt), so they run off the async runtime.
 async fn load_tokens(slug: &str) -> Result<Option<Tokens>> {
-    let slug = slug.to_string();
-    tokio::task::spawn_blocking(move || read_tokens_blocking(&slug))
-        .await
-        .context("keychain read")?
+    oauth::load_tokens("linear", slug).await
 }
 
 async fn save_tokens(slug: &str, tokens: Tokens) -> Result<()> {
-    let slug = slug.to_string();
-    tokio::task::spawn_blocking(move || write_tokens_blocking(&slug, &tokens))
-        .await
-        .context("keychain write")?
+    oauth::save_tokens("linear", slug, tokens).await
 }
 
 /// Every connected org as `(slug, name)`, ordered by name — the order the "first
@@ -309,7 +248,8 @@ pub(crate) async fn import_cli_credential(
     // a refresh token the moment it's spent.
     let lock = refresh_lock(slug);
     let _guard = lock.lock().await;
-    let body = token_request(
+    let body = oauth::token_request(
+        TOKEN_URL,
         &[
             ("grant_type", "refresh_token"),
             ("client_id", CLIENT_ID),
@@ -364,12 +304,19 @@ async fn resolve_org_slug(db: &Db, repo: &str) -> Result<Option<String>> {
 /// repo row only — binding an org for an unregistered repo used to INSERT a
 /// half-populated row (NULL path/tracker) that showed up as a phantom repo.
 pub async fn set_repo_org(db: &Db, repo: &str, slug: Option<String>) -> Result<()> {
-    let affected = sqlx::query("UPDATE repos SET linear_org_slug = ? WHERE name = ?")
-        .bind(slug)
-        .bind(repo)
-        .execute(db)
-        .await?
-        .rows_affected();
+    // A repo has one tracker: linking an org takes it off Jira, while clearing
+    // the link (back to the default org) leaves a Jira link alone.
+    let affected = sqlx::query(
+        "UPDATE repos SET linear_org_slug = ?,
+           jira_cloud_id = CASE WHEN ? IS NULL THEN jira_cloud_id ELSE NULL END
+         WHERE name = ?",
+    )
+    .bind(slug.clone())
+    .bind(slug)
+    .bind(repo)
+    .execute(db)
+    .await?
+    .rows_affected();
     if affected == 0 {
         bail!("repo '{repo}' is not registered");
     }
@@ -378,87 +325,11 @@ pub async fn set_repo_org(db: &Db, repo: &str, slug: Option<String>) -> Result<(
 
 // ── Token refresh ──────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: String,
-    expires_in: i64,
-    /// What Linear actually granted. Deserialized permissively because the
-    /// shape is the server's to choose: absent on some responses, a JSON list
-    /// on others, a delimited string elsewhere. Guessing one and being wrong
-    /// would make every connection look read-only.
-    #[serde(default)]
-    scope: Option<GrantedScope>,
-}
-
-/// Linear's `scope` field, in whichever shape it arrives.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum GrantedScope {
-    List(Vec<String>),
-    Text(String),
-}
-
-impl GrantedScope {
-    /// Normalized to the comma-separated form stored on the org row.
-    fn as_csv(&self) -> String {
-        match self {
-            Self::List(items) => items.join(","),
-            // Linear documents commas; OAuth generally uses spaces. Accept both.
-            Self::Text(s) => s
-                .split([',', ' '])
-                .filter(|p| !p.is_empty())
-                .collect::<Vec<_>>()
-                .join(","),
-        }
-    }
-}
-
-/// POST the OAuth token endpoint (code exchange or refresh) and decode the token
-/// pair. On failure Linear's *body* is what matters — `invalid_grant` (the grant is
-/// gone; the org has to be reconnected) reads as the same bare 400 as a transient
-/// server error — so it's preserved, exactly as `gql::post` does for GraphQL.
-async fn token_request(form: &[(&str, &str)], what: &str) -> Result<TokenResponse> {
-    let res = gql::client()
-        .post(TOKEN_URL)
-        .form(form)
-        .send()
-        .await
-        .with_context(|| format!("{what} request"))?;
-    if !res.status().is_success() {
-        let status = res.status();
-        let body = res.text().await.unwrap_or_default();
-        let snippet: String = body.chars().take(300).collect();
-        bail!("{what} failed ({status}): {snippet}");
-    }
-    res.json()
-        .await
-        .with_context(|| format!("decoding the {what} response"))
-}
-
-/// Per-org locks serializing token refresh. Linear rotates the refresh token on
-/// each use, so two commands refreshing the same org concurrently (Issues +
-/// Triage both load on startup) would race: the second sends an already-consumed
-/// token and fails — or both persist, last-writer-wins. We single-flight per slug.
-static REFRESH_LOCKS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
-> = std::sync::LazyLock::new(Default::default);
-
 fn refresh_lock(slug: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-    // Poison-tolerant (matching the pty/openers/settings locks): the map holds
-    // only Arcs, so a thread that panicked mid-access left it structurally sound.
-    REFRESH_LOCKS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(slug.to_string())
-        .or_default()
-        .clone()
+    oauth::refresh_lock("linear", slug)
 }
 
-/// An org's metadata row paired with its keychain credential. A row with no
-/// keychain entry means the credential was removed out from under us (keychain
-/// reset, or a migration that couldn't reach it) — say so instead of reporting
-/// the org as simply not connected.
+/// An org's metadata row paired with its keychain credential.
 async fn org_credentials(db: &Db, slug: &str) -> Result<(OrgRow, Tokens)> {
     let row = org_row(db, slug)
         .await?
@@ -469,29 +340,17 @@ async fn org_credentials(db: &Db, slug: &str) -> Result<(OrgRow, Tokens)> {
     Ok((row, tokens))
 }
 
-/// Whether a token expiring at `expires_at` is still usable at `now`. The skew is
-/// what stops a token that passes this check from expiring mid-flight; a call that
-/// takes longer than [`REFRESH_SKEW_MS`] would fail either way.
-fn usable_at(expires_at: i64, now: i64) -> bool {
-    now < expires_at - REFRESH_SKEW_MS
-}
-
 /// A valid access token for `slug`, refreshing + persisting if near expiry.
 async fn valid_token(db: &Db, slug: &str) -> Result<String> {
     let (row, tokens) = org_credentials(db, slug).await?;
-    if usable_at(row.expires_at, now_ms()) {
+    if oauth::usable_at(row.expires_at, now_ms()) {
         return Ok(tokens.access);
     }
 
-    // Near expiry: serialize the refresh per org, then re-read — another caller
-    // may have refreshed while we waited, so we'd reuse its fresh token. Re-reading
-    // the *keychain* too (not just the row) is the load-bearing half: Linear rotates
-    // the refresh token on every use, so the one we read before the lock is already
-    // spent if someone else got there first.
     let lock = refresh_lock(slug);
     let _guard = lock.lock().await;
     let (row, tokens) = org_credentials(db, slug).await?;
-    if usable_at(row.expires_at, now_ms()) {
+    if oauth::usable_at(row.expires_at, now_ms()) {
         return Ok(tokens.access);
     }
     rotate(db, row, tokens).await
@@ -518,7 +377,8 @@ async fn force_refresh(db: &Db, slug: &str, spent: &str) -> Result<String> {
 /// access token. The caller holds the org's [`refresh_lock`] — Linear rotates the
 /// refresh token on every use, so two concurrent exchanges would spend it twice.
 async fn rotate(db: &Db, row: OrgRow, tokens: Tokens) -> Result<String> {
-    let body = token_request(
+    let body = oauth::token_request(
+        TOKEN_URL,
         &[
             ("grant_type", "refresh_token"),
             ("client_id", CLIENT_ID),
@@ -2147,6 +2007,7 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
         id: issue.identifier,
         title: issue.title,
         priority: core_linear::map_priority(issue.priority),
+        tracker_name: "Linear".into(),
         state: state.map(|s| s.name).unwrap_or_else(|| "Triage".into()),
         state_id,
         states,
@@ -3296,31 +3157,18 @@ async fn fetch_data_uri(client: &reqwest::Client, url: &str, token: &str) -> Res
 
 // ── OAuth PKCE connect flow ──────────────────────────────────────────────
 
-fn b64url(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
-fn random_bytes(n: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; n];
-    rand::thread_rng().fill_bytes(&mut buf);
-    buf
-}
-
 /// Run the OAuth flow, persist the org's tokens, and return the updated org list.
 pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
-    let verifier = b64url(&random_bytes(32));
-    let challenge = b64url(&Sha256::digest(verifier.as_bytes()));
-    let state = hex(&random_bytes(16));
+    let verifier = oauth::b64url(&oauth::random_bytes(32));
+    let challenge = oauth::pkce_challenge(&verifier);
+    let state = oauth::hex(&oauth::random_bytes(16));
 
-    let redirect_uri = format!("http://localhost:{OAUTH_PORT}");
+    let redirect_uri = format!("http://localhost:{}", oauth::OAUTH_PORT);
     let scope = requested_scope(db).await?;
     let params = [
         ("client_id", CLIENT_ID),
         ("redirect_uri", redirect_uri.as_str()),
         ("response_type", "code"),
-        // `write` lets the app move issues between workflow states, comment and
-        // promote tickets. Which one we ask for is the user's choice — a workspace
-        // that only approves reads still connects, and the UI disables the rest.
         ("scope", scope),
         ("state", state.as_str()),
         ("code_challenge", challenge.as_str()),
@@ -3328,13 +3176,13 @@ pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
     ];
     let query = params
         .iter()
-        .map(|(k, v)| format!("{k}={}", urlencode(v)))
+        .map(|(k, v)| format!("{k}={}", oauth::urlencode(v)))
         .collect::<Vec<_>>()
         .join("&");
-    open_browser(&format!("{AUTHORIZE_URL}?{query}"));
+    oauth::open_browser(&format!("{AUTHORIZE_URL}?{query}"));
 
     let expected_state = state.clone();
-    let code = tokio::task::spawn_blocking(move || wait_for_code(&expected_state))
+    let code = tokio::task::spawn_blocking(move || oauth::wait_for_code(&expected_state, "Linear"))
         .await
         .context("oauth listener task")??;
 
@@ -3361,190 +3209,14 @@ pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
     list_orgs(db).await
 }
 
-/// How long the whole browser round-trip gets before the connect is abandoned.
-const OAUTH_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// How long an accepted connection gets to send its request line. Clamped to the
-/// remaining [`OAUTH_TIMEOUT`] budget, so a peer that connects and then says
-/// nothing (a browser preconnect, a port scan) can't park the thread past it.
-const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
-
-fn wait_for_code(expected_state: &str) -> Result<String> {
-    let listener = TcpListener::bind(("127.0.0.1", OAUTH_PORT)).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AddrInUse {
-            anyhow!(
-                "Port {OAUTH_PORT} is already in use — another Linear sign-in may be in progress. Close it and try again."
-            )
-        } else {
-            anyhow::Error::new(e).context("binding oauth port")
-        }
-    })?;
-    accept_code(&listener, expected_state, Instant::now() + OAUTH_TIMEOUT)
-}
-
-/// Serve the OAuth callback until the browser delivers a `code` for our `state`,
-/// the user declines, or `deadline` passes. Split from [`wait_for_code`] so it can
-/// be driven over an ephemeral port in tests.
-fn accept_code(listener: &TcpListener, expected_state: &str, deadline: Instant) -> Result<String> {
-    // Non-blocking only so the accept loop can notice the deadline; each accepted
-    // socket is put back into blocking mode before it's read (see `read_request`).
-    listener.set_nonblocking(true)?;
-    let (tx, rx) = std::sync::mpsc::channel::<Result<String>>();
-
-    loop {
-        if Instant::now() > deadline {
-            bail!("timed out waiting for Linear authorization");
-        }
-        match listener.accept() {
-            // One thread per connection: a peer that connects and then says nothing
-            // (a browser preconnect, a port scan) sits on its read timeout, and must
-            // not hold the real callback behind it.
-            Ok((stream, _)) => {
-                let tx = tx.clone();
-                let state = expected_state.to_string();
-                std::thread::spawn(move || {
-                    if let Some(outcome) = serve_callback(stream, &state, deadline) {
-                        let _ = tx.send(outcome);
-                    }
-                });
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(e.into()),
-        }
-        // Doubles as the accept loop's idle sleep.
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(outcome) => return outcome,
-            // We hold a `tx`, so the channel can't disconnect.
-            Err(_) => continue,
-        }
-    }
-}
-
-/// Answer one connection to the callback port. `Some` when it *was* the callback —
-/// a `code` carrying our `state` (Ok) or the user declining (Err) — and `None` for
-/// anything else: a stray request must neither end the flow nor tell a still-open
-/// tab that authentication failed.
-fn serve_callback(
-    mut stream: std::net::TcpStream,
-    expected_state: &str,
-    deadline: Instant,
-) -> Option<Result<String>> {
-    let req = match read_request(&mut stream, deadline) {
-        Ok(req) => req,
-        Err(e) => {
-            log::debug!("ignoring an unreadable oauth callback connection: {e}");
-            return None;
-        }
-    };
-    let path = req
-        .lines()
-        .next()
-        .unwrap_or("")
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("");
-    let (code, returned_state, error) = parse_callback(path);
-    if code.is_none() && error.is_none() {
-        return None;
-    }
-    let state_matches = returned_state.as_deref() == Some(expected_state);
-    let ok = code.is_some() && state_matches;
-
-    let html = if ok {
-        "<html><body><h2>Authentication successful!</h2><p>You can close this tab.</p></body></html>"
-    } else {
-        "<html><body><h2>Authentication failed.</h2></body></html>"
-    };
-    let _ = stream.write_all(
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-            html.len(),
-            html
-        )
-        .as_bytes(),
-    );
-
-    if ok {
-        return Some(Ok(code.unwrap()));
-    }
-    // Linear's deny redirect carries `error=access_denied` (no code) rather than a
-    // failure status — without this, a user who declines sits on the full timeout
-    // before seeing an error. Only trust the error when the state matches, so a stray
-    // request to the callback port can't abort the flow.
-    error
-        .filter(|_| state_matches)
-        .map(|error| Err(anyhow!("Linear authorization failed: {error}")))
-}
-
-/// Read an accepted callback connection's request line.
-///
-/// The socket has to be put back into blocking mode first: on macOS/BSD an accepted
-/// socket *inherits* the listener's non-blocking flag (on Linux it doesn't), so the
-/// first `read` would return `WouldBlock` before the browser's bytes landed — which
-/// used to be swallowed as an empty request, answered with "Authentication failed",
-/// and the auth code dropped on the floor. The read timeout is the other half: a
-/// connection that never sends anything must not hold the flow past its deadline.
-fn read_request(stream: &mut std::net::TcpStream, deadline: Instant) -> std::io::Result<String> {
-    stream.set_nonblocking(false)?;
-    let budget = deadline
-        .saturating_duration_since(Instant::now())
-        .min(CALLBACK_READ_TIMEOUT)
-        // `set_read_timeout` rejects a zero duration (it means "block forever").
-        .max(Duration::from_millis(50));
-    stream.set_read_timeout(Some(budget))?;
-
-    let mut buf = [0u8; 2048];
-    let mut len = 0;
-    while len < buf.len() {
-        match stream.read(&mut buf[len..]) {
-            Ok(0) => break,
-            Ok(n) => {
-                len += n;
-                // The request line is all we need — don't wait for headers/body.
-                if buf[..len].contains(&b'\n') {
-                    break;
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    if len == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "the callback connection sent nothing",
-        ));
-    }
-    Ok(String::from_utf8_lossy(&buf[..len]).into_owned())
-}
-
-/// Extract `code`, `state`, and `error` from a callback path like
-/// `/?code=…&state=…` (success) or `/?error=access_denied&state=…` (the user
-/// declined), percent-decoding each value (a `%`-escaped code would otherwise
-/// mismatch).
-fn parse_callback(path: &str) -> (Option<String>, Option<String>, Option<String>) {
-    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-    let mut code = None;
-    let mut state = None;
-    let mut error = None;
-    for (k, v) in form_urlencoded::parse(query.as_bytes()) {
-        match k.as_ref() {
-            "code" => code = Some(v.into_owned()),
-            "state" => state = Some(v.into_owned()),
-            "error" => error = Some(v.into_owned()),
-            _ => {}
-        }
-    }
-    (code, state, error)
-}
-
-/// Exchange an auth code for `(access_token, refresh_token, expires_at_ms)`.
+/// Exchange an auth code for `(access_token, refresh_token, expires_at_ms, scopes_csv)`.
 async fn exchange_code(
     code: &str,
     redirect_uri: &str,
     verifier: &str,
 ) -> Result<(String, String, i64, String)> {
-    let body = token_request(
+    let body = oauth::token_request(
+        TOKEN_URL,
         &[
             ("grant_type", "authorization_code"),
             ("client_id", CLIENT_ID),
@@ -3593,42 +3265,17 @@ async fn fetch_viewer_org(access_token: &str) -> Result<(String, String)> {
     Ok((org.url_key, org.name))
 }
 
-fn open_browser(url: &str) {
-    let cmd = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    let _ = std::process::Command::new(cmd).arg(url).spawn();
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn urlencode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        accept_code, apply_subtask_dependencies, cached_team_facts, cycle_ref, decode_tokens,
-        encode_tokens, entity_not_found, facts_of, header_window, image_spans, inbox_filter,
-        map_issue, map_related, migrate_tokens_to_keychain, parse_callback, parse_ms,
-        record_budget, refresh_lock, resolve_org_slug, resolved_org, scope_from_setting, scope_of,
-        splice_images, split_identifier, usable_at, AssignedTriageData, CommentNode, CycleNode,
-        ImageCache, IssueDetailNode, IssueNode, ParentIssueNode, ProjectMilestoneNode, ProjectNode,
-        RelatedIssue, RelationNode, SchedQueryData, StateNode, TeamFacts, TeamRefNode, TeamScope,
-        TicketLookupNode, Tokens, TriageRow, TriageTeamRules, TtlCache, UserNode, BUDGETS,
-        IMAGE_HOST, REFRESH_SKEW_MS,
+        apply_subtask_dependencies, cached_team_facts, cycle_ref, entity_not_found, facts_of,
+        header_window, image_spans, inbox_filter, map_issue, map_related,
+        migrate_tokens_to_keychain, parse_ms, record_budget, resolve_org_slug, resolved_org,
+        scope_from_setting, scope_of, splice_images, split_identifier, AssignedTriageData,
+        CommentNode, CycleNode, ImageCache, IssueDetailNode, IssueNode, ParentIssueNode,
+        ProjectMilestoneNode, ProjectNode, RelatedIssue, RelationNode, SchedQueryData, StateNode,
+        TeamFacts, TeamRefNode, TeamScope, TicketLookupNode, TriageRow, TriageTeamRules, TtlCache,
+        UserNode, BUDGETS, IMAGE_HOST,
     };
     use crate::gql::{Connection, GqlError, GraphQlErrors, PageInfo};
     use anyhow::anyhow;
@@ -3696,28 +3343,6 @@ mod tests {
         assert_eq!(scope_from_setting(None), "read");
         assert_eq!(scope_from_setting(Some("")), "read");
         assert_eq!(scope_from_setting(Some("read,write")), "read");
-    }
-
-    /// Both tokens share one keychain entry, so the blob is the only thing
-    /// standing between a refresh and a bricked org — it has to round-trip
-    /// exactly (Linear tokens are opaque and may contain any of `.`, `-`, `_`).
-    #[test]
-    fn token_blob_round_trips() {
-        let tokens = Tokens {
-            access: "lin_oauth_ac.ce-ss_1/2+3".into(),
-            refresh: "lin_oauth_re\"fresh\"".into(),
-        };
-        let blob = encode_tokens(&tokens).unwrap();
-        assert_eq!(decode_tokens(&blob).unwrap(), tokens);
-    }
-
-    /// A garbage / foreign credential must be a loud error, not a silent
-    /// "disconnected org" (which would send the user round the OAuth flow again
-    /// with no idea why).
-    #[test]
-    fn token_blob_rejects_garbage() {
-        assert!(decode_tokens("not json").is_err());
-        assert!(decode_tokens(r#"{"access":"a"}"#).is_err());
     }
 
     async fn memory_db() -> crate::db::Db {
@@ -3831,26 +3456,6 @@ mod tests {
     fn lookalike_host_is_not_a_match() {
         let md = format!("{IMAGE_HOST}.evil.com/x");
         assert!(image_spans(&md).is_empty());
-    }
-
-    // ── Token refresh ─────────────────────────────────────────────────────
-
-    /// Linear rotates the refresh token on every use, so both directions of this
-    /// check are load-bearing: refreshing too eagerly burns the stored grant on
-    /// every call, and refreshing too late sends a token that expires in flight.
-    #[test]
-    fn a_token_is_reused_until_the_refresh_skew() {
-        let now = 1_700_000_000_000;
-        let expires = |mins: i64| now + mins * 60 * 1000;
-        assert_eq!(REFRESH_SKEW_MS, 5 * 60 * 1000);
-
-        assert!(usable_at(expires(6), now), "still well inside its lifetime");
-        assert!(
-            !usable_at(expires(5), now),
-            "inside the skew — refresh before it expires mid-call"
-        );
-        assert!(!usable_at(expires(1), now));
-        assert!(!usable_at(expires(-1), now), "already expired");
     }
 
     // ── Triage team scope ─────────────────────────────────────────────────
@@ -4261,22 +3866,6 @@ mod tests {
         );
     }
 
-    // ── refresh_lock ──────────────────────────────────────────────────────
-
-    #[test]
-    fn refresh_lock_same_slug_returns_the_same_arc() {
-        let a = refresh_lock("refresh-lock-test-same");
-        let b = refresh_lock("refresh-lock-test-same");
-        assert!(std::sync::Arc::ptr_eq(&a, &b));
-    }
-
-    #[test]
-    fn refresh_lock_different_slugs_return_different_arcs() {
-        let a = refresh_lock("refresh-lock-test-a");
-        let b = refresh_lock("refresh-lock-test-b");
-        assert!(!std::sync::Arc::ptr_eq(&a, &b));
-    }
-
     // ── ImageCache ────────────────────────────────────────────────────────
 
     #[test]
@@ -4307,42 +3896,6 @@ mod tests {
         cache.insert_bounded("b".into(), "67890".into(), 100);
         assert_eq!(cache.get("a"), Some("12345".into()));
         assert_eq!(cache.get("b"), Some("67890".into()));
-    }
-
-    // ── parse_callback ────────────────────────────────────────────────────
-
-    #[test]
-    fn parse_callback_reads_code_and_state() {
-        let (code, state, error) = parse_callback("/?code=abc123&state=xyz789");
-        assert_eq!(code.as_deref(), Some("abc123"));
-        assert_eq!(state.as_deref(), Some("xyz789"));
-        assert_eq!(error, None);
-    }
-
-    #[test]
-    fn parse_callback_percent_decodes_values() {
-        // A `%`-escaped code (e.g. one containing `+` or `/`) must come back
-        // decoded, or it would mismatch the raw code sent in the token exchange.
-        let (code, state, _) = parse_callback("/?code=a%2Bb%2Fc&state=has%20space");
-        assert_eq!(code.as_deref(), Some("a+b/c"));
-        assert_eq!(state.as_deref(), Some("has space"));
-    }
-
-    #[test]
-    fn parse_callback_reads_error_on_deny() {
-        // Linear's deny redirect: no code, an `error`, and the original `state`.
-        let (code, state, error) = parse_callback("/?error=access_denied&state=xyz789");
-        assert_eq!(code, None);
-        assert_eq!(state.as_deref(), Some("xyz789"));
-        assert_eq!(error.as_deref(), Some("access_denied"));
-    }
-
-    #[test]
-    fn parse_callback_handles_missing_query_string() {
-        let (code, state, error) = parse_callback("/");
-        assert_eq!(code, None);
-        assert_eq!(state, None);
-        assert_eq!(error, None);
     }
 
     // ── parse_ms ──────────────────────────────────────────────────────────
@@ -4962,81 +4515,6 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    // ── OAuth callback ────────────────────────────────────────────────────
-
-    /// The bug this guards: the accepted socket inherits the listener's
-    /// non-blocking flag on macOS/BSD, so the first `read` returned `WouldBlock`
-    /// before the browser's bytes arrived — the request was read as empty, answered
-    /// with "Authentication failed", and the auth code was lost. A silent peer
-    /// (browser preconnect) accepted first must not consume the flow either.
-    #[test]
-    fn the_callback_waits_for_a_slow_browser_and_ignores_a_silent_peer() {
-        use std::io::{Read as _, Write as _};
-        use std::net::{TcpListener, TcpStream};
-        use std::time::{Duration, Instant};
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let client = std::thread::spawn(move || {
-            let _silent = TcpStream::connect(addr).unwrap();
-            let mut real = TcpStream::connect(addr).unwrap();
-            // The request lands only after the socket has been accepted.
-            std::thread::sleep(Duration::from_millis(150));
-            real.write_all(b"GET /?code=abc%2F123&state=st HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                .unwrap();
-            let mut resp = String::new();
-            real.read_to_string(&mut resp).unwrap();
-            assert!(resp.contains("successful"), "{resp}");
-        });
-
-        let code = accept_code(&listener, "st", Instant::now() + Duration::from_secs(10)).unwrap();
-        // Percent-decoded, and not truncated to whatever arrived in the first read.
-        assert_eq!(code, "abc/123");
-        client.join().unwrap();
-    }
-
-    /// A peer that connects and says nothing must not park the flow past its
-    /// deadline (it used to be read on the accept thread, with no read timeout).
-    #[test]
-    fn a_silent_peer_cannot_park_the_callback_past_its_deadline() {
-        use std::net::{TcpListener, TcpStream};
-        use std::time::{Duration, Instant};
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let _silent = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-
-        let start = Instant::now();
-        let err = accept_code(&listener, "st", start + Duration::from_millis(300)).unwrap_err();
-        assert!(err.to_string().contains("timed out"), "{err:#}");
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "deadline overshot"
-        );
-    }
-
-    /// Declining in Linear redirects with `error=…` and no code: the flow ends
-    /// immediately instead of sitting out the timeout.
-    #[test]
-    fn a_denied_authorization_fails_fast() {
-        use std::io::Write as _;
-        use std::net::{TcpListener, TcpStream};
-        use std::time::{Duration, Instant};
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let mut s = TcpStream::connect(addr).unwrap();
-            s.write_all(b"GET /?error=access_denied&state=st HTTP/1.1\r\n\r\n")
-                .unwrap();
-            std::thread::sleep(Duration::from_millis(200));
-        });
-
-        let err =
-            accept_code(&listener, "st", Instant::now() + Duration::from_secs(10)).unwrap_err();
-        assert!(err.to_string().contains("access_denied"), "{err:#}");
     }
 
     #[test]

@@ -9,21 +9,31 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
 
-use santree_core::domain::Repo;
+use santree_core::domain::{Repo, TicketProvider};
 
 use crate::db::Db;
 use crate::git;
+use crate::jira;
 use crate::linear;
+use crate::tracker;
 
 /// Every registered repository, in insertion order. The displayed tracker
-/// reflects the Linear org the repo actually resolves to (its explicit link, or
-/// the only connected org) — so a GitHub-hosted repo whose issues live in Linear
-/// reads "Linear · <workspace>", not "GitHub Issues". `agents` is a live count of
-/// worktree links (one per issue with an active agent worktree) rather than a
-/// stored column, so it always reflects reality.
+/// reflects the connected ticket provider the repo actually resolves to — so a
+/// GitHub-hosted repo whose issues live in Linear reads "Linear · <workspace>",
+/// one using Jira reads "Jira · <site>". `agents` is a live count of worktree
+/// links (one per issue with an active agent worktree) rather than a stored
+/// column, so it always reflects reality.
 pub async fn list(db: &Db) -> Result<Vec<Repo>> {
-    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
-        "SELECT r.name, r.tracker, r.path, r.linear_org_slug FROM repos r ORDER BY r.rowid",
+    type RepoRow = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let rows = sqlx::query_as::<_, RepoRow>(
+        "SELECT r.name, r.tracker, r.path, r.linear_org_slug, r.jira_cloud_id
+         FROM repos r ORDER BY r.rowid",
     )
     .fetch_all(db)
     .await?;
@@ -31,27 +41,43 @@ pub async fn list(db: &Db) -> Result<Vec<Repo>> {
     // rows go through the one predicate that excludes them everywhere else — they
     // are throwaway detached trees, not agents the user has working.
     let counts = worktree_counts(db).await?;
-    // The label has to name the org the repo's queries actually go to, so it comes
-    // from the same resolver they do rather than a second copy of the fallback.
+    // The provider and its label have to name what the repo's reads actually go
+    // to, so both come from the resolvers those reads use rather than a copy.
     let orgs = linear::orgs_by_name(db).await?;
+    let sites = jira::sites_by_name(db).await?;
 
     Ok(rows
         .into_iter()
-        .map(|(name, tracker, path, linked_slug)| {
-            let org_name = linear::resolved_org(&orgs, linked_slug.as_deref())
-                .map(|(_, org_name)| org_name.clone());
-            Repo {
-                agents: path
-                    .as_deref()
-                    .map_or(0, |path| worktrees_at(&counts, path)),
-                name,
-                tracker: match org_name {
-                    Some(org) => format!("Linear · {org}"),
-                    None => tracker,
-                },
-                path,
-            }
-        })
+        .map(
+            |(name, stored_tracker, path, linked_slug, linked_cloud_id)| {
+                let provider = tracker::resolve(
+                    linked_cloud_id.is_some(),
+                    linked_slug.is_some(),
+                    !orgs.is_empty(),
+                    !sites.is_empty(),
+                );
+                let label = match provider {
+                    Some(TicketProvider::Jira) => {
+                        jira::resolved_site(&sites, linked_cloud_id.as_deref())
+                            .map(|(_, site)| format!("Jira · {site}"))
+                    }
+                    Some(TicketProvider::Linear) => {
+                        linear::resolved_org(&orgs, linked_slug.as_deref())
+                            .map(|(_, org)| format!("Linear · {org}"))
+                    }
+                    None => None,
+                };
+                Repo {
+                    agents: path
+                        .as_deref()
+                        .map_or(0, |path| worktrees_at(&counts, path)),
+                    name,
+                    tracker: label.unwrap_or(stored_tracker),
+                    provider,
+                    path,
+                }
+            },
+        )
         .collect())
 }
 
@@ -169,10 +195,13 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
     // (the call is idempotent) can have existing worktree links.
     let agents = worktrees_at(&worktree_counts(db).await?, &toplevel);
 
+    let provider = tracker::provider(db, &name).await?;
+
     log::info!("registered repository {name} at {toplevel}");
     Ok(Repo {
         name,
         tracker,
+        provider,
         agents,
         path: Some(toplevel),
     })

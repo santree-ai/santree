@@ -96,7 +96,7 @@ const BLOCKS_KEY: &str = "prompt.custom_blocks";
 /// Documented variables of the `issue` prompt — also available to any prompt that
 /// `{% include "issue" %}`s it (the `work`/`fill-pr` flows flatten them in).
 const ISSUE_VARS: &[VarDoc] = &[
-    VarDoc { name: "tracker_name", description: "Issue tracker name, e.g. \"Linear\"." },
+    VarDoc { name: "tracker_name", description: "The issue tracker the ticket came from: \"Linear\" or \"Jira\"." },
     VarDoc { name: "identifier", description: "Issue identifier, e.g. \"AK-165\"." },
     VarDoc { name: "title", description: "Issue title." },
     VarDoc { name: "url", description: "Canonical issue URL (may be empty)." },
@@ -163,6 +163,10 @@ static PROMPT_DEFS: &[PromptDef] = &[
             VarDoc {
                 name: "ticket_content",
                 description: "The rendered Issue block (description + comment thread). Empty when the issue couldn't be fetched.",
+            },
+            VarDoc {
+                name: "tracker_name",
+                description: "The repo's issue tracker, \"Linear\" or \"Jira\" — set even when the issue couldn't be fetched; empty when no tracker is connected.",
             },
             VarDoc { name: "custom_context", description: "The user's per-task notes, if any." },
             VarDoc { name: "mode", description: "\"implement\" (default) or \"plan\" (read-only planning)." },
@@ -300,7 +304,7 @@ static PROMPT_DEFS: &[PromptDef] = &[
     PromptDef {
         name: "issue",
         label: "Issue context",
-        description: "How a Linear issue (description + comment thread) is rendered. Embedded by the Work, Commit and PR prompts as `ticket_content`.",
+        description: "How a Linear or Jira issue (description + comment thread) is rendered. Embedded by the Work, Commit and PR prompts as `ticket_content`.",
         kind: PromptKind::Block,
         editable: true,
         preview: PromptPreviewKind::Ticket,
@@ -927,7 +931,7 @@ pub fn issue_context(detail: &TriageDetail) -> Value {
     let description = budget.take(&detail.description);
     let comments = prompt_comments(&detail.comments, &mut budget);
     context! {
-        tracker_name => "Linear",
+        tracker_name => &detail.tracker_name,
         identifier => &detail.id,
         title => &detail.title,
         url => &detail.url,
@@ -1292,6 +1296,7 @@ fn sample_detail() -> TriageDetail {
         id: "AK-123".into(),
         title: "Add login throttling".into(),
         priority: Priority::High,
+        tracker_name: "Linear".into(),
         state: "In Progress".into(),
         state_id: None,
         states: Vec::new(),
@@ -1533,7 +1538,7 @@ mod tests {
         assert!(out.contains("set_review_brief"));
         assert!(out.contains("add_review_comment"));
         assert!(out.contains("list_review_comments"));
-        assert!(out.contains("Notion, Linear, whatever is connected"));
+        assert!(out.contains("Notion, Linear, Jira, whatever is connected"));
         // And the rule that makes the whole feature safe to leave running.
         assert!(out.contains("Never write through any other tool"));
         assert!(out.contains("<pull-request>"), "fences the untrusted diff");
@@ -1752,6 +1757,26 @@ mod tests {
             !out.contains("could not be fetched"),
             "fallback hint is skipped when ticket_content is present"
         );
+    }
+
+    /// With no ticket body the agent is told to fetch it itself, through the
+    /// repo's own tracker — and never pointed at a tracker the repo doesn't use.
+    #[test]
+    fn work_fallback_names_the_repos_tracker() {
+        let fallback = |tracker: &str| {
+            render_default(
+                "work",
+                context! { ticket_id => "SAN-4", tracker_name => tracker, mode => "implement" },
+            )
+            .unwrap()
+        };
+        let jira = fallback("Jira");
+        assert!(jira.contains("If a Jira MCP server is available"));
+        assert!(!jira.contains("Linear"));
+
+        let none = fallback("");
+        assert!(none.contains("If an issue-tracker MCP server is available"));
+        assert!(!none.contains("Linear"));
     }
 
     /// A real (temp-file-backed) SQLite pool, isolated per test.

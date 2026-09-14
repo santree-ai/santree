@@ -14,8 +14,9 @@ import type { ReactNode } from "react";
 
 import type { Priority, TriageDetail } from "../bindings";
 import { formatSnoozeLabel } from "../lib/relativeTime";
+import { trackerOf } from "../lib/tracker";
 import { IssueMeta } from "./IssueMeta";
-import { LinearLogo, RefreshIcon } from "./icons";
+import { RefreshIcon, TrackerLogo } from "./icons";
 import { MarkdownTitle } from "./Markdown";
 import { PriorityPill } from "./PriorityPill";
 import { Button, Skeleton } from "./primitives";
@@ -45,7 +46,7 @@ export function IssueHeader({
   detail: TriageDetail | undefined;
   summary?: IssueSummary;
   onSetState: (stateId: string) => void;
-  /** Linear granted read-only, so the status picker is shown but inert. */
+  /** The tracker granted read-only, so the status picker is shown but inert. */
   linearReadOnly?: boolean;
   onRefresh: () => void;
   refreshing: boolean;
@@ -56,6 +57,7 @@ export function IssueHeader({
   // The detail is the truth once it lands; the summary is the same fields as the
   // host last saw them, good enough to draw the frame with.
   const known: IssueSummary | undefined = detail ?? summary;
+  const tracker = trackerOf(detail?.trackerName);
 
   return (
     <div className="flex-none border-b border-hairline px-5 pt-4 pb-3.5">
@@ -74,14 +76,14 @@ export function IssueHeader({
             type="button"
             onClick={onRefresh}
             disabled={refreshing}
-            title="Refresh this issue from Linear"
+            title={`Refresh this issue from ${tracker}`}
             aria-label="Refresh"
             className="flex h-[27px] w-[27px] cursor-pointer items-center justify-center rounded-md border border-line-2 bg-input text-muted-2 hover:text-fg-2 disabled:cursor-default"
           >
             <RefreshIcon size={13} className={refreshing ? "animate-spin" : ""} />
           </button>
           <Button size="sm" onClick={() => detail && openUrl(detail.url)} disabled={!detail}>
-            <LinearLogo size={12} className="text-[color:var(--linear-brand)]" />
+            <TrackerLogo provider={tracker} size={12} branded />
             Open Issue
           </Button>
           {actions}

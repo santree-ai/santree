@@ -684,7 +684,7 @@ pub async fn create(
         let repo = repo.to_string();
         let issue_id = issue_id.to_string();
         tokio::spawn(async move {
-            if let Err(e) = crate::linear::move_issue_to_started(&db, &repo, &issue_id).await {
+            if let Err(e) = crate::tracker::move_to_started(&db, &repo, &issue_id).await {
                 log::warn!("couldn't move issue {issue_id} to In Progress: {e}");
             }
         });
@@ -1388,9 +1388,20 @@ pub async fn work_prompt(
     // to re-fetch via MCP. `triage_detail` fetches any issue by id, not just
     // triage ones. On any failure we leave `ticket_content` empty and the
     // template falls back to the MCP-fetch hint.
-    let detail = match crate::linear::triage_detail(db, repo, issue_id).await {
+    let detail = match crate::tracker::triage_detail(db, repo, issue_id).await {
         Ok(Some(detail)) => Some(detail),
         _ => None,
+    };
+    // Named even when the fetch failed, so the fallback hint points the agent at
+    // the right tracker's MCP server.
+    let tracker_name = match &detail {
+        Some(d) => d.tracker_name.clone(),
+        None => crate::tracker::provider(db, repo)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| crate::tracker::name(p).to_string())
+            .unwrap_or_default(),
     };
     let ticket_content = detail
         .as_ref()
@@ -1418,6 +1429,7 @@ pub async fn work_prompt(
             title => title.unwrap_or_default(),
             ticket_content,
             custom_context,
+            tracker_name,
             mode => "implement",
             ..issue_ctx,
         },
@@ -1554,7 +1566,7 @@ pub async fn investigate_prompt(
 
     // Fetch the full ticket. `triage_detail` fetches any issue by id. On any
     // failure we leave `ticket_content` empty and the template says so.
-    let detail = match crate::linear::triage_detail(db, repo, issue_id).await {
+    let detail = match crate::tracker::triage_detail(db, repo, issue_id).await {
         Ok(Some(detail)) => Some(detail),
         _ => None,
     };

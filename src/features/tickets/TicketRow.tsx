@@ -27,10 +27,11 @@
  * dialog — and answers it the same way for the queue (`useWorkRepoGate`).
  */
 import { memo } from "react";
+import type { TicketProvider } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
 import { BranchIcon, CheckIcon, PlayIcon, QueueIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
-import { linearTicketItems } from "../../components/menuRows";
+import { ticketItems } from "../../components/menuRows";
 import { PrChips } from "../../components/PrChip";
 import { ContextMenu, type ContextMenuItem, Pill } from "../../components/primitives";
 import { attentionMeta } from "../../components/shell/AttentionDot";
@@ -41,7 +42,7 @@ import {
   PriorityBars,
   StatusGlyph,
 } from "../../components/WorkSignals";
-import { useLinearIssueUrl } from "../../lib/queries";
+import { useTicketIssueUrl, useTicketProvider } from "../../lib/queries";
 import { shortRepoName } from "../../lib/repoName";
 import { statusLabel } from "../../theme/colors";
 import { isStartable, type TicketRow as Row } from "./useTickets";
@@ -110,7 +111,7 @@ function StartAction({ row, onStart }: { row: Row; onStart: OnStart }) {
  *  projects carry — the way past the default for this one run. */
 function menuFor(
   row: Row,
-  url: string | null,
+  ticket: { url: string | null; provider: TicketProvider },
   opts: {
     queued: boolean;
     onStart: OnStart;
@@ -165,8 +166,8 @@ function menuFor(
       run: () => onOpenWorktree(row),
     });
   }
-  if (items.length > 0) items.push({ kind: "rule", key: "rule-linear" });
-  items.push(...linearTicketItems(row.task.id, url));
+  if (items.length > 0) items.push({ kind: "rule", key: "rule-tracker" });
+  items.push(...ticketItems(row.task.id, ticket.url, ticket.provider));
   return items;
 }
 
@@ -200,8 +201,13 @@ export const TicketRow = memo(function TicketRow({
 }) {
   const { task } = row;
   const startable = isStartable(row);
-  const linkFor = useLinearIssueUrl(row.repo);
-  const menu = menuFor(row, linkFor(task.id), { queued, onStart, onToggleQueue, onOpenWorktree });
+  const linkFor = useTicketIssueUrl(row.repo);
+  const provider = useTicketProvider(row.repo);
+  const menu = menuFor(
+    row,
+    { url: linkFor(task.id), provider },
+    { queued, onStart, onToggleQueue, onOpenWorktree },
+  );
 
   return (
     // `contents`: the menu's wrapper takes no box of its own, so the row stays

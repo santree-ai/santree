@@ -174,6 +174,10 @@
      `LINEAR_BRAND` token in theme/colors and the `text-[color:var(--linear-brand)]`
      icon tints. */
   --linear-brand: #5e6ad2;
+  /* Jira's brand blue — `JIRA_BRAND` and the Jira mark's tint. Atlassian's
+     current blue rather than the classic #0052cc, which sinks into the dark
+     theme's background at icon size. */
+  --jira-brand: #1868db;
   /* Claude's brand terracotta — the `ClaudeSparkIcon` logomark tint on tabs
      that host a Claude session. Reads on both themes. */
   --claude-brand: #d97757;

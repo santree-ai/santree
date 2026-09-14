@@ -15,7 +15,7 @@ an installed app will meet their future versions.
 
 **Views:** all of them — Triage, Issues, Trees, Reviews, Settings, Terminal — are
 backed by real data. **No view ever renders sample data**; when a backend isn't
-connected (no Linear org, no `gh` auth, no repo path) commands return real-but-empty
+connected (no Linear workspace or Jira site, no `gh` auth, no repo path) commands return real-but-empty
 results and the view shows its empty state. The one sample lives outside the views:
 `prompts::preview` renders a template against a built-in sample ticket so the prompt
 editor can re-render on every keystroke without a fetch.
@@ -64,8 +64,8 @@ applied version the resolved set no longer has — and `0028` drops the table.
 ```
 React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
           → #[tauri::command] (src-tauri/src/commands.rs)
-          → live backend (linear.rs / db.rs / repo.rs / settings.rs / terminal.rs /
-                           github.rs / reviews.rs)
+          → live backend (tracker.rs → linear.rs | jira.rs / db.rs / repo.rs /
+                           settings.rs / terminal.rs / github.rs / reviews.rs)
             └─ when not connected: return real-but-empty (no sample data)
 ```
 
@@ -93,7 +93,7 @@ React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
 docs/terminals.md  how terminal emulation works, end to end — the source of
                    truth for crates/pty, terminal.rs and features/terminal
 crates/core/src/   domain.rs (types) · config.rs (static config/defaults) · linear.rs
-                   (mapping) · layout.rs (dagre-free graph helpers) · diff_index.rs
+                   + jira.rs (tracker → domain mapping) · layout.rs (dagre-free graph helpers) · diff_index.rs
                    (a PR's commentable hunk spans; written by the app, read by the
                    AI review's MCP server) · lib.rs
 crates/pty/src/    lib.rs — PtyManager: spawn real process behind a PTY, stream bytes
@@ -103,8 +103,13 @@ crates/hook/src/   main.rs — the bundled `santree-hook`: Claude's session-stat
                    hooks + statusLine, and `mcp` mode (mcp.rs · review_tools.rs),
                    the AI review's draft-comment tools
 src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin wrappers)
-                   · linear.rs (GraphQL + OAuth + token store) · db.rs (sqlx pool +
-                   migrations) · repo.rs · settings.rs · terminal.rs · stream.rs
+                   · tracker.rs (the `TicketTracker` trait: which tracker a repo
+                   reads, and the dispatch every provider-neutral ticket read and
+                   write goes through — see "A repo reads one tracker") · linear.rs
+                   (GraphQL) · jira.rs (Jira Cloud REST: `search/jql`, ADF,
+                   transitions, the per-repo triage query) · oauth.rs (the PKCE
+                   flow, keychain token store and refresh both trackers share)
+                   · db.rs (sqlx pool + migrations) · repo.rs · settings.rs · terminal.rs · stream.rs
                    (background command runs behind a PTY → read-only log panes)
                    · proc_table.rs (the one `ps` listing, cached 500ms) +
                    agent_procs.rs (which agent owns each pane's foreground —
@@ -143,21 +148,21 @@ src/
                    row, so a restart reopens exactly what was open, and closing
                    the last leaves the welcome surface) · a picked file's diff ·
                    setup logs · a check's raw job log · the PR page and the
-                   Linear ticket page, each opened from its rail pane's expand
+                   ticket page, each opened from its rail pane's expand
                    control (closable, and not a row)
   features/reviews/  OTHER PEOPLE's PRs (the inbox). Main area = the same tab
                    strip Trees has (`ReviewTabBar`): a non-closable **Pull
                    Request** tab (its header, then Conversation — description
                    block, then the comments — · Commits · Checks · Files changed,
                    which carries the diffstat) · the PR checkout's own
-                   `worktree_tabs` rows · the AI review sessions · the Linear
+                   `worktree_tabs` rows · the AI review sessions · the
                    ticket page when expanded from the rail. Beside it a
                    `ReviewSidePanel` rail of Issue + AI work queue. Also the PR
                    components both hosts share — `PrPage` (the whole PR view,
                    host-agnostic: Trees opens it too), checks, brief, queue list,
                    AI work pane, file body, cards
   features/triage/ the ticket workspace at `/triage?ticket=` — a third tab-strip
-                   host (`TriageTabBar`): a non-closable **Linear** tab
+                   host (`TriageTabBar`): a non-closable ticket tab (named for its tracker)
                    (`components/IssuePage`), one closable tab per investigation
                    agent (started from the ticket page's "Investigate with"
                    and its provider chooser, never from the "+"), and the
@@ -182,7 +187,7 @@ src/
   components/       shared chrome + primitives.tsx (Badge, EmptyState, ChevronSelect…)
                    · SidePanel (the one right-panel shell every view is built on)
                    · TabStrip (the one main-area tab strip every view draws)
-                   · IssuePane (the Linear-ticket RAIL pane) + IssuePage (the
+                   · IssuePane (the ticket RAIL pane) + IssuePage (the
                    same ticket at reading width, for a tab) · IssueProperties
                    (the one Linear-style property strip — priority, points,
                    cycle, due, project, milestone, assignee, labels — every
@@ -215,7 +220,7 @@ src/
   The sidebar lists no own-PR rows: a worktree's PR is reached through the
   worktree. The full PR page (header + Conversation · Commits · Checks · Files
   changed) is `reviews/PrPage`, and the PR pane's expand control opens it as a
-  closable Trees tab — so do the Linear and GitHub marks on a sidebar worktree
+  closable Trees tab — so do the ticket and GitHub marks on a sidebar worktree
   row (`TreeFocus.expand`: the ticket page or the PR page, never the rail pane).
   The prompt "Start work" hands the agent is the `pr-fix` template
   (`review_ai::fix_prompt` renders it over the open queue items), editable in
@@ -274,14 +279,19 @@ src/
   exactly as Reviews' `?pr=` does. There is no manual ordering: the order is the
   backend's (active first, soonest SLA). `useTriageQueue` is the one source for
   what the section shows. A row's right-click menu (`shell/TriageTicketMenu`)
-  snoozes it — the one Linear write offered from the rail, gated like the
-  status picker (disabled with `LINEAR_READ_ONLY_HINT`, refused by
-  `repo_write_session` regardless). With no Linear workspace connected the section
-  draws greyed out rather than as an empty queue, and the rail's
-  `shell/LinearConnectPrompt` (off `useLinearConnected`, `null` until the org read
-  answers) links to Settings → Linear.
+  snoozes it — the one tracker write offered from the rail, gated like the
+  status picker (disabled with `TRACKER_READ_ONLY_HINT`, refused by the backend
+  regardless). With no tracker connected the section draws greyed out rather
+  than as an empty queue, and the rail's `shell/TrackerConnectPrompt` (off
+  `useTrackerConnected`, `null` until both connection reads answer) links to
+  Settings → Linear or Jira. **Jira has no triage state, team inbox, rotation,
+  SLA or snooze.** Its queue is whatever the repo's `jira_triage_jql` setting
+  matches (Settings → Repo → Ticket tracker; unset is `jira::DEFAULT_TRIAGE_JQL`,
+  the viewer's assigned To Do issues), a ticket's team is its project key, the
+  Teams rules above are Linear's alone, and `triage_snooze` refuses a Jira repo
+  rather than falling through to a Linear org.
 - **A triage ticket runs on an attached project, never a worktree.** Two repos,
-  deliberately: the queue and the ticket come from one Linear org
+  deliberately: the queue and the ticket come from one tracker org or site
   (`useTriageOrgRepo` — the triage default, else the first registered project —
   read by both the section and the workspace so a row and the ticket it opens
   can't disagree),
@@ -294,7 +304,7 @@ src/
   a worktree, and the backend agrees: `validate_agent_cwd` refuses a `triage:`
   session anywhere but the registered repo root.
 - **Where a ticket starts is the Work gate's answer — for every start.**
-  Several registered projects can share a ticket's Linear org, so the project is
+  Several registered projects can share a ticket's tracker org, so the project is
   resolved through `state/WorkRepoGate` — the one project that carries the ticket
   (no question), else the Work default (`work_default_repo`, Settings → Work;
   distinct from triage's on purpose), else `ProjectPickerDialog` over just those
@@ -320,6 +330,18 @@ src/
   `BackgroundLaunch.repo`, `QueuedLaunch.repo`, `TreeFocus.repo`, and
   `CreateWorktreeVars.repo` (a var, not a hook argument — the answer arrives at
   click time).
+- **A repo reads one tracker, resolved in one place.** `tracker::resolve` decides
+  it: an explicit `jira_cloud_id` or `linear_org_slug` link wins (binding one
+  clears the other in the same write), and an unlinked repo takes whichever
+  tracker is connected, Linear first. That answer ships as `Repo.provider`, read
+  through `useTicketProvider(repo)`. Every provider-neutral command — issues,
+  triage, detail, state, comments, `pr_tickets`, the work and investigate prompts
+  — dispatches through `tracker::*`; calling `linear::` or `jira::` directly for
+  one of those is how a Jira repo came to read a Linear org. Marks and labels
+  follow the repo (`TrackerLogo`, `RepoTrackerLogo`, or a detail's
+  `trackerOf(trackerName)`). A list that spans projects hands its selection over
+  with the row's project (`issues/model` `openTicket`): looking an id up in one
+  project and falling back to its first ticket showed a different ticket.
 - **One right panel, four hosts.** `components/SidePanel` is the chrome — icon
   strip, underline, dots, drag region, edge resize, collapse-to-nothing — and each
   view supplies its own panes, dots and model (`trees/FilePickerPanel`,
@@ -342,7 +364,7 @@ src/
   and each host supplies its tabs, its menu rows and its trailing controls
   (`trees/MainTabBar`, `reviews/ReviewTabBar`, `triage/TriageTabBar`). A tab is a
   `worktree_tabs` row, or one of three other things: the tab that *is* the view
-  (Reviews' "Pull Request", Triage's "Linear" — always there, never closes), a
+  (Reviews' "Pull Request", Triage's ticket tab — always there, never closes), a
   transient view that appears with what it shows (a picked file, setup logs, a
   check log, the PR page, the ticket page — ephemeral `MainTab` literals, never
   rows, closable), or a session that hangs off the view's own surface rather
@@ -378,13 +400,14 @@ src/
   objects have one: a worktree (`shell/WorktreeMenu`), a ticket (the Tickets
   list row and the graph node — `tickets/TicketRow`, `issues/ticketMenu` — and
   the triage row, `shell/TriageTicketMenu`), and a pull request in the sidebar
-  (`shell/ReviewPrMenu`). A ticket's Linear rows (open, copy id, copy link)
-  come from `components/menuRows` so every host offers the same three; the
-  Linear url is built from the org's slug (`useLinearIssueUrl`), never fetched.
+  (`shell/ReviewPrMenu`). A ticket's tracker rows (open, copy id, copy link)
+  come from `components/menuRows` (`ticketItems`) so every host offers the same
+  three; the url is built, never fetched (`useTicketIssueUrl`: Linear's org slug,
+  or the Jira site's url + `/browse/<key>`).
   Rows are declarative `ContextMenuItem`s — a menu is a fixed list of actions
   on one object, and a render prop is how two of them drift.
 - **Colors:** never hardcode hex in components — use `theme/colors.ts` (`successColor`,
-  `LINEAR_BRAND`, `alpha()`, `statusColor`) or a CSS token. Tinted-text/on-accent have
+  `LINEAR_BRAND`, `JIRA_BRAND`, `alpha()`, `statusColor`) or a CSS token. Tinted-text/on-accent have
   dedicated tokens (`--accent-text`, `--on-accent`) so they flip in light mode.
 
 ## Security & validation invariants (load-bearing)
@@ -394,12 +417,13 @@ src/
   `safe_path`/`safe_real_path` (single normal component; reject `..`, absolute,
   symlink-escape); branch/ref names must not start with `-` (flag injection).
   `issue_id`, `base`, session ids all cross this line — never `Path::join` or
-  shell them raw.
+  shell them raw. A ticket id bound for Jira passes `jira::is_issue_key` before
+  it reaches JQL or a request path.
 - **Match hosts/URLs by parse at the sink, never by string prefix** —
   `url.host_str() == Some("uploads.linear.app")`, not
   `starts_with("https://uploads.linear.app")` (a prefix also matches
   `…app.evil.com`). Same for any allowlist.
-- **App-owned secrets** (Linear tokens) belong in the OS keychain, not plaintext
+- **App-owned secrets** (Linear and Jira tokens) belong in the OS keychain, not plaintext
   SQLite. Don't add new plaintext-secret columns. (Distinct from `COMPLIANCE.md`,
   which bars *agent-CLI* creds — this is our own OAuth.)
 - **Nothing an agent writes reaches GitHub without a click.** The AI review's MCP

@@ -50,8 +50,8 @@ The area beside it is whatever you picked.
 - **Triage** lives in the sidebar. Who is on rotation, the tickets waiting
   with their SLA, and a snoozed group. Open one and it gets a workspace: the
   ticket, an **Investigate** agent digging through the project's main
-  checkout, and a shell.
-- **Tickets** is your Linear queue as a list grouped by project and
+  checkout, and a shell. With Jira, the queue is a query you set per project.
+- **Tickets** is your Linear or Jira queue as a list grouped by project and
   milestone, or as a dependency graph. Every row says whether it is ready or
   what blocks it. **Run** starts a ticket in a new worktree; the launch queue
   starts several at once, each with its own agent.
@@ -107,8 +107,9 @@ You'll also want:
   credentials.
 - **[GitHub CLI](https://cli.github.com)** (`gh`), signed in. Optional; it
   powers Reviews, the PR panes and the checks.
-- A **[Linear](https://linear.app)** workspace. Optional; it powers Tickets
-  and Triage.
+- A **[Linear](https://linear.app)** workspace or a
+  **[Jira Cloud](https://www.atlassian.com/software/jira)** site. Optional; it
+  powers Tickets and Triage, and each project picks which one it reads.
 
 ## Building from source
 

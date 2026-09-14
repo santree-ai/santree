@@ -1,5 +1,5 @@
 /**
- * The Linear ticket a piece of work is about, rendered like the Triage detail —
+ * The ticket a piece of work is about, rendered like the Triage detail —
  * id · priority · state · title · the meta row (author, labels, points, cycle,
  * due date), then the description and comment thread. Reference for the work
  * happening beside it.
@@ -16,11 +16,11 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect } from "react";
 
-import { useTriageDetail } from "../lib/queries";
+import { useTicketProvider, useTriageDetail } from "../lib/queries";
 import { priorityColor } from "../theme/colors";
 import { DiscussionPane, DiscussionSkeleton } from "./IssueDiscussion";
 import { IssueMeta } from "./IssueMeta";
-import { ExpandIcon, LinearLogo } from "./icons";
+import { ExpandIcon, TrackerLogo } from "./icons";
 import { MarkdownTitle } from "./Markdown";
 import { Button, Dot, EmptyState } from "./primitives";
 
@@ -33,21 +33,22 @@ export function IssuePane({
 }: {
   repo: string;
   ticketId: string | null;
-  /** Fired with the live Linear title once it resolves. The caller decides
+  /** Fired with the live ticket title once it resolves. The caller decides
    *  whether it differs from what it holds and what to do about it — a worktree
    *  self-heals its cached title from this, which is a worktree concern and not
    *  something a ticket-rendering pane should know about. */
   onResolvedTitle?: (title: string) => void;
-  /** What to show until Linear answers. A worktree already holds the ticket's
-   *  title, and falling back to the bare id would blank a name the caller could
-   *  have shown all along — the id is true, but it is not what was there a
-   *  moment ago. Absent for a PR, whose ticket the app has never fetched. */
+  /** What to show until the tracker answers. A worktree already holds the
+   *  ticket's title, and falling back to the bare id would blank a name the
+   *  caller could have shown all along — the id is true, but it is not what was
+   *  there a moment ago. Absent for a PR, whose ticket the app has never fetched. */
   fallbackTitle?: string;
   /** Open the same ticket as a main-area tab, at reading width (the host's
    *  `IssuePage`). The control is drawn only when a host offers it. */
   onExpand?: () => void;
 }) {
   const { data: detail } = useTriageDetail(repo, ticketId);
+  const provider = useTicketProvider(repo);
   // Only treat the fetched detail as this ticket's once its id matches (avoids
   // flashing the previous one's body while a new one loads).
   const ready = ticketId && detail?.id === ticketId ? detail : undefined;
@@ -58,8 +59,8 @@ export function IssuePane({
   }, [liveTitle, onResolvedTitle]);
 
   // Two ways to have no ticket, one thing to say: nothing carried an id, or it
-  // carried one Linear has no issue for (`detail === null`) — a branch named like
-  // a ticket, a ticket since deleted. Neither is a failure to report.
+  // carried one the tracker has no issue for (`detail === null`) — a branch named
+  // like a ticket, a ticket since deleted. Neither is a failure to report.
   if (!ticketId || detail === null) {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-app">
@@ -67,7 +68,7 @@ export function IssuePane({
           title="No linked ticket"
           subtitle={
             ticketId
-              ? `Linear has no issue ${ticketId}.`
+              ? `${provider} has no issue ${ticketId}.`
               : "This PR's title has no ticket id (e.g. [AK-123])."
           }
         />
@@ -94,8 +95,8 @@ export function IssuePane({
           )}
           <div className="ml-auto flex items-center gap-1.5">
             {ready && (
-              <Button size="sm" onClick={() => openUrl(ready.url)} title="Open in Linear">
-                <LinearLogo size={11} className="text-[color:var(--linear-brand)]" />
+              <Button size="sm" onClick={() => openUrl(ready.url)} title={`Open in ${provider}`}>
+                <TrackerLogo provider={provider} size={11} branded />
                 Open
               </Button>
             )}

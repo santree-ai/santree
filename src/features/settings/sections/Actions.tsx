@@ -201,8 +201,8 @@ function AppTriagePanel() {
           <div className="text-[13px] font-semibold text-fg-bright">Enable Triage</div>
           <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
             {linear
-              ? "Show the Triage section in the sidebar and pull your Linear issues into it."
-              : "Connect Linear first (Settings → Integrations) to enable triage."}
+              ? "Show the Triage section in the sidebar and pull your tracker's issues into it."
+              : "Connect Linear or Jira first (Settings → Integrations) to enable triage."}
           </div>
         </div>
         {/* The real `disabled`, not a wrapper's `pointer-events-none`: without

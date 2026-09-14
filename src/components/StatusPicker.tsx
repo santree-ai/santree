@@ -9,7 +9,7 @@
  * "Saving…" state is needed.
  */
 import type { TriageDetail } from "../bindings";
-import { LINEAR_READ_ONLY_HINT } from "../lib/queries";
+import { TRACKER_READ_ONLY_HINT } from "../lib/queries";
 import { ChevronDownIcon } from "./icons";
 import { Dropdown } from "./primitives";
 
@@ -20,7 +20,7 @@ export function StatusPicker({
 }: {
   detail?: TriageDetail;
   onSetState: (stateId: string) => void;
-  /** Linear is connected without `write`: show the state, refuse to change it. */
+  /** The tracker is connected without `write`: show the state, refuse to change it. */
   readOnly?: boolean;
 }) {
   if (!detail) {
@@ -42,7 +42,7 @@ export function StatusPicker({
       trigger={(toggle) => (
         // A `title` on a disabled button is suppressed by the browser, so the
         // explanation rides on a wrapper that is still hoverable.
-        <span title={readOnly ? LINEAR_READ_ONLY_HINT : undefined}>
+        <span title={readOnly ? TRACKER_READ_ONLY_HINT : undefined}>
           <button
             type="button"
             onClick={() => !disabled && toggle()}

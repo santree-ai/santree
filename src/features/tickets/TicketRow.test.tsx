@@ -8,7 +8,8 @@ import type { TicketRow as Row } from "./useTickets";
 
 // The menu's Linear rows need the repo's org; the row is otherwise pure props.
 vi.mock("../../lib/queries", () => ({
-  useLinearIssueUrl: () => (id: string) => `https://linear.app/acme/issue/${id}`,
+  useTicketIssueUrl: () => (id: string) => `https://linear.app/acme/issue/${id}`,
+  useTicketProvider: () => "Linear",
 }));
 
 const task: Task = {

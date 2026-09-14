@@ -22,7 +22,7 @@ invariants below, and report violations with `file:line` evidence.
    `url.host_str() == Some("uploads.linear.app")` is correct;
    `starts_with("https://uploads.linear.app")` is a finding (it also matches
    `uploads.linear.app.evil.com`). Applies to every allowlist.
-3. **App-owned secrets (Linear OAuth tokens) live in the OS keychain.** A new
+3. **App-owned secrets (Linear and Jira OAuth tokens) live in the OS keychain.** A new
    plaintext secret column in SQLite, or a token written to disk/logs, is a
    finding.
 

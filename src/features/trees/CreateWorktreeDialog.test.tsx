@@ -39,6 +39,7 @@ vi.mock("../../state/AppContext", () => ({
 }));
 
 vi.mock("../../lib/queries", () => ({
+  useTicketProvider: () => "Linear",
   WORK_AGENT_KEY: "work_agent",
   // Only the fields the dialog reads. This used to also carry `state` and
   // `stateType`, which exist on no domain type — an untyped `vi.mock` factory

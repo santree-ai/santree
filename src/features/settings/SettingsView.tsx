@@ -20,8 +20,10 @@ import {
   DocsIcon,
   GearIcon,
   GitHubLogo,
+  JiraLogo,
   KeyIcon,
   LinearLogo,
+  LinkIcon,
   PencilIcon,
   PlayIcon,
   PrIcon,
@@ -39,9 +41,10 @@ import { EnglishTutorSection } from "./sections/EnglishTutor";
 import { EnvironmentSection } from "./sections/Environment";
 import { GeneralSection } from "./sections/General";
 import { GitHubSection } from "./sections/GitHub";
+import { JiraSection } from "./sections/Jira";
 import { LinearSection } from "./sections/Linear";
 import { PromptsSection } from "./sections/Prompts";
-import { RepoLinearSection } from "./sections/RepoLinear";
+import { RepoTrackerSection } from "./sections/RepoTracker";
 import { TerminalSection } from "./sections/Terminal";
 import { UsageSection } from "./sections/Usage";
 import { WorkSection } from "./sections/Work";
@@ -132,6 +135,12 @@ const APP_NAV: NavNode[] = [
         render: () => <LinearSection />,
       },
       {
+        key: "jira",
+        label: "Jira",
+        icon: <JiraLogo size={ICON_SIZE} />,
+        render: () => <JiraSection />,
+      },
+      {
         key: "github",
         label: "GitHub",
         icon: <GitHubLogo size={ICON_SIZE} />,
@@ -191,10 +200,10 @@ const APP_NAV: NavNode[] = [
 
 const REPO_NAV: NavNode[] = [
   {
-    key: "linear",
-    label: "Linear",
-    icon: <LinearLogo size={ICON_SIZE} />,
-    render: (repo) => <RepoLinearSection repo={repo} />,
+    key: "tracker",
+    label: "Ticket tracker",
+    icon: <LinkIcon size={ICON_SIZE} />,
+    render: (repo) => <RepoTrackerSection repo={repo} />,
   },
   {
     key: "environment",

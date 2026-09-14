@@ -256,7 +256,7 @@ async fn draft_body(
     let helper = agent::helper_config(db, repo, agent::HelperKind::PrBody)
         .await
         .ok()?;
-    let detail = crate::linear::triage_detail(db, repo, issue_id)
+    let detail = crate::tracker::triage_detail(db, repo, issue_id)
         .await
         .ok()
         .flatten();

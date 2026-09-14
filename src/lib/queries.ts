@@ -51,6 +51,7 @@ import type {
   ReviewWorkItemSource,
   ScriptInfo,
   Settings,
+  TicketProvider,
   TicketRef,
   TriageComment,
   TriageDetail,
@@ -416,6 +417,11 @@ export const queryKeys = {
   linearStatus: (repo: string) => ["linear-status", repo] as const,
   linearOrgs: ["linear-orgs"] as const,
   linearApiBudget: ["linear-api-budget"] as const,
+  /** Prefix for every repo's Jira connection status, as `linearStatusPrefix` is
+   *  for Linear. */
+  jiraStatusPrefix: ["jira-status"] as const,
+  jiraStatus: (repo: string) => ["jira-status", repo] as const,
+  jiraSites: ["jira-sites"] as const,
   claudeUsage: ["claude-usage"] as const,
 };
 
@@ -699,10 +705,19 @@ export type LinearScope = "read" | "read_write";
 export const parseLinearScope = (raw: string | null | undefined): LinearScope =>
   raw === "read_write" ? "read_write" : "read";
 
-/** Said wherever a Linear write is disabled, so the four places that gate on it
+/** A Jira repo's triage queue, as JQL (repo-scoped). Read by Rust
+ *  (`jira::TRIAGE_JQL_KEY`), so the two declarations have to agree. */
+export const JIRA_TRIAGE_JQL_KEY = "jira_triage_jql";
+
+/** What an unset query runs — the placeholder for `jira::DEFAULT_TRIAGE_JQL`,
+ *  whose copy is the one the backend actually sends. */
+export const DEFAULT_JIRA_TRIAGE_JQL =
+  'assignee = currentUser() AND statusCategory = "To Do" ORDER BY created DESC';
+
+/** Said wherever a tracker write is disabled, so the four places that gate on it
  *  can't drift into four different explanations. */
-export const LINEAR_READ_ONLY_HINT =
-  "santree can't change Linear right now: it is set to read-only, or the workspace was connected without write access. Both live in Settings → Integrations.";
+export const TRACKER_READ_ONLY_HINT =
+  "santree can't change this tracker right now: it is set to read-only, or the workspace or site was connected without write access. Both live in Settings → Integrations.";
 
 /** Whether to confirm before quitting the app. App-scoped; defaults to ON (a
  *  missing value means confirm), so read it as `data !== "false"`. */
@@ -1039,6 +1054,8 @@ export const useSetSetting = () =>
       ...(a.key === TRIAGE_TEAMS_KEY
         ? [queryKeys.triageTicketsPrefix, queryKeys.triageSchedulePrefix]
         : []),
+      // A Jira repo's queue *is* this query, so a new one is a different queue.
+      ...(a.key === JIRA_TRIAGE_JQL_KEY ? [queryKeys.triageTicketsPrefix] : []),
     ],
   });
 
@@ -1457,9 +1474,21 @@ export const useSetBinaryPath = (name: string) =>
     ],
   });
 
-// ── Linear: connection, orgs and the issue graph ─────────────────────────────
-// Everything that talks to Linear except Triage (which has its own cache policy,
-// further down): the OAuth connection, the org a repo is bound to, and the issues.
+// ── Ticket trackers: Linear and Jira connections, and what a repo reads ──────
+// Everything that talks to a tracker except Triage (which has its own cache
+// policy, further down): the OAuth connections, the org or site a repo is bound
+// to, and the issues.
+
+/**
+ * The tracker a repo's tickets come from, off the registry every view already
+ * holds (`Repo.provider`, resolved by the backend's own dispatch rule). Linear
+ * while that read is in flight or nothing is connected — the backend's first
+ * choice too, so a Linear install's marks don't flip on launch.
+ */
+export const useTicketProvider = (repo: string): TicketProvider => {
+  const { data: repos } = useRepos();
+  return repos?.find((r) => r.name === repo)?.provider ?? "Linear";
+};
 
 /** Linear connection status for a repo (which org it uses, if any). */
 export const useLinearStatus = (repo: string) =>
@@ -1473,58 +1502,86 @@ export const useLinearOrgs = () =>
     staleTime: SETTING_STALE_TIME,
   });
 
+/** Jira connection status for a repo (which site it uses, if any). */
+export const useJiraStatus = (repo: string) =>
+  useUnwrappedQuery(queryKeys.jiraStatus(repo), () => commands.jiraAuthStatus(repo), {
+    staleTime: SETTING_STALE_TIME,
+  });
+
+/** Every connected Jira site. */
+export const useJiraSites = () =>
+  useUnwrappedQuery(queryKeys.jiraSites, () => commands.jiraSites(), {
+    staleTime: SETTING_STALE_TIME,
+  });
+
 /**
- * Whether any Linear workspace is connected, or `null` until the org read has
- * answered — an unknown is not a no. The chrome's one reading of it (the rail's
- * connect prompt, Triage's disabled state), by the rule Settings' Linear card uses.
+ * Whether any tracker — a Linear workspace or a Jira site — is connected, or
+ * `null` until that is known. An unknown is not a no: one connection answers
+ * yes, but a no waits for both reads. The chrome's one reading of it (the rail's
+ * connect prompt, Triage's disabled state).
  */
-export const useLinearConnected = (): boolean | null => {
-  const { data } = useLinearOrgs();
-  return data === undefined ? null : data.length > 0;
+export const useTrackerConnected = (): boolean | null => {
+  const { data: orgs } = useLinearOrgs();
+  const { data: sites } = useJiraSites();
+  if ((orgs?.length ?? 0) > 0 || (sites?.length ?? 0) > 0) return true;
+  return orgs === undefined || sites === undefined ? null : false;
 };
 
 /**
- * True only when Linear is connected *and* the grant is read-only.
+ * True only when the repo's tracker is connected *and* its grant is read-only.
  *
  * Deliberately not `!canWrite`: "nothing connected" and "connected read-only"
  * want different words, and while the status is still loading nothing should
  * flicker to disabled. The backend refuses the write either way — this is the
- * courtesy, `repo_write_session` is the guarantee.
+ * courtesy, the backend's write session is the guarantee.
  */
-export const useLinearReadOnly = (repo: string) => {
-  const { data } = useLinearStatus(repo);
-  return data?.authenticated === true && data.canWrite === false;
+export const useTrackerReadOnly = (repo: string) => {
+  const provider = useTicketProvider(repo);
+  const { data: linear } = useLinearStatus(repo);
+  const { data: jira } = useJiraStatus(repo);
+  const status = provider === "Jira" ? jira : linear;
+  return status?.authenticated === true && status.canWrite === false;
 };
 
 /**
- * A ticket's page in Linear, from the org the repo is bound to. The org's slug
- * is its url key, so the address is `linear.app/<slug>/issue/<id>` — Linear
- * routes that to the issue without the title slug its own links carry. A builder
- * rather than one url, because a list hands the same repo's builder to every
- * row; it answers `null` until the status read lands, or when no org is bound.
+ * A ticket's page in its tracker, built from what the repo is bound to rather
+ * than fetched: Linear's `linear.app/<slug>/issue/<id>` (Linear routes that
+ * without the title slug its own links carry), Jira's `<site>/browse/<key>`. A
+ * builder rather than one url, because a list hands the same repo's builder to
+ * every row; it answers `null` until the status read lands, or when nothing is
+ * bound.
  */
-export const useLinearIssueUrl = (repo: string): ((id: string) => string | null) => {
-  const { data } = useLinearStatus(repo);
-  const slug = data?.orgSlug ?? null;
-  return useCallback(
-    (id: string) => (slug ? `https://linear.app/${slug}/issue/${id}` : null),
-    [slug],
-  );
+export const useTicketIssueUrl = (repo: string): ((id: string) => string | null) => {
+  const provider = useTicketProvider(repo);
+  const { data: linear } = useLinearStatus(repo);
+  const { data: jira } = useJiraStatus(repo);
+  let base: string | null = null;
+  if (provider === "Jira" && jira?.siteUrl) base = `${jira.siteUrl.replace(/\/+$/, "")}/browse`;
+  if (provider === "Linear" && linear?.orgSlug) base = `https://linear.app/${linear.orgSlug}/issue`;
+  return useCallback((id: string) => (base ? `${base}/${encodeURIComponent(id)}` : null), [base]);
 };
 
-/** Run the Linear OAuth connect flow, refreshing status + orgs + tickets. */
+/** Every read a new tracker connection can move: which tracker and org or site
+ *  each repo resolves to, and everything read through them. Triage is included
+ *  so a freshly connected queue appears without the 3-minute wait. */
+const TRACKER_READS: QueryKey[] = [
+  queryKeys.repos,
+  queryKeys.linearStatusPrefix,
+  queryKeys.linearOrgs,
+  queryKeys.jiraStatusPrefix,
+  queryKeys.jiraSites,
+  queryKeys.tasksPrefix,
+  queryKeys.triageTicketsPrefix,
+  queryKeys.triageSchedulePrefix,
+];
+
+/** Run the Linear OAuth connect flow, refreshing every tracker read. */
 export const useLinearConnect = () => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => unwrap(commands.linearConnect()),
     onSuccess: (orgs) => {
-      qc.invalidateQueries({ queryKey: queryKeys.linearStatusPrefix });
-      qc.invalidateQueries({ queryKey: queryKeys.linearOrgs });
-      qc.invalidateQueries({ queryKey: queryKeys.tasksPrefix });
-      // Triage is Linear-derived too; refresh it (all repos) so a freshly
-      // connected workspace's queue/schedule appears without the 3-min wait.
-      qc.invalidateQueries({ queryKey: queryKeys.triageTicketsPrefix });
-      qc.invalidateQueries({ queryKey: queryKeys.triageSchedulePrefix });
+      for (const queryKey of TRACKER_READS) qc.invalidateQueries({ queryKey });
       // `connect` returns the full (name-sorted) org list, so we can't single out
       // the one just added — a generic confirmation avoids naming the wrong org.
       toast.success("Linear connected.", {
@@ -1534,7 +1591,34 @@ export const useLinearConnect = () => {
   });
 };
 
-/** Bind (or clear) the Linear org a repo uses. */
+/** Run the Jira OAuth connect flow, refreshing every tracker read. */
+export const useJiraConnect = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => unwrap(commands.jiraConnect()),
+    onSuccess: (sites) => {
+      for (const queryKey of TRACKER_READS) qc.invalidateQueries({ queryKey });
+      toast.success("Jira connected.", {
+        title: sites.length > 1 ? "Jira sites connected" : "Connected",
+      });
+    },
+  });
+};
+
+/** Flip a repo's registry row to `provider` at once, so the tracker switch and
+ *  every mark reading `Repo.provider` move with the click. Returns the rollback. */
+function patchRepoProvider(qc: QueryClient, repo: string, provider: TicketProvider) {
+  const prev = qc.getQueryData<Repo[]>(queryKeys.repos);
+  if (prev === undefined) return () => {};
+  qc.setQueryData<Repo[]>(
+    queryKeys.repos,
+    prev.map((r) => (r.name === repo ? { ...r, provider } : r)),
+  );
+  return () => qc.setQueryData(queryKeys.repos, prev);
+}
+
+/** Bind (or clear) the Linear org a repo uses. Binding one takes the repo off
+ *  Jira — the backend clears that link in the same write. */
 export const useSetRepoLinearOrg = () =>
   useOptimisticMutation({
     mutationKey: ["set-repo-linear-org"],
@@ -1545,12 +1629,44 @@ export const useSetRepoLinearOrg = () =>
       // once; full status (auth flags, names) reconciles on settle.
       const key = queryKeys.linearStatus(args.repo);
       const prev = qc.getQueryData<{ orgSlug: string | null }>(key);
-      if (prev === undefined) return;
-      qc.setQueryData(key, { ...prev, orgSlug: args.slug });
-      return () => qc.setQueryData(key, prev);
+      const undoProvider = args.slug ? patchRepoProvider(qc, args.repo, "Linear") : () => {};
+      if (prev !== undefined) qc.setQueryData(key, { ...prev, orgSlug: args.slug });
+      return () => {
+        undoProvider();
+        if (prev !== undefined) qc.setQueryData(key, prev);
+      };
     },
     invalidate: (args) => [
+      queryKeys.repos,
       queryKeys.linearStatusPrefix,
+      queryKeys.jiraStatusPrefix,
+      queryKeys.tasksPrefix,
+      queryKeys.triageTickets(args.repo),
+      queryKeys.triageSchedule(args.repo),
+    ],
+  });
+
+/** Bind (or clear) the Jira site a repo uses. Binding one takes the repo off
+ *  Linear — the backend clears that link in the same write. */
+export const useSetRepoJiraSite = () =>
+  useOptimisticMutation({
+    mutationKey: ["set-repo-jira-site"],
+    mutationFn: (args: { repo: string; cloudId: string | null }) =>
+      unwrap(commands.setRepoJiraSite(args.repo, args.cloudId)),
+    optimistic: (qc, args) => {
+      const key = queryKeys.jiraStatus(args.repo);
+      const prev = qc.getQueryData<{ cloudId: string | null }>(key);
+      const undoProvider = args.cloudId ? patchRepoProvider(qc, args.repo, "Jira") : () => {};
+      if (prev !== undefined) qc.setQueryData(key, { ...prev, cloudId: args.cloudId });
+      return () => {
+        undoProvider();
+        if (prev !== undefined) qc.setQueryData(key, prev);
+      };
+    },
+    invalidate: (args) => [
+      queryKeys.repos,
+      queryKeys.linearStatusPrefix,
+      queryKeys.jiraStatusPrefix,
       queryKeys.tasksPrefix,
       queryKeys.triageTickets(args.repo),
       queryKeys.triageSchedule(args.repo),

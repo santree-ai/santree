@@ -46,10 +46,11 @@ import { useState } from "react";
 import { agentKey } from "../../features/agents/registry";
 import { MAX_DEPTH } from "../../features/trees/worktreeGrouping";
 import type { TreeFocusPane } from "../../state/AppContext";
-import { BranchIcon, LinearLogo } from "../icons";
+import { BranchIcon } from "../icons";
 import { MarkdownTitle } from "../Markdown";
 import { PrMark } from "../PrChip";
 import { Spinner } from "../primitives";
+import { RepoTrackerLogo } from "../RepoTrackerLogo";
 import { CARD_GLYPH, CARD_INSET, CARD_LABEL_X, INDENT_PX } from "../WorkSignals";
 import { AgentRow } from "./AgentRow";
 import { AgentSummaryRow } from "./AgentSummaryRow";
@@ -163,11 +164,11 @@ export function WorktreeRow({
                       e.stopPropagation();
                       onOpenPage("issue");
                     }}
-                    title={`Linear · ${task.id} — open the ticket`}
-                    aria-label={`Open the Linear ticket for ${w.title || w.id}`}
+                    title={`${task.id} — open the ticket`}
+                    aria-label={`Open the ticket for ${w.title || w.id}`}
                     className={MARK_CLASS}
                   >
-                    <LinearLogo size={11} />
+                    <RepoTrackerLogo repo={repo} size={11} />
                   </button>
                 )}
                 {/* Both marks open the thing they name, at reading width, as a

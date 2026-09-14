@@ -27,9 +27,11 @@ mod github;
 mod global_capture;
 mod gql;
 mod hooks;
+mod jira;
 mod legacy;
 mod linear;
 mod notes;
+mod oauth;
 mod openers;
 mod pr;
 mod pricing;
@@ -51,6 +53,7 @@ mod stream;
 mod tabs;
 mod terminal;
 mod text_store;
+mod tracker;
 mod update;
 mod usage;
 mod worktree;
@@ -236,6 +239,10 @@ fn specta_builder() -> AppBuilder {
             commands::linear_list_issues,
             commands::linear_invalidate_caches,
             commands::linear_connect,
+            commands::jira_auth_status,
+            commands::jira_sites,
+            commands::set_repo_jira_site,
+            commands::jira_connect,
             commands::legacy_cli_probe,
             commands::legacy_cli_migrate,
             commands::check_for_update,

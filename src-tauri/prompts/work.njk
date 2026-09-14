@@ -3,7 +3,7 @@
 {% else %}
 Work on {{ ticket_id }}{% if title %}: {{ title }}{% endif %}.
 
-Note: the {{ ticket_id }} ticket could not be fetched directly. If a Linear MCP server is available, use it to fetch the ticket description, comments, and any relevant details for {{ ticket_id }}. Otherwise, proceed based on the branch/title context above.
+Note: the {{ ticket_id }} ticket could not be fetched directly. If {% if tracker_name %}a {{ tracker_name }}{% else %}an issue-tracker{% endif %} MCP server is available, use it to fetch the ticket description, comments, and any relevant details for {{ ticket_id }}. Otherwise, proceed based on the branch/title context above.
 {% endif %}
 {% if custom_context %}
 ## Additional context from the user

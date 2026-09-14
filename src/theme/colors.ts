@@ -68,6 +68,9 @@ export const successColor = palette.green;
  *  in integration surfaces. */
 export const LINEAR_BRAND = "var(--linear-brand)";
 
+/** Jira's brand blue (the `--jira-brand` token), for the Jira logo/badge. */
+export const JIRA_BRAND = "var(--jira-brand)";
+
 /** The colour a provider's mark wears where it identifies a session (the
  *  history list, the usage meters): Claude's terracotta, and the foreground
  *  for Codex, whose mark is black-on-white by design. Anything else is muted. */

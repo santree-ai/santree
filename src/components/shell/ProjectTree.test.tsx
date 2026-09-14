@@ -104,6 +104,7 @@ vi.mock("../../lib/queries", async (importOriginal) => {
     // The Reviews section's nesting: off here, which is also the app default, so
     // neither the setting read nor the Linear resolve it feeds needs a client.
     useSetting: () => ({ data: undefined }),
+    useTicketProvider: () => "Linear",
     usePrTicketsByRepo: () => new Map(),
     useMergeQueue: () => ({ data: mergeQueue.view }),
   };

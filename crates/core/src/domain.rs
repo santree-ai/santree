@@ -488,6 +488,9 @@ pub struct ClaudeGlobalCapture {
 pub struct Repo {
     pub name: String,
     pub tracker: String,
+    /// The ticket tracker this repo's tickets come from; `None` when nothing is
+    /// connected. The same resolution the backend dispatches reads through.
+    pub provider: Option<TicketProvider>,
     /// Number of agents currently active on this repo.
     pub agents: u32,
     /// Absolute path on disk of the repo's git checkout. Always set in
@@ -2373,6 +2376,10 @@ pub struct TriageDetail {
     pub id: String,
     pub title: String,
     pub priority: Priority,
+    /// Which provider this issue came from — drives the logo, URL format, and
+    /// `{{ tracker_name }}` in prompt templates.
+    #[serde(default = "default_tracker_name")]
+    pub tracker_name: String,
     /// Workflow state name (e.g. "Triage").
     pub state: String,
     /// Id of the current workflow state (for the status picker's selection).
@@ -2407,6 +2414,10 @@ pub struct TriageDetail {
     /// Markdown description — may contain inline images.
     pub description: String,
     pub comments: Vec<TriageComment>,
+}
+
+fn default_tracker_name() -> String {
+    "Linear".into()
 }
 
 /// A single on-call slot in a triage rotation. The bounds are raw instants,
@@ -2480,6 +2491,13 @@ pub struct AgentSetting {
     pub model: String,
 }
 
+/// Which ticket provider a repo uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum TicketProvider {
+    Linear,
+    Jira,
+}
+
 /// Which trackers/services are connected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase", default)]
@@ -2540,6 +2558,28 @@ pub struct LinearStatus {
     /// Whether this repo's org can be written to. False when nothing is
     /// connected, so read `authenticated` first: "not connected" and "connected
     /// read-only" are different things to say to a user.
+    pub can_write: bool,
+}
+
+/// A connected Jira Cloud site (the Jira counterpart of [`LinearOrg`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraSite {
+    pub cloud_id: String,
+    pub site_name: String,
+    pub site_url: String,
+    pub can_write: bool,
+}
+
+/// Jira connection status surfaced to the UI for a given repo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraStatus {
+    pub authenticated: bool,
+    pub site_name: Option<String>,
+    /// The site's base address — what a ticket's `/browse/<key>` link hangs off.
+    pub site_url: Option<String>,
+    pub cloud_id: Option<String>,
     pub can_write: bool,
 }
 

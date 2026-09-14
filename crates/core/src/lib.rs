@@ -7,6 +7,7 @@
 pub mod config;
 pub mod diff_index;
 pub mod domain;
+pub mod jira;
 pub mod layout;
 pub mod linear;
 pub mod review_tools;

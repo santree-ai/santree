@@ -17,6 +17,7 @@ vi.mock("./model", () => ({
   useReviewsModel: () => ({ infoCollapsed: false, toggleInfo: vi.fn() }),
 }));
 vi.mock("../../lib/queries", () => ({
+  useTicketProvider: () => "Linear",
   useReviewDrafts: () => ({ data: drafts }),
   useAgentAuth: () => ({ data: { connected: true } }),
   useCodexAccount: () => ({ data: { connected: true } }),

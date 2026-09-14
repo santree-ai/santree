@@ -14,6 +14,8 @@ import type { TerminalTabs } from "../terminal/orchestrator";
 import { TerminalsProvider, useTerminals } from "../terminal/TerminalsContext";
 
 vi.mock("../../lib/queries", () => ({
+  useTicketProvider: () => "Linear",
+  useTriageOrgRepo: () => "acme/app",
   useAgentAuth: () => ({ data: { connected: true } }),
   useCodexAccount: () => ({ data: { connected: true } }),
   useCodexHealth: () => ({ data: { available: true } }),

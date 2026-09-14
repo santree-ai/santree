@@ -10,7 +10,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { TriageDetail } from "../bindings";
 
 const detail = vi.hoisted(() => ({ data: undefined as TriageDetail | null | undefined }));
-vi.mock("../lib/queries", () => ({ useTriageDetail: () => detail }));
+vi.mock("../lib/queries", () => ({
+  useTriageDetail: () => detail,
+  useTicketProvider: () => "Linear",
+}));
 vi.mock("./IssueDiscussion", () => ({
   DiscussionPane: () => <div data-testid="discussion" />,
   DiscussionSkeleton: () => <div data-testid="discussion-skeleton" />,

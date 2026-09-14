@@ -79,9 +79,27 @@ export const REPO_PATH: Record<string, string> = {
 export const LINEAR_ORG = { slug: "mallard", name: "Mallard Labs" };
 
 export const repos = (): Repo[] => [
-  { name: QUACK, tracker: `Linear · ${LINEAR_ORG.name}`, agents: 4, path: REPO_PATH[QUACK] },
-  { name: INFRA, tracker: `Linear · ${LINEAR_ORG.name}`, agents: 0, path: REPO_PATH[INFRA] },
-  { name: BEAK, tracker: `Linear · ${LINEAR_ORG.name}`, agents: 0, path: REPO_PATH[BEAK] },
+  {
+    name: QUACK,
+    tracker: `Linear · ${LINEAR_ORG.name}`,
+    provider: "Linear",
+    agents: 4,
+    path: REPO_PATH[QUACK],
+  },
+  {
+    name: INFRA,
+    tracker: `Linear · ${LINEAR_ORG.name}`,
+    provider: "Linear",
+    agents: 0,
+    path: REPO_PATH[INFRA],
+  },
+  {
+    name: BEAK,
+    tracker: `Linear · ${LINEAR_ORG.name}`,
+    provider: "Linear",
+    agents: 0,
+    path: REPO_PATH[BEAK],
+  },
 ];
 
 export const worktreePath = (repo: string, id: string) =>

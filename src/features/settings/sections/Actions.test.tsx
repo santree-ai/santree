@@ -186,15 +186,15 @@ describe("app-scope Triage settings", () => {
     expect(screen.getByText(/Show the Triage section in the sidebar/)).toBeInTheDocument();
   });
 
-  /** Triage has nothing to pull without Linear, so the master switch is dimmed —
+  /** Triage has nothing to pull without a tracker, so the master switch is dimmed —
    *  and dimming it is only honest if it is also really `disabled`. The panel's
    *  own rule (every control below takes the real attribute, not just
    *  `pointer-events-none`) has to hold for the switch that turns it all on. */
-  it("really disables the master toggle while Linear is not connected", () => {
+  it("really disables the master toggle while no tracker is connected", () => {
     linearOn = false;
     render(<TriageActionSection />);
 
-    expect(screen.getByText(/Connect Linear first/)).toBeInTheDocument();
+    expect(screen.getByText(/Connect Linear or Jira first/)).toBeInTheDocument();
     expect(screen.getAllByRole("switch")[0]).toBeDisabled();
   });
 
