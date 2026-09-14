@@ -1149,6 +1149,12 @@ export const commands = {
 	linearInvalidateCaches: () => __TAURI_INVOKE<void>("linear_invalidate_caches"),
 	/**  Run the Linear OAuth flow; returns the updated org list. */
 	linearConnect: () => typedError<LinearOrg[], CmdError>(__TAURI_INVOKE("linear_connect")),
+	/**
+	 *  Connect Linear through its hosted MCP server — the last resort for workspaces
+	 *  that block santree's OAuth app (`docs/linear-mcp.md`). Returns the updated org
+	 *  list.
+	 */
+	linearMcpConnect: () => typedError<LinearOrg[], CmdError>(__TAURI_INVOKE("linear_mcp_connect")),
 	/**  Connection status for a repo's Jira site. */
 	jiraAuthStatus: (repo: string) => typedError<JiraStatus, CmdError>(__TAURI_INVOKE("jira_auth_status", { repo })),
 	/**  Every connected Jira Cloud site. */
@@ -2079,6 +2085,22 @@ export type LinearApiBudget = {
 	observedAtMs: number | null,
 };
 
+/**
+ *  How a Linear org is connected. Both reach the same workspace; they differ in
+ *  what santree can do through them (`docs/linear-mcp.md`).
+ */
+export type LinearConnection = 
+/**
+ *  santree's OAuth app and Linear's GraphQL API — the default, and the one
+ *  with every feature.
+ */
+"OAuth" | 
+/**
+ *  Linear's hosted MCP server — the last resort for workspaces that block
+ *  OAuth apps, with fewer features.
+ */
+"Mcp";
+
 /**  A connected Linear organization. */
 export type LinearOrg = {
 	slug: string,
@@ -2089,6 +2111,7 @@ export type LinearOrg = {
 	 *  unconditional read,write flow.
 	 */
 	canWrite: boolean,
+	via: LinearConnection,
 };
 
 /**  Linear connection status surfaced to the UI for a given repo. */
@@ -2105,6 +2128,8 @@ export type LinearStatus = {
 	 *  read-only" are different things to say to a user.
 	 */
 	canWrite: boolean,
+	/**  How this repo's org is connected; `None` when no org resolves. */
+	via: LinearConnection | null,
 };
 
 /**
@@ -2116,10 +2141,13 @@ export type LinearTeam = {
 	name: string,
 	/**  The viewer is on the team's roster. */
 	member: boolean,
-	/**  The viewer is in the team's triage rotation. */
-	inRotation: boolean,
-	/**  The team runs a triage rotation at all. */
-	hasRotation: boolean,
+	/**
+	 *  The viewer is in the team's triage rotation. `None` when the connection
+	 *  can't see rotations (Linear's MCP server) — unknown, not "no".
+	 */
+	inRotation: boolean | null,
+	/**  The team runs a triage rotation at all; `None` as for `in_rotation`. */
+	hasRotation: boolean | null,
 	/**  The team holds a triage issue assigned to the viewer. */
 	hasAssigned: boolean,
 };

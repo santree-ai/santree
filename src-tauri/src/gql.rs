@@ -21,6 +21,22 @@ pub fn client() -> &'static reqwest::Client {
     &CLIENT
 }
 
+/// [`client`] that never follows a redirect, for requests whose body is a
+/// credential: an OAuth token endpoint (a code verifier, a refresh token) and the
+/// MCP server's calls. reqwest drops `Authorization` on a cross-host redirect but
+/// re-sends the body, and that body must reach the host it was addressed to or
+/// nowhere.
+pub fn credential_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("building HTTP client")
+    });
+    &CLIENT
+}
+
 /// A GraphQL `{ nodes: [...] }` connection. One generic wrapper instead of a
 /// near-identical `*Conn` struct per query. `Default` is hand-written because the
 /// derive would needlessly require `T: Default` — an absent connection is simply
@@ -179,9 +195,15 @@ pub fn status_message(service: &str, status: reqwest::StatusCode, body: &str) ->
 /// The error for a non-success GraphQL response, with the status attached for
 /// [`status_of`].
 fn status_error(service: &str, status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    http_error(&format!("{service} GraphQL"), status, body)
+}
+
+/// The error for a non-success response from `service`, worded by
+/// [`status_message`] and carrying the status for [`status_of`].
+pub fn http_error(service: &str, status: reqwest::StatusCode, body: &str) -> anyhow::Error {
     anyhow::Error::new(HttpError {
         status,
-        message: status_message(&format!("{service} GraphQL"), status, body),
+        message: status_message(service, status, body),
     })
 }
 
@@ -221,7 +243,26 @@ fn is_repeatable(request: &reqwest::Request) -> bool {
 pub async fn send(req: reqwest::RequestBuilder, service: &str) -> Result<reqwest::Response> {
     let (client, request) = req.build_split();
     let request = request.with_context(|| format!("{service} request"))?;
-    let again = if is_repeatable(&request) {
+    let repeatable = is_repeatable(&request);
+    execute(client, request, repeatable, service).await
+}
+
+/// [`send`] for a POST the caller knows is a read, where [`is_repeatable`] can't
+/// see it: an MCP `tools/call` of a read tool carries no GraphQL `query` to
+/// inspect. Resent once on a gateway failure; never use it for a write.
+pub async fn send_read(req: reqwest::RequestBuilder, service: &str) -> Result<reqwest::Response> {
+    let (client, request) = req.build_split();
+    let request = request.with_context(|| format!("{service} request"))?;
+    execute(client, request, true, service).await
+}
+
+async fn execute(
+    client: reqwest::Client,
+    request: reqwest::Request,
+    repeatable: bool,
+    service: &str,
+) -> Result<reqwest::Response> {
+    let again = if repeatable {
         request.try_clone()
     } else {
         None
@@ -500,6 +541,27 @@ mod tests {
             }
         });
         (url, served)
+    }
+
+    /// A body `is_repeatable` can't read (an MCP `tools/call`) is only resent when
+    /// the caller declares it a read; the same POST through `send` is sent once.
+    #[tokio::test]
+    async fn a_declared_read_is_resent_and_an_opaque_post_is_not() {
+        let call = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call" });
+
+        let (url, served) = serve_each(vec![("502 Bad Gateway", "<html>"), ("200 OK", "{}")]);
+        let res = send_read(client().post(&url).json(&call), "Linear MCP")
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+        assert_eq!(served.load(Ordering::SeqCst), 2);
+
+        let (url, served) = serve_each(vec![("502 Bad Gateway", "<html>"), ("200 OK", "{}")]);
+        let res = send(client().post(&url).json(&call), "Linear MCP")
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::BAD_GATEWAY);
+        assert_eq!(served.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

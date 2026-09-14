@@ -6,7 +6,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use santree_core::domain::{
-    Task, TicketProvider, TicketRef, TriageDetail, TriageSchedule, TriageTicket,
+    LinearConnection, Task, TicketProvider, TicketRef, TriageDetail, TriageSchedule, TriageTicket,
 };
 
 use crate::db::Db;
@@ -191,14 +191,17 @@ pub async fn provider(db: &Db, repo: &str) -> Result<Option<TicketProvider>> {
 }
 
 async fn repo_tracker(db: &Db, repo: &str) -> Result<Option<Box<dyn TicketTracker>>> {
-    Ok(provider(db, repo)
-        .await?
-        .map(|p| -> Box<dyn TicketTracker> {
-            match p {
-                TicketProvider::Linear => Box::new(LinearTracker),
-                TicketProvider::Jira => Box::new(JiraTracker),
-            }
-        }))
+    let tracker: Box<dyn TicketTracker> = match provider(db, repo).await? {
+        None => return Ok(None),
+        Some(TicketProvider::Jira) => Box::new(JiraTracker),
+        // A Linear repo reads through however its org is connected: GraphQL, or
+        // the MCP server (`docs/linear-mcp.md`).
+        Some(TicketProvider::Linear) => match crate::linear::repo_connection(db, repo).await? {
+            Some(LinearConnection::Mcp) => Box::new(crate::linear_mcp::tracker::LinearMcpTracker),
+            _ => Box::new(LinearTracker),
+        },
+    };
+    Ok(Some(tracker))
 }
 
 pub async fn list_issues(db: &Db, repo: &str) -> Result<Option<Vec<Task>>> {
@@ -265,6 +268,7 @@ pub async fn move_to_started(db: &Db, repo: &str, id: &str) -> Result<Option<()>
 
 pub fn invalidate_all_caches() {
     crate::linear::invalidate_all_caches();
+    crate::linear_mcp::tracker::invalidate_all_caches();
     crate::jira::invalidate_all_caches();
 }
 

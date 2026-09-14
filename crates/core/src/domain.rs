@@ -2447,10 +2447,11 @@ pub struct LinearTeam {
     pub name: String,
     /// The viewer is on the team's roster.
     pub member: bool,
-    /// The viewer is in the team's triage rotation.
-    pub in_rotation: bool,
-    /// The team runs a triage rotation at all.
-    pub has_rotation: bool,
+    /// The viewer is in the team's triage rotation. `None` when the connection
+    /// can't see rotations (Linear's MCP server) — unknown, not "no".
+    pub in_rotation: Option<bool>,
+    /// The team runs a triage rotation at all; `None` as for `in_rotation`.
+    pub has_rotation: Option<bool>,
     /// The team holds a triage issue assigned to the viewer.
     pub has_assigned: bool,
 }
@@ -2517,6 +2518,18 @@ impl Default for Integrations {
     }
 }
 
+/// How a Linear org is connected. Both reach the same workspace; they differ in
+/// what santree can do through them (`docs/linear-mcp.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum LinearConnection {
+    /// santree's OAuth app and Linear's GraphQL API — the default, and the one
+    /// with every feature.
+    OAuth,
+    /// Linear's hosted MCP server — the last resort for workspaces that block
+    /// OAuth apps, with fewer features.
+    Mcp,
+}
+
 /// A connected Linear organization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -2527,6 +2540,7 @@ pub struct LinearOrg {
     /// recorded scopes read as writable — they all went through the old
     /// unconditional read,write flow.
     pub can_write: bool,
+    pub via: LinearConnection,
 }
 
 /// santree-CLI configuration (`.santree/metadata.json` + the CLI's global auth
@@ -2559,6 +2573,8 @@ pub struct LinearStatus {
     /// connected, so read `authenticated` first: "not connected" and "connected
     /// read-only" are different things to say to a user.
     pub can_write: bool,
+    /// How this repo's org is connected; `None` when no org resolves.
+    pub via: Option<LinearConnection>,
 }
 
 /// A connected Jira Cloud site (the Jira counterpart of [`LinearOrg`]).

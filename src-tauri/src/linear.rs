@@ -15,9 +15,9 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use santree_core::domain::{
-    ApiBudgetKind, ApiBudgetWindow, CycleRef, LinearApiBudget, LinearOrg, LinearStatus, LinearTeam,
-    ProjectMilestoneRef, Task, TaskStatus, TeamRef, TicketRef, TriageComment, TriageDetail,
-    TriageSchedule, TriageShift, TriageTicket, WorkflowState,
+    ApiBudgetKind, ApiBudgetWindow, CycleRef, LinearApiBudget, LinearConnection, LinearOrg,
+    LinearStatus, LinearTeam, ProjectMilestoneRef, Task, TaskStatus, TeamRef, TicketRef,
+    TriageComment, TriageDetail, TriageSchedule, TriageShift, TriageTicket, WorkflowState,
 };
 use santree_core::{layout, linear as core_linear};
 
@@ -38,7 +38,7 @@ pub const LINEAR_SCOPE_KEY: &str = "linear_scope";
 /// The OAuth scope string for a connection, from the [`LINEAR_SCOPE_KEY`] setting.
 /// Only the exact UI value opts up; unset or malformed values fail closed so a
 /// typo can never silently request permission to mutate Linear.
-async fn requested_scope(db: &Db) -> Result<&'static str> {
+pub(crate) async fn requested_scope(db: &Db) -> Result<&'static str> {
     let raw = settings::get(db, "app", LINEAR_SCOPE_KEY).await?;
     Ok(scope_from_setting(raw.as_deref()))
 }
@@ -91,12 +91,46 @@ async fn read_only_mode(db: &Db) -> Result<bool> {
 
 /// An org's non-secret metadata. The tokens are *not* here — see [`oauth::Tokens`].
 #[derive(sqlx::FromRow)]
-struct OrgRow {
-    slug: String,
-    name: String,
-    expires_at: i64,
+pub(crate) struct OrgRow {
+    pub(crate) slug: String,
+    pub(crate) name: String,
+    pub(crate) expires_at: i64,
     /// Comma-separated OAuth scopes Linear granted; see `scopes_allow_write`.
-    scopes: String,
+    pub(crate) scopes: String,
+    /// How the org is connected: [`AUTH_OAUTH`] or [`AUTH_MCP`].
+    pub(crate) auth: String,
+    /// The MCP client the org's grant belongs to; `None` for an OAuth org.
+    pub(crate) mcp_client_id: Option<String>,
+}
+
+/// `linear_orgs.auth` for an org connected through santree's OAuth app.
+pub(crate) const AUTH_OAUTH: &str = "oauth";
+/// `linear_orgs.auth` for an org connected through Linear's MCP server.
+pub(crate) const AUTH_MCP: &str = "mcp";
+
+impl OrgRow {
+    pub(crate) fn connection(&self) -> LinearConnection {
+        connection_of(&self.auth)
+    }
+
+    /// The keychain namespace this org's credential lives under — per connection,
+    /// so a row can never pair with a credential from the other token endpoint.
+    fn keychain(&self) -> &'static str {
+        match self.connection() {
+            LinearConnection::OAuth => "linear",
+            LinearConnection::Mcp => crate::linear_mcp::auth::KEYCHAIN,
+        }
+    }
+}
+
+/// A stored `auth` value as a connection. Anything but `mcp` is the OAuth app:
+/// that is the column's default, and every org that predates it.
+fn connection_of(auth: &str) -> LinearConnection {
+    if auth == AUTH_MCP {
+        LinearConnection::Mcp
+    } else {
+        LinearConnection::OAuth
+    }
 }
 
 async fn load_tokens(slug: &str) -> Result<Option<Tokens>> {
@@ -123,15 +157,16 @@ pub async fn list_orgs(db: &Db) -> Result<Vec<LinearOrg>> {
     let read_only = read_only_mode(db).await?;
     // Its own query rather than `orgs_by_name`: that one feeds `resolved_org`, whose
     // (slug, name) shape several callers depend on.
-    let rows = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT slug, name, scopes FROM linear_orgs ORDER BY name",
+    let rows = sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT slug, name, scopes, auth FROM linear_orgs ORDER BY name",
     )
     .fetch_all(db)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(slug, name, scopes)| LinearOrg {
+        .map(|(slug, name, scopes, auth)| LinearOrg {
             can_write: !read_only && scopes_allow_write(&scopes),
+            via: connection_of(&auth),
             slug,
             name,
         })
@@ -152,9 +187,10 @@ pub(crate) fn resolved_org<'a>(
         .or_else(|| orgs.first())
 }
 
-async fn org_row(db: &Db, slug: &str) -> Result<Option<OrgRow>> {
+pub(crate) async fn org_row(db: &Db, slug: &str) -> Result<Option<OrgRow>> {
     Ok(sqlx::query_as::<_, OrgRow>(
-        "SELECT slug, name, expires_at, scopes FROM linear_orgs WHERE slug = ?",
+        "SELECT slug, name, expires_at, scopes, auth, mcp_client_id
+           FROM linear_orgs WHERE slug = ?",
     )
     .bind(slug)
     .fetch_optional(db)
@@ -164,22 +200,73 @@ async fn org_row(db: &Db, slug: &str) -> Result<Option<OrgRow>> {
 /// Persist an org: credential to the keychain, metadata to SQLite. Keychain
 /// first — a metadata row we couldn't back with a credential would show up as a
 /// connected org whose every call then fails.
-async fn upsert_org(db: &Db, org: &OrgRow, tokens: Tokens) -> Result<()> {
-    save_tokens(&org.slug, tokens).await?;
+pub(crate) async fn upsert_org(db: &Db, org: &OrgRow, tokens: Tokens) -> Result<()> {
+    oauth::save_tokens(org.keychain(), &org.slug, tokens).await?;
     sqlx::query(
-        "INSERT INTO linear_orgs (slug, name, expires_at, scopes)
-         VALUES (?, ?, ?, ?)
+        "INSERT INTO linear_orgs (slug, name, expires_at, scopes, auth, mcp_client_id)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(slug) DO UPDATE SET
            name = excluded.name,
            expires_at = excluded.expires_at,
-           scopes = excluded.scopes",
+           scopes = excluded.scopes,
+           auth = excluded.auth,
+           mcp_client_id = excluded.mcp_client_id",
     )
     .bind(&org.slug)
     .bind(&org.name)
     .bind(org.expires_at)
     .bind(&org.scopes)
+    .bind(&org.auth)
+    .bind(&org.mcp_client_id)
     .execute(db)
     .await?;
+    Ok(())
+}
+
+/// [`upsert_org`] for an MCP org, which never overwrites an OAuth one. The write
+/// itself checks, so an OAuth connect that lands between a caller's read and this
+/// write still wins. `false` when the org is connected through OAuth: the MCP
+/// credential was stored under its own name and is the caller's to discard.
+pub(crate) async fn upsert_mcp_org(db: &Db, org: &OrgRow, tokens: Tokens) -> Result<bool> {
+    oauth::save_tokens(crate::linear_mcp::auth::KEYCHAIN, &org.slug, tokens).await?;
+    let written = sqlx::query(
+        "INSERT INTO linear_orgs (slug, name, expires_at, scopes, auth, mcp_client_id)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(slug) DO UPDATE SET
+           name = excluded.name,
+           expires_at = excluded.expires_at,
+           scopes = excluded.scopes,
+           mcp_client_id = excluded.mcp_client_id
+         WHERE linear_orgs.auth = ?",
+    )
+    .bind(&org.slug)
+    .bind(&org.name)
+    .bind(org.expires_at)
+    .bind(&org.scopes)
+    .bind(AUTH_MCP)
+    .bind(&org.mcp_client_id)
+    .bind(AUTH_MCP)
+    .execute(db)
+    .await?
+    .rows_affected();
+    Ok(written > 0)
+}
+
+/// Persist an org connected through santree's OAuth app. The normal connection
+/// replaces an MCP one for the same workspace (`docs/linear-mcp.md`), so once
+/// this credential is stored, the MCP grant the row held is revoked and removed.
+async fn persist_oauth_org(db: &Db, org: &OrgRow, tokens: Tokens) -> Result<()> {
+    let replaced = org_row(db, &org.slug)
+        .await?
+        .filter(|prior| prior.connection() == LinearConnection::Mcp);
+    upsert_org(db, org, tokens).await?;
+    if let Some(prior) = replaced {
+        crate::linear_mcp::auth::forget(&prior.slug, prior.mcp_client_id.as_deref()).await;
+        log::info!(
+            "Linear org {} is connected through the OAuth app now; its MCP connection was replaced",
+            prior.slug
+        );
+    }
     Ok(())
 }
 
@@ -266,13 +353,15 @@ pub(crate) async fn import_cli_credential(
         .as_ref()
         .map(GrantedScope::as_csv)
         .unwrap_or_default();
-    upsert_org(
+    persist_oauth_org(
         db,
         &OrgRow {
             slug: slug.clone(),
             name: name.clone(),
             expires_at: now_ms() + body.expires_in * 1000,
             scopes: scopes.clone(),
+            auth: AUTH_OAUTH.into(),
+            mcp_client_id: None,
         },
         Tokens {
             access: body.access_token,
@@ -284,13 +373,23 @@ pub(crate) async fn import_cli_credential(
     log::info!("imported the Linear credential for org {slug} from the santree CLI auth store");
     Ok(LinearOrg {
         can_write: scopes_allow_write(&scopes),
+        via: LinearConnection::OAuth,
         slug,
         name,
     })
 }
 
+/// How the org a repo resolves to is connected, or `None` when no org resolves —
+/// what a Linear repo's reads dispatch on: GraphQL, or the MCP server.
+pub(crate) async fn repo_connection(db: &Db, repo: &str) -> Result<Option<LinearConnection>> {
+    let Some(slug) = resolve_org_slug(db, repo).await? else {
+        return Ok(None);
+    };
+    Ok(org_row(db, &slug).await?.map(|row| row.connection()))
+}
+
 /// The org slug a repo should use — see [`resolved_org`].
-async fn resolve_org_slug(db: &Db, repo: &str) -> Result<Option<String>> {
+pub(crate) async fn resolve_org_slug(db: &Db, repo: &str) -> Result<Option<String>> {
     let linked: Option<Option<String>> =
         sqlx::query_scalar("SELECT linear_org_slug FROM repos WHERE name = ?")
             .bind(repo)
@@ -334,6 +433,14 @@ async fn org_credentials(db: &Db, slug: &str) -> Result<(OrgRow, Tokens)> {
     let row = org_row(db, slug)
         .await?
         .ok_or_else(|| anyhow!("org {slug} not connected"))?;
+    // Checked before the keychain is touched: an MCP org's credential lives under
+    // another name and refreshes against another endpoint (`linear_mcp::auth`).
+    if row.connection() == LinearConnection::Mcp {
+        bail!(
+            "{} is connected through Linear's MCP server, which santree can't read tickets through yet",
+            row.name
+        );
+    }
     let tokens = load_tokens(slug).await?.ok_or_else(|| {
         anyhow!("no Linear credential for org {slug} in the OS keychain — reconnect it in Settings")
     })?;
@@ -387,17 +494,17 @@ async fn rotate(db: &Db, row: OrgRow, tokens: Tokens) -> Result<String> {
         "Linear token refresh",
     )
     .await?;
+    // A refresh response need not repeat the grant; keeping the recorded scopes
+    // stops a routine token refresh from silently demoting the org to read-only.
+    let scopes = body
+        .scope
+        .as_ref()
+        .map(GrantedScope::as_csv)
+        .unwrap_or_else(|| row.scopes.clone());
     let updated = OrgRow {
-        slug: row.slug,
-        name: row.name,
         expires_at: now_ms() + body.expires_in * 1000,
-        // A refresh response need not repeat the grant; keeping the recorded scopes
-        // stops a routine token refresh from silently demoting the org to read-only.
-        scopes: body
-            .scope
-            .as_ref()
-            .map(GrantedScope::as_csv)
-            .unwrap_or(row.scopes),
+        scopes,
+        ..row
     };
     let rotated = Tokens {
         access: body.access_token,
@@ -587,7 +694,7 @@ struct QueryData {
     viewer: Viewer,
 }
 
-const TERMINAL_STATES: [&str; 3] = ["completed", "canceled", "duplicate"];
+pub(crate) const TERMINAL_STATES: [&str; 3] = ["completed", "canceled", "duplicate"];
 
 /// An assignee's `(name, avatar_url)` for a Task — the full name (falling back to
 /// the @handle), and the avatar URL. `(None, None)` when unassigned.
@@ -773,7 +880,7 @@ fn map_related(issue: RelatedIssue) -> Task {
 /// relation is structural rather than a `blocks` relation, but the work cannot be
 /// complete until its subtasks are. Keeping this in the domain result makes the
 /// graph, inspector and launch-readiness rules agree.
-fn apply_subtask_dependencies(tasks: &mut [Task]) {
+pub(crate) fn apply_subtask_dependencies(tasks: &mut [Task]) {
     let children: Vec<(String, String, bool)> = tasks
         .iter()
         .filter_map(|task| {
@@ -819,13 +926,16 @@ type Slot<T> = std::sync::Arc<tokio::sync::Mutex<Option<(Instant, std::sync::Arc
 /// issuing the same query. [`TtlCache::invalidate`] drops the slot outright: a fetch
 /// already in flight completes into the orphaned slot and is simply never served, so
 /// a write never waits on a read to land.
-struct TtlCache<T> {
+/// How many keys a [`TtlCache`] holds before inserting sweeps the expired ones.
+const PRUNE_AT: usize = 256;
+
+pub(crate) struct TtlCache<T> {
     ttl: Duration,
     slots: std::sync::Mutex<HashMap<String, Slot<T>>>,
 }
 
 impl<T> TtlCache<T> {
-    fn new(ttl: Duration) -> Self {
+    pub(crate) fn new(ttl: Duration) -> Self {
         Self {
             ttl,
             slots: Default::default(),
@@ -835,19 +945,30 @@ impl<T> TtlCache<T> {
     fn slot(&self, key: &str) -> Slot<T> {
         // Poison-tolerant, like `refresh_lock`: the map holds only Arcs, so a thread
         // that panicked mid-access left it structurally sound.
-        self.slots
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(key.to_string())
-            .or_default()
-            .clone()
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        // Some caches are keyed by whatever ids are asked about, so expired entries
+        // are swept once the map grows. A slot mid-fetch is locked and stays.
+        if slots.len() >= PRUNE_AT && !slots.contains_key(key) {
+            slots.retain(|_, slot| {
+                slot.try_lock().map_or(true, |entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|(at, _)| at.elapsed() < self.ttl)
+                })
+            });
+        }
+        slots.entry(key.to_string()).or_default().clone()
     }
 
     /// The value for `key` — served from the cache while younger than the TTL, else
     /// fetched exactly once however many callers arrive mid-flight. The flag reports
     /// which happened, so the caller can log a hit differently from a fetch. A failed
     /// fetch is not cached: the next caller tries again.
-    async fn get_or_fetch<F, Fut>(&self, key: &str, fetch: F) -> Result<(std::sync::Arc<T>, bool)>
+    pub(crate) async fn get_or_fetch<F, Fut>(
+        &self,
+        key: &str,
+        fetch: F,
+    ) -> Result<(std::sync::Arc<T>, bool)>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
@@ -859,13 +980,29 @@ impl<T> TtlCache<T> {
                 return Ok((value.clone(), true));
             }
         }
-        let value = std::sync::Arc::new(fetch().await?);
+        let value = match fetch().await {
+            Ok(value) => std::sync::Arc::new(value),
+            Err(err) => {
+                drop(entry);
+                // A failure caches nothing, so it keeps no slot either — an id that
+                // names nothing would otherwise leave one behind on every ask.
+                // Only this slot goes: a newer one for the key is someone else's.
+                let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+                if slots
+                    .get(key)
+                    .is_some_and(|current| std::sync::Arc::ptr_eq(current, &slot))
+                {
+                    slots.remove(key);
+                }
+                return Err(err);
+            }
+        };
         *entry = Some((Instant::now(), value.clone()));
         Ok((value, false))
     }
 
     /// Forget `key` so the next read fetches. Never waits on an in-flight fetch.
-    fn invalidate(&self, key: &str) {
+    pub(crate) fn invalidate(&self, key: &str) {
         self.slots
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -873,8 +1010,22 @@ impl<T> TtlCache<T> {
     }
 
     /// Forget every key — the manual refresh, which promises a real fetch.
-    fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.slots.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// Whatever is cached for `key`, however old, without fetching — for a read
+    /// that can use what another read already paid for, and does without it
+    /// otherwise. Waits on a fetch already in flight for the key.
+    pub(crate) async fn peek(&self, key: &str) -> Option<std::sync::Arc<T>> {
+        let slot = self
+            .slots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .cloned()?;
+        let entry = slot.lock().await;
+        entry.as_ref().map(|(_, value)| value.clone())
     }
 }
 
@@ -902,7 +1053,7 @@ fn issues_changed(slug: &str) {
 
 /// Drop everything cached for an org whose credential was just (re)issued — the
 /// viewer behind the slug may be a different user now.
-fn invalidate_org_caches(slug: &str) {
+pub(crate) fn invalidate_org_caches(slug: &str) {
     ASSIGNED_ISSUES.invalidate(slug);
     TEAM_FACTS.invalidate(slug);
 }
@@ -997,7 +1148,7 @@ async fn fetch_assigned_issues(db: &Db, slug: String, repo: &str) -> Result<Vec<
 /// `("AK", 165)`. `None` for anything that isn't the `<KEY>-<number>` shape, with
 /// the same key rule the frontend's `ticketIdFor` uses (uppercase, alphanumeric,
 /// 2–10 chars) so the two agree on what counts as an id.
-fn split_identifier(id: &str) -> Option<(&str, u64)> {
+pub(crate) fn split_identifier(id: &str) -> Option<(&str, u64)> {
     let (key, number) = id.rsplit_once('-')?;
     let key_ok = (2..=10).contains(&key.len())
         && key.starts_with(|c: char| c.is_ascii_uppercase())
@@ -1121,6 +1272,7 @@ pub async fn auth_status(db: &Db, repo: &str) -> Result<LinearStatus> {
         authenticated: !orgs.is_empty(),
         org: resolved.map(|o| o.name.clone()),
         can_write: resolved.is_some_and(|o| o.can_write),
+        via: resolved.map(|o| o.via),
         org_slug: slug,
     })
 }
@@ -1305,7 +1457,9 @@ fn record_budget(slug: &str, headers: &reqwest::header::HeaderMap) {
 pub async fn api_budget(db: &Db) -> Result<Vec<LinearApiBudget>> {
     let orgs = list_orgs(db).await?;
     let now = now_ms() as f64;
-    for org in &orgs {
+    // Only OAuth orgs have a budget to read: the probe is GraphQL, and Linear's
+    // MCP server sends no rate-limit headers at all. An MCP org is simply absent.
+    for org in orgs.iter().filter(|o| o.via == LinearConnection::OAuth) {
         let fresh = BUDGETS
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -1393,13 +1547,13 @@ struct UserNode {
 
 /// How a user's name is rendered — mirrors Linear's "Display names" preference.
 #[derive(Clone, Copy, PartialEq)]
-enum NameStyle {
+pub(crate) enum NameStyle {
     Full,
     Username,
 }
 
 /// Read the global display-names preference (defaults to full name).
-async fn name_style(db: &Db) -> NameStyle {
+pub(crate) async fn name_style(db: &Db) -> NameStyle {
     match settings::get(db, "app", "display_names").await {
         Ok(Some(v)) if v == "username" => NameStyle::Username,
         _ => NameStyle::Full,
@@ -1408,7 +1562,7 @@ async fn name_style(db: &Db) -> NameStyle {
 
 /// Choose a user's label from (full name, @handle) per the preference, falling
 /// back to whichever is present when the preferred one is missing.
-fn pick_name(
+pub(crate) fn pick_name(
     name: Option<String>,
     display_name: Option<String>,
     style: NameStyle,
@@ -1835,7 +1989,8 @@ async fn map_comment(
         all_replies(session, &node.id, node.children.take().unwrap_or_default()).await;
     child_nodes.sort_by_key(|c| c.created_at.as_deref().and_then(parse_ms).unwrap_or(0));
     // Read the token *after* the replies are in: paging them can have re-minted it.
-    let token = &session.token().await;
+    let token = session.token().await;
+    let token = Some(token.as_str());
     // Inline each reply's images concurrently; join_all preserves order. Resolve
     // the timestamp up front so the per-reply futures don't borrow `ch`.
     let children = join_all(child_nodes.into_iter().map(|ch| {
@@ -1958,7 +2113,12 @@ pub async fn triage_detail(db: &Db, repo: &str, ticket_id: &str) -> Result<Optio
     let client = gql::client();
     let token = session.token().await;
 
-    let description = inline_images(client, &issue.description.unwrap_or_default(), &token).await;
+    let description = inline_images(
+        client,
+        &issue.description.unwrap_or_default(),
+        Some(token.as_str()),
+    )
+    .await;
 
     // Top-level comments (replies hang off each via `children`), oldest first.
     let mut top: Vec<CommentNode> = issue
@@ -2116,6 +2276,11 @@ pub async fn snooze_issue(
     ticket_id: &str,
     until_ms: Option<i64>,
 ) -> Result<Option<()>> {
+    if repo_connection(db, repo).await? == Some(LinearConnection::Mcp) {
+        bail!(
+            "Linear's MCP server can't snooze tickets. Connect the workspace through santree's OAuth app to snooze from santree."
+        );
+    }
     let Some(session) = repo_write_session(db, repo).await? else {
         return Ok(None);
     };
@@ -2388,7 +2553,7 @@ struct TimeSchedule {
 }
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct TriageResp {
+pub(crate) struct TriageResp {
     #[serde(default)]
     current_user: Option<IdRef>,
     #[serde(default)]
@@ -2399,11 +2564,11 @@ struct TriageResp {
 /// to re-running the query.
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct TeamNode {
-    key: String,
-    name: String,
+pub(crate) struct TeamNode {
+    pub(crate) key: String,
+    pub(crate) name: String,
     #[serde(default)]
-    triage_responsibility: Option<TriageResp>,
+    pub(crate) triage_responsibility: Option<TriageResp>,
 }
 
 /// A team runs a triage rotation when its responsibility is backed by a non-empty
@@ -2549,15 +2714,15 @@ async fn fetch_all_teams(session: &Session<'_>) -> Result<Vec<TeamNode>> {
 /// scope is decided from — fetched once and cached ([`team_facts`]), then read
 /// through [`scope_of`] under whatever rules the user has set. Facts, not a
 /// scope: the rules can change without a refetch.
-struct TeamFacts {
-    viewer_id: Option<String>,
+pub(crate) struct TeamFacts {
+    pub(crate) viewer_id: Option<String>,
     /// Every team, by key, in the org's order — the memberships folded in, since
     /// a team the viewer belongs to but the `teams` list omits is still theirs.
-    teams: Vec<TeamNode>,
+    pub(crate) teams: Vec<TeamNode>,
     /// Keys of the teams the viewer is a member of.
-    member: HashSet<String>,
+    pub(crate) member: HashSet<String>,
     /// Keys of the teams holding a triage issue assigned to the viewer.
-    assigned: HashSet<String>,
+    pub(crate) assigned: HashSet<String>,
 }
 
 impl TeamFacts {
@@ -2651,28 +2816,37 @@ impl Default for TriageTeamRules {
 pub const TRIAGE_TEAMS_KEY: &str = "triage_teams";
 
 async fn triage_team_rules(db: &Db) -> TriageTeamRules {
+    saved_triage_team_rules(db).await.unwrap_or_default()
+}
+
+/// The rules the user saved, or `None` when they never saved any — or saved
+/// something unreadable, which counts as unset. Distinct from
+/// [`triage_team_rules`] for a connection whose defaults differ (Linear's MCP
+/// server has no rotations for the default rule to find).
+pub(crate) async fn saved_triage_team_rules(db: &Db) -> Option<TriageTeamRules> {
     match settings::get(db, "app", TRIAGE_TEAMS_KEY).await {
-        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_else(|err| {
-            log::warn!("ignoring an unreadable {TRIAGE_TEAMS_KEY} setting: {err}");
-            TriageTeamRules::default()
-        }),
-        _ => TriageTeamRules::default(),
+        Ok(Some(raw)) => serde_json::from_str(&raw)
+            .inspect_err(|err| {
+                log::warn!("ignoring an unreadable {TRIAGE_TEAMS_KEY} setting: {err}")
+            })
+            .ok(),
+        _ => None,
     }
 }
 
 /// The viewer and the teams in their Triage — what both Triage reads derive
 /// from: the queue's filter ([`inbox_filter`]) and its "mine" marks, and one
 /// schedule per team.
-struct TeamScope {
-    viewer_id: Option<String>,
+pub(crate) struct TeamScope {
+    pub(crate) viewer_id: Option<String>,
     /// In display order: the rotations the viewer is in, then teams holding a
     /// ticket of theirs, then teams they belong to, then the picked ones — each
     /// once, and never a hidden one.
-    teams: Vec<TeamNode>,
+    pub(crate) teams: Vec<TeamNode>,
 }
 
 /// Apply the rules to the facts.
-fn scope_of(facts: &TeamFacts, rules: &TriageTeamRules) -> TeamScope {
+pub(crate) fn scope_of(facts: &TeamFacts, rules: &TriageTeamRules) -> TeamScope {
     let hidden: HashSet<&str> = rules.hidden.iter().map(String::as_str).collect();
     let picked: HashSet<&str> = rules.picked.iter().map(String::as_str).collect();
     // The rules in display order; each pass admits what it admits, once.
@@ -2758,6 +2932,9 @@ async fn team_scope(db: &Db, session: &Session<'_>) -> Result<TeamScope> {
 /// Every team the org exposes, with what the viewer is to it — the list the
 /// Triage teams setting is picked from. `None` when no org is connected.
 pub async fn linear_teams(db: &Db, repo: &str) -> Result<Option<Vec<LinearTeam>>> {
+    if repo_connection(db, repo).await? == Some(LinearConnection::Mcp) {
+        return crate::linear_mcp::tracker::linear_teams(db, repo).await;
+    }
     let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
@@ -2770,8 +2947,8 @@ pub async fn linear_teams(db: &Db, repo: &str) -> Result<Option<Vec<LinearTeam>>
                 key: t.key.clone(),
                 name: t.name.clone(),
                 member: facts.member.contains(&t.key),
-                in_rotation: facts.in_rotation(t),
-                has_rotation: is_rotation_team(t),
+                in_rotation: Some(facts.in_rotation(t)),
+                has_rotation: Some(is_rotation_team(t)),
                 has_assigned: facts.assigned.contains(&t.key),
             })
             .collect(),
@@ -2953,7 +3130,7 @@ query ResolveUsers($ids: [ID!]!) {
 // ── Timestamp + image helpers ──────────────────────────────────────────────
 
 /// Parse an RFC3339 timestamp (Linear's format) to epoch milliseconds.
-fn parse_ms(s: &str) -> Option<i64> {
+pub(crate) fn parse_ms(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|dt| dt.timestamp_millis())
@@ -3024,9 +3201,14 @@ fn splice_images(
 }
 
 /// Replace `https://uploads.linear.app/...` image URLs in markdown with
-/// base64 data URIs, downloading each with the access token. URLs that fail to
-/// fetch are left untouched.
-async fn inline_images(client: &reqwest::Client, md: &str, token: &str) -> String {
+/// base64 data URIs, downloading each with the org's access token — or with none,
+/// for the MCP server's urls, which come pre-signed. URLs that fail to fetch are
+/// left untouched.
+pub(crate) async fn inline_images(
+    client: &reqwest::Client,
+    md: &str,
+    token: Option<&str>,
+) -> String {
     if !md.contains(IMAGE_HOST) {
         return md.to_string();
     }
@@ -3105,7 +3287,18 @@ impl ImageCache {
 static IMAGE_CACHE: std::sync::LazyLock<tokio::sync::Mutex<ImageCache>> =
     std::sync::LazyLock::new(Default::default);
 
-async fn fetch_data_uri(client: &reqwest::Client, url: &str, token: &str) -> Result<String> {
+/// The image cache's key for `url`: the url without its query. The MCP server's
+/// upload urls carry a signature that changes on every read of the same image, so
+/// keyed with it, nothing would ever hit.
+fn image_cache_key(url: &str) -> &str {
+    url.split_once('?').map_or(url, |(path, _)| path)
+}
+
+async fn fetch_data_uri(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+) -> Result<String> {
     // Re-validate the host by parsing (not string-prefix) right before the token
     // goes out over the wire — the last line of defense against sending the org's
     // Linear OAuth token to a lookalike host (e.g. uploads.linear.app.evil.com).
@@ -3113,10 +3306,16 @@ async fn fetch_data_uri(client: &reqwest::Client, url: &str, token: &str) -> Res
     if parsed.scheme() != "https" || parsed.host_str() != Some("uploads.linear.app") {
         bail!("refusing to fetch image from untrusted host: {url}");
     }
-    if let Some(hit) = IMAGE_CACHE.lock().await.get(url) {
+    if let Some(hit) = IMAGE_CACHE.lock().await.get(image_cache_key(url)) {
         return Ok(hit);
     }
-    let res = client.get(url).bearer_auth(token).send().await?;
+    let mut req = client.get(url);
+    // Only a GraphQL-connected org's uploads take its token. The MCP server's urls
+    // are pre-signed, and its token must never leave for another host.
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    let res = req.send().await?;
     if !res.status().is_success() {
         bail!("image fetch returned {}", res.status());
     }
@@ -3151,7 +3350,7 @@ async fn fetch_data_uri(client: &reqwest::Client, url: &str, token: &str) -> Res
     IMAGE_CACHE
         .lock()
         .await
-        .insert(url.to_string(), uri.clone());
+        .insert(image_cache_key(url).to_string(), uri.clone());
     Ok(uri)
 }
 
@@ -3195,8 +3394,10 @@ pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
         name,
         expires_at,
         scopes,
+        auth: AUTH_OAUTH.into(),
+        mcp_client_id: None,
     };
-    upsert_org(
+    persist_oauth_org(
         db,
         &org,
         Tokens {
@@ -4463,6 +4664,57 @@ mod tests {
             Some("alpha")
         );
         assert_eq!(resolved_org(&[], Some("zulu")), None);
+    }
+
+    /// An MCP org lists as one, and the GraphQL path refuses it by name before it
+    /// touches the keychain: its credential lives under another name and refreshes
+    /// against another endpoint. Orgs from before the column read as OAuth.
+    #[tokio::test]
+    async fn an_mcp_org_lists_as_one_and_graphql_refuses_it() {
+        use super::{connection_of, list_orgs, org_credentials};
+        use santree_core::domain::LinearConnection;
+
+        let dir =
+            std::env::temp_dir().join(format!("santree-org-connection-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = crate::db::init(dir.join("test.db")).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO linear_orgs (slug, name, expires_at) VALUES ('legacy', 'Legacy', 0)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO linear_orgs (slug, name, expires_at, scopes, auth, mcp_client_id)
+             VALUES ('acme', 'Acme', 0, 'read', 'mcp', 'client-1')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let orgs = list_orgs(&db).await.unwrap();
+        assert_eq!(
+            orgs.iter()
+                .map(|o| (o.slug.as_str(), o.via))
+                .collect::<Vec<_>>(),
+            vec![
+                ("acme", LinearConnection::Mcp),
+                ("legacy", LinearConnection::OAuth)
+            ]
+        );
+
+        let err = org_credentials(&db, "acme")
+            .await
+            .err()
+            .expect("an MCP org has no GraphQL credential");
+        assert!(err.to_string().contains("Acme"), "{err}");
+        assert!(err.to_string().contains("MCP server"), "{err}");
+
+        assert_eq!(connection_of("oauth"), LinearConnection::OAuth);
+        assert_eq!(connection_of("something new"), LinearConnection::OAuth);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The invariant the repo list's tracker column promises: the workspace it

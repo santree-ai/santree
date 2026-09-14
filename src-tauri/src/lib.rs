@@ -30,6 +30,7 @@ mod hooks;
 mod jira;
 mod legacy;
 mod linear;
+mod linear_mcp;
 mod notes;
 mod oauth;
 mod openers;
@@ -239,6 +240,7 @@ fn specta_builder() -> AppBuilder {
             commands::linear_list_issues,
             commands::linear_invalidate_caches,
             commands::linear_connect,
+            commands::linear_mcp_connect,
             commands::jira_auth_status,
             commands::jira_sites,
             commands::set_repo_jira_site,

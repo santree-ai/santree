@@ -95,6 +95,20 @@ pub async fn save_tokens(provider: &str, org_id: &str, tokens: Tokens) -> Result
         .context("keychain write")?
 }
 
+/// Remove the org's stored token pair. A missing entry is already the goal.
+pub async fn delete_tokens(provider: &str, org_id: &str) -> Result<()> {
+    let provider = provider.to_string();
+    let org_id = org_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        match keychain_entry(&provider, &org_id)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(keychain_err(e)),
+        }
+    })
+    .await
+    .context("keychain delete")?
+}
+
 // ── Token endpoint ───────────────────────────────────────────────────────
 
 /// The response from an OAuth token endpoint (code exchange or refresh).
@@ -128,11 +142,33 @@ impl GrantedScope {
     }
 }
 
+/// A token endpoint's refusal. Typed so a caller can tell a dead grant
+/// (`invalid_grant`: the user has to reconnect) from a transient failure without
+/// matching on message text. Its `Display` keeps the endpoint's body, which is
+/// where the reason is.
+#[derive(Debug)]
+pub struct TokenEndpointError {
+    /// The OAuth `error` code from the body (RFC 6749 §5.2), when it had one.
+    pub code: Option<String>,
+    message: String,
+}
+impl std::fmt::Display for TokenEndpointError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for TokenEndpointError {}
+
+/// The OAuth error code a failed [`token_request`] carried, if it had one.
+pub fn token_error_code(err: &anyhow::Error) -> Option<&str> {
+    err.downcast_ref::<TokenEndpointError>()?.code.as_deref()
+}
+
 /// POST an OAuth token endpoint and decode the token pair. On failure the
 /// response body is preserved — `invalid_grant` reads as the same bare 400
 /// as a transient error without it.
 pub async fn token_request(url: &str, form: &[(&str, &str)], what: &str) -> Result<TokenResponse> {
-    let res = gql::client()
+    let res = gql::credential_client()
         .post(url)
         .form(form)
         .send()
@@ -141,8 +177,14 @@ pub async fn token_request(url: &str, form: &[(&str, &str)], what: &str) -> Resu
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
+        let code = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|json| json.get("error")?.as_str().map(str::to_owned));
         let snippet: String = body.chars().take(300).collect();
-        bail!("{what} failed ({status}): {snippet}");
+        return Err(anyhow::Error::new(TokenEndpointError {
+            code,
+            message: format!("{what} failed ({status}): {snippet}"),
+        }));
     }
     res.json()
         .await
@@ -386,6 +428,39 @@ mod tests {
         assert!(!usable_at(expires(5), now));
         assert!(!usable_at(expires(1), now));
         assert!(!usable_at(expires(-1), now));
+    }
+
+    /// A dead grant has to be recognisable as one — the MCP connection turns it
+    /// into "reconnect" instead of a raw 400 — and the reason has to survive.
+    #[tokio::test]
+    async fn a_refused_grant_keeps_its_oauth_error_code() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 4096]);
+            let body = r#"{"error":"invalid_grant","error_description":"Invalid refresh token"}"#;
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        });
+
+        let err = token_request(&url, &[("grant_type", "refresh_token")], "test refresh")
+            .await
+            .err()
+            .expect("a 400 is a failure");
+        assert_eq!(token_error_code(&err), Some("invalid_grant"));
+        assert!(err.to_string().contains("Invalid refresh token"), "{err}");
+        // Callers add context on the way up; the code must still be readable.
+        assert_eq!(
+            token_error_code(&err.context("while refreshing")),
+            Some("invalid_grant")
+        );
+        assert_eq!(token_error_code(&anyhow!("invalid_grant")), None);
     }
 
     #[test]
