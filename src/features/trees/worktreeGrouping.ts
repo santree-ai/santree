@@ -4,12 +4,6 @@
  *  worktrees can share the same nesting. */
 import type { Worktree } from "../../bindings";
 
-/** Deepest level that still indents. A longer chain keeps its order but stops
- *  stepping in, so a tall stack can't starve the text column of the rows at the
- *  bottom of it — which is what a sidebar only a few hundred pixels wide would
- *  otherwise do. Shared with the surfaces that render the nesting. */
-export const MAX_DEPTH = 3;
-
 /**
  * Order one project's worktrees so a stacked one sits directly under the worktree
  * it branched off, with the depth to indent it by.
@@ -43,7 +37,7 @@ export function stackWorktrees(list: Worktree[]): { worktree: Worktree; depth: n
   const walk = (w: Worktree, depth: number) => {
     if (seen.has(w.id)) return; // a cycle would otherwise recurse forever
     seen.add(w.id);
-    out.push({ worktree: w, depth: Math.min(depth, MAX_DEPTH) });
+    out.push({ worktree: w, depth });
     for (const child of childrenOf.get(w.id) ?? []) walk(child, depth + 1);
   };
   for (const root of roots) walk(root, 0);

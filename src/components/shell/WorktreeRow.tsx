@@ -44,7 +44,6 @@
 import { useState } from "react";
 
 import { agentKey } from "../../features/agents/registry";
-import { MAX_DEPTH } from "../../features/trees/worktreeGrouping";
 import type { TreeFocusPane } from "../../state/AppContext";
 import { BranchIcon } from "../icons";
 import { MarkdownTitle } from "../Markdown";
@@ -94,7 +93,7 @@ export function WorktreeRow({
   // Local, not persisted: expanding is a "let me look" gesture, and a tree that
   // reopens yesterday's expansions on launch is noisier than one that doesn't.
   const [expanded, setExpanded] = useState(false);
-  const rowIndent = indent + Math.min(node.depth, MAX_DEPTH) * INDENT_PX;
+  const rowIndent = indent + node.depth * INDENT_PX;
   // The card begins one inset before its own row's text; everything inside it
   // pays that inset back, so the gutter stays absolute at `rowIndent`.
   const cardIndent = rowIndent - CARD_INSET;

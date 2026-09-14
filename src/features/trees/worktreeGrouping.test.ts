@@ -73,9 +73,7 @@ describe("stackWorktrees", () => {
     ]);
   });
 
-  // A long chain keeps its nesting order but stops stepping in, so the cards at the
-  // bottom don't get squeezed against the edge of the sidebar.
-  it("caps the indent depth without reordering the chain", () => {
+  it("preserves every level of indentation in a long chain", () => {
     const a = worktree("AK-1");
     const b = worktree("AK-2", a.branch);
     const c = worktree("AK-3", b.branch);
@@ -86,7 +84,7 @@ describe("stackWorktrees", () => {
       ["AK-2", 1],
       ["AK-3", 2],
       ["AK-4", 3],
-      ["AK-5", 3],
+      ["AK-5", 4],
     ]);
   });
 

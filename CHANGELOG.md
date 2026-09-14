@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.16-beta.2 — 2026-09-14
+
+- Stacked worktrees keep indenting at every level, so deeply nested branches appear beneath their actual parent instead of lining up as siblings.
+
 ## 0.1.16-beta.1 — 2026-09-14
 
 - Connect Jira Cloud and choose Jira or Linear as the ticket tracker for each project.
