@@ -7,6 +7,11 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.16-beta.1 — 2026-09-14
+
+- Connect Jira Cloud and choose Jira or Linear as the ticket tracker for each project.
+- Connect Linear through its MCP server when your workspace blocks OAuth apps.
+
 ## 0.1.15 — 2026-09-12
 
 - Pull requests waiting on your review start with one to three bars showing how big the change is, so you can pick a review that fits the time you have. Hovering a row shows how many files and lines it changes.
