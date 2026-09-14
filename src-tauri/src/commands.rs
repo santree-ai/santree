@@ -46,6 +46,7 @@ use crate::github;
 use crate::jira;
 use crate::legacy;
 use crate::linear;
+use crate::linear_mcp;
 use crate::notes;
 use crate::openers;
 use crate::pr;
@@ -2774,6 +2775,15 @@ pub fn linear_invalidate_caches() {
 #[specta::specta]
 pub async fn linear_connect(db: State<'_, Db>) -> CmdResult<Vec<LinearOrg>> {
     Ok(linear::connect(&db).await?)
+}
+
+/// Connect Linear through its hosted MCP server — the last resort for workspaces
+/// that block santree's OAuth app (`docs/linear-mcp.md`). Returns the updated org
+/// list.
+#[tauri::command]
+#[specta::specta]
+pub async fn linear_mcp_connect(db: State<'_, Db>) -> CmdResult<Vec<LinearOrg>> {
+    Ok(linear_mcp::connect(&db).await?)
 }
 
 // ── Jira integration ────────────────────────────────────────────────────────

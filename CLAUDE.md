@@ -109,6 +109,10 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    (GraphQL) · jira.rs (Jira Cloud REST: `search/jql`, ADF,
                    transitions, the per-repo triage query) · oauth.rs (the PKCE
                    flow, keychain token store and refresh both trackers share)
+                   · linear_mcp/ (Linear through its hosted MCP server — the
+                   last-resort connection: `auth` sign-in + refresh, `client`
+                   JSON-RPC, `tracker` the reads, `wire` the tool → domain
+                   mapping; design and fallbacks in docs/linear-mcp.md)
                    · db.rs (sqlx pool + migrations) · repo.rs · settings.rs · terminal.rs · stream.rs
                    (background command runs behind a PTY → read-only log panes)
                    · proc_table.rs (the one `ps` listing, cached 500ms) +

@@ -162,9 +162,10 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
       orgSlug: LINEAR_ORG.slug,
       org: LINEAR_ORG.name,
       canWrite: true,
+      via: "OAuth",
     }),
     linear_orgs: (): LinearOrg[] => [
-      { slug: LINEAR_ORG.slug, name: LINEAR_ORG.name, canWrite: true },
+      { slug: LINEAR_ORG.slug, name: LINEAR_ORG.name, canWrite: true, via: "OAuth" },
     ],
     linear_api_budget: (): LinearApiBudget[] => [
       {

@@ -1591,6 +1591,22 @@ export const useLinearConnect = () => {
   });
 };
 
+/**
+ * Connect Linear through its hosted MCP server — the last resort beneath
+ * {@link useLinearConnect}, for workspaces whose admins block santree's OAuth
+ * app. Same workspace, fewer features (`docs/linear-mcp.md`).
+ */
+export const useLinearMcpConnect = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => unwrap(commands.linearMcpConnect()),
+    onSuccess: () => {
+      for (const queryKey of TRACKER_READS) qc.invalidateQueries({ queryKey });
+      toast.success("Linear connected through its MCP server.", { title: "Connected" });
+    },
+  });
+};
+
 /** Run the Jira OAuth connect flow, refreshing every tracker read. */
 export const useJiraConnect = () => {
   const qc = useQueryClient();

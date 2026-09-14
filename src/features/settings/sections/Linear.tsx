@@ -11,8 +11,10 @@
  *  whole install, and the sidebar tree is cross-repo. *Which* connected org a
  *  given repo draws its issues from is the per-repo pane (`RepoLinear.tsx`). */
 
+import { useState } from "react";
+
 import { LinearLogo } from "../../../components/icons";
-import { Badge, Button, ChevronSelect } from "../../../components/primitives";
+import { Badge, Button, ChevronSelect, ConfirmDialog } from "../../../components/primitives";
 import {
   LINEAR_GROUP_BY_KEY,
   LINEAR_SCOPE_KEY,
@@ -22,6 +24,7 @@ import {
   parseLinearScope,
   useLinearApiBudget,
   useLinearConnect,
+  useLinearMcpConnect,
   useLinearOrgs,
   useSetSetting,
   useSetting,
@@ -129,10 +132,13 @@ export function LinearSection() {
                 <span className="text-[12px] text-fg-3">{org.name}</span>
                 <span className="font-mono text-[10.5px] text-muted-4">{org.slug}</span>
                 {!org.canWrite && <Badge>read-only</Badge>}
+                {org.via === "Mcp" && <Badge>via MCP</Badge>}
               </div>
             ))}
           </div>
         )}
+
+        <McpConnectRow />
       </div>
 
       {connected && <LinearBudget />}
@@ -163,6 +169,40 @@ export function LinearSection() {
           )}
         </CardRow>
       </div>
+    </>
+  );
+}
+
+/** The last-resort connection, at the foot of the card: Linear's hosted MCP
+ *  server, for workspaces whose admins block santree's OAuth app. It reaches the
+ *  same workspace with fewer features, so it says what it can't do before the
+ *  browser opens (`docs/linear-mcp.md`). A plain button on purpose — Connect
+ *  above is the way in; this is what to try once that is refused. */
+function McpConnectRow() {
+  const connect = useLinearMcpConnect();
+  const [confirming, setConfirming] = useState(false);
+
+  return (
+    <>
+      <CardRow
+        label="Can't connect?"
+        hint="Some workspaces block OAuth apps but allow Linear's own MCP server. santree can connect through it instead, with fewer features."
+      >
+        {() => (
+          <Button onClick={() => setConfirming(true)} disabled={connect.isPending}>
+            {connect.isPending ? "Connecting…" : "Connect via MCP"}
+          </Button>
+        )}
+      </CardRow>
+      <ConfirmDialog
+        open={confirming}
+        title="Connect through Linear's MCP server?"
+        message="Use this only if Connect is blocked. It reaches the same workspace, with the permissions chosen above, but santree can't show triage rotations, snooze tickets or show an API budget through it. Connecting the normal way later replaces it."
+        confirmLabel="Continue in browser"
+        busyLabel="Waiting for Linear…"
+        onConfirm={() => connect.mutateAsync()}
+        onClose={() => setConfirming(false)}
+      />
     </>
   );
 }
