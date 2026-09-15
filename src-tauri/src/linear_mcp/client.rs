@@ -26,10 +26,9 @@ const SERVICE: &str = "Linear MCP";
 pub(crate) enum Effect {
     /// A read: resent once on a gateway failure, as a GraphQL query is.
     Read,
-    /// A write: never resent. A 502 doesn't say whether the server applied it,
-    /// and the server annotates its write tools non-idempotent.
-    // Phase 2 (docs/linear-mcp.md) sends the first writes.
-    #[allow(dead_code)]
+    /// A write: never resent after a response that could mean it was applied —
+    /// a 502 doesn't say, and the server annotates its write tools
+    /// non-idempotent. Only a refusal (a 401, a dropped-session 404) is sent again.
     Write,
 }
 
@@ -53,8 +52,7 @@ fn remember_session(slug: &str, session: Option<String>) {
         .insert(slug.to_string(), session);
 }
 
-/// Call `tool` as the MCP org `slug` and decode its output into `T`. A 401
-/// re-mints the token once and retries, as `linear::Session::query` does.
+/// Call `tool` as the MCP org `slug` and decode its output into `T`.
 pub(crate) async fn call_tool<T: DeserializeOwned>(
     db: &Db,
     slug: &str,
@@ -62,15 +60,49 @@ pub(crate) async fn call_tool<T: DeserializeOwned>(
     args: Value,
     effect: Effect,
 ) -> Result<T> {
+    decode(tool, &call_tool_text(db, slug, tool, args, effect).await?)
+}
+
+/// Call a write tool as the MCP org `slug`, succeeding when the tool does. Its
+/// output is not decoded: what the write tools answer with was never measured,
+/// and a write that landed must not report failure because its confirmation
+/// didn't parse. A tool that reports an error, or answers with nothing, fails.
+pub(crate) async fn call_write(db: &Db, slug: &str, tool: &str, args: Value) -> Result<()> {
+    let answer = call_tool_text(db, slug, tool, args, Effect::Write).await?;
+    confirmed(tool, &answer)
+}
+
+/// Whether a write tool's answer confirms anything. An empty one doesn't, and
+/// reading it as done would clear a comment's draft for a comment that may not
+/// exist.
+fn confirmed(tool: &str, answer: &str) -> Result<()> {
+    if answer.trim().is_empty() {
+        bail!(
+            "{SERVICE} {tool} answered with nothing, so santree can't tell whether the change was made"
+        );
+    }
+    Ok(())
+}
+
+/// A tool call's text output. A 401 re-mints the token once and retries, as
+/// `linear::Session::query` does — safe even for a write, since a 401 is a
+/// refusal, not a request half-applied.
+async fn call_tool_text(
+    db: &Db,
+    slug: &str,
+    tool: &str,
+    args: Value,
+    effect: Effect,
+) -> Result<String> {
     let spent = auth::valid_token(db, slug).await?;
-    match call_with_token(Some(slug), &spent, tool, args.clone(), effect).await {
+    match call_with_token_text(Some(slug), &spent, tool, args.clone(), effect).await {
         Err(e) if gql::status_of(&e) == Some(reqwest::StatusCode::UNAUTHORIZED) => {
             log::warn!(
                 "Linear's MCP server rejected the stored access token for org {slug} before its \
                  recorded expiry — re-minting it and retrying once"
             );
             let fresh = auth::force_refresh(db, slug, &spent).await?;
-            call_with_token(Some(slug), &fresh, tool, args, effect).await
+            call_with_token_text(Some(slug), &fresh, tool, args, effect).await
         }
         other => other,
     }
@@ -85,6 +117,19 @@ pub(crate) async fn call_with_token<T: DeserializeOwned>(
     args: Value,
     effect: Effect,
 ) -> Result<T> {
+    decode(
+        tool,
+        &call_with_token_text(slug, token, tool, args, effect).await?,
+    )
+}
+
+async fn call_with_token_text(
+    slug: Option<&str>,
+    token: &str,
+    tool: &str,
+    args: Value,
+    effect: Effect,
+) -> Result<String> {
     let call = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -106,7 +151,7 @@ pub(crate) async fn call_with_token<T: DeserializeOwned>(
         }
         other => other?,
     };
-    decode_tool_output(tool, rpc_result(&reply, 1)?)
+    tool_text(tool, rpc_result(&reply, 1)?)
 }
 
 /// `initialize`, then the `initialized` notification. Returns the session the
@@ -270,9 +315,8 @@ enum Content {
     Other,
 }
 
-/// A tool's output: its text content decoded as JSON into `T`. A tool that
-/// reports an error fails with the tool's own words.
-fn decode_tool_output<T: DeserializeOwned>(tool: &str, result: Value) -> Result<T> {
+/// A tool's text output. A tool that reports an error fails with its own words.
+fn tool_text(tool: &str, result: Value) -> Result<String> {
     let result: ToolResult = serde_json::from_value(result)
         .with_context(|| format!("decoding the {SERVICE} {tool} result"))?;
     let text: String = result
@@ -289,7 +333,12 @@ fn decode_tool_output<T: DeserializeOwned>(tool: &str, result: Value) -> Result<
             message: text.trim().to_string(),
         }));
     }
-    serde_json::from_str(&text).with_context(|| {
+    Ok(text)
+}
+
+/// A read tool's text output, decoded as JSON into `T`.
+fn decode<T: DeserializeOwned>(tool: &str, text: &str) -> Result<T> {
+    serde_json::from_str(text).with_context(|| {
         format!("decoding the {SERVICE} {tool} output — Linear may have changed its shape")
     })
 }
@@ -362,8 +411,9 @@ mod tests {
                 { "type": "image", "data": "", "mimeType": "image/png" },
             ]
         });
+        let text = tool_text("get_workspace", result).unwrap();
         assert_eq!(
-            decode_tool_output::<Workspace>("get_workspace", result).unwrap(),
+            decode::<Workspace>("get_workspace", &text).unwrap(),
             Workspace {
                 name: "Acme".into(),
                 url: "https://linear.app/acme".into(),
@@ -373,18 +423,40 @@ mod tests {
 
     #[test]
     fn a_tool_error_fails_with_the_tools_words_and_a_reshape_names_the_tool() {
-        let err = decode_tool_output::<Value>(
+        let err = tool_text(
             "get_issue",
             json!({ "content": [{ "type": "text", "text": "Issue not found" }], "isError": true }),
         )
         .unwrap_err();
         assert_eq!(err.to_string(), "Linear MCP get_issue: Issue not found");
 
-        let err = decode_tool_output::<Vec<String>>(
-            "list_teams",
-            json!({ "content": [{ "type": "text", "text": "{\"teams\":[]}" }] }),
-        )
-        .unwrap_err();
+        let err = decode::<Vec<String>>("list_teams", "{\"teams\":[]}").unwrap_err();
         assert!(err.to_string().contains("list_teams"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_write_answer_confirms_nothing() {
+        assert!(confirmed("save_comment", "Comment created.").is_ok());
+        assert!(confirmed("save_comment", "  \n").is_err());
+        assert!(confirmed("save_issue", "").is_err());
+    }
+
+    /// A write's confirmation is whatever the tool says: prose is as good as JSON,
+    /// and only the tool's own error flag makes it a failure.
+    #[test]
+    fn a_write_succeeds_on_any_text_and_fails_only_on_the_tools_error() {
+        assert_eq!(
+            tool_text(
+                "save_comment",
+                json!({ "content": [{ "type": "text", "text": "Comment created." }] }),
+            )
+            .unwrap(),
+            "Comment created."
+        );
+        assert!(tool_text(
+            "save_issue",
+            json!({ "content": [{ "type": "text", "text": "State not found" }], "isError": true }),
+        )
+        .is_err());
     }
 }
