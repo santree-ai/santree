@@ -2067,8 +2067,9 @@ pub async fn triage_schedule(repo: String, db: State<'_, Db>) -> CmdResult<Vec<T
 }
 
 /// Move a triage issue to a different workflow state (the status picker). Moving
-/// it out of `triage` is how the UI promotes an item. Requires a connected,
-/// write-scoped Linear org; errors when no org is connected.
+/// it out of `triage` is how the UI promotes an item. Requires a write-capable
+/// connection to the repo's tracker — a Linear org, over GraphQL or its MCP
+/// server, or a Jira site; errors when none is connected.
 #[tauri::command]
 #[specta::specta]
 pub async fn triage_set_state(
@@ -2108,8 +2109,8 @@ pub async fn triage_snooze(
 
 /// Post a comment on an issue — a top-level comment, or a reply when `parent_id`
 /// is the id of the comment being replied to. `ticket_id`/`parent_id` are used
-/// only as GraphQL variables (never as a path or git arg). Requires a
-/// write-scoped Linear org.
+/// only as arguments to the repo's tracker API (never as a filesystem path or git
+/// arg). Requires a write-capable tracker connection.
 #[tauri::command]
 #[specta::specta]
 pub async fn triage_add_comment(

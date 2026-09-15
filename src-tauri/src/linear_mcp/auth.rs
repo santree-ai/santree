@@ -80,10 +80,13 @@ pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
     let expires_at = now_ms() + body.expires_in * 1000;
     // Without a `scope` in the response, record what was asked for rather than
     // nothing: an empty scope string reads as writable (legacy OAuth orgs).
+    // An empty granted scope says no more than a missing one, and must not be
+    // stored: an empty string reads as writable (legacy OAuth orgs).
     let scopes = body
         .scope
         .as_ref()
         .map(GrantedScope::as_csv)
+        .filter(|granted| !granted.is_empty())
         .unwrap_or_else(|| requested.to_string());
     let tokens = Tokens {
         access: body.access_token,
@@ -317,10 +320,12 @@ async fn rotate(db: &Db, row: OrgRow, tokens: Tokens) -> Result<String> {
         }
         Err(e) => return Err(e),
     };
+    // As at connect: an empty granted scope keeps what was recorded.
     let scopes = body
         .scope
         .as_ref()
         .map(GrantedScope::as_csv)
+        .filter(|granted| !granted.is_empty())
         .unwrap_or_else(|| row.scopes.clone());
     let updated = OrgRow {
         expires_at: now_ms() + body.expires_in * 1000,

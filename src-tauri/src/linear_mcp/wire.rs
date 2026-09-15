@@ -529,6 +529,17 @@ pub(crate) fn workflow_states(mut statuses: Vec<McpStatus>) -> Vec<WorkflowState
         .collect()
 }
 
+/// The state "move to started" takes a ticket to. GraphQL picks the started state
+/// with the lowest position; MCP states have none, so this is the first `started`
+/// state that reads as in progress — not one named like Blocked or In Review —
+/// and failing that, the first `started` state.
+pub(crate) fn started_state(statuses: &[McpStatus]) -> Option<&McpStatus> {
+    let started = || statuses.iter().filter(|s| s.type_ == "started");
+    started()
+        .find(|s| core_linear::map_status(&s.name, &s.type_) == TaskStatus::InProgress)
+        .or_else(|| started().next())
+}
+
 /// The colour Linear gives a new state of each type.
 fn state_type_color(state_type: &str) -> &'static str {
     match state_type {
@@ -910,6 +921,25 @@ mod tests {
         assert!(is_not_found(&tool_failure("Issue not found")));
         assert!(!is_not_found(&tool_failure("Rate limit exceeded")));
         assert!(!is_not_found(&anyhow::anyhow!("Issue not found")));
+    }
+
+    #[test]
+    fn starting_a_ticket_takes_the_in_progress_state_not_blocked_or_review() {
+        let statuses: Vec<McpStatus> = serde_json::from_value(json!([
+            { "id": "b", "type": "started", "name": "Blocked" },
+            { "id": "r", "type": "started", "name": "In Review" },
+            { "id": "p", "type": "started", "name": "In Progress" },
+            { "id": "t", "type": "unstarted", "name": "Todo" }
+        ]))
+        .unwrap();
+        assert_eq!(started_state(&statuses).map(|s| s.id.as_str()), Some("p"));
+        // No in-progress state at all: the first started one.
+        assert_eq!(
+            started_state(&statuses[..2]).map(|s| s.id.as_str()),
+            Some("b")
+        );
+        // No started state: nothing to move to.
+        assert!(started_state(&statuses[3..]).is_none());
     }
 
     /// A reshaped response must fail, not read as an empty queue.

@@ -1362,19 +1362,27 @@ async fn repo_write_session<'a>(db: &'a Db, repo: &str) -> Result<Option<Session
     let Some(session) = repo_session(db, repo).await? else {
         return Ok(None);
     };
-    if !can_write_to(db, &session.slug).await? {
-        // Two causes, two fixes — saying "reconnect" to someone who only has to
-        // flip a switch sends them through an OAuth round-trip for nothing.
-        if read_only_mode(db).await? {
-            anyhow::bail!(
-                "santree is set to read-only for Linear. Change it under Settings → Integrations."
-            );
-        }
+    ensure_writable(db, &session.slug).await?;
+    Ok(Some(session))
+}
+
+/// Refuse a write to `slug` when santree may not make it — the gate every write
+/// to a Linear org passes, however the org is connected (GraphQL here, the MCP
+/// server in `linear_mcp::tracker`).
+pub(crate) async fn ensure_writable(db: &Db, slug: &str) -> Result<()> {
+    if can_write_to(db, slug).await? {
+        return Ok(());
+    }
+    // Two causes, two fixes — saying "reconnect" to someone who only has to
+    // flip a switch sends them through an OAuth round-trip for nothing.
+    if read_only_mode(db).await? {
         anyhow::bail!(
-            "This Linear workspace is connected read-only. Reconnect it with write access from Settings → Integrations."
+            "santree is set to read-only for Linear. Change it under Settings → Integrations."
         );
     }
-    Ok(Some(session))
+    anyhow::bail!(
+        "This Linear workspace is connected read-only. Reconnect it with write access from Settings → Integrations."
+    )
 }
 
 // ── Rate-limit budget ───────────────────────────────────────────────────────
