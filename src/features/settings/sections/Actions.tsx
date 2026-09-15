@@ -34,6 +34,7 @@ import {
   useRepos,
   useSetSetting,
   useSetting,
+  useTrackerFeatures,
   useTriageOrgRepo,
   useTriageTeamRules,
   WORK_AGENT_KEY,
@@ -271,6 +272,12 @@ function TriageTeamsCard({ disabled }: { disabled: boolean }) {
   const repo = useTriageOrgRepo();
   const { data: teams = [] } = useLinearTeams(repo);
   const { rules, setRules } = useTriageTeamRules();
+  // A workspace connected through Linear's MCP server triages the teams you are
+  // a member of and nothing wider, whatever the rules say — only "Never show"
+  // narrows it (docs/linear-mcp.md, "Triage scope"). The switches show what
+  // applies there rather than what is saved, and can't be changed.
+  const { memberTeamsOnly } = useTrackerFeatures(repo);
+  const widening = disabled || memberTeamsOnly;
   const rule = (key: "rotation" | "assigned" | "member") => (on: boolean) =>
     setRules({ ...rules, [key]: on });
   // A key moves between the lists, never sits in both.
@@ -281,27 +288,34 @@ function TriageTeamsCard({ disabled }: { disabled: boolean }) {
 
   return (
     <div className="space-y-3.5">
+      {memberTeamsOnly && (
+        <p className="rounded-xl border border-line-2 bg-raised px-4 py-3 text-[11.5px] leading-[1.5] text-muted-3">
+          This workspace is connected through Linear's MCP server, so Triage shows the triage
+          inboxes of the teams you are a member of. The rules and “Always show” don't apply there;
+          “Never show” still hides a team.
+        </p>
+      )}
       <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
         <ToggleRow
           label="Teams whose triage rotation you are in"
           hint="Their whole triage inbox is yours to watch."
-          on={rules.rotation}
+          on={memberTeamsOnly ? false : rules.rotation}
           onChange={rule("rotation")}
-          disabled={disabled}
+          disabled={widening}
         />
         <ToggleRow
           label="Teams that assigned you a triage ticket"
           hint="Whether or not you are in their rotation."
-          on={rules.assigned}
+          on={memberTeamsOnly ? false : rules.assigned}
           onChange={rule("assigned")}
-          disabled={disabled}
+          disabled={widening}
         />
         <ToggleRow
           label="Teams you are a member of"
           hint="Off by default: Linear keeps people on a team long after they've left its work."
-          on={rules.member}
+          on={memberTeamsOnly || rules.member}
           onChange={rule("member")}
-          disabled={disabled}
+          disabled={widening}
         />
       </div>
       <div className="rounded-xl border border-line-2 bg-raised">
@@ -311,7 +325,7 @@ function TriageTeamsCard({ disabled }: { disabled: boolean }) {
           teams={teams}
           keys={rules.picked}
           onChange={(keys) => setList("picked", keys)}
-          disabled={disabled}
+          disabled={widening}
         />
         <TeamListRow
           label="Never show"

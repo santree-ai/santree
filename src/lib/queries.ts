@@ -67,6 +67,7 @@ import type {
 import { commands, events } from "../bindings";
 import { type ToastOptions, toast } from "../state/toast";
 import { splitRepoSlug } from "./repo";
+import { type TrackerFeatures, trackerFeatures } from "./tracker";
 
 // ── Shared primitives ────────────────────────────────────────────────────────
 // The machinery every hook below is built from: unwrapping a generated `Result`
@@ -1541,6 +1542,19 @@ export const useTrackerReadOnly = (repo: string) => {
   const { data: jira } = useJiraStatus(repo);
   const status = provider === "Jira" ? jira : linear;
   return status?.authenticated === true && status.canWrite === false;
+};
+
+/**
+ * What the repo's tracker connection can do — see `trackerFeatures`. While the
+ * Linear status is still loading it reads as the OAuth connection, which can do
+ * everything: nothing flickers disabled on launch, and the backend refuses what
+ * an MCP-connected org can't do either way.
+ */
+export const useTrackerFeatures = (repo: string): TrackerFeatures => {
+  const provider = useTicketProvider(repo);
+  const { data: linear } = useLinearStatus(repo);
+  const via = linear?.via;
+  return useMemo(() => trackerFeatures(provider, via), [provider, via]);
 };
 
 /**

@@ -7,7 +7,8 @@ beneath it, says what it can't do before it starts, and steps aside the moment
 the same workspace is connected the normal way.
 
 Status: **in progress** — phase 0 (measuring the server), phase 1 (sign-in),
-phase 2 (reads) and phase 3 (writes) are done; the UI's feature gating is next. What
+phase 2 (reads), phase 3 (writes) and phase 4 (the UI's feature gating) are
+done. What
 the measuring found is in "Measured" at the end, and the fallbacks below are
 written against it.
 
@@ -244,10 +245,22 @@ still sends one back if a future server hands it out, and re-initializes on the
   what won't work before the browser opens. The org row wears a `via MCP` badge.
 - **Per-repo tracker card:** unchanged — one Connect. The last resort lives only
   in Integrations.
-- **`useTrackerFeatures(repo)`** — `{ snooze, rotations, threadedComments,
-  writes, apiBudget }` from provider + connection kind. The Jira branch's
-  `provider === "Jira"` checks move onto it too, so a third connection kind
-  doesn't multiply them.
+- **`useTrackerFeatures(repo)`** (`lib/tracker` `trackerFeatures`) —
+  `{ snoozeUnavailable, threadedComments, memberTeamsOnly }` from the provider
+  and the Linear connection. The Jira branch's `provider === "Jira"` checks
+  moved onto it, so another kind of connection is one entry, not a check per
+  view:
+  - a triage row's menu keeps its snooze rows, disabled with the reason;
+  - a comment offers Reply only where comments are threaded;
+  - Settings → Triage → Teams says an MCP org triages its member teams, shows
+    the rules as they apply there, and leaves only "Never show" to change.
+
+  While the Linear status loads it reads as OAuth, so an ordinary install never
+  flickers disabled; the backend refuses what an MCP org can't do either way.
+- **No flag needed:** rotation chips and the Snoozed lane draw from data an MCP
+  org never has (no schedules, no snoozed tickets); the API budget card lists
+  only orgs with a reading; writes are gated by `LinearStatus.canWrite`, as for
+  any read-only connection.
 
 ## Phases
 

@@ -99,7 +99,16 @@ vi.mock("../../../lib/queries", () => ({
   useTriageOrgRepo: () => "acme/app",
   useLinearTeams: () => ({ data: linearTeams, isLoading: false }),
   useTriageTeamRules: () => ({ rules: teamRules, loading: false, setRules }),
+  useTrackerFeatures: () => features,
 }));
+
+/** What the triage org's connection can do; `memberTeamsOnly` is an org
+ *  connected through Linear's MCP server. */
+let features = {
+  snoozeUnavailable: null as string | null,
+  threadedComments: true,
+  memberTeamsOnly: false,
+};
 
 vi.mock("../../../state/AppContext", () => ({
   useApp: () => ({
@@ -121,7 +130,36 @@ describe("app-scope Triage settings", () => {
     linearOn = true;
     settingValues = {};
     teamRules = { rotation: true, assigned: true, member: false, picked: [], hidden: [] };
+    features = { snoozeUnavailable: null, threadedComments: true, memberTeamsOnly: false };
     setRules.mockClear();
+  });
+
+  /** An org connected through Linear's MCP server triages its member teams and
+   *  nothing wider: the card says so, shows the rules as they apply there, and
+   *  leaves only "Never show" to change. */
+  it("leaves only Never show editable for a workspace connected through Linear's MCP server", () => {
+    triageOn = true;
+    features = { ...features, memberTeamsOnly: true };
+    render(<TriageActionSection />);
+
+    expect(screen.getByText(/connected through Linear's MCP server/)).toBeInTheDocument();
+    const [, ...rules] = screen.getAllByRole("switch");
+    expect(rules).toHaveLength(3);
+    for (const rule of rules) expect(rule).toBeDisabled();
+    expect(screen.getByRole("switch", { name: "Teams you are a member of" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(
+      screen.getByRole("switch", { name: "Teams whose triage rotation you are in" }),
+    ).toHaveAttribute("aria-checked", "false");
+
+    const always = screen.getByRole("group", { name: "Always show" });
+    const never = screen.getByRole("group", { name: "Never show" });
+    expect(
+      within(always).getByRole("button", { name: "Add a team to Always show" }),
+    ).toBeDisabled();
+    expect(within(never).getByRole("button", { name: "Add a team to Never show" })).toBeEnabled();
   });
 
   it("really disables every control in the panel while triage is off", () => {
