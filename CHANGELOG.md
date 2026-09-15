@@ -7,6 +7,11 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.16-beta.3 — 2026-09-15
+
+- Worktree stacks now follow their open pull requests’ target branches. Splitting or retargeting PRs updates the sidebar, diffs, and branch statistics on refresh, including the automatic refresh each minute while the app is visible.
+- Branches without an open PR keep their remembered base, including while offline.
+
 ## 0.1.16-beta.2 — 2026-09-14
 
 - Stacked worktrees keep indenting at every level, so deeply nested branches appear beneath their actual parent instead of lining up as siblings.

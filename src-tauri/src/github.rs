@@ -337,6 +337,7 @@ struct PullItem {
     state: String,
     merged_at: Option<String>,
     head: PullRef,
+    base: PullRef,
 }
 
 #[derive(Deserialize)]
@@ -357,6 +358,7 @@ struct PullRepo {
 /// uses to attach it to a worktree — its head branch and its title — so a whole
 /// repo's PRs can be matched against every linked worktree client-side, with no
 /// API call per worktree.
+#[derive(Clone)]
 pub struct RepoPr {
     pub number: u32,
     pub title: String,
@@ -365,6 +367,7 @@ pub struct RepoPr {
     /// The PR's head branch. GitHub deletes the *branch* on merge but keeps this
     /// field on the PR record, so it stays a valid join key for merged PRs too.
     pub head_ref: String,
+    pub base_ref: String,
     /// Whether that head branch lives in **this** repo rather than a fork.
     ///
     /// `head_ref` is a bare branch name with no owner in it, so a PR raised from a
@@ -465,6 +468,7 @@ fn to_repo_pr(p: PullItem, base_slug: &str) -> RepoPr {
         url: p.html_url,
         state,
         head_ref: p.head.name,
+        base_ref: p.base.name,
         same_repo: p.head.repo.is_some_and(|r| r.full_name == base_slug),
     }
 }
@@ -3430,6 +3434,20 @@ pub async fn pr_file_source(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rest_pr_mapping_preserves_the_target_branch() {
+        let item: super::PullItem = serde_json::from_value(serde_json::json!({
+            "number": 1, "title": "A stacked change", "html_url": "https://github.com/acme/app/pull/1",
+            "state": "open", "merged_at": null,
+            "head": { "ref": "child", "repo": { "full_name": "acme/app" } },
+            "base": { "ref": "parent", "repo": { "full_name": "acme/app" } }
+        })).unwrap();
+        let pr = super::to_repo_pr(item, "acme/app");
+        assert_eq!(pr.head_ref, "child");
+        assert_eq!(pr.base_ref, "parent");
+        assert!(pr.same_repo);
+    }
+
     use super::*;
 
     fn viewer() -> ViewerCtx {

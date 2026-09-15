@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider, type QueryKey } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, type QueryKey, useQuery } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -37,6 +37,11 @@ const settings = vi.hoisted(() => {
   };
 });
 // Captures the worktreeChanged handler so watcher tests can fire events at it.
+const baseWatcher = vi.hoisted(() => ({
+  handler: undefined as
+    | ((e: { payload: { repo: string; issueIds: string[] } }) => void)
+    | undefined,
+}));
 const watcher = vi.hoisted(() => ({
   handler: undefined as ((e: { payload: { issueId: string } }) => void) | undefined,
 }));
@@ -55,6 +60,12 @@ vi.mock("../bindings", () => ({
     linearInvalidateCaches: vi.fn(async () => null),
   },
   events: {
+    worktreeBasesChanged: {
+      listen: vi.fn(async (cb: (typeof baseWatcher)["handler"]) => {
+        baseWatcher.handler = cb;
+        return () => {};
+      }),
+    },
     worktreeChanged: {
       listen: vi.fn(async (cb: (typeof watcher)["handler"]) => {
         watcher.handler = cb;
@@ -90,6 +101,7 @@ import {
   useRefreshExternal,
   useTriageRepo,
   useUpdateBaseBranch,
+  useWorktreeBaseChanges,
   useWorktreeWatcher,
 } from "./queries";
 
@@ -1287,5 +1299,63 @@ describe("useRefreshExternal", () => {
   // one click covers every repo the cross-repo Agents view is showing.
   it("invalidates by prefix, so no key carries a repo", () => {
     for (const k of refreshed()) expect(JSON.parse(k)).toHaveLength(1);
+  });
+});
+
+describe("PR base reconciliation", () => {
+  it("replaces an initial worktree read that started before the base changed", async () => {
+    const qc = makeClient();
+    const key = queryKeys.worktrees("repo");
+    let finishOld!: (value: string) => void;
+    const queryFn = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishOld = resolve;
+          }),
+      )
+      .mockResolvedValue("new base");
+    const view = renderHook(
+      () => {
+        useWorktreeBaseChanges();
+        return useQuery({ queryKey: key, queryFn });
+      },
+      { wrapper: wrapper(qc) },
+    );
+    await waitFor(() => expect(queryFn).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      baseWatcher.handler?.({ payload: { repo: "repo", issueIds: ["B"] } });
+    });
+    await waitFor(() => expect(view.result.current.data).toBe("new base"));
+    await act(async () => {
+      finishOld("old base");
+    });
+    expect(qc.getQueryData(key)).toBe("new base");
+    view.unmount();
+  });
+
+  it("invalidates the changed repository's stack and comparisons without refreshing PRs again", async () => {
+    const qc = makeClient();
+    const changed = [
+      queryKeys.worktrees("other"),
+      queryKeys.worktreeStatus("other", "B"),
+      queryKeys.worktreeBranchChanges("other", "B"),
+      queryKeys.worktreeBranchFileDiff("other", "B", "file.ts"),
+      queryKeys.commitDraft("other", "B"),
+    ];
+    const untouched = [
+      queryKeys.worktrees("current"),
+      queryKeys.worktreeStatus("other", "A"),
+      queryKeys.worktreePrs("other"),
+    ];
+    for (const key of [...changed, ...untouched]) qc.setQueryData(key, []);
+    const view = renderHook(() => useWorktreeBaseChanges(), { wrapper: wrapper(qc) });
+    await act(async () => {
+      baseWatcher.handler?.({ payload: { repo: "other", issueIds: ["B"] } });
+    });
+    for (const key of changed) expect(qc.getQueryState(key)?.isInvalidated).toBe(true);
+    for (const key of untouched) expect(qc.getQueryState(key)?.isInvalidated).toBe(false);
+    view.unmount();
   });
 });

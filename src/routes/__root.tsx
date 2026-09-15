@@ -5,7 +5,12 @@ import { AppShell } from "../components/shell/AppShell";
 import { WelcomeScreen } from "../components/WelcomeScreen";
 import { TerminalLayer } from "../features/terminal/TerminalLayer";
 import { AgentRunHost } from "../features/trees/AgentRunHost";
-import { useRepos, useUpdateWatcher, useWorktreeWatcher } from "../lib/queries";
+import {
+  useRepos,
+  useUpdateWatcher,
+  useWorktreeBaseChanges,
+  useWorktreeWatcher,
+} from "../lib/queries";
 import { useKeyboardShortcuts } from "../lib/useKeyboardShortcuts";
 import { useNativeContextMenu } from "../lib/useNativeContextMenu";
 import { AgentRunsProvider } from "../state/AgentRuns";
@@ -35,6 +40,7 @@ function RootLayout() {
   useKeyboardShortcuts();
   useNativeContextMenu();
   useUpdateWatcher();
+  useWorktreeBaseChanges();
   const { data: repos } = useRepos();
   // The filesystem watcher follows the open workspace's project. It is a single
   // watcher by construction (`watch_worktrees` re-points rather than adding, and

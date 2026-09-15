@@ -81,6 +81,7 @@ fn specta_builder() -> AppBuilder {
     Builder::<tauri::Wry>::new()
         .events(collect_events![
             git_watch::WorktreeChanged,
+            pr::WorktreeBasesChanged,
             session_signal::ClaudeRateLimitsChanged,
             session_signal::ReviewAiChanged,
             session_signal::SessionStateChanged,

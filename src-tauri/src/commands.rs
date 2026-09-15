@@ -1291,8 +1291,12 @@ pub async fn worktree_has_transcripts(
 /// GitHub. Empty when `gh` isn't authenticated; worktrees without a PR are omitted.
 #[tauri::command]
 #[specta::specta]
-pub async fn worktree_prs(repo: String, db: State<'_, Db>) -> CmdResult<Vec<WorktreePr>> {
-    Ok(pr::statuses(&db, &repo).await?)
+pub async fn worktree_prs(
+    repo: String,
+    db: State<'_, Db>,
+    app: tauri::AppHandle,
+) -> CmdResult<Vec<WorktreePr>> {
+    Ok(pr::statuses(&db, &repo, &app).await?)
 }
 
 /// The Reviews dashboard inbox across every registered project: the viewer's open

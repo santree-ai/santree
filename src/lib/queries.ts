@@ -2250,6 +2250,31 @@ export const useWorktreeWatcher = (repo: string) => {
   }, [repo, qc]);
 };
 
+/** A PR retarget changes local comparisons even when no worktree file changed. */
+export function useWorktreeBaseChanges() {
+  const qc = useQueryClient();
+  useEffect(() => {
+    const unlisten = events.worktreeBasesChanged.listen(({ payload: { repo, issueIds } }) => {
+      const keys: QueryKey[] = [queryKeys.worktrees(repo)];
+      for (const id of issueIds) {
+        keys.push(
+          queryKeys.worktreeStatus(repo, id),
+          queryKeys.worktreeBranchChanges(repo, id),
+          queryKeys.worktreeBranchFileDiffPrefix(repo, id),
+          queryKeys.commitDraft(repo, id),
+        );
+      }
+      // Cancel even a first load: invalidation alone reuses its pre-sync snapshot.
+      for (const queryKey of keys) {
+        void qc.cancelQueries({ queryKey }).then(() => qc.invalidateQueries({ queryKey }));
+      }
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [qc]);
+}
+
 // ── Multi-repo fan-out ───────────────────────────────────────────────────────
 // The same repo-scoped reads run across several repos at once for the sidebar's
 // project tree. They reuse the single-repo query keys, so both share one cache.
@@ -2267,12 +2292,14 @@ function useResultsByRepo<T>(
   keyFor: (repo: string) => QueryKey,
   command: (repo: string) => CommandResult<T>,
   staleTime: number,
+  refetchInterval: number | false = false,
 ): Map<string, T> {
   const results = useQueries({
     queries: repos.map((repo) => ({
       queryKey: keyFor(repo),
       queryFn: () => unwrap(command(repo)),
       staleTime,
+      refetchInterval,
     })),
   });
   // `useQueries` returns a fresh array every render, so memoising on it directly
@@ -2304,7 +2331,13 @@ export const useTasksByRepo = (repos: string[]) =>
 
 /** {@link useWorktreePrs} across several repos at once, keyed by repo. */
 export const useWorktreePrsByRepo = (repos: string[]) =>
-  useResultsByRepo(repos, queryKeys.worktreePrs, commands.worktreePrs, WORKTREE_STALE_TIME);
+  useResultsByRepo(
+    repos,
+    queryKeys.worktreePrs,
+    commands.worktreePrs,
+    WORKTREE_STALE_TIME,
+    WORKTREE_STALE_TIME,
+  );
 
 // ── Worktree lifecycle: create, remove, sync ─────────────────────────────────
 // The writes that make or unmake a worktree, plus the branch-level syncs. Each is
@@ -2924,12 +2957,13 @@ export const useRemoveWorktreeTab = (repo: string) =>
 // One set of hooks, because the difference is which view mounts them, not the data.
 
 /** Live PR status (number/url/state) for the repo's worktrees, from GitHub. Empty
- *  when `gh` isn't authenticated. Cached a minute — merge state changes server-side
- *  and the user can refetch by revisiting. */
+ *  when `gh` isn't authenticated. Refreshed each minute while visible so external
+ *  PR retargets also reconcile the local worktree bases. */
 export const useWorktreePrs = (repo: string) =>
   useUnwrappedQuery(queryKeys.worktreePrs(repo), () => commands.worktreePrs(repo), {
     enabled: !!repo,
     staleTime: WORKTREE_STALE_TIME,
+    refetchInterval: WORKTREE_STALE_TIME,
   });
 
 /** One PR's summary row — the same shape the Reviews inbox ships, fetched by
@@ -4577,7 +4611,7 @@ const EXTERNAL_PREFIXES = [
  * Force-refetch everything santree reads from Linear and GitHub — the chrome's
  * Refresh button and ⌘⇧R.
  *
- * Nothing polls those services and `refetchOnWindowFocus` is off globally, so a
+ * Ticket lists do not poll and `refetchOnWindowFocus` is off globally, so a
  * ticket created seconds ago is otherwise invisible until the view remounts
  * *and* its stale window has lapsed. This is the only way to pull on demand.
  *

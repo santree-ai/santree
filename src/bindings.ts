@@ -1331,6 +1331,7 @@ export const events = {
 	updateProgress: makeEvent<UpdateProgress>("update-progress"),
 	usageChanged: makeEvent<UsageChanged>("usage-changed"),
 	usageProgress: makeEvent<UsageProgress>("usage-progress"),
+	worktreeBasesChanged: makeEvent<WorktreeBasesChanged>("worktree-bases-changed"),
 	worktreeChanged: makeEvent<WorktreeChanged>("worktree-changed"),
 };
 
@@ -4233,6 +4234,11 @@ export type Worktree = {
 	 *  deserialized from this type (`Worktree` only derives `Serialize`).
 	 */
 	pending: boolean,
+};
+
+export type WorktreeBasesChanged = {
+	repo: string,
+	issueIds: string[],
 };
 
 /**
