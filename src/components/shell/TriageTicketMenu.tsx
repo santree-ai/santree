@@ -4,8 +4,9 @@
  *
  * Snoozing is a tracker write, so it follows the status picker's rule: always
  * offered, disabled with the read-only hint when the org can't be written to,
- * and refused by the backend either way. Jira has no snooze to write to, so
- * there the rows stay but say so. Two wake-ups are enough for a menu on a rail —
+ * and refused by the backend either way. Where the connection has no snooze to
+ * write to — Jira, a Linear org connected through its MCP server — the rows stay
+ * but say why (`useTrackerFeatures`). Two wake-ups are enough for a menu on a rail —
  * tomorrow morning, and a week out; anything finer is the tracker's own picker.
  * A snoozed row offers the reverse instead.
  */
@@ -16,6 +17,7 @@ import {
   TRACKER_READ_ONLY_HINT,
   useTicketIssueUrl,
   useTicketProvider,
+  useTrackerFeatures,
   useTrackerReadOnly,
   useTriageSnooze,
 } from "../../lib/queries";
@@ -37,13 +39,13 @@ export function TriageTicketMenu({
   const linkFor = useTicketIssueUrl(repo);
   const provider = useTicketProvider(repo);
   const readOnly = useTrackerReadOnly(repo);
+  const { snoozeUnavailable } = useTrackerFeatures(repo);
   const snooze = useTriageSnooze(repo);
-  const gate =
-    provider === "Jira"
-      ? { disabled: true, title: "Jira tickets can't be snoozed from santree." }
-      : readOnly
-        ? { disabled: true, title: TRACKER_READ_ONLY_HINT }
-        : {};
+  const gate = snoozeUnavailable
+    ? { disabled: true, title: snoozeUnavailable }
+    : readOnly
+      ? { disabled: true, title: TRACKER_READ_ONLY_HINT }
+      : {};
   const park = (untilMs: number | null) => snooze.mutate({ ticketId: ticket.id, untilMs });
 
   const parking: ContextMenuItem[] =

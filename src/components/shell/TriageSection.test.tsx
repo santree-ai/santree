@@ -37,6 +37,12 @@ const data = vi.hoisted(() => ({
   markSeen: vi.fn(),
   openAgent: vi.fn(),
   readOnly: false,
+  /** What the connection can do: an MCP-connected Linear org has no snooze. */
+  features: {
+    snoozeUnavailable: null as string | null,
+    threadedComments: true,
+    memberTeamsOnly: false,
+  },
   snooze: vi.fn(),
   /** Whether any tracker is connected; `null` is the read in flight. */
   trackerConnected: true as boolean | null,
@@ -68,6 +74,7 @@ vi.mock("../../lib/queries", async (importOriginal) => ({
   // The row's menu: its Linear address, and the snooze write and its gate.
   useTicketIssueUrl: () => (id: string) => `https://linear.app/acme/issue/${id}`,
   useTrackerReadOnly: () => data.readOnly,
+  useTrackerFeatures: () => data.features,
   useTicketProvider: () => "Linear",
   useTriageSnooze: () => ({ mutate: data.snooze }),
 }));
@@ -589,6 +596,26 @@ describe("TriageSection", () => {
 
       fireEvent.click(screen.getByRole("menuitem", { name: "Wake up now" }));
       expect(data.snooze).toHaveBeenCalledWith({ ticketId: "AK-2", untilMs: null });
+    });
+
+    /** A connection with no snooze to write to (an MCP-connected Linear org)
+     *  keeps the rows, disabled with its own reason rather than the read-only one. */
+    it("disables the snooze rows with the reason where the connection can't snooze", () => {
+      const reason = "Linear's MCP server can't snooze tickets.";
+      data.features = { ...data.features, snoozeUnavailable: reason };
+      try {
+        queue({ active: [ticket("AK-1")] });
+        render(<TriageSection />);
+        fireEvent.contextMenu(card("AK-1") as HTMLElement);
+        for (const name of ["Snooze until tomorrow", "Snooze for a week"]) {
+          const row = screen.getByRole("menuitem", { name });
+          expect(row).toBeDisabled();
+          expect(row).toHaveAttribute("title", reason);
+        }
+        expect(screen.getByRole("menuitem", { name: "Copy ticket id" })).toBeEnabled();
+      } finally {
+        data.features = { ...data.features, snoozeUnavailable: null };
+      }
     });
 
     it("keeps the snooze rows but disables them on a read-only org", () => {

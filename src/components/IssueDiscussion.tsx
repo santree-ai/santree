@@ -11,7 +11,7 @@ import type { TriageComment, TriageDetail } from "../bindings";
 import {
   TRACKER_READ_ONLY_HINT,
   useAddComment,
-  useTicketProvider,
+  useTrackerFeatures,
   useTrackerReadOnly,
 } from "../lib/queries";
 import { Avatar } from "./Avatar";
@@ -134,7 +134,7 @@ function CommentItem({
   const [replying, setReplying] = useState(false);
   const readOnly = useTrackerReadOnly(repo);
   // Jira comments are flat, so a Jira ticket offers no Reply to post into one.
-  const threaded = useTicketProvider(repo) !== "Jira";
+  const threaded = useTrackerFeatures(repo).threadedComments;
   return (
     <div
       className="rounded-[10px] border border-hairline bg-panel px-3.5 py-3"

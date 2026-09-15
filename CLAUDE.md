@@ -343,7 +343,12 @@ src/
   — dispatches through `tracker::*`; calling `linear::` or `jira::` directly for
   one of those is how a Jira repo came to read a Linear org. Marks and labels
   follow the repo (`TrackerLogo`, `RepoTrackerLogo`, or a detail's
-  `trackerOf(trackerName)`). A list that spans projects hands its selection over
+  `trackerOf(trackerName)`). What a connection can do — snooze, threaded
+  replies, which Triage team rules apply — is `lib/tracker` `trackerFeatures`
+  (read through `useTrackerFeatures`), never a view's own `provider === "Jira"`
+  or `via === "Mcp"`. A Linear org connected through its hosted MCP server
+  (`LinearStatus.via`) is still `TicketProvider::Linear`; `tracker::repo_tracker`
+  sends it to `linear_mcp` (docs/linear-mcp.md). A list that spans projects hands its selection over
   with the row's project (`issues/model` `openTicket`): looking an id up in one
   project and falling back to its first ticket showed a different ticket.
 - **One right panel, four hosts.** `components/SidePanel` is the chrome — icon
