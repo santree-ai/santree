@@ -6,8 +6,8 @@ server. The full OAuth connection stays the default; this one is offered
 beneath it, says what it can't do before it starts, and steps aside the moment
 the same workspace is connected the normal way.
 
-Status: **in progress** — phase 0 (measuring the server), phase 1 (sign-in)
-and phase 2 (reads) are done; writes and the UI's feature gating are next. What
+Status: **in progress** — phase 0 (measuring the server), phase 1 (sign-in),
+phase 2 (reads) and phase 3 (writes) are done; the UI's feature gating is next. What
 the measuring found is in "Measured" at the end, and the fallbacks below are
 written against it.
 
@@ -96,7 +96,14 @@ here before changing it in code.
   write tools, gated exactly as today (`linear_scope` + the granted scope).
   They exist: `save_issue` (`id` + `state` — a state id, name or type) and
   `save_comment` (`issueId`, `parentId` for a reply, `body`). Both are annotated
-  destructive and non-idempotent, so neither is ever resent.
+  destructive and non-idempotent, so neither is resent after a response that
+  could mean it was applied (a gateway failure, a timeout). A 401 or a
+  dropped-session 404 is a refusal, and those alone are sent again. Their
+  output is not decoded (`client::call_write`): it was never measured, and a
+  write that landed must not report failure because its confirmation didn't
+  parse — only the tool's own error flag fails it. Every write, sent or
+  failed, drops the org's issue list (as a GraphQL write does) and that issue's
+  own cached copy (which only the MCP reads keep).
 - **"Move to started" has no position to go by.** `list_issue_statuses` returns
   `id`, `name`, `type` only, so GraphQL's "lowest-position started state" can't
   be computed. It takes the first `started` state that `core::linear::map_status`
@@ -269,7 +276,7 @@ bug report contradicts.
 | Revocation | `POST /token` with `token` + `token_type_hint` + `client_id` → 200 for both tokens, and the access token 401s immediately after. A replaced MCP credential is revoked once its replacement is stored (there is no disconnect yet) |
 | Transport | Streamable HTTP, protocol `2025-06-18`, **no `mcp-session-id`** (stateless), no rate-limit headers |
 | Read tools | `list_issues` (≤250/page, cursor; `fields` includes `estimate {value,name}`, `projectMilestone {id,name}`, `cycleId`, `parentId`, `sla*`, `triageIntel`; `state` takes one type), `get_issue` (relations, attachments, state history — no estimate, cycle or milestone), `list_comments` (`parentId`, `author {id,name}`), `list_issue_statuses` (`id,name,type` only), `list_cycles` (`number,startsAt,endsAt`, no name), `list_milestones` (`sortOrder`, no target date), `get_project`/`list_projects` (`color,icon,targetDate`, milestones with target date), `list_users` (`avatarUrl` when set), `get_user me` (teams with keys), `get_workspace` (`url`) |
-| Write tools | `save_issue` (`id`, `state`, …), `save_comment` (`issueId`, `parentId`, `body`) — `destructiveHint: true`, `idempotentHint: false`. No issue snooze (`mark_notification` snoozes inbox notifications only) |
+| Write tools | `save_issue` (`id`, `state`, …), `save_comment` (`issueId`, `parentId`, `body`) — `destructiveHint: true`, `idempotentHint: false`. No issue snooze (`mark_notification` snoozes inbox notifications only). A status change, a comment, a reply and move-to-started all worked from the app (2026-09-15) |
 | Absent | triage rotations / `triageResponsibility`, `snoozedUntilAt`, lookup by identifier list, workflow-state colour and position |
 | Images | `uploads.linear.app` urls are pre-signed for 300 s and load without a token; `extract_images` failed on one the plain request loaded |
 | Descriptions | mentions arrive as `<issue id=… href=…>` / `<user id=…>` tags, not markdown links; list results truncate descriptions |

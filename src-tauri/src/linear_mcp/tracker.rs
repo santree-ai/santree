@@ -71,8 +71,6 @@ const TRIAGE_FIELDS: &[&str] = &[
     "teamId",
 ];
 
-const NO_WRITES: &str = "santree can't change tickets through Linear's MCP server yet";
-
 /// The viewer's issues as laid out, per org — the same 15-second window as the
 /// GraphQL read, for the same burst of per-repo asks.
 static ASSIGNED: LazyLock<TtlCache<Vec<Task>>> =
@@ -151,23 +149,37 @@ impl TicketTracker for LinearMcpTracker {
 
     async fn set_issue_state(
         &self,
-        _db: &Db,
-        _repo: &str,
-        _id: &str,
-        _state: &str,
+        db: &Db,
+        repo: &str,
+        id: &str,
+        state: &str,
     ) -> Result<Option<()>> {
-        bail!(NO_WRITES)
+        require_ticket_id(id)?;
+        let Some(slug) = writable_slug(db, repo).await? else {
+            return Ok(None);
+        };
+        save_state(db, &slug, id, state).await.map(Some)
     }
 
     async fn create_comment(
         &self,
-        _db: &Db,
-        _repo: &str,
-        _id: &str,
-        _parent: Option<&str>,
-        _body: &str,
+        db: &Db,
+        repo: &str,
+        id: &str,
+        parent: Option<&str>,
+        body: &str,
     ) -> Result<Option<()>> {
-        bail!(NO_WRITES)
+        require_ticket_id(id)?;
+        let Some(slug) = writable_slug(db, repo).await? else {
+            return Ok(None);
+        };
+        let mut args = json!({ "issueId": id, "body": body });
+        if let Some(parent) = parent {
+            args["parentId"] = json!(parent);
+        }
+        let sent = client::call_write(db, &slug, "save_comment", args).await;
+        issue_changed(&slug, id);
+        sent.map(Some)
     }
 
     async fn tickets_by_id(
@@ -189,9 +201,94 @@ impl TicketTracker for LinearMcpTracker {
             .map(|_| Vec::new()))
     }
 
-    async fn move_to_started(&self, _db: &Db, _repo: &str, _id: &str) -> Result<Option<()>> {
-        bail!(NO_WRITES)
+    async fn move_to_started(&self, db: &Db, repo: &str, id: &str) -> Result<Option<()>> {
+        let Some(slug) = writable_slug(db, repo).await? else {
+            return Ok(None);
+        };
+        start_issue(db, &slug, id).await.map(Some)
     }
+}
+
+// ── Writes ──────────────────────────────────────────────────────────────────
+
+/// The org a repo writes to, refused up front when santree may not write there —
+/// the same gate a GraphQL write passes. `None` when no org resolves.
+async fn writable_slug(db: &Db, repo: &str) -> Result<Option<String>> {
+    let Some(slug) = linear::resolve_org_slug(db, repo).await? else {
+        return Ok(None);
+    };
+    linear::ensure_writable(db, &slug).await?;
+    Ok(Some(slug))
+}
+
+/// Refuse a write whose ticket id isn't a Linear identifier. `save_issue` creates
+/// an issue when it isn't given an id to update, so an empty or malformed one must
+/// never reach it — and the MCP reads only ever hand out identifiers.
+fn require_ticket_id(ticket_id: &str) -> Result<()> {
+    if linear::split_identifier(ticket_id).is_none() {
+        bail!("{ticket_id:?} isn't a Linear ticket id");
+    }
+    Ok(())
+}
+
+/// Move an issue to a workflow state. `state` is the state's id, as the status
+/// picker holds it (`save_issue` takes an id, a name or a type).
+async fn save_state(db: &Db, slug: &str, ticket_id: &str, state: &str) -> Result<()> {
+    let sent = client::call_write(
+        db,
+        slug,
+        "save_issue",
+        json!({ "id": ticket_id, "state": state }),
+    )
+    .await;
+    issue_changed(slug, ticket_id);
+    sent
+}
+
+/// Forget what's cached about an issue once a write to it was sent — whether or
+/// not it succeeded, as for GraphQL: a failure reply doesn't prove the change
+/// didn't land, and the next read must go and look.
+fn issue_changed(slug: &str, ticket_id: &str) {
+    ASSIGNED.invalidate(slug);
+    ISSUES.invalidate(&format!("{slug}/{ticket_id}"));
+}
+
+/// Move an issue into its team's in-progress state as its worktree starts. Never
+/// drags one backwards: an issue already started or closed is left as it is, and
+/// an id that names no issue is nothing to move.
+async fn start_issue(db: &Db, slug: &str, ticket_id: &str) -> Result<()> {
+    // A worktree on a plain branch carries its branch name where a ticket id goes:
+    // nothing to move, so nothing to send.
+    if linear::split_identifier(ticket_id).is_none() {
+        return Ok(());
+    }
+    let issue: McpIssue = match client::call_tool(
+        db,
+        slug,
+        "get_issue",
+        json!({ "id": ticket_id }),
+        Effect::Read,
+    )
+    .await
+    {
+        Ok(issue) => issue,
+        Err(err) if wire::is_not_found(&err) => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    if matches!(
+        issue.status_type.as_deref(),
+        Some("started" | "completed" | "canceled" | "duplicate")
+    ) {
+        return Ok(());
+    }
+    let Some(team_id) = issue.team_id.as_deref() else {
+        bail!("{ticket_id} has no team to take a started state from");
+    };
+    let states = statuses(db, slug, team_id).await?;
+    let Some(started) = wire::started_state(&states) else {
+        bail!("{ticket_id}'s team has no started state to move it to");
+    };
+    save_state(db, slug, ticket_id, &started.id).await
 }
 
 /// Every team the viewer's MCP org lets santree see, with what the viewer is to
