@@ -132,6 +132,13 @@
   --selection-fill: color-mix(in srgb, var(--accent) 10%, transparent);
   --selection-border: color-mix(in srgb, var(--accent) 45%, transparent);
   --selection-text: var(--accent-text);
+  /* Find-in-view (⌘F, `components/FindInView`). Amber rather than the accent:
+     the accent means "this is the current destination" everywhere, and a find
+     hit is not a destination — it is a result. One pair for both themes, since
+     the amber they mix from is defined once. */
+  --find-match: color-mix(in srgb, var(--color-status-amber) 32%, transparent);
+  --find-current: var(--color-status-amber);
+  --on-find-current: #17181c;
   /* THE focus ring's color — see the `:focus-visible` rule below for why it is a
      hairline of --accent-text rather than a slab of --accent. Named separately so
      the ring can be re-tuned in one place without touching what "accent" means. */
@@ -230,6 +237,18 @@
 .selection-row[data-active="true"] {
   background: var(--selection-fill);
   box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Find-in-view's matches (⌘F). The Highlight API paints ranges, not elements,
+   so this is the only place the styling can live — which is the point: it needs
+   no class on anything, and the diff viewer's DOM belongs to a third party. */
+::highlight(santree-find) {
+  background: var(--find-match);
+}
+
+::highlight(santree-find-current) {
+  background: var(--find-current);
+  color: var(--on-find-current);
 }
 
 /* The sidebar tree's own state vocabulary — neutral, rounded, inset.

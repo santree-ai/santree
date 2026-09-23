@@ -2264,6 +2264,64 @@ export const useWorktreeWatcher = (repo: string) => {
   }, [repo, qc]);
 };
 
+/** Every local read about one worktree: what git says, what is on disk, and the
+ *  agent sessions that have run there. The per-file caches come in as prefixes,
+ *  so a refresh reaches the file you are *looking at*, not only the lists. */
+function worktreeLocalKeys(repo: string, id: string): QueryKey[] {
+  return [
+    queryKeys.worktreeStatus(repo, id),
+    queryKeys.worktreeFiles(repo, id),
+    queryKeys.worktreeFileDiffPrefix(repo, id),
+    queryKeys.worktreeFileSourcePrefix(repo, id),
+    queryKeys.worktreeBranchChanges(repo, id),
+    queryKeys.worktreeBranchFileDiffPrefix(repo, id),
+    queryKeys.worktreeSessions(repo, id),
+    // The lists carrying this worktree's own +/- counters.
+    queryKeys.worktrees(repo),
+    queryKeys.baseWorktree(repo),
+  ];
+}
+
+/** True when `key` sits under `prefix` — the match {@link useRefreshWorktree}'s
+ *  spinner needs, since half the keys above are prefixes of a per-file key. */
+const underPrefix = (key: QueryKey, prefix: QueryKey) => prefix.every((part, i) => key[i] === part);
+
+/**
+ * Re-read one worktree's local state on demand — the rail's Refresh button.
+ *
+ * {@link useWorktreeWatcher} normally makes this unnecessary, which is why
+ * {@link useRefreshExternal} leaves locally-sourced reads alone. But a watcher
+ * can miss, and every way it does leaves the panes quietly behind the disk: its
+ * events are debounced and coalesced, `SKIP_DIRS` drops whole subtrees (`dist`,
+ * `build`, `target`, `node_modules` — a source file under one of those never
+ * reports), santree mutes its own writes while a worktree is being created, and
+ * a watch that failed to start only warns in the log. None of that is visible
+ * from the panel, and none of it is something the user can do anything about. A
+ * button is.
+ *
+ * Unlike the watcher's own invalidation this **cancels** an in-flight fetch
+ * (TanStack's default) rather than piggybacking on it: that fetch may have
+ * started before the edits you pressed the button to see, and a refresh that
+ * hands back the same stale answer is worse than no refresh at all. The
+ * git-scan pile-up the watcher guards against needs an event every debounce
+ * window to build; a click cannot reach that rate.
+ */
+export const useRefreshWorktree = (repo: string, id: string) => {
+  const qc = useQueryClient();
+  const keys = useMemo(() => worktreeLocalKeys(repo, id), [repo, id]);
+  const refresh = useCallback(() => {
+    if (!repo || !id) return;
+    for (const queryKey of keys) qc.invalidateQueries({ queryKey });
+  }, [qc, keys, repo, id]);
+  // Spins for the watcher's refetches too: both are the same reads landing, and
+  // a spinner that only reacted to this button would sit still while the data
+  // it refreshes is visibly in flight.
+  const fetching = useIsFetching({
+    predicate: (q) => keys.some((key) => underPrefix(q.queryKey, key)),
+  });
+  return { refresh, fetching: fetching > 0 };
+};
+
 /** A PR retarget changes local comparisons even when no worktree file changed. */
 export function useWorktreeBaseChanges() {
   const qc = useQueryClient();
@@ -4607,7 +4665,9 @@ export const useReviewCountsByProject = (): Map<string, ReviewProjectCounts> => 
 
 /** What {@link useRefreshExternal} re-pulls: every read sourced from Linear or
  *  GitHub. Local git state is deliberately absent — it has a filesystem watcher
- *  and refreshes itself, so a manual refresh would only duplicate that. */
+ *  and refreshes itself, so a manual refresh would only duplicate that. When
+ *  that watcher misses, {@link useRefreshWorktree} forces the one worktree
+ *  rather than every repo's git state at once. */
 const EXTERNAL_PREFIXES = [
   queryKeys.tasksPrefix,
   queryKeys.triageTicketsPrefix,

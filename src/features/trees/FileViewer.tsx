@@ -2,8 +2,9 @@
  *  list. Changed files render as a diff; any other file shows its current
  *  contents. A slim header names the file (the tab bar owns navigation) and, for
  *  a markdown file, carries the Code/Preview toggle. */
-import { type ReactElement, useState } from "react";
+import { type ReactElement, useRef, useState } from "react";
 
+import { FindBar, useFindInView } from "../../components/FindInView";
 import { CodeIcon, MarkdownIcon } from "../../components/icons";
 import { MarkdownDocument } from "../../components/Markdown";
 import { EmptyState, Segmented, TerminalActivity } from "../../components/primitives";
@@ -23,8 +24,14 @@ export function isMarkdownPath(path: string): boolean {
 }
 
 export function FileViewer() {
-  const { repo, activeId, selectedFile, selectedFileScope } = useTrees();
+  const { repo, activeId, selectedFile, selectedFileScope, activeTab } = useTrees();
   const { data: status = [] } = useWorktreeStatus(repo, activeId);
+  // Find searches whatever the pane below has drawn — a diff, highlighted
+  // source, a rendered document — so it hangs off this element rather than any
+  // one of them. Live only while the File tab is the one showing: the view stays
+  // mounted behind its neighbours, and ⌘F must belong to what you are looking at.
+  const root = useRef<HTMLDivElement>(null);
+  const find = useFindInView(root, activeTab === "file" && selectedFile !== null);
   // `null` = the user hasn't picked, so the default below applies. Once they
   // have, the choice sticks as they move between files — someone who switched to
   // the source meant it for more than one file.
@@ -39,7 +46,8 @@ export function FileViewer() {
   const mode: ViewMode = markdown ? (chosen ?? (changed ? "code" : "preview")) : "code";
 
   return (
-    <div className="flex h-full min-w-0 flex-col bg-app">
+    <div ref={root} className="relative flex h-full min-w-0 flex-col bg-app">
+      <FindBar find={find} />
       <div className="flex h-8 flex-none items-center gap-3 border-b border-line bg-deep px-3">
         <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted-2">
           {selectedFile}

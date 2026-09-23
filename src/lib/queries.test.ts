@@ -99,6 +99,7 @@ import {
   usePullRemoteWorktree,
   usePushWorktree,
   useRefreshExternal,
+  useRefreshWorktree,
   useTriageRepo,
   useUpdateBaseBranch,
   useWorktreeBaseChanges,
@@ -1242,6 +1243,58 @@ describe("useWorktreeWatcher: single-flight invalidation", () => {
     fire("AK-2"); // not blocked behind AK-1's in-flight wave
     expect(spy).toHaveBeenCalledTimes(2 * WAVE);
     unmount();
+  });
+});
+
+describe("useRefreshWorktree", () => {
+  const key = (k: readonly unknown[]) => JSON.stringify(k);
+
+  /** Click the rail's refresh and collect the query keys it invalidated. */
+  function refreshed(repo = "acme/app", id = "AK-1"): string[] {
+    const qc = makeClient();
+    const keys: string[] = [];
+    vi.spyOn(qc, "invalidateQueries").mockImplementation((filters) => {
+      keys.push(JSON.stringify(filters?.queryKey));
+      return Promise.resolve();
+    });
+    const { result } = renderHook(() => useRefreshWorktree(repo, id), { wrapper: wrapper(qc) });
+    act(() => result.current.refresh());
+    return keys;
+  }
+
+  // The watcher misses — debounced events, `SKIP_DIRS` subtrees, a watch that
+  // never started — and this button is then the only way back to what is on
+  // disk. A key missing here is a pane that stays stale with the button pressed.
+  it("invalidates every local read the disk-backed panes render", () => {
+    const keys = refreshed();
+    for (const local of [
+      queryKeys.worktreeStatus("acme/app", "AK-1"),
+      queryKeys.worktreeFiles("acme/app", "AK-1"),
+      queryKeys.worktreeFileDiffPrefix("acme/app", "AK-1"),
+      queryKeys.worktreeFileSourcePrefix("acme/app", "AK-1"),
+      queryKeys.worktreeBranchChanges("acme/app", "AK-1"),
+      queryKeys.worktreeBranchFileDiffPrefix("acme/app", "AK-1"),
+      queryKeys.worktreeSessions("acme/app", "AK-1"),
+      queryKeys.worktrees("acme/app"),
+      queryKeys.baseWorktree("acme/app"),
+    ]) {
+      expect(keys).toContain(key(local));
+    }
+  });
+
+  // Scoped to the worktree on screen, unlike the external refresh above: a
+  // prefix sweep here would run `git status` over every worktree the user has,
+  // for a button that is about one of them.
+  it("leaves other worktrees and the external reads alone", () => {
+    const keys = refreshed();
+    expect(keys).not.toContain(key(queryKeys.worktreeStatus("acme/app", "AK-2")));
+    expect(keys.some((k) => k.includes("reviews") || k.includes("tasks"))).toBe(false);
+  });
+
+  // The rail renders before a worktree resolves; a refresh then would invalidate
+  // `["worktree-status", "", ""]` and refetch nothing, spinner and all.
+  it("does nothing until it has a worktree to refresh", () => {
+    expect(refreshed("", "")).toEqual([]);
   });
 });
 

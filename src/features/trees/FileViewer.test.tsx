@@ -6,6 +6,7 @@ const spies = vi.hoisted(() => ({
   selectedFileScope: "working" as "working" | "branch",
   status: [] as { path: string }[],
   text: "# Title\n\nBody text.",
+  activeTab: "file" as string | null,
 }));
 
 vi.mock("../../lib/queries", () => ({
@@ -19,6 +20,7 @@ vi.mock("./model", () => ({
     activeId: "AK-1",
     selectedFile: spies.selectedFile,
     selectedFileScope: spies.selectedFileScope,
+    activeTab: spies.activeTab,
   }),
 }));
 
@@ -56,6 +58,7 @@ describe("FileViewer", () => {
       selectedFileScope: "working",
       status: [],
       text: "# Title\n\nBody text.",
+      activeTab: "file",
       ...over,
     });
     return render(<FileViewer />);
@@ -90,5 +93,22 @@ describe("FileViewer", () => {
     // A NUL is how the backend's lossy UTF-8 decode announces a binary file.
     setup({ text: "binary\u0000payload" });
     expect(screen.getByText("Binary file")).toBeTruthy();
+  });
+
+  /** A Tauri window has no browser find bar, so ⌘F is this or nothing. */
+  it("finds text in whatever the pane rendered", () => {
+    setup();
+    fireEvent.keyDown(window, { key: "f", metaKey: true });
+    const input = screen.getByLabelText("Find in file");
+    fireEvent.change(input, { target: { value: "Body" } });
+    expect(input.parentElement?.textContent).toContain("1/1");
+  });
+
+  /** The view stays mounted behind whichever tab is showing; ⌘F there belongs to
+   *  the terminal you are looking at, not to the file you left open. */
+  it("leaves ⌘F alone while another tab is showing", () => {
+    setup({ activeTab: "tab:1" });
+    fireEvent.keyDown(window, { key: "f", metaKey: true });
+    expect(screen.queryByLabelText("Find in file")).toBeNull();
   });
 });

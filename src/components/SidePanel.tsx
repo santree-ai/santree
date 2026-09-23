@@ -80,6 +80,7 @@ export function SidePanel<T extends string>({
   max,
   resetTo,
   ariaLabel,
+  action,
   children,
 }: {
   tabs: SidePanelTab<T>[];
@@ -97,6 +98,11 @@ export function SidePanel<T extends string>({
   resetTo: number;
   /** The tablist's accessible name. */
   ariaLabel: string;
+  /** An optional control for the header strip, beside the collapse toggle. What
+   *  a host offers *about the pane on screen* goes here (Trees and Reviews put
+   *  the worktree refresh there, on the panes that read the disk); a rail with
+   *  nothing to add leaves it out and the strip is unchanged. */
+  action?: ReactNode;
   /** The active pane — the host picks it, this only frames it. */
   children: ReactNode;
 }): ReactNode {
@@ -204,7 +210,10 @@ export function SidePanel<T extends string>({
             );
           })}
         </div>
-        <PanelToggle collapsed={collapsed} onToggle={onToggle} />
+        <div className="flex flex-none items-stretch gap-0.5">
+          {action}
+          <PanelToggle collapsed={collapsed} onToggle={onToggle} />
+        </div>
       </div>
 
       {children}

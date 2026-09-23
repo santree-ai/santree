@@ -41,6 +41,7 @@ import { usePrReviewBrief, useReviewWorkItems, useWorktreeStatus } from "../../l
 import { AllFilesList } from "../trees/AllFilesList";
 import { changesDot } from "../trees/FilePickerPanel";
 import { GitPanel } from "../trees/GitPanel";
+import { RefreshWorktreeButton } from "../trees/RefreshWorktreeButton";
 import { SessionHistory } from "../trees/SessionHistory";
 import type { SessionResumer } from "../trees/useResumeSession";
 import { AiWorkPane, aiWorkDot } from "./AiWorkPane";
@@ -51,6 +52,9 @@ import { ticketIdFor } from "./ticket";
 import { useStartWorkFromReviews } from "./useStartWork";
 
 export type RailTab = "issue" | "files" | "changes" | "history" | "aiWork";
+
+/** The panes read off the checkout on disk — where the refresh button belongs. */
+const LOCAL_PANES = new Set<RailTab>(["files", "changes", "history"]);
 
 const DEFAULT_W = 400;
 const MIN_W = 300;
@@ -222,6 +226,12 @@ export function ReviewSidePanel({
     ),
   };
 
+  // The same three disk-backed panes Trees puts it on, reading the PR's own
+  // checkout instead of a worktree the user created.
+  const refresh = LOCAL_PANES.has(tab) ? (
+    <RefreshWorktreeButton repo={source.repo} worktreeId={source.worktreeId} />
+  ) : null;
+
   return (
     <SidePanel
       tabs={tabs}
@@ -236,6 +246,7 @@ export function ReviewSidePanel({
       max={MAX_W}
       resetTo={DEFAULT_W}
       ariaLabel="Pull request panel"
+      action={refresh}
     >
       {/* A total map rather than a ternary cascade, for the reason Trees gives:
           a new `RailTab` is a compile error here instead of quietly landing in

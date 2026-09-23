@@ -49,6 +49,7 @@ vi.mock("../../lib/queries", () => ({
   useReviewWorkItems: () => ({ data: [] }),
   useWorktreeStatus: () => ({ data: undefined }),
   useSetWorktreeTitle: () => ({ mutate: vi.fn() }),
+  useRefreshWorktree: () => ({ refresh: vi.fn(), fetching: false }),
 }));
 
 // Reach a router and a query client to launch an agent; the panel only needs the
