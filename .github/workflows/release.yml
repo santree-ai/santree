@@ -229,7 +229,31 @@ jobs:
           # --deep to have covered it.
           codesign --verify --strict --verbose=2 "$app/Contents/Resources/santree-hook"
           spctl --assess --type exec --verbose=4 "$app"
-          xcrun stapler validate "$app"
+          # `stapler validate` re-checks a ticket the bundling step already
+          # stapled, and it asks Apple to do the checking — so it fails for two
+          # unrelated reasons: the app carries no ticket (real, and the release
+          # must stop), or Apple's ticket service is briefly unreachable.
+          # v0.1.16 hit the second: a CloudKit 503 with a 35-minute retry-after,
+          # on a build the two checks above had just accepted as signed and
+          # notarized, and a correct release died at its last step. So retry,
+          # and treat "Apple did not answer" as the warning it is rather than as
+          # a verdict on the app.
+          staple() {
+            local out
+            for attempt in 1 2 3 4 5; do
+              out=$(xcrun stapler validate "$1" 2>&1) && return 0
+              printf '%s\n' "$out"
+              case "$out" in
+                *CloudKit*|*"Status Code: 5"*|*"network connection"*|*"Could not connect"*) ;;
+                # Anything else is about the bundle, not the service: a missing
+                # ticket has to fail the release.
+                *) return 1 ;;
+              esac
+              sleep $((attempt * 30))
+            done
+            echo "::warning::stapler could not reach Apple to confirm $1 after 5 tries; spctl accepted the app above"
+          }
+          staple "$app"
           # The DMG's own ticket is a nicety — a Mac that's online fetches the
           # verdict for the stapled .app inside it either way — so report it
           # rather than failing a release that is otherwise correct.
