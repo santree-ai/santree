@@ -7,6 +7,14 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.16 — 2026-09-23
+
+- Jira Cloud joins Linear as a ticket tracker, chosen per project. Connect Jira in Settings, pick which tracker a project reads, and its tickets, triage queue, comments and status changes work the way Linear's always have. Triage on a Jira project lists whatever a JQL query you set for that project matches.
+- Linear can connect through its MCP server when your workspace blocks OAuth apps, and a workspace connected that way can now change tickets too: status, comments and replies. Where such a connection cannot do something, like snoozing a triage ticket or some of the Triage team rules, santree says so and why instead of offering a control that quietly fails.
+- Stacked worktrees indent at every level, so a deeply nested branch sits under its real parent instead of lining up as a sibling. They also follow their open pull requests' target branches: splitting or retargeting a pull request updates the sidebar, the diffs and the branch statistics on the next refresh, including the automatic one each minute while the app is visible. A branch with no open pull request keeps its remembered base, including while offline.
+- The right panel has a Refresh button on its Files, Changes and Session history panes, in both Trees and Reviews. Those panes normally keep up with an agent's edits on their own, but the filesystem watcher behind them can miss changes; this re-reads the git status, the file tree, the open file's diff, the branch's committed changes and the session list on demand.
+- Press ⌘F to find text in the file you have open, whether it is showing a diff, its source or a rendered document. Enter and Shift-Enter step through the matches, ⌘G and Shift-⌘G do the same without the box focused, and Escape closes it. Lines a diff has not expanded are not searched, because they are not on screen.
+
 ## 0.1.16-beta.3 — 2026-09-15
 
 - Worktree stacks now follow their open pull requests’ target branches. Splitting or retargeting PRs updates the sidebar, diffs, and branch statistics on refresh, including the automatic refresh each minute while the app is visible.
