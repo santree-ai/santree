@@ -4259,7 +4259,7 @@ dependencies = [
 
 [[package]]
 name = "santree"
-version = "0.1.16"
+version = "0.1.17-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4303,7 +4303,7 @@ dependencies = [
 
 [[package]]
 name = "santree-core"
-version = "0.1.16"
+version = "0.1.17-beta.1"
 dependencies = [
  "serde",
  "specta",
@@ -4311,7 +4311,7 @@ dependencies = [
 
 [[package]]
 name = "santree-hook"
-version = "0.1.16"
+version = "0.1.17-beta.1"
 dependencies = [
  "santree-core",
  "serde",
@@ -4322,7 +4322,7 @@ dependencies = [
 
 [[package]]
 name = "santree-pty"
-version = "0.1.16"
+version = "0.1.17-beta.1"
 dependencies = [
  "anyhow",
  "log",
@@ -4332,7 +4332,7 @@ dependencies = [
 
 [[package]]
 name = "santree-remote-client"
-version = "0.1.16"
+version = "0.1.17-beta.1"
 dependencies = [
  "base64 0.22.1",
  "log",
