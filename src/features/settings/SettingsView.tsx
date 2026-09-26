@@ -17,6 +17,7 @@ import {
   BackArrowIcon,
   BoltIcon,
   ChevronDownIcon,
+  DaedalusLogo,
   DocsIcon,
   GearIcon,
   GitHubLogo,
@@ -37,6 +38,7 @@ import { useApp } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
 import { ReviewActionSection, TriageActionSection } from "./sections/Actions";
 import { ClaudeAgentSection, CodexAgentSection } from "./sections/Agents";
+import { DaedalusSection } from "./sections/Daedalus";
 import { EnglishTutorSection } from "./sections/EnglishTutor";
 import { EnvironmentSection } from "./sections/Environment";
 import { GeneralSection } from "./sections/General";
@@ -145,6 +147,12 @@ const APP_NAV: NavNode[] = [
         label: "GitHub",
         icon: <GitHubLogo size={ICON_SIZE} />,
         render: () => <GitHubSection />,
+      },
+      {
+        key: "daedalus",
+        label: "Daedalus",
+        icon: <DaedalusLogo size={ICON_SIZE} />,
+        render: () => <DaedalusSection />,
       },
     ],
   },
@@ -295,9 +303,11 @@ export function SettingsView() {
           variant="inset"
           className="h-full gap-0.5"
           tabClassName="h-full"
+          // No Repo scope before the first project (Settings is reachable from
+          // the first-run screen, to connect Daedalus).
           tabs={[
             { value: "app", label: "User" },
-            { value: "repo", label: "Repo" },
+            ...(repos.length > 0 ? [{ value: "repo" as const, label: "Repo" }] : []),
           ]}
           value={scope}
           onChange={switchScope}

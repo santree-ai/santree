@@ -18,6 +18,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 santree-core = { path = "../crates/core" }
 santree-pty = { path = "../crates/pty" }
+# The link to santree-remote on Daedalus (docs/remote.md).
+santree-remote-client = { path = "../crates/remote" }
+# The hook binary's own "payload → rows" code, as a library: a hook relayed from
+# Daedalus is applied by exactly what applies a local one.
+santree-hook = { path = "../crates/hook" }
 
 tauri = { version = "2", features = ["specta"] }
 tauri-plugin-opener = "2"
@@ -110,6 +115,10 @@ socket2 = "0.6"
 # Service), never in santree.db — see CLAUDE.md's secrets invariant and linear.rs.
 # Default features are exactly the two native stores we target plus the `Entry` API.
 keyring = "4"
+
+[dev-dependencies]
+# The in-process santree-remote, for the Daedalus link's tests.
+santree-remote-client = { path = "../crates/remote", features = ["fake"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Repositions the macOS traffic lights (the `trafficLightPosition` config field is

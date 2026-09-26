@@ -74,6 +74,7 @@ const SETTINGS_SECTIONS: { key: string; label: string; keywords?: string }[] = [
   { key: "linear", label: "Linear", keywords: "org token connect" },
   { key: "jira", label: "Jira", keywords: "atlassian site connect" },
   { key: "github", label: "GitHub", keywords: "gh auth" },
+  { key: "daedalus", label: "Daedalus", keywords: "home server remote ssh vpn" },
   { key: "agent-claude", label: "Claude Code", keywords: "agent model" },
   { key: "agent-codex", label: "Codex", keywords: "agent model openai" },
   { key: "triage", label: "Triage", keywords: "rotation schedule" },

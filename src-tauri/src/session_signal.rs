@@ -58,8 +58,8 @@ pub struct ClaudeRateLimitsChanged {}
 /// An unknown byte means session state: that was the original, untagged signal, so
 /// treating it as the default keeps an older `santree-hook` (one left in a stale
 /// bundle) working instead of silently doing nothing.
-#[derive(Debug, PartialEq, Eq)]
-enum Signal {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
     Usage,
     ReviewAi,
     RateLimits,
@@ -118,23 +118,22 @@ pub fn start(app: &AppHandle, socket_path: &Path) -> Result<()> {
             // limits, anything else = session state.
             let mut buf = [0u8; 8];
             let n = stream.read(&mut buf).unwrap_or(0);
-            match kind_for_tag((n > 0).then(|| buf[0])) {
-                Signal::Usage => {
-                    let _ = SessionUsageChanged {}.emit(&app);
-                }
-                Signal::ReviewAi => {
-                    let _ = ReviewAiChanged {}.emit(&app);
-                }
-                Signal::RateLimits => {
-                    let _ = ClaudeRateLimitsChanged {}.emit(&app);
-                }
-                Signal::State => {
-                    let _ = SessionStateChanged {}.emit(&app);
-                }
-            }
+            emit(&app, kind_for_tag((n > 0).then(|| buf[0])));
         }
     });
     Ok(())
+}
+
+/// What a nudge does: tell the frontend which table to refetch. Also how a
+/// hook relayed from Daedalus refreshes the UI (`daedalus::host`) — the same
+/// events, without a socket round trip to ourselves.
+pub fn emit(app: &AppHandle, signal: Signal) {
+    let _ = match signal {
+        Signal::Usage => SessionUsageChanged {}.emit(app),
+        Signal::ReviewAi => ReviewAiChanged {}.emit(app),
+        Signal::RateLimits => ClaudeRateLimitsChanged {}.emit(app),
+        Signal::State => SessionStateChanged {}.emit(app),
+    };
 }
 
 #[cfg(test)]

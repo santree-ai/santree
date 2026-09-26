@@ -57,7 +57,8 @@ applied version the resolved set no longer has — and `0028` drops the table.
 - **Cargo workspace:** `src-tauri` (the backend: the Tauri adapter plus the
   integrations and services it drives) + `crates/core` (pure domain
   + static config, no Tauri dep) + `crates/pty` (PTY manager, Tauri-agnostic) +
-  `crates/hook` (the bundled `santree-hook`: Claude hooks, status line, MCP server).
+  `crates/hook` (the bundled `santree-hook`: Claude hooks, status line, MCP server)
+  + `crates/remote` (`santree-remote-client`: the ssh link to Daedalus, Tauri-agnostic).
 
 ## Architecture & data flow
 
@@ -99,14 +100,22 @@ crates/core/src/   domain.rs (types) · config.rs (static config/defaults) · li
 crates/pty/src/    lib.rs — PtyManager: spawn real process behind a PTY, stream bytes
                    · ring.rs (a session's recent output + the attach protocol, so
                    a reload costs the view and not the work)
-crates/hook/src/   main.rs — the bundled `santree-hook`: Claude's session-state
-                   hooks + statusLine, and `mcp` mode (mcp.rs · review_tools.rs),
-                   the AI review's draft-comment tools
+crates/hook/src/   lib.rs — the bundled `santree-hook` (main.rs only calls `run`):
+                   Claude's session-state hooks + statusLine, and `mcp` mode
+                   (mcp.rs · review_tools.rs), the AI review's draft-comment
+                   tools; `apply` is the same writes over the app's own pool,
+                   for hooks relayed from Daedalus
+crates/remote/src/ the client for `santree-remote` on Daedalus (docs/remote.md):
+                   proto · transport (the ssh argv) · client · host (reconnect,
+                   hook cursor) · probe (health check) · fake (test daemon)
 src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin wrappers)
                    · tracker.rs (the `TicketTracker` trait: which tracker a repo
                    reads, and the dispatch every provider-neutral ticket read and
                    write goes through — see "A repo reads one tracker") · linear.rs
-                   (GraphQL) · jira.rs (Jira Cloud REST: `search/jql`, ADF,
+                   (GraphQL) · daedalus/ (the home server: REST `api`, the
+                   saved connection, `host` — the live ssh link, its
+                   `client(app)` accessor and the hook relay — and `health`)
+                   · jira.rs (Jira Cloud REST: `search/jql`, ADF,
                    transitions, the per-repo triage query) · oauth.rs (the PKCE
                    flow, keychain token store and refresh both trackers share)
                    · linear_mcp/ (Linear through its hosted MCP server — the
@@ -141,7 +150,8 @@ src/
                    (window chrome belongs to the shell, never to a view)
   components/shell/  the one permanent frame: sidebar (search · destinations ·
                    triage → tickets → investigations · projects → worktrees →
-                   agents) · status bar · AppShell
+                   agents · daedalus → the same tree, for projects on the home
+                   server) · status bar · AppShell
   features/<view>/ each owns a model.tsx (context) + presentational components
   features/trees/  the worktree workspace. Right panel = 6 panes (Issue · Files ·
                    Changes · History · PR · AI work queue; the last two only when

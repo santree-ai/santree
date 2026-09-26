@@ -46,6 +46,22 @@ pub fn term_key(owner: &str, tab_id: &str) -> String {
     }
 }
 
+/// Whether `term_key` is a terminal key santree could have minted: short, and
+/// only characters that can't reach a path or an argv as anything but text.
+/// Every key that arrives from outside — IPC, a hook relayed from Daedalus —
+/// passes this before it is stored or used.
+pub fn validate_term_key(term_key: &str) -> Result<(), String> {
+    if term_key.is_empty()
+        || term_key.len() > 240
+        || !term_key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '/' | '#' | '.'))
+    {
+        return Err("invalid terminal key".into());
+    }
+    Ok(())
+}
+
 /// The columns every read selects, in the order [`row_to_tab`] destructures them.
 const COLUMNS: &str = "id, worktree_id, kind, agent_kind, title, pr_repo, pr_number";
 
@@ -516,6 +532,32 @@ mod tests {
                 .await
                 .unwrap();
         assert!(leftovers.is_empty(), "0030 left {leftovers:?} behind");
+    }
+
+    #[test]
+    fn terminal_keys_are_plain_text() {
+        for good in [
+            "tree:AK-1",
+            "tree:AK-1:tab:t1",
+            "triage:AK-1",
+            "ai-review:acme/web#42",
+        ] {
+            assert!(validate_term_key(good).is_ok(), "{good}");
+        }
+        let long = "k".repeat(241);
+        for bad in [
+            "",
+            "tree:AK-1;rm -rf ~",
+            "tree:$(id)",
+            "tree:`id`",
+            "tree:a b",
+            "tree:a\nb",
+            "tree:a|b",
+            "tree:'a'",
+            long.as_str(),
+        ] {
+            assert!(validate_term_key(bad).is_err(), "{bad:?}");
+        }
     }
 
     /// A triage ticket's tabs key under the ticket's own surface, not a

@@ -1,0 +1,32 @@
+[package]
+name = "santree-remote-client"
+description = "Client for santree-remote (protocol v1): ssh transport, typed JSON-lines client, reconnecting host — Tauri-agnostic."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+# An in-process daemon speaking protocol v1 over an in-memory link, backed by a
+# real `PtyManager`, real processes and the real filesystem. For tests — this
+# crate's own and the app's dispatch tests — never for shipping.
+fake = ["dep:santree-pty"]
+
+[dependencies]
+# For `AgentKind` alone: a remote session carries the same (label, provider)
+# identity a local one does, and the provider is a domain enum, not a string.
+santree-core = { path = "../core" }
+santree-pty = { path = "../pty", optional = true }
+serde = { workspace = true }
+# `raw_value` so a frame's payload is decoded once, by the caller that knows its
+# type, instead of through an intermediate `Value` tree.
+serde_json = { workspace = true, features = ["raw_value"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "process", "io-util", "macros"] }
+base64 = "0.22"
+thiserror = "2"
+log = { workspace = true }
+
+[dev-dependencies]
+# The `fake` module is also compiled for this crate's own unit tests.
+santree-pty = { path = "../pty" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = "3"

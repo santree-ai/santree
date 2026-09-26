@@ -953,10 +953,13 @@ const HEARTBEAT_DEAD_MS: i64 = STATUSLINE_REFRESH_SECS as i64 * 1_000 * 4;
 /// otherwise.
 ///
 /// - **`term_key` present** — decisive, both ways. `live_terminals` comes from
-///   the in-memory PTY manager, which is the whole truth about what is running:
-///   santree has no daemon, so a session with no live PTY has no process. This is
-///   also what makes an app restart correct for free — nothing is live, so every
-///   stored row retires instead of sitting at "active" until a timer notices.
+///   the in-memory PTY manager, which is the whole truth about what runs on this
+///   Mac: there is no local daemon, so a local session with no live PTY has no
+///   process. This is also what makes an app restart correct for free — nothing
+///   is live, so every stored row retires instead of sitting at "active" until a
+///   timer notices. Sessions on a Daedalus server (docs/remote.md) do outlive the
+///   app, in `santree-remote`'s own PTY manager, but aren't in this set yet, so
+///   their rows read as exited here until remote terminals are counted as live.
 ///
 ///   Matched on the row's own identity — `(term_key, agent_kind)`, the pair its
 ///   primary key is — and never on `cwd`. Both halves, because a surface hosts
@@ -1064,13 +1067,20 @@ pub const PTY_EXIT_EVENT: &str = "PtyExit";
 /// transcript's tail cheaply — they grow to many MB over a long session, but the
 /// only thing that matters here is the most recent few conversation turns. A
 /// partial first line (from seeking mid-file) just fails to parse and is skipped.
+///
+/// The path is whatever a hook payload said, so only a regular file is read, and
+/// never more than `max_bytes` of it: a device reports length 0 and never ends
+/// (`/dev/zero` would fill memory), and opening a FIFO blocks until a writer comes.
 fn read_tail(path: &str, max_bytes: u64) -> Option<String> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
     f.seek(SeekFrom::Start(len.saturating_sub(max_bytes)))
         .ok()?;
     let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
+    f.take(max_bytes).read_to_end(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -1264,6 +1274,32 @@ fn reconcile_live_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A transcript path comes from a hook payload: only a regular file is read,
+    /// and only its tail. `/dev/zero` reports length 0 and never ends — read to
+    /// its end it would take the app's memory with it.
+    #[test]
+    fn read_tail_reads_only_the_tail_of_a_regular_file() {
+        let dir = std::env::temp_dir().join(format!("santree-read-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("t.jsonl");
+        std::fs::write(&file, "0123456789").unwrap();
+
+        assert_eq!(
+            read_tail(file.to_str().unwrap(), 4).as_deref(),
+            Some("6789")
+        );
+        assert_eq!(
+            read_tail(file.to_str().unwrap(), 64).as_deref(),
+            Some("0123456789")
+        );
+        assert_eq!(read_tail("/dev/zero", 4), None);
+        assert_eq!(read_tail(dir.to_str().unwrap(), 4), None);
+        assert_eq!(read_tail(dir.join("missing").to_str().unwrap(), 4), None);
+        assert_eq!(main_activity_ms("/dev/zero"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_mcp_config_names_the_server_and_scopes_it_to_one_pull_request() {
@@ -1785,8 +1821,8 @@ mod tests {
         }
 
         // An app restart leaves no live terminals at all, which is the correct
-        // answer rather than a missing one: santree has no daemon, so a pty cannot
-        // outlive the process that opened it.
+        // answer rather than a missing one: there is no local daemon, so a local
+        // pty cannot outlive the process that opened it.
         let out = reconcile_rows(vec![row("active")], now_ms(), &live([]));
         assert_eq!(out[0].state, AgentState::Exited);
     }

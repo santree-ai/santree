@@ -43,6 +43,7 @@ vi.mock("./sections/Environment", () => ({
 }));
 vi.mock("./sections/General", () => ({ GeneralSection: () => <div>General pane</div> }));
 vi.mock("./sections/GitHub", () => ({ GitHubSection: () => <div>GitHub pane</div> }));
+vi.mock("./sections/Daedalus", () => ({ DaedalusSection: () => <div>Daedalus pane</div> }));
 vi.mock("./sections/Linear", () => ({ LinearSection: () => <div>Linear pane</div> }));
 vi.mock("./sections/Jira", () => ({ JiraSection: () => <div>Jira pane</div> }));
 vi.mock("./sections/Prompts", () => ({ PromptsSection: () => <div>Prompts pane</div> }));
@@ -70,7 +71,7 @@ describe("Settings → nav", () => {
 
   it("groups the integrations under an Integrations heading", () => {
     render(<SettingsView />);
-    expect(groupItems("Integrations")).toEqual(["Linear", "Jira", "GitHub"]);
+    expect(groupItems("Integrations")).toEqual(["Linear", "Jira", "GitHub", "Daedalus"]);
   });
 
   it("groups the two harnesses under an Agents heading", () => {

@@ -31,12 +31,17 @@ export function WorktreeMenu({
   repo,
   worktree,
   primary,
+  actionsDisabled,
   children,
 }: {
   repo: string;
   worktree: Worktree;
   /** The repo's default-branch checkout — deletable only as a repo, not here. */
   primary: boolean;
+  /** Why the checkout can't be changed right now (its Daedalus host is out of
+   *  reach). Set, Delete stays listed but disabled with this as its tooltip;
+   *  copying what the row already knows still works. */
+  actionsDisabled?: string;
   children: React.ReactNode;
 }) {
   const [confirming, setConfirming] = useState(false);
@@ -93,6 +98,8 @@ export function WorktreeMenu({
             label: "Delete",
             icon: <TrashIcon size={13} />,
             danger: true,
+            disabled: actionsDisabled !== undefined,
+            title: actionsDisabled,
             run: () => setConfirming(true),
           },
         ] as ContextMenuItem[])),

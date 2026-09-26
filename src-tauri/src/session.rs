@@ -43,6 +43,17 @@ fn transcript_path(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
         .join(format!("{session_id}.jsonl"))
 }
 
+/// Whether `id` has the shape of a provider session id: a hyphenated UUID, which
+/// is what both providers use — the id santree mints for Claude's `--session-id`,
+/// and the thread id Codex mints for itself. An id from outside santree (a hook
+/// relayed from Daedalus) is checked against it before it is stored, since a
+/// stored id is later joined into transcript paths ([`transcript_path`]).
+pub(crate) fn is_session_id(id: &str) -> bool {
+    // 36 characters is the hyphenated form only: `try_parse` also takes the
+    // braced, urn and bare-hex spellings, none of which a provider emits.
+    id.len() == 36 && Uuid::try_parse(id).is_ok()
+}
+
 /// The `projects/` directory name Claude derives from a working directory (see
 /// [`transcript_path`] for the escaping, verified against real transcripts).
 pub(crate) fn project_slug(cwd: &str) -> String {
@@ -1186,6 +1197,28 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn session_ids_are_hyphenated_uuids() {
+        for good in [
+            "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
+            "01998f6c-1d3f-7c11-9a2b-4e6f8a0b1c2d",
+            &Uuid::new_v4().to_string(),
+        ] {
+            assert!(is_session_id(good), "{good}");
+        }
+        for bad in [
+            "",
+            "t-1",
+            "../../../etc/passwd",
+            "9f1c0e2a4b7d4c819d2e0a1b2c3d4e5f",
+            "{9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f}",
+            "urn:uuid:9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
+            "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5/",
+        ] {
+            assert!(!is_session_id(bad), "{bad:?}");
+        }
     }
 
     #[test]

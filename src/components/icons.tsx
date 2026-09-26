@@ -640,6 +640,35 @@ export function JiraLogo({ size = 18, className }: IconProps) {
   );
 }
 
+/**
+ * Daedalus's logomark — its app icon: the labyrinth path on the brand tile.
+ * Unlike the Linear and Jira marks it carries its own fill, because the tile
+ * *is* the mark; both colours are tokens (`--daedalus-brand`,
+ * `--daedalus-on-brand`). Decorative: every place it appears names Daedalus in
+ * words beside it.
+ */
+export function DaedalusLogo({ size = 18, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={className}
+      aria-hidden
+    >
+      <rect width="32" height="32" rx="7" fill="var(--daedalus-brand)" />
+      <path
+        d="M16 16 L16 20 L12 20 L12 12 L20 12 L20 24 L8 24 L8 8 L24 8 L24 28 L4 28 L4 4 L28 4"
+        stroke="var(--daedalus-on-brand)"
+        strokeWidth={1.75}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 /** The mark of the tracker a ticket comes from. `branded` tints it in that
  *  tracker's colour, for the controls that leave santree for it. */
 export function TrackerLogo({

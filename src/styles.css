@@ -185,6 +185,11 @@
      current blue rather than the classic #0052cc, which sinks into the dark
      theme's background at icon size. */
   --jira-brand: #1868db;
+  /* Daedalus's brand coral and the ink drawn on it — `DAEDALUS_BRAND` /
+     `DAEDALUS_ON_BRAND` and the `DaedalusLogo` tile, straight from its app
+     icon. Shared by both themes, like the tile itself. */
+  --daedalus-brand: #e2795a;
+  --daedalus-on-brand: #fdf3ef;
   /* Claude's brand terracotta — the `ClaudeSparkIcon` logomark tint on tabs
      that host a Claude session. Reads on both themes. */
   --claude-brand: #d97757;

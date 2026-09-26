@@ -69,10 +69,13 @@ function RootLayout() {
         <LegacyMigrationProvider>
           <div className="relative flex h-screen flex-col overflow-hidden bg-surface text-fg">
             <div className="min-h-0 flex-1">
-              {repos === undefined ? null : repos.length === 0 ? (
-                <WelcomeScreen />
-              ) : fullPage ? (
+              {/* Settings is reachable before the first project too: a project
+                  that lives on Daedalus can only be added once Daedalus is
+                  connected there. */}
+              {repos === undefined ? null : fullPage ? (
                 <Outlet />
+              ) : repos.length === 0 ? (
+                <WelcomeScreen />
               ) : (
                 <AppShell>
                   <Outlet />

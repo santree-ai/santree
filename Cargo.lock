@@ -4277,7 +4277,9 @@ dependencies = [
  "rand 0.8.6",
  "reqwest 0.12.28",
  "santree-core",
+ "santree-hook",
  "santree-pty",
+ "santree-remote-client",
  "serde",
  "serde_json",
  "sha2",
@@ -4326,6 +4328,21 @@ dependencies = [
  "log",
  "portable-pty",
  "santree-core",
+]
+
+[[package]]
+name = "santree-remote-client"
+version = "0.1.16"
+dependencies = [
+ "base64 0.22.1",
+ "log",
+ "santree-core",
+ "santree-pty",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

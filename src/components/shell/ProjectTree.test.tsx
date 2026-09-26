@@ -24,8 +24,13 @@ import {
 // Recorded rather than rendered: this file is about the tree's own wiring, and
 // "is this row lit" is a prop the tree computes, not markup the row owns.
 vi.mock("./WorktreeRow", () => ({
-  WorktreeRow: (props: { node: { worktree: { id: string } }; selected: boolean }) => {
+  WorktreeRow: (props: {
+    node: { worktree: { id: string } };
+    selected: boolean;
+    actionsDisabled?: string;
+  }) => {
     rendered.worktrees.push({ id: props.node.worktree.id, selected: props.selected });
+    rendered.actionsDisabled.push(props.actionsDisabled);
     return null;
   },
 }));
@@ -62,7 +67,8 @@ const ui = vi.hoisted(() => ({
   treeFocus: null as TreeFocus | null,
   requestTreeFocus: vi.fn(),
 }));
-const model = vi.hoisted(() => ({ current: null as unknown }));
+/** What the mocked tree hook answers, and the location it was last asked for. */
+const model = vi.hoisted(() => ({ current: null as unknown, location: null as string | null }));
 
 /** The router state the tree reads: which project Reviews is open on, if any. */
 const route = vi.hoisted(() => ({
@@ -77,7 +83,10 @@ const route = vi.hoisted(() => ({
 }));
 
 /** What the mocked rows were handed on the last render. */
-const rendered = vi.hoisted(() => ({ worktrees: [] as { id: string; selected: boolean }[] }));
+const rendered = vi.hoisted(() => ({
+  worktrees: [] as { id: string; selected: boolean }[],
+  actionsDisabled: [] as (string | undefined)[],
+}));
 
 /** The inbox behind the per-project Reviews rows. `undefined` is the read still
  *  being in flight, which must render nothing rather than a row full of zeroes. */
@@ -114,7 +123,10 @@ vi.mock("../../lib/queries", async (importOriginal) => {
 vi.mock("../../lib/openPr", () => ({ useOpenPr: () => route.openPr }));
 vi.mock("./useProjectTree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./useProjectTree")>()),
-  useProjectTree: () => model.current,
+  useProjectTree: (location: string) => {
+    model.location = location;
+    return model.current;
+  },
 }));
 
 function project(over: Partial<ProjectNode> = {}): ProjectNode {
@@ -143,6 +155,7 @@ type SectionOverrides = {
   onOpenMergeQueue?: () => void;
   onOpenPrInInbox?: (pr: { url: string }) => void;
   prAgents?: PrAgents;
+  actionsDisabled?: string;
 };
 
 let agentSeq = 0;
@@ -188,6 +201,7 @@ function renderSection(over: Partial<ProjectNode> = {}, section: SectionOverride
       onOpenMergeQueue={section.onOpenMergeQueue ?? vi.fn()}
       onOpenPrInInbox={section.onOpenPrInInbox ?? vi.fn()}
       prAgents={section.prAgents}
+      actionsDisabled={section.actionsDisabled}
     />,
   );
 }
@@ -241,6 +255,11 @@ function digitsOf(count: HTMLElement): HTMLElement {
   return count.querySelector("[class*='min-w-']") as HTMLElement;
 }
 
+/** The tree as PROJECTS draws it — the case every block below is about. */
+function LocalTree() {
+  return <ProjectTree location="Local" emptyLabel="No projects on this machine" />;
+}
+
 describe("ProjectSection header", () => {
   /** Both header counts are permanent reference — the ask was to read them at a
    *  glance — so the worktree count is not gated on hover, and it sits with its
@@ -251,6 +270,27 @@ describe("ProjectSection header", () => {
     expect(count).toHaveTextContent("6");
     expect(count.className).not.toContain("opacity-0");
     expect(count.querySelector("svg")).toBeInTheDocument();
+  });
+
+  /** Where a project lives is its section's to say (PROJECTS or DAEDALUS), so
+   *  the row itself wears no mark for it. */
+  it("carries no mark of where the project lives", () => {
+    renderSection();
+    expect(screen.queryByRole("img")).toBeNull();
+  });
+
+  /** Out of reach, the header's create button is still there to be found, but
+   *  it can't start anything and says why. */
+  it("disables creating a worktree while the project's host is out of reach", () => {
+    renderSection({}, { actionsDisabled: "Unavailable until santree can reach Daedalus" });
+    const create = screen.getByRole("button", { name: "Create worktree in santree" });
+    expect(create).toBeDisabled();
+    expect(create).toHaveAttribute("title", "Unavailable until santree can reach Daedalus");
+  });
+
+  it("offers creating a worktree whenever nothing holds it back", () => {
+    renderSection();
+    expect(screen.getByRole("button", { name: "Create worktree in santree" })).toBeEnabled();
   });
 
   /** Folded, the counts are all that is left of the project; they stay. */
@@ -936,7 +976,7 @@ describe("ProjectTree reviews rows", () => {
 
   it("counts what still needs you, straight off the shared inbox read", () => {
     reviews.inbox = inbox({ requested: [waiting("a"), waiting("b")] });
-    render(<ProjectTree />);
+    render(<LocalTree />);
     expect(band(screen.getByRole("button", { name: /app reviews/ }))).toHaveTextContent("2");
   });
 
@@ -950,7 +990,7 @@ describe("ProjectTree reviews rows", () => {
       githubConnected: true,
       queue: { repo: "acme/app", branch: "main", entries: [] },
     };
-    render(<ProjectTree />);
+    render(<LocalTree />);
     // The section is folded by default, and the row lives inside it.
     fireEvent.click(screen.getByRole("button", { name: /app reviews/ }));
     fireEvent.click(screen.getByRole("button", { name: /Open the merge queue/ }));
@@ -964,7 +1004,7 @@ describe("ProjectTree reviews rows", () => {
    *  silent forever rather than silent today — even with `gh` disconnected. */
   it("gives a project with no GitHub remote no row, connected or not", () => {
     reviews.inbox = inbox({ projects: [{ repo: REPO, slug: null }], githubConnected: false });
-    render(<ProjectTree />);
+    render(<LocalTree />);
     expect(screen.queryByRole("button", { name: /app reviews/ })).not.toBeInTheDocument();
   });
 });
@@ -1047,7 +1087,7 @@ describe("ProjectTree selection follows the visible destination", () => {
   });
 
   it("lights the open worktree while Trees is showing", () => {
-    render(<ProjectTree />);
+    render(<LocalTree />);
     expect(rendered.worktrees).toContainEqual({ id: "AK-1", selected: true });
   });
 
@@ -1057,7 +1097,7 @@ describe("ProjectTree selection follows the visible destination", () => {
     route.reviewsProject = REPO;
     route.openPrUrl = PR_URL;
     localStorage.setItem("santree.shell.projectTree.reviewsOpen", JSON.stringify({ [REPO]: true }));
-    const { container } = render(<ProjectTree />);
+    const { container } = render(<LocalTree />);
 
     expect(rendered.worktrees).toContainEqual({ id: "AK-1", selected: false });
     // …and the row that IS lit is the PR the route names.
@@ -1155,7 +1195,7 @@ describe("ProjectTree reveals a selection made elsewhere", () => {
   it("expands every ancestor of a worktree selected from another view", () => {
     collapseAll();
     ui.treeFocus = { repo: REPO, id: "AK-1", pane: "issue" };
-    render(<ProjectTree />);
+    render(<LocalTree />);
     expect(screen.getByRole("button", { name: "Collapse app" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Collapse project Core" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Collapse milestone M1" })).toBeInTheDocument();
@@ -1166,7 +1206,7 @@ describe("ProjectTree reveals a selection made elsewhere", () => {
   it("leaves the bands it did not have to open exactly as it found them", () => {
     collapseAll();
     ui.treeFocus = { repo: REPO, id: "AK-1", pane: "issue" };
-    render(<ProjectTree />);
+    render(<LocalTree />);
     expect(screen.getByRole("button", { name: "Expand project Infra" })).toBeInTheDocument();
   });
 
@@ -1175,7 +1215,7 @@ describe("ProjectTree reveals a selection made elsewhere", () => {
   it("expands nothing for a selection made by clicking in the tree itself", () => {
     collapseAll();
     ui.treeFocus = { repo: REPO, id: "AK-1", pane: "issue", fromSidebar: true };
-    render(<ProjectTree />);
+    render(<LocalTree />);
     expect(screen.getByRole("button", { name: "Expand app" })).toBeInTheDocument();
   });
 
@@ -1186,9 +1226,9 @@ describe("ProjectTree reveals a selection made elsewhere", () => {
    *  reachable only by unfolding the project by hand. */
   it("expands every ancestor of a worktree the route has just opened", () => {
     collapseAll();
-    const { rerender } = render(<ProjectTree />);
+    const { rerender } = render(<LocalTree />);
     route.openTree = { repo: REPO, id: "AK-1" };
-    rerender(<ProjectTree />);
+    rerender(<LocalTree />);
     expect(screen.getByRole("button", { name: "Collapse app" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Collapse project Core" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Collapse milestone M1" })).toBeInTheDocument();
@@ -1202,7 +1242,107 @@ describe("ProjectTree reveals a selection made elsewhere", () => {
   it("leaves the bands folded around the workspace the app started on", () => {
     collapseAll();
     route.openTree = { repo: REPO, id: "AK-1" };
-    render(<ProjectTree />);
+    render(<LocalTree />);
     expect(screen.getByRole("button", { name: "Expand app" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * One tree per location: PROJECTS draws this machine's repos and DAEDALUS the
+ * home server's, each from its own read of the model and its own folds.
+ */
+describe("ProjectTree locations", () => {
+  const REPO = "acme/app";
+  const row = (id: string): WorktreeNode => ({
+    worktree: fxWorktree(id),
+    depth: 0,
+    primary: false,
+    prs: [],
+    task: null,
+    agents: [],
+    attention: { level: "idle", at: 0 },
+  });
+  const withRow: ProjectTreeModel = {
+    projects: [
+      {
+        ...project({ repo: REPO, label: "app" }),
+        linearProjects: [
+          {
+            key: "Core",
+            label: "Core",
+            color: "#888",
+            icon: null,
+            targetDate: null,
+            milestones: [{ key: "m1", label: "M1", targetDate: null, worktrees: [row("AK-1")] }],
+            showMilestones: false,
+            worktreeCount: 1,
+          },
+        ],
+      },
+    ],
+    loading: false,
+    markSeen: vi.fn(),
+    agentsByPr: new Map(),
+  };
+
+  beforeEach(() => {
+    localStorage.clear();
+    rendered.worktrees = [];
+    rendered.actionsDisabled = [];
+    model.current = withRow;
+    model.location = null;
+    ui.treeFocus = null;
+    route.reviewsProject = null;
+    route.openPrUrl = undefined;
+    route.openTree = null;
+    reviews.inbox = undefined;
+  });
+
+  it("asks for the projects at its own location", () => {
+    render(<ProjectTree location="Daedalus" emptyLabel="None" />);
+    expect(model.location).toBe("Daedalus");
+    render(<LocalTree />);
+    expect(model.location).toBe("Local");
+  });
+
+  /** A section with nothing in it says so in one quiet line — its host's words. */
+  it("draws its host's empty line when no project lives there", () => {
+    model.current = { ...withRow, projects: [] };
+    render(<ProjectTree location="Daedalus" emptyLabel="No projects yet. Add one with +" />);
+    expect(screen.getByText("No projects yet. Add one with +")).toBeInTheDocument();
+  });
+
+  it("draws no empty line while the repo list is still in flight", () => {
+    model.current = { ...withRow, projects: [], loading: true };
+    render(<ProjectTree location="Daedalus" emptyLabel="No projects yet. Add one with +" />);
+    expect(screen.queryByText("No projects yet. Add one with +")).toBeNull();
+  });
+
+  /** Out of reach, the rows still open — that is navigation — but every action
+   *  that would run on the server is handed the reason it can't. */
+  it("hands its rows the reason actions are disabled, and keeps them selectable", () => {
+    render(
+      <ProjectTree
+        location="Daedalus"
+        emptyLabel="None"
+        actionsDisabled="Unavailable until santree can reach Daedalus"
+      />,
+    );
+    expect(rendered.actionsDisabled).toContain("Unavailable until santree can reach Daedalus");
+    expect(screen.getByRole("button", { name: "Create worktree in app" })).toBeDisabled();
+  });
+
+  /** Each section folds on its own record: two trees sharing one would each
+   *  write back a copy missing the other's folds. */
+  it("keeps each location's folds apart", () => {
+    localStorage.setItem(
+      "santree.shell.projectTree.collapsed",
+      JSON.stringify({ [repoKey(REPO)]: true }),
+    );
+    const { unmount } = render(<LocalTree />);
+    expect(screen.getByRole("button", { name: "Expand app" })).toBeInTheDocument();
+    unmount();
+    render(<ProjectTree location="Daedalus" emptyLabel="None" />);
+    expect(screen.getByRole("button", { name: "Collapse app" })).toBeInTheDocument();
   });
 });

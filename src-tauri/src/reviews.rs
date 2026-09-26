@@ -749,6 +749,15 @@ pub async fn inbox(db: &Db) -> Result<ReviewInbox> {
 /// repo while the inbox beside it is about the whole org, and neither empty
 /// state is readable without saying which.
 pub async fn merge_queue(db: &Db, repo: &str) -> Result<MergeQueueView> {
+    // A Daedalus repo's `origin` lives on the server, and reading it needs the
+    // remote link (docs/remote.md). Until then its queue is unknown, not an error.
+    if repo::is_daedalus(db, repo).await? {
+        return Ok(MergeQueueView {
+            repo: String::new(),
+            github_connected: github::token().await.is_some(),
+            queue: None,
+        });
+    }
     let (token, remote) = tokio::join!(github::token(), origin(db, repo));
     let slug = remote
         .as_ref()

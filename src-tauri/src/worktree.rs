@@ -1624,6 +1624,16 @@ fn init_script_path(repo_root: &str) -> PathBuf {
 
 /// Read the repo's `.santree/init.sh` for the Settings editor.
 pub async fn init_script(db: &Db, repo: &str) -> Result<ScriptInfo> {
+    // A Daedalus repo's script is on the server, and nothing runs it from here
+    // yet (docs/remote.md). Read as absent — never stat a server path locally.
+    if repo::is_daedalus(db, repo).await? {
+        return Ok(ScriptInfo {
+            path: String::new(),
+            exists: false,
+            executable: false,
+            content: String::new(),
+        });
+    }
     let root = repo_root(db, repo).await?;
     let path = init_script_path(&root);
     Ok(tokio::task::spawn_blocking(move || ScriptInfo {

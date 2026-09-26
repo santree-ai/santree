@@ -189,6 +189,18 @@ and is **best-effort defence-in-depth, not a hard gate** — never build on it a
 security boundary.
 → `no_injected_hook_can_gate_claude_and_pretooluse_is_never_injected`
 
+The app also applies hook payloads **relayed from Daedalus** (docs/remote.md):
+agents on the user's home server run the same hooks through `santree-remote
+hook`, and the app applies each event with `crates/hook`'s own `apply` — the
+same writes the binary makes, into the app's own database, with a failure
+logged to the same `santree-hook-errors.log`. Nothing goes back to the agent:
+the relay only records. Because the server is not trusted the way the local
+binary is, an event whose terminal key or session id has a shape santree would
+never mint, or that names a session a local project owns, is refused (logged
+and acked), and the payload's `transcript_path` is dropped before it is applied
+— a path on the server names nothing on the Mac.
+→ `relayed_hooks_cannot_reach_local_sessions_or_carry_bad_ids`
+
 **The status-line passthrough** is opt-in, rewrites one key, backs the file up
 once, and is reversible. It forwards the same stdin bytes, stdout, stderr and
 exit code, kills a hung command at 5s, and **never interprets the user's

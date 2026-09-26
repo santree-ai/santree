@@ -327,6 +327,7 @@ mod tests {
     (31, "review worktrees", "ef7671bf655d4db172cc37eaf141fb0119992360efdafab0e4b98beee79b93cfc5965d1d557c62b0059857736f0ca7c8"),
     (32, "jira sites", "8ab36f1e5c61fd0b7a7fd1dba2e75c36fa02743ffdcc5ee2933f6105c51f1a576d2fb8a5e16bafbc5ab93f8d8740c879"),
     (33, "linear org connection", "67f61fcfba52bd79b68e767321ac67d6a3c6270a3e1da58ba83f448313f1f132846f2853dbb677a165a710c36f75f7c4"),
+    (34, "daedalus", "b39c2d8b3149ae894c581f897665d80b0083b9d531ec5d23f907eadc4e351d16b3d2e8928ca934835d65bc538f55cc57"),
     ];
 
     /// See [`SHIPPED_MIGRATIONS`]. Checked against the embedded set, so it fails at

@@ -16,6 +16,7 @@ mod commit_draft;
 // tree and asserts over what it finds.
 #[cfg(test)]
 mod compliance;
+mod daedalus;
 mod db;
 mod diagnostics;
 mod english_tutor;
@@ -80,6 +81,7 @@ const BINDINGS_PATH: &str = "../src/bindings.ts";
 fn specta_builder() -> AppBuilder {
     Builder::<tauri::Wry>::new()
         .events(collect_events![
+            daedalus::host::DaedalusDaemonChanged,
             git_watch::WorktreeChanged,
             pr::WorktreeBasesChanged,
             session_signal::ClaudeRateLimitsChanged,
@@ -246,6 +248,15 @@ fn specta_builder() -> AppBuilder {
             commands::jira_sites,
             commands::set_repo_jira_site,
             commands::jira_connect,
+            commands::daedalus_status,
+            commands::daedalus_daemon_status,
+            commands::daedalus_health,
+            commands::daedalus_config,
+            commands::daedalus_connect,
+            commands::daedalus_set_identity_file,
+            commands::daedalus_disconnect,
+            commands::daedalus_workspaces,
+            commands::add_daedalus_repo,
             commands::legacy_cli_probe,
             commands::legacy_cli_migrate,
             commands::check_for_update,
@@ -693,6 +704,23 @@ pub fn run() {
             let keep_awake = awake::KeepAwake::default();
             tauri::async_runtime::block_on(awake::restore(&db, &keep_awake));
             app.manage(keep_awake);
+
+            // The link to santree-remote on Daedalus, and the relay that applies
+            // the hooks agents fire there. Configured from the saved connection
+            // once the runtime is up; unconfigured, it just reads NotConfigured.
+            let daedalus_link = daedalus::host::DaedalusHost::new(data_dir.clone());
+            daedalus_link.start(
+                app.handle(),
+                db.clone(),
+                data_dir.join("santree.db").to_string_lossy().into_owned(),
+            );
+            app.manage(daedalus_link);
+            {
+                let (app, db) = (app.handle().clone(), db.clone());
+                tauri::async_runtime::spawn(async move {
+                    app.state::<daedalus::host::DaedalusHost>().sync(&db).await;
+                });
+            }
 
             app.manage(db);
 

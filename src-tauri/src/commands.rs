@@ -20,16 +20,17 @@ use santree_core::{
         AgentAuth, AgentDef, AgentKind, AgentProcess, AgentSession, AgentVersionStatus,
         AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
         ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
+        DaedalusConfig, DaedalusHealth, DaedalusReach, DaedalusWorkspaceList, DaemonReach,
         EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget, GithubStatus, JiraSite,
         JiraStatus, LegacyCliMigration, LinearApiBudget, LinearOrg, LinearStatus, LinearTeam,
         LogExport, MergeQueueView, NewInlineComment, NewPr, NewReviewWorkItem, Opener, PrDetail,
         PrDraft, PrLabel, PromptInfo, PromptLayer, PromptPreview, PromptWorkItemSample, Repo,
-        RepoBranch, ResourceUsage, ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent,
-        ReviewInbox, ReviewPr, ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer,
-        ScriptInfo, SessionDetail, SessionState, SessionSubagent, SessionUsageLive, Settings,
-        TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail, TriageSchedule, TriageSession,
-        TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreeLaunch, WorktreePr,
-        WorktreeSession, WorktreeTab,
+        RepoBranch, RepoLocation, ResourceUsage, ReviewBrief, ReviewCheckout, ReviewDraft,
+        ReviewEvent, ReviewInbox, ReviewPr, ReviewPublishOutcome, ReviewTarget, ReviewWorkItem,
+        Reviewer, ScriptInfo, SessionDetail, SessionState, SessionSubagent, SessionUsageLive,
+        Settings, TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail, TriageSchedule,
+        TriageSession, TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreeLaunch,
+        WorktreePr, WorktreeSession, WorktreeTab,
     },
 };
 
@@ -37,6 +38,8 @@ use crate::awake::{self, KeepAwake, KeepAwakeStatus};
 use crate::codex_cli;
 use crate::codex_rollouts;
 use crate::commit_draft;
+use crate::daedalus;
+use crate::daedalus::host::DaedalusHost;
 use crate::db::Db;
 use crate::diagnostics;
 use crate::english_tutor;
@@ -60,7 +63,7 @@ use crate::reviewed;
 use crate::reviews;
 use crate::session;
 use crate::settings;
-use crate::tabs;
+use crate::tabs::{self, validate_term_key};
 use crate::tracker;
 use crate::usage;
 use crate::worktree;
@@ -78,6 +81,114 @@ pub async fn list_repos(db: State<'_, Db>) -> CmdResult<Vec<Repo>> {
 #[specta::specta]
 pub async fn add_repo(path: String, db: State<'_, Db>) -> CmdResult<Repo> {
     Ok(repo::add(&db, path).await?)
+}
+
+// ── Daedalus (docs/remote.md) ────────────────────────────────────────────────
+
+/// Whether the Daedalus API answers. Unreachable, unauthorized and not
+/// configured are all `Ok` states — being away from home is normal, and an `Err`
+/// would toast. Only broken local state (database, keychain) fails.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_status(
+    db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
+) -> CmdResult<DaedalusReach> {
+    let reach = daedalus::status(&db).await?;
+    // The read refreshes the cached connection info the link is built from.
+    link.sync(&db).await;
+    Ok(reach)
+}
+
+/// Whether santree has a live link to santree-remote on Daedalus. Every link
+/// state is an `Ok` value, like `daedalus_status`'s.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_daemon_status(link: State<'_, DaedalusHost>) -> CmdResult<DaemonReach> {
+    Ok(link.reach())
+}
+
+/// Check each stage of reaching Daedalus in order — the API, ssh, then
+/// santree-remote — skipping what an earlier failure makes moot. Every outcome
+/// is an `Ok` value; only broken local state (database, keychain) fails.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_health(
+    db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
+) -> CmdResult<DaedalusHealth> {
+    Ok(daedalus::health::check(&db, &link).await?)
+}
+
+/// The saved Daedalus connection (never the token), or `None`.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_config(db: State<'_, Db>) -> CmdResult<Option<DaedalusConfig>> {
+    Ok(daedalus::config(&db).await?)
+}
+
+/// Save the Daedalus URL and API token (the token to the OS keychain) and try
+/// them. Saved even when unreachable; the answer says how the try went.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_connect(
+    url: String,
+    token: String,
+    db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
+) -> CmdResult<DaedalusReach> {
+    let reach = daedalus::connect(&db, &url, &token).await?;
+    link.sync(&db).await;
+    Ok(reach)
+}
+
+/// Set or clear the ssh identity file: an absolute path to an existing regular
+/// file under the user's home, resolved before it is stored.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_set_identity_file(
+    path: Option<String>,
+    db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
+) -> CmdResult<()> {
+    daedalus::set_identity_file(&db, path).await?;
+    link.sync(&db).await;
+    Ok(())
+}
+
+/// Forget the Daedalus connection and its token. Registered Daedalus projects
+/// are kept.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_disconnect(
+    db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
+) -> CmdResult<()> {
+    daedalus::disconnect(&db).await?;
+    link.sync(&db).await;
+    Ok(())
+}
+
+/// The server's checkouts, marked with which are already projects. Empty, with
+/// the reach saying why, whenever the API doesn't answer.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_workspaces(
+    db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
+) -> CmdResult<DaedalusWorkspaceList> {
+    let list = daedalus::workspaces(&db).await?;
+    link.sync(&db).await;
+    Ok(list)
+}
+
+/// Register one of the server's checkouts as a project. `name` only selects: its
+/// path and remote are re-read from the server, never taken from IPC. Fails when
+/// Daedalus can't be reached — this is an explicit action.
+#[tauri::command]
+#[specta::specta]
+pub async fn add_daedalus_repo(name: String, db: State<'_, Db>) -> CmdResult<Repo> {
+    Ok(daedalus::add_repo(&db, &name).await?)
 }
 
 /// Available coding agents and their models.
@@ -140,11 +251,14 @@ pub async fn codex_logout(db: State<'_, Db>) -> CmdResult<()> {
 pub async fn claude_usage(app: AppHandle, db: State<'_, Db>) -> CmdResult<UsageReport> {
     let table = pricing::ensure_fresh(&db).await;
     // Registered repos let a session's cwd resolve to its repo (and worktree),
-    // so the panel can group sessions by repo folder.
+    // so the panel can group sessions by repo folder. Local ones only: the
+    // transcripts read here are this machine's, and a Daedalus repo's path is on
+    // the server.
     let repos: Vec<usage::Repo> = repo::list(&db)
         .await
         .unwrap_or_default()
         .into_iter()
+        .filter(|r| r.location == RepoLocation::Local)
         .filter_map(|r| r.path.map(|p| (r.name, p)))
         .collect();
     // Emit parse progress so the panel can show a bar on the (slow) cold load.
@@ -734,18 +848,6 @@ pub async fn investigate_prompt(
 /// `term_key` is the logical terminal id (e.g. `tree:AK-1`, `triage:AK-1`); `cwd`
 /// is where the provider runs. `allow_fresh` mints a session when none is resumable
 /// (set on an explicit launch; false on a passive reopen).
-fn validate_term_key(term_key: &str) -> Result<(), String> {
-    if term_key.is_empty()
-        || term_key.len() > 240
-        || !term_key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '/' | '#' | '.'))
-    {
-        return Err("invalid terminal key".into());
-    }
-    Ok(())
-}
-
 #[tauri::command]
 #[specta::specta]
 #[allow(clippy::too_many_arguments)]

@@ -32,6 +32,10 @@ import type {
   AnalysisScope,
   ChangedFile,
   ClaudeGlobalCapture,
+  DaedalusConfig,
+  DaedalusReach,
+  DaedalusWorkspaceList,
+  DaemonReach,
   KeepAwakeStatus,
   NewInlineComment,
   PrDetail,
@@ -109,6 +113,8 @@ function useUnwrappedQuery<T>(
     // `{ silent: true }` opts out of the global query-error→toast handler (see
     // `main.tsx`), for a read that renders its own failure UI.
     meta?: UseQueryOptions<T>["meta"];
+    // Off globally; on for reads of state that changes outside the app.
+    refetchOnWindowFocus?: boolean;
   } = {},
 ) {
   return useQuery({ queryKey, queryFn: () => unwrap(command()), ...options });
@@ -379,6 +385,11 @@ export const queryKeys = {
   prCheckLog: (owner: string, name: string, jobId: number) =>
     ["pr-check-log", owner, name, jobId] as const,
   openers: ["openers"] as const,
+  daedalusStatus: ["daedalus-status"] as const,
+  daedalusConfig: ["daedalus-config"] as const,
+  daedalusWorkspaces: ["daedalus-workspaces"] as const,
+  daedalusDaemonStatus: ["daedalus-daemon-status"] as const,
+  daedalusHealth: ["daedalus-health"] as const,
   initScript: (repo: string) => ["init-script", repo] as const,
   taskNote: (repo: string, id: string) => ["task-note", repo, id] as const,
   /** Prefixes for every repo's triage reads — invalidate these (not the
@@ -1777,6 +1788,153 @@ export const useSetTaskNote = (repo: string) =>
     // Reconcile with what the backend actually stored (e.g. trimmed body) instead
     // of leaving the optimistic value to diverge until the next cold mount.
     invalidate: (a) => [queryKeys.taskNote(repo, a.taskId)],
+  });
+
+// ── Daedalus: the home server ────────────────────────────────────────────────
+// The saved connection, whether its API answers, and the checkouts it offers as
+// projects (docs/remote.md). Unreachable is a state these reads *return*, never
+// an error: being away from home is normal, and a failed read would toast.
+
+/** Whether the Daedalus API answers. Polled gently and re-read on focus —
+ *  reachability changes with the network the Mac is on, outside the app. */
+export const useDaedalusStatus = () =>
+  useUnwrappedQuery(queryKeys.daedalusStatus, () => commands.daedalusStatus(), {
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+
+/** The saved connection (never the token), `null` when not configured. The
+ *  cached connection info changes when a status read reaches the server, so
+ *  that read refreshes this one too. */
+export const useDaedalusConfig = () =>
+  useUnwrappedQuery(queryKeys.daedalusConfig, () => commands.daedalusConfig(), {
+    staleTime: 15_000,
+    refetchOnWindowFocus: true,
+  });
+
+/** The server's checkouts, marked with which are already projects. Read only
+ *  while something shows them. */
+export const useDaedalusWorkspaces = (enabled = true) =>
+  useUnwrappedQuery(queryKeys.daedalusWorkspaces, () => commands.daedalusWorkspaces(), {
+    enabled,
+    staleTime: 15_000,
+    refetchOnWindowFocus: true,
+  });
+
+/** The live link to santree-remote on Daedalus. Pushed: the backend emits
+ *  `daedalusDaemonChanged` on every link transition and
+ *  {@link useDaedalusDaemonWatcher} invalidates; the slow poll only covers an
+ *  event missed while the webview was reloading. */
+export const useDaedalusDaemonStatus = () =>
+  useUnwrappedQuery(queryKeys.daedalusDaemonStatus, () => commands.daedalusDaemonStatus(), {
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+
+/** Realtime refresh for {@link useDaedalusDaemonStatus}. Mount once at the app
+ *  root, beside the session watchers. */
+export const useDaedalusDaemonWatcher = () => {
+  const qc = useQueryClient();
+  useEffect(() => {
+    const unlisten = events.daedalusDaemonChanged.listen(() => {
+      qc.invalidateQueries({ queryKey: queryKeys.daedalusDaemonStatus });
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [qc]);
+};
+
+/** Each stage of reaching Daedalus — API, ssh, santree-remote — checked in
+ *  order. Runs ssh, so it is never polled: once when something shows it, again
+ *  on "Run check", and after a connect (which invalidates it). */
+export const useDaedalusHealth = () =>
+  useUnwrappedQuery(queryKeys.daedalusHealth, () => commands.daedalusHealth(), {
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+
+/** Every Daedalus read, for a write that changes what they all answer. */
+const DAEDALUS_READS = [
+  queryKeys.daedalusStatus,
+  queryKeys.daedalusConfig,
+  queryKeys.daedalusWorkspaces,
+  queryKeys.daedalusDaemonStatus,
+  queryKeys.daedalusHealth,
+];
+
+/** Save the URL + token and try them. The answer is the reach, written straight
+ *  into the status read: an unreachable server is a state the pane shows, so
+ *  only a reachable one earns a toast. */
+export const useDaedalusConnect = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (a: { url: string; token: string }) =>
+      unwrap(commands.daedalusConnect(a.url, a.token)),
+    onSuccess: (reach) => {
+      qc.setQueryData<DaedalusReach>(queryKeys.daedalusStatus, reach);
+      qc.invalidateQueries({ queryKey: queryKeys.daedalusConfig });
+      qc.invalidateQueries({ queryKey: queryKeys.daedalusWorkspaces });
+      // A new connection is the moment to check every stage of it.
+      qc.invalidateQueries({ queryKey: queryKeys.daedalusHealth });
+      if (reach.kind === "ApiReachable") toast.success("Daedalus connected.");
+    },
+  });
+};
+
+/** Set or clear the ssh identity file, optimistically. */
+export const useDaedalusSetIdentityFile = () =>
+  useOptimisticMutation({
+    mutationKey: ["daedalus-set-identity-file"],
+    mutationFn: (path: string | null) => unwrap(commands.daedalusSetIdentityFile(path)),
+    optimistic: (qc, path) => {
+      const prev = qc.getQueryData<DaedalusConfig | null>(queryKeys.daedalusConfig);
+      if (prev)
+        qc.setQueryData<DaedalusConfig>(queryKeys.daedalusConfig, { ...prev, identityFile: path });
+      return () => qc.setQueryData(queryKeys.daedalusConfig, prev);
+    },
+    // A different key is a different ssh check.
+    invalidate: () => [queryKeys.daedalusConfig, queryKeys.daedalusHealth],
+  });
+
+/** Forget the connection and its token. Registered Daedalus projects stay. */
+export const useDaedalusDisconnect = () =>
+  useOptimisticMutation<void, null>({
+    mutationFn: () => unwrap(commands.daedalusDisconnect()),
+    optimistic: (qc) => {
+      const prev = DAEDALUS_READS.map((key) => [key, qc.getQueryData(key)] as const);
+      qc.setQueryData<DaedalusConfig | null>(queryKeys.daedalusConfig, null);
+      qc.setQueryData<DaedalusReach>(queryKeys.daedalusStatus, { kind: "NotConfigured" });
+      qc.setQueryData<DaemonReach>(queryKeys.daedalusDaemonStatus, { kind: "NotConfigured" });
+      qc.setQueryData<DaedalusWorkspaceList>(queryKeys.daedalusWorkspaces, {
+        reach: { kind: "NotConfigured" },
+        generatedAt: null,
+        workspaces: [],
+      });
+      return () => {
+        for (const [key, data] of prev) qc.setQueryData(key, data);
+      };
+    },
+    invalidate: () => DAEDALUS_READS,
+  });
+
+/** Register one of the server's checkouts as a project. The row reads as added
+ *  at once; the repo list and the server's list reconcile on settle. */
+export const useAddDaedalusRepo = () =>
+  useOptimisticMutation({
+    mutationKey: ["add-daedalus-repo"],
+    mutationFn: (name: string) => unwrap(commands.addDaedalusRepo(name)),
+    optimistic: (qc, name) => {
+      const key = queryKeys.daedalusWorkspaces;
+      const prev = qc.getQueryData<DaedalusWorkspaceList>(key);
+      if (!prev) return undefined;
+      qc.setQueryData<DaedalusWorkspaceList>(key, {
+        ...prev,
+        workspaces: prev.workspaces.map((w) => (w.name === name ? { ...w, registered: true } : w)),
+      });
+      return () => qc.setQueryData(key, prev);
+    },
+    invalidate: () => [queryKeys.repos, queryKeys.daedalusWorkspaces],
   });
 
 // ── Agent sessions and live agent state ──────────────────────────────────────

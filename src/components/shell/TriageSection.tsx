@@ -58,6 +58,7 @@ import { RepoTrackerLogo } from "../RepoTrackerLogo";
 import { BAND_LABEL_X, CARD_GLYPH, CARD_INSET, CARD_LABEL_X, PriorityBars } from "../WorkSignals";
 import { AgentRow } from "./AgentRow";
 import { RotationDialog } from "./RotationDialog";
+import { SECTION_HEADER } from "./SectionHeader";
 import { TriageTicketMenu } from "./TriageTicketMenu";
 import { groupTriageByTeam, type TriageTeamGroup } from "./triageTeams";
 import { type AgentNode, useTicketAgents } from "./useProjectTree";
@@ -170,9 +171,7 @@ export function TriageSection() {
   if (trackerConnected === false) {
     return (
       <div className="flex flex-none flex-col pb-1 opacity-60">
-        <div className="mt-2 flex h-8 flex-none items-center px-4 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-5">
-          Triage
-        </div>
+        <div className={SECTION_HEADER}>Triage</div>
         <div
           className="py-(--density-compact) text-[11px] text-muted-4"
           style={{ paddingLeft: SECTION_GUTTER }}
@@ -282,7 +281,7 @@ export function TriageSection() {
           Inline, not at the trailing edge: a slot held open beside the menu was
           a gap the header wore all day for a glyph it showed on hover. Here it
           appears in room that was empty, and nothing moves. */}
-      <div className="group relative mt-2 flex h-8 flex-none items-center gap-1.5 px-4 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-5">
+      <div className={`group relative ${SECTION_HEADER}`}>
         <button
           type="button"
           onClick={() => setCollapsed(open)}

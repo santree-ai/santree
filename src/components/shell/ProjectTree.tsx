@@ -1,6 +1,9 @@
 /**
- * The sidebar's project tree: every registered repo, expanding to its worktrees,
- * each expanding to the agents live inside it.
+ * The sidebar's project tree: every registered repo at one location, expanding
+ * to its worktrees, each expanding to the agents live inside it. The rail draws
+ * it twice — under PROJECTS for this machine's repos and under DAEDALUS for the
+ * home server's (`DaedalusSection`) — so a project row does the same things
+ * wherever it lives.
  *
  * This is the permanent answer to "what is happening across my work", which is
  * why it is cross-repo and always mounted rather than scoped to whatever repo
@@ -19,13 +22,13 @@
  * section: "you have nothing here" and "we haven't looked yet" are different
  * answers and the second one is not ours to assert.
  *
- * The "Projects" label and the add-project action above it belong to `Sidebar`;
- * this component starts at the first repo header.
+ * Each section's label and add action belong to its host (`Sidebar`,
+ * `DaedalusSection`); this component starts at the first repo header.
  */
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { ReviewPr, TicketRef } from "../../bindings";
+import type { RepoLocation, ReviewPr, TicketRef } from "../../bindings";
 import { useOpenAgent } from "../../features/agents/useOpenAgent";
 import { ticketIdFor } from "../../features/reviews/ticket";
 import { CreateWorktreeDialog } from "../../features/trees/CreateWorktreeDialog";
@@ -77,21 +80,35 @@ import { WorktreeRow } from "./WorktreeRow";
  *  hands a row a fresh `[]` and re-renders it for nothing. */
 const EMPTY_AGENTS: AgentNode[] = [];
 
-/** Which sections the user has folded away, by section key. Persisted because a
- *  tree that re-expands every repo on relaunch undoes the one piece of curation
- *  this surface offers. */
-const COLLAPSED_KEY = "santree.shell.projectTree.collapsed";
-
-/** Which Reviews sections the user has opened, by registry name.
+/**
+ * Where each location's tree keeps its folds.
  *
- *  A second record rather than a flag in the one above, because the default runs
- *  the other way: every band in this tree is open until you fold it, and the
- *  Reviews section is folded until you open it. It is a place you go to browse,
- *  and its resting state is the one number that says whether browsing is worth it
- *  — a project that expanded to eight PR rows by default would push the work you
- *  actually have checked out off the screen. Both records hold "not the default",
- *  which is why neither needs seeding. */
-const REVIEWS_OPEN_KEY = "santree.shell.projectTree.reviewsOpen";
+ * `collapsed` is which sections the user has folded away, by section key.
+ * Persisted because a tree that re-expands every repo on relaunch undoes the one
+ * piece of curation this surface offers.
+ *
+ * `reviewsOpen` is which Reviews sections the user has opened, by registry name.
+ * A second record rather than a flag in the first, because the default runs the
+ * other way: every band in this tree is open until you fold it, and the Reviews
+ * section is folded until you open it. It is a place you go to browse, and its
+ * resting state is the one number that says whether browsing is worth it — a
+ * project that expanded to eight PR rows by default would push the work you
+ * actually have checked out off the screen. Both records hold "not the default",
+ * which is why neither needs seeding.
+ *
+ * One pair per location because each section is its own tree: two trees on one
+ * record would each write back a copy missing the other's folds.
+ */
+const FOLD_KEYS: Record<RepoLocation, { collapsed: string; reviewsOpen: string }> = {
+  Local: {
+    collapsed: "santree.shell.projectTree.collapsed",
+    reviewsOpen: "santree.shell.projectTree.reviewsOpen",
+  },
+  Daedalus: {
+    collapsed: "santree.shell.daedalusTree.collapsed",
+    reviewsOpen: "santree.shell.daedalusTree.reviewsOpen",
+  },
+};
 
 /** Left gutter of a repo header — the tree's level 0. Lines the avatar up with
  *  the "Projects" label above it (`px-4`). */
@@ -174,15 +191,27 @@ function useReviewTickets(
 }
 
 /**
- * The projects → worktrees → agents tree.
+ * The projects → worktrees → agents tree for the repos at `location`.
  *
  * Selecting a worktree is a three-part handoff, because every other view is
  * scoped to the active repo: switch the repo, publish the focus request, then
  * navigate. Opening an agent goes through `useOpenAgent`, which already knows
  * how to reach each surface a session can belong to.
  */
-export function ProjectTree() {
-  const { projects, loading, markSeen, agentsByPr } = useProjectTree();
+export function ProjectTree({
+  location,
+  emptyLabel,
+  actionsDisabled,
+}: {
+  location: RepoLocation;
+  /** The quiet line drawn when no registered repo lives here. */
+  emptyLabel: string;
+  /** Why nothing can run in these projects right now (Daedalus out of reach):
+   *  set, every action that would run there is disabled with this as its
+   *  tooltip. Opening a row still works — it is navigation, not execution. */
+  actionsDisabled?: string;
+}) {
+  const { projects, loading, markSeen, agentsByPr } = useProjectTree(location);
   const navigate = useNavigate();
   const { requestTreeFocus, treeFocus } = useAppUi();
   const openAgent = useOpenAgent();
@@ -230,7 +259,10 @@ export function ProjectTree() {
   // than per-section so only one can ever be open.
   const [createFor, setCreateFor] = useState<string | null>(null);
 
-  const [collapsed, setCollapsed] = usePersistedState<Record<string, boolean>>(COLLAPSED_KEY, {});
+  const [collapsed, setCollapsed] = usePersistedState<Record<string, boolean>>(
+    FOLD_KEYS[location].collapsed,
+    {},
+  );
   // Read at call time so `toggle` keeps one identity across a projects refetch.
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
@@ -250,7 +282,7 @@ export function ProjectTree() {
   );
 
   const [reviewsOpen, setReviewsOpen] = usePersistedState<Record<string, boolean>>(
-    REVIEWS_OPEN_KEY,
+    FOLD_KEYS[location].reviewsOpen,
     {},
   );
   // Read at call time: `toggleReviews` decides the groups' state from what the
@@ -368,11 +400,18 @@ export function ProjectTree() {
   );
 
   // No viewport of its own: the tree scrolls inside the sidebar's, together
-  // with Triage and the Projects label above it (see `Sidebar`).
+  // with Triage and the section labels around it (see `Sidebar`).
   return (
     <div className="flex flex-none flex-col pb-2">
       {loading ? (
         <SectionSkeleton />
+      ) : projects.length === 0 ? (
+        <div
+          className="py-(--density-compact) text-[11px] text-muted-4"
+          style={{ paddingLeft: HEADER_GUTTER }}
+        >
+          {emptyLabel}
+        </div>
       ) : (
         projects.map((project) => (
           <ProjectSection
@@ -386,6 +425,7 @@ export function ProjectTree() {
             onSelectWorktree={(worktreeId, pane) => selectWorktree(project.repo, worktreeId, pane)}
             onOpenAgent={openAgentRow}
             onCreateWorktree={() => setCreateFor(project.repo)}
+            actionsDisabled={actionsDisabled}
             reviews={reviewsByProject.get(project.repo) ?? null}
             showEmptyReviews={showEmptyReviews}
             openPrUrl={openPrUrl}
@@ -425,6 +465,7 @@ export function ProjectSection({
   onSelectWorktree,
   onOpenAgent,
   onCreateWorktree,
+  actionsDisabled,
   reviews = null,
   showEmptyReviews = false,
   openPrUrl = null,
@@ -450,6 +491,8 @@ export function ProjectSection({
   onOpenAgent: (agent: AgentNode) => void;
   /** Open the "Create worktree" dialog for this repo. */
   onCreateWorktree: () => void;
+  /** See {@link ProjectTree}'s prop of the same name. */
+  actionsDisabled?: string;
   /** This project's review inbox, or `null` while the read is in flight (or when
    *  the project has no GitHub remote). See {@link showReviewsSection}. */
   reviews?: ProjectReviews | null;
@@ -463,7 +506,7 @@ export function ProjectSection({
   reviewGroupBy?: LinearGroupBy;
   /** This project's PR tickets by identifier — what that nesting groups on. */
   reviewTickets?: Map<string, TicketRef>;
-  /** The Reviews section is expanded. Defaults closed — see {@link REVIEWS_OPEN_KEY}. */
+  /** The Reviews section is expanded. Defaults closed — see {@link FOLD_KEYS}. */
   reviewsOpen?: boolean;
   onToggleReviews?: (bulk: boolean) => void;
   /** Open Reviews on this project's merge queue — the section's one row that
@@ -527,9 +570,10 @@ export function ProjectSection({
         <button
           type="button"
           onClick={onCreateWorktree}
+          disabled={actionsDisabled !== undefined}
           aria-label={`Create worktree in ${project.label}`}
-          title="Create worktree"
-          className="relative flex h-4 w-4 flex-none cursor-pointer items-center justify-center rounded text-muted-4 opacity-0 transition-opacity hover:bg-hover-2 hover:text-fg-2 focus-visible:opacity-100 group-hover:opacity-100"
+          title={actionsDisabled ?? "Create worktree"}
+          className="relative flex h-4 w-4 flex-none cursor-pointer items-center justify-center rounded text-muted-4 opacity-0 transition-opacity hover:bg-hover-2 hover:text-fg-2 focus-visible:opacity-100 group-hover:opacity-100 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-muted-4"
         >
           <PlusIcon size={11} />
         </button>
@@ -607,6 +651,7 @@ export function ProjectSection({
           onSelect={() => onSelectWorktree(project.base?.worktree.id ?? "")}
           onOpenPage={(page) => onSelectWorktree(project.base?.worktree.id ?? "", page)}
           onOpenAgent={onOpenAgent}
+          actionsDisabled={actionsDisabled}
         />
       )}
 
@@ -663,6 +708,7 @@ export function ProjectSection({
                             onSelect={() => onSelectWorktree(node.worktree.id)}
                             onOpenPage={(page) => onSelectWorktree(node.worktree.id, page)}
                             onOpenAgent={onOpenAgent}
+                            actionsDisabled={actionsDisabled}
                           />
                         ))}
                     </div>

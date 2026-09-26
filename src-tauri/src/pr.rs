@@ -48,6 +48,12 @@ pub async fn statuses(db: &Db, repo: &str, app: &tauri::AppHandle) -> Result<Vec
     let Some(token) = github::token().await else {
         return Ok(vec![]);
     };
+    // A Daedalus repo has no worktrees on this machine to have PRs for (its
+    // worktrees run on the server — docs/remote.md), and the sidebar polls this
+    // for every project, so it answers empty rather than failing.
+    if repo::is_daedalus(db, repo).await? {
+        return Ok(vec![]);
+    }
     let root = repo::path(db, repo)
         .await?
         .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;

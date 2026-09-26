@@ -1,6 +1,6 @@
 [package]
 name = "santree-hook"
-description = "Tiny CLI that Claude Code hooks invoke to record santree session-state events."
+description = "Tiny CLI that Claude Code hooks invoke to record santree session-state events, and the library the app applies hooks relayed from Daedalus with."
 edition.workspace = true
 version.workspace = true
 license.workspace = true

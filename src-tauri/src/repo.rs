@@ -9,7 +9,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
 
-use santree_core::domain::{Repo, TicketProvider};
+use santree_core::domain::{Repo, RepoLocation, TicketProvider};
 
 use crate::db::Db;
 use crate::git;
@@ -30,9 +30,10 @@ pub async fn list(db: &Db) -> Result<Vec<Repo>> {
         Option<String>,
         Option<String>,
         Option<String>,
+        String,
     );
     let rows = sqlx::query_as::<_, RepoRow>(
-        "SELECT r.name, r.tracker, r.path, r.linear_org_slug, r.jira_cloud_id
+        "SELECT r.name, r.tracker, r.path, r.linear_org_slug, r.jira_cloud_id, r.location
          FROM repos r ORDER BY r.rowid",
     )
     .fetch_all(db)
@@ -49,7 +50,7 @@ pub async fn list(db: &Db) -> Result<Vec<Repo>> {
     Ok(rows
         .into_iter()
         .map(
-            |(name, stored_tracker, path, linked_slug, linked_cloud_id)| {
+            |(name, stored_tracker, path, linked_slug, linked_cloud_id, location)| {
                 let provider = tracker::resolve(
                     linked_cloud_id.is_some(),
                     linked_slug.is_some(),
@@ -75,6 +76,7 @@ pub async fn list(db: &Db) -> Result<Vec<Repo>> {
                     tracker: label.unwrap_or(stored_tracker),
                     provider,
                     path,
+                    location: RepoLocation::from_db(&location),
                 }
             },
         )
@@ -101,13 +103,16 @@ fn worktrees_at(links: &[(String, String)], repo_path: &str) -> u32 {
     links.iter().filter(|(path, _)| path == repo_path).count() as u32
 }
 
-/// Every registered repo as `(registry name, stored top-level path)`, in insertion
-/// order. Deliberately not [`list`]: that one resolves Linear orgs to build display
-/// labels, and the callers here are asking a filesystem question — they just need
-/// to say which project the answer came from.
+/// Every registered *local* repo as `(registry name, stored top-level path)`, in
+/// insertion order. Deliberately not [`list`]: that one resolves Linear orgs to
+/// build display labels, and the callers here are asking a filesystem question —
+/// they just need to say which project the answer came from. A Daedalus repo's
+/// path is a path on the server, so it is no answer to a question about this
+/// machine's filesystem and is left out.
 pub(crate) async fn registered(db: &Db) -> Result<Vec<(String, String)>> {
     Ok(sqlx::query_as::<_, (String, String)>(
-        "SELECT name, path FROM repos WHERE path IS NOT NULL ORDER BY rowid",
+        "SELECT name, path FROM repos
+         WHERE path IS NOT NULL AND location = 'local' ORDER BY rowid",
     )
     .fetch_all(db)
     .await?)
@@ -122,13 +127,35 @@ pub(crate) async fn paths(db: &Db) -> Result<Vec<String>> {
         .collect())
 }
 
-/// The stored top-level path of a registered repo, if it has one.
+/// The stored top-level path of a registered repo's checkout **on this machine**,
+/// if it has one. Every caller hands the answer to `std::fs`, `git` or a PTY cwd,
+/// so a Daedalus repo — whose path is on the server — answers `None`, and each of
+/// those callers already treats "no local path" as real-but-empty. Remote
+/// execution resolves a Daedalus repo's path through its own dispatch, never
+/// through this.
 pub async fn path(db: &Db, name: &str) -> Result<Option<String>> {
-    let row: Option<(Option<String>,)> = sqlx::query_as("SELECT path FROM repos WHERE name = ?")
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT path FROM repos WHERE name = ? AND location = 'local'")
+            .bind(name)
+            .fetch_optional(db)
+            .await?;
+    Ok(row.and_then(|(p,)| p))
+}
+
+/// Where a registered repo's checkout lives; `None` when no repo has that name.
+pub async fn location(db: &Db, name: &str) -> Result<Option<RepoLocation>> {
+    let row: Option<String> = sqlx::query_scalar("SELECT location FROM repos WHERE name = ?")
         .bind(name)
         .fetch_optional(db)
         .await?;
-    Ok(row.and_then(|(p,)| p))
+    Ok(row.as_deref().map(RepoLocation::from_db))
+}
+
+/// Whether `name` is a registered Daedalus repo — the question every local-only
+/// read asks before answering real-but-empty instead of failing on a path that
+/// isn't on this machine.
+pub async fn is_daedalus(db: &Db, name: &str) -> Result<bool> {
+    Ok(location(db, name).await? == Some(RepoLocation::Daedalus))
 }
 
 /// Validate that `path` is inside a git work tree and register it. The stored
@@ -163,15 +190,22 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
         })
         .await??;
 
-    let registered: Option<(String,)> = sqlx::query_as("SELECT name FROM repos WHERE path = ?")
-        .bind(&toplevel)
-        .fetch_optional(db)
-        .await?;
+    let registered: Option<(String, String)> =
+        sqlx::query_as("SELECT name, location FROM repos WHERE path = ?")
+            .bind(&toplevel)
+            .fetch_optional(db)
+            .await?;
 
     let name = match registered {
+        // `path` is unique across both locations, and a server checkout can share
+        // its spelling with a local folder. Refreshing that row would relabel a
+        // Daedalus project as this folder.
+        Some((name, location)) if RepoLocation::from_db(&location) != RepoLocation::Local => {
+            bail!("{name} is already registered at that path as a Daedalus project.")
+        }
         // Already registered: refresh the tracker but keep the stored name — a
         // rename (the remote moved) would strand its `repo:<name>` settings scope.
-        Some((name,)) => {
+        Some((name, _)) => {
             sqlx::query("UPDATE repos SET tracker = ? WHERE path = ?")
                 .bind(&tracker)
                 .bind(&toplevel)
@@ -204,7 +238,73 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
         provider,
         agents,
         path: Some(toplevel),
+        location: RepoLocation::Local,
     })
+}
+
+/// Register a checkout that lives on Daedalus. Nothing here touches this
+/// machine's filesystem: `server_path` and `remote` come from Daedalus's own
+/// workspace listing (the caller re-reads it rather than trusting IPC), and the
+/// identity is derived from the remote URL the same way [`add`] derives it from
+/// `git remote get-url origin`. Idempotent like [`add`]: the same server path
+/// again returns the existing row.
+pub async fn add_daedalus(db: &Db, server_path: &str, remote: Option<&str>) -> Result<Repo> {
+    let top = Path::new(server_path);
+    let (derived, tracker) = match remote.and_then(github_slug) {
+        Some(slug) => (slug, "GitHub Issues".to_string()),
+        None => (identity(None, top).0, "Daedalus".to_string()),
+    };
+
+    let registered: Option<(String, String)> =
+        sqlx::query_as("SELECT name, location FROM repos WHERE path = ?")
+            .bind(server_path)
+            .fetch_optional(db)
+            .await?;
+    let name = match registered {
+        Some((name, location)) if RepoLocation::from_db(&location) != RepoLocation::Daedalus => {
+            bail!("{name} is already registered at that path as a local project.")
+        }
+        Some((name, _)) => {
+            sqlx::query("UPDATE repos SET tracker = ? WHERE path = ?")
+                .bind(&tracker)
+                .bind(server_path)
+                .execute(db)
+                .await?;
+            name
+        }
+        None => {
+            let name = free_name(db, &derived, top).await?;
+            sqlx::query("INSERT INTO repos (name, tracker, path, location) VALUES (?, ?, ?, ?)")
+                .bind(&name)
+                .bind(&tracker)
+                .bind(server_path)
+                .bind(RepoLocation::Daedalus.as_db())
+                .execute(db)
+                .await?;
+            name
+        }
+    };
+
+    let provider = tracker::provider(db, &name).await?;
+    log::info!("registered Daedalus repository {name}");
+    Ok(Repo {
+        name,
+        tracker,
+        provider,
+        agents: worktrees_at(&worktree_counts(db).await?, server_path),
+        path: Some(server_path.to_string()),
+        location: RepoLocation::Daedalus,
+    })
+}
+
+/// The server paths of every registered Daedalus repo — what the workspace
+/// listing marks as already added.
+pub(crate) async fn daedalus_paths(db: &Db) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT path FROM repos WHERE path IS NOT NULL AND location = 'daedalus'",
+    )
+    .fetch_all(db)
+    .await?)
 }
 
 /// A free registry name for a checkout that isn't registered yet: its derived

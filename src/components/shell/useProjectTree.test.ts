@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { Task, Worktree, WorktreePr } from "../../bindings";
+import type { Repo, Task, Worktree, WorktreePr } from "../../bindings";
 import type { AgentBucket, AgentEntry, AgentOriginKind } from "../../features/agents/registry";
 import type { SeenMap } from "../../lib/attention";
 import {
@@ -22,6 +22,7 @@ import {
   type ProjectNode,
   projectKey,
   repoKey,
+  reposAt,
   worktreeKey,
 } from "./useProjectTree";
 
@@ -100,6 +101,26 @@ const milestone = (id: string, name: string, sortOrder: number) => ({
 
 const firstRow = (node: ReturnType<typeof build>) =>
   node.linearProjects[0]?.milestones[0]?.worktrees[0];
+
+/** The rail's two project sections split the registered repos by where each
+ *  checkout lives, and every repo lands in exactly one of them. */
+describe("reposAt", () => {
+  const repo = (name: string, location: Repo["location"]) => ({ name, location }) as Repo;
+  const repos = [
+    repo("acme/app", "Local"),
+    repo("home/web", "Daedalus"),
+    repo("acme/api", "Local"),
+    repo("home/infra", "Daedalus"),
+  ];
+
+  it("lists this machine's repos under PROJECTS, in registration order", () => {
+    expect(reposAt(repos, "Local")).toEqual(["acme/app", "acme/api"]);
+  });
+
+  it("lists the home server's repos under DAEDALUS, and none of this machine's", () => {
+    expect(reposAt(repos, "Daedalus")).toEqual(["home/web", "home/infra"]);
+  });
+});
 
 describe("worktreeKey", () => {
   it("qualifies the worktree with its repo, because two repos routinely carry the same ticket id", () => {

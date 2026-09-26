@@ -184,10 +184,13 @@ fn place(cwd: &Path, repos: &[RepoRef], links: &[LinkRef]) -> Placement {
 /// cwd); a path that no longer exists is kept as stored so a terminal still
 /// running in a deleted worktree isn't orphaned to its own group.
 async fn registry(db: &Db) -> Result<(Vec<RepoRef>, Vec<LinkRef>)> {
-    let repos: Vec<(String, String)> =
-        sqlx::query_as("SELECT name, path FROM repos WHERE path IS NOT NULL")
-            .fetch_all(db)
-            .await?;
+    // Local repos only: these are canonicalised against this machine's
+    // filesystem, and a Daedalus repo's path is on the server.
+    let repos: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, path FROM repos WHERE path IS NOT NULL AND location = 'local'",
+    )
+    .fetch_all(db)
+    .await?;
     let links: Vec<(String, String, String, String)> =
         sqlx::query_as("SELECT repo_path, issue_id, title, worktree_path FROM worktree_links")
             .fetch_all(db)

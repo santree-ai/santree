@@ -1,6 +1,6 @@
 /**
- * The sidebar tree's data fold: every registered repo, its worktrees, and the
- * live agents sitting on each one.
+ * The sidebar tree's data fold: every registered repo at one location (this
+ * machine, or Daedalus), its worktrees, and the live agents sitting on each one.
  *
  * A single-repo rail can read "the active repo" and be done. A permanent sidebar
  * cannot — its whole point is that work in a repo you are not looking at still
@@ -19,7 +19,7 @@
  */
 import { useCallback, useEffect, useMemo } from "react";
 
-import type { Task, Worktree, WorktreePr } from "../../bindings";
+import type { Repo, RepoLocation, Task, Worktree, WorktreePr } from "../../bindings";
 import { type AgentEntry, agentKey } from "../../features/agents/registry";
 import { useAgentEntries } from "../../features/agents/useAgents";
 import { mergeWorktrees } from "../../features/trees/model";
@@ -539,18 +539,31 @@ export function buildProjectNode(input: {
   };
 }
 
-/** Every registered repo as a tree of worktrees and their live agents. */
-export function useProjectTree(): ProjectTreeModel {
+/** The registered repos whose checkout lives at `location`, by name — what one
+ *  of the rail's project sections lists. Exported for testing. */
+export function reposAt(repos: readonly Repo[], location: RepoLocation): string[] {
+  return repos.filter((repo) => repo.location === location).map((repo) => repo.name);
+}
+
+/**
+ * The registered repos at one location as a tree of worktrees and their live
+ * agents. The rail draws one section per location — PROJECTS for this
+ * machine's, DAEDALUS for the home server's — each over its own fold, so a repo
+ * is read and folded once, by the section that lists it.
+ */
+export function useProjectTree(location: RepoLocation): ProjectTreeModel {
   const { data: repos } = useRepos();
-  const repoNames = useMemo(() => (repos ?? []).map((repo) => repo.name), [repos]);
+  const allRepoNames = useMemo(() => (repos ?? []).map((repo) => repo.name), [repos]);
+  const repoNames = useMemo(() => reposAt(repos ?? [], location), [repos, location]);
 
   const worktreesByRepo = useWorktreesByRepo(repoNames);
   const basesByRepo = useBaseWorktreesByRepo(repoNames);
   const tasksByRepo = useTasksByRepo(repoNames);
   const prsByRepo = useWorktreePrsByRepo(repoNames);
-  // Shown and known are the same set here: the tree lists every repo, so there
-  // is no "hidden repo" whose sessions would need filtering out.
-  const entries = useAgentEntries(repoNames, repoNames);
+  // Known is every registered repo, shown only this section's: a session in the
+  // other section's repo is filtered out as that section's, rather than kept here
+  // as one with no repo to hang from.
+  const entries = useAgentEntries(repoNames, allRepoNames);
   const { seen, markSeen } = useSeenAgents();
   // One timer for the whole tree, armed at the first moment a row's hook event
   // goes stale — so a decayed dot appears exactly then, and never costs a poll.

@@ -71,6 +71,12 @@ export const LINEAR_BRAND = "var(--linear-brand)";
 /** Jira's brand blue (the `--jira-brand` token), for the Jira logo/badge. */
 export const JIRA_BRAND = "var(--jira-brand)";
 
+/** Daedalus's brand coral (the `--daedalus-brand` token), the fill of its mark. */
+export const DAEDALUS_BRAND = "var(--daedalus-brand)";
+
+/** The ink Daedalus's mark draws on its brand fill (`--daedalus-on-brand`). */
+export const DAEDALUS_ON_BRAND = "var(--daedalus-on-brand)";
+
 /** The colour a provider's mark wears where it identifies a session (the
  *  history list, the usage meters): Claude's terracotta, and the foreground
  *  for Codex, whose mark is black-on-white by design. Anything else is muted. */

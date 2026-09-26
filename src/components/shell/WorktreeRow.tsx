@@ -77,6 +77,7 @@ export function WorktreeRow({
   onSelect,
   onOpenPage,
   onOpenAgent,
+  actionsDisabled,
 }: {
   repo: string;
   node: WorktreeNode;
@@ -88,6 +89,9 @@ export function WorktreeRow({
    *  main tab — what the Linear and GitHub marks do. */
   onOpenPage: (page: TreeFocusPane) => void;
   onOpenAgent: (agent: AgentNode) => void;
+  /** Why the menu's actions on the checkout can't run right now (see
+   *  `ProjectTree`); the row itself still opens. */
+  actionsDisabled?: string;
 }) {
   const { worktree: w, prs, task, agents } = node;
   // Local, not persisted: expanding is a "let me look" gesture, and a tree that
@@ -213,7 +217,7 @@ export function WorktreeRow({
   return w.pending ? (
     card
   ) : (
-    <WorktreeMenu repo={repo} worktree={w} primary={node.primary}>
+    <WorktreeMenu repo={repo} worktree={w} primary={node.primary} actionsDisabled={actionsDisabled}>
       {card}
     </WorktreeMenu>
   );

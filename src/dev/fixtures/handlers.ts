@@ -156,6 +156,17 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
       canWrite: false,
     }),
 
+    // ── Daedalus ──────────────────────────────────────────────────────────
+    // Not configured, so a real home server's address never reaches a capture.
+    daedalus_status: () => ({ kind: "NotConfigured" }),
+    daedalus_daemon_status: () => ({ kind: "NotConfigured" }),
+    daedalus_config: () => null,
+    daedalus_workspaces: () => ({
+      reach: { kind: "NotConfigured" },
+      generatedAt: null,
+      workspaces: [],
+    }),
+
     // ── Linear ────────────────────────────────────────────────────────────
     linear_auth_status: (): LinearStatus => ({
       authenticated: true,

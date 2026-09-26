@@ -85,6 +85,7 @@ export const repos = (): Repo[] => [
     provider: "Linear",
     agents: 4,
     path: REPO_PATH[QUACK],
+    location: "Local",
   },
   {
     name: INFRA,
@@ -92,6 +93,7 @@ export const repos = (): Repo[] => [
     provider: "Linear",
     agents: 0,
     path: REPO_PATH[INFRA],
+    location: "Local",
   },
   {
     name: BEAK,
@@ -99,6 +101,7 @@ export const repos = (): Repo[] => [
     provider: "Linear",
     agents: 0,
     path: REPO_PATH[BEAK],
+    location: "Local",
   },
 ];
 

@@ -417,10 +417,14 @@ pub async fn resolve_env(db: &Db, cwd: Option<&str>) -> Vec<(String, String)> {
 /// cwd is always under the repo path). `None` when no registered repo contains it.
 async fn repo_scope_for_cwd(db: &Db, cwd: &str) -> Option<String> {
     let rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT name, path FROM repos WHERE path IS NOT NULL")
-            .fetch_all(db)
-            .await
-            .ok()?;
+        // Local repos only: a Daedalus repo's path is on the server, and a local
+        // cwd that happens to share its spelling is not inside it.
+        sqlx::query_as(
+            "SELECT name, path FROM repos WHERE path IS NOT NULL AND location = 'local'",
+        )
+        .fetch_all(db)
+        .await
+        .ok()?;
 
     let cwd = Path::new(cwd);
     let mut best: Option<(usize, String)> = None;
