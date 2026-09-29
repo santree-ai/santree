@@ -4,6 +4,8 @@ description = "santree-remote protocol v1 as types: the frames, methods and shap
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+# The daedalus engine builds this crate with nix on rustc 1.95.
+rust-version = "1.95"
 
 # Consumed outside this workspace: the daedalus engine's session host depends on
 # this crate by git rev. Its public API and its dependency list are a contract —

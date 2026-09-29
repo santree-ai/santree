@@ -4,6 +4,8 @@ description = "AgentKind, the coding-agent vocabulary santree-pty and santree-re
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+# The daedalus engine builds this crate with nix on rustc 1.95.
+rust-version = "1.95"
 
 # Consumed outside this workspace: the daedalus engine depends on this crate
 # (through santree-pty and santree-remote-proto) by git rev. Its public API and

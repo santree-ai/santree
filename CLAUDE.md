@@ -67,7 +67,9 @@ applied version the resolved set no longer has — and `0028` drops the table.
   repo, so their public API and their dependency list are a contract. None may
   depend on `santree-core`, Tauri, or (by default) specta — `AgentKind`'s
   `specta::Type` sits behind the `specta` feature, which only `santree-core`
-  turns on.
+  turns on. The engine builds them with nix on an older rustc than
+  `rust-toolchain.toml` pins, so they declare `rust-version = "1.95"` and must
+  keep building on it.
 
 ## Architecture & data flow
 
