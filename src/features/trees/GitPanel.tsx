@@ -162,28 +162,35 @@ export function GitPanel({
         selectedScope={selectedScope}
         onOpen={onOpen}
       />
-      {splitForm && (
+      {(onSplit || splitForm) && (
         <div
-          id={splitId}
-          className="max-h-[50%] flex-none overflow-auto border-t border-line bg-app"
+          className={`flex min-h-0 min-w-0 flex-none flex-col overflow-hidden border-t border-line ${splitForm ? "max-h-[50%] bg-app" : ""}`}
         >
-          {splitForm}
-        </div>
-      )}
-      {onSplit && (
-        <div className="flex flex-none justify-end border-t border-line px-3 py-2">
-          <button
-            type="button"
-            aria-expanded={!!splitForm}
-            aria-controls={splitForm ? splitId : undefined}
-            onClick={splitForm ? onCloseSplit : onSplit}
-            className={`flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-hover hover:text-fg ${splitForm ? "bg-hover text-fg" : "text-muted-2"}`}
-            title={splitForm ? "Collapse split branch" : "Move remaining changes to a child branch"}
-          >
-            <BranchIcon size={13} />
-            Split branch
-            <ChevronDownIcon size={12} className={splitForm ? "" : "rotate-180"} />
-          </button>
+          {onSplit && (
+            <div className={`flex flex-none justify-end px-3 ${splitForm ? "pt-2" : "py-2"}`}>
+              <button
+                type="button"
+                aria-expanded={!!splitForm}
+                aria-controls={splitForm ? splitId : undefined}
+                onClick={splitForm ? onCloseSplit : onSplit}
+                className={`flex cursor-pointer items-center gap-2 rounded-md py-1.5 text-xs transition-colors hover:bg-hover hover:text-fg ${splitForm ? "w-full justify-between font-medium text-fg" : "px-2.5 text-muted-2"}`}
+                title={
+                  splitForm ? "Collapse split branch" : "Move remaining changes to a child branch"
+                }
+              >
+                <span className="flex items-center gap-2">
+                  <BranchIcon size={13} />
+                  Split branch
+                </span>
+                <ChevronDownIcon size={12} className={splitForm ? "" : "rotate-180"} />
+              </button>
+            </div>
+          )}
+          {splitForm && (
+            <div id={splitId} className="min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
+              {splitForm}
+            </div>
+          )}
         </div>
       )}
     </>

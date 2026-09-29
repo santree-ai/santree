@@ -7,6 +7,11 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.5 — 2026-09-29
+
+- The expanded Split branch form now includes its collapse control in the header. When collapsed, it returns to the compact bottom-right button.
+- Long ticket names fit within the split form without stretching it or adding a horizontal scrollbar.
+
 ## 0.1.17-beta.4 — 2026-09-29
 
 - Child branches appear beneath their parent immediately with a creating status while their remaining changes move. Choose whether to run setup in the child worktree; it is off by default.

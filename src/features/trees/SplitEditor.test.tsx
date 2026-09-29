@@ -248,7 +248,7 @@ it("shares the Changes list for staging and opening diffs while keeping the spli
   expect(mocked.stage).toHaveBeenCalledWith({ action: "stage", path: "src/ui.ts" });
 });
 
-it("keeps split controls collapsed until requested and lets the footer collapse them", () => {
+it("keeps split controls collapsed until requested and lets the disclosure collapse them", () => {
   function Panel() {
     const [open, setOpen] = useState(false);
     return (

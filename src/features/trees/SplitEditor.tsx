@@ -103,8 +103,8 @@ function MoveForm({
       <p className="text-xs text-muted-2">
         Commit what belongs here, then move the rest to a child branch.
       </p>
-      <section className="space-y-3">
-        <fieldset disabled={move.isPending || resuming} className="space-y-3">
+      <section className="min-w-0 space-y-3">
+        <fieldset disabled={move.isPending || resuming} className="min-w-0 space-y-3">
           <label className="block text-xs text-fg-2">
             Branch name
             <input
