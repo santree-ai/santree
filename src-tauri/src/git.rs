@@ -5,6 +5,8 @@
 //! higher-level orchestration (DB links, setup scripts, agent launch) lives in
 //! [`crate::worktree`]. Ported from the CLI's `source/lib/git.ts`.
 
+pub(crate) mod split;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;

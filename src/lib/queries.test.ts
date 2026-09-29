@@ -751,6 +751,7 @@ describe("git mutations: what they refresh", () => {
     expect(keys).toContain(key(queryKeys.worktreeFileDiffPrefix(repo, "AK-1")));
     expect(keys).toContain(key(queryKeys.worktreeFileSourcePrefix(repo, "AK-1")));
     expect(keys).toContain(key(queryKeys.worktreeStatus(repo, "AK-1")));
+    expect(keys).toContain(key(queryKeys.moveChangesPreview(repo, "AK-1")));
     expect(keys).toContain(key(queryKeys.baseWorktree(repo)));
   });
 });

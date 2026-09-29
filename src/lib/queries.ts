@@ -255,6 +255,8 @@ const SETTING_STALE_TIME = Number.POSITIVE_INFINITY;
 // invalidates what" is answerable by reading one object.
 
 export const queryKeys = {
+  moveChangesPreview: (repo: string, source: string) =>
+    ["move-changes-preview", repo, source] as const,
   appVersion: ["app-version"] as const,
   keepAwake: ["keep-awake"] as const,
   envFileVars: (path: string) => ["env-file-vars", path] as const,
@@ -2808,6 +2810,7 @@ export const useCommitWorktree = (repo: string, id: string) =>
     mutationFn: (a: { message: string; stageAll: boolean }) =>
       unwrap(commands.commitWorktree(repo, id, a.message, a.stageAll)),
     invalidate: () => [
+      queryKeys.moveChangesPreview(repo, id),
       queryKeys.worktreeStatus(repo, id),
       queryKeys.worktreeFileDiffPrefix(repo, id),
       queryKeys.worktreeFileSourcePrefix(repo, id),
@@ -4872,3 +4875,33 @@ export const useRefreshExternal = () => {
   });
   return { refresh, fetching: fetching > 0 };
 };
+
+export const useMoveChangesPreview = (repo: string, source: string) =>
+  useUnwrappedQuery(
+    queryKeys.moveChangesPreview(repo, source),
+    () => commands.moveChangesPreview(repo, source),
+    {
+      enabled: !!repo && !!source,
+      staleTime: 0,
+      refetchOnWindowFocus: false,
+    },
+  );
+
+export function useMoveRemainingChanges(repo: string, source: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; branch: string; ticketId: string | null }) =>
+      unwrap(commands.moveRemainingChanges(repo, v.id, v.branch, v.ticketId)),
+    onSettled: () => {
+      for (const queryKey of [
+        queryKeys.worktrees(repo),
+        queryKeys.baseWorktree(repo),
+        queryKeys.repoBranches(repo),
+        queryKeys.worktreeStatus(repo, source),
+        queryKeys.worktreeFiles(repo, source),
+        queryKeys.worktreeBranchChanges(repo, source),
+      ])
+        void qc.invalidateQueries({ queryKey });
+    },
+  });
+}

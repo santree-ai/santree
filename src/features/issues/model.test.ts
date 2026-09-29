@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { Task, Worktree } from "../../bindings";
-import { countLaunchSuccesses, deriveIssueState, launchPlan, stackBase } from "./model";
+import {
+  countLaunchSuccesses,
+  deriveIssueState,
+  launchPlan,
+  stackBase,
+  worktreesByTicket,
+} from "./model";
 
 /** Minimal Task fixture — only `ready` varies across the matrix below. */
 function task(overrides: Partial<Task> = {}): Task {
@@ -337,5 +343,23 @@ describe("countLaunchSuccesses", () => {
       { status: "fulfilled", value: null },
     ];
     expect(countLaunchSuccesses(results)).toBe(0);
+  });
+});
+
+describe("ticket worktrees after a split", () => {
+  const first = { ...worktree("split-first", "review-first"), ticketId: "AK-1" };
+  const last = {
+    ...worktree("split-last", "review-last"),
+    ticketId: "AK-1",
+    baseBranch: "review-first",
+  };
+  it("keeps the original development worktree as the ticket destination", () => {
+    expect(worktreesByTicket([last, worktree("AK-1"), first]).get("AK-1")?.id).toBe("AK-1");
+  });
+  it("opens the last prepared part when the original checkout is gone", () => {
+    expect(worktreesByTicket([last, first]).get("AK-1")?.id).toBe("split-last");
+  });
+  it("does not treat an explicitly unlinked checkout as a ticket", () => {
+    expect(worktreesByTicket([{ ...first, ticketId: null }]).size).toBe(0);
   });
 });

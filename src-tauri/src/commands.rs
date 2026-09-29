@@ -3612,3 +3612,25 @@ mod tests {
         );
     }
 }
+
+#[tauri::command]
+#[specta::specta]
+pub async fn move_changes_preview(
+    repo: String,
+    source: String,
+    db: State<'_, Db>,
+) -> CmdResult<santree_core::domain::MoveChanges> {
+    Ok(crate::split_stack::preview(&db, &repo, &source).await?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn move_remaining_changes(
+    repo: String,
+    id: String,
+    branch: String,
+    ticket_id: Option<String>,
+    db: State<'_, Db>,
+) -> CmdResult<santree_core::domain::MoveChanges> {
+    Ok(crate::split_stack::move_remaining(&db, &repo, &id, &branch, ticket_id).await?)
+}

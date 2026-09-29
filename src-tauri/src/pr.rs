@@ -428,7 +428,8 @@ async fn draft_body(
     let helper = agent::helper_config(db, repo, agent::HelperKind::PrBody)
         .await
         .ok()?;
-    let detail = crate::tracker::triage_detail(db, repo, issue_id)
+    let linked_ticket = worktree::ticket_id(db, repo, issue_id).await.ok().flatten();
+    let detail = crate::tracker::triage_detail(db, repo, linked_ticket.as_deref().unwrap_or(""))
         .await
         .ok()
         .flatten();
@@ -448,7 +449,7 @@ async fn draft_body(
     // The diff reads, prompt render, and agent call all block — run the whole
     // chain on one blocking thread instead of shelling out git on the runtime.
     let c = c.clone();
-    let issue_id = issue_id.to_string();
+    let issue_id = linked_ticket.unwrap_or_default();
     tokio::task::spawn_blocking(move || {
         // Cap the diff so the prompt stays within sane arg/token limits.
         let diff: String = git::diff_range(&c.path, &c.base_branch)

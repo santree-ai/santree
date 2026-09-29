@@ -85,6 +85,23 @@ export interface IssueVisualState {
   blocked: boolean;
 }
 
+export function worktreesByTicket(worktrees: Worktree[]): Map<string, Worktree> {
+  const groups = new Map<string, Worktree[]>();
+  for (const worktree of worktrees) {
+    if (worktree.ticketId === null) continue;
+    const ticket = worktree.ticketId ?? worktree.id;
+    groups.set(ticket, [...(groups.get(ticket) ?? []), worktree]);
+  }
+  return new Map(
+    [...groups].map(([ticket, trees]) => [
+      ticket,
+      trees.find((tree) => tree.id === ticket) ??
+        trees.find((tree) => !trees.some((child) => child.baseBranch === tree.branch)) ??
+        trees[0],
+    ]),
+  );
+}
+
 /**
  * The blocker `task` would stack on — its first dependency that already has a
  * worktree — as both the ticket id (what the ⛓ chip shows) and that worktree's
@@ -578,32 +595,34 @@ export function IssuesProvider({
     setQueueRepos({});
   }, [scopeRepo]);
 
-  const worktreeIds = useMemo(() => new Set(worktrees.map((w) => w.id)), [worktrees]);
-
   // The real worktree (status/PR/changes) for a ticket, keyed by issue id — read
   // by the right panel to show live worktree state and the "Open in Trees" link.
-  const worktreeById = useMemo(() => new Map(worktrees.map((w) => [w.id, w])), [worktrees]);
+  const worktreeById = useMemo(() => worktreesByTicket(worktrees), [worktrees]);
+  const worktreeIds = useMemo(() => new Set(worktreeById.keys()), [worktreeById]);
 
   // Live PR status keyed by issue id — read inside the graph node (from context,
   // not node data, so a PR refetch never rebuilds the React Flow nodes array).
   const prByTask = useMemo(() => {
     const map = new Map<string, WorktreePr[]>();
     for (const p of worktreePrs) {
-      const list = map.get(p.issueId) ?? [];
+      const worktree = worktrees.find((w) => w.id === p.issueId);
+      const ticket = worktree?.ticketId ?? p.issueId;
+      const list = map.get(ticket) ?? [];
       list.push(p);
-      map.set(p.issueId, list);
+      map.set(ticket, list);
     }
     return map;
-  }, [worktreePrs]);
+  }, [worktreePrs, worktrees]);
 
   // Jump to the Trees tab and open this ticket's existing worktree (no agent
   // start — the work is already there).
   const goToWorktree = useCallback(
     (id: string) => {
-      navigate({ to: "/trees", search: { project: scopeRepo, tree: id } });
-      requestTreeFocus(scopeRepo, id);
+      const target = worktreeById.get(id)?.id ?? id;
+      navigate({ to: "/trees", search: { project: scopeRepo, tree: target } });
+      requestTreeFocus(scopeRepo, target);
     },
-    [scopeRepo, requestTreeFocus, navigate],
+    [scopeRepo, requestTreeFocus, navigate, worktreeById],
   );
 
   /** What a launch of `task` branches from (see `stackBase`). */

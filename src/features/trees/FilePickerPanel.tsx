@@ -110,6 +110,7 @@ export function FilePickerPanel() {
     toggleRightPanel,
     openPrView,
     openIssueView,
+    openSplit,
   } = useTrees();
   const { data: prSummary } = usePrSummary(activePr?.repo ?? null, activePr?.number ?? 0);
   const { data: workItems } = useReviewWorkItems(activePr?.repo ?? "", activePr?.number ?? 0);
@@ -139,7 +140,13 @@ export function FilePickerPanel() {
   const healed = useRef<string | null>(null);
   const onResolvedTitle = useCallback(
     (live: string) => {
-      if (!active || healed.current === active.id || live === active.title) return;
+      if (
+        !active ||
+        active.id.startsWith("split-") ||
+        healed.current === active.id ||
+        live === active.title
+      )
+        return;
       healed.current = active.id;
       refreshTitle({ id: active.id, title: live });
     },
@@ -181,7 +188,7 @@ export function FilePickerPanel() {
       <IssuePane
         key={active.id}
         repo={repo}
-        ticketId={active.id}
+        ticketId={active.ticketId ?? active.id}
         fallbackTitle={active.title}
         onResolvedTitle={onResolvedTitle}
         onExpand={openIssueView}
@@ -232,6 +239,7 @@ export function FilePickerPanel() {
         selectedPath={selectedFile}
         selectedScope={selectedFileScope}
         onOpen={selectFile}
+        onSplit={openSplit}
         createPr={{
           hasPr: (prsByWorktree.get(activeId) ?? []).length > 0,
           open: () => openPrDialog(activeId),

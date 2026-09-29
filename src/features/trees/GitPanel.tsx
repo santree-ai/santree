@@ -55,6 +55,7 @@ export function GitPanel({
   selectedScope,
   onOpen,
   createPr,
+  onSplit,
 }: {
   repo: string;
   worktreeId: string;
@@ -68,6 +69,7 @@ export function GitPanel({
   /** See {@link ChangesList.onOpen} — absent leaves the file names inert. */
   onOpen?: (path: string, scope: FileScope) => void;
   createPr?: CreatePrActions;
+  onSplit?: () => void;
 }) {
   const { data: committed } = useWorktreeBranchChanges(repo, worktreeId);
   // The one action the branch's state calls for: offered while it is ahead of
@@ -118,6 +120,16 @@ export function GitPanel({
               </span>
             )}
           </div>
+          {onSplit && (
+            <button
+              type="button"
+              onClick={onSplit}
+              className={`${ACTION} h-auto max-w-full self-start py-1 text-left whitespace-normal`}
+              title="Commit what belongs here, then move all remaining edits to a child branch"
+            >
+              Split branch…
+            </button>
+          )}
           <div className="flex items-center gap-1">
             <BaseSync repo={repo} worktree={worktree} />
             <span className="min-w-1 flex-1" />

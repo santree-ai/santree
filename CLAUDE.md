@@ -399,6 +399,18 @@ src/
   the local diff *with a notice* when the branch has unpushed commits. Never
   overlay PR comments on a locally recomputed diff — that is how a comment lands
   on the wrong line.
+- **Split branch…** opens from the worktree menu or Git
+  panel. Commit the current part first; this action moves all remaining staged,
+  unstaged and untracked changes into one new child worktree at the source HEAD.
+  Creation requires a commit beyond the source's base and remaining changes.
+  The form keeps its branch/ticket inputs during the automatic post-commit preview
+  refresh, then closes after one child is created. Further splits start from the menu.
+  `split_stack.rs` journals retries in `worktree_moves`; `git/split.rs` keeps a named
+  recovery stash and restores the original staging state. Ignored files stay unless
+  already tracked or staged. No commit or push is automatic. Worktree ids remain
+  independent of `Worktree.ticketId` / `worktree_links.ticket_id`: ids own paths and
+  sessions, ticket associations drive tracker reads. Remote, sparse and submodule
+  changes are unsupported. Old split-draft migrations remain for database compatibility.
 - **Data:** every read is a hook in `lib/queries.ts`. Result-typed commands go through
   `useUnwrappedQuery`; raw-value commands use plain `useQuery`. Writes use
   `useOptimisticMutation` (cancel → patch → rollback-on-error → invalidate-on-settle).

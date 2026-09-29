@@ -78,6 +78,8 @@ export const commands = {
 	 *  for the Trees "main" entry. `None` when the repo has no local path.
 	 */
 	baseWorktree: (repo: string) => typedError<{
+	/**  Ticket association, independent of this checkout's identity. */
+	ticketId?: string | null,
 	/**  The issue identifier this worktree was created for (e.g. "AK-165"). */
 	id: string,
 	title: string,
@@ -157,6 +159,8 @@ export const commands = {
 	 *  so it isn't gated on this call.
 	 */
 	createWorktree: (repo: string, issueId: string, title: string, launch: WorktreeLaunch, base: string | null, agent: "Claude" | "Codex" | "Cursor" | "Opencode" | null) => typedError<Worktree, CmdError>(__TAURI_INVOKE("create_worktree", { repo, issueId, title, launch, base, agent })),
+	moveChangesPreview: (repo: string, source: string) => typedError<MoveChanges, CmdError>(__TAURI_INVOKE("move_changes_preview", { repo, source })),
+	moveRemainingChanges: (repo: string, id: string, branch: string, ticketId: string | null) => typedError<MoveChanges, CmdError>(__TAURI_INVOKE("move_remaining_changes", { repo, id, branch, ticketId })),
 	/**
 	 *  The repo's branches (local, plus `origin`-only ones), each flagged with
 	 *  whether it is already checked out somewhere — the Create-worktree dialog's
@@ -2477,6 +2481,23 @@ export type ModelUsage = {
 	totals: UsageTotals,
 };
 
+/**  A preview and durable recovery record for moving remaining edits to a child branch. */
+export type MoveChanges = {
+	id: string,
+	sourceId: string,
+	sourceBranch: string,
+	head: string,
+	snapshotTree: string,
+	indexTree: string,
+	files: string[],
+	ticketId: string | null,
+	branch: string | null,
+	worktreeId: string,
+	stashOid: string | null,
+	completed: boolean,
+	sourceHasChanges: boolean,
+};
+
 /**
  *  A new inline review comment the **user** is leaving on a diff line.
  * 
@@ -4399,6 +4420,8 @@ export type WorkflowState = {
 
 /**  A live git worktree with an agent attached. */
 export type Worktree = {
+	/**  Ticket association, independent of this checkout's identity. */
+	ticketId?: string | null,
 	/**  The issue identifier this worktree was created for (e.g. "AK-165"). */
 	id: string,
 	title: string,

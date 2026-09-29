@@ -12,8 +12,8 @@
  * the configured default editor first, so the muscle-memory pick stays at the top.
  * The repo's primary checkout has no Delete: it is the repo, not a workspace.
  */
+import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-
 import type { Worktree } from "../../bindings";
 import { OpenerIcon } from "../../features/trees/openerIcons";
 import { useWorktreeDeletion } from "../../features/trees/useWorktreeDeletion";
@@ -21,8 +21,10 @@ import {
   TREES_DEFAULT_EDITOR_KEY,
   useOpeners,
   useOpenInApp,
+  useRepos,
   useResolvedSetting,
 } from "../../lib/queries";
+import { useAppUi } from "../../state/AppContext";
 import { BranchIcon, CopyIcon, TrashIcon } from "../icons";
 import { copyText } from "../menuRows";
 import { ConfirmDialog, ContextMenu, type ContextMenuItem } from "../primitives";
@@ -44,6 +46,14 @@ export function WorktreeMenu({
   actionsDisabled?: string;
   children: React.ReactNode;
 }) {
+  const { data: repos = [] } = useRepos();
+  const splitDisabled =
+    actionsDisabled ??
+    (repos.find((r) => r.name === repo)?.location === "Daedalus"
+      ? "Splitting is available for local worktrees"
+      : undefined);
+  const navigate = useNavigate();
+  const { requestTreeFocus } = useAppUi();
   const [confirming, setConfirming] = useState(false);
   const { data: openers = [] } = useOpeners();
   const { mutate: openIn } = useOpenInApp();
@@ -87,6 +97,18 @@ export function WorktreeMenu({
       label: "Copy branch",
       icon: <BranchIcon size={13} />,
       run: () => copyText(worktree.branch, "Branch"),
+    },
+    {
+      kind: "action",
+      key: "split",
+      label: "Split branch…",
+      icon: <BranchIcon size={13} />,
+      disabled: !!splitDisabled,
+      title: splitDisabled,
+      run: () => {
+        requestTreeFocus(repo, worktree.id, { split: true, fromSidebar: true });
+        void navigate({ to: "/trees", search: { project: repo, tree: worktree.id } });
+      },
     },
     ...(primary
       ? []

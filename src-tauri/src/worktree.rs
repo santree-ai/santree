@@ -77,6 +77,8 @@ pub enum BranchPlan<'a> {
     Existing(&'a str),
     /// Create a branch under exactly this name, off the base.
     New(&'a str),
+    /// A split part starts at an exact commit, without fetching or adopting another branch.
+    Split(&'a str),
 }
 
 impl BranchPlan<'_> {
@@ -85,7 +87,7 @@ impl BranchPlan<'_> {
     fn named(&self) -> Option<&str> {
         match self {
             Self::Derived => None,
-            Self::Existing(b) | Self::New(b) => Some(b),
+            Self::Existing(b) | Self::New(b) | Self::Split(b) => Some(b),
         }
     }
 }
@@ -103,6 +105,7 @@ struct Link {
 /// isn't spelled out as a tuple twice.
 #[derive(sqlx::FromRow)]
 struct LinkRow {
+    ticket_id: Option<String>,
     issue_id: String,
     title: String,
     project: Option<String>,
@@ -114,7 +117,7 @@ struct LinkRow {
 }
 
 const LINK_COLUMNS: &str =
-    "issue_id, title, project, branch, worktree_path, base_branch, agent, setup_ran";
+    "issue_id, ticket_id, title, project, branch, worktree_path, base_branch, agent, setup_ran";
 
 /// Resolve a registered repo's top-level path, erroring if it has none (e.g. a
 /// seed repo with no local checkout).
@@ -182,8 +185,17 @@ pub(crate) async fn coords(db: &Db, repo: &str, issue_id: &str) -> Result<Coords
     Ok(Coords {
         branch: row.0,
         base_branch: row.1,
-        path: PathBuf::from(row.2),
+        path: available_checkout(PathBuf::from(row.2))?,
     })
+}
+
+fn available_checkout(path: PathBuf) -> Result<PathBuf> {
+    ensure!(
+        path.is_dir(),
+        "This worktree directory is no longer available: {}. Refresh the worktree list or restore the directory before continuing.",
+        path.display()
+    );
+    Ok(path)
 }
 
 /// Refresh the stored title for a worktree. Self-healing: the Issue tab calls
@@ -206,12 +218,12 @@ pub async fn set_title(db: &Db, repo: &str, issue_id: &str, title: &str) -> Resu
 async fn worktree_path(db: &Db, repo: &str, issue_id: &str) -> Result<PathBuf> {
     let root = repo_root(db, repo).await?;
     if issue_id == BASE_ID {
-        return Ok(PathBuf::from(root));
+        return available_checkout(PathBuf::from(root));
     }
     let l = link(db, &root, issue_id)
         .await?
         .ok_or_else(|| anyhow!("no worktree for issue '{issue_id}'"))?;
-    Ok(PathBuf::from(l.worktree_path))
+    available_checkout(PathBuf::from(l.worktree_path))
 }
 
 /// The repo root as a worktree-like entry: the checkout the per-issue worktrees
@@ -244,6 +256,7 @@ pub async fn base_worktree(db: &Db, repo: &str) -> Result<Option<Worktree>> {
         // The base entry's base is the repo's default branch, never a worktree's.
         let stats = git::stats(&p, &branch, &base, git::BaseKind::Upstream);
         Worktree {
+            ticket_id: None,
             id: BASE_ID.to_string(),
             title: branch.clone(),
             // The base branch isn't a ticket, has no agent of its own, and runs no
@@ -338,6 +351,9 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<Worktree>> {
     let handles: Vec<_> = rows
         .into_iter()
         .zip(kinds)
+        // Missing directories must not look actionable. Keep their saved rows
+        // above for stack ancestry: a missing parent's local branch still exists.
+        .filter(|(row, _)| Path::new(&row.worktree_path).is_dir())
         .map(|(row, kind)| tokio::task::spawn_blocking(move || build_worktree(row, kind)))
         .collect();
     let mut worktrees = Vec::with_capacity(handles.len());
@@ -361,7 +377,7 @@ fn base_kind(worktree_branches: &HashSet<&str>, base: &str) -> git::BaseKind {
 /// [`base_kind`] for a single worktree, when the caller doesn't already have the
 /// whole list in hand ([`get`], [`create`]). One indexed SQLite read — still no git
 /// process — versus the set `list` builds once for the whole batch.
-async fn base_kind_of(db: &Db, root: &str, base: &str) -> Result<git::BaseKind> {
+pub(crate) async fn base_kind_of(db: &Db, root: &str, base: &str) -> Result<git::BaseKind> {
     let branches = sqlx::query_as::<_, (String, String)>(
         "SELECT issue_id, branch FROM worktree_links WHERE repo_path = ?",
     )
@@ -404,6 +420,11 @@ fn build_worktree_local(row: LinkRow, kind: git::BaseKind) -> Worktree {
 
 fn build_worktree_from(row: LinkRow, stats: git::Stats, pull_conflict: bool) -> Worktree {
     Worktree {
+        ticket_id: row
+            .ticket_id
+            .clone()
+            .or_else(|| legacy_ticket_id(&row.issue_id))
+            .filter(|id| !id.is_empty()),
         id: row.issue_id,
         title: row.title,
         // The link row stores no ticket status, and this path is deliberately
@@ -450,6 +471,7 @@ pub async fn get(db: &Db, repo: &str, issue_id: &str) -> Result<Option<Worktree>
     let Some(row) = link_row(db, &root, issue_id).await? else {
         return Ok(None);
     };
+    available_checkout(PathBuf::from(&row.worktree_path))?;
     let kind = base_kind_of(db, &root, &row.base_branch).await?;
     Ok(Some(
         tokio::task::spawn_blocking(move || build_worktree(row, kind)).await?,
@@ -570,6 +592,10 @@ pub async fn create(
     // trying to add a second worktree on a branch git has already checked out.
     .next();
     if let Some(existing_issue) = existing_issue {
+        ensure!(
+            !matches!(plan, BranchPlan::Split(_)),
+            "Another worktree already owns this split branch"
+        );
         return get(db, repo, &existing_issue)
             .await?
             .ok_or_else(|| anyhow!("tracked worktree {existing_issue} disappeared"));
@@ -588,6 +614,7 @@ pub async fn create(
     // off the base. `git::create_worktree` already covers both Derived and New —
     // it branches `target_branch` from the base, or checks it out if it turns out
     // to exist — so only Existing needs the other call.
+    let exact_split = matches!(plan, BranchPlan::Split(_));
     let checkout_existing = matches!(plan, BranchPlan::Existing(_));
     let (base_branch, branch, wt_path_str) = {
         let root = root.clone();
@@ -628,6 +655,9 @@ pub async fn create(
                     wt_path.display()
                 );
                 b
+            } else if exact_split {
+                git::split::create_worktree(root_path, &wt_path, &target_branch, &base_branch)?;
+                target_branch
             } else if checkout_existing {
                 // Check out an existing branch (a PR's head) rather than branching new
                 // work — so commits made here land on the PR's branch.
@@ -648,6 +678,7 @@ pub async fn create(
     // `run_setup_streamed` command (driven from the Trees "Setup" tab), never as
     // part of create.
     let row = LinkRow {
+        ticket_id: None,
         issue_id: issue_id.to_string(),
         title: title.to_string(),
         project: project.map(str::to_string),
@@ -679,7 +710,7 @@ pub async fn create(
         .flatten()
         .as_deref()
         == Some("true");
-    if move_in_progress {
+    if move_in_progress && !exact_split {
         let db = db.clone();
         let repo = repo.to_string();
         let issue_id = issue_id.to_string();
@@ -1175,6 +1206,7 @@ pub async fn commit(
 /// message when the provider isn't available, the diff is empty, or the call fails.
 pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
     let root = repo_root(db, repo).await?;
+    let ticket = ticket_id(db, repo, issue_id).await?;
     // The base sentinel commits the repo root on its own branch; per-issue
     // worktrees resolve their path + branch from the link row.
     let (path, known_branch) = if issue_id == BASE_ID {
@@ -1195,27 +1227,22 @@ pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<Strin
     })
     .await?;
 
-    let fallback = if issue_id == BASE_ID {
-        "update".to_string()
-    } else {
-        format!("[{issue_id}] update")
-    };
+    let fallback = ticket
+        .as_ref()
+        .map_or_else(|| "update".to_string(), |id| format!("[{id}] update"));
     if diff.trim().is_empty() {
         return Ok(fallback);
     }
 
     // Cap the diff so the prompt stays within sane arg/token limits.
     let diff: String = diff.chars().take(12_000).collect();
-    // The base worktree's `issue_id` is the `BASE_ID` sentinel, not a real ticket —
-    // pass `None` so `{% if ticket_id %}` in the template omits the `[__base__] `
-    // prefix, matching the non-AI fallback above.
     let prompt = crate::prompts::render(
         db,
         Some(repo),
         "fill-commit",
         minijinja::context! {
             branch_name => branch,
-            ticket_id => (issue_id != BASE_ID).then_some(issue_id),
+            ticket_id => ticket,
             diff_content => diff,
         },
     )
@@ -1372,6 +1399,8 @@ pub async fn work_prompt(
     prompts_root: &Path,
 ) -> Result<String> {
     let root = repo_root(db, repo).await?;
+    let linked_ticket = ticket_id(db, repo, issue_id).await?;
+    let ticket = linked_ticket.as_deref().unwrap_or(issue_id);
     let title: Option<String> =
         sqlx::query_scalar("SELECT title FROM worktree_links WHERE repo_path = ? AND issue_id = ?")
             .bind(&root)
@@ -1388,7 +1417,7 @@ pub async fn work_prompt(
     // to re-fetch via MCP. `triage_detail` fetches any issue by id, not just
     // triage ones. On any failure we leave `ticket_content` empty and the
     // template falls back to the MCP-fetch hint.
-    let detail = match crate::tracker::triage_detail(db, repo, issue_id).await {
+    let detail = match crate::tracker::triage_detail(db, repo, ticket).await {
         Ok(Some(detail)) => Some(detail),
         _ => None,
     };
@@ -1415,7 +1444,7 @@ pub async fn work_prompt(
 
     // The user's per-task notes become the work prompt's `custom_context` — the
     // app's analog of the CLI's ad-hoc launch context.
-    let custom_context = crate::notes::get(db, repo, issue_id)
+    let custom_context = crate::notes::get(db, repo, ticket)
         .await
         .ok()
         .flatten()
@@ -1425,7 +1454,7 @@ pub async fn work_prompt(
         &sources,
         "work",
         minijinja::context! {
-            ticket_id => issue_id,
+            ticket_id => ticket,
             title => title.unwrap_or_default(),
             ticket_content,
             custom_context,
@@ -1758,6 +1787,34 @@ fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a worktree's ticket without reusing its identity for a tracker request.
+pub(crate) async fn ticket_id(db: &Db, repo: &str, id: &str) -> Result<Option<String>> {
+    if id == BASE_ID {
+        return Ok(None);
+    }
+    let root = repo_root(db, repo).await?;
+    let ticket: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT ticket_id FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
+    )
+    .bind(root)
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+    Ok(ticket
+        .flatten()
+        .or_else(|| legacy_ticket_id(id))
+        .filter(|id| !id.is_empty()))
+}
+
+fn legacy_ticket_id(id: &str) -> Option<String> {
+    let (team, number) = id.split_once('-')?;
+    (team.starts_with(|c: char| c.is_ascii_alphabetic())
+        && team.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !number.is_empty()
+        && number.bytes().all(|b| b.is_ascii_digit()))
+    .then(|| id.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1882,6 +1939,67 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn missing_worktree_is_not_listed_and_keeps_its_saved_metadata() {
+        let (base, repo_dir, db) = test_repo("missing-worktree").await;
+        let wt = spawn_worktree(&db, "AK-1").await;
+        git::git(
+            &repo_dir,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{}", wt.branch),
+                "HEAD",
+            ],
+        )
+        .unwrap();
+        git::git(
+            Path::new(&wt.path),
+            &["commit", "--allow-empty", "-m", "parent part"],
+        )
+        .unwrap();
+        let child = create(
+            &db,
+            "test",
+            "AK-2",
+            "Child",
+            None,
+            Some(&wt.branch),
+            None,
+            BranchPlan::Derived,
+        )
+        .await
+        .unwrap();
+        git::git(&repo_dir, &["worktree", "remove", &wt.path]).unwrap();
+
+        let listed = list(&db, "test").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, child.id);
+        assert_eq!(
+            listed[0].ahead, 0,
+            "child still compares with its local parent"
+        );
+        let saved: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM worktree_links WHERE issue_id = 'AK-1'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(saved, 1);
+        assert!(coords(&db, "test", "AK-1")
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("worktree directory is no longer available"));
+        assert!(worktree_path(&db, "test", "AK-1").await.is_err());
+        assert!(get(&db, "test", "AK-1").await.is_err());
+
+        git::git(&repo_dir, &["worktree", "add", &wt.path, &wt.branch]).unwrap();
+        assert_eq!(list(&db, "test").await.unwrap().len(), 2);
+        assert!(coords(&db, "test", "AK-1").await.is_ok());
+        db.close().await;
+        let _ = std::fs::remove_dir_all(base);
     }
 
     /// A review checkout is registered in the same table as everything else so the
@@ -2969,6 +3087,7 @@ mod tests {
         let db = crate::db::init(base.join("test.db")).await.unwrap();
 
         let row = |branch: &str| LinkRow {
+            ticket_id: None,
             issue_id: "AK-1".into(),
             title: "First".into(),
             project: None,

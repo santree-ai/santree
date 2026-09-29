@@ -7,6 +7,12 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.2 — 2026-09-29
+
+- Split a branch into smaller reviews: commit the part that belongs on the current branch, then choose “Split branch…” to move the remaining changes into one child branch and worktree. Staging is preserved, and a recovery copy remains in Git stash. Commit, push and open pull requests when you are ready.
+- Child branches inherit the parent’s ticket, with the option to choose another ticket or none. The split form refreshes after committing and keeps your branch name and ticket selection.
+- Worktree directories removed outside the app no longer appear as usable checkouts. Their saved metadata and stack relationships are preserved.
+
 ## 0.1.16 — 2026-09-23
 
 - Jira Cloud joins Linear as a ticket tracker, chosen per project. Connect Jira in Settings, pick which tracker a project reads, and its tickets, triage queue, comments and status changes work the way Linear's always have. Triage on a Jira project lists whatever a JQL query you set for that project matches.

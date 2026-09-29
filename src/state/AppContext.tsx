@@ -194,6 +194,7 @@ export type TreeFocusPane = "issue" | "pr";
  *  agent landed you on tab one, and a click in the History pane threw away the
  *  pane you were reading. A request now moves only what it names. */
 export interface TreeFocus {
+  split?: boolean;
   /** The project the worktree belongs to. The url already carries it for the
    *  view; the sidebar needs it too, to find the row's ancestors in a tree that
    *  spans every project. */

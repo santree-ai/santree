@@ -431,7 +431,7 @@ export function buildProjectNode(input: {
       depth,
       primary,
       prs: prsByWorktree.get(worktree.id) ?? [],
-      task: primary ? null : (tasksById.get(worktree.id) ?? null),
+      task: primary ? null : (tasksById.get(worktree.ticketId ?? worktree.id) ?? null),
       agents,
       attention: highest(agents.map((agent) => agent.attention)),
     };
@@ -471,7 +471,7 @@ export function buildProjectNode(input: {
   const byProject =
     groupBy === "project" || groupBy === "project_milestone"
       ? groupByProject(ordered, (worktree) => {
-          const task = tasksById.get(worktree.id);
+          const task = tasksById.get(worktree.ticketId ?? worktree.id);
           // The live ticket first — it is the only source that also carries the
           // project's colour, icon and target date.
           if (task) {
@@ -502,7 +502,10 @@ export function buildProjectNode(input: {
   const linearProjects: LinearProjectNode[] = byProject.map((band) => {
     const groups =
       groupBy === "milestone" || groupBy === "project_milestone"
-        ? groupByMilestone(band.items, (worktree) => tasksById.get(worktree.id)?.projectMilestone)
+        ? groupByMilestone(
+            band.items,
+            (worktree) => tasksById.get(worktree.ticketId ?? worktree.id)?.projectMilestone,
+          )
         : oneBand(band.items);
     return {
       key: band.key,

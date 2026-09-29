@@ -104,7 +104,7 @@ export function withLiveWorktreeStatus(
 ): Worktree {
   return {
     ...w,
-    status: statusByTaskId.get(w.id) ?? w.status,
+    status: statusByTaskId.get(w.ticketId ?? w.id) ?? w.status,
     activity: hasLivePane(liveTermRefIds, w.id) ? "Running" : "Idle",
   };
 }
@@ -237,7 +237,14 @@ export function prDiffModeFor(opts: { inPr: boolean; unpushed: number }): PrDiff
  *  worktree has the thing they show. "file"/"setup"/"checkLog" are the transient
  *  views that appear with the thing they show. All of them close, and closing
  *  the last one leaves the workspace showing nothing. */
-export type MainTab = "file" | "setup" | "checkLog" | "prView" | "issueView" | `tab:${string}`;
+export type MainTab =
+  | "file"
+  | "setup"
+  | "checkLog"
+  | "prView"
+  | "issueView"
+  | "split"
+  | `tab:${string}`;
 
 /** A CI check whose raw job log is open in the **main** area.
  *
@@ -297,8 +304,10 @@ export function openMainTabs(opts: {
   hasFile: boolean;
   hasSetup: boolean;
   hasCheckLog: boolean;
+  hasSplit?: boolean;
 }): MainTab[] {
   const tabs: MainTab[] = opts.tabIds.map(extraTab);
+  if (opts.hasSplit) tabs.push("split");
   if (opts.hasPrView) tabs.push("prView");
   if (opts.hasIssueView) tabs.push("issueView");
   if (opts.hasFile) tabs.push("file");
@@ -440,6 +449,9 @@ interface TreesModel {
    *  ticket to show, whatever was remembered. */
   prViewOpen: boolean;
   issueViewOpen: boolean;
+  splitOpen: boolean;
+  openSplit: () => void;
+  closeSplit: () => void;
   /** The active worktree's persisted tabs, in open order — every agent and every
    *  shell it has open, the one a started task runs in included. This is the
    *  whole set: there is no tab outside it. */
@@ -659,8 +671,15 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // the pane. `null` is Linear's definitive "no such issue"; `undefined` is "still
   // asking", and tickets usually exist, so the pane shows until told otherwise.
   // Skipped for the base entry, which has no ticket by construction.
-  const { data: activeTicket } = useTriageDetail(repo, activeId === BASE_ID ? null : activeId);
-  const hasTicket = activeTicket !== null;
+  const linkedWorktree = realWorktrees.find((w) => w.id === activeId);
+  const ticketId =
+    activeId === BASE_ID
+      ? null
+      : linkedWorktree?.ticketId === null
+        ? null
+        : (linkedWorktree?.ticketId ?? activeId);
+  const { data: activeTicket } = useTriageDetail(repo, ticketId);
+  const hasTicket = ticketId !== null && activeTicket !== null;
 
   const [rightCollapsed, setRightCollapsed] = usePersistedState(RIGHT_COLLAPSED_KEY, false);
   const [rightWidth, setRightWidth] = usePersistedState(RIGHT_WIDTH_KEY, 320);
@@ -696,6 +715,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     PR_VIEW_BY_WT_KEY,
     {},
   );
+  const [splitByWt, setSplitByWt] = usePersistedState<Record<string, true>>("trees.split-tabs", {});
   const [issueViewByWt, setIssueViewByWt] = usePersistedState<Record<string, true>>(
     ISSUE_VIEW_BY_WT_KEY,
     {},
@@ -818,7 +838,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     // The base checkout is selectable but deliberately absent from `worktrees`,
     // so it has to clear the existence gate on its own — otherwise picking it in
     // the sidebar switches repo and then lands on whatever was open before.
-    const { id, pane, tab, expand } = treeFocus;
+    const { id, pane, tab, expand, split } = treeFocus;
     if (id !== BASE_ID && !worktrees.some((w) => w.id === id)) return;
     // The worktree itself arrived in the url (`?project=`/`?tree=`); what is left
     // here is the part of a request that is an *instruction* rather than a
@@ -859,6 +879,10 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         setTabFor(id, pane === "pr" ? "prView" : "issueView");
       }
     }
+    if (split) {
+      setSplitByWt((current) => ({ ...current, [id]: true }));
+      setTabFor(id, "split");
+    }
     consumeTreeFocus();
   }, [
     treeFocus,
@@ -869,6 +893,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     setFileTab,
     setPrViewByWt,
     setIssueViewByWt,
+    setSplitByWt,
   ]);
 
   // Consume a "Fix CI with AI" hand-off from Reviews: once the PR's worktree has
@@ -956,6 +981,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       hasFile: selectedFile !== null,
       hasSetup: setupFor !== null,
       hasCheckLog: openCheckLog !== null,
+      hasSplit: !!splitByWt[activeId],
     });
     const activeTab = resolveActiveTab(activeTabByWt[activeId], openTabs);
     return {
@@ -981,6 +1007,12 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       openCheckLog,
       prViewOpen,
       issueViewOpen,
+      splitOpen: !!splitByWt[activeId],
+      openSplit: () => {
+        setSplitByWt((current) => ({ ...current, [activeId]: true }));
+        setTabFor(activeId, "split");
+      },
+      closeSplit: () => setSplitByWt((current) => omit(current, activeId)),
       tabs,
       // Switching worktrees just changes which one is active — each remembers its
       // own tab/file (see activeTabByWt/selectedFileByWt), so returning to a worktree
@@ -1120,6 +1152,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     deleteWorktrees,
     checkLogByWt,
     prViewByWt,
+    splitByWt,
+    setSplitByWt,
     issueViewByWt,
     setPrViewByWt,
     setIssueViewByWt,

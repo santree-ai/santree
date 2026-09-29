@@ -51,6 +51,7 @@ mod santree_dir;
 mod session;
 mod session_signal;
 mod settings;
+mod split_stack;
 mod stream;
 mod tabs;
 mod terminal;
@@ -109,6 +110,8 @@ fn specta_builder() -> AppBuilder {
             commands::worktrees,
             commands::base_worktree,
             commands::create_worktree,
+            commands::move_changes_preview,
+            commands::move_remaining_changes,
             commands::repo_branches,
             commands::remove_worktree,
             commands::run_worktree_setup_streamed,

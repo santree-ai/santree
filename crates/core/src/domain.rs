@@ -2041,6 +2041,9 @@ pub enum Activity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Worktree {
+    /// Ticket association, independent of this checkout's identity.
+    #[specta(optional)]
+    pub ticket_id: Option<String>,
     /// The issue identifier this worktree was created for (e.g. "AK-165").
     pub id: String,
     pub title: String,
@@ -3144,4 +3147,23 @@ mod tests {
         // Case-sensitive: the persisted form is exactly `as_str`.
         assert!(AgentKind::from_str("claude").is_err());
     }
+}
+
+/// A preview and durable recovery record for moving remaining edits to a child branch.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveChanges {
+    pub id: String,
+    pub source_id: String,
+    pub source_branch: String,
+    pub head: String,
+    pub snapshot_tree: String,
+    pub index_tree: String,
+    pub files: Vec<String>,
+    pub ticket_id: Option<String>,
+    pub branch: Option<String>,
+    pub worktree_id: String,
+    pub stash_oid: Option<String>,
+    pub completed: bool,
+    pub source_has_changes: bool,
 }
