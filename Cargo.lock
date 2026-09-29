@@ -4302,9 +4302,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "santree-agent-kind"
+version = "0.1.17-beta.6"
+dependencies = [
+ "serde",
+ "specta",
+]
+
+[[package]]
 name = "santree-core"
 version = "0.1.17-beta.6"
 dependencies = [
+ "santree-agent-kind",
  "serde",
  "specta",
 ]
@@ -4327,22 +4336,32 @@ dependencies = [
  "anyhow",
  "log",
  "portable-pty",
- "santree-core",
+ "santree-agent-kind",
 ]
 
 [[package]]
 name = "santree-remote-client"
 version = "0.1.17-beta.6"
 dependencies = [
- "base64 0.22.1",
  "log",
- "santree-core",
  "santree-pty",
+ "santree-remote-proto",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "santree-remote-proto"
+version = "0.1.17-beta.6"
+dependencies = [
+ "base64 0.22.1",
+ "santree-agent-kind",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

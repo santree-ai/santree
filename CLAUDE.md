@@ -58,7 +58,16 @@ applied version the resolved set no longer has — and `0028` drops the table.
   integrations and services it drives) + `crates/core` (pure domain
   + static config, no Tauri dep) + `crates/pty` (PTY manager, Tauri-agnostic) +
   `crates/hook` (the bundled `santree-hook`: Claude hooks, status line, MCP server)
-  + `crates/remote` (`santree-remote-client`: the ssh link to Daedalus, Tauri-agnostic).
+  + `crates/remote` (`santree-remote-client`: the ssh link to Daedalus, Tauri-agnostic)
+  + `crates/remote-proto` (`santree-remote-proto`: protocol v1's types) +
+  `crates/agent-kind` (`santree-agent-kind`: the `AgentKind` enum, re-exported by
+  `santree_core::domain`).
+- **Crates the daedalus engine consumes:** `santree-pty`, `santree-remote-proto`
+  and `santree-agent-kind` are depended on by git rev from the daedalus engine
+  repo, so their public API and their dependency list are a contract. None may
+  depend on `santree-core`, Tauri, or (by default) specta — `AgentKind`'s
+  `specta::Type` sits behind the `specta` feature, which only `santree-core`
+  turns on.
 
 ## Architecture & data flow
 
@@ -106,8 +115,11 @@ crates/hook/src/   lib.rs — the bundled `santree-hook` (main.rs only calls `ru
                    tools; `apply` is the same writes over the app's own pool,
                    for hooks relayed from Daedalus
 crates/remote/src/ the client for `santree-remote` on Daedalus (docs/remote.md):
-                   proto · transport (the ssh argv) · client · host (reconnect,
-                   hook cursor) · probe (health check) · fake (test daemon)
+                   transport (the ssh argv) · client · host (reconnect, hook
+                   cursor) · probe (health check) · fake (test daemon)
+crates/remote-proto/src/  lib.rs — protocol v1 as types (re-exported as the
+                   client's `proto`); its tests pin the exact wire text
+crates/agent-kind/src/    lib.rs — `AgentKind` + `UnknownAgentKind`
 src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin wrappers)
                    · tracker.rs (the `TicketTracker` trait: which tracker a repo
                    reads, and the dispatch every provider-neutral ticket read and

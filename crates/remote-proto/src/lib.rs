@@ -7,10 +7,13 @@
 //! - event    `{"e":"<name>","p":{…}}` (server → client only)
 //!
 //! Every method is a marker type in [`m`] implementing [`Method`], which ties
-//! its wire name to its params and result types — the client's `call` and the
-//! fake daemon's dispatch both go through it, so the two can't disagree about a
-//! shape. Binary fields are `Vec<u8>` on this side and standard padded base64 on
-//! the wire ([`b64`]).
+//! its wire name to its params and result types — the client's `call`
+//! (`santree-remote-client`) and a daemon's dispatch both go through it, so the
+//! two can't disagree about a shape. Binary fields are `Vec<u8>` in Rust and
+//! standard padded base64 on the wire ([`b64`]).
+//!
+//! Its own crate, with nothing but serde, base64 and thiserror beneath it, so the daemon
+//! side can speak the same types without santree's app crates.
 //!
 //! Decoding is lenient where the doc is silent (a missing optional key and an
 //! explicit `null` read the same; unknown keys are ignored) and encoding is
@@ -22,7 +25,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 
-pub use santree_core::domain::AgentKind;
+pub use santree_agent_kind::AgentKind;
 
 /// The protocol this client speaks. `hello` refuses any other with `version`.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -219,7 +222,8 @@ pub mod m {
         /// First request on every connection.
         Hello = "hello": HelloParams => HelloResult;
         PtyOpen = "pty.open": PtyOpenParams => SessionInfo;
-        /// See [`crate::RemoteClient::pty_attach`] for the ordering guarantee.
+        /// See `santree_remote_client::RemoteClient::pty_attach` for the ordering
+        /// guarantee.
         PtyAttach = "pty.attach": PtyAttachParams => AttachResult;
         PtyDetach = "pty.detach": SessionRef => Empty;
         PtyWrite = "pty.write": PtyWriteParams => Empty;

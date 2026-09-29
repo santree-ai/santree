@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use santree_core::domain::AgentKind;
+use santree_agent_kind::AgentKind;
 
 mod ring;
 use ring::Ring;

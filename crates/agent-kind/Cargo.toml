@@ -1,0 +1,20 @@
+[package]
+name = "santree-agent-kind"
+description = "AgentKind, the coding-agent vocabulary santree-pty and santree-remote-proto share."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Consumed outside this workspace: the daedalus engine depends on this crate
+# (through santree-pty and santree-remote-proto) by git rev. Its public API and
+# its dependency list are a contract — no santree-core, and no specta unless the
+# `specta` feature is asked for.
+
+[features]
+# `specta::Type`, for the app side: santree-core enables it so domain structs
+# that carry an `AgentKind` can derive `Type` and reach bindings.ts.
+specta = ["dep:specta"]
+
+[dependencies]
+serde = { workspace = true }
+specta = { workspace = true, optional = true }

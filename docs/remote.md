@@ -2,8 +2,8 @@
 
 The source of truth for how santree works on repos that live on the user's home
 server, managed by **Daedalus**. Read this before touching `src-tauri/src/remote/`,
-`crates/remote/`, `src-tauri/src/daedalus/`, or anything that dispatches on
-`RepoLocation`.
+`crates/remote/`, `crates/remote-proto/`, `src-tauri/src/daedalus/`, or anything
+that dispatches on `RepoLocation`.
 
 ---
 
@@ -183,7 +183,8 @@ Exec / files / hooks:
 ## How santree dispatches (app side)
 
 - `crates/remote` (package `santree-remote-client`, Tauri-agnostic like
-  `crates/pty`) is transport + client only (`proto`, `transport`, `client`, `host`):
+  `crates/pty`) is transport + client only (`transport`, `client`, `host`, over the
+  protocol types in `crates/remote-proto`):
   it knows nothing about repos. Its `fake` module (behind the `fake` feature, for
   tests) is an in-process daemon
   speaking the same protocol, backed by a real `PtyManager`, so the client and every
@@ -225,11 +226,19 @@ Exec / files / hooks:
 
 ## Code map
 
-`crates/remote` (package `santree-remote-client`):
+`crates/remote-proto` (package `santree-remote-proto`) — protocol v1 as types: one
+marker per method in `m` (`Method` ties the wire name to params and result), the
+frames, events, error codes, base64 helpers. Its tests pin the exact wire text;
+changing one is a protocol change. `AgentKind` comes from `crates/agent-kind`
+(package `santree-agent-kind`).
 
-- `proto.rs` — protocol v1 as types: one marker per method in `proto::m` (`Method`
-  ties the wire name to params and result), the frames, events, error codes, base64
-  helpers. Its tests pin the exact wire text; changing one is a protocol change.
+These two and `crates/pty` are the crates the daemon side shares: the daedalus
+engine depends on them by git rev, so none of them depends on `santree-core`, Tauri
+or (by default) specta, and their public APIs are a contract with that repo.
+
+`crates/remote` (package `santree-remote-client`), which re-exports
+`santree-remote-proto` as `proto`:
+
 - `transport.rs` — `SshTarget`, the validated `ssh` argv (`ssh_args` /
   `ssh_command`), `SshConnector`, stderr → short reason (`classify_ssh_failure`),
   the `Connector` seam and `memory_link()`.

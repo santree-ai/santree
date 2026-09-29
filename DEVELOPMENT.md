@@ -271,7 +271,10 @@ from. See `src/dev/fixtures/README.md` for what is fake and what is real.
 .
 ├── crates/core/               # pure domain + static config — NO Tauri dep, unit-testable
 │   └── src/{domain,config,linear,jira,layout}.rs  # types · canonical config/defaults · tracker→domain mapping · dagre-free graph helpers
+├── crates/agent-kind/         # AgentKind, shared by core, pty and remote-proto (specta behind a feature)
 ├── crates/pty/                # PtyManager: real process behind a real PTY (Tauri-agnostic)
+├── crates/remote-proto/       # protocol v1 types for the Daedalus link (docs/remote.md)
+├── crates/remote/             # santree-remote-client: ssh transport, client, reconnecting host
 ├── src-tauri/                 # THIN Tauri adapter (wiring + commands + live backends)
 │   ├── src/{lib,commands}.rs  #   builder + registration + #[tauri::command] wrappers
 │   ├── src/{tracker,linear,jira,oauth,db,repo,settings,terminal,github,worktree,git,reviews}.rs  # live backends (tracker dispatch, Linear/Jira, OAuth, sqlx, PTY, GitHub API, worktrees, PR reviews)

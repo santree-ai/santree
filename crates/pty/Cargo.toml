@@ -5,12 +5,15 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+# Consumed outside this workspace: the daedalus engine's session host depends on
+# this crate by git rev. Its public API and its dependency list are a contract —
+# no santree-core, no specta, nothing Tauri.
+
 [dependencies]
 # For `AgentKind` alone: a session's identity is the (surface, provider) pair,
 # and carrying the provider as an untyped string would put a fallible parse in
-# the middle of the liveness join. `santree-core` is pure domain — this crate
-# stays Tauri-agnostic and unit-testable against a real shell.
-santree-core = { path = "../core" }
+# the middle of the liveness join.
+santree-agent-kind = { path = "../agent-kind" }
 portable-pty = { workspace = true }
 anyhow = { workspace = true }
 # Logging via the `log` facade; the host app installs the global logger.

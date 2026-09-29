@@ -1,0 +1,21 @@
+[package]
+name = "santree-remote-proto"
+description = "santree-remote protocol v1 as types: the frames, methods and shapes both ends of the link speak."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Consumed outside this workspace: the daedalus engine's session host depends on
+# this crate by git rev. Its public API and its dependency list are a contract —
+# no santree-core, no specta, no transport or runtime.
+
+[dependencies]
+# For `AgentKind` alone: a remote session carries the same (label, provider)
+# identity a local one does, and the provider is a domain enum, not a string.
+santree-agent-kind = { path = "../agent-kind" }
+serde = { workspace = true }
+# `raw_value` so a frame's payload is decoded once, by the caller that knows its
+# type, instead of through an intermediate `Value` tree.
+serde_json = { workspace = true, features = ["raw_value"] }
+base64 = "0.22"
+thiserror = "2"
