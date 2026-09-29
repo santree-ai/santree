@@ -217,7 +217,13 @@ export function WorktreeRow({
   return w.pending ? (
     card
   ) : (
-    <WorktreeMenu repo={repo} worktree={w} primary={node.primary} actionsDisabled={actionsDisabled}>
+    <WorktreeMenu
+      repo={repo}
+      worktree={w}
+      prs={prs}
+      primary={node.primary}
+      actionsDisabled={actionsDisabled}
+    >
       {card}
     </WorktreeMenu>
   );

@@ -7,6 +7,12 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.6 — 2026-09-29
+
+- A worktree's right-click menu can copy its GitHub pull request link, beside the path and branch.
+- Split branch sits in its own group above Delete in the worktree menu.
+- The Daedalus icon in Settings is monochrome like the other integrations; the sidebar keeps its colours.
+
 ## 0.1.17-beta.5 — 2026-09-29
 
 - The expanded Split branch form now includes its collapse control in the header. When collapsed, it returns to the compact bottom-right button.

@@ -151,7 +151,7 @@ const APP_NAV: NavNode[] = [
       {
         key: "daedalus",
         label: "Daedalus",
-        icon: <DaedalusLogo size={ICON_SIZE} />,
+        icon: <DaedalusLogo size={ICON_SIZE} mono />,
         render: () => <DaedalusSection />,
       },
     ],

@@ -14,7 +14,7 @@
  */
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import type { Worktree } from "../../bindings";
+import type { Worktree, WorktreePr } from "../../bindings";
 import { OpenerIcon } from "../../features/trees/openerIcons";
 import { useWorktreeDeletion } from "../../features/trees/useWorktreeDeletion";
 import {
@@ -25,19 +25,23 @@ import {
   useResolvedSetting,
 } from "../../lib/queries";
 import { useAppUi } from "../../state/AppContext";
-import { BranchIcon, CopyIcon, TrashIcon } from "../icons";
+import { BranchIcon, CopyIcon, GitHubLogo, TrashIcon } from "../icons";
 import { copyText } from "../menuRows";
+import { primaryPr } from "../PrChip";
 import { ConfirmDialog, ContextMenu, type ContextMenuItem } from "../primitives";
 
 export function WorktreeMenu({
   repo,
   worktree,
+  prs,
   primary,
   actionsDisabled,
   children,
 }: {
   repo: string;
   worktree: Worktree;
+  /** The PRs linked to the worktree; the open one, else the first, is copied. */
+  prs: WorktreePr[];
   /** The repo's default-branch checkout — deletable only as a repo, not here. */
   primary: boolean;
   /** Why the checkout can't be changed right now (its Daedalus host is out of
@@ -60,6 +64,7 @@ export function WorktreeMenu({
   const { data: defaultKey } = useResolvedSetting(repo, TREES_DEFAULT_EDITOR_KEY);
   const { deleteWorktree } = useWorktreeDeletion(repo);
 
+  const pr = primaryPr(prs);
   const installed = openers.filter((o) => o.available);
   const ranked = [
     ...installed.filter((o) => o.key === defaultKey),
@@ -98,6 +103,18 @@ export function WorktreeMenu({
       icon: <BranchIcon size={13} />,
       run: () => copyText(worktree.branch, "Branch"),
     },
+    ...(pr
+      ? ([
+          {
+            kind: "action",
+            key: "copy-pr-link",
+            label: "Copy GitHub PR link",
+            icon: <GitHubLogo size={12} />,
+            run: () => copyText(pr.url, "PR link"),
+          },
+        ] satisfies ContextMenuItem[])
+      : []),
+    { kind: "rule", key: "rule-split" },
     {
       kind: "action",
       key: "split",

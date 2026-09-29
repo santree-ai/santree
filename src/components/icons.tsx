@@ -644,10 +644,36 @@ export function JiraLogo({ size = 18, className }: IconProps) {
  * Daedalus's logomark — its app icon: the labyrinth path on the brand tile.
  * Unlike the Linear and Jira marks it carries its own fill, because the tile
  * *is* the mark; both colours are tokens (`--daedalus-brand`,
- * `--daedalus-on-brand`). Decorative: every place it appears names Daedalus in
- * words beside it.
+ * `--daedalus-on-brand`). `mono` drops the tile and strokes the path in
+ * `currentColor`, for a list of glyphs (Settings' nav) where one coloured
+ * tile among monochrome marks reads as a different kind of thing.
+ * Decorative: every place it appears names Daedalus in words beside it.
  */
-export function DaedalusLogo({ size = 18, className }: IconProps) {
+export function DaedalusLogo({
+  size = 18,
+  className,
+  mono = false,
+}: IconProps & { mono?: boolean }) {
+  if (mono) {
+    return (
+      <svg
+        width={size}
+        height={size}
+        viewBox="2 2 28 28"
+        fill="none"
+        className={className}
+        aria-hidden
+      >
+        <path
+          d="M16 16 L16 20 L12 20 L12 12 L20 12 L20 24 L8 24 L8 8 L24 8 L24 28 L4 28 L4 4 L28 4"
+          stroke="currentColor"
+          strokeWidth={2.25}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
   return (
     <svg
       width={size}
