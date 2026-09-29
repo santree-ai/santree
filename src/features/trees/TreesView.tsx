@@ -31,7 +31,6 @@ import { FileViewer } from "./FileViewer";
 import { MainTabBar } from "./MainTabBar";
 import { BASE_ID, extraTab, TreesProvider, useTrees } from "./model";
 import { SetupLogsView } from "./SetupLogsView";
-import { SplitEditor } from "./SplitEditor";
 import { useReopenClosedTab } from "./useReopenClosedTab";
 import { WelcomeSurface } from "./WelcomeSurface";
 import { WorktreeTerminal } from "./WorktreeTerminal";
@@ -189,7 +188,6 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
     activePr,
     prViewOpen,
     issueViewOpen,
-    splitOpen,
   } = useTrees();
 
   return (
@@ -264,13 +262,6 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
               className={activeTab === "prView" ? "absolute inset-0 z-40 flex flex-col" : "hidden"}
             >
               <PrView key={`${activePr.repo}#${activePr.number}`} pr={activePr} />
-            </div>
-          )}
-          {splitOpen && (
-            <div
-              className={activeTab === "split" ? "absolute inset-0 z-40 flex flex-col" : "hidden"}
-            >
-              <SplitEditor key={`${repo}:${worktree.id}`} repo={repo} worktree={worktree} />
             </div>
           )}
           {issueViewOpen && (

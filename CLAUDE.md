@@ -399,8 +399,10 @@ src/
   the local diff *with a notice* when the branch has unpushed commits. Never
   overlay PR comments on a locally recomputed diff — that is how a comment lands
   on the wrong line.
-- **Split branch…** opens from the worktree menu or Git
-  panel. Commit the current part first; this action moves all remaining staged,
+- **Split branch…** opens in the Changes panel from the worktree menu or Git
+  panel. A bottom-right disclosure expands its form; it starts collapsed on app
+  launch. The form shares the existing commit controls and ChangesList
+  (icons, tree/list preference, staging, and file diffs in the main area). Commit the current part first; this action moves all remaining staged,
   unstaged and untracked changes into one new child worktree at the source HEAD.
   Creation requires a commit beyond the source's base and remaining changes.
   The form keeps its branch/ticket inputs during the automatic post-commit preview

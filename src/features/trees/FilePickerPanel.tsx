@@ -43,6 +43,7 @@ import { GitPanel } from "./GitPanel";
 import { availableFileTabs, BASE_ID, type FileTab, useTrees } from "./model";
 import { RefreshWorktreeButton } from "./RefreshWorktreeButton";
 import { SessionHistory } from "./SessionHistory";
+import { SplitEditor } from "./SplitEditor";
 import { useResumeSessionInWorktree } from "./useResumeSession";
 import { WorktreePrPane } from "./WorktreePrPane";
 
@@ -111,6 +112,8 @@ export function FilePickerPanel() {
     openPrView,
     openIssueView,
     openSplit,
+    splitOpen,
+    closeSplit,
   } = useTrees();
   const { data: prSummary } = usePrSummary(activePr?.repo ?? null, activePr?.number ?? 0);
   const { data: workItems } = useReviewWorkItems(activePr?.repo ?? "", activePr?.number ?? 0);
@@ -240,6 +243,12 @@ export function FilePickerPanel() {
         selectedScope={selectedFileScope}
         onOpen={selectFile}
         onSplit={openSplit}
+        onCloseSplit={closeSplit}
+        splitForm={
+          splitOpen && active ? (
+            <SplitEditor key={`${repo}:${active.id}`} repo={repo} worktree={active} />
+          ) : undefined
+        }
         createPr={{
           hasPr: (prsByWorktree.get(activeId) ?? []).length > 0,
           open: () => openPrDialog(activeId),

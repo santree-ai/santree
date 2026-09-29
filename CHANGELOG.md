@@ -7,6 +7,12 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.3 — 2026-09-29
+
+- Split branches directly from the Changes panel. A compact button at the bottom-right expands the form when needed; it starts collapsed on launch. The branch’s right-click menu opens the same form.
+- Review and stage remaining changes using the familiar file icons and tree or list view, with file diffs in the main area. The split preview refreshes after staging, discarding, or committing.
+- Choose a ticket with the app’s searchable picker, enter another ticket ID, or select no ticket. The current ticket remains selected by default.
+
 ## 0.1.17-beta.2 — 2026-09-29
 
 - Split a branch into smaller reviews: commit the part that belongs on the current branch, then choose “Split branch…” to move the remaining changes into one child branch and worktree. Staging is preserved, and a recovery copy remains in Git stash. Commit, push and open pull requests when you are ready.

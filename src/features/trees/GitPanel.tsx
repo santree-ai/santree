@@ -12,8 +12,17 @@
  *  worktree, and the local checkout of the PR you are reviewing. Everything here
  *  is a fact about a branch on disk and holds either way; the one exception is
  *  {@link CreatePrActions}, which Reviews leaves out. */
+import { type ReactNode, useId } from "react";
+
 import type { ChangedFile, Worktree } from "../../bindings";
-import { DownloadIcon, PrIcon, PullIcon, PushIcon } from "../../components/icons";
+import {
+  BranchIcon,
+  ChevronDownIcon,
+  DownloadIcon,
+  PrIcon,
+  PullIcon,
+  PushIcon,
+} from "../../components/icons";
 import { Spinner } from "../../components/primitives";
 import {
   usePullRemoteWorktree,
@@ -56,6 +65,8 @@ export function GitPanel({
   onOpen,
   createPr,
   onSplit,
+  onCloseSplit,
+  splitForm,
 }: {
   repo: string;
   worktreeId: string;
@@ -70,7 +81,10 @@ export function GitPanel({
   onOpen?: (path: string, scope: FileScope) => void;
   createPr?: CreatePrActions;
   onSplit?: () => void;
+  onCloseSplit?: () => void;
+  splitForm?: ReactNode;
 }) {
+  const splitId = useId();
   const { data: committed } = useWorktreeBranchChanges(repo, worktreeId);
   // The one action the branch's state calls for: offered while it is ahead of
   // its base with no PR yet, and only where the host can open one (the primary
@@ -120,16 +134,6 @@ export function GitPanel({
               </span>
             )}
           </div>
-          {onSplit && (
-            <button
-              type="button"
-              onClick={onSplit}
-              className={`${ACTION} h-auto max-w-full self-start py-1 text-left whitespace-normal`}
-              title="Commit what belongs here, then move all remaining edits to a child branch"
-            >
-              Split branch…
-            </button>
-          )}
           <div className="flex items-center gap-1">
             <BaseSync repo={repo} worktree={worktree} />
             <span className="min-w-1 flex-1" />
@@ -153,11 +157,35 @@ export function GitPanel({
         repo={repo}
         worktreeId={worktreeId}
         files={status}
-        committed={committed}
+        committed={splitForm ? [] : committed}
         selectedPath={selectedPath}
         selectedScope={selectedScope}
         onOpen={onOpen}
       />
+      {splitForm && (
+        <div
+          id={splitId}
+          className="max-h-[50%] flex-none overflow-auto border-t border-line bg-app"
+        >
+          {splitForm}
+        </div>
+      )}
+      {onSplit && (
+        <div className="flex flex-none justify-end border-t border-line px-3 py-2">
+          <button
+            type="button"
+            aria-expanded={!!splitForm}
+            aria-controls={splitForm ? splitId : undefined}
+            onClick={splitForm ? onCloseSplit : onSplit}
+            className={`flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-hover hover:text-fg ${splitForm ? "bg-hover text-fg" : "text-muted-2"}`}
+            title={splitForm ? "Collapse split branch" : "Move remaining changes to a child branch"}
+          >
+            <BranchIcon size={13} />
+            Split branch
+            <ChevronDownIcon size={12} className={splitForm ? "" : "rotate-180"} />
+          </button>
+        </div>
+      )}
     </>
   );
 }

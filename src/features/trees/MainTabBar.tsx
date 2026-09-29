@@ -53,8 +53,6 @@ export function MainTabBar() {
     prViewOpen,
     closePrView,
     issueViewOpen,
-    splitOpen,
-    closeSplit,
     closeIssueView,
     tabs,
     addTab,
@@ -86,15 +84,6 @@ export function MainTabBar() {
       onClose: () => closeWithSession(t),
       onRename: (title: string) => renameTab(t.id, title),
     })),
-    ...(splitOpen
-      ? [
-          {
-            tab: "split" as const,
-            label: "Split branch",
-            onClose: closeSplit,
-          },
-        ]
-      : []),
     ...(prViewOpen
       ? [
           {

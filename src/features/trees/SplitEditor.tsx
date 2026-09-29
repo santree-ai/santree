@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import type { MoveChanges, Worktree } from "../../bindings";
-import { Button, Spinner } from "../../components/primitives";
+import { ChevronDownIcon } from "../../components/icons";
+import { Button, Dropdown, MENU_ITEM, Spinner } from "../../components/primitives";
 import {
   useMoveChangesPreview,
   useMoveRemainingChanges,
@@ -13,18 +14,12 @@ import { invalidBranchReason } from "./createWorktree";
 import { useTrees } from "./model";
 
 const FIELD =
-  "w-full rounded border border-line bg-input px-3 py-2 text-sm text-fg-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent";
+  "w-full rounded border border-line bg-input px-2.5 py-1.5 text-xs text-fg-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent";
 
 export function SplitEditor({ repo, worktree }: { repo: string; worktree: Worktree }) {
   const preview = useMoveChangesPreview(repo, worktree.id);
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-auto bg-app">
-      <div className="border-b border-line px-5 py-4">
-        <h2 className="text-sm font-semibold text-fg">Create a child branch</h2>
-        <p className="mt-2 text-sm text-fg-2">
-          Commit what belongs here, then move the remaining changes to one child branch.
-        </p>
-      </div>
+    <div className="w-full min-w-0">
       {preview.data ? (
         <MoveForm
           repo={repo}
@@ -66,7 +61,7 @@ function MoveForm({
   const move = useMoveRemainingChanges(repo, preview.sourceId);
   const branches = useRepoBranches(repo);
   const { data: tasks = [] } = useTasks(repo);
-  const { setActive, setFileTab, closeSplit, rightCollapsed, toggleRightPanel } = useTrees();
+  const { setActive, setFileTab, closeSplit } = useTrees();
   const [branch, setBranch] = useState(preview.branch ?? "");
   const [ticket, setTicket] = useState(preview.ticketId ?? "");
   const resuming = preview.branch !== null;
@@ -98,25 +93,12 @@ function MoveForm({
             : null);
 
   return (
-    <div className="flex max-w-2xl flex-col gap-5 p-5">
-      <section className="space-y-2">
-        <h3 className="text-sm font-semibold text-fg">1. Commit this branch’s part</h3>
-        <p className="text-sm text-fg-2">
-          Leave the rest uncommitted. This preview updates automatically after you commit.
-        </p>
-        <Button
-          disabled={move.isPending || resuming}
-          onClick={() => {
-            setFileTab("changes");
-            if (rightCollapsed) toggleRightPanel();
-          }}
-        >
-          Open commit panel
-        </Button>
-      </section>
-      <section className="space-y-4">
-        <h3 className="text-sm font-semibold text-fg">2. Create one child branch</h3>
-        <fieldset disabled={move.isPending || resuming} className="space-y-4">
+    <div className="flex w-full min-w-0 flex-col gap-3 p-3">
+      <p className="text-xs text-muted-2">
+        Commit what belongs here, then move the rest to a child branch.
+      </p>
+      <section className="space-y-3">
+        <fieldset disabled={move.isPending || resuming} className="space-y-3">
           <label className="block text-xs text-fg-2">
             Branch name
             <input
@@ -127,44 +109,19 @@ function MoveForm({
               onChange={(e) => setBranch(e.target.value)}
             />
           </label>
-          <label className="block text-xs text-fg-2">
-            Ticket
-            <input
-              className={`${FIELD} mt-1`}
-              value={ticket}
-              placeholder="No ticket"
-              list={`move-tickets-${preview.id}`}
-              onChange={(e) => setTicket(e.target.value)}
-            />
-          </label>
-          <datalist id={`move-tickets-${preview.id}`}>
-            {tasks.map((task) => (
-              <option key={task.id} value={task.id}>
-                {task.title}
-              </option>
-            ))}
-          </datalist>
-          <p className="text-xs text-muted-2">
-            Current ticket selected by default. Change it or clear it.
-          </p>
+          <TicketPicker
+            value={ticket}
+            onChange={setTicket}
+            tasks={tasks}
+            disabled={move.isPending || resuming}
+          />
         </fieldset>
-        <details className="rounded border border-line p-3">
-          <summary className="cursor-pointer text-xs font-semibold text-fg-2">
-            {preview.files.length} {preview.files.length === 1 ? "file moves" : "files move"} to the
-            child branch
-          </summary>
-          <ul className="mt-2 max-h-48 space-y-1 overflow-auto">
-            {preview.files.map((path) => (
-              <li key={path} className="break-all font-mono text-xs text-muted-2">
-                {path}
-              </li>
-            ))}
-          </ul>
-          <p className="mt-2 text-xs text-muted-2">
-            Staging is preserved and a recovery stash is kept. Ignored files stay here unless
-            tracked or staged. Pause agents before moving.
+        {preview.files.length > 0 && (
+          <p className="text-xs text-fg-2">
+            {preview.files.length} {preview.files.length === 1 ? "file" : "files"} will move.
+            Staging is preserved.
           </p>
-        </details>
+        )}
         {resuming && (
           <p className="text-xs text-fg-2">
             A previous move did not finish. Retry to continue the same move. Your recovery stash and
@@ -172,12 +129,13 @@ function MoveForm({
           </p>
         )}
         <p className="text-xs text-muted-2">
-          Creates a worktree from this branch’s latest commit and moves the remaining changes there.
+          Pause agents before moving. A recovery stash is kept.
         </p>
         <Failure error={previewError} />
         <Failure error={move.error} />
         <div className="flex flex-wrap items-center gap-3">
           <Button
+            size="sm"
             disabled={move.isPending || !!reason}
             title={reason ?? undefined}
             onClick={() =>
@@ -200,12 +158,16 @@ function MoveForm({
           >
             {move.isPending ? "Moving changes…" : resuming ? "Retry move" : "Create child branch"}
           </Button>
-          <Button disabled={move.isPending || refreshing} onClick={refresh}>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={move.isPending || refreshing}
+            onClick={refresh}
+          >
             Refresh changes
           </Button>
         </div>
         {reason && <p className="text-xs text-muted-2">{reason}</p>}
-        <p className="text-xs text-muted-2">For another split, right-click the child branch.</p>
       </section>
     </div>
   );
@@ -217,4 +179,106 @@ function Failure({ error }: { error: Error | null }) {
       {error.message}
     </p>
   ) : null;
+}
+
+function TicketPicker({
+  value,
+  onChange,
+  tasks,
+  disabled,
+}: {
+  value: string;
+  onChange: (id: string) => void;
+  tasks: { id: string; title: string }[];
+  disabled: boolean;
+}) {
+  const labelId = useId();
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const matches = tasks.filter((task) => `${task.id} ${task.title}`.toLowerCase().includes(needle));
+  const selected = tasks.find((task) => task.id === value);
+  return (
+    <div className="min-w-0">
+      <span id={labelId} className="text-xs text-fg-2">
+        Ticket
+      </span>
+      <Dropdown
+        menuClassName="w-72 max-w-[calc(100vw-24px)] overflow-hidden"
+        trigger={(toggle) => (
+          <button
+            type="button"
+            aria-labelledby={labelId}
+            disabled={disabled}
+            className={`${FIELD} mt-1 flex items-center gap-2 text-left`}
+            title={selected ? `${value}: ${selected.title}` : value || "No ticket"}
+            onClick={() => {
+              setQuery("");
+              toggle();
+            }}
+          >
+            <span className="min-w-0 flex-1 truncate">
+              {value || "No ticket"}
+              {selected ? ` · ${selected.title}` : ""}
+            </span>
+            <ChevronDownIcon size={12} />
+          </button>
+        )}
+      >
+        {(close) => {
+          const pick = (id: string) => {
+            onChange(id);
+            close();
+          };
+          return (
+            <>
+              <div className="px-2 py-1">
+                <input
+                  aria-label="Search tickets"
+                  placeholder="Search tickets or enter an ID…"
+                  className={FIELD}
+                  autoComplete="off"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                />
+              </div>
+              <div className="max-h-56 overflow-auto">
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={MENU_ITEM}
+                  onClick={() => pick("")}
+                >
+                  No ticket
+                </button>
+                {query.trim() && !tasks.some((task) => task.id.toLowerCase() === needle) && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className={MENU_ITEM}
+                    onClick={() => pick(query.trim())}
+                  >
+                    Use ticket {query.trim()}
+                  </button>
+                )}
+                {matches.map((task) => (
+                  <button
+                    key={task.id}
+                    type="button"
+                    role="menuitem"
+                    className={MENU_ITEM}
+                    onClick={() => pick(task.id)}
+                  >
+                    <span className="min-w-0">
+                      <span className="block font-mono text-xs">{task.id}</span>
+                      <span className="block truncate text-xs text-muted-2">{task.title}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </>
+          );
+        }}
+      </Dropdown>
+    </div>
+  );
 }

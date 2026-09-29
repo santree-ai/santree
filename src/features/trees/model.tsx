@@ -237,14 +237,7 @@ export function prDiffModeFor(opts: { inPr: boolean; unpushed: number }): PrDiff
  *  worktree has the thing they show. "file"/"setup"/"checkLog" are the transient
  *  views that appear with the thing they show. All of them close, and closing
  *  the last one leaves the workspace showing nothing. */
-export type MainTab =
-  | "file"
-  | "setup"
-  | "checkLog"
-  | "prView"
-  | "issueView"
-  | "split"
-  | `tab:${string}`;
+export type MainTab = "file" | "setup" | "checkLog" | "prView" | "issueView" | `tab:${string}`;
 
 /** A CI check whose raw job log is open in the **main** area.
  *
@@ -304,10 +297,8 @@ export function openMainTabs(opts: {
   hasFile: boolean;
   hasSetup: boolean;
   hasCheckLog: boolean;
-  hasSplit?: boolean;
 }): MainTab[] {
   const tabs: MainTab[] = opts.tabIds.map(extraTab);
-  if (opts.hasSplit) tabs.push("split");
   if (opts.hasPrView) tabs.push("prView");
   if (opts.hasIssueView) tabs.push("issueView");
   if (opts.hasFile) tabs.push("file");
@@ -715,7 +706,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     PR_VIEW_BY_WT_KEY,
     {},
   );
-  const [splitByWt, setSplitByWt] = usePersistedState<Record<string, true>>("trees.split-tabs", {});
+  const [splitByWt, setSplitByWt] = useState<Record<string, true>>({});
   const [issueViewByWt, setIssueViewByWt] = usePersistedState<Record<string, true>>(
     ISSUE_VIEW_BY_WT_KEY,
     {},
@@ -843,7 +834,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     // The worktree itself arrived in the url (`?project=`/`?tree=`); what is left
     // here is the part of a request that is an *instruction* rather than a
     // location — which pane to show, which tab, whether to expand.
-    setFileFor(id, null);
+    if (!split) setFileFor(id, null);
     // Only move what the caller named. A string is a tab id; `null` is a caller
     // that has no tab to name (a session minted before every agent lived in one),
     // and `undefined` keeps whatever the worktree had open — which is what the old
@@ -881,7 +872,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     }
     if (split) {
       setSplitByWt((current) => ({ ...current, [id]: true }));
-      setTabFor(id, "split");
+      setFileTab("changes");
+      setRightCollapsed(false);
     }
     consumeTreeFocus();
   }, [
@@ -893,7 +885,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     setFileTab,
     setPrViewByWt,
     setIssueViewByWt,
-    setSplitByWt,
+    setRightCollapsed,
   ]);
 
   // Consume a "Fix CI with AI" hand-off from Reviews: once the PR's worktree has
@@ -981,7 +973,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       hasFile: selectedFile !== null,
       hasSetup: setupFor !== null,
       hasCheckLog: openCheckLog !== null,
-      hasSplit: !!splitByWt[activeId],
     });
     const activeTab = resolveActiveTab(activeTabByWt[activeId], openTabs);
     return {
@@ -1010,7 +1001,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       splitOpen: !!splitByWt[activeId],
       openSplit: () => {
         setSplitByWt((current) => ({ ...current, [activeId]: true }));
-        setTabFor(activeId, "split");
+        setFileTab("changes");
+        setRightCollapsed(false);
       },
       closeSplit: () => setSplitByWt((current) => omit(current, activeId)),
       tabs,
@@ -1153,7 +1145,6 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     checkLogByWt,
     prViewByWt,
     splitByWt,
-    setSplitByWt,
     issueViewByWt,
     setPrViewByWt,
     setIssueViewByWt,

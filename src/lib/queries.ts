@@ -2914,7 +2914,10 @@ export const useStageAction = (repo: string, id: string) =>
       return () => qc.setQueryData(key, prev);
     },
     invalidate: (a) => {
-      const keys: QueryKey[] = [queryKeys.worktreeStatus(repo, id)];
+      const keys: QueryKey[] = [
+        queryKeys.worktreeStatus(repo, id),
+        queryKeys.moveChangesPreview(repo, id),
+      ];
       const diffPrefix = queryKeys.worktreeFileDiffPrefix(repo, id);
       switch (a.action) {
         case "stage":
