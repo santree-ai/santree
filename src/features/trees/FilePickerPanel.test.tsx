@@ -12,10 +12,17 @@
  * put a red error toast on screen.
  */
 import { cleanup, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { WorktreePr } from "../../bindings";
+import type { CheckRollup, PrState, WorktreePr } from "../../bindings";
 import type { FileScope, FileTab } from "./model";
+
+const summary = vi.hoisted(() => ({
+  data: undefined as { state: PrState; checks: CheckRollup } | undefined,
+}));
+beforeEach(() => {
+  summary.data = undefined;
+});
 
 const trees = vi.hoisted(() => ({
   repo: "acme/app",
@@ -44,7 +51,7 @@ vi.mock("./model", async (importOriginal) => ({
 
 vi.mock("../../lib/queries", () => ({
   useTicketProvider: () => "Linear",
-  usePrSummary: () => ({ data: undefined }),
+  usePrSummary: () => summary,
   usePrReviewBrief: () => ({ data: undefined }),
   useReviewWorkItems: () => ({ data: [] }),
   useWorktreeStatus: () => ({ data: undefined }),
@@ -193,3 +200,13 @@ const PANE_TEXT: Record<FileTab, string> = {
   pr: "PR",
   aiWork: "AI work",
 };
+
+it.each([
+  "summary",
+  "worktree",
+])("shows merged purple over failing CI from the %s PR state", (source) => {
+  summary.data = { state: source === "summary" ? "Merged" : "Open", checks: "Failure" };
+  mount({ activePr: { ...pr, state: source === "worktree" ? "Merged" : "Open" }, fileTab: "pr" });
+  const tab = screen.getByRole("tab", { name: "Pull request" });
+  expect(tab.querySelector("span[style]")).toHaveStyle({ background: "#a371f7" });
+});

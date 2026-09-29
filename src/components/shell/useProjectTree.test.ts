@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Repo, Task, Worktree, WorktreePr } from "../../bindings";
 import type { AgentBucket, AgentEntry, AgentOriginKind } from "../../features/agents/registry";
+import { pendingWorktree } from "../../features/trees/model";
 import type { SeenMap } from "../../lib/attention";
 import {
   agentEntry as fxAgentEntry,
@@ -495,6 +496,30 @@ describe("buildProjectNode", () => {
       [
         ["AK-1", 0],
         ["AK-2", 1],
+      ],
+    ]);
+  });
+
+  it("nests a pending split with its inherited ticket inside the parent’s milestone", () => {
+    const parent = worktree("AK-1");
+    const child = pendingWorktree({
+      repo: "acme/app",
+      id: "split-1",
+      title: "smaller-review",
+      project: "Core",
+      agent: null,
+      baseBranch: parent.branch,
+      ticketId: "AK-1",
+      holdUntilSettled: true,
+    });
+    const node = build({
+      worktrees: [child, parent],
+      tasks: [task("AK-1", { projectMilestone: milestone("m1", "M1", 1) })],
+    });
+    expect(bands(node)).toEqual([
+      [
+        ["AK-1", 0],
+        ["split-1", 1],
       ],
     ]);
   });

@@ -20,6 +20,7 @@ import {
   type UseQueryOptions,
   useIsFetching,
   useMutation,
+  useMutationState,
   useQueries,
   useQuery,
   useQueryClient,
@@ -37,6 +38,7 @@ import type {
   DaedalusWorkspaceList,
   DaemonReach,
   KeepAwakeStatus,
+  MoveChanges,
   NewInlineComment,
   PrDetail,
   PrLabel,
@@ -4890,21 +4892,59 @@ export const useMoveChangesPreview = (repo: string, source: string) =>
     },
   );
 
-export function useMoveRemainingChanges(repo: string, source: string) {
+export interface MoveRemainingChangesVars {
+  runSetup: boolean;
+  id: string;
+  branch: string;
+  ticketId: string | null;
+  destination: { id: string; baseBranch: string; project: string | null };
+}
+
+/** Mutation state survives the form unmounting and cannot be erased by a watcher refetch. */
+export function usePendingWorktreeMoves() {
+  return useMutationState({
+    filters: { mutationKey: ["move-remaining-changes"], status: "pending" },
+    select: (mutation) => {
+      const vars = mutation.state.variables as MoveRemainingChangesVars;
+      return {
+        repo: mutation.options.mutationKey?.[1] as string,
+        id: vars.destination.id,
+        title: vars.branch,
+        ticketId: vars.ticketId,
+        project: vars.destination.project,
+        agent: null,
+        baseBranch: vars.destination.baseBranch,
+        holdUntilSettled: true,
+      };
+    },
+  });
+}
+
+export function useMoveRemainingChanges(
+  repo: string,
+  source: string,
+  onCreated?: (result: MoveChanges, vars: MoveRemainingChangesVars) => void,
+) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { id: string; branch: string; ticketId: string | null }) =>
+    mutationKey: ["move-remaining-changes", repo, source],
+    onSuccess: onCreated,
+    mutationFn: (v: MoveRemainingChangesVars) =>
       unwrap(commands.moveRemainingChanges(repo, v.id, v.branch, v.ticketId)),
-    onSettled: () => {
-      for (const queryKey of [
-        queryKeys.worktrees(repo),
-        queryKeys.baseWorktree(repo),
-        queryKeys.repoBranches(repo),
-        queryKeys.worktreeStatus(repo, source),
-        queryKeys.worktreeFiles(repo, source),
-        queryKeys.worktreeBranchChanges(repo, source),
-      ])
-        void qc.invalidateQueries({ queryKey });
+    // Keep the placeholder until the final worktree list has landed, including
+    // on failure: Git may have created a recoverable child before the move failed.
+    onSettled: async () => {
+      await Promise.all(
+        [
+          queryKeys.worktrees(repo),
+          queryKeys.baseWorktree(repo),
+          queryKeys.repoBranches(repo),
+          queryKeys.worktreeStatus(repo, source),
+          queryKeys.worktreeFiles(repo, source),
+          queryKeys.worktreeBranchChanges(repo, source),
+          queryKeys.moveChangesPreview(repo, source),
+        ].map((queryKey) => qc.invalidateQueries({ queryKey })),
+      );
     },
   });
 }

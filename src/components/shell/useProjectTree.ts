@@ -40,6 +40,7 @@ import {
   type LinearGroupBy,
   parseLinearGroupBy,
   useBaseWorktreesByRepo,
+  usePendingWorktreeMoves,
   useRepos,
   useSetting,
   useTasksByRepo,
@@ -576,6 +577,7 @@ export function useProjectTree(location: RepoLocation): ProjectTreeModel {
   // which project it is happening in, so the placeholder appears in that
   // project's section rather than under whichever one was being looked at.
   const { pendingLaunches, pendingDeletes, removePendingLaunch } = useAppUi();
+  const pendingMoves = usePendingWorktreeMoves();
   // App-scoped: the tree is cross-repo, so one shape has to serve all of it.
   const { data: groupByRaw } = useSetting("app", LINEAR_GROUP_BY_KEY);
   const groupBy = parseLinearGroupBy(groupByRaw);
@@ -606,13 +608,13 @@ export function useProjectTree(location: RepoLocation): ProjectTreeModel {
   const worktreesFor = useCallback(
     (repo: string): Worktree[] | undefined => {
       const real = worktreesByRepo.get(repo);
-      const launches = pendingLaunches.filter((l) => l.repo === repo);
+      const launches = [...pendingLaunches, ...pendingMoves].filter((l) => l.repo === repo);
       // A launch has to show up even before the first read lands, or starting a
       // task on a cold repo looks like it did nothing.
       if (real === undefined && launches.length === 0) return undefined;
       return mergeWorktrees(real ?? [], launches, pendingDeletes, (worktree) => worktree);
     },
-    [worktreesByRepo, pendingLaunches, pendingDeletes],
+    [worktreesByRepo, pendingLaunches, pendingMoves, pendingDeletes],
   );
 
   const projects = useMemo(

@@ -7,6 +7,14 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.4 — 2026-09-29
+
+- Child branches appear beneath their parent immediately with a creating status while their remaining changes move. Choose whether to run setup in the child worktree; it is off by default.
+- Ticket pickers and other dropdowns open above or below their button to fit the window, keeping long lists scrollable.
+- Merged pull requests show a purple status dot, even when their earlier CI checks failed.
+- Find clears highlights from earlier queries, preserves accurate match positions around Unicode text, and cleans up when switching panes or files.
+- The create-pull-request dialog shows the branch name you chose instead of an internal worktree ID, with a separate source and target line below its heading.
+
 ## 0.1.17-beta.3 — 2026-09-29
 
 - Split branches directly from the Changes panel. A compact button at the bottom-right expands the form when needed; it starts collapsed on launch. The branch’s right-click menu opens the same form.

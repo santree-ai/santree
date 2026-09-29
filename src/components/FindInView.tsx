@@ -108,16 +108,16 @@ function locate(chunks: Chunk[], offset: number): { node: Text; offset: number }
 
 /** Every rendered occurrence of `query` under `root`, as live ranges. */
 export function findRanges(root: HTMLElement, query: string): { ranges: Range[]; capped: boolean } {
-  const needle = query.toLowerCase();
-  if (needle === "") return { ranges: [], capped: false };
+  if (query === "") return { ranges: [], capped: false };
   const { text, chunks } = collect(root);
-  const haystack = text.toLowerCase();
+  // Match against the original text: lowercasing can change its UTF-16 length
+  // (for example İ), shifting every subsequent DOM range.
+  const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "giu");
   const ranges: Range[] = [];
-  let at = haystack.indexOf(needle);
-  while (at !== -1) {
+  for (const match of text.matchAll(pattern)) {
     if (ranges.length === MAX_MATCHES) return { ranges, capped: true };
-    const start = locate(chunks, at);
-    const end = locate(chunks, at + needle.length);
+    const start = locate(chunks, match.index);
+    const end = locate(chunks, match.index + match[0].length);
     if (start && end) {
       const range = document.createRange();
       try {
@@ -129,7 +129,6 @@ export function findRanges(root: HTMLElement, query: string): { ranges: Range[];
         // than lose the whole scan; the next mutation rescans anyway.
       }
     }
-    at = haystack.indexOf(needle, at + needle.length);
   }
   return { ranges, capped: false };
 }
@@ -137,13 +136,6 @@ export function findRanges(root: HTMLElement, query: string): { ranges: Range[];
 /** The Highlight API, when this engine has it. */
 function registry(): HighlightRegistry | null {
   return typeof CSS !== "undefined" && "highlights" in CSS ? CSS.highlights : null;
-}
-
-function clearHighlights() {
-  const highlights = registry();
-  if (!highlights) return;
-  highlights.delete(ALL);
-  highlights.delete(CURRENT);
 }
 
 /**
@@ -166,14 +158,15 @@ export function useFindInView(scope: RefObject<HTMLElement | null>, enabled: boo
 
   const { ranges, capped } = useMemo(() => {
     const root = scope.current;
-    if (!open || !root) return { ranges: [] as Range[], capped: false };
+    if (!enabled || !open || !root) return { ranges: [] as Range[], capped: false };
     // `version` is the dependency that matters here — the DOM it reads is not
     // React state, so a content change has to be announced.
     void version;
     return findRanges(root, query);
-  }, [open, query, version, scope]);
+  }, [enabled, open, query, version, scope]);
 
   const count = ranges.length;
+  const currentIndex = Math.min(index, Math.max(0, count - 1));
 
   // A shorter query (or a file that changed under the bar) can leave the cursor
   // past the end. Clamp rather than reset: a rescan mid-typing shouldn't throw
@@ -182,47 +175,67 @@ export function useFindInView(scope: RefObject<HTMLElement | null>, enabled: boo
     setIndex((i) => (count === 0 ? 0 : Math.min(i, count - 1)));
   }, [count]);
 
-  // Paint. The current match is registered on its own so it can be styled apart
-  // from the rest; both registrations are replaced wholesale on every change,
-  // which is what keeps stale ranges from accumulating.
   useEffect(() => {
+    if (count === 0) return;
     const highlights = registry();
-    const current = ranges[index];
+    const current = ranges[currentIndex];
     if (highlights) {
-      if (count === 0) {
-        clearHighlights();
-      } else {
-        highlights.set(ALL, new Highlight(...ranges));
-        if (current) highlights.set(CURRENT, new Highlight(current));
+      const owned = new Map([
+        [ALL, new Highlight(...ranges)],
+        [CURRENT, new Highlight(current)],
+      ]);
+      for (const [name, highlight] of owned) {
+        // WebKit can leave the previous query painted when set() replaces a
+        // registry entry. clear() repaints its old ranges before unregistering.
+        // https://bugs.webkit.org/show_bug.cgi?id=321567
+        highlights.get(name)?.clear();
+        highlights.delete(name);
+        highlights.set(name, highlight);
       }
-      return;
+      return () => {
+        for (const [name, highlight] of owned) {
+          highlight.clear();
+          if (highlights.get(name) === highlight) highlights.delete(name);
+        }
+      };
     }
-    // No Highlight API: select the current match instead. Nothing to clean up
-    // per change — the next one replaces the selection.
     const selection = window.getSelection?.();
     if (!selection) return;
     selection.removeAllRanges();
-    if (current) selection.addRange(current);
-  }, [ranges, index, count]);
+    selection.addRange(current);
+    return () => {
+      if (selection.rangeCount === 1 && selection.getRangeAt(0) === current) {
+        selection.removeAllRanges();
+      }
+    };
+  }, [ranges, currentIndex, count]);
 
   // Bring the current match into view. `scrollIntoView` on the match's own
   // element walks every scroller between it and the window, which is what the
   // nested panes here need (and jsdom has none of it, hence the optional call).
   useEffect(() => {
-    const current = ranges[index];
+    const current = ranges[currentIndex];
     const el =
       current?.startContainer.nodeType === Node.ELEMENT_NODE
         ? (current.startContainer as HTMLElement)
         : current?.startContainer.parentElement;
     el?.scrollIntoView?.({ block: "center", inline: "nearest" });
-  }, [ranges, index]);
+  }, [ranges, currentIndex]);
 
   // Rescan while the file is being written underneath the bar.
   useEffect(() => {
     const root = scope.current;
     if (!open || query === "" || !root || typeof MutationObserver === "undefined") return;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const observer = new MutationObserver(() => {
+    const observer = new MutationObserver((records) => {
+      if (
+        records.every((record) => {
+          const element =
+            record.target instanceof Element ? record.target : record.target.parentElement;
+          return element?.closest(`[${BAR_ATTR}]`);
+        })
+      )
+        return;
       clearTimeout(timer);
       timer = setTimeout(() => setVersion((v) => v + 1), 120);
     });
@@ -235,7 +248,6 @@ export function useFindInView(scope: RefObject<HTMLElement | null>, enabled: boo
 
   const close = useCallback(() => {
     setOpen(false);
-    clearHighlights();
   }, []);
 
   const next = useCallback(() => {
@@ -251,8 +263,6 @@ export function useFindInView(scope: RefObject<HTMLElement | null>, enabled: boo
   useEffect(() => {
     if (!enabled && openRef.current) close();
   }, [enabled, close]);
-
-  useEffect(() => clearHighlights, []);
 
   useEffect(() => {
     if (!enabled) return;
@@ -291,7 +301,7 @@ export function useFindInView(scope: RefObject<HTMLElement | null>, enabled: boo
     return () => window.removeEventListener("keydown", onKey);
   }, [enabled, next, prev, close]);
 
-  return { open, query, setQuery, count, index, capped, next, prev, close, inputRef };
+  return { open, query, setQuery, count, index: currentIndex, capped, next, prev, close, inputRef };
 }
 
 /** The bar itself: floating over the pane's top-right corner, where a browser

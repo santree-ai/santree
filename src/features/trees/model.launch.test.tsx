@@ -105,6 +105,7 @@ vi.mock("../../lib/queries", async () => {
       subscribe();
       return { data: store.worktrees, isLoading: false };
     },
+    usePendingWorktreeMoves: () => [],
     useBaseWorktree: () => ({ data: null, isLoading: false }),
     useWorktreePrs: () => ({ data: [] }),
     useTasks: () => ({ data: [] }),

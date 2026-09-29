@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MoveChanges, Worktree } from "../../bindings";
+import type { MoveRemainingChangesVars } from "../../lib/queries";
 import { GitPanel } from "./GitPanel";
 import { SplitEditor } from "./SplitEditor";
 
@@ -9,6 +10,10 @@ const mocked = vi.hoisted(() => ({
   preview: {} as MoveChanges,
   fetching: false,
   mutate: vi.fn(),
+  runSetup: vi.fn(),
+  onCreated: undefined as
+    | ((result: MoveChanges, vars: MoveRemainingChangesVars) => void)
+    | undefined,
   refetch: vi.fn(),
   setActive: vi.fn(),
   closeSplit: vi.fn(),
@@ -24,7 +29,10 @@ vi.mock("../../lib/queries", () => ({
     isFetching: mocked.fetching,
     error: null,
   }),
-  useMoveRemainingChanges: () => ({ mutate: mocked.mutate, isPending: false, error: null }),
+  useMoveRemainingChanges: (_repo: string, _source: string, onCreated: typeof mocked.onCreated) => {
+    mocked.onCreated = onCreated;
+    return { mutate: mocked.mutate, isPending: false, error: null };
+  },
   useRepoBranches: () => ({ data: [{ name: "feature" }], isLoading: false, isError: false }),
   useTasks: () => ({ data: [{ id: "AK-456", title: "Notifications UI" }] }),
   useWorktreeBranchChanges: () => ({ data: [] }),
@@ -78,13 +86,35 @@ describe("move remaining changes", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Create child branch" }));
     expect(mocked.mutate).toHaveBeenCalledWith(
-      { id: "move-1", branch: "notifications-ui", ticketId: "AK-123" },
+      {
+        id: "move-1",
+        runSetup: false,
+        branch: "notifications-ui",
+        ticketId: "AK-123",
+        destination: { id: "split-1", baseBranch: "feature", project: null },
+      },
       expect.any(Object),
     );
+    expect(
+      screen.getByRole("checkbox", { name: "Run setup in the child branch" }),
+    ).not.toBeChecked();
+    mocked.onCreated?.({ ...mocked.preview, completed: true }, mocked.mutate.mock.calls[0][0]);
+    expect(mocked.runSetup).not.toHaveBeenCalled();
     const callbacks = mocked.mutate.mock.calls[0][1];
     callbacks.onSuccess({ ...mocked.preview, completed: true });
     expect(mocked.setActive).toHaveBeenCalledWith("split-1");
     expect(mocked.closeSplit).toHaveBeenCalledOnce();
+  });
+  it("runs setup only in the created child when explicitly checked", () => {
+    show();
+    fireEvent.change(screen.getByLabelText("Branch name"), { target: { value: "child" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Run setup in the child branch" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create child branch" }));
+    const vars = mocked.mutate.mock.calls[0][0];
+    expect(vars.runSetup).toBe(true);
+    expect(mocked.runSetup).not.toHaveBeenCalled();
+    mocked.onCreated?.({ ...mocked.preview, completed: true }, vars);
+    expect(mocked.runSetup).toHaveBeenCalledExactlyOnceWith("split-1");
   });
   it("allows a new branch name and ticket override", () => {
     show();
@@ -98,7 +128,13 @@ describe("move remaining changes", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /AK-456/ }));
     fireEvent.click(screen.getByRole("button", { name: "Create child branch" }));
     expect(mocked.mutate).toHaveBeenCalledWith(
-      { id: "move-1", branch: "notifications-ui", ticketId: "AK-456" },
+      {
+        id: "move-1",
+        runSetup: false,
+        branch: "notifications-ui",
+        ticketId: "AK-456",
+        destination: { id: "split-1", baseBranch: "feature", project: null },
+      },
       expect.any(Object),
     );
   });
@@ -144,7 +180,13 @@ describe("move remaining changes", () => {
     expect(screen.getByText(/1 file will move/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Create child branch" }));
     expect(mocked.mutate).toHaveBeenCalledWith(
-      { id: "refreshed", branch: "ui", ticketId: "AK-456" },
+      {
+        id: "refreshed",
+        runSetup: false,
+        branch: "ui",
+        ticketId: "AK-456",
+        destination: { id: "split-1", baseBranch: "feature", project: null },
+      },
       expect.any(Object),
     );
   });
@@ -154,7 +196,13 @@ describe("move remaining changes", () => {
     expect(screen.getByLabelText("Branch name")).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Retry move" }));
     expect(mocked.mutate).toHaveBeenCalledWith(
-      { id: "move-1", branch: "feature-next", ticketId: "AK-123" },
+      {
+        id: "move-1",
+        runSetup: false,
+        branch: "feature-next",
+        ticketId: "AK-123",
+        destination: { id: "split-1", baseBranch: "feature", project: null },
+      },
       expect.any(Object),
     );
   });

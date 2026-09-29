@@ -91,6 +91,7 @@ vi.mock("../../lib/queries", async () => {
     useResolvedBoolSetting: () => ({ value: false, isFetched: true }),
     TREES_RUN_SETUP_KEY: "trees_run_setup",
     useWorktrees: () => ({ data: [worktree], isLoading: false }),
+    usePendingWorktreeMoves: () => [],
     useBaseWorktree: () => ({ data: null, isLoading: false }),
     useWorktreePrs: () => ({ data: [pr] }),
     useTasks: () => ({ data: [] }),

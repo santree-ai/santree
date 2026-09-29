@@ -18,12 +18,14 @@ import {
 } from "../../lib/queries";
 import { toast } from "../../state/toast";
 import { alpha } from "../../theme/colors";
-import { useTrees } from "./model";
+import { BASE_ID, useTrees } from "./model";
 
 export function CreatePrDialog() {
-  const { repo, prDialogFor, closePrDialog, prsByWorktree } = useTrees();
+  const { repo, prDialogFor, closePrDialog, prsByWorktree, worktrees, baseWorktree } = useTrees();
   // Rendered only when a worktree is targeted, so this is always set on mount.
   const id = prDialogFor ?? "";
+  const worktree = id === BASE_ID ? baseWorktree : worktrees.find((worktree) => worktree.id === id);
+  const branch = worktree?.branch ?? "Current branch";
 
   // An already-open PR for this branch blocks a new one (GitHub rejects duplicates).
   // Merged/closed PRs don't — the branch can have new commits to open a fresh PR for.
@@ -134,12 +136,18 @@ export function CreatePrDialog() {
         className="relative flex w-[560px] max-w-full flex-col rounded-xl border border-line-3 bg-panel p-4 shadow-2xl"
         style={{ animation: "toastIn .16s ease-out" }}
       >
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-col items-start gap-1">
           <span className="text-[13px] font-semibold text-fg-bright">Create pull request</span>
           {base ? (
-            <span className="font-mono text-[10.5px] text-muted-3">
-              {id} → {base}
-            </span>
+            <div className="flex w-full min-w-0 items-center gap-1.5 font-mono text-[10.5px] text-muted-3">
+              <span className="min-w-0 flex-1 truncate" title={branch}>
+                {branch}
+              </span>
+              <span className="flex-none">→</span>
+              <span className="min-w-0 flex-1 truncate" title={base}>
+                {base}
+              </span>
+            </div>
           ) : (
             prefilling && <Spinner size={11} />
           )}

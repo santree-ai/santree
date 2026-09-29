@@ -880,7 +880,7 @@ export function Dropdown({
 }: {
   trigger: (toggle: () => void) => ReactNode;
   children: (close: () => void) => ReactNode;
-  /** Open above (`up`) or below (`down`, default) the trigger. */
+  /** Preferred side; flips when the other side has more room. */
   placement?: "up" | "down";
   /** Anchor the menu to the trigger's left (default) or right edge. */
   align?: "left" | "right";
@@ -908,9 +908,8 @@ export function Dropdown({
   // Fixed-position coordinates for the portaled menu, anchored to the trigger.
   const [coords, setCoords] = useState<CSSProperties | null>(null);
 
-  // Measure the trigger and derive the menu's fixed position. Re-runs while open
-  // on scroll/resize so the menu tracks the trigger (it lives in document.body,
-  // not next to the trigger, so it can't rely on normal layout to follow it).
+  // The portal escapes panel clipping, but still has to fit the app viewport.
+  // Measure before paint and again when filtering, scrolling, or resizing changes it.
   useLayoutEffect(() => {
     if (!open) {
       setCoords(null);
@@ -918,21 +917,57 @@ export function Dropdown({
     }
     const place = () => {
       const el = ref.current;
-      if (!el) return;
+      const menu = menuRef.current;
+      if (!el || !menu) return;
       const r = el.getBoundingClientRect();
-      const next: CSSProperties = {
+      const oldHeight = menu.style.maxHeight;
+      const oldWidth = menu.style.maxWidth;
+      // Measure its unconstrained size so a previous clamp cannot hide the need
+      // to flip, or keep it small after the window grows again.
+      menu.style.maxHeight = "none";
+      menu.style.maxWidth = "none";
+      const size = menu.getBoundingClientRect();
+      menu.style.maxHeight = oldHeight;
+      menu.style.maxWidth = oldWidth;
+      const margin = 8;
+      const gap = 4;
+      const above = Math.max(0, r.top - gap - margin);
+      const below = Math.max(0, window.innerHeight - r.bottom - gap - margin);
+      const preferUp = placement === "up";
+      const preferred = preferUp ? above : below;
+      const alternate = preferUp ? below : above;
+      const up = size.height > preferred && alternate > preferred ? !preferUp : preferUp;
+      const available = Math.min(up ? above : below, Math.max(0, window.innerHeight - margin * 2));
+      const width = Math.min(size.width, Math.max(0, window.innerWidth - margin * 2));
+      const height = Math.min(size.height, available);
+      const left = align === "right" ? r.right - width : r.left;
+      setCoords({
         position: "fixed",
-        ...(placement === "up"
-          ? { bottom: window.innerHeight - r.top + 4 }
-          : { top: r.bottom + 4 }),
-        ...(align === "right" ? { right: window.innerWidth - r.right } : { left: r.left }),
-      };
-      setCoords(next);
+        left: Math.max(margin, Math.min(left, window.innerWidth - width - margin)),
+        top: Math.max(
+          margin,
+          Math.min(
+            up ? r.top - gap - height : r.bottom + gap,
+            window.innerHeight - height - margin,
+          ),
+        ),
+        maxWidth: Math.max(0, window.innerWidth - margin * 2),
+        maxHeight: available,
+        overflowY: "auto",
+      });
     };
     place();
+    const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
+    if (ref.current) resized?.observe(ref.current);
+    if (menuRef.current) resized?.observe(menuRef.current);
+    const changed = new MutationObserver(place);
+    if (menuRef.current)
+      changed.observe(menuRef.current, { childList: true, subtree: true, characterData: true });
     window.addEventListener("resize", place);
     window.addEventListener("scroll", place, true);
     return () => {
+      resized?.disconnect();
+      changed.disconnect();
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
     };
@@ -982,13 +1017,12 @@ export function Dropdown({
     <div ref={ref} className="relative">
       {triggerNode}
       {open &&
-        coords &&
         createPortal(
           <div
             ref={menuRef}
             role="menu"
             onKeyDown={onMenuKeyDown}
-            style={coords}
+            style={coords ?? { position: "fixed", visibility: "hidden" }}
             className={`z-[200] rounded-lg border border-line-3 bg-raised py-1 shadow-lg ${menuClassName}`}
           >
             {children(() => setOpen(false))}

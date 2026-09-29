@@ -24,6 +24,7 @@ export function SplitEditor({ repo, worktree }: { repo: string; worktree: Worktr
         <MoveForm
           repo={repo}
           preview={preview.data}
+          project={worktree.project ?? null}
           hasCommits={worktree.ahead > 0}
           refreshing={preview.isFetching}
           previewError={preview.error}
@@ -48,6 +49,7 @@ function MoveForm({
   preview,
   refresh,
   hasCommits,
+  project,
   refreshing,
   previewError,
 }: {
@@ -55,13 +57,17 @@ function MoveForm({
   preview: MoveChanges;
   refresh: () => void;
   hasCommits: boolean;
+  project: string | null;
   refreshing: boolean;
   previewError: Error | null;
 }) {
-  const move = useMoveRemainingChanges(repo, preview.sourceId);
+  const { setActive, setFileTab, closeSplit, runSetup } = useTrees();
+  const move = useMoveRemainingChanges(repo, preview.sourceId, (result, vars) => {
+    if (vars.runSetup) runSetup(result.worktreeId);
+  });
   const branches = useRepoBranches(repo);
   const { data: tasks = [] } = useTasks(repo);
-  const { setActive, setFileTab, closeSplit } = useTrees();
+  const [setup, setSetup] = useState(false);
   const [branch, setBranch] = useState(preview.branch ?? "");
   const [ticket, setTicket] = useState(preview.ticketId ?? "");
   const resuming = preview.branch !== null;
@@ -128,6 +134,16 @@ function MoveForm({
             any destination edits are preserved.
           </p>
         )}
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-fg-2">
+          <input
+            type="checkbox"
+            checked={setup}
+            disabled={move.isPending}
+            onChange={(e) => setSetup(e.target.checked)}
+            className="h-3.5 w-3.5 cursor-pointer accent-[var(--accent)]"
+          />
+          Run setup in the child branch
+        </label>
         <p className="text-xs text-muted-2">
           Pause agents before moving. A recovery stash is kept.
         </p>
@@ -140,7 +156,17 @@ function MoveForm({
             title={reason ?? undefined}
             onClick={() =>
               move.mutate(
-                { id: preview.id, branch: name, ticketId: ticket.trim() || null },
+                {
+                  id: preview.id,
+                  runSetup: setup,
+                  branch: name,
+                  ticketId: ticket.trim() || null,
+                  destination: {
+                    id: preview.worktreeId,
+                    baseBranch: preview.sourceBranch,
+                    project,
+                  },
+                },
                 {
                   onSuccess: (result) => {
                     toast.success(
@@ -203,7 +229,7 @@ function TicketPicker({
         Ticket
       </span>
       <Dropdown
-        menuClassName="w-72 max-w-[calc(100vw-24px)] overflow-hidden"
+        menuClassName="flex w-72 flex-col overflow-hidden"
         trigger={(toggle) => (
           <button
             type="button"
@@ -231,7 +257,7 @@ function TicketPicker({
           };
           return (
             <>
-              <div className="px-2 py-1">
+              <div className="flex-none px-2 py-1">
                 <input
                   aria-label="Search tickets"
                   placeholder="Search tickets or enter an ID…"
@@ -241,7 +267,7 @@ function TicketPicker({
                   onChange={(e) => setQuery(e.target.value)}
                 />
               </div>
-              <div className="max-h-56 overflow-auto">
+              <div className="min-h-0 max-h-56 flex-1 overflow-auto">
                 <button
                   type="button"
                   role="menuitem"

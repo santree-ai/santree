@@ -269,6 +269,9 @@ export interface PendingLaunch {
    *  makes a sub-task look like a root for the seconds the create takes. Absent for
    *  a root launch. */
   baseBranch?: string;
+  /** A split can have a real checkout before its file transfer finishes. */
+  holdUntilSettled?: boolean;
+  ticketId?: string | null;
 }
 
 /** A Reviews→Trees review hand-off: which worktree + freshly-minted review tab to

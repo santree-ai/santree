@@ -152,7 +152,7 @@ export function SidePanel<T extends string>({
 
           A tab's dot means "there is something here": pending changes and open
           queue items take the accent, because they are counts. A *status* carries
-          its own colour instead — the PR's is the CI rollup, and the AI work
+          its own colour instead — the PR’s is merged purple or its CI rollup, and the AI work
           queue's is amber when its brief was written against a head the PR has
           since moved past (advice about code that has changed reads as current,
           which is worse than none). See {@link aiWorkDot} for why that beats the

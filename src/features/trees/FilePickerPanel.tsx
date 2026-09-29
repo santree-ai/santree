@@ -34,7 +34,7 @@ import {
   useSetWorktreeTitle,
   useWorktreeStatus,
 } from "../../lib/queries";
-import { checkRollupMeta } from "../../theme/colors";
+import { checkRollupMeta, prStateMeta } from "../../theme/colors";
 import { AiWorkPane, aiWorkDot } from "../reviews/AiWorkPane";
 import { reviewBriefStale } from "../reviews/briefStale";
 import { useStartAiReviewInWorktree, useStartWorkInWorktree } from "../reviews/useStartWork";
@@ -170,10 +170,13 @@ export function FilePickerPanel() {
    *  Null is "nothing to say", which is most tabs most of the time. */
   function dotFor(tab: FileTab): string | null {
     if (tab === "changes") return changesDot(status);
-    if (tab === "pr")
+    if (tab === "pr") {
+      if (prSummary?.state === "Merged" || activePr?.state === "Merged")
+        return prStateMeta.Merged.color;
       return prSummary && prSummary.checks !== "None"
         ? checkRollupMeta[prSummary.checks].color
         : null;
+    }
     if (tab === "aiWork") return aiWorkDot(staleReview, openWork);
     return null;
   }

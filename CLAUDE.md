@@ -401,7 +401,10 @@ src/
   on the wrong line.
 - **Split branch…** opens in the Changes panel from the worktree menu or Git
   panel. A bottom-right disclosure expands its form; it starts collapsed on app
-  launch. The form shares the existing commit controls and ChangesList
+  launch. A pending mutation supplies the sidebar’s nested “Creating…” placeholder
+  until the move and list reconciliation finish, including across form unmounts.
+  “Run setup” is opt-in and starts the child’s existing setup flow only after
+  the move succeeds. The form shares the existing commit controls and ChangesList
   (icons, tree/list preference, staging, and file diffs in the main area). Commit the current part first; this action moves all remaining staged,
   unstaged and untracked changes into one new child worktree at the source HEAD.
   Creation requires a commit beyond the source's base and remaining changes.

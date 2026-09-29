@@ -2,9 +2,9 @@
  * What find has to get right: it searches what the pane *drew*, across the token
  * boundaries highlighting introduces, and it belongs to the pane on screen.
  */
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useRef } from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FindBar, findRanges, useFindInView } from "./FindInView";
 
@@ -156,6 +156,41 @@ describe("useFindInView", () => {
     type("Find");
     expect(position()).toContain("0/0");
   });
+
+  it("clears its fallback selection on unmount", () => {
+    const view = render(
+      <Harness>
+        <pre>categories</pre>
+      </Harness>,
+    );
+    openFind();
+    type("categories");
+    expect(window.getSelection()?.toString()).toBe("categories");
+    view.unmount();
+    expect(window.getSelection()?.rangeCount).toBe(0);
+  });
+
+  it("preserves a selection the user made after the fallback match", () => {
+    render(
+      <Harness>
+        <pre>categories other</pre>
+      </Harness>,
+    );
+    openFind();
+    type("categories");
+    const node = screen.getByText("categories other").firstChild;
+    expect(node).not.toBeNull();
+    if (!node) return;
+    const userRange = document.createRange();
+    userRange.setStart(node, 11);
+    userRange.setEnd(node, 16);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(userRange);
+    fireEvent.click(screen.getByLabelText("Close find"));
+    expect(selection?.toString()).toBe("other");
+    selection?.removeAllRanges();
+  });
 });
 
 describe("findRanges", () => {
@@ -178,5 +213,153 @@ describe("findRanges", () => {
 
   it("finds nothing for an empty query", () => {
     expect(findRanges(root("<p>anything</p>"), "").ranges).toHaveLength(0);
+  });
+
+  it("keeps offsets after Unicode whose lowercase form expands", () => {
+    const { ranges } = findRanges(root("<p>İ categories CATEGORIES</p>"), "categories");
+    expect(ranges.map((range) => range.toString())).toEqual(["categories", "CATEGORIES"]);
+  });
+
+  it("treats regular expression characters as literal search text", () => {
+    const query = "obj.items[0]?.value + (a*b) \\ $ ^ | {x}";
+    const el = document.createElement("pre");
+    el.textContent = `${query}\n${query}`;
+    expect(findRanges(el, query).ranges.map((range) => range.toString())).toEqual([query, query]);
+  });
+});
+
+describe("Find highlight lifecycle", () => {
+  let highlights: Map<string, Set<Range>>;
+  const all = () => highlights.get("santree-find");
+  const current = () => highlights.get("santree-find-current");
+  const matches = () => [...(all() ?? [])].map((range) => range.toString());
+
+  beforeEach(() => {
+    highlights = new Map();
+    vi.stubGlobal("CSS", { highlights });
+    vi.stubGlobal(
+      "Highlight",
+      class extends Set<Range> {
+        constructor(...ranges: Range[]) {
+          super(ranges);
+        }
+      },
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("clears the painted ranges before replacing a progressively typed query", () => {
+    const set = vi.spyOn(highlights, "set");
+    render(
+      <Harness>
+        <pre>class categories exception categories</pre>
+      </Harness>,
+    );
+    openFind();
+    type("c");
+    const previous = all();
+    const previousCurrent = current();
+    expect(previous?.size).toBe(4);
+    set.mockImplementation((name, value) => {
+      // Replacing an existing registration fails to repaint in affected WebKit.
+      expect(highlights.has(name)).toBe(false);
+      expect(previous?.size).toBe(0);
+      expect(previousCurrent?.size).toBe(0);
+      return Map.prototype.set.call(highlights, name, value);
+    });
+    type("categories");
+    expect(matches()).toEqual(["categories", "categories"]);
+    expect([...(current() ?? [])][0]?.toString()).toBe("categories");
+    type("no match");
+    expect(highlights.size).toBe(0);
+  });
+
+  it.each(["empty query", "close", "unmount", "hide"])("removes painted ranges on %s", (action) => {
+    const view = render(
+      <Harness>
+        <pre>categories</pre>
+      </Harness>,
+    );
+    openFind();
+    type("categories");
+    const previous = all();
+    const previousCurrent = current();
+    if (action === "empty query") type("");
+    if (action === "close") fireEvent.click(screen.getByLabelText("Close find"));
+    if (action === "unmount") view.unmount();
+    if (action === "hide")
+      view.rerender(
+        <Harness enabled={false}>
+          <pre>categories</pre>
+        </Harness>,
+      );
+    expect(highlights.size).toBe(0);
+    expect(previous?.size).toBe(0);
+    expect(previousCurrent?.size).toBe(0);
+  });
+
+  it("does not let a hidden pane clear the active pane's highlights", () => {
+    render(
+      <Harness>
+        <pre>categories</pre>
+      </Harness>,
+    );
+    openFind();
+    type("categories");
+    const hidden = render(
+      <Harness enabled={false}>
+        <pre>other file</pre>
+      </Harness>,
+    );
+    expect(matches()).toEqual(["categories"]);
+    hidden.unmount();
+    expect(matches()).toEqual(["categories"]);
+  });
+
+  it("clamps the current match when a narrower query has fewer results", () => {
+    render(
+      <Harness>
+        <pre>class categories exception categories</pre>
+      </Harness>,
+    );
+    openFind();
+    type("c");
+    fireEvent.click(screen.getByLabelText("Previous match"));
+    expect(position()).toContain("4/4");
+    type("categories");
+    expect(position()).toContain("2/2");
+    expect([...(current() ?? [])][0]?.toString()).toBe("categories");
+  });
+
+  it("replaces detached ranges when the displayed file changes", async () => {
+    vi.useFakeTimers();
+    const view = render(
+      <Harness>
+        <pre key="first">categories categories</pre>
+      </Harness>,
+    );
+    openFind();
+    type("categories");
+    const previous = all();
+    view.rerender(
+      <Harness>
+        <pre key="second">new categories file</pre>
+      </Harness>,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(120);
+    });
+    expect(previous?.size).toBe(0);
+    expect(matches()).toEqual(["categories"]);
+    expect([...(all() ?? [])][0]?.startContainer.isConnected).toBe(true);
+    expect(position()).toContain("1/1");
   });
 });

@@ -191,6 +191,26 @@ describe("mergeWorktrees", () => {
     expect(result[0].pending).toBe(false);
   });
 
+  it("keeps a split child pending through early watcher refreshes, then replaces it once settled", () => {
+    const parent = { ...worktree("AK-1"), branch: "parent" };
+    const child = { ...worktree("split-1"), branch: "child", baseBranch: "parent" };
+    const pending = pendingLaunch("split-1", {
+      baseBranch: "parent",
+      ticketId: "AK-1",
+      holdUntilSettled: true,
+    });
+    const during = mergeWorktrees([parent, child], [pending], new Set(), identity);
+    expect(during).toHaveLength(2);
+    expect(during.find((w) => w.id === "split-1")).toMatchObject({
+      pending: true,
+      baseBranch: "parent",
+      ticketId: "AK-1",
+      path: "",
+    });
+    const after = mergeWorktrees([parent, child], [], new Set(), identity);
+    expect(after.find((w) => w.id === "split-1")).toEqual(child);
+  });
+
   it("hides a worktree that's pending delete, even though it's still in the real list", () => {
     const result = mergeWorktrees([worktree("AK-1")], [], new Set(["AK-1"]), identity);
     expect(result).toHaveLength(0);

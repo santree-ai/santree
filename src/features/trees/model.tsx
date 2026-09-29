@@ -36,6 +36,7 @@ import { primaryPr } from "../../components/PrChip";
 import {
   useAddWorktreeTab,
   useBaseWorktree,
+  usePendingWorktreeMoves,
   useRemoveWorktreeTab,
   useRenameWorktreeTab,
   useRepos,
@@ -66,6 +67,7 @@ export function pendingWorktree(p: PendingLaunch): Worktree {
   return {
     id: p.id,
     title: p.title,
+    ticketId: p.ticketId,
     // Nothing is known about a worktree that doesn't exist yet — and a placeholder
     // is on screen for a second or two. Don't invent a status/activity for it.
     status: null,
@@ -138,8 +140,8 @@ export function effectiveSessionState(w: Worktree, hook: SessionState | undefine
 
 /** Merge real worktrees with in-flight launch placeholders and pending
  *  deletes: a launch keeps showing its "Creating workspace…" placeholder
- *  until the real worktree with the same id lands (then the placeholder is
- *  dropped), and a worktree mid-delete is hidden immediately rather than
+ *  until the real worktree with the same id lands. A split holds it longer,
+ *  until the file transfer settles. A worktree mid-delete is hidden rather than
  *  waiting for the filesystem watcher's refetch to catch up. Exported for
  *  testing — see model.test.ts. */
 export function mergeWorktrees(
@@ -149,8 +151,13 @@ export function mergeWorktrees(
   withLiveStatus: (w: Worktree) => Worktree,
 ): Worktree[] {
   const realIds = new Set(realWorktrees.map((w) => w.id));
-  const placeholders = pendingLaunches.filter((p) => !realIds.has(p.id)).map(pendingWorktree);
-  const visible = realWorktrees.filter((w) => !pendingDeletes.has(w.id)).map(withLiveStatus);
+  const held = new Set(pendingLaunches.filter((p) => p.holdUntilSettled).map((p) => p.id));
+  const placeholders = pendingLaunches
+    .filter((p) => !pendingDeletes.has(p.id) && (p.holdUntilSettled || !realIds.has(p.id)))
+    .map(pendingWorktree);
+  const visible = realWorktrees
+    .filter((w) => !pendingDeletes.has(w.id) && !held.has(w.id))
+    .map(withLiveStatus);
   return [...placeholders, ...visible];
 }
 
@@ -599,8 +606,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   );
 
   // Show "Creating workspace…" placeholders for in-flight launches; hide worktrees
-  // being deleted. Both held as state (not query-cache patches) so the refetch this
-  // tab's mount — or the filesystem watcher mid-delete — triggers can't wipe them.
+  // being deleted. App state and mutation state survive the watcher refetches
+  // that would erase an optimistic patch to the worktree query cache.
   //
   // Only *this* project's launches. The register is app-wide, and it used to be
   // implicitly single-project because a launch could only ever happen in the one
@@ -608,15 +615,16 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // merge would show a workspace a placeholder for a worktree being created in
   // another one — a row that never resolves, because its real worktree lands in
   // a list this view never reads.
+  const pendingMoves = usePendingWorktreeMoves();
   const worktrees = useMemo(
     () =>
       mergeWorktrees(
         realWorktrees,
-        pendingLaunches.filter((l) => l.repo === repo),
+        [...pendingLaunches, ...pendingMoves].filter((l) => l.repo === repo),
         pendingDeletes,
         withLiveStatus,
       ),
-    [realWorktrees, repo, pendingLaunches, pendingDeletes, withLiveStatus],
+    [realWorktrees, repo, pendingLaunches, pendingMoves, pendingDeletes, withLiveStatus],
   );
 
   // Live PR status keyed by worktree id (worktree.id == its issue id).

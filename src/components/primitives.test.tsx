@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { Dropdown, Segmented, Tabs, TerminalActivity } from "./primitives";
 
@@ -86,6 +86,59 @@ describe("Dropdown focus management", () => {
 
     fireEvent.keyDown(menu, { key: "Home" });
     expect(screen.getByRole("button", { name: "One" })).toHaveFocus();
+  });
+});
+
+describe("Dropdown viewport placement", () => {
+  it.each([
+    { placement: "down" as const, y: 520, viewport: 600, top: 256, maxHeight: 508 },
+    { placement: "up" as const, y: 30, viewport: 600, top: 64, maxHeight: 528 },
+    { placement: "down" as const, y: 80, viewport: 200, top: 114, maxHeight: 78 },
+  ])("fits a $placement menu at y=$y inside a $viewport px window", ({
+    placement,
+    y,
+    viewport,
+    top,
+    maxHeight,
+  }) => {
+    vi.stubGlobal("innerHeight", viewport);
+    vi.stubGlobal("innerWidth", 800);
+    const bounds = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.getAttribute("role") === "menu"
+          ? new DOMRect(0, 0, 288, 260)
+          : new DOMRect(600, y, 180, 30);
+      });
+    try {
+      render(
+        <Dropdown
+          placement={placement}
+          trigger={(toggle) => (
+            <button type="button" onClick={toggle}>
+              Open menu
+            </button>
+          )}
+        >
+          {() => <button type="button">An issue</button>}
+        </Dropdown>,
+      );
+      fireEvent.click(trigger());
+      expect(screen.getByRole("menu")).toHaveStyle({
+        top: `${top}px`,
+        left: "504px",
+        maxHeight: `${maxHeight}px`,
+        overflowY: "auto",
+      });
+      // Growing the viewport lets a formerly constrained menu use the preferred side again.
+      vi.stubGlobal("innerHeight", 900);
+      fireEvent(window, new Event("resize"));
+      if (placement === "down")
+        expect(screen.getByRole("menu")).toHaveStyle({ top: `${y + 34}px` });
+    } finally {
+      bounds.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 });
 
