@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.12 — 2026-09-30
+
+- The same app as beta.11, rebuilt after a fix to one of santree's own tests. Nothing changes in the app.
+
 ## 0.1.17-beta.11 — 2026-09-30
 
 - Daedalus projects now show their worktrees, changes, diffs and files, read from the box. The open worktree refreshes every few seconds while it is on screen.
