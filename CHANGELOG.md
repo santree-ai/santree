@@ -7,6 +7,12 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.9 — 2026-09-29
+
+- Daedalus projects now connect through the Daedalus agent on this Mac. There is nothing to configure in Settings: install the agent, approve this Mac and turn on santree for it in Daedalus › Settings › Machines.
+- Settings › Daedalus shows one status card saying how the connection is and what to do when it isn't, with a Run check button to try again now.
+- The Daedalus URL, API token, SSH details and identity file are gone from Settings.
+
 ## 0.1.17-beta.8 — 2026-09-29
 
 - Internal groundwork for connecting to Daedalus over its own secure link. Nothing changes in the app.
