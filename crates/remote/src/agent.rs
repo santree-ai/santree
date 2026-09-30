@@ -16,7 +16,9 @@
 //!    an agent that predates santree's socket;
 //! 2. the other end checked: the kernel names the peer's uid, and both it
 //!    and the socket file's owner must be root, who runs the agent — so a
-//!    process that got to the path first is not handed santree's traffic;
+//!    process that got to the path first is not handed santree's traffic
+//!    (a peer that already closed, as after a refusal, can't be named on
+//!    macOS; nothing reaches it, so the file's owner is enough then);
 //! 3. the agent's one first line (≤ [`FIRST_LINE_MAX`] bytes, within
 //!    [`FIRST_LINE_WAIT`]), read a byte at a time so nothing after it is
 //!    taken: `{"id":null,"ok":{host,node,agent}}`, after which the stream is
@@ -136,17 +138,27 @@ impl AgentConnector {
     /// The peer the kernel names, and the socket file's owner, are both
     /// `server_uid`.
     fn check_server(&self, stream: &UnixStream) -> Result<(), ConnectError> {
-        let peer = stream
-            .peer_cred()
-            .map_err(|e| ConnectError::Failed(format!("can't tell who serves the socket: {e}")))?
-            .uid();
+        let peer = match stream.peer_cred() {
+            Ok(cred) => Some(cred.uid()),
+            // macOS can't name a peer that has already closed its end
+            // (ENOTCONN), and the agent closes right after writing a refusal.
+            // Nothing santree writes can reach a closed peer, so its line is
+            // still worth reading; the file's owner is still checked.
+            Err(e) if e.kind() == ErrorKind::NotConnected => None,
+            Err(e) => {
+                return Err(ConnectError::Failed(format!(
+                    "can't tell who serves the socket: {e}"
+                )))
+            }
+        };
         let owner = std::fs::symlink_metadata(&self.socket)
             .map_err(|e| ConnectError::Failed(format!("can't read the socket: {e}")))?
             .uid();
-        if peer != self.server_uid || owner != self.server_uid {
+        if peer.is_some_and(|uid| uid != self.server_uid) || owner != self.server_uid {
             return Err(ConnectError::Untrusted(format!(
-                "{} is served by uid {peer} and owned by uid {owner}, not the Daedalus agent's",
-                self.socket.display()
+                "{} is served by uid {} and owned by uid {owner}, not the Daedalus agent's",
+                self.socket.display(),
+                peer.map_or_else(|| "?".into(), |uid| uid.to_string()),
             )));
         }
         Ok(())

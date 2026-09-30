@@ -58,8 +58,11 @@ santree app (Mac)
    serve santree. Refused (a stale file, nobody listening) → the agent isn't running.
 2. **The other end is checked**: the kernel's peer credentials and the socket file's
    owner must both be root, who runs the agent — the same check every client of the
-   agent's local socket makes. Anything else is refused as untrusted. (The agent
-   checks this side too: only root and the user who installed it may connect.)
+   agent's local socket makes. Anything else is refused as untrusted. macOS can't
+   name a peer that has already closed, as the agent does right after a refusal;
+   then the file's owner alone is checked, since nothing santree writes reaches a
+   closed peer. The agent checks this side too: only root and the user who
+   installed it may connect.
 3. **One first line from the agent**, before santree writes anything (≤ 4 KiB,
    within 20 s — the agent answers within its own 15, its 10 s dial to the host
    included), read a byte at a time so nothing after it is taken:
