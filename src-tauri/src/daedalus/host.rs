@@ -591,9 +591,11 @@ mod tests {
         (sessions, states, usage)
     }
 
-    async fn cursor(db: &Db) -> (Option<i64>, Option<String>) {
+    /// The saved cursor row, or `None` before the first ack writes it — the queue
+    /// empties on the host at the ack, a moment before the row is saved here.
+    async fn cursor(db: &Db) -> Option<(Option<i64>, Option<String>)> {
         sqlx::query_as("SELECT hook_cursor, boot_id FROM daedalus_connection WHERE id = 1")
-            .fetch_one(db)
+            .fetch_optional(db)
             .await
             .unwrap()
     }
@@ -665,7 +667,8 @@ mod tests {
         }
         let boot = first.boot_id().to_string();
         eventually("the whole batch acked and saved", || async {
-            first.queued_hooks().is_empty() && cursor(&db).await == (Some(5), Some(boot.clone()))
+            first.queued_hooks().is_empty()
+                && cursor(&db).await == Some((Some(5), Some(boot.clone())))
         })
         .await;
 
@@ -733,7 +736,7 @@ mod tests {
         first.shutdown();
         let new_boot = second.boot_id().to_string();
         eventually("the new boot's first event applied and saved", || async {
-            cursor(&db).await == (Some(1), Some(new_boot.clone()))
+            cursor(&db).await == Some((Some(1), Some(new_boot.clone())))
         })
         .await;
         let (_, states, _) = rows(&db).await;
