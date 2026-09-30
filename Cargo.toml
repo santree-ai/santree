@@ -6,6 +6,7 @@ members = [
     "crates/pty",
     "crates/hook",
     "crates/remote-proto",
+    "crates/remote-tls",
     "crates/remote",
 ]
 resolver = "2"

@@ -274,6 +274,7 @@ from. See `src/dev/fixtures/README.md` for what is fake and what is real.
 ├── crates/agent-kind/         # AgentKind, shared by core, pty and remote-proto (specta behind a feature)
 ├── crates/pty/                # PtyManager: real process behind a real PTY (Tauri-agnostic)
 ├── crates/remote-proto/       # protocol v1 types for the Daedalus link (docs/remote.md)
+├── crates/remote-tls/         # the pinned TLS 1.3 profile of the session-host link (ring only)
 ├── crates/remote/             # santree-remote-client: ssh transport, client, reconnecting host
 ├── src-tauri/                 # THIN Tauri adapter (wiring + commands + live backends)
 │   ├── src/{lib,commands}.rs  #   builder + registration + #[tauri::command] wrappers

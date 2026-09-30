@@ -60,14 +60,18 @@ applied version the resolved set no longer has — and `0028` drops the table.
   `crates/hook` (the bundled `santree-hook`: Claude hooks, status line, MCP server)
   + `crates/remote` (`santree-remote-client`: the ssh link to Daedalus, Tauri-agnostic)
   + `crates/remote-proto` (`santree-remote-proto`: protocol v1's types) +
+  `crates/remote-tls` (`santree-remote-tls`: the pinned TLS 1.3 profile of the
+  session-host link) +
   `crates/agent-kind` (`santree-agent-kind`: the `AgentKind` enum, re-exported by
   `santree_core::domain`).
-- **Crates the daedalus engine consumes:** `santree-pty`, `santree-remote-proto`
-  and `santree-agent-kind` are depended on by git rev from the daedalus engine
-  repo, so their public API and their dependency list are a contract. None may
-  depend on `santree-core`, Tauri, or (by default) specta — `AgentKind`'s
-  `specta::Type` sits behind the `specta` feature, which only `santree-core`
-  turns on. The engine builds them with nix on an older rustc than
+- **Crates the daedalus engine consumes:** `santree-pty`, `santree-remote-proto`,
+  `santree-remote-tls` and `santree-agent-kind` are depended on by git rev from
+  the daedalus engine repo, so their public API and their dependency list are a
+  contract. None may depend on `santree-core`, Tauri, or (by default) specta —
+  `AgentKind`'s `specta::Type` sits behind the `specta` feature, which only
+  `santree-core` turns on. `santree-remote-tls` uses ring as its only crypto
+  provider, passed explicitly (no aws-lc-rs in its tree, never the process
+  default). The engine builds them with nix on an older rustc than
   `rust-toolchain.toml` pins, so they declare `rust-version = "1.95"` and must
   keep building on it.
 
@@ -121,6 +125,9 @@ crates/remote/src/ the client for `santree-remote` on Daedalus (docs/remote.md):
                    cursor) · probe (health check) · fake (test daemon)
 crates/remote-proto/src/  lib.rs — protocol v1 as types (re-exported as the
                    client's `proto`); its tests pin the exact wire text
+crates/remote-tls/src/    lib.rs — the session-host link's TLS profile (identity,
+                   pinning verifiers, configs, refusals) · cert.rs (the
+                   self-signed ed25519 certificate)
 crates/agent-kind/src/    lib.rs — `AgentKind` + `UnknownAgentKind`
 src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin wrappers)
                    · tracker.rs (the `TicketTracker` trait: which tracker a repo

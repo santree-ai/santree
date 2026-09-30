@@ -2,8 +2,8 @@
 
 The source of truth for how santree works on repos that live on the user's home
 server, managed by **Daedalus**. Read this before touching `src-tauri/src/remote/`,
-`crates/remote/`, `crates/remote-proto/`, `src-tauri/src/daedalus/`, or anything
-that dispatches on `RepoLocation`.
+`crates/remote/`, `crates/remote-proto/`, `crates/remote-tls/`,
+`src-tauri/src/daedalus/`, or anything that dispatches on `RepoLocation`.
 
 ---
 
@@ -141,11 +141,17 @@ Newline-delimited JSON, one object per line, both directions. Binary data is bas
 
 `hello` (first request):
 `{"protocol":1,"client":"santree/<ver>","owner":"<client instance id>"}` →
-`{"protocol":1,"version","hostname","user","home","bootId"}`. `bootId` is random per
+`{"protocol":1,"version","hostname","user","home","bootId","projectsRoot","hookBin","features"}`.
+`bootId` is random per
 `serve` start: hook `seq` restarts at 1 with each boot, so a client whose stored
 `bootId` differs resets its hook cursor to 0. Unsupported protocol → error `version`,
 connection kept open. `owner` is minted once per app process (the link outlives page
 reloads); a PTY session's own `owner` is the webview's page owner, as locally.
+`projectsRoot` is the absolute root the checkouts live under; `hookBin` the absolute
+path an agent's hook command runs (`<hookBin> hook <args>`), stable across host
+updates; `features` the wire names of the optional methods the host serves
+(`["workspaces.list"]`) — a client checks it (`HelloResult::supports`) and shows
+"session host too old" rather than calling a missing one. All three are required.
 
 PTY (session info = `{id,pid,cwd,command,owner,label,agentKind,cols,rows,attached,
 alive,epoch}`, `agentKind` ∈ `"Claude"|"Codex"|"Cursor"|"Opencode"|null`):
@@ -179,6 +185,47 @@ Exec / files / hooks:
 | `hooks.ack` | `{upTo}` | `{}` |
 
 `hooks.dropped {count}` is sent when the in-memory queue (10k) overflows.
+
+Features (served only when `hello`'s `features` names them):
+
+| method | params | result |
+|---|---|---|
+| `workspaces.list` | `{}` | `{root,generatedAt,workspaces:[{name,path,remote,branch,head,headAt,dirty,ahead,behind,sync}]}` |
+
+`root` is `projectsRoot`; `path` is `<root>/<name>`, `name` one plain component. Every
+optional is written as `null`, never omitted: `generatedAt` (RFC 3339; `null` = no
+snapshot yet, with an empty list), `remote`/`branch`/`head`/`headAt`, `ahead`/`behind`
+(`null` with no upstream) and `sync` (`{result,detail,at}`, `null` before the host's
+first sync of that checkout).
+
+### TLS profile (`santree-remote-tls`)
+
+The session-host link runs protocol v1 over TLS instead of ssh stdio. Both ends build
+their rustls configs from `crates/remote-tls`, so the profile cannot drift:
+
+- **Keys, not names or CAs.** Each end has an ed25519 `Identity` (PKCS#8 via ring) and
+  presents a self-signed certificate made from it at load time. The client pins the
+  host's **raw 32-byte public key** (64 hex on the wire, `parse_key_hex`; compared in
+  constant time), not a digest; the host admits a client key only if its `allow`
+  check (the enrolled devices, read live at each handshake) accepts it. Client
+  certificates are mandatory.
+- The pin says *which* key; the handshake signature (TLS 1.3 CertificateVerify,
+  checked with rustls' `verify_tls13_signature` over ring's algorithms) proves the
+  peer *holds* it. A peer showing the pinned key's certificate without the private
+  key fails.
+- TLS 1.3 only, the ED25519 signature scheme only, ring's provider passed explicitly
+  (never the process default; no aws-lc-rs in the crate's tree), no session
+  resumption, no tickets, no 0-RTT. The SNI is the constant `daedalus-session-host`,
+  which nobody validates.
+- `fingerprint(key)` — SHA-256 of the key, lowercase hex in sixteen groups of four
+  joined by `:`, the daedalus agent's format — is for display only.
+- **Refusals** (`Refusal::of(&io::Error)`): a host presenting another key fails the
+  client's `connect` → `HostKeyMismatch` ("host key changed — sign in again"). A
+  client key the host does not admit does **not** fail the connect: in TLS 1.3 the
+  client finishes before the host judges its certificate, so the host's
+  `access_denied` alert arrives on the client's **first read** → `NotEnrolled` (never
+  enrolled, or revoked). Both are terminal states, not reasons to reconnect. Every
+  other error is `None`.
 
 ## How santree dispatches (app side)
 
@@ -232,7 +279,12 @@ frames, events, error codes, base64 helpers. Its tests pin the exact wire text;
 changing one is a protocol change. `AgentKind` comes from `crates/agent-kind`
 (package `santree-agent-kind`).
 
-These two and `crates/pty` are the crates the daemon side shares: the daedalus
+`crates/remote-tls` (package `santree-remote-tls`) — the TLS profile above: `Identity`,
+the self-signed certificate (a small DER writer), `client_config` / `server_config`
+and their pinning verifiers, `connect` / `accept` (tokio-rustls), `peer_key`,
+`fingerprint`, `Refusal`. Its tests run real handshakes over an in-memory duplex.
+
+These, and `crates/pty`, are the crates the daemon side shares: the daedalus
 engine depends on them by git rev, so none of them depends on `santree-core`, Tauri
 or (by default) specta, and their public APIs are a contract with that repo.
 

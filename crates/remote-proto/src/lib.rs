@@ -240,6 +240,9 @@ pub mod m {
         HooksPush = "hooks.push": HookPushParams => HookPushResult;
         HooksSubscribe = "hooks.subscribe": HooksSubscribeParams => Empty;
         HooksAck = "hooks.ack": HooksAckParams => Empty;
+        /// The checkouts under the host's projects root. A feature: a host
+        /// that serves it names it in `hello`'s `features`.
+        WorkspacesList = "workspaces.list": Empty => WorkspacesResult;
     }
 }
 
@@ -266,6 +269,25 @@ pub struct HelloResult {
     /// cursor is only meaningful next to the boot it was taken under.
     #[serde(rename = "bootId")]
     pub boot_id: String,
+    /// Absolute: where the host's checkouts live, and the root a `pty.open`
+    /// or `exec.run` `cwd` must resolve under.
+    #[serde(rename = "projectsRoot")]
+    pub projects_root: String,
+    /// Absolute: the binary an agent's hook command runs (`<hookBin> hook
+    /// <args>`), at a path that outlives the host's own updates.
+    #[serde(rename = "hookBin")]
+    pub hook_bin: String,
+    /// The optional methods this host serves, by wire name (see
+    /// [`HelloResult::supports`]).
+    pub features: Vec<String>,
+}
+
+impl HelloResult {
+    /// Whether the host serves `M` — the check a client makes before calling a
+    /// method that is a feature rather than part of every v1 host.
+    pub fn supports<M: Method>(&self) -> bool {
+        self.features.iter().any(|f| f == M::NAME)
+    }
 }
 
 // ── pty ───────────────────────────────────────────────────────────────────
@@ -510,6 +532,58 @@ pub struct HooksAckParams {
     pub up_to: u64,
 }
 
+// ── workspaces ────────────────────────────────────────────────────────────
+
+/// `workspaces.list`: the host's snapshot of the checkouts under its projects
+/// root. A host with no snapshot yet answers an empty list with
+/// `generatedAt: null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacesResult {
+    /// Absolute; the same root `hello` names.
+    pub root: String,
+    /// When the snapshot was taken (RFC 3339).
+    #[serde(default)]
+    pub generated_at: Option<String>,
+    pub workspaces: Vec<Workspace>,
+}
+
+/// One checkout. Optional fields are written as `null`, never omitted.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Workspace {
+    /// One plain path component.
+    pub name: String,
+    /// Absolute: `<root>/<name>`.
+    pub path: String,
+    #[serde(default)]
+    pub remote: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub head: Option<String>,
+    /// The head commit's date (RFC 3339).
+    #[serde(default)]
+    pub head_at: Option<String>,
+    pub dirty: bool,
+    /// Commits ahead of / behind the upstream; `null` with no upstream.
+    #[serde(default)]
+    pub ahead: Option<u32>,
+    #[serde(default)]
+    pub behind: Option<u32>,
+    /// The host's last sync of this checkout; `null` before the first.
+    #[serde(default)]
+    pub sync: Option<WorkspaceSync>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WorkspaceSync {
+    pub result: String,
+    pub detail: String,
+    /// RFC 3339.
+    pub at: String,
+}
+
 // ── events ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -738,8 +812,85 @@ mod tests {
                 user: "santiago".into(),
                 home: "/home/santiago".into(),
                 boot_id: "b-1".into(),
+                projects_root: "/home/santiago/projects".into(),
+                hook_bin: "/run/current-system/sw/bin/daedalus-session-host".into(),
+                features: vec!["workspaces.list".into()],
             },
-            r#"{"protocol":1,"version":"0.3.0","hostname":"daedalus","user":"santiago","home":"/home/santiago","bootId":"b-1"}"#,
+            r#"{"protocol":1,"version":"0.3.0","hostname":"daedalus","user":"santiago","home":"/home/santiago","bootId":"b-1","projectsRoot":"/home/santiago/projects","hookBin":"/run/current-system/sw/bin/daedalus-session-host","features":["workspaces.list"]}"#,
+        );
+    }
+
+    #[test]
+    fn a_hello_names_the_features_it_serves() {
+        let hello = |features: &[&str]| HelloResult {
+            protocol: 1,
+            version: String::new(),
+            hostname: String::new(),
+            user: String::new(),
+            home: String::new(),
+            boot_id: String::new(),
+            projects_root: String::new(),
+            hook_bin: String::new(),
+            features: features.iter().map(|f| f.to_string()).collect(),
+        };
+        assert!(hello(&["workspaces.list"]).supports::<m::WorkspacesList>());
+        assert!(!hello(&[]).supports::<m::WorkspacesList>());
+        assert!(!hello(&["workspaces"]).supports::<m::WorkspacesList>());
+        // The new fields are part of every hello, not optional.
+        assert!(serde_json::from_str::<HelloResult>(
+            r#"{"protocol":1,"version":"v","hostname":"h","user":"u","home":"/h","bootId":"b"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn workspaces_list_shapes() {
+        assert_eq!(
+            req::<m::WorkspacesList>(11, &Empty),
+            r#"{"id":11,"m":"workspaces.list","p":{}}"#
+        );
+        round_trip(
+            &WorkspacesResult {
+                root: "/home/santiago/projects".into(),
+                generated_at: Some("2026-09-27T10:00:00Z".into()),
+                workspaces: vec![
+                    Workspace {
+                        name: "web".into(),
+                        path: "/home/santiago/projects/web".into(),
+                        remote: Some("git@github.com:o/web.git".into()),
+                        branch: Some("main".into()),
+                        head: Some("abc123".into()),
+                        head_at: Some("2026-09-27T09:00:00Z".into()),
+                        dirty: true,
+                        ahead: Some(1),
+                        behind: Some(0),
+                        sync: Some(WorkspaceSync {
+                            result: "ok".into(),
+                            detail: "fast-forwarded".into(),
+                            at: "2026-09-27T09:30:00Z".into(),
+                        }),
+                    },
+                    Workspace {
+                        name: "fresh".into(),
+                        path: "/home/santiago/projects/fresh".into(),
+                        ..Default::default()
+                    },
+                ],
+            },
+            concat!(
+                r#"{"root":"/home/santiago/projects","generatedAt":"2026-09-27T10:00:00Z","workspaces":["#,
+                r#"{"name":"web","path":"/home/santiago/projects/web","remote":"git@github.com:o/web.git","branch":"main","head":"abc123","headAt":"2026-09-27T09:00:00Z","dirty":true,"ahead":1,"behind":0,"sync":{"result":"ok","detail":"fast-forwarded","at":"2026-09-27T09:30:00Z"}},"#,
+                r#"{"name":"fresh","path":"/home/santiago/projects/fresh","remote":null,"branch":null,"head":null,"headAt":null,"dirty":false,"ahead":null,"behind":null,"sync":null}"#,
+                r#"]}"#
+            ),
+        );
+        round_trip(
+            &WorkspacesResult {
+                root: "/home/santiago/projects".into(),
+                generated_at: None,
+                workspaces: vec![],
+            },
+            r#"{"root":"/home/santiago/projects","generatedAt":null,"workspaces":[]}"#,
         );
     }
 

@@ -45,6 +45,13 @@ pub struct FakeOptions {
     pub hostname: String,
     pub user: String,
     pub home: String,
+    /// `hello`'s `projectsRoot`, and `workspaces.list`'s `root`.
+    pub projects_root: String,
+    pub hook_bin: String,
+    pub features: Vec<String>,
+    /// What `workspaces.list` answers: the snapshot's time and rows.
+    pub workspaces_generated_at: Option<String>,
+    pub workspaces: Vec<Workspace>,
     pub ping_interval: Duration,
     pub hook_queue_cap: usize,
 }
@@ -57,6 +64,11 @@ impl Default for FakeOptions {
             hostname: "fake-daedalus".into(),
             user: std::env::var("USER").unwrap_or_default(),
             home: std::env::var("HOME").unwrap_or_default(),
+            projects_root: std::env::var("HOME").unwrap_or_default(),
+            hook_bin: "/fake/bin/daedalus-session-host".into(),
+            features: vec![m::WorkspacesList::NAME.into()],
+            workspaces_generated_at: None,
+            workspaces: vec![],
             ping_interval: PING_INTERVAL,
             hook_queue_cap: HOOK_QUEUE_CAP,
         }
@@ -521,6 +533,9 @@ impl Daemon {
             user: self.opts.user.clone(),
             home: self.opts.home.clone(),
             boot_id: self.boot_id.clone(),
+            projects_root: self.opts.projects_root.clone(),
+            hook_bin: self.opts.hook_bin.clone(),
+            features: self.opts.features.clone(),
         })
     }
 
@@ -637,6 +652,11 @@ impl Daemon {
                 lock(&self.hooks).items.retain(|h| h.seq > p.up_to);
                 Some(ok(&Empty))
             }
+            m::WorkspacesList::NAME => Some(ok(&WorkspacesResult {
+                root: self.opts.projects_root.clone(),
+                generated_at: self.opts.workspaces_generated_at.clone(),
+                workspaces: self.opts.workspaces.clone(),
+            })),
             other => Some(Err(err(
                 ErrorCode::BadRequest,
                 format!("unknown method {other}"),

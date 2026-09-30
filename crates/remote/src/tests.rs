@@ -85,7 +85,37 @@ async fn handshake_reports_the_daemon() {
     let hello = client.hello("santree/test", "owner-a").await.unwrap();
     assert_eq!(hello.version, "fake-0.0.0");
     assert_eq!(hello.hostname, "fake-daedalus");
+    assert_eq!(hello.hook_bin, "/fake/bin/daedalus-session-host");
     assert!(client.pty_sessions().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspaces_list_answers_the_hosts_snapshot() {
+    let workspace = Workspace {
+        name: "web".into(),
+        path: "/srv/projects/web".into(),
+        branch: Some("main".into()),
+        ..Default::default()
+    };
+    let daemon = FakeDaemon::with_options(FakeOptions {
+        projects_root: "/srv/projects".into(),
+        workspaces_generated_at: Some("2026-09-29T10:00:00Z".into()),
+        workspaces: vec![workspace.clone()],
+        ..FakeOptions::default()
+    });
+    let client = unhandshaken(&daemon);
+    let hello = client.hello("santree/test", "owner-a").await.unwrap();
+    assert_eq!(hello.projects_root, "/srv/projects");
+    assert!(hello.supports::<m::WorkspacesList>());
+    let listed = client.call::<m::WorkspacesList>(&Empty).await.unwrap();
+    assert_eq!(
+        listed,
+        WorkspacesResult {
+            root: "/srv/projects".into(),
+            generated_at: Some("2026-09-29T10:00:00Z".into()),
+            workspaces: vec![workspace],
+        }
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

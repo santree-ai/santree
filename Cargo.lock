@@ -4365,6 +4365,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "santree-remote-tls"
+version = "0.1.17-beta.7"
+dependencies = [
+ "ring",
+ "rustls",
+ "subtle",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
