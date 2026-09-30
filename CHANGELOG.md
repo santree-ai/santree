@@ -7,6 +7,11 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.11 — 2026-09-30
+
+- Daedalus projects now show their worktrees, changes, diffs and files, read from the box. The open worktree refreshes every few seconds while it is on screen.
+- Editing, terminals and agents in Daedalus projects come next: their buttons stay in place, disabled, and say so. When santree can't reach Daedalus, they say that instead, and nothing runs on this Mac in the project's place.
+
 ## 0.1.17-beta.10 — 2026-09-30
 
 - On macOS, Settings › Daedalus now reliably says santree is off for this Mac (or that the box's key changed) instead of sometimes showing a connection error.
