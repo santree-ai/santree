@@ -1,4 +1,11 @@
-import { QueryClient, QueryClientProvider, type QueryKey, useQuery } from "@tanstack/react-query";
+import {
+  defaultScheduler,
+  notifyManager,
+  QueryClient,
+  QueryClientProvider,
+  type QueryKey,
+  useQuery,
+} from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -1256,7 +1263,8 @@ describe("useWorktreeWatcher: a Daedalus project is polled, not watched", () => 
   const WAVE = 6;
 
   /** Let the repo list and the link state land (real timers; only the poll's
-   *  interval is faked). */
+   *  interval is faked). The cache notifies synchronously in this test (see
+   *  below), so a render that saw the data has also run its effects. */
   async function settle(qc: QueryClient) {
     for (let i = 0; i < 50; i++) {
       if (qc.getQueryData(queryKeys.repos) && qc.getQueryData(queryKeys.daedalusStatus)) return;
@@ -1269,6 +1277,11 @@ describe("useWorktreeWatcher: a Daedalus project is polled, not watched", () => 
 
   it("re-reads the worktree on screen while the link is up, and stops while it is down", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    // The cache notifies its observers on a macrotask by default, which would
+    // leave "has the hook seen the new link state yet?" to timing. Synchronous
+    // here, a cache write inside `act` is rendered, and its effects run, when
+    // the `act` ends.
+    notifyManager.setScheduler((notify) => notify());
     try {
       settings.reset([]);
       settings.repos = [
@@ -1299,8 +1312,6 @@ describe("useWorktreeWatcher: a Daedalus project is polled, not watched", () => 
       daedalus.link = { kind: "SantreeOff" };
       await act(async () => {
         qc.setQueryData(queryKeys.daedalusStatus, daedalus.link);
-        // The cache notifies on a macrotask; let the hook see the new state.
-        await new Promise((resolve) => setTimeout(resolve, 20));
       });
       await act(async () => {
         vi.advanceTimersByTime(12_000);
@@ -1315,6 +1326,7 @@ describe("useWorktreeWatcher: a Daedalus project is polled, not watched", () => 
       expect(spy).not.toHaveBeenCalled();
       view.unmount();
     } finally {
+      notifyManager.setScheduler(defaultScheduler);
       vi.useRealTimers();
     }
   });
