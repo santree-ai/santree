@@ -69,9 +69,8 @@ function RootLayout() {
         <LegacyMigrationProvider>
           <div className="relative flex h-screen flex-col overflow-hidden bg-surface text-fg">
             <div className="min-h-0 flex-1">
-              {/* Settings is reachable before the first project too: a project
-                  that lives on Daedalus can only be added once Daedalus is
-                  connected there. */}
+              {/* Settings is reachable before the first project too: it says
+                  why a project that lives on Daedalus can't be added yet. */}
               {repos === undefined ? null : fullPage ? (
                 <Outlet />
               ) : repos.length === 0 ? (

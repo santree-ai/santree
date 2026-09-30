@@ -304,7 +304,7 @@ export function SettingsView() {
           className="h-full gap-0.5"
           tabClassName="h-full"
           // No Repo scope before the first project (Settings is reachable from
-          // the first-run screen, to connect Daedalus).
+          // the first-run screen, to see why Daedalus isn't reachable).
           tabs={[
             { value: "app", label: "User" },
             ...(repos.length > 0 ? [{ value: "repo" as const, label: "Repo" }] : []),

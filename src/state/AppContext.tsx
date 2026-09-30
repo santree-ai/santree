@@ -27,7 +27,7 @@ import type { AgentKind, Settings, TabKind, TabPr } from "../bindings";
 import { preloadRepoAvatars } from "../components/chrome/RepoAvatar";
 import {
   useClaudeRateLimitsWatcher,
-  useDaedalusDaemonWatcher,
+  useDaedalusLinkWatcher,
   useRepos,
   useReviewAiWatcher,
   useSaveSettings,
@@ -376,7 +376,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useSessionUsageWatcher();
   useClaudeRateLimitsWatcher();
   // The link to Daedalus changes state on its own (networks, the server).
-  useDaedalusDaemonWatcher();
+  useDaedalusLinkWatcher();
 
   // The AI review writes its brief and drafts through santree's MCP server — a
   // separate process — so the only way the UI hears about them is this nudge. A

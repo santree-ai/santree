@@ -3,9 +3,9 @@
  * as a santree project (docs/remote.md).
  *
  * Not reaching Daedalus is a state this dialog shows, not an error: the list
- * read answers with a reach, and anything but reachable renders its hint and a
- * way to Settings → Daedalus. Rows already seen while reachable stay listed but
- * disabled, so a dropped connection mid-browse reads as "can't add right now"
+ * read answers with the link's state, and anything but a listing renders what
+ * to do and a way to Settings → Daedalus. Rows already seen while listed stay
+ * but disabled, so a dropped link mid-browse reads as "can't add right now"
  * rather than as the projects vanishing.
  *
  * Chrome matches {@link ProjectPickerDialog}: the same portal, scrim and card.
@@ -14,7 +14,8 @@ import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import type { DaedalusReach, DaedalusWorkspace } from "../../bindings";
+import type { DaedalusWorkspace, DaedalusWorkspaceList } from "../../bindings";
+import { linkNotice } from "../../lib/daedalusLink";
 import { useAddDaedalusRepo, useDaedalusWorkspaces } from "../../lib/queries";
 import { toast } from "../../state/toast";
 import { BranchIcon, DaedalusLogo, RefreshIcon } from "../icons";
@@ -30,14 +31,13 @@ export function DaedalusProjectsDialog({ onClose }: { onClose: () => void }) {
   const doneRef = useRef<HTMLButtonElement>(null);
   useModalA11y({ open: true, onClose, dialogRef, initialFocusRef: doneRef });
 
-  const reach = list.data?.reach;
-  const reachable = reach?.kind === "ApiReachable";
+  const listed = list.data !== undefined && isListed(list.data);
   // The last list Daedalus answered with, kept while it stops answering.
   const [seen, setSeen] = useState<DaedalusWorkspace[]>([]);
   useEffect(() => {
-    if (list.data?.reach.kind === "ApiReachable") setSeen(list.data.workspaces);
+    if (list.data && isListed(list.data)) setSeen(list.data.workspaces);
   }, [list.data]);
-  const rows = reachable ? (list.data?.workspaces ?? []) : seen;
+  const rows = listed ? (list.data?.workspaces ?? []) : seen;
 
   const openSettings = () => {
     onClose();
@@ -85,13 +85,13 @@ export function DaedalusProjectsDialog({ onClose }: { onClose: () => void }) {
           The projects Daedalus keeps. Their shells, agents and git run on Daedalus.
         </p>
 
-        {reach && !reachable && <ReachNotice reach={reach} onOpenSettings={openSettings} />}
+        {list.data && !listed && <Unlisted list={list.data} onOpenSettings={openSettings} />}
 
         <div className="flex max-h-80 flex-col overflow-y-auto rounded-lg border border-hairline bg-raised">
           {list.data === undefined ? (
             <ListSkeleton rows={3} className="p-2" />
           ) : rows.length === 0 ? (
-            reachable && (
+            listed && (
               <div className="px-3 py-3 text-[11.5px] text-muted-3">
                 Daedalus has no projects under its projects root.
               </div>
@@ -102,7 +102,7 @@ export function DaedalusProjectsDialog({ onClose }: { onClose: () => void }) {
                 <WorkspaceRow
                   key={w.path}
                   workspace={w}
-                  disabled={!reachable || (add.isPending && add.variables === w.name)}
+                  disabled={!listed || (add.isPending && add.variables === w.name)}
                   onAdd={() => addOne(w.name)}
                 />
               ))}
@@ -121,27 +121,30 @@ export function DaedalusProjectsDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+/** Whether the host listed its checkouts: linked, and new enough to list. */
+function isListed(list: DaedalusWorkspaceList): boolean {
+  return list.link.kind === "Connected" && !list.hostOutdated;
+}
+
 /** Why the list is empty (or stale), and where to fix it. */
-function ReachNotice({
-  reach,
+function Unlisted({
+  list,
   onOpenSettings,
 }: {
-  reach: DaedalusReach;
+  list: DaedalusWorkspaceList;
   onOpenSettings: () => void;
 }) {
-  const [lead, detail] =
-    reach.kind === "NotConfigured"
-      ? ["Daedalus isn't set up yet.", "Add its URL and API token in Settings."]
-      : reach.kind === "Unauthorized"
-        ? ["Daedalus refused the token.", "Paste a new one in Settings."]
-        : reach.kind === "ApiUnreachable"
-          ? ["Can't reach Daedalus.", `Connect to your home network or VPN. ${reach.reason}`]
-          : ["", ""];
+  const { title, detail } = list.hostOutdated
+    ? {
+        title: "Daedalus's session host is too old to list its projects.",
+        detail: "Update Daedalus.",
+      }
+    : linkNotice(list.link);
   return (
     <div className="flex items-start gap-2 rounded-lg border border-hairline bg-raised px-3 py-2.5 text-[11.5px]">
       <DaedalusLogo size={14} className="mt-px flex-none" />
       <div className="min-w-0 flex-1 text-muted-3">
-        <span className="font-medium text-fg-3">{lead}</span> {detail}
+        <span className="font-medium text-fg-3">{title}</span> {detail}
       </div>
       <button
         type="button"

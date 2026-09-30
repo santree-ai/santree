@@ -480,45 +480,51 @@ impl RepoLocation {
     }
 }
 
-/// Whether santree can reach the Daedalus API — the REST side only; the ssh
-/// daemon has a reach of its own. Every variant is a *state* to render, never an
-/// error: being away from home is normal, and `daedalus_status` answers with
-/// this as a plain value so it never becomes a red toast.
+/// How santree reaches Daedalus: through the Daedalus agent on this machine,
+/// which pipes a connection to the box's session host (docs/remote.md). Every
+/// variant is a *state* to render, never an error — no agent, santree turned
+/// off, being away from home are all normal, and the commands answer with this
+/// as a plain value so it never becomes a red toast.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(tag = "kind")]
-pub enum DaedalusReach {
-    /// No Daedalus URL saved.
-    NotConfigured,
-    /// The URL didn't answer, or answered without santree's API. `reason` is a
-    /// short human line (never carries the bearer).
-    ApiUnreachable {
-        reason: String,
+pub enum DaedalusLink {
+    /// No Daedalus agent on this machine.
+    AgentMissing,
+    /// The agent here is older than santree's socket in it.
+    AgentOutdated,
+    /// Trying, or retrying after a lost link.
+    Connecting,
+    /// Daedalus keeps santree off for this machine (Settings › Machines).
+    SantreeOff,
+    /// The session host proved another key than the one the box named: the
+    /// agent refused it. `reason` is the agent's.
+    HostKeyChanged { reason: String },
+    /// No link now — the machine not approved, the box out of reach, the
+    /// agent busy or refusing this user. `reason` is the agent's own line, or
+    /// santree's when the agent never answered.
+    Unavailable { reason: String },
+    /// The session host speaks another protocol; `theirs` when it said which.
+    VersionMismatch { theirs: Option<u32> },
+    Connected {
+        /// The box's name, as its session host reports it.
+        hostname: String,
+        /// The session host's version.
+        version: String,
+        /// Where the box's checkouts live.
+        #[serde(rename = "projectsRoot")]
+        projects_root: String,
+        /// The agent's version.
+        agent: Option<String>,
     },
-    /// Daedalus answered and refused the token.
-    Unauthorized,
-    ApiReachable,
 }
 
-/// The saved Daedalus connection, as Settings shows it. Carries whether a token
-/// is stored, never the token itself.
+/// `daedalus_health`: the link as it settled after a fresh attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct DaedalusConfig {
-    pub url: String,
-    /// The rest is what Daedalus's `connection` endpoint last reported; `None`
-    /// until it has been reached once. Read-only: santree never lets the user
-    /// set these.
-    pub ssh_user: Option<String>,
-    /// One name that reaches the server's sshd from anywhere
-    /// (docs/remote.md "One address").
-    pub ssh_host: Option<String>,
-    pub ssh_port: Option<u16>,
-    pub projects_root: Option<String>,
-    /// The ssh identity file the user picked, if any (else ssh's own defaults).
-    pub identity_file: Option<String>,
-    pub has_token: bool,
-    /// When the connection info above was fetched (RFC 3339).
-    pub fetched_at: Option<String>,
+pub struct DaedalusHealth {
+    pub link: DaedalusLink,
+    /// RFC 3339.
+    pub checked_at: String,
 }
 
 /// A checkout's last sync with its remote, as Daedalus reports it.
@@ -530,9 +536,8 @@ pub struct DaedalusSync {
     pub at: Option<String>,
 }
 
-/// One checkout under Daedalus's projects root — its `workspaces` endpoint's
-/// row, plus whether santree has it registered. Read off the wire leniently by
-/// `daedalus::api`, which owns the server's shape.
+/// One checkout under Daedalus's projects root — a row of the session host's
+/// `workspaces.list` — plus whether santree has it registered.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DaedalusWorkspace {
@@ -552,89 +557,16 @@ pub struct DaedalusWorkspace {
     pub registered: bool,
 }
 
-/// What `daedalus_workspaces` answers: how the read went, and the checkouts it
-/// found (empty whenever `reach` isn't `ApiReachable`).
+/// What `daedalus_workspaces` answers: the link as it was, and the checkouts
+/// the host listed (empty unless `link` is `Connected` and the host lists).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DaedalusWorkspaceList {
-    pub reach: DaedalusReach,
+    pub link: DaedalusLink,
+    /// Connected, but the session host is too old to list its checkouts.
+    pub host_outdated: bool,
     pub generated_at: Option<String>,
     pub workspaces: Vec<DaedalusWorkspace>,
-}
-
-/// Whether santree has a live link to `santree-remote` on Daedalus — the
-/// ssh/daemon side; the REST side is [`DaedalusReach`]. A state to render, never
-/// an error: `daedalus_daemon_status` answers every one of them as a plain value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(tag = "kind")]
-pub enum DaemonReach {
-    /// No ssh user or host to try yet (Daedalus hasn't reported them).
-    NotConfigured,
-    /// Trying, or retrying after a lost link.
-    Connecting,
-    Connected {
-        /// `santree-remote`'s own version.
-        version: String,
-    },
-    /// The server didn't answer. `reason` is a short human line.
-    Unreachable { reason: String },
-    /// The daemon speaks another protocol; `theirs` when it said which.
-    VersionMismatch { theirs: Option<u32> },
-}
-
-/// A health check's first stage: the Daedalus API.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(tag = "kind")]
-pub enum DaedalusApiCheck {
-    Ok,
-    Unreachable { reason: String },
-    Unauthorized,
-    NotConfigured,
-}
-
-/// A health check's second stage: ssh access to the server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(tag = "kind")]
-pub enum DaedalusSshCheck {
-    /// `target` is the `user@host` that answered.
-    Ok { target: String },
-    /// ssh to `target` (`user@host`) failed; `reason` is a short human line.
-    Failed { reason: String, target: String },
-    /// Nothing to try yet — `reason` says what's missing.
-    Skipped { reason: String },
-}
-
-/// A health check's last stage: `santree-remote` on the server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(tag = "kind")]
-pub enum DaedalusDaemonCheck {
-    Connected {
-        version: String,
-    },
-    /// ssh works and `santree-remote` isn't on the server's `PATH`.
-    NotInstalled,
-    /// Installed, but santree can't link to it — its service isn't running.
-    NotRunning {
-        reason: String,
-    },
-    VersionMismatch {
-        theirs: Option<u32>,
-    },
-    Skipped {
-        reason: String,
-    },
-}
-
-/// `daedalus_health`: each stage of reaching Daedalus, in order. A stage that
-/// can't run because an earlier one failed is `Skipped` with the reason.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct DaedalusHealth {
-    pub api: DaedalusApiCheck,
-    pub ssh: DaedalusSshCheck,
-    pub daemon: DaedalusDaemonCheck,
-    /// RFC 3339.
-    pub checked_at: String,
 }
 
 /// Lifecycle status of a ticket / worktree.

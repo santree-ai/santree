@@ -1,11 +1,13 @@
-//! `RemoteHost`: the connection lifecycle for one server.
+//! `RemoteHost`: the connection lifecycle for one session host.
 //!
-//! Connects to its one target and completes `hello`. While connected it keeps
-//! a hooks subscription open, forwarding
-//! events into one receiver that survives reconnects. When the link dies it
-//! reports `Connecting` (panes read "reconnecting", never "exited") and tries
-//! again with backoff; every successful connect is broadcast as a
-//! [`Reconnected`] so terminals re-attach through their ring anchors.
+//! Opens a link through its [`Connector`] and completes `hello`. While
+//! connected it keeps a hooks subscription open, forwarding events into one
+//! receiver that survives reconnects. When the link dies it reports
+//! `Connecting` (panes read "reconnecting", never "exited") and tries again
+//! with backoff — at the slowest pace at once when the connect failed in a way
+//! only a person can change ([`ConnectError::permanent`]); every successful
+//! connect is broadcast as a [`Reconnected`] so terminals re-attach through
+//! their ring anchors.
 //!
 //! Unreachable is a normal state, not an error: it is only ever *reported*,
 //! through [`RemoteHost::status`].
@@ -18,29 +20,34 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::client::{ClientOptions, HookMessage, RemoteClient, RemoteError};
-use crate::proto::{ErrorCode, PROTOCOL_VERSION};
-use crate::transport::{Connector, Link, LinkTransport, SshTarget};
+use crate::proto::{ErrorCode, HelloResult, PROTOCOL_VERSION};
+use crate::transport::{ConnectError, Connector, Link};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostStatus {
-    NotConfigured,
+    /// Not started, or stopped.
+    Stopped,
     Connecting,
     Connected {
+        /// The session host's own version.
         version: String,
+        hostname: String,
+        /// Where the host's checkouts live.
+        projects_root: String,
+        /// The agent's version, when the link came through it.
+        agent: Option<String>,
     },
-    Unreachable {
-        reason: String,
-    },
-    /// The daemon speaks another protocol; `theirs` when it said which.
+    /// No link: why, as the connect (or the handshake after it) said.
+    Down(ConnectError),
+    /// The host speaks another protocol; `theirs` when it said which.
     VersionMismatch {
         theirs: Option<u32>,
     },
 }
 
-/// What to connect to, and as whom.
+/// Who this client is, and where it was in the hook queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConfig {
-    pub target: SshTarget,
     /// `hello`'s `client`: `santree/<ver>`.
     pub client: String,
     /// `hello`'s `owner`: a stable id for this app instance.
@@ -57,7 +64,7 @@ pub struct HostConfig {
 pub struct HostOptions {
     pub backoff_min: Duration,
     pub backoff_max: Duration,
-    /// Bounds one attempt from spawning the transport to `hello`'s answer.
+    /// Bounds one attempt from opening the link to `hello`'s answer.
     pub hello_timeout: Duration,
     pub client: ClientOptions,
 }
@@ -67,7 +74,9 @@ impl Default for HostOptions {
         Self {
             backoff_min: Duration::from_secs(1),
             backoff_max: Duration::from_secs(30),
-            hello_timeout: Duration::from_secs(10),
+            // Past the agent's own first-line wait (its dial to the host
+            // included), plus the handshake.
+            hello_timeout: Duration::from_secs(25),
             client: ClientOptions::default(),
         }
     }
@@ -106,7 +115,8 @@ struct Inner {
     connector: Arc<dyn Connector>,
     options: HostOptions,
     status: watch::Sender<HostStatus>,
-    client: Mutex<Option<Arc<RemoteClient>>>,
+    /// The live client and the `hello` it was answered, set together.
+    live: Mutex<Option<(Arc<RemoteClient>, Arc<HelloResult>)>>,
     reconnected: broadcast::Sender<Reconnected>,
     hooks_tx: mpsc::UnboundedSender<HookDelivery>,
     hooks_rx: Mutex<Option<mpsc::UnboundedReceiver<HookDelivery>>>,
@@ -123,8 +133,12 @@ impl Inner {
         });
     }
 
-    fn set_client(&self, client: Option<Arc<RemoteClient>>) {
-        *self.client.lock().unwrap_or_else(|e| e.into_inner()) = client;
+    fn set_live(&self, live: Option<(Arc<RemoteClient>, Arc<HelloResult>)>) {
+        *self.live() = live;
+    }
+
+    fn live(&self) -> std::sync::MutexGuard<'_, Option<(Arc<RemoteClient>, Arc<HelloResult>)>> {
+        self.live.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn cursor(&self) -> std::sync::MutexGuard<'_, HookCursor> {
@@ -147,10 +161,10 @@ impl Drop for RemoteHost {
 }
 
 impl RemoteHost {
-    /// An idle host (`NotConfigured`) that will open links through
-    /// `connector` — `SshConnector` in the app, the fake's in tests.
+    /// An idle host (`Stopped`) that will open links through `connector` —
+    /// `AgentConnector` in the app, the fake's in tests.
     pub fn new(connector: Arc<dyn Connector>, options: HostOptions) -> Self {
-        let (status, _) = watch::channel(HostStatus::NotConfigured);
+        let (status, _) = watch::channel(HostStatus::Stopped);
         let (reconnected, _) = broadcast::channel(16);
         let (hooks_tx, hooks_rx) = mpsc::unbounded_channel();
         Self {
@@ -158,7 +172,7 @@ impl RemoteHost {
                 connector,
                 options,
                 status,
-                client: Mutex::new(None),
+                live: Mutex::new(None),
                 reconnected,
                 hooks_tx,
                 hooks_rx: Mutex::new(Some(hooks_rx)),
@@ -176,7 +190,7 @@ impl RemoteHost {
         if let Some(old) = task.take() {
             old.abort();
         }
-        self.inner.set_client(None);
+        self.inner.set_live(None);
         match config {
             Some(config) => {
                 {
@@ -195,7 +209,7 @@ impl RemoteHost {
                 self.inner.set_status(HostStatus::Connecting);
                 *task = Some(tokio::spawn(run(self.inner.clone(), config)));
             }
-            None => self.inner.set_status(HostStatus::NotConfigured),
+            None => self.inner.set_status(HostStatus::Stopped),
         }
     }
 
@@ -215,11 +229,13 @@ impl RemoteHost {
     /// The live client, when connected. Don't hold it across a reconnect:
     /// ask again after a [`Reconnected`].
     pub fn client(&self) -> Option<Arc<RemoteClient>> {
-        self.inner
-            .client
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.inner.live().as_ref().map(|(client, _)| client.clone())
+    }
+
+    /// What the host answered `hello` on the live link — its `features`,
+    /// say — when connected.
+    pub fn hello(&self) -> Option<Arc<HelloResult>> {
+        self.inner.live().as_ref().map(|(_, hello)| hello.clone())
     }
 
     pub fn reconnected(&self) -> broadcast::Receiver<Reconnected> {
@@ -262,91 +278,96 @@ impl RemoteHost {
 }
 
 enum AttemptError {
-    Failed(String),
+    Down(ConnectError),
     Version(Option<u32>),
 }
 
 struct Connection {
     client: Arc<RemoteClient>,
-    /// Kept alive for as long as the client is in use (it owns the ssh child).
-    _transport: Box<dyn LinkTransport>,
-    version: String,
-    boot_id: String,
+    hello: Arc<HelloResult>,
+    /// The agent's version, when the link came through it.
+    agent: Option<String>,
 }
 
 async fn attempt(inner: &Inner, config: &HostConfig) -> Result<Connection, AttemptError> {
+    let failed = |reason: &str| AttemptError::Down(ConnectError::Failed(reason.into()));
     let opened = tokio::time::timeout(inner.options.hello_timeout, async {
         let Link {
             reader,
             writer,
-            transport,
+            agent,
         } = inner
             .connector
-            .connect(&config.target)
+            .connect()
             .await
-            .map_err(AttemptError::Failed)?;
+            .map_err(AttemptError::Down)?;
         let client = Arc::new(RemoteClient::with_options(
             reader,
             writer,
             inner.options.client.clone(),
         ));
         let hello = client.hello(&config.client, &config.owner).await;
-        Ok::<_, AttemptError>((client, transport, hello))
+        Ok::<_, AttemptError>((client, agent, hello))
     })
     .await
-    .map_err(|_| AttemptError::Failed("the server did not answer in time".into()))??;
+    .map_err(|_| failed("the session host didn't answer in time"))??;
 
-    let (client, mut transport, hello) = opened;
+    let (client, agent, hello) = opened;
     match hello {
         Ok(hello) if hello.protocol == PROTOCOL_VERSION => Ok(Connection {
             client,
-            _transport: transport,
-            version: hello.version,
-            boot_id: hello.boot_id,
+            hello: Arc::new(hello),
+            agent: agent.map(|a| a.agent),
         }),
         Ok(hello) => Err(AttemptError::Version(Some(hello.protocol))),
         Err(RemoteError::Remote(e)) if e.code == ErrorCode::Version => {
             Err(AttemptError::Version(e.protocol))
         }
-        Err(e @ RemoteError::Disconnected(_)) => {
-            // The link died under the handshake: the transport usually knows
-            // why (ssh's "Permission denied", a missing santree-remote).
-            let reason = transport.failure_reason().await;
-            Err(AttemptError::Failed(
-                reason.unwrap_or_else(|| e.to_string()),
-            ))
-        }
-        Err(e) => Err(AttemptError::Failed(e.to_string())),
+        // The agent answered `ok`, then the stream ended before the host said
+        // a word: in TLS 1.3 that is how the host turns a key away after the
+        // handshake, so the likeliest reason is its allow-list.
+        Err(RemoteError::Disconnected(_)) => Err(failed(
+            "the session host closed the link before answering; it may not admit this machine \
+             yet",
+        )),
+        Err(e) => Err(AttemptError::Down(ConnectError::Failed(e.to_string()))),
     }
 }
 
 async fn run(inner: Arc<Inner>, config: HostConfig) {
     let mut backoff = inner.options.backoff_min;
     loop {
+        let mut wait = backoff;
         match attempt(&inner, &config).await {
             Ok(connection) => {
-                backoff = inner.options.backoff_min;
+                wait = inner.options.backoff_min;
                 serve(&inner, connection).await;
-                inner.set_client(None);
+                inner.set_live(None);
                 inner.set_status(HostStatus::Connecting);
             }
+            // Retrying soon cannot change these: wait at the slow end, where a
+            // fix made elsewhere (the agent installed, santree turned on, the
+            // host updated) is still picked up without a restart.
             Err(AttemptError::Version(theirs)) => {
-                inner.set_status(HostStatus::VersionMismatch { theirs })
+                wait = inner.options.backoff_max;
+                inner.set_status(HostStatus::VersionMismatch { theirs });
             }
-            Err(AttemptError::Failed(reason)) => {
-                log::info!("remote: {} unreachable: {reason}", config.target.host);
-                inner.set_status(HostStatus::Unreachable { reason });
+            Err(AttemptError::Down(e)) => {
+                if e.permanent() {
+                    wait = inner.options.backoff_max;
+                }
+                inner.set_status(HostStatus::Down(e));
             }
         }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(inner.options.backoff_max);
+        tokio::time::sleep(wait).await;
+        backoff = (wait * 2).min(inner.options.backoff_max);
     }
 }
 
 /// Run one live link until it dies.
 async fn serve(inner: &Inner, connection: Connection) {
     let client = connection.client.clone();
-    let boot_id = connection.boot_id.clone();
+    let boot_id = connection.hello.boot_id.clone();
     let acked = {
         let mut cursor = inner.cursor();
         if cursor.boot_id.as_deref() != Some(boot_id.as_str()) {
@@ -380,9 +401,13 @@ async fn serve(inner: &Inner, connection: Connection) {
         }
     };
 
-    inner.set_client(Some(client.clone()));
+    let hello = &connection.hello;
+    inner.set_live(Some((client.clone(), hello.clone())));
     inner.set_status(HostStatus::Connected {
-        version: connection.version.clone(),
+        version: hello.version.clone(),
+        hostname: hello.hostname.clone(),
+        projects_root: hello.projects_root.clone(),
+        agent: connection.agent.clone(),
     });
     let generation = inner.generation.fetch_add(1, Ordering::Relaxed) + 1;
     log::info!("remote: connected (generation {generation})");

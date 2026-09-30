@@ -157,12 +157,15 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
     }),
 
     // ── Daedalus ──────────────────────────────────────────────────────────
-    // Not configured, so a real home server's address never reaches a capture.
-    daedalus_status: () => ({ kind: "NotConfigured" }),
-    daedalus_daemon_status: () => ({ kind: "NotConfigured" }),
-    daedalus_config: () => null,
+    // No agent, so a real home server's name never reaches a capture.
+    daedalus_status: () => ({ kind: "AgentMissing" }),
+    daedalus_health: () => ({
+      link: { kind: "AgentMissing" },
+      checkedAt: new Date(now()).toISOString(),
+    }),
     daedalus_workspaces: () => ({
-      reach: { kind: "NotConfigured" },
+      link: { kind: "AgentMissing" },
+      hostOutdated: false,
       generatedAt: null,
       workspaces: [],
     }),

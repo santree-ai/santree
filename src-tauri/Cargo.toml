@@ -117,8 +117,11 @@ socket2 = "0.6"
 keyring = "4"
 
 [dev-dependencies]
-# The in-process santree-remote, for the Daedalus link's tests.
+# The in-process session host and the fake agent socket, for the Daedalus
+# link's tests.
 santree-remote-client = { path = "../crates/remote", features = ["fake"] }
+# A private directory per test for the fake agent's socket.
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Repositions the macOS traffic lights (the `trafficLightPosition` config field is

@@ -1176,62 +1176,16 @@ export const commands = {
 	/**  Run the Jira OAuth flow; returns the updated site list. */
 	jiraConnect: () => typedError<JiraSite[], CmdError>(__TAURI_INVOKE("jira_connect")),
 	/**
-	 *  Whether the Daedalus API answers. Unreachable, unauthorized and not
-	 *  configured are all `Ok` states — being away from home is normal, and an `Err`
-	 *  would toast. Only broken local state (database, keychain) fails.
+	 *  How santree reaches Daedalus right now, through the Daedalus agent on this
+	 *  machine. Every state is an `Ok` value — no agent, santree off and being
+	 *  away from home are all normal, and an `Err` would toast.
 	 */
-	daedalusStatus: () => typedError<DaedalusReach, CmdError>(__TAURI_INVOKE("daedalus_status")),
-	/**
-	 *  Whether santree has a live link to santree-remote on Daedalus. Every link
-	 *  state is an `Ok` value, like `daedalus_status`'s.
-	 */
-	daedalusDaemonStatus: () => typedError<DaemonReach, CmdError>(__TAURI_INVOKE("daedalus_daemon_status")),
-	/**
-	 *  Check each stage of reaching Daedalus in order — the API, ssh, then
-	 *  santree-remote — skipping what an earlier failure makes moot. Every outcome
-	 *  is an `Ok` value; only broken local state (database, keychain) fails.
-	 */
+	daedalusStatus: () => __TAURI_INVOKE<DaedalusLink>("daedalus_status"),
+	/**  Try the link now, skipping its backoff, and report how it settled. */
 	daedalusHealth: () => typedError<DaedalusHealth, CmdError>(__TAURI_INVOKE("daedalus_health")),
-	/**  The saved Daedalus connection (never the token), or `None`. */
-	daedalusConfig: () => typedError<{
-	url: string,
-	/**
-	 *  The rest is what Daedalus's `connection` endpoint last reported; `None`
-	 *  until it has been reached once. Read-only: santree never lets the user
-	 *  set these.
-	 */
-	sshUser: string | null,
-	/**
-	 *  One name that reaches the server's sshd from anywhere
-	 *  (docs/remote.md "One address").
-	 */
-	sshHost: string | null,
-	sshPort: number | null,
-	projectsRoot: string | null,
-	/**  The ssh identity file the user picked, if any (else ssh's own defaults). */
-	identityFile: string | null,
-	hasToken: boolean,
-	/**  When the connection info above was fetched (RFC 3339). */
-	fetchedAt: string | null,
-} | null, CmdError>(__TAURI_INVOKE("daedalus_config")),
-	/**
-	 *  Save the Daedalus URL and API token (the token to the OS keychain) and try
-	 *  them. Saved even when unreachable; the answer says how the try went.
-	 */
-	daedalusConnect: (url: string, token: string) => typedError<DaedalusReach, CmdError>(__TAURI_INVOKE("daedalus_connect", { url, token })),
-	/**
-	 *  Set or clear the ssh identity file: an absolute path to an existing regular
-	 *  file under the user's home, resolved before it is stored.
-	 */
-	daedalusSetIdentityFile: (path: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("daedalus_set_identity_file", { path })),
-	/**
-	 *  Forget the Daedalus connection and its token. Registered Daedalus projects
-	 *  are kept.
-	 */
-	daedalusDisconnect: () => typedError<null, CmdError>(__TAURI_INVOKE("daedalus_disconnect")),
 	/**
 	 *  The server's checkouts, marked with which are already projects. Empty, with
-	 *  the reach saying why, whenever the API doesn't answer.
+	 *  the link saying why, whenever the session host can't list them.
 	 */
 	daedalusWorkspaces: () => typedError<DaedalusWorkspaceList, CmdError>(__TAURI_INVOKE("daedalus_workspaces")),
 	/**
@@ -1402,7 +1356,7 @@ export const commands = {
 /** Events */
 export const events = {
 	claudeRateLimitsChanged: makeEvent<ClaudeRateLimitsChanged>("claude-rate-limits-changed"),
-	daedalusDaemonChanged: makeEvent<DaedalusDaemonChanged>("daedalus-daemon-changed"),
+	daedalusLinkChanged: makeEvent<DaedalusLinkChanged>("daedalus-link-changed"),
 	reviewAiChanged: makeEvent<ReviewAiChanged>("review-ai-changed"),
 	sessionStateChanged: makeEvent<SessionStateChanged>("session-state-changed"),
 	sessionUsageChanged: makeEvent<SessionUsageChanged>("session-usage-changed"),
@@ -1968,85 +1922,56 @@ export type CycleRef = {
 	startsAtMs: number | null,
 };
 
-/**  A health check's first stage: the Daedalus API. */
-export type DaedalusApiCheck = { kind: "Ok" } | { kind: "Unreachable"; reason: string } | { kind: "Unauthorized" } | { kind: "NotConfigured" };
-
-/**
- *  The saved Daedalus connection, as Settings shows it. Carries whether a token
- *  is stored, never the token itself.
- */
-export type DaedalusConfig = {
-	url: string,
-	/**
-	 *  The rest is what Daedalus's `connection` endpoint last reported; `None`
-	 *  until it has been reached once. Read-only: santree never lets the user
-	 *  set these.
-	 */
-	sshUser: string | null,
-	/**
-	 *  One name that reaches the server's sshd from anywhere
-	 *  (docs/remote.md "One address").
-	 */
-	sshHost: string | null,
-	sshPort: number | null,
-	projectsRoot: string | null,
-	/**  The ssh identity file the user picked, if any (else ssh's own defaults). */
-	identityFile: string | null,
-	hasToken: boolean,
-	/**  When the connection info above was fetched (RFC 3339). */
-	fetchedAt: string | null,
-};
-
-/**
- *  "The link to santree-remote changed state" — the frontend refetches
- *  `daedalus_daemon_status`. Empty, like its siblings: the arrival is the news.
- */
-export type DaedalusDaemonChanged = Record<string, never>;
-
-/**  A health check's last stage: `santree-remote` on the server. */
-export type DaedalusDaemonCheck = { kind: "Connected"; version: string } | 
-/**  ssh works and `santree-remote` isn't on the server's `PATH`. */
-{ kind: "NotInstalled" } | 
-/**  Installed, but santree can't link to it — its service isn't running. */
-{ kind: "NotRunning"; reason: string } | { kind: "VersionMismatch"; theirs: number | null } | { kind: "Skipped"; reason: string };
-
-/**
- *  `daedalus_health`: each stage of reaching Daedalus, in order. A stage that
- *  can't run because an earlier one failed is `Skipped` with the reason.
- */
+/**  `daedalus_health`: the link as it settled after a fresh attempt. */
 export type DaedalusHealth = {
-	api: DaedalusApiCheck,
-	ssh: DaedalusSshCheck,
-	daemon: DaedalusDaemonCheck,
+	link: DaedalusLink,
 	/**  RFC 3339. */
 	checkedAt: string,
 };
 
 /**
- *  Whether santree can reach the Daedalus API — the REST side only; the ssh
- *  daemon has a reach of its own. Every variant is a *state* to render, never an
- *  error: being away from home is normal, and `daedalus_status` answers with
- *  this as a plain value so it never becomes a red toast.
+ *  How santree reaches Daedalus: through the Daedalus agent on this machine,
+ *  which pipes a connection to the box's session host (docs/remote.md). Every
+ *  variant is a *state* to render, never an error — no agent, santree turned
+ *  off, being away from home are all normal, and the commands answer with this
+ *  as a plain value so it never becomes a red toast.
  */
-export type DaedalusReach = 
-/**  No Daedalus URL saved. */
-{ kind: "NotConfigured" } | 
+export type DaedalusLink = 
+/**  No Daedalus agent on this machine. */
+{ kind: "AgentMissing" } | 
+/**  The agent here is older than santree's socket in it. */
+{ kind: "AgentOutdated" } | 
+/**  Trying, or retrying after a lost link. */
+{ kind: "Connecting" } | 
+/**  Daedalus keeps santree off for this machine (Settings › Machines). */
+{ kind: "SantreeOff" } | 
 /**
- *  The URL didn't answer, or answered without santree's API. `reason` is a
- *  short human line (never carries the bearer).
+ *  The session host proved another key than the one the box named: the
+ *  agent refused it. `reason` is the agent's.
  */
-{ kind: "ApiUnreachable"; reason: string } | 
-/**  Daedalus answered and refused the token. */
-{ kind: "Unauthorized" } | { kind: "ApiReachable" };
+{ kind: "HostKeyChanged"; reason: string } | 
+/**
+ *  No link now — the machine not approved, the box out of reach, the
+ *  agent busy or refusing this user. `reason` is the agent's own line, or
+ *  santree's when the agent never answered.
+ */
+{ kind: "Unavailable"; reason: string } | 
+/**  The session host speaks another protocol; `theirs` when it said which. */
+{ kind: "VersionMismatch"; theirs: number | null } | { kind: "Connected"; 
+/**  The box's name, as its session host reports it. */
+hostname: string; 
+/**  The session host's version. */
+version: string; 
+/**  Where the box's checkouts live. */
+projectsRoot: string; 
+/**  The agent's version. */
+agent: string | null };
 
-/**  A health check's second stage: ssh access to the server. */
-export type DaedalusSshCheck = 
-/**  `target` is the `user@host` that answered. */
-{ kind: "Ok"; target: string } | 
-/**  ssh to `target` (`user@host`) failed; `reason` is a short human line. */
-{ kind: "Failed"; reason: string; target: string } | 
-/**  Nothing to try yet — `reason` says what's missing. */
-{ kind: "Skipped"; reason: string };
+/**
+ *  "The link to Daedalus changed state" — the frontend refetches
+ *  `daedalus_status`. Empty, like its siblings: the arrival is the news.
+ */
+export type DaedalusLinkChanged = Record<string, never>;
 
 /**  A checkout's last sync with its remote, as Daedalus reports it. */
 export type DaedalusSync = {
@@ -2056,9 +1981,8 @@ export type DaedalusSync = {
 };
 
 /**
- *  One checkout under Daedalus's projects root — its `workspaces` endpoint's
- *  row, plus whether santree has it registered. Read off the wire leniently by
- *  `daedalus::api`, which owns the server's shape.
+ *  One checkout under Daedalus's projects root — a row of the session host's
+ *  `workspaces.list` — plus whether santree has it registered.
  */
 export type DaedalusWorkspace = {
 	name: string,
@@ -2078,31 +2002,16 @@ export type DaedalusWorkspace = {
 };
 
 /**
- *  What `daedalus_workspaces` answers: how the read went, and the checkouts it
- *  found (empty whenever `reach` isn't `ApiReachable`).
+ *  What `daedalus_workspaces` answers: the link as it was, and the checkouts
+ *  the host listed (empty unless `link` is `Connected` and the host lists).
  */
 export type DaedalusWorkspaceList = {
-	reach: DaedalusReach,
+	link: DaedalusLink,
+	/**  Connected, but the session host is too old to list its checkouts. */
+	hostOutdated: boolean,
 	generatedAt: string | null,
 	workspaces: DaedalusWorkspace[],
 };
-
-/**
- *  Whether santree has a live link to `santree-remote` on Daedalus — the
- *  ssh/daemon side; the REST side is [`DaedalusReach`]. A state to render, never
- *  an error: `daedalus_daemon_status` answers every one of them as a plain value.
- */
-export type DaemonReach = 
-/**  No ssh user or host to try yet (Daedalus hasn't reported them). */
-{ kind: "NotConfigured" } | 
-/**  Trying, or retrying after a lost link. */
-{ kind: "Connecting" } | { kind: "Connected"; 
-/**  `santree-remote`'s own version. */
-version: string } | 
-/**  The server didn't answer. `reason` is a short human line. */
-{ kind: "Unreachable"; reason: string } | 
-/**  The daemon speaks another protocol; `theirs` when it said which. */
-{ kind: "VersionMismatch"; theirs: number | null };
 
 /**
  *  A stored analysis of the practice log: which habits to work on next, generated

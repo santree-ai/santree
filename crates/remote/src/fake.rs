@@ -1,10 +1,11 @@
-//! An in-process daemon speaking protocol v1, for tests.
+//! An in-process daemon speaking protocol v1, and a stand-in for the
+//! Daedalus agent's santree socket in front of it ([`FakeAgent`]), for tests.
 //!
 //! Faithful rather than minimal: PTYs are a real `santree_pty::PtyManager`,
 //! `exec.run` spawns real processes, `fs.*` touches the real filesystem, and
 //! the hook queue has the daemon's semantics (seq, backlog on subscribe, ack,
-//! overflow). What wave-2 code passes against this should pass against
-//! `santree-remote serve`.
+//! overflow). What code passes against this should pass against the
+//! session host.
 //!
 //! Choices the doc leaves open, made here and mirrored by the client:
 //! - the `pty.attach` response is written before any `pty.data` of that
@@ -29,9 +30,10 @@ use serde_json::value::RawValue;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, Notify};
 
+use crate::agent::AgentConnector;
 use crate::framing::read_line;
 use crate::proto::*;
-use crate::transport::{memory_link, BoxFuture, Connector, Link, SshTarget};
+use crate::transport::{memory_link, BoxFuture, ConnectError, Connector, Link};
 
 /// Per-stream cap on `exec.run` output.
 pub const EXEC_OUTPUT_CAP: usize = 8 * 1024 * 1024;
@@ -322,7 +324,7 @@ impl FakeDaemon {
         }
     }
 
-    /// Serve one connection (what `santree-remote connect` would relay).
+    /// Serve one connection (what the agent would pipe to the session host).
     /// Must be called inside a tokio runtime.
     pub fn serve<R, W>(&self, reader: R, writer: W) -> tokio::task::JoinHandle<()>
     where
@@ -340,19 +342,16 @@ impl FakeDaemon {
         link
     }
 
-    /// A [`Connector`] whose every connect is [`FakeDaemon::connect`],
-    /// whatever the target.
+    /// A [`Connector`] whose every connect is [`FakeDaemon::connect`].
     pub fn connector(&self) -> Arc<dyn Connector> {
         let daemon = self.clone();
-        Arc::new(
-            move |_: &SshTarget| -> BoxFuture<'static, Result<Link, String>> {
-                let link = daemon.connect();
-                Box::pin(async move { Ok(link) })
-            },
-        )
+        Arc::new(move || -> BoxFuture<'static, Result<Link, ConnectError>> {
+            let link = daemon.connect();
+            Box::pin(async move { Ok(link) })
+        })
     }
 
-    /// What `santree-remote hook <Event>` does on the server.
+    /// What `<hookBin> hook <Event>` does on the server.
     pub fn push_hook(&self, event: &str, env: Vec<(String, String)>, stdin: Vec<u8>) -> u64 {
         lock(&self.inner.hooks).push(event.to_string(), env, stdin)
     }
@@ -391,6 +390,100 @@ impl FakeDaemon {
     pub fn shutdown(&self) {
         self.disconnect_all();
         self.inner.mgr.close_all();
+    }
+}
+
+/// A stand-in for the Daedalus agent's santree socket: it listens where the
+/// test says and writes each connection the agent's first line — `ok`, then
+/// the connection is served by a [`FakeDaemon`] as the agent would pipe it
+/// to the session host; or a refusal, then the connection is closed.
+pub struct FakeAgent {
+    socket: PathBuf,
+    /// The refusal line new connections get; `None` admits them.
+    refusal: Arc<Mutex<Option<String>>>,
+    accepted: Arc<AtomicU64>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FakeAgent {
+    /// The version its `ok` line names.
+    pub const VERSION: &'static str = "0.22.0-fake";
+
+    /// Listen at `socket`, admitting every connection to `daemon`. Must be
+    /// called inside a tokio runtime.
+    pub fn serve(socket: impl Into<PathBuf>, daemon: FakeDaemon) -> std::io::Result<Self> {
+        let socket = socket.into();
+        let listener = tokio::net::UnixListener::bind(&socket)?;
+        let refusal: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let accepted = Arc::new(AtomicU64::new(0));
+        let task = {
+            let (refusal, accepted) = (refusal.clone(), accepted.clone());
+            tokio::spawn(async move {
+                while let Ok((mut stream, _)) = listener.accept().await {
+                    accepted.fetch_add(1, Ordering::SeqCst);
+                    let refused = lock(&refusal).clone();
+                    let daemon = daemon.clone();
+                    tokio::spawn(async move {
+                        let line = refused.clone().unwrap_or_else(|| {
+                            serde_json::json!({ "id": null, "ok": {
+                                "host": "box.test:7789",
+                                "node": "00112233445566ff",
+                                "agent": FakeAgent::VERSION,
+                            } })
+                            .to_string()
+                        });
+                        if stream
+                            .write_all(format!("{line}\n").as_bytes())
+                            .await
+                            .is_err()
+                            || refused.is_some()
+                        {
+                            return;
+                        }
+                        let (reader, writer) = stream.into_split();
+                        daemon.serve(reader, writer);
+                    });
+                }
+            })
+        };
+        Ok(Self {
+            socket,
+            refusal,
+            accepted,
+            task,
+        })
+    }
+
+    /// Refuse new connections with `code` and `msg`, as the agent does.
+    pub fn refuse(&self, code: &str, msg: &str) {
+        let line = serde_json::json!({ "id": null, "err": { "code": code, "msg": msg } });
+        *lock(&self.refusal) = Some(line.to_string());
+    }
+
+    /// Admit new connections again.
+    pub fn admit(&self) {
+        *lock(&self.refusal) = None;
+    }
+
+    /// Connections accepted so far.
+    pub fn connections(&self) -> u64 {
+        self.accepted.load(Ordering::SeqCst)
+    }
+
+    /// An [`AgentConnector`] for this socket, trusting its owner — the test.
+    pub fn connector(&self) -> AgentConnector {
+        use std::os::unix::fs::MetadataExt;
+        let owner = std::fs::symlink_metadata(&self.socket)
+            .expect("the fake agent's socket")
+            .uid();
+        AgentConnector::at(&self.socket, owner)
+    }
+}
+
+impl Drop for FakeAgent {
+    fn drop(&mut self) {
+        self.task.abort();
+        let _ = std::fs::remove_file(&self.socket);
     }
 }
 

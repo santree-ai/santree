@@ -58,10 +58,11 @@ applied version the resolved set no longer has — and `0028` drops the table.
   integrations and services it drives) + `crates/core` (pure domain
   + static config, no Tauri dep) + `crates/pty` (PTY manager, Tauri-agnostic) +
   `crates/hook` (the bundled `santree-hook`: Claude hooks, status line, MCP server)
-  + `crates/remote` (`santree-remote-client`: the ssh link to Daedalus, Tauri-agnostic)
+  + `crates/remote` (`santree-remote-client`: the link to Daedalus through the local
+  Daedalus agent's socket, Tauri-agnostic)
   + `crates/remote-proto` (`santree-remote-proto`: protocol v1's types) +
-  `crates/remote-tls` (`santree-remote-tls`: the pinned TLS 1.3 profile of the
-  session-host link) +
+  `crates/remote-tls` (`santree-remote-tls`: the session host's pinned TLS 1.3
+  profile — the engine's; santree itself doesn't depend on it) +
   `crates/agent-kind` (`santree-agent-kind`: the `AgentKind` enum, re-exported by
   `santree_core::domain`).
 - **Crates the daedalus engine consumes:** `santree-pty`, `santree-remote-proto`,
@@ -120,9 +121,11 @@ crates/hook/src/   lib.rs — the bundled `santree-hook` (main.rs only calls `ru
                    (mcp.rs · review_tools.rs), the AI review's draft-comment
                    tools; `apply` is the same writes over the app's own pool,
                    for hooks relayed from Daedalus
-crates/remote/src/ the client for `santree-remote` on Daedalus (docs/remote.md):
-                   transport (the ssh argv) · client · host (reconnect, hook
-                   cursor) · probe (health check) · fake (test daemon)
+crates/remote/src/ the client for Daedalus's session host (docs/remote.md):
+                   agent (the Daedalus agent's santree socket, its first line)
+                   · transport (the `Connector` seam, `ConnectError` states)
+                   · client · host (reconnect, backoff, hook cursor) · fake
+                   (test daemon + fake agent socket)
 crates/remote-proto/src/  lib.rs — protocol v1 as types (re-exported as the
                    client's `proto`); its tests pin the exact wire text
 crates/remote-tls/src/    lib.rs — the session-host link's TLS profile (identity,
@@ -133,9 +136,10 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    · tracker.rs (the `TicketTracker` trait: which tracker a repo
                    reads, and the dispatch every provider-neutral ticket read and
                    write goes through — see "A repo reads one tracker") · linear.rs
-                   (GraphQL) · daedalus/ (the home server: REST `api`, the
-                   saved connection, `host` — the live ssh link, its
-                   `client(app)` accessor and the hook relay — and `health`)
+                   (GraphQL) · daedalus/ (the home server through the local
+                   Daedalus agent: `host` — the live link, its `client(app)`
+                   accessor and the hook relay — plus the health check and
+                   the workspace list over the link)
                    · jira.rs (Jira Cloud REST: `search/jql`, ADF,
                    transitions, the per-repo triage query) · oauth.rs (the PKCE
                    flow, keychain token store and refresh both trackers share)

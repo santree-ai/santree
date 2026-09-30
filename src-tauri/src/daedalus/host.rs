@@ -1,13 +1,12 @@
-//! The live link to `santree-remote` on Daedalus (docs/remote.md): one
-//! [`RemoteHost`] over system ssh, configured from the `daedalus_connection`
-//! row, plus the relay that applies the hooks agents fire on the server.
+//! The live link to Daedalus (docs/remote.md): one [`RemoteHost`] through the
+//! Daedalus agent on this machine, plus the relay that applies the hooks
+//! agents fire on the server.
 //!
 //! [`DaedalusHost`] is Tauri-managed. Everything that runs on the server gets
 //! its client through [`client`] / [`connected_client`] and turns
 //! [`NotConnected`] into its own disabled state — a Daedalus project never
 //! falls back to running locally.
 
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,22 +17,18 @@ use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
 use tokio::sync::{broadcast, mpsc};
 
-use santree_core::domain::DaemonReach;
+use santree_core::domain::DaedalusLink;
 use santree_hook::{HookEnv, Invocation, Nudges};
-use santree_remote_client::proto::HookEvent;
+use santree_remote_client::proto::{HelloResult, HookEvent};
 use santree_remote_client::{
-    Connector, HookDelivery, HookMessage, HostConfig, HostOptions, HostStatus, Reconnected,
-    RemoteClient, RemoteHost, SshConnector, SshTarget,
+    AgentConnector, ConnectError, Connector, HookDelivery, HookMessage, HostConfig, HostOptions,
+    HostStatus, Reconnected, Refusal, RemoteClient, RemoteHost,
 };
 
-use super::Row;
 use crate::db::Db;
 use crate::session;
 use crate::session_signal::{self, Signal};
 use crate::tabs::validate_term_key;
-
-/// ssh's port when Daedalus doesn't name one.
-const DEFAULT_SSH_PORT: u16 = 22;
 
 /// How long [`connected_client`] waits out a link that is still coming up.
 pub const CONNECT_WAIT: Duration = Duration::from_secs(5);
@@ -42,121 +37,88 @@ pub const CONNECT_WAIT: Duration = Duration::from_secs(5);
 /// trip and one cursor write for a burst, not one per event.
 const ACK_BATCH: usize = 256;
 
-/// "The link to santree-remote changed state" — the frontend refetches
-/// `daedalus_daemon_status`. Empty, like its siblings: the arrival is the news.
+/// "The link to Daedalus changed state" — the frontend refetches
+/// `daedalus_status`. Empty, like its siblings: the arrival is the news.
 #[derive(Clone, Serialize, Type, Event)]
-pub struct DaedalusDaemonChanged {}
+pub struct DaedalusLinkChanged {}
 
 /// Why there is no client to hand out: the link's state at the time of asking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotConnected {
-    pub reach: DaemonReach,
+    pub link: DaedalusLink,
 }
 
 impl std::fmt::Display for NotConnected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.reach {
-            DaemonReach::NotConfigured => {
-                f.write_str("Daedalus hasn't reported how to reach it over ssh yet.")
-            }
-            DaemonReach::Connecting => f.write_str("Still connecting to Daedalus."),
-            DaemonReach::Connected { .. } => f.write_str("The link to Daedalus just dropped."),
-            DaemonReach::Unreachable { reason } => write!(f, "Can't reach Daedalus: {reason}"),
-            DaemonReach::VersionMismatch { .. } => {
-                f.write_str("santree-remote on Daedalus speaks another protocol version.")
-            }
-        }
+        f.write_str(&describe(&self.link))
     }
 }
 
 impl std::error::Error for NotConnected {}
 
+/// A link state as one sentence, for an action that needed the link.
+pub fn describe(link: &DaedalusLink) -> String {
+    match link {
+        DaedalusLink::AgentMissing => {
+            "Install the Daedalus agent on this machine to reach Daedalus.".into()
+        }
+        DaedalusLink::AgentOutdated => {
+            "Update the Daedalus agent on this machine: this one is too old for santree.".into()
+        }
+        DaedalusLink::Connecting => "Still connecting to Daedalus.".into(),
+        DaedalusLink::SantreeOff => {
+            "santree is off for this machine. Turn it on in Daedalus › Settings › Machines.".into()
+        }
+        DaedalusLink::HostKeyChanged { reason } => {
+            format!("Daedalus's session host key changed: {reason}")
+        }
+        DaedalusLink::Unavailable { reason } => format!("Can't reach Daedalus: {reason}"),
+        DaedalusLink::VersionMismatch { .. } => {
+            "Daedalus's session host speaks another protocol version.".into()
+        }
+        DaedalusLink::Connected { .. } => "The link to Daedalus just dropped.".into(),
+    }
+}
+
 /// The app's one link to Daedalus.
 pub struct DaedalusHost {
     host: Arc<RemoteHost>,
-    /// What [`DaedalusHost::sync`] last configured, so a refresh that changes
-    /// nothing doesn't drop a working link.
+    /// What [`DaedalusHost::resume`] configured, for [`DaedalusHost::retry_now`].
     applied: Mutex<Option<HostConfig>>,
     /// `hello`'s `owner`: this app process. Minted per launch — the link
     /// outlives page reloads, so it can't be the webview's page owner (which
     /// is what a remote PTY session is tagged with, like a local one).
     owner: String,
-    app_dir: PathBuf,
+}
+
+impl Default for DaedalusHost {
+    /// A host that reaches Daedalus through the installed agent's socket.
+    fn default() -> Self {
+        Self::with_connector(Arc::new(AgentConnector::new()), HostOptions::default())
+    }
 }
 
 impl DaedalusHost {
-    /// A host that reaches Daedalus with system ssh, keeping its pinned host
-    /// key and control sockets under `<app_dir>/ssh`.
-    pub fn new(app_dir: PathBuf) -> Self {
-        let connector = Arc::new(SshConnector::new(app_dir.clone()));
-        Self::with_connector(connector, HostOptions::default(), app_dir)
-    }
-
-    pub fn with_connector(
-        connector: Arc<dyn Connector>,
-        options: HostOptions,
-        app_dir: PathBuf,
-    ) -> Self {
+    pub fn with_connector(connector: Arc<dyn Connector>, options: HostOptions) -> Self {
         Self {
             host: Arc::new(RemoteHost::new(connector, options)),
             applied: Mutex::new(None),
             owner: uuid::Uuid::new_v4().to_string(),
-            app_dir,
         }
     }
 
-    pub fn app_dir(&self) -> &Path {
-        &self.app_dir
-    }
-
-    /// Bring the link in line with the saved connection: (re)configure when
-    /// its target changed, stop when there is none, and otherwise leave it
-    /// alone. Cheap — call it after anything that may have changed the row.
-    pub async fn sync(&self, db: &Db) {
-        match super::load(db).await {
-            Ok(row) => self.apply(row.as_ref().and_then(|row| self.config_for(row))),
-            Err(e) => log::warn!("daedalus: reading the connection for the link failed: {e:#}"),
-        }
-    }
-
-    fn config_for(&self, row: &Row) -> Option<HostConfig> {
-        let target = target(row)?;
-        // The pair is only meaningful together (seqs restart per boot).
-        let (hook_cursor, boot_id) = match (&row.boot_id, row.hook_cursor) {
-            (Some(boot), Some(seq)) => (u64::try_from(seq).ok(), Some(boot.clone())),
-            _ => (None, None),
-        };
-        Some(HostConfig {
-            target,
+    /// Start linking, resuming the hook queue after `cursor` (`(boot_id,
+    /// seq)`, as [`saved_cursor`] reads it). Call once the runtime is up.
+    pub fn resume(&self, cursor: Option<(String, u64)>) {
+        let (boot_id, hook_cursor) = cursor.map_or((None, None), |(b, s)| (Some(b), Some(s)));
+        let config = HostConfig {
             client: format!("santree/{}", env!("CARGO_PKG_VERSION")),
             owner: self.owner.clone(),
             hook_cursor,
             boot_id,
-        })
-    }
-
-    fn apply(&self, config: Option<HostConfig>) {
-        let mut applied = self.applied.lock().unwrap_or_else(|e| e.into_inner());
-        // Only the target decides: the cursor fields just seed a host that
-        // hasn't met a daemon yet, and change with every ack.
-        let unchanged = match (applied.as_ref(), config.as_ref()) {
-            (Some(a), Some(b)) => a.target == b.target,
-            (None, None) => true,
-            _ => false,
         };
-        if unchanged {
-            return;
-        }
-        log::info!(
-            "daedalus: link {}",
-            if config.is_some() {
-                "configured"
-            } else {
-                "stopped"
-            }
-        );
-        self.host.configure(config.clone());
-        *applied = config;
+        *self.applied.lock().unwrap_or_else(|e| e.into_inner()) = Some(config.clone());
+        self.host.configure(Some(config));
     }
 
     /// Skip the backoff: a link that isn't up tries again now. What a health
@@ -171,23 +133,24 @@ impl DaedalusHost {
         }
     }
 
-    pub fn reach(&self) -> DaemonReach {
-        reach_of(self.host.current_status())
+    /// The link's state now.
+    pub fn state(&self) -> DaedalusLink {
+        link_of(self.host.current_status())
     }
 
-    /// The reach once the link stops `Connecting`, or as it is after `wait`.
-    pub async fn settled_reach(&self, wait: Duration) -> DaemonReach {
+    /// The state once the link stops `Connecting`, or as it is after `wait`.
+    pub async fn settled(&self, wait: Duration) -> DaedalusLink {
         let mut status = self.host.status();
         let _ = tokio::time::timeout(wait, status.wait_for(|s| *s != HostStatus::Connecting)).await;
-        self.reach()
+        self.state()
     }
 
     /// The live client, or why there isn't one. Don't hold it across a
     /// reconnect: ask again after [`DaedalusHost::reconnected`].
     pub fn client(&self) -> Result<Arc<RemoteClient>, NotConnected> {
-        self.host.client().ok_or_else(|| NotConnected {
-            reach: self.reach(),
-        })
+        self.host
+            .client()
+            .ok_or_else(|| NotConnected { link: self.state() })
     }
 
     /// [`DaedalusHost::client`], waiting up to `wait` for a link that is
@@ -202,29 +165,34 @@ impl DaedalusHost {
         self.client()
     }
 
+    /// What the session host answered `hello` on the live link.
+    pub fn hello(&self) -> Option<Arc<HelloResult>> {
+        self.host.hello()
+    }
+
     /// Every (re)connect, the first included — terminals re-attach on it.
     pub fn reconnected(&self) -> broadcast::Receiver<Reconnected> {
         self.host.reconnected()
     }
 
     /// Start the link's background work: announce every status change to the
-    /// frontend, relay hooks into `db`, and configure from the saved row.
-    /// Call once, from setup.
+    /// frontend and relay hooks into `db`. Call once, from setup; the link
+    /// itself starts with [`DaedalusHost::resume`].
     pub fn start(&self, app: &AppHandle, db: Db, db_path: String) {
         let mut status = self.host.status();
         let emitter = app.clone();
         tauri::async_runtime::spawn(async move {
             while status.changed().await.is_ok() {
-                let reach = reach_of(status.borrow_and_update().clone());
-                log::info!("daedalus: link {reach:?}");
-                let _ = DaedalusDaemonChanged {}.emit(&emitter);
+                let link = link_of(status.borrow_and_update().clone());
+                log::info!("daedalus: link {link:?}");
+                let _ = DaedalusLinkChanged {}.emit(&emitter);
             }
         });
 
         if let Some(events) = self.host.take_hook_events() {
             let relay = Relay {
                 host: self.host.clone(),
-                db: db.clone(),
+                db,
                 db_path,
             };
             let app = app.clone();
@@ -262,31 +230,37 @@ pub fn reconnected(app: &AppHandle) -> broadcast::Receiver<Reconnected> {
     app.state::<DaedalusHost>().reconnected()
 }
 
-/// Where a saved connection says sshd is: `None` until Daedalus has reported
-/// both a user and a host. Values reach ssh only through `ssh_args`, which
-/// validates them (a bad one fails its attempt with a reason rather than
-/// vanishing here).
-pub(super) fn target(row: &Row) -> Option<SshTarget> {
-    let non_empty = |v: &Option<String>| v.as_deref().filter(|v| !v.is_empty()).map(String::from);
-    Some(SshTarget {
-        user: non_empty(&row.ssh_user)?,
-        host: non_empty(&row.ssh_host)?,
-        port: row
-            .ssh_port
-            .and_then(|p| u16::try_from(p).ok())
-            .filter(|p| *p != 0)
-            .unwrap_or(DEFAULT_SSH_PORT),
-        identity_file: row.identity_file.as_ref().map(PathBuf::from),
-    })
-}
-
-fn reach_of(status: HostStatus) -> DaemonReach {
+/// The link's status as the state santree shows.
+fn link_of(status: HostStatus) -> DaedalusLink {
     match status {
-        HostStatus::NotConfigured => DaemonReach::NotConfigured,
-        HostStatus::Connecting => DaemonReach::Connecting,
-        HostStatus::Connected { version } => DaemonReach::Connected { version },
-        HostStatus::Unreachable { reason } => DaemonReach::Unreachable { reason },
-        HostStatus::VersionMismatch { theirs } => DaemonReach::VersionMismatch { theirs },
+        HostStatus::Stopped | HostStatus::Connecting => DaedalusLink::Connecting,
+        HostStatus::Connected {
+            version,
+            hostname,
+            projects_root,
+            agent,
+        } => DaedalusLink::Connected {
+            hostname,
+            version,
+            projects_root,
+            agent,
+        },
+        HostStatus::VersionMismatch { theirs } => DaedalusLink::VersionMismatch { theirs },
+        HostStatus::Down(e) => match e {
+            ConnectError::NoAgent => DaedalusLink::AgentMissing,
+            ConnectError::AgentOutdated => DaedalusLink::AgentOutdated,
+            ConnectError::Refused {
+                refusal: Refusal::SantreeOff,
+                ..
+            } => DaedalusLink::SantreeOff,
+            ConnectError::Refused {
+                refusal: Refusal::HostKeyChanged,
+                msg,
+            } => DaedalusLink::HostKeyChanged { reason: msg },
+            ConnectError::Refused { msg: reason, .. }
+            | ConnectError::Untrusted(reason)
+            | ConnectError::Failed(reason) => DaedalusLink::Unavailable { reason },
+        },
     }
 }
 
@@ -341,7 +315,7 @@ impl Relay {
                         nudges.rate_limits |= applied.rate_limits;
                     }
                     HookMessage::Dropped { count } => log::warn!(
-                        "daedalus: santree-remote's hook queue overflowed and lost {count} \
+                        "daedalus: the session host's hook queue overflowed and lost {count} \
                          event(s); agent state may be stale until the next hook"
                     ),
                 }
@@ -510,18 +484,37 @@ fn quoted(text: &str) -> String {
     format!("{:?}", capped(text))
 }
 
+/// Where the app is in the session host's hook queue: `(boot_id, seq)`, the
+/// last seq applied and acked and the host boot it belongs to. `None` before
+/// the first ack.
+pub async fn saved_cursor(db: &Db) -> anyhow::Result<Option<(String, u64)>> {
+    let row: Option<(Option<String>, Option<i64>)> =
+        sqlx::query_as("SELECT boot_id, hook_cursor FROM daedalus_connection WHERE id = 1")
+            .fetch_optional(db)
+            .await?;
+    // The pair is only meaningful together (seqs restart per boot).
+    Ok(match row {
+        Some((Some(boot), Some(seq))) => u64::try_from(seq).ok().map(|seq| (boot, seq)),
+        _ => None,
+    })
+}
+
 async fn save_cursor(db: &Db, boot_id: &str, seq: u64) -> anyhow::Result<()> {
-    sqlx::query("UPDATE daedalus_connection SET hook_cursor = ?, boot_id = ? WHERE id = 1")
-        .bind(i64::try_from(seq)?)
-        .bind(boot_id)
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "INSERT INTO daedalus_connection (id, hook_cursor, boot_id) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET hook_cursor = ?1, boot_id = ?2",
+    )
+    .bind(i64::try_from(seq)?)
+    .bind(boot_id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::path::Path;
 
     use santree_remote_client::fake::FakeDaemon;
     use santree_remote_client::transport::BoxFuture;
@@ -545,19 +538,11 @@ mod tests {
         assert!(ok.is_ok(), "timed out waiting for {what}");
     }
 
-    /// An app database with a Daedalus connection that has ssh info, and one
-    /// registered Daedalus project (`acme/web`).
+    /// An app database with one registered Daedalus project (`acme/web`).
     async fn app_db(base: &Path) -> (Db, String) {
         let _ = std::fs::remove_dir_all(base);
         let path = base.join("santree.db");
         let db = crate::db::init(path.clone()).await.unwrap();
-        sqlx::query(
-            "INSERT INTO daedalus_connection (id, url, ssh_user, ssh_host, ssh_port)
-             VALUES (1, 'https://daedalus.test', 'santiago', 's2.example.org', 22)",
-        )
-        .execute(&db)
-        .await
-        .unwrap();
         crate::repo::add_daedalus(
             &db,
             "/srv/projects/web",
@@ -579,12 +564,10 @@ mod tests {
 
     /// Reaches whichever daemon is current: swapping it is a server restart.
     fn swappable(current: Arc<Mutex<FakeDaemon>>) -> Arc<dyn Connector> {
-        Arc::new(
-            move |_: &SshTarget| -> BoxFuture<'static, Result<Link, String>> {
-                let link = current.lock().unwrap().connect();
-                Box::pin(async move { Ok(link) })
-            },
-        )
+        Arc::new(move || -> BoxFuture<'static, Result<Link, ConnectError>> {
+            let link = current.lock().unwrap().connect();
+            Box::pin(async move { Ok(link) })
+        })
     }
 
     fn env(term_key: &str) -> Vec<(String, String)> {
@@ -659,20 +642,18 @@ mod tests {
 
         let first = FakeDaemon::new();
         let current = Arc::new(Mutex::new(first.clone()));
-        let link = DaedalusHost::with_connector(swappable(current.clone()), fast(), base.clone());
+        let link = DaedalusHost::with_connector(swappable(current.clone()), fast());
         let mut reconnected = link.reconnected();
         assert!(matches!(
             link.client(),
             Err(NotConnected {
-                reach: DaemonReach::NotConfigured
+                link: DaedalusLink::Connecting
             })
         ));
-        link.sync(&db).await;
+        link.resume(saved_cursor(&db).await.unwrap());
         let client = link.client_within(WAIT).await.expect("the link comes up");
         drop(client);
-        assert!(matches!(link.reach(), DaemonReach::Connected { .. }));
-        // A refresh that changes nothing keeps the link.
-        link.sync(&db).await;
+        assert!(matches!(link.state(), DaedalusLink::Connected { .. }));
         assert_eq!(reconnected.recv().await.unwrap().generation, 1);
 
         let (nudged_tx, mut nudged) = mpsc::unbounded_channel();
@@ -773,12 +754,7 @@ mod tests {
         assert!(log.contains("relayed from Daedalus"), "{log}");
 
         // An app restart resumes from the saved cursor.
-        let row = super::super::load(&db).await.unwrap().unwrap();
-        let config = link.config_for(&row).unwrap();
-        assert_eq!(
-            (config.hook_cursor, config.boot_id.as_deref()),
-            (Some(5), Some(boot.as_str()))
-        );
+        assert_eq!(saved_cursor(&db).await.unwrap(), Some((boot.clone(), 5)));
 
         // The server restarts: a new boot, whose seqs start over — and are
         // applied, not skipped as already seen.
@@ -901,36 +877,5 @@ mod tests {
             LOGGED_TEXT_MAX
         );
         assert!(logged.ends_with("…\""), "{logged}");
-    }
-
-    #[test]
-    fn the_target_follows_the_saved_connection() {
-        let row = |user: Option<&str>, host: Option<&str>, port: Option<i64>| Row {
-            url: "https://d.test".into(),
-            ssh_user: user.map(Into::into),
-            ssh_host: host.map(Into::into),
-            ssh_port: port,
-            projects_root: None,
-            identity_file: Some("/Users/me/.ssh/daedalus".into()),
-            fetched_at: None,
-            hook_cursor: None,
-            boot_id: None,
-        };
-        assert_eq!(
-            target(&row(Some("me"), Some("s2.example.org"), None)),
-            Some(SshTarget {
-                user: "me".into(),
-                host: "s2.example.org".into(),
-                port: 22,
-                identity_file: Some(PathBuf::from("/Users/me/.ssh/daedalus")),
-            })
-        );
-        let port = |p| target(&row(Some("me"), Some("s2.example.org"), p)).map(|t| t.port);
-        assert_eq!(port(Some(2222)), Some(2222));
-        assert_eq!(port(Some(0)), Some(22));
-        assert_eq!(port(Some(70_000)), Some(22));
-        assert_eq!(target(&row(None, Some("s2.example.org"), None)), None);
-        assert_eq!(target(&row(Some("me"), None, None)), None);
-        assert_eq!(target(&row(Some("me"), Some(""), None)), None);
     }
 }

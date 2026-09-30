@@ -82,7 +82,7 @@ const BINDINGS_PATH: &str = "../src/bindings.ts";
 fn specta_builder() -> AppBuilder {
     Builder::<tauri::Wry>::new()
         .events(collect_events![
-            daedalus::host::DaedalusDaemonChanged,
+            daedalus::host::DaedalusLinkChanged,
             git_watch::WorktreeChanged,
             pr::WorktreeBasesChanged,
             session_signal::ClaudeRateLimitsChanged,
@@ -252,12 +252,7 @@ fn specta_builder() -> AppBuilder {
             commands::set_repo_jira_site,
             commands::jira_connect,
             commands::daedalus_status,
-            commands::daedalus_daemon_status,
             commands::daedalus_health,
-            commands::daedalus_config,
-            commands::daedalus_connect,
-            commands::daedalus_set_identity_file,
-            commands::daedalus_disconnect,
             commands::daedalus_workspaces,
             commands::add_daedalus_repo,
             commands::legacy_cli_probe,
@@ -708,10 +703,11 @@ pub fn run() {
             tauri::async_runtime::block_on(awake::restore(&db, &keep_awake));
             app.manage(keep_awake);
 
-            // The link to santree-remote on Daedalus, and the relay that applies
-            // the hooks agents fire there. Configured from the saved connection
-            // once the runtime is up; unconfigured, it just reads NotConfigured.
-            let daedalus_link = daedalus::host::DaedalusHost::new(data_dir.clone());
+            // The link to Daedalus through the Daedalus agent on this machine,
+            // and the relay that applies the hooks agents fire there. It starts
+            // once the runtime is up, resuming the hook queue where the last
+            // run acked it; without an agent it just reads AgentMissing.
+            let daedalus_link = daedalus::host::DaedalusHost::default();
             daedalus_link.start(
                 app.handle(),
                 db.clone(),
@@ -721,7 +717,11 @@ pub fn run() {
             {
                 let (app, db) = (app.handle().clone(), db.clone());
                 tauri::async_runtime::spawn(async move {
-                    app.state::<daedalus::host::DaedalusHost>().sync(&db).await;
+                    let cursor = daedalus::host::saved_cursor(&db).await.unwrap_or_else(|e| {
+                        log::warn!("daedalus: reading the hook cursor failed: {e:#}");
+                        None
+                    });
+                    app.state::<daedalus::host::DaedalusHost>().resume(cursor);
                 });
             }
 

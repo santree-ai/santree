@@ -1,17 +1,16 @@
 /**
- * The rail's Daedalus section: absent until Daedalus is set up or holds a
+ * The rail's Daedalus section: absent until the link is up or Daedalus holds a
  * project, the home server's projects under their own header, and greyed with
- * one line of what to do while the server is out of reach — never a toast.
+ * one line of what to do while the link is down — never a toast.
  */
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DaedalusConfig, DaedalusReach, Repo } from "../../bindings";
+import type { DaedalusLink, Repo } from "../../bindings";
 
 const state = vi.hoisted(() => ({
   repos: undefined as Repo[] | undefined,
-  config: undefined as DaedalusConfig | null | undefined,
-  reach: undefined as DaedalusReach | undefined,
+  link: undefined as DaedalusLink | undefined,
   navigate: vi.fn(),
   /** The props the section handed its tree on the last render. */
   tree: null as { location: string; emptyLabel: string; actionsDisabled?: string } | null,
@@ -24,8 +23,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 vi.mock("../../lib/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/queries")>()),
   useRepos: () => ({ data: state.repos }),
-  useDaedalusConfig: () => ({ data: state.config }),
-  useDaedalusStatus: () => ({ data: state.reach }),
+  useDaedalusStatus: () => ({ data: state.link }),
 }));
 // The tree is its own component with its own test; here it is only what the
 // section hands it.
@@ -41,15 +39,12 @@ vi.mock("./DaedalusProjectsDialog", () => ({
 
 import { DaedalusSection } from "./DaedalusSection";
 
-const CONFIG: DaedalusConfig = {
-  url: "https://daedalus.home",
-  sshUser: "santiago",
-  sshHost: "s2.example.org",
-  sshPort: 22,
+const CONNECTED: DaedalusLink = {
+  kind: "Connected",
+  hostname: "s2-server",
+  version: "0.4.0",
   projectsRoot: "/home/santiago/projects",
-  identityFile: null,
-  hasToken: true,
-  fetchedAt: null,
+  agent: "0.22.0",
 };
 
 const repo = (name: string, location: Repo["location"]) => ({ name, location }) as Repo;
@@ -59,30 +54,28 @@ const header = () => screen.queryByText("Daedalus");
 
 beforeEach(() => {
   state.repos = [repo("acme/app", "Local")];
-  state.config = CONFIG;
-  state.reach = { kind: "ApiReachable" };
+  state.link = CONNECTED;
   state.navigate.mockClear();
   state.tree = null;
 });
 
 describe("DaedalusSection visibility", () => {
-  /** An integration you never set up has nothing to say in the rail. */
-  it("draws nothing when Daedalus isn't set up and holds no project", () => {
-    state.config = null;
-    state.reach = { kind: "NotConfigured" };
+  /** A Mac without the agent, and no Daedalus project: nothing to say. */
+  it("draws nothing without a link and without a Daedalus project", () => {
+    state.link = { kind: "AgentMissing" };
     const { container } = render(<DaedalusSection />);
     expect(container).toBeEmptyDOMElement();
   });
 
-  /** Unknown is not "not set up": a cold start doesn't flash the section in. */
-  it("draws nothing while the config read is in flight and no project is known", () => {
-    state.config = undefined;
+  /** Unknown is not "linked": a cold start doesn't flash the section in. */
+  it("draws nothing while the status read is in flight and no project is known", () => {
+    state.link = undefined;
     const { container } = render(<DaedalusSection />);
     expect(container).toBeEmptyDOMElement();
   });
 
-  /** Set up, nothing added: the header and the tree's quiet line pointing at "+". */
-  it("draws the header over an empty tree once Daedalus is set up", () => {
+  /** Linked, nothing added: the header and the tree's quiet line pointing at "+". */
+  it("draws the header over an empty tree once the link is up", () => {
     render(<DaedalusSection />);
     expect(header()).toBeInTheDocument();
     expect(state.tree).toMatchObject({
@@ -92,11 +85,9 @@ describe("DaedalusSection visibility", () => {
     expect(state.tree?.actionsDisabled).toBeUndefined();
   });
 
-  /** A registered Daedalus project keeps its section even after the connection
-   *  is forgotten — the projects stay, so their section does. */
-  it("stays while a Daedalus project is registered, set up or not", () => {
-    state.config = null;
-    state.reach = { kind: "NotConfigured" };
+  /** A registered Daedalus project keeps its section whatever the link says. */
+  it("stays while a Daedalus project is registered, linked or not", () => {
+    state.link = { kind: "AgentMissing" };
     state.repos = [repo("home/web", "Daedalus")];
     render(<DaedalusSection />);
     expect(header()).toBeInTheDocument();
@@ -104,23 +95,23 @@ describe("DaedalusSection visibility", () => {
   });
 });
 
-describe("DaedalusSection reach", () => {
+describe("DaedalusSection link", () => {
   beforeEach(() => {
     state.repos = [repo("home/web", "Daedalus")];
   });
 
-  /** Away from home is normal: the section greys, says what to do in one line
+  /** Out of reach is normal: the section greys, says what to do in one line
    *  linked to Settings → Daedalus, and the rows stay with their actions off. */
-  it("greys out with a hint to Settings when the API can't be reached", () => {
-    state.reach = { kind: "ApiUnreachable", reason: "timed out" };
+  it("greys out with the agent's reason and a link to Settings when unavailable", () => {
+    state.link = { kind: "Unavailable", reason: "the session host did not answer" };
     render(<DaedalusSection />);
 
     expect(header()).toHaveClass("opacity-60");
     expect(screen.getByTestId("daedalus-tree").parentElement).toHaveClass("opacity-60");
     expect(state.tree?.actionsDisabled).toBe("Unavailable until santree can reach Daedalus");
 
-    const hint = screen.getByRole("button", { name: /Connect to your home network or VPN/ });
-    expect(hint).toHaveTextContent("Connect to your home network or VPN");
+    const hint = screen.getByRole("button", { name: /Can't reach Daedalus/ });
+    expect(hint).toHaveAttribute("title", "the session host did not answer");
     // The hint is the one thing still asking to be read, so it isn't dimmed.
     expect(hint).not.toHaveClass("opacity-60");
     fireEvent.click(hint);
@@ -130,24 +121,34 @@ describe("DaedalusSection reach", () => {
     });
   });
 
-  it("says the token was refused, rather than to find a network, on Unauthorized", () => {
-    state.reach = { kind: "Unauthorized" };
+  it.each([
+    [{ kind: "AgentMissing" }, "Install the Daedalus agent on this Mac"],
+    [{ kind: "AgentOutdated" }, "Update the Daedalus agent on this Mac"],
+    [{ kind: "SantreeOff" }, "Turn on santree for this Mac in Daedalus › Settings › Machines"],
+    [{ kind: "HostKeyChanged", reason: "another key" }, "Daedalus's session host key changed"],
+  ] as [DaedalusLink, string][])("says what to do about %o", (link, hint) => {
+    state.link = link;
     render(<DaedalusSection />);
-    expect(screen.getByRole("button", { name: /Daedalus refused the token/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: `${hint}. Open Settings, Daedalus` }),
+    ).toHaveTextContent(hint);
     expect(state.tree?.actionsDisabled).toBeDefined();
   });
 
-  /** An unknown is not a no: until the status read answers, the section draws
-   *  as reachable rather than flashing grey at a server that is there. */
-  it("draws at full strength while the status read is in flight", () => {
-    state.reach = undefined;
+  /** An unknown is not a no, and a retry in flight is not a failure: the
+   *  section draws at full strength rather than flashing grey. */
+  it.each([
+    undefined,
+    { kind: "Connecting" } as DaedalusLink,
+  ])("draws at full strength while the link is %o", (link) => {
+    state.link = link;
     render(<DaedalusSection />);
     expect(header()).not.toHaveClass("opacity-60");
     expect(state.tree?.actionsDisabled).toBeUndefined();
     expect(screen.queryByRole("button", { name: /Settings/ })).toBeNull();
   });
 
-  it("draws no hint while Daedalus answers", () => {
+  it("draws no hint while connected", () => {
     render(<DaedalusSection />);
     expect(screen.queryByRole("button", { name: /Settings/ })).toBeNull();
   });
@@ -161,9 +162,10 @@ describe("DaedalusSection add", () => {
     expect(screen.getByRole("dialog", { name: "Add from Daedalus" })).toBeInTheDocument();
   });
 
-  /** Out of reach, "+" still opens the dialog: it shows the reach itself. */
-  it("keeps the + working while Daedalus is out of reach", () => {
-    state.reach = { kind: "ApiUnreachable", reason: "timed out" };
+  /** With the link down, "+" still opens the dialog: it shows the state itself. */
+  it("keeps the + working while the link is down", () => {
+    state.repos = [repo("home/web", "Daedalus")];
+    state.link = { kind: "SantreeOff" };
     render(<DaedalusSection />);
     expect(screen.getByRole("button", { name: "Add from Daedalus" })).toBeEnabled();
   });

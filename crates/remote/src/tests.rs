@@ -1,5 +1,5 @@
-//! The client against the fake daemon over in-memory links: no ssh, no
-//! network, real PTYs and processes.
+//! The client against the fake daemon over in-memory links, and through the
+//! fake agent's unix socket: no network, real PTYs and processes.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -8,9 +8,9 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Notify};
 
-use crate::fake::{FakeDaemon, FakeOptions};
+use crate::fake::{FakeAgent, FakeDaemon, FakeOptions};
 use crate::proto::*;
-use crate::transport::{memory_link, BoxFuture, Link, SshTarget};
+use crate::transport::{memory_link, BoxFuture, Link};
 use crate::*;
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -723,12 +723,6 @@ async fn a_server_side_drop_fails_in_flight_calls() {
 
 fn host_config() -> HostConfig {
     HostConfig {
-        target: SshTarget {
-            user: "santiago".into(),
-            host: "s2.example.org".into(),
-            port: 22,
-            identity_file: None,
-        },
         client: "santree/test".into(),
         owner: "owner-a".into(),
         hook_cursor: None,
@@ -763,41 +757,35 @@ async fn the_host_retries_reconnects_and_resumes_hooks() {
     let release = Arc::new(Notify::new());
     let connector = {
         let (daemon, calls, release) = (daemon.clone(), calls.clone(), release.clone());
-        Arc::new(
-            move |target: &SshTarget| -> BoxFuture<'static, Result<Link, String>> {
-                let n = calls.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(target.host, "s2.example.org");
-                let (daemon, release) = (daemon.clone(), release.clone());
-                Box::pin(async move {
-                    match n {
-                        0 => Err("ssh: no route to host".into()),
-                        // The retry waits until the test has seen the
-                        // Unreachable it expects, so the transition can't be missed.
-                        1 => {
-                            release.notified().await;
-                            Ok(daemon.connect())
-                        }
-                        _ => Ok(daemon.connect()),
+        Arc::new(move || -> BoxFuture<'static, Result<Link, ConnectError>> {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            let (daemon, release) = (daemon.clone(), release.clone());
+            Box::pin(async move {
+                match n {
+                    0 => Err(ConnectError::Failed("no route to host".into())),
+                    // The retry waits until the test has seen the
+                    // Down it expects, so the transition can't be missed.
+                    1 => {
+                        release.notified().await;
+                        Ok(daemon.connect())
                     }
-                })
-            },
-        )
+                    _ => Ok(daemon.connect()),
+                }
+            })
+        })
     };
     let host = RemoteHost::new(connector, fast_host_options());
-    assert_eq!(host.current_status(), HostStatus::NotConfigured);
+    assert_eq!(host.current_status(), HostStatus::Stopped);
     let mut status = host.status();
     let mut reconnected = host.reconnected();
     let mut hooks = host.take_hook_events().unwrap();
     assert!(host.take_hook_events().is_none());
 
     host.configure(Some(host_config()));
-    let unreachable =
-        wait_status(&mut status, |s| matches!(s, HostStatus::Unreachable { .. })).await;
+    let down = wait_status(&mut status, |s| matches!(s, HostStatus::Down(_))).await;
     assert_eq!(
-        unreachable,
-        HostStatus::Unreachable {
-            reason: "ssh: no route to host".into()
-        }
+        down,
+        HostStatus::Down(ConnectError::Failed("no route to host".into()))
     );
     assert!(host.client().is_none());
     release.notify_one();
@@ -806,7 +794,10 @@ async fn the_host_retries_reconnects_and_resumes_hooks() {
     assert_eq!(
         connected,
         HostStatus::Connected {
-            version: "fake-0.0.0".into()
+            version: "fake-0.0.0".into(),
+            hostname: FakeOptions::default().hostname,
+            projects_root: FakeOptions::default().projects_root,
+            agent: None,
         }
     );
     let first = tokio::time::timeout(WAIT, reconnected.recv())
@@ -843,7 +834,7 @@ async fn the_host_retries_reconnects_and_resumes_hooks() {
     assert_eq!(daemon.queued_hooks(), vec![2, 3]);
 
     host.stop();
-    assert_eq!(host.current_status(), HostStatus::NotConfigured);
+    assert_eq!(host.current_status(), HostStatus::Stopped);
     assert!(host.client().is_none());
 }
 
@@ -862,12 +853,10 @@ async fn next_delivered(rx: &mut mpsc::UnboundedReceiver<HookDelivery>) -> (Stri
 /// A connector that reaches whichever daemon is current — swapping it is a
 /// server restart as the app sees one.
 fn swappable(current: Arc<std::sync::Mutex<FakeDaemon>>) -> Arc<dyn Connector> {
-    Arc::new(
-        move |_: &SshTarget| -> BoxFuture<'static, Result<Link, String>> {
-            let link = current.lock().unwrap().connect();
-            Box::pin(async move { Ok(link) })
-        },
-    )
+    Arc::new(move || -> BoxFuture<'static, Result<Link, ConnectError>> {
+        let link = current.lock().unwrap().connect();
+        Box::pin(async move { Ok(link) })
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -962,5 +951,137 @@ async fn the_host_reports_a_protocol_mismatch() {
     })
     .await;
     assert_eq!(mismatch, HostStatus::VersionMismatch { theirs: Some(2) });
+    host.stop();
+}
+
+// ── the agent's socket ────────────────────────────────────────────────────
+
+/// A fake agent on a socket in a fresh temp dir, in front of `daemon`.
+fn fake_agent(daemon: &FakeDaemon) -> (tempfile::TempDir, FakeAgent) {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = FakeAgent::serve(dir.path().join("santree.sock"), daemon.clone()).unwrap();
+    (dir, agent)
+}
+
+#[tokio::test]
+async fn the_agents_ok_line_opens_protocol_v1() {
+    let daemon = FakeDaemon::new();
+    let (_dir, agent) = fake_agent(&daemon);
+    let Link {
+        reader,
+        writer,
+        agent: ok,
+    } = agent.connector().connect().await.unwrap();
+    assert_eq!(
+        ok,
+        Some(AgentOk {
+            host: "box.test:7789".into(),
+            node: "00112233445566ff".into(),
+            agent: FakeAgent::VERSION.into(),
+        })
+    );
+    // Not a byte of the protocol was taken with the first line.
+    let client = RemoteClient::new(reader, writer);
+    let hello = client.hello("santree/test", "owner-a").await.unwrap();
+    assert_eq!(hello.protocol, PROTOCOL_VERSION);
+}
+
+#[tokio::test]
+async fn every_refusal_is_a_typed_state() {
+    let daemon = FakeDaemon::new();
+    let (_dir, agent) = fake_agent(&daemon);
+    for (code, refusal) in [
+        ("santree_off", Refusal::SantreeOff),
+        ("host_key_changed", Refusal::HostKeyChanged),
+        ("unavailable", Refusal::Unavailable),
+        ("forbidden", Refusal::Forbidden),
+        ("busy", Refusal::Busy),
+    ] {
+        let msg = format!("the agent's reason for {code}");
+        agent.refuse(code, &msg);
+        let refused = agent.connector().connect().await.unwrap_err();
+        assert_eq!(refused, ConnectError::Refused { refusal, msg }, "{code}");
+    }
+    assert_eq!(daemon.connection_count(), 0, "a refusal reaches no host");
+}
+
+#[tokio::test]
+async fn a_missing_socket_is_no_agent_or_an_old_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let connector = AgentConnector::at(dir.path().join("santree.sock"), 0);
+    assert_eq!(
+        connector.connect().await.unwrap_err(),
+        ConnectError::NoAgent
+    );
+    // The agent's own socket beside it: an agent from before santree's.
+    std::fs::write(dir.path().join("agent.sock"), b"").unwrap();
+    assert_eq!(
+        connector.connect().await.unwrap_err(),
+        ConnectError::AgentOutdated
+    );
+}
+
+#[tokio::test]
+async fn a_socket_served_by_someone_else_is_refused() {
+    use std::os::unix::fs::MetadataExt;
+    let daemon = FakeDaemon::new();
+    let (dir, _agent) = fake_agent(&daemon);
+    let socket = dir.path().join("santree.sock");
+    let owner = std::fs::metadata(&socket).unwrap().uid();
+    let err = AgentConnector::at(&socket, owner.wrapping_add(1))
+        .connect()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ConnectError::Untrusted(_)), "{err:?}");
+    assert!(err.permanent());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_permanent_refusal_waits_at_the_slow_end() {
+    let daemon = FakeDaemon::new();
+    let (_dir, agent) = fake_agent(&daemon);
+    let options = HostOptions {
+        backoff_min: Duration::from_millis(10),
+        backoff_max: Duration::from_secs(3),
+        ..fast_host_options()
+    };
+    let window = Duration::from_millis(700);
+
+    // santree off: one attempt, then the slow end.
+    agent.refuse("santree_off", "santree is off for this machine");
+    let host = RemoteHost::new(Arc::new(agent.connector()), options.clone());
+    let mut status = host.status();
+    host.configure(Some(host_config()));
+    let down = wait_status(&mut status, |s| matches!(s, HostStatus::Down(_))).await;
+    assert_eq!(
+        down,
+        HostStatus::Down(ConnectError::Refused {
+            refusal: Refusal::SantreeOff,
+            msg: "santree is off for this machine".into(),
+        })
+    );
+    tokio::time::sleep(window).await;
+    assert_eq!(agent.connections(), 1, "no hot loop on a permanent refusal");
+    host.stop();
+
+    // Unavailable (the host out of reach) is worth retrying at the usual pace.
+    agent.refuse("unavailable", "the session host did not answer");
+    let before = agent.connections();
+    host.configure(Some(host_config()));
+    tokio::time::sleep(window).await;
+    assert!(
+        agent.connections() - before >= 3,
+        "a transient refusal retries: {}",
+        agent.connections() - before
+    );
+
+    // Turned on in Daedalus: the next attempt connects, through the agent.
+    agent.admit();
+    host.configure(Some(host_config()));
+    let connected = wait_status(&mut status, |s| matches!(s, HostStatus::Connected { .. })).await;
+    assert!(
+        matches!(&connected, HostStatus::Connected { agent: Some(v), .. } if v == FakeAgent::VERSION),
+        "{connected:?}"
+    );
     host.stop();
 }

@@ -1,212 +1,48 @@
 //! Daedalus — the user's home server, where Daedalus projects live and run
-//! (docs/remote.md). This module is the REST side: the saved connection, the API
-//! token, reachability, the server's workspace list and registering one of them
-//! as a santree project. [`host`] is the live ssh link to `santree-remote`
-//! (over `crates/remote`) and the hook relay; [`health`] checks each stage of
-//! reaching the server in order.
+//! (docs/remote.md). santree reaches it only through the Daedalus agent on
+//! this machine: [`host`] is that live link and the hook relay. This module
+//! answers the health check, lists the server's checkouts over the link, and
+//! registers one of them as a santree project.
 //!
-//! Unreachable is normal. Every read here answers with a [`DaedalusReach`] as a
-//! plain value; only genuinely broken local state (the database, the keychain)
-//! is an `Err`, because an `Err` becomes a red toast.
+//! Unreachable is normal. Every read here answers with a [`DaedalusLink`] as
+//! a plain value; only genuinely broken local state (the database) is an
+//! `Err`, because an `Err` becomes a red toast.
 
-pub mod api;
-pub mod health;
 pub mod host;
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
+use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Result};
 
-use santree_core::domain::{DaedalusConfig, DaedalusReach, DaedalusWorkspaceList, Repo};
+use santree_core::domain::{
+    DaedalusHealth, DaedalusLink, DaedalusSync, DaedalusWorkspace, DaedalusWorkspaceList, Repo,
+};
+use santree_remote_client::proto::{m, Empty, Workspace, WorkspacesResult};
 
 use crate::db::Db;
-use crate::oauth::{keychain_err, KEYCHAIN_SERVICE};
 use crate::repo;
+use host::{DaedalusHost, NotConnected};
 
-/// The keychain account the API token is stored under (service
-/// [`KEYCHAIN_SERVICE`]).
-const KEYCHAIN_ACCOUNT: &str = "daedalus";
+/// How long the health check waits for a fresh attempt to settle: past one
+/// attempt's own limit (`HostOptions::hello_timeout`).
+const CHECK_WAIT: Duration = Duration::from_secs(30);
 
-// ── The saved connection ─────────────────────────────────────────────────────
-
-#[derive(sqlx::FromRow)]
-struct Row {
-    url: String,
-    ssh_user: Option<String>,
-    ssh_host: Option<String>,
-    ssh_port: Option<i64>,
-    projects_root: Option<String>,
-    identity_file: Option<String>,
-    fetched_at: Option<String>,
-    hook_cursor: Option<i64>,
-    boot_id: Option<String>,
-}
-
-async fn load(db: &Db) -> Result<Option<Row>> {
-    Ok(sqlx::query_as::<_, Row>(
-        "SELECT url, ssh_user, ssh_host, ssh_port, projects_root,
-                identity_file, fetched_at, hook_cursor, boot_id
-         FROM daedalus_connection WHERE id = 1",
-    )
-    .fetch_optional(db)
-    .await?)
-}
-
-/// Save the URL. A different URL is a different server, so what was fetched from
-/// the old one — and where the app was in its hook queue — is cleared; the
-/// identity file is the user's and survives.
-async fn save_url(db: &Db, url: &str) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO daedalus_connection (id, url) VALUES (1, ?1)
-         ON CONFLICT(id) DO UPDATE SET
-            ssh_user      = CASE WHEN url = ?1 THEN ssh_user END,
-            ssh_host      = CASE WHEN url = ?1 THEN ssh_host END,
-            ssh_port      = CASE WHEN url = ?1 THEN ssh_port END,
-            projects_root = CASE WHEN url = ?1 THEN projects_root END,
-            fetched_at    = CASE WHEN url = ?1 THEN fetched_at END,
-            hook_cursor   = CASE WHEN url = ?1 THEN hook_cursor END,
-            boot_id       = CASE WHEN url = ?1 THEN boot_id END,
-            url           = ?1",
-    )
-    .bind(url)
-    .execute(db)
-    .await?;
-    Ok(())
-}
-
-/// Record the connection info Daedalus just reported, for the URL it came from
-/// (a disconnect or a new URL in between leaves nothing to update).
-async fn save_connection(db: &Db, url: &str, conn: &api::Connection) -> Result<()> {
-    sqlx::query(
-        "UPDATE daedalus_connection
-         SET ssh_user = ?, ssh_host = ?, ssh_port = ?, projects_root = ?,
-             fetched_at = ?
-         WHERE id = 1 AND url = ?",
-    )
-    .bind(&conn.ssh_user)
-    .bind(&conn.ssh_host)
-    .bind(conn.ssh_port.map(i64::from))
-    .bind(&conn.projects_root)
-    .bind(chrono::Utc::now().to_rfc3339())
-    .bind(url)
-    .execute(db)
-    .await?;
-    Ok(())
-}
-
-// ── The token (OS keychain) ──────────────────────────────────────────────────
-
-fn keychain_entry() -> Result<keyring::Entry> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(keychain_err)
-}
-
-async fn load_token() -> Result<Option<String>> {
-    tokio::task::spawn_blocking(|| match keychain_entry()?.get_password() {
-        Ok(token) => Ok(Some(token)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(keychain_err(e)),
-    })
-    .await
-    .context("keychain read")?
-}
-
-async fn save_token(token: String) -> Result<()> {
-    tokio::task::spawn_blocking(move || {
-        keychain_entry()?.set_password(&token).map_err(keychain_err)
-    })
-    .await
-    .context("keychain write")?
-}
-
-async fn delete_token() -> Result<()> {
-    tokio::task::spawn_blocking(|| match keychain_entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(keychain_err(e)),
-    })
-    .await
-    .context("keychain delete")?
-}
-
-/// A token as the user pasted it: trimmed, non-empty, and nothing that could
-/// break out of an `Authorization` header.
-fn clean_token(token: &str) -> Result<String> {
-    let token = token.trim();
-    if token.is_empty() {
-        bail!("Paste the API token Daedalus gave you.");
-    }
-    if token.len() > 4096 || !token.bytes().all(|b| b.is_ascii_graphic()) {
-        bail!("That token has characters an API token can't have.");
-    }
-    Ok(token.to_string())
-}
-
-// ── Reads ────────────────────────────────────────────────────────────────────
-
-/// The saved connection for Settings, or `None` when nothing is configured.
-pub async fn config(db: &Db) -> Result<Option<DaedalusConfig>> {
-    let Some(row) = load(db).await? else {
-        return Ok(None);
-    };
-    let has_token = load_token().await?.is_some();
-    Ok(Some(DaedalusConfig {
-        url: row.url,
-        ssh_user: row.ssh_user,
-        ssh_host: row.ssh_host,
-        ssh_port: row.ssh_port.and_then(|p| u16::try_from(p).ok()),
-        projects_root: row.projects_root,
-        identity_file: row.identity_file,
-        has_token,
-        fetched_at: row.fetched_at,
-    }))
-}
-
-/// The saved URL and token, or `None` when nothing is configured.
-async fn credentials(db: &Db) -> Result<Option<(String, Option<String>)>> {
-    let Some(row) = load(db).await? else {
-        return Ok(None);
-    };
-    Ok(Some((row.url, load_token().await?)))
-}
-
-/// Whether the API answers, by asking for the connection info — which is also
-/// the moment to refresh the cached copy of it.
-pub async fn status(db: &Db) -> Result<DaedalusReach> {
-    let Some((url, token)) = credentials(db).await? else {
-        return Ok(DaedalusReach::NotConfigured);
-    };
-    probe(db, &url, token.as_deref()).await
-}
-
-async fn probe(db: &Db, url: &str, token: Option<&str>) -> Result<DaedalusReach> {
-    match api::connection(url, token).await {
-        Ok(conn) => {
-            save_connection(db, url, &conn).await?;
-            Ok(DaedalusReach::ApiReachable)
-        }
-        Err(reach) => Ok(reach),
+/// Try the link now, skipping its backoff, and report how it settled.
+pub async fn check(link: &DaedalusHost) -> DaedalusHealth {
+    link.retry_now();
+    DaedalusHealth {
+        link: link.settled(CHECK_WAIT).await,
+        checked_at: chrono::Utc::now().to_rfc3339(),
     }
 }
 
-/// The server's checkouts, each marked with whether santree has it registered.
-/// Empty with the reach set whenever the API doesn't answer.
-pub async fn workspaces(db: &Db) -> Result<DaedalusWorkspaceList> {
-    let Some((url, token)) = credentials(db).await? else {
-        return Ok(unanswered(DaedalusReach::NotConfigured));
-    };
-    let (listed, conn) = tokio::join!(
-        api::workspaces(&url, token.as_deref()),
-        api::connection(&url, token.as_deref())
-    );
-    // Opportunistic: the list is what was asked for, so a failed connection read
-    // beside it changes nothing.
-    if let Ok(conn) = conn {
-        if let Err(e) = save_connection(db, &url, &conn).await {
-            log::warn!("daedalus: caching the connection info failed: {e:#}");
-        }
-    }
-    let listed = match listed {
+/// The server's checkouts, each marked with whether santree has it
+/// registered. Empty, with the link saying why, whenever the host can't list.
+pub async fn workspaces(db: &Db, link: &DaedalusHost) -> Result<DaedalusWorkspaceList> {
+    let listed = match list(link).await {
         Ok(listed) => listed,
-        Err(reach) => return Ok(unanswered(reach)),
+        Err(unlisted) => return Ok(unlisted),
     };
     let registered = repo::daedalus_paths(db).await?;
     let workspaces = listed
@@ -214,151 +50,87 @@ pub async fn workspaces(db: &Db) -> Result<DaedalusWorkspaceList> {
         .into_iter()
         .map(|w| {
             let is_registered = registered.contains(&w.path);
-            w.into_domain(is_registered)
+            workspace(w, is_registered)
         })
         .collect();
     Ok(DaedalusWorkspaceList {
-        reach: DaedalusReach::ApiReachable,
+        link: link.state(),
+        host_outdated: false,
         generated_at: listed.generated_at,
         workspaces,
     })
 }
 
-fn unanswered(reach: DaedalusReach) -> DaedalusWorkspaceList {
-    DaedalusWorkspaceList {
-        reach,
+/// `workspaces.list` over the live link, or the empty answer that says why
+/// there is none.
+async fn list(link: &DaedalusHost) -> Result<WorkspacesResult, DaedalusWorkspaceList> {
+    let unlisted = |link: DaedalusLink, host_outdated: bool| DaedalusWorkspaceList {
+        link,
+        host_outdated,
         generated_at: None,
         workspaces: vec![],
-    }
-}
-
-// ── Writes ───────────────────────────────────────────────────────────────────
-
-/// Save the URL and token — even when Daedalus can't be reached right now, since
-/// configuring it away from home is expected — then try it. A blank token keeps
-/// the stored one, but only for the server it was saved for (see
-/// [`same_server`]): a new address has to be given its token again.
-pub async fn connect(db: &Db, url: &str, token: &str) -> Result<DaedalusReach> {
-    let url = api::normalize_url(url)?;
-    let saved_url = load(db).await?.map(|row| row.url);
-    let token = match (token.trim().is_empty(), load_token().await?) {
-        (true, Some(stored)) if saved_url.as_deref().is_some_and(|s| same_server(s, &url)) => {
-            stored
-        }
-        (true, Some(_)) => bail!(
-            "Paste the API token for this address. The saved token is only sent to the \
-             server it was saved for, and this URL points somewhere else."
-        ),
-        _ => {
-            let token = clean_token(token)?;
-            // Keychain first: a row without its token would read as configured
-            // and answer Unauthorized forever.
-            save_token(token.clone()).await?;
-            token
-        }
     };
-    save_url(db, &url).await?;
-    log::info!("daedalus: connection saved");
-    probe(db, &url, Some(&token)).await
-}
-
-/// Whether two Daedalus URLs name the same server: the same scheme, host and
-/// port, compared parsed (a default port written out or left off is the same
-/// port). A path is the same server; anything that doesn't parse is not.
-fn same_server(a: &str, b: &str) -> bool {
-    match (reqwest::Url::parse(a), reqwest::Url::parse(b)) {
-        (Ok(a), Ok(b)) => a.origin() == b.origin(),
-        _ => false,
-    }
-}
-
-/// Forget the connection and its token. Registered Daedalus projects stay: they
-/// are the user's projects, and reconnecting brings them back to life.
-pub async fn disconnect(db: &Db) -> Result<()> {
-    delete_token().await?;
-    sqlx::query("DELETE FROM daedalus_connection")
-        .execute(db)
-        .await?;
-    log::info!("daedalus: disconnected");
-    Ok(())
-}
-
-/// Set (or clear, with `None`) the ssh identity file.
-pub async fn set_identity_file(db: &Db, path: Option<String>) -> Result<()> {
-    let stored = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-        None => None,
-        Some(path) => {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .ok_or_else(|| anyhow!("can't resolve the home directory"))?;
-            let path = path.to_string();
-            let real =
-                tokio::task::spawn_blocking(move || validate_identity_file(&path, &home)).await??;
-            Some(real.to_string_lossy().into_owned())
-        }
-    };
-    let updated = sqlx::query("UPDATE daedalus_connection SET identity_file = ? WHERE id = 1")
-        .bind(&stored)
-        .execute(db)
-        .await?;
-    if updated.rows_affected() == 0 {
-        bail!("Connect Daedalus first.");
-    }
-    Ok(())
-}
-
-/// An identity file has to be an absolute path to an existing regular file under
-/// the user's home. Returns the resolved path, so a symlink is judged — and
-/// stored — by where it really points.
-fn validate_identity_file(path: &str, home: &Path) -> Result<PathBuf> {
-    let candidate = Path::new(path);
-    if !candidate.is_absolute() {
-        bail!("Use the identity file's full path.");
-    }
-    if candidate
-        .components()
-        .any(|c| matches!(c, Component::ParentDir))
+    let client = link
+        .client_within(host::CONNECT_WAIT)
+        .await
+        .map_err(|NotConnected { link }| unlisted(link, false))?;
+    if !link
+        .hello()
+        .is_some_and(|hello| hello.supports::<m::WorkspacesList>())
     {
-        bail!("The identity file's path can't contain `..`.");
+        return Err(unlisted(link.state(), true));
     }
-    let real =
-        std::fs::canonicalize(candidate).map_err(|_| anyhow!("There's no file at {path}."))?;
-    let home = std::fs::canonicalize(home).context("resolving the home directory")?;
-    if !real.starts_with(&home) {
-        bail!("The identity file has to be inside your home folder.");
+    client.call::<m::WorkspacesList>(&Empty).await.map_err(|e| {
+        unlisted(
+            DaedalusLink::Unavailable {
+                reason: format!("the session host didn't list its projects: {e}"),
+            },
+            false,
+        )
+    })
+}
+
+/// A `workspaces.list` row, with santree's own `registered` mark.
+fn workspace(w: Workspace, registered: bool) -> DaedalusWorkspace {
+    let sync = w.sync.map_or_else(DaedalusSync::default, |s| DaedalusSync {
+        result: Some(s.result),
+        detail: Some(s.detail),
+        at: Some(s.at),
+    });
+    DaedalusWorkspace {
+        name: w.name,
+        path: w.path,
+        remote: w.remote,
+        branch: w.branch,
+        head: w.head,
+        head_at: w.head_at,
+        dirty: w.dirty,
+        ahead: w.ahead.unwrap_or(0),
+        behind: w.behind.unwrap_or(0),
+        sync,
+        registered,
     }
-    if !std::fs::metadata(&real)?.is_file() {
-        bail!("{path} isn't a file.");
-    }
-    Ok(real)
 }
 
 /// Register one of the server's checkouts as a santree project. `name` only
-/// selects: the path and remote come from a fresh read of the server's own list.
-pub async fn add_repo(db: &Db, name: &str) -> Result<Repo> {
+/// selects: the path and remote come from a fresh read of the server's own
+/// list.
+pub async fn add_repo(db: &Db, link: &DaedalusHost, name: &str) -> Result<Repo> {
     validate_workspace_name(name)?;
-    let Some((url, token)) = credentials(db).await? else {
-        bail!("Connect Daedalus in Settings first.");
+    let listed = match list(link).await {
+        Ok(listed) => listed,
+        Err(unlisted) if unlisted.host_outdated => {
+            bail!("Daedalus's session host is too old to list its projects. Update Daedalus.")
+        }
+        Err(unlisted) => bail!("{}", host::describe(&unlisted.link)),
     };
-    let listed = api::workspaces(&url, token.as_deref())
-        .await
-        .map_err(|reach| anyhow!(unreachable_message(&reach)))?;
     let workspace = listed
         .workspaces
         .into_iter()
         .find(|w| w.name == name)
-        .ok_or_else(|| anyhow!("Daedalus has no project called {name}."))?;
+        .ok_or_else(|| anyhow::anyhow!("Daedalus has no project called {name}."))?;
     validate_server_path(&workspace.path, name)?;
     repo::add_daedalus(db, &workspace.path, workspace.remote.as_deref()).await
-}
-
-fn unreachable_message(reach: &DaedalusReach) -> String {
-    match reach {
-        DaedalusReach::NotConfigured => "Connect Daedalus in Settings first.".into(),
-        DaedalusReach::Unauthorized => "Daedalus refused the token. Check it in Settings.".into(),
-        DaedalusReach::ApiUnreachable { reason } => format!("Can't reach Daedalus. {reason}"),
-        DaedalusReach::ApiReachable => "Daedalus answered, but not with a list.".into(),
-    }
 }
 
 /// A workspace name is one directory under the projects root: a single normal
@@ -394,6 +166,12 @@ fn validate_server_path(path: &str, name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use santree_remote_client::fake::{FakeAgent, FakeDaemon, FakeOptions};
+    use santree_remote_client::proto::WorkspaceSync;
+    use santree_remote_client::{ClientOptions, HostOptions};
+
     use super::*;
 
     #[test]
@@ -414,71 +192,6 @@ mod tests {
         assert!(validate_server_path("srv/projects/web", "web").is_err());
         assert!(validate_server_path("/srv/projects/../web", "web").is_err());
         assert!(validate_server_path("/srv/projects/other", "web").is_err());
-    }
-
-    /// The saved token follows the server, not the form: a blank token field
-    /// reuses it only for the same scheme, host and port.
-    #[test]
-    fn a_saved_token_is_only_reused_for_the_same_server() {
-        let saved = "https://daedalus.example";
-        for same in [
-            "https://daedalus.example",
-            "https://daedalus.example:443",
-            "https://DAEDALUS.example/api",
-        ] {
-            assert!(same_server(saved, same), "{same}");
-        }
-        for other in [
-            "http://daedalus.example",
-            "https://daedalus.example:8443",
-            "https://evil.example",
-            "https://daedalus.example.evil.example",
-            "not a url",
-        ] {
-            assert!(!same_server(saved, other), "{other}");
-        }
-        assert!(same_server("http://10.0.0.2:8080", "http://10.0.0.2:8080/"));
-        assert!(!same_server("http://10.0.0.2:8080", "http://10.0.0.3:8080"));
-    }
-
-    #[test]
-    fn tokens_are_trimmed_and_header_safe() {
-        assert_eq!(clean_token("  abc.def  ").unwrap(), "abc.def");
-        assert!(clean_token("   ").is_err());
-        assert!(clean_token("abc\r\nX-Evil: 1").is_err());
-        assert!(clean_token("has space").is_err());
-    }
-
-    #[test]
-    fn identity_files_must_be_real_files_under_home() {
-        let base = std::env::temp_dir().join(format!("santree-daedalus-id-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let home = base.join("home");
-        let ssh = home.join(".ssh");
-        std::fs::create_dir_all(&ssh).unwrap();
-        let key = ssh.join("id_ed25519");
-        std::fs::write(&key, "key").unwrap();
-        let outside = base.join("outside");
-        std::fs::write(&outside, "key").unwrap();
-
-        let ok = validate_identity_file(key.to_str().unwrap(), &home).unwrap();
-        assert_eq!(ok, std::fs::canonicalize(&key).unwrap());
-
-        // Relative, `..`, missing, a directory, outside home.
-        assert!(validate_identity_file(".ssh/id_ed25519", &home).is_err());
-        let dotdot = format!("{}/.ssh/../.ssh/id_ed25519", home.display());
-        assert!(validate_identity_file(&dotdot, &home).is_err());
-        let missing = ssh.join("nope");
-        assert!(validate_identity_file(missing.to_str().unwrap(), &home).is_err());
-        assert!(validate_identity_file(ssh.to_str().unwrap(), &home).is_err());
-        assert!(validate_identity_file(outside.to_str().unwrap(), &home).is_err());
-
-        // A symlink under home that points out of it is judged by its target.
-        let link = ssh.join("escape");
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
-        assert!(validate_identity_file(link.to_str().unwrap(), &home).is_err());
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Registering a Daedalus repo never touches the local filesystem, derives
@@ -538,50 +251,151 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[tokio::test]
-    async fn a_url_change_forgets_what_the_old_server_reported() {
-        let base =
-            std::env::temp_dir().join(format!("santree-daedalus-url-{}", std::process::id()));
+    fn fast() -> HostOptions {
+        HostOptions {
+            backoff_min: Duration::from_millis(20),
+            backoff_max: Duration::from_millis(200),
+            hello_timeout: Duration::from_secs(5),
+            client: ClientOptions::default(),
+        }
+    }
+
+    fn row(name: &str) -> Workspace {
+        Workspace {
+            name: name.into(),
+            path: format!("/srv/projects/{name}"),
+            remote: Some(format!("git@github.com:acme/{name}.git")),
+            branch: Some("main".into()),
+            head: Some("abc123".into()),
+            head_at: None,
+            dirty: true,
+            ahead: Some(2),
+            behind: None,
+            sync: Some(WorkspaceSync {
+                result: "ok".into(),
+                detail: "fast-forwarded".into(),
+                at: "2026-09-30T10:00:00Z".into(),
+            }),
+        }
+    }
+
+    /// Every state the health check can settle in, from what the agent's
+    /// socket says (or doesn't): no agent, an old one, each refusal, and a
+    /// connected link.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_health_check_names_each_agent_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("santree.sock");
+
+        // No socket at all.
+        let missing = DaedalusHost::with_connector(
+            Arc::new(santree_remote_client::AgentConnector::at(&socket, 0)),
+            fast(),
+        );
+        missing.resume(None);
+        assert_eq!(check(&missing).await.link, DaedalusLink::AgentMissing);
+        // The agent's own socket, and none for santree: an old agent.
+        std::fs::write(dir.path().join("agent.sock"), b"").unwrap();
+        assert_eq!(check(&missing).await.link, DaedalusLink::AgentOutdated);
+        std::fs::remove_file(dir.path().join("agent.sock")).unwrap();
+
+        let agent = FakeAgent::serve(&socket, FakeDaemon::new()).unwrap();
+        let link = DaedalusHost::with_connector(Arc::new(agent.connector()), fast());
+        link.resume(None);
+        agent.refuse("santree_off", "santree is off for this machine");
+        assert_eq!(check(&link).await.link, DaedalusLink::SantreeOff);
+        agent.refuse("host_key_changed", "another key");
+        assert_eq!(
+            check(&link).await.link,
+            DaedalusLink::HostKeyChanged {
+                reason: "another key".into()
+            }
+        );
+        for code in ["unavailable", "forbidden", "busy"] {
+            agent.refuse(code, "the agent's reason");
+            assert_eq!(
+                check(&link).await.link,
+                DaedalusLink::Unavailable {
+                    reason: "the agent's reason".into()
+                },
+                "{code}"
+            );
+        }
+        agent.admit();
+        let health = check(&link).await;
+        assert_eq!(
+            health.link,
+            DaedalusLink::Connected {
+                hostname: FakeOptions::default().hostname,
+                version: FakeOptions::default().version,
+                projects_root: FakeOptions::default().projects_root,
+                agent: Some(FakeAgent::VERSION.into()),
+            }
+        );
+        assert!(!health.checked_at.is_empty());
+    }
+
+    /// The add-project dialog's list comes over the link, marked with what is
+    /// already registered, and adding re-reads it; a host too old to list,
+    /// and a link that is down, answer empty with why.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspaces_come_over_the_link() {
+        let base = std::env::temp_dir().join(format!("santree-daedalus-ws-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = FakeDaemon::with_options(FakeOptions {
+            workspaces_generated_at: Some("2026-09-30T10:00:00Z".into()),
+            workspaces: vec![row("web"), row("infra")],
+            ..Default::default()
+        });
+        let agent = FakeAgent::serve(dir.path().join("santree.sock"), daemon).unwrap();
+        agent.refuse("santree_off", "off");
+        let link = DaedalusHost::with_connector(Arc::new(agent.connector()), fast());
+        link.resume(None);
 
-        save_url(&db, "https://a.example").await.unwrap();
-        let conn = api::Connection {
-            ssh_user: Some("me".into()),
-            ssh_host: Some("s2.example.org".into()),
-            ssh_port: Some(22),
-            projects_root: Some("/srv/projects".into()),
-        };
-        save_connection(&db, "https://a.example", &conn)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE daedalus_connection SET identity_file = '/k'")
-            .execute(&db)
-            .await
-            .unwrap();
+        let off = workspaces(&db, &link).await.unwrap();
+        assert_eq!(off.link, DaedalusLink::SantreeOff);
+        assert!(off.workspaces.is_empty() && !off.host_outdated);
+        assert!(add_repo(&db, &link, "web").await.is_err());
 
-        // Same URL: kept.
-        save_url(&db, "https://a.example").await.unwrap();
-        let row = load(&db).await.unwrap().unwrap();
-        assert_eq!(row.ssh_user.as_deref(), Some("me"));
-        assert!(row.fetched_at.is_some());
+        agent.admit();
+        link.retry_now();
+        let listed = workspaces(&db, &link).await.unwrap();
+        assert!(matches!(listed.link, DaedalusLink::Connected { .. }));
+        assert_eq!(listed.generated_at.as_deref(), Some("2026-09-30T10:00:00Z"));
+        let web = &listed.workspaces[0];
+        assert_eq!(
+            (web.name.as_str(), web.ahead, web.behind, web.registered),
+            ("web", 2, 0, false)
+        );
+        assert_eq!(web.sync.detail.as_deref(), Some("fast-forwarded"));
 
-        // New URL: cleared, identity file kept.
-        save_url(&db, "https://b.example").await.unwrap();
-        let row = load(&db).await.unwrap().unwrap();
-        assert_eq!(row.url, "https://b.example");
-        assert_eq!(row.ssh_user, None);
-        assert_eq!(row.ssh_host, None);
-        assert_eq!(row.ssh_port, None);
-        assert_eq!(row.projects_root, None);
-        assert_eq!(row.fetched_at, None);
-        assert_eq!(row.identity_file.as_deref(), Some("/k"));
+        let repo = add_repo(&db, &link, "web").await.unwrap();
+        assert_eq!(repo.path.as_deref(), Some("/srv/projects/web"));
+        assert!(add_repo(&db, &link, "nope").await.is_err());
+        let after = workspaces(&db, &link).await.unwrap();
+        let marks: Vec<_> = after
+            .workspaces
+            .iter()
+            .map(|w| (w.name.as_str(), w.registered))
+            .collect();
+        assert_eq!(marks, [("web", true), ("infra", false)]);
 
-        // A stale response for the old URL updates nothing.
-        save_connection(&db, "https://a.example", &conn)
-            .await
-            .unwrap();
-        assert_eq!(load(&db).await.unwrap().unwrap().ssh_user, None);
+        // A session host from before `workspaces.list`.
+        let dir = tempfile::tempdir().unwrap();
+        let old = FakeAgent::serve(
+            dir.path().join("santree.sock"),
+            FakeDaemon::with_options(FakeOptions {
+                features: vec![],
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let old_link = DaedalusHost::with_connector(Arc::new(old.connector()), fast());
+        old_link.resume(None);
+        let outdated = workspaces(&db, &old_link).await.unwrap();
+        assert!(outdated.host_outdated && outdated.workspaces.is_empty());
 
         let _ = std::fs::remove_dir_all(&base);
     }

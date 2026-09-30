@@ -1,9 +1,9 @@
 # Daedalus projects (remote execution) in santree
 
 The source of truth for how santree works on repos that live on the user's home
-server, managed by **Daedalus**. Read this before touching `src-tauri/src/remote/`,
-`crates/remote/`, `crates/remote-proto/`, `crates/remote-tls/`,
-`src-tauri/src/daedalus/`, or anything that dispatches on `RepoLocation`.
+server, managed by **Daedalus**. Read this before touching `crates/remote/`,
+`crates/remote-proto/`, `src-tauri/src/daedalus/`, or anything that dispatches on
+`RepoLocation`.
 
 ---
 
@@ -14,119 +14,107 @@ A **Daedalus project** is a registered repo whose checkout lives on the server
 touches it executes **on the server**: shells, agents, git, file reads, setup
 scripts. santree on the Mac only draws.
 
+santree never talks to the box itself. It talks to the **Daedalus agent**
+installed on the same machine, which the box already knows (its node key,
+approved in Daedalus › Settings › Machines):
+
 ```
 santree app (Mac)
-  ├─ daedalus/   REST: GET <url>/api/santree/{connection,workspaces}  (bearer token)
-  └─ crates/remote  ssh <user>@<host> santree-remote connect   (one long-lived process)
-                    │  stdio = newline-delimited JSON, protocol v1 (below)
-                    ▼
-server: `santree-remote serve`  (always-on service, owned by the daedalus repo)
-          ├─ PtyManager from santree's own crates/pty (sessions outlive the link)
-          ├─ exec.run (argv, no shell) · fs.read/write/stat
-          └─ hook queue  ◀── `santree-remote hook <Event>` (Claude/Codex hooks there)
+  └─ crates/remote ──unix socket──▶ Daedalus agent (same Mac; root)
+                                      │ per connection: its own TLS 1.3 link,
+                                      │ proving the node key, pinning the host's
+                                      ▼
+                        session host on the box (Daedalus runs it)
+                          ├─ PtyManager from santree's own crates/pty (sessions outlive the link)
+                          ├─ exec.run (argv, no shell) · fs.read/write/stat · workspaces.list
+                          └─ hook queue  ◀── `<hookBin> hook <Event>` (Claude/Codex hooks there)
 ```
 
-- The daemon is **not** shipped or launched by santree. Daedalus builds and runs it.
-  santree only connects. A daemon that isn't there, or speaks another protocol
-  version, is a **state** santree shows, never a crash.
-- The daemon is deliberately **thin**: primitives only. All santree logic (the git
+- santree has **nothing to configure**: no URL, no token, no ssh, no key. It finds
+  the agent's socket at a fixed path. Whether this Mac may use santree at all is
+  Daedalus's call — the per-machine `santree` switch in Settings › Machines.
+- The session host is **not** shipped or launched by santree, and neither is the
+  agent. A missing agent, santree switched off, or a host speaking another
+  protocol version is a **state** santree shows, never a crash.
+- The host is deliberately **thin**: primitives only. All santree logic (the git
   operations in `git.rs`/`worktree.rs`, hooks settings, prompts) stays in the app and
-  runs *through* those primitives, so an app update almost never needs a daemon update.
+  runs *through* those primitives, so an app update almost never needs a host update.
 - **Unreachable is normal** (the user is away from home without the VPN). Every read
   that asks "is Daedalus there" answers with a typed state as a plain `Ok` value —
   never an `Err`, which `lib/queryFailures.ts` would turn into a red toast. Daedalus
   surfaces disable with a hint instead of attempting and failing.
 - **A Daedalus project never silently executes locally.** When the link is down, its
   actions are disabled; live remote panes read "reconnecting", never "exited".
+- GitHub, Linear and Jira stay local to santree; only the checkout is remote.
 
-## Configuration and reachability
+## The transport: the Daedalus agent's socket
 
-- `daedalus_connection` (one row): the Daedalus URL, plus the connection info last
-  fetched from `GET /api/santree/connection` (`{sshUser, sshHost, sshPort,
-  projectsRoot}`), plus an optional user-set identity file. The API token lives in
-  the OS keychain (service `com.santree.desktop`, account `daedalus`), never in
-  SQLite.
-- The token rides every request, so the URL must be `https` — except to a host on
-  the user's own network, judged on the parsed host (`api.rs`
-  `plain_http_allowed`): loopback, a private or link-local IP literal (10/8,
-  172.16/12, 192.168/16, 169.254/16, fc00::/7, fe80::/10), `localhost`, a `.local`
-  name, or a single-label name. A blank token on Connect reuses the saved one only
-  when the new URL has the saved one's scheme, host and port; a new server gets
-  its token typed again.
-- **Daedalus owns the connection details.** The user sets exactly three things:
-  the URL, the token and the identity file (a private key path on the Mac).
-  `sshUser`/`sshHost`/`sshPort`/`projectsRoot` are shown read-only, and no command
-  writes them except the refresh from the API. A missing `sshPort` is 22.
-- **One address.** `sshHost` is a split-horizon name: the home Pi-hole answers it
-  with the server's LAN IP (at home, and over the VPN, whose DNS is that Pi-hole),
-  and public DNS with the public IP. Over the VPN, packets for the LAN IP land in
-  wg-easy's rootless network namespace rather than on the host, so the server
-  DNATs port 22 on the tunnel to sshd; that rule is what lets the one name reach
-  sshd from both places. santree therefore tries one target, never a list.
+`crates/remote/src/agent.rs` (`AgentConnector`). One connect is:
+
+1. **The socket**, at one fixed path per OS (overridable only in tests):
+   `/Library/Application Support/daedalus-agent/run/santree.sock` on macOS,
+   `/var/lib/daedalus-agent/run/santree.sock` on Linux. Not there → **no agent**;
+   not there but the agent's own `agent.sock` beside it → **an agent too old** to
+   serve santree. Refused (a stale file, nobody listening) → the agent isn't running.
+2. **The other end is checked**: the kernel's peer credentials and the socket file's
+   owner must both be root, who runs the agent — the same check every client of the
+   agent's local socket makes. Anything else is refused as untrusted. (The agent
+   checks this side too: only root and the user who installed it may connect.)
+3. **One first line from the agent**, before santree writes anything (≤ 4 KiB,
+   within 20 s — the agent answers within its own 15, its 10 s dial to the host
+   included), read a byte at a time so nothing after it is taken:
+   - `{"id":null,"ok":{"host":"<host:port>","node":"<node id>","agent":"<version>"}}`
+     — from here on the socket is protocol v1 to the session host, raw, and the
+     client speaks `hello` first;
+   - `{"id":null,"err":{"code","msg"}}` and a closed socket — `santree_off`
+     (Settings › Machines keeps it off), `host_key_changed` (the host proved
+     another key than the box named), `unavailable` with the agent's reason (not
+     paired, not approved, no session host, unreachable, TLS failed), and the
+     agent door's own `forbidden` (this user may not use the socket) and `busy`
+     (past four connections at once). An unknown code reads as `unavailable`.
+4. **The host may still refuse the key after `ok`**: in TLS 1.3 the host judges the
+   client's certificate after the client's flight, so a key its allow-list doesn't
+   hold (yet — it re-reads it every second) shows as the stream ending before
+   `hello` is answered: "can't reach", retried.
+
+A failed connect is a `ConnectError` (`transport.rs`), a state, never an error. Those
+only a person can change — no agent, an old agent, an untrusted socket,
+`santree_off`, `host_key_changed`, `forbidden` — are `permanent()`. They, and a host
+speaking another protocol, send the reconnect loop straight to its slowest pace
+(30 s) instead of spinning, so turning santree on in Daedalus connects within 30 s,
+or at once with "Run check". Everything else backs off 1 s → 30 s. On every
+reconnect the client re-sends `hello`, re-subscribes to hooks after the last acked
+seq, and emits a reconnected event so terminals re-attach through their ring
+anchors.
+
+## States and settings
+
+- `DaedalusLink` (what `daedalus_status` returns, pushed by `DaedalusLinkChanged`):
+  `AgentMissing | AgentOutdated | Connecting | SantreeOff |
+  HostKeyChanged { reason } | Unavailable { reason } | VersionMismatch { theirs } |
+  Connected { hostname, version, projectsRoot, agent }`. `forbidden`, `busy`, an
+  untrusted socket, a host that ends the stream before `hello` and every local
+  failure are `Unavailable` with the reason; `src/lib/daedalusLink.ts` holds the one
+  wording of each state and what to do about it.
+- `daedalus_health` is "Run check": skip the backoff, try now, and answer the state
+  the attempt settled on (`DaedalusHealth { link, checkedAt }`).
+- Settings › Daedalus is one status card — the state, what to do, and for a
+  connected link the box, the session host's and agent's versions and the projects
+  root — plus "Run check". There is nothing to fill in.
+- `daedalus_workspaces` lists the checkouts over the link (`workspaces.list`), each
+  marked with whether it is registered; empty, with the link state saying why,
+  whenever the host can't list — `hostOutdated` when it is connected but predates
+  `workspaces.list` (`hello`'s `features`). `add_daedalus_repo(name)` re-reads that
+  list and registers the named checkout; the path and remote are the host's, never
+  IPC's.
 - `repos.location` is `'local'` (default) or `'daedalus'`; it ships as
   `Repo.location: RepoLocation`. A Daedalus repo's `path` is the absolute path **on
   the server**. Never `canonicalize`, `is_dir` or read it locally.
-- `DaedalusReach` (what `daedalus_status` returns — the REST side only):
-  `NotConfigured | ApiUnreachable { reason } | Unauthorized | ApiReachable`.
-- `DaemonReach` (what `daedalus_daemon_status` returns — the ssh/daemon side):
-  `NotConfigured | Connecting | Connected { version } |
-  Unreachable { reason } | VersionMismatch { theirs }`. The two are separate because
-  "Daedalus answers but the daemon doesn't" and "nothing answers" need different hints.
-- `DaedalusHealth` (what `daedalus_health` returns — the card's one status surface):
-  each stage in order, `api` → `ssh` → `daemon`, with a stage an earlier failure
-  makes moot reading `Skipped { reason }`. ssh is `Ok { target }` or
-  `Failed { reason, target }`, `target` being the `user@host` it tried; it needs
-  only the cached connection info, never a live API. The ssh stage is `ssh_probe` (`crates/remote/src/probe.rs`):
-  the link's own argv running
-  `command -v santree-remote >/dev/null 2>&1 && santree-remote --version || echo __santree_remote_missing__`,
-  8s — the marker is `NotInstalled`. An installed daemon is then
-  judged by the live link (`NotRunning { reason }` when `connect` can't complete).
-  Settings runs it on open, on "Run check" and after a connect; the santree-remote
-  row follows `DaemonReach` from then on, and never toasts.
-- The VPN setting in the card is a disabled toggle with a WIP badge: santree does not
-  run its own WireGuard tunnel yet. Until it does, the Mac must be on the home network
-  or on the system VPN.
+- `daedalus_connection` (one row, written with the first ack) holds only where the
+  app is in the host's hook queue: `hook_cursor` and `boot_id` (see "How santree
+  dispatches").
 
-## SSH transport
-
-System `ssh` (the user's keys, agent and config keep working), spawned once per
-connection:
-
-```
-ssh -T -o BatchMode=yes -o ConnectTimeout=4
-    -o ControlMaster=auto -o ControlPath=<app_data>/ssh/cm-%C -o ControlPersist=300
-    -o ServerAliveInterval=15 -o ServerAliveCountMax=3
-    -o HostKeyAlias=santree-daedalus -o StrictHostKeyChecking=accept-new
-    -o UserKnownHostsFile="<app_data>/ssh/known_hosts ~/.ssh/known_hosts"
-    -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes
-    -o PermitLocalCommand=no
-    [-i <identity_file> -o IdentitiesOnly=yes] -p <port> <user>@<host>
-    santree-remote connect
-```
-
-- `<user>` and `<host>` come from Daedalus's API, so they are allow-listed before
-  they reach the argv: a user is letters, digits, `.`, `_`, `-`; a host is
-  letters, digits, `.`, `-`, `:` (an IPv6 literal, unbracketed); neither may be
-  empty or start with `-`. Anything else fails the attempt with a reason.
-- No forwarding: the link needs only its stdio, so whatever the user's ssh config
-  forwards elsewhere (agent, X11, ports) or runs locally on connect is switched
-  off. Command-line `-o` beats the config files — ssh keeps the first value.
-
-- `BatchMode=yes`: a GUI app must never block on a password or passphrase prompt.
-  Auth failure is a state (`Unreachable { reason: "ssh: permission denied" }`).
-- `HostKeyAlias` pins the server's key under one name, whichever IP `sshHost`
-  resolved to; `accept-new` pins it on first connect, and a changed key fails the
-  connection.
-- `ControlPath` is really `<app_data>/ssh/cm-<8 hex>` (a hash of user, host, port and
-  key): `%C` is 40 characters, and under macOS's `Application Support` that overflows
-  a unix socket path (104 bytes), which ssh treats as fatal. When even the short name
-  won't fit, the three `Control*` options are left out — multiplexing only speeds up
-  reconnects. Paths are passed double-quoted (the app dir has a space in it).
-- Reconnect with backoff (1s → 30s) while the app runs. On every reconnect the client
-  re-sends `hello`, re-subscribes to hooks after the last acked seq, and emits a
-  reconnected event so terminals re-attach through their ring anchors.
-
-## Protocol v1 (the contract with the daemon)
+## Protocol v1 (the contract with the session host)
 
 Newline-delimited JSON, one object per line, both directions. Binary data is base64
 (standard alphabet, padded).
@@ -143,7 +131,7 @@ Newline-delimited JSON, one object per line, both directions. Binary data is bas
 `{"protocol":1,"client":"santree/<ver>","owner":"<client instance id>"}` →
 `{"protocol":1,"version","hostname","user","home","bootId","projectsRoot","hookBin","features"}`.
 `bootId` is random per
-`serve` start: hook `seq` restarts at 1 with each boot, so a client whose stored
+session host start: hook `seq` restarts at 1 with each boot, so a client whose stored
 `bootId` differs resets its hook cursor to 0. Unsupported protocol → error `version`,
 connection kept open. `owner` is minted once per app process (the link outlives page
 reloads); a PTY session's own `owner` is the webview's page owner, as locally.
@@ -198,50 +186,31 @@ snapshot yet, with an empty list), `remote`/`branch`/`head`/`headAt`, `ahead`/`b
 (`null` with no upstream) and `sync` (`{result,detail,at}`, `null` before the host's
 first sync of that checkout).
 
-### TLS profile (`santree-remote-tls`)
+### The agent ↔ session host link
 
-The session-host link runs protocol v1 over TLS instead of ssh stdio. Both ends build
-their rustls configs from `crates/remote-tls`, so the profile cannot drift:
-
-- **Keys, not names or CAs.** Each end has an ed25519 `Identity` (PKCS#8 via ring) and
-  presents a self-signed certificate made from it at load time. The client pins the
-  host's **raw 32-byte public key** (64 hex on the wire, `parse_key_hex`; compared in
-  constant time), not a digest; the host admits a client key only if its `allow`
-  check (the enrolled devices, read live at each handshake) accepts it. Client
-  certificates are mandatory.
-- The pin says *which* key; the handshake signature (TLS 1.3 CertificateVerify,
-  checked with rustls' `verify_tls13_signature` over ring's algorithms) proves the
-  peer *holds* it. A peer showing the pinned key's certificate without the private
-  key fails.
-- TLS 1.3 only, the ED25519 signature scheme only, ring's provider passed explicitly
-  (never the process default; no aws-lc-rs in the crate's tree), no session
-  resumption, no tickets, no 0-RTT. The SNI is the constant `daedalus-session-host`,
-  which nobody validates.
-- `fingerprint(key)` — SHA-256 of the key, lowercase hex in sixteen groups of four
-  joined by `:`, the daedalus agent's format — is for display only.
-- **Refusals** (`Refusal::of(&io::Error)`): a host presenting another key fails the
-  client's `connect` → `HostKeyMismatch` ("host key changed — sign in again"). A
-  client key the host does not admit does **not** fail the connect: in TLS 1.3 the
-  client finishes before the host judges its certificate, so the host's
-  `access_denied` alert arrives on the client's **first read** → `NotEnrolled` (never
-  enrolled, or revoked). Both are terminal states, not reasons to reconnect. Every
-  other error is `None`.
+santree never sees it. The agent opens it per santree connection: TLS 1.3, both
+ends proving ed25519 keys (the agent the machine's node key, the host its own),
+the agent pinning the host key the box named in the machine's policy and the host
+admitting only the keys on its allow-list (approved machines with santree on). The
+host builds its side from `crates/remote-tls` (`santree-remote-tls`, below); the
+agent uses its own rustls client, and the engine's `session-host/interop` tests
+prove the two meet. santree does not depend on `santree-remote-tls`.
 
 ## How santree dispatches (app side)
 
 - `crates/remote` (package `santree-remote-client`, Tauri-agnostic like
-  `crates/pty`) is transport + client only (`transport`, `client`, `host`, over the
+  `crates/pty`) is transport + client only (`agent`, `transport`, `client`, `host`, over the
   protocol types in `crates/remote-proto`):
   it knows nothing about repos. Its `fake` module (behind the `fake` feature, for
   tests) is an in-process daemon
   speaking the same protocol, backed by a real `PtyManager`, so the client and every
-  dispatch path are tested without ssh.
+  dispatch path are tested without a box.
 - Every backend path that touches a repo resolves its `RepoLocation` once and
   dispatches: local → `std::fs`/`Command`/`PtyManager` as today; Daedalus →
   `exec.run`/`fs.*`/`pty.*`. `git.rs`'s one spawn site (`git_capture`) is where git
   dispatches.
 - Hooks: agents on the server are launched with a settings file santree writes there
-  via `fs.write`, whose hook commands are `santree-remote hook <args>`. The relayed
+  via `fs.write`, whose hook commands are `<hookBin> hook <args>` (`hookBin` from `hello`). The relayed
   `event` is those args, space-joined — exactly what follows `--db <path>` in the
   local `santree-hook` command (`SessionStart`, `--agent-kind Codex SessionStart`,
   `statusline`), parsed by the binary's own `parse_args`. `statusline` records only
@@ -279,40 +248,47 @@ frames, events, error codes, base64 helpers. Its tests pin the exact wire text;
 changing one is a protocol change. `AgentKind` comes from `crates/agent-kind`
 (package `santree-agent-kind`).
 
-`crates/remote-tls` (package `santree-remote-tls`) — the TLS profile above: `Identity`,
-the self-signed certificate (a small DER writer), `client_config` / `server_config`
-and their pinning verifiers, `connect` / `accept` (tokio-rustls), `peer_key`,
-`fingerprint`, `Refusal`. Its tests run real handshakes over an in-memory duplex.
+`crates/remote-tls` (package `santree-remote-tls`) — the session host's TLS
+profile: `Identity`, the self-signed certificate (a small DER writer),
+`client_config` / `server_config` and their pinning verifiers, `connect` / `accept`
+(tokio-rustls), `peer_key`, `fingerprint`, `Refusal`. TLS 1.3 and ED25519 only,
+ring's provider passed explicitly, no resumption. Its tests run real handshakes over
+an in-memory duplex. santree itself doesn't link it.
 
-These, and `crates/pty`, are the crates the daemon side shares: the daedalus
+These, and `crates/pty`, are the crates the host side shares: the daedalus
 engine depends on them by git rev, so none of them depends on `santree-core`, Tauri
 or (by default) specta, and their public APIs are a contract with that repo.
 
 `crates/remote` (package `santree-remote-client`), which re-exports
 `santree-remote-proto` as `proto`:
 
-- `transport.rs` — `SshTarget`, the validated `ssh` argv (`ssh_args` /
-  `ssh_command`), `SshConnector`, stderr → short reason (`classify_ssh_failure`),
-  the `Connector` seam and `memory_link()`.
+- `agent.rs` — `AgentConnector`: the socket path per OS, the root peer check, the
+  first line (`AgentOk` or a refusal).
+- `transport.rs` — the `Connector` seam, `Link`, `ConnectError` / `Refusal` and
+  `permanent()`, `memory_link()`.
 - `client.rs` — `RemoteClient`: framing (32 MiB line cap), concurrent calls, event
   routing (per-session receivers from `pty_attach`, one hooks receiver), link death
   after 45s of silence, `call_blocking` for sync callers.
-- `host.rs` — `RemoteHost`: its one `SshTarget`, `hello`, the `HostStatus` watch, backoff,
-  the hooks subscription carried across links (boot-tagged `HookDelivery`s, the
-  cursor reset on a new `bootId`), the `Reconnected` broadcast.
-- `probe.rs` — `ssh_probe`: the health check's one ssh round trip.
+- `host.rs` — `RemoteHost`: its connector, `hello` (kept for `features`), the
+  `HostStatus` watch, backoff (the slow end at once for a permanent refusal), the
+  hooks subscription carried across links (boot-tagged `HookDelivery`s, the cursor
+  reset on a new `bootId`), the `Reconnected` broadcast.
 - `fake.rs` (feature `fake`) — the in-process daemon (a random `bootId` per
-  instance); `FakeDaemon::connector()` plugs it into a `RemoteHost`.
+  instance; `FakeDaemon::connector()` plugs it into a `RemoteHost` over memory), and
+  `FakeAgent`, a unix socket that writes the agent's first line and then hands the
+  connection to a `FakeDaemon` — what the connector and the app's health and
+  workspace tests connect through.
 
 `src-tauri/src/daedalus/`:
 
-- `host.rs` — `DaedalusHost` (Tauri-managed): the one `RemoteHost`, configured from
-  the `daedalus_connection` row (`ssh_user@ssh_host`, port 22 by default) and
-  re-synced after every command that can change it (reconfigured only when the
-  target changes); `client(app)` / `connected_client(app)` (waits ≤5s while `Connecting`)
-  → `Result<Arc<RemoteClient>, NotConnected>`; `reconnected(app)`; the
-  `DaedalusDaemonChanged` event; the hook `Relay`.
-- `health.rs` — `daedalus_health`'s staging.
+- `host.rs` — `DaedalusHost` (Tauri-managed): the one `RemoteHost` over the
+  `AgentConnector`, started once with the saved hook cursor (`resume`);
+  `state()` / `settled()` → `DaedalusLink`; `retry_now()`; `client(app)` /
+  `connected_client(app)` (waits ≤5s while `Connecting`) →
+  `Result<Arc<RemoteClient>, NotConnected>`; `reconnected(app)`; the
+  `DaedalusLinkChanged` event; the hook `Relay`.
+- `mod.rs` — the health check, `workspaces.list` over the link, and registering a
+  checkout.
 
 `crates/hook` is a library plus a one-line binary: `santree_hook::apply` is the
 binary's hook and status-line modes over a caller's connection.
