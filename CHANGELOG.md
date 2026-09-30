@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.10 — 2026-09-30
+
+- On macOS, Settings › Daedalus now reliably says santree is off for this Mac (or that the box's key changed) instead of sometimes showing a connection error.
+
 ## 0.1.17-beta.9 — 2026-09-29
 
 - Daedalus projects now connect through the Daedalus agent on this Mac. There is nothing to configure in Settings: install the agent, approve this Mac and turn on santree for it in Daedalus › Settings › Machines.
