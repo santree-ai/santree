@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.16 — 2026-09-30
+
+- Claude and Codex sessions in Daedalus projects now run on the box. Start one from + in a worktree, from a ticket, or as a triage investigation, and it runs there with the same prompts, models and settings as on this Mac.
+- Their state shows in santree as usual: working, waiting on you, idle, and which agent is in each tab.
+- If an agent isn't installed on Daedalus, its choice in the + menu stays disabled and says so.
+- Session history for Daedalus projects comes next, and AI review stays off for them.
+
 ## 0.1.17-beta.15 — 2026-09-30
 
 - Terminals and setup scripts in Daedalus projects now run on the box. Open a terminal with + or ⌘T, or Run setup, and it runs in the worktree there.
