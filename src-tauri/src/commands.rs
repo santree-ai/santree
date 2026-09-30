@@ -208,20 +208,29 @@ pub async fn claude_usage(app: AppHandle, db: State<'_, Db>) -> CmdResult<UsageR
 
 // ── Real worktrees (Trees view) ────────────────────────────────────────────
 
-/// The repo's live agent worktrees (DB-tracked, with live git stats). Empty when
-/// the repo has no local path.
+/// The repo's live agent worktrees (DB-tracked, with live git stats), read on
+/// Daedalus for a Daedalus project. Empty when the repo has no path.
 #[tauri::command]
 #[specta::specta]
-pub async fn worktrees(repo: String, db: State<'_, Db>) -> CmdResult<Vec<Worktree>> {
-    Ok(worktree::list(&db, &repo).await?)
+pub async fn worktrees(
+    repo: String,
+    db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
+) -> CmdResult<Vec<Worktree>> {
+    Ok(worktree::list(&db, &daedalus, &repo).await?)
 }
 
 /// The repo's base branch as a worktree-like entry (repo root on main/master),
-/// for the Trees "main" entry. `None` when the repo has no local path.
+/// for the Trees "main" entry, read on Daedalus for a Daedalus project. `None`
+/// when the repo has no path.
 #[tauri::command]
 #[specta::specta]
-pub async fn base_worktree(repo: String, db: State<'_, Db>) -> CmdResult<Option<Worktree>> {
-    Ok(worktree::base_worktree(&db, &repo).await?)
+pub async fn base_worktree(
+    repo: String,
+    db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
+) -> CmdResult<Option<Worktree>> {
+    Ok(worktree::base_worktree(&db, &daedalus, &repo).await?)
 }
 
 /// Find-or-create a worktree and record the issue ↔ worktree link. `launch` says
@@ -292,11 +301,15 @@ async fn create_from_launch(
 
 /// The repo's branches (local, plus `origin`-only ones), each flagged with
 /// whether it is already checked out somewhere — the Create-worktree dialog's
-/// Branch source. Empty when the repo has no local path.
+/// Branch source. Empty when the repo has no path.
 #[tauri::command]
 #[specta::specta]
-pub async fn repo_branches(repo: String, db: State<'_, Db>) -> CmdResult<Vec<RepoBranch>> {
-    Ok(worktree::branches(&db, &repo).await?)
+pub async fn repo_branches(
+    repo: String,
+    db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
+) -> CmdResult<Vec<RepoBranch>> {
+    Ok(worktree::branches(&db, &daedalus, &repo).await?)
 }
 
 fn validate_pr_repo(pr_repo: &str, local_owner: &str, local_name: &str) -> anyhow::Result<()> {
@@ -432,8 +445,9 @@ pub async fn worktree_status(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<Vec<ChangedFile>> {
-    Ok(worktree::status(&db, &repo, &issue_id).await?)
+    Ok(worktree::status(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// A unified diff for one changed file (staged + unstaged vs HEAD).
@@ -445,8 +459,9 @@ pub async fn worktree_file_diff(
     path: String,
     untracked: bool,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<String> {
-    Ok(worktree::file_diff(&db, &repo, &issue_id, &path, untracked).await?)
+    Ok(worktree::file_diff(&db, &daedalus, &repo, &issue_id, &path, untracked).await?)
 }
 
 /// The old/new full file contents, for the diff viewer's context expansion.
@@ -457,8 +472,9 @@ pub async fn worktree_file_source(
     issue_id: String,
     path: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<FileSource> {
-    Ok(worktree::file_source(&db, &repo, &issue_id, &path).await?)
+    Ok(worktree::file_source(&db, &daedalus, &repo, &issue_id, &path).await?)
 }
 
 /// The files the branch has committed relative to its base (merge-base diff),
@@ -470,8 +486,9 @@ pub async fn worktree_branch_changes(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<Vec<ChangedFile>> {
-    Ok(worktree::branch_changes(&db, &repo, &issue_id).await?)
+    Ok(worktree::branch_changes(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// One file's committed diff on the branch (`<base>...HEAD -- <path>`). Empty
@@ -483,8 +500,9 @@ pub async fn worktree_branch_file_diff(
     issue_id: String,
     path: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<String> {
-    Ok(worktree::branch_file_diff(&db, &repo, &issue_id, &path).await?)
+    Ok(worktree::branch_file_diff(&db, &daedalus, &repo, &issue_id, &path).await?)
 }
 
 /// The agent sessions that have run in the worktree, newest first — registry
@@ -625,8 +643,9 @@ pub async fn worktree_files(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<Vec<String>> {
-    Ok(worktree::files(&db, &repo, &issue_id).await?)
+    Ok(worktree::files(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// Stage a single file.

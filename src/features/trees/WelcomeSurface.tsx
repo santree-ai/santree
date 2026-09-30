@@ -75,7 +75,13 @@ function Enter({
   );
 }
 
-export function WelcomeSurface({ workspace }: { workspace?: { onOpenTerminal: () => void } }) {
+export function WelcomeSurface({
+  workspace,
+}: {
+  /** Set inside a workspace. `actionsOff` is why nothing can be opened in it
+   *  (a Daedalus project): the button stays, disabled, with that as its tooltip. */
+  workspace?: { onOpenTerminal: () => void; actionsOff?: string };
+}) {
   const flow = useAddProject();
   const { toggleShortcuts } = useAppUi();
 
@@ -96,16 +102,24 @@ export function WelcomeSurface({ workspace }: { workspace?: { onOpenTerminal: ()
           <Enter delay={80} className="flex flex-col items-center gap-1.5">
             <h1 className="text-[20px] font-semibold tracking-[-.02em] text-fg-bright">santree</h1>
             <p className="max-w-[300px] text-center text-[13px] leading-[1.5] text-muted-3">
-              {workspace
-                ? "Nothing is open here. Start a terminal, or pick up an agent from Session history."
-                : "Pick a worktree in the sidebar, or start one from a ticket."}
+              {!workspace
+                ? "Pick a worktree in the sidebar, or start one from a ticket."
+                : workspace.actionsOff
+                  ? "Its changes, diffs and files are in the side panel. Terminals and agents in Daedalus projects are coming soon."
+                  : "Nothing is open here. Start a terminal, or pick up an agent from Session history."}
             </p>
           </Enter>
         </div>
 
         <Enter delay={160} className="flex flex-wrap items-center justify-center gap-2.5">
           {workspace ? (
-            <button type="button" onClick={workspace.onOpenTerminal} className={ACTION}>
+            <button
+              type="button"
+              onClick={workspace.onOpenTerminal}
+              disabled={workspace.actionsOff !== undefined}
+              title={workspace.actionsOff}
+              className={ACTION}
+            >
               <TerminalIcon size={15} />
               Open terminal
             </button>

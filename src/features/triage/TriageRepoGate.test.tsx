@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock("../../lib/queries", () => ({
   useRepos: () => ({ data: [{ name: "acme/app", path: "/src/app" }] }),
+  useDaedalusStatus: () => ({ data: { kind: "Connected" } }),
   useTriageRepo: () => ({
     repo: state.repo,
     attached: false,

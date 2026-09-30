@@ -23,7 +23,8 @@
 import { type KeyboardEvent, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { useRepos } from "../lib/queries";
+import { actionsOff } from "../lib/daedalusLink";
+import { useDaedalusStatus, useRepos } from "../lib/queries";
 import { shortRepoName } from "../lib/repoName";
 import { accentActiveStyle } from "../theme/colors";
 import { RepoAvatar } from "./chrome/RepoAvatar";
@@ -63,6 +64,11 @@ export function ProjectPickerDialog({
 }) {
   const { data: registered = [] } = useRepos();
   const repos = only ? registered.filter((r) => only.includes(r.name)) : registered;
+  // Every asker runs something in the project it gets (a worktree, an agent on
+  // its checkout), which a Daedalus project doesn't offer yet: listed, so the
+  // registry reads whole, but not pickable, and says why.
+  const { data: link } = useDaedalusStatus();
+  const offFor = (location: string) => actionsOff(location === "Daedalus", link);
   const [asDefault, setAsDefault] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const initialRef = useRef<HTMLButtonElement>(null);
@@ -72,14 +78,16 @@ export function ProjectPickerDialog({
   // would pick, so it is the one to look at.
   const initialIndex = Math.max(
     0,
-    repos.findIndex((r) => r.name === current),
+    repos.findIndex((r) => r.name === current && !offFor(r.location)),
   );
 
   /** Arrows walk the rows; the ends clamp rather than wrap, like every other
    *  list in the app. Rows are buttons, so Enter and Space already click. */
   const onListKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
-    const rows = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("[role=option]"));
+    const rows = Array.from(
+      e.currentTarget.querySelectorAll<HTMLButtonElement>("[role=option]:not(:disabled)"),
+    );
     if (rows.length === 0) return;
     const at = rows.indexOf(document.activeElement as HTMLButtonElement);
     const next =
@@ -133,6 +141,7 @@ export function ProjectPickerDialog({
           )}
           {repos.map((repo, i) => {
             const selected = repo.name === current;
+            const off = offFor(repo.location);
             return (
               <button
                 key={repo.name}
@@ -140,16 +149,17 @@ export function ProjectPickerDialog({
                 type="button"
                 role="option"
                 aria-selected={selected}
-                title={repo.name}
+                disabled={off !== undefined}
+                title={off ?? repo.name}
                 onClick={() => onPick(repo.name, asDefault)}
                 onKeyDown={(e) => {
                   // Enter is handled here rather than left to the button's own
                   // click so a pick and the click can't both fire from one key.
-                  if (e.key !== "Enter") return;
+                  if (e.key !== "Enter" || off) return;
                   e.preventDefault();
                   onPick(repo.name, asDefault);
                 }}
-                className="flex w-full cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-hover"
+                className="flex w-full cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-hover disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
                 style={selected ? accentActiveStyle() : undefined}
               >
                 <RepoAvatar repo={repo.name} size={16} bordered={false} />

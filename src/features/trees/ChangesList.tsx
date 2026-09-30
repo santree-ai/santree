@@ -60,6 +60,7 @@ export function ChangesList({
   selectedPath,
   selectedScope,
   onOpen,
+  readOnly = false,
 }: {
   repo: string;
   worktreeId: string;
@@ -74,6 +75,9 @@ export function ChangesList({
    *  button. Staging and discard are unaffected — those act on the checkout, not
    *  on the host. */
   onOpen?: (path: string, scope: FileScope) => void;
+  /** List and diff only: no staging and no discard (a Daedalus project, which
+   *  santree doesn't change yet). */
+  readOnly?: boolean;
 }) {
   const { mutate: act, mutateAsync: actAsync } = useStageAction(repo, worktreeId);
   const loading = files === undefined;
@@ -136,6 +140,11 @@ export function ChangesList({
     () => (onOpen ? (path: string) => onOpen(path, "branch") : undefined),
     [onOpen],
   );
+  // What a working-tree row can do to the checkout — nothing, for a read-only one
+  // (its staged marks still show: they are facts about the index).
+  const editing = readOnly
+    ? {}
+    : { onToggle, onDiscard: discardFile, onDiscardDir: discardDir, onStageDir };
   const workingSelected = selectedScope === "working" ? selectedPath : null;
   const branchSelected = selectedScope === "branch" ? selectedPath : null;
 
@@ -151,13 +160,15 @@ export function ChangesList({
           </span>
           <div className="flex items-center gap-1.5">
             <ViewToggle tree={tree} onChange={setTree} />
-            <button
-              type="button"
-              onClick={() => act({ action: allStaged ? "unstageAll" : "stageAll" })}
-              className="cursor-pointer rounded-[5px] border border-line-3 bg-input px-2 py-0.5 text-[10.5px] text-muted-2 hover:border-line-strong hover:text-fg-2"
-            >
-              {allStaged ? "Unstage all" : "Stage all"}
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => act({ action: allStaged ? "unstageAll" : "stageAll" })}
+                className="cursor-pointer rounded-[5px] border border-line-3 bg-input px-2 py-0.5 text-[10.5px] text-muted-2 hover:border-line-strong hover:text-fg-2"
+              >
+                {allStaged ? "Unstage all" : "Stage all"}
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -175,11 +186,8 @@ export function ChangesList({
                   files={tracked}
                   tree={tree}
                   selectedFile={workingSelected}
-                  onToggle={onToggle}
                   onOpen={openWorking}
-                  onDiscard={discardFile}
-                  onDiscardDir={discardDir}
-                  onStageDir={onStageDir}
+                  {...editing}
                 />
               </Section>
             )}
@@ -189,11 +197,8 @@ export function ChangesList({
                   files={untracked}
                   tree={tree}
                   selectedFile={workingSelected}
-                  onToggle={onToggle}
                   onOpen={openWorking}
-                  onDiscard={discardFile}
-                  onDiscardDir={discardDir}
-                  onStageDir={onStageDir}
+                  {...editing}
                 />
               </Section>
             )}

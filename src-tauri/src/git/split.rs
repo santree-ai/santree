@@ -1,9 +1,16 @@
 //! Private-index previews and recoverable Git-stash transfers into child worktrees.
+//!
+//! Local checkouts only: a preview builds a private index in this machine's temp
+//! directory, so the split runs its own `git` (with `GIT_INDEX_FILE` and stdin)
+//! rather than going through [`super::Checkout`]. The UI offers it for local
+//! worktrees alone.
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{ensure, Context, Result};
+
+use super::Checkout;
 
 pub(crate) struct Scratch(PathBuf);
 impl Scratch {
@@ -26,6 +33,11 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// [`super::git`] in a checkout on this machine.
+fn git(cwd: &Path, args: &[&str]) -> Result<String> {
+    super::git(&Checkout::local(cwd), args)
 }
 
 fn run(cwd: &Path, index: Option<&Path>, args: &[&str], input: Option<&str>) -> Result<String> {
@@ -70,7 +82,7 @@ fn run(cwd: &Path, index: Option<&Path>, args: &[&str], input: Option<&str>) -> 
 
 pub(crate) fn oid(cwd: &Path, reference: &str) -> Result<String> {
     ensure!(!reference.starts_with('-'), "Invalid reference");
-    super::git(
+    git(
         cwd,
         &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
     )
@@ -84,9 +96,9 @@ pub(crate) fn validate_branch(cwd: &Path, branch: &str) -> Result<()> {
             && branch != "HEAD",
         "Invalid branch name"
     );
-    super::git(cwd, &["check-ref-format", &format!("refs/heads/{branch}")])?;
+    git(cwd, &["check-ref-format", &format!("refs/heads/{branch}")])?;
     ensure!(
-        super::git(
+        git(
             cwd,
             &["show-ref", "--verify", &format!("refs/heads/{branch}")]
         )
@@ -94,7 +106,7 @@ pub(crate) fn validate_branch(cwd: &Path, branch: &str) -> Result<()> {
         "Branch '{branch}' already exists"
     );
     ensure!(
-        super::git(
+        git(
             cwd,
             &[
                 "show-ref",
@@ -105,7 +117,7 @@ pub(crate) fn validate_branch(cwd: &Path, branch: &str) -> Result<()> {
         .is_err(),
         "Remote branch '{branch}' already exists"
     );
-    let refs = super::git(
+    let refs = git(
         cwd,
         &[
             "for-each-ref",
@@ -131,23 +143,23 @@ pub(crate) fn validate_branch(cwd: &Path, branch: &str) -> Result<()> {
 
 pub(crate) fn assert_checkout(cwd: &Path, branch: &str) -> Result<()> {
     ensure!(
-        super::git(cwd, &["config", "--bool", "core.sparseCheckout"])
+        git(cwd, &["config", "--bool", "core.sparseCheckout"])
             .ok()
             .as_deref()
             != Some("true"),
         "Splitting requires a full checkout; sparse worktrees are not supported"
     );
-    let top = super::git(cwd, &["rev-parse", "--show-toplevel"])?;
+    let top = git(cwd, &["rev-parse", "--show-toplevel"])?;
     ensure!(
         std::fs::canonicalize(top)? == std::fs::canonicalize(cwd)?,
         "Worktree no longer exists at its registered path"
     );
     ensure!(
-        super::git(cwd, &["symbolic-ref", "--short", "HEAD"])? == branch,
+        git(cwd, &["symbolic-ref", "--short", "HEAD"])? == branch,
         "The checked-out branch changed; reopen the split"
     );
     ensure!(
-        super::git(cwd, &["ls-files", "--unmerged"])?.is_empty(),
+        git(cwd, &["ls-files", "--unmerged"])?.is_empty(),
         "Resolve merge conflicts before splitting"
     );
     for state in [
@@ -157,7 +169,7 @@ pub(crate) fn assert_checkout(cwd: &Path, branch: &str) -> Result<()> {
         "rebase-merge",
         "rebase-apply",
     ] {
-        let path = super::git(cwd, &["rev-parse", "--git-path", state])?;
+        let path = git(cwd, &["rev-parse", "--git-path", state])?;
         ensure!(
             !cwd.join(path).exists(),
             "Finish the current Git operation before splitting"
@@ -265,7 +277,7 @@ pub(crate) fn create_worktree(root: &Path, path: &Path, branch: &str, base: &str
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    super::git(
+    git(
         root,
         &[
             "worktree",
@@ -304,7 +316,7 @@ pub(crate) fn changed_paths(
                 "Santree checkout storage cannot be moved as project changes"
             );
             if path == ".santree/.gitignore" {
-                ensure!(super::git(cwd, &["cat-file", "-e", &format!("{head}:{path}")]).is_err() && super::git(cwd, &["cat-file", "-e", &format!("{index}:{path}")]).is_err(), "Commit or discard changes to .santree/.gitignore before moving; it protects the worktree storage");
+                ensure!(git(cwd, &["cat-file", "-e", &format!("{head}:{path}")]).is_err() && git(cwd, &["cat-file", "-e", &format!("{index}:{path}")]).is_err(), "Commit or discard changes to .santree/.gitignore before moving; it protects the worktree storage");
                 continue;
             }
             ensure!(
@@ -343,7 +355,7 @@ pub(crate) fn stash_remaining(
     cwd: &Path,
     op: &santree_core::domain::MoveChanges,
 ) -> Result<String> {
-    super::with_index_lock(cwd, || {
+    super::with_index_lock(&Checkout::local(cwd), || {
         assert_checkout(cwd, &op.source_branch)?;
         ensure!(
             oid(cwd, "HEAD")? == op.head
@@ -381,7 +393,7 @@ pub(crate) fn stash_remaining(
 }
 
 pub(crate) fn restore_backup(cwd: &Path, stash: &str, head: &str) -> Result<()> {
-    super::with_index_lock(cwd, || {
+    super::with_index_lock(&Checkout::local(cwd), || {
         ensure!(
             oid(cwd, "HEAD")? == head,
             "The destination branch changed; its files were preserved"
@@ -404,11 +416,11 @@ pub(crate) fn restore_backup(cwd: &Path, stash: &str, head: &str) -> Result<()> 
         let expected = run(cwd, Some(&index), &["write-tree"], None)?
             .trim()
             .to_string();
-        let staged = super::git(cwd, &["rev-parse", &format!("{stash}^2^{{tree}}")])?;
+        let staged = git(cwd, &["rev-parse", &format!("{stash}^2^{{tree}}")])?;
         if snapshot_from(cwd, Some(&expected))? == expected && index_tree(cwd)? == staged {
             return Ok(());
         }
-        ensure!(super::git(cwd, &["status", "--porcelain"])?.is_empty(), "The destination already has edits. They were preserved. Resolve them before retrying; the recovery stash is still available");
+        ensure!(git(cwd, &["status", "--porcelain"])?.is_empty(), "The destination already has edits. They were preserved. Resolve them before retrying; the recovery stash is still available");
         run(cwd, None, &["stash", "apply", "--index", stash], None)
             .context("Could not apply the recovery stash. It is still saved; inspect the destination before retrying")?;
         ensure!(

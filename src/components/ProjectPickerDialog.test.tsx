@@ -12,7 +12,10 @@ const registry = vi.hoisted(() => ({
     { name: "acme/web", path: "/src/web" },
   ],
 }));
-vi.mock("../lib/queries", () => ({ useRepos: () => ({ data: registry.repos }) }));
+vi.mock("../lib/queries", () => ({
+  useRepos: () => ({ data: registry.repos }),
+  useDaedalusStatus: () => ({ data: { kind: "Connected" } }),
+}));
 
 import { ProjectPickerDialog } from "./ProjectPickerDialog";
 

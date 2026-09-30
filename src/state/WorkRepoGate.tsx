@@ -11,6 +11,9 @@
  * the launch queue — resolve through here, so they can't answer the same ticket
  * differently.
  *
+ * A Daedalus project is never answered for the user: nothing can be started in
+ * one yet, so it is only ever a disabled row in the dialog, saying why.
+ *
  * `always` skips the first two answers: the menu's "Run in another project…" is
  * a request to be asked. Modelled on `TriageRepoGate`, down to the
  * one-question-at-a-time rule and the declined-outside-a-provider default — a
@@ -20,7 +23,7 @@
 import { createContext, type ReactNode, useCallback, useContext, useRef, useState } from "react";
 
 import { ProjectPickerDialog } from "../components/ProjectPickerDialog";
-import { useWorkDefaultRepo } from "../lib/queries";
+import { useRepos, useWorkDefaultRepo } from "../lib/queries";
 
 /** Resolve the project for `action` — named in the dialog, so it reads
  *  "Starting AK-1 needs a project." — out of `candidates`, the projects that
@@ -53,6 +56,9 @@ export function WorkRepoGateProvider({ children }: { children: ReactNode }) {
   // it in memoized handlers — while the default changes under it.
   const defaultRef = useRef(defaultRepo);
   defaultRef.current = defaultRepo;
+  const { data: repos } = useRepos();
+  const localRef = useRef<(name: string) => boolean>(() => false);
+  localRef.current = (name) => repos?.find((r) => r.name === name)?.location !== "Daedalus";
 
   const settle = useCallback((picked: string | null) => {
     pending.current?.(picked);
@@ -62,9 +68,10 @@ export function WorkRepoGateProvider({ children }: { children: ReactNode }) {
 
   const ask = useCallback<AskWorkRepo>((candidates, action, opts) => {
     if (!opts?.always) {
-      if (candidates.length === 1) return Promise.resolve(candidates[0]);
+      const startable = candidates.filter((name) => localRef.current(name));
+      if (candidates.length === 1 && startable.length === 1) return Promise.resolve(startable[0]);
       const preset = defaultRef.current;
-      if (preset && candidates.includes(preset)) return Promise.resolve(preset);
+      if (preset && startable.includes(preset)) return Promise.resolve(preset);
     }
     // Nothing to choose from, or a question already on screen — the one the
     // user is looking at, so a second asker is declined rather than allowed to

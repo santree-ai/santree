@@ -54,7 +54,15 @@ function RootLayout() {
         ? ((s.location.search as { project?: string }).project ?? "")
         : "",
   });
-  useWorktreeWatcher(watched);
+  // The worktree on screen: a Daedalus project has no filesystem here to watch,
+  // so that one worktree is re-read on a timer instead.
+  const onScreen = useRouterState({
+    select: (s) =>
+      s.location.pathname.startsWith("/trees")
+        ? ((s.location.search as { tree?: string }).tree ?? "")
+        : "",
+  });
+  useWorktreeWatcher(watched, onScreen);
   // Settings is a page, not a view: it takes the whole window and brings its
   // own way back, so the shell (sidebar, status bar) steps aside for it.
   const fullPage = useRouterState({ select: (s) => s.location.pathname.startsWith("/settings") });

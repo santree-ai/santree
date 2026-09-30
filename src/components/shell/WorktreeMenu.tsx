@@ -21,7 +21,7 @@ import {
   TREES_DEFAULT_EDITOR_KEY,
   useOpeners,
   useOpenInApp,
-  useRepos,
+  useRepoReach,
   useResolvedSetting,
 } from "../../lib/queries";
 import { useAppUi } from "../../state/AppContext";
@@ -44,18 +44,13 @@ export function WorktreeMenu({
   prs: WorktreePr[];
   /** The repo's default-branch checkout — deletable only as a repo, not here. */
   primary: boolean;
-  /** Why the checkout can't be changed right now (its Daedalus host is out of
-   *  reach). Set, Delete stays listed but disabled with this as its tooltip;
-   *  copying what the row already knows still works. */
+  /** Why the checkout can't be changed from here (a Daedalus project: out of
+   *  reach, or not yet). Set, Split and Delete stay listed but disabled with this
+   *  as their tooltip; copying what the row already knows still works. */
   actionsDisabled?: string;
   children: React.ReactNode;
 }) {
-  const { data: repos = [] } = useRepos();
-  const splitDisabled =
-    actionsDisabled ??
-    (repos.find((r) => r.name === repo)?.location === "Daedalus"
-      ? "Splitting is available for local worktrees"
-      : undefined);
+  const { remote } = useRepoReach(repo);
   const navigate = useNavigate();
   const { requestTreeFocus } = useAppUi();
   const [confirming, setConfirming] = useState(false);
@@ -65,7 +60,8 @@ export function WorktreeMenu({
   const { deleteWorktree } = useWorktreeDeletion(repo);
 
   const pr = primaryPr(prs);
-  const installed = openers.filter((o) => o.available);
+  // A Daedalus checkout is a folder on the box: nothing on this Mac can open it.
+  const installed = remote ? [] : openers.filter((o) => o.available);
   const ranked = [
     ...installed.filter((o) => o.key === defaultKey),
     ...installed.filter((o) => o.key !== defaultKey),
@@ -120,8 +116,8 @@ export function WorktreeMenu({
       key: "split",
       label: "Split branch…",
       icon: <BranchIcon size={13} />,
-      disabled: !!splitDisabled,
-      title: splitDisabled,
+      disabled: actionsDisabled !== undefined,
+      title: actionsDisabled,
       run: () => {
         requestTreeFocus(repo, worktree.id, { split: true, fromSidebar: true });
         void navigate({ to: "/trees", search: { project: repo, tree: worktree.id } });

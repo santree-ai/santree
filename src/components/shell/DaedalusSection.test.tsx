@@ -82,7 +82,7 @@ describe("DaedalusSection visibility", () => {
       location: "Daedalus",
       emptyLabel: "No projects yet. Add one with +",
     });
-    expect(state.tree?.actionsDisabled).toBeUndefined();
+    expect(state.tree?.actionsDisabled).toBe("Coming soon for Daedalus projects");
   });
 
   /** A registered Daedalus project keeps its section whatever the link says. */
@@ -132,7 +132,7 @@ describe("DaedalusSection link", () => {
     expect(
       screen.getByRole("button", { name: `${hint}. Open Settings, Daedalus` }),
     ).toHaveTextContent(hint);
-    expect(state.tree?.actionsDisabled).toBeDefined();
+    expect(state.tree?.actionsDisabled).toBe("Unavailable until santree can reach Daedalus");
   });
 
   /** An unknown is not a no, and a retry in flight is not a failure: the
@@ -144,7 +144,8 @@ describe("DaedalusSection link", () => {
     state.link = link;
     render(<DaedalusSection />);
     expect(header()).not.toHaveClass("opacity-60");
-    expect(state.tree?.actionsDisabled).toBeUndefined();
+    // Reachable, so the reason nothing runs there is only that nothing does yet.
+    expect(state.tree?.actionsDisabled).toBe("Coming soon for Daedalus projects");
     expect(screen.queryByRole("button", { name: /Settings/ })).toBeNull();
   });
 

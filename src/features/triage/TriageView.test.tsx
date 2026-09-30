@@ -60,6 +60,7 @@ vi.mock("../../lib/queries", () => ({
   useSetting: () => ({ data: null }),
   useTriageDetail: () => ({ data: undefined }),
   useRepos: () => ({ data: [{ name: "acme/app", path: "/src/app" }] }),
+  useDaedalusStatus: () => ({ data: { kind: "Connected" } }),
 }));
 // The page and the panes are their own tests; here they are the slots the
 // view fills. The page renders its host action so the gate can be driven.

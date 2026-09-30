@@ -62,6 +62,7 @@ export function TabStrip<T extends string>({
   onSelect,
   newTabMenu,
   newTabMenuClassName,
+  newTabDisabled,
   trailing,
   ariaLabel,
 }: {
@@ -77,6 +78,9 @@ export function TabStrip<T extends string>({
   /** The menu's own width class — the rows are the host's, so their measure is
    *  too. */
   newTabMenuClassName?: string;
+  /** Why the "+" can't open anything right now: set, it stays in place but
+   *  disabled with this as its tooltip, and ⌘T does nothing. */
+  newTabDisabled?: string;
   /** The host's own cluster at the far edge — outside the tablist, because these
    *  act on the pane rather than being places in it. */
   trailing?: ReactNode;
@@ -123,7 +127,13 @@ export function TabStrip<T extends string>({
           </div>
         )}
         {hidden.length > 0 && <OverflowTabsMenu tabs={hidden} onSelect={onSelect} />}
-        {newTabMenu && <NewTabButton menu={newTabMenu} menuClassName={newTabMenuClassName} />}
+        {newTabMenu && (
+          <NewTabButton
+            menu={newTabMenu}
+            menuClassName={newTabMenuClassName}
+            disabled={newTabDisabled}
+          />
+        )}
         <div data-tauri-drag-region className="min-w-2 flex-1" />
       </div>
 
@@ -254,15 +264,18 @@ function OverflowTabsMenu<T extends string>({
 function NewTabButton({
   menu,
   menuClassName = "w-52 overflow-hidden",
+  disabled,
 }: {
   menu: (close: () => void) => ReactNode;
   menuClassName?: string;
+  disabled?: string;
 }) {
   const [open, setOpen] = useState(false);
 
   // ⌘T opens the menu. Scoped to this component's lifetime, which matches "a
   // workspace is on screen" (the bar only renders then).
   useEffect(() => {
+    if (disabled) return;
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.key !== "t") return;
       if (targetOwnsKey(e)) return;
@@ -271,7 +284,21 @@ function NewTabButton({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [disabled]);
+
+  if (disabled) {
+    return (
+      <button
+        type="button"
+        disabled
+        aria-label="New tab"
+        title={disabled}
+        className="flex h-full w-8 cursor-default items-center justify-center text-muted-5"
+      >
+        <PlusIcon size={13} />
+      </button>
+    );
+  }
 
   return (
     <Dropdown

@@ -25,6 +25,7 @@ import { type ReactNode, useCallback, useRef } from "react";
 import type { ChangedFile } from "../../bindings";
 import { IssuePane } from "../../components/IssuePane";
 import { BranchIcon, ClockIcon, FilesIcon, GitHubLogo, SparklesIcon } from "../../components/icons";
+import { EmptyState } from "../../components/primitives";
 import { RepoTrackerLogo } from "../../components/RepoTrackerLogo";
 import { SidePanel, type SidePanelTab } from "../../components/SidePanel";
 import {
@@ -93,6 +94,7 @@ const LOCAL_PANES = new Set<FileTab>(["files", "changes", "history"]);
 export function FilePickerPanel() {
   const {
     repo,
+    reach,
     active,
     activeId,
     activePr,
@@ -257,9 +259,17 @@ export function FilePickerPanel() {
           open: () => openPrDialog(activeId),
           suggestAfterPush: () => suggestPr(activeId),
         }}
+        actionsOff={reach.actionsOff}
       />
     ),
-    history: (
+    // Agent sessions are read from this Mac's transcripts; a Daedalus project's
+    // ran on the box, and santree doesn't read those yet.
+    history: reach.remote ? (
+      <EmptyState
+        title="Session history"
+        subtitle="Agent sessions in Daedalus projects are coming soon."
+      />
+    ) : (
       <SessionHistory
         repo={repo}
         worktreeId={activeId}

@@ -14,8 +14,11 @@
  * - the link down (no agent, santree off, out of reach…): the section greys,
  *   as Triage does without a tracker, and one line says what to do, linked to
  *   Settings → Daedalus. The rows stay: they still open, since navigating is
- *   not running anything, but every action that would run on the server is
- *   disabled.
+ *   not running anything.
+ *
+ * Every action that would change a project or run something in it is disabled
+ * with the reason (`actionsOff`): out of reach while the link is down, and
+ * otherwise not yet — santree reads Daedalus projects but doesn't change them.
  *
  * Unknown is not "no": while the status read is in flight the section draws as
  * linked rather than flashing grey at a server that is there.
@@ -23,15 +26,12 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
-import { linkNotice, linkUp } from "../../lib/daedalusLink";
+import { actionsOff, linkNotice, linkUp } from "../../lib/daedalusLink";
 import { useDaedalusStatus, useRepos } from "../../lib/queries";
 import { DaedalusLogo } from "../icons";
 import { DaedalusProjectsDialog } from "./DaedalusProjectsDialog";
 import { ProjectTree } from "./ProjectTree";
 import { SECTION_HEADER, SectionAddButton } from "./SectionHeader";
-
-/** The tooltip on every action the section disables while the link is down. */
-const OUT_OF_REACH = "Unavailable until santree can reach Daedalus";
 
 export function DaedalusSection() {
   const navigate = useNavigate();
@@ -69,7 +69,7 @@ export function DaedalusSection() {
         <ProjectTree
           location="Daedalus"
           emptyLabel="No projects yet. Add one with +"
-          actionsDisabled={notice ? OUT_OF_REACH : undefined}
+          actionsDisabled={actionsOff(true, link)}
         />
       </div>
       {adding && <DaedalusProjectsDialog onClose={() => setAdding(false)} />}

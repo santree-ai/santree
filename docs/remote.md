@@ -208,10 +208,36 @@ prove the two meet. santree does not depend on `santree-remote-tls`.
   tests) is an in-process daemon
   speaking the same protocol, backed by a real `PtyManager`, so the client and every
   dispatch path are tested without a box.
-- Every backend path that touches a repo resolves its `RepoLocation` once and
-  dispatches: local → `std::fs`/`Command`/`PtyManager` as today; Daedalus →
-  `exec.run`/`fs.*`/`pty.*`. `git.rs`'s one spawn site (`git_capture`) is where git
-  dispatches.
+- **One seam: `git::Checkout`** (`src-tauri/src/git/checkout.rs`) — a directory (a
+  repo root or a worktree) and where it lives. Every `git.rs` function takes one,
+  so each git operation is written once: `Checkout::git` is a child process here or
+  `exec.run {cwd, argv: ["git", …]}` on the box, `read` is `open_in_worktree` or
+  `fs.read` with `within` = the checkout (the host's symlink check), `contained` is
+  `safe_real_path` or a zero-length `fs.read` with `within`, `is_dir` is a stat or
+  `fs.stat`. IPC paths pass the lexical `safe_path` here before anything is sent.
+  Output cut at the host's cap is an error, never a parsed half-answer. The remote
+  half is blocking (`RemoteClient::call_blocking`), like the processes it stands
+  in for: git code runs on the blocking pool.
+- **Resolved in one place**: `repo::checkout(db, daedalus, name)` answers a local
+  checkout, or a Daedalus one over the live client (waiting ≤5 s for a link that
+  is still connecting); with the link down it is the error saying so
+  (`NotConnected`), never a fall back to this machine. `worktree::locate` builds a
+  worktree's checkout from the repo's (`Checkout::at`), and every worktree read
+  (`list`, `base_worktree`, `status`, `file_diff`, `file_source`,
+  `branch_changes`, `branch_file_diff`, `files`, `branches`) goes through it.
+- **Not yet on the seam, and refusing a Daedalus repo**: the writes (staging,
+  commit, push, pull, worktree create/remove, split, setup, PR creation) still
+  resolve through the local-only `repo_root` / `repo::path`; code that needs this
+  machine's filesystem asks `Checkout::local_path`, which a Daedalus checkout
+  refuses; `terminal_open` refuses a cwd inside a Daedalus project
+  (`repo::on_daedalus`). The UI offers none of these for a Daedalus project: each
+  control stays, disabled with `lib/daedalusLink` `actionsOff`'s reason ("Coming
+  soon for Daedalus projects", or "Unavailable until santree can reach Daedalus").
+- **Reads wait for the link**: a Daedalus project's worktree reads are `enabled`
+  only while the link is `Connected` (`useRepoReach` / `useReadableRepos` in
+  `lib/queries.ts`), so a down link never fails a read into a toast; the sidebar
+  greys and says why, and the workspace shows the link's state when it has nothing
+  read yet.
 - Hooks: agents on the server are launched with a settings file santree writes there
   via `fs.write`, whose hook commands are `<hookBin> hook <args>` (`hookBin` from `hello`). The relayed
   `event` is those args, space-joined — exactly what follows `--db <path>` in the
@@ -238,10 +264,12 @@ prove the two meet. santree does not depend on `santree-remote-tls`.
   has since left is refused, never applied to the new boot's seqs.
 - Which agent is running: `ps -axo pid=,ppid=,pcpu=,rss=,stat=,command=` via
   `exec.run`, parsed by the existing `proc_table` parser.
-- Worktree changes: polled (`git status` while the worktree is on screen), not
-  watched.
-- Stays local: GitHub (`gh`, by repo slug), Linear/Jira. **AI review is disabled for
-  Daedalus projects** (its MCP draft tools would need a relay).
+- Worktree changes: polled, not watched — `useWorktreeWatcher(repo, tree)` re-reads
+  the worktree on screen every 4 s through the watcher's own single-flight
+  invalidation, while the link is up and the window visible.
+- Stays local: GitHub (`gh`, by repo slug — PR status reads the slug from the
+  checkout on the box, then asks GitHub from here), Linear/Jira. **AI review is
+  disabled for Daedalus projects** (its MCP draft tools would need a relay).
 
 ## Code map
 
@@ -286,12 +314,17 @@ or (by default) specta, and their public APIs are a contract with that repo.
 
 - `host.rs` — `DaedalusHost` (Tauri-managed): the one `RemoteHost` over the
   `AgentConnector`, started once with the saved hook cursor (`resume`);
-  `state()` / `settled()` → `DaedalusLink`; `retry_now()`; `client(app)` /
-  `connected_client(app)` (waits ≤5s while `Connecting`) →
-  `Result<Arc<RemoteClient>, NotConnected>`; `reconnected(app)`; the
-  `DaedalusLinkChanged` event; the hook `Relay`.
+  `state()` / `settled()` → `DaedalusLink`; `retry_now()`; `client()` /
+  `client_within(wait)` (≤5 s while `Connecting`, `CONNECT_WAIT`) →
+  `Result<Arc<RemoteClient>, NotConnected>`; the `DaedalusLinkChanged` event; the
+  hook `Relay`.
 - `mod.rs` — the health check, `workspaces.list` over the link, and registering a
-  checkout.
+  checkout. `git_tests.rs` drives a Daedalus project's reads end to end: the
+  worktree commands through a `FakeAgent` and `FakeDaemon` to real git in a temp
+  repo, and the link-down case running nothing.
+
+`src-tauri/src/git/checkout.rs` — `Checkout`, the seam (above); `repo::checkout`
+resolves one.
 
 `crates/hook` is a library plus a one-line binary: `santree_hook::apply` is the
 binary's hook and status-line modes over a caller's connection.

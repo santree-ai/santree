@@ -26,6 +26,7 @@ beforeEach(() => {
 
 const trees = vi.hoisted(() => ({
   repo: "acme/app",
+  reach: { remote: false, readable: true, actionsOff: undefined as string | undefined },
   active: { id: "AK-1", title: "A ticket" } as { id: string; title: string } | null,
   activeId: "AK-1",
   activePr: null as WorktreePr | null,

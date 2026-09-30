@@ -62,6 +62,7 @@ export function MainTabBar() {
     rightCollapsed,
     toggleRightPanel,
     repo,
+    reach,
   } = useTrees();
   const provider = useTicketProvider(repo);
   const { closeWithSession } = useTabSessions(activeId, tabs, closeTab);
@@ -136,14 +137,16 @@ export function MainTabBar() {
       ariaLabel="Worktree tabs"
       newTabMenu={(close) => <NewTabMenu onAdd={addTab} close={close} />}
       newTabMenuClassName="w-40 overflow-hidden"
+      newTabDisabled={reach.actionsOff}
       trailing={
         <>
           {!isBase && active && (
             <button
               type="button"
               onClick={() => runSetup(active.id)}
-              title="Run .santree/init.sh and watch its logs"
-              className="flex h-[22px] cursor-pointer items-center gap-1.5 rounded px-2 text-[11px] whitespace-nowrap text-muted-2 hover:bg-hover hover:text-fg-2"
+              disabled={reach.actionsOff !== undefined}
+              title={reach.actionsOff ?? "Run .santree/init.sh and watch its logs"}
+              className="flex h-[22px] cursor-pointer items-center gap-1.5 rounded px-2 text-[11px] whitespace-nowrap text-muted-2 hover:bg-hover hover:text-fg-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted-2"
             >
               <PlayIcon size={10} />
               {active.setupRan ? "Re-run setup" : "Run setup"}

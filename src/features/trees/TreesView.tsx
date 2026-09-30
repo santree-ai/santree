@@ -11,14 +11,16 @@
  *  would carry act on the checkout as a place on disk — they live on that row's
  *  right-click menu. Which worktree is selected comes from the app shell's project
  *  tree; with nothing selected the view shows its launch surface. */
+import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
 
 import type { Worktree, WorktreePr } from "../../bindings";
 import { IssuePage } from "../../components/IssuePage";
 import { CloseIcon, PrIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
-import { Button, TerminalActivity } from "../../components/primitives";
-import { usePrSummary, useWorktreeTabs } from "../../lib/queries";
+import { Button, EmptyState, TerminalActivity } from "../../components/primitives";
+import { linkNotice } from "../../lib/daedalusLink";
+import { useDaedalusStatus, usePrSummary, useWorktreeTabs } from "../../lib/queries";
 import { useAppUi } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
 import type { FileFocus } from "../reviews/model";
@@ -36,12 +38,22 @@ import { WelcomeSurface } from "./WelcomeSurface";
 import { WorktreeTerminal } from "./WorktreeTerminal";
 
 function TreesContent() {
-  const { worktrees, active, loading } = useTrees();
+  const { worktrees, active, loading, reach } = useTrees();
   useAbandonedLaunchTabs();
   // Clicking an exited agent in the rail asks for a tab its process took with
   // it; this resumes the conversation into a new one. Above the early return so
   // it keeps running whatever the view is showing.
   useReopenClosedTab();
+
+  // A Daedalus project with the link down and nothing read yet: say why, rather
+  // than the front door's "pick a worktree" over a project that has some.
+  if (!active && worktrees.length === 0 && reach.remote && !reach.readable) {
+    return (
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
+        <DaedalusOutOfReach />
+      </div>
+    );
+  }
 
   // Nothing selected and no worktrees yet: show a loading state while the first
   // fetch is in flight (otherwise the empty state flashes as if nothing exists),
@@ -104,6 +116,32 @@ function useAbandonedLaunchTabs() {
       consumeAbandonedLaunchTab(id);
     }
   }, [abandonedLaunchTabs, tabs, closeTab, consumeAbandonedLaunchTab]);
+}
+
+/** A Daedalus project santree can't reach right now, with nothing of it read
+ *  yet: the link's own state and where to fix it. */
+function DaedalusOutOfReach() {
+  const navigate = useNavigate();
+  const { data: link } = useDaedalusStatus();
+  const notice = link ? linkNotice(link) : null;
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3">
+      <EmptyState
+        className="flex-none"
+        title={notice?.title ?? "Connecting to Daedalus…"}
+        subtitle={
+          notice?.detail ?? "This project lives on Daedalus: santree reads it through the link."
+        }
+      />
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => navigate({ to: "/settings", search: { section: "daedalus" } })}
+      >
+        Open Settings › Daedalus
+      </Button>
+    </div>
+  );
 }
 
 /** Shown while a freshly-launched worktree is still being created (no path/branch
@@ -178,6 +216,7 @@ function PrSuggestionBar({ worktree }: { worktree: Worktree }) {
 function WorktreePane({ worktree }: { worktree: Worktree }) {
   const {
     repo,
+    reach,
     selectedFile,
     activeTab,
     tabs,
@@ -206,7 +245,12 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
               thing it can open; Session history resumes any past agent. */}
           {activeTab === null && (
             <div className="absolute inset-0 flex flex-col">
-              <WelcomeSurface workspace={{ onOpenTerminal: () => addTab("terminal") }} />
+              <WelcomeSurface
+                workspace={{
+                  onOpenTerminal: () => addTab("terminal"),
+                  actionsOff: reach.actionsOff,
+                }}
+              />
             </div>
           )}
           {/* One pane per open tab, mounted only while showing — the session

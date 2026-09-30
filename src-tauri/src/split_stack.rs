@@ -143,7 +143,7 @@ pub async fn move_remaining(
                     .or_else(|_| git::split::oid(&path, &base))?,
             };
             let count: u32 = git::git(
-                &path,
+                &git::Checkout::local(&path),
                 &["rev-list", "--count", &format!("{base}..{}", checked.head)],
             )?
             .parse()?;
@@ -196,7 +196,7 @@ pub async fn move_remaining(
         // Before stashing the source, never commandeer an edited destination.
         if !backed_up {
             ensure!(
-                git::git(path, &["status", "--porcelain"])?.is_empty(),
+                git::git(&git::Checkout::local(path), &["status", "--porcelain"])?.is_empty(),
                 "The destination already has edits; both worktrees were preserved"
             );
         }
@@ -228,14 +228,18 @@ pub async fn move_remaining(
     let head = op.head.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let path = Path::new(&path);
-        git::git(path, &["update-ref", &pin, &stash])?;
+        git::git(&git::Checkout::local(path), &["update-ref", &pin, &stash])?;
         git::split::restore_backup(path, &stash, &head)
     })
     .await??;
-    op.source_has_changes =
-        !tokio::task::spawn_blocking(move || git::git(&coords.path, &["status", "--porcelain"]))
-            .await??
-            .is_empty();
+    op.source_has_changes = !tokio::task::spawn_blocking(move || {
+        git::git(
+            &git::Checkout::local(&coords.path),
+            &["status", "--porcelain"],
+        )
+    })
+    .await??
+    .is_empty();
     op.completed = true;
     save(db, &root, &op).await?;
     Ok(op)
@@ -273,18 +277,30 @@ mod tests {
             let scratch = git::split::Scratch::new().unwrap();
             let path = scratch.path().join("repo");
             std::fs::create_dir(&path).unwrap();
-            git::git(&path, &["init", "-b", "main"]).unwrap();
-            git::git(&path, &["config", "user.name", "Move test"]).unwrap();
-            git::git(&path, &["config", "user.email", "move@example.test"]).unwrap();
+            git::git(&git::Checkout::local(&path), &["init", "-b", "main"]).unwrap();
+            git::git(
+                &git::Checkout::local(&path),
+                &["config", "user.name", "Move test"],
+            )
+            .unwrap();
+            git::git(
+                &git::Checkout::local(&path),
+                &["config", "user.email", "move@example.test"],
+            )
+            .unwrap();
             std::fs::write(path.join(".gitignore"), ".santree/\n*.secret\n").unwrap();
             std::fs::write(path.join("a.txt"), "original\n").unwrap();
             std::fs::write(path.join("deleted.txt"), "remove later\n").unwrap();
-            git::git(&path, &["add", "."]).unwrap();
-            git::git(&path, &["commit", "-m", "base"]).unwrap();
-            git::git(&path, &["switch", "-c", "feature"]).unwrap();
+            git::git(&git::Checkout::local(&path), &["add", "."]).unwrap();
+            git::git(&git::Checkout::local(&path), &["commit", "-m", "base"]).unwrap();
+            git::git(&git::Checkout::local(&path), &["switch", "-c", "feature"]).unwrap();
             std::fs::write(path.join("committed.txt"), "belongs on first branch\n").unwrap();
-            git::git(&path, &["add", "."]).unwrap();
-            git::git(&path, &["commit", "-m", "first reviewed part"]).unwrap();
+            git::git(&git::Checkout::local(&path), &["add", "."]).unwrap();
+            git::git(
+                &git::Checkout::local(&path),
+                &["commit", "-m", "first reviewed part"],
+            )
+            .unwrap();
             let db = crate::db::init(scratch.path().join("test.db"))
                 .await
                 .unwrap();
@@ -318,7 +334,7 @@ mod tests {
     #[tokio::test]
     async fn refuses_child_until_source_has_its_own_commit() {
         let f = Fixture::new().await;
-        git::git(&f.path, &["reset", "--soft", "main"]).unwrap();
+        git::git(&git::Checkout::local(&f.path), &["reset", "--soft", "main"]).unwrap();
         let op = f.preview().await;
         let error = f.run(&op).await.unwrap_err().to_string();
         assert!(error.contains("Commit the first part"), "{error}");
@@ -333,11 +349,15 @@ mod tests {
     #[tokio::test]
     async fn upstream_commits_do_not_count_as_source_commits() {
         let f = Fixture::new().await;
-        git::git(&f.path, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
+        git::git(
+            &git::Checkout::local(&f.path),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        )
+        .unwrap();
         std::fs::write(f.path.join("a.txt"), "remaining\n").unwrap();
         for remote_only in [false, true] {
             if remote_only {
-                git::git(&f.path, &["branch", "-D", "main"]).unwrap();
+                git::git(&git::Checkout::local(&f.path), &["branch", "-D", "main"]).unwrap();
             }
             let op = f.preview().await;
             let error = f.run(&op).await.unwrap_err().to_string();
@@ -353,10 +373,14 @@ mod tests {
     async fn moves_remaining_changes_and_preserves_commits_staging_and_ticket_chain() {
         let f = Fixture::new().await;
         std::fs::write(f.path.join("a.txt"), "staged\n").unwrap();
-        git::git(&f.path, &["add", "a.txt"]).unwrap();
+        git::git(&git::Checkout::local(&f.path), &["add", "a.txt"]).unwrap();
         std::fs::write(f.path.join("a.txt"), "staged and unstaged\n").unwrap();
         std::fs::write(f.path.join("forced.secret"), "staged ignored\n").unwrap();
-        git::git(&f.path, &["add", "-f", "forced.secret"]).unwrap();
+        git::git(
+            &git::Checkout::local(&f.path),
+            &["add", "-f", "forced.secret"],
+        )
+        .unwrap();
         std::fs::write(f.path.join("keep.secret"), "stay in source\n").unwrap();
         std::fs::write(f.path.join("new.txt"), "no final newline").unwrap();
         std::fs::write(f.path.join("binary.bin"), [0, 255, 0, 16]).unwrap();
@@ -366,9 +390,11 @@ mod tests {
         let done = f.run(&op).await.unwrap();
         assert!(done.completed);
         assert!(!done.source_has_changes);
-        assert!(git::git(&f.path, &["status", "--porcelain"])
-            .unwrap()
-            .is_empty());
+        assert!(
+            git::git(&git::Checkout::local(&f.path), &["status", "--porcelain"])
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(git::split::oid(&f.path, "HEAD").unwrap(), op.head);
         assert!(f.path.join("keep.secret").exists());
         assert!(!f.path.join("new.txt").exists());
@@ -388,7 +414,11 @@ mod tests {
         );
         assert_eq!(f.run(&op).await.unwrap().worktree_id, child.id);
         // Commit only the staged portion; carry the rest one more branch forward.
-        git::git(child_path, &["commit", "-m", "second reviewed part"]).unwrap();
+        git::git(
+            &git::Checkout::local(child_path),
+            &["commit", "-m", "second reviewed part"],
+        )
+        .unwrap();
         let next = preview(&f.db, "test", &child.id).await.unwrap();
         let last = move_remaining(&f.db, "test", &next.id, "feature-third", None)
             .await
@@ -403,9 +433,12 @@ mod tests {
             git::split::snapshot(Path::new(&last.path)).unwrap(),
             op.snapshot_tree
         );
-        assert!(git::git(child_path, &["status", "--porcelain"])
-            .unwrap()
-            .is_empty());
+        assert!(git::git(
+            &git::Checkout::local(child_path),
+            &["status", "--porcelain"]
+        )
+        .unwrap()
+        .is_empty());
         f.db.close().await;
     }
 
@@ -458,10 +491,13 @@ mod tests {
             .unwrap();
         assert!(f.run(&interrupted).await.unwrap().completed);
         assert_eq!(
-            git::git(&f.path, &["stash", "list", "--format=%H"])
-                .unwrap()
-                .lines()
-                .count(),
+            git::git(
+                &git::Checkout::local(&f.path),
+                &["stash", "list", "--format=%H"]
+            )
+            .unwrap()
+            .lines()
+            .count(),
             1
         );
         f.db.close().await;
@@ -496,7 +532,7 @@ mod tests {
             "user destination edits\n"
         );
         assert!(git::split::find_backup(&f.path, &op.id).unwrap().is_some());
-        git::git(path, &["restore", "a.txt"]).unwrap();
+        git::git(&git::Checkout::local(path), &["restore", "a.txt"]).unwrap();
         assert!(f.run(&op).await.unwrap().completed);
         f.db.close().await;
     }
@@ -505,7 +541,7 @@ mod tests {
     async fn staged_change_with_working_file_reverted_is_not_lost() {
         let f = Fixture::new().await;
         std::fs::write(f.path.join("a.txt"), "staged only\n").unwrap();
-        git::git(&f.path, &["add", "a.txt"]).unwrap();
+        git::git(&git::Checkout::local(&f.path), &["add", "a.txt"]).unwrap();
         std::fs::write(f.path.join("a.txt"), "original\n").unwrap();
         let op = f.preview().await;
         assert_eq!(op.files, vec!["a.txt"]);
@@ -584,8 +620,12 @@ mod tests {
     async fn root_source_keeps_santree_metadata_and_never_moves_nested_worktrees() {
         let f = Fixture::new().await;
         std::fs::write(f.path.join(".gitignore"), "*.secret\n").unwrap();
-        git::git(&f.path, &["add", ".gitignore"]).unwrap();
-        git::git(&f.path, &["commit", "-m", "use nested ignores"]).unwrap();
+        git::git(&git::Checkout::local(&f.path), &["add", ".gitignore"]).unwrap();
+        git::git(
+            &git::Checkout::local(&f.path),
+            &["commit", "-m", "use nested ignores"],
+        )
+        .unwrap();
         std::fs::write(f.path.join("new.txt"), "remaining\n").unwrap();
         let op = preview(&f.db, "test", worktree::BASE_ID).await.unwrap();
         assert_eq!(op.files, vec!["new.txt"]);
@@ -605,14 +645,22 @@ mod tests {
     async fn dirty_path_snapshot_keeps_intent_to_add_and_excludes_ignored_directory_contents() {
         let f = Fixture::new().await;
         std::fs::write(f.path.join("intent.secret"), "intent to add\n").unwrap();
-        git::git(&f.path, &["add", "-N", "-f", "intent.secret"]).unwrap();
+        git::git(
+            &git::Checkout::local(&f.path),
+            &["add", "-N", "-f", "intent.secret"],
+        )
+        .unwrap();
         std::fs::remove_file(f.path.join("a.txt")).unwrap();
         std::fs::create_dir(f.path.join("a.txt")).unwrap();
         std::fs::write(f.path.join("a.txt/visible.txt"), "include\n").unwrap();
         std::fs::write(f.path.join("a.txt/ignored.secret"), "stay ignored\n").unwrap();
         let before = git::split::index_tree(&f.path).unwrap();
         let tree = git::split::snapshot(&f.path).unwrap();
-        let names = git::git(&f.path, &["ls-tree", "-r", "--name-only", &tree]).unwrap();
+        let names = git::git(
+            &git::Checkout::local(&f.path),
+            &["ls-tree", "-r", "--name-only", &tree],
+        )
+        .unwrap();
         assert!(names.lines().any(|p| p == "intent.secret"));
         assert!(names.lines().any(|p| p == "a.txt/visible.txt"));
         assert!(!names.lines().any(|p| p == "a.txt/ignored.secret"));

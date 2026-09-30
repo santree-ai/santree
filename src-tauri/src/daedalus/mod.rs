@@ -10,6 +10,9 @@
 
 pub mod host;
 
+#[cfg(test)]
+mod git_tests;
+
 use std::path::{Component, Path};
 use std::time::Duration;
 
@@ -196,7 +199,8 @@ mod tests {
 
     /// Registering a Daedalus repo never touches the local filesystem, derives
     /// its identity from the remote, and is idempotent — and every local-only
-    /// read then treats it as having no local path.
+    /// read then treats it as having no local path (the reads that run on the box
+    /// are `git_tests`'s).
     #[tokio::test]
     async fn a_daedalus_repo_registers_without_a_local_checkout() {
         let base =
@@ -229,14 +233,6 @@ mod tests {
             repo::daedalus_paths(&db).await.unwrap(),
             vec![server_path.to_string()]
         );
-        assert!(crate::worktree::list(&db, "acme/web")
-            .await
-            .unwrap()
-            .is_empty());
-        assert!(crate::worktree::base_worktree(&db, "acme/web")
-            .await
-            .unwrap()
-            .is_none());
         assert!(
             !crate::worktree::init_script(&db, "acme/web")
                 .await

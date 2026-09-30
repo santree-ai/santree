@@ -34,11 +34,13 @@ import type {
 } from "../../bindings";
 import { primaryPr } from "../../components/PrChip";
 import {
+  type RepoReach,
   useAddWorktreeTab,
   useBaseWorktree,
   usePendingWorktreeMoves,
   useRemoveWorktreeTab,
   useRenameWorktreeTab,
+  useRepoReach,
   useRepos,
   useTasks,
   useTriageDetail,
@@ -403,6 +405,10 @@ export function tabForRun(launch: QueuedLaunch | undefined, initialSetup: boolea
 
 interface TreesModel {
   repo: string;
+  /** Where the project lives and what santree can do in it now: a Daedalus
+   *  project is read here but not changed, and not read while the link is down
+   *  (`reach.actionsOff` says why, on every control it turns off). */
+  reach: RepoReach;
   worktrees: Worktree[];
   /** Live PR status keyed by worktree id (from the worktree_prs stream). The
    *  single source for the sidebar cards, the bottom bar, and the commit box. */
@@ -574,6 +580,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // run must survive navigating away from Trees (see AgentRuns).
   const { runSetup, isSettingUp, isInitialSetup, setVisibleWorktree, launchAgents } =
     useAgentRuns();
+  const reach = useRepoReach(repo);
   const { data: realWorktrees = [], isLoading: worktreesLoading } = useWorktrees(repo);
   const { data: baseWorktree = null, isLoading: baseWorktreeLoading } = useBaseWorktree(repo);
   const { data: worktreePrs = [] } = useWorktreePrs(repo);
@@ -985,6 +992,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     const activeTab = resolveActiveTab(activeTabByWt[activeId], openTabs);
     return {
       repo,
+      reach,
       reopenTab,
       consumeReopenTab,
       worktrees,
@@ -1054,7 +1062,10 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       // The id is minted here (not by the backend) so the optimistic cache patch
       // is the exact row the DB will hold and the tab can be focused immediately.
       addTab: (kind, agentKind) => {
-        if (!activeId) return null;
+        // Every way to open a tab (the "+" menu, its digit keys, the welcome
+        // surface) comes through here, so a project that runs nothing from santree
+        // yet opens nothing, whichever control was missed.
+        if (!activeId || reach.actionsOff) return null;
         const id = crypto.randomUUID();
         const resolvedAgent = kind === "terminal" ? null : (agentKind ?? "Codex");
         addTabRow({
@@ -1145,6 +1156,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     runSetup,
     fixCiLaunchByTab,
     repo,
+    reach,
     prDialogFor,
     prSuggestFor,
     selectedWorktrees,

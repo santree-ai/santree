@@ -8,11 +8,13 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tauri_specta::Event;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
+use tauri::Manager;
 
 use santree_core::domain::{NewPr, PrDraft, WorktreePr};
 
 use crate::agent;
+use crate::daedalus::host::{DaedalusHost, NotConnected};
 use crate::db::Db;
 use crate::git;
 use crate::github;
@@ -43,20 +45,25 @@ static REFRESH_LOCKS: LazyLock<Mutex<HashMap<String, RefreshLock>>> =
 /// worktree, and joined to worktrees by [`match_issue`]. Returns an empty list (not
 /// an error) when `gh` isn't authenticated, the repo has no linked worktrees, or the
 /// call itself fails (logged, not surfaced) so the UI degrades gracefully;
-/// worktrees without a PR are simply omitted.
+/// worktrees without a PR are simply omitted. A Daedalus repo is matched the same
+/// way — its slug read from the checkout on the box, GitHub asked from here — and
+/// answers empty while the link is down, since the sidebar polls this for every
+/// project.
 pub async fn statuses(db: &Db, repo: &str, app: &tauri::AppHandle) -> Result<Vec<WorktreePr>> {
     let Some(token) = github::token().await else {
         return Ok(vec![]);
     };
-    // A Daedalus repo has no worktrees on this machine to have PRs for (its
-    // worktrees run on the server — docs/remote.md), and the sidebar polls this
-    // for every project, so it answers empty rather than failing.
-    if repo::is_daedalus(db, repo).await? {
+    let checkout = match repo::checkout(db, &app.state::<DaedalusHost>(), repo).await {
+        Ok(Some(checkout)) => checkout,
+        Ok(None) => bail!("repo '{repo}' has no path"),
+        Err(e) if e.is::<NotConnected>() => return Ok(vec![]),
+        Err(e) => return Err(e),
+    };
+    let root = checkout.path().to_string_lossy().into_owned();
+    let links = linked_worktrees(db, &root).await?;
+    if links.is_empty() {
         return Ok(vec![]);
     }
-    let root = repo::path(db, repo)
-        .await?
-        .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
 
     // Serialize snapshots so a slower, older response cannot undo a newer stack.
     let lock = REFRESH_LOCKS
@@ -70,9 +77,8 @@ pub async fn statuses(db: &Db, repo: &str, app: &tauri::AppHandle) -> Result<Vec
     // A missing/non-GitHub origin (e.g. a "Local git" repo) is not an error here —
     // same not-connected-⇒-empty contract as the unauthenticated case above and as
     // `reviewers` below.
-    let root_path = PathBuf::from(&root);
     let Ok((owner, name)) =
-        tokio::task::spawn_blocking(move || github::owner_repo(&root_path)).await?
+        tokio::task::spawn_blocking(move || github::owner_repo(&checkout)).await?
     else {
         return Ok(vec![]);
     };
@@ -83,10 +89,6 @@ pub async fn statuses(db: &Db, repo: &str, app: &tauri::AppHandle) -> Result<Vec
             slug: Some(slug.clone()),
             ..PrRefresh::default()
         };
-    }
-    let links = linked_worktrees(db, &root).await?;
-    if links.is_empty() {
-        return Ok(vec![]);
     }
     let issue_ids: HashSet<String> = links.iter().map(|(id, _)| id.clone()).collect();
     let by_branch: HashMap<String, String> = links
@@ -376,7 +378,7 @@ pub async fn draft(
         let c = c.clone();
         tokio::task::spawn_blocking(move || {
             (
-                git::first_commit_subject(&c.path, &c.base_branch),
+                git::first_commit_subject(&c.checkout(), &c.base_branch),
                 github::pr_template(&c.path),
             )
         })
@@ -452,7 +454,7 @@ async fn draft_body(
     let issue_id = linked_ticket.unwrap_or_default();
     tokio::task::spawn_blocking(move || {
         // Cap the diff so the prompt stays within sane arg/token limits.
-        let diff: String = git::diff_range(&c.path, &c.base_branch)
+        let diff: String = git::diff_range(&c.checkout(), &c.base_branch)
             .chars()
             .take(12_000)
             .collect();
@@ -475,8 +477,8 @@ async fn draft_body(
                 ticket_id => issue_id,
                 ticket_content => ticket_content,
                 base_branch => c.base_branch.clone(),
-                commit_log => git::commit_log(&c.path, &c.base_branch),
-                diff_stat => git::diff_stat(&c.path, &c.base_branch),
+                commit_log => git::commit_log(&c.checkout(), &c.base_branch),
+                diff_stat => git::diff_stat(&c.checkout(), &c.base_branch),
                 diff => diff,
                 transcripts => transcripts,
                 ..issue_ctx,
@@ -515,12 +517,12 @@ pub async fn create(
         .ok_or_else(|| anyhow!("GitHub CLI not authenticated. Run `gh auth login`."))?;
 
     // Remote parsing + push are blocking (subprocess) — keep off the async pool.
-    let path = c.path.clone();
-    let (owner, name) = tokio::task::spawn_blocking(move || github::owner_repo(&path)).await??;
+    let dir = c.checkout();
+    let (owner, name) = tokio::task::spawn_blocking(move || github::owner_repo(&dir)).await??;
 
-    let path = c.path.clone();
+    let dir = c.checkout();
     let branch = c.branch.clone();
-    tokio::task::spawn_blocking(move || git::push(&path, &branch)).await??;
+    tokio::task::spawn_blocking(move || git::push(&dir, &branch)).await??;
 
     let (number, url) = github::create_pr(
         &token,
@@ -557,8 +559,8 @@ pub async fn reviewers(
         return Ok(vec![]);
     };
     let c = worktree::coords(db, repo, issue_id).await?;
-    let path = c.path.clone();
-    let Ok((owner, name)) = tokio::task::spawn_blocking(move || github::owner_repo(&path)).await?
+    let dir = c.checkout();
+    let Ok((owner, name)) = tokio::task::spawn_blocking(move || github::owner_repo(&dir)).await?
     else {
         return Ok(vec![]);
     };

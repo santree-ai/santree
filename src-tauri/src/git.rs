@@ -1,15 +1,19 @@
 //! Low-level git operations, shelled out to the `git` binary (no third-party
 //! crate — the same approach as [`crate::repo`] and the santree CLI).
 //!
-//! These are pure, DB-agnostic helpers keyed on a worktree/repo path. The
+//! These are pure, DB-agnostic helpers keyed on a [`Checkout`] — a worktree or
+//! repo root, on this machine or on Daedalus ([`checkout`] is where the two
+//! part ways; nothing else here knows which it is). The
 //! higher-level orchestration (DB links, setup scripts, agent launch) lives in
 //! [`crate::worktree`]. Ported from the CLI's `source/lib/git.ts`.
 
+mod checkout;
 pub(crate) mod split;
+
+pub use checkout::Checkout;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -119,17 +123,9 @@ fn same_file(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
     true
 }
 
-/// The full contents of a worktree file, read through [`open_in_worktree`].
-fn read_in_worktree(cwd: &Path, rel: &str) -> Result<String> {
-    use std::io::Read;
-    let mut text = String::new();
-    open_in_worktree(cwd, rel)?.read_to_string(&mut text)?;
-    Ok(text)
-}
-
-/// Run `git -C <cwd> <args>`, returning trimmed stdout. Errors (with stderr) on
+/// Run `git <args>` in the checkout, returning trimmed stdout. Errors (with stderr) on
 /// non-zero exit or if git can't be spawned.
-pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
+pub fn git(cwd: &Checkout, args: &[&str]) -> Result<String> {
     let (ok, stdout, stderr) = git_capture(cwd, args)?;
     if !ok {
         bail!("git {}: {}", args.join(" "), stderr.trim());
@@ -139,7 +135,7 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
 
 /// Like [`git`] but returns raw stdout (no trimming) — for diffs and file blobs
 /// where leading/trailing whitespace and newlines are significant.
-pub fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
+pub fn git_output(cwd: &Checkout, args: &[&str]) -> Result<String> {
     let (ok, stdout, stderr) = git_capture(cwd, args)?;
     if !ok {
         bail!("git {}: {}", args.join(" "), stderr.trim());
@@ -150,28 +146,11 @@ pub fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
 /// Run git and capture `(success, stdout, stderr)`. Only errors if the process
 /// can't be spawned — a non-zero exit is reported via the bool, so callers can
 /// handle commands that exit non-zero by design (e.g. `diff --no-index`).
-fn git_capture(cwd: &Path, args: &[&str]) -> Result<(bool, String, String)> {
+fn git_capture(cwd: &Checkout, args: &[&str]) -> Result<(bool, String, String)> {
     #[cfg(test)]
-    count_git_call(cwd);
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        // Read-only commands (`status`, `diff`) opportunistically take
-        // `.git/index.lock` to write back a refreshed index. That's a pure
-        // optimization, but it makes every status poll a contender for the lock
-        // that `add`/`restore`/`commit` *must* have — and this app polls status on
-        // every filesystem burst while an agent writes. Opting out (what editors
-        // and IDEs do) keeps the reads out of the fight entirely; commands whose
-        // index write is required, not optional, are unaffected.
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(args)
-        .output()
-        .map_err(|e| anyhow!("failed to run git: {e}"))?;
-    Ok((
-        out.status.success(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    ))
+    count_git_call(cwd.path());
+    let out = cwd.git(args)?;
+    Ok((out.ok, out.stdout, out.stderr))
 }
 
 /// How long to keep retrying a command blocked on a `.git/index.lock` we don't
@@ -200,7 +179,7 @@ const INDEX_LOCK_POLL: Duration = Duration::from_millis(50);
 /// one. [`commit`] is why that matters: it stages and commits inside a *single*
 /// lock rather than taking one per step, which is also what stops a staging click
 /// from landing between the two.
-fn with_index_lock<T>(cwd: &Path, mut run: impl FnMut() -> Result<T>) -> Result<T> {
+fn with_index_lock<T>(cwd: &Checkout, mut run: impl FnMut() -> Result<T>) -> Result<T> {
     /// One entry per worktree path — bounded by the worktrees that exist on disk.
     /// Poison-tolerant, like the linear/pty/settings locks: the map holds only
     /// `Arc`s, so a thread that panicked mid-access left it structurally sound.
@@ -210,7 +189,7 @@ fn with_index_lock<T>(cwd: &Path, mut run: impl FnMut() -> Result<T>) -> Result<
     let lock = INDEX_LOCKS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .entry(cwd.to_path_buf())
+        .entry(cwd.path().to_path_buf())
         .or_default()
         .clone();
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -227,7 +206,7 @@ fn with_index_lock<T>(cwd: &Path, mut run: impl FnMut() -> Result<T>) -> Result<
 }
 
 /// Run one index-writing git command under [`with_index_lock`]; otherwise [`git`].
-fn git_indexed(cwd: &Path, args: &[&str]) -> Result<String> {
+fn git_indexed(cwd: &Checkout, args: &[&str]) -> Result<String> {
     with_index_lock(cwd, || git(cwd, args))
 }
 
@@ -268,7 +247,7 @@ pub(crate) fn git_calls_under(prefix: &Path) -> u32 {
 
 /// The default branch for the repo's `origin` remote (e.g. `main`/`master`),
 /// falling back to whichever of main/master exists, then to `main`.
-pub fn default_branch(repo: &Path) -> String {
+pub fn default_branch(repo: &Checkout) -> String {
     if let Ok(r) = git(repo, &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
         if let Some(b) = r.strip_prefix("refs/remotes/origin/") {
             return b.to_string();
@@ -283,7 +262,7 @@ pub fn default_branch(repo: &Path) -> String {
 }
 
 /// Whether a local branch already exists.
-fn branch_exists(repo: &Path, branch: &str) -> bool {
+fn branch_exists(repo: &Checkout, branch: &str) -> bool {
     git(
         repo,
         &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
@@ -302,7 +281,7 @@ fn branch_exists(repo: &Path, branch: &str) -> bool {
 /// child off the parent's last *pushed* commit, dropping everything the parent has
 /// committed but not pushed. "Does local already contain origin?" separates the two
 /// without having to know which kind of base this is.
-fn freshest_base(repo: &Path, base: &str) -> String {
+fn freshest_base(repo: &Checkout, base: &str) -> String {
     let origin_ref = format!("origin/{base}");
     if git(repo, &["rev-parse", "--verify", &origin_ref]).is_err() {
         return base.to_string();
@@ -320,7 +299,7 @@ fn freshest_base(repo: &Path, base: &str) -> String {
 /// the remote, both fail the ancestry check, which is the answer callers want:
 /// prefer `origin/<base>`. One process — an unresolvable ref makes `merge-base`
 /// exit non-zero, so no separate existence check is needed.
-fn local_base_is_fresher(repo: &Path, base: &str) -> bool {
+fn local_base_is_fresher(repo: &Checkout, base: &str) -> bool {
     git(
         repo,
         &[
@@ -403,7 +382,14 @@ fn read_pointer_file(path: &Path) -> Option<String> {
 /// Best-effort fetches `base` first so the new branch starts from the freshest
 /// commit ([`freshest_base`]). If `branch` already exists it's checked out as-is;
 /// otherwise it's created from the base.
-pub fn create_worktree(repo: &Path, worktree_path: &Path, branch: &str, base: &str) -> Result<()> {
+pub fn create_worktree(
+    repo: &Checkout,
+    worktree_path: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<()> {
+    // It makes the directory itself, so the checkout has to be on this machine.
+    repo.local_path()?;
     if let Some(parent) = worktree_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -430,7 +416,8 @@ pub fn create_worktree(repo: &Path, worktree_path: &Path, branch: &str, base: &s
 /// in it land on that branch and update the PR. If the branch already exists
 /// locally it's checked out directly; otherwise a local branch tracking
 /// `origin/<branch>` is created. `branch` must be caller-validated (no leading `-`).
-pub fn add_worktree_for_branch(repo: &Path, worktree_path: &Path, branch: &str) -> Result<()> {
+pub fn add_worktree_for_branch(repo: &Checkout, worktree_path: &Path, branch: &str) -> Result<()> {
+    repo.local_path()?;
     if let Some(parent) = worktree_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -551,7 +538,7 @@ pub(crate) fn safe_sha(sha: &str) -> Result<&str> {
 /// the repo's own trunk and isn't. Matching `origin/<head_ref>` by **commit** and
 /// not by existence is the other half of that: a fork PR from a branch called
 /// `main` must not resolve to the base repo's `main`.
-pub fn pr_branch(repo: &Path, number: u32, head_ref: &str, head_sha: &str) -> Result<String> {
+pub fn pr_branch(repo: &Checkout, number: u32, head_ref: &str, head_sha: &str) -> Result<String> {
     let sha = safe_sha(head_sha)?;
     let head_ref = safe_branch(head_ref)?;
 
@@ -596,8 +583,11 @@ pub fn pr_branch(repo: &Path, number: u32, head_ref: &str, head_sha: &str) -> Re
 ///
 /// Kept only for the one-time sweep in `reviews::sweep_legacy_checkouts`; nothing
 /// creates such a checkout any more.
-pub fn remove_legacy_review_checkout(repo: &Path, worktree_path: &Path) {
-    let reviews_root = repo.join(".santree").join("reviews");
+pub fn remove_legacy_review_checkout(repo: &Checkout, worktree_path: &Path) {
+    let Ok(root) = repo.local_path() else {
+        return;
+    };
+    let reviews_root = root.join(".santree").join("reviews");
     let direct_child = worktree_path.parent() == Some(reviews_root.as_path())
         && worktree_path.file_name().is_some_and(|name| {
             let mut components = Path::new(name).components();
@@ -629,7 +619,9 @@ pub fn remove_legacy_review_checkout(repo: &Path, worktree_path: &Path) {
 /// non-fatal: drop the directory ourselves and `prune` git's stale bookkeeping so
 /// the path is fully forgotten (and the id can be reused later). Branch deletion
 /// is best-effort (it may be checked out elsewhere or already gone).
-pub fn remove_worktree(repo: &Path, worktree_path: &Path, branch: &str) -> Result<()> {
+pub fn remove_worktree(repo: &Checkout, worktree_path: &Path, branch: &str) -> Result<()> {
+    // It may have to delete the directory itself, so it runs on this machine only.
+    repo.local_path()?;
     let path = worktree_path.to_string_lossy().into_owned();
     if git(repo, &["worktree", "remove", "--force", &path]).is_err() {
         // Half-removed (or never a real worktree): finish the job manually.
@@ -649,7 +641,9 @@ pub fn remove_worktree(repo: &Path, worktree_path: &Path, branch: &str) -> Resul
 /// The branch checked out at `worktree_path`, read from `git worktree list`.
 /// Returns `None` when the path isn't a registered worktree (e.g. a stale dir).
 /// Used to adopt worktrees the app didn't create (the CLI, a prior run).
-pub fn worktree_branch(repo: &Path, worktree_path: &Path) -> Option<String> {
+pub fn worktree_branch(repo: &Checkout, worktree_path: &Path) -> Option<String> {
+    // Paths are compared canonicalized on this machine's filesystem.
+    repo.local_path().ok()?;
     let out = git_output(repo, &["worktree", "list", "--porcelain"]).ok()?;
     let target =
         std::fs::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
@@ -673,7 +667,7 @@ pub fn worktree_branch(repo: &Path, worktree_path: &Path) -> Option<String> {
 /// Git allows exactly one checkout per branch, so this is precisely the set
 /// `worktree add` would refuse. Read from git rather than from santree's own
 /// `worktree_links` so a worktree the app didn't create still counts.
-fn checked_out_branches(repo: &Path) -> HashSet<String> {
+fn checked_out_branches(repo: &Checkout) -> HashSet<String> {
     let Ok(out) = git_output(repo, &["worktree", "list", "--porcelain"]) else {
         return HashSet::new();
     };
@@ -690,7 +684,7 @@ fn checked_out_branches(repo: &Path) -> HashSet<String> {
 /// check one out (it creates a local tracking branch), which is what makes "the
 /// branch a teammate pushed" reachable from the Create-worktree dialog without a
 /// manual `git fetch` first.
-pub fn branches(repo: &Path) -> Result<Vec<RepoBranch>> {
+pub fn branches(repo: &Checkout) -> Result<Vec<RepoBranch>> {
     let checked_out = checked_out_branches(repo);
     // One process for both namespaces. `%09` is a tab: a branch name can contain
     // almost anything except a control character, so it can't appear in the name
@@ -757,7 +751,7 @@ pub fn branches(repo: &Path) -> Result<Vec<RepoBranch>> {
 /// every unrelated upstream commit between the stale local ref and the fork point
 /// into the branch's diff, stats, and PR title. Falls back to the local `<base>`
 /// for stacked branches whose base is a sibling worktree branch with no remote.
-pub(crate) fn compare_base(cwd: &Path, base: &str) -> String {
+pub(crate) fn compare_base(cwd: &Checkout, base: &str) -> String {
     let origin_ref = format!("origin/{base}");
     if git(cwd, &["rev-parse", "--verify", &origin_ref]).is_ok() {
         origin_ref
@@ -776,7 +770,7 @@ pub(crate) fn compare_base(cwd: &Path, base: &str) -> String {
 /// every filesystem change (the FS watcher invalidates it): an agent actively
 /// writing files would otherwise trigger a fetch storm. Failures are swallowed
 /// (offline, no remote) — a stale ref just means the Pull count lags, never an error.
-pub fn refresh_remote_ref(cwd: &Path, branch: &str) {
+pub fn refresh_remote_ref(cwd: &Checkout, branch: &str) {
     static LAST_FETCH: LazyLock<Mutex<HashMap<PathBuf, Instant>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
     const THROTTLE: Duration = Duration::from_secs(20);
@@ -784,14 +778,14 @@ pub fn refresh_remote_ref(cwd: &Path, branch: &str) {
     {
         let mut last = LAST_FETCH.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        if let Some(&t) = last.get(cwd) {
+        if let Some(&t) = last.get(cwd.path()) {
             if now.duration_since(t) < THROTTLE {
                 return;
             }
         }
         // Record before fetching so concurrent status builds for the same worktree
         // (spawned in parallel by `list`) don't all fire a redundant fetch.
-        last.insert(cwd.to_path_buf(), now);
+        last.insert(cwd.path().to_path_buf(), now);
     }
     let _ = git_capture(cwd, &["fetch", "origin", branch]);
 }
@@ -838,7 +832,7 @@ pub enum BaseKind {
 /// * `unpushed` / `remote_behind` — against the branch's own tracking ref: what a
 ///   push would upload and what a pull would download. A branch that was never
 ///   pushed has no tracking ref, so everything it added over the base is unpushed.
-pub fn stats(cwd: &Path, branch: &str, base: &str, kind: BaseKind) -> Stats {
+pub fn stats(cwd: &Checkout, branch: &str, base: &str, kind: BaseKind) -> Stats {
     // One `for-each-ref` for both remote refs, rather than a `rev-parse --verify`
     // per lookup — the same two were resolved up to five times per build.
     let remotes = origin_refs(cwd, &[base, branch]);
@@ -879,7 +873,7 @@ pub fn stats(cwd: &Path, branch: &str, base: &str, kind: BaseKind) -> Stats {
 /// Which of `names` exist as `origin/<name>`, resolved in a single `git` process.
 /// `for-each-ref` takes several patterns at once and (unlike `rev-parse --verify`)
 /// can't mistake a name for a flag, since each is embedded in a full `refs/…` path.
-fn origin_refs(cwd: &Path, names: &[&str]) -> Vec<String> {
+fn origin_refs(cwd: &Checkout, names: &[&str]) -> Vec<String> {
     let patterns: Vec<String> = names
         .iter()
         .map(|n| format!("refs/remotes/origin/{n}"))
@@ -902,7 +896,7 @@ fn origin_refs(cwd: &Path, names: &[&str]) -> Vec<String> {
 /// its merge base with `base`, the way a PR shows them. `--merge-base` resolves the
 /// fork point inside the same process, so this is one `git` call, not a `merge-base`
 /// followed by a `diff`. `(0, 0)` when `base` can't be resolved.
-fn numstat_totals(cwd: &Path, base: &str) -> (u32, u32) {
+fn numstat_totals(cwd: &Checkout, base: &str) -> (u32, u32) {
     let Ok(raw) = git_output(cwd, &["diff", "--merge-base", base, "--numstat"]) else {
         return (0, 0);
     };
@@ -914,7 +908,7 @@ fn numstat_totals(cwd: &Path, base: &str) -> (u32, u32) {
 /// The two commit counts of the symmetric difference `a...b` — what each side has
 /// that the other doesn't — in a single process instead of a `rev-list` per
 /// direction. `(0, 0)` when either ref can't be resolved.
-fn left_right(cwd: &Path, a: &str, b: &str) -> (u32, u32) {
+fn left_right(cwd: &Checkout, a: &str, b: &str) -> (u32, u32) {
     let Ok(out) = git(
         cwd,
         &["rev-list", "--left-right", "--count", &format!("{a}...{b}")],
@@ -931,7 +925,7 @@ fn left_right(cwd: &Path, a: &str, b: &str) -> (u32, u32) {
 /// objects into the object database, and the status build that asks this re-runs on
 /// every filesystem burst. Neither commit moves while an agent is merely *editing*
 /// files, so the virtual merge now runs when one of them actually does.
-pub fn would_conflict(cwd: &Path, target: &str) -> bool {
+pub fn would_conflict(cwd: &Checkout, target: &str) -> bool {
     /// Per worktree: the commit pair the last answer was computed for, and the answer.
     type Cache = Mutex<HashMap<PathBuf, ([String; 2], bool)>>;
     // One entry per worktree: the previous answer is only ever consulted for the same
@@ -942,18 +936,18 @@ pub fn would_conflict(cwd: &Path, target: &str) -> bool {
         return false;
     };
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((cached, conflict)) = cache.get(cwd) {
+    if let Some((cached, conflict)) = cache.get(cwd.path()) {
         if *cached == pair {
             return *conflict;
         }
     }
     let conflict = merge_conflicts(cwd, target).is_some_and(|c| !c.is_empty());
-    cache.insert(cwd.to_path_buf(), (pair, conflict));
+    cache.insert(cwd.path().to_path_buf(), (pair, conflict));
     conflict
 }
 
 /// Resolve two revs to their commit oids in one process. `None` if either is missing.
-fn rev_pair(cwd: &Path, a: &str, b: &str) -> Option<[String; 2]> {
+fn rev_pair(cwd: &Checkout, a: &str, b: &str) -> Option<[String; 2]> {
     let out = git(cwd, &["rev-parse", a, b]).ok()?;
     let mut lines = out.lines();
     Some([lines.next()?.to_string(), lines.next()?.to_string()])
@@ -964,7 +958,7 @@ fn rev_pair(cwd: &Path, a: &str, b: &str) -> Option<[String; 2]> {
 /// base is a sibling branch. Best-effort fetches first. On a conflicting (non-clean)
 /// merge it aborts and errors, so the worktree is left untouched. Returns the
 /// resolved base ref that was merged.
-pub fn pull_base(cwd: &Path, base: &str) -> Result<String> {
+pub fn pull_base(cwd: &Checkout, base: &str) -> Result<String> {
     let _ = git_capture(cwd, &["fetch", "origin", base]);
     let target = freshest_base(cwd, base);
     merge_checked(cwd, &target)?;
@@ -979,7 +973,7 @@ pub fn pull_base(cwd: &Path, base: &str) -> Result<String> {
 ///
 /// On conflict, stdout is `<tree-oid>\n<conflicted paths…>\n\n<messages…>`, so the
 /// files are the lines between the oid (line 1) and the first blank line.
-pub fn merge_conflicts(cwd: &Path, target: &str) -> Option<Vec<String>> {
+pub fn merge_conflicts(cwd: &Checkout, target: &str) -> Option<Vec<String>> {
     let (ok, out, _err) = git_capture(
         cwd,
         &["merge-tree", "--write-tree", "--name-only", "HEAD", target],
@@ -1008,7 +1002,7 @@ pub fn merge_conflicts(cwd: &Path, target: &str) -> Option<Vec<String>> {
 /// never touches the tree), so a conflicting pull is refused with a legible error
 /// instead of dropping the branch into a half-merged, conflicted state the user
 /// then has to `git merge --abort` out of. Shared by the pull actions.
-fn merge_checked(cwd: &Path, target: &str) -> Result<()> {
+fn merge_checked(cwd: &Checkout, target: &str) -> Result<()> {
     if let Some(conflicts) = merge_conflicts(cwd, target) {
         if !conflicts.is_empty() {
             bail!(
@@ -1039,7 +1033,7 @@ fn merge_checked(cwd: &Path, target: &str) -> Result<()> {
 /// --ff-only` is required (git refuses to move the ref HEAD points at via a
 /// fetch refspec); otherwise a single combined-refspec fetch ff-updates the
 /// local ref directly, in one round-trip instead of two.
-pub fn update_base(repo: &Path, base: &str) -> Result<()> {
+pub fn update_base(repo: &Checkout, base: &str) -> Result<()> {
     let checked_out = git(repo, &["symbolic-ref", "--short", "HEAD"]).ok();
     if checked_out.as_deref() == Some(base) {
         let (ok, _o, err) = git_capture(repo, &["fetch", "origin", base])?;
@@ -1065,7 +1059,7 @@ pub fn update_base(repo: &Path, base: &str) -> Result<()> {
 /// ff isn't possible, so it falls back to [`merge_checked`] — which refuses up
 /// front (no working-tree touch) if the merge would conflict, exactly like
 /// [`pull_base`].
-pub fn pull_remote(cwd: &Path, branch: &str) -> Result<()> {
+pub fn pull_remote(cwd: &Checkout, branch: &str) -> Result<()> {
     let (ok, _o, err) = git_capture(cwd, &["fetch", "origin", branch])?;
     if !ok {
         bail!("Couldn't fetch origin/{branch}: {}", err.trim());
@@ -1081,7 +1075,7 @@ pub fn pull_remote(cwd: &Path, branch: &str) -> Result<()> {
 }
 
 /// Whether the working tree has any uncommitted change (staged or not).
-pub fn is_dirty(cwd: &Path) -> bool {
+pub fn is_dirty(cwd: &Checkout) -> bool {
     git_output(cwd, &["status", "--porcelain"])
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false)
@@ -1098,7 +1092,7 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// The working-tree status as a list of changed files (the commit box model).
 /// Combines porcelain status (for state + staged flag) with `--numstat` line
 /// counts; untracked files are counted by reading them.
-pub fn status(cwd: &Path) -> Result<Vec<ChangedFile>> {
+pub fn status(cwd: &Checkout) -> Result<Vec<ChangedFile>> {
     // `-uall` expands an untracked *directory* into its files. Without it git
     // collapses it to a single `?? dir/` record, which then reads as a file:
     // zero added lines, and an empty diff when the user clicks it.
@@ -1190,7 +1184,7 @@ fn parse_numstat_line(line: &str) -> Option<(String, u32, u32, bool)> {
 /// `-z`, git emits a `{old => new}` arrow form for renames that never matches the
 /// status path, so they'd show (0, 0). A map (not a Vec + linear scan) keeps the
 /// per-file lookup in [`status`] O(1) instead of O(files²).
-fn numstat(cwd: &Path, diff_base: &str) -> Result<HashMap<String, (u32, u32, bool)>> {
+fn numstat(cwd: &Checkout, diff_base: &str) -> Result<HashMap<String, (u32, u32, bool)>> {
     let raw = git_output(cwd, &["diff", diff_base, "--numstat", "-z", "--"])?;
     let mut map = HashMap::new();
     // With `-z`, each record is `add\tdel\tpath\0`; for a rename the path field is
@@ -1228,57 +1222,46 @@ const MAX_COUNTED_LINES: u32 = 10_000;
 /// Byte cap for [`count_new_file`], guarding the pathological case of a huge
 /// file with very few newlines (e.g. a multi-MB single-line minified bundle)
 /// where the line cap alone would never kick in.
-const MAX_SCANNED_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SCANNED_BYTES: u64 = 4 * 1024 * 1024;
+
+/// How much of an untracked file decides whether it is binary: git's own
+/// heuristic looks for a NUL near the start.
+const BINARY_PROBE_BYTES: u64 = 8192;
 
 /// Additions / binary-ness of an untracked file, counted the way `git diff`
 /// counts them: one line per newline, plus a final unterminated line, and 0 for
 /// an empty file. The binary check only needs the first chunk, so a huge binary
-/// (image, build artifact) is detected without a full read; a text file is then
-/// streamed for its line count, capped at [`MAX_COUNTED_LINES`]/
-/// [`MAX_SCANNED_BYTES`] so a large generated file (log, dataset, lockfile)
-/// isn't read end-to-end on every `worktree_status` poll — the file watcher's
-/// 400ms debounce would otherwise re-read it repeatedly just to show a
-/// line-count badge.
-fn count_new_file(cwd: &Path, path: &str) -> (u32, u32, bool) {
-    use std::io::Read;
-    let Ok(file) = open_in_worktree(cwd, path) else {
+/// (image, build artifact) is detected without a full read — one round trip for a
+/// small file on Daedalus; a text file is then read for its line count, capped at
+/// [`MAX_SCANNED_BYTES`] and counted to [`MAX_COUNTED_LINES`], so a large
+/// generated file (log, dataset, lockfile) isn't read end-to-end on every
+/// `worktree_status` refresh just to show a line-count badge.
+fn count_new_file(cwd: &Checkout, path: &str) -> (u32, u32, bool) {
+    let Ok((head, whole)) = cwd.read(path, BINARY_PROBE_BYTES) else {
         return (0, 0, false);
     };
-    let mut reader = std::io::BufReader::new(file);
-
-    let mut buf = [0u8; 8192];
-    let mut lines: u32 = 0;
-    let mut scanned = 0usize;
-    let mut last = b'\n';
-    let mut at_eof = false;
-    while lines < MAX_COUNTED_LINES && scanned < MAX_SCANNED_BYTES {
-        let n = match reader.read(&mut buf) {
-            Ok(0) => {
-                at_eof = true;
-                break;
-            }
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        // A NUL byte in the first chunk marks the file binary (git's own heuristic).
-        if scanned == 0 && buf[..n].contains(&0) {
-            return (0, 0, true);
-        }
-        lines += buf[..n].iter().filter(|&&b| b == b'\n').count() as u32;
-        scanned += n;
-        last = buf[n - 1];
+    if head.contains(&0) {
+        return (0, 0, true);
     }
+    let (data, whole) = if whole {
+        (head, true)
+    } else {
+        match cwd.read(path, MAX_SCANNED_BYTES) {
+            Ok(read) => read,
+            Err(_) => return (0, 0, false),
+        }
+    };
+    let newlines = data.iter().filter(|&&b| b == b'\n').count();
     // A trailing line with no newline still counts as an addition (git shows it
     // with "\ No newline at end of file"); an empty file has none at all.
-    if at_eof && last != b'\n' {
-        lines += 1;
-    }
-    (lines.min(MAX_COUNTED_LINES), 0, false)
+    let unterminated = whole && data.last().is_some_and(|&b| b != b'\n');
+    let lines = (newlines + usize::from(unterminated)).min(MAX_COUNTED_LINES as usize);
+    (lines as u32, 0, false)
 }
 
 /// A unified diff for a single file vs HEAD (staged + unstaged combined).
 /// Untracked files are diffed against `/dev/null` so they render as all-adds.
-pub fn file_diff(cwd: &Path, path: &str, untracked: bool) -> Result<String> {
+pub fn file_diff(cwd: &Checkout, path: &str, untracked: bool) -> Result<String> {
     if untracked {
         // `--no-index` reads any path on disk, so resolve symlinks and confirm
         // containment before handing it the absolute path.
@@ -1293,7 +1276,7 @@ pub fn file_diff(cwd: &Path, path: &str, untracked: bool) -> Result<String> {
         // runs in this worktree, and it can already read any file the user can. Closing
         // it would mean passing git a verified fd (`/dev/fd/N`) — which needs the fd to
         // survive the `exec` — for no security the attacker doesn't already have.
-        let abs = safe_real_path(cwd, path)?;
+        let abs = cwd.contained(path)?;
         // `--no-index` exits 1 when the files differ — expected, so capture.
         let (_, stdout, _) = git_capture(
             cwd,
@@ -1307,27 +1290,36 @@ pub fn file_diff(cwd: &Path, path: &str, untracked: bool) -> Result<String> {
         )?;
         return Ok(stdout);
     }
-    safe_path(cwd, path)?;
+    safe_path(cwd.path(), path)?;
     git_output(cwd, &["diff", "HEAD", "--", path])
 }
 
+/// The largest working-tree file [`file_source`] reads: one `fs.read` over the
+/// link.
+const FILE_SOURCE_MAX: u64 = santree_remote_client::proto::FS_READ_MAX;
+
 /// The old (HEAD) and new (working-tree) full contents of a file, for the diff
 /// viewer's context expansion. Either side is empty when absent.
-pub fn file_source(cwd: &Path, path: &str) -> Result<FileSource> {
-    let new_text = read_in_worktree(cwd, path).unwrap_or_default();
+pub fn file_source(cwd: &Checkout, path: &str) -> Result<FileSource> {
+    // Capped at what one read over the link carries. A file past it is no source
+    // for context lines anyway, so it reads as absent rather than cut short.
+    let new_text = match cwd.read(path, FILE_SOURCE_MAX) {
+        Ok((data, true)) => String::from_utf8(data).unwrap_or_default(),
+        _ => String::new(),
+    };
     let old_text = git_output(cwd, &["show", &format!("HEAD:{path}")]).unwrap_or_default();
     Ok(FileSource { old_text, new_text })
 }
 
 /// Stage a single file (works for new, modified, deleted).
-pub fn stage(cwd: &Path, path: &str) -> Result<()> {
-    safe_path(cwd, path)?;
+pub fn stage(cwd: &Checkout, path: &str) -> Result<()> {
+    safe_path(cwd.path(), path)?;
     git_indexed(cwd, &["add", "--", path]).map(|_| ())
 }
 
 /// Unstage a single file (leaves the working tree untouched).
-pub fn unstage(cwd: &Path, path: &str) -> Result<()> {
-    safe_path(cwd, path)?;
+pub fn unstage(cwd: &Checkout, path: &str) -> Result<()> {
+    safe_path(cwd.path(), path)?;
     git_indexed(cwd, &["restore", "--staged", "--", path]).map(|_| ())
 }
 
@@ -1344,7 +1336,7 @@ pub fn unstage(cwd: &Path, path: &str) -> Result<()> {
 /// index column holds a staged change (not space/untracked) and the worktree
 /// column is also dirty — i.e. `MM`, `AM`, `MD`, …. Whole-file, matching how the
 /// commit box stages.
-pub fn reconcile_staged(cwd: &Path) -> Result<Vec<String>> {
+pub fn reconcile_staged(cwd: &Checkout) -> Result<Vec<String>> {
     let raw = git_output(cwd, &["status", "--porcelain=v1", "-z", "-uall"])?;
     let parts: Vec<&str> = raw.split('\0').collect();
 
@@ -1395,8 +1387,8 @@ pub fn reconcile_staged(cwd: &Path) -> Result<Vec<String>> {
 /// a symlinked directory component, and it unlinks a symlinked leaf rather than its
 /// target. `remove_file` had to be handed an already-resolved absolute path, which an
 /// agent writing in the worktree could invalidate between the check and the `unlink`.
-pub fn discard(cwd: &Path, path: &str, untracked: bool) -> Result<()> {
-    safe_path(cwd, path)?;
+pub fn discard(cwd: &Checkout, path: &str, untracked: bool) -> Result<()> {
+    safe_path(cwd.path(), path)?;
     if untracked {
         return git_indexed(cwd, &["clean", "--force", "--", path]).map(|_| ());
     }
@@ -1404,12 +1396,12 @@ pub fn discard(cwd: &Path, path: &str, untracked: bool) -> Result<()> {
 }
 
 /// Stage every change (new, modified, deleted).
-pub fn stage_all(cwd: &Path) -> Result<()> {
+pub fn stage_all(cwd: &Checkout) -> Result<()> {
     git_indexed(cwd, &["add", "-A"]).map(|_| ())
 }
 
 /// Unstage everything (mixed reset; working tree untouched).
-pub fn unstage_all(cwd: &Path) -> Result<()> {
+pub fn unstage_all(cwd: &Checkout) -> Result<()> {
     git_indexed(cwd, &["reset"]).map(|_| ())
 }
 
@@ -1419,7 +1411,7 @@ pub fn unstage_all(cwd: &Path) -> Result<()> {
 /// The two steps share one lock rather than taking one each: between a separate
 /// `stage_all` and `commit`, a staging click could land and be committed silently —
 /// the commit would then contain something other than what the user had selected.
-pub fn commit(cwd: &Path, message: &str, stage_all: bool) -> Result<()> {
+pub fn commit(cwd: &Checkout, message: &str, stage_all: bool) -> Result<()> {
     with_index_lock(cwd, || {
         if stage_all {
             git(cwd, &["add", "-A"])?;
@@ -1430,18 +1422,18 @@ pub fn commit(cwd: &Path, message: &str, stage_all: bool) -> Result<()> {
 }
 
 /// The full staged diff, for AI commit-message generation.
-pub fn staged_diff(cwd: &Path) -> String {
+pub fn staged_diff(cwd: &Checkout) -> String {
     git_output(cwd, &["diff", "--cached"]).unwrap_or_default()
 }
 
 /// Push `branch` to origin, setting upstream. Network op — slow / may fail.
-pub fn push(cwd: &Path, branch: &str) -> Result<()> {
+pub fn push(cwd: &Checkout, branch: &str) -> Result<()> {
     git(cwd, &["push", "-u", "origin", branch]).map(|_| ())
 }
 
 /// Subject of the first commit on this branch since `base` — the natural PR
 /// title. `None` when there are no commits ahead of `base`.
-pub fn first_commit_subject(cwd: &Path, base: &str) -> Option<String> {
+pub fn first_commit_subject(cwd: &Checkout, base: &str) -> Option<String> {
     let base = compare_base(cwd, base);
     let range = format!("{base}..HEAD");
     let out = git_output(cwd, &["log", &range, "--reverse", "--format=%s"]).ok()?;
@@ -1453,7 +1445,7 @@ pub fn first_commit_subject(cwd: &Path, base: &str) -> Option<String> {
 }
 
 /// `git log base..HEAD` as a bullet list of subjects, for PR-body context.
-pub fn commit_log(cwd: &Path, base: &str) -> String {
+pub fn commit_log(cwd: &Checkout, base: &str) -> String {
     let base = compare_base(cwd, base);
     let range = format!("{base}..HEAD");
     git_output(cwd, &["log", &range, "--format=- %s"]).unwrap_or_default()
@@ -1462,7 +1454,7 @@ pub fn commit_log(cwd: &Path, base: &str) -> String {
 /// `git diff base...HEAD --stat`, for PR-body context. Three-dot (merge-base) diff
 /// so it shows only the branch's own changes, never a net-diff against an upstream
 /// `base` that advanced past the fork point.
-pub fn diff_stat(cwd: &Path, base: &str) -> String {
+pub fn diff_stat(cwd: &Checkout, base: &str) -> String {
     let base = compare_base(cwd, base);
     let range = format!("{base}...HEAD");
     git_output(cwd, &["diff", &range, "--stat"]).unwrap_or_default()
@@ -1470,7 +1462,7 @@ pub fn diff_stat(cwd: &Path, base: &str) -> String {
 
 /// Full `git diff base...HEAD`, for PR-body context (capped by the caller).
 /// Three-dot (merge-base) diff — see [`diff_stat`].
-pub fn diff_range(cwd: &Path, base: &str) -> String {
+pub fn diff_range(cwd: &Checkout, base: &str) -> String {
     let base = compare_base(cwd, base);
     let range = format!("{base}...HEAD");
     git_output(cwd, &["diff", &range]).unwrap_or_default()
@@ -1484,7 +1476,7 @@ pub fn diff_range(cwd: &Path, base: &str) -> String {
 ///
 /// Rename detection is left to git's default (`diff.renames`) on both calls, the
 /// same setting [`status`]'s porcelain follows, so the two listings agree.
-pub fn branch_changes(cwd: &Path, base: &str) -> Result<Vec<ChangedFile>> {
+pub fn branch_changes(cwd: &Checkout, base: &str) -> Result<Vec<ChangedFile>> {
     let base = compare_base(cwd, base);
     let range = format!("{base}...HEAD");
     // `--` after the range: a file named like `main...HEAD` must stay a path.
@@ -1537,8 +1529,8 @@ pub fn branch_changes(cwd: &Path, base: &str) -> Result<Vec<ChangedFile>> {
 /// A unified diff of one file's committed changes on the branch — `git diff
 /// <base>...HEAD -- <path>` (the diff a [`branch_changes`] row opens). Empty
 /// when the branch didn't touch the file.
-pub fn branch_file_diff(cwd: &Path, base: &str, path: &str) -> Result<String> {
-    safe_path(cwd, path)?;
+pub fn branch_file_diff(cwd: &Checkout, base: &str, path: &str) -> Result<String> {
+    safe_path(cwd.path(), path)?;
     // A leading `:` is pathspec magic (`:/`, `:(glob)`, `:!`), never a file the
     // panel listed; and the path is passed as a literal so `*`/`?` in a real
     // filename can't widen the diff to whatever they'd match.
@@ -1553,7 +1545,7 @@ pub fn branch_file_diff(cwd: &Path, base: &str, path: &str) -> Result<String> {
 
 /// Every file in the worktree the user would browse — tracked plus untracked,
 /// honouring `.gitignore`. Relative paths, sorted; the frontend builds the tree.
-pub fn list_files(cwd: &Path) -> Result<Vec<String>> {
+pub fn list_files(cwd: &Checkout) -> Result<Vec<String>> {
     let raw = git_output(
         cwd,
         &[
@@ -1577,6 +1569,7 @@ pub fn list_files(cwd: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn safe_sha_accepts_real_object_ids() {
@@ -1697,7 +1690,7 @@ mod tests {
             &["worktree", "add", wt.to_string_lossy().as_ref(), "taken"],
         );
 
-        let listed = branches(&repo).unwrap();
+        let listed = branches(&Checkout::local(&repo)).unwrap();
         let by_name = |n: &str| listed.iter().find(|b| b.name == n).cloned();
 
         // `main` is the repo's own checkout — also a worktree, also unavailable.
@@ -1781,7 +1774,7 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("keep"), "safe").unwrap();
 
-        remove_legacy_review_checkout(&repo, &outside);
+        remove_legacy_review_checkout(&Checkout::local(&repo), &outside);
 
         assert!(outside.join("keep").is_file());
         let _ = std::fs::remove_dir_all(&base);
@@ -1877,7 +1870,7 @@ mod tests {
         // ...plus an unrelated unstaged modification right after it.
         std::fs::write(repo.join("b.txt"), "hello\nworld\n").unwrap();
 
-        let files = status(&repo).unwrap();
+        let files = status(&Checkout::local(&repo)).unwrap();
 
         let renamed = files
             .iter()
@@ -1941,7 +1934,7 @@ mod tests {
     fn branch_changes_lists_committed_files_with_statuses_and_counts() {
         let (base, repo) = branch_fixture("branch-changes");
 
-        let files = branch_changes(&repo, "main").unwrap();
+        let files = branch_changes(&Checkout::local(&repo), "main").unwrap();
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(
             paths,
@@ -1984,25 +1977,25 @@ mod tests {
     fn branch_file_diff_shows_one_files_committed_hunks_and_guards_the_path() {
         let (base, repo) = branch_fixture("branch-file-diff");
 
-        let diff = branch_file_diff(&repo, "main", "a.txt").unwrap();
+        let diff = branch_file_diff(&Checkout::local(&repo), "main", "a.txt").unwrap();
         assert!(diff.contains("+three"), "the branch's own change: {diff}");
         assert!(
             !diff.contains("upstream"),
             "main's later commit is excluded"
         );
         assert_eq!(
-            branch_file_diff(&repo, "main", "upstream.txt").unwrap(),
+            branch_file_diff(&Checkout::local(&repo), "main", "upstream.txt").unwrap(),
             "",
             "a file the branch never touched diffs to nothing"
         );
-        assert!(branch_file_diff(&repo, "main", "../a.txt").is_err());
-        assert!(branch_file_diff(&repo, "main", "/etc/passwd").is_err());
+        assert!(branch_file_diff(&Checkout::local(&repo), "main", "../a.txt").is_err());
+        assert!(branch_file_diff(&Checkout::local(&repo), "main", "/etc/passwd").is_err());
         assert!(
-            branch_file_diff(&repo, "main", ":/a.txt").is_err(),
+            branch_file_diff(&Checkout::local(&repo), "main", ":/a.txt").is_err(),
             "pathspec magic is refused"
         );
         assert_eq!(
-            branch_file_diff(&repo, "main", "*.txt").unwrap(),
+            branch_file_diff(&Checkout::local(&repo), "main", "*.txt").unwrap(),
             "",
             "a glob is a literal filename, not a pattern"
         );
@@ -2035,19 +2028,21 @@ mod tests {
         run_git(&repo, &["add", "a.txt", "b.txt"]);
 
         // Nothing edited-after-staging yet: reconcile is a no-op.
-        assert!(reconcile_staged(&repo).unwrap().is_empty());
+        assert!(reconcile_staged(&Checkout::local(&repo))
+            .unwrap()
+            .is_empty());
 
         // Now edit a.txt *again* on disk (porcelain `MM`); b.txt stays `M `.
         std::fs::write(repo.join("a.txt"), "three\n").unwrap();
 
-        let unstaged = reconcile_staged(&repo).unwrap();
+        let unstaged = reconcile_staged(&Checkout::local(&repo)).unwrap();
         assert_eq!(
             unstaged,
             vec!["a.txt".to_string()],
             "only the re-edited file"
         );
 
-        let files = status(&repo).unwrap();
+        let files = status(&Checkout::local(&repo)).unwrap();
         let a = files.iter().find(|f| f.path == "a.txt").unwrap();
         assert!(!a.staged, "a.txt is unstaged after being re-edited");
         let b = files.iter().find(|f| f.path == "b.txt").unwrap();
@@ -2080,7 +2075,8 @@ mod tests {
 
         std::fs::write(repo.join("new.txt"), "hello\nworld\n").unwrap();
 
-        let files = status(&repo).expect("status() must not error on unborn HEAD");
+        let files =
+            status(&Checkout::local(&repo)).expect("status() must not error on unborn HEAD");
         let f = files
             .iter()
             .find(|f| f.path == "new.txt")
@@ -2106,7 +2102,8 @@ mod tests {
         std::fs::write(repo.join("staged.txt"), "a\nb\nc\n").unwrap();
         run_git(&repo, &["add", "staged.txt"]);
 
-        let files = status(&repo).expect("status() must not error on unborn HEAD");
+        let files =
+            status(&Checkout::local(&repo)).expect("status() must not error on unborn HEAD");
         let f = files
             .iter()
             .find(|f| f.path == "staged.txt")
@@ -2149,7 +2146,7 @@ mod tests {
                 .map(|i| {
                     let repo = &repo;
                     s.spawn(move || {
-                        stage(repo, &format!("f{i}.txt"))
+                        stage(&Checkout::local(repo), &format!("f{i}.txt"))
                             .err()
                             .map(|e| e.to_string())
                     })
@@ -2166,7 +2163,7 @@ mod tests {
         );
 
         // ...and the index must agree with what was asked for, not just "no error".
-        let staged: Vec<_> = status(&repo)
+        let staged: Vec<_> = status(&Checkout::local(&repo))
             .unwrap()
             .into_iter()
             .filter(|f| f.staged)
@@ -2203,12 +2200,14 @@ mod tests {
             })
         };
 
-        stage(&repo, "a.txt").expect("staging must ride out a foreign index.lock");
+        stage(&Checkout::local(&repo), "a.txt")
+            .expect("staging must ride out a foreign index.lock");
         releaser.join().unwrap();
 
         // And a lock that never clears still errors rather than hanging the click.
         std::fs::write(&lock, "").unwrap();
-        let err = stage(&repo, "a.txt").expect_err("a stale lock must surface, not hang");
+        let err = stage(&Checkout::local(&repo), "a.txt")
+            .expect_err("a stale lock must surface, not hang");
         assert!(
             is_index_lock_contention(&err),
             "the give-up error should still name the lock: {err}"
@@ -2231,7 +2230,7 @@ mod tests {
         std::fs::write(repo.join("newdir/a.txt"), "one\ntwo\n").unwrap();
         std::fs::write(repo.join("newdir/nested/b.txt"), "solo\n").unwrap();
 
-        let files = status(&repo).unwrap();
+        let files = status(&Checkout::local(&repo)).unwrap();
         let mut paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
         paths.sort_unstable();
         assert_eq!(paths, ["newdir/a.txt", "newdir/nested/b.txt"]);
@@ -2249,7 +2248,7 @@ mod tests {
         let base = scratch_dir("count-new-file-binary");
         std::fs::write(base.join("bin.dat"), [b'h', b'i', 0u8, b'x']).unwrap();
 
-        let (add, del, binary) = count_new_file(&base, "bin.dat");
+        let (add, del, binary) = count_new_file(&Checkout::local(&base), "bin.dat");
         assert!(
             binary,
             "a NUL byte in the content must be detected as binary"
@@ -2263,7 +2262,7 @@ mod tests {
         let base = scratch_dir("count-new-file-text");
         std::fs::write(base.join("text.txt"), "one\ntwo\nthree\n").unwrap();
 
-        let (add, del, binary) = count_new_file(&base, "text.txt");
+        let (add, del, binary) = count_new_file(&Checkout::local(&base), "text.txt");
         assert!(!binary);
         assert_eq!(add, 3);
         assert_eq!(del, 0);
@@ -2279,8 +2278,14 @@ mod tests {
         std::fs::write(base.join("empty.txt"), "").unwrap();
         std::fs::write(base.join("no-newline.txt"), "one\ntwo").unwrap();
 
-        assert_eq!(count_new_file(&base, "empty.txt"), (0, 0, false));
-        assert_eq!(count_new_file(&base, "no-newline.txt"), (2, 0, false));
+        assert_eq!(
+            count_new_file(&Checkout::local(&base), "empty.txt"),
+            (0, 0, false)
+        );
+        assert_eq!(
+            count_new_file(&Checkout::local(&base), "no-newline.txt"),
+            (2, 0, false)
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -2293,7 +2298,7 @@ mod tests {
         let content = "x\n".repeat(MAX_COUNTED_LINES as usize + 500);
         std::fs::write(base.join("huge.txt"), content).unwrap();
 
-        let (add, del, binary) = count_new_file(&base, "huge.txt");
+        let (add, del, binary) = count_new_file(&Checkout::local(&base), "huge.txt");
         assert!(!binary);
         assert_eq!(
             add, MAX_COUNTED_LINES,
@@ -2335,7 +2340,7 @@ mod tests {
 
         // The parent worktree: pushed once (it has a PR), then committed to again.
         let parent = repo.join(".santree/worktrees/AK-274");
-        create_worktree(&repo, &parent, "santree/ak-274", "main").unwrap();
+        create_worktree(&Checkout::local(&repo), &parent, "santree/ak-274", "main").unwrap();
         std::fs::write(parent.join("p.txt"), "pushed\n").unwrap();
         run_git(&parent, &["add", "-A"]);
         run_git(&parent, &["commit", "-m", "pushed work"]);
@@ -2345,10 +2350,20 @@ mod tests {
         run_git(&parent, &["commit", "-m", "unpushed work"]);
 
         let child = repo.join(".santree/worktrees/AK-275");
-        create_worktree(&repo, &child, "santree/ak-275", "santree/ak-274").unwrap();
+        create_worktree(
+            &Checkout::local(&repo),
+            &child,
+            "santree/ak-275",
+            "santree/ak-274",
+        )
+        .unwrap();
 
-        let parent_tip = git(&repo, &["rev-parse", "refs/heads/santree/ak-274"]).unwrap();
-        let child_head = git(&child, &["rev-parse", "HEAD"]).unwrap();
+        let parent_tip = git(
+            &Checkout::local(&repo),
+            &["rev-parse", "refs/heads/santree/ak-274"],
+        )
+        .unwrap();
+        let child_head = git(&Checkout::local(&child), &["rev-parse", "HEAD"]).unwrap();
         assert_eq!(
             child_head, parent_tip,
             "child must fork from the parent's local tip, not its pushed one"
@@ -2372,7 +2387,7 @@ mod tests {
 
         // Parent worktree, pushed (so `origin/santree/ak-274` exists — it has a PR).
         let parent = repo.join(".santree/worktrees/AK-274");
-        create_worktree(&repo, &parent, "santree/ak-274", "main").unwrap();
+        create_worktree(&Checkout::local(&repo), &parent, "santree/ak-274", "main").unwrap();
         std::fs::write(parent.join("p.txt"), "pushed\n").unwrap();
         run_git(&parent, &["add", "-A"]);
         run_git(&parent, &["commit", "-m", "pushed work"]);
@@ -2380,10 +2395,16 @@ mod tests {
 
         // Child stacked on the parent, in sync at this point.
         let child = repo.join(".santree/worktrees/AK-275");
-        create_worktree(&repo, &child, "santree/ak-275", "santree/ak-274").unwrap();
+        create_worktree(
+            &Checkout::local(&repo),
+            &child,
+            "santree/ak-275",
+            "santree/ak-274",
+        )
+        .unwrap();
         assert_eq!(
             stats(
-                &child,
+                &Checkout::local(&child),
                 "santree/ak-275",
                 "santree/ak-274",
                 BaseKind::LocalBranch
@@ -2401,7 +2422,7 @@ mod tests {
 
         assert_eq!(
             stats(
-                &child,
+                &Checkout::local(&child),
                 "santree/ak-275",
                 "santree/ak-274",
                 BaseKind::LocalBranch
@@ -2424,10 +2445,10 @@ mod tests {
         advance_origin_main(&seed, "v2\n");
 
         let wt = repo.join(".santree/worktrees/AK-1");
-        create_worktree(&repo, &wt, "santree/ak-1", "main").unwrap();
+        create_worktree(&Checkout::local(&repo), &wt, "santree/ak-1", "main").unwrap();
 
-        let origin_tip = git(&origin, &["rev-parse", "main"]).unwrap();
-        let head = git(&wt, &["rev-parse", "HEAD"]).unwrap();
+        let origin_tip = git(&Checkout::local(&origin), &["rev-parse", "main"]).unwrap();
+        let head = git(&Checkout::local(&wt), &["rev-parse", "HEAD"]).unwrap();
         assert_eq!(
             head, origin_tip,
             "must fork from origin/main, not stale local"
@@ -2571,10 +2592,10 @@ mod tests {
 
         advance_origin_main(&seed, "v2\n");
 
-        update_base(&repo, "main").expect("update_base should succeed");
+        update_base(&Checkout::local(&repo), "main").expect("update_base should succeed");
 
-        let local_main = git(&repo, &["rev-parse", "refs/heads/main"]).unwrap();
-        let origin_tip = git(&origin, &["rev-parse", "main"]).unwrap();
+        let local_main = git(&Checkout::local(&repo), &["rev-parse", "refs/heads/main"]).unwrap();
+        let origin_tip = git(&Checkout::local(&origin), &["rev-parse", "main"]).unwrap();
         assert_eq!(
             local_main, origin_tip,
             "local main ref must be fast-forwarded to origin's tip"
@@ -2595,15 +2616,15 @@ mod tests {
 
         advance_origin_main(&seed, "v2\n");
 
-        update_base(&repo, "main").expect("update_base should succeed");
+        update_base(&Checkout::local(&repo), "main").expect("update_base should succeed");
 
         let content = std::fs::read_to_string(repo.join("f.txt")).unwrap();
         assert_eq!(
             content, "v2\n",
             "checked-out main's working tree must be ff-merged"
         );
-        let local_head = git(&repo, &["rev-parse", "HEAD"]).unwrap();
-        let origin_tip = git(&origin, &["rev-parse", "main"]).unwrap();
+        let local_head = git(&Checkout::local(&repo), &["rev-parse", "HEAD"]).unwrap();
+        let origin_tip = git(&Checkout::local(&origin), &["rev-parse", "main"]).unwrap();
         assert_eq!(local_head, origin_tip);
 
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
@@ -2639,15 +2660,15 @@ mod tests {
     fn pull_remote_fast_forwards_branch_from_origin() {
         let (origin, seed, repo) = init_diverged_feature("pull-remote-ff");
 
-        pull_remote(&repo, "feature").expect("pull_remote should ff cleanly");
+        pull_remote(&Checkout::local(&repo), "feature").expect("pull_remote should ff cleanly");
 
         let content = std::fs::read_to_string(repo.join("f.txt")).unwrap();
         assert_eq!(
             content, "remote-edit\n",
             "working tree must reflect the remote commit"
         );
-        let local_head = git(&repo, &["rev-parse", "HEAD"]).unwrap();
-        let origin_tip = git(&origin, &["rev-parse", "feature"]).unwrap();
+        let local_head = git(&Checkout::local(&repo), &["rev-parse", "HEAD"]).unwrap();
+        let origin_tip = git(&Checkout::local(&origin), &["rev-parse", "feature"]).unwrap();
         assert_eq!(
             local_head, origin_tip,
             "local branch must match origin's feature tip"
@@ -2665,20 +2686,38 @@ mod tests {
 
         // Tracking ref is stale until a fetch, so nothing looks pending yet.
         assert_eq!(
-            stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind,
+            stats(
+                &Checkout::local(&repo),
+                "feature",
+                "main",
+                BaseKind::Upstream
+            )
+            .remote_behind,
             0
         );
 
         run_git(&repo, &["fetch", "origin", "feature"]);
         assert_eq!(
-            stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind,
+            stats(
+                &Checkout::local(&repo),
+                "feature",
+                "main",
+                BaseKind::Upstream
+            )
+            .remote_behind,
             1,
             "one remote commit is now pending"
         );
 
-        pull_remote(&repo, "feature").expect("pull_remote should succeed");
+        pull_remote(&Checkout::local(&repo), "feature").expect("pull_remote should succeed");
         assert_eq!(
-            stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind,
+            stats(
+                &Checkout::local(&repo),
+                "feature",
+                "main",
+                BaseKind::Upstream
+            )
+            .remote_behind,
             0,
             "up to date after pulling"
         );
@@ -2713,7 +2752,12 @@ mod tests {
         advance_origin_main(&seed, "v2\n");
         run_git(&repo, &["fetch", "origin", "main"]);
 
-        let s = stats(&repo, "feature", "main", BaseKind::Upstream);
+        let s = stats(
+            &Checkout::local(&repo),
+            "feature",
+            "main",
+            BaseKind::Upstream,
+        );
         assert_eq!(s.ahead, 2, "two commits on top of the base");
         assert_eq!(s.behind, 1, "one commit added to the base upstream");
         assert_eq!(s.unpushed, 1, "only the second commit is unpushed");
@@ -2739,7 +2783,12 @@ mod tests {
         run_git(&repo, &["add", "-A"]);
         run_git(&repo, &["commit", "-m", "c1"]);
 
-        let s = stats(&repo, "feature", "main", BaseKind::Upstream);
+        let s = stats(
+            &Checkout::local(&repo),
+            "feature",
+            "main",
+            BaseKind::Upstream,
+        );
         assert_eq!((s.ahead, s.unpushed), (1, 1));
         assert_eq!(s.remote_behind, 0, "no tracking ref, nothing to pull");
         assert!(!s.dirty);
@@ -2759,10 +2808,10 @@ mod tests {
         run_git(&repo, &["commit", "-m", "conflicting local edit"]);
         run_git(&repo, &["fetch", "origin", "feature"]);
 
-        assert!(would_conflict(&repo, "origin/feature"));
+        assert!(would_conflict(&Checkout::local(&repo), "origin/feature"));
         // The repeat answer costs a single `rev-parse` — no second virtual merge.
         let before = git_calls_under(&repo);
-        assert!(would_conflict(&repo, "origin/feature"));
+        assert!(would_conflict(&Checkout::local(&repo), "origin/feature"));
         assert_eq!(
             git_calls_under(&repo) - before,
             1,
@@ -2775,7 +2824,7 @@ mod tests {
             &["merge", "-X", "theirs", "--no-edit", "origin/feature"],
         );
         assert!(
-            !would_conflict(&repo, "origin/feature"),
+            !would_conflict(&Checkout::local(&repo), "origin/feature"),
             "the cache must not outlive the commit pair it was computed for"
         );
 
@@ -2794,7 +2843,8 @@ mod tests {
         run_git(&repo, &["add", "-A"]);
         run_git(&repo, &["commit", "-m", "local divergence"]);
 
-        pull_remote(&repo, "feature").expect("non-conflicting divergence should merge");
+        pull_remote(&Checkout::local(&repo), "feature")
+            .expect("non-conflicting divergence should merge");
 
         // Remote edit pulled in…
         assert_eq!(
@@ -2820,9 +2870,10 @@ mod tests {
         std::fs::write(repo.join("f.txt"), "local-conflict\n").unwrap();
         run_git(&repo, &["add", "-A"]);
         run_git(&repo, &["commit", "-m", "conflicting local edit"]);
-        let head_before = git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let head_before = git(&Checkout::local(&repo), &["rev-parse", "HEAD"]).unwrap();
 
-        let err = pull_remote(&repo, "feature").expect_err("conflicting pull must error");
+        let err = pull_remote(&Checkout::local(&repo), "feature")
+            .expect_err("conflicting pull must error");
 
         // The message must name the conflicted file, not leak git's raw stderr.
         let msg = err.to_string();
@@ -2836,16 +2887,20 @@ mod tests {
         );
         // Nothing touched: clean tree, unchanged HEAD, no MERGE_HEAD started.
         assert!(
-            !is_dirty(&repo),
+            !is_dirty(&Checkout::local(&repo)),
             "tree must be untouched when a conflict is detected"
         );
         assert_eq!(
-            git(&repo, &["rev-parse", "HEAD"]).unwrap(),
+            git(&Checkout::local(&repo), &["rev-parse", "HEAD"]).unwrap(),
             head_before,
             "HEAD must not move"
         );
         assert!(
-            git(&repo, &["rev-parse", "--verify", "MERGE_HEAD"]).is_err(),
+            git(
+                &Checkout::local(&repo),
+                &["rev-parse", "--verify", "MERGE_HEAD"]
+            )
+            .is_err(),
             "no merge in progress"
         );
         assert_eq!(
@@ -2866,10 +2921,11 @@ mod tests {
         run_git(&repo, &["commit", "-m", "conflicting local edit"]);
         run_git(&repo, &["fetch", "origin", "feature"]);
 
-        let conflicts = merge_conflicts(&repo, "origin/feature").expect("detection should run");
+        let conflicts = merge_conflicts(&Checkout::local(&repo), "origin/feature")
+            .expect("detection should run");
         assert_eq!(conflicts, vec!["f.txt".to_string()]);
         assert!(
-            !is_dirty(&repo),
+            !is_dirty(&Checkout::local(&repo)),
             "virtual merge must not touch the working tree"
         );
 
@@ -2886,14 +2942,22 @@ mod tests {
         run_git(&repo, &["add", "-A"]);
         run_git(&repo, &["commit", "-m", "conflicting local edit"]);
 
-        refresh_remote_ref(&repo, "feature");
-        let s = stats(&repo, "feature", "main", BaseKind::Upstream);
+        refresh_remote_ref(&Checkout::local(&repo), "feature");
+        let s = stats(
+            &Checkout::local(&repo),
+            "feature",
+            "main",
+            BaseKind::Upstream,
+        );
         assert_eq!(s.remote_behind, 1, "one remote commit is pending");
         assert!(
-            would_conflict(&repo, "origin/feature"),
+            would_conflict(&Checkout::local(&repo), "origin/feature"),
             "the pending pull conflicts with the local edit"
         );
-        assert!(!is_dirty(&repo), "detecting it must not touch the tree");
+        assert!(
+            !is_dirty(&Checkout::local(&repo)),
+            "detecting it must not touch the tree"
+        );
 
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
     }
@@ -2907,13 +2971,19 @@ mod tests {
         run_git(&repo, &["add", "-A"]);
         run_git(&repo, &["commit", "-m", "non-conflicting local edit"]);
 
-        refresh_remote_ref(&repo, "feature");
+        refresh_remote_ref(&Checkout::local(&repo), "feature");
         assert_eq!(
-            stats(&repo, "feature", "main", BaseKind::Upstream).remote_behind,
+            stats(
+                &Checkout::local(&repo),
+                "feature",
+                "main",
+                BaseKind::Upstream
+            )
+            .remote_behind,
             1
         );
         assert!(
-            !would_conflict(&repo, "origin/feature"),
+            !would_conflict(&Checkout::local(&repo), "origin/feature"),
             "a non-conflicting pull must not be flagged"
         );
 
@@ -2938,11 +3008,11 @@ mod tests {
 
         // Untracked, nested inside a directory git has never seen.
         std::fs::write(repo.join("sub/new.txt"), "x\n").unwrap();
-        discard(&repo, "sub/new.txt", true).unwrap();
+        discard(&Checkout::local(&repo), "sub/new.txt", true).unwrap();
         assert!(!repo.join("sub/new.txt").exists(), "untracked file deleted");
 
         std::fs::write(repo.join("tracked.txt"), "clobbered\n").unwrap();
-        discard(&repo, "tracked.txt", false).unwrap();
+        discard(&Checkout::local(&repo), "tracked.txt", false).unwrap();
         assert_eq!(
             std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
             "original\n"
@@ -2974,7 +3044,7 @@ mod tests {
 
         // A symlinked leaf: the link goes, its target stays.
         std::os::unix::fs::symlink(outside.join("victim.txt"), repo.join("link.txt")).unwrap();
-        discard(&repo, "link.txt", true).unwrap();
+        discard(&Checkout::local(&repo), "link.txt", true).unwrap();
         assert!(repo.join("link.txt").symlink_metadata().is_err());
         assert!(
             outside.join("victim.txt").exists(),
@@ -2983,7 +3053,7 @@ mod tests {
 
         // A symlinked directory component: nothing beyond it may be touched.
         std::os::unix::fs::symlink(&outside, repo.join("escape")).unwrap();
-        let _ = discard(&repo, "escape/victim.txt", true);
+        let _ = discard(&Checkout::local(&repo), "escape/victim.txt", true);
         assert!(
             outside.join("victim.txt").exists(),
             "discard must not descend a symlinked directory out of the worktree"
@@ -3006,8 +3076,17 @@ mod tests {
         std::fs::write(root.join("real.txt"), "content\n").unwrap();
         std::os::unix::fs::symlink(root.join("real.txt"), root.join("inside-link")).unwrap();
 
-        assert_eq!(read_in_worktree(&root, "real.txt").unwrap(), "content\n");
-        assert_eq!(read_in_worktree(&root, "inside-link").unwrap(), "content\n");
+        let checkout = Checkout::local(&root);
+        for rel in ["real.txt", "inside-link"] {
+            let (data, whole) = checkout.read(rel, 1024).unwrap();
+            assert_eq!((data.as_slice(), whole), (&b"content\n"[..], true), "{rel}");
+        }
+        let (head, whole) = checkout.read("real.txt", 3).unwrap();
+        assert_eq!(
+            (head.as_slice(), whole),
+            (&b"con"[..], false),
+            "a capped read says so"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

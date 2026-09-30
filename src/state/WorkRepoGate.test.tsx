@@ -17,8 +17,10 @@ vi.mock("../lib/queries", () => ({
       { name: "acme/app", path: "/src/app" },
       { name: "acme/infra", path: "/src/infra" },
       { name: "acme/web", path: "/src/web" },
+      { name: "acme/box", path: "/srv/projects/box", location: "Daedalus" },
     ],
   }),
+  useDaedalusStatus: () => ({ data: { kind: "Connected" } }),
   useWorkDefaultRepo: () => ({ repo: state.repo, loading: false, setRepo: state.setRepo }),
 }));
 
@@ -112,6 +114,15 @@ describe("WorkRepoGate", () => {
     const answers = mount(TWO);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(answers).toEqual([null]));
+  });
+
+  it("never answers with a Daedalus project, and offers one only as a disabled row", () => {
+    state.repo = "acme/box";
+    mount(["acme/box"]);
+    screen.getByRole("dialog", { name: "Which project?" });
+    const box = screen.getByRole("option", { name: /box/ });
+    expect(box).toBeDisabled();
+    expect(box).toHaveAttribute("title", "Coming soon for Daedalus projects");
   });
 
   it("declines outside a provider", async () => {

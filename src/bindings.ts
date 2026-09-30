@@ -69,13 +69,14 @@ export const commands = {
 	windows: ApiBudgetWindow[],
 } | null>("github_api_budget"),
 	/**
-	 *  The repo's live agent worktrees (DB-tracked, with live git stats). Empty when
-	 *  the repo has no local path.
+	 *  The repo's live agent worktrees (DB-tracked, with live git stats), read on
+	 *  Daedalus for a Daedalus project. Empty when the repo has no path.
 	 */
 	worktrees: (repo: string) => typedError<Worktree[], CmdError>(__TAURI_INVOKE("worktrees", { repo })),
 	/**
 	 *  The repo's base branch as a worktree-like entry (repo root on main/master),
-	 *  for the Trees "main" entry. `None` when the repo has no local path.
+	 *  for the Trees "main" entry, read on Daedalus for a Daedalus project. `None`
+	 *  when the repo has no path.
 	 */
 	baseWorktree: (repo: string) => typedError<{
 	/**  Ticket association, independent of this checkout's identity. */
@@ -164,7 +165,7 @@ export const commands = {
 	/**
 	 *  The repo's branches (local, plus `origin`-only ones), each flagged with
 	 *  whether it is already checked out somewhere — the Create-worktree dialog's
-	 *  Branch source. Empty when the repo has no local path.
+	 *  Branch source. Empty when the repo has no path.
 	 */
 	repoBranches: (repo: string) => typedError<RepoBranch[], CmdError>(__TAURI_INVOKE("repo_branches", { repo })),
 	/**

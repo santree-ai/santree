@@ -71,3 +71,18 @@ export function linkNotice(link: DaedalusLink): LinkNotice {
 export function linkUp(link: DaedalusLink | undefined): boolean {
   return link === undefined || link.kind === "Connected" || link.kind === "Connecting";
 }
+
+/** The tooltip on every action that would change a Daedalus project, or run
+ *  something in it, while santree can't reach the box. */
+export const OUT_OF_REACH = "Unavailable until santree can reach Daedalus";
+
+/** The same, while it can: santree reads Daedalus projects (worktrees, changes,
+ *  diffs, files) but doesn't change them or run anything in them yet. */
+export const DAEDALUS_READ_ONLY = "Coming soon for Daedalus projects";
+
+/** Why santree offers no way to change a project or run something in it right
+ *  now — `undefined` for a project on this Mac. */
+export function actionsOff(remote: boolean, link: DaedalusLink | undefined): string | undefined {
+  if (!remote) return undefined;
+  return linkUp(link) ? DAEDALUS_READ_ONLY : OUT_OF_REACH;
+}

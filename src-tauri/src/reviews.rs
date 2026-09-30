@@ -26,8 +26,8 @@ pub(crate) async fn origin(db: &Db, repo: &str) -> Result<(String, String)> {
     let root = repo::path(db, repo)
         .await?
         .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
-    let root_path = PathBuf::from(root);
-    tokio::task::spawn_blocking(move || github::owner_repo(&root_path)).await?
+    let root = git::Checkout::local(root);
+    tokio::task::spawn_blocking(move || github::owner_repo(&root)).await?
 }
 
 /// Where review checkouts *used to* live: `.santree/reviews/`, a sibling of the
@@ -153,7 +153,7 @@ async fn repo_for_pr(
     // short-circuits on the first match, which is usually the first entry.
     tokio::task::spawn_blocking(move || {
         for root in roots {
-            let Ok((owner, name)) = github::owner_repo(Path::new(&root)) else {
+            let Ok((owner, name)) = github::owner_repo(&git::Checkout::local(&root)) else {
                 continue;
             };
             if owner.eq_ignore_ascii_case(&want_owner) && name.eq_ignore_ascii_case(&want_name) {
@@ -207,7 +207,7 @@ pub async fn review_workspace(
         );
         let number = target.number;
         tokio::task::spawn_blocking(move || {
-            git::pr_branch(Path::new(&root), number, &head_ref, &head_sha)
+            git::pr_branch(&git::Checkout::local(&root), number, &head_ref, &head_sha)
         })
         .await??
     };
@@ -350,7 +350,7 @@ pub async fn sweep_legacy_checkouts(db: &Db) {
                 .map(Path::to_path_buf)
                 .unwrap_or_default();
             for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                git::remove_legacy_review_checkout(&root, &entry.path());
+                git::remove_legacy_review_checkout(&git::Checkout::local(&root), &entry.path());
             }
             let _ = std::fs::remove_dir_all(&dir);
             true
@@ -562,7 +562,7 @@ async fn projects(db: &Db) -> Result<Vec<ReviewProject>> {
         rows.into_iter()
             .map(|(name, path)| ReviewProject {
                 repo: name,
-                slug: github::owner_repo(Path::new(&path))
+                slug: github::owner_repo(&git::Checkout::local(&path))
                     .ok()
                     .filter(|(owner, repo)| {
                         repo::valid_github_component(owner) && repo::valid_github_component(repo)

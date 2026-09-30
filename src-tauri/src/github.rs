@@ -296,7 +296,7 @@ impl RateLimitResponse {
 
 /// `(owner, repo)` parsed from the worktree's `origin` remote, or an error when
 /// it isn't a recognizable GitHub remote.
-pub fn owner_repo(cwd: &Path) -> Result<(String, String)> {
+pub fn owner_repo(cwd: &git::Checkout) -> Result<(String, String)> {
     let url = git::git(cwd, &["remote", "get-url", "origin"])
         .map_err(|_| anyhow!("no `origin` remote found"))?;
     let slug = repo::github_slug(&url).ok_or_else(|| anyhow!("origin is not a GitHub remote"))?;

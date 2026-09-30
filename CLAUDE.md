@@ -137,9 +137,11 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    reads, and the dispatch every provider-neutral ticket read and
                    write goes through — see "A repo reads one tracker") · linear.rs
                    (GraphQL) · daedalus/ (the home server through the local
-                   Daedalus agent: `host` — the live link, its `client(app)`
-                   accessor and the hook relay — plus the health check and
-                   the workspace list over the link)
+                   Daedalus agent: `host` — the live link and the hook relay —
+                   plus the health check and the workspace list over the link)
+                   · git.rs + git/checkout.rs (`Checkout`: the one seam a repo's
+                   git and file reads go through, here or on Daedalus;
+                   `repo::checkout` resolves it — docs/remote.md)
                    · jira.rs (Jira Cloud REST: `search/jql`, ADF,
                    transitions, the per-repo triage query) · oauth.rs (the PKCE
                    flow, keychain token store and refresh both trackers share)

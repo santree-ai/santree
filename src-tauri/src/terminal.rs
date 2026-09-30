@@ -571,6 +571,16 @@ pub async fn terminal_open(
     manager: State<'_, PtyManager>,
     db: State<'_, Db>,
 ) -> CmdResult<SessionId> {
+    // A Daedalus project's checkout is a path on the server: a shell there runs
+    // on the box or not at all, never in whatever this machine has at that path.
+    if let Some(cwd) = opts.cwd.as_deref() {
+        if crate::repo::on_daedalus(&db, Path::new(cwd)).await? {
+            return Err(anyhow::anyhow!(
+                "Terminals in Daedalus projects aren't available in this version of santree yet."
+            )
+            .into());
+        }
+    }
     // The user's configured project env for the repo this cwd belongs to (app +
     // per-repo). Applies to every santree-spawned terminal — the one chokepoint.
     let env = crate::env::resolve_env(&db, opts.cwd.as_deref()).await;

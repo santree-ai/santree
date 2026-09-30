@@ -11,8 +11,9 @@ use anyhow::{anyhow, bail, Result};
 
 use santree_core::domain::{Repo, RepoLocation, TicketProvider};
 
+use crate::daedalus::host::{self, DaedalusHost};
 use crate::db::Db;
-use crate::git;
+use crate::git::{self, Checkout};
 use crate::jira;
 use crate::linear;
 use crate::tracker;
@@ -130,9 +131,8 @@ pub(crate) async fn paths(db: &Db) -> Result<Vec<String>> {
 /// The stored top-level path of a registered repo's checkout **on this machine**,
 /// if it has one. Every caller hands the answer to `std::fs`, `git` or a PTY cwd,
 /// so a Daedalus repo — whose path is on the server — answers `None`, and each of
-/// those callers already treats "no local path" as real-but-empty. Remote
-/// execution resolves a Daedalus repo's path through its own dispatch, never
-/// through this.
+/// those callers already treats "no local path" as real-but-empty. What runs
+/// wherever the repo lives resolves it through [`checkout`] instead.
 pub async fn path(db: &Db, name: &str) -> Result<Option<String>> {
     let row: Option<(Option<String>,)> =
         sqlx::query_as("SELECT path FROM repos WHERE name = ? AND location = 'local'")
@@ -140,6 +140,29 @@ pub async fn path(db: &Db, name: &str) -> Result<Option<String>> {
             .fetch_optional(db)
             .await?;
     Ok(row.and_then(|(p,)| p))
+}
+
+/// Where a registered repo's checkout lives, as the [`Checkout`] its git runs
+/// in — the one resolution every repo read that runs git or reads the tree goes
+/// through (docs/remote.md, "How santree dispatches"). `None` when no repo has
+/// that name or it has no path. A Daedalus repo is reached through `daedalus`,
+/// waiting out a link that is still coming up; while it is down this is the
+/// error saying so, never a fall back to this machine.
+pub async fn checkout(db: &Db, daedalus: &DaedalusHost, name: &str) -> Result<Option<Checkout>> {
+    let row: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT path, location FROM repos WHERE name = ?")
+            .bind(name)
+            .fetch_optional(db)
+            .await?;
+    let Some((Some(path), location)) = row else {
+        return Ok(None);
+    };
+    Ok(Some(match RepoLocation::from_db(&location) {
+        RepoLocation::Local => Checkout::local(path),
+        RepoLocation::Daedalus => {
+            Checkout::daedalus(daedalus.client_within(host::CONNECT_WAIT).await?, path)
+        }
+    }))
 }
 
 /// Where a registered repo's checkout lives; `None` when no repo has that name.
@@ -177,12 +200,12 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
             if !dir.is_dir() {
                 bail!("That path isn't a folder.");
             }
-            let toplevel = git::git(dir, &["rev-parse", "--show-toplevel"])
+            let toplevel = git::git(&Checkout::local(dir), &["rev-parse", "--show-toplevel"])
                 .ok()
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| anyhow!("That folder isn't a git repository."))?;
             let top = Path::new(&toplevel);
-            let remote = git::git(top, &["remote", "get-url", "origin"])
+            let remote = git::git(&Checkout::local(top), &["remote", "get-url", "origin"])
                 .ok()
                 .filter(|s| !s.is_empty());
             let (name, tracker) = identity(remote.as_deref(), top);
@@ -305,6 +328,15 @@ pub(crate) async fn daedalus_paths(db: &Db) -> Result<Vec<String>> {
     )
     .fetch_all(db)
     .await?)
+}
+
+/// Whether `path` is inside a registered Daedalus repo's checkout — a directory
+/// on the server, whatever this machine happens to have at the same spelling.
+pub(crate) async fn on_daedalus(db: &Db, path: &Path) -> Result<bool> {
+    Ok(daedalus_paths(db)
+        .await?
+        .iter()
+        .any(|root| path.starts_with(root)))
 }
 
 /// A free registry name for a checkout that isn't registered yet: its derived

@@ -3,8 +3,9 @@
 //! agents fire on the server.
 //!
 //! [`DaedalusHost`] is Tauri-managed. Everything that runs on the server gets
-//! its client through [`client`] / [`connected_client`] and turns
-//! [`NotConnected`] into its own disabled state — a Daedalus project never
+//! its client through [`DaedalusHost::client_within`] — by way of
+//! `repo::checkout`, the one place a repo is resolved to where it lives — and
+//! turns [`NotConnected`] into its own disabled state: a Daedalus project never
 //! falls back to running locally.
 
 use std::sync::{Arc, Mutex};
@@ -13,16 +14,16 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 use specta::Type;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tauri_specta::Event;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 
 use santree_core::domain::DaedalusLink;
 use santree_hook::{HookEnv, Invocation, Nudges};
 use santree_remote_client::proto::{HelloResult, HookEvent};
 use santree_remote_client::{
     AgentConnector, ConnectError, Connector, HookDelivery, HookMessage, HostConfig, HostOptions,
-    HostStatus, Reconnected, Refusal, RemoteClient, RemoteHost,
+    HostStatus, Refusal, RemoteClient, RemoteHost,
 };
 
 use crate::db::Db;
@@ -30,7 +31,7 @@ use crate::session;
 use crate::session_signal::{self, Signal};
 use crate::tabs::validate_term_key;
 
-/// How long [`connected_client`] waits out a link that is still coming up.
+/// How long a read waits out a link that is still coming up.
 pub const CONNECT_WAIT: Duration = Duration::from_secs(5);
 
 /// Hook events applied between acks at most. Acks are per batch: one round
@@ -146,7 +147,7 @@ impl DaedalusHost {
     }
 
     /// The live client, or why there isn't one. Don't hold it across a
-    /// reconnect: ask again after [`DaedalusHost::reconnected`].
+    /// reconnect: ask again.
     pub fn client(&self) -> Result<Arc<RemoteClient>, NotConnected> {
         self.host
             .client()
@@ -168,11 +169,6 @@ impl DaedalusHost {
     /// What the session host answered `hello` on the live link.
     pub fn hello(&self) -> Option<Arc<HelloResult>> {
         self.host.hello()
-    }
-
-    /// Every (re)connect, the first included — terminals re-attach on it.
-    pub fn reconnected(&self) -> broadcast::Receiver<Reconnected> {
-        self.host.reconnected()
     }
 
     /// Start the link's background work: announce every status change to the
@@ -199,35 +195,6 @@ impl DaedalusHost {
             tauri::async_runtime::spawn(relay.run(events, move |nudges| emit_nudges(&app, nudges)));
         }
     }
-}
-
-/// The client for running something on Daedalus now, or why not.
-#[expect(
-    dead_code,
-    reason = "the remote git/fs/terminal dispatch is its first caller"
-)]
-pub fn client(app: &AppHandle) -> Result<Arc<RemoteClient>, NotConnected> {
-    app.state::<DaedalusHost>().client()
-}
-
-/// [`client`], waiting up to [`CONNECT_WAIT`] while the link is `Connecting`.
-#[expect(
-    dead_code,
-    reason = "the remote git/fs/terminal dispatch is its first caller"
-)]
-pub async fn connected_client(app: &AppHandle) -> Result<Arc<RemoteClient>, NotConnected> {
-    app.state::<DaedalusHost>()
-        .client_within(CONNECT_WAIT)
-        .await
-}
-
-/// Every (re)connect of the link.
-#[expect(
-    dead_code,
-    reason = "the remote git/fs/terminal dispatch is its first caller"
-)]
-pub fn reconnected(app: &AppHandle) -> broadcast::Receiver<Reconnected> {
-    app.state::<DaedalusHost>().reconnected()
 }
 
 /// The link's status as the state santree shows.
@@ -643,7 +610,6 @@ mod tests {
         let first = FakeDaemon::new();
         let current = Arc::new(Mutex::new(first.clone()));
         let link = DaedalusHost::with_connector(swappable(current.clone()), fast());
-        let mut reconnected = link.reconnected();
         assert!(matches!(
             link.client(),
             Err(NotConnected {
@@ -654,7 +620,6 @@ mod tests {
         let client = link.client_within(WAIT).await.expect("the link comes up");
         drop(client);
         assert!(matches!(link.state(), DaedalusLink::Connected { .. }));
-        assert_eq!(reconnected.recv().await.unwrap().generation, 1);
 
         let (nudged_tx, mut nudged) = mpsc::unbounded_channel();
         let relay = Relay {

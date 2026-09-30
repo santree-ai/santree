@@ -33,6 +33,7 @@ import type {
   AnalysisScope,
   ChangedFile,
   ClaudeGlobalCapture,
+  DaedalusLink,
   DaedalusWorkspaceList,
   KeepAwakeStatus,
   MoveChanges,
@@ -69,6 +70,7 @@ import type {
 } from "../bindings";
 import { commands, events } from "../bindings";
 import { type ToastOptions, toast } from "../state/toast";
+import { actionsOff } from "./daedalusLink";
 import { splitRepoSlug } from "./repo";
 import { type TrackerFeatures, trackerFeatures } from "./tracker";
 
@@ -1282,11 +1284,13 @@ export const useAddRepo = () =>
  * move under us (a fetch, a push from a terminal), so a long stale window would
  * offer a branch that has since been taken.
  */
-export const useRepoBranches = (repo: string, enabled = true) =>
-  useUnwrappedQuery(queryKeys.repoBranches(repo), () => commands.repoBranches(repo), {
-    enabled: enabled && repo.length > 0,
+export const useRepoBranches = (repo: string, enabled = true) => {
+  const { readable } = useRepoReach(repo);
+  return useUnwrappedQuery(queryKeys.repoBranches(repo), () => commands.repoBranches(repo), {
+    enabled: enabled && readable,
     staleTime: 15_000,
   });
+};
 
 /** The "open in app" targets (Finder, editors, terminals) for a worktree — which
  *  apps are *installed*, probed on disk. External state, so nothing in the app
@@ -1789,6 +1793,59 @@ export const useSetTaskNote = (repo: string) =>
     invalidate: (a) => [queryKeys.taskNote(repo, a.taskId)],
   });
 
+// ── Where a project lives ────────────────────────────────────────────────────
+// A Daedalus project's reads run on the box (docs/remote.md). They wait for the
+// link instead of failing while it is down — being away from home is normal,
+// and the rail already says why — and nothing that changes a project or runs
+// in it is offered for one yet.
+
+/** Whether `repo`'s reads can run now: a project on this Mac always, a Daedalus
+ *  one while the link is connected. A name the registry doesn't hold (still
+ *  loading, or gone) waits. */
+function readableRepo(
+  repos: readonly Repo[] | undefined,
+  link: DaedalusLink | undefined,
+  repo: string,
+): boolean {
+  const found = repos?.find((r) => r.name === repo);
+  if (!found) return false;
+  return found.location !== "Daedalus" || link?.kind === "Connected";
+}
+
+export interface RepoReach {
+  /** The project's checkout lives on Daedalus. */
+  remote: boolean;
+  /** Its reads can run now. */
+  readable: boolean;
+  /** Why nothing that changes it or runs in it is offered, when so. */
+  actionsOff: string | undefined;
+}
+
+/** Where `repo` lives and what santree can do there right now. */
+export function useRepoReach(repo: string): RepoReach {
+  const { data: repos } = useRepos();
+  const { data: link } = useDaedalusStatus();
+  return useMemo(() => {
+    const remote = repos?.find((r) => r.name === repo)?.location === "Daedalus";
+    return {
+      remote,
+      readable: readableRepo(repos, link, repo),
+      actionsOff: actionsOff(remote, link),
+    };
+  }, [repos, link, repo]);
+}
+
+/** {@link useRepoReach}'s `readable`, for reads that span projects. */
+function useReadableRepos(): (repo: string) => boolean {
+  const { data: repos } = useRepos();
+  const { data: link } = useDaedalusStatus();
+  return useCallback((repo: string) => readableRepo(repos, link, repo), [repos, link]);
+}
+
+/** How often the worktree on screen is re-read when it lives on Daedalus: there
+ *  is no filesystem to watch from here, so its changes are polled instead. */
+const DAEDALUS_POLL_MS = 4_000;
+
 // ── Daedalus: the home server ────────────────────────────────────────────────
 // The link through the Daedalus agent on this Mac, and the checkouts the box
 // offers as projects (docs/remote.md). Every state — no agent, santree off,
@@ -2165,37 +2222,47 @@ export const useUsageProgress = () => {
 // on every remount.
 const WORKTREE_STALE_TIME = 60_000;
 
-/** The repo's live agent worktrees (real git when the repo has a local path,
- *  else empty). */
-export const useWorktrees = (repo: string) =>
-  useUnwrappedQuery(queryKeys.worktrees(repo), () => commands.worktrees(repo), {
-    enabled: !!repo,
+/** The repo's live agent worktrees, with live git stats — read wherever the
+ *  project lives (a Daedalus one while the link is up). */
+export const useWorktrees = (repo: string) => {
+  const { readable } = useRepoReach(repo);
+  return useUnwrappedQuery(queryKeys.worktrees(repo), () => commands.worktrees(repo), {
+    enabled: readable,
     staleTime: WORKTREE_STALE_TIME,
   });
+};
 
 /** The repo's base branch as a worktree-like entry (repo root on main/master) —
- *  the Trees "main" entry. `null` when the repo has no local path. */
-export const useBaseWorktree = (repo: string) =>
-  useUnwrappedQuery(queryKeys.baseWorktree(repo), () => commands.baseWorktree(repo), {
-    enabled: !!repo,
+ *  the Trees "main" entry. `null` when the repo has no path. */
+export const useBaseWorktree = (repo: string) => {
+  const { readable } = useRepoReach(repo);
+  return useUnwrappedQuery(queryKeys.baseWorktree(repo), () => commands.baseWorktree(repo), {
+    enabled: readable,
     staleTime: WORKTREE_STALE_TIME,
   });
+};
 
 /** A worktree's changed files (the commit-box model). `staleTime: 0` so every
  *  mount (e.g. returning to the Trees tab) refetches `git status` — the watcher
  *  keeps it live while visible, this covers the gap on re-entry. */
-export const useWorktreeStatus = (repo: string, id: string) =>
-  useUnwrappedQuery(queryKeys.worktreeStatus(repo, id), () => commands.worktreeStatus(repo, id), {
-    enabled: !!repo && !!id,
-    staleTime: 0,
-  });
+export const useWorktreeStatus = (repo: string, id: string) => {
+  const { readable } = useRepoReach(repo);
+  return useUnwrappedQuery(
+    queryKeys.worktreeStatus(repo, id),
+    () => commands.worktreeStatus(repo, id),
+    { enabled: readable && !!id, staleTime: 0 },
+  );
+};
 
 /** Every browsable file in the worktree (tracked + untracked, gitignore-aware). */
-export const useWorktreeFiles = (repo: string, id: string) =>
-  useUnwrappedQuery(queryKeys.worktreeFiles(repo, id), () => commands.worktreeFiles(repo, id), {
-    enabled: !!repo && !!id,
-    staleTime: WORKTREE_STALE_TIME,
-  });
+export const useWorktreeFiles = (repo: string, id: string) => {
+  const { readable } = useRepoReach(repo);
+  return useUnwrappedQuery(
+    queryKeys.worktreeFiles(repo, id),
+    () => commands.worktreeFiles(repo, id),
+    { enabled: readable && !!id, staleTime: WORKTREE_STALE_TIME },
+  );
+};
 
 /** The unified diff for one changed file (staged + unstaged vs HEAD). Cached: the
  *  filesystem watcher invalidates it on real change, so re-clicking a file it
@@ -2209,46 +2276,56 @@ export const useWorktreeFileDiff = (
   path: string,
   untracked: boolean,
   enabled = true,
-) =>
-  useUnwrappedQuery(
+) => {
+  const { readable } = useRepoReach(repo);
+  return useUnwrappedQuery(
     queryKeys.worktreeFileDiff(repo, id, path),
     () => commands.worktreeFileDiff(repo, id, path, untracked),
-    { enabled: enabled && !!repo && !!id && !!path, staleTime: WORKTREE_STALE_TIME },
+    { enabled: enabled && readable && !!id && !!path, staleTime: WORKTREE_STALE_TIME },
   );
+};
 
 /** The files the branch has committed relative to its base (merge-base diff),
  *  for the git panel's "Committed on branch" section. */
-export const useWorktreeBranchChanges = (repo: string, id: string) =>
-  useUnwrappedQuery(
+export const useWorktreeBranchChanges = (repo: string, id: string) => {
+  const { readable } = useRepoReach(repo);
+  return useUnwrappedQuery(
     queryKeys.worktreeBranchChanges(repo, id),
     () => commands.worktreeBranchChanges(repo, id),
-    { enabled: !!repo && !!id, staleTime: WORKTREE_STALE_TIME },
+    { enabled: readable && !!id, staleTime: WORKTREE_STALE_TIME },
   );
+};
 
 /** One committed file's diff against the branch's base. */
-export const useWorktreeBranchFileDiff = (repo: string, id: string, path: string) =>
-  useUnwrappedQuery(
+export const useWorktreeBranchFileDiff = (repo: string, id: string, path: string) => {
+  const { readable } = useRepoReach(repo);
+  return useUnwrappedQuery(
     queryKeys.worktreeBranchFileDiff(repo, id, path),
     () => commands.worktreeBranchFileDiff(repo, id, path),
-    { enabled: !!repo && !!id && !!path, staleTime: WORKTREE_STALE_TIME },
+    { enabled: readable && !!id && !!path, staleTime: WORKTREE_STALE_TIME },
   );
+};
 
 /** The old/new full file contents, for the diff viewer's context expansion.
  *  Cached like the diff (watcher-invalidated) so revisiting a file is instant. */
-export const useWorktreeFileSource = (repo: string, id: string, path: string) =>
-  useUnwrappedQuery(
+export const useWorktreeFileSource = (repo: string, id: string, path: string) => {
+  const { readable } = useRepoReach(repo);
+  return useUnwrappedQuery(
     queryKeys.worktreeFileSource(repo, id, path),
     () => commands.worktreeFileSource(repo, id, path),
-    { enabled: !!repo && !!id && !!path, staleTime: WORKTREE_STALE_TIME },
+    { enabled: readable && !!id && !!path, staleTime: WORKTREE_STALE_TIME },
   );
+};
 
 /**
- * Keep the worktree views in sync with on-disk changes. Points the Rust
- * filesystem watcher at `repo`'s worktrees and, on each debounced
- * `worktreeChanged` event, invalidates that worktree's status/files/diffs *and*
- * the worktrees list (its `+/-` line stats) — so an agent editing files in the
- * terminal updates the Changes/All-files panes and the sidebar card with no
- * polling or refresh button.
+ * Keep the worktree views in sync with the disk. For a project on this Mac it
+ * points the Rust filesystem watcher at `repo`'s worktrees and, on each
+ * debounced `worktreeChanged` event, invalidates that worktree's
+ * status/files/diffs *and* the worktrees list (its `+/-` line stats) — so an
+ * agent editing files in the terminal updates the Changes/All-files panes and
+ * the sidebar card with no polling or refresh button. A Daedalus project has no
+ * filesystem here to watch: the worktree on screen (`tree`) is re-read every
+ * {@link DAEDALUS_POLL_MS} instead, while the link is up and the window shows.
  *
  * Mounted once at the app root (not in the Trees view) so invalidation happens
  * even while another tab is showing: returning to Trees then sees fresh data
@@ -2261,12 +2338,14 @@ export const useWorktreeFileSource = (repo: string, id: string, path: string) =>
  * that) piles up abandoned `git status` scans until the disk saturates. With
  * `cancelRefetch: false` an event landing mid-fetch piggybacks on it instead;
  * the drain loop then runs one trailing pass so the final on-disk state is
- * never left stale-at-rest.
+ * never left stale-at-rest. A poll tick is one such event.
  */
-export const useWorktreeWatcher = (repo: string) => {
+export const useWorktreeWatcher = (repo: string, tree: string) => {
   const qc = useQueryClient();
+  const { remote, readable } = useRepoReach(repo);
+
   useEffect(() => {
-    if (!repo) return;
+    if (!repo || remote) return;
     // Idempotent on the Rust side; re-points if the repo changed. The binding
     // resolves (never rejects) on failure, so surface a `Result` error
     // explicitly — otherwise a watcher that fails to start leaves every
@@ -2275,70 +2354,94 @@ export const useWorktreeWatcher = (repo: string) => {
     commands.watchWorktrees(repo).then((r) => {
       if (r.status === "error") console.warn("watchWorktrees failed:", r.error);
     });
-
-    let disposed = false;
-    const draining = new Set<string>();
-    const dirty = new Set<string>();
-
-    const invalidate = (issueId: string) =>
-      Promise.all([
-        qc.invalidateQueries(
-          { queryKey: queryKeys.worktreeStatus(repo, issueId) },
-          { cancelRefetch: false },
-        ),
-        qc.invalidateQueries(
-          { queryKey: queryKeys.worktreeFiles(repo, issueId) },
-          { cancelRefetch: false },
-        ),
-        qc.invalidateQueries(
-          { queryKey: queryKeys.worktreeFileDiffPrefix(repo, issueId) },
-          { cancelRefetch: false },
-        ),
-        // DiffPane pairs the full-file source with the diff above for the diff
-        // viewer's context expansion; without it, an agent editing a file mid-view
-        // leaves expanded context lines stale for up to `WORKTREE_STALE_TIME`.
-        qc.invalidateQueries(
-          { queryKey: queryKeys.worktreeFileSourcePrefix(repo, issueId) },
-          { cancelRefetch: false },
-        ),
-        // The list carries each worktree's add/del line counts, shown on the
-        // sidebar card and the Issues-panel worktree card.
-        qc.invalidateQueries({ queryKey: queryKeys.worktrees(repo) }, { cancelRefetch: false }),
-        // The base entry is a *separate* read (it isn't in the list above) showing
-        // the same live git state — dirty/ahead/behind/unpushed for the repo root.
-        // Refreshed for any worktree's event rather than only the BASE_ID one: the
-        // sentinel lives in the Trees feature, and importing it here would point
-        // the data layer back at a module that imports from it.
-        qc.invalidateQueries({ queryKey: queryKeys.baseWorktree(repo) }, { cancelRefetch: false }),
-      ]);
-
-    const drain = async (issueId: string) => {
-      if (draining.has(issueId)) {
-        // A pass is running for this worktree — remember that more changed and
-        // let that pass's trailing loop pick it up.
-        dirty.add(issueId);
-        return;
-      }
-      draining.add(issueId);
-      try {
-        do {
-          dirty.delete(issueId);
-          await invalidate(issueId);
-        } while (dirty.has(issueId) && !disposed);
-      } finally {
-        draining.delete(issueId);
-      }
-    };
-
+    const refresh = worktreeRefresher(qc, repo);
     const unlisten = events.worktreeChanged.listen(({ payload: { issueId } }) => {
-      void drain(issueId);
+      void refresh.drain(issueId);
     });
     return () => {
-      disposed = true;
+      refresh.dispose();
       void unlisten.then((off) => off());
     };
-  }, [repo, qc]);
+  }, [repo, remote, qc]);
+
+  useEffect(() => {
+    if (!repo || !remote || !readable || !tree) return;
+    const refresh = worktreeRefresher(qc, repo);
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void refresh.drain(tree);
+    }, DAEDALUS_POLL_MS);
+    return () => {
+      clearInterval(timer);
+      refresh.dispose();
+    };
+  }, [repo, remote, readable, tree, qc]);
 };
+
+/** The single-flight re-read of one worktree's views that both the watcher and
+ *  the poll above drive (see {@link useWorktreeWatcher} for why it is
+ *  single-flight). */
+function worktreeRefresher(qc: QueryClient, repo: string) {
+  let disposed = false;
+  const draining = new Set<string>();
+  const dirty = new Set<string>();
+
+  const invalidate = (issueId: string) =>
+    Promise.all([
+      qc.invalidateQueries(
+        { queryKey: queryKeys.worktreeStatus(repo, issueId) },
+        { cancelRefetch: false },
+      ),
+      qc.invalidateQueries(
+        { queryKey: queryKeys.worktreeFiles(repo, issueId) },
+        { cancelRefetch: false },
+      ),
+      qc.invalidateQueries(
+        { queryKey: queryKeys.worktreeFileDiffPrefix(repo, issueId) },
+        { cancelRefetch: false },
+      ),
+      // DiffPane pairs the full-file source with the diff above for the diff
+      // viewer's context expansion; without it, an agent editing a file mid-view
+      // leaves expanded context lines stale for up to `WORKTREE_STALE_TIME`.
+      qc.invalidateQueries(
+        { queryKey: queryKeys.worktreeFileSourcePrefix(repo, issueId) },
+        { cancelRefetch: false },
+      ),
+      // The list carries each worktree's add/del line counts, shown on the
+      // sidebar card and the Issues-panel worktree card.
+      qc.invalidateQueries({ queryKey: queryKeys.worktrees(repo) }, { cancelRefetch: false }),
+      // The base entry is a *separate* read (it isn't in the list above) showing
+      // the same live git state — dirty/ahead/behind/unpushed for the repo root.
+      // Refreshed for any worktree's event rather than only the BASE_ID one: the
+      // sentinel lives in the Trees feature, and importing it here would point
+      // the data layer back at a module that imports from it.
+      qc.invalidateQueries({ queryKey: queryKeys.baseWorktree(repo) }, { cancelRefetch: false }),
+    ]);
+
+  const drain = async (issueId: string) => {
+    if (draining.has(issueId)) {
+      // A pass is running for this worktree — remember that more changed and
+      // let that pass's trailing loop pick it up.
+      dirty.add(issueId);
+      return;
+    }
+    draining.add(issueId);
+    try {
+      do {
+        dirty.delete(issueId);
+        await invalidate(issueId);
+      } while (dirty.has(issueId) && !disposed);
+    } finally {
+      draining.delete(issueId);
+    }
+  };
+
+  return {
+    drain,
+    dispose: () => {
+      disposed = true;
+    },
+  };
+}
 
 /** Every local read about one worktree: what git says, what is on disk, and the
  *  agent sessions that have run there. The per-file caches come in as prefixes,
@@ -2441,11 +2544,13 @@ function useResultsByRepo<T>(
   command: (repo: string) => CommandResult<T>,
   staleTime: number,
   refetchInterval: number | false = false,
+  readable: (repo: string) => boolean = () => true,
 ): Map<string, T> {
   const results = useQueries({
     queries: repos.map((repo) => ({
       queryKey: keyFor(repo),
       queryFn: () => unwrap(command(repo)),
+      enabled: readable(repo),
       staleTime,
       refetchInterval,
     })),
@@ -2467,11 +2572,25 @@ function useResultsByRepo<T>(
 
 /** {@link useWorktrees} across several repos at once, keyed by repo. */
 export const useWorktreesByRepo = (repos: string[]) =>
-  useResultsByRepo(repos, queryKeys.worktrees, commands.worktrees, WORKTREE_STALE_TIME);
+  useResultsByRepo(
+    repos,
+    queryKeys.worktrees,
+    commands.worktrees,
+    WORKTREE_STALE_TIME,
+    false,
+    useReadableRepos(),
+  );
 
 /** {@link useBaseWorktree} across several repos at once, keyed by repo. */
 export const useBaseWorktreesByRepo = (repos: string[]) =>
-  useResultsByRepo(repos, queryKeys.baseWorktree, commands.baseWorktree, WORKTREE_STALE_TIME);
+  useResultsByRepo(
+    repos,
+    queryKeys.baseWorktree,
+    commands.baseWorktree,
+    WORKTREE_STALE_TIME,
+    false,
+    useReadableRepos(),
+  );
 
 /** {@link useTasks} across several repos at once, keyed by repo. */
 export const useTasksByRepo = (repos: string[]) =>

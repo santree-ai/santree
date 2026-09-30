@@ -67,6 +67,7 @@ export function GitPanel({
   onSplit,
   onCloseSplit,
   splitForm,
+  actionsOff,
 }: {
   repo: string;
   worktreeId: string;
@@ -83,6 +84,10 @@ export function GitPanel({
   onSplit?: () => void;
   onCloseSplit?: () => void;
   splitForm?: ReactNode;
+  /** Why nothing here may change the checkout (a Daedalus project): every
+   *  action stays where it is, disabled with this as its tooltip, and the lists
+   *  are read-only. */
+  actionsOff?: string;
 }) {
   const splitId = useId();
   const { data: committed } = useWorktreeBranchChanges(repo, worktreeId);
@@ -109,8 +114,9 @@ export function GitPanel({
               <button
                 type="button"
                 onClick={openPr}
-                title="Open a pull request for this branch"
-                className="flex h-6 cursor-pointer items-center gap-1.5 rounded-full bg-fg px-2.5 text-[11px] font-semibold text-app transition-opacity hover:opacity-85"
+                disabled={actionsOff !== undefined}
+                title={actionsOff ?? "Open a pull request for this branch"}
+                className="flex h-6 cursor-pointer items-center gap-1.5 rounded-full bg-fg px-2.5 text-[11px] font-semibold text-app transition-opacity hover:opacity-85 disabled:cursor-default disabled:opacity-50"
               >
                 <PrIcon size={12} />
                 Create PR
@@ -135,23 +141,34 @@ export function GitPanel({
             )}
           </div>
           <div className="flex items-center gap-1">
-            <BaseSync repo={repo} worktree={worktree} />
+            <BaseSync repo={repo} worktree={worktree} actionsOff={actionsOff} />
             <span className="min-w-1 flex-1" />
-            <PullRemote repo={repo} worktree={worktree} />
-            <Push repo={repo} worktree={worktree} onPushed={createPr?.suggestAfterPush} />
+            <PullRemote repo={repo} worktree={worktree} actionsOff={actionsOff} />
+            <Push
+              repo={repo}
+              worktree={worktree}
+              onPushed={createPr?.suggestAfterPush}
+              actionsOff={actionsOff}
+            />
           </div>
         </div>
       )}
 
-      {/* Keyed per worktree so each gets its own persisted-draft instance. */}
-      <CommitBox
-        key={worktreeId}
-        repo={repo}
-        worktreeId={worktreeId}
-        stagedCount={(status ?? []).filter((f) => f.staged).length}
-        totalCount={status?.length ?? 0}
-        createPr={createPr}
-      />
+      {actionsOff ? (
+        <div className="flex-none border-b border-line px-3 py-2 text-[11px] leading-[1.5] text-muted-4">
+          <span className="text-muted-3">Commit</span> · {actionsOff}
+        </div>
+      ) : (
+        // Keyed per worktree so each gets its own persisted-draft instance.
+        <CommitBox
+          key={worktreeId}
+          repo={repo}
+          worktreeId={worktreeId}
+          stagedCount={(status ?? []).filter((f) => f.staged).length}
+          totalCount={status?.length ?? 0}
+          createPr={createPr}
+        />
+      )}
 
       <ChangesList
         repo={repo}
@@ -161,6 +178,7 @@ export function GitPanel({
         selectedPath={selectedPath}
         selectedScope={selectedScope}
         onOpen={onOpen}
+        readOnly={actionsOff !== undefined}
       />
       {(onSplit || splitForm) && (
         <div
@@ -173,9 +191,11 @@ export function GitPanel({
                 aria-expanded={!!splitForm}
                 aria-controls={splitForm ? splitId : undefined}
                 onClick={splitForm ? onCloseSplit : onSplit}
+                disabled={actionsOff !== undefined}
                 className={`flex cursor-pointer items-center gap-2 rounded-md py-1.5 text-xs transition-colors hover:bg-hover hover:text-fg ${splitForm ? "w-full justify-between font-medium text-fg" : "px-2.5 text-muted-2"}`}
                 title={
-                  splitForm ? "Collapse split branch" : "Move remaining changes to a child branch"
+                  actionsOff ??
+                  (splitForm ? "Collapse split branch" : "Move remaining changes to a child branch")
                 }
               >
                 <span className="flex items-center gap-2">
@@ -206,7 +226,15 @@ export function GitPanel({
  *  Syncing the *local base branch itself* from origin is a repo-level action that
  *  never touches this worktree, so it stays on the sidebar's base entry rather
  *  than becoming a second thing this button might mean. */
-function BaseSync({ repo, worktree }: { repo: string; worktree: Worktree }) {
+function BaseSync({
+  repo,
+  worktree,
+  actionsOff,
+}: {
+  repo: string;
+  worktree: Worktree;
+  actionsOff?: string;
+}) {
   const { mutate: pull, isPending } = usePullWorktree(repo);
   const { ahead, behind, baseBranch } = worktree;
   // The base entry has no base of its own to be measured against.
@@ -216,12 +244,13 @@ function BaseSync({ repo, worktree }: { repo: string; worktree: Worktree }) {
   return (
     <button
       type="button"
-      disabled={!canPull || isPending}
+      disabled={!canPull || isPending || actionsOff !== undefined}
       onClick={() => pull(worktree.id)}
       title={
-        canPull
+        actionsOff ??
+        (canPull
           ? `Pull ${baseBranch} into this worktree (${behind} behind, ${ahead} ahead)`
-          : `Up to date with ${baseBranch}${ahead > 0 ? ` (${ahead} ahead)` : ""}`
+          : `Up to date with ${baseBranch}${ahead > 0 ? ` (${ahead} ahead)` : ""}`)
       }
       className={`${ACTION} min-w-0 text-muted-4`}
     >
@@ -238,7 +267,15 @@ function BaseSync({ repo, worktree }: { repo: string; worktree: Worktree }) {
  *  origin/<branch> when it can, else merges. Disabled rather than hidden when the
  *  pull would conflict, so the count is still readable and the tooltip says where
  *  to resolve it. */
-function PullRemote({ repo, worktree }: { repo: string; worktree: Worktree }) {
+function PullRemote({
+  repo,
+  worktree,
+  actionsOff,
+}: {
+  repo: string;
+  worktree: Worktree;
+  actionsOff?: string;
+}) {
   const { mutate: pullRemote, isPending } = usePullRemoteWorktree(repo);
   const n = worktree.remoteBehind;
   if (n === 0) return null;
@@ -248,11 +285,12 @@ function PullRemote({ repo, worktree }: { repo: string; worktree: Worktree }) {
     <button
       type="button"
       onClick={() => pullRemote(worktree.id)}
-      disabled={isPending || conflict}
+      disabled={isPending || conflict || actionsOff !== undefined}
       title={
-        conflict
+        actionsOff ??
+        (conflict
           ? `Pulling ${commits} would conflict with your local changes. Resolve it in the worktree (open Terminal → git merge origin/${worktree.branch})`
-          : `Pull ${commits} from origin/${worktree.branch}`
+          : `Pull ${commits} from origin/${worktree.branch}`)
       }
       className={ACTION}
     >
@@ -268,11 +306,13 @@ function Push({
   repo,
   worktree,
   onPushed,
+  actionsOff,
 }: {
   repo: string;
   worktree: Worktree;
   /** What follows a push, when the host has something to follow it with. */
   onPushed?: () => void;
+  actionsOff?: string;
 }) {
   const { mutate: push, isPending } = usePushWorktree(repo);
   // Nothing to suggest for the base branch — you don't open a PR against main.
@@ -283,8 +323,8 @@ function Push({
     <button
       type="button"
       onClick={() => push(worktree.id, suggest ? { onSuccess: suggest } : undefined)}
-      disabled={isPending}
-      title={`Push ${n} commit${n === 1 ? "" : "s"} to origin`}
+      disabled={isPending || actionsOff !== undefined}
+      title={actionsOff ?? `Push ${n} commit${n === 1 ? "" : "s"} to origin`}
       className={ACTION}
     >
       {isPending ? <Spinner size={10} /> : <PushIcon size={11} />}

@@ -19,7 +19,7 @@ const settings = vi.hoisted(() => {
   const at = (scope: string, key: string) => `${scope}/${key}`;
   return {
     store,
-    repos: [] as { name: string; path: string }[],
+    repos: [] as { name: string; path: string; location?: string }[],
     getSetting: vi.fn(async (scope: string, key: string) => ({
       status: "ok" as const,
       data: store[at(scope, key)] ?? null,
@@ -45,6 +45,10 @@ const baseWatcher = vi.hoisted(() => ({
 const watcher = vi.hoisted(() => ({
   handler: undefined as ((e: { payload: { issueId: string } }) => void) | undefined,
 }));
+// The Daedalus link's state, as `daedalusStatus` answers it.
+const daedalus = vi.hoisted(() => ({
+  link: { kind: "Connected" } as { kind: string },
+}));
 vi.mock("../bindings", () => ({
   commands: {
     commitWorktree: git.ok,
@@ -56,6 +60,7 @@ vi.mock("../bindings", () => ({
     setSetting: settings.setSetting,
     listRepos: vi.fn(async () => ({ status: "ok" as const, data: settings.repos })),
     watchWorktrees: vi.fn(async () => ({ status: "ok" as const, data: null })),
+    daedalusStatus: vi.fn(async () => daedalus.link),
     // The manual refresh clears the backend's Linear caches before refetching.
     linearInvalidateCaches: vi.fn(async () => null),
   },
@@ -1190,7 +1195,7 @@ describe("useWorktreeWatcher: single-flight invalidation", () => {
     const spy = vi
       .spyOn(qc, "invalidateQueries")
       .mockImplementation(() => new Promise<void>((res) => pending.push(res)) as Promise<void>);
-    const view = renderHook(() => useWorktreeWatcher("repo"), { wrapper: wrapper(qc) });
+    const view = renderHook(() => useWorktreeWatcher("repo", ""), { wrapper: wrapper(qc) });
     const flush = async () => {
       const batch = pending;
       pending = [];
@@ -1244,6 +1249,74 @@ describe("useWorktreeWatcher: single-flight invalidation", () => {
     fire("AK-2"); // not blocked behind AK-1's in-flight wave
     expect(spy).toHaveBeenCalledTimes(2 * WAVE);
     unmount();
+  });
+});
+
+describe("useWorktreeWatcher: a Daedalus project is polled, not watched", () => {
+  const WAVE = 6;
+
+  /** Let the repo list and the link state land (real timers; only the poll's
+   *  interval is faked). */
+  async function settle(qc: QueryClient) {
+    for (let i = 0; i < 50; i++) {
+      if (qc.getQueryData(queryKeys.repos) && qc.getQueryData(queryKeys.daedalusStatus)) return;
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      });
+    }
+    throw new Error("the repo list and the link state never arrived");
+  }
+
+  it("re-reads the worktree on screen while the link is up, and stops while it is down", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      settings.reset([]);
+      settings.repos = [
+        { name: "acme/web", path: "/srv/projects/web", location: "Daedalus" },
+        { name: "acme/local", path: "/src/local", location: "Local" },
+      ];
+      daedalus.link = { kind: "Connected" };
+      const qc = makeClient();
+      const spy = vi.spyOn(qc, "invalidateQueries").mockResolvedValue(undefined);
+      const view = renderHook(({ repo }) => useWorktreeWatcher(repo, "__base__"), {
+        wrapper: wrapper(qc),
+        initialProps: { repo: "acme/web" },
+      });
+      await settle(qc);
+      spy.mockClear();
+
+      await act(async () => {
+        vi.advanceTimersByTime(4_000);
+      });
+      expect(spy).toHaveBeenCalledTimes(WAVE);
+      expect(spy).toHaveBeenCalledWith(
+        { queryKey: queryKeys.worktreeStatus("acme/web", "__base__") },
+        { cancelRefetch: false },
+      );
+
+      // The link drops: nothing is asked of a box santree can't reach.
+      spy.mockClear();
+      daedalus.link = { kind: "SantreeOff" };
+      await act(async () => {
+        qc.setQueryData(queryKeys.daedalusStatus, daedalus.link);
+        // The cache notifies on a macrotask; let the hook see the new state.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(12_000);
+      });
+      expect(spy).not.toHaveBeenCalled();
+
+      // A project on this Mac is watched, never polled.
+      view.rerender({ repo: "acme/local" });
+      await act(async () => {
+        vi.advanceTimersByTime(12_000);
+      });
+      expect(spy).not.toHaveBeenCalled();
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
