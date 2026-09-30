@@ -142,6 +142,17 @@ pub async fn path(db: &Db, name: &str) -> Result<Option<String>> {
     Ok(row.and_then(|(p,)| p))
 }
 
+/// A registered repo's stored top-level path, wherever its checkout lives — the
+/// key its worktree rows are filed under, for bookkeeping that opens nothing.
+/// Anything that runs or reads there resolves [`checkout`] instead.
+pub(crate) async fn stored_path(db: &Db, name: &str) -> Result<Option<String>> {
+    let row: Option<(Option<String>,)> = sqlx::query_as("SELECT path FROM repos WHERE name = ?")
+        .bind(name)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.and_then(|(p,)| p))
+}
+
 /// Where a registered repo's checkout lives, as the [`Checkout`] its git runs
 /// in — the one resolution every repo read that runs git or reads the tree goes
 /// through (docs/remote.md, "How santree dispatches"). `None` when no repo has

@@ -3,7 +3,7 @@
 //! runs with a fail-closed configuration that excludes ambient extensions.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -104,6 +104,58 @@ const READER_GRACE: Duration = Duration::from_secs(2);
 /// so a denied `Read` costs quality, not correctness.
 pub fn read_within(dir: &Path) -> String {
     format!("Read(/{}/**)", dir.display())
+}
+
+/// Where a helper runs for a checkout: the checkout itself when it is on this
+/// machine; for a Daedalus one, an empty private directory made for the call
+/// (and removed with it). A helper always runs here and is fed the text it
+/// needs, so nothing it does reaches the box; its `Read` grant, if any, is the
+/// caller's to scope to [`HelperDir::checkout`].
+pub struct HelperDir {
+    path: PathBuf,
+    /// `path` is a scratch directory made for this call, deleted on drop.
+    scratch: bool,
+}
+
+impl HelperDir {
+    pub fn for_checkout(dir: &crate::git::Checkout) -> Result<Self> {
+        if let Ok(path) = dir.local_path() {
+            return Ok(Self {
+                path: path.to_path_buf(),
+                scratch: false,
+            });
+        }
+        let path = std::env::temp_dir().join(format!("santree-helper-{}", uuid::Uuid::new_v4()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&path)?;
+        Ok(Self {
+            path,
+            scratch: true,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The checkout, when the helper runs in it — what a `Read` grant may
+    /// name. `None` for a scratch directory, which holds nothing to read.
+    pub fn checkout(&self) -> Option<&Path> {
+        (!self.scratch).then_some(self.path.as_path())
+    }
+}
+
+impl Drop for HelperDir {
+    fn drop(&mut self) {
+        if self.scratch {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 /// Build the argument list for a headless `claude -p` invocation. Pure and

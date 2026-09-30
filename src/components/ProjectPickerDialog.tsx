@@ -23,7 +23,7 @@
 import { type KeyboardEvent, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { actionsOff } from "../lib/daedalusLink";
+import { runOff } from "../lib/daedalusLink";
 import { useDaedalusStatus, useRepos } from "../lib/queries";
 import { shortRepoName } from "../lib/repoName";
 import { accentActiveStyle } from "../theme/colors";
@@ -68,7 +68,7 @@ export function ProjectPickerDialog({
   // its checkout), which a Daedalus project doesn't offer yet: listed, so the
   // registry reads whole, but not pickable, and says why.
   const { data: link } = useDaedalusStatus();
-  const offFor = (location: string) => actionsOff(location === "Daedalus", link);
+  const offFor = (location: string) => runOff(location === "Daedalus", link);
   const [asDefault, setAsDefault] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const initialRef = useRef<HTMLButtonElement>(null);

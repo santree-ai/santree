@@ -5,7 +5,6 @@
 //! API directly with `reqwest` — no browser round-trip. The owner/repo comes from
 //! the worktree's `origin` remote; the PR template is read from the checkout.
 
-use std::path::Path;
 use std::process::Command;
 use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, Instant};
@@ -307,8 +306,10 @@ pub fn owner_repo(cwd: &git::Checkout) -> Result<(String, String)> {
 }
 
 /// The repo's PR template, read from the checkout (the worktree shares the
-/// branch's files). Checks the standard locations; `None` when there's none.
-pub fn pr_template(cwd: &Path) -> Option<String> {
+/// branch's files), wherever it lives. Checks the standard locations; `None`
+/// when there's none (or it is too large to be one).
+pub fn pr_template(cwd: &git::Checkout) -> Option<String> {
+    const MAX: u64 = 256 * 1024;
     const PATHS: &[&str] = &[
         ".github/pull_request_template.md",
         ".github/PULL_REQUEST_TEMPLATE.md",
@@ -319,7 +320,10 @@ pub fn pr_template(cwd: &Path) -> Option<String> {
     ];
     PATHS
         .iter()
-        .find_map(|p| std::fs::read_to_string(cwd.join(p)).ok())
+        .find_map(|p| match cwd.read(p, MAX) {
+            Ok((bytes, true)) => String::from_utf8(bytes).ok(),
+            _ => None,
+        })
         .filter(|s| !s.trim().is_empty())
 }
 

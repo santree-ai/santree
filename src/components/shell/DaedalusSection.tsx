@@ -16,9 +16,8 @@
  *   Settings → Daedalus. The rows stay: they still open, since navigating is
  *   not running anything.
  *
- * Every action that would change a project or run something in it is disabled
- * with the reason (`actionsOff`): out of reach while the link is down, and
- * otherwise not yet — santree reads Daedalus projects but doesn't change them.
+ * Its rows' git actions (create, split and delete a worktree) are disabled with
+ * the reason while the link is down (`gitOff`); with it up they run on the box.
  *
  * Unknown is not "no": while the status read is in flight the section draws as
  * linked rather than flashing grey at a server that is there.
@@ -26,7 +25,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
-import { actionsOff, linkNotice, linkUp } from "../../lib/daedalusLink";
+import { gitOff, linkNotice, linkUp } from "../../lib/daedalusLink";
 import { useDaedalusStatus, useRepos } from "../../lib/queries";
 import { DaedalusLogo } from "../icons";
 import { DaedalusProjectsDialog } from "./DaedalusProjectsDialog";
@@ -69,7 +68,7 @@ export function DaedalusSection() {
         <ProjectTree
           location="Daedalus"
           emptyLabel="No projects yet. Add one with +"
-          actionsDisabled={actionsOff(true, link)}
+          actionsDisabled={gitOff(true, link)}
         />
       </div>
       {adding && <DaedalusProjectsDialog onClose={() => setAdding(false)} />}

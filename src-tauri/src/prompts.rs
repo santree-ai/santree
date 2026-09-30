@@ -586,7 +586,7 @@ pub async fn set_project_prompt(
     tokio::task::spawn_blocking(move || -> Result<()> {
         match content {
             Some(c) => {
-                santree_dir::ensure(Path::new(&root))?;
+                santree_dir::ensure(&crate::git::Checkout::local(&root))?;
                 std::fs::create_dir_all(path.parent().expect("file has a parent"))?;
                 std::fs::write(&path, c)?;
             }

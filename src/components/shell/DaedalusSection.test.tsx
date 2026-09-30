@@ -82,7 +82,8 @@ describe("DaedalusSection visibility", () => {
       location: "Daedalus",
       emptyLabel: "No projects yet. Add one with +",
     });
-    expect(state.tree?.actionsDisabled).toBe("Coming soon for Daedalus projects");
+    // Linked: a Daedalus project's worktrees are created, split and deleted there.
+    expect(state.tree?.actionsDisabled).toBeUndefined();
   });
 
   /** A registered Daedalus project keeps its section whatever the link says. */
@@ -144,8 +145,8 @@ describe("DaedalusSection link", () => {
     state.link = link;
     render(<DaedalusSection />);
     expect(header()).not.toHaveClass("opacity-60");
-    // Reachable, so the reason nothing runs there is only that nothing does yet.
-    expect(state.tree?.actionsDisabled).toBe("Coming soon for Daedalus projects");
+    // Reachable (or a moment from it), so its worktree actions stay on.
+    expect(state.tree?.actionsDisabled).toBeUndefined();
     expect(screen.queryByRole("button", { name: /Settings/ })).toBeNull();
   });
 

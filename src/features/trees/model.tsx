@@ -406,8 +406,9 @@ export function tabForRun(launch: QueuedLaunch | undefined, initialSetup: boolea
 interface TreesModel {
   repo: string;
   /** Where the project lives and what santree can do in it now: a Daedalus
-   *  project is read here but not changed, and not read while the link is down
-   *  (`reach.actionsOff` says why, on every control it turns off). */
+   *  project's git is worked over the link, nothing else runs in it yet, and
+   *  none of it is offered while the link is down (`reach.gitOff` and
+   *  `reach.runOff` say why, on every control they turn off). */
   reach: RepoReach;
   worktrees: Worktree[];
   /** Live PR status keyed by worktree id (from the worktree_prs stream). The
@@ -1065,7 +1066,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         // Every way to open a tab (the "+" menu, its digit keys, the welcome
         // surface) comes through here, so a project that runs nothing from santree
         // yet opens nothing, whichever control was missed.
-        if (!activeId || reach.actionsOff) return null;
+        if (!activeId || reach.runOff) return null;
         const id = crypto.randomUUID();
         const resolvedAgent = kind === "terminal" ? null : (agentKind ?? "Codex");
         addTabRow({

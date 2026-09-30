@@ -70,7 +70,7 @@ import type {
 } from "../bindings";
 import { commands, events } from "../bindings";
 import { type ToastOptions, toast } from "../state/toast";
-import { actionsOff } from "./daedalusLink";
+import { gitOff, runOff } from "./daedalusLink";
 import { splitRepoSlug } from "./repo";
 import { type TrackerFeatures, trackerFeatures } from "./tracker";
 
@@ -1796,8 +1796,8 @@ export const useSetTaskNote = (repo: string) =>
 // ── Where a project lives ────────────────────────────────────────────────────
 // A Daedalus project's reads run on the box (docs/remote.md). They wait for the
 // link instead of failing while it is down — being away from home is normal,
-// and the rail already says why — and nothing that changes a project or runs
-// in it is offered for one yet.
+// and the rail already says why. Its git changes run there too, over the same
+// link; nothing else runs in it from santree yet (terminals, agents, setup).
 
 /** Whether `repo`'s reads can run now: a project on this Mac always, a Daedalus
  *  one while the link is connected. A name the registry doesn't hold (still
@@ -1817,8 +1817,11 @@ export interface RepoReach {
   remote: boolean;
   /** Its reads can run now. */
   readable: boolean;
-  /** Why nothing that changes it or runs in it is offered, when so. */
-  actionsOff: string | undefined;
+  /** Why its git can't be changed now (staging, commits, push and pull,
+   *  worktrees, splits, PRs) — a Daedalus project while the link is down. */
+  gitOff: string | undefined;
+  /** Why nothing can be run in it now (terminals, agents, setup scripts). */
+  runOff: string | undefined;
 }
 
 /** Where `repo` lives and what santree can do there right now. */
@@ -1830,7 +1833,8 @@ export function useRepoReach(repo: string): RepoReach {
     return {
       remote,
       readable: readableRepo(repos, link, repo),
-      actionsOff: actionsOff(remote, link),
+      gitOff: gitOff(remote, link),
+      runOff: runOff(remote, link),
     };
   }, [repos, link, repo]);
 }
@@ -3317,11 +3321,15 @@ export const usePrTicketsByRepo = (
  *  the `owner/name` it asked about plus whether `gh` could be asked; `queue` is
  *  `null` when that repo has no merge queue. Positions shift as PRs merge, so
  *  it's cached only briefly and refetches on revisit. */
-export const useMergeQueue = (repo: string) =>
-  useUnwrappedQuery(queryKeys.mergeQueue(repo), () => commands.mergeQueue(repo), {
-    enabled: !!repo,
+export const useMergeQueue = (repo: string) => {
+  // A Daedalus project's `origin` is read on the box: asked only while the
+  // link is up, so a down link is the rail's state rather than a failed read.
+  const { readable } = useRepoReach(repo);
+  return useUnwrappedQuery(queryKeys.mergeQueue(repo), () => commands.mergeQueue(repo), {
+    enabled: !!repo && readable,
     staleTime: 20_000,
   });
+};
 
 /** Full detail (body + conversation + diff + checks) for one PR. Gated on a
  *  selection. While any CI check is still running we poll every 30s so the Checks

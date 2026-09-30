@@ -44,9 +44,9 @@ export function WorktreeMenu({
   prs: WorktreePr[];
   /** The repo's default-branch checkout — deletable only as a repo, not here. */
   primary: boolean;
-  /** Why the checkout can't be changed from here (a Daedalus project: out of
-   *  reach, or not yet). Set, Split and Delete stay listed but disabled with this
-   *  as their tooltip; copying what the row already knows still works. */
+  /** Why the checkout's git can't be changed from here (a Daedalus project out
+   *  of reach). Split and Delete stay listed but disabled with this as their
+   *  tooltip; copying what the row already knows still works. */
   actionsDisabled?: string;
   children: React.ReactNode;
 }) {

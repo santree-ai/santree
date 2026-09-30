@@ -1,19 +1,23 @@
 //! Move the remaining uncommitted edits one branch forward, with a durable Git backup.
-use std::path::Path;
+
 use std::sync::LazyLock;
 
 use anyhow::{anyhow, ensure, Result};
 use santree_core::domain::MoveChanges;
 use tokio::sync::Mutex;
 
-use crate::{db::Db, git, repo, worktree};
+use crate::daedalus::host::DaedalusHost;
+use crate::git::{self, Checkout, FsKind};
+use crate::{db::Db, worktree};
 
 static MUTATIONS: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-async fn root(db: &Db, repo: &str) -> Result<String> {
-    repo::path(db, repo)
-        .await?
-        .ok_or_else(|| anyhow!("Moving changes requires a local repository"))
+/// The repo's root checkout, wherever it lives, and the key its move rows are
+/// filed under.
+async fn root(db: &Db, daedalus: &DaedalusHost, repo: &str) -> Result<(Checkout, String)> {
+    let root = worktree::root(db, daedalus, repo).await?;
+    let key = root.path().to_string_lossy().into_owned();
+    Ok((root, key))
 }
 
 async fn save(db: &Db, root: &str, op: &MoveChanges) -> Result<()> {
@@ -22,9 +26,14 @@ async fn save(db: &Db, root: &str, op: &MoveChanges) -> Result<()> {
     Ok(())
 }
 
-pub async fn preview(db: &Db, repo: &str, source: &str) -> Result<MoveChanges> {
+pub async fn preview(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    source: &str,
+) -> Result<MoveChanges> {
     let _guard = MUTATIONS.lock().await;
-    let root = root(db, repo).await?;
+    let (checkout, root) = root(db, daedalus, repo).await?;
     let saved: Option<String> =
         sqlx::query_scalar("SELECT data FROM worktree_moves WHERE repo_path = ? AND source_id = ?")
             .bind(&root)
@@ -35,11 +44,10 @@ pub async fn preview(db: &Db, repo: &str, source: &str) -> Result<MoveChanges> {
     if let Some(saved) = saved {
         let mut op: MoveChanges = serde_json::from_str(&saved)?;
         if op.branch.is_some() && !op.completed {
-            let path = root.clone();
+            let dir = checkout.clone();
             let id = op.id.clone();
             let backup =
-                tokio::task::spawn_blocking(move || git::split::find_backup(Path::new(&path), &id))
-                    .await??;
+                tokio::task::spawn_blocking(move || git::split::find_backup(&dir, &id)).await??;
             if op.stash_oid.is_some() || backup.is_some() {
                 op.stash_oid = op.stash_oid.or(backup);
                 save(db, &root, &op).await?;
@@ -48,21 +56,27 @@ pub async fn preview(db: &Db, repo: &str, source: &str) -> Result<MoveChanges> {
             retry = Some(op);
         }
     }
-    check_destination(Path::new(&root), "preview")?;
-    crate::santree_dir::ensure(Path::new(&root))?;
-    let coords = worktree::coords(db, repo, source).await?;
+    {
+        let dir = checkout.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            check_destination(&dir, "preview")?;
+            crate::santree_dir::ensure(&dir)
+        })
+        .await??;
+    }
+    let coords = worktree::coords(db, daedalus, repo, source).await?;
     let ticket_id = worktree::ticket_id(db, repo, source).await?;
     let source_id = source.to_string();
     let mut op = tokio::task::spawn_blocking(move || -> Result<MoveChanges> {
-        git::split::assert_checkout(&coords.path, &coords.branch)?;
-        let head = git::split::oid(&coords.path, "HEAD")?;
-        let index_tree = git::split::index_tree(&coords.path)?;
-        let snapshot_tree = git::split::snapshot(&coords.path)?;
-        let files = git::split::changed_paths(&coords.path, &head, &snapshot_tree, &index_tree)?;
+        git::split::assert_checkout(&coords.dir, &coords.branch)?;
+        let head = git::split::oid(&coords.dir, "HEAD")?;
+        let index_tree = git::split::index_tree(&coords.dir)?;
+        let snapshot_tree = git::split::snapshot(&coords.dir)?;
+        let files = git::split::changed_paths(&coords.dir, &head, &snapshot_tree, &index_tree)?;
         ensure!(
-            git::split::oid(&coords.path, "HEAD")? == head
-                && git::split::index_tree(&coords.path)? == index_tree
-                && git::split::snapshot(&coords.path)? == snapshot_tree,
+            git::split::oid(&coords.dir, "HEAD")? == head
+                && git::split::index_tree(&coords.dir)? == index_tree
+                && git::split::snapshot(&coords.dir)? == snapshot_tree,
             "Changes are still being edited. Refresh the preview when edits have stopped"
         );
         let id = uuid::Uuid::new_v4().to_string();
@@ -97,13 +111,14 @@ pub async fn preview(db: &Db, repo: &str, source: &str) -> Result<MoveChanges> {
 
 pub async fn move_remaining(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     id: &str,
     branch: &str,
     ticket_id: Option<String>,
 ) -> Result<MoveChanges> {
     let _guard = MUTATIONS.lock().await;
-    let root = root(db, repo).await?;
+    let (checkout, root) = root(db, daedalus, repo).await?;
     let data: String =
         sqlx::query_scalar("SELECT data FROM worktree_moves WHERE repo_path = ? AND id = ?")
             .bind(&root)
@@ -123,14 +138,14 @@ pub async fn move_remaining(
         worktree::validate_issue_id(ticket)?;
         ensure!(!ticket.trim().is_empty(), "Ticket ID cannot be empty");
     }
-    let coords = worktree::coords(db, repo, &op.source_id).await?;
+    let coords = worktree::coords(db, daedalus, repo, &op.source_id).await?;
     if let Some(chosen) = &op.branch {
         ensure!(
             chosen == branch && op.ticket_id == ticket_id,
             "Retry the existing move using its original branch and ticket"
         );
     } else {
-        let path = coords.path.clone();
+        let path = coords.dir.clone();
         let checked = op.clone();
         let name = branch.to_string();
         let base = coords.base_branch.clone();
@@ -143,7 +158,7 @@ pub async fn move_remaining(
                     .or_else(|_| git::split::oid(&path, &base))?,
             };
             let count: u32 = git::git(
-                &git::Checkout::local(&path),
+                &path,
                 &["rev-list", "--count", &format!("{base}..{}", checked.head)],
             )?
             .parse()?;
@@ -165,9 +180,10 @@ pub async fn move_remaining(
         op.ticket_id = ticket_id;
         save(db, &root, &op).await?;
     }
-    check_destination(Path::new(&root), &op.worktree_id)?;
+    destination_ok(&checkout, &op.worktree_id).await?;
     let wt = worktree::create(
         db,
+        &checkout,
         repo,
         &op.worktree_id,
         branch,
@@ -181,13 +197,13 @@ pub async fn move_remaining(
         wt.id == op.worktree_id,
         "Another worktree owns this branch; its files were preserved"
     );
-    check_destination(Path::new(&root), &op.worktree_id)?;
-    let path = wt.path.clone();
+    destination_ok(&checkout, &op.worktree_id).await?;
+    let path = checkout.at(&wt.path);
     let name = branch.to_string();
     let head = op.head.clone();
     let backed_up = op.stash_oid.is_some();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        let path = Path::new(&path);
+        let path = &path;
         git::split::assert_checkout(path, &name)?;
         ensure!(
             git::split::oid(path, "HEAD")? == head,
@@ -196,7 +212,7 @@ pub async fn move_remaining(
         // Before stashing the source, never commandeer an edited destination.
         if !backed_up {
             ensure!(
-                git::git(&git::Checkout::local(path), &["status", "--porcelain"])?.is_empty(),
+                git::git(path, &["status", "--porcelain"])?.is_empty(),
                 "The destination already has edits; both worktrees were preserved"
             );
         }
@@ -210,7 +226,7 @@ pub async fn move_remaining(
         "The destination worktree was removed; the source was preserved"
     );
     if op.stash_oid.is_none() {
-        let source = coords.path.clone();
+        let source = coords.dir.clone();
         let checked = op.clone();
         let stash = tokio::task::spawn_blocking(move || -> Result<String> {
             if let Some(stash) = git::split::find_backup(&source, &checked.id)? {
@@ -224,37 +240,41 @@ pub async fn move_remaining(
     }
     let stash = op.stash_oid.clone().unwrap();
     let pin = format!("refs/santree/moves/{}", op.id);
-    let path = wt.path.clone();
+    let path = checkout.at(&wt.path);
     let head = op.head.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        let path = Path::new(&path);
-        git::git(&git::Checkout::local(path), &["update-ref", &pin, &stash])?;
-        git::split::restore_backup(path, &stash, &head)
+        git::git(&path, &["update-ref", &pin, &stash])?;
+        git::split::restore_backup(&path, &stash, &head)
     })
     .await??;
-    op.source_has_changes = !tokio::task::spawn_blocking(move || {
-        git::git(
-            &git::Checkout::local(&coords.path),
-            &["status", "--porcelain"],
-        )
-    })
-    .await??
-    .is_empty();
+    op.source_has_changes =
+        !tokio::task::spawn_blocking(move || git::git(&coords.dir, &["status", "--porcelain"]))
+            .await??
+            .is_empty();
     op.completed = true;
     save(db, &root, &op).await?;
     Ok(op)
 }
 
-fn check_destination(root: &Path, id: &str) -> Result<()> {
+/// [`check_destination`] on the blocking pool (on Daedalus it asks the box).
+async fn destination_ok(root: &Checkout, id: &str) -> Result<()> {
+    let root = root.clone();
+    let id = id.to_string();
+    tokio::task::spawn_blocking(move || check_destination(&root, &id)).await?
+}
+
+/// Refuse a worktree destination any part of which is a symlink: the checkout
+/// must land where its path says, inside the repo.
+fn check_destination(root: &Checkout, id: &str) -> Result<()> {
     for rel in [
         ".santree".to_string(),
         ".santree/.gitignore".to_string(),
         ".santree/worktrees".to_string(),
         format!(".santree/worktrees/{id}"),
     ] {
-        if let Ok(meta) = std::fs::symlink_metadata(root.join(rel)) {
+        if let Some(kind) = root.stat(&root.path().join(rel))? {
             ensure!(
-                !meta.file_type().is_symlink(),
+                kind != FsKind::Symlink,
                 "The worktree destination must not contain symlinks"
             );
         }
@@ -265,16 +285,22 @@ fn check_destination(root: &Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    fn local(path: &Path) -> Checkout {
+        Checkout::local(path)
+    }
 
     struct Fixture {
-        _scratch: git::split::Scratch,
+        _scratch: tempfile::TempDir,
         path: PathBuf,
         db: Db,
+        /// Never connected: these repos are local, so nothing asks it.
+        link: DaedalusHost,
     }
     impl Fixture {
         async fn new() -> Self {
-            let scratch = git::split::Scratch::new().unwrap();
+            let scratch = tempfile::tempdir().unwrap();
             let path = scratch.path().join("repo");
             std::fs::create_dir(&path).unwrap();
             git::git(&git::Checkout::local(&path), &["init", "-b", "main"]).unwrap();
@@ -314,14 +340,18 @@ mod tests {
                 _scratch: scratch,
                 path,
                 db,
+                link: DaedalusHost::default(),
             }
         }
         async fn preview(&self) -> MoveChanges {
-            preview(&self.db, "test", "AK-123").await.unwrap()
+            preview(&self.db, &self.link, "test", "AK-123")
+                .await
+                .unwrap()
         }
         async fn run(&self, op: &MoveChanges) -> Result<MoveChanges> {
             move_remaining(
                 &self.db,
+                &self.link,
                 "test",
                 &op.id,
                 "feature-next",
@@ -338,11 +368,19 @@ mod tests {
         let op = f.preview().await;
         let error = f.run(&op).await.unwrap_err().to_string();
         assert!(error.contains("Commit the first part"), "{error}");
-        assert_eq!(git::split::oid(&f.path, "HEAD").unwrap(), op.head);
-        assert_eq!(git::split::index_tree(&f.path).unwrap(), op.index_tree);
-        assert_eq!(git::split::snapshot(&f.path).unwrap(), op.snapshot_tree);
-        assert!(git::split::find_backup(&f.path, &op.id).unwrap().is_none());
-        assert!(git::split::oid(&f.path, "feature-next").is_err());
+        assert_eq!(git::split::oid(&local(&f.path), "HEAD").unwrap(), op.head);
+        assert_eq!(
+            git::split::index_tree(&local(&f.path)).unwrap(),
+            op.index_tree
+        );
+        assert_eq!(
+            git::split::snapshot(&local(&f.path)).unwrap(),
+            op.snapshot_tree
+        );
+        assert!(git::split::find_backup(&local(&f.path), &op.id)
+            .unwrap()
+            .is_none());
+        assert!(git::split::oid(&local(&f.path), "feature-next").is_err());
         f.db.close().await;
     }
 
@@ -362,9 +400,14 @@ mod tests {
             let op = f.preview().await;
             let error = f.run(&op).await.unwrap_err().to_string();
             assert!(error.contains("Commit the first part"), "{error}");
-            assert_eq!(git::split::snapshot(&f.path).unwrap(), op.snapshot_tree);
-            assert!(git::split::find_backup(&f.path, &op.id).unwrap().is_none());
-            assert!(git::split::oid(&f.path, "feature-next").is_err());
+            assert_eq!(
+                git::split::snapshot(&local(&f.path)).unwrap(),
+                op.snapshot_tree
+            );
+            assert!(git::split::find_backup(&local(&f.path), &op.id)
+                .unwrap()
+                .is_none());
+            assert!(git::split::oid(&local(&f.path), "feature-next").is_err());
         }
         f.db.close().await;
     }
@@ -395,21 +438,30 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(git::split::oid(&f.path, "HEAD").unwrap(), op.head);
+        assert_eq!(git::split::oid(&local(&f.path), "HEAD").unwrap(), op.head);
         assert!(f.path.join("keep.secret").exists());
         assert!(!f.path.join("new.txt").exists());
-        let child = worktree::get(&f.db, "test", &done.worktree_id)
+        let child = worktree::get(&f.db, &local(&f.path), &done.worktree_id)
             .await
             .unwrap()
             .unwrap();
         let child_path = Path::new(&child.path);
         assert_eq!(child.base_branch, "feature");
         assert_eq!(child.ticket_id.as_deref(), Some("AK-456"));
-        assert_eq!(git::split::snapshot(child_path).unwrap(), op.snapshot_tree);
-        assert_eq!(git::split::index_tree(child_path).unwrap(), op.index_tree);
-        assert_eq!(git::split::oid(child_path, "HEAD").unwrap(), op.head);
         assert_eq!(
-            git::split::find_backup(&f.path, &op.id).unwrap(),
+            git::split::snapshot(&local(child_path)).unwrap(),
+            op.snapshot_tree
+        );
+        assert_eq!(
+            git::split::index_tree(&local(child_path)).unwrap(),
+            op.index_tree
+        );
+        assert_eq!(
+            git::split::oid(&local(child_path), "HEAD").unwrap(),
+            op.head
+        );
+        assert_eq!(
+            git::split::find_backup(&local(&f.path), &op.id).unwrap(),
             done.stash_oid
         );
         assert_eq!(f.run(&op).await.unwrap().worktree_id, child.id);
@@ -419,18 +471,18 @@ mod tests {
             &["commit", "-m", "second reviewed part"],
         )
         .unwrap();
-        let next = preview(&f.db, "test", &child.id).await.unwrap();
-        let last = move_remaining(&f.db, "test", &next.id, "feature-third", None)
+        let next = preview(&f.db, &f.link, "test", &child.id).await.unwrap();
+        let last = move_remaining(&f.db, &f.link, "test", &next.id, "feature-third", None)
             .await
             .unwrap();
-        let last = worktree::get(&f.db, "test", &last.worktree_id)
+        let last = worktree::get(&f.db, &local(&f.path), &last.worktree_id)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(last.base_branch, "feature-next");
         assert_eq!(last.ticket_id, None);
         assert_eq!(
-            git::split::snapshot(Path::new(&last.path)).unwrap(),
+            git::split::snapshot(&local(Path::new(&last.path))).unwrap(),
             op.snapshot_tree
         );
         assert!(git::git(
@@ -448,7 +500,7 @@ mod tests {
         std::fs::write(f.path.join("new.txt"), "remaining\n").unwrap();
         let op = f.preview().await;
         for branch in ["--help", "main", "feature/child", "refs/heads/no"] {
-            assert!(move_remaining(&f.db, "test", &op.id, branch, None)
+            assert!(move_remaining(&f.db, &f.link, "test", &op.id, branch, None)
                 .await
                 .is_err());
         }
@@ -463,8 +515,10 @@ mod tests {
             std::fs::read_to_string(f.path.join("new.txt")).unwrap(),
             "newer edits\n"
         );
-        assert!(git::split::oid(&f.path, "feature-next").is_err());
-        assert!(git::split::find_backup(&f.path, &op.id).unwrap().is_none());
+        assert!(git::split::oid(&local(&f.path), "feature-next").is_err());
+        assert!(git::split::find_backup(&local(&f.path), &op.id)
+            .unwrap()
+            .is_none());
         f.db.close().await;
     }
 
@@ -476,7 +530,7 @@ mod tests {
         op.branch = Some("feature-next".into());
         op.ticket_id = Some("AK-456".into());
         save(&f.db, f.path.to_str().unwrap(), &op).await.unwrap();
-        let stash = git::split::stash_remaining(&f.path, &op).unwrap();
+        let stash = git::split::stash_remaining(&local(&f.path), &op).unwrap();
         std::fs::write(f.path.join("later.txt"), "new source edits\n").unwrap();
         let resumed = f.preview().await;
         assert_eq!(resumed.id, op.id);
@@ -512,6 +566,7 @@ mod tests {
         op.ticket_id = Some("AK-456".into());
         let wt = worktree::create(
             &f.db,
+            &local(&f.path),
             "test",
             &op.worktree_id,
             "feature-next",
@@ -522,7 +577,7 @@ mod tests {
         )
         .await
         .unwrap();
-        op.stash_oid = Some(git::split::stash_remaining(&f.path, &op).unwrap());
+        op.stash_oid = Some(git::split::stash_remaining(&local(&f.path), &op).unwrap());
         save(&f.db, f.path.to_str().unwrap(), &op).await.unwrap();
         let path = Path::new(&wt.path);
         std::fs::write(path.join("a.txt"), "user destination edits\n").unwrap();
@@ -531,7 +586,9 @@ mod tests {
             std::fs::read_to_string(path.join("a.txt")).unwrap(),
             "user destination edits\n"
         );
-        assert!(git::split::find_backup(&f.path, &op.id).unwrap().is_some());
+        assert!(git::split::find_backup(&local(&f.path), &op.id)
+            .unwrap()
+            .is_some());
         git::git(&git::Checkout::local(path), &["restore", "a.txt"]).unwrap();
         assert!(f.run(&op).await.unwrap().completed);
         f.db.close().await;
@@ -546,16 +603,16 @@ mod tests {
         let op = f.preview().await;
         assert_eq!(op.files, vec!["a.txt"]);
         let done = f.run(&op).await.unwrap();
-        let wt = worktree::get(&f.db, "test", &done.worktree_id)
+        let wt = worktree::get(&f.db, &local(&f.path), &done.worktree_id)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(
-            git::split::index_tree(Path::new(&wt.path)).unwrap(),
+            git::split::index_tree(&local(Path::new(&wt.path))).unwrap(),
             op.index_tree
         );
         assert_eq!(
-            git::split::snapshot(Path::new(&wt.path)).unwrap(),
+            git::split::snapshot(&local(Path::new(&wt.path))).unwrap(),
             op.snapshot_tree
         );
         f.db.close().await;
@@ -576,7 +633,9 @@ mod tests {
             .to_string()
             .contains("symlink"));
         assert!(f.path.join("new.txt").exists());
-        assert!(git::split::find_backup(&f.path, &op.id).unwrap().is_none());
+        assert!(git::split::find_backup(&local(&f.path), &op.id)
+            .unwrap()
+            .is_none());
         f.db.close().await;
     }
     #[tokio::test]
@@ -589,6 +648,7 @@ mod tests {
         save(&f.db, f.path.to_str().unwrap(), &op).await.unwrap();
         worktree::create(
             &f.db,
+            &local(&f.path),
             "test",
             &op.worktree_id,
             "feature-next",
@@ -605,7 +665,7 @@ mod tests {
         assert_eq!(refreshed.id, op.id);
         assert_ne!(refreshed.snapshot_tree, op.snapshot_tree);
         let done = f.run(&refreshed).await.unwrap();
-        let wt = worktree::get(&f.db, "test", &done.worktree_id)
+        let wt = worktree::get(&f.db, &local(&f.path), &done.worktree_id)
             .await
             .unwrap()
             .unwrap();
@@ -627,7 +687,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(f.path.join("new.txt"), "remaining\n").unwrap();
-        let op = preview(&f.db, "test", worktree::BASE_ID).await.unwrap();
+        let op = preview(&f.db, &f.link, "test", worktree::BASE_ID)
+            .await
+            .unwrap();
         assert_eq!(op.files, vec!["new.txt"]);
         let done = f.run(&op).await.unwrap();
         assert!(f.path.join(".santree/.gitignore").exists());
@@ -636,7 +698,9 @@ mod tests {
             .join(".santree/worktrees")
             .join(&done.worktree_id)
             .exists());
-        let after = preview(&f.db, "test", worktree::BASE_ID).await.unwrap();
+        let after = preview(&f.db, &f.link, "test", worktree::BASE_ID)
+            .await
+            .unwrap();
         assert!(after.files.is_empty());
         assert!(!f.path.join("new.txt").exists());
         f.db.close().await;
@@ -654,8 +718,8 @@ mod tests {
         std::fs::create_dir(f.path.join("a.txt")).unwrap();
         std::fs::write(f.path.join("a.txt/visible.txt"), "include\n").unwrap();
         std::fs::write(f.path.join("a.txt/ignored.secret"), "stay ignored\n").unwrap();
-        let before = git::split::index_tree(&f.path).unwrap();
-        let tree = git::split::snapshot(&f.path).unwrap();
+        let before = git::split::index_tree(&local(&f.path)).unwrap();
+        let tree = git::split::snapshot(&local(&f.path)).unwrap();
         let names = git::git(
             &git::Checkout::local(&f.path),
             &["ls-tree", "-r", "--name-only", &tree],
@@ -664,7 +728,7 @@ mod tests {
         assert!(names.lines().any(|p| p == "intent.secret"));
         assert!(names.lines().any(|p| p == "a.txt/visible.txt"));
         assert!(!names.lines().any(|p| p == "a.txt/ignored.secret"));
-        assert_eq!(git::split::index_tree(&f.path).unwrap(), before);
+        assert_eq!(git::split::index_tree(&local(&f.path)).unwrap(), before);
         f.db.close().await;
     }
 }

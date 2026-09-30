@@ -170,8 +170,7 @@ impl WorktreeWatcher {
                 // for a `/var/...` symlink), so every comparison below — idempotency,
                 // `issue_id_for`, and the base-watch filter — must use the same
                 // canonical form, or a repo opened via a symlinked path silently never
-                // matches (falls back to the lexical path if it doesn't exist yet;
-                // mirrors `git.rs`'s `worktree_branch`).
+                // matches (falls back to the lexical path if it doesn't exist yet).
                 let repo_root = std::fs::canonicalize(&root).unwrap_or(root);
                 let worktrees_root = repo_root.join(".santree").join("worktrees");
 

@@ -366,20 +366,21 @@ fn issue_tag(title: &str) -> Option<&str> {
 /// + the branch diff; otherwise it's the raw template (or empty).
 pub async fn draft(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
     fill: bool,
     send_transcripts: bool,
 ) -> Result<PrDraft> {
-    let c = worktree::coords(db, repo, issue_id).await?;
+    let c = worktree::coords(db, daedalus, repo, issue_id).await?;
     // `first_commit_subject` and `pr_template` shell out / read files; keep them
     // off the async runtime's worker threads.
     let (title, template) = {
         let c = c.clone();
         tokio::task::spawn_blocking(move || {
             (
-                git::first_commit_subject(&c.checkout(), &c.base_branch),
-                github::pr_template(&c.path),
+                git::first_commit_subject(&c.dir, &c.base_branch),
+                github::pr_template(&c.dir),
             )
         })
         .await?
@@ -454,7 +455,7 @@ async fn draft_body(
     let issue_id = linked_ticket.unwrap_or_default();
     tokio::task::spawn_blocking(move || {
         // Cap the diff so the prompt stays within sane arg/token limits.
-        let diff: String = git::diff_range(&c.checkout(), &c.base_branch)
+        let diff: String = git::diff_range(&c.dir, &c.base_branch)
             .chars()
             .take(12_000)
             .collect();
@@ -477,21 +478,25 @@ async fn draft_body(
                 ticket_id => issue_id,
                 ticket_content => ticket_content,
                 base_branch => c.base_branch.clone(),
-                commit_log => git::commit_log(&c.checkout(), &c.base_branch),
-                diff_stat => git::diff_stat(&c.checkout(), &c.base_branch),
+                commit_log => git::commit_log(&c.dir, &c.base_branch),
+                diff_stat => git::diff_stat(&c.dir, &c.base_branch),
                 diff => diff,
                 transcripts => transcripts,
                 ..issue_ctx,
             },
         )
         .ok()?;
-        // `Read` is granted only inside the worktree. The prompt embeds Linear
+        // The helper runs here either way; for a Daedalus worktree in an empty
+        // scratch directory, reading nothing on the box.
+        let cwd = agent::HelperDir::for_checkout(&c.dir).ok()?;
+        // `Read` is granted only inside the worktree, and only one on this machine. The prompt embeds Linear
         // ticket text, which any org member (or bot, or integration) can write, and
         // the drafted body is something the user then pushes — an unscoped grant
         // would let an injected "…also include the contents of ~/.ssh/id_rsa" reach
         // real secrets. Everything this prompt legitimately needs is under `c.path`.
-        let read_worktree = agent::read_within(&c.path);
-        agent::run_helper(&helper, &c.path, &prompt, &[&read_worktree], BODY_TIMEOUT)
+        let read_worktree = cwd.checkout().map(agent::read_within);
+        let allowed: Vec<&str> = read_worktree.iter().map(String::as_str).collect();
+        agent::run_helper(&helper, cwd.path(), &prompt, &allowed, BODY_TIMEOUT)
             // Best-effort: the caller falls back to the raw template.
             .ok()
     })
@@ -502,8 +507,10 @@ async fn draft_body(
 
 /// Create the PR: push the branch, then open it via the GitHub API. The token is
 /// borrowed from the `gh` CLI; errors clearly if `gh` isn't authenticated.
+#[allow(clippy::too_many_arguments)] // The PR's fields, and where its branch lives.
 pub async fn create(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
     title: &str,
@@ -511,16 +518,16 @@ pub async fn create(
     draft: bool,
     reviewers: &[String],
 ) -> Result<NewPr> {
-    let c = worktree::coords(db, repo, issue_id).await?;
+    let c = worktree::coords(db, daedalus, repo, issue_id).await?;
     let token = github::token()
         .await
         .ok_or_else(|| anyhow!("GitHub CLI not authenticated. Run `gh auth login`."))?;
 
     // Remote parsing + push are blocking (subprocess) — keep off the async pool.
-    let dir = c.checkout();
+    let dir = c.dir.clone();
     let (owner, name) = tokio::task::spawn_blocking(move || github::owner_repo(&dir)).await??;
 
-    let dir = c.checkout();
+    let dir = c.dir.clone();
     let branch = c.branch.clone();
     tokio::task::spawn_blocking(move || git::push(&dir, &branch)).await??;
 
@@ -552,14 +559,15 @@ pub async fn create(
 /// no resolvable GitHub remote, so the dialog just omits the picker.
 pub async fn reviewers(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
 ) -> Result<Vec<santree_core::domain::Reviewer>> {
     let Some(token) = github::token().await else {
         return Ok(vec![]);
     };
-    let c = worktree::coords(db, repo, issue_id).await?;
-    let dir = c.checkout();
+    let c = worktree::coords(db, daedalus, repo, issue_id).await?;
+    let dir = c.dir.clone();
     let Ok((owner, name)) = tokio::task::spawn_blocking(move || github::owner_repo(&dir)).await?
     else {
         return Ok(vec![]);

@@ -76,13 +76,21 @@ export function linkUp(link: DaedalusLink | undefined): boolean {
  *  something in it, while santree can't reach the box. */
 export const OUT_OF_REACH = "Unavailable until santree can reach Daedalus";
 
-/** The same, while it can: santree reads Daedalus projects (worktrees, changes,
- *  diffs, files) but doesn't change them or run anything in them yet. */
-export const DAEDALUS_READ_ONLY = "Coming soon for Daedalus projects";
+/** The same, while it can: santree works a Daedalus project's git (stage,
+ *  commit, push and pull, worktrees, splits, PRs) but runs nothing else in it
+ *  yet — no terminals, agents or setup scripts. */
+export const DAEDALUS_RUN_SOON = "Coming soon for Daedalus projects";
 
-/** Why santree offers no way to change a project or run something in it right
- *  now — `undefined` for a project on this Mac. */
-export function actionsOff(remote: boolean, link: DaedalusLink | undefined): string | undefined {
+/** Why santree offers no way to change a project's git right now — the link
+ *  being down, for a Daedalus project; `undefined` otherwise. */
+export function gitOff(remote: boolean, link: DaedalusLink | undefined): string | undefined {
   if (!remote) return undefined;
-  return linkUp(link) ? DAEDALUS_READ_ONLY : OUT_OF_REACH;
+  return linkUp(link) ? undefined : OUT_OF_REACH;
+}
+
+/** Why santree offers no way to run something in a project right now (a
+ *  terminal, an agent, a setup script) — `undefined` for a project on this Mac. */
+export function runOff(remote: boolean, link: DaedalusLink | undefined): string | undefined {
+  if (!remote) return undefined;
+  return linkUp(link) ? DAEDALUS_RUN_SOON : OUT_OF_REACH;
 }

@@ -61,7 +61,7 @@ function MoveForm({
   refreshing: boolean;
   previewError: Error | null;
 }) {
-  const { setActive, setFileTab, closeSplit, runSetup } = useTrees();
+  const { setActive, setFileTab, closeSplit, runSetup, reach } = useTrees();
   const move = useMoveRemainingChanges(repo, preview.sourceId, (result, vars) => {
     if (vars.runSetup) runSetup(result.worktreeId);
   });
@@ -134,11 +134,14 @@ function MoveForm({
             any destination edits are preserved.
           </p>
         )}
-        <label className="flex cursor-pointer items-center gap-2 text-xs text-fg-2">
+        <label
+          className="flex cursor-pointer items-center gap-2 text-xs text-fg-2"
+          title={reach.runOff}
+        >
           <input
             type="checkbox"
-            checked={setup}
-            disabled={move.isPending}
+            checked={setup && !reach.runOff}
+            disabled={move.isPending || reach.runOff !== undefined}
             onChange={(e) => setSetup(e.target.checked)}
             className="h-3.5 w-3.5 cursor-pointer accent-[var(--accent)]"
           />
@@ -158,7 +161,7 @@ function MoveForm({
               move.mutate(
                 {
                   id: preview.id,
-                  runSetup: setup,
+                  runSetup: setup && !reach.runOff,
                   branch: name,
                   ticketId: ticket.trim() || null,
                   destination: {

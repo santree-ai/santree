@@ -10,6 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::git::Checkout;
+
 /// The ignore file santree drops into a fresh `.santree/`. `reviews/` is the
 /// pre-unification review checkout dir, still present in older repos.
 const IGNORE: &str = "\
@@ -19,15 +21,15 @@ worktrees/
 reviews/
 ";
 
-/// The repo's `.santree/` directory, created (with its `.gitignore`) if missing.
-pub fn ensure(repo_root: &Path) -> std::io::Result<PathBuf> {
-    let dir = repo_root.join(".santree");
-    std::fs::create_dir_all(&dir)?;
-    let ignore = dir.join(".gitignore");
-    if !ignore.exists() {
-        std::fs::write(&ignore, IGNORE)?;
+/// The repo's `.santree/` directory, created with its `.gitignore` if that is
+/// missing — in the checkout, wherever it lives (blocking: on Daedalus it asks
+/// the box).
+pub fn ensure(repo_root: &Checkout) -> anyhow::Result<()> {
+    let ignore = repo_root.path().join(".santree").join(".gitignore");
+    if repo_root.stat(&ignore)?.is_none() {
+        repo_root.write(&ignore, IGNORE.as_bytes())?;
     }
-    Ok(dir)
+    Ok(())
 }
 
 /// Where a repo's committed prompt layers live: `.santree/prompts/<name>.njk`.
@@ -43,9 +45,8 @@ mod tests {
     fn ensure_creates_the_dir_and_ignore_once() {
         let root = std::env::temp_dir().join(format!("santree-dir-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let dir = ensure(&root).unwrap();
-        assert!(dir.is_dir());
-        let ignore = dir.join(".gitignore");
+        ensure(&Checkout::local(&root)).unwrap();
+        let ignore = root.join(".santree").join(".gitignore");
         assert!(std::fs::read_to_string(&ignore)
             .unwrap()
             .lines()
@@ -53,7 +54,7 @@ mod tests {
 
         // A repo's own edit to the ignore file survives the next ensure.
         std::fs::write(&ignore, "worktrees/\nprompts/\n").unwrap();
-        ensure(&root).unwrap();
+        ensure(&Checkout::local(&root)).unwrap();
         assert_eq!(
             std::fs::read_to_string(&ignore).unwrap(),
             "worktrees/\nprompts/\n"

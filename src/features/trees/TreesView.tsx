@@ -248,7 +248,7 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
               <WelcomeSurface
                 workspace={{
                   onOpenTerminal: () => addTab("terminal"),
-                  actionsOff: reach.actionsOff,
+                  actionsOff: reach.runOff,
                 }}
               />
             </div>

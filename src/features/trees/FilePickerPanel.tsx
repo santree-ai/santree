@@ -259,7 +259,7 @@ export function FilePickerPanel() {
           open: () => openPrDialog(activeId),
           suggestAfterPush: () => suggestPr(activeId),
         }}
-        actionsOff={reach.actionsOff}
+        actionsOff={reach.gitOff}
       />
     ),
     // Agent sessions are read from this Mac's transcripts; a Daedalus project's

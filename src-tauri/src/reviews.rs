@@ -14,19 +14,22 @@ use santree_core::domain::{
     ReviewCheckout, ReviewEvent, ReviewInbox, ReviewPr, ReviewProject, ReviewTarget, TeamReviews,
 };
 
+use crate::daedalus::host::DaedalusHost;
 use crate::db::Db;
 use crate::git;
 use crate::github;
 use crate::repo;
 use crate::review_drafts;
 
-/// `(owner, name)` of the active repo's `origin` remote. Remote parsing shells out
-/// to git, so it runs off the async pool.
-pub(crate) async fn origin(db: &Db, repo: &str) -> Result<(String, String)> {
-    let root = repo::path(db, repo)
-        .await?
-        .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))?;
-    let root = git::Checkout::local(root);
+/// `(owner, name)` of the active repo's `origin` remote, read in its checkout
+/// wherever it lives. Remote parsing shells out to git, so it runs off the
+/// async pool.
+pub(crate) async fn origin(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+) -> Result<(String, String)> {
+    let root = crate::worktree::root(db, daedalus, repo).await?;
     tokio::task::spawn_blocking(move || github::owner_repo(&root)).await?
 }
 
@@ -215,8 +218,11 @@ pub async fn review_workspace(
     // A base that isn't a usable branch name falls back to the repo's default,
     // which is what `worktree::create` does with `None`.
     let base = git::safe_branch(&target.base_ref).ok();
+    // A PR's project is found among the registered local ones
+    // (`repo::registered`), so its checkout is on this machine.
     let worktree = crate::worktree::create(
         db,
+        &git::Checkout::local(&found.root),
         &found.project,
         &id,
         &target.title,
@@ -495,7 +501,8 @@ pub async fn review_checkout(
     let id = review_worktree_id(&found.owner, &found.name, number)?;
     // The same read every other worktree gets: it is on a branch now, so its
     // ahead/behind and remote-sync numbers mean what they mean everywhere else.
-    let Some(worktree) = crate::worktree::get(db, &found.project, &id).await? else {
+    let Some(worktree) = crate::worktree::get(db, &git::Checkout::local(&found.root), &id).await?
+    else {
         return Ok(None);
     };
     Ok(Some(ReviewCheckout {
@@ -539,7 +546,14 @@ pub async fn remove_review_workspace(
     let id = review_worktree_id(&found.owner, &found.name, number)?;
     // No prompts root: a per-worktree prompt file is written when *you* start a
     // task in a tree, and nothing writes one for a pull request you are reading.
-    crate::worktree::remove(db, &found.project, &id, None).await?;
+    crate::worktree::remove(
+        db,
+        &git::Checkout::local(&found.root),
+        &found.project,
+        &id,
+        None,
+    )
+    .await?;
     // The membership row goes with the worktree it classified.
     unmark_review(db, &found.root, &id).await;
     Ok(())
@@ -748,17 +762,11 @@ pub async fn inbox(db: &Db) -> Result<ReviewInbox> {
 /// answer is carried back with it: the panel's "no queue here" is about *this*
 /// repo while the inbox beside it is about the whole org, and neither empty
 /// state is readable without saying which.
-pub async fn merge_queue(db: &Db, repo: &str) -> Result<MergeQueueView> {
-    // A Daedalus repo's `origin` lives on the server, and reading it needs the
-    // remote link (docs/remote.md). Until then its queue is unknown, not an error.
-    if repo::is_daedalus(db, repo).await? {
-        return Ok(MergeQueueView {
-            repo: String::new(),
-            github_connected: github::token().await.is_some(),
-            queue: None,
-        });
-    }
-    let (token, remote) = tokio::join!(github::token(), origin(db, repo));
+///
+/// The `origin` is read in the checkout — on the box, for a Daedalus project —
+/// and GitHub is asked from here, by that slug.
+pub async fn merge_queue(db: &Db, daedalus: &DaedalusHost, repo: &str) -> Result<MergeQueueView> {
+    let (token, remote) = tokio::join!(github::token(), origin(db, daedalus, repo));
     let slug = remote
         .as_ref()
         .map(|(owner, name)| format!("{owner}/{name}"))

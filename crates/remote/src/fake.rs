@@ -278,6 +278,9 @@ struct Daemon {
     hooks: Mutex<HookQueue>,
     next_conn: AtomicU64,
     conns: Mutex<HashMap<u64, Arc<Notify>>>,
+    /// The argv of every `exec.run` served, in order — what a test reads to
+    /// know a command ran here, on the "box", and not somewhere else.
+    execs: Mutex<Vec<Vec<String>>>,
 }
 
 impl Drop for Daemon {
@@ -320,6 +323,7 @@ impl FakeDaemon {
                 }),
                 next_conn: AtomicU64::new(1),
                 conns: Mutex::new(HashMap::new()),
+                execs: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -380,6 +384,11 @@ impl FakeDaemon {
         for kill in lock(&self.inner.conns).values() {
             kill.notify_one();
         }
+    }
+
+    /// The argv of every `exec.run` this daemon has served, oldest first.
+    pub fn exec_log(&self) -> Vec<Vec<String>> {
+        lock(&self.inner.execs).clone()
     }
 
     pub fn connection_count(&self) -> usize {
@@ -705,7 +714,11 @@ impl Daemon {
                 let p = params!(PtyAdoptParams);
                 blocking(move || Some(this.pty_adopt(&p.owner))).await
             }
-            m::ExecRun::NAME => Some(exec_run(params!(ExecParams)).await),
+            m::ExecRun::NAME => {
+                let p = params!(ExecParams);
+                lock(&this.execs).push(p.argv.clone());
+                Some(exec_run(p).await)
+            }
             m::FsRead::NAME => {
                 let p = params!(FsReadParams);
                 blocking(move || Some(fs_read(&p).and_then(|r| ok(&r)))).await

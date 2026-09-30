@@ -11,6 +11,7 @@ mod checkout;
 pub(crate) mod split;
 
 pub use checkout::Checkout;
+pub(crate) use checkout::FsKind;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -147,10 +148,12 @@ pub fn git_output(cwd: &Checkout, args: &[&str]) -> Result<String> {
 /// can't be spawned — a non-zero exit is reported via the bool, so callers can
 /// handle commands that exit non-zero by design (e.g. `diff --no-index`).
 fn git_capture(cwd: &Checkout, args: &[&str]) -> Result<(bool, String, String)> {
-    #[cfg(test)]
-    count_git_call(cwd.path());
     let out = cwd.git(args)?;
-    Ok((out.ok, out.stdout, out.stderr))
+    Ok((
+        out.ok,
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.stderr,
+    ))
 }
 
 /// How long to keep retrying a command blocked on a `.git/index.lock` we don't
@@ -377,6 +380,15 @@ fn read_pointer_file(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// Refuse a worktree destination that is already taken. `git worktree add`
+/// makes the directory (and its parents) itself, wherever the checkout is.
+fn ensure_absent(repo: &Checkout, worktree_path: &Path) -> Result<()> {
+    if repo.stat(worktree_path)?.is_some() {
+        bail!("Worktree already exists at {}", worktree_path.display());
+    }
+    Ok(())
+}
+
 /// Create a git worktree at `worktree_path` checked out on `branch`.
 ///
 /// Best-effort fetches `base` first so the new branch starts from the freshest
@@ -388,15 +400,7 @@ pub fn create_worktree(
     branch: &str,
     base: &str,
 ) -> Result<()> {
-    // It makes the directory itself, so the checkout has to be on this machine.
-    repo.local_path()?;
-    if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if worktree_path.exists() {
-        bail!("Worktree already exists at {}", worktree_path.display());
-    }
-
+    ensure_absent(repo, worktree_path)?;
     let path = worktree_path.to_string_lossy();
     if branch_exists(repo, branch) {
         git(repo, &["worktree", "add", &path, branch])?;
@@ -417,13 +421,7 @@ pub fn create_worktree(
 /// locally it's checked out directly; otherwise a local branch tracking
 /// `origin/<branch>` is created. `branch` must be caller-validated (no leading `-`).
 pub fn add_worktree_for_branch(repo: &Checkout, worktree_path: &Path, branch: &str) -> Result<()> {
-    repo.local_path()?;
-    if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if worktree_path.exists() {
-        bail!("Worktree already exists at {}", worktree_path.display());
-    }
+    ensure_absent(repo, worktree_path)?;
     let path = worktree_path.to_string_lossy();
 
     // Freshen the branch from origin so we check out its latest tip.
@@ -620,45 +618,36 @@ pub fn remove_legacy_review_checkout(repo: &Checkout, worktree_path: &Path) {
 /// the path is fully forgotten (and the id can be reused later). Branch deletion
 /// is best-effort (it may be checked out elsewhere or already gone).
 pub fn remove_worktree(repo: &Checkout, worktree_path: &Path, branch: &str) -> Result<()> {
-    // It may have to delete the directory itself, so it runs on this machine only.
-    repo.local_path()?;
     let path = worktree_path.to_string_lossy().into_owned();
-    if git(repo, &["worktree", "remove", "--force", &path]).is_err() {
-        // Half-removed (or never a real worktree): finish the job manually.
-        if worktree_path.exists() {
-            let _ = std::fs::remove_dir_all(worktree_path);
-        }
+    let removed = git(repo, &["worktree", "remove", "--force", &path]).is_ok();
+    // Half-removed (or never a real worktree): finish the job by hand. A clean
+    // removal can still leave untracked files behind.
+    let _ = repo.remove(worktree_path);
+    if !removed {
         // Forget any orphaned admin entry so `<id>` is free to recreate.
         let _ = git(repo, &["worktree", "prune"]);
-    } else if worktree_path.exists() {
-        // Clean removal can still leave untracked files behind.
-        let _ = std::fs::remove_dir_all(worktree_path);
     }
     let _ = git(repo, &["branch", "-D", branch]);
     Ok(())
 }
 
-/// The branch checked out at `worktree_path`, read from `git worktree list`.
-/// Returns `None` when the path isn't a registered worktree (e.g. a stale dir).
-/// Used to adopt worktrees the app didn't create (the CLI, a prior run).
-pub fn worktree_branch(repo: &Checkout, worktree_path: &Path) -> Option<String> {
-    // Paths are compared canonicalized on this machine's filesystem.
-    repo.local_path().ok()?;
-    let out = git_output(repo, &["worktree", "list", "--porcelain"]).ok()?;
-    let target =
-        std::fs::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
-    let mut at_target = false;
-    for line in out.lines() {
-        if let Some(p) = line.strip_prefix("worktree ") {
-            let path = std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
-            at_target = path == target;
-        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
-            if at_target {
-                return Some(branch.to_string());
-            }
-        }
-    }
-    None
+/// Whether `dir` is a git checkout in its own right — a registered worktree —
+/// rather than a directory that merely lives inside a repo. `git -C` on an
+/// unregistered directory under the repo resolves *upward* to the root `.git`
+/// and answers for the root checkout, so the question is "is this its own top
+/// level?": the prefix from the top level to `dir` is empty. Asked of git
+/// rather than of canonicalized paths, which would mean nothing on a machine
+/// the checkout isn't on.
+pub fn is_own_worktree(dir: &Checkout) -> bool {
+    git(dir, &["rev-parse", "--show-prefix"]).is_ok_and(|prefix| prefix.is_empty())
+}
+
+/// The branch checked out in `worktree`; `None` when HEAD is detached. Used to
+/// adopt worktrees the app didn't create (the CLI, a prior run).
+pub fn worktree_branch(worktree: &Checkout) -> Option<String> {
+    git(worktree, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .ok()
+        .filter(|branch| !branch.is_empty())
 }
 
 /// Every branch already checked out in one of the repo's worktrees — the main

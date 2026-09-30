@@ -27,7 +27,12 @@ const trees = vi.hoisted(() => ({
   addTab: vi.fn<(kind: TabKind, agentKind?: AgentKind) => string | null>(),
   closeTab: vi.fn<(id: string) => void>(),
   renameTab: vi.fn(),
-  reach: { remote: false, readable: true, actionsOff: undefined as string | undefined },
+  reach: {
+    remote: false,
+    readable: true,
+    gitOff: undefined as string | undefined,
+    runOff: undefined as string | undefined,
+  },
 }));
 
 vi.mock("./model", async (importOriginal) => ({

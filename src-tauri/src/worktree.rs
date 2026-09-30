@@ -93,14 +93,6 @@ impl BranchPlan<'_> {
     }
 }
 
-/// A stored issue ↔ worktree link's git coordinates, hydrated from
-/// `worktree_links`. The `list` query reads the full row separately; this is
-/// only what the single-worktree operations need to find the directory.
-struct Link {
-    branch: String,
-    worktree_path: String,
-}
-
 /// A full `worktree_links` row — read back for building a `Worktree` (list/get) and
 /// built up by `create` for the insert. One `FromRow` struct so the column list
 /// isn't spelled out as a tuple twice.
@@ -120,91 +112,81 @@ struct LinkRow {
 const LINK_COLUMNS: &str =
     "issue_id, ticket_id, title, project, branch, worktree_path, base_branch, agent, setup_ran";
 
-/// Resolve a registered repo's top-level path **on this machine**, erroring if it
-/// has none — a Daedalus repo included, so the writes that still resolve through
-/// this refuse one rather than touching a local path that shares its spelling.
-/// Reads resolve through [`locate`], which knows where every repo lives.
-async fn repo_root(db: &Db, repo: &str) -> Result<String> {
+/// Where a registered repo's checkout lives — the root every worktree operation
+/// runs in, here or on Daedalus ([`repo::checkout`]). Errors for an unknown
+/// repo, and for a Daedalus one while the link is down: nothing falls back to
+/// this machine.
+pub(crate) async fn root(db: &Db, daedalus: &DaedalusHost, repo: &str) -> Result<Checkout> {
+    repo::checkout(db, daedalus, repo)
+        .await?
+        .ok_or_else(|| anyhow!("repo '{repo}' has no path"))
+}
+
+/// The key a root's worktree rows are filed under: its stored path, spelled as
+/// its own machine spells it.
+fn root_key(root: &Checkout) -> String {
+    root.path().to_string_lossy().into_owned()
+}
+
+/// A registered repo's stored path, wherever it lives — for the bookkeeping
+/// that only touches rows (titles, ticket ids, run keys).
+async fn stored_root(db: &Db, repo: &str) -> Result<String> {
+    repo::stored_path(db, repo)
+        .await?
+        .ok_or_else(|| anyhow!("repo '{repo}' has no path"))
+}
+
+/// A registered repo's top-level path **on this machine**, for what still runs
+/// only here: setup scripts and the agent prompt files (docs/remote.md). A
+/// Daedalus repo is refused rather than touched at a local path that shares its
+/// spelling.
+async fn local_root(db: &Db, repo: &str) -> Result<String> {
     repo::path(db, repo)
         .await?
         .ok_or_else(|| anyhow!("repo '{repo}' has no local path"))
 }
 
-/// Fetch the link for one issue, or `None` when the worktree isn't tracked.
-async fn link(db: &Db, repo_root: &str, issue_id: &str) -> Result<Option<Link>> {
-    let row = sqlx::query_as::<_, (String, String)>(
-        "SELECT branch, worktree_path
-         FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
+/// The stored directory of one issue's worktree, or `None` when it isn't tracked.
+async fn linked_path(db: &Db, repo_root: &str, issue_id: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT worktree_path FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
     )
     .bind(repo_root)
     .bind(issue_id)
     .fetch_optional(db)
-    .await?;
-    Ok(row.map(|(branch, worktree_path)| Link {
-        branch,
-        worktree_path,
-    }))
+    .await?)
 }
 
-/// A worktree's git coordinates, for operations that need more than the path
-/// (commit-message drafting, PR creation): branch, its base, and the directory.
+/// A worktree's git coordinates, for operations that need more than the
+/// directory (push, pull, PR creation): its branch, its base, and the checkout.
 #[derive(Clone)]
 pub(crate) struct Coords {
     pub branch: String,
     pub base_branch: String,
-    pub path: PathBuf,
+    pub dir: Checkout,
 }
 
-impl Coords {
-    /// The worktree as a git checkout — on this machine, where [`coords`] finds it.
-    pub fn checkout(&self) -> Checkout {
-        Checkout::local(&self.path)
-    }
-}
-
-/// Resolve a worktree's branch, base branch, and directory, erroring when the
-/// issue isn't tracked.
-pub(crate) async fn coords(db: &Db, repo: &str, issue_id: &str) -> Result<Coords> {
-    let root = repo_root(db, repo).await?;
-    if issue_id == BASE_ID {
-        let root_path = PathBuf::from(&root);
-        // The base card is the repo root *as it stands*: its branch is whatever HEAD
-        // points at, which is where a commit made from it would land. Usually that's
-        // the default branch — but when the user has checked out something else in the
-        // root, claiming "main" would push/PR the wrong branch under the wrong label.
-        let (branch, base_branch) = tokio::task::spawn_blocking({
-            let root_path = root_path.clone();
-            move || {
-                let root = Checkout::local(root_path);
-                (head_branch(&root), git::default_branch(&root))
-            }
+/// Resolve a worktree's branch, base branch and checkout, wherever it lives;
+/// errors when the issue isn't tracked or its directory is gone.
+///
+/// The base entry is the repo root *as it stands*: its branch is whatever HEAD
+/// points at, which is where a commit made from it would land. Usually that's
+/// the default branch — but when the user has checked out something else in the
+/// root, claiming "main" would push/PR the wrong branch under the wrong label.
+pub(crate) async fn coords(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+) -> Result<Coords> {
+    with_checkout(db, daedalus, repo, issue_id, |w| {
+        Ok(Coords {
+            branch: w.branch.clone().unwrap_or_else(|| head_branch(&w.dir)),
+            base_branch: w.base_branch(),
+            dir: w.dir.clone(),
         })
-        .await?;
-        return Ok(Coords {
-            branch,
-            base_branch,
-            path: root_path,
-        });
-    }
-    let row = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT branch, base_branch, worktree_path
-         FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
-    )
-    .bind(&root)
-    .bind(issue_id)
-    .fetch_optional(db)
-    .await?
-    .ok_or_else(|| anyhow!("no worktree for issue '{issue_id}'"))?;
-    Ok(Coords {
-        branch: row.0,
-        base_branch: row.1,
-        path: available_checkout(PathBuf::from(row.2))?,
     })
-}
-
-fn available_checkout(path: PathBuf) -> Result<PathBuf> {
-    ensure_available(&Checkout::local(&path))?;
-    Ok(path)
+    .await
 }
 
 /// Refuse a worktree whose directory has gone (blocking: on Daedalus it asks the
@@ -222,7 +204,7 @@ fn ensure_available(dir: &Checkout) -> Result<()> {
 /// this when the live Linear title differs from what's stored, so the sidebar
 /// stays accurate without the (git-only, offline-capable) list ever hitting Linear.
 pub async fn set_title(db: &Db, repo: &str, issue_id: &str, title: &str) -> Result<()> {
-    let root = repo_root(db, repo).await?;
+    let root = stored_root(db, repo).await?;
     sqlx::query("UPDATE worktree_links SET title = ? WHERE repo_path = ? AND issue_id = ?")
         .bind(title)
         .bind(&root)
@@ -232,24 +214,11 @@ pub async fn set_title(db: &Db, repo: &str, issue_id: &str, title: &str) -> Resu
     Ok(())
 }
 
-/// Resolve the worktree directory for an issue, erroring when it isn't tracked.
-/// The base sentinel resolves to the repo root, so the commit-box / file ops work
-/// on the base branch checkout directly.
-async fn worktree_path(db: &Db, repo: &str, issue_id: &str) -> Result<PathBuf> {
-    let root = repo_root(db, repo).await?;
-    if issue_id == BASE_ID {
-        return available_checkout(PathBuf::from(root));
-    }
-    let l = link(db, &root, issue_id)
-        .await?
-        .ok_or_else(|| anyhow!("no worktree for issue '{issue_id}'"))?;
-    available_checkout(PathBuf::from(l.worktree_path))
-}
-
-/// A worktree to read, wherever its repo lives: its checkout and, for a tracked
-/// worktree, the base it was cut from.
+/// A worktree, wherever its repo lives: its checkout and, for a tracked
+/// worktree, the branch it was created on and the base it was cut from.
 struct Located {
     dir: Checkout,
+    branch: Option<String>,
     base: Option<String>,
 }
 
@@ -263,37 +232,39 @@ impl Located {
     }
 }
 
-/// Where a worktree's checkout is — the one resolution every read of a worktree
-/// goes through, for local and Daedalus repos alike ([`repo::checkout`]).
-/// Errors when the repo or the worktree isn't known, and for a Daedalus repo
-/// while the link is down.
+/// Where a worktree's checkout is — the one resolution every operation on a
+/// worktree goes through, reads and writes, for local and Daedalus repos alike
+/// ([`repo::checkout`]). Errors when the repo or the worktree isn't known, and
+/// for a Daedalus repo while the link is down. The base sentinel is the repo
+/// root, so the commit box and the file ops work on its checkout directly.
 async fn locate(db: &Db, daedalus: &DaedalusHost, repo: &str, issue_id: &str) -> Result<Located> {
-    let root = repo::checkout(db, daedalus, repo)
-        .await?
-        .ok_or_else(|| anyhow!("repo '{repo}' has no path"))?;
+    let root = root(db, daedalus, repo).await?;
     if issue_id == BASE_ID {
         return Ok(Located {
             dir: root,
+            branch: None,
             base: None,
         });
     }
-    let (base, path) = sqlx::query_as::<_, (String, String)>(
-        "SELECT base_branch, worktree_path FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
+    let (branch, base, path) = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT branch, base_branch, worktree_path
+         FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
     )
-    .bind(root.path().to_string_lossy())
+    .bind(root_key(&root))
     .bind(issue_id)
     .fetch_optional(db)
     .await?
     .ok_or_else(|| anyhow!("no worktree for issue '{issue_id}'"))?;
     Ok(Located {
         dir: root.at(path),
+        branch: Some(branch),
         base: Some(base),
     })
 }
 
 /// [`locate`] a worktree and run `f` on it on the blocking pool, once its
-/// directory is known to exist — the shape every worktree read shares. `f` is
-/// `Send + 'static`, so callers pass owned data.
+/// directory is known to exist — the shape every worktree operation shares,
+/// reads and writes. `f` is `Send + 'static`, so callers pass owned data.
 async fn with_checkout<T, F>(
     db: &Db,
     daedalus: &DaedalusHost,
@@ -311,6 +282,23 @@ where
         f(&located)
     })
     .await?
+}
+
+/// A worktree's directory **on this machine**, for what still reads only here:
+/// the agent session transcripts keyed by it. A Daedalus repo is refused
+/// ([`local_root`]).
+pub(crate) async fn local_worktree(db: &Db, repo: &str, issue_id: &str) -> Result<PathBuf> {
+    let root = local_root(db, repo).await?;
+    let path = if issue_id == BASE_ID {
+        PathBuf::from(root)
+    } else {
+        let path = linked_path(db, &root, issue_id)
+            .await?
+            .ok_or_else(|| anyhow!("no worktree for issue '{issue_id}'"))?;
+        PathBuf::from(path)
+    };
+    ensure_available(&Checkout::local(&path))?;
+    Ok(path)
 }
 
 /// The repo root as a worktree-like entry: the checkout the per-issue worktrees
@@ -506,9 +494,8 @@ fn build_worktree(dir: &Checkout, row: LinkRow, kind: git::BaseKind) -> Worktree
 /// `remote_behind`/`pull_conflict` are reported as zero rather than read off a
 /// tracking ref nobody refreshed. An adopted worktree's remote state, if any, lands
 /// on the next `list`/`get` refresh.
-fn build_worktree_local(row: LinkRow, kind: git::BaseKind) -> Worktree {
-    let dir = Checkout::local(&row.worktree_path);
-    let mut stats = git::stats(&dir, &row.branch, &row.base_branch, kind);
+fn build_worktree_local(dir: &Checkout, row: LinkRow, kind: git::BaseKind) -> Worktree {
+    let mut stats = git::stats(dir, &row.branch, &row.base_branch, kind);
     stats.remote_behind = 0;
     build_worktree_from(row, stats, false)
 }
@@ -560,17 +547,21 @@ async fn link_row(db: &Db, repo_root: &str, issue_id: &str) -> Result<Option<Lin
     .await?)
 }
 
-/// The tracked worktree for one issue (with live stats), or `None` if untracked.
-pub async fn get(db: &Db, repo: &str, issue_id: &str) -> Result<Option<Worktree>> {
-    let root = repo_root(db, repo).await?;
-    let Some(row) = link_row(db, &root, issue_id).await? else {
+/// The tracked worktree for one issue under `root` (with live stats), or `None`
+/// if untracked.
+pub async fn get(db: &Db, root: &Checkout, issue_id: &str) -> Result<Option<Worktree>> {
+    let key = root_key(root);
+    let Some(row) = link_row(db, &key, issue_id).await? else {
         return Ok(None);
     };
-    let dir = Checkout::local(available_checkout(PathBuf::from(&row.worktree_path))?);
-    let kind = base_kind_of(db, &root, &row.base_branch).await?;
-    Ok(Some(
-        tokio::task::spawn_blocking(move || build_worktree(&dir, row, kind)).await?,
-    ))
+    let kind = base_kind_of(db, &key, &row.base_branch).await?;
+    let dir = root.at(&row.worktree_path);
+    let worktree = tokio::task::spawn_blocking(move || -> Result<Worktree> {
+        ensure_available(&dir)?;
+        Ok(build_worktree(&dir, row, kind))
+    })
+    .await??;
+    Ok(Some(worktree))
 }
 
 /// The repo's branches, for the Create-worktree dialog's Branch source. Empty
@@ -617,6 +608,7 @@ fn create_lock(root: &str, identity: &str) -> CreateLock {
 #[allow(clippy::too_many_arguments)]
 pub async fn create(
     db: &Db,
+    root: &Checkout,
     repo: &str,
     issue_id: &str,
     title: &str,
@@ -632,7 +624,7 @@ pub async fn create(
     if let Some(b) = plan.named() {
         validate_branch_name(b)?;
     }
-    let root = repo_root(db, repo).await?;
+    let key = root_key(root);
 
     // Held across the whole create: the tracked-check, the (slow) git work and the
     // insert must be one unit. PR trees have two independent identities: their
@@ -648,8 +640,8 @@ pub async fn create(
         format!("branch:{target_branch}"),
     ];
     lock_keys.sort_unstable();
-    let primary_lock = create_lock(&root, &lock_keys[0]);
-    let secondary_lock = lock_keys.get(1).map(|key| create_lock(&root, key));
+    let primary_lock = create_lock(&key, &lock_keys[0]);
+    let secondary_lock = lock_keys.get(1).map(|lock_key| create_lock(&key, lock_key));
     let _primary_guard = primary_lock.lock().await;
     let _secondary_guard = if let Some(lock) = secondary_lock.as_ref() {
         Some(lock.lock().await)
@@ -660,7 +652,7 @@ pub async fn create(
     // Already tracked → just open it, unless a PR caller is asking for a different
     // branch. Returning the old checkout would give the new PR prompt authority over
     // unrelated files under a deceptively matching ticket id.
-    if let Some(existing) = get(db, repo, issue_id).await? {
+    if let Some(existing) = get(db, root, issue_id).await? {
         if let Some(requested_branch) = plan.named() {
             ensure!(
                 existing.branch == requested_branch,
@@ -677,7 +669,7 @@ pub async fn create(
     let existing_issue = sqlx::query_scalar::<_, String>(
         "SELECT issue_id FROM worktree_links WHERE repo_path = ? AND branch = ?",
     )
-    .bind(&root)
+    .bind(&key)
     .bind(&target_branch)
     .fetch_all(db)
     .await?
@@ -691,7 +683,7 @@ pub async fn create(
             !matches!(plan, BranchPlan::Split(_)),
             "Another worktree already owns this split branch"
         );
-        return get(db, repo, &existing_issue)
+        return get(db, root, &existing_issue)
             .await?
             .ok_or_else(|| anyhow!("tracked worktree {existing_issue} disappeared"));
     }
@@ -712,31 +704,34 @@ pub async fn create(
     let exact_split = matches!(plan, BranchPlan::Split(_));
     let checkout_existing = matches!(plan, BranchPlan::Existing(_));
     let (base_branch, branch, wt_path_str) = {
-        let root = root.clone();
+        let repo = root.clone();
         let issue_id = issue_id.to_string();
         let base = base.map(str::to_string);
         let target_branch = target_branch.clone();
         tokio::task::spawn_blocking(move || -> Result<_> {
-            let root_path = Path::new(&root);
-            let repo = Checkout::local(root_path);
             let base_branch = match base {
                 Some(b) => b,
                 None => git::default_branch(&repo),
             };
             // First contact with the repo's `.santree/` also writes its ignore
             // file, so the checkout about to land under it is never content.
-            crate::santree_dir::ensure(root_path)?;
-            let wt_path = root_path.join(".santree").join("worktrees").join(&issue_id);
+            crate::santree_dir::ensure(&repo)?;
+            let wt_path = repo
+                .path()
+                .join(".santree")
+                .join("worktrees")
+                .join(&issue_id);
             // Only a *registered* worktree may be adopted. A directory git doesn't know
             // as one (an interrupted delete, a pruned admin entry, a hand-made dir) sits
             // inside the repo's own working tree, so every later `git -C <dir>` resolves
             // up to the root `.git` — stage/commit would silently act on the root
             // checkout's branch under this issue's label. Reclaim an empty leftover;
             // refuse anything with contents rather than delete work we didn't create.
-            let adopted = is_registered_worktree(&wt_path)
-                .then(|| git::worktree_branch(&repo, &wt_path).unwrap_or(target_branch.clone()));
-            if adopted.is_none() && wt_path.exists() {
-                std::fs::remove_dir(&wt_path).map_err(|e| {
+            let wt = repo.at(&wt_path);
+            let adopted = git::is_own_worktree(&wt)
+                .then(|| git::worktree_branch(&wt).unwrap_or(target_branch.clone()));
+            if adopted.is_none() && repo.stat(&wt_path)?.is_some() {
+                repo.remove_empty_dir(&wt_path).map_err(|e| {
                     anyhow!(
                         "{} exists but is not a git worktree ({e}) — remove it and try again",
                         wt_path.display()
@@ -751,7 +746,7 @@ pub async fn create(
                 );
                 b
             } else if exact_split {
-                git::split::create_worktree(root_path, &wt_path, &target_branch, &base_branch)?;
+                git::split::create_worktree(&repo, &wt_path, &target_branch, &base_branch)?;
                 target_branch
             } else if checkout_existing {
                 // Check out an existing branch (a PR's head) rather than branching new
@@ -783,14 +778,14 @@ pub async fn create(
         agent: agent.map(|kind| kind.as_str().to_string()),
         setup_ran: 0,
     };
-    let row = if insert_link(db, &root, &row).await? {
+    let row = if insert_link(db, &key, &row).await? {
         row
     } else {
         // Lost a race with a concurrent create for the same issue (double-clicked
         // Run, or an Issues launch racing a Trees one, both past the `get` check
         // above while the slow git work ran) — adopt the winner's row instead of
         // reporting our own, never-persisted values.
-        link_row(db, &root, issue_id)
+        link_row(db, &key, issue_id)
             .await?
             .ok_or_else(|| anyhow!("worktree {issue_id} missing after create"))?
     };
@@ -819,8 +814,9 @@ pub async fn create(
     // Build the response locally: `get` would probe the remote for a branch that by
     // construction isn't on origin yet, holding "Creating workspace…" for a doomed
     // network round-trip on every single task start.
-    let kind = base_kind_of(db, &root, &row.base_branch).await?;
-    Ok(tokio::task::spawn_blocking(move || build_worktree_local(row, kind)).await?)
+    let kind = base_kind_of(db, &key, &row.base_branch).await?;
+    let dir = root.at(&row.worktree_path);
+    Ok(tokio::task::spawn_blocking(move || build_worktree_local(&dir, row, kind)).await?)
 }
 
 /// Record the issue ↔ worktree link, reporting whether *this* call inserted it.
@@ -861,11 +857,13 @@ async fn insert_link(db: &Db, repo_root: &str, row: &LinkRow) -> Result<bool> {
 /// up the chain.
 pub async fn remove(
     db: &Db,
+    root: &Checkout,
     repo: &str,
     issue_id: &str,
     prompts_root: Option<&Path>,
 ) -> Result<()> {
-    let root = repo_root(db, repo).await?;
+    let dir = root.clone();
+    let root = root_key(root);
     // A setup script running here would keep building — and spawning children —
     // against a directory we're about to `remove_dir_all`, then outlive it headless.
     stream::RUNS.cancel(&setup_key(&root, issue_id));
@@ -885,13 +883,10 @@ pub async fn remove(
         // Muted like create's checkout: deleting a big tree is the same kind of
         // self-inflicted event storm (see git_watch::BULK_OPS).
         let _mute = crate::git_watch::suppress_events(issue_id);
-        let root = root.clone();
         let branch = branch.clone();
         let wt = worktree_path.clone();
-        tokio::task::spawn_blocking(move || {
-            git::remove_worktree(&Checkout::local(&root), Path::new(&wt), &branch)
-        })
-        .await??;
+        tokio::task::spawn_blocking(move || git::remove_worktree(&dir, Path::new(&wt), &branch))
+            .await??;
     }
 
     // Forget the terminal session tied to this worktree — and its persisted extra
@@ -963,11 +958,11 @@ pub async fn run_setup_streamed(
     issue_id: &str,
     on_event: Channel<StreamEvent>,
 ) -> Result<()> {
-    let root = repo_root(db, repo).await?;
-    let l = link(db, &root, issue_id)
+    let root = local_root(db, repo).await?;
+    let wt_dir = linked_path(db, &root, issue_id)
         .await?
         .ok_or_else(|| anyhow!("no worktree for issue '{issue_id}'"))?;
-    let wt_path = PathBuf::from(&l.worktree_path);
+    let wt_path = PathBuf::from(&wt_dir);
     let script = init_script_path(&root);
 
     let runnable = tokio::task::spawn_blocking({
@@ -992,10 +987,10 @@ pub async fn run_setup_streamed(
     // The user's configured project env, so `init.sh` sees the same variables the
     // Terminal does — otherwise it behaves differently in the Setup tab than when the
     // user runs it by hand (a missing DATABASE_URL, a private-registry token, …).
-    let mut env = crate::env::resolve_env(db, Some(&l.worktree_path)).await;
+    let mut env = crate::env::resolve_env(db, Some(&wt_dir)).await;
     // santree's own variables are the run's contract with the script, so they go
     // last and aren't overridable by the user's project env.
-    env.push(("SANTREE_WORKTREE_PATH".into(), l.worktree_path.clone()));
+    env.push(("SANTREE_WORKTREE_PATH".into(), wt_dir.clone()));
     env.push(("SANTREE_REPO_ROOT".into(), root.clone()));
 
     let ev = on_event.clone();
@@ -1032,7 +1027,7 @@ pub async fn run_setup_streamed(
 /// reports failure — there's no separate teardown path to keep in sync.
 pub async fn cancel_setup(db: &Db, repo: &str, issue_id: &str) -> Result<bool> {
     validate_issue_id(issue_id)?;
-    let root = repo_root(db, repo).await?;
+    let root = stored_root(db, repo).await?;
     Ok(stream::RUNS.cancel(&setup_key(&root, issue_id)))
 }
 
@@ -1046,7 +1041,7 @@ pub async fn resize_setup(
     rows: u16,
 ) -> Result<bool> {
     validate_issue_id(issue_id)?;
-    let root = repo_root(db, repo).await?;
+    let root = stored_root(db, repo).await?;
     Ok(stream::RUNS.resize(&setup_key(&root, issue_id), cols, rows))
 }
 
@@ -1057,17 +1052,17 @@ fn shell_quote(s: &str) -> String {
 
 /// Merge the base branch (origin/main, etc.) into the worktree — the "pull from
 /// main/master" button. Errors on a conflicting merge (leaving the tree clean).
-pub async fn pull(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
-    let c = coords(db, repo, issue_id).await?;
+pub async fn pull(db: &Db, daedalus: &DaedalusHost, repo: &str, issue_id: &str) -> Result<String> {
+    let c = coords(db, daedalus, repo, issue_id).await?;
     // `pull_base` fetches + merges (network + blocking) — keep it off the runtime.
-    tokio::task::spawn_blocking(move || git::pull_base(&c.checkout(), &c.base_branch)).await?
+    tokio::task::spawn_blocking(move || git::pull_base(&c.dir, &c.base_branch)).await?
 }
 
 /// Push the worktree's branch to origin (setting upstream) — the Trees "Push"
 /// button and the post-commit auto-push. Network + blocking, so off the runtime.
-pub async fn push(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
-    let c = coords(db, repo, issue_id).await?;
-    tokio::task::spawn_blocking(move || git::push(&c.checkout(), &c.branch)).await?
+pub async fn push(db: &Db, daedalus: &DaedalusHost, repo: &str, issue_id: &str) -> Result<()> {
+    let c = coords(db, daedalus, repo, issue_id).await?;
+    tokio::task::spawn_blocking(move || git::push(&c.dir, &c.branch)).await?
 }
 
 /// Integrate origin/<branch> into the worktree's own branch — the Trees "Pull"
@@ -1075,27 +1070,37 @@ pub async fn push(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
 /// branch", a teammate's push). Fast-forwards when possible, else merges — but
 /// refuses up front (nothing touched) if that merge would conflict. Network +
 /// blocking, so off the runtime.
-pub async fn pull_remote(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
-    let c = coords(db, repo, issue_id).await?;
-    tokio::task::spawn_blocking(move || git::pull_remote(&c.checkout(), &c.branch)).await?
+pub async fn pull_remote(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+) -> Result<()> {
+    let c = coords(db, daedalus, repo, issue_id).await?;
+    tokio::task::spawn_blocking(move || git::pull_remote(&c.dir, &c.branch)).await?
 }
 
 /// Fast-forward the repo's local base branch (main/master) to origin — the
 /// "update base from origin" action. Operates on the main repo dir, not the
 /// worktree, so it's driven from the sidebar's base entry ([`BASE_ID`], whose base
 /// is the repo's own default branch) rather than from any one worktree.
-pub async fn update_base(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
-    let root = repo_root(db, repo).await?;
+pub async fn update_base(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+) -> Result<String> {
+    let root = root(db, daedalus, repo).await?;
     let base = if issue_id == BASE_ID {
         // The base entry has no `worktree_links` row — its branch is the repo's
         // default one, the same source `base_worktree` reports it from.
         let root = root.clone();
-        tokio::task::spawn_blocking(move || git::default_branch(&Checkout::local(&root))).await?
+        tokio::task::spawn_blocking(move || git::default_branch(&root)).await?
     } else {
         sqlx::query_scalar::<_, String>(
             "SELECT base_branch FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
         )
-        .bind(&root)
+        .bind(root_key(&root))
         .bind(issue_id)
         .fetch_optional(db)
         .await?
@@ -1103,29 +1108,13 @@ pub async fn update_base(db: &Db, repo: &str, issue_id: &str) -> Result<String> 
     };
     {
         // `update_base` fetches from origin (network + blocking).
-        let root = root.clone();
         let base = base.clone();
-        tokio::task::spawn_blocking(move || git::update_base(&Checkout::local(&root), &base))
-            .await??;
+        tokio::task::spawn_blocking(move || git::update_base(&root, &base)).await??;
     }
     Ok(base)
 }
 
-// ── Commit-box operations (delegate to git, resolving the worktree path) ─────
-
-/// Resolve a worktree's directory **on this machine** and run `f` on it on the
-/// blocking pool — the writes (stage, commit, …). Reads go through
-/// [`with_checkout`] instead; a write still resolves through [`repo_root`], so a
-/// Daedalus repo is refused rather than written to. `f` is `Send + 'static`, so
-/// callers pass owned data (e.g. an owned `path`).
-async fn with_worktree<T, F>(db: &Db, repo: &str, issue_id: &str, f: F) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce(&Checkout) -> Result<T> + Send + 'static,
-{
-    let path = worktree_path(db, repo, issue_id).await?;
-    tokio::task::spawn_blocking(move || f(&Checkout::local(path))).await?
-}
+// ── Commit-box operations (delegate to git, wherever the worktree lives) ─────
 
 pub async fn status(
     db: &Db,
@@ -1207,7 +1196,7 @@ pub async fn branch_file_diff(
 
 /// The agent sessions that have run in the worktree, newest first.
 pub async fn sessions(db: &Db, repo: &str, issue_id: &str) -> Result<Vec<WorktreeSession>> {
-    let path = worktree_path(db, repo, issue_id).await?;
+    let path = local_worktree(db, repo, issue_id).await?;
     session::history(db, repo, issue_id, &path).await
 }
 
@@ -1220,7 +1209,7 @@ pub async fn session_detail(
     issue_id: &str,
     session_id: &str,
 ) -> Result<SessionDetail> {
-    let path = worktree_path(db, repo, issue_id).await?;
+    let path = local_worktree(db, repo, issue_id).await?;
     let listed = session::history(db, repo, issue_id, &path).await?;
     session::detail(db, repo, issue_id, &path, &listed, session_id).await
 }
@@ -1233,7 +1222,7 @@ pub async fn session_subagents(
     issue_id: &str,
     session_id: &str,
 ) -> Result<Vec<SessionSubagent>> {
-    let path = worktree_path(db, repo, issue_id).await?;
+    let path = local_worktree(db, repo, issue_id).await?;
     let listed = session::history(db, repo, issue_id, &path).await?;
     session::subagents(db, repo, issue_id, &path, &listed, session_id).await
 }
@@ -1245,7 +1234,7 @@ pub async fn reveal_session_transcript(
     issue_id: &str,
     session_id: &str,
 ) -> Result<()> {
-    let path = worktree_path(db, repo, issue_id).await?;
+    let path = local_worktree(db, repo, issue_id).await?;
     let listed = session::history(db, repo, issue_id, &path).await?;
     session::reveal_transcript(db, repo, issue_id, &path, &listed, session_id).await
 }
@@ -1259,58 +1248,79 @@ pub async fn files(
     with_checkout(db, daedalus, repo, issue_id, |w| git::list_files(&w.dir)).await
 }
 
-pub async fn stage(db: &Db, repo: &str, issue_id: &str, path: &str) -> Result<()> {
+pub async fn stage(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+    path: &str,
+) -> Result<()> {
     let path = path.to_string();
-    with_worktree(db, repo, issue_id, move |p| git::stage(p, &path)).await
+    with_checkout(db, daedalus, repo, issue_id, move |w| {
+        git::stage(&w.dir, &path)
+    })
+    .await
 }
 
-pub async fn unstage(db: &Db, repo: &str, issue_id: &str, path: &str) -> Result<()> {
+pub async fn unstage(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+    path: &str,
+) -> Result<()> {
     let path = path.to_string();
-    with_worktree(db, repo, issue_id, move |p| git::unstage(p, &path)).await
+    with_checkout(db, daedalus, repo, issue_id, move |w| {
+        git::unstage(&w.dir, &path)
+    })
+    .await
 }
 
 pub async fn discard(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
     path: &str,
     untracked: bool,
 ) -> Result<()> {
     let path = path.to_string();
-    with_worktree(db, repo, issue_id, move |p| {
-        git::discard(p, &path, untracked)
+    with_checkout(db, daedalus, repo, issue_id, move |w| {
+        git::discard(&w.dir, &path, untracked)
     })
     .await
 }
 
-pub async fn stage_all(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
-    with_worktree(db, repo, issue_id, git::stage_all).await
+pub async fn stage_all(db: &Db, daedalus: &DaedalusHost, repo: &str, issue_id: &str) -> Result<()> {
+    with_checkout(db, daedalus, repo, issue_id, |w| git::stage_all(&w.dir)).await
 }
 
-pub async fn unstage_all(db: &Db, repo: &str, issue_id: &str) -> Result<()> {
-    with_worktree(db, repo, issue_id, git::unstage_all).await
+pub async fn unstage_all(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+) -> Result<()> {
+    with_checkout(db, daedalus, repo, issue_id, |w| git::unstage_all(&w.dir)).await
 }
 
 /// Commit the worktree. When `stage_all` is set, everything is staged first
 /// (honouring the "stage all before committing" setting).
 pub async fn commit(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
     message: &str,
     stage_all: bool,
 ) -> Result<()> {
-    let path = worktree_path(db, repo, issue_id).await?;
-    {
-        // Blocking git (`add`/`commit`) off the async runtime. Both steps run under
-        // one index lock inside `git::commit`, so a staging click can't slip in
-        // between them and end up in the commit.
-        let message = message.to_string();
-        tokio::task::spawn_blocking(move || {
-            git::commit(&Checkout::local(path), &message, stage_all)
-        })
-        .await??;
-    }
+    // Both steps run under one index lock inside `git::commit`, so a staging
+    // click can't slip in between them and end up in the commit.
+    let message = message.to_string();
+    with_checkout(db, daedalus, repo, issue_id, move |w| {
+        git::commit(&w.dir, &message, stage_all)
+    })
+    .await?;
     // The message is now committed — drop the saved draft so it doesn't reappear and
     // invite a second commit of the same change. Not fatal (the commit landed), but a
     // silent failure here is exactly what makes that duplicate look like a UI bug.
@@ -1323,26 +1333,21 @@ pub async fn commit(
 /// Draft a commit message from the worktree's staged diff using its configured
 /// headless provider and the `fill-commit` prompt template. Falls back to a plain
 /// message when the provider isn't available, the diff is empty, or the call fails.
-pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<String> {
-    let root = repo_root(db, repo).await?;
+///
+/// The diff is read wherever the worktree lives; the helper always runs here,
+/// fed the text ([`crate::agent::HelperDir`]).
+pub async fn commit_message(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+) -> Result<String> {
     let ticket = ticket_id(db, repo, issue_id).await?;
-    // The base sentinel commits the repo root on its own branch; per-issue
-    // worktrees resolve their path + branch from the link row.
-    let (path, known_branch) = if issue_id == BASE_ID {
-        (PathBuf::from(&root), None)
-    } else {
-        let l = link(db, &root, issue_id)
-            .await?
-            .ok_or_else(|| anyhow!("no worktree for issue '{issue_id}'"))?;
-        (PathBuf::from(&l.worktree_path), Some(l.branch))
-    };
-
-    // `head_branch` and `staged_diff` both shell out to git; run them off the async
-    // runtime's worker threads.
-    let p = Checkout::local(&path);
-    let (branch, diff) = tokio::task::spawn_blocking(move || {
-        let branch = known_branch.unwrap_or_else(|| head_branch(&p));
-        (branch, git::staged_diff(&p))
+    // The base sentinel commits the repo root on its own branch; a per-issue
+    // worktree commits to the branch its link row records.
+    let (branch, diff, dir) = with_checkout(db, daedalus, repo, issue_id, |w| {
+        let branch = w.branch.clone().unwrap_or_else(|| head_branch(&w.dir));
+        Ok((branch, git::staged_diff(&w.dir), w.dir.clone()))
     })
     .await?;
 
@@ -1372,10 +1377,17 @@ pub async fn commit_message(db: &Db, repo: &str, issue_id: &str) -> Result<Strin
 
     // Agent CLIs can take tens of seconds; run them off the async runtime's
     // worker threads.
-    let cwd = path.clone();
     let drafted = tokio::task::spawn_blocking(move || {
         // Best-effort: falls back to the generated subject below.
-        crate::agent::run_helper(&helper, &cwd, &prompt, &[], crate::agent::SHORT_TIMEOUT).ok()
+        let cwd = crate::agent::HelperDir::for_checkout(&dir).ok()?;
+        crate::agent::run_helper(
+            &helper,
+            cwd.path(),
+            &prompt,
+            &[],
+            crate::agent::SHORT_TIMEOUT,
+        )
+        .ok()
     })
     .await
     .ok()
@@ -1517,7 +1529,7 @@ pub async fn work_prompt(
     issue_id: &str,
     prompts_root: &Path,
 ) -> Result<String> {
-    let root = repo_root(db, repo).await?;
+    let root = local_root(db, repo).await?;
     let linked_ticket = ticket_id(db, repo, issue_id).await?;
     let ticket = linked_ticket.as_deref().unwrap_or(issue_id);
     let title: Option<String> =
@@ -1706,7 +1718,7 @@ pub async fn investigate_prompt(
     issue_id: &str,
     prompts_root: &Path,
 ) -> Result<String> {
-    let root = repo_root(db, repo).await?;
+    let root = local_root(db, repo).await?;
 
     // Resolve the effective prompt sources once (honoring app/repo overrides) —
     // reused to render both the embedded `issue` and the `triage` prompt below.
@@ -1782,7 +1794,7 @@ pub async fn init_script(db: &Db, repo: &str) -> Result<ScriptInfo> {
             content: String::new(),
         });
     }
-    let root = repo_root(db, repo).await?;
+    let root = local_root(db, repo).await?;
     let path = init_script_path(&root);
     Ok(tokio::task::spawn_blocking(move || ScriptInfo {
         exists: path.exists(),
@@ -1795,11 +1807,11 @@ pub async fn init_script(db: &Db, repo: &str) -> Result<ScriptInfo> {
 
 /// Write the repo's `.santree/init.sh`, creating `.santree/` if needed.
 pub async fn set_init_script(db: &Db, repo: &str, content: &str) -> Result<()> {
-    let root = repo_root(db, repo).await?;
+    let root = local_root(db, repo).await?;
     let path = init_script_path(&root);
     let content = content.to_string();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        crate::santree_dir::ensure(Path::new(&root))?;
+        crate::santree_dir::ensure(&Checkout::local(&root))?;
         std::fs::write(&path, content)?;
         Ok(())
     })
@@ -1808,7 +1820,7 @@ pub async fn set_init_script(db: &Db, repo: &str, content: &str) -> Result<()> {
 
 /// Mark `.santree/init.sh` executable (required for `run_setup_streamed` to run it).
 pub async fn make_init_executable(db: &Db, repo: &str) -> Result<()> {
-    let root = repo_root(db, repo).await?;
+    let root = local_root(db, repo).await?;
     let path = init_script_path(&root);
     tokio::task::spawn_blocking(move || {
         if !path.exists() {
@@ -1820,20 +1832,6 @@ pub async fn make_init_executable(db: &Db, repo: &str) -> Result<()> {
 }
 
 // ── Small helpers ─────────────────────────────────────────────────────────
-
-/// Whether `dir` is a git worktree in its own right, rather than just a directory
-/// that happens to live inside a repo. `git -C` on an unregistered directory under
-/// the repo resolves *upward* to the root `.git` and answers for the root checkout,
-/// so "is this a worktree?" has to be asked as "is this its own top level?".
-fn is_registered_worktree(dir: &Path) -> bool {
-    let Ok(real) = std::fs::canonicalize(dir) else {
-        return false;
-    };
-    git::git(&Checkout::local(dir), &["rev-parse", "--show-toplevel"])
-        .ok()
-        .and_then(|top| std::fs::canonicalize(top).ok())
-        .is_some_and(|top| top == real)
-}
 
 /// The branch actually checked out in `repo` — what a commit made there would land
 /// on. Falls back to the default branch when HEAD is detached (nothing to name).
@@ -1911,7 +1909,7 @@ pub(crate) async fn ticket_id(db: &Db, repo: &str, id: &str) -> Result<Option<St
     if id == BASE_ID {
         return Ok(None);
     }
-    let root = repo_root(db, repo).await?;
+    let root = stored_root(db, repo).await?;
     let ticket: Option<Option<String>> = sqlx::query_scalar(
         "SELECT ticket_id FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
     )
@@ -1945,6 +1943,11 @@ mod tests {
     /// The link these local tests never use: every repo here is on this machine.
     fn no_link() -> DaedalusHost {
         DaedalusHost::default()
+    }
+
+    /// The `test` repo's root checkout, as a command resolves it.
+    async fn test_root(db: &Db) -> Checkout {
+        root(db, &no_link(), "test").await.unwrap()
     }
 
     /// A `Channel` that records the JSON of every `StreamEvent` sent through it — the
@@ -2054,6 +2057,7 @@ mod tests {
     async fn spawn_worktree(db: &Db, issue_id: &str) -> Worktree {
         create(
             db,
+            &test_root(db).await,
             "test",
             issue_id,
             "Do a thing",
@@ -2086,6 +2090,7 @@ mod tests {
         .unwrap();
         let child = create(
             &db,
+            &test_root(&db).await,
             "test",
             "AK-2",
             "Child",
@@ -2115,14 +2120,14 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(saved, 1);
-        assert!(coords(&db, "test", "AK-1")
+        assert!(coords(&db, &no_link(), "test", "AK-1")
             .await
             .err()
             .unwrap()
             .to_string()
             .contains("worktree directory is no longer available"));
-        assert!(worktree_path(&db, "test", "AK-1").await.is_err());
-        assert!(get(&db, "test", "AK-1").await.is_err());
+        assert!(local_worktree(&db, "test", "AK-1").await.is_err());
+        assert!(get(&db, &test_root(&db).await, "AK-1").await.is_err());
 
         git::git(
             &Checkout::local(&repo_dir),
@@ -2130,7 +2135,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(list(&db, &no_link(), "test").await.unwrap().len(), 2);
-        assert!(coords(&db, "test", "AK-1").await.is_ok());
+        assert!(coords(&db, &no_link(), "test", "AK-1").await.is_ok());
         db.close().await;
         let _ = std::fs::remove_dir_all(base);
     }
@@ -2190,8 +2195,8 @@ mod tests {
 
         // Addressable, and by exactly the same reads as any other worktree — the
         // point of making them one kind of thing.
-        assert_eq!(worktree_path(&db, "test", &id).await.unwrap(), checkout);
-        let opened = get(&db, "test", &id).await.unwrap().unwrap();
+        assert_eq!(local_worktree(&db, "test", &id).await.unwrap(), checkout);
+        let opened = get(&db, &test_root(&db).await, &id).await.unwrap().unwrap();
         assert_eq!(opened.id, id);
         assert_eq!(opened.branch, "user/pr-branch");
 
@@ -2285,7 +2290,9 @@ mod tests {
         // Wait until the script is genuinely running (its first line reached us).
         wait_for(&log, "started").await;
 
-        remove(&db, "test", "AK-1", None).await.unwrap();
+        remove(&db, &test_root(&db).await, "test", "AK-1", None)
+            .await
+            .unwrap();
 
         tokio::time::timeout(Duration::from_secs(20), run)
             .await
@@ -2327,7 +2334,13 @@ mod tests {
         let _serial = crate::stream::pty_guard().await;
         let (base, repo_dir, db) = test_repo("setup-success").await;
         spawn_worktree(&db, "AK-1").await;
-        assert!(!get(&db, "test", "AK-1").await.unwrap().unwrap().setup_ran);
+        assert!(
+            !get(&db, &test_root(&db).await, "AK-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .setup_ran
+        );
 
         // A redrawing progress bar (`printf`, not `echo`, so the `\r` stands alone),
         // then a committed line.
@@ -2348,7 +2361,11 @@ mod tests {
             "the run reports success"
         );
         assert!(
-            get(&db, "test", "AK-1").await.unwrap().unwrap().setup_ran,
+            get(&db, &test_root(&db).await, "AK-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .setup_ran,
             "a successful setup is recorded, so the tab stops offering to re-run it"
         );
 
@@ -2374,7 +2391,11 @@ mod tests {
 
         assert!(events_contain(&log, r#""ok":false"#));
         assert!(
-            !get(&db, "test", "AK-1").await.unwrap().unwrap().setup_ran,
+            !get(&db, &test_root(&db).await, "AK-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .setup_ran,
             "a failed setup must not be marked as run"
         );
 
@@ -2409,7 +2430,13 @@ mod tests {
         assert!(events_contain(&log, "nothing to run"));
         assert!(!events_contain(&log, "should not run"));
 
-        assert!(!get(&db, "test", "AK-1").await.unwrap().unwrap().setup_ran);
+        assert!(
+            !get(&db, &test_root(&db).await, "AK-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .setup_ran
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -2443,7 +2470,11 @@ mod tests {
             .unwrap();
         assert!(events_contain(&log, r#""ok":false"#));
         assert!(
-            !get(&db, "test", "AK-1").await.unwrap().unwrap().setup_ran,
+            !get(&db, &test_root(&db).await, "AK-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .setup_ran,
             "a cancelled setup is not a completed one"
         );
         // The slot is freed, so the user can hit Run again.
@@ -2465,12 +2496,13 @@ mod tests {
         std::fs::create_dir_all(&wt_dir).unwrap();
         std::fs::write(wt_dir.join("leftover.txt"), "x\n").unwrap();
         assert!(
-            !is_registered_worktree(&wt_dir),
+            !git::is_own_worktree(&Checkout::local(&wt_dir)),
             "precondition: git doesn't know this directory as a worktree"
         );
 
         let err = create(
             &db,
+            &test_root(&db).await,
             "test",
             "AK-1",
             "Stale",
@@ -2483,7 +2515,10 @@ mod tests {
         .expect_err("a directory that isn't a worktree must not be adopted");
         assert!(err.to_string().contains("not a git worktree"), "{err}");
         assert!(
-            get(&db, "test", "AK-1").await.unwrap().is_none(),
+            get(&db, &test_root(&db).await, "AK-1")
+                .await
+                .unwrap()
+                .is_none(),
             "and no link may be recorded for it"
         );
 
@@ -2491,7 +2526,7 @@ mod tests {
         std::fs::remove_file(wt_dir.join("leftover.txt")).unwrap();
         let wt = spawn_worktree(&db, "AK-1").await;
         assert!(
-            is_registered_worktree(&wt_dir),
+            git::is_own_worktree(&Checkout::local(&wt_dir)),
             "a real worktree now lives there"
         );
         assert_eq!(wt.branch, "santree/ak-1-do-a-thing");
@@ -2596,7 +2631,7 @@ mod tests {
         );
 
         // The push / PR / commit-message path agrees with the card.
-        let c = coords(&db, "test", BASE_ID).await.unwrap();
+        let c = coords(&db, &no_link(), "test", BASE_ID).await.unwrap();
         assert_eq!(c.branch, "feature");
         assert_eq!(c.base_branch, "main");
 
@@ -2686,6 +2721,7 @@ mod tests {
         // 1. Create the worktree and record the link.
         let wt = create(
             &db,
+            &test_root(&db).await,
             "test",
             "AK-1",
             "Do a thing",
@@ -2721,6 +2757,7 @@ mod tests {
         // Idempotent: creating again just returns the existing worktree (no error).
         let again = create(
             &db,
+            &test_root(&db).await,
             "test",
             "AK-1",
             "Do a thing",
@@ -2743,6 +2780,7 @@ mod tests {
         // branch-specific, so that would run them against unrelated code.
         let branch_conflict = create(
             &db,
+            &test_root(&db).await,
             "test",
             "AK-1",
             "Different pull request",
@@ -2762,6 +2800,7 @@ mod tests {
         // instead of asking git to check out one branch in two worktrees.
         let by_branch = create(
             &db,
+            &test_root(&db).await,
             "test",
             "review-4-acme-3-app-1",
             "Same pull request",
@@ -2781,9 +2820,13 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        assert!(get(&db, "test", "AK-1").await.unwrap().is_none());
+        assert!(get(&db, &test_root(&db).await, "AK-1")
+            .await
+            .unwrap()
+            .is_none());
         let adopted = create(
             &db,
+            &test_root(&db).await,
             "test",
             "AK-1",
             "Do a thing",
@@ -2800,7 +2843,10 @@ mod tests {
             adopted.branch
         );
         assert!(
-            get(&db, "test", "AK-1").await.unwrap().is_some(),
+            get(&db, &test_root(&db).await, "AK-1")
+                .await
+                .unwrap()
+                .is_some(),
             "link re-created on adopt"
         );
 
@@ -2813,7 +2859,7 @@ mod tests {
             .expect("new.txt in status");
         assert_eq!(new_file.status, FileStatus::Untracked);
 
-        commit(&db, "test", "AK-1", "[AK-1] add file", true)
+        commit(&db, &no_link(), "test", "AK-1", "[AK-1] add file", true)
             .await
             .unwrap();
         assert!(
@@ -2845,7 +2891,9 @@ mod tests {
         .unwrap();
 
         // 3. Remove the worktree + link.
-        remove(&db, "test", "AK-1", Some(&prompts)).await.unwrap();
+        remove(&db, &test_root(&db).await, "test", "AK-1", Some(&prompts))
+            .await
+            .unwrap();
         assert!(!wt_dir.exists(), "worktree directory should be gone");
         assert!(
             !pfile.exists(),
@@ -2892,6 +2940,7 @@ mod tests {
         // AK-1 branches off main.
         let ak1 = create(
             &db,
+            &test_root(&db).await,
             "test",
             "AK-1",
             "First",
@@ -2907,6 +2956,7 @@ mod tests {
         // AK-2 is stacked on AK-1's branch.
         let ak2 = create(
             &db,
+            &test_root(&db).await,
             "test",
             "AK-2",
             "Second",
@@ -2920,8 +2970,13 @@ mod tests {
         assert_eq!(ak2.base_branch, ak1.branch);
 
         // Removing AK-1 restacks AK-2 onto AK-1's own (old) base: main.
-        remove(&db, "test", "AK-1", None).await.unwrap();
-        let ak2_after = get(&db, "test", "AK-2").await.unwrap().unwrap();
+        remove(&db, &test_root(&db).await, "test", "AK-1", None)
+            .await
+            .unwrap();
+        let ak2_after = get(&db, &test_root(&db).await, "AK-2")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             ak2_after.base_branch, "main",
             "AK-2 should be re-pointed to AK-1's old base, not left on the deleted branch"
@@ -2978,6 +3033,7 @@ mod tests {
 
         let wt = create(
             &db,
+            &test_root(&db).await,
             "test",
             "AK-3",
             "Remote work",
@@ -2996,7 +3052,10 @@ mod tests {
         assert!(!wt.pull_conflict);
 
         // The probing path sees what's really on origin, so nothing is lost.
-        let fetched = get(&db, "test", "AK-3").await.unwrap().unwrap();
+        let fetched = get(&db, &test_root(&db).await, "AK-3")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             fetched.remote_behind, 1,
             "the pending remote commit lands on the next refresh"
@@ -3015,6 +3074,7 @@ mod tests {
 
         let checked_out = create(
             &db,
+            &test_root(&db).await,
             "test",
             "existing-work",
             "existing-work",
@@ -3035,6 +3095,7 @@ mod tests {
 
         let fresh = create(
             &db,
+            &test_root(&db).await,
             "test",
             "brand-new",
             "brand/new",
@@ -3055,6 +3116,7 @@ mod tests {
         // child branches off the parent's branch, not the repo's default.
         let stacked = create(
             &db,
+            &test_root(&db).await,
             "test",
             "stacked",
             "stacked",
@@ -3101,6 +3163,7 @@ mod tests {
             for plan in [BranchPlan::Existing(bad), BranchPlan::New(bad)] {
                 let err = create(
                     &db,
+                    &test_root(&db).await,
                     "test",
                     "hostile",
                     "Hostile",
@@ -3122,6 +3185,7 @@ mod tests {
         // that becomes the worktree *directory*.
         assert!(create(
             &db,
+            &test_root(&db).await,
             "test",
             "hostile",
             "Hostile",
@@ -3136,6 +3200,7 @@ mod tests {
             assert!(
                 create(
                     &db,
+                    &test_root(&db).await,
                     "test",
                     bad_id,
                     "Hostile",

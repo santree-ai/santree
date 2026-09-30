@@ -21,6 +21,7 @@ const mocked = vi.hoisted(() => ({
   stage: vi.fn(),
   setSetting: vi.fn(),
   view: null as string | null,
+  reach: { runOff: undefined as string | undefined },
 }));
 vi.mock("../../lib/queries", () => ({
   useMoveChangesPreview: () => ({
@@ -49,6 +50,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocked.fetching = false;
   mocked.view = null;
+  mocked.reach.runOff = undefined;
   mocked.preview = {
     id: "move-1",
     sourceId: "AK-123",
@@ -115,6 +117,16 @@ describe("move remaining changes", () => {
     expect(mocked.runSetup).not.toHaveBeenCalled();
     mocked.onCreated?.({ ...mocked.preview, completed: true }, vars);
     expect(mocked.runSetup).toHaveBeenCalledExactlyOnceWith("split-1");
+  });
+
+  it("offers no setup where nothing runs yet, and splits without it", () => {
+    mocked.reach.runOff = "Coming soon for Daedalus projects";
+    show();
+    const setup = screen.getByRole("checkbox", { name: "Run setup in the child branch" });
+    expect(setup).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Branch name"), { target: { value: "child" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create child branch" }));
+    expect(mocked.mutate.mock.calls[0][0].runSetup).toBe(false);
   });
   it("allows a new branch name and ticket override", () => {
     show();

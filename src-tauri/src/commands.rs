@@ -247,6 +247,7 @@ pub async fn base_worktree(
 /// so it isn't gated on this call.
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)] // Typed IPC fields stay explicit at this security boundary.
 pub async fn create_worktree(
     repo: String,
     issue_id: String,
@@ -255,9 +256,11 @@ pub async fn create_worktree(
     base: Option<String>,
     agent: Option<AgentKind>,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<Worktree> {
     Ok(create_from_launch(
         &db,
+        &daedalus,
         &repo,
         &issue_id,
         &title,
@@ -270,8 +273,10 @@ pub async fn create_worktree(
 
 /// [`create_worktree`] minus Tauri, so the origin → (project, branch plan)
 /// resolution is testable without a `State`.
+#[allow(clippy::too_many_arguments)] // The command's fields, plus the db and the link.
 async fn create_from_launch(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
     title: &str,
@@ -284,7 +289,7 @@ async fn create_from_launch(
     // what it creates. Every branch name below is re-validated inside
     // `worktree::create` (`git::safe_branch`) before it can reach a `git` argv.
     if let WorktreeLaunch::Pr { pr_repo, .. } = launch {
-        let (local_owner, local_name) = reviews::origin(db, repo).await?;
+        let (local_owner, local_name) = reviews::origin(db, daedalus, repo).await?;
         validate_pr_repo(pr_repo, &local_owner, &local_name)?;
     }
     // Only a ticket has a project. The other origins record none rather than a
@@ -296,7 +301,8 @@ async fn create_from_launch(
         WorktreeLaunch::NewBranch { branch } => (None, worktree::BranchPlan::New(branch)),
         WorktreeLaunch::Pr { branch, .. } => (None, worktree::BranchPlan::Existing(branch)),
     };
-    worktree::create(db, repo, issue_id, title, project, base, agent, plan).await
+    let root = worktree::root(db, daedalus, repo).await?;
+    worktree::create(db, &root, repo, issue_id, title, project, base, agent, plan).await
 }
 
 /// The repo's branches (local, plus `origin`-only ones), each flagged with
@@ -331,25 +337,37 @@ pub async fn remove_worktree(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
     let prompts = worktree::prompts_root(&app);
-    Ok(worktree::remove(&db, &repo, &issue_id, prompts.as_deref()).await?)
+    let root = worktree::root(&db, &daedalus, &repo).await?;
+    Ok(worktree::remove(&db, &root, &repo, &issue_id, prompts.as_deref()).await?)
 }
 
 /// Merge the base branch into the worktree (the "pull from main/master" button).
 /// Errors on a conflicting merge; returns the base ref that was merged on success.
 #[tauri::command]
 #[specta::specta]
-pub async fn pull_worktree(repo: String, issue_id: String, db: State<'_, Db>) -> CmdResult<String> {
-    Ok(worktree::pull(&db, &repo, &issue_id).await?)
+pub async fn pull_worktree(
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
+) -> CmdResult<String> {
+    Ok(worktree::pull(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// Push the worktree's branch to origin (the Trees "Push" button / post-commit
 /// auto-push). Network op — may fail (no auth, rejected non-fast-forward, …).
 #[tauri::command]
 #[specta::specta]
-pub async fn push_worktree(repo: String, issue_id: String, db: State<'_, Db>) -> CmdResult<()> {
-    Ok(worktree::push(&db, &repo, &issue_id).await?)
+pub async fn push_worktree(
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
+) -> CmdResult<()> {
+    Ok(worktree::push(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// Integrate origin/<branch> into the worktree's own branch — the Trees "Pull"
@@ -362,8 +380,9 @@ pub async fn pull_remote_worktree(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
-    Ok(worktree::pull_remote(&db, &repo, &issue_id).await?)
+    Ok(worktree::pull_remote(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// Run a worktree's setup script, streaming each output line over `on_event` for
@@ -416,8 +435,9 @@ pub async fn update_base_branch(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<String> {
-    Ok(worktree::update_base(&db, &repo, &issue_id).await?)
+    Ok(worktree::update_base(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// Start (or re-point) the filesystem watcher at the given repo's worktrees, so
@@ -603,7 +623,7 @@ pub async fn resume_worktree_session(
     validate_term_key(&term_key)?;
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let sessions_root = codex_rollouts::sessions_root();
-    let worktree_dir = worktree::coords(&db, &repo, &issue_id).await?.path;
+    let worktree_dir = worktree::local_worktree(&db, &repo, &issue_id).await?;
     Ok(session::adopt(
         &db,
         &listed,
@@ -656,8 +676,9 @@ pub async fn stage_path(
     issue_id: String,
     path: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
-    Ok(worktree::stage(&db, &repo, &issue_id, &path).await?)
+    Ok(worktree::stage(&db, &daedalus, &repo, &issue_id, &path).await?)
 }
 
 /// Unstage a single file.
@@ -668,8 +689,9 @@ pub async fn unstage_path(
     issue_id: String,
     path: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
-    Ok(worktree::unstage(&db, &repo, &issue_id, &path).await?)
+    Ok(worktree::unstage(&db, &daedalus, &repo, &issue_id, &path).await?)
 }
 
 /// Discard a file's uncommitted changes (delete if untracked, else restore HEAD).
@@ -681,22 +703,33 @@ pub async fn discard_path(
     path: String,
     untracked: bool,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
-    Ok(worktree::discard(&db, &repo, &issue_id, &path, untracked).await?)
+    Ok(worktree::discard(&db, &daedalus, &repo, &issue_id, &path, untracked).await?)
 }
 
 /// Stage every change in the worktree.
 #[tauri::command]
 #[specta::specta]
-pub async fn stage_all_paths(repo: String, issue_id: String, db: State<'_, Db>) -> CmdResult<()> {
-    Ok(worktree::stage_all(&db, &repo, &issue_id).await?)
+pub async fn stage_all_paths(
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
+) -> CmdResult<()> {
+    Ok(worktree::stage_all(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// Unstage everything in the worktree.
 #[tauri::command]
 #[specta::specta]
-pub async fn unstage_all_paths(repo: String, issue_id: String, db: State<'_, Db>) -> CmdResult<()> {
-    Ok(worktree::unstage_all(&db, &repo, &issue_id).await?)
+pub async fn unstage_all_paths(
+    repo: String,
+    issue_id: String,
+    db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
+) -> CmdResult<()> {
+    Ok(worktree::unstage_all(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// Commit the worktree (optionally staging everything first).
@@ -708,8 +741,9 @@ pub async fn commit_worktree(
     message: String,
     stage_all: bool,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
-    Ok(worktree::commit(&db, &repo, &issue_id, &message, stage_all).await?)
+    Ok(worktree::commit(&db, &daedalus, &repo, &issue_id, &message, stage_all).await?)
 }
 
 /// Draft a commit message from the staged diff via a headless `claude -p` call.
@@ -719,8 +753,9 @@ pub async fn commit_message(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<String> {
-    Ok(worktree::commit_message(&db, &repo, &issue_id).await?)
+    Ok(worktree::commit_message(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// Refresh a worktree's stored Linear title (the Issue tab calls this when the
@@ -1325,8 +1360,9 @@ pub async fn pr_draft(
     fill: bool,
     send_transcripts: bool,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<PrDraft> {
-    Ok(pr::draft(&db, &repo, &issue_id, fill, send_transcripts).await?)
+    Ok(pr::draft(&db, &daedalus, &repo, &issue_id, fill, send_transcripts).await?)
 }
 
 /// Whether the worktree has any Claude session transcript on disk — gates the PR
@@ -1759,8 +1795,12 @@ pub async fn publish_review_drafts(
 /// the `owner/name` it was asked about and whether `gh` could be asked at all.
 #[tauri::command]
 #[specta::specta]
-pub async fn merge_queue(repo: String, db: State<'_, Db>) -> CmdResult<MergeQueueView> {
-    Ok(reviews::merge_queue(&db, &repo).await?)
+pub async fn merge_queue(
+    repo: String,
+    db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
+) -> CmdResult<MergeQueueView> {
+    Ok(reviews::merge_queue(&db, &daedalus, &repo).await?)
 }
 
 /// Full detail for one PR — body, conversation (comments + reviews + inline
@@ -2008,6 +2048,7 @@ pub async fn set_file_reviewed(
 /// URL (the frontend opens it in the browser).
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)] // Typed IPC fields stay explicit at this security boundary.
 pub async fn create_pull_request(
     repo: String,
     issue_id: String,
@@ -2016,8 +2057,12 @@ pub async fn create_pull_request(
     draft: bool,
     reviewers: Vec<String>,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<NewPr> {
-    Ok(pr::create(&db, &repo, &issue_id, &title, &body, draft, &reviewers).await?)
+    Ok(pr::create(
+        &db, &daedalus, &repo, &issue_id, &title, &body, draft, &reviewers,
+    )
+    .await?)
 }
 
 /// Candidate reviewers (repo collaborators) for the create-PR dialog's picker.
@@ -2028,8 +2073,9 @@ pub async fn pr_reviewers(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<Vec<Reviewer>> {
-    Ok(pr::reviewers(&db, &repo, &issue_id).await?)
+    Ok(pr::reviewers(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// The repo's `.santree/init.sh` setup script (for the Settings editor).
@@ -3387,7 +3433,17 @@ mod tests {
         title: &str,
         launch: WorktreeLaunch,
     ) -> anyhow::Result<Worktree> {
-        create_from_launch(db, "test", issue_id, title, &launch, None, None).await
+        create_from_launch(
+            db,
+            &DaedalusHost::default(),
+            "test",
+            issue_id,
+            title,
+            &launch,
+            None,
+            None,
+        )
+        .await
     }
 
     /// The ticket origin is the only one that names a project, and the only one
@@ -3572,8 +3628,9 @@ pub async fn move_changes_preview(
     repo: String,
     source: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<santree_core::domain::MoveChanges> {
-    Ok(crate::split_stack::preview(&db, &repo, &source).await?)
+    Ok(crate::split_stack::preview(&db, &daedalus, &repo, &source).await?)
 }
 
 #[tauri::command]
@@ -3584,6 +3641,7 @@ pub async fn move_remaining_changes(
     branch: String,
     ticket_id: Option<String>,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<santree_core::domain::MoveChanges> {
-    Ok(crate::split_stack::move_remaining(&db, &repo, &id, &branch, ticket_id).await?)
+    Ok(crate::split_stack::move_remaining(&db, &daedalus, &repo, &id, &branch, ticket_id).await?)
 }

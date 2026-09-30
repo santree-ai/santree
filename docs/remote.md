@@ -210,29 +210,63 @@ prove the two meet. santree does not depend on `santree-remote-tls`.
   dispatch path are tested without a box.
 - **One seam: `git::Checkout`** (`src-tauri/src/git/checkout.rs`) — a directory (a
   repo root or a worktree) and where it lives. Every `git.rs` function takes one,
-  so each git operation is written once: `Checkout::git` is a child process here or
-  `exec.run {cwd, argv: ["git", …]}` on the box, `read` is `open_in_worktree` or
-  `fs.read` with `within` = the checkout (the host's symlink check), `contained` is
-  `safe_real_path` or a zero-length `fs.read` with `within`, `is_dir` is a stat or
-  `fs.stat`. IPC paths pass the lexical `safe_path` here before anything is sent.
-  Output cut at the host's cap is an error, never a parsed half-answer. The remote
+  so each git operation is written once: `Checkout::git_with` (and `git`, the plain
+  case) is the one place a git process starts — a child process here, or
+  `exec.run {cwd, argv: ["git", …], env, stdin, timeoutMs: 10 min}` on the box,
+  since a local git has no deadline and a push must not hit the host's one-minute
+  default. `read` is `open_in_worktree` or `fs.read` with `within` = the checkout
+  (the host's symlink check), `contained` is `safe_real_path` or a zero-length
+  `fs.read` with `within`, `is_dir`/`stat` are a stat or `fs.stat`, `write` is
+  `std::fs` or `fs.write`, and the two deletes the protocol has no method for —
+  `remove` (a tree, symlinks unlinked, never followed) and `remove_empty_dir` —
+  are `std::fs` or `exec.run` of `rm -rf --` / `rmdir --` in the checkout, on an
+  absolute, non-climbing path. IPC paths pass the lexical `safe_path` here before
+  anything is sent. Output cut at the host's cap is an error, never a parsed
+  half-answer; a failing git's stderr is the error, as it is locally. The remote
   half is blocking (`RemoteClient::call_blocking`), like the processes it stands
   in for: git code runs on the blocking pool.
 - **Resolved in one place**: `repo::checkout(db, daedalus, name)` answers a local
   checkout, or a Daedalus one over the live client (waiting ≤5 s for a link that
   is still connecting); with the link down it is the error saying so
-  (`NotConnected`), never a fall back to this machine. `worktree::locate` builds a
-  worktree's checkout from the repo's (`Checkout::at`), and every worktree read
-  (`list`, `base_worktree`, `status`, `file_diff`, `file_source`,
-  `branch_changes`, `branch_file_diff`, `files`, `branches`) goes through it.
-- **Not yet on the seam, and refusing a Daedalus repo**: the writes (staging,
-  commit, push, pull, worktree create/remove, split, setup, PR creation) still
-  resolve through the local-only `repo_root` / `repo::path`; code that needs this
-  machine's filesystem asks `Checkout::local_path`, which a Daedalus checkout
-  refuses; `terminal_open` refuses a cwd inside a Daedalus project
-  (`repo::on_daedalus`). The UI offers none of these for a Daedalus project: each
-  control stays, disabled with `lib/daedalusLink` `actionsOff`'s reason ("Coming
-  soon for Daedalus projects", or "Unavailable until santree can reach Daedalus").
+  (`NotConnected`), never a fall back to this machine. `worktree::root` is that for
+  a repo's root, and `worktree::locate` builds a worktree's checkout from it
+  (`Checkout::at`). Everything done to a worktree goes through them, reads and
+  writes alike: the reads (`list`, `base_worktree`, `status`, `file_diff`,
+  `file_source`, `branch_changes`, `branch_file_diff`, `files`, `branches`), the
+  commit box (`stage`, `unstage`, `discard`, `stage_all`, `unstage_all`, `commit`
+  under `with_index_lock` as locally, and `commit_message`'s staged diff), the sync
+  buttons (`push`, `pull`, `pull_remote`, `update_base`), `worktree::create` /
+  `remove` (given the resolved root), the split (`split_stack`), PR creation
+  (`pr::draft`/`create`: the push, the first commit's subject, the diff and the
+  template read through the checkout; GitHub asked from here) and the merge queue
+  (the slug read on the box).
+- **Worktrees on the box** keep the local layout: `<root>/.santree/worktrees/<id>`.
+  `santree_dir::ensure` writes `.santree/.gitignore` through the checkout
+  (`fs.write`), `git worktree add` makes the directory and its parents itself, a
+  tree is adopted when git says it is its own top level (`rev-parse --show-prefix`
+  is empty — asked of git, so no path is canonicalized on the wrong machine), an
+  empty leftover is reclaimed with `remove_empty_dir`, and removal is
+  `git worktree remove --force` then `remove` for whatever is left.
+- **A split on the box**: `git/split.rs` runs every step through the checkout. Its
+  private index is a file in the checkout's own git dir
+  (`rev-parse --path-format=absolute --git-path santree-split-<uuid>.index`, set as
+  `GIT_INDEX_FILE`) — never in the working tree it is snapshotting, always beside
+  the git that writes it — and is removed, with any `.lock`, when the step ends.
+  Pathspec lists go on stdin. The recovery stash is as it was.
+- **Helpers stay here**: a commit message or PR body is drafted by the configured
+  helper on this Mac, fed the diff read through the checkout. For a Daedalus
+  worktree it runs in an empty scratch directory (`agent::HelperDir`) with no
+  `Read` grant, so nothing it does reaches the box.
+- **Still local-only, and refusing a Daedalus repo**: setup scripts
+  (`run_setup_streamed` streams through a PTY — increment 3), agent launches, work
+  prompts and session history (`local_root` / `local_worktree`, and
+  `Checkout::local_path`); `terminal_open` refuses a cwd inside a Daedalus project
+  (`repo::on_daedalus`). The UI says so per kind of action (`lib/daedalusLink`):
+  `gitOff` turns git actions off only while the link is down ("Unavailable until
+  santree can reach Daedalus"); `runOff` keeps terminals, agents and setup off
+  ("Coming soon for Daedalus projects", or the same unreachable reason). Creating
+  a worktree from a ticket makes the tree but starts no agent in it, and a split
+  offers no "Run setup".
 - **Reads wait for the link**: a Daedalus project's worktree reads are `enabled`
   only while the link is `Connected` (`useRepoReach` / `useReadableRepos` in
   `lib/queries.ts`), so a down link never fails a read into a toast; the sidebar
@@ -307,8 +341,9 @@ or (by default) specta, and their public APIs are a contract with that repo.
 - `fake.rs` (feature `fake`) — the in-process daemon (a random `bootId` per
   instance; `FakeDaemon::connector()` plugs it into a `RemoteHost` over memory), and
   `FakeAgent`, a unix socket that writes the agent's first line and then hands the
-  connection to a `FakeDaemon` — what the connector and the app's health and
-  workspace tests connect through.
+  connection to a `FakeDaemon` — what the connector and the app's health,
+  workspace and git tests connect through. `FakeDaemon::exec_log()` is the argv of
+  every `exec.run` it served, so a test can say what ran on the "box".
 
 `src-tauri/src/daedalus/`:
 
@@ -319,9 +354,10 @@ or (by default) specta, and their public APIs are a contract with that repo.
   `Result<Arc<RemoteClient>, NotConnected>`; the `DaedalusLinkChanged` event; the
   hook `Relay`.
 - `mod.rs` — the health check, `workspaces.list` over the link, and registering a
-  checkout. `git_tests.rs` drives a Daedalus project's reads end to end: the
+  checkout. `git_tests.rs` drives a Daedalus project's git end to end: the
   worktree commands through a `FakeAgent` and `FakeDaemon` to real git in a temp
-  repo, and the link-down case running nothing.
+  repo — reads, the commit box, push and pull against a local bare origin,
+  worktree create/remove, a split — and the link-down case running nothing.
 
 `src-tauri/src/git/checkout.rs` — `Checkout`, the seam (above); `repo::checkout`
 resolves one.

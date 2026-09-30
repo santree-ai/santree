@@ -140,7 +140,8 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    Daedalus agent: `host` — the live link and the hook relay —
                    plus the health check and the workspace list over the link)
                    · git.rs + git/checkout.rs (`Checkout`: the one seam a repo's
-                   git and file reads go through, here or on Daedalus;
+                   git, reads and writes, and its file access go through, here
+                   or on Daedalus;
                    `repo::checkout` resolves it — docs/remote.md)
                    · jira.rs (Jira Cloud REST: `search/jql`, ADF,
                    transitions, the per-repo triage query) · oauth.rs (the PKCE
@@ -441,8 +442,10 @@ src/
   recovery stash and restores the original staging state. Ignored files stay unless
   already tracked or staged. No commit or push is automatic. Worktree ids remain
   independent of `Worktree.ticketId` / `worktree_links.ticket_id`: ids own paths and
-  sessions, ticket associations drive tracker reads. Remote, sparse and submodule
-  changes are unsupported. Old split-draft migrations remain for database compatibility.
+  sessions, ticket associations drive tracker reads. The private index lives in
+  the checkout's own git dir (`git rev-parse --git-path`), so a Daedalus project's
+  split runs on the box like any other git; its "Run setup" stays off until setup
+  scripts run there. Sparse and submodule changes are unsupported. Old split-draft migrations remain for database compatibility.
 - **Data:** every read is a hook in `lib/queries.ts`. Result-typed commands go through
   `useUnwrappedQuery`; raw-value commands use plain `useQuery`. Writes use
   `useOptimisticMutation` (cancel → patch → rollback-on-error → invalidate-on-settle).

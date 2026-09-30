@@ -84,9 +84,9 @@ export function GitPanel({
   onSplit?: () => void;
   onCloseSplit?: () => void;
   splitForm?: ReactNode;
-  /** Why nothing here may change the checkout (a Daedalus project): every
-   *  action stays where it is, disabled with this as its tooltip, and the lists
-   *  are read-only. */
+  /** Why nothing here may change the checkout now (a Daedalus project out of
+   *  reach): every action stays where it is, disabled with this as its
+   *  tooltip, and the lists are read-only. */
   actionsOff?: string;
 }) {
   const splitId = useId();
