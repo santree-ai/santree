@@ -41,6 +41,8 @@ Five facts that explain most of the rest:
    can be caught up instead of losing the session.
 4. **There is no daemon.** Sessions survive a webview reload; they die when
    santree quits. This is a deliberate trade — see [No daemon](#no-daemon).
+   (A Daedalus project's terminals are the exception: they run on the box and
+   outlive santree — see [Remote sessions](#remote-sessions).)
 5. **santree never reads what the agent prints in order to decide what to
    send.** That rule is what keeps this a terminal emulator rather than a
    harness, and it is enforced by tests (`COMPLIANCE.md`).
@@ -164,6 +166,16 @@ memory; the renderer side is still unbounded. See
 | route navigation, tab switch | ✅ | ✅ |
 | **webview reload** (⌘R, HMR, crash recovery) | ✅ **adopted** | ring replay (2 MiB) |
 | app quit | ❌ `close_all()` | ❌ |
+
+A terminal in a Daedalus project runs on the box instead, and outlives more —
+see [Remote sessions](#remote-sessions):
+
+| event | PTY process on the box | scrollback |
+|---|---|---|
+| webview reload | ✅ adopted (the pane lives in the app) | the box's ring |
+| link drop | ✅ pane reads "Reconnecting…" | exact replay of what was missed |
+| app quit + relaunch | ✅ found again by its address | the box's ring |
+| the box's session host restarts | ❌ the pane exits | ❌ |
 
 ### The one rule
 
@@ -289,6 +301,45 @@ already turns it back into a `--resume`.
 This is an open decision, not a closed one. If it is ever taken, the ring,
 `attach`/`detach`/`adopt` and the anchor protocol all transfer unchanged; they
 were designed against exactly this architecture.
+
+That is not hypothetical: a Daedalus project's terminals already run on such a
+host — the session host on the box, built on this same `crates/pty` — and ride
+the ring and the anchors unchanged. See the next section.
+
+---
+
+## Remote sessions
+
+A terminal whose cwd is inside a Daedalus project is a PTY on the box, reached
+over the link (docs/remote.md, "Terminals and setup scripts on the box"). The
+frontend knows only what it has to:
+
+- **The same backend calls.** `terminal.rs` dispatches on the cwd at open and on
+  the id afterwards (remote ids start at 2³¹, `daedalus::terminals::FIRST_ID`);
+  `TerminalView`, the layer and the orchestrator don't branch on where a
+  session runs.
+- **One more signal, never an exit.** `terminal_open`/`terminal_attach` take a
+  second channel, `on_link`, which only a remote session sends on: `live` or
+  `reconnecting` (`PaneLink`). `TerminalView` shows "Reconnecting…" over the
+  pane while the link is down; the exit sentinel is still the only thing that
+  closes a tab, and a dropped link never sends it. On reconnect the backend
+  re-attaches from the anchor it kept — every byte it forwarded — and the box
+  replays exactly the gap, into the same xterm.
+- **Adoption.** A reload adopts remote panes through the same `terminal_adopt`
+  (they live in the app process). After santree itself restarts, a pane that
+  opens finds its session on the box by its address — the pair from
+  [Identity](#identity-one-pair-three-homes) — and attaches `fresh`, so the tab
+  comes back running; its seed is not typed again.
+- **Untrusted bytes** (design S5): `TerminalLayer` builds a remote pane's
+  renderer with `untrusted` (decided from the tab's cwd, before any byte,
+  which is why the layer also waits for the repo registry): OSC 52 is claimed
+  and dropped ahead of any clipboard handler, and an OSC 8 link opens only as
+  an `http(s)` page through the system browser. Remote text reaches the screen
+  only through xterm's renderer, never as HTML.
+- Keystrokes typed while the pane is reconnecting are dropped, not queued.
+
+Setup scripts in a Daedalus project run the same way, streamed to the usual
+read-only pane (`daedalus/setup.rs`).
 
 ---
 
@@ -622,6 +673,8 @@ as `/bin/bash -lc <command>`, owned by a process-wide registry keyed by an opaqu
 caller string rather than by a tab, with a 60-minute watchdog and a 120×40
 starting grid. Output arrives as a `Channel<StreamEvent>` of
 `Chunk { text } | Done { ok }`, with partial UTF-8 carried across reads.
+A Daedalus project's setup script streams the same events from a PTY on the box
+(`daedalus/setup.rs`, docs/remote.md).
 
 **`agent.rs` — headless one-shots.** `claude -p` / `codex exec` to draft a commit
 message, a PR body, or an English-tutor analysis. Prompts go over **stdin, never
@@ -666,7 +719,10 @@ parts that bear on this layer:
 crates/pty/src/lib.rs        PtyManager: spawn, read loop, attach/detach/adopt, close_all
 crates/pty/src/ring.rs       the output ring + the anchor protocol
 crates/hook/src/main.rs      the hook binary: state hooks, status line, MCP mode
-src-tauri/src/terminal.rs    Tauri adapter + the RawBytes channel; pane_roots
+src-tauri/src/terminal.rs    Tauri adapter + the RawBytes channel; pane_roots; the
+                             local/Daedalus dispatch and PaneLink
+src-tauri/src/daedalus/terminals.rs  remote panes: ids, anchors, re-attach, find-again
+src-tauri/src/daedalus/setup.rs      setup scripts in a PTY on the box
 src-tauri/src/proc_table.rs  the one `ps` listing, cached 500ms and shared
 src-tauri/src/agent_procs.rs which agent owns each pane's foreground
 src-tauri/src/hooks.rs       the --settings file every claude launch layers
@@ -681,7 +737,8 @@ src/features/terminal/
   TerminalLayer.tsx          the persistent overlay that outlives routes
   TerminalsContext.tsx       once-per-document adoption
   orchestrator.ts            tabs, embed claims, the pane handle registry
-  XtermRenderer.ts           the only xterm import; WebGL rationing; theming
+  XtermRenderer.ts           the only xterm import; WebGL rationing; theming;
+                             the untrusted mode (OSC 52 off, web-only OSC 8)
   agentProvider.ts           the seed line
 src/features/agents/registry.ts   term_key parsing + the state → bucket fold
 ```

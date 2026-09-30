@@ -70,7 +70,7 @@ import type {
 } from "../bindings";
 import { commands, events } from "../bindings";
 import { type ToastOptions, toast } from "../state/toast";
-import { gitOff, runOff } from "./daedalusLink";
+import { agentOff, gitOff, runOff } from "./daedalusLink";
 import { splitRepoSlug } from "./repo";
 import { type TrackerFeatures, trackerFeatures } from "./tracker";
 
@@ -1820,8 +1820,11 @@ export interface RepoReach {
   /** Why its git can't be changed now (staging, commits, push and pull,
    *  worktrees, splits, PRs) — a Daedalus project while the link is down. */
   gitOff: string | undefined;
-  /** Why nothing can be run in it now (terminals, agents, setup scripts). */
+  /** Why no terminal or setup script can run in it now — they run on the box,
+   *  so only a Daedalus project with the link down. */
   runOff: string | undefined;
+  /** Why no agent can run in it now — none run on Daedalus yet. */
+  agentOff: string | undefined;
 }
 
 /** Where `repo` lives and what santree can do there right now. */
@@ -1835,6 +1838,7 @@ export function useRepoReach(repo: string): RepoReach {
       readable: readableRepo(repos, link, repo),
       gitOff: gitOff(remote, link),
       runOff: runOff(remote, link),
+      agentOff: agentOff(remote, link),
     };
   }, [repos, link, repo]);
 }

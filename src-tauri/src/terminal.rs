@@ -7,7 +7,8 @@
 
 use std::collections::HashSet;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -15,10 +16,13 @@ use specta::{datatype::DataType, Type, Types};
 use tauri::ipc::{Channel, InvokeResponseBody, IpcResponse};
 use tauri::{AppHandle, Manager, State};
 
+use crate::daedalus::host::{DaedalusHost, CONNECT_WAIT};
+use crate::daedalus::terminals::{self, RemoteTerminals, Sinks, Spec};
 use crate::db::Db;
 use crate::error::CmdResult;
 use santree_core::domain::AgentKind;
 use santree_pty::{Anchor, OpenOpts, PtyManager, ReplayMode, SessionId};
+use santree_remote_client::proto::{Anchor as BoxAnchor, ReplayMode as BoxReplayMode};
 
 /// A PTY output chunk, wrapped so it crosses the Tauri IPC [`Channel`] as raw
 /// bytes (delivered to the frontend as an `ArrayBuffer`) instead of the
@@ -132,6 +136,30 @@ impl From<TerminalAnchor> for Anchor {
     }
 }
 
+impl From<TerminalAnchor> for BoxAnchor {
+    /// The same anchor, for a session on Daedalus: the box's ring answers it
+    /// with the same three outcomes.
+    fn from(value: TerminalAnchor) -> Self {
+        match Anchor::from(value) {
+            Anchor::At { epoch, seq } => BoxAnchor::At { epoch, seq },
+            Anchor::Fresh => BoxAnchor::Fresh,
+            Anchor::Unknown => BoxAnchor::Unknown,
+        }
+    }
+}
+
+/// Whether a pane is reaching its session right now, pushed on its own
+/// channel beside the bytes. Only a session on Daedalus ever sends one: a local
+/// PTY is always reachable. `Reconnecting` is never an exit — the process is
+/// still running on the box, and the pane catches up from its anchor when the
+/// link returns; only the empty output chunk says a process ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum PaneLink {
+    Live,
+    Reconnecting,
+}
+
 /// What the client should believe after an attach.
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -161,6 +189,16 @@ impl From<ReplayMode> for TerminalReplayMode {
             ReplayMode::Exact => TerminalReplayMode::Exact,
             ReplayMode::Tail => TerminalReplayMode::Tail,
             ReplayMode::Reanchor => TerminalReplayMode::Reanchor,
+        }
+    }
+}
+
+impl From<BoxReplayMode> for TerminalReplayMode {
+    fn from(value: BoxReplayMode) -> Self {
+        match value {
+            BoxReplayMode::Exact => TerminalReplayMode::Exact,
+            BoxReplayMode::Tail => TerminalReplayMode::Tail,
+            BoxReplayMode::Reanchor => TerminalReplayMode::Reanchor,
         }
     }
 }
@@ -545,9 +583,151 @@ fn sweep_seed_scripts(dir: &Path) {
 /// Both [`terminal_write`] (keystrokes) and [`terminal_seed`] (the one
 /// human-initiated launch line) go through here, so COMPLIANCE.md's "only
 /// `terminal.rs` writes into a PTY" stays checkable as one call site rather than
-/// a growing list of them.
-fn write_pty(manager: &PtyManager, id: SessionId, bytes: &[u8]) -> anyhow::Result<()> {
-    manager.write(id, bytes)
+/// a growing list of them. A pane on Daedalus is written the same way, through
+/// its session's one writer ([`RemoteTerminals::write`] / [`RemoteTerminals::seed`]),
+/// which is the only `pty.write` santree sends.
+fn write_pty(
+    manager: &PtyManager,
+    remote: &RemoteTerminals,
+    id: SessionId,
+    input: Input,
+) -> anyhow::Result<()> {
+    match (terminals::is_remote(id), input) {
+        (true, Input::Keys(bytes)) => remote.write(id, bytes),
+        (true, Input::Seed(line)) => remote.seed(id, line),
+        (false, input) => manager.write(id, &input.into_bytes()),
+    }
+}
+
+/// What [`write_pty`] types: the user's keystrokes, or the one launch line
+/// (with its Enter). A remote session tells them apart — a found-again session
+/// is already running its launch, so only keystrokes reach it.
+enum Input {
+    Keys(Vec<u8>),
+    Seed(String),
+}
+
+impl Input {
+    fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Input::Keys(bytes) => bytes,
+            Input::Seed(line) => line.into_bytes(),
+        }
+    }
+}
+
+/// What a terminal on Daedalus is given from here: `TERM` and nothing else.
+///
+/// Not [`crate::env::resolve_env`]: that is this Mac's project environment —
+/// variables whose values live in this Mac's keychain and `.env` files read
+/// from this Mac's disk — and none of it is the box's to have. The shell there
+/// is the box's login shell under the session host, which already runs with
+/// the operator's profile `PATH`; the box's own profile is where a Daedalus
+/// project's environment belongs. `TERM` is what santree's renderer is, so it
+/// travels (santree-pty on the box sets the same value last anyway). santree's
+/// own `SANTREE_*` keys are per launch — a setup run's worktree and root, an
+/// agent's repo and term key — and are added by what launches them.
+fn remote_env() -> Vec<(String, String)> {
+    vec![("TERM".into(), "xterm-256color".into())]
+}
+
+/// Output and link channels, as the sinks a remote pane forwards to.
+fn channel_sinks(on_output: Channel<RawBytes>, on_link: Channel<PaneLink>) -> Sinks {
+    Sinks {
+        output: Arc::new(move |bytes| {
+            let _ = on_output.send(RawBytes(bytes));
+        }),
+        link: Arc::new(move |link| {
+            let _ = on_link.send(link);
+        }),
+    }
+}
+
+/// A cwd on the box as IPC gave it, refused unless it is an absolute path
+/// that never climbs: the host confines it under its projects root, and this
+/// keeps a `..` from walking it to another checkout first.
+fn box_cwd(cwd: &str) -> anyhow::Result<String> {
+    let path = Path::new(cwd);
+    let plain = path.is_absolute()
+        && path
+            .components()
+            .all(|c| matches!(c, Component::RootDir | Component::Normal(_)));
+    anyhow::ensure!(
+        plain,
+        "not a directory santree can open a terminal in: {cwd}"
+    );
+    Ok(cwd.to_string())
+}
+
+/// Open a terminal: a local PTY, or — for a cwd inside a Daedalus project — a
+/// pane on the box. A Daedalus project's checkout is a path on the server: a
+/// shell there runs on the box or not at all, never in whatever this machine
+/// has at that path. With the link down the pane waits, `Reconnecting`, and
+/// opens on the next connect.
+pub(crate) async fn open(
+    manager: &PtyManager,
+    db: &Db,
+    daedalus: &DaedalusHost,
+    opts: TerminalOpenOpts,
+    on_output: Channel<RawBytes>,
+    on_link: Channel<PaneLink>,
+) -> anyhow::Result<SessionId> {
+    if let Some(cwd) = opts.cwd.as_deref() {
+        if crate::repo::on_daedalus(db, Path::new(cwd)).await? {
+            // Agents on the box need their hooks written there and their
+            // process table read there — the next step, not this one.
+            anyhow::ensure!(
+                opts.agent_kind.is_none(),
+                "Agents in Daedalus projects aren't available in this version of santree yet."
+            );
+            let spec = Spec {
+                cwd: box_cwd(cwd)?,
+                command: opts.command,
+                args: opts.args,
+                env: remote_env(),
+                label: opts.label,
+                agent_kind: None,
+            };
+            let client = daedalus.client_within(CONNECT_WAIT).await.ok();
+            return daedalus
+                .terminals()
+                .open(
+                    spec,
+                    opts.owner,
+                    (opts.cols, opts.rows),
+                    client,
+                    channel_sinks(on_output, on_link),
+                )
+                .await;
+        }
+    }
+    // The user's configured project env for the repo this cwd belongs to (app +
+    // per-repo). Applies to every santree-spawned terminal — the one chokepoint.
+    let env = crate::env::resolve_env(db, opts.cwd.as_deref()).await;
+    let opts = OpenOpts {
+        cwd: opts.cwd,
+        command: opts.command,
+        args: opts.args,
+        cols: opts.cols,
+        rows: opts.rows,
+        env,
+        owner: opts.owner,
+        label: opts.label,
+        agent_kind: opts.agent_kind,
+    };
+    let manager = manager.clone();
+    let sink = retiring_sink(
+        db.clone(),
+        opts.label.clone(),
+        opts.agent_kind,
+        opts.cwd.clone(),
+        move |bytes| {
+            // A failed send means the channel was dropped (view unmounted); the
+            // session will be closed separately, so just stop forwarding.
+            let _ = on_output.send(RawBytes(bytes));
+        },
+    );
+    tokio::task::spawn_blocking(move || manager.open(opts, sink)).await?
 }
 
 // These are `async` so Tauri runs them on the async runtime rather than the main
@@ -563,51 +743,21 @@ fn write_pty(manager: &PtyManager, id: SessionId, bytes: &[u8]) -> anyhow::Resul
 /// [`terminal_write`]. Nothing about *what* is spawned or how its bytes stream
 /// changes: `PtyManager::open` runs exactly once, with the same opts and the
 /// same verbatim byte-forwarding sink (COMPLIANCE.md).
+///
+/// In a Daedalus project the process is spawned on the box instead ([`open`]);
+/// `on_link` then says whether the pane is reaching it. A local session never
+/// sends on it.
 #[tauri::command]
 #[specta::specta]
 pub async fn terminal_open(
     opts: TerminalOpenOpts,
     on_output: Channel<RawBytes>,
+    on_link: Channel<PaneLink>,
     manager: State<'_, PtyManager>,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<SessionId> {
-    // A Daedalus project's checkout is a path on the server: a shell there runs
-    // on the box or not at all, never in whatever this machine has at that path.
-    if let Some(cwd) = opts.cwd.as_deref() {
-        if crate::repo::on_daedalus(&db, Path::new(cwd)).await? {
-            return Err(anyhow::anyhow!(
-                "Terminals in Daedalus projects aren't available in this version of santree yet."
-            )
-            .into());
-        }
-    }
-    // The user's configured project env for the repo this cwd belongs to (app +
-    // per-repo). Applies to every santree-spawned terminal — the one chokepoint.
-    let env = crate::env::resolve_env(&db, opts.cwd.as_deref()).await;
-    let opts = OpenOpts {
-        cwd: opts.cwd,
-        command: opts.command,
-        args: opts.args,
-        cols: opts.cols,
-        rows: opts.rows,
-        env,
-        owner: opts.owner,
-        label: opts.label,
-        agent_kind: opts.agent_kind,
-    };
-    let manager = manager.inner().clone();
-    let sink = retiring_sink(
-        db.inner().clone(),
-        opts.label.clone(),
-        opts.agent_kind,
-        opts.cwd.clone(),
-        move |bytes| {
-            // A failed send means the channel was dropped (view unmounted); the
-            // session will be closed separately, so just stop forwarding.
-            let _ = on_output.send(RawBytes(bytes));
-        },
-    );
-    Ok(tokio::task::spawn_blocking(move || manager.open(opts, sink)).await??)
+    Ok(open(&manager, &db, &daedalus, opts, on_output, on_link).await?)
 }
 
 /// Write raw bytes to a session — the user's keystrokes, verbatim.
@@ -626,9 +776,13 @@ pub async fn terminal_write(
     id: SessionId,
     data: String,
     manager: State<'_, PtyManager>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
-    let manager = manager.inner().clone();
-    Ok(tokio::task::spawn_blocking(move || write_pty(&manager, id, data.as_bytes())).await??)
+    let (manager, remote) = (manager.inner().clone(), daedalus.terminals().clone());
+    Ok(tokio::task::spawn_blocking(move || {
+        write_pty(&manager, &remote, id, Input::Keys(data.into_bytes()))
+    })
+    .await??)
 }
 
 /// Type the one human-initiated seed into a session, followed by Enter.
@@ -646,6 +800,10 @@ pub async fn terminal_write(
 /// one keystroke at a time. It never reaches a path — the spill file's name is a
 /// UUID this process mints — and it is shell-quoted by the builder that composed
 /// it (`agentProvider.ts`), which this must preserve rather than redo.
+///
+/// A session on Daedalus has no spill: the script would have to be written on
+/// the box, which comes with agents there. A seed that doesn't fit is refused
+/// rather than truncated.
 #[tauri::command]
 #[specta::specta]
 pub async fn terminal_seed(
@@ -653,21 +811,31 @@ pub async fn terminal_seed(
     id: SessionId,
     seed: String,
     manager: State<'_, PtyManager>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
     let dir = seed_dir(&app);
-    let manager = manager.inner().clone();
+    let (manager, remote) = (manager.inner().clone(), daedalus.terminals().clone());
     Ok(tokio::task::spawn_blocking(move || {
-        // Resolve the session BEFORE spilling, so a file is only ever the
-        // consequence of a real launch. `write_pty` would reject an unknown id
-        // anyway, but only after the script had been written — and a caller
-        // looping on an id that does not exist would leave one file per call
-        // for the whole TTL. Ordinary TOCTOU applies (the session can close in
-        // between) and is harmless: the write then fails exactly as before.
-        if !manager.sessions().iter().any(|s| s.id == id) {
-            anyhow::bail!("no terminal session {id}");
-        }
-        let line = seed_line(dir.as_deref(), &seed);
-        write_pty(&manager, id, format!("{line}\r").as_bytes())
+        let line = if terminals::is_remote(id) {
+            let line = seed.trim_end_matches(['\r', '\n']);
+            anyhow::ensure!(
+                line.len() < MAX_SEED_LINE,
+                "this launch line is too long to type into a terminal on Daedalus"
+            );
+            line.to_string()
+        } else {
+            // Resolve the session BEFORE spilling, so a file is only ever the
+            // consequence of a real launch. `write_pty` would reject an unknown id
+            // anyway, but only after the script had been written — and a caller
+            // looping on an id that does not exist would leave one file per call
+            // for the whole TTL. Ordinary TOCTOU applies (the session can close in
+            // between) and is harmless: the write then fails exactly as before.
+            if !manager.sessions().iter().any(|s| s.id == id) {
+                anyhow::bail!("no terminal session {id}");
+            }
+            seed_line(dir.as_deref(), &seed)
+        };
+        write_pty(&manager, &remote, id, Input::Seed(format!("{line}\r")))
     })
     .await??)
 }
@@ -680,14 +848,27 @@ pub async fn terminal_resize(
     cols: u16,
     rows: u16,
     manager: State<'_, PtyManager>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
+    if terminals::is_remote(id) {
+        return Ok(daedalus.terminals().resize(id, cols, rows)?);
+    }
     Ok(manager.resize(id, cols, rows)?)
 }
 
-/// Kill a session's child and free it.
+/// Kill a session's child and free it. On Daedalus, as soon as the box can be
+/// told.
 #[tauri::command]
 #[specta::specta]
-pub async fn terminal_close(id: SessionId, manager: State<'_, PtyManager>) -> CmdResult<()> {
+pub async fn terminal_close(
+    id: SessionId,
+    manager: State<'_, PtyManager>,
+    daedalus: State<'_, DaedalusHost>,
+) -> CmdResult<()> {
+    if terminals::is_remote(id) {
+        daedalus.terminals().close(id);
+        return Ok(());
+    }
     Ok(manager.close(id)?)
 }
 
@@ -704,6 +885,10 @@ pub async fn terminal_close(id: SessionId, manager: State<'_, PtyManager>) -> Cm
 /// client's own screen is better than anything this could synthesize, and the
 /// caller repaints from the running program instead.
 ///
+/// A session on Daedalus is caught up from the box's ring the same way; while
+/// the link is down the answer is `Reanchor` with nothing sent, `on_link` says
+/// `Reconnecting`, and the catch-up follows on the next connect.
+///
 /// Untrusted like any IPC value, and inert: `epoch` is compared for string
 /// equality against a value this process minted, `seq` indexes a byte count.
 /// Neither reaches the filesystem, a git argv, or a lookup key, and neither
@@ -714,9 +899,22 @@ pub async fn terminal_attach(
     id: SessionId,
     anchor: TerminalAnchor,
     on_output: Channel<RawBytes>,
+    on_link: Channel<PaneLink>,
     manager: State<'_, PtyManager>,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<TerminalAttached> {
+    if terminals::is_remote(id) {
+        let attached = daedalus
+            .terminals()
+            .attach(id, anchor.into(), channel_sinks(on_output, on_link))
+            .await?;
+        return Ok(TerminalAttached {
+            epoch: attached.epoch,
+            seq: attached.seq as f64,
+            mode: attached.mode.into(),
+        });
+    }
     // Attaching *replaces* the sink, so the exit retirement has to be re-wrapped
     // here or a session loses it the first time its pane remounts — which is the
     // common case, not the rare one. The label comes from the manager rather than
@@ -758,8 +956,16 @@ pub async fn terminal_attach(
 /// stops, and [`terminal_attach`] resumes it.
 #[tauri::command]
 #[specta::specta]
-pub async fn terminal_detach(id: SessionId, manager: State<'_, PtyManager>) -> CmdResult<()> {
-    manager.detach(id);
+pub async fn terminal_detach(
+    id: SessionId,
+    manager: State<'_, PtyManager>,
+    daedalus: State<'_, DaedalusHost>,
+) -> CmdResult<()> {
+    if terminals::is_remote(id) {
+        daedalus.terminals().detach(id);
+    } else {
+        manager.detach(id);
+    }
     Ok(())
 }
 
@@ -768,7 +974,8 @@ pub async fn terminal_detach(id: SessionId, manager: State<'_, PtyManager>) -> C
 /// Read-only and cheap: a snapshot under the manager lock plus one non-blocking
 /// `try_wait` per session. It grants no authority the frontend doesn't have —
 /// it can already close any id — and it reveals nothing about a session's
-/// *contents*, only that it exists.
+/// *contents*, only that it exists. This Mac's sessions only: the box's are
+/// its own to list.
 #[tauri::command]
 #[specta::specta]
 pub async fn terminal_sessions(manager: State<'_, PtyManager>) -> CmdResult<Vec<TerminalSession>> {
@@ -800,6 +1007,11 @@ pub async fn terminal_sessions(manager: State<'_, PtyManager>) -> CmdResult<Vec<
 /// reloaded page can rebuild the tab from `(label, agent_kind)` and catch the
 /// pane up from the stream — a reload now costs the view, not the work.
 ///
+/// Panes on Daedalus are handed over the same way: they live in this process
+/// too, beside the link. (After santree itself restarts there is nothing here
+/// to adopt; a pane opening under the same address finds its session on the
+/// box instead — `daedalus::terminals`.)
+///
 /// The caller must close whatever it cannot host (a worktree deleted while the
 /// page was down); this reports everything rather than filtering, because only
 /// the caller knows which surfaces still exist.
@@ -813,8 +1025,9 @@ pub async fn terminal_sessions(manager: State<'_, PtyManager>) -> CmdResult<Vec<
 pub async fn terminal_adopt(
     owner: String,
     manager: State<'_, PtyManager>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<Vec<AdoptedSession>> {
-    let adopted: Vec<AdoptedSession> = manager
+    let mut adopted: Vec<AdoptedSession> = manager
         .adopt_others(&owner)
         .into_iter()
         .map(|info| AdoptedSession {
@@ -825,6 +1038,19 @@ pub async fn terminal_adopt(
             command: info.command,
         })
         .collect();
+    adopted.extend(
+        daedalus
+            .terminals()
+            .adopt(&owner)
+            .into_iter()
+            .map(|pane| AdoptedSession {
+                id: pane.id,
+                label: pane.label,
+                agent_kind: pane.agent_kind,
+                cwd: Some(pane.cwd),
+                command: pane.command,
+            }),
+    );
     if !adopted.is_empty() {
         log::info!(
             "adopted {} pty session(s) from a previous page load",

@@ -25,6 +25,8 @@
 
 import { useLayoutEffect, useRef, useState } from "react";
 
+import { onDaedalus } from "../../lib/daedalusLink";
+import { useRepos } from "../../lib/queries";
 import { paneAddress } from "./paneAddress";
 import { useAdoptedSessions, useTerminals } from "./TerminalsContext";
 import { TerminalView } from "./TerminalView";
@@ -67,6 +69,11 @@ function place(el: HTMLElement, r: Rect) {
 export function TerminalLayer() {
   const { tabs, close, embed, detachEmbeds, registerPane } = useTerminals();
   const adopted = useAdoptedSessions();
+  // Which panes show a session on Daedalus, whose bytes are untrusted: decided
+  // from the pane's cwd before its renderer exists, so the registry has to be
+  // known before any pane mounts (a settled failure counts: nothing is shown
+  // for a project santree couldn't list).
+  const { data: repos, isFetched: reposKnown } = useRepos();
 
   // The overlay element itself, as state rather than a ref: the layer renders
   // nothing until adoption settles, so "the element exists" is a real input to
@@ -120,8 +127,9 @@ export function TerminalLayer() {
 
   // Nothing until we know what this page inherited. A pane that mounts before
   // the answer spawns a second session for work that is already running, and its
-  // mount effect never re-runs to correct it — see `useAdoptedSessions`.
-  if (!adopted.ready) return null;
+  // mount effect never re-runs to correct it — see `useAdoptedSessions`. Nor
+  // until the registry says which panes are on Daedalus (above).
+  if (!adopted.ready || !reposKnown) return null;
 
   return (
     <div
@@ -153,6 +161,7 @@ export function TerminalLayer() {
             // pane that owns it without inventing a second one.
             label={t.refId ?? t.key}
             agentKind={t.agent?.kind ?? null}
+            untrusted={onDaedalus(repos, t.cwd)}
             adoptId={
               t.refId ? adopted.sessions.get(paneAddress(t.refId, t.agent?.kind)) : undefined
             }

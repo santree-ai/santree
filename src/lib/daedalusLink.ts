@@ -76,10 +76,9 @@ export function linkUp(link: DaedalusLink | undefined): boolean {
  *  something in it, while santree can't reach the box. */
 export const OUT_OF_REACH = "Unavailable until santree can reach Daedalus";
 
-/** The same, while it can: santree works a Daedalus project's git (stage,
- *  commit, push and pull, worktrees, splits, PRs) but runs nothing else in it
- *  yet — no terminals, agents or setup scripts. */
-export const DAEDALUS_RUN_SOON = "Coming soon for Daedalus projects";
+/** The same, while it can: santree works a Daedalus project's git and runs its
+ *  terminals and setup scripts on the box, but no agents there yet. */
+export const DAEDALUS_AGENTS_SOON = "Coming soon for Daedalus projects";
 
 /** Why santree offers no way to change a project's git right now — the link
  *  being down, for a Daedalus project; `undefined` otherwise. */
@@ -88,9 +87,33 @@ export function gitOff(remote: boolean, link: DaedalusLink | undefined): string 
   return linkUp(link) ? undefined : OUT_OF_REACH;
 }
 
-/** Why santree offers no way to run something in a project right now (a
- *  terminal, an agent, a setup script) — `undefined` for a project on this Mac. */
+/** Why santree offers no terminal or setup script in a project right now:
+ *  they run on the box, so a Daedalus project's are off only while the link
+ *  is down. `undefined` for a project on this Mac. */
 export function runOff(remote: boolean, link: DaedalusLink | undefined): string | undefined {
+  return gitOff(remote, link);
+}
+
+/** Why santree offers no agent in a project right now — agents don't run on
+ *  Daedalus yet. `undefined` for a project on this Mac. */
+export function agentOff(remote: boolean, link: DaedalusLink | undefined): string | undefined {
   if (!remote) return undefined;
-  return linkUp(link) ? DAEDALUS_RUN_SOON : OUT_OF_REACH;
+  return linkUp(link) ? DAEDALUS_AGENTS_SOON : OUT_OF_REACH;
+}
+
+/** Whether `cwd` lies inside one of the Daedalus projects in `repos` — the
+ *  frontend's copy of the backend's `repo::on_daedalus`, for the one decision
+ *  a pane makes before any byte arrives: whether its bytes are the box's, and
+ *  so untrusted (OSC 52 off). Component-wise, like `Path::starts_with`. */
+export function onDaedalus(
+  repos: readonly { location: string; path: string | null }[] | undefined,
+  cwd: string | undefined,
+): boolean {
+  if (!cwd || !repos) return false;
+  return repos.some(
+    (r) =>
+      r.location === "Daedalus" &&
+      r.path !== null &&
+      (cwd === r.path || cwd.startsWith(r.path.endsWith("/") ? r.path : `${r.path}/`)),
+  );
 }

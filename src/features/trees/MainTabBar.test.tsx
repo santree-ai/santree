@@ -32,6 +32,7 @@ const trees = vi.hoisted(() => ({
     readable: true,
     gitOff: undefined as string | undefined,
     runOff: undefined as string | undefined,
+    agentOff: undefined as string | undefined,
   },
 }));
 
@@ -94,6 +95,8 @@ beforeEach(() => {
   trees.setupFor = null;
   trees.addTab.mockClear();
   trees.closeTab.mockClear();
+  trees.reach.runOff = undefined;
+  trees.reach.agentOff = undefined;
 });
 
 describe("MainTabBar", () => {
@@ -244,6 +247,34 @@ describe("MainTabBar", () => {
 
     // The digits belong to the menu only while it's open — otherwise a stray "1"
     // anywhere in Trees would spawn a Claude session.
+    // A Daedalus project on a live link: its terminals run on the box, so the
+    // "+" and ⌘T work and the terminal row opens one; its agents don't yet,
+    // so their rows stay, disabled, and their digits do nothing.
+    it("offers a Daedalus project's terminal and keeps its agents off", () => {
+      trees.reach.agentOff = "Coming soon for Daedalus projects";
+      mount();
+      openMenu();
+      const codex = screen.getByRole("button", { name: /Codex/ });
+      expect(codex).toBeDisabled();
+      expect(codex).toHaveAttribute("title", "Coming soon for Daedalus projects");
+      expect(screen.getByRole("button", { name: /Claude Code/ })).toBeDisabled();
+
+      press("1");
+      press("2");
+      expect(trees.addTab).not.toHaveBeenCalled();
+      press("3");
+      expect(trees.addTab).toHaveBeenCalledWith("terminal");
+    });
+
+    it("offers nothing while Daedalus is out of reach", () => {
+      trees.reach.runOff = "Unavailable until santree can reach Daedalus";
+      trees.reach.agentOff = trees.reach.runOff;
+      mount();
+      openMenu();
+      expect(screen.queryByRole("button", { name: /Codex/ })).toBeNull();
+      expect(screen.getByRole("button", { name: "New tab" })).toBeDisabled();
+    });
+
     it("stops listening for digits once the menu closes", () => {
       mount();
       openMenu();

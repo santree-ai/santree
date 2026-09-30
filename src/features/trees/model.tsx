@@ -406,9 +406,10 @@ export function tabForRun(launch: QueuedLaunch | undefined, initialSetup: boolea
 interface TreesModel {
   repo: string;
   /** Where the project lives and what santree can do in it now: a Daedalus
-   *  project's git is worked over the link, nothing else runs in it yet, and
-   *  none of it is offered while the link is down (`reach.gitOff` and
-   *  `reach.runOff` say why, on every control they turn off). */
+   *  project's git, terminals and setup scripts run on the box, its agents not
+   *  yet, and none of it is offered while the link is down (`reach.gitOff`,
+   *  `reach.runOff` and `reach.agentOff` say why, on every control they turn
+   *  off). */
   reach: RepoReach;
   worktrees: Worktree[];
   /** Live PR status keyed by worktree id (from the worktree_prs stream). The
@@ -1063,10 +1064,11 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       // The id is minted here (not by the backend) so the optimistic cache patch
       // is the exact row the DB will hold and the tab can be focused immediately.
       addTab: (kind, agentKind) => {
-        // Every way to open a tab (the "+" menu, its digit keys, the welcome
-        // surface) comes through here, so a project that runs nothing from santree
-        // yet opens nothing, whichever control was missed.
-        if (!activeId || reach.runOff) return null;
+        // Every way to open a tab (the "+" menu, its digit keys, ⌘T, the welcome
+        // surface) comes through here, so what a project can't run right now (a
+        // terminal while Daedalus is out of reach, an agent on Daedalus at all)
+        // opens nothing, whichever control was missed.
+        if (!activeId || (kind === "terminal" ? reach.runOff : reach.agentOff)) return null;
         const id = crypto.randomUUID();
         const resolvedAgent = kind === "terminal" ? null : (agentKind ?? "Codex");
         addTabRow({

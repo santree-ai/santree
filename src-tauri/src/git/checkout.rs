@@ -86,7 +86,7 @@ impl Checkout {
     }
 
     /// The directory on **this** machine, for the operations that are still
-    /// local-only (setup scripts, agents, the AI review). A Daedalus checkout
+    /// local-only (agents, the AI review). A Daedalus checkout
     /// refuses, so such an operation fails closed rather than touching a local
     /// path that merely shares a spelling.
     pub fn local_path(&self) -> Result<&Path> {
@@ -227,6 +227,34 @@ impl Checkout {
                     path: self.server_path(path),
                 })?;
                 Ok(stat.exists.then(|| stat.kind.unwrap_or(FsKind::Other)))
+            }
+        }
+    }
+
+    /// Whether `path` (absolute, on the checkout's machine) is a regular file
+    /// that machine would run — following symlinks, as running it does.
+    pub(crate) fn is_executable(&self, path: &Path) -> Result<bool> {
+        match &self.host {
+            Host::Local => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    Ok(std::fs::metadata(path)
+                        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+                }
+                #[cfg(not(unix))]
+                Ok(path.is_file())
+            }
+            Host::Daedalus(client) => {
+                let path = self.server_path(path);
+                let out = client.call_blocking::<m::ExecRun>(&ExecParams {
+                    cwd: self.server_path(&self.path),
+                    argv: ["test", "-f", &path, "-a", "-x", &path]
+                        .map(str::to_string)
+                        .to_vec(),
+                    ..ExecParams::default()
+                })?;
+                Ok(out.success())
             }
         }
     }

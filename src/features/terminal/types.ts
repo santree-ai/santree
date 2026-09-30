@@ -7,7 +7,9 @@
  * id. Nothing outside the single `XtermRenderer` implementation imports xterm.
  */
 
-import type { AgentKind } from "../../bindings";
+import type { AgentKind, PaneLink } from "../../bindings";
+
+export type { PaneLink };
 
 export type SessionId = number;
 export type Unsubscribe = () => void;
@@ -91,6 +93,11 @@ export interface OutputHandlers {
   onOutput(bytes: Uint8Array): void;
   /** The hosted process exited. Fires at most once. */
   onExit(): void;
+  /** Whether the pane reaches its session right now. Only a session on
+   *  Daedalus ever reports one: `reconnecting` while the link is down — the
+   *  process is still running there, never exited — and `live` once it is
+   *  caught up again. */
+  onLink?(link: PaneLink): void;
 }
 
 /** The transport to the local Rust PTY layer (one implementation over Tauri). */

@@ -137,7 +137,7 @@ async fn stored_root(db: &Db, repo: &str) -> Result<String> {
 }
 
 /// A registered repo's top-level path **on this machine**, for what still runs
-/// only here: setup scripts and the agent prompt files (docs/remote.md). A
+/// only here: a local setup script and the agent prompt files (docs/remote.md). A
 /// Daedalus repo is refused rather than touched at a local path that shares its
 /// spelling.
 async fn local_root(db: &Db, repo: &str) -> Result<String> {
@@ -952,12 +952,19 @@ fn setup_key(root: &str, issue_id: &str) -> String {
 /// The process, the PTY and the cancel registry all belong to [`crate::stream`] —
 /// the same machinery behind the Dev tab's build. All this adds is what's specific
 /// to setup: finding the script, the worktree env, and the `setup_ran` flag.
+///
+/// In a Daedalus project the script runs on the box ([`run_setup_on_box`]),
+/// streamed to the same pane.
 pub async fn run_setup_streamed(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
     on_event: Channel<StreamEvent>,
 ) -> Result<()> {
+    if repo::is_daedalus(db, repo).await? {
+        return run_setup_on_box(db, daedalus, repo, issue_id, on_event).await;
+    }
     let root = local_root(db, repo).await?;
     let wt_dir = linked_path(db, &root, issue_id)
         .await?
@@ -1009,40 +1016,129 @@ pub async fn run_setup_streamed(
     .await
     .unwrap_or(false);
 
+    finish_setup(db, &root, issue_id, ok, &on_event).await;
+    Ok(())
+}
+
+/// Record a finished setup run and tell its pane.
+async fn finish_setup(
+    db: &Db,
+    root: &str,
+    issue_id: &str,
+    ok: bool,
+    on_event: &Channel<StreamEvent>,
+) {
     if ok {
         let _ = sqlx::query(
             "UPDATE worktree_links SET setup_ran = 1 WHERE repo_path = ? AND issue_id = ?",
         )
-        .bind(&root)
+        .bind(root)
         .bind(issue_id)
         .execute(db)
         .await;
     }
     let _ = on_event.send(StreamEvent::Done { ok });
+}
+
+/// [`run_setup_streamed`] for a Daedalus project: `.santree/init.sh` in a PTY on
+/// the box, in the worktree there, streamed to the same pane
+/// ([`crate::daedalus::setup`]). The script and the worktree are the box's; the
+/// environment is `TERM` and santree's two variables, never this Mac's project
+/// env (see `terminal::remote_env`). With the link down it fails with the
+/// link's state, like every other action on the box.
+async fn run_setup_on_box(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+    on_event: Channel<StreamEvent>,
+) -> Result<()> {
+    let located = locate(db, daedalus, repo, issue_id).await?;
+    let root = stored_root(db, repo).await?;
+    let wt_dir = located.dir.path().to_string_lossy().into_owned();
+    let script = init_script_path(&root).to_string_lossy().into_owned();
+
+    let status = tokio::task::spawn_blocking({
+        let (dir, script) = (located.dir.clone(), script.clone());
+        move || -> Result<Option<String>> {
+            ensure_available(&dir)?;
+            if !dir.is_executable(Path::new(&script))? {
+                return Ok(None);
+            }
+            // The wrapper's exit-code file: in the checkout's own git dir, like
+            // the split's private index — never in the tree it is setting up.
+            let name = format!("santree-setup-{}.status", uuid::Uuid::new_v4());
+            let path = git::git(
+                &dir,
+                &["rev-parse", "--path-format=absolute", "--git-path", &name],
+            )?;
+            ensure!(!path.is_empty(), "git named no place for the setup status");
+            Ok(Some(path))
+        }
+    })
+    .await??;
+    let Some(status) = status else {
+        let _ = on_event.send(StreamEvent::Chunk {
+            text: "No executable .santree/init.sh — nothing to run.\r\n".into(),
+        });
+        let _ = on_event.send(StreamEvent::Done { ok: true });
+        return Ok(());
+    };
+
+    let client = daedalus
+        .client_within(crate::daedalus::host::CONNECT_WAIT)
+        .await?;
+    let spec = crate::daedalus::setup::RunSpec {
+        cwd: wt_dir.clone(),
+        script,
+        status,
+        env: vec![
+            ("TERM".into(), "xterm-256color".into()),
+            ("SANTREE_WORKTREE_PATH".into(), wt_dir),
+            ("SANTREE_REPO_ROOT".into(), root.clone()),
+        ],
+        label: format!("setup:{issue_id}"),
+        owner: daedalus.owner().to_string(),
+    };
+    let ev = on_event.clone();
+    let ok = daedalus
+        .runs()
+        .run(&setup_key(&root, issue_id), &client, spec, move |text| {
+            let _ = ev.send(StreamEvent::Chunk { text });
+        })
+        .await?;
+    finish_setup(db, &root, issue_id, ok, &on_event).await;
     Ok(())
 }
 
 /// Stop the setup script running for a worktree, if any. Returns whether one was
 /// running. The kill closes the PTY, so the streaming run finishes on its own and
-/// reports failure — there's no separate teardown path to keep in sync.
-pub async fn cancel_setup(db: &Db, repo: &str, issue_id: &str) -> Result<bool> {
+/// reports failure — there's no separate teardown path to keep in sync. A run on
+/// Daedalus is closed on the box.
+pub async fn cancel_setup(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+) -> Result<bool> {
     validate_issue_id(issue_id)?;
-    let root = stored_root(db, repo).await?;
-    Ok(stream::RUNS.cancel(&setup_key(&root, issue_id)))
+    let key = setup_key(&stored_root(db, repo).await?, issue_id);
+    Ok(stream::RUNS.cancel(&key) || daedalus.runs().cancel(&key).await)
 }
 
 /// Re-grid a running setup script's PTY to the pane showing it, so its remaining
 /// output wraps to the width on screen. Returns whether one was running.
 pub async fn resize_setup(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
     cols: u16,
     rows: u16,
 ) -> Result<bool> {
     validate_issue_id(issue_id)?;
-    let root = stored_root(db, repo).await?;
-    Ok(stream::RUNS.resize(&setup_key(&root, issue_id), cols, rows))
+    let key = setup_key(&stored_root(db, repo).await?, issue_id);
+    Ok(stream::RUNS.resize(&key, cols, rows) || daedalus.runs().resize(&key, cols, rows).await)
 }
 
 /// Single-quote a string for a POSIX shell command line.
@@ -2249,9 +2345,10 @@ mod tests {
 
         let (first_ch, first_log) = recording_channel();
         let (second_ch, second_log) = recording_channel();
+        let link = no_link();
         let (first, second) = tokio::join!(
-            run_setup_streamed(&db, "test", "AK-1", first_ch),
-            run_setup_streamed(&db, "test", "AK-1", second_ch),
+            run_setup_streamed(&db, &link, "test", "AK-1", first_ch),
+            run_setup_streamed(&db, &link, "test", "AK-1", second_ch),
         );
 
         assert!(
@@ -2318,8 +2415,9 @@ mod tests {
     fn start_setup(db: &Db) -> (tokio::task::JoinHandle<Result<()>>, Arc<Mutex<Vec<String>>>) {
         let (channel, log) = recording_channel();
         let db = db.clone();
-        let run =
-            tokio::spawn(async move { run_setup_streamed(&db, "test", "AK-1", channel).await });
+        let run = tokio::spawn(async move {
+            run_setup_streamed(&db, &no_link(), "test", "AK-1", channel).await
+        });
         (run, log)
     }
 
@@ -2413,7 +2511,7 @@ mod tests {
 
         // Absent entirely.
         let (channel, log) = recording_channel();
-        run_setup_streamed(&db, "test", "AK-1", channel)
+        run_setup_streamed(&db, &no_link(), "test", "AK-1", channel)
             .await
             .unwrap();
         assert!(events_contain(&log, "nothing to run"));
@@ -2424,7 +2522,7 @@ mod tests {
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
         std::fs::write(&script, "#!/bin/bash\necho should not run\n").unwrap();
         let (channel, log) = recording_channel();
-        run_setup_streamed(&db, "test", "AK-1", channel)
+        run_setup_streamed(&db, &no_link(), "test", "AK-1", channel)
             .await
             .unwrap();
         assert!(events_contain(&log, "nothing to run"));
@@ -2454,14 +2552,14 @@ mod tests {
         write_init_script(&repo_dir, "#!/bin/bash\necho started\nsleep 120\n");
 
         assert!(
-            !cancel_setup(&db, "test", "AK-1").await.unwrap(),
+            !cancel_setup(&db, &no_link(), "test", "AK-1").await.unwrap(),
             "nothing is running yet"
         );
 
         let (run, log) = start_setup(&db);
         wait_for(&log, "started").await;
 
-        assert!(cancel_setup(&db, "test", "AK-1").await.unwrap());
+        assert!(cancel_setup(&db, &no_link(), "test", "AK-1").await.unwrap());
 
         tokio::time::timeout(Duration::from_secs(20), run)
             .await

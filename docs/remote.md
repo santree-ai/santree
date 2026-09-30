@@ -257,16 +257,16 @@ prove the two meet. santree does not depend on `santree-remote-tls`.
   helper on this Mac, fed the diff read through the checkout. For a Daedalus
   worktree it runs in an empty scratch directory (`agent::HelperDir`) with no
   `Read` grant, so nothing it does reaches the box.
-- **Still local-only, and refusing a Daedalus repo**: setup scripts
-  (`run_setup_streamed` streams through a PTY — increment 3), agent launches, work
+- **Terminals on the box** — see "Terminals and setup scripts on the box" below.
+- **Still local-only, and refusing a Daedalus repo**: agent launches (a Claude or
+  Codex tab: `terminal_open` refuses an `agentKind` with a Daedalus cwd), work
   prompts and session history (`local_root` / `local_worktree`, and
-  `Checkout::local_path`); `terminal_open` refuses a cwd inside a Daedalus project
-  (`repo::on_daedalus`). The UI says so per kind of action (`lib/daedalusLink`):
-  `gitOff` turns git actions off only while the link is down ("Unavailable until
-  santree can reach Daedalus"); `runOff` keeps terminals, agents and setup off
-  ("Coming soon for Daedalus projects", or the same unreachable reason). Creating
-  a worktree from a ticket makes the tree but starts no agent in it, and a split
-  offers no "Run setup".
+  `Checkout::local_path`). The UI says so per kind of action (`lib/daedalusLink`):
+  `gitOff` and `runOff` turn git actions, terminals and setup scripts off only
+  while the link is down ("Unavailable until santree can reach Daedalus");
+  `agentOff` keeps agents off ("Coming soon for Daedalus projects", or the same
+  unreachable reason) — the "+" menu's agent rows, the project pickers that start
+  one, a ticket's worktree, which is made but gets no agent.
 - **Reads wait for the link**: a Daedalus project's worktree reads are `enabled`
   only while the link is `Connected` (`useRepoReach` / `useReadableRepos` in
   `lib/queries.ts`), so a down link never fails a read into a toast; the sidebar
@@ -304,6 +304,74 @@ prove the two meet. santree does not depend on `santree-remote-tls`.
 - Stays local: GitHub (`gh`, by repo slug — PR status reads the slug from the
   checkout on the box, then asks GitHub from here), Linear/Jira. **AI review is
   disabled for Daedalus projects** (its MCP draft tools would need a relay).
+
+## Terminals and setup scripts on the box
+
+A terminal in a Daedalus project is a PTY on the box (`pty.open` in the
+checkout, which the host confines under `projectsRoot`), drawn by the same
+terminal layer as a local one — docs/terminals.md, "Remote sessions", has the
+pane's side. `terminal.rs` dispatches: a cwd inside a Daedalus project
+(`repo::on_daedalus`, absolute and never climbing) goes to
+`daedalus/terminals.rs`, every other id and command stays on `PtyManager`.
+
+- **Ids.** A remote pane gets an app-side id from `terminals::FIRST_ID` (2³¹) up
+  — a range `PtyManager` never reaches — so `write`/`resize`/`close`/`attach`/
+  `detach` dispatch on the id alone. The box's own session id is bound to the
+  pane once it is opened or found.
+- **Anchors.** Every byte forwarded advances the pane's anchor; `pty.attach`
+  resumes from it and the box's ring answers `exact|tail|reanchor` exactly as
+  the local ring does. The frontend's own `terminal_attach` (a remount, a
+  reload) passes its anchor through.
+- **A dropped link is not an exit.** The route closing without `pty.exit` leaves
+  the pane `Reconnecting` (a `PaneLink` on its own channel beside the bytes); on
+  every `Reconnected` each waiting pane re-attaches from its anchor, so the box
+  replays exactly what it missed. Only `pty.exit`, or an attach the box answers
+  `not_found` (it restarted and lost the session), ends a pane. Keystrokes are
+  tagged with the attach they were typed at and dropped while the pane can't
+  reach its session — never replayed later into whatever runs by then. They go
+  through one writer per pane, in order; the grid follows on the next attach.
+- **santree quitting.** The PTY stays on the box. A pane with no session bound
+  — after a relaunch, or opened while the link was down — first looks for a
+  live one with its own address (label and provider, `pty.sessions`, one no
+  other pane holds) and attaches to it from `fresh`, replaying the box's ring;
+  only when there is none does it `pty.open`. A seed is typed only into a
+  session the pane opened itself. A webview reload hands panes over through
+  `terminal_adopt` like local ones: they live in the app process beside the
+  link. `pty.adopt` is not used — the app-side registry is the reload hand-over,
+  and a relaunch finds sessions by address, which also works when the link is
+  down at launch (adoption at page load can't wait for it).
+- **Closing** is `pty.close`; with the link down the pane waits and closes on
+  the next connect (finding its session by address if it never bound one). A
+  tab closed while the link is down and never reconnected before santree quits
+  leaves its session running on the box.
+- **Environment.** A remote pane gets `TERM` and nothing else from this Mac
+  (`terminal::remote_env`). `env::resolve_env` is this Mac's project
+  environment — values from this Mac's keychain and `.env` files read from this
+  Mac's disk — and none of it is the box's to have; the shell there is the
+  box's login shell under the session host, which runs with the operator's
+  profile `PATH`, and the box's own profile is where a Daedalus project's
+  environment belongs. santree's `SANTREE_*` keys are per launch and added by
+  what launches: a setup run's two, and an agent's once agents run there.
+- **Untrusted bytes** (design S5): the pane's renderer is built untrusted —
+  OSC 52 (clipboard writes) swallowed, OSC 8 links opened only as `http(s)`,
+  remote text never rendered as HTML. The frontend decides it from the pane's
+  cwd before the first byte (`lib/daedalusLink` `onDaedalus`, the backend's
+  `on_daedalus`), which is why the terminal layer waits for the repo registry.
+- **Setup scripts** (`worktree::run_setup_streamed` → `daedalus/setup.rs`):
+  `.santree/init.sh` in a PTY on the box, `bash -lc` around it in the worktree
+  there, env `TERM` + `SANTREE_WORKTREE_PATH` + `SANTREE_REPO_ROOT`, streamed
+  to the same read-only pane as `StreamEvent`s. The run re-attaches from its
+  anchor across a dropped link. `pty.exit` carries no status, so the wrapper
+  writes the script's exit code to a file in the worktree's git dir
+  (`rev-parse --git-path santree-setup-<uuid>.status`, like the split's index),
+  read back and removed once the process is gone; no file (stopped, killed) is
+  a failure. Stop is `pty.close` (queued while the link is down), resize
+  `pty.resize`, removing the worktree stops it, and a 60-minute backstop closes
+  a run that never ends. Quitting santree leaves a running script to finish on
+  the box; nothing records it.
+- **Compliance**: remote bytes enter a PTY only through `terminal.rs`'s
+  `write_pty` → the pane's one writer (`pty.write`), pinned by
+  `only_the_terminal_adapter_writes_bytes_into_a_pty`.
 
 ## Code map
 
@@ -353,11 +421,21 @@ or (by default) specta, and their public APIs are a contract with that repo.
   `client_within(wait)` (≤5 s while `Connecting`, `CONNECT_WAIT`) →
   `Result<Arc<RemoteClient>, NotConnected>`; the `DaedalusLinkChanged` event; the
   hook `Relay`.
+- `terminals.rs` — `RemoteTerminals`: the remote panes (ids, anchors, the
+  re-attach on `Reconnected`, finding a session again by address, the per-pane
+  writer). Owned by `DaedalusHost`, started by `resume`.
+- `setup.rs` — `RemoteRuns`: setup scripts in a PTY on the box, keyed like
+  `stream::RUNS`.
 - `mod.rs` — the health check, `workspaces.list` over the link, and registering a
   checkout. `git_tests.rs` drives a Daedalus project's git end to end: the
   worktree commands through a `FakeAgent` and `FakeDaemon` to real git in a temp
   repo — reads, the commit box, push and pull against a local bare origin,
   worktree create/remove, a split — and the link-down case running nothing.
+  `terminal_tests.rs` does the same for terminals and setup: open, type, read,
+  resize, detach and an exact re-attach, a dropped link (reconnecting, then
+  caught up once, the same process), santree restarting (the session found
+  again, its seed not retyped), setup runs (success, failure, resize, a drop,
+  Stop), and the link-down case opening nothing on either machine.
 
 `src-tauri/src/git/checkout.rs` — `Checkout`, the seam (above); `repo::checkout`
 resolves one.

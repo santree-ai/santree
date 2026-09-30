@@ -97,7 +97,7 @@ pub(crate) fn pty_guard_blocking() -> tokio::sync::MutexGuard<'static, ()> {
 /// and this stops mattering. 120 is wide enough that a build watched entirely from a
 /// closed tab still reads correctly.
 pub const COLS: u16 = 120;
-const ROWS: u16 = 40;
+pub const ROWS: u16 = 40;
 
 /// A streamed run event. `Chunk` is raw PTY output — arbitrary bytes as they
 /// arrive, *not* line-aligned and with escape sequences intact; the view feeds it
@@ -443,7 +443,7 @@ fn send_text(ev: &Channel<StreamEvent>, text: &str) {
 /// partial sequence behind for the next read to complete. Invalid bytes (not merely
 /// incomplete ones) are replaced rather than held forever — a tool emitting binary
 /// junk must not wedge the stream.
-fn take_utf8(buf: &mut Vec<u8>) -> String {
+pub(crate) fn take_utf8(buf: &mut Vec<u8>) -> String {
     match std::str::from_utf8(buf) {
         Ok(s) => {
             let out = s.to_string();

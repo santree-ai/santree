@@ -138,7 +138,10 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    write goes through — see "A repo reads one tracker") · linear.rs
                    (GraphQL) · daedalus/ (the home server through the local
                    Daedalus agent: `host` — the live link and the hook relay —
-                   plus the health check and the workspace list over the link)
+                   `terminals` — a Daedalus project's terminals as PTYs on the
+                   box, re-attached across dropped links and relaunches —
+                   `setup` — its setup scripts there — plus the health check
+                   and the workspace list over the link)
                    · git.rs + git/checkout.rs (`Checkout`: the one seam a repo's
                    git, reads and writes, and its file access go through, here
                    or on Daedalus;
@@ -444,8 +447,8 @@ src/
   independent of `Worktree.ticketId` / `worktree_links.ticket_id`: ids own paths and
   sessions, ticket associations drive tracker reads. The private index lives in
   the checkout's own git dir (`git rev-parse --git-path`), so a Daedalus project's
-  split runs on the box like any other git; its "Run setup" stays off until setup
-  scripts run there. Sparse and submodule changes are unsupported. Old split-draft migrations remain for database compatibility.
+  split runs on the box like any other git, and its "Run setup" runs the child's
+  setup script there. Sparse and submodule changes are unsupported. Old split-draft migrations remain for database compatibility.
 - **Data:** every read is a hook in `lib/queries.ts`. Result-typed commands go through
   `useUnwrappedQuery`; raw-value commands use plain `useQuery`. Writes use
   `useOptimisticMutation` (cancel → patch → rollback-on-error → invalidate-on-settle).

@@ -339,6 +339,9 @@ pub async fn remove_worktree(
     db: State<'_, Db>,
     daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
+    // A setup script on the box would keep running against a directory about
+    // to go (`remove` stops a local one itself).
+    worktree::cancel_setup(&db, &daedalus, &repo, &issue_id).await?;
     let prompts = worktree::prompts_root(&app);
     let root = worktree::root(&db, &daedalus, &repo).await?;
     Ok(worktree::remove(&db, &root, &repo, &issue_id, prompts.as_deref()).await?)
@@ -394,8 +397,9 @@ pub async fn run_worktree_setup_streamed(
     issue_id: String,
     on_event: Channel<crate::stream::StreamEvent>,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
-    Ok(worktree::run_setup_streamed(&db, &repo, &issue_id, on_event).await?)
+    Ok(worktree::run_setup_streamed(&db, &daedalus, &repo, &issue_id, on_event).await?)
 }
 
 /// Stop a running setup script (the Setup tab's Stop button). Killing the child
@@ -407,8 +411,9 @@ pub async fn cancel_worktree_setup(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<bool> {
-    Ok(worktree::cancel_setup(&db, &repo, &issue_id).await?)
+    Ok(worktree::cancel_setup(&db, &daedalus, &repo, &issue_id).await?)
 }
 
 /// Re-grid a running setup script's PTY to the pane showing it — the Setup tab
@@ -423,8 +428,9 @@ pub async fn resize_worktree_setup(
     cols: u16,
     rows: u16,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<bool> {
-    Ok(worktree::resize_setup(&db, &repo, &issue_id, cols, rows).await?)
+    Ok(worktree::resize_setup(&db, &daedalus, &repo, &issue_id, cols, rows).await?)
 }
 
 /// Fast-forward the repo's local base branch (main/master) to origin — the

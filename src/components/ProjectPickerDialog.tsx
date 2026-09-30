@@ -23,7 +23,7 @@
 import { type KeyboardEvent, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { runOff } from "../lib/daedalusLink";
+import { agentOff } from "../lib/daedalusLink";
 import { useDaedalusStatus, useRepos } from "../lib/queries";
 import { shortRepoName } from "../lib/repoName";
 import { accentActiveStyle } from "../theme/colors";
@@ -64,11 +64,11 @@ export function ProjectPickerDialog({
 }) {
   const { data: registered = [] } = useRepos();
   const repos = only ? registered.filter((r) => only.includes(r.name)) : registered;
-  // Every asker runs something in the project it gets (a worktree, an agent on
+  // Every asker starts an agent in the project it gets (on a worktree, or on
   // its checkout), which a Daedalus project doesn't offer yet: listed, so the
   // registry reads whole, but not pickable, and says why.
   const { data: link } = useDaedalusStatus();
-  const offFor = (location: string) => runOff(location === "Daedalus", link);
+  const offFor = (location: string) => agentOff(location === "Daedalus", link);
   const [asDefault, setAsDefault] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const initialRef = useRef<HTMLButtonElement>(null);

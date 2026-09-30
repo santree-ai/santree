@@ -12,7 +12,7 @@
  */
 import { Channel } from "@tauri-apps/api/core";
 
-import { commands, type TerminalAnchor } from "../../bindings";
+import { commands, type PaneLink, type TerminalAnchor } from "../../bindings";
 import { PAGE_OWNER } from "./pageOwner";
 import { paneAddress } from "./paneAddress";
 import type {
@@ -44,6 +44,13 @@ function channelFor(handlers: OutputHandlers): Channel<ArrayBuffer> {
   return channel;
 }
 
+/** A pane's link-state channel: only a session on Daedalus sends on it. */
+function linkChannelFor(handlers: OutputHandlers): Channel<PaneLink> {
+  const channel = new Channel<PaneLink>();
+  channel.onmessage = (link) => handlers.onLink?.(link);
+  return channel;
+}
+
 const toBinding = (anchor: Anchor): TerminalAnchor =>
   anchor.kind === "at"
     ? { kind: "at", epoch: anchor.epoch, seq: anchor.seq }
@@ -72,13 +79,19 @@ export class TauriBackend implements TerminalBackend {
         agentKind: opts.agentKind ?? null,
       },
       channelFor(handlers),
+      linkChannelFor(handlers),
     );
     if (result.status === "error") throw new Error(result.error);
     return result.data;
   }
 
   async attach(id: SessionId, anchor: Anchor, handlers: OutputHandlers): Promise<Attached> {
-    const result = await commands.terminalAttach(id, toBinding(anchor), channelFor(handlers));
+    const result = await commands.terminalAttach(
+      id,
+      toBinding(anchor),
+      channelFor(handlers),
+      linkChannelFor(handlers),
+    );
     if (result.status === "error") throw new Error(result.error);
     return result.data;
   }

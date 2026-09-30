@@ -1258,8 +1258,12 @@ export const commands = {
 	 *  [`terminal_write`]. Nothing about *what* is spawned or how its bytes stream
 	 *  changes: `PtyManager::open` runs exactly once, with the same opts and the
 	 *  same verbatim byte-forwarding sink (COMPLIANCE.md).
+	 * 
+	 *  In a Daedalus project the process is spawned on the box instead ([`open`]);
+	 *  `on_link` then says whether the pane is reaching it. A local session never
+	 *  sends on it.
 	 */
-	terminalOpen: (opts: TerminalOpenOpts, onOutput: Channel<ArrayBuffer>) => typedError<number, CmdError>(__TAURI_INVOKE("terminal_open", { opts, onOutput })),
+	terminalOpen: (opts: TerminalOpenOpts, onOutput: Channel<ArrayBuffer>, onLink: Channel<PaneLink>) => typedError<number, CmdError>(__TAURI_INVOKE("terminal_open", { opts, onOutput, onLink })),
 	/**
 	 *  Write raw bytes to a session — the user's keystrokes, verbatim.
 	 * 
@@ -1289,11 +1293,18 @@ export const commands = {
 	 *  one keystroke at a time. It never reaches a path — the spill file's name is a
 	 *  UUID this process mints — and it is shell-quoted by the builder that composed
 	 *  it (`agentProvider.ts`), which this must preserve rather than redo.
+	 * 
+	 *  A session on Daedalus has no spill: the script would have to be written on
+	 *  the box, which comes with agents there. A seed that doesn't fit is refused
+	 *  rather than truncated.
 	 */
 	terminalSeed: (id: number, seed: string) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_seed", { id, seed })),
 	/**  Resize a session's PTY to the visible grid. */
 	terminalResize: (id: number, cols: number, rows: number) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_resize", { id, cols, rows })),
-	/**  Kill a session's child and free it. */
+	/**
+	 *  Kill a session's child and free it. On Daedalus, as soon as the box can be
+	 *  told.
+	 */
 	terminalClose: (id: number) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_close", { id })),
 	/**
 	 *  Point a live session's output at this page's channel, and catch it up.
@@ -1309,12 +1320,16 @@ export const commands = {
 	 *  client's own screen is better than anything this could synthesize, and the
 	 *  caller repaints from the running program instead.
 	 * 
+	 *  A session on Daedalus is caught up from the box's ring the same way; while
+	 *  the link is down the answer is `Reanchor` with nothing sent, `on_link` says
+	 *  `Reconnecting`, and the catch-up follows on the next connect.
+	 * 
 	 *  Untrusted like any IPC value, and inert: `epoch` is compared for string
 	 *  equality against a value this process minted, `seq` indexes a byte count.
 	 *  Neither reaches the filesystem, a git argv, or a lookup key, and neither
 	 *  grants authority the caller doesn't already have.
 	 */
-	terminalAttach: (id: number, anchor: TerminalAnchor, onOutput: Channel<ArrayBuffer>) => typedError<TerminalAttached, CmdError>(__TAURI_INVOKE("terminal_attach", { id, anchor, onOutput })),
+	terminalAttach: (id: number, anchor: TerminalAnchor, onOutput: Channel<ArrayBuffer>, onLink: Channel<PaneLink>) => typedError<TerminalAttached, CmdError>(__TAURI_INVOKE("terminal_attach", { id, anchor, onOutput, onLink })),
 	/**
 	 *  Stop delivering a session's output without ending it — what a pane does when
 	 *  it unmounts. The process keeps running and keeps recording; only delivery
@@ -1333,6 +1348,11 @@ export const commands = {
 	 *  reloaded page can rebuild the tab from `(label, agent_kind)` and catch the
 	 *  pane up from the stream — a reload now costs the view, not the work.
 	 * 
+	 *  Panes on Daedalus are handed over the same way: they live in this process
+	 *  too, beside the link. (After santree itself restarts there is nothing here
+	 *  to adopt; a pane opening under the same address finds its session on the
+	 *  box instead — `daedalus::terminals`.)
+	 * 
 	 *  The caller must close whatever it cannot host (a worktree deleted while the
 	 *  page was down); this reports everything rather than filtering, because only
 	 *  the caller knows which surfaces still exist.
@@ -1349,7 +1369,8 @@ export const commands = {
 	 *  Read-only and cheap: a snapshot under the manager lock plus one non-blocking
 	 *  `try_wait` per session. It grants no authority the frontend doesn't have —
 	 *  it can already close any id — and it reveals nothing about a session's
-	 *  *contents*, only that it exists.
+	 *  *contents*, only that it exists. This Mac's sessions only: the box's are
+	 *  its own to list.
 	 */
 	terminalSessions: () => typedError<TerminalSession[], CmdError>(__TAURI_INVOKE("terminal_sessions")),
 };
@@ -2480,6 +2501,15 @@ export type Opener = {
 	/**  Whether the app was found installed on this machine. */
 	available: boolean,
 };
+
+/**
+ *  Whether a pane is reaching its session right now, pushed on its own
+ *  channel beside the bytes. Only a session on Daedalus ever sends one: a local
+ *  PTY is always reachable. `Reconnecting` is never an exit — the process is
+ *  still running on the box, and the pane catches up from its anchor when the
+ *  link returns; only the empty output chunk says a process ended.
+ */
+export type PaneLink = "live" | "reconnecting";
 
 /**
  *  The detail panel payload for a selected PR: body, conversation, diff, checks.

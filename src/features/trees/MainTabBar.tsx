@@ -135,7 +135,7 @@ export function MainTabBar() {
       active={activeTab}
       onSelect={setActiveTab}
       ariaLabel="Worktree tabs"
-      newTabMenu={(close) => <NewTabMenu onAdd={addTab} close={close} />}
+      newTabMenu={(close) => <NewTabMenu onAdd={addTab} close={close} agentOff={reach.agentOff} />}
       newTabMenuClassName="w-40 overflow-hidden"
       newTabDisabled={reach.runOff}
       trailing={
@@ -166,15 +166,19 @@ export function MainTabBar() {
 function NewTabMenu({
   onAdd,
   close,
+  agentOff,
 }: {
   onAdd: (kind: TabKind, agentKind?: AgentKind) => void;
   close: () => void;
+  /** Why no agent can start in this project (one on Daedalus): its rows stay,
+   *  disabled, with that as their tooltip; the terminal row is unaffected. */
+  agentOff?: string;
 }) {
   const claude = useAgentAuth("Claude").data;
   const codexHealth = useCodexHealth().data;
   const codexAccount = useCodexAccount(codexHealth?.available === true).data;
-  const codexReady = !!codexHealth?.available && !!codexAccount?.connected;
-  const claudeReady = !!claude?.connected;
+  const codexReady = !agentOff && !!codexHealth?.available && !!codexAccount?.connected;
+  const claudeReady = !agentOff && !!claude?.connected;
   const add = (kind: TabKind, agentKind?: AgentKind) => {
     if (agentKind === "Codex" && !codexReady) return;
     if (agentKind === "Claude" && !claudeReady) return;
@@ -195,7 +199,7 @@ function NewTabMenu({
       <button
         type="button"
         disabled={!codexReady}
-        title={codexReady ? undefined : "Connect Codex in Settings first"}
+        title={agentOff ?? (codexReady ? undefined : "Connect Codex in Settings first")}
         onClick={() => add("agent", "Codex")}
         className={MENU_ITEM}
       >
@@ -206,7 +210,7 @@ function NewTabMenu({
       <button
         type="button"
         disabled={!claudeReady}
-        title={claudeReady ? undefined : "Sign in to Claude Code first"}
+        title={agentOff ?? (claudeReady ? undefined : "Sign in to Claude Code first")}
         onClick={() => add("agent", "Claude")}
         className={MENU_ITEM}
       >

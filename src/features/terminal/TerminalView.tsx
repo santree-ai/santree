@@ -5,14 +5,14 @@
  * unmount. Backend and renderer are injectable so the wiring is unit-testable
  * with fakes. No xterm import here — only the `TerminalRenderer` interface.
  */
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AgentKind } from "../../bindings";
 import type { PaneHandle } from "./orchestrator";
 import { paneAddress } from "./paneAddress";
 import { clearSessionTitle, setSessionTitle } from "./sessionTitles";
 import { tauriBackend } from "./TauriBackend";
-import type { SessionId, TerminalBackend, TerminalRenderer } from "./types";
+import type { PaneLink, SessionId, TerminalBackend, TerminalRenderer } from "./types";
 import { XtermRenderer } from "./XtermRenderer";
 
 export interface TerminalViewProps {
@@ -43,8 +43,13 @@ export interface TerminalViewProps {
    *  how to type into the session from elsewhere (the Agents panel's reply box),
    *  and how to end it. Returns a cleanup fn, run when the pane tears down. */
   onReady?: (handle: PaneHandle) => (() => void) | undefined;
+  /** The session's bytes come from Daedalus, not this Mac: they are untrusted
+   *  (design S5), so the renderer is built with clipboard writes (OSC 52) off
+   *  and only web links openable. Read once, when the pane mounts — it must be
+   *  settled before the first byte. */
+  untrusted?: boolean;
   backend?: TerminalBackend;
-  createRenderer?: () => TerminalRenderer;
+  createRenderer?: (opts: { untrusted: boolean }) => TerminalRenderer;
 }
 
 /** How long a resize burst has to be quiet before the new grid is sent to the
@@ -67,15 +72,20 @@ export function TerminalView({
   args,
   label,
   agentKind = null,
+  untrusted = false,
   adoptId,
   seed,
   active = true,
   onExit,
   onReady,
   backend = tauriBackend,
-  createRenderer = () => new XtermRenderer(),
+  createRenderer = (opts) => new XtermRenderer(opts),
 }: TerminalViewProps) {
   const host = useRef<HTMLDivElement>(null);
+  // Whether the session is reachable right now. Only a session on Daedalus ever
+  // says otherwise, and `reconnecting` is never an exit: the process is still
+  // running there, and the backend catches this pane up when the link is back.
+  const [link, setLink] = useState<PaneLink>("live");
   const rendererRef = useRef<TerminalRenderer | null>(null);
   const idRef = useRef<SessionId | null>(null);
   // Where this pane is in the session's stream, for a later re-attach. Null
@@ -127,7 +137,7 @@ export function TerminalView({
     const el = host.current;
     if (!el) return;
 
-    const renderer = createRenderer();
+    const renderer = createRenderer({ untrusted });
     rendererRef.current = renderer;
     renderer.mount(el);
     // Passive and display-only: a coding CLI animates its OSC title while it
@@ -143,6 +153,9 @@ export function TerminalView({
     const handlers = {
       onOutput: (bytes: Uint8Array) => renderer.write(bytes),
       onExit: () => onExitRef.current?.(),
+      onLink: (next: PaneLink) => {
+        if (!disposed) setLink(next);
+      },
     };
 
     (async () => {
@@ -292,5 +305,18 @@ export function TerminalView({
     return () => cancelAnimationFrame(raf);
   }, [active, commitResize]);
 
-  return <div ref={host} className="h-full w-full" />;
+  return (
+    <div className="relative h-full w-full">
+      <div ref={host} className="h-full w-full" />
+      {link === "reconnecting" && (
+        <div
+          role="status"
+          className="pointer-events-none absolute top-2 right-3 flex items-center gap-1.5 rounded border border-line-2 bg-raised px-2 py-1 text-[11px] text-muted-2 shadow-sm"
+        >
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-amber" />
+          Reconnecting…
+        </div>
+      )}
+    </div>
+  );
 }

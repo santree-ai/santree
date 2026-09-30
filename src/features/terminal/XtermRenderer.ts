@@ -72,6 +72,35 @@ const themeFor = (mode: string | null) => {
   };
 };
 
+/** Open a link a program in an untrusted pane printed: a web page, through the
+ *  system browser like every other link here, and nothing else — no `file:`, no
+ *  app scheme. Exported for testing. */
+export function openWebLink(uri: string) {
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return;
+  }
+  if (url.protocol === "https:" || url.protocol === "http:") void openUrl(url.href);
+}
+
+/**
+ * Make a terminal safe for bytes from Daedalus (design S5): a program on the box
+ * must not reach this Mac through its terminal.
+ *
+ * OSC 52 is how a terminal program writes the clipboard. xterm.js core has no
+ * handler for it and santree loads no clipboard addon, so nothing acts on one
+ * today; a remote pane claims the sequence anyway, ahead of anything registered
+ * before it (xterm tries the newest handler first and stops at the one that
+ * answers `true`), so no addon can ever let the box write the Mac's clipboard.
+ * Remote text reaches the screen only through xterm's own renderer, never as
+ * HTML. Exported for testing.
+ */
+export function distrust(term: Pick<Terminal, "parser">) {
+  term.parser.registerOscHandler(52, () => true);
+}
+
 /** WebKit only keeps ~16 live WebGL contexts per page; past that it silently
  *  drops the oldest ones, and an xterm whose context is lost that way never gets
  *  it back — it renders through the DOM fallback for the rest of the session. So
@@ -99,8 +128,11 @@ export class XtermRenderer implements TerminalRenderer {
 
   /** `readOnly` is for panes that only ever *show* a process's output (the build
    *  and setup logs): no keystrokes are wired to anything, so a blinking cursor and
-   *  a focusable textarea would only advertise an input that goes nowhere. */
-  constructor(opts: { readOnly?: boolean } = {}) {
+   *  a focusable textarea would only advertise an input that goes nowhere.
+   *
+   *  `untrusted` is for bytes from Daedalus (design S5): a program there must not
+   *  reach this Mac through the terminal. See {@link distrust}. */
+  constructor(opts: { readOnly?: boolean; untrusted?: boolean } = {}) {
     this.term = new Terminal({
       allowProposedApi: true,
       cursorBlink: !opts.readOnly,
@@ -113,7 +145,13 @@ export class XtermRenderer implements TerminalRenderer {
       letterSpacing: 0,
       scrollback: 10000,
       theme: themeFor(document.documentElement.getAttribute("data-theme")),
+      // OSC 8 hyperlinks from a remote program open only as web links; the
+      // default handler would offer any scheme it names.
+      ...(opts.untrusted
+        ? { linkHandler: { activate: (_e: MouseEvent, uri: string) => openWebLink(uri) } }
+        : {}),
     });
+    if (opts.untrusted) distrust(this.term);
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
     // Default handler is `window.open`, which WKWebView doesn't route to the

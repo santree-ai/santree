@@ -435,3 +435,80 @@ test("an open that fails after the pane closed does not write to the disposed re
 
   expect(renderer.written).toEqual([]);
 });
+
+/**
+ * A pane on Daedalus reports whether it reaches its session. A dropped link is
+ * `reconnecting` — the process is still running on the box — and must never
+ * read as an exit: only the exit sentinel closes the tab.
+ */
+describe("the pane's link state", () => {
+  test("a dropped link reads reconnecting, never exited, until the session is back", async () => {
+    const renderer = new FakeRenderer();
+    const backend = new FakeBackend();
+    const onExit = vi.fn();
+    const { queryByRole } = render(
+      <TerminalView
+        label="tree:AK-1:tab:t1"
+        backend={backend}
+        onExit={onExit}
+        createRenderer={() => renderer}
+      />,
+    );
+    await waitFor(() => expect(backend.handlers).toBeDefined());
+    expect(queryByRole("status")).toBeNull();
+
+    act(() => backend.handlers?.onLink?.("reconnecting"));
+    expect(queryByRole("status")).toHaveTextContent("Reconnecting…");
+    expect(onExit).not.toHaveBeenCalled();
+    // Input still goes to the backend, which decides it can't be delivered.
+    renderer.inputCb?.("x");
+    expect(backend.writes).toContainEqual([7, "x"]);
+
+    // Caught up again: the replayed bytes land on the same screen.
+    act(() => {
+      backend.handlers?.onOutput(new Uint8Array([111, 107]));
+      backend.handlers?.onLink?.("live");
+    });
+    expect(queryByRole("status")).toBeNull();
+    expect(onExit).not.toHaveBeenCalled();
+
+    // Only the process ending closes the pane.
+    backend.handlers?.onExit();
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  test("a pane that opens while the link is down shows reconnecting from the start", async () => {
+    const renderer = new FakeRenderer();
+    const backend = new FakeBackend();
+    backend.open = async (opts, handlers) => {
+      backend.opened = opts;
+      backend.handlers = handlers;
+      handlers.onLink?.("reconnecting");
+      return 7 as SessionId;
+    };
+    const { findByRole } = render(
+      <TerminalView label="tree:AK-1:tab:t2" backend={backend} createRenderer={() => renderer} />,
+    );
+    expect(await findByRole("status")).toHaveTextContent("Reconnecting…");
+  });
+
+  test("the renderer is built untrusted for a pane whose bytes come from Daedalus", async () => {
+    const built: { untrusted: boolean }[] = [];
+    const make = (untrusted: boolean) =>
+      render(
+        <TerminalView
+          label={`tree:x:${untrusted}`}
+          untrusted={untrusted}
+          backend={new FakeBackend()}
+          createRenderer={(opts) => {
+            built.push(opts);
+            return new FakeRenderer();
+          }}
+        />,
+      );
+    make(true);
+    make(false);
+    await waitFor(() => expect(built).toHaveLength(2));
+    expect(built).toEqual([{ untrusted: true }, { untrusted: false }]);
+  });
+});

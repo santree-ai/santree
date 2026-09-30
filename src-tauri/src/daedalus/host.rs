@@ -26,6 +26,8 @@ use santree_remote_client::{
     HostStatus, Refusal, RemoteClient, RemoteHost,
 };
 
+use super::setup::RemoteRuns;
+use super::terminals::RemoteTerminals;
 use crate::db::Db;
 use crate::session;
 use crate::session_signal::{self, Signal};
@@ -90,6 +92,10 @@ pub struct DaedalusHost {
     /// outlives page reloads, so it can't be the webview's page owner (which
     /// is what a remote PTY session is tagged with, like a local one).
     owner: String,
+    /// Terminals whose shell runs on the box.
+    terminals: RemoteTerminals,
+    /// Setup scripts running on the box.
+    runs: RemoteRuns,
 }
 
 impl Default for DaedalusHost {
@@ -101,8 +107,11 @@ impl Default for DaedalusHost {
 
 impl DaedalusHost {
     pub fn with_connector(connector: Arc<dyn Connector>, options: HostOptions) -> Self {
+        let host = Arc::new(RemoteHost::new(connector, options));
         Self {
-            host: Arc::new(RemoteHost::new(connector, options)),
+            terminals: RemoteTerminals::new(host.clone()),
+            runs: RemoteRuns::new(host.clone()),
+            host,
             applied: Mutex::new(None),
             owner: uuid::Uuid::new_v4().to_string(),
         }
@@ -120,6 +129,7 @@ impl DaedalusHost {
         };
         *self.applied.lock().unwrap_or_else(|e| e.into_inner()) = Some(config.clone());
         self.host.configure(Some(config));
+        self.terminals.watch();
     }
 
     /// Skip the backoff: a link that isn't up tries again now. What a health
@@ -132,6 +142,13 @@ impl DaedalusHost {
         if let Some(config) = applied.clone() {
             self.host.configure(Some(config));
         }
+    }
+
+    /// Drop the link and stop reconnecting — santree quitting, as far as the box
+    /// can tell.
+    #[cfg(test)]
+    pub fn stop(&self) {
+        self.host.stop();
     }
 
     /// The link's state now.
@@ -164,6 +181,22 @@ impl DaedalusHost {
         let mut status = self.host.status();
         let _ = tokio::time::timeout(wait, status.wait_for(|s| *s != HostStatus::Connecting)).await;
         self.client()
+    }
+
+    /// The terminals of Daedalus projects (`terminal.rs` dispatches to them).
+    pub fn terminals(&self) -> &RemoteTerminals {
+        &self.terminals
+    }
+
+    /// The setup scripts running on the box.
+    pub fn runs(&self) -> &RemoteRuns {
+        &self.runs
+    }
+
+    /// This app process, as the box knows it: what santree's own PTYs there
+    /// (setup scripts) are tagged with.
+    pub fn owner(&self) -> &str {
+        &self.owner
     }
 
     /// What the session host answered `hello` on the live link.

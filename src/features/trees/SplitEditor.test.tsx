@@ -119,8 +119,8 @@ describe("move remaining changes", () => {
     expect(mocked.runSetup).toHaveBeenCalledExactlyOnceWith("split-1");
   });
 
-  it("offers no setup where nothing runs yet, and splits without it", () => {
-    mocked.reach.runOff = "Coming soon for Daedalus projects";
+  it("offers no setup while Daedalus is out of reach, and splits without it", () => {
+    mocked.reach.runOff = "Unavailable until santree can reach Daedalus";
     show();
     const setup = screen.getByRole("checkbox", { name: "Run setup in the child branch" });
     expect(setup).toBeDisabled();

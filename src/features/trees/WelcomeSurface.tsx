@@ -78,8 +78,9 @@ function Enter({
 export function WelcomeSurface({
   workspace,
 }: {
-  /** Set inside a workspace. `actionsOff` is why nothing can be opened in it
-   *  (a Daedalus project): the button stays, disabled, with that as its tooltip. */
+  /** Set inside a workspace. `actionsOff` is why no terminal can be opened in
+   *  it (a Daedalus project out of reach): the button stays, disabled, with
+   *  that as its tooltip. */
   workspace?: { onOpenTerminal: () => void; actionsOff?: string };
 }) {
   const flow = useAddProject();
@@ -105,7 +106,7 @@ export function WelcomeSurface({
               {!workspace
                 ? "Pick a worktree in the sidebar, or start one from a ticket."
                 : workspace.actionsOff
-                  ? "Its changes, diffs and files are in the side panel. Terminals and agents in Daedalus projects are coming soon."
+                  ? "santree can't reach Daedalus right now. Terminals here open again once it can."
                   : "Nothing is open here. Start a terminal, or pick up an agent from Session history."}
             </p>
           </Enter>

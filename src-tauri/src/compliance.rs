@@ -853,12 +853,14 @@ fn every_pty_spawn_site_strips_the_inherited_session_markers() {
 fn only_the_terminal_adapter_writes_bytes_into_a_pty() {
     // Modules that may name the PTY manager at all. A new entry here is a new
     // module able to reach a live terminal, and wants a reviewer.
-    const MAY_HOLD_A_PTY: [&str; 5] = [
+    const MAY_HOLD_A_PTY: [&str; 6] = [
         "src-tauri/src/terminal.rs",  // the adapter itself
         "src-tauri/src/commands.rs",  // hands it to resource accounting
         "src-tauri/src/lib.rs",       // registers it as managed state
         "src-tauri/src/resources.rs", // sums each session's process tree
         "src-tauri/src/update.rs",    // closes every session before restarting
+        // Tests only: proves a Daedalus terminal opens nothing on this Mac.
+        "src-tauri/src/daedalus/terminal_tests.rs",
     ];
     // `agent_procs.rs` deliberately does NOT appear above: it reads the process
     // table, not the manager, and takes its pane roots as plain
@@ -902,6 +904,39 @@ fn only_the_terminal_adapter_writes_bytes_into_a_pty() {
          keystrokes) and `terminal_seed` (the one human-initiated launch line). A new \
          one is a new way to answer the agent on the user's behalf: name it here, with \
          a reason, or route it through one of the two."
+    );
+
+    // A terminal on Daedalus is the same PTY one hop further, so it gets the
+    // same rule: its bytes go in through `pty.write`, which only the pane's own
+    // writer in `daedalus/terminals.rs` sends, and that writer is fed only by
+    // `write_pty` above — the one `remote.write(` / `remote.seed(` pair.
+    const REMOTE: &str = "src-tauri/src/daedalus/terminals.rs";
+    for (path, _) in rust_sources() {
+        if path.ends_with("_tests.rs") {
+            continue;
+        }
+        let shipped = shipped(&path);
+        assert!(
+            !shipped.contains(".pty_write(") || path == REMOTE,
+            "{path} writes into a PTY on Daedalus. Only a pane's writer in {REMOTE} may, \
+             fed by `write_pty`."
+        );
+        for call in [".terminals().write(", ".terminals().seed("] {
+            assert!(
+                !shipped.contains(call),
+                "{path} types into a Daedalus terminal around `write_pty`"
+            );
+        }
+    }
+    assert_eq!(
+        shipped(REMOTE).matches(".pty_write(").count(),
+        1,
+        "{REMOTE} should hold exactly one `pty.write` — its panes' writer"
+    );
+    assert_eq!(
+        terminal.matches("remote.write(").count() + terminal.matches("remote.seed(").count(),
+        2,
+        "`write_pty` is the one caller of a remote pane's `write` and `seed`"
     );
 }
 

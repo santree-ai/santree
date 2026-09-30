@@ -9,9 +9,13 @@
 //! `Err`, because an `Err` becomes a red toast.
 
 pub mod host;
+pub mod setup;
+pub mod terminals;
 
 #[cfg(test)]
 mod git_tests;
+#[cfg(test)]
+mod terminal_tests;
 
 use std::path::{Component, Path};
 use std::time::Duration;

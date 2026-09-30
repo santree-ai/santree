@@ -39,7 +39,18 @@ const fixture = vi.hoisted(() => ({
 /** The renderers the layer built, in mount order. A pane's `onInput` callback is
  *  registered at the same moment its session id is — so `input` being set is the
  *  signal that the open/attach round-trip finished and the pane is live. */
-const renderers = vi.hoisted(() => ({ live: [] as { input?: (data: string) => void }[] }));
+const renderers = vi.hoisted(() => ({
+  live: [] as { input?: (data: string) => void; untrusted: boolean }[],
+}));
+
+/** The registry the layer reads to tell which panes are on Daedalus. */
+const registry = vi.hoisted(() => ({
+  repos: [{ name: "acme/web", location: "Daedalus", path: "/srv/projects/web" }],
+}));
+
+vi.mock("../../lib/queries", () => ({
+  useRepos: () => ({ data: registry.repos, isFetched: true }),
+}));
 
 vi.mock("./TauriBackend", () => ({
   tauriBackend: {
@@ -64,7 +75,9 @@ vi.mock("./TauriBackend", () => ({
 vi.mock("./XtermRenderer", () => {
   class FakeRenderer implements TerminalRenderer {
     input?: (data: string) => void;
-    constructor() {
+    untrusted: boolean;
+    constructor(opts: { untrusted?: boolean } = {}) {
+      this.untrusted = !!opts.untrusted;
       renderers.live.push(this);
     }
     mount() {}
@@ -323,5 +336,53 @@ describe("TerminalLayer session lifetime", () => {
     expect(backend.attach).toHaveBeenCalledTimes(2);
     // The whole point: one session, two views of it.
     expect(backend.open).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Bytes from Daedalus are untrusted (design S5): a pane whose session runs on
+ * the box gets a renderer built with OSC 52 off and only web links openable,
+ * decided from its cwd before the first byte — and a pane on this Mac keeps
+ * the ordinary one.
+ */
+describe("TerminalLayer untrusted panes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    renderers.live.length = 0;
+  });
+
+  function Pane({ spec }: { spec: EmbeddedTerminalSpec }) {
+    const { hostRef } = useEmbeddedTerminal({ spec });
+    return <div ref={hostRef} />;
+  }
+
+  test("a pane in a Daedalus project renders untrusted; one on this Mac doesn't", async () => {
+    render(
+      <TerminalsProvider>
+        <Pane
+          spec={{
+            title: "box",
+            source: "issue",
+            refId: "tree:AK-1:tab:a",
+            cwd: "/srv/projects/web/.santree/worktrees/AK-1",
+          }}
+        />
+        <Pane
+          spec={{ title: "mac", source: "issue", refId: "tree:AK-2:tab:b", cwd: "/Users/me/web" }}
+        />
+        <Pane
+          spec={{
+            title: "sibling",
+            source: "issue",
+            refId: "tree:AK-3:tab:c",
+            // A prefix of the project's path, not inside it.
+            cwd: "/srv/projects/webby",
+          }}
+        />
+        <TerminalLayer />
+      </TerminalsProvider>,
+    );
+    await waitFor(() => expect(renderers.live).toHaveLength(3));
+    expect(renderers.live.map((r) => r.untrusted)).toEqual([true, false, false]);
   });
 });

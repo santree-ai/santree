@@ -92,7 +92,7 @@ export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose:
   const { mutate: create, isPending } = useCreateWorktree({ silent: true });
   const guard = useLaunchGuard();
   // A Daedalus project gets its worktree, but no agent is started in it yet.
-  const { runOff } = useRepoReach(repo);
+  const { agentOff } = useRepoReach(repo);
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -121,7 +121,7 @@ export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose:
       { ...args, repo, agent },
       {
         onSuccess: (wt) => {
-          if (choice.kind === "ticket" && !runOff) {
+          if (choice.kind === "ticket" && !agentOff) {
             // Begin the task through the launch register, as every other start
             // does: the app shell's launcher mints the tab and runs the agent
             // once the refetched list carries the worktree. The placeholder is

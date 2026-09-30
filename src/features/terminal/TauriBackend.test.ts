@@ -10,9 +10,11 @@ import type { OpenOpts, OutputHandlers } from "./types";
  *  stream by calling that handler with raw `ArrayBuffer` chunks, exactly as Rust
  *  does. */
 const { FakeChannel, channels } = vi.hoisted(() => {
-  const channels: { onmessage?: (chunk: ArrayBuffer) => void }[] = [];
+  // biome-ignore lint/suspicious/noExplicitAny: a channel carries bytes or a link state.
+  const channels: { onmessage?: (message: any) => void }[] = [];
   class FakeChannel {
-    onmessage?: (chunk: ArrayBuffer) => void;
+    // biome-ignore lint/suspicious/noExplicitAny: as above.
+    onmessage?: (message: any) => void;
     constructor() {
       channels.push(this);
     }
@@ -45,8 +47,11 @@ const opts: OpenOpts = {
   label: "tree:a",
 };
 
-/** The channel Rust would be streaming into for the nth session opened. */
-const stream = (n = 0) => channels[n];
+/** The channel Rust would be streaming into for the nth session opened. Each
+ *  open or attach makes two, bytes first, then the link state. */
+const stream = (n = 0) => channels[2 * n];
+/** The nth session's link-state channel — only a session on Daedalus sends on it. */
+const linkStream = (n = 0) => channels[2 * n + 1];
 const chunk = (...bytes: number[]) => new Uint8Array(bytes).buffer;
 const EXIT = new ArrayBuffer(0);
 
@@ -133,6 +138,23 @@ describe("TauriBackend", () => {
     });
   });
 
+  /** A session on Daedalus says whether its pane reaches it, on a channel of
+   *  its own beside the bytes — never as bytes, and never as an exit. */
+  it("hands a pane its link state, apart from its output", async () => {
+    const backend = new TauriBackend();
+    const links: string[] = [];
+    const handlers = Object.assign(spyHandlers(), { onLink: (link: string) => links.push(link) });
+    await backend.open(opts, handlers);
+
+    linkStream().onmessage?.("reconnecting");
+    stream().onmessage?.(chunk(1));
+    linkStream().onmessage?.("live");
+
+    expect(links).toEqual(["reconnecting", "live"]);
+    expect(handlers.out).toEqual([[1]]);
+    expect(handlers.exits).toBe(0);
+  });
+
   describe("attach", () => {
     it("catches a pane up on its own channel, then streams live", async () => {
       terminalAttach.mockResolvedValue({
@@ -161,6 +183,7 @@ describe("TauriBackend", () => {
       expect(terminalAttach).toHaveBeenCalledWith(
         7,
         { kind: "at", epoch: "e1", seq: 30 },
+        expect.anything(),
         expect.anything(),
       );
     });
@@ -241,6 +264,7 @@ describe("TauriBackend", () => {
     expect(terminalOpen).toHaveBeenCalledWith(
       expect.objectContaining({ label: "tree:a", agentKind: "Codex" }),
       expect.anything(),
+      expect.anything(),
     );
   });
 
@@ -248,6 +272,7 @@ describe("TauriBackend", () => {
     await new TauriBackend().open(opts, spyHandlers());
     expect(terminalOpen).toHaveBeenCalledWith(
       expect.objectContaining({ label: "tree:a", agentKind: null }),
+      expect.anything(),
       expect.anything(),
     );
   });
