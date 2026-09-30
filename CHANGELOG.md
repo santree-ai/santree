@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.15 — 2026-09-30
+
+- Terminals and setup scripts in Daedalus projects now run on the box. Open a terminal with + or ⌘T, or Run setup, and it runs in the worktree there.
+- They survive losing the connection: the terminal says "Reconnecting…" and catches up with everything it missed once santree reaches Daedalus again. They also survive quitting santree, and come back running when you reopen it.
+- A program on the box can't write to this Mac's clipboard through the terminal, and its links open only as web pages.
+- Agents in Daedalus projects come next: their choices in the + menu stay disabled and say so.
+
 ## 0.1.17-beta.14 — 2026-09-30
 
 - In Daedalus projects you can now stage, unstage and discard changes, commit, push and pull, update the base branch, create and delete worktrees, split a branch, and open pull requests. It all runs on the box, and nothing runs on this Mac in its place when santree can't reach Daedalus.
