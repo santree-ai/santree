@@ -83,6 +83,7 @@ jobs:
       # macOS ships WebKit as part of the OS, so this step is Linux-only.
       - name: Install system dependencies
         if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -155,6 +156,7 @@ jobs:
       # the .deb bundler shells out to.
       - name: Install system dependencies
         if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y \
