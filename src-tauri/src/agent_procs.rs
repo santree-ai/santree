@@ -116,11 +116,21 @@ pub async fn detect(panes: &[(crate::terminal::LiveTerminal, u32)]) -> Vec<Agent
             return Vec::new();
         }
     };
+    attribute(&tree, panes)
+}
+
+/// The agent in each pane's foreground, in a process table already read — this
+/// Mac's ([`detect`]), or the box's for the panes of a Daedalus project
+/// (`daedalus::agents`), whose root pids are the box's.
+pub(crate) fn attribute(
+    tree: &ProcTree,
+    panes: &[(crate::terminal::LiveTerminal, u32)],
+) -> Vec<AgentProcess> {
     let catalog = catalog();
     panes
         .iter()
         .filter_map(|(pane, pid)| {
-            foreground_agent(&tree, *pid, &catalog).map(|agent_kind| AgentProcess {
+            foreground_agent(tree, *pid, &catalog).map(|agent_kind| AgentProcess {
                 term_key: pane.term_key.clone(),
                 pane_agent_kind: pane.agent_kind,
                 agent_kind,

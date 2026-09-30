@@ -161,6 +161,34 @@ pub async fn resolve(
     executable: &str,
     allow_fresh: bool,
 ) -> Result<AgentSession> {
+    resolve_with(
+        db,
+        repo,
+        term_key,
+        cwd,
+        executable,
+        allow_fresh,
+        |stored_cwd, id| async move { transcript_presence(home, &stored_cwd, &id).await },
+    )
+    .await
+}
+
+/// [`resolve`], asking `presence(stored_cwd, session_id)` whether a stored
+/// session's transcript is still there — wherever the transcripts are: this
+/// machine's `~/.claude`, or the box's for a Daedalus project.
+pub async fn resolve_with<F, Fut>(
+    db: &Db,
+    repo: &str,
+    term_key: &str,
+    cwd: &str,
+    executable: &str,
+    allow_fresh: bool,
+    presence: F,
+) -> Result<AgentSession>
+where
+    F: FnOnce(String, String) -> Fut,
+    Fut: std::future::Future<Output = RecordPresence>,
+{
     let row: Option<(String, String, String)> = sqlx::query_as(
         "SELECT session_id, cwd, agent_kind FROM terminal_sessions
          WHERE repo = ? AND term_key = ? AND agent_kind = 'Claude'",
@@ -175,7 +203,7 @@ pub async fn resolve(
         if agent_kind != AgentKind::Claude {
             anyhow::bail!("stored provider does not match Claude session resolver");
         }
-        match transcript_presence(home, &stored_cwd, &session_id).await {
+        match presence(stored_cwd, session_id.clone()).await {
             RecordPresence::Present => {
                 return Ok(AgentSession::Resume {
                     agent_kind: AgentKind::Claude,
@@ -234,12 +262,31 @@ pub struct CodexSessionOpts<'a> {
 /// one here would name a thread `codex resume` will never find — and why this
 /// function writes nothing: there is no id to persist yet.
 pub async fn resolve_codex(db: &Db, opts: CodexSessionOpts<'_>) -> Result<AgentSession> {
+    let sessions_root = opts.sessions_root;
+    resolve_codex_with(db, opts, |thread_id| async move {
+        codex_rollout_presence(sessions_root, &thread_id).await
+    })
+    .await
+}
+
+/// [`resolve_codex`], asking `presence(thread_id)` whether a stored thread's
+/// rollout is still there — wherever the rollouts are (`opts.sessions_root` is
+/// not read): this machine's, or the box's for a Daedalus project.
+pub async fn resolve_codex_with<F, Fut>(
+    db: &Db,
+    opts: CodexSessionOpts<'_>,
+    presence: F,
+) -> Result<AgentSession>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = RecordPresence>,
+{
     let CodexSessionOpts {
         executable,
         repo,
         term_key,
         allow_fresh,
-        sessions_root,
+        sessions_root: _,
     } = opts;
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT session_id FROM terminal_sessions
@@ -255,7 +302,7 @@ pub async fn resolve_codex(db: &Db, opts: CodexSessionOpts<'_>) -> Result<AgentS
         // gone (Codex pruned it, or `CODEX_HOME` moved), so the stored id is only
         // a resume target while its rollout is on disk. A stale row is left in
         // place rather than deleted: the fresh run's `SessionStart` repoints it.
-        match codex_rollout_presence(sessions_root, &thread_id).await? {
+        match presence(thread_id.clone()).await {
             RecordPresence::Present => {
                 return Ok(AgentSession::Resume {
                     agent_kind: AgentKind::Codex,
@@ -292,18 +339,16 @@ pub async fn resolve_codex(db: &Db, opts: CodexSessionOpts<'_>) -> Result<AgentS
 /// not the same call as Claude's `home`: `codex_rollouts::sessions_root()`
 /// answers `Some` only for a directory that is *there*, so `None` is Codex
 /// never having written a session on this machine — a real absence.
-async fn codex_rollout_presence(
-    sessions_root: Option<&Path>,
-    thread_id: &str,
-) -> Result<RecordPresence> {
+async fn codex_rollout_presence(sessions_root: Option<&Path>, thread_id: &str) -> RecordPresence {
     let Some(root) = sessions_root.map(Path::to_path_buf) else {
-        return Ok(RecordPresence::Absent);
+        return RecordPresence::Absent;
     };
     let thread_id = thread_id.to_string();
-    Ok(tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         crate::codex_rollouts::rollout_presence_in(&root, &thread_id)
     })
-    .await?)
+    .await
+    .unwrap_or_else(|e| RecordPresence::Unknown(format!("the rollout check failed: {e}")))
 }
 
 /// Store a new session id for the terminal and return the id it will actually
@@ -773,7 +818,7 @@ pub async fn adopt(db: &Db, listed: &[WorktreeSession], req: ResumeRequest<'_>) 
     let cwd = req.worktree.to_string_lossy().into_owned();
     let on_disk = match req.agent_kind {
         // A rollout is addressed by thread id alone, wherever it ran.
-        AgentKind::Codex => codex_rollout_presence(req.sessions_root, req.session_id).await?,
+        AgentKind::Codex => codex_rollout_presence(req.sessions_root, req.session_id).await,
         // Claude (the `ensure!` above leaves nothing else).
         _ => transcript_presence(req.home, &cwd, req.session_id).await,
     };

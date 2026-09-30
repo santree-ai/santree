@@ -14,6 +14,11 @@
  * is a *Claude* capability (`false` for Codex), so every Codex investigation,
  * repo session, triage batch and AI review launched hookless. Hence one hook: a
  * new launch site can forget to think about providers, but it can't forget this.
+ *
+ * It also picks *where* the hooks run. A Daedalus project's agents run on the
+ * box, so their hooks are the ones santree writes there (`daedalus_agent_hooks`:
+ * the session host's own hook binary, relayed back to this app) — never this
+ * Mac's paths, which name nothing on the box.
  */
 import { useCallback } from "react";
 
@@ -22,6 +27,8 @@ import {
   useClaudeHookSettings,
   useClaudeHookSettingsNoGit,
   useCodexHookFlags,
+  useDaedalusAgentHooks,
+  useRepos,
 } from "../../lib/queries";
 import { agentProvider, shellQuote } from "./agentProvider";
 
@@ -34,6 +41,9 @@ export interface HookInjectionOptions {
    *  hold its launch until the path resolves: falling through to the standard
    *  settings would run the review with no deny list at all. */
   settingsPath?: string | null;
+  /** The project the launch runs in. A Daedalus project's hooks are the box's;
+   *  until the registry says where `repo` lives, nothing is ready. */
+  repo?: string;
 }
 
 export interface HookInjection {
@@ -62,7 +72,11 @@ export interface HookInjection {
 }
 
 export function useHookInjection(opts: HookInjectionOptions = {}): HookInjection {
-  const { noGit = false, settingsPath } = opts;
+  const { noGit = false, settingsPath, repo } = opts;
+  const { data: repos } = useRepos();
+  const located = repo === undefined || repos !== undefined;
+  const remote = repos?.find((r) => r.name === repo)?.location === "Daedalus";
+  const box = useDaedalusAgentHooks(repo ?? "", remote);
   // All three are observed unconditionally: hooks can't be conditional, and each
   // is a `staleTime: Infinity` read of a resolved local path (shared app-wide, so
   // at most one fetch per app run).
@@ -75,32 +89,37 @@ export function useHookInjection(opts: HookInjectionOptions = {}): HookInjection
   const codexFlags = codex.data;
   const codexFetched = codex.isFetched;
 
+  const boxHooks = box.data;
+  const boxSettings = noGit ? boxHooks?.claudeSettingsNoGit : boxHooks?.claudeSettings;
   const flagFor = useCallback(
     (kind: AgentKind) => {
+      const claude = remote ? boxSettings : settings;
       switch (agentProvider(kind).capabilities.hookInjection) {
         case "settings-file":
-          return settings ? `--settings ${shellQuote(settings)}` : undefined;
+          return claude ? `--settings ${shellQuote(claude)}` : undefined;
         case "config-flags":
-          return codexFlags ?? undefined;
+          return (remote ? boxHooks?.codexFlags : codexFlags) ?? undefined;
         default:
           return undefined;
       }
     },
-    [settings, codexFlags],
+    [remote, boxSettings, boxHooks, settings, codexFlags],
   );
 
+  const boxFetched = box.isFetched;
   const readyFor = useCallback(
     (kind: AgentKind) => {
+      if (!located) return false;
       switch (agentProvider(kind).capabilities.hookInjection) {
         case "settings-file":
-          return settingsFetched;
+          return remote ? boxFetched : settingsFetched;
         case "config-flags":
-          return codexFetched;
+          return remote ? boxFetched : codexFetched;
         default:
           return true;
       }
     },
-    [settingsFetched, codexFetched],
+    [located, remote, boxFetched, settingsFetched, codexFetched],
   );
 
   return { flagFor, readyFor };

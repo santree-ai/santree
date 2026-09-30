@@ -863,6 +863,7 @@ pub async fn remove(
     prompts_root: Option<&Path>,
 ) -> Result<()> {
     let dir = root.clone();
+    let checkout = root.clone();
     let root = root_key(root);
     // A setup script running here would keep building — and spawning children —
     // against a directory we're about to `remove_dir_all`, then outlive it headless.
@@ -929,11 +930,14 @@ pub async fn remove(
 
     // Delete the on-disk work prompt (best-effort; absent is fine).
     if let Some(prompts_root) = prompts_root {
-        let prompts_root = prompts_root.to_path_buf();
-        let root = root.clone();
-        let issue_id = issue_id.to_string();
-        tokio::task::spawn_blocking(move || delete_prompt_file(&prompts_root, &root, &issue_id))
+        if let Ok(prompts) = prompts_dir(&checkout, prompts_root).await {
+            let root = root.clone();
+            let issue_id = issue_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                delete_prompt_file(&checkout, &prompts, &root, &issue_id)
+            })
             .await?;
+        }
     }
     log::info!("removed worktree {issue_id} ({restacked} children restacked)");
     Ok(())
@@ -1559,16 +1563,29 @@ fn investigate_images_dir(prompts_root: &Path, repo_root: &str, issue_id: &str) 
     prompt_path(prompts_root, repo_root, issue_id, ".images")
 }
 
-/// Write a rendered prompt to `path` (creating its per-repo directory) and hand back
-/// the path. The fs work — and, for the CI-fix prompt, a whole embedded job log —
-/// runs on the blocking pool, like the rest of this module's filesystem I/O.
-async fn write_prompt_file(path: PathBuf, body: String) -> Result<String> {
+/// Write a rendered prompt to `path` (creating its per-repo directory) on the
+/// checkout's machine and hand back the path. The fs work runs on the blocking
+/// pool, like the rest of this module's filesystem I/O.
+async fn write_prompt_file(root: &Checkout, path: PathBuf, body: String) -> Result<String> {
+    let root = root.clone();
     tokio::task::spawn_blocking(move || -> Result<String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, body)?;
+        root.write(&path, body.as_bytes())?;
         Ok(path.to_string_lossy().into_owned())
+    })
+    .await?
+}
+
+/// Where a repo's agent prompt files go: this Mac's `prompts_root` for a local
+/// repo; for a Daedalus one, santree's directory in the checkout's git dir on
+/// the box ([`crate::daedalus::agents::santree_dir`]) — the agent reads the file
+/// where it runs.
+async fn prompts_dir(root: &Checkout, prompts_root: &Path) -> Result<PathBuf> {
+    if root.local_path().is_ok() {
+        return Ok(prompts_root.to_path_buf());
+    }
+    let root = root.clone();
+    tokio::task::spawn_blocking(move || {
+        Ok(crate::daedalus::agents::santree_dir(&root)?.join("prompts"))
     })
     .await?
 }
@@ -1595,22 +1612,20 @@ fn fix_ci_prompt_file_path(
     prompt_path(prompts_root, repo_root, issue_id, ".fixci.md")
 }
 
-/// Best-effort delete of a worktree's on-disk prompt files — the work, CI-fix and
-/// Triage-investigation prompts, plus the investigation's extracted-images dir
-/// (missing is fine).
-fn delete_prompt_file(prompts_root: &Path, repo_root: &str, issue_id: &str) {
+/// Best-effort delete of a worktree's prompt files on the checkout's machine —
+/// the work, CI-fix and Triage-investigation prompts, plus the investigation's
+/// extracted-images dir (missing is fine). Blocking.
+fn delete_prompt_file(checkout: &Checkout, prompts_root: &Path, repo_root: &str, issue_id: &str) {
     for path in [
         prompt_file_path(prompts_root, repo_root, issue_id),
         fix_ci_prompt_file_path(prompts_root, repo_root, issue_id),
         investigate_prompt_file_path(prompts_root, repo_root, issue_id),
+        investigate_images_dir(prompts_root, repo_root, issue_id),
     ]
     .into_iter()
     .flatten()
     {
-        let _ = std::fs::remove_file(path);
-    }
-    if let Ok(dir) = investigate_images_dir(prompts_root, repo_root, issue_id) {
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = checkout.remove(&path);
     }
 }
 
@@ -1621,11 +1636,13 @@ fn delete_prompt_file(prompts_root: &Path, repo_root: &str, issue_id: &str) {
 /// pure template render + one file write, no AI.
 pub async fn work_prompt(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
     prompts_root: &Path,
 ) -> Result<String> {
-    let root = local_root(db, repo).await?;
+    let checkout = self::root(db, daedalus, repo).await?;
+    let root = root_key(&checkout);
     let linked_ticket = ticket_id(db, repo, issue_id).await?;
     let ticket = linked_ticket.as_deref().unwrap_or(issue_id);
     let title: Option<String> =
@@ -1635,9 +1652,10 @@ pub async fn work_prompt(
             .fetch_optional(db)
             .await?;
 
-    // Resolve the effective prompt sources once (honoring app/repo overrides) —
-    // reused to render both the embedded `issue` and the `work` prompt below.
-    let sources = crate::prompts::resolve_sources(db, Some(repo)).await?;
+    // Resolve the effective prompt sources once (honoring app/repo overrides, and
+    // the repo's own layer read from its checkout, wherever that lives) — reused
+    // to render both the embedded `issue` and the `work` prompt below.
+    let sources = crate::prompts::resolve_sources_at(db, repo, &checkout).await?;
 
     // Fetch the full ticket (description + comment thread) and render it the way
     // the CLI does, so the agent starts with real context instead of being told
@@ -1697,8 +1715,12 @@ pub async fn work_prompt(
     // then the short `Read <path> …` line. Writing here (inside the launch fetch,
     // which pulled the live ticket above) is what keeps the file current: every
     // fresh launch re-renders from the latest Linear state and overwrites.
-    let path = prompt_file_path(prompts_root, &root, issue_id)?;
-    write_prompt_file(path, rendered).await
+    let path = prompt_file_path(
+        &prompts_dir(&checkout, prompts_root).await?,
+        &root,
+        issue_id,
+    )?;
+    write_prompt_file(&checkout, path, rendered).await
 }
 
 // ── Triage investigation prompt (images kept, not stripped) ──────────────────
@@ -1733,6 +1755,7 @@ fn image_ext(mime: &str) -> &'static str {
 /// absolute path to splice in place of the URI. Prose like "data: see below" (no
 /// `,` separator) or a non-image / non-base64 URI returns `None` and is left as-is.
 fn write_data_uri_image(
+    checkout: &Checkout,
     uri: &str,
     images_dir: &Path,
     next_index: &mut usize,
@@ -1758,15 +1781,19 @@ fn write_data_uri_image(
     let idx = *next_index;
     *next_index += 1;
     let path = images_dir.join(format!("{idx}.{}", image_ext(mime)));
-    std::fs::create_dir_all(images_dir)?;
-    std::fs::write(&path, &bytes)?;
+    checkout.write(&path, &bytes)?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 /// Rewrite one markdown field: every inlined image data URI becomes a link to an
 /// extracted file. Mirrors the span-scan `prompts::strip_data_uris` uses, so the
 /// boundary set matches what `linear.rs` spliced the URI over.
-fn extract_field_images(md: &str, images_dir: &Path, next_index: &mut usize) -> Result<String> {
+fn extract_field_images(
+    checkout: &Checkout,
+    md: &str,
+    images_dir: &Path,
+    next_index: &mut usize,
+) -> Result<String> {
     const DELIMS: &[char] = &[')', ' ', '\n', '\t', '"', ']', '>', '<'];
     let mut out = String::with_capacity(md.len());
     let mut rest = md;
@@ -1774,7 +1801,7 @@ fn extract_field_images(md: &str, images_dir: &Path, next_index: &mut usize) -> 
         let (before, uri) = rest.split_at(at);
         let end = uri.find(DELIMS).unwrap_or(uri.len());
         out.push_str(before);
-        match write_data_uri_image(&uri[..end], images_dir, next_index)? {
+        match write_data_uri_image(checkout, &uri[..end], images_dir, next_index)? {
             Some(path) => out.push_str(&path),
             None => out.push_str(&uri[..end]),
         }
@@ -1785,20 +1812,30 @@ fn extract_field_images(md: &str, images_dir: &Path, next_index: &mut usize) -> 
 }
 
 /// A copy of `detail` with every inlined image (description + the whole comment
-/// thread) extracted to a file under `images_dir` and its markdown rewritten to
-/// link that file. Blocking (fs writes) — call inside `spawn_blocking`.
-fn extract_detail_images(detail: &TriageDetail, images_dir: &Path) -> Result<TriageDetail> {
-    fn walk(comments: &mut [TriageComment], dir: &Path, idx: &mut usize) -> Result<()> {
+/// thread) extracted to a file under `images_dir` on the checkout's machine and
+/// its markdown rewritten to link that file. Blocking (fs writes) — call inside
+/// `spawn_blocking`.
+fn extract_detail_images(
+    checkout: &Checkout,
+    detail: &TriageDetail,
+    images_dir: &Path,
+) -> Result<TriageDetail> {
+    fn walk(
+        checkout: &Checkout,
+        comments: &mut [TriageComment],
+        dir: &Path,
+        idx: &mut usize,
+    ) -> Result<()> {
         for c in comments {
-            c.body = extract_field_images(&c.body, dir, idx)?;
-            walk(&mut c.children, dir, idx)?;
+            c.body = extract_field_images(checkout, &c.body, dir, idx)?;
+            walk(checkout, &mut c.children, dir, idx)?;
         }
         Ok(())
     }
     let mut out = detail.clone();
     let mut idx = 0usize;
-    out.description = extract_field_images(&out.description, images_dir, &mut idx)?;
-    walk(&mut out.comments, images_dir, &mut idx)?;
+    out.description = extract_field_images(checkout, &out.description, images_dir, &mut idx)?;
+    walk(checkout, &mut out.comments, images_dir, &mut idx)?;
     Ok(out)
 }
 
@@ -1810,15 +1847,19 @@ fn extract_detail_images(detail: &TriageDetail, images_dir: &Path) -> Result<Tri
 /// [`work_prompt`]; rewritten on every launch so it reflects the latest ticket.
 pub async fn investigate_prompt(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
     prompts_root: &Path,
 ) -> Result<String> {
-    let root = local_root(db, repo).await?;
+    let checkout = self::root(db, daedalus, repo).await?;
+    let root = root_key(&checkout);
+    let prompts_root = prompts_dir(&checkout, prompts_root).await?;
 
-    // Resolve the effective prompt sources once (honoring app/repo overrides) —
-    // reused to render both the embedded `issue` and the `triage` prompt below.
-    let sources = crate::prompts::resolve_sources(db, Some(repo)).await?;
+    // Resolve the effective prompt sources once (honoring app/repo overrides, and
+    // the repo's own layer read from its checkout) — reused to render both the
+    // embedded `issue` and the `triage` prompt below.
+    let sources = crate::prompts::resolve_sources_at(db, repo, &checkout).await?;
 
     // Fetch the full ticket. `triage_detail` fetches any issue by id. On any
     // failure we leave `ticket_content` empty and the template says so.
@@ -1829,14 +1870,14 @@ pub async fn investigate_prompt(
 
     // Extract the ticket's inlined screenshots to files (clearing any stale ones
     // from a previous launch first) and rewrite its markdown to link them.
-    let images_dir = investigate_images_dir(prompts_root, &root, issue_id)?;
+    let images_dir = investigate_images_dir(&prompts_root, &root, issue_id)?;
     let detail = match detail {
         Some(d) => {
-            let dir = images_dir.clone();
+            let (dir, at) = (images_dir.clone(), checkout.clone());
             Some(
                 tokio::task::spawn_blocking(move || -> Result<TriageDetail> {
-                    let _ = std::fs::remove_dir_all(&dir);
-                    extract_detail_images(&d, &dir)
+                    let _ = at.remove(&dir);
+                    extract_detail_images(&at, &d, &dir)
                 })
                 .await??,
             )
@@ -1868,8 +1909,8 @@ pub async fn investigate_prompt(
     .trim()
     .to_string();
 
-    let path = investigate_prompt_file_path(prompts_root, &root, issue_id)?;
-    write_prompt_file(path, rendered).await
+    let path = investigate_prompt_file_path(&prompts_root, &root, issue_id)?;
+    write_prompt_file(&checkout, path, rendered).await
 }
 
 // ── Setup script (.santree/init.sh) ──────────────────────────────────────────
@@ -3370,7 +3411,7 @@ mod tests {
         );
         let mut idx = 0usize;
         let md = format!("Repro:\n\n![login screen]({data_uri})\n\nSee data: the note above.");
-        let out = extract_field_images(&md, &dir, &mut idx).unwrap();
+        let out = extract_field_images(&Checkout::local(&dir), &md, &dir, &mut idx).unwrap();
 
         assert_eq!(idx, 1, "one image extracted");
         assert!(

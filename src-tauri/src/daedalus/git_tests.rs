@@ -369,12 +369,14 @@ async fn nothing_runs_locally_when_the_link_is_down() {
         ""
     );
     // And no shell opens in it here: `terminal_open` asks this first.
-    assert!(repo::on_daedalus(&db, &server.web.join("src"))
+    assert!(repo::daedalus_repo_at(&db, &server.web.join("src"))
         .await
-        .unwrap());
-    assert!(!repo::on_daedalus(&db, &server.root.join("webby"))
+        .unwrap()
+        .is_some());
+    assert!(repo::daedalus_repo_at(&db, &server.root.join("webby"))
         .await
-        .unwrap());
+        .unwrap()
+        .is_none());
 
     // Back on: the same reads and writes answer.
     agent.admit();

@@ -28,6 +28,7 @@ import {
   useAgentSession,
   useBoolSetting,
   useInvestigatePrompt,
+  useRepos,
   useResolvedProviderSetting,
   useResolvedSetting,
 } from "../../lib/queries";
@@ -135,10 +136,13 @@ export function InvestigatePane({
   // flags" gotcha) and no way to turn it off.
   const remoteControlSetting = useResolvedSetting(repo, CLAUDE_REMOTE_CONTROL_KEY);
   const remoteControlEnabled = remoteControlSetting.data !== "false";
-  // Whichever way this provider takes santree's session hooks. Without them the
-  // investigation is unresumable and never reaches the registry.
-  const hooks = useHookInjection();
-  const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value;
+  // Whichever way this provider takes santree's session hooks — the box's, for a
+  // Daedalus project. Without them the investigation is unresumable and never
+  // reaches the registry.
+  const hooks = useHookInjection({ repo });
+  // Chrome is this Mac's browser: an agent on the box has none to drive.
+  const onBox = useRepos().data?.find((r) => r.name === repo)?.location === "Daedalus";
+  const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY).value && !onBox;
   const seed = agentSessionSeed(session.data, {
     repo,
     termKey,

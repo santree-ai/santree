@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const state = vi.hoisted(() => ({
   repo: null as string | null,
   setRepo: vi.fn(),
+  link: { kind: "Connected" } as { kind: string; reason?: string },
 }));
 vi.mock("../lib/queries", () => ({
   useRepos: () => ({
@@ -20,7 +21,7 @@ vi.mock("../lib/queries", () => ({
       { name: "acme/box", path: "/srv/projects/box", location: "Daedalus" },
     ],
   }),
-  useDaedalusStatus: () => ({ data: { kind: "Connected" } }),
+  useDaedalusStatus: () => ({ data: state.link }),
   useWorkDefaultRepo: () => ({ repo: state.repo, loading: false, setRepo: state.setRepo }),
 }));
 
@@ -63,6 +64,7 @@ describe("WorkRepoGate", () => {
   beforeEach(() => {
     state.repo = null;
     state.setRepo.mockClear();
+    state.link = { kind: "Connected" };
   });
 
   it("answers a ticket only one project carries without asking", async () => {
@@ -116,13 +118,20 @@ describe("WorkRepoGate", () => {
     await waitFor(() => expect(answers).toEqual([null]));
   });
 
-  it("never answers with a Daedalus project, and offers one only as a disabled row", () => {
+  it("answers with a Daedalus project while santree can reach the box", async () => {
+    const answers = mount(["acme/box"]);
+    await waitFor(() => expect(answers).toEqual(["acme/box"]));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("never answers with a Daedalus project out of reach, and offers it only disabled", () => {
+    state.link = { kind: "Unavailable", reason: "unreachable" };
     state.repo = "acme/box";
     mount(["acme/box"]);
     screen.getByRole("dialog", { name: "Which project?" });
     const box = screen.getByRole("option", { name: /box/ });
     expect(box).toBeDisabled();
-    expect(box).toHaveAttribute("title", "Coming soon for Daedalus projects");
+    expect(box).toHaveAttribute("title", "Unavailable until santree can reach Daedalus");
   });
 
   it("declines outside a provider", async () => {

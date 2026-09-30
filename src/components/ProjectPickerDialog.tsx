@@ -65,8 +65,8 @@ export function ProjectPickerDialog({
   const { data: registered = [] } = useRepos();
   const repos = only ? registered.filter((r) => only.includes(r.name)) : registered;
   // Every asker starts an agent in the project it gets (on a worktree, or on
-  // its checkout), which a Daedalus project doesn't offer yet: listed, so the
-  // registry reads whole, but not pickable, and says why.
+  // its checkout), which a Daedalus project can't while the link is down:
+  // listed, so the registry reads whole, but not pickable, and says why.
   const { data: link } = useDaedalusStatus();
   const offFor = (location: string) => agentOff(location === "Daedalus", link);
   const [asDefault, setAsDefault] = useState(false);

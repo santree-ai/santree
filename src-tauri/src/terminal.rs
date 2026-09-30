@@ -326,8 +326,8 @@ fn retiring_sink(
     label: String,
     agent_kind: Option<AgentKind>,
     cwd: Option<String>,
-    forward: impl Fn(Vec<u8>) + Send + 'static,
-) -> impl Fn(Vec<u8>) + Send + 'static {
+    forward: impl Fn(Vec<u8>) + Send + Sync + 'static,
+) -> impl Fn(Vec<u8>) + Send + Sync + 'static {
     move |bytes| {
         let exited = bytes.is_empty();
         forward(bytes);
@@ -366,6 +366,13 @@ fn retiring_sink(
 /// repeating an absolute hook-binary and db path. Shortening one command fixes
 /// one command; a limit every seed passes through fixes the next one too.
 const MAX_SEED_LINE: usize = 512;
+
+/// [`MAX_SEED_LINE`] for a pane on Daedalus, where the tty is the box's: a
+/// Linux one, whose canonical buffer (`N_TTY_BUF_SIZE`) is 4096 bytes. Half of
+/// it, by the same reasoning. A Codex launch there carries six hook flags, each
+/// naming the session host's hook binary, which a 512-byte line can't hold; this
+/// holds it with room to spare, and a seed past it is refused, never truncated.
+const MAX_REMOTE_SEED_LINE: usize = 2048;
 
 /// How long a spilled seed script may sit before a later launch sweeps it.
 ///
@@ -631,12 +638,26 @@ fn remote_env() -> Vec<(String, String)> {
     vec![("TERM".into(), "xterm-256color".into())]
 }
 
-/// Output and link channels, as the sinks a remote pane forwards to.
-fn channel_sinks(on_output: Channel<RawBytes>, on_link: Channel<PaneLink>) -> Sinks {
+/// Output and link channels, as the sinks a remote pane forwards to. The exit
+/// sentinel retires the pane's session rows, as a local pane's does
+/// ([`retiring_sink`]): `pane` is its address, `cwd` its directory on the box.
+fn channel_sinks(
+    db: &Db,
+    pane: LiveTerminal,
+    cwd: String,
+    on_output: Channel<RawBytes>,
+    on_link: Channel<PaneLink>,
+) -> Sinks {
     Sinks {
-        output: Arc::new(move |bytes| {
-            let _ = on_output.send(RawBytes(bytes));
-        }),
+        output: Arc::new(retiring_sink(
+            db.clone(),
+            pane.term_key,
+            pane.agent_kind,
+            Some(cwd),
+            move |bytes| {
+                let _ = on_output.send(RawBytes(bytes));
+            },
+        )),
         link: Arc::new(move |link| {
             let _ = on_link.send(link);
         }),
@@ -646,7 +667,7 @@ fn channel_sinks(on_output: Channel<RawBytes>, on_link: Channel<PaneLink>) -> Si
 /// A cwd on the box as IPC gave it, refused unless it is an absolute path
 /// that never climbs: the host confines it under its projects root, and this
 /// keeps a `..` from walking it to another checkout first.
-fn box_cwd(cwd: &str) -> anyhow::Result<String> {
+pub(crate) fn box_cwd(cwd: &str) -> anyhow::Result<String> {
     let path = Path::new(cwd);
     let plain = path.is_absolute()
         && path
@@ -673,31 +694,34 @@ pub(crate) async fn open(
     on_link: Channel<PaneLink>,
 ) -> anyhow::Result<SessionId> {
     if let Some(cwd) = opts.cwd.as_deref() {
-        if crate::repo::on_daedalus(db, Path::new(cwd)).await? {
-            // Agents on the box need their hooks written there and their
-            // process table read there — the next step, not this one.
-            anyhow::ensure!(
-                opts.agent_kind.is_none(),
-                "Agents in Daedalus projects aren't available in this version of santree yet."
-            );
+        if let Some(repo) = crate::repo::daedalus_repo_at(db, Path::new(cwd)).await? {
+            let cwd = box_cwd(cwd)?;
+            let mut env = remote_env();
+            if opts.agent_kind.is_some() {
+                // What the hooks the agent fires on the box carry back, so the
+                // relay binds its session to this pane (docs/remote.md). The
+                // seed exports the same pair; here they are the pane's own.
+                crate::tabs::validate_term_key(&opts.label).map_err(anyhow::Error::msg)?;
+                env.push(("SANTREE_REPO".into(), repo));
+                env.push(("SANTREE_TERM_KEY".into(), opts.label.clone()));
+            }
+            let pane = LiveTerminal {
+                term_key: opts.label.clone(),
+                agent_kind: opts.agent_kind,
+            };
+            let sinks = channel_sinks(db, pane, cwd.clone(), on_output, on_link);
             let spec = Spec {
-                cwd: box_cwd(cwd)?,
+                cwd,
                 command: opts.command,
                 args: opts.args,
-                env: remote_env(),
+                env,
                 label: opts.label,
-                agent_kind: None,
+                agent_kind: opts.agent_kind,
             };
             let client = daedalus.client_within(CONNECT_WAIT).await.ok();
             return daedalus
                 .terminals()
-                .open(
-                    spec,
-                    opts.owner,
-                    (opts.cols, opts.rows),
-                    client,
-                    channel_sinks(on_output, on_link),
-                )
+                .open(spec, opts.owner, (opts.cols, opts.rows), client, sinks)
                 .await;
         }
     }
@@ -801,8 +825,8 @@ pub async fn terminal_write(
 /// UUID this process mints — and it is shell-quoted by the builder that composed
 /// it (`agentProvider.ts`), which this must preserve rather than redo.
 ///
-/// A session on Daedalus has no spill: the script would have to be written on
-/// the box, which comes with agents there. A seed that doesn't fit is refused
+/// A session on Daedalus has no spill: its tty is the box's Linux one, whose
+/// line holds [`MAX_REMOTE_SEED_LINE`], and a seed that doesn't fit is refused
 /// rather than truncated.
 #[tauri::command]
 #[specta::specta]
@@ -819,7 +843,7 @@ pub async fn terminal_seed(
         let line = if terminals::is_remote(id) {
             let line = seed.trim_end_matches(['\r', '\n']);
             anyhow::ensure!(
-                line.len() < MAX_SEED_LINE,
+                line.len() < MAX_REMOTE_SEED_LINE,
                 "this launch line is too long to type into a terminal on Daedalus"
             );
             line.to_string()
@@ -905,9 +929,19 @@ pub async fn terminal_attach(
     daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<TerminalAttached> {
     if terminals::is_remote(id) {
+        // The address and cwd from the pane as it was opened, never IPC's —
+        // as the label is the manager's for a local session below.
+        let (pane, cwd) = daedalus
+            .terminals()
+            .address(id)
+            .ok_or_else(|| anyhow::anyhow!("no terminal session {id}"))?;
         let attached = daedalus
             .terminals()
-            .attach(id, anchor.into(), channel_sinks(on_output, on_link))
+            .attach(
+                id,
+                anchor.into(),
+                channel_sinks(&db, pane, cwd, on_output, on_link),
+            )
             .await?;
         return Ok(TerminalAttached {
             epoch: attached.epoch,

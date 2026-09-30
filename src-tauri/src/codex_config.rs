@@ -50,7 +50,6 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 
-use crate::git;
 use crate::hooks::sh_quote;
 use crate::provider::SessionSurface;
 
@@ -119,8 +118,8 @@ impl CodexProfile {
     }
 
     /// Whether the session is meant to change the checkout — the two profiles
-    /// that need git to work, and so the only two that get [`LaunchConfig::cwd`]'s
-    /// git directory as a writable root or the network knob. The read-only
+    /// that need git to work, and so the only two that get [`LaunchConfig::git_dir`]
+    /// as a writable root or the network knob. The read-only
     /// surfaces are pinned to `--sandbox read-only`, where both are inert anyway;
     /// gating on this keeps santree from *emitting* a widening flag on a surface
     /// whose whole point is that it cannot write.
@@ -157,11 +156,15 @@ pub struct LaunchConfig<'a> {
     /// `--mcp-config`), when this surface has one. Derived in Rust from the
     /// session's own row — never supplied over IPC.
     pub review_mcp_config: Option<&'a Path>,
-    /// The directory the session runs in — santree's own worktree path, from the
-    /// tab's row, never from the webview. Only its *git* directory is read out of
-    /// this (see the module note on `--add-dir`); the cwd itself is already the
-    /// sandbox's writable root, and santree does not name it.
-    pub cwd: Option<&'a Path>,
+    /// The *common* git directory of the checkout the session runs in (see the
+    /// module note on `--add-dir`) — santree's own worktree, from the tab's row,
+    /// never from the webview — resolved by the caller wherever that checkout
+    /// lives: [`crate::git::common_git_dir`] here, `rev-parse --git-common-dir` on
+    /// Daedalus. `None` for anything that is not demonstrably a git directory,
+    /// so a bogus `.git` degrades to no flag rather than to a wider root. The
+    /// cwd itself is already the sandbox's writable root; santree does not name
+    /// it.
+    pub git_dir: Option<&'a Path>,
     /// [`NETWORK_ACCESS_KEY`], already resolved. Off is the default and the whole
     /// point: a Codex sandbox has no host allowlist, so this is all-or-nothing.
     pub network_access: bool,
@@ -186,12 +189,9 @@ pub fn launch_flags(config: &LaunchConfig<'_>) -> Result<String> {
 
     if profile.writes_the_checkout() {
         // The one directory outside the worktree that git *must* be able to write
-        // — see the module note. Resolved from the checkout's own pointer files,
-        // and `None` for anything that is not demonstrably a git directory, so an
-        // unreadable or bogus `.git` degrades to no flag rather than to a wider
-        // root. `to_str` and not `to_string_lossy`: a path we cannot reproduce
+        // — see the module note. `to_str` and not `to_string_lossy`: a path we cannot reproduce
         // byte-for-byte is not one to hand a child process as a writable root.
-        if let Some(dir) = config.cwd.and_then(git::common_git_dir) {
+        if let Some(dir) = config.git_dir {
             if let Some(dir) = dir.to_str() {
                 flags.push(format!("--add-dir {}", sh_quote(dir)));
             } else {
@@ -335,24 +335,9 @@ fn review_server_override(path: &Path) -> Result<String> {
 /// Paired with `required = true`, the two ends close the loop: a key Codex stops
 /// recognising fails here, and a server that cannot start fails there.
 pub async fn validate_overrides(executable: &str, flags: &str) -> Result<()> {
-    let overrides = config_overrides_of(flags);
-    if overrides.is_empty() {
+    let Some(args) = validation_args(flags) else {
         return Ok(());
-    }
-    let mut args: Vec<&str> = vec![
-        "exec",
-        "--strict-config",
-        "--ephemeral",
-        "--ignore-user-config",
-    ];
-    for value in &overrides {
-        args.push("-c");
-        args.push(value);
-    }
-    // The prompt argument, with stdin closed: the CLI validates its config, finds
-    // no prompt, and stops.
-    args.push("-");
-
+    };
     let output = tokio::process::Command::new(executable)
         .args(&args)
         .stdin(std::process::Stdio::null())
@@ -360,13 +345,47 @@ pub async fn validate_overrides(executable: &str, flags: &str) -> Result<()> {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), output)
+    let output = tokio::time::timeout(VALIDATION_TIMEOUT, output)
         .await
         .map_err(|_| anyhow!("checking santree's Codex launch configuration timed out"))?
         .context("checking santree's Codex launch configuration")?;
+    validation_verdict(&output.stdout, &output.stderr)
+}
 
-    let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
+/// How long [`validate_overrides`]'s check may take, here or on Daedalus.
+pub const VALIDATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The arguments after `codex` that check `flags`' `-c` overrides, or `None`
+/// when there are none to check. The same check runs on Daedalus for a Codex
+/// launched there, against the box's own binary.
+pub fn validation_args(flags: &str) -> Option<Vec<String>> {
+    let overrides = config_overrides_of(flags);
+    if overrides.is_empty() {
+        return None;
+    }
+    let mut args: Vec<String> = [
+        "exec",
+        "--strict-config",
+        "--ephemeral",
+        "--ignore-user-config",
+    ]
+    .map(str::to_string)
+    .to_vec();
+    for value in overrides {
+        args.push("-c".into());
+        args.push(value);
+    }
+    // The prompt argument, with stdin closed: the CLI validates its config, finds
+    // no prompt, and stops.
+    args.push("-".into());
+    Some(args)
+}
+
+/// What the check's output says: `Err` naming the override this Codex build
+/// rejected, else `Ok`.
+pub fn validation_verdict(stdout: &[u8], stderr: &[u8]) -> Result<()> {
+    let mut text = String::from_utf8_lossy(stderr).into_owned();
+    text.push_str(&String::from_utf8_lossy(stdout));
     if let Some(line) = text
         .lines()
         .find(|line| line.contains("Error loading config.toml"))
@@ -471,7 +490,7 @@ mod tests {
             model: None,
             effort: None,
             review_mcp_config: None,
-            cwd: None,
+            git_dir: None,
             network_access: false,
         }
     }
@@ -507,8 +526,9 @@ mod tests {
         // Still true once it is given a worktree to widen: `--add-dir` adds a
         // writable root to whatever sandbox the user chose, and never names one.
         let tree = write_linked_worktree("keeps-user-sandbox");
+        let git_dir = crate::git::common_git_dir(&tree.worktree);
         let mut cfg = config(SessionSurface::Work);
-        cfg.cwd = Some(&tree.worktree);
+        cfg.git_dir = git_dir.as_deref();
         let flags = launch_flags(&cfg).unwrap();
         assert!(!flags.contains("--sandbox"), "{flags}");
         assert!(!flags.contains("--ask-for-approval"), "{flags}");
@@ -525,8 +545,9 @@ mod tests {
         let common = std::fs::canonicalize(tree.repo.join(".git")).unwrap();
 
         for surface in [SessionSurface::Work, SessionSurface::FixCi] {
+            let git_dir = crate::git::common_git_dir(&tree.worktree);
             let mut cfg = config(surface);
-            cfg.cwd = Some(&tree.worktree);
+            cfg.git_dir = git_dir.as_deref();
             let review = write_review_config("git-writes");
             if CodexProfile::for_surface(surface).wants_review_tools() {
                 cfg.review_mcp_config = Some(&review);
@@ -546,8 +567,9 @@ mod tests {
             SessionSurface::AskAi,
             SessionSurface::Review,
         ] {
+            let git_dir = crate::git::common_git_dir(&tree.worktree);
             let mut cfg = config(surface);
-            cfg.cwd = Some(&tree.worktree);
+            cfg.git_dir = git_dir.as_deref();
             let review = write_review_config("git-writes-ro");
             if CodexProfile::for_surface(surface).wants_review_tools() {
                 cfg.review_mcp_config = Some(&review);
@@ -565,8 +587,9 @@ mod tests {
     fn an_unresolvable_git_directory_drops_the_grant_rather_than_widening_it() {
         let tree = write_linked_worktree("unresolvable");
         std::fs::write(tree.worktree.join(".git"), "gitdir: /\n").unwrap();
+        let git_dir = crate::git::common_git_dir(&tree.worktree);
         let mut cfg = config(SessionSurface::Work);
-        cfg.cwd = Some(&tree.worktree);
+        cfg.git_dir = git_dir.as_deref();
         assert_eq!(launch_flags(&cfg).unwrap(), "");
 
         std::fs::remove_file(tree.worktree.join(".git")).unwrap();
@@ -669,8 +692,9 @@ mod tests {
             SessionSurface::Review,
             SessionSurface::FixCi,
         ] {
+            let git_dir = crate::git::common_git_dir(&tree.worktree);
             let mut config = config(surface);
-            config.cwd = Some(&tree.worktree);
+            config.git_dir = git_dir.as_deref();
             config.network_access = true;
             let path = write_review_config("bypass");
             if CodexProfile::for_surface(surface).wants_review_tools() {

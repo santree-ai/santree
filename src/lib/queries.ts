@@ -276,6 +276,8 @@ export const queryKeys = {
   claudeHookSettings: ["claude-hook-settings"] as const,
   codexHookFlags: ["codex-hook-flags"] as const,
   claudeHookSettingsNoGit: ["claude-hook-settings-no-git"] as const,
+  daedalusAgentHooks: (repo: string) => ["daedalus-agent-hooks", repo] as const,
+  daedalusAgentClis: ["daedalus-agent-clis"] as const,
   englishLog: ["english-log"] as const,
   englishAnalysis: ["english-analysis"] as const,
   sessionStates: ["session-states"] as const,
@@ -1823,24 +1825,28 @@ export interface RepoReach {
   /** Why no terminal or setup script can run in it now — they run on the box,
    *  so only a Daedalus project with the link down. */
   runOff: string | undefined;
-  /** Why no agent can run in it now — none run on Daedalus yet. */
-  agentOff: string | undefined;
+  /** Why agent `kind` can't start in it now (without `kind`, any agent) — a
+   *  Daedalus project's run on the box: the link is down, or the box has no
+   *  such CLI. */
+  agentOff: (kind?: AgentKind) => string | undefined;
 }
 
 /** Where `repo` lives and what santree can do there right now. */
 export function useRepoReach(repo: string): RepoReach {
   const { data: repos } = useRepos();
   const { data: link } = useDaedalusStatus();
-  return useMemo(() => {
-    const remote = repos?.find((r) => r.name === repo)?.location === "Daedalus";
-    return {
+  const remote = repos?.find((r) => r.name === repo)?.location === "Daedalus";
+  const { data: clis } = useDaedalusAgentClis(remote);
+  return useMemo(
+    () => ({
       remote,
       readable: readableRepo(repos, link, repo),
       gitOff: gitOff(remote, link),
       runOff: runOff(remote, link),
-      agentOff: agentOff(remote, link),
-    };
-  }, [repos, link, repo]);
+      agentOff: (kind?: AgentKind) => agentOff(remote, link, kind, clis),
+    }),
+    [repos, link, repo, remote, clis],
+  );
 }
 
 /** {@link useRepoReach}'s `readable`, for reads that span projects. */
@@ -1891,6 +1897,30 @@ export const useDaedalusHealth = () =>
   useUnwrappedQuery(queryKeys.daedalusHealth, () => commands.daedalusHealth(), {
     staleTime: Number.POSITIVE_INFINITY,
   });
+
+/** The agent CLIs the box has (`null` while it can't say), for the menus that
+ *  start one in a Daedalus project. Asked only while one is on screen and the
+ *  link is up; the backend reuses the answer for a minute. */
+export const useDaedalusAgentClis = (enabled: boolean) => {
+  const { data: link } = useDaedalusStatus();
+  return useUnwrappedQuery(queryKeys.daedalusAgentClis, () => commands.daedalusAgentClis(), {
+    enabled: enabled && link?.kind === "Connected",
+    staleTime: 60_000,
+    meta: { silent: true },
+  });
+};
+
+/** santree's hooks for agents in the Daedalus project `repo`, written on the
+ *  box — what a launch there carries (`useHookInjection`). Written once per
+ *  project per app run; a launch waits for the link to write them. */
+export const useDaedalusAgentHooks = (repo: string, enabled: boolean) => {
+  const { data: link } = useDaedalusStatus();
+  return useUnwrappedQuery(
+    queryKeys.daedalusAgentHooks(repo),
+    () => commands.daedalusAgentHooks(repo),
+    { enabled: enabled && link?.kind === "Connected", staleTime: Infinity },
+  );
+};
 
 /** The server's checkouts, marked with which are already projects. Read only
  *  while something shows them. */

@@ -32,9 +32,13 @@ pub fn ensure(repo_root: &Checkout) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The directory's name in a repo root, and its committed prompts' under it.
+pub const SANTREE: &str = ".santree";
+pub const PROMPTS: &str = "prompts";
+
 /// Where a repo's committed prompt layers live: `.santree/prompts/<name>.njk`.
 pub fn prompts_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join(".santree").join("prompts")
+    repo_root.join(SANTREE).join(PROMPTS)
 }
 
 #[cfg(test)]

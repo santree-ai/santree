@@ -49,7 +49,13 @@ vi.mock("../../lib/queries", () => ({
     isLoading: false,
   }),
   useRepoBranches: () => ({ data: [], isLoading: false }),
-  useRepoReach: () => ({ remote: false, readable: true, gitOff: undefined, runOff: undefined }),
+  useRepoReach: () => ({
+    remote: false,
+    readable: true,
+    gitOff: undefined,
+    runOff: undefined,
+    agentOff: () => undefined,
+  }),
   // Two shapes the parent picker has to render: a ticket worktree, whose branch
   // is far longer than its name, and a branch-sourced one, whose name *is* its
   // branch. Neither id may collide with a ticket above, or that ticket's row

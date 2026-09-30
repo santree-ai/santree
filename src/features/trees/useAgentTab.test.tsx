@@ -108,6 +108,8 @@ vi.mock("../../lib/queries", () => ({
     data: backend.codexHooks,
     isFetched: backend.codexHooksFetched,
   }),
+  useRepos: () => ({ data: [{ name: "acme/app", location: "Local" }] }),
+  useDaedalusAgentHooks: () => ({ data: undefined, isFetched: false }),
 }));
 
 vi.mock("../../state/AppContext", () => ({

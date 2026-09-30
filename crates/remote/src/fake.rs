@@ -56,6 +56,10 @@ pub struct FakeOptions {
     pub workspaces: Vec<Workspace>,
     pub ping_interval: Duration,
     pub hook_queue_cap: usize,
+    /// The host's own environment, over this process's, for every `exec.run`
+    /// and `pty.open` child (a request's `env` still goes on top) — as the real
+    /// host's children get its unit's `PATH` and `HOME`.
+    pub env: Vec<(String, String)>,
 }
 
 impl Default for FakeOptions {
@@ -73,6 +77,7 @@ impl Default for FakeOptions {
             workspaces: vec![],
             ping_interval: PING_INTERVAL,
             hook_queue_cap: HOOK_QUEUE_CAP,
+            env: Vec::new(),
         }
     }
 }
@@ -717,7 +722,7 @@ impl Daemon {
             m::ExecRun::NAME => {
                 let p = params!(ExecParams);
                 lock(&this.execs).push(p.argv.clone());
-                Some(exec_run(p).await)
+                Some(exec_run(&self.opts.env, p).await)
             }
             m::FsRead::NAME => {
                 let p = params!(FsReadParams);
@@ -813,7 +818,7 @@ impl Daemon {
                     args: p.args,
                     cols: p.cols,
                     rows: p.rows,
-                    env: p.env,
+                    env: self.opts.env.iter().cloned().chain(p.env).collect(),
                     owner: p.owner,
                     label: p.label,
                     agent_kind: p.agent_kind,
@@ -969,7 +974,7 @@ async fn read_capped<R: AsyncRead + Unpin>(mut reader: R) -> (Vec<u8>, bool) {
     (kept, truncated)
 }
 
-async fn exec_run(p: ExecParams) -> Outcome {
+async fn exec_run(host_env: &[(String, String)], p: ExecParams) -> Outcome {
     let Some(program) = p.argv.first() else {
         return Err(err(ErrorCode::BadRequest, "argv is empty"));
     };
@@ -982,6 +987,7 @@ async fn exec_run(p: ExecParams) -> Outcome {
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(&p.argv[1..])
         .current_dir(&cwd)
+        .envs(host_env.iter().cloned())
         .envs(p.env.unwrap_or_default())
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(if p.stdin.is_some() {

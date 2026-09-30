@@ -264,13 +264,14 @@ impl AgentProvider for CodexProvider {
         if matches!(session, AgentSession::Shell) {
             return Ok(session);
         }
+        let git_dir = crate::git::common_git_dir(request.cwd);
         let flags = codex_config::launch_flags(&codex_config::LaunchConfig {
             surface: request.surface,
             fresh: matches!(session, AgentSession::Fresh { .. }),
             model: request.model,
             effort: request.effort,
             review_mcp_config: request.review_mcp_config,
-            cwd: Some(request.cwd),
+            git_dir: git_dir.as_deref(),
             network_access: codex_network_access(request.db).await,
         })?;
         // The CLI ignores a `-c` key it does not recognise, so "we passed it" is
@@ -288,7 +289,7 @@ impl AgentProvider for CodexProvider {
 /// Absence is off, and so is a failed read: a knob that lifts every outbound
 /// connection a model-generated command makes must never come on because a query
 /// errored.
-async fn codex_network_access(db: &Db) -> bool {
+pub(crate) async fn codex_network_access(db: &Db) -> bool {
     matches!(
         settings::get(db, "app", codex_config::NETWORK_ACCESS_KEY).await,
         Ok(Some(value)) if value == "true"

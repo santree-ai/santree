@@ -853,7 +853,7 @@ fn every_pty_spawn_site_strips_the_inherited_session_markers() {
 fn only_the_terminal_adapter_writes_bytes_into_a_pty() {
     // Modules that may name the PTY manager at all. A new entry here is a new
     // module able to reach a live terminal, and wants a reviewer.
-    const MAY_HOLD_A_PTY: [&str; 6] = [
+    const MAY_HOLD_A_PTY: [&str; 7] = [
         "src-tauri/src/terminal.rs",  // the adapter itself
         "src-tauri/src/commands.rs",  // hands it to resource accounting
         "src-tauri/src/lib.rs",       // registers it as managed state
@@ -861,6 +861,8 @@ fn only_the_terminal_adapter_writes_bytes_into_a_pty() {
         "src-tauri/src/update.rs",    // closes every session before restarting
         // Tests only: proves a Daedalus terminal opens nothing on this Mac.
         "src-tauri/src/daedalus/terminal_tests.rs",
+        // Tests only: the same, for a Daedalus project's agents.
+        "src-tauri/src/daedalus/agent_tests.rs",
     ];
     // `agent_procs.rs` deliberately does NOT appear above: it reads the process
     // table, not the manager, and takes its pane roots as plain
@@ -995,7 +997,7 @@ fn hook_registration_violations(src: &str) -> Vec<String> {
         }
     }
 
-    let builder = fn_body(src, "base_settings_map");
+    let builder = fn_body(src, "hook_settings");
 
     // The builder singles out exactly one event, and that singling-out *is* the
     // synchronous exception. A second `== "<Event>"` means a second hook has been
@@ -1050,14 +1052,37 @@ fn hook_registration_violations(src: &str) -> Vec<String> {
 /// exempted) are the real test. `PreToolUse` is still checked by name because it
 /// is the only hook that can *authorize* a tool call rather than comment on one.
 ///
-/// A source scan, not a behavioural one: `hooks::base_settings_map` builds the
-/// settings from a Tauri `AppHandle`, is private to its module, and tauri's
-/// `test` feature isn't enabled, so the settings map cannot be produced here. If
-/// that changes, replace this with a call and assert over the real JSON.
+/// A source scan of `hooks::hook_settings` — the one builder every launch's
+/// hooks come from, this Mac's and the box's — and the same rules asserted over
+/// the JSON it really builds, for both command prefixes.
 #[test]
 fn no_injected_hook_can_gate_claude_and_pretooluse_is_never_injected() {
     let found = hook_registration_violations(&shipped("src-tauri/src/hooks.rs"));
     assert!(found.is_empty(), "{}", found.join("\n"));
+
+    for prefix in [
+        "'/Applications/santree.app/Contents/Resources/santree-hook' --db '/db'".to_string(),
+        crate::hooks::box_prefix("/run/current-system/sw/bin/daedalus-session-host"),
+    ] {
+        for built in [
+            crate::hooks::hook_settings(&prefix),
+            crate::hooks::hook_settings_no_git(&prefix),
+        ] {
+            let hooks = built["hooks"].as_object().expect("a hooks map");
+            assert!(!hooks.contains_key("PreToolUse") && !hooks.contains_key("PermissionDenied"));
+            for (event, entries) in hooks {
+                for hook in entries[0]["hooks"].as_array().expect("hook entries") {
+                    let background = hook["async"] == serde_json::Value::Bool(true);
+                    assert_eq!(
+                        background,
+                        event != "SessionEnd",
+                        "{event} must be `async: true` unless it is SessionEnd: {hook}"
+                    );
+                    assert!(hook["command"].as_str().unwrap().starts_with(&prefix));
+                }
+            }
+        }
+    }
 
     // The scan, proved to speak: a builder that added a per-tool hook and made a
     // second event synchronous has to come back with all four complaints. Without
@@ -1067,7 +1092,7 @@ const EVENTS: &[&str] = &[
     "SessionStart", "UserPromptSubmit", "Notification",
     "PermissionRequest", "Stop", "SessionEnd", "PreToolUse",
 ];
-fn base_settings_map(app: &AppHandle) -> Option<Map<String, Value>> {
+fn hook_settings(prefix: &str) -> Map<String, Value> {
     for &event in EVENTS {
         let is_end = event == "SessionEnd";
         let blocking = event == "PermissionRequest";

@@ -24,6 +24,7 @@ import {
   queryKeys,
   useAgentSession,
   useBoolSetting,
+  useRepos,
   useResolvedProviderSetting,
   useSetting,
   WORK_AGENT_KEY,
@@ -184,9 +185,12 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
   // Whatever this provider's hooks ride in on — a `--settings` file, `-c` config
   // overrides — lands in `hookFlag`, because to the launch builder they are the
   // same thing: the flag that makes this launch report its session back.
-  const hooks = useHookInjection({ noGit, settingsPath: opts.settingsPath });
+  // …the box's, for a Daedalus project, whose agents run there.
+  const hooks = useHookInjection({ noGit, settingsPath: opts.settingsPath, repo });
   const startWithChrome = useBoolSetting("app", CLAUDE_START_WITH_CHROME_KEY);
   const remoteControl = useSetting("app", CLAUDE_REMOTE_CONTROL_KEY);
+  // Chrome is this Mac's browser: an agent on the box has none to drive.
+  const onBox = useRepos().data?.find((r) => r.name === repo)?.location === "Daedalus";
 
   // The model is never a launch-time choice: a fresh launch always runs the model
   // configured for this agent in Settings → Actions → Work (a resume carries the
@@ -208,7 +212,7 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
     effort: effort.data,
     hookFlag: hooks.flagFor(resolvedAgent),
     mcpConfigPath: opts.mcpConfigPath,
-    chrome: startWithChrome.value,
+    chrome: startWithChrome.value && !onBox,
     permissionMode: permissionMode.data,
   });
 

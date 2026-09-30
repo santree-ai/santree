@@ -1196,6 +1196,21 @@ export const commands = {
 	 */
 	addDaedalusRepo: (name: string) => typedError<Repo, CmdError>(__TAURI_INVOKE("add_daedalus_repo", { name })),
 	/**
+	 *  santree's session hooks for agents in the Daedalus project `repo`, written on
+	 *  the box: its Claude settings files and Codex's hook flags, every command the
+	 *  session host's own hook binary. What a launch there carries in place of this
+	 *  Mac's `claude_hook_settings` / `codex_hook_flags`. `repo` only selects a
+	 *  registered project; the paths are derived on the box. Fails while the link
+	 *  is down — the launch waits for it.
+	 */
+	daedalusAgentHooks: (repo: string) => typedError<DaedalusAgentHooks, CmdError>(__TAURI_INVOKE("daedalus_agent_hooks", { repo })),
+	/**
+	 *  The agent CLIs the box's login shell finds (`claude`, `codex`), so a menu can
+	 *  say which it can't start there. `None` when that can't be asked right now —
+	 *  the link is down, or the probe failed — which is not "none".
+	 */
+	daedalusAgentClis: () => typedError<AgentKind[] | null, CmdError>(__TAURI_INVOKE("daedalus_agent_clis")),
+	/**
 	 *  santree-CLI configuration detected in a registered repo that the app could
 	 *  adopt — `None` when there's nothing actionable. Detection only; tokens stay
 	 *  on the Rust side.
@@ -1294,8 +1309,8 @@ export const commands = {
 	 *  UUID this process mints — and it is shell-quoted by the builder that composed
 	 *  it (`agentProvider.ts`), which this must preserve rather than redo.
 	 * 
-	 *  A session on Daedalus has no spill: the script would have to be written on
-	 *  the box, which comes with agents there. A seed that doesn't fit is refused
+	 *  A session on Daedalus has no spill: its tty is the box's Linux one, whose
+	 *  line holds [`MAX_REMOTE_SEED_LINE`], and a seed that doesn't fit is refused
 	 *  rather than truncated.
 	 */
 	terminalSeed: (id: number, seed: string) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_seed", { id, seed })),
@@ -1942,6 +1957,20 @@ export type CycleRef = {
 	 *  now is — what the cycle mark's ring draws, computed live by the frontend.
 	 */
 	startsAtMs: number | null,
+};
+
+/**
+ *  `daedalus_agent_hooks`: santree's session hooks for agents launched in one
+ *  Daedalus project, written on the box — what `useHookInjection` hands a
+ *  launch there in place of this Mac's. Paths are on the server.
+ */
+export type DaedalusAgentHooks = {
+	/**  Claude's `--settings` file: the session-state hooks and the status line. */
+	claudeSettings: string,
+	/**  The same plus the Fix-CI commit/push deny list. */
+	claudeSettingsNoGit: string,
+	/**  Codex's `-c 'hooks.<Event>=[…]'` flags, already shell-quoted. */
+	codexFlags: string,
 };
 
 /**  `daedalus_health`: the link as it settled after a fresh attempt. */

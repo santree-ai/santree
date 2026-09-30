@@ -140,7 +140,9 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    Daedalus agent: `host` — the live link and the hook relay —
                    `terminals` — a Daedalus project's terminals as PTYs on the
                    box, re-attached across dropped links and relaunches —
-                   `setup` — its setup scripts there — plus the health check
+                   `setup` — its setup scripts there — `agents` — Claude and
+                   Codex there: hooks written on the box, launch resolution,
+                   the box's CLIs and process table — plus the health check
                    and the workspace list over the link)
                    · git.rs + git/checkout.rs (`Checkout`: the one seam a repo's
                    git, reads and writes, and its file access go through, here

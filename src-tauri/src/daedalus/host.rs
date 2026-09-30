@@ -26,6 +26,7 @@ use santree_remote_client::{
     HostStatus, Refusal, RemoteClient, RemoteHost,
 };
 
+use super::agents::BoxAgents;
 use super::setup::RemoteRuns;
 use super::terminals::RemoteTerminals;
 use crate::db::Db;
@@ -96,6 +97,8 @@ pub struct DaedalusHost {
     terminals: RemoteTerminals,
     /// Setup scripts running on the box.
     runs: RemoteRuns,
+    /// What santree knows of the agents on the box.
+    agents: BoxAgents,
 }
 
 impl Default for DaedalusHost {
@@ -111,6 +114,7 @@ impl DaedalusHost {
         Self {
             terminals: RemoteTerminals::new(host.clone()),
             runs: RemoteRuns::new(host.clone()),
+            agents: BoxAgents::default(),
             host,
             applied: Mutex::new(None),
             owner: uuid::Uuid::new_v4().to_string(),
@@ -193,6 +197,11 @@ impl DaedalusHost {
         &self.runs
     }
 
+    /// The agent CLIs and process table on the box.
+    pub fn agents(&self) -> &BoxAgents {
+        &self.agents
+    }
+
     /// This app process, as the box knows it: what santree's own PTYs there
     /// (setup scripts) are tagged with.
     pub fn owner(&self) -> &str {
@@ -218,15 +227,28 @@ impl DaedalusHost {
             }
         });
 
-        if let Some(events) = self.host.take_hook_events() {
-            let relay = Relay {
-                host: self.host.clone(),
-                db,
-                db_path,
-            };
-            let app = app.clone();
-            tauri::async_runtime::spawn(relay.run(events, move |nudges| emit_nudges(&app, nudges)));
+        let app = app.clone();
+        if let Some(relay) = self.hook_relay(db, db_path, move |nudges| emit_nudges(&app, nudges)) {
+            tauri::async_runtime::spawn(relay);
         }
+    }
+
+    /// The hook relay, as a task to spawn: the box's hook queue applied to `db`
+    /// for as long as the app runs, `on_nudges` told what each batch changed.
+    /// `None` once taken — there is one relay per link.
+    pub(crate) fn hook_relay(
+        &self,
+        db: Db,
+        db_path: String,
+        on_nudges: impl Fn(Nudges) + Send + 'static,
+    ) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
+        let events = self.host.take_hook_events()?;
+        let relay = Relay {
+            host: self.host.clone(),
+            db,
+            db_path,
+        };
+        Some(relay.run(events, on_nudges))
     }
 }
 

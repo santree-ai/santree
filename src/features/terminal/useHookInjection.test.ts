@@ -18,12 +18,29 @@ const q = vi.hoisted(() => ({
   noGitFetched: true,
   codex: "-c 'hooks.SessionStart=[…]'" as string | null,
   codexFetched: true,
+  repos: [
+    { name: "acme/app", location: "Local" },
+    { name: "acme/web", location: "Daedalus" },
+  ] as { name: string; location: string }[] | undefined,
+  box: {
+    claudeSettings: "/srv/web/.git/santree/claude-hooks.json",
+    claudeSettingsNoGit: "/srv/web/.git/santree/claude-hooks-fixci.json",
+    codexFlags: "-c 'hooks.SessionStart=[box]'",
+  } as { claudeSettings: string; claudeSettingsNoGit: string; codexFlags: string } | undefined,
+  boxFetched: true,
+  boxAsked: [] as [string, boolean][],
 }));
 
 vi.mock("../../lib/queries", () => ({
   useClaudeHookSettings: () => ({ data: q.settings, isFetched: q.settingsFetched }),
   useClaudeHookSettingsNoGit: () => ({ data: q.noGitSettings, isFetched: q.noGitFetched }),
   useCodexHookFlags: () => ({ data: q.codex, isFetched: q.codexFetched }),
+  useRepos: () => ({ data: q.repos }),
+  useDaedalusAgentHooks: (repo: string, enabled: boolean) => {
+    q.boxAsked.push([repo, enabled]);
+    const fetched = enabled && q.boxFetched;
+    return { data: fetched ? q.box : undefined, isFetched: fetched };
+  },
 }));
 
 import { type HookInjectionOptions, useHookInjection } from "./useHookInjection";
@@ -38,6 +55,12 @@ beforeEach(() => {
   q.noGitFetched = true;
   q.codex = "-c 'hooks.SessionStart=[…]'";
   q.codexFetched = true;
+  q.repos = [
+    { name: "acme/app", location: "Local" },
+    { name: "acme/web", location: "Daedalus" },
+  ];
+  q.boxFetched = true;
+  q.boxAsked = [];
 });
 
 describe("useHookInjection", () => {
@@ -90,6 +113,32 @@ describe("useHookInjection", () => {
     const other = injection();
     expect(other.readyFor("Claude")).toBe(true);
     expect(other.readyFor("Codex")).toBe(false);
+  });
+
+  it("hands a Daedalus project's launch the hooks written on the box", () => {
+    const remote = injection({ repo: "acme/web" });
+    expect(remote.flagFor("Claude")).toBe("--settings '/srv/web/.git/santree/claude-hooks.json'");
+    expect(remote.flagFor("Codex")).toBe("-c 'hooks.SessionStart=[box]'");
+    expect(injection({ repo: "acme/web", noGit: true }).flagFor("Claude")).toBe(
+      "--settings '/srv/web/.git/santree/claude-hooks-fixci.json'",
+    );
+    // A project on this Mac never asks the box.
+    expect(injection({ repo: "acme/app" }).flagFor("Claude")).toBe(
+      "--settings '/data/claude-hooks.json'",
+    );
+    expect(q.boxAsked).toContainEqual(["acme/app", false]);
+  });
+
+  it("holds a launch until it knows where the project lives and the box has its hooks", () => {
+    q.boxFetched = false;
+    expect(injection({ repo: "acme/web" }).readyFor("Claude")).toBe(false);
+    expect(injection({ repo: "acme/web" }).readyFor("Codex")).toBe(false);
+    // Never this Mac's paths in the meantime.
+    expect(injection({ repo: "acme/web" }).flagFor("Claude")).toBeUndefined();
+
+    q.boxFetched = true;
+    q.repos = undefined;
+    expect(injection({ repo: "acme/web" }).readyFor("Claude")).toBe(false);
   });
 
   it("waits on the variant the launch will actually use", () => {

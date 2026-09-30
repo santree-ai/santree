@@ -70,6 +70,8 @@ vi.mock("../../lib/queries", () => ({
   useClaudeHookSettings: () => ({ data: "/data/claude-hooks.json", isFetched: true }),
   useClaudeHookSettingsNoGit: () => ({ data: "/data/claude-hooks-no-git.json", isFetched: true }),
   useCodexHookFlags: () => ({ data: q.codexHooks, isFetched: true }),
+  useRepos: () => ({ data: [] }),
+  useDaedalusAgentHooks: () => ({ data: undefined, isFetched: false }),
   useBoolSetting: () => ({ value: false, isFetched: true }),
   useResolvedProviderSetting: (_repo: string, key: string) => ({
     data: key === "model" ? "opus" : key === "effort" ? "high" : "acceptEdits",

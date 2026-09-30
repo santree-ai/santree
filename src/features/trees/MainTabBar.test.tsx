@@ -32,7 +32,9 @@ const trees = vi.hoisted(() => ({
     readable: true,
     gitOff: undefined as string | undefined,
     runOff: undefined as string | undefined,
-    agentOff: undefined as string | undefined,
+    /** What `agentOff(kind)` answers, per provider. */
+    off: {} as Partial<Record<AgentKind, string>>,
+    agentOff: (kind?: AgentKind): string | undefined => (kind ? trees.reach.off[kind] : undefined),
   },
 }));
 
@@ -44,9 +46,12 @@ vi.mock("./model", async (importOriginal) => ({
 vi.mock("../../lib/queries", () => ({
   useTicketProvider: () => "Linear",
   useAgentAuth: () => ({ data: { connected: true } }),
-  useCodexAccount: () => ({ data: { connected: true } }),
-  useCodexHealth: () => ({ data: { available: true } }),
+  useCodexAccount: () => ({ data: { connected: q.macCodex } }),
+  useCodexHealth: () => ({ data: { available: q.macCodex } }),
 }));
+
+/** Whether this Mac's Codex is signed in — asked only for a project here. */
+const q = vi.hoisted(() => ({ macCodex: true }));
 
 /** Leaks the terminal registry so a test can spawn/kill the PTY sessions the bar
  *  watches (the real orchestrator — sessions are plain state). */
@@ -96,7 +101,9 @@ beforeEach(() => {
   trees.addTab.mockClear();
   trees.closeTab.mockClear();
   trees.reach.runOff = undefined;
-  trees.reach.agentOff = undefined;
+  trees.reach.remote = false;
+  trees.reach.off = {};
+  q.macCodex = true;
 });
 
 describe("MainTabBar", () => {
@@ -247,18 +254,34 @@ describe("MainTabBar", () => {
 
     // The digits belong to the menu only while it's open — otherwise a stray "1"
     // anywhere in Trees would spawn a Claude session.
-    // A Daedalus project on a live link: its terminals run on the box, so the
-    // "+" and ⌘T work and the terminal row opens one; its agents don't yet,
-    // so their rows stay, disabled, and their digits do nothing.
-    it("offers a Daedalus project's terminal and keeps its agents off", () => {
-      trees.reach.agentOff = "Coming soon for Daedalus projects";
+    // A Daedalus project on a live link: its terminals and agents run on the
+    // box, with the box's CLIs — this Mac's Codex sign-in doesn't matter —
+    // and a CLI the box lacks keeps its row, disabled, saying so.
+    it("starts a Daedalus project's agents on the box, except one it lacks", () => {
+      trees.reach.remote = true;
+      q.macCodex = false;
+      trees.reach.off = { Codex: "Codex isn't installed on Daedalus" };
       mount();
       openMenu();
       const codex = screen.getByRole("button", { name: /Codex/ });
       expect(codex).toBeDisabled();
-      expect(codex).toHaveAttribute("title", "Coming soon for Daedalus projects");
-      expect(screen.getByRole("button", { name: /Claude Code/ })).toBeDisabled();
+      expect(codex).toHaveAttribute("title", "Codex isn't installed on Daedalus");
+      expect(screen.getByRole("button", { name: /Claude Code/ })).toBeEnabled();
 
+      press("1");
+      expect(trees.addTab).not.toHaveBeenCalled();
+      press("2");
+      expect(trees.addTab).toHaveBeenCalledWith("agent", "Claude");
+    });
+
+    it("offers a Daedalus project's terminal whatever its agents can do", () => {
+      trees.reach.remote = true;
+      trees.reach.off = {
+        Codex: "Codex isn't installed on Daedalus",
+        Claude: "Claude Code isn't installed on Daedalus",
+      };
+      mount();
+      openMenu();
       press("1");
       press("2");
       expect(trees.addTab).not.toHaveBeenCalled();
@@ -268,7 +291,7 @@ describe("MainTabBar", () => {
 
     it("offers nothing while Daedalus is out of reach", () => {
       trees.reach.runOff = "Unavailable until santree can reach Daedalus";
-      trees.reach.agentOff = trees.reach.runOff;
+      trees.reach.off = { Codex: trees.reach.runOff, Claude: trees.reach.runOff };
       mount();
       openMenu();
       expect(screen.queryByRole("button", { name: /Codex/ })).toBeNull();

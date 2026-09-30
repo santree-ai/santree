@@ -36,6 +36,7 @@ use santree_core::domain::{
 use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
+use crate::git::Checkout;
 use crate::{repo, santree_dir, settings};
 
 /// One documented variable a prompt receives (name + human blurb for the editor).
@@ -405,6 +406,24 @@ pub async fn resolve_sources(db: &Db, repo: Option<&str>) -> Result<Vec<(String,
     resolve_sources_with(db, repo, None).await
 }
 
+/// [`resolve_sources`] for a launch in `repo`, its own layer read from `root` —
+/// its main checkout, wherever that lives: on Daedalus the `.santree/prompts/`
+/// the agent's checkout carries is the box's, read through the link.
+pub async fn resolve_sources_at(
+    db: &Db,
+    repo: &str,
+    root: &Checkout,
+) -> Result<Vec<(String, String)>> {
+    let root = root.clone();
+    let project_files = tokio::task::spawn_blocking(move || match root.local_path() {
+        Ok(local) => read_project_prompts(local),
+        Err(_) => read_checkout_prompts(&root),
+    })
+    .await
+    .unwrap_or_default();
+    resolve_sources_from(db, Some(repo), None, project_files).await
+}
+
 /// [`resolve_sources`] with one layer of one prompt replaced by `draft`.
 async fn resolve_sources_with(
     db: &Db,
@@ -415,6 +434,16 @@ async fn resolve_sources_with(
         Some(r) => project_prompts(db, r).await,
         None => HashMap::new(),
     };
+    resolve_sources_from(db, repo, draft, project_files).await
+}
+
+/// The sources, given the repo's committed layer already read.
+async fn resolve_sources_from(
+    db: &Db,
+    repo: Option<&str>,
+    draft: Option<Draft<'_>>,
+    project_files: HashMap<String, String>,
+) -> Result<Vec<(String, String)>> {
     let mut names: Vec<(String, Option<&'static str>)> = PROMPT_DEFS
         .iter()
         .map(|d| (d.name.to_string(), Some(d.default)))
@@ -558,6 +587,44 @@ fn read_project_prompts(repo_root: &Path) -> HashMap<String, String> {
         }
         if let Ok(src) = std::fs::read_to_string(&path) {
             out.insert(name.to_string(), src);
+        }
+    }
+    out
+}
+
+/// [`read_project_prompts`] through a checkout that isn't on this machine: the
+/// same rules — regular files only, a valid stem, at most [`PROJECT_FILE_MAX`]
+/// — with the host's `within` (the checkout) as the symlink check.
+fn read_checkout_prompts(root: &Checkout) -> HashMap<String, String> {
+    let rel = Path::new(santree_dir::SANTREE).join(santree_dir::PROMPTS);
+    let rel = rel.to_string_lossy();
+    let names = match root.list_files(&rel) {
+        Ok(names) => names,
+        Err(e) => {
+            log::warn!("ignoring {rel} in {}: {e:#}", root.path().display());
+            return HashMap::new();
+        }
+    };
+    let mut out = HashMap::new();
+    for file in names {
+        let Some(name) = file.strip_suffix(".njk") else {
+            continue;
+        };
+        if !is_valid_block_name(name) {
+            log::warn!("ignoring {rel}/{file}: not a valid prompt name");
+            continue;
+        }
+        match root.read(&format!("{rel}/{file}"), PROJECT_FILE_MAX) {
+            Ok((data, true)) => match String::from_utf8(data) {
+                Ok(src) => {
+                    out.insert(name.to_string(), src);
+                }
+                Err(_) => log::warn!("ignoring {rel}/{file}: not UTF-8"),
+            },
+            Ok((_, false)) => {
+                log::warn!("ignoring {rel}/{file}: larger than {PROJECT_FILE_MAX} bytes")
+            }
+            Err(e) => log::warn!("ignoring {rel}/{file}: {e:#}"),
         }
     }
     out

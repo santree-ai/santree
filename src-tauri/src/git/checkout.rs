@@ -306,20 +306,92 @@ impl Checkout {
     /// Run a program other than git on the box, in the checkout, for the file
     /// operations the protocol has no method for. Its stderr is the error.
     fn exec(&self, argv: &[&str]) -> Result<()> {
-        let Host::Daedalus(client) = &self.host else {
-            bail!("exec runs on Daedalus only");
-        };
-        let out = client.call_blocking::<m::ExecRun>(&ExecParams {
-            cwd: self.server_path(&self.path),
-            argv: argv.iter().map(|s| (*s).to_string()).collect(),
-            ..ExecParams::default()
-        })?;
         ensure!(
-            out.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            matches!(self.host, Host::Daedalus(_)),
+            "exec runs on Daedalus only"
         );
+        let out = self.run(argv)?;
+        ensure!(out.ok, "{}", out.stderr.trim());
         Ok(())
+    }
+
+    /// Run `argv` (a program and its arguments, no shell) in the checkout, on
+    /// its machine — a child process here, `exec.run` on the box. Errors only
+    /// when it can't be run (or its output was cut at the host's cap); a
+    /// non-zero exit is `ok: false`.
+    pub(crate) fn run(&self, argv: &[&str]) -> Result<Output> {
+        let Some((program, args)) = argv.split_first() else {
+            bail!("nothing to run");
+        };
+        match &self.host {
+            Host::Local => {
+                let out = Command::new(program)
+                    .args(args)
+                    .current_dir(&self.path)
+                    .stdin(Stdio::null())
+                    .output()
+                    .map_err(|e| anyhow!("failed to run {program}: {e}"))?;
+                Ok(Output {
+                    ok: out.status.success(),
+                    stdout: out.stdout,
+                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                })
+            }
+            Host::Daedalus(client) => {
+                let out = client.call_blocking::<m::ExecRun>(&ExecParams {
+                    cwd: self.server_path(&self.path),
+                    argv: argv.iter().map(|s| (*s).to_string()).collect(),
+                    ..ExecParams::default()
+                })?;
+                if out.truncated {
+                    bail!("{program}: more output than Daedalus sends");
+                }
+                Ok(Output {
+                    ok: out.success(),
+                    stdout: out.stdout,
+                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                })
+            }
+        }
+    }
+
+    /// The names of the regular files directly in the directory `rel` inside
+    /// the checkout — no symlinks, and never through a symlinked directory.
+    /// A directory that isn't there has none.
+    pub(crate) fn list_files(&self, rel: &str) -> Result<Vec<String>> {
+        let dir = super::safe_path(&self.path, rel)?;
+        match self.stat(&dir)? {
+            None => return Ok(Vec::new()),
+            Some(FsKind::Dir) => {}
+            Some(_) => bail!("{} is not a directory", dir.display()),
+        }
+        match &self.host {
+            Host::Local => Ok(std::fs::read_dir(&dir)?
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect()),
+            Host::Daedalus(_) => {
+                let dir = self.server_path(&dir);
+                let out = self.run(&[
+                    "find",
+                    &dir,
+                    "-mindepth",
+                    "1",
+                    "-maxdepth",
+                    "1",
+                    "-type",
+                    "f",
+                    "-printf",
+                    "%f\\n",
+                ])?;
+                ensure!(out.ok, "listing {dir}: {}", out.stderr.trim());
+                Ok(String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(str::to_string)
+                    .collect())
+            }
+        }
     }
 
     /// Up to `max` bytes from the start of the file at `rel` inside the

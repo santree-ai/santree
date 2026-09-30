@@ -341,13 +341,20 @@ pub(crate) async fn daedalus_paths(db: &Db) -> Result<Vec<String>> {
     .await?)
 }
 
-/// Whether `path` is inside a registered Daedalus repo's checkout — a directory
-/// on the server, whatever this machine happens to have at the same spelling.
-pub(crate) async fn on_daedalus(db: &Db, path: &Path) -> Result<bool> {
-    Ok(daedalus_paths(db)
-        .await?
-        .iter()
-        .any(|root| path.starts_with(root)))
+/// The registered Daedalus repo whose checkout holds `path` — a directory on
+/// the server, whatever this machine happens to have at the same spelling —
+/// by name; the innermost, should one checkout sit inside another.
+pub(crate) async fn daedalus_repo_at(db: &Db, path: &Path) -> Result<Option<String>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, path FROM repos WHERE path IS NOT NULL AND location = 'daedalus'",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, root)| path.starts_with(root))
+        .max_by_key(|(_, root)| root.len())
+        .map(|(name, _)| name))
 }
 
 /// A free registry name for a checkout that isn't registered yet: its derived

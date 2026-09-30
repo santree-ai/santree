@@ -11,8 +11,9 @@
  * the launch queue — resolve through here, so they can't answer the same ticket
  * differently.
  *
- * A Daedalus project is never answered for the user: nothing can be started in
- * one yet, so it is only ever a disabled row in the dialog, saying why.
+ * A Daedalus project is answered like any other while santree can reach the
+ * box, where its agents run; with the link down it is never answered for the
+ * user, and is only a disabled row in the dialog, saying why.
  *
  * `always` skips the first two answers: the menu's "Run in another project…" is
  * a request to be asked. Modelled on `TriageRepoGate`, down to the
@@ -23,7 +24,8 @@
 import { createContext, type ReactNode, useCallback, useContext, useRef, useState } from "react";
 
 import { ProjectPickerDialog } from "../components/ProjectPickerDialog";
-import { useRepos, useWorkDefaultRepo } from "../lib/queries";
+import { linkUp } from "../lib/daedalusLink";
+import { useDaedalusStatus, useRepos, useWorkDefaultRepo } from "../lib/queries";
 
 /** Resolve the project for `action` — named in the dialog, so it reads
  *  "Starting AK-1 needs a project." — out of `candidates`, the projects that
@@ -57,8 +59,10 @@ export function WorkRepoGateProvider({ children }: { children: ReactNode }) {
   const defaultRef = useRef(defaultRepo);
   defaultRef.current = defaultRepo;
   const { data: repos } = useRepos();
-  const localRef = useRef<(name: string) => boolean>(() => false);
-  localRef.current = (name) => repos?.find((r) => r.name === name)?.location !== "Daedalus";
+  const { data: link } = useDaedalusStatus();
+  const startableRef = useRef<(name: string) => boolean>(() => false);
+  startableRef.current = (name) =>
+    repos?.find((r) => r.name === name)?.location !== "Daedalus" || linkUp(link);
 
   const settle = useCallback((picked: string | null) => {
     pending.current?.(picked);
@@ -68,7 +72,7 @@ export function WorkRepoGateProvider({ children }: { children: ReactNode }) {
 
   const ask = useCallback<AskWorkRepo>((candidates, action, opts) => {
     if (!opts?.always) {
-      const startable = candidates.filter((name) => localRef.current(name));
+      const startable = candidates.filter((name) => startableRef.current(name));
       if (candidates.length === 1 && startable.length === 1) return Promise.resolve(startable[0]);
       const preset = defaultRef.current;
       if (preset && startable.includes(preset)) return Promise.resolve(preset);

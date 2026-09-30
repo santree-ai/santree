@@ -8,10 +8,13 @@
 //! a plain value; only genuinely broken local state (the database) is an
 //! `Err`, because an `Err` becomes a red toast.
 
+pub mod agents;
 pub mod host;
 pub mod setup;
 pub mod terminals;
 
+#[cfg(test)]
+mod agent_tests;
 #[cfg(test)]
 mod git_tests;
 #[cfg(test)]

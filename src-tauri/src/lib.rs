@@ -255,6 +255,8 @@ fn specta_builder() -> AppBuilder {
             commands::daedalus_health,
             commands::daedalus_workspaces,
             commands::add_daedalus_repo,
+            commands::daedalus_agent_hooks,
+            commands::daedalus_agent_clis,
             commands::legacy_cli_probe,
             commands::legacy_cli_migrate,
             commands::check_for_update,

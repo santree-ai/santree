@@ -190,8 +190,8 @@ security boundary.
 → `no_injected_hook_can_gate_claude_and_pretooluse_is_never_injected`
 
 The app also applies hook payloads **relayed from Daedalus** (docs/remote.md):
-agents on the user's home server run the same hooks through `santree-remote
-hook`, and the app applies each event with `crates/hook`'s own `apply` — the
+agents on the user's home server run the same hooks through the session host's
+`hook` subcommand, and the app applies each event with `crates/hook`'s own `apply` — the
 same writes the binary makes, into the app's own database, with a failure
 logged to the same `santree-hook-errors.log`. Nothing goes back to the agent:
 the relay only records. Because the server is not trusted the way the local
@@ -357,6 +357,12 @@ unusable — it reported `claude.exe` for a running `claude` *and* for a `ugrep`
 that Claude spawned — and no cross-platform column yields `argv[0]` alone. The
 narrow retention is what makes the wider read acceptable; widening it is a change
 to this paragraph, not just to a parser.
+
+A Daedalus project's panes run on the user's home server, so their process table
+is read there — the same constant `ps` argv through `exec.run`, the same parse,
+the same foreground walk (`daedalus/agents.rs`), identity only. The full listing
+crosses the link once per read and is parsed here the way the local one is: only
+`argv[0]` basenames survive it.
 → `only_the_terminal_adapter_writes_bytes_into_a_pty` (its allowlist is what
 keeps that module away from the PTY)
 

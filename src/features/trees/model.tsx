@@ -406,10 +406,10 @@ export function tabForRun(launch: QueuedLaunch | undefined, initialSetup: boolea
 interface TreesModel {
   repo: string;
   /** Where the project lives and what santree can do in it now: a Daedalus
-   *  project's git, terminals and setup scripts run on the box, its agents not
-   *  yet, and none of it is offered while the link is down (`reach.gitOff`,
-   *  `reach.runOff` and `reach.agentOff` say why, on every control they turn
-   *  off). */
+   *  project's git, terminals, setup scripts and agents run on the box, an
+   *  agent only when the box has its CLI, and none of it is offered while the
+   *  link is down (`reach.gitOff`, `reach.runOff` and `reach.agentOff(kind)`
+   *  say why, on every control they turn off). */
   reach: RepoReach;
   worktrees: Worktree[];
   /** Live PR status keyed by worktree id (from the worktree_prs stream). The
@@ -1066,11 +1066,13 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       addTab: (kind, agentKind) => {
         // Every way to open a tab (the "+" menu, its digit keys, ⌘T, the welcome
         // surface) comes through here, so what a project can't run right now (a
-        // terminal while Daedalus is out of reach, an agent on Daedalus at all)
-        // opens nothing, whichever control was missed.
-        if (!activeId || (kind === "terminal" ? reach.runOff : reach.agentOff)) return null;
-        const id = crypto.randomUUID();
+        // terminal or agent while Daedalus is out of reach, an agent the box
+        // lacks) opens nothing, whichever control was missed.
         const resolvedAgent = kind === "terminal" ? null : (agentKind ?? "Codex");
+        if (!activeId || (resolvedAgent ? reach.agentOff(resolvedAgent) : reach.runOff)) {
+          return null;
+        }
+        const id = crypto.randomUUID();
         addTabRow({
           id,
           worktreeId: activeId,

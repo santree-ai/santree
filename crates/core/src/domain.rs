@@ -527,6 +527,20 @@ pub struct DaedalusHealth {
     pub checked_at: String,
 }
 
+/// `daedalus_agent_hooks`: santree's session hooks for agents launched in one
+/// Daedalus project, written on the box — what `useHookInjection` hands a
+/// launch there in place of this Mac's. Paths are on the server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DaedalusAgentHooks {
+    /// Claude's `--settings` file: the session-state hooks and the status line.
+    pub claude_settings: String,
+    /// The same plus the Fix-CI commit/push deny list.
+    pub claude_settings_no_git: String,
+    /// Codex's `-c 'hooks.<Event>=[…]'` flags, already shell-quoted.
+    pub codex_flags: String,
+}
+
 /// A checkout's last sync with its remote, as Daedalus reports it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]

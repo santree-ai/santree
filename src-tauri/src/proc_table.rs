@@ -34,7 +34,7 @@ use anyhow::{bail, Context, Result};
 /// keeps **only `argv[0]`'s basename** and drops the rest before any caller sees
 /// a row — nothing here logs, stores, or forwards a command line. See
 /// COMPLIANCE.md, "Reading the OS process table is observation, not a loop".
-const PS_ARGS: &[&str] = &["-axo", "pid=,ppid=,pcpu=,rss=,stat=,command="];
+pub(crate) const PS_ARGS: &[&str] = &["-axo", "pid=,ppid=,pcpu=,rss=,stat=,command="];
 
 /// How long one listing is reused. Orca's process-table snapshot uses the same
 /// 500ms, for the same reason: several callers can want "what is running right

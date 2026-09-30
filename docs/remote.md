@@ -258,22 +258,25 @@ prove the two meet. santree does not depend on `santree-remote-tls`.
   worktree it runs in an empty scratch directory (`agent::HelperDir`) with no
   `Read` grant, so nothing it does reaches the box.
 - **Terminals on the box** — see "Terminals and setup scripts on the box" below.
-- **Still local-only, and refusing a Daedalus repo**: agent launches (a Claude or
-  Codex tab: `terminal_open` refuses an `agentKind` with a Daedalus cwd), work
-  prompts and session history (`local_root` / `local_worktree`, and
-  `Checkout::local_path`). The UI says so per kind of action (`lib/daedalusLink`):
-  `gitOff` and `runOff` turn git actions, terminals and setup scripts off only
-  while the link is down ("Unavailable until santree can reach Daedalus");
-  `agentOff` keeps agents off ("Coming soon for Daedalus projects", or the same
-  unreachable reason) — the "+" menu's agent rows, the project pickers that start
-  one, a ticket's worktree, which is made but gets no agent.
+- **Agents on the box** — see "Agents on the box" below.
+- **Still local-only, and refusing a Daedalus repo**: session history (the
+  Session history pane reads this Mac's transcripts through `local_worktree`;
+  a Daedalus project's shows "coming soon") and the AI review (`agent_session`
+  refuses the review surfaces). The UI says so per kind of action
+  (`lib/daedalusLink`): `gitOff` and `runOff` turn git actions, terminals and
+  setup scripts off while the link is down ("Unavailable until santree can reach
+  Daedalus"); `agentOff(kind)` does the same for agents, and also turns off one
+  whose CLI the box doesn't have ("Codex isn't installed on Daedalus") — the "+"
+  menu's agent rows, the project pickers that start one, a ticket's worktree
+  (made, but its agent not started).
 - **Reads wait for the link**: a Daedalus project's worktree reads are `enabled`
   only while the link is `Connected` (`useRepoReach` / `useReadableRepos` in
   `lib/queries.ts`), so a down link never fails a read into a toast; the sidebar
   greys and says why, and the workspace shows the link's state when it has nothing
   read yet.
 - Hooks: agents on the server are launched with a settings file santree writes there
-  via `fs.write`, whose hook commands are `<hookBin> hook <args>` (`hookBin` from `hello`). The relayed
+  via `fs.write` (Codex: `-c` flags), whose hook commands are `<hookBin> hook <args>`
+  (`hookBin` from `hello`; `hooks::box_prefix`). The relayed
   `event` is those args, space-joined — exactly what follows `--db <path>` in the
   local `santree-hook` command (`SessionStart`, `--agent-kind Codex SessionStart`,
   `statusline`), parsed by the binary's own `parse_args`. `statusline` records only
@@ -297,7 +300,7 @@ prove the two meet. santree does not depend on `santree-remote-tls`.
   warning. Each delivery is tagged with its boot, and an ack for a boot the daemon
   has since left is refused, never applied to the new boot's seqs.
 - Which agent is running: `ps -axo pid=,ppid=,pcpu=,rss=,stat=,command=` via
-  `exec.run`, parsed by the existing `proc_table` parser.
+  `exec.run`, parsed by the existing `proc_table` parser (see "Agents on the box").
 - Worktree changes: polled, not watched — `useWorktreeWatcher(repo, tree)` re-reads
   the worktree on screen every 4 s through the watcher's own single-flight
   invalidation, while the link is up and the window visible.
@@ -311,7 +314,7 @@ A terminal in a Daedalus project is a PTY on the box (`pty.open` in the
 checkout, which the host confines under `projectsRoot`), drawn by the same
 terminal layer as a local one — docs/terminals.md, "Remote sessions", has the
 pane's side. `terminal.rs` dispatches: a cwd inside a Daedalus project
-(`repo::on_daedalus`, absolute and never climbing) goes to
+(`repo::daedalus_repo_at`, absolute and never climbing) goes to
 `daedalus/terminals.rs`, every other id and command stays on `PtyManager`.
 
 - **Ids.** A remote pane gets an app-side id from `terminals::FIRST_ID` (2³¹) up
@@ -351,7 +354,9 @@ pane's side. `terminal.rs` dispatches: a cwd inside a Daedalus project
   box's login shell under the session host, which runs with the operator's
   profile `PATH`, and the box's own profile is where a Daedalus project's
   environment belongs. santree's `SANTREE_*` keys are per launch and added by
-  what launches: a setup run's two, and an agent's once agents run there.
+  what launches: a setup run's two, and an agent pane's `SANTREE_REPO` /
+  `SANTREE_TERM_KEY` (the project owning the cwd, and the pane's validated
+  term key).
 - **Untrusted bytes** (design S5): the pane's renderer is built untrusted —
   OSC 52 (clipboard writes) swallowed, OSC 8 links opened only as `http(s)`,
   remote text never rendered as HTML. The frontend decides it from the pane's
@@ -372,6 +377,66 @@ pane's side. `terminal.rs` dispatches: a cwd inside a Daedalus project
 - **Compliance**: remote bytes enter a PTY only through `terminal.rs`'s
   `write_pty` → the pane's one writer (`pty.write`), pinned by
   `only_the_terminal_adapter_writes_bytes_into_a_pty`.
+
+## Agents on the box
+
+A Claude or Codex tab in a Daedalus project is the local launch, run on the box:
+the same `agent_session` resolution, the same seed (`agentSessionSeed`), the
+same work and investigate prompts — typed into a remote pane
+(`terminal_open` with an `agentKind`, "Terminals and setup scripts on the box").
+What the launch names lives on the box too (`daedalus/agents.rs`):
+
+- **santree's files there** go in `santree/` inside the checkout's common git
+  dir (`rev-parse --path-format=absolute --git-common-dir`, `agents::santree_dir`):
+  under `projectsRoot` (the host's `fs.write` confinement), never in a working
+  tree's `git status`, beside the split's index and the setup's status file.
+  - `claude-hooks.json` / `claude-hooks-fixci.json`: `hooks::hook_settings`
+    (the session-state hooks + the status line; the Fix-CI deny list) with
+    every command `'<hookBin>' hook <args>`; Codex's `-c 'hooks.<Event>=…'`
+    flags the same way. Written by `daedalus_agent_hooks(repo)`, which
+    `useHookInjection({ repo })` asks in place of this Mac's
+    `claude_hook_settings` / `codex_hook_flags` — a launch holds until it has
+    them, and never takes this Mac's paths meanwhile. No English tutor on the
+    box: its instruction and practice log are this Mac's files. The status line
+    runs on the box and records only.
+  - `prompts/<repo-key>/<id>.md` (and `.investigate.md` + its extracted
+    images): `work_prompt` / `investigate_prompt` render through
+    `prompts::resolve_sources_at`, whose project layer is the box's
+    `.santree/prompts/*.njk` (listed with `Checkout::list_files` — `find` on
+    the box — and read with `within` = the checkout), and write through
+    `Checkout::write`. The ticket itself is still fetched here.
+- **Resolution** (`agents::resolve_session`, from `agent_session` for a
+  Daedalus repo): the cwd and the stored paths are the box's, checked as
+  stored (absolute, never climbing), never canonicalized here. The executable
+  is the plain `claude` / `codex` the box's shell finds — this Mac's exec
+  override names nothing there. A stored session resumes while its record is
+  on the box: Claude's transcript `fs.stat`ed at
+  `<home>/.claude/projects/<escaped cwd>/<id>.jsonl`, Codex's rollout found
+  under `<home>/.codex/sessions` (`find -name 'rollout-*-<id>.jsonl'`; the
+  box's `CODEX_HOME` is not read). Codex's `--add-dir` is the box's git dir,
+  and its `-c` overrides are checked by the box's own `codex exec
+  --strict-config`. The AI review surfaces are refused.
+- **Which CLIs the box has**: `bash -lc 'command -v …' claude codex` in
+  `projectsRoot` — the login shell's `PATH`, which is what a pane's seed meets —
+  cached for a minute per session-host boot (`BoxAgents::clis`,
+  `daedalus_agent_clis`). The menus disable a missing one with "… isn't
+  installed on Daedalus", and a launch of one is refused with the same words.
+  `None` (no link, a failed probe) gates nothing: the launch says so if it must.
+- **Seeds**: the box's tty is Linux's (`N_TTY_BUF_SIZE` 4096), so a remote seed
+  may be up to 2048 bytes (`MAX_REMOTE_SEED_LINE`) — a Codex launch's six hook
+  flags fit — and one past it is refused, never truncated or spilled.
+- **Detection** (`BoxAgents::detect`, merged into `agent_processes`): for each
+  remote agent pane bound to a session, its root pid from `pty.sessions`, the
+  box's process table from `exec.run ps -axo …` in `projectsRoot` (bounded to
+  3 s, cached 500 ms, a failure cached too) parsed by `proc_table::parse_ps`,
+  and `agent_procs::attribute` — the same foreground walk. The frontend polls
+  it while panes are open. Identity only, as locally.
+- **Liveness**: `session_states` counts a remote pane as live until it ends
+  (`RemoteTerminals::live`), a dropped link included; a remote pane's exit
+  sentinel retires its session rows like a local one's.
+- **Session history** stays "coming soon" for Daedalus projects: its
+  transcripts are on the box, and reading them there (`fs.read` with `within`)
+  is the next step.
 
 ## Code map
 
@@ -413,7 +478,10 @@ or (by default) specta, and their public APIs are a contract with that repo.
   workspace and git tests connect through. `FakeDaemon::exec_log()` is the argv of
   every `exec.run` it served, so a test can say what ran on the "box".
 
-`src-tauri/src/daedalus/`:
+`src-tauri/src/daedalus/` (also `agents.rs`: "Agents on the box"; its tests,
+`agent_tests.rs`, run the launch, the relay, detection and the prompts over the
+fake agent and daemon, whose `FakeOptions::env` gives the fake box a home and
+`PATH` of its own):
 
 - `host.rs` — `DaedalusHost` (Tauri-managed): the one `RemoteHost` over the
   `AgentConnector`, started once with the saved hook cursor (`resume`);

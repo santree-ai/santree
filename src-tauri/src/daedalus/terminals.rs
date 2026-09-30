@@ -43,7 +43,7 @@ use santree_remote_client::proto::{
 };
 use santree_remote_client::{PtyEvent, RemoteClient, RemoteError, RemoteHost};
 
-use crate::terminal::PaneLink;
+use crate::terminal::{LiveTerminal, PaneLink};
 
 /// The first app-side id of a remote pane. `PtyManager` counts its own from 1
 /// and would need two billion sessions in one run to get here.
@@ -156,6 +156,14 @@ struct State {
 impl Pane {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.st.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The pane's address: what it was opened under and for which provider.
+    fn address(&self) -> LiveTerminal {
+        LiveTerminal {
+            term_key: self.spec.label.clone(),
+            agent_kind: self.spec.agent_kind,
+        }
     }
 }
 
@@ -423,6 +431,41 @@ impl RemoteTerminals {
             _ => st.resize_due = true,
         }
         Ok(())
+    }
+
+    /// The panes whose process is still running on the box, by the address a
+    /// session row joins on — the remote half of `terminal::live_terminals`. A
+    /// pane waiting out a dropped link counts: its process never stopped.
+    pub fn live(&self) -> HashSet<LiveTerminal> {
+        self.inner
+            .lock()
+            .values()
+            .filter(|pane| {
+                let st = pane.lock();
+                !st.ended && !st.closing
+            })
+            .map(|pane| pane.address())
+            .collect()
+    }
+
+    /// Each live pane bound to a session on the box, with that session's id —
+    /// what a scan of the box's process table walks down from.
+    pub fn bound(&self) -> Vec<(LiveTerminal, BoxSessionId)> {
+        self.inner
+            .lock()
+            .values()
+            .filter_map(|pane| {
+                let st = pane.lock();
+                let remote = st.remote.filter(|_| !st.ended && !st.closing)?;
+                Some((pane.address(), remote))
+            })
+            .collect()
+    }
+
+    /// Pane `id`'s address and cwd on the box, as it was opened.
+    pub fn address(&self, id: SessionId) -> Option<(LiveTerminal, String)> {
+        let pane = self.inner.pane(id).ok()?;
+        Some((pane.address(), pane.spec.cwd.clone()))
     }
 
     /// Hand every pane of another page to `owner`, and say which they are.

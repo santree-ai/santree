@@ -135,7 +135,9 @@ export function MainTabBar() {
       active={activeTab}
       onSelect={setActiveTab}
       ariaLabel="Worktree tabs"
-      newTabMenu={(close) => <NewTabMenu onAdd={addTab} close={close} agentOff={reach.agentOff} />}
+      newTabMenu={(close) => (
+        <NewTabMenu onAdd={addTab} close={close} remote={reach.remote} agentOff={reach.agentOff} />
+      )}
       newTabMenuClassName="w-40 overflow-hidden"
       newTabDisabled={reach.runOff}
       trailing={
@@ -166,19 +168,27 @@ export function MainTabBar() {
 function NewTabMenu({
   onAdd,
   close,
+  remote,
   agentOff,
 }: {
   onAdd: (kind: TabKind, agentKind?: AgentKind) => void;
   close: () => void;
-  /** Why no agent can start in this project (one on Daedalus): its rows stay,
-   *  disabled, with that as their tooltip; the terminal row is unaffected. */
-  agentOff?: string;
+  /** The project lives on Daedalus: its agents run there, with the box's CLIs
+   *  and sign-ins, so this Mac's aren't asked. */
+  remote: boolean;
+  /** Why an agent can't start in this project (one on Daedalus: the link is
+   *  down, or the box lacks that CLI): its row stays, disabled, with that as
+   *  its tooltip; the terminal row is unaffected. */
+  agentOff: (kind: AgentKind) => string | undefined;
 }) {
   const claude = useAgentAuth("Claude").data;
   const codexHealth = useCodexHealth().data;
   const codexAccount = useCodexAccount(codexHealth?.available === true).data;
-  const codexReady = !agentOff && !!codexHealth?.available && !!codexAccount?.connected;
-  const claudeReady = !agentOff && !!claude?.connected;
+  const codexOff = agentOff("Codex");
+  const claudeOff = agentOff("Claude");
+  const codexReady =
+    !codexOff && (remote || (!!codexHealth?.available && !!codexAccount?.connected));
+  const claudeReady = !claudeOff && (remote || !!claude?.connected);
   const add = (kind: TabKind, agentKind?: AgentKind) => {
     if (agentKind === "Codex" && !codexReady) return;
     if (agentKind === "Claude" && !claudeReady) return;
@@ -199,7 +209,7 @@ function NewTabMenu({
       <button
         type="button"
         disabled={!codexReady}
-        title={agentOff ?? (codexReady ? undefined : "Connect Codex in Settings first")}
+        title={codexOff ?? (codexReady ? undefined : "Connect Codex in Settings first")}
         onClick={() => add("agent", "Codex")}
         className={MENU_ITEM}
       >
@@ -210,7 +220,7 @@ function NewTabMenu({
       <button
         type="button"
         disabled={!claudeReady}
-        title={agentOff ?? (claudeReady ? undefined : "Sign in to Claude Code first")}
+        title={claudeOff ?? (claudeReady ? undefined : "Sign in to Claude Code first")}
         onClick={() => add("agent", "Claude")}
         className={MENU_ITEM}
       >

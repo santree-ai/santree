@@ -29,9 +29,9 @@ use crate::stream::StreamEvent;
 use crate::terminal::{self, PaneLink, RawBytes, TerminalOpenOpts};
 use crate::worktree;
 
-const WAIT: Duration = Duration::from_secs(20);
+pub(super) const WAIT: Duration = Duration::from_secs(20);
 
-fn fast() -> HostOptions {
+pub(super) fn fast() -> HostOptions {
     HostOptions {
         backoff_min: Duration::from_millis(20),
         backoff_max: Duration::from_millis(200),
@@ -40,7 +40,7 @@ fn fast() -> HostOptions {
     }
 }
 
-fn run_git(dir: &Path, args: &[&str]) {
+pub(super) fn run_git(dir: &Path, args: &[&str]) {
     let out = std::process::Command::new("git")
         .current_dir(dir)
         .args(args)
@@ -50,14 +50,14 @@ fn run_git(dir: &Path, args: &[&str]) {
 }
 
 /// The box: a projects root holding `web`, with a tracked worktree `AK-1`.
-struct Server {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    web: PathBuf,
-    worktree: PathBuf,
+pub(super) struct Server {
+    pub(super) _dir: tempfile::TempDir,
+    pub(super) root: PathBuf,
+    pub(super) web: PathBuf,
+    pub(super) worktree: PathBuf,
 }
 
-fn server() -> Server {
+pub(super) fn server() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap().join("projects");
     let web = root.join("web");
@@ -90,7 +90,7 @@ fn server() -> Server {
 }
 
 /// A database with `web` registered as a Daedalus project and `AK-1` tracked.
-async fn registered(server: &Server, db_dir: &Path) -> (Db, String) {
+pub(super) async fn registered(server: &Server, db_dir: &Path) -> (Db, String) {
     let db = crate::db::init(db_dir.join("test.db")).await.unwrap();
     let web = server.web.to_string_lossy().into_owned();
     let repo = repo::add_daedalus(&db, &web, Some("git@github.com:acme/web.git"))
@@ -128,7 +128,7 @@ fn link_through(agent: &FakeAgent) -> DaedalusHost {
 /// exited, and every link state in order. Every change bumps `changed`, so a
 /// test waits on a condition over it rather than on time.
 #[derive(Clone)]
-struct Screen {
+pub(super) struct Screen {
     out: Arc<Mutex<Vec<u8>>>,
     exited: Arc<Mutex<bool>>,
     links: Arc<Mutex<Vec<PaneLink>>>,
@@ -136,7 +136,7 @@ struct Screen {
 }
 
 impl Screen {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             out: Arc::default(),
             exited: Arc::default(),
@@ -145,11 +145,11 @@ impl Screen {
         }
     }
 
-    fn bump(&self) {
+    pub(super) fn bump(&self) {
         self.changed.send_modify(|n| *n += 1);
     }
 
-    fn output(&self, bytes: Vec<u8>) {
+    pub(super) fn output(&self, bytes: Vec<u8>) {
         if bytes.is_empty() {
             *self.exited.lock().unwrap() = true;
         } else {
@@ -158,12 +158,12 @@ impl Screen {
         self.bump();
     }
 
-    fn link(&self, link: PaneLink) {
+    pub(super) fn link(&self, link: PaneLink) {
         self.links.lock().unwrap().push(link);
         self.bump();
     }
 
-    fn sinks(&self) -> Sinks {
+    pub(super) fn sinks(&self) -> Sinks {
         let (out, link) = (self.clone(), self.clone());
         Sinks {
             output: Arc::new(move |bytes| out.output(bytes)),
@@ -172,7 +172,7 @@ impl Screen {
     }
 
     /// The pane's channels as `terminal::open` takes them.
-    fn channels(&self) -> (Channel<RawBytes>, Channel<PaneLink>) {
+    pub(super) fn channels(&self) -> (Channel<RawBytes>, Channel<PaneLink>) {
         let (out, link) = (self.clone(), self.clone());
         let output = Channel::new(move |body| {
             if let InvokeResponseBody::Raw(bytes) = body {
@@ -193,31 +193,31 @@ impl Screen {
         (output, links)
     }
 
-    fn text(&self) -> String {
+    pub(super) fn text(&self) -> String {
         String::from_utf8_lossy(&self.out.lock().unwrap()).into_owned()
     }
 
-    fn len(&self) -> u64 {
+    pub(super) fn len(&self) -> u64 {
         self.out.lock().unwrap().len() as u64
     }
 
-    fn count(&self, needle: &str) -> usize {
+    pub(super) fn count(&self, needle: &str) -> usize {
         self.text().matches(needle).count()
     }
 
-    fn links(&self) -> Vec<PaneLink> {
+    pub(super) fn links(&self) -> Vec<PaneLink> {
         self.links.lock().unwrap().clone()
     }
 
-    fn last_link(&self) -> Option<PaneLink> {
+    pub(super) fn last_link(&self) -> Option<PaneLink> {
         self.links.lock().unwrap().last().copied()
     }
 
-    fn exited(&self) -> bool {
+    pub(super) fn exited(&self) -> bool {
         *self.exited.lock().unwrap()
     }
 
-    async fn until(&self, what: &str, cond: impl Fn(&Screen) -> bool) {
+    pub(super) async fn until(&self, what: &str, cond: impl Fn(&Screen) -> bool) {
         let mut changed = self.changed.subscribe();
         let met = tokio::time::timeout(WAIT, changed.wait_for(|_| cond(self))).await;
         assert!(
@@ -231,7 +231,7 @@ impl Screen {
 
 /// Wait for state outside the pane (the box's PTY table): checked on every
 /// scheduler turn until it holds, bounded by [`WAIT`].
-async fn until(what: &str, cond: impl Fn() -> bool) {
+pub(super) async fn until(what: &str, cond: impl Fn() -> bool) {
     let met = tokio::time::timeout(WAIT, async {
         while !cond() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -519,9 +519,11 @@ async fn nothing_runs_locally_while_the_link_is_down() {
     assert!(manager.sessions().is_empty(), "no shell opened on this Mac");
     assert!(daemon.pty().sessions().is_empty(), "nor on the box");
 
-    // Agents on the box are the next step: refused, not run anywhere.
-    let (output, links) = Screen::new().channels();
-    let agent_open = terminal::open(
+    // An agent's pane waits the same way, and runs nowhere meanwhile; closed
+    // before the link returns, it never opens at all.
+    let agent_screen = Screen::new();
+    let (output, links) = agent_screen.channels();
+    let agent_id = terminal::open(
         &manager,
         &db,
         &link,
@@ -529,8 +531,10 @@ async fn nothing_runs_locally_while_the_link_is_down() {
         output,
         links,
     )
-    .await;
-    assert!(agent_open.is_err(), "{agent_open:?}");
+    .await
+    .unwrap();
+    assert_eq!(agent_screen.links(), [PaneLink::Reconnecting]);
+    link.terminals().close(agent_id);
     // A cwd that climbs out of the project never leaves this machine.
     let (output, links) = Screen::new().channels();
     let climbing = TerminalOpenOpts {

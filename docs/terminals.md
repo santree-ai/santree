@@ -339,7 +339,11 @@ frontend knows only what it has to:
 - Keystrokes typed while the pane is reconnecting are dropped, not queued.
 
 Setup scripts in a Daedalus project run the same way, streamed to the usual
-read-only pane (`daedalus/setup.rs`).
+read-only pane (`daedalus/setup.rs`). So do its agents: an agent tab's pane is
+a remote one carrying `SANTREE_REPO`/`SANTREE_TERM_KEY`, its seed the usual
+one (up to the box's longer line, `MAX_REMOTE_SEED_LINE`), its hooks written
+and fired on the box and relayed back, and which agent is in its foreground
+read from the box's process table (docs/remote.md, "Agents on the box").
 
 ---
 

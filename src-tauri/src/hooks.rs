@@ -128,41 +128,11 @@ pub fn db_path(app: &AppHandle) -> Option<PathBuf> {
 /// off — see [`tutor_entry`]. It's passed in rather than read here because it's an
 /// editable prompt with a db-backed override, and this builder is sync.
 fn base_settings_map(app: &AppHandle, tutor: Option<&str>) -> Option<Map<String, Value>> {
-    // Both the hooks and the statusline invoke `santree-hook` against the db, so
-    // resolve them once.
-    let (bin, db_pathbuf) = (hook_bin(app)?, db_path(app)?);
-    // Claude runs `command` through a shell, so both paths are shell-quoted:
-    // app_data_dir always has a space ("Application Support") and a home directory
-    // may contain `$`/backtick/quote characters too.
-    let (bin, db) = (sh_quote(bin.to_str()?), sh_quote(db_pathbuf.to_str()?));
-
-    let mut root = Map::new();
-
-    let mut hooks = Map::new();
-    for &event in EVENTS {
-        // SessionEnd runs synchronously (short timeout) so "exited" reliably lands
-        // before session teardown; the rest are async so they never add latency to
-        // a turn — and, crucially, so this hook can never gate a Claude decision.
-        let is_end = event == "SessionEnd";
-        let command = format!("{bin} --db {db} {event}");
-
-        let mut hook = Map::new();
-        hook.insert("type".into(), json!("command"));
-        hook.insert("command".into(), json!(command));
-        hook.insert("timeout".into(), json!(if is_end { 5 } else { 10 }));
-        if !is_end {
-            hook.insert("async".into(), json!(true));
-        }
-
-        hooks.insert(
-            event.to_string(),
-            json!([{ "hooks": [Value::Object(hook)] }]),
-        );
-    }
+    let mut root = hook_settings(&local_prefix(app)?);
 
     // The English tutor rides along as a *second* `UserPromptSubmit` entry, next to
-    // the state hook above (Claude runs every entry for an event). Two things about
-    // it are load-bearing and easy to get wrong:
+    // the state hook (Claude runs every entry for an event). Two things about it
+    // are load-bearing and easy to get wrong:
     //  - it is **synchronous** — no `async: true`. An async hook is fire-and-forget
     //    and its stdout is discarded, so the instruction would never reach the model
     //    and the tutor would silently do nothing.
@@ -171,8 +141,9 @@ fn base_settings_map(app: &AppHandle, tutor: Option<&str>) -> Option<Map<String,
     //    on a permission prompt.
     if let Some(instruction) = tutor {
         if let Some((prompt_file, log)) = tutor_files(app, instruction) {
-            if let Some(entries) = hooks
-                .get_mut("UserPromptSubmit")
+            if let Some(entries) = root
+                .get_mut("hooks")
+                .and_then(|hooks| hooks.get_mut("UserPromptSubmit"))
                 .and_then(Value::as_array_mut)
             {
                 entries.push(json!({ "hooks": [{
@@ -187,9 +158,58 @@ fn base_settings_map(app: &AppHandle, tutor: Option<&str>) -> Option<Map<String,
             );
         }
     }
+    Some(root)
+}
 
+/// How santree's hook commands start on this Mac: the bundled binary against the
+/// app's db (`'<bin>' --db '<db>'`). `None` when either doesn't resolve.
+///
+/// Claude runs `command` through a shell, so both paths are shell-quoted:
+/// app_data_dir always has a space ("Application Support") and a home directory
+/// may contain `$`/backtick/quote characters too.
+fn local_prefix(app: &AppHandle) -> Option<String> {
+    let (bin, db) = (hook_bin(app)?, db_path(app)?);
+    Some(format!(
+        "{} --db {}",
+        sh_quote(bin.to_str()?),
+        sh_quote(db.to_str()?)
+    ))
+}
+
+/// How santree's hook commands start on Daedalus: the session host's own hook
+/// subcommand (`'<hookBin>' hook`, `hookBin` from `hello`), which queues the
+/// event for the app to relay. What follows the prefix is the same either way —
+/// the relayed event is exactly the words after `--db <db>` locally
+/// (docs/remote.md, the hooks relay).
+pub(crate) fn box_prefix(hook_bin: &str) -> String {
+    format!("{} hook", sh_quote(hook_bin))
+}
+
+/// The hooks + statusLine map every santree `claude` launch layers over the
+/// user's settings, with each command starting `prefix` ([`local_prefix`] here,
+/// [`box_prefix`] on Daedalus).
+pub(crate) fn hook_settings(prefix: &str) -> Map<String, Value> {
+    let mut hooks = Map::new();
+    for &event in EVENTS {
+        // SessionEnd runs synchronously (short timeout) so "exited" reliably lands
+        // before session teardown; the rest are async so they never add latency to
+        // a turn — and, crucially, so this hook can never gate a Claude decision.
+        let is_end = event == "SessionEnd";
+        let mut hook = Map::new();
+        hook.insert("type".into(), json!("command"));
+        hook.insert("command".into(), json!(format!("{prefix} {event}")));
+        hook.insert("timeout".into(), json!(if is_end { 5 } else { 10 }));
+        if !is_end {
+            hook.insert("async".into(), json!(true));
+        }
+        hooks.insert(
+            event.to_string(),
+            json!([{ "hooks": [Value::Object(hook)] }]),
+        );
+    }
+
+    let mut root = Map::new();
     root.insert("hooks".into(), Value::Object(hooks));
-
     // santree's own status line: the `statusline` mode of the same binary. Prints
     // a context-fill bar AND captures Claude's authoritative usage into the db.
     // Always injected — the app gates *display* of the inline bar at runtime, so
@@ -198,12 +218,19 @@ fn base_settings_map(app: &AppHandle, tutor: Option<&str>) -> Option<Map<String,
         "statusLine".into(),
         json!({
             "type": "command",
-            "command": statusline_command(&bin, &db, None),
+            "command": statusline_command_for(prefix, None),
             "refreshInterval": STATUSLINE_REFRESH_SECS,
         }),
     );
+    root
+}
 
-    Some(root)
+/// A hooks map plus the Fix-CI deny list — [`claude_settings_no_git`]'s rules,
+/// for a launch that builds its settings elsewhere (Daedalus).
+pub(crate) fn hook_settings_no_git(prefix: &str) -> Map<String, Value> {
+    let mut root = hook_settings(prefix);
+    merge_permissions(&mut root, &NO_GIT_RULES, &[]);
+    root
 }
 
 /// How often Claude re-runs our status line on its own, in **seconds**.
@@ -234,7 +261,12 @@ const STATUSLINE_REFRESH_SECS: u32 = 15;
 /// [`crate::global_capture`]). `bin` and `db` arrive already shell-quoted; the
 /// user's command is quoted here so it stays ONE argv element to the hook.
 pub(crate) fn statusline_command(bin: &str, db: &str, then: Option<&str>) -> String {
-    let mut command = format!("{bin} --db {db} statusline");
+    statusline_command_for(&format!("{bin} --db {db}"), then)
+}
+
+/// [`statusline_command`] after any command prefix (see [`hook_settings`]).
+fn statusline_command_for(prefix: &str, then: Option<&str>) -> String {
+    let mut command = format!("{prefix} statusline");
     if let Some(then) = then {
         command.push_str(" --then ");
         command.push_str(&sh_quote(then));
@@ -333,18 +365,21 @@ fn toml_quote(s: &str) -> String {
 /// there's a documented way to compute it, the bypass is what makes the
 /// injection work at all.
 pub fn codex_hook_flags(app: &AppHandle) -> Option<String> {
-    let (bin, db_pathbuf) = (hook_bin(app)?, db_path(app)?);
-    let (bin, db) = (bin.to_str()?, db_pathbuf.to_str()?);
-
-    let flags: Vec<String> = CODEX_EVENTS
-        .iter()
-        .map(|event| codex_hook_flag(bin, db, event))
-        .collect();
-    Some(flags.join(" "))
+    Some(codex_flags_for(&local_prefix(app)?))
 }
 
-/// The single `-c 'hooks.<Event>=[…]'` flag for one event, from the *unquoted*
-/// binary and db paths. Split out from [`codex_hook_flags`] so the three quoting
+/// Every Codex hook flag, each command starting `prefix` (see [`hook_settings`]).
+pub(crate) fn codex_flags_for(prefix: &str) -> String {
+    CODEX_EVENTS
+        .iter()
+        .map(|event| codex_hook_flag(prefix, event))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The single `-c 'hooks.<Event>=[…]'` flag for one event, after a command
+/// prefix whose paths are already shell-quoted ([`local_prefix`] /
+/// [`box_prefix`]). Split out from [`codex_hook_flags`] so the three quoting
 /// layers can be exercised end to end without an `AppHandle`.
 ///
 /// Three layers, all of which have to hold at once, innermost first:
@@ -357,12 +392,11 @@ pub fn codex_hook_flags(app: &AppHandle) -> Option<String> {
 ///     escapes the `'` … `'\''` … `'` that step 1 introduces — a `\` there);
 ///  3. the whole `hooks.<Event>=…` assignment is one shell word of the seed
 ///     command line ([`sh_quote`]).
-fn codex_hook_flag(bin: &str, db: &str, event: &str) -> String {
-    let (bin, db) = (sh_quote(bin), sh_quote(db));
+fn codex_hook_flag(prefix: &str, event: &str) -> String {
     // The event is the positional arg, exactly as Claude's is: the injected
     // command is what santree decided this hook means, so it must not depend on
     // the payload agreeing.
-    let command = format!("{bin} --db {db} --agent-kind Codex {event}");
+    let command = format!("{prefix} --agent-kind Codex {event}");
     let entry = format!(
         "hooks.{event}=[{{hooks=[{{type=\"command\",command={}}}]}}]",
         toml_quote(&command)
@@ -2137,7 +2171,10 @@ mod tests {
     fn the_codex_hook_flag_survives_all_three_quoting_layers() {
         let bin = r#"/Apps/My "App"/santree-hook"#;
         let db = "/Users/me/Library/Application Support/com.santree.desktop/santree.db";
-        let flag = codex_hook_flag(bin, db, "SessionStart");
+        let flag = codex_hook_flag(
+            &format!("{} --db {}", sh_quote(bin), sh_quote(db)),
+            "SessionStart",
+        );
         assert!(
             flag.contains(r#"My \"App\""#),
             "an embedded quote must be escaped for TOML, not left to end the string: {flag}"

@@ -3,7 +3,7 @@
  *  santree reaches Daedalus only through the Daedalus agent on this Mac, so
  *  every fix is on the agent or in Daedalus, never a field in santree. */
 
-import type { DaedalusLink } from "../bindings";
+import type { AgentKind, DaedalusLink } from "../bindings";
 
 export type LinkTone = "ok" | "pending" | "warn" | "error";
 
@@ -76,10 +76,6 @@ export function linkUp(link: DaedalusLink | undefined): boolean {
  *  something in it, while santree can't reach the box. */
 export const OUT_OF_REACH = "Unavailable until santree can reach Daedalus";
 
-/** The same, while it can: santree works a Daedalus project's git and runs its
- *  terminals and setup scripts on the box, but no agents there yet. */
-export const DAEDALUS_AGENTS_SOON = "Coming soon for Daedalus projects";
-
 /** Why santree offers no way to change a project's git right now — the link
  *  being down, for a Daedalus project; `undefined` otherwise. */
 export function gitOff(remote: boolean, link: DaedalusLink | undefined): string | undefined {
@@ -94,15 +90,30 @@ export function runOff(remote: boolean, link: DaedalusLink | undefined): string 
   return gitOff(remote, link);
 }
 
-/** Why santree offers no agent in a project right now — agents don't run on
- *  Daedalus yet. `undefined` for a project on this Mac. */
-export function agentOff(remote: boolean, link: DaedalusLink | undefined): string | undefined {
+/** What an agent menu row says when the box has no such CLI on its PATH. */
+export function notOnDaedalus(kind: AgentKind): string {
+  return `${kind === "Claude" ? "Claude Code" : kind} isn't installed on Daedalus`;
+}
+
+/** Why santree can't start agent `kind` in a project right now: a Daedalus
+ *  project's agents run on the box, so the link must be up and — once the box
+ *  has said which (`clis`, `null`/`undefined` while it can't) — the CLI must be
+ *  there. Without `kind`, whether any agent can start. `undefined` for a
+ *  project on this Mac. */
+export function agentOff(
+  remote: boolean,
+  link: DaedalusLink | undefined,
+  kind?: AgentKind,
+  clis?: readonly AgentKind[] | null,
+): string | undefined {
   if (!remote) return undefined;
-  return linkUp(link) ? DAEDALUS_AGENTS_SOON : OUT_OF_REACH;
+  if (!linkUp(link)) return OUT_OF_REACH;
+  if (kind && clis && !clis.includes(kind)) return notOnDaedalus(kind);
+  return undefined;
 }
 
 /** Whether `cwd` lies inside one of the Daedalus projects in `repos` — the
- *  frontend's copy of the backend's `repo::on_daedalus`, for the one decision
+ *  frontend's copy of the backend's `repo::daedalus_repo_at`, for the one decision
  *  a pane makes before any byte arrives: whether its bytes are the box's, and
  *  so untrusted (OSC 52 off). Component-wise, like `Path::starts_with`. */
 export function onDaedalus(

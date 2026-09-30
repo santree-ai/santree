@@ -20,15 +20,15 @@ use santree_core::{
         AgentAuth, AgentDef, AgentKind, AgentProcess, AgentSession, AgentVersionStatus,
         AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
         ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
-        DaedalusHealth, DaedalusLink, DaedalusWorkspaceList, EnglishAnalysis, EnglishLog,
-        FileSource, GithubApiBudget, GithubStatus, JiraSite, JiraStatus, LegacyCliMigration,
-        LinearApiBudget, LinearOrg, LinearStatus, LinearTeam, LogExport, MergeQueueView,
-        NewInlineComment, NewPr, NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo,
-        PromptLayer, PromptPreview, PromptWorkItemSample, Repo, RepoBranch, RepoLocation,
-        ResourceUsage, ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent, ReviewInbox,
-        ReviewPr, ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo,
-        SessionDetail, SessionState, SessionSubagent, SessionUsageLive, Settings, TabKind,
-        TabLaunch, TabPr, Task, TicketRef, TriageDetail, TriageSchedule, TriageSession,
+        DaedalusAgentHooks, DaedalusHealth, DaedalusLink, DaedalusWorkspaceList, EnglishAnalysis,
+        EnglishLog, FileSource, GithubApiBudget, GithubStatus, JiraSite, JiraStatus,
+        LegacyCliMigration, LinearApiBudget, LinearOrg, LinearStatus, LinearTeam, LogExport,
+        MergeQueueView, NewInlineComment, NewPr, NewReviewWorkItem, Opener, PrDetail, PrDraft,
+        PrLabel, PromptInfo, PromptLayer, PromptPreview, PromptWorkItemSample, Repo, RepoBranch,
+        RepoLocation, ResourceUsage, ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent,
+        ReviewInbox, ReviewPr, ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer,
+        ScriptInfo, SessionDetail, SessionState, SessionSubagent, SessionUsageLive, Settings,
+        TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail, TriageSchedule, TriageSession,
         TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreeLaunch, WorktreePr,
         WorktreeSession, WorktreeTab,
     },
@@ -110,6 +110,33 @@ pub async fn daedalus_workspaces(
     link: State<'_, DaedalusHost>,
 ) -> CmdResult<DaedalusWorkspaceList> {
     Ok(daedalus::workspaces(&db, &link).await?)
+}
+
+/// santree's session hooks for agents in the Daedalus project `repo`, written on
+/// the box: its Claude settings files and Codex's hook flags, every command the
+/// session host's own hook binary. What a launch there carries in place of this
+/// Mac's `claude_hook_settings` / `codex_hook_flags`. `repo` only selects a
+/// registered project; the paths are derived on the box. Fails while the link
+/// is down — the launch waits for it.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_agent_hooks(
+    repo: String,
+    db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
+) -> CmdResult<DaedalusAgentHooks> {
+    Ok(daedalus::agents::hooks(&db, &link, &repo).await?)
+}
+
+/// The agent CLIs the box's login shell finds (`claude`, `codex`), so a menu can
+/// say which it can't start there. `None` when that can't be asked right now —
+/// the link is down, or the probe failed — which is not "none".
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_agent_clis(
+    link: State<'_, DaedalusHost>,
+) -> CmdResult<Option<Vec<AgentKind>>> {
+    Ok(link.agents().clis(&link).await)
 }
 
 /// Register one of the server's checkouts as a project. `name` only selects: its
@@ -815,9 +842,10 @@ pub async fn work_prompt(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<String> {
     let prompts = worktree::prompts_root(&app).ok_or("no writable data dir for prompt file")?;
-    Ok(worktree::work_prompt(&db, &repo, &issue_id, &prompts).await?)
+    Ok(worktree::work_prompt(&db, &daedalus, &repo, &issue_id, &prompts).await?)
 }
 
 /// Render the Triage-investigation opening prompt for a ticket (the `triage`
@@ -832,9 +860,10 @@ pub async fn investigate_prompt(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<String> {
     let prompts = worktree::prompts_root(&app).ok_or("no writable data dir for prompt file")?;
-    Ok(worktree::investigate_prompt(&db, &repo, &issue_id, &prompts).await?)
+    Ok(worktree::investigate_prompt(&db, &daedalus, &repo, &issue_id, &prompts).await?)
 }
 
 /// Resolve an interactive provider session: resume its durable id, start fresh,
@@ -853,11 +882,28 @@ pub async fn agent_session(
     allow_fresh: bool,
     agent: AgentKind,
     db: State<'_, Db>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<AgentSession> {
     validate_term_key(&term_key)?;
-    let cwd_path = std::fs::canonicalize(&cwd)?;
-    let repo_db_path = agent_repo_path(&db, &repo).await?;
-    let repo_root = std::fs::canonicalize(&repo_db_path)?;
+    // A Daedalus project's paths are the box's: compared as the host spells
+    // them (absolute, never climbing), never canonicalized on this Mac.
+    let remote = repo::is_daedalus(&db, &repo).await?;
+    let (cwd_path, repo_db_path, repo_root) = if remote {
+        let root = repo::stored_path(&db, &repo)
+            .await?
+            .ok_or("repository has no path")?;
+        let cwd = crate::terminal::box_cwd(&cwd)?;
+        (
+            std::path::PathBuf::from(cwd),
+            root.clone(),
+            std::path::PathBuf::from(root),
+        )
+    } else {
+        let cwd_path = std::fs::canonicalize(&cwd)?;
+        let repo_db_path = agent_repo_path(&db, &repo).await?;
+        let repo_root = std::fs::canonicalize(&repo_db_path)?;
+        (cwd_path, repo_db_path, repo_root)
+    };
     // Provider selection and id creation form one reservation. Serializing this
     // small launch-only section prevents simultaneous first launches from
     // adopting the other provider's id.
@@ -867,7 +913,26 @@ pub async fn agent_session(
         .lock()
         .await;
     let context = session_context(&db, &repo, &repo_db_path, &term_key).await?;
-    validate_agent_cwd(&db, &repo, &term_key, &cwd_path, &repo_root, &repo_db_path).await?;
+    if remote
+        && matches!(
+            context.surface,
+            SessionSurface::Review | SessionSurface::AskAi
+        )
+    {
+        // Its tools are santree's MCP server, which would need a relay of its
+        // own (docs/remote.md).
+        return Err("AI review isn't available for Daedalus projects".into());
+    }
+    validate_agent_cwd(
+        &db,
+        &repo,
+        &term_key,
+        &cwd_path,
+        &repo_root,
+        &repo_db_path,
+        remote,
+    )
+    .await?;
     if let Some(authoritative) = context.agent {
         if agent != authoritative {
             return Err("terminal provider does not match the persisted surface".into());
@@ -895,6 +960,26 @@ pub async fn agent_session(
         .find(|setting| setting.key == agent)
         .map(|setting| setting.model.as_str());
     let model = resolved_model.as_deref().or(configured_model);
+    if remote {
+        let root = worktree::root(&db, &daedalus, &repo).await?;
+        return Ok(crate::daedalus::agents::resolve_session(
+            &daedalus,
+            &root,
+            agent,
+            SessionRequest {
+                db: &db,
+                repo: &repo,
+                term_key: &term_key,
+                cwd: &cwd_path,
+                model,
+                effort: effort.as_deref(),
+                surface,
+                allow_fresh,
+                review_mcp_config: None,
+            },
+        )
+        .await?);
+    }
     let executable = settings::agent_executable(&db, agent).await?;
     let provider = provider::provider(agent, executable)?;
     debug_assert_eq!(provider.kind(), agent);
@@ -1158,6 +1243,8 @@ async fn session_context(
     Ok(SessionContext::new(SessionSurface::Work, agent))
 }
 
+/// `remote`: the repo is a Daedalus project, whose stored paths are the box's
+/// and are compared as stored rather than canonicalized here.
 async fn validate_agent_cwd(
     db: &Db,
     repo: &str,
@@ -1165,6 +1252,7 @@ async fn validate_agent_cwd(
     cwd: &std::path::Path,
     repo_root: &std::path::Path,
     repo_db_path: &str,
+    remote: bool,
 ) -> Result<(), String> {
     if term_key.starts_with("triage:") {
         return (cwd == repo_root)
@@ -1193,7 +1281,7 @@ async fn validate_agent_cwd(
         // is the stronger claim — it is what `worktree::create` actually made.
         let id = crate::reviews::review_worktree_id(&found.owner, &found.name, number)
             .map_err(|error| error.to_string())?;
-        return stored_worktree_cwd(db, &found.root, &id, cwd)
+        return stored_worktree_cwd(db, &found.root, &id, cwd, remote)
             .await?
             .then_some(())
             .ok_or_else(|| "review session cwd does not match the requested pull request".into());
@@ -1210,7 +1298,7 @@ async fn validate_agent_cwd(
             .then_some(())
             .ok_or_else(|| "terminal cwd is not the repository root".into());
     }
-    stored_worktree_cwd(db, repo_db_path, issue_id, cwd)
+    stored_worktree_cwd(db, repo_db_path, issue_id, cwd, remote)
         .await?
         .then_some(())
         .ok_or_else(|| "terminal cwd is not the registered worktree".into())
@@ -1220,12 +1308,14 @@ async fn validate_agent_cwd(
 ///
 /// The comparison is against the *stored* path, canonicalized — never against a
 /// path assembled from parts here, and never against one the webview sent. A row
-/// that is missing, or a directory that is gone, answers `false`.
+/// that is missing, or a directory that is gone, answers `false`. A `remote`
+/// row's path is the box's, compared as stored.
 async fn stored_worktree_cwd(
     db: &Db,
     repo_path: &str,
     issue_id: &str,
     cwd: &std::path::Path,
+    remote: bool,
 ) -> Result<bool, String> {
     let stored: Option<String> = sqlx::query_scalar(
         "SELECT worktree_path FROM worktree_links WHERE repo_path = ? AND issue_id = ?",
@@ -1236,7 +1326,13 @@ async fn stored_worktree_cwd(
     .await
     .map_err(|error| error.to_string())?;
     Ok(stored
-        .and_then(|path| std::fs::canonicalize(path).ok())
+        .and_then(|path| {
+            if remote {
+                Some(std::path::PathBuf::from(path))
+            } else {
+                std::fs::canonicalize(path).ok()
+            }
+        })
         .is_some_and(|path| path == cwd))
 }
 
@@ -2549,8 +2645,17 @@ pub async fn resource_usage(
 #[specta::specta]
 pub async fn agent_processes(
     manager: State<'_, santree_pty::PtyManager>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<Vec<AgentProcess>> {
-    Ok(crate::agent_procs::detect(&crate::terminal::pane_roots(&manager)).await)
+    // A Daedalus project's panes run on the box, so their process table is the
+    // box's (`exec.run ps`, the same parse); both answers are identity only.
+    let roots = crate::terminal::pane_roots(&manager);
+    let (mut found, remote) = tokio::join!(
+        crate::agent_procs::detect(&roots),
+        daedalus.agents().detect(&daedalus),
+    );
+    found.extend(remote);
+    Ok(found)
 }
 
 /// The current state of every agent session santree has launched, as recorded
@@ -2565,8 +2670,13 @@ pub async fn agent_processes(
 pub async fn session_states(
     db: State<'_, Db>,
     manager: State<'_, PtyManager>,
+    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<Vec<SessionState>> {
-    Ok(crate::hooks::session_states(&db, crate::terminal::live_terminals(&manager)).await?)
+    // A Daedalus pane's process runs on the box and outlives a dropped link;
+    // it is live until the box says it ended.
+    let mut live = crate::terminal::live_terminals(&manager);
+    live.extend(daedalus.terminals().live());
+    Ok(crate::hooks::session_states(&db, live).await?)
 }
 
 /// The user's local note for a task — extra context stored only on this machine
@@ -3264,6 +3374,7 @@ mod tests {
                     &cwd,
                     &repo_root,
                     repo.to_str().unwrap(),
+                    false,
                 )
                 .await
             }
@@ -3303,6 +3414,7 @@ mod tests {
             &cwd,
             &repo_root,
             repo.to_str().unwrap(),
+            false,
         )
         .await;
         // `a/b-c` is a real slug that simply isn't in the registry, so that is what
@@ -3343,6 +3455,7 @@ mod tests {
             &repo_root,
             &repo_root,
             repo.to_str().unwrap(),
+            false,
         )
         .await
         .is_ok());
@@ -3353,6 +3466,7 @@ mod tests {
             &std::fs::canonicalize(&outside).unwrap(),
             &repo_root,
             repo.to_str().unwrap(),
+            false,
         )
         .await;
         assert_eq!(
