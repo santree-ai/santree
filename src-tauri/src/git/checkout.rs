@@ -372,6 +372,7 @@ impl Checkout {
                 .filter_map(|entry| entry.file_name().into_string().ok())
                 .collect()),
             Host::Daedalus(_) => {
+                // Plain POSIX `find` (no `-printf`): each line is `<dir>/<name>`.
                 let dir = self.server_path(&dir);
                 let out = self.run(&[
                     "find",
@@ -382,12 +383,13 @@ impl Checkout {
                     "1",
                     "-type",
                     "f",
-                    "-printf",
-                    "%f\\n",
                 ])?;
                 ensure!(out.ok, "listing {dir}: {}", out.stderr.trim());
+                let prefix = format!("{}/", dir.trim_end_matches('/'));
                 Ok(String::from_utf8_lossy(&out.stdout)
                     .lines()
+                    .filter_map(|line| line.strip_prefix(&prefix))
+                    .filter(|name| !name.contains('/'))
                     .map(str::to_string)
                     .collect())
             }
