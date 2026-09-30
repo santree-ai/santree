@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.8 — 2026-09-29
+
+- Internal groundwork for connecting to Daedalus over its own secure link. Nothing changes in the app.
+
 ## 0.1.17-beta.7 — 2026-09-29
 
 - Internal restructuring so the terminal manager and the Daedalus link protocol can be shared with Daedalus itself. Nothing changes in the app.
