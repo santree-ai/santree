@@ -7,6 +7,15 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17 — 2026-10-01
+
+- Split a branch into smaller reviews from the Changes panel: commit the current part, then move remaining changes into one child branch and worktree. Choose its ticket and whether to run setup; staging is preserved and a recovery stash is kept.
+- Child branches appear beneath their parent while being created. Ticket pickers fit within the window, long ticket names fit the split form, and pull request dialogs show the branch name you chose.
+- Closed agent sessions can be resumed from Session history immediately. History refreshes when a terminal opens or closes, without waiting for the old Exited status to disappear.
+- Claude Code settings distinguish saved account details from a working CLI, show the executable being checked and report launch errors. Changing the executable path refreshes the check.
+- Daedalus projects connect through the agent on this Mac, show their app icons, and support worktrees, Git changes, terminals, setup scripts, Claude and Codex sessions, and session history on the box. Their terminals reconnect after connection loss and survive restarting santree. This Mac's Daedalus settings can be changed from Settings. Collapse the entire sidebar section from its header; your choice is remembered.
+- Merged pull requests keep their purple status dot despite earlier CI failures. Find clears stale highlights and preserves match positions around Unicode text. Worktree menus can copy their pull request link.
+
 ## 0.1.17-beta.19 — 2026-10-01
 
 - Daedalus projects show their app icons. The sidebar, the project picker and everywhere else a project is drawn use the icon its app has on Daedalus, in place of the GitHub mark. A project without one keeps the GitHub mark, and icons stay put away from home.
