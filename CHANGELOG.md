@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.17 — 2026-09-30
+
+- Settings › Daedalus now has a This Mac card with this Mac's three settings: Keep awake, Claude Remote Control, and santree on the box. Flip one and Daedalus applies it within seconds. While it's on its way the switch says so, and if Daedalus doesn't apply it the card says why.
+- Turning santree on opens Daedalus in your browser, where an admin confirms it by typing the start of this Mac's key. The card shows that key, with a copy button.
+- When santree is off for this Mac, "Turn on santree for this Mac…" now starts that same flow.
+- Only the person who installed the Daedalus agent on this Mac can change these switches. Anyone else sees them read-only. With a Daedalus agent older than 0.25, the card asks you to update it.
+
 ## 0.1.17-beta.16 — 2026-09-30
 
 - Claude and Codex sessions in Daedalus projects now run on the box. Start one from + in a worktree, from a ticket, or as a triage investigation, and it runs there with the same prompts, models and settings as on this Mac.
