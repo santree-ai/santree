@@ -32,55 +32,66 @@ struct PublishedVersion {
 /// consume the typed result. A registry outage never makes an installed CLI
 /// unavailable; it only leaves the comparison unknown.
 pub async fn version_status(db: &Db, kind: AgentKind) -> AgentVersionStatus {
-    let installed = installed_version(db, kind).await;
+    let (executable, installed, error) = match settings::agent_executable(db, kind).await {
+        Ok(executable) => {
+            let result = probe_cli_version(&executable).await.and_then(|raw| {
+                normalize_version(&raw)
+                    .ok_or_else(|| anyhow::anyhow!("CLI returned an unrecognized version"))
+            });
+            match result {
+                Ok(version) => (Some(executable), Some(version), None),
+                Err(error) => (Some(executable), None, Some(format!("{error:#}"))),
+            }
+        }
+        Err(error) => (None, None, Some(format!("{error:#}"))),
+    };
     let latest = latest_version(kind).await;
     let update_available = match (&installed, &latest) {
         (Some(installed), Some(latest)) => version_parts(latest) > version_parts(installed),
         _ => false,
     };
     AgentVersionStatus {
+        executable,
+        error,
         installed,
         latest,
         update_available,
     }
 }
 
-async fn installed_version(db: &Db, kind: AgentKind) -> Option<String> {
-    let executable = settings::agent_executable(db, kind).await.ok()?;
-    match probe_cli_version(&executable).await {
-        Ok(version) => normalize_version(&version),
-        Err(error) => {
-            log::warn!(
-                "could not check installed {} version: {error:#}",
-                kind.as_str()
-            );
-            None
-        }
-    }
-}
-
 async fn probe_cli_version(executable: &str) -> Result<String> {
     let mut child = tokio::process::Command::new(executable)
         .arg("--version")
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("version process stdout was not captured"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("version process stderr was not captured"))?;
     let probe = async {
-        let mut body = Vec::new();
-        stdout
-            .take((VERSION_PROCESS_LIMIT + 1) as u64)
-            .read_to_end(&mut body)
-            .await?;
-        if body.len() > VERSION_PROCESS_LIMIT {
-            bail!("version output exceeds {VERSION_PROCESS_LIMIT} bytes");
-        }
-        if !child.wait().await?.success() {
-            bail!("version process exited unsuccessfully");
+        let read = async |stream: Box<dyn tokio::io::AsyncRead + Unpin + Send>| -> Result<Vec<u8>> {
+            let mut body = Vec::new();
+            stream
+                .take((VERSION_PROCESS_LIMIT + 1) as u64)
+                .read_to_end(&mut body)
+                .await?;
+            if body.len() > VERSION_PROCESS_LIMIT {
+                bail!("version output exceeds {VERSION_PROCESS_LIMIT} bytes");
+            }
+            Ok(body)
+        };
+        let (body, diagnostic) = tokio::try_join!(read(Box::new(stdout)), read(Box::new(stderr)))?;
+        let status = child.wait().await?;
+        if !status.success() {
+            let diagnostic = String::from_utf8_lossy(&diagnostic);
+            bail!("CLI --version failed ({status}): {}", diagnostic.trim());
         }
         String::from_utf8(body)
             .map_err(Into::into)
@@ -315,6 +326,57 @@ pub fn provider(kind: AgentKind, executable: String) -> Result<Box<dyn AgentProv
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_probe_reports_broken_wrapper_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("santree-cli-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let target = dir.join("missing-native-binary");
+        std::fs::write(&target, "placeholder").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let wrapper = dir.join("claude");
+        std::fs::write(
+            &wrapper,
+            format!("#!/bin/sh\nexec '{}' \"$@\"\n", target.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = probe_cli_version(wrapper.to_str().unwrap())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("126"), "{error}");
+        assert!(error.contains("Permission denied"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_probe_accepts_cli_version_and_bounds_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("santree-cli-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let cli = dir.join("claude");
+        std::fs::write(&cli, "#!/bin/sh\nprintf '2.1.285 (Claude Code)\\n'\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            probe_cli_version(cli.to_str().unwrap()).await.unwrap(),
+            "2.1.285 (Claude Code)"
+        );
+        std::fs::write(
+            &cli,
+            "#!/bin/sh\nwhile :; do printf 'diagnostic diagnostic diagnostic\\n' >&2; done\n",
+        )
+        .unwrap();
+        let error = probe_cli_version(cli.to_str().unwrap())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exceeds"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn every_surface_has_an_explicit_settings_family() {

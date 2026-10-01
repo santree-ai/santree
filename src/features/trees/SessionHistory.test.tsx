@@ -1,10 +1,13 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-
 import type { SessionDetail, SessionSubagent, WorktreeSession } from "../../bindings";
+import type { AgentEntry } from "../agents/registry";
 
 const spies = vi.hoisted(() => ({
   sessions: [] as WorktreeSession[],
+  entries: [] as AgentEntry[],
+  resume: vi.fn(),
+  open: vi.fn(),
   detail: undefined as SessionDetail | undefined,
   subagents: [] as SessionSubagent[],
   /** Every `(sessionId, enabled)` the two lazy reads were mounted with — the
@@ -30,8 +33,8 @@ vi.mock("../../lib/queries", () => ({
   useRepoReach: () => ({ remote: spies.remote }),
 }));
 
-vi.mock("../agents/useAgents", () => ({ useAgentEntries: () => [] }));
-vi.mock("../agents/useOpenAgent", () => ({ useOpenAgent: () => vi.fn() }));
+vi.mock("../agents/useAgents", () => ({ useAgentEntries: () => spies.entries }));
+vi.mock("../agents/useOpenAgent", () => ({ useOpenAgent: () => spies.open }));
 
 import { SessionHistory } from "./SessionHistory";
 
@@ -44,7 +47,7 @@ function mount() {
       repo="acme/app"
       worktreeId="AK-1"
       branch="feat/ak-1"
-      onResume={vi.fn()}
+      onResume={spies.resume}
       resumingId={null}
     />,
   );
@@ -86,6 +89,9 @@ function subagent(over: Partial<SessionSubagent> = {}): SessionSubagent {
 
 function reset(sessions: WorktreeSession[]) {
   spies.sessions = sessions;
+  spies.entries = [];
+  spies.resume.mockClear();
+  spies.open.mockClear();
   spies.detail = undefined;
   spies.subagents = [];
   spies.detailCalls = [];
@@ -245,4 +251,28 @@ describe("SessionHistory rows", () => {
     fireEvent.click(rowToggle("Refactor the parser"));
     expect(screen.getByText(/so it has at least this many messages/)).toBeInTheDocument();
   });
+});
+
+it("offers Resume immediately when an openable session loses its terminal", () => {
+  reset([session()]);
+  spies.entries = [{ sessionId: "s1", live: true, openable: true, state: "idle" } as AgentEntry];
+  const view = mount();
+  fireEvent.click(rowToggle("Refactor the parser"));
+  expect(screen.getByRole("button", { name: "Open session" })).toBeInTheDocument();
+  spies.entries = [{ ...spies.entries[0], live: false } as AgentEntry];
+  view.rerender(
+    <SessionHistory
+      repo="acme/app"
+      worktreeId="AK-1"
+      branch="feat/ak-1"
+      onResume={spies.resume}
+      resumingId={null}
+    />,
+  );
+  expect(screen.queryByRole("button", { name: "Open session" })).not.toBeInTheDocument();
+  const resume = screen.getByRole("button", { name: "Resume" });
+  expect(resume).toHaveAttribute("aria-disabled", "false");
+  fireEvent.click(resume);
+  expect(spies.resume).toHaveBeenCalledWith(spies.sessions[0]);
+  expect(spies.open).not.toHaveBeenCalled();
 });

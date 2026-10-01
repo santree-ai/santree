@@ -65,11 +65,13 @@ pub struct AgentAuth {
     pub detected_exec: String,
 }
 
-/// Installed and published versions for an agent CLI. An unavailable registry
-/// leaves `latest` empty; the installed CLI remains usable and visible.
+/// Probe the executable used for launch separately from the version registry.
+/// `error` describes a local CLI failure; an unavailable registry only clears `latest`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentVersionStatus {
+    pub executable: Option<String>,
+    pub error: Option<String>,
     pub installed: Option<String>,
     pub latest: Option<String>,
     pub update_available: bool,

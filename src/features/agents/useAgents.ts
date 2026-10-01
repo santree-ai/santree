@@ -115,6 +115,7 @@ export function useDetectedAgents(terminals: TerminalTab[]): ReadonlyMap<string,
     if (panes === lastPanes.current) return;
     lastPanes.current = panes;
     qc.invalidateQueries({ queryKey: queryKeys.sessionStates });
+    qc.invalidateQueries({ queryKey: queryKeys.worktreeSessionsPrefix });
   }, [qc, panes]);
 
   const { data } = useAgentProcesses(terminals.length);

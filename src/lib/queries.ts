@@ -310,6 +310,7 @@ export const queryKeys = {
     ["worktree-branch-file-diff", repo, id, path] as const,
   worktreeBranchFileDiffPrefix: (repo: string, id: string) =>
     ["worktree-branch-file-diff", repo, id] as const,
+  worktreeSessionsPrefix: ["worktree-sessions"] as const,
   worktreeSessions: (repo: string, id: string) => ["worktree-sessions", repo, id] as const,
   worktreeSessionDetail: (repo: string, id: string, sessionId: string) =>
     ["worktree-session-detail", repo, id, sessionId] as const,
@@ -868,7 +869,12 @@ export const useSaveSettings = () =>
       qc.setQueryData(queryKeys.settings, next);
       return () => qc.setQueryData(queryKeys.settings, prev);
     },
-    invalidate: () => [queryKeys.settings],
+    invalidate: () => [
+      queryKeys.settings,
+      ["agent-version-status"],
+      ["agent-auth"],
+      queryKeys.codexHealth,
+    ],
   });
 
 /** A single setting value for an exact scope (`"app"` or `"repo:<name>"`).
@@ -1374,8 +1380,9 @@ export const useAgentAuth = (kind: AgentKind) =>
   useQuery({ queryKey: queryKeys.agentAuth(kind), queryFn: () => commands.agentAuth(kind) });
 
 /** Installed CLI version plus the provider's latest published release. */
-export const useAgentVersionStatus = (kind: AgentKind) =>
+export const useAgentVersionStatus = (kind: AgentKind, enabled = true) =>
   useUnwrappedQuery(queryKeys.agentVersionStatus(kind), () => commands.agentVersionStatus(kind), {
+    enabled,
     staleTime: 5 * 60 * 1000,
   });
 
@@ -3160,9 +3167,9 @@ export const useCreatePr = (repo: string) => {
 // The main area's tabs and what they relaunch with: the persisted tab rows, the
 // on-disk prompt a launch is seeded from, and the past sessions a tab can resume.
 
-/** The agent sessions that have run in a worktree, newest first. Sessions end
- *  and transcripts grow without an event we listen for, so this refetches on a
- *  slow interval while the panel is mounted. */
+/** The agent sessions that have run in a worktree, newest first. Pane changes
+ *  refresh history immediately; the slow interval catches transcript growth
+ *  while the panel is mounted. */
 export const useWorktreeSessions = (repo: string, id: string) => {
   // A Daedalus project's are read on the box: only while the link is up.
   const readable = useReadableRepos();

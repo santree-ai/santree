@@ -16,6 +16,7 @@ import type { TerminalTab } from "../terminal/orchestrator";
 vi.mock("../../lib/queries", () => ({
   queryKeys: {
     sessionStates: ["session-states"] as const,
+    worktreeSessionsPrefix: ["worktree-sessions"] as const,
     agentProcesses: ["agent-processes"] as const,
   },
   useAgentProcesses: () => ({ data: [] }),
@@ -82,6 +83,7 @@ describe("useDetectedAgents", () => {
     rerender([pane("tree:AK-1:tab:a1")]);
 
     expect(sawSessions()).toBe(true);
+    expect(invalidated.some((k) => k[0] === "worktree-sessions")).toBe(true);
   });
 
   // The bug: closing the last agent tab is exactly when a stale row is left
@@ -93,6 +95,7 @@ describe("useDetectedAgents", () => {
     rerender([]);
 
     expect(sawSessions()).toBe(true);
+    expect(invalidated.some((k) => k[0] === "worktree-sessions")).toBe(true);
     expect(sawProcesses()).toBe(false);
   });
 

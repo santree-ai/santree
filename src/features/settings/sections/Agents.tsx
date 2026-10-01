@@ -65,6 +65,7 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
   const { data: agents = [] } = useAgents();
   const authQ = useAgentAuth(kind);
   const auth = authQ.data;
+  const cli = useAgentVersionStatus(kind, kind === "Claude");
   const [loginOpen, setLoginOpen] = useState(false);
   // Local draft for the executable path: null means "showing the saved value
   // as-is". Committing on every keystroke would fire a full-settings-blob
@@ -90,7 +91,14 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
 
   return (
     <div className="flex flex-col gap-5">
-      <Block title="Authentication">
+      <Block
+        title="Authentication"
+        subtitle={
+          kind === "Claude"
+            ? "Saved account details do not verify that the CLI can start or that your login is still valid."
+            : undefined
+        }
+      >
         <div className="grid grid-cols-2 gap-3">
           <div
             className="relative flex flex-col items-center justify-center gap-1.5 rounded-xl border bg-input py-5"
@@ -117,14 +125,28 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
               <Badge
                 color={auth.connected ? "var(--color-status-green)" : "var(--color-status-amber)"}
               >
-                {auth.connected ? "Connected" : "Not connected"}
+                {kind === "Claude"
+                  ? auth.connected
+                    ? "Account found"
+                    : "No saved account"
+                  : auth.connected
+                    ? "Connected"
+                    : "Not connected"}
               </Badge>
               <button
                 type="button"
-                onClick={() => authQ.refetch()}
+                onClick={() => {
+                  void authQ.refetch();
+                  if (kind === "Claude") void cli.refetch();
+                }}
                 className="flex cursor-pointer items-center gap-1.5 text-[11.5px] text-muted-2 transition-colors hover:text-fg-2"
               >
-                <RefreshIcon size={12} className={authQ.isFetching ? "animate-spin" : ""} />
+                <RefreshIcon
+                  size={12}
+                  className={
+                    authQ.isFetching || (kind === "Claude" && cli.isFetching) ? "animate-spin" : ""
+                  }
+                />
                 Refresh
               </button>
             </div>
@@ -135,7 +157,13 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
               <KvRow label="Account" value={auth.account} />
             </div>
             {!loginOpen && (
-              <Button onClick={() => setLoginOpen(true)} className="mt-3">
+              <Button
+                onClick={() => setLoginOpen(true)}
+                disabled={
+                  kind === "Claude" && (!cli.data?.installed || cli.isFetching || !!cli.error)
+                }
+                className="mt-3"
+              >
                 <PlayIcon size={11} />
                 Run <span className="font-mono">{auth.loginCmd}</span>
               </Button>
@@ -369,30 +397,40 @@ function ClaudeVersionBlock() {
 
   return (
     <Block
-      title="Version"
-      subtitle="Santree only checks for updates. Install Claude Code updates through its own installer or package manager."
+      title="Claude Code CLI"
+      subtitle="Checks that the configured executable can run. Install or repair Claude Code through its own installer."
     >
       <div className="mb-3 flex items-center justify-between">
-        {versions.data?.updateAvailable ? (
+        {versions.isFetching ? (
+          <Badge color="var(--color-muted-2)">Checking…</Badge>
+        ) : versions.error || !versions.data?.installed ? (
+          <Badge color="var(--color-status-amber)">Unavailable</Badge>
+        ) : versions.data?.updateAvailable ? (
           <Badge color="var(--color-status-amber)">Update available</Badge>
         ) : versions.data?.installed && versions.data.latest ? (
           <Badge color="var(--color-status-green)">Up to date</Badge>
         ) : (
-          <Badge color="var(--color-muted-2)">Unknown</Badge>
+          <Badge color="var(--color-status-green)">Ready</Badge>
         )}
         <button
           type="button"
           onClick={() => versions.refetch()}
-          aria-label="Refresh Claude Code versions"
+          aria-label="Refresh Claude Code checks"
           className="cursor-pointer text-[11px] text-muted-2 hover:text-fg-2"
         >
           <RefreshIcon size={12} className={versions.isFetching ? "animate-spin" : ""} />
         </button>
       </div>
       <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
+        <KvRow label="Executable" value={versions.data?.executable ?? "Not found"} />
         <KvRow label="Installed" value={current} />
         <KvRow label="Latest" value={latest} />
       </div>
+      {(versions.data?.error || versions.error) && (
+        <p role="alert" className="mt-3 break-words text-[11.5px] text-status-amber">
+          {versions.data?.error ?? String(versions.error)}
+        </p>
+      )}
     </Block>
   );
 }

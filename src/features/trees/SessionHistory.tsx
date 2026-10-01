@@ -372,7 +372,7 @@ function SessionDetails({
   // A Daedalus project's transcripts are on the box: nothing to reveal here.
   const { remote } = useRepoReach(repo);
 
-  const openable = !!live?.openable;
+  const openable = !!live?.live && live.openable;
   const blocked = openable
     ? null
     : // A PTY is open on this conversation right now; a second `--resume` would

@@ -1604,10 +1604,12 @@ export type AgentState =
 "exited";
 
 /**
- *  Installed and published versions for an agent CLI. An unavailable registry
- *  leaves `latest` empty; the installed CLI remains usable and visible.
+ *  Probe the executable used for launch separately from the version registry.
+ *  `error` describes a local CLI failure; an unavailable registry only clears `latest`.
  */
 export type AgentVersionStatus = {
+	executable: string | null,
+	error: string | null,
 	installed: string | null,
 	latest: string | null,
 	updateAvailable: boolean,
