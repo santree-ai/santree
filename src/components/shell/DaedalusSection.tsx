@@ -27,7 +27,8 @@ import { useState } from "react";
 
 import { gitOff, linkNotice, linkUp } from "../../lib/daedalusLink";
 import { useDaedalusStatus, useRepos } from "../../lib/queries";
-import { DaedalusLogo } from "../icons";
+import { usePersistedState } from "../../lib/usePersistedState";
+import { ChevronDownIcon, ChevronRightIcon, DaedalusLogo } from "../icons";
 import { DaedalusProjectsDialog } from "./DaedalusProjectsDialog";
 import { ProjectTree } from "./ProjectTree";
 import { SECTION_HEADER, SectionAddButton } from "./SectionHeader";
@@ -37,6 +38,8 @@ export function DaedalusSection() {
   const { data: repos } = useRepos();
   const { data: link } = useDaedalusStatus();
   const [adding, setAdding] = useState(false);
+  const [collapsed, setCollapsed] = usePersistedState("santree.shell.daedalus.collapsed", false);
+  const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon;
 
   const hasProjects = repos?.some((repo) => repo.location === "Daedalus") ?? false;
   if (!hasProjects && link?.kind !== "Connected") return null;
@@ -46,30 +49,41 @@ export function DaedalusSection() {
 
   return (
     <div className="flex flex-none flex-col">
-      <div className={`${SECTION_HEADER} ${dim}`}>
-        <DaedalusLogo size={12} className="flex-none" />
-        Daedalus
-        <SectionAddButton label="Add from Daedalus" onClick={() => setAdding(true)} />
-      </div>
-      {/* Outside the dimming: it is the one thing in a greyed section still
-          asking to be read, and a link at 60% is a link nobody sees. */}
-      {notice && (
+      <div className={SECTION_HEADER}>
         <button
           type="button"
-          onClick={() => navigate({ to: "/settings", search: { section: "daedalus" } })}
-          aria-label={`${notice.title}. Open Settings, Daedalus`}
-          title={notice.detail ?? undefined}
-          className="mx-2.5 mb-0.5 min-w-0 cursor-pointer truncate rounded px-1.5 py-(--density-compact) text-left text-[11px] text-muted-3 underline-offset-2 transition-colors hover:text-fg-2 hover:underline"
+          aria-label={`${collapsed ? "Expand" : "Collapse"} Daedalus`}
+          aria-expanded={!collapsed}
+          onClick={() => setCollapsed((value) => !value)}
+          className={`-ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-left uppercase transition-colors hover:text-fg-2 ${dim}`}
         >
-          {notice.title}
+          <Chevron size={10} className="flex-none" />
+          <DaedalusLogo size={12} className="flex-none" />
+          Daedalus
         </button>
-      )}
-      <div className={dim}>
-        <ProjectTree
-          location="Daedalus"
-          emptyLabel="No projects yet. Add one with +"
-          actionsDisabled={gitOff(true, link)}
-        />
+        <SectionAddButton label="Add from Daedalus" onClick={() => setAdding(true)} />
+      </div>
+      <div hidden={collapsed}>
+        {/* Outside the dimming: it is the one thing in a greyed section still
+          asking to be read, and a link at 60% is a link nobody sees. */}
+        {notice && (
+          <button
+            type="button"
+            onClick={() => navigate({ to: "/settings", search: { section: "daedalus" } })}
+            aria-label={`${notice.title}. Open Settings, Daedalus`}
+            title={notice.detail ?? undefined}
+            className="mx-2.5 mb-0.5 min-w-0 cursor-pointer truncate rounded px-1.5 py-(--density-compact) text-left text-[11px] text-muted-3 underline-offset-2 transition-colors hover:text-fg-2 hover:underline"
+          >
+            {notice.title}
+          </button>
+        )}
+        <div className={dim}>
+          <ProjectTree
+            location="Daedalus"
+            emptyLabel="No projects yet. Add one with +"
+            actionsDisabled={gitOff(true, link)}
+          />
+        </div>
       </div>
       {adding && <DaedalusProjectsDialog onClose={() => setAdding(false)} />}
     </div>

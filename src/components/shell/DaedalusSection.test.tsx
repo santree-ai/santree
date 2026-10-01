@@ -57,6 +57,7 @@ beforeEach(() => {
   state.link = CONNECTED;
   state.navigate.mockClear();
   state.tree = null;
+  localStorage.clear();
 });
 
 describe("DaedalusSection visibility", () => {
@@ -170,5 +171,29 @@ describe("DaedalusSection add", () => {
     state.link = { kind: "SantreeOff" };
     render(<DaedalusSection />);
     expect(screen.getByRole("button", { name: "Add from Daedalus" })).toBeEnabled();
+  });
+});
+
+describe("DaedalusSection collapse", () => {
+  it("remembers the section fold and keeps adding available while collapsed", () => {
+    state.repos = [repo("home/web", "Daedalus")];
+    state.link = { kind: "SantreeOff" };
+    const { unmount } = render(<DaedalusSection />);
+    fireEvent.click(screen.getByRole("button", { name: "Collapse Daedalus" }));
+    expect(screen.getByRole("button", { name: "Expand Daedalus" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.getByTestId("daedalus-tree")).not.toBeVisible();
+    expect(screen.queryByRole("button", { name: /Open Settings/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Add from Daedalus" }));
+    expect(screen.getByRole("dialog", { name: "Add from Daedalus" })).toBeVisible();
+    unmount();
+
+    render(<DaedalusSection />);
+    expect(screen.getByTestId("daedalus-tree")).not.toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Daedalus" }));
+    expect(screen.getByTestId("daedalus-tree")).toBeVisible();
+    expect(screen.getByRole("button", { name: /Open Settings/ })).toBeVisible();
   });
 });
