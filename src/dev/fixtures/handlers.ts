@@ -230,6 +230,7 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
               messageCount: 11,
               status: "Completed",
               lastActivityMs: now() - 25 * HOUR,
+              sampled: false,
             },
             {
               agentId: "sub-2",
@@ -240,6 +241,7 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
               messageCount: 18,
               status: "Completed",
               lastActivityMs: now() - 25 * HOUR,
+              sampled: false,
             },
           ]
         : [],

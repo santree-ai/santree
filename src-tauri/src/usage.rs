@@ -740,13 +740,21 @@ struct Parsed {
 fn parse_from(path: &Path, from: u64, base: Option<&FileData>) -> Option<Parsed> {
     use std::io::{Read, Seek, SeekFrom};
 
-    let (project, session_id, is_main) = classify(path)?;
+    classify(path)?;
     let mut file = std::fs::File::open(path).ok()?;
     if from > 0 {
         file.seek(SeekFrom::Start(from)).ok()?;
     }
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
+    parse_bytes(path, &buf, from, base)
+}
+
+/// [`parse_from`] over bytes already read — `buf` is the transcript from byte
+/// `from` on, wherever it was read (this Mac, or the box: `RemoteTranscript`).
+/// `path` only classifies it (its project dir, session id, main or subagent).
+fn parse_bytes(path: &Path, buf: &[u8], from: u64, base: Option<&FileData>) -> Option<Parsed> {
+    let (project, session_id, is_main) = classify(path)?;
     // Only whole lines are parseable; anything after the final newline is a
     // half-written line, so leave it for the next poll.
     let complete = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
@@ -1470,19 +1478,24 @@ const PEEK_BYTES: u64 = 256 * 1024;
 fn peek_cwd(path: &Path) -> Option<String> {
     use std::io::Read;
 
-    #[derive(Deserialize)]
-    struct CwdLine {
-        cwd: Option<String>,
-    }
-
     let mut buf = Vec::new();
     std::fs::File::open(path)
         .ok()?
         .take(PEEK_BYTES)
         .read_to_end(&mut buf)
         .ok()?;
-    let complete = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    String::from_utf8_lossy(&buf[..complete])
+    cwd_of_head(&buf)
+}
+
+/// The `cwd` on the first whole line that has one, in a transcript's first bytes.
+pub(crate) fn cwd_of_head(head: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    struct CwdLine {
+        cwd: Option<String>,
+    }
+
+    let complete = head.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    String::from_utf8_lossy(&head[..complete])
         .lines()
         .filter_map(|l| serde_json::from_str::<CwdLine>(l).ok())
         .find_map(|l| l.cwd)
@@ -1678,6 +1691,7 @@ fn summaries_in(
                 started_at_ms: s.first_ts_ms,
                 last_activity_ms: s.last_ts_ms,
                 spend: Some(session_spend(p, &fd, table)),
+                sampled: false,
             },
         );
     }
@@ -1696,9 +1710,14 @@ fn session_spend(main: &Path, fd: &FileData, table: &PriceTable) -> SessionSpend
     let files: Vec<&FileData> = std::iter::once(fd)
         .chain(subs.iter().map(|a| a.as_ref()))
         .collect();
+    spend_of(&files, table)
+}
 
+/// [`session_spend`] over transcripts already parsed: the main one first, then
+/// its subagents'.
+fn spend_of(files: &[&FileData], table: &PriceTable) -> SessionSpend {
     let mut folded: HashMap<String, Toks> = HashMap::new();
-    for f in &files {
+    for f in files {
         for e in &f.events {
             if let Some(key) = dedup_key(e) {
                 folded
@@ -1712,7 +1731,7 @@ fn session_spend(main: &Path, fd: &FileData, table: &PriceTable) -> SessionSpend
     let mut seen: HashSet<String> = HashSet::new();
     // `(tokens, cost)` per model; cost stays `None` until a priced turn adds to it.
     let mut by_model: HashMap<&str, (f64, Option<f64>)> = HashMap::new();
-    for f in &files {
+    for f in files {
         for e in &f.events {
             let toks = match dedup_key(e) {
                 Some(key) => {
@@ -1801,6 +1820,11 @@ pub(crate) fn session_detail(main: &Path) -> SessionDetail {
     let Some(fd) = load_files(std::slice::from_ref(&main.to_path_buf()), |_, _| {}).pop() else {
         return SessionDetail::default();
     };
+    detail_of(&fd)
+}
+
+/// [`session_detail`] of a transcript already parsed.
+fn detail_of(fd: &FileData) -> SessionDetail {
     let s = &fd.summary;
     SessionDetail {
         first_prompt: s.first_prompt.clone(),
@@ -1887,47 +1911,238 @@ pub(crate) fn session_subagents(main: &Path, now_ms: i64) -> Vec<SessionSubagent
     files
         .iter()
         .map(|path| {
-            // `agent-<id>.jsonl` — the stem past the prefix is the agent id.
-            let agent_id = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.strip_prefix("agent-"))
-                .unwrap_or_default()
-                .to_string();
-            let meta: SubagentMeta = std::fs::read_to_string(path.with_extension("meta.json"))
-                .ok()
-                .and_then(|t| serde_json::from_str(&t).ok())
-                .unwrap_or_default();
+            let meta = std::fs::read(path.with_extension("meta.json")).ok();
             let last_activity_ms = std::fs::metadata(path)
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as i64);
-            let status = reported
-                .get(&agent_id)
-                .and_then(|s| terminal_status(s))
-                .unwrap_or_else(|| match last_activity_ms {
-                    Some(ms) if now_ms - ms < RUNNING_WINDOW_MS => SubagentStatus::Running,
-                    _ => SubagentStatus::Unknown,
-                });
             let message_count = load_files(std::slice::from_ref(path), |_, _| {})
                 .pop()
                 .map_or(0, |fd| fd.summary.message_count);
-            SessionSubagent {
-                agent_id,
-                parent_agent_id: meta.parent_agent_id,
-                // Claude's depth is 1-based; treat a missing one as top level
-                // rather than inventing a `0` tier the tree would have to
-                // special-case.
-                depth: meta.spawn_depth.unwrap_or(1).max(1),
-                agent_type: meta.agent_type,
-                description: meta.description,
-                message_count,
-                status,
-                last_activity_ms: last_activity_ms.map(|ms| ms as f64),
-            }
+            subagent_row(
+                path,
+                meta.as_deref(),
+                last_activity_ms,
+                &reported,
+                (message_count, false),
+                now_ms,
+            )
         })
         .collect()
+}
+
+/// One subagent's row: its id from `agent-<id>.jsonl`, the sidecar's
+/// metadata (`meta`, its bytes, when there is one), and its status — the
+/// spawner's report, else the freshness of its last write. `messages` is its
+/// own count and whether its transcript was read in part.
+fn subagent_row(
+    path: &Path,
+    meta: Option<&[u8]>,
+    last_activity_ms: Option<i64>,
+    reported: &HashMap<String, String>,
+    (message_count, sampled): (u32, bool),
+    now_ms: i64,
+) -> SessionSubagent {
+    // `agent-<id>.jsonl` — the stem past the prefix is the agent id.
+    let agent_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix("agent-"))
+        .unwrap_or_default()
+        .to_string();
+    let meta: SubagentMeta = meta
+        .and_then(|bytes| serde_json::from_slice(bytes).ok())
+        .unwrap_or_default();
+    let status = reported
+        .get(&agent_id)
+        .and_then(|s| terminal_status(s))
+        .unwrap_or_else(|| match last_activity_ms {
+            Some(ms) if now_ms - ms < RUNNING_WINDOW_MS => SubagentStatus::Running,
+            _ => SubagentStatus::Unknown,
+        });
+    SessionSubagent {
+        agent_id,
+        parent_agent_id: meta.parent_agent_id,
+        // Claude's depth is 1-based; treat a missing one as top level
+        // rather than inventing a `0` tier the tree would have to
+        // special-case.
+        depth: meta.spawn_depth.unwrap_or(1).max(1),
+        agent_type: meta.agent_type,
+        description: meta.description,
+        message_count,
+        status,
+        last_activity_ms: last_activity_ms.map(|ms| ms as f64),
+        sampled,
+    }
+}
+
+// ── Transcripts read off the box (a Daedalus project's history) ─────────────
+
+/// A Claude transcript parsed from bytes santree read off Daedalus
+/// (`daedalus/history.rs`), which reads it in pages: whole, extended by what
+/// was appended since, or — a transcript too large to fetch whole — from its
+/// first and last pages alone (`sampled`), where the counts are lower bounds
+/// and the spend is not known. The parse is this module's own, so a session
+/// reads the same on the box as it would here.
+#[derive(Clone)]
+pub(crate) struct RemoteTranscript {
+    data: Arc<FileData>,
+    consumed: u64,
+    sampled: bool,
+}
+
+impl RemoteTranscript {
+    /// `bytes` is the whole transcript at `path` (a path on the box, which only
+    /// classifies it). `None` when the path isn't a transcript's.
+    pub(crate) fn whole(path: &Path, bytes: &[u8]) -> Option<Self> {
+        let Parsed { data, consumed } = parse_bytes(path, bytes, 0, None)?;
+        Some(Self {
+            data: Arc::new(data),
+            consumed,
+            sampled: false,
+        })
+    }
+
+    /// This transcript extended by `bytes`, read from [`Self::consumed`] on.
+    pub(crate) fn extended(&self, path: &Path, bytes: &[u8]) -> Option<Self> {
+        let Parsed { data, consumed } = parse_bytes(path, bytes, self.consumed, Some(&self.data))?;
+        Some(Self {
+            data: Arc::new(data),
+            consumed,
+            sampled: false,
+        })
+    }
+
+    /// A transcript known only by its `head` (its first bytes) and `tail` (its
+    /// last, which start mid-line): the opening — title, first prompt, `cwd` —
+    /// from the one, the latest turns and model from the other.
+    pub(crate) fn sampled(path: &Path, head: &[u8], tail: &[u8]) -> Option<Self> {
+        let head = parse_bytes(path, head, 0, None)?.data;
+        // The tail's first line is cut: start after it.
+        let tail = tail
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(&[][..], |i| &tail[i + 1..]);
+        let tail = parse_bytes(path, tail, 0, None)?.data;
+        let (h, t) = (&head.summary, &tail.summary);
+        let mut agent_status = head.agent_status.clone();
+        agent_status.extend(tail.agent_status.clone());
+        let summary = Summary {
+            title: h.title.clone().or_else(|| t.title.clone()),
+            first_prompt: h.first_prompt.clone().or_else(|| t.first_prompt.clone()),
+            first_prompt_truncated: if h.first_prompt.is_some() {
+                h.first_prompt_truncated
+            } else {
+                t.first_prompt_truncated
+            },
+            last_message: t.last_message.clone().or_else(|| h.last_message.clone()),
+            last_from: t.last_from.or(h.last_from),
+            recent: if t.recent.is_empty() {
+                h.recent.clone()
+            } else {
+                t.recent.clone()
+            },
+            message_count: h.message_count + t.message_count,
+            first_ts_ms: h.first_ts_ms.or(t.first_ts_ms),
+            last_ts_ms: t.last_ts_ms.or(h.last_ts_ms),
+        };
+        let data = FileData {
+            project: head.project.clone(),
+            cwd: head.cwd.clone().or_else(|| tail.cwd.clone()),
+            session_id: head.session_id.clone(),
+            events: head.events.iter().chain(&tail.events).cloned().collect(),
+            context: tail.context.clone().or_else(|| head.context.clone()),
+            summary,
+            agent_status,
+        };
+        Some(Self {
+            data: Arc::new(data),
+            consumed: 0,
+            sampled: true,
+        })
+    }
+
+    /// The bytes parsed so far — where an extension reads from.
+    pub(crate) fn consumed(&self) -> u64 {
+        self.consumed
+    }
+
+    pub(crate) fn is_sampled(&self) -> bool {
+        self.sampled
+    }
+
+    /// The working directory the session ran in, as its transcript records it.
+    pub(crate) fn cwd(&self) -> Option<&str> {
+        self.data.cwd.as_deref()
+    }
+
+    /// User + assistant lines carrying prose (a lower bound when sampled).
+    pub(crate) fn message_count(&self) -> u32 {
+        self.data.summary.message_count
+    }
+
+    /// The statuses this transcript reported for the subagents it spawned.
+    pub(crate) fn reported(&self) -> &HashMap<String, String> {
+        &self.data.agent_status
+    }
+
+    /// The history row's summary, as [`worktree_summaries`] makes one here:
+    /// `subagents` are the session's subagent transcripts that could be read,
+    /// of `subagent_count` listed. The spend needs every one of them whole.
+    pub(crate) fn summary(
+        &self,
+        subagent_count: u32,
+        subagents: &[RemoteTranscript],
+        table: &PriceTable,
+    ) -> SessionSummary {
+        let s = &self.data.summary;
+        let sampled = self.sampled || subagents.iter().any(|t| t.sampled);
+        let complete = !sampled && subagents.len() as u32 == subagent_count;
+        let spend = complete.then(|| {
+            let files: Vec<&FileData> = std::iter::once(self.data.as_ref())
+                .chain(subagents.iter().map(|t| t.data.as_ref()))
+                .collect();
+            spend_of(&files, table)
+        });
+        SessionSummary {
+            title: s.title.clone(),
+            last_message: s.last_message.clone(),
+            last_message_from: s.last_from,
+            message_count: s.message_count,
+            subagent_count,
+            model: primary_model(&self.data.events),
+            started_at_ms: s.first_ts_ms,
+            last_activity_ms: s.last_ts_ms,
+            spend,
+            sampled,
+        }
+    }
+
+    /// What the expanded row shows, as [`session_detail`] reads it here.
+    pub(crate) fn detail(&self) -> SessionDetail {
+        detail_of(&self.data)
+    }
+
+    /// This transcript as a subagent's row (see [`subagent_row`]); `reported`
+    /// holds every status the session's transcripts reported.
+    pub(crate) fn subagent_row(
+        &self,
+        path: &Path,
+        meta: Option<&[u8]>,
+        last_activity_ms: Option<i64>,
+        reported: &HashMap<String, String>,
+        now_ms: i64,
+    ) -> SessionSubagent {
+        subagent_row(
+            path,
+            meta,
+            last_activity_ms,
+            reported,
+            (self.message_count(), self.sampled),
+            now_ms,
+        )
+    }
 }
 
 // ── Live-refresh watcher (mirrors git_watch.rs) ─────────────────────────────

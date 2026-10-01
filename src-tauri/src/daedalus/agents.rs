@@ -381,7 +381,12 @@ async fn blocking(check: impl FnOnce() -> RecordPresence + Send + 'static) -> Re
 
 /// Whether Claude's transcript for `id`, run in `stored_cwd`, is on the box:
 /// `<home>/.claude/projects/<escaped cwd>/<id>.jsonl`, as locally.
-fn transcript_on_box(at: &Checkout, home: &Path, stored_cwd: &str, id: &str) -> RecordPresence {
+pub(crate) fn transcript_on_box(
+    at: &Checkout,
+    home: &Path,
+    stored_cwd: &str,
+    id: &str,
+) -> RecordPresence {
     if !session::is_session_id(id) {
         return RecordPresence::Unknown(format!("{id:?} is not a session id"));
     }
@@ -398,7 +403,7 @@ fn transcript_on_box(at: &Checkout, home: &Path, stored_cwd: &str, id: &str) -> 
 
 /// Whether Codex's rollout for thread `id` is on the box, under
 /// `<home>/.codex/sessions` (a rollout's file name ends in its thread id).
-fn rollout_on_box(at: &Checkout, home: &Path, id: &str) -> RecordPresence {
+pub(crate) fn rollout_on_box(at: &Checkout, home: &Path, id: &str) -> RecordPresence {
     if !session::is_session_id(id) {
         return RecordPresence::Unknown(format!("{id:?} is not a thread id"));
     }

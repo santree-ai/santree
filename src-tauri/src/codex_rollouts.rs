@@ -228,9 +228,13 @@ struct Meta {
 const MAX_LINE: u64 = 4 * 1024 * 1024;
 
 fn read_meta(path: &Path) -> Option<Meta> {
-    let file = std::fs::File::open(path).ok()?;
+    meta_from(std::fs::File::open(path).ok()?)
+}
+
+/// [`read_meta`] over any reader of the rollout's first bytes.
+fn meta_from(rollout: impl Read) -> Option<Meta> {
     let mut line = Vec::new();
-    BufReader::new(file.take(MAX_LINE))
+    BufReader::new(rollout.take(MAX_LINE))
         .read_until(b'\n', &mut line)
         .ok()?;
     // Codex is still writing the first line: no newline yet, nothing to trust.
@@ -347,8 +351,14 @@ const ROOT_AGENT: &str = "/root";
 /// Parse a whole rollout, streaming line by line (they run to hundreds of MB).
 /// A line that isn't valid JSON, or not UTF-8, contributes nothing.
 fn parse(path: &Path) -> Option<Parsed> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = BufReader::new(file);
+    Some(parse_reader(BufReader::new(
+        std::fs::File::open(path).ok()?,
+    )))
+}
+
+/// [`parse`] over any buffered reader of a rollout (or of a run of whole
+/// records from it).
+fn parse_reader(mut reader: impl BufRead) -> Parsed {
     let mut out = Parsed::default();
     let mut line = Vec::new();
     loop {
@@ -452,7 +462,7 @@ fn parse(path: &Path) -> Option<Parsed> {
             _ => {}
         }
     }
-    Some(out)
+    out
 }
 
 impl Parsed {
@@ -643,36 +653,99 @@ fn summaries_in(root: &Path, worktree: &Path, known: &[String]) -> HashMap<Strin
             continue;
         };
         let spawned = children.get(&meta.thread_id).copied().unwrap_or(0);
-        let subagent_count = if spawned > 0 {
-            spawned
-        } else if !parsed.agents.is_empty() {
-            parsed.agents.len() as u32
-        } else {
-            parsed.handoffs
-        };
-        let thread = parsed.thread();
         out.insert(
             meta.thread_id.clone(),
-            SessionSummary {
-                title: thread.title.clone(),
-                last_message: thread.last.as_ref().map(|(_, text, _)| text.clone()),
-                last_message_from: thread.last.as_ref().map(|(_, _, src)| src.from()),
-                message_count: thread.message_count,
-                subagent_count,
-                model: parsed
-                    .settings_model
-                    .clone()
-                    .or_else(|| parsed.turn_model.clone()),
-                started_at_ms: meta.started_ms.or(parsed.started_ms).or(parsed.first_ms),
-                last_activity_ms: parsed.last_ms,
-                // A rollout carries no per-turn token counts to price, and the
-                // one `token_count` record it does write is a rate-limit window,
-                // not a spend. No number is honest here.
-                spend: None,
-            },
+            summary_of(&meta, &parsed, spawned, false),
         );
     }
     out
+}
+
+/// A root rollout's history row. `spawned` is how many children's own
+/// rollouts name it; without any, its mail and hand-offs stand in.
+fn summary_of(meta: &Meta, parsed: &Parsed, spawned: u32, sampled: bool) -> SessionSummary {
+    let subagent_count = if spawned > 0 {
+        spawned
+    } else if !parsed.agents.is_empty() {
+        parsed.agents.len() as u32
+    } else {
+        parsed.handoffs
+    };
+    let thread = parsed.thread();
+    SessionSummary {
+        title: thread.title.clone(),
+        last_message: thread.last.as_ref().map(|(_, text, _)| text.clone()),
+        last_message_from: thread.last.as_ref().map(|(_, _, src)| src.from()),
+        message_count: thread.message_count,
+        subagent_count,
+        model: parsed
+            .settings_model
+            .clone()
+            .or_else(|| parsed.turn_model.clone()),
+        started_at_ms: meta.started_ms.or(parsed.started_ms).or(parsed.first_ms),
+        last_activity_ms: parsed.last_ms,
+        // A rollout carries no per-turn token counts to price, and the
+        // one `token_count` record it does write is a rate-limit window,
+        // not a spend. No number is honest here.
+        spend: None,
+        sampled,
+    }
+}
+
+/// A rollout read off Daedalus (`daedalus/history.rs`): its thread id and its
+/// history row. `bytes` is the whole rollout, or — with `tail`, its last bytes
+/// — only its first: the opening (title, start) from the one, the latest
+/// reply and model from the other, the counts their sum (a lower bound). Its
+/// children's rollouts aren't read on the box, so its subagents are counted
+/// from its own mail. `None` when it opens with no `session_meta`.
+pub(crate) fn remote_summary(
+    bytes: &[u8],
+    tail: Option<&[u8]>,
+) -> Option<(String, SessionSummary)> {
+    let meta = meta_from(bytes)?;
+    let parsed = match tail {
+        None => parse_reader(bytes),
+        Some(tail) => {
+            // The tail's first line is cut: start after it.
+            let tail = tail
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(&[][..], |i| &tail[i + 1..]);
+            Parsed::joined(parse_reader(bytes), parse_reader(tail))
+        }
+    };
+    let summary = summary_of(&meta, &parsed, 0, tail.is_some());
+    Some((meta.thread_id, summary))
+}
+
+impl Thread {
+    /// A thread's start (`head`) and its end (`tail`), parsed apart.
+    fn joined(head: Thread, tail: Thread) -> Thread {
+        Thread {
+            title: head.title.or(tail.title),
+            last: tail.last.or(head.last),
+            message_count: head.message_count + tail.message_count,
+        }
+    }
+}
+
+impl Parsed {
+    /// A rollout's first and last pages, parsed apart, as one.
+    fn joined(head: Parsed, tail: Parsed) -> Parsed {
+        let mut agents = head.agents;
+        agents.extend(tail.agents);
+        Parsed {
+            events: Thread::joined(head.events, tail.events),
+            items: Thread::joined(head.items, tail.items),
+            settings_model: tail.settings_model.or(head.settings_model),
+            turn_model: tail.turn_model.or(head.turn_model),
+            started_ms: head.started_ms.or(tail.started_ms),
+            first_ms: head.first_ms.or(tail.first_ms),
+            last_ms: tail.last_ms.or(head.last_ms),
+            agents,
+            handoffs: head.handoffs + tail.handoffs,
+        }
+    }
 }
 
 // ── Subscription usage, from Codex's own record of it ───────────────────────

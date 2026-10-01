@@ -312,10 +312,10 @@ prove the two meet. santree does not depend on `santree-remote-tls`.
   `Read` grant, so nothing it does reaches the box.
 - **Terminals on the box** — see "Terminals and setup scripts on the box" below.
 - **Agents on the box** — see "Agents on the box" below.
-- **Still local-only, and refusing a Daedalus repo**: session history (the
-  Session history pane reads this Mac's transcripts through `local_worktree`;
-  a Daedalus project's shows "coming soon") and the AI review (`agent_session`
-  refuses the review surfaces). The UI says so per kind of action
+- **Session history** reads the box's transcripts — see "Session history on the
+  box" below.
+- **Still local-only, and refusing a Daedalus repo**: the AI review
+  (`agent_session` refuses the review surfaces). The UI says so per kind of action
   (`lib/daedalusLink`): `gitOff` and `runOff` turn git actions, terminals and
   setup scripts off while the link is down ("Unavailable until santree can reach
   Daedalus"); `agentOff(kind)` does the same for agents, and also turns off one
@@ -487,9 +487,60 @@ What the launch names lives on the box too (`daedalus/agents.rs`):
 - **Liveness**: `session_states` counts a remote pane as live until it ends
   (`RemoteTerminals::live`), a dropped link included; a remote pane's exit
   sentinel retires its session rows like a local one's.
-- **Session history** stays "coming soon" for Daedalus projects: its
-  transcripts are on the box, and reading them there (`fs.read` with `within`)
-  is the next step.
+- **Session history** reads these sessions' records on the box (next section).
+
+## Session history on the box
+
+The History pane, and its Resume, work for a Daedalus worktree as for a local
+one: the same registry rows (`session::history_rows`), the same parsers and the
+same merge (`session::merge_history`). Only the records come from elsewhere —
+the box's home (`hello`'s `home`), read by `daedalus/history.rs` (`BoxRecords`)
+through the worktree's `Checkout`, on the blocking pool. `worktree::sessions`,
+`session_detail`, `session_subagents` and `resume_session` dispatch on
+`repo::is_daedalus`.
+
+- **Listing**: one `exec.run` in the worktree, plain POSIX `find` + `wc -c`:
+  `find <home>/.claude/projects -mindepth 2 -maxdepth 4 -type f -name '*.jsonl'
+  ( -path '<root>/<slug>/*' -o -path '<root>/<slug>-*/*' … ) -exec wc -c {} +`
+  — the worktree's slug dir, the dirs that extend it (a subdirectory's
+  sessions) and each registered session's cwd's dir, every file with its size.
+  The root is glob-escaped; a slug is letters, digits and dashes. A line must
+  be a session id's `<dir>/<id>.jsonl` or `<dir>/<id>/subagents/agent-*.jsonl`,
+  or it is dropped. `find` follows no symlink and `-type f` skips them, so a
+  linked transcript or `subagents` dir never lists. Codex rollouts are found by
+  the registered thread ids alone (`-name 'rollout-*-<id>.jsonl'` under
+  `<home>/.codex/sessions`), and each one's `session_meta` must name its thread.
+  A Codex session started by hand on the box isn't listed: finding it would mean
+  reading every rollout's head over the link. Its children's rollouts aren't read
+  either, so a Codex row counts its subagents from its own mail.
+- **Belonging**, as locally: a registered row is listed on the registry's word,
+  anything found by scanning only when its transcript's `cwd` is the worktree or
+  under it (`usage::cwd_belongs_to`). One in a dir that merely extends the slug —
+  likely a sibling checkout's — has its first 256 KiB peeked for its `cwd`
+  before anything more of it is read (cached: a `cwd` never changes).
+- **Reading**: `Checkout::read_at`, which is `fs.read` with `within` =
+  `<home>/.claude/projects` (or `.codex/sessions`), so the host refuses a
+  symlink out of them. A record up to `WHOLE_MAX` (8 MiB) is read whole, in
+  4 MiB pages, and parsed by `usage::RemoteTranscript` — the local parser, fed
+  bytes — cached by box path and size; one that grew is read only from where the
+  last parse stopped. A bigger one is **sampled**: its first `HEAD` (1 MiB) and
+  last `TAIL` (4 MiB) only — title, first prompt and `cwd` from the one, the
+  latest turns, model and activity from the other. Its row carries `sampled`:
+  the message count is a lower bound (the pane shows "12+ msgs" and says why)
+  and the spend is `None` — as it is for a session whose subagents couldn't all
+  be read whole. A 100 MB transcript costs about 5 MB over the link.
+- **The expanded row** re-derives the listing (the id must be in it, as
+  locally) and reads the main transcript's detail from the same cache. Its
+  subagents are the listing's `subagents/` files, each with its `.meta.json`
+  (`fs.read`, 64 KiB at most) and its last write (`fs.stat`). "Open transcript"
+  isn't offered — the file is on the box — and
+  `reveal_worktree_session_transcript` refuses a Daedalus repo.
+- **Resume** goes through `session::adopt_with`: the same checks, with the
+  record's presence asked of the box (`agents::transcript_on_box`,
+  `rollout_on_box`). The tab it points launches `--resume` there.
+- **The link down**: the pane reads "Unavailable until santree can reach
+  Daedalus" and its reads wait (`useReadableRepos`), as every Daedalus read
+  does; the commands answer `NotConnected` and read nothing on this Mac.
 
 ## Code map
 
@@ -542,6 +593,10 @@ or (by default) specta, and their public APIs are a contract with that repo.
 fake agent and daemon, whose `FakeOptions::env` gives the fake box a home and
 `PATH` of its own):
 
+- `history.rs` — `BoxRecords`: "Session history on the box". `history_tests.rs`
+  runs the pane's commands over the fake agent and daemon against transcripts and
+  a rollout written into the fake box's home — a 13 MB one sampled — and the
+  link-down case reading nothing.
 - `host.rs` — `DaedalusHost` (Tauri-managed): the one `RemoteHost` over the
   `AgentConnector`, started once with the saved hook cursor (`resume`);
   `state()` / `settled()` → `DaedalusLink`; `retry_now()`; `client()` /

@@ -2221,6 +2221,10 @@ pub struct WorktreeSession {
     /// record to price (a registry row whose transcript is gone) or when the
     /// provider keeps no token counts — never a zeroed placeholder.
     pub spend: Option<SessionSpend>,
+    /// Summarised from the start and end of its record only — a Daedalus
+    /// transcript too large to read whole over the link: `message_count` is a
+    /// lower bound and `spend` is `None`. Never on this Mac.
+    pub sampled: bool,
 }
 
 /// Tokens attributed to one model inside a session, with its approximate cost.
@@ -2317,6 +2321,9 @@ pub struct SessionSubagent {
     pub status: SubagentStatus,
     /// Epoch ms of its transcript's last write.
     pub last_activity_ms: Option<f64>,
+    /// Its transcript was read in part (see [`WorktreeSession::sampled`]):
+    /// `message_count` is a lower bound.
+    pub sampled: bool,
 }
 
 /// The repo's `.santree/init.sh` setup script, surfaced to the Settings editor.

@@ -28,6 +28,7 @@ import { BranchIcon, ClockIcon, FilesIcon, GitHubLogo, SparklesIcon } from "../.
 import { EmptyState } from "../../components/primitives";
 import { RepoTrackerLogo } from "../../components/RepoTrackerLogo";
 import { SidePanel, type SidePanelTab } from "../../components/SidePanel";
+import { OUT_OF_REACH } from "../../lib/daedalusLink";
 import {
   usePrReviewBrief,
   usePrSummary,
@@ -262,22 +263,20 @@ export function FilePickerPanel() {
         actionsOff={reach.gitOff}
       />
     ),
-    // Agent sessions are read from this Mac's transcripts; a Daedalus project's
-    // ran on the box, and santree doesn't read those yet.
-    history: reach.remote ? (
-      <EmptyState
-        title="Session history"
-        subtitle="Agent sessions in Daedalus projects are coming soon."
-      />
-    ) : (
-      <SessionHistory
-        repo={repo}
-        worktreeId={activeId}
-        branch={active?.branch ?? null}
-        onResume={resumeSession.resume}
-        resumingId={resumeSession.resumingId}
-      />
-    ),
+    // A Daedalus project's sessions ran on the box, and their transcripts are
+    // read there: while the link is down there is nothing to read them with.
+    history:
+      reach.remote && !reach.readable ? (
+        <EmptyState title="Session history" subtitle={OUT_OF_REACH} />
+      ) : (
+        <SessionHistory
+          repo={repo}
+          worktreeId={activeId}
+          branch={active?.branch ?? null}
+          onResume={resumeSession.resume}
+          resumingId={resumeSession.resumingId}
+        />
+      ),
   };
 
   // Only on the panes that read the disk. Beside the ticket or the pull request

@@ -18,6 +18,7 @@ function agent(agentId: string, parentAgentId: string | null, depth = 1): Sessio
     messageCount: 1,
     status: "Completed",
     lastActivityMs: null,
+    sampled: false,
   };
 }
 

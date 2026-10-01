@@ -472,6 +472,7 @@ fn worktree_key_patterns(issue_id: &str) -> (String, String) {
 /// What a session's on-disk record (a Claude transcript, a Codex rollout) says
 /// about it, in the shape the Trees history shows. Filled by `usage.rs` and
 /// `codex_rollouts.rs`; timestamps stay integral here and convert at the wire.
+#[derive(Clone)]
 pub(crate) struct SessionSummary {
     pub title: Option<String>,
     pub last_message: Option<String>,
@@ -484,59 +485,35 @@ pub(crate) struct SessionSummary {
     /// Tokens + cost, when the provider's record carries them. Codex rollouts
     /// don't, so theirs stays `None` rather than reporting a zero as a total.
     pub spend: Option<SessionSpend>,
+    /// Summarised from the record's first and last pages only (a Daedalus
+    /// transcript too large to read whole): counts are lower bounds.
+    pub sampled: bool,
 }
 
 /// A worktree's registered session with the hook-tracked state joined on:
 /// `(session_id, agent_kind, term_key, cwd, created_at, updated_at_ms)`.
-type HistoryRow = (String, String, String, String, String, Option<i64>);
+pub(crate) type HistoryRow = (String, String, String, String, String, Option<i64>);
 
 /// The agent sessions that have run in a worktree, newest first: every session
 /// the terminal registry attributes to it (its main terminal and tabs), plus the
 /// Claude transcripts and Codex rollouts on disk for that directory with no
 /// registry row (launched by hand, or a row since forgotten). Both providers are
 /// summarised from their own record — a Claude session from its transcript, a
-/// Codex one from its rollout. Empty when nothing ran.
+/// Codex one from its rollout. Empty when nothing ran. A Daedalus project's
+/// are read on the box instead (`daedalus/history.rs`), over the same rows.
 pub async fn history(
     db: &Db,
     repo: &str,
     issue_id: &str,
     worktree: &Path,
 ) -> Result<Vec<WorktreeSession>> {
-    let (exact, prefix) = worktree_key_patterns(issue_id);
-    // Every provider's rows. LEFT JOIN: `session_state` is written by Claude's
-    // hooks, so a Codex row (or a Claude one from before the hooks) has none — it
-    // still counts as a session.
-    let rows: Vec<HistoryRow> = sqlx::query_as(
-        "SELECT t.session_id, t.agent_kind, t.term_key, t.cwd, t.created_at, s.updated_at_ms
-         FROM terminal_sessions t
-         LEFT JOIN session_state s ON s.session_id = t.session_id
-         WHERE t.repo = ? AND (t.term_key = ? OR t.term_key LIKE ? ESCAPE '\\')
-         ORDER BY t.created_at",
-    )
-    .bind(repo)
-    .bind(exact)
-    .bind(prefix)
-    .fetch_all(db)
-    .await?;
-
-    // Claude transcripts are located by `(cwd, session_id)`; Codex rollouts by
-    // thread id alone (the registry's `session_id` for a Codex row *is* the
-    // thread id — what `session_meta.id` carries).
-    let known_claude: Vec<(String, String)> = rows
-        .iter()
-        .filter(|r| r.1 == AgentKind::Claude.as_str())
-        .map(|r| (r.3.clone(), r.0.clone()))
-        .collect();
-    let known_codex: Vec<String> = rows
-        .iter()
-        .filter(|r| r.1 == AgentKind::Codex.as_str())
-        .map(|r| r.0.clone())
-        .collect();
+    let rows = history_rows(db, repo, issue_id).await?;
+    let (known_claude, known_codex) = known_sessions(&rows);
     let dir = worktree.to_path_buf();
     // The same table the Usage panel prices with, so a session's cost reads the
     // same in both places. Never blocks on the network (see `pricing`).
     let table = crate::pricing::ensure_fresh(db).await;
-    let mut summaries: HashMap<String, (AgentKind, SessionSummary)> =
+    let summaries: HashMap<String, (AgentKind, SessionSummary)> =
         tokio::task::spawn_blocking(move || {
             let claude = crate::usage::worktree_summaries(&dir, &known_claude, &table)
                 .into_iter()
@@ -547,7 +524,51 @@ pub async fn history(
             claude.chain(codex).collect()
         })
         .await?;
+    Ok(merge_history(rows, summaries))
+}
 
+/// The registry's rows for a worktree's sessions, every provider's, oldest first.
+pub(crate) async fn history_rows(db: &Db, repo: &str, issue_id: &str) -> Result<Vec<HistoryRow>> {
+    let (exact, prefix) = worktree_key_patterns(issue_id);
+    // LEFT JOIN: `session_state` is written by Claude's hooks, so a Codex row (or
+    // a Claude one from before the hooks) has none — it still counts as a session.
+    Ok(sqlx::query_as(
+        "SELECT t.session_id, t.agent_kind, t.term_key, t.cwd, t.created_at, s.updated_at_ms
+         FROM terminal_sessions t
+         LEFT JOIN session_state s ON s.session_id = t.session_id
+         WHERE t.repo = ? AND (t.term_key = ? OR t.term_key LIKE ? ESCAPE '\\')
+         ORDER BY t.created_at",
+    )
+    .bind(repo)
+    .bind(exact)
+    .bind(prefix)
+    .fetch_all(db)
+    .await?)
+}
+
+/// What locates the rows' records: Claude transcripts by `(cwd, session_id)`;
+/// Codex rollouts by thread id alone (the registry's `session_id` for a Codex
+/// row *is* the thread id — what `session_meta.id` carries).
+pub(crate) fn known_sessions(rows: &[HistoryRow]) -> (Vec<(String, String)>, Vec<String>) {
+    let claude = rows
+        .iter()
+        .filter(|r| r.1 == AgentKind::Claude.as_str())
+        .map(|r| (r.3.clone(), r.0.clone()))
+        .collect();
+    let codex = rows
+        .iter()
+        .filter(|r| r.1 == AgentKind::Codex.as_str())
+        .map(|r| r.0.clone())
+        .collect();
+    (claude, codex)
+}
+
+/// The registry's rows joined with what the records say (`summaries`, by
+/// session id), plus the records no row names — newest first.
+pub(crate) fn merge_history(
+    rows: Vec<HistoryRow>,
+    mut summaries: HashMap<String, (AgentKind, SessionSummary)>,
+) -> Vec<WorktreeSession> {
     // Each session paired with its sort key (epoch ms, kept integral here — the
     // wire type is `f64` because specta refuses `i64`), newest first.
     let mut out: Vec<(Option<i64>, WorktreeSession)> =
@@ -587,6 +608,7 @@ pub async fn history(
                 started_at_ms: started.map(|ms| ms as f64),
                 last_activity_ms: last.map(|ms| ms as f64),
                 spend: s.as_ref().and_then(|s| s.spend.clone()),
+                sampled: s.as_ref().is_some_and(|s| s.sampled),
             },
         ));
     }
@@ -609,12 +631,13 @@ pub async fn history(
                 started_at_ms: s.started_at_ms.map(|ms| ms as f64),
                 last_activity_ms: s.last_activity_ms.map(|ms| ms as f64),
                 spend: s.spend,
+                sampled: s.sampled,
             },
         ));
     }
     // Newest first; a session with no timestamp at all sinks to the bottom.
     out.sort_by_key(|(when, _)| std::cmp::Reverse(*when));
-    Ok(out.into_iter().map(|(_, s)| s).collect())
+    out.into_iter().map(|(_, s)| s).collect()
 }
 
 /// The Claude transcript of one of the worktree's *listed* sessions.
@@ -637,16 +660,9 @@ async fn listed_transcript(
     listed: &[WorktreeSession],
     session_id: &str,
 ) -> Result<Option<PathBuf>> {
-    let Some(_) = listed
-        .iter()
-        .find(|s| s.session_id == session_id && s.agent_kind == AgentKind::Claude)
-    else {
-        ensure!(
-            listed.iter().any(|s| s.session_id == session_id),
-            "no session '{session_id}' has run in this worktree"
-        );
+    if !listed_claude(listed, session_id)? {
         return Ok(None); // listed, but not a Claude session
-    };
+    }
     let known = claude_known(db, repo, issue_id).await?;
     let dir = worktree.to_path_buf();
     let id = session_id.to_string();
@@ -654,6 +670,19 @@ async fn listed_transcript(
         tokio::task::spawn_blocking(move || crate::usage::worktree_transcript(&dir, &known, &id))
             .await?,
     )
+}
+
+/// Whether `session_id` is a Claude session of `listed` — the worktree's own
+/// listing, re-derived by the caller: `false` for one of its other providers',
+/// an error for an id it doesn't list (the "discoverable ⇒ actionable" gate).
+pub(crate) fn listed_claude(listed: &[WorktreeSession], session_id: &str) -> Result<bool> {
+    ensure!(
+        listed.iter().any(|s| s.session_id == session_id),
+        "no session '{session_id}' has run in this worktree"
+    );
+    Ok(listed
+        .iter()
+        .any(|s| s.session_id == session_id && s.agent_kind == AgentKind::Claude))
 }
 
 /// The `(cwd, session_id)` pairs of the worktree's registered Claude sessions —
@@ -785,6 +814,32 @@ pub struct ResumeRequest<'a> {
 ///   replacing, so a tab id that names an existing tab can't silently repoint it
 ///   at someone else's session.
 pub async fn adopt(db: &Db, listed: &[WorktreeSession], req: ResumeRequest<'_>) -> Result<()> {
+    let (home, sessions_root) = (req.home, req.sessions_root);
+    adopt_with(db, listed, &req, |kind, cwd, id| async move {
+        match kind {
+            // A rollout is addressed by thread id alone, wherever it ran.
+            AgentKind::Codex => codex_rollout_presence(sessions_root, &id).await,
+            _ => transcript_presence(home, &cwd, &id).await,
+        }
+    })
+    .await
+}
+
+/// [`adopt`], asking `on_disk` whether the session's record is there — this
+/// Mac's transcripts for [`adopt`], the box's for a Daedalus project
+/// (`daedalus/history.rs`); `req.home` and `req.sessions_root` are then unread.
+/// `on_disk` is asked `(provider, cwd, session id)` only once the id is known
+/// to be one of `listed`.
+pub async fn adopt_with<F, Fut>(
+    db: &Db,
+    listed: &[WorktreeSession],
+    req: &ResumeRequest<'_>,
+    on_disk: F,
+) -> Result<()>
+where
+    F: FnOnce(AgentKind, String, String) -> Fut,
+    Fut: std::future::Future<Output = RecordPresence>,
+{
     // Only the two providers with an on-disk record have a resume path at all;
     // the others reach the listing solely as registry rows.
     ensure!(
@@ -816,13 +871,7 @@ pub async fn adopt(db: &Db, listed: &[WorktreeSession], req: ResumeRequest<'_>) 
     // pair `resolve` will stat and the project directory the CLI will look the
     // conversation up in.
     let cwd = req.worktree.to_string_lossy().into_owned();
-    let on_disk = match req.agent_kind {
-        // A rollout is addressed by thread id alone, wherever it ran.
-        AgentKind::Codex => codex_rollout_presence(req.sessions_root, req.session_id).await,
-        // Claude (the `ensure!` above leaves nothing else).
-        _ => transcript_presence(req.home, &cwd, req.session_id).await,
-    };
-    match on_disk {
+    match on_disk(req.agent_kind, cwd.clone(), req.session_id.to_string()).await {
         RecordPresence::Present => {}
         RecordPresence::Absent => bail!(
             "santree can't find that session's record for this worktree, so there is nothing to resume"
@@ -1842,6 +1891,7 @@ mod tests {
             started_at_ms: None,
             last_activity_ms: None,
             spend: None,
+            sampled: false,
         }
     }
 

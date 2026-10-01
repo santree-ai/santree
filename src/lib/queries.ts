@@ -3142,12 +3142,15 @@ export const useCreatePr = (repo: string) => {
 /** The agent sessions that have run in a worktree, newest first. Sessions end
  *  and transcripts grow without an event we listen for, so this refetches on a
  *  slow interval while the panel is mounted. */
-export const useWorktreeSessions = (repo: string, id: string) =>
-  useUnwrappedQuery(
+export const useWorktreeSessions = (repo: string, id: string) => {
+  // A Daedalus project's are read on the box: only while the link is up.
+  const readable = useReadableRepos();
+  return useUnwrappedQuery(
     queryKeys.worktreeSessions(repo, id),
     () => commands.worktreeSessions(repo, id),
-    { enabled: !!repo && !!id, staleTime: 15_000, refetchInterval: 30_000 },
+    { enabled: !!repo && !!id && readable(repo), staleTime: 15_000, refetchInterval: 30_000 },
   );
+};
 
 /** What a session's history row shows once it is expanded: the full first
  *  prompt (kept out of the list, where it would bloat every scan) and the tail
@@ -3160,16 +3163,18 @@ export const useWorktreeSessionDetail = (
   id: string,
   sessionId: string,
   enabled: boolean,
-) =>
-  useUnwrappedQuery(
+) => {
+  const readable = useReadableRepos();
+  return useUnwrappedQuery(
     queryKeys.worktreeSessionDetail(repo, id, sessionId),
     () => commands.worktreeSessionDetail(repo, id, sessionId),
     {
-      enabled: enabled && !!repo && !!id && !!sessionId,
+      enabled: enabled && !!repo && !!id && !!sessionId && readable(repo),
       staleTime: 30_000,
       placeholderData: keepPreviousData,
     },
   );
+};
 
 /** The Task subagents of one session, flat, each carrying the parent and depth
  *  its sidecar records — the pane nests them. Gate `enabled` on the session's
@@ -3179,16 +3184,18 @@ export const useWorktreeSessionSubagents = (
   id: string,
   sessionId: string,
   enabled: boolean,
-) =>
-  useUnwrappedQuery(
+) => {
+  const readable = useReadableRepos();
+  return useUnwrappedQuery(
     queryKeys.worktreeSessionSubagents(repo, id, sessionId),
     () => commands.worktreeSessionSubagents(repo, id, sessionId),
     {
-      enabled: enabled && !!repo && !!id && !!sessionId,
+      enabled: enabled && !!repo && !!id && !!sessionId && readable(repo),
       staleTime: 30_000,
       placeholderData: keepPreviousData,
     },
   );
+};
 
 /** Reveal a session's transcript in the OS file browser. The backend derives the
  *  path from the same validated listing the pane reads — the webview names a

@@ -600,15 +600,17 @@ pub async fn worktree_branch_file_diff(
 }
 
 /// The agent sessions that have run in the worktree, newest first — registry
-/// rows plus Claude transcripts found on disk for its directory.
+/// rows plus Claude transcripts found on disk for its directory (this Mac's,
+/// or the box's for a Daedalus project).
 #[tauri::command]
 #[specta::specta]
 pub async fn worktree_sessions(
     repo: String,
     issue_id: String,
     db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
 ) -> CmdResult<Vec<WorktreeSession>> {
-    Ok(worktree::sessions(&db, &repo, &issue_id).await?)
+    Ok(worktree::sessions(&db, &link, &repo, &issue_id).await?)
 }
 
 /// What one of those sessions shows when its history row is expanded: the full
@@ -627,8 +629,9 @@ pub async fn worktree_session_detail(
     issue_id: String,
     session_id: String,
     db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
 ) -> CmdResult<SessionDetail> {
-    Ok(worktree::session_detail(&db, &repo, &issue_id, &session_id).await?)
+    Ok(worktree::session_detail(&db, &link, &repo, &issue_id, &session_id).await?)
 }
 
 /// The Task subagents of one of those sessions — one row per `agent-*.jsonl`
@@ -646,8 +649,9 @@ pub async fn worktree_session_subagents(
     issue_id: String,
     session_id: String,
     db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
 ) -> CmdResult<Vec<SessionSubagent>> {
-    Ok(worktree::session_subagents(&db, &repo, &issue_id, &session_id).await?)
+    Ok(worktree::session_subagents(&db, &link, &repo, &issue_id, &session_id).await?)
 }
 
 /// Reveal one of those sessions' transcripts in the OS file browser. The path is
@@ -688,28 +692,21 @@ pub async fn resume_worktree_session(
     session_id: String,
     agent_kind: AgentKind,
     db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
 ) -> CmdResult<()> {
     validate_tab_id(&tab_id)?;
-    // Also the `issue_id` gate: this errors unless the id names a worktree the
-    // repo actually tracks, so nothing unvouched-for reaches the key below.
-    let listed = worktree::sessions(&db, &repo, &issue_id).await?;
     let term_key = format!("tree:{issue_id}:tab:{tab_id}");
     validate_term_key(&term_key)?;
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let sessions_root = codex_rollouts::sessions_root();
-    let worktree_dir = worktree::local_worktree(&db, &repo, &issue_id).await?;
-    Ok(session::adopt(
+    // Also the `issue_id` gate: this errors unless the id names a worktree the
+    // repo actually tracks, before anything is written under the key.
+    Ok(worktree::resume_session(
         &db,
-        &listed,
-        session::ResumeRequest {
-            repo: &repo,
-            term_key: &term_key,
-            session_id: &session_id,
-            agent_kind,
-            worktree: &worktree_dir,
-            home: home.as_deref(),
-            sessions_root: sessions_root.as_deref(),
-        },
+        &link,
+        &repo,
+        &issue_id,
+        &term_key,
+        &session_id,
+        agent_kind,
     )
     .await?)
 }

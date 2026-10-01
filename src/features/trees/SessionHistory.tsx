@@ -34,6 +34,7 @@ import { Badge, Button, Dot, EmptyState, ListSkeleton } from "../../components/p
 import { RelativeTime } from "../../components/RelativeTime";
 import { formatCompact, formatCostPrecise } from "../../lib/format";
 import {
+  useRepoReach,
   useRevealSessionTranscript,
   useWorktreeSessionDetail,
   useWorktreeSessionSubagents,
@@ -57,6 +58,16 @@ import {
   countSubagentNodes,
   type SubagentNode,
 } from "./sessionDetail";
+
+/** What a row says when its transcript was too long to read whole over the
+ *  link (`sampled`): its counts are then a lower bound, and its usage unknown. */
+const SAMPLED_HINT =
+  "A long transcript on Daedalus: santree read its start and its end, so it has at least this many messages and its usage isn't shown.";
+
+/** A message count, as a lower bound when only part of the transcript was read. */
+function msgs(count: number, sampled: boolean): string {
+  return `${count}${sampled ? "+" : ""} msgs`;
+}
 
 /** A model id as a badge: the vendor prefix says nothing next to the agent icon. */
 function modelLabel(model: string): string {
@@ -241,7 +252,9 @@ function SessionRow({
             {/* No cost at all rather than "$0.00": the backend sends null when it
                 has no price for the model, and a zero would read as free. */}
             {cost && <span className="tabular-nums">{cost} ·</span>}
-            <span className="tabular-nums">{s.messageCount} msgs</span>
+            <span className="tabular-nums" title={s.sampled ? SAMPLED_HINT : undefined}>
+              {msgs(s.messageCount, s.sampled)}
+            </span>
             {s.subagentCount > 0 && (
               <span className="tabular-nums">
                 · {s.subagentCount} subagent{s.subagentCount === 1 ? "" : "s"}
@@ -356,6 +369,8 @@ function SessionDetails({
   // A session with no subagents reads nothing from disk at all.
   const subagents = useWorktreeSessionSubagents(repo, worktreeId, s.sessionId, s.subagentCount > 0);
   const reveal = useRevealSessionTranscript(repo, worktreeId);
+  // A Daedalus project's transcripts are on the box: nothing to reveal here.
+  const { remote } = useRepoReach(repo);
 
   const openable = !!live?.openable;
   const blocked = openable
@@ -432,14 +447,16 @@ function SessionDetails({
             <CopyIcon size={11} /> Copy resume command
           </Button>
         )}
-        <Button
-          variant="outline"
-          size="sm"
-          title="Reveal this session's transcript in the file browser"
-          onClick={() => reveal.mutate(s.sessionId)}
-        >
-          <ExternalLinkIcon size={11} /> Open transcript
-        </Button>
+        {!remote && (
+          <Button
+            variant="outline"
+            size="sm"
+            title="Reveal this session's transcript in the file browser"
+            onClick={() => reveal.mutate(s.sessionId)}
+          >
+            <ExternalLinkIcon size={11} /> Open transcript
+          </Button>
+        )}
       </div>
       {/* Only where the button it explains is on offer — a reason you can't press
           something that isn't there reads as a missing control. */}
@@ -503,6 +520,8 @@ function SessionDetails({
           )}
         </>
       )}
+
+      {s.sampled && <p className="text-[11px] leading-[1.5] text-muted-3">{SAMPLED_HINT}</p>}
 
       {s.subagentCount > 0 && <SubagentSection count={s.subagentCount} rows={subagents.data} />}
 
@@ -631,7 +650,7 @@ function SubagentRow({ agent, level }: { agent: SessionSubagent; level: number }
       </span>
       {agent.agentType && <Badge>{agent.agentType}</Badge>}
       <span className="flex-none font-mono text-[10px] tabular-nums text-muted-4">
-        {agent.messageCount} msgs
+        {msgs(agent.messageCount, agent.sampled)}
       </span>
     </div>
   );

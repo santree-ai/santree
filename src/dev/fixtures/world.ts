@@ -897,6 +897,7 @@ export function sessions(repo: string, id: string, now: number): WorktreeSession
           startedAtMs: now - 38 * MIN,
           lastActivityMs: now - 40_000,
           spend: spend("claude-opus-5", 184_320, 1.87),
+          sampled: false,
         },
         {
           sessionId: "9b2e7f10-142z",
@@ -911,6 +912,7 @@ export function sessions(repo: string, id: string, now: number): WorktreeSession
           startedAtMs: now - 26 * HOUR,
           lastActivityMs: now - 25 * HOUR,
           spend: spend("claude-sonnet-5", 96_100, 0.64),
+          sampled: false,
         },
       ];
     case "QK-119":
@@ -928,6 +930,7 @@ export function sessions(repo: string, id: string, now: number): WorktreeSession
           startedAtMs: now - 3 * HOUR,
           lastActivityMs: now - 25 * MIN,
           spend: spend("claude-opus-5", 402_800, 4.12),
+          sampled: false,
         },
       ];
     case BASE_ID:
@@ -946,6 +949,7 @@ export function sessions(repo: string, id: string, now: number): WorktreeSession
           startedAtMs: now - 12 * MIN,
           lastActivityMs: now - 70_000,
           spend: spend("claude-opus-5", 61_200, 0.58),
+          sampled: false,
         },
         {
           sessionId: "d1e2f3a4-base",
@@ -960,6 +964,7 @@ export function sessions(repo: string, id: string, now: number): WorktreeSession
           startedAtMs: now - 2 * DAY,
           lastActivityMs: now - 2 * DAY + 20 * MIN,
           spend: spend("gpt-5.6-sol", 143_000, 0.9),
+          sampled: false,
         },
       ];
     default:

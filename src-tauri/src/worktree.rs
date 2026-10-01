@@ -20,12 +20,13 @@ use santree_core::domain::{
     TriageComment, TriageDetail, Worktree, WorktreeSession,
 };
 
+use crate::daedalus::history::{self, BoxRecords};
 use crate::daedalus::host::DaedalusHost;
 use crate::db::Db;
 use crate::git::{self, Checkout};
 use crate::repo;
 use crate::reviews;
-use crate::session;
+use crate::session::{self, RecordPresence};
 use crate::stream::{self, StreamEvent};
 
 /// Sentinel worktree id for the repo root itself — the checkout the per-issue
@@ -1294,49 +1295,205 @@ pub async fn branch_file_diff(
     .await
 }
 
-/// The agent sessions that have run in the worktree, newest first.
-pub async fn sessions(db: &Db, repo: &str, issue_id: &str) -> Result<Vec<WorktreeSession>> {
-    let path = local_worktree(db, repo, issue_id).await?;
-    session::history(db, repo, issue_id, &path).await
+/// Where a worktree's agent sessions left their records: this Mac's home, or
+/// — a Daedalus project's — the box's, read through the worktree's checkout
+/// there (`daedalus::history`).
+enum SessionsAt {
+    Local(PathBuf),
+    Daedalus { at: Checkout, home: PathBuf },
+}
+
+async fn sessions_at(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+) -> Result<SessionsAt> {
+    if !repo::is_daedalus(db, repo).await? {
+        return Ok(SessionsAt::Local(local_worktree(db, repo, issue_id).await?));
+    }
+    let located = locate(db, daedalus, repo, issue_id).await?;
+    let hello = daedalus
+        .hello()
+        .ok_or_else(|| anyhow!(crate::daedalus::host::describe(&daedalus.state())))?;
+    let at = located.dir;
+    let checked = at.clone();
+    tokio::task::spawn_blocking(move || ensure_available(&checked)).await??;
+    Ok(SessionsAt::Daedalus {
+        at,
+        home: PathBuf::from(&hello.home),
+    })
+}
+
+/// [`sessions`] of a Daedalus worktree, from the box's records.
+async fn box_sessions(
+    db: &Db,
+    repo: &str,
+    issue_id: &str,
+    at: Checkout,
+    home: PathBuf,
+) -> Result<Vec<WorktreeSession>> {
+    let rows = session::history_rows(db, repo, issue_id).await?;
+    let (claude, codex) = session::known_sessions(&rows);
+    let table = crate::pricing::ensure_fresh(db).await;
+    let summaries = tokio::task::spawn_blocking(move || {
+        BoxRecords::new(at, &home).summaries(&claude, &codex, &table)
+    })
+    .await??;
+    Ok(session::merge_history(rows, summaries))
+}
+
+/// The registered Claude sessions' `(cwd, id)` — what locates their
+/// transcripts on the box.
+async fn known_claude(db: &Db, repo: &str, issue_id: &str) -> Result<Vec<(String, String)>> {
+    let rows = session::history_rows(db, repo, issue_id).await?;
+    Ok(session::known_sessions(&rows).0)
+}
+
+/// The agent sessions that have run in the worktree, newest first — this
+/// Mac's records for a local project, the box's for a Daedalus one.
+pub async fn sessions(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+) -> Result<Vec<WorktreeSession>> {
+    match sessions_at(db, daedalus, repo, issue_id).await? {
+        SessionsAt::Local(path) => session::history(db, repo, issue_id, &path).await,
+        SessionsAt::Daedalus { at, home } => box_sessions(db, repo, issue_id, at, home).await,
+    }
 }
 
 /// What one of those sessions shows when its row is expanded. The listing is
 /// re-derived here rather than trusted from IPC, exactly as the resume path does
-/// it — `session::listed_transcript` then requires the id to be in it.
+/// it — the id must be in it.
 pub async fn session_detail(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
     session_id: &str,
 ) -> Result<SessionDetail> {
-    let path = local_worktree(db, repo, issue_id).await?;
-    let listed = session::history(db, repo, issue_id, &path).await?;
-    session::detail(db, repo, issue_id, &path, &listed, session_id).await
+    match sessions_at(db, daedalus, repo, issue_id).await? {
+        SessionsAt::Local(path) => {
+            let listed = session::history(db, repo, issue_id, &path).await?;
+            session::detail(db, repo, issue_id, &path, &listed, session_id).await
+        }
+        SessionsAt::Daedalus { at, home } => {
+            let listed = box_sessions(db, repo, issue_id, at.clone(), home.clone()).await?;
+            if !session::listed_claude(&listed, session_id)? {
+                return Ok(SessionDetail::default());
+            }
+            let known = known_claude(db, repo, issue_id).await?;
+            let id = session_id.to_string();
+            tokio::task::spawn_blocking(move || BoxRecords::new(at, &home).detail(&known, &id))
+                .await?
+        }
+    }
 }
 
 /// The Task subagents of one of those sessions, as a flat list carrying each
 /// one's parent and depth (the pane nests them).
 pub async fn session_subagents(
     db: &Db,
+    daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
     session_id: &str,
 ) -> Result<Vec<SessionSubagent>> {
-    let path = local_worktree(db, repo, issue_id).await?;
-    let listed = session::history(db, repo, issue_id, &path).await?;
-    session::subagents(db, repo, issue_id, &path, &listed, session_id).await
+    match sessions_at(db, daedalus, repo, issue_id).await? {
+        SessionsAt::Local(path) => {
+            let listed = session::history(db, repo, issue_id, &path).await?;
+            session::subagents(db, repo, issue_id, &path, &listed, session_id).await
+        }
+        SessionsAt::Daedalus { at, home } => {
+            let listed = box_sessions(db, repo, issue_id, at.clone(), home.clone()).await?;
+            if !session::listed_claude(&listed, session_id)? {
+                return Ok(Vec::new());
+            }
+            let known = known_claude(db, repo, issue_id).await?;
+            let id = session_id.to_string();
+            let now = chrono::Local::now().timestamp_millis();
+            tokio::task::spawn_blocking(move || {
+                BoxRecords::new(at, &home).subagents(&known, &id, now)
+            })
+            .await?
+        }
+    }
 }
 
-/// Reveal one of those sessions' transcripts in the OS file browser.
+/// Reveal one of those sessions' transcripts in the OS file browser — a local
+/// project's; a Daedalus project's transcript is on the box.
 pub async fn reveal_session_transcript(
     db: &Db,
     repo: &str,
     issue_id: &str,
     session_id: &str,
 ) -> Result<()> {
+    ensure!(
+        !repo::is_daedalus(db, repo).await?,
+        "This session's transcript is on Daedalus, not on this Mac."
+    );
     let path = local_worktree(db, repo, issue_id).await?;
     let listed = session::history(db, repo, issue_id, &path).await?;
     session::reveal_transcript(db, repo, issue_id, &path, &listed, session_id).await
+}
+
+/// Point the new tab `term_key` at one of the worktree's past sessions (the
+/// History pane's Resume), once its record is confirmed — on this Mac, or on
+/// the box for a Daedalus project, whose launch then resumes it there.
+pub async fn resume_session(
+    db: &Db,
+    daedalus: &DaedalusHost,
+    repo: &str,
+    issue_id: &str,
+    term_key: &str,
+    session_id: &str,
+    agent_kind: AgentKind,
+) -> Result<()> {
+    match sessions_at(db, daedalus, repo, issue_id).await? {
+        SessionsAt::Local(path) => {
+            let listed = session::history(db, repo, issue_id, &path).await?;
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let sessions_root = crate::codex_rollouts::sessions_root();
+            session::adopt(
+                db,
+                &listed,
+                session::ResumeRequest {
+                    repo,
+                    term_key,
+                    session_id,
+                    agent_kind,
+                    worktree: &path,
+                    home: home.as_deref(),
+                    sessions_root: sessions_root.as_deref(),
+                },
+            )
+            .await
+        }
+        SessionsAt::Daedalus { at, home } => {
+            let listed = box_sessions(db, repo, issue_id, at.clone(), home.clone()).await?;
+            let worktree = at.path().to_path_buf();
+            let request = session::ResumeRequest {
+                repo,
+                term_key,
+                session_id,
+                agent_kind,
+                worktree: &worktree,
+                home: None,
+                sessions_root: None,
+            };
+            session::adopt_with(db, &listed, &request, |kind, cwd, id| async move {
+                tokio::task::spawn_blocking(move || match kind {
+                    AgentKind::Codex => history::rollout_present(&at, &home, &id),
+                    _ => history::transcript_present(&at, &home, &cwd, &id),
+                })
+                .await
+                .unwrap_or_else(|e| RecordPresence::Unknown(format!("the check failed: {e}")))
+            })
+            .await
+        }
+    }
 }
 
 pub async fn files(

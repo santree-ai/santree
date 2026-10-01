@@ -144,8 +144,9 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    `setup` — its setup scripts there — `agents` — Claude and
                    Codex there: hooks written on the box, launch resolution,
                    the box's CLIs and process table — `settings` — this Mac's
-                   own settings through the agent's socket — plus the health
-                   check and the workspace list over the link)
+                   own settings through the agent's socket — `history` — its
+                   session history, read from the box's transcripts — plus the
+                   health check and the workspace list over the link)
                    · git.rs + git/checkout.rs (`Checkout`: the one seam a repo's
                    git, reads and writes, and its file access go through, here
                    or on Daedalus;

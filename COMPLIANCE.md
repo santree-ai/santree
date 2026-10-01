@@ -147,6 +147,8 @@ resume a past conversation. On a click, `resume_worktree_session` writes that id
 into `terminal_sessions` and the tab's ordinary launch builds `--resume <id>`
 from it. The id is re-derived from the worktree's own listing rather than
 trusted from IPC, and a human opening the tab is still the whole of the trigger.
+A Daedalus project's records are the same records on the box, read over the
+link by `daedalus/history.rs` with these same parsers, to the same ends.
 The third reader is opt-in: with the transcripts checkbox
 on, a single-shot PR-body draft receives the session text with tool calls and
 results stripped, and the user reviews what comes back.

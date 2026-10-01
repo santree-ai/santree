@@ -44,6 +44,15 @@ pub struct Checkout {
     path: PathBuf,
 }
 
+/// What [`Checkout::metadata`] answers: what is at a path, its size and its
+/// last write (Unix ms).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileMeta {
+    pub kind: FsKind,
+    pub size: u64,
+    pub mtime_ms: i64,
+}
+
 /// A finished git run: whether it exited 0, and what it printed. `stdout` is
 /// the raw bytes (a split refuses non-UTF-8 rather than guess); `stderr` is
 /// only ever shown.
@@ -227,6 +236,89 @@ impl Checkout {
                     path: self.server_path(path),
                 })?;
                 Ok(stat.exists.then(|| stat.kind.unwrap_or(FsKind::Other)))
+            }
+        }
+    }
+
+    /// What is at `path` (absolute, on the checkout's machine) — its kind, size
+    /// and last write — without following a final symlink; `None` when nothing
+    /// is.
+    pub(crate) fn metadata(&self, path: &Path) -> Result<Option<FileMeta>> {
+        match &self.host {
+            Host::Local => match std::fs::symlink_metadata(path) {
+                Ok(meta) => {
+                    let kind = meta.file_type();
+                    let mtime_ms = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_millis() as i64);
+                    Ok(Some(FileMeta {
+                        kind: if kind.is_symlink() {
+                            FsKind::Symlink
+                        } else if kind.is_dir() {
+                            FsKind::Dir
+                        } else if kind.is_file() {
+                            FsKind::File
+                        } else {
+                            FsKind::Other
+                        },
+                        size: meta.len(),
+                        mtime_ms,
+                    }))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(anyhow!("can't read {}: {e}", path.display())),
+            },
+            Host::Daedalus(client) => {
+                let stat = client.call_blocking::<m::FsStat>(&FsStatParams {
+                    path: self.server_path(path),
+                })?;
+                Ok(stat.exists.then(|| FileMeta {
+                    kind: stat.kind.unwrap_or(FsKind::Other),
+                    size: stat.size,
+                    mtime_ms: stat.mtime_ms,
+                }))
+            }
+        }
+    }
+
+    /// Up to `len` bytes of the file at `path` (absolute, on the checkout's
+    /// machine) from byte `offset`, refused unless its real path stays under
+    /// `within` — for files outside the checkout that santree finds by its own
+    /// path (the box's agent transcripts). On Daedalus the host caps `len`
+    /// (`FS_READ_MAX`): read big files in pages.
+    pub(crate) fn read_at(
+        &self,
+        path: &Path,
+        offset: u64,
+        len: u64,
+        within: &Path,
+    ) -> Result<Vec<u8>> {
+        match &self.host {
+            Host::Local => {
+                use std::io::{Seek, SeekFrom};
+                let real = path.canonicalize()?;
+                ensure!(
+                    real.starts_with(within.canonicalize()?),
+                    "{} resolves outside {}",
+                    path.display(),
+                    within.display()
+                );
+                let mut file = std::fs::File::open(&real)?;
+                file.seek(SeekFrom::Start(offset))?;
+                let mut data = Vec::new();
+                file.take(len).read_to_end(&mut data)?;
+                Ok(data)
+            }
+            Host::Daedalus(client) => {
+                let read = client.call_blocking::<m::FsRead>(&FsReadParams {
+                    path: self.server_path(path),
+                    offset: Some(i64::try_from(offset)?),
+                    len: Some(len),
+                    within: Some(self.server_path(within)),
+                })?;
+                Ok(read.data)
             }
         }
     }

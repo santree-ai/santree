@@ -12,6 +12,8 @@ const spies = vi.hoisted(() => ({
   detailCalls: [] as [string, boolean][],
   subagentCalls: [] as [string, boolean][],
   reveal: vi.fn(),
+  /** Whether the project lives on Daedalus (its transcripts are on the box). */
+  remote: false,
 }));
 
 vi.mock("../../lib/queries", () => ({
@@ -25,6 +27,7 @@ vi.mock("../../lib/queries", () => ({
     return { data: enabled ? spies.subagents : undefined };
   },
   useRevealSessionTranscript: () => ({ mutate: spies.reveal }),
+  useRepoReach: () => ({ remote: spies.remote }),
 }));
 
 vi.mock("../agents/useAgents", () => ({ useAgentEntries: () => [] }));
@@ -61,6 +64,7 @@ function session(over: Partial<WorktreeSession> = {}): WorktreeSession {
     startedAtMs: null,
     lastActivityMs: 1_700_000_000_000,
     spend: null,
+    sampled: false,
     ...over,
   };
 }
@@ -75,6 +79,7 @@ function subagent(over: Partial<SessionSubagent> = {}): SessionSubagent {
     messageCount: 4,
     status: "Completed",
     lastActivityMs: null,
+    sampled: false,
     ...over,
   };
 }
@@ -86,6 +91,7 @@ function reset(sessions: WorktreeSession[]) {
   spies.detailCalls = [];
   spies.subagentCalls = [];
   spies.reveal.mockClear();
+  spies.remote = false;
 }
 
 /** The row's own toggle, by its accessible name (the chevron has its own). */
@@ -216,5 +222,27 @@ describe("SessionHistory rows", () => {
     fireEvent.click(rowToggle("Refactor the parser"));
     fireEvent.click(screen.getByRole("button", { name: /Open transcript/ }));
     expect(spies.reveal).toHaveBeenCalledWith("s1");
+  });
+
+  /** A Daedalus project's transcript is on the box: nothing to reveal here. */
+  it("offers no file-browser reveal for a session that ran on Daedalus", () => {
+    reset([session()]);
+    spies.remote = true;
+    mount();
+    fireEvent.click(rowToggle("Refactor the parser"));
+    expect(screen.queryByRole("button", { name: /Open transcript/ })).toBeNull();
+  });
+
+  /** Too long to read whole over the link: the count is a lower bound, and says so. */
+  it("marks a session read from its start and end as at least its count", () => {
+    reset([session({ sampled: true, messageCount: 7 })]);
+    spies.remote = true;
+    mount();
+    expect(screen.getByText("7+ msgs")).toHaveAttribute(
+      "title",
+      expect.stringContaining("read its start and its end"),
+    );
+    fireEvent.click(rowToggle("Refactor the parser"));
+    expect(screen.getByText(/so it has at least this many messages/)).toBeInTheDocument();
   });
 });

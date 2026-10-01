@@ -234,7 +234,8 @@ export const commands = {
 	worktreeBranchFileDiff: (repo: string, issueId: string, path: string) => typedError<string, CmdError>(__TAURI_INVOKE("worktree_branch_file_diff", { repo, issueId, path })),
 	/**
 	 *  The agent sessions that have run in the worktree, newest first — registry
-	 *  rows plus Claude transcripts found on disk for its directory.
+	 *  rows plus Claude transcripts found on disk for its directory (this Mac's,
+	 *  or the box's for a Daedalus project).
 	 */
 	worktreeSessions: (repo: string, issueId: string) => typedError<WorktreeSession[], CmdError>(__TAURI_INVOKE("worktree_sessions", { repo, issueId })),
 	/**
@@ -3747,6 +3748,11 @@ export type SessionSubagent = {
 	status: SubagentStatus,
 	/**  Epoch ms of its transcript's last write. */
 	lastActivityMs: number | null,
+	/**
+	 *  Its transcript was read in part (see [`WorktreeSession::sampled`]):
+	 *  `message_count` is a lower bound.
+	 */
+	sampled: boolean,
 };
 
 /**  One message in a session's tail, for the expanded history row. */
@@ -4667,6 +4673,12 @@ export type WorktreeSession = {
 	 *  provider keeps no token counts — never a zeroed placeholder.
 	 */
 	spend: SessionSpend | null,
+	/**
+	 *  Summarised from the start and end of its record only — a Daedalus
+	 *  transcript too large to read whole over the link: `message_count` is a
+	 *  lower bound and `spend` is `None`. Never on this Mac.
+	 */
+	sampled: boolean,
 };
 
 /**
