@@ -1,11 +1,15 @@
 /**
- * The icon for a repository. For an `owner/name` repo we pull the owner's
+ * The icon for a repository. A Daedalus project draws its app icon, as the box
+ * serves it (`src/lib/daedalusIcon.ts`) — as an `<img>`, never inlined markup.
+ * Otherwise, or when the box has none, an `owner/name` repo draws the owner's
  * avatar from GitHub (`https://github.com/<owner>.png`, no auth needed); if the
  * repo has no owner or the avatar fails to load, we fall back to the GitHub
  * logomark. Remote images are allowed by the app's (null) CSP.
  */
 import { useState } from "react";
 
+import { iconSrc, workspaceOf } from "../../lib/daedalusIcon";
+import { useDaedalusIcon, useRepos } from "../../lib/queries";
 import { GitHubLogo } from "../icons";
 
 /** Owner of an `owner/name` repo, or null if the name has no owner segment. */
@@ -43,6 +47,18 @@ export function RepoAvatar({
   bordered?: boolean;
 }) {
   const owner = ownerOf(repo);
+  const { data: repos } = useRepos();
+  const workspace = workspaceOf(repos?.find((r) => r.name === repo));
+  const icon = useDaedalusIcon(workspace);
+  const appIcon = iconSrc(icon.data);
+  // The same per-source failure memory as the owner's avatar: an icon that
+  // won't decode falls back, and a new one is tried.
+  const [failedIcon, setFailedIcon] = useState<string | null>(null);
+  // Until the first answer, nothing: drawing the GitHub mark and then swapping
+  // in the app icon is the flash this avoids. The answer is usually the
+  // backend's cache (memory, then disk); only a workspace never seen waits on
+  // the box. Later re-reads keep the drawn icon until they answer.
+  const waiting = workspace !== null && icon.status === "pending";
   // Track which owner's avatar failed, so changing repos retries without an
   // effect (and an owner that already failed keeps its fallback).
   const [failedOwner, setFailedOwner] = useState<string | null>(null);
@@ -54,7 +70,17 @@ export function RepoAvatar({
       }`}
       style={{ width: size, height: size }}
     >
-      {owner && owner !== failedOwner ? (
+      {waiting ? null : appIcon && appIcon !== failedIcon ? (
+        <img
+          src={appIcon}
+          alt=""
+          width={size}
+          height={size}
+          draggable={false}
+          className="h-full w-full object-contain"
+          onError={() => setFailedIcon(appIcon)}
+        />
+      ) : owner && owner !== failedOwner ? (
         <img
           src={avatarUrl(owner)}
           alt=""

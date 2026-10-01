@@ -20,17 +20,18 @@ use santree_core::{
         AgentAuth, AgentDef, AgentKind, AgentProcess, AgentSession, AgentVersionStatus,
         AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
         ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
-        DaedalusAgentHooks, DaedalusHealth, DaedalusLink, DaedalusMachine, DaedalusSettingAnswer,
-        DaedalusSettingKey, DaedalusWorkspaceList, EnglishAnalysis, EnglishLog, FileSource,
-        GithubApiBudget, GithubStatus, JiraSite, JiraStatus, LegacyCliMigration, LinearApiBudget,
-        LinearOrg, LinearStatus, LinearTeam, LogExport, MergeQueueView, NewInlineComment, NewPr,
-        NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptLayer,
-        PromptPreview, PromptWorkItemSample, Repo, RepoBranch, RepoLocation, ResourceUsage,
-        ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
-        ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail,
-        SessionState, SessionSubagent, SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task,
-        TicketRef, TriageDetail, TriageSchedule, TriageSession, TriageTicket, UsageReport,
-        ViewedMarks, Worktree, WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
+        DaedalusAgentHooks, DaedalusHealth, DaedalusIcon, DaedalusLink, DaedalusMachine,
+        DaedalusSettingAnswer, DaedalusSettingKey, DaedalusWorkspaceList, EnglishAnalysis,
+        EnglishLog, FileSource, GithubApiBudget, GithubStatus, JiraSite, JiraStatus,
+        LegacyCliMigration, LinearApiBudget, LinearOrg, LinearStatus, LinearTeam, LogExport,
+        MergeQueueView, NewInlineComment, NewPr, NewReviewWorkItem, Opener, PrDetail, PrDraft,
+        PrLabel, PromptInfo, PromptLayer, PromptPreview, PromptWorkItemSample, Repo, RepoBranch,
+        RepoLocation, ResourceUsage, ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent,
+        ReviewInbox, ReviewPr, ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer,
+        ScriptInfo, SessionDetail, SessionState, SessionSubagent, SessionUsageLive, Settings,
+        TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail, TriageSchedule, TriageSession,
+        TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreeLaunch, WorktreePr,
+        WorktreeSession, WorktreeTab,
     },
 };
 
@@ -151,6 +152,19 @@ pub async fn daedalus_workspaces(
     link: State<'_, DaedalusHost>,
 ) -> CmdResult<DaedalusWorkspaceList> {
     Ok(daedalus::workspaces(&db, &link).await?)
+}
+
+/// The app icon of the box's workspace `name` (a `workspaces.list` name), or
+/// `None` for the generic mark. Asked of the box once per workspace per link
+/// and kept, on disk too: a link that is down answers the icon kept last time.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_icon(
+    name: String,
+    icons: State<'_, daedalus::icons::Icons>,
+    link: State<'_, DaedalusHost>,
+) -> CmdResult<Option<DaedalusIcon>> {
+    Ok(icons.get(&link, &name).await?)
 }
 
 /// santree's session hooks for agents in the Daedalus project `repo`, written on

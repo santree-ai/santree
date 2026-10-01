@@ -256,6 +256,7 @@ fn specta_builder() -> AppBuilder {
             commands::daedalus_settings,
             commands::daedalus_set_setting,
             commands::daedalus_workspaces,
+            commands::daedalus_icon,
             commands::add_daedalus_repo,
             commands::daedalus_agent_hooks,
             commands::daedalus_agent_clis,
@@ -718,6 +719,8 @@ pub fn run() {
                 data_dir.join("santree.db").to_string_lossy().into_owned(),
             );
             app.manage(daedalus_link);
+            // Daedalus projects' app icons, kept beside the database.
+            app.manage(daedalus::icons::Icons::new(data_dir.join("daedalus-icons")));
             // The agent's own socket, for this Mac's settings (Settings › Daedalus).
             app.manage(santree_remote_client::AgentControl::new());
             {

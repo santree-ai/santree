@@ -213,6 +213,11 @@ impl DaedalusHost {
         self.host.hello()
     }
 
+    /// Which link this is: it moves on every reconnect.
+    pub fn generation(&self) -> u64 {
+        self.host.generation()
+    }
+
     /// Start the link's background work: announce every status change to the
     /// frontend and relay hooks into `db`. Call once, from setup; the link
     /// itself starts with [`DaedalusHost::resume`].

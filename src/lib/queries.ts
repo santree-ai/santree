@@ -394,6 +394,8 @@ export const queryKeys = {
   openers: ["openers"] as const,
   daedalusStatus: ["daedalus-status"] as const,
   daedalusWorkspaces: ["daedalus-workspaces"] as const,
+  daedalusIcons: ["daedalus-icon"] as const,
+  daedalusIcon: (name: string) => ["daedalus-icon", name] as const,
   daedalusHealth: ["daedalus-health"] as const,
   daedalusMachine: ["daedalus-machine"] as const,
   initScript: (repo: string) => ["init-script", repo] as const,
@@ -1887,6 +1889,9 @@ export const useDaedalusLinkWatcher = () => {
   useEffect(() => {
     const unlisten = events.daedalusLinkChanged.listen(() => {
       qc.invalidateQueries({ queryKey: queryKeys.daedalusStatus });
+      // A reconnect is when the backend asks the box for icons again; one
+      // that went down answers what it kept, so this never blanks a mark.
+      qc.invalidateQueries({ queryKey: queryKeys.daedalusIcons });
     });
     return () => {
       void unlisten.then((off) => off());
@@ -1932,6 +1937,22 @@ export const useDaedalusWorkspaces = (enabled = true) =>
     enabled,
     staleTime: 15_000,
     refetchOnWindowFocus: true,
+  });
+
+/** How often an icon on screen is re-read from the backend, which asks the box
+ *  only on a new link or once a day — so this is what makes "a day" happen for
+ *  an app left open on one link. */
+const DAEDALUS_ICON_REREAD_MS = 60 * 60_000;
+
+/** The app icon of the box's workspace `name`, or `null` for the generic mark.
+ *  Never an error toast: an icon is decoration. */
+export const useDaedalusIcon = (name: string | null) =>
+  useUnwrappedQuery(queryKeys.daedalusIcon(name ?? ""), () => commands.daedalusIcon(name ?? ""), {
+    enabled: name !== null,
+    staleTime: DAEDALUS_ICON_REREAD_MS,
+    refetchInterval: DAEDALUS_ICON_REREAD_MS,
+    gcTime: Number.POSITIVE_INFINITY,
+    meta: { silent: true },
   });
 
 /** Register one of the server's checkouts as a project. The row reads as added

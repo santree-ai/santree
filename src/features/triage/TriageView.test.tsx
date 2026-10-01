@@ -38,6 +38,8 @@ vi.mock("../../state/AppContext", () => ({
   }),
 }));
 vi.mock("../../lib/queries", () => ({
+  // RepoAvatar asks for a Daedalus project's icon; none here.
+  useDaedalusIcon: () => ({ data: null, status: "success" }),
   INVESTIGATE_AGENT_KEY: "investigate.agent",
   useAgentAuth: () => ({ data: { connected: true } }),
   useCodexAccount: () => ({ data: { connected: true } }),

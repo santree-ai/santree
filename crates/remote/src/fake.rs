@@ -54,6 +54,11 @@ pub struct FakeOptions {
     /// What `workspaces.list` answers: the snapshot's time and rows.
     pub workspaces_generated_at: Option<String>,
     pub workspaces: Vec<Workspace>,
+    /// What `workspaces.icon` answers, by workspace name; a name with none
+    /// is `not_found`. Served only while `features` names the method, as a
+    /// host from before it answers it as unknown. [`FakeDaemon::set_icon`]
+    /// changes it on a running daemon.
+    pub icons: HashMap<String, WorkspaceIcon>,
     pub ping_interval: Duration,
     pub hook_queue_cap: usize,
     /// The host's own environment, over this process's, for every `exec.run`
@@ -72,9 +77,13 @@ impl Default for FakeOptions {
             home: std::env::var("HOME").unwrap_or_default(),
             projects_root: std::env::var("HOME").unwrap_or_default(),
             hook_bin: "/fake/bin/daedalus-session-host".into(),
-            features: vec![m::WorkspacesList::NAME.into()],
+            features: vec![
+                m::WorkspacesList::NAME.into(),
+                m::WorkspacesIcon::NAME.into(),
+            ],
             workspaces_generated_at: None,
             workspaces: vec![],
+            icons: HashMap::new(),
             ping_interval: PING_INTERVAL,
             hook_queue_cap: HOOK_QUEUE_CAP,
             env: Vec::new(),
@@ -286,6 +295,9 @@ struct Daemon {
     /// The argv of every `exec.run` served, in order — what a test reads to
     /// know a command ran here, on the "box", and not somewhere else.
     execs: Mutex<Vec<Vec<String>>>,
+    icons: Mutex<HashMap<String, WorkspaceIcon>>,
+    /// The `name` of every `workspaces.icon` asked, in order.
+    icon_asks: Mutex<Vec<String>>,
 }
 
 impl Drop for Daemon {
@@ -313,6 +325,7 @@ impl FakeDaemon {
 
     pub fn with_options(opts: FakeOptions) -> Self {
         let cap = opts.hook_queue_cap;
+        let icons = opts.icons.clone();
         Self {
             inner: Arc::new(Daemon {
                 opts,
@@ -329,6 +342,8 @@ impl FakeDaemon {
                 next_conn: AtomicU64::new(1),
                 conns: Mutex::new(HashMap::new()),
                 execs: Mutex::new(Vec::new()),
+                icons: Mutex::new(icons),
+                icon_asks: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -394,6 +409,21 @@ impl FakeDaemon {
     /// The argv of every `exec.run` this daemon has served, oldest first.
     pub fn exec_log(&self) -> Vec<Vec<String>> {
         lock(&self.inner.execs).clone()
+    }
+
+    /// Give workspace `name` an icon, or take it away.
+    pub fn set_icon(&self, name: &str, icon: Option<WorkspaceIcon>) {
+        let mut icons = lock(&self.inner.icons);
+        match icon {
+            Some(icon) => icons.insert(name.to_string(), icon),
+            None => icons.remove(name),
+        };
+    }
+
+    /// The `name` of every `workspaces.icon` this daemon was asked, oldest
+    /// first — whether or not it had one.
+    pub fn icon_log(&self) -> Vec<String> {
+        lock(&self.inner.icon_asks).clone()
     }
 
     pub fn connection_count(&self) -> usize {
@@ -768,10 +798,38 @@ impl Daemon {
                 generated_at: self.opts.workspaces_generated_at.clone(),
                 workspaces: self.opts.workspaces.clone(),
             })),
+            m::WorkspacesIcon::NAME
+                if self
+                    .opts
+                    .features
+                    .iter()
+                    .any(|f| f == m::WorkspacesIcon::NAME) =>
+            {
+                let p = params!(WorkspacesIconParams);
+                lock(&self.icon_asks).push(p.name.clone());
+                Some(self.workspace_icon(&p.name))
+            }
             other => Some(Err(err(
                 ErrorCode::BadRequest,
                 format!("unknown method {other}"),
             ))),
+        }
+    }
+
+    /// `workspaces.icon`: the host's answers — `bad_request` for a name that
+    /// is not one plain path component, `not_found` for one with no icon.
+    fn workspace_icon(&self, name: &str) -> Outcome {
+        let plain =
+            !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0']);
+        if !plain {
+            return Err(err(
+                ErrorCode::BadRequest,
+                format!("{name:?} is not a workspace name"),
+            ));
+        }
+        match lock(&self.icons).get(name) {
+            Some(icon) => ok(icon),
+            None => Err(err(ErrorCode::NotFound, format!("no icon for {name}"))),
         }
     }
 

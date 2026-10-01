@@ -1206,6 +1206,15 @@ export const commands = {
 	 */
 	daedalusWorkspaces: () => typedError<DaedalusWorkspaceList, CmdError>(__TAURI_INVOKE("daedalus_workspaces")),
 	/**
+	 *  The app icon of the box's workspace `name` (a `workspaces.list` name), or
+	 *  `None` for the generic mark. Asked of the box once per workspace per link
+	 *  and kept, on disk too: a link that is down answers the icon kept last time.
+	 */
+	daedalusIcon: (name: string) => typedError<{
+	contentType: string,
+	data: string,
+} | null, CmdError>(__TAURI_INVOKE("daedalus_icon", { name })),
+	/**
 	 *  Register one of the server's checkouts as a project. `name` only selects: its
 	 *  path and remote are re-read from the server, never taken from IPC. Fails when
 	 *  Daedalus can't be reached — this is an explicit action.
@@ -1994,6 +2003,18 @@ export type DaedalusHealth = {
 	link: DaedalusLink,
 	/**  RFC 3339. */
 	checkedAt: string,
+};
+
+/**
+ *  A Daedalus project's app icon, as the box serves it (`workspaces.icon`) and
+ *  santree re-checked it: `content_type` is one of `image/png`,
+ *  `image/svg+xml`, `image/x-icon` or `image/webp`, and `data` is the bytes as
+ *  standard padded base64, at most 64 KiB decoded. Drawn only as an image (an
+ *  `<img>` with a `data:` URL), never inlined: the bytes are the box's.
+ */
+export type DaedalusIcon = {
+	contentType: string,
+	data: string,
 };
 
 /**

@@ -119,6 +119,65 @@ async fn workspaces_list_answers_the_hosts_snapshot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspaces_icon_answers_the_hosts_icons() {
+    let svg = WorkspaceIcon {
+        content_type: "image/svg+xml".into(),
+        data: b"<svg/>".to_vec(),
+    };
+    let daemon = FakeDaemon::with_options(FakeOptions {
+        icons: [("web".to_string(), svg.clone())].into(),
+        ..FakeOptions::default()
+    });
+    let client = unhandshaken(&daemon);
+    let hello = client.hello("santree/test", "owner-a").await.unwrap();
+    assert!(hello.supports::<m::WorkspacesIcon>());
+    let ask = |name: &str| {
+        let params = WorkspacesIconParams { name: name.into() };
+        let client = &client;
+        async move { client.call::<m::WorkspacesIcon>(&params).await }
+    };
+    assert_eq!(ask("web").await.unwrap(), svg);
+    assert_eq!(
+        ask("infra").await.unwrap_err().code(),
+        Some(&ErrorCode::NotFound)
+    );
+    for bad in ["", "..", "a/b"] {
+        assert_eq!(
+            ask(bad).await.unwrap_err().code(),
+            Some(&ErrorCode::BadRequest),
+            "{bad:?}"
+        );
+    }
+    daemon.set_icon("infra", Some(svg.clone()));
+    daemon.set_icon("web", None);
+    assert_eq!(ask("infra").await.unwrap(), svg);
+    assert_eq!(
+        ask("web").await.unwrap_err().code(),
+        Some(&ErrorCode::NotFound)
+    );
+    assert_eq!(
+        daemon.icon_log(),
+        ["web", "infra", "", "..", "a/b", "infra", "web"]
+    );
+
+    // A host that doesn't announce it doesn't know it.
+    let old = FakeDaemon::with_options(FakeOptions {
+        features: vec![m::WorkspacesList::NAME.into()],
+        icons: [("web".to_string(), svg)].into(),
+        ..FakeOptions::default()
+    });
+    let client = unhandshaken(&old);
+    let hello = client.hello("santree/test", "owner-a").await.unwrap();
+    assert!(!hello.supports::<m::WorkspacesIcon>());
+    let refused = client
+        .call::<m::WorkspacesIcon>(&WorkspacesIconParams { name: "web".into() })
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Some(&ErrorCode::BadRequest));
+    assert!(old.icon_log().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unsupported_protocol_is_refused_and_the_link_stays_open() {
     let daemon = FakeDaemon::new();
     let client = unhandshaken(&daemon);

@@ -113,6 +113,24 @@ anchors.
   `workspaces.list` (`hello`'s `features`). `add_daedalus_repo(name)` re-reads that
   list and registers the named checkout; the path and remote are the host's, never
   IPC's.
+- `daedalus_icon(name)` is a workspace's app icon (`workspaces.icon`) as
+  `DaedalusIcon { contentType, data }` (base64), or `null` for the generic mark.
+  `daedalus/icons.rs` asks only when `hello` announces the method, and once per
+  workspace per link: an answer, `not_found` included, holds until a reconnect or
+  a day passes, and is written to `<app data>/daedalus-icons/<name>.json`. With
+  the link down (or still coming up) the kept answer is served and nothing is
+  asked, so a launch away from home draws the icon it drew last time; with
+  nothing kept, or a host that doesn't announce icons, it is `null`. `busy` or a
+  dropped link keeps what there was. The bytes are checked again here — an allowed
+  type, 1..=64 KiB, and bytes that sniff as that type (`WorkspaceIcon::checked`)
+  — and kept files are checked again on read.
+  The frontend's `RepoAvatar` asks for every Daedalus repo (the workspace is the
+  last component of its server path) and draws it as an `<img>` with a `data:`
+  URL — never inlined markup, so a script in an SVG never runs — after checking
+  the type and size once more (`src/lib/daedalusIcon.ts`). Until the first answer
+  the tile is drawn empty rather than with the GitHub mark it might then swap; a
+  `null` answer, or an image that fails to decode, draws the usual mark. The link
+  watcher re-asks on every link change.
 - `repos.location` is `'local'` (default) or `'daedalus'`; it ships as
   `Repo.location: RepoLocation`. A Daedalus repo's `path` is the absolute path **on
   the server**. Never `canonicalize`, `is_dir` or read it locally.
@@ -194,7 +212,7 @@ reloads); a PTY session's own `owner` is the webview's page owner, as locally.
 `projectsRoot` is the absolute root the checkouts live under; `hookBin` the absolute
 path an agent's hook command runs (`<hookBin> hook <args>`), stable across host
 updates; `features` the wire names of the optional methods the host serves
-(`["workspaces.list"]`) — a client checks it (`HelloResult::supports`) and shows
+(`["workspaces.list", "workspaces.icon"]`) — a client checks it (`HelloResult::supports`) and shows
 "session host too old" rather than calling a missing one. All three are required.
 
 PTY (session info = `{id,pid,cwd,command,owner,label,agentKind,cols,rows,attached,
@@ -235,12 +253,20 @@ Features (served only when `hello`'s `features` names them):
 | method | params | result |
 |---|---|---|
 | `workspaces.list` | `{}` | `{root,generatedAt,workspaces:[{name,path,remote,branch,head,headAt,dirty,ahead,behind,sync}]}` |
+| `workspaces.icon` | `{name}` (unknown keys: `bad_request`) | `{contentType,data}` |
 
 `root` is `projectsRoot`; `path` is `<root>/<name>`, `name` one plain component. Every
 optional is written as `null`, never omitted: `generatedAt` (RFC 3339; `null` = no
 snapshot yet, with an empty list), `remote`/`branch`/`head`/`headAt`, `ahead`/`behind`
 (`null` with no upstream) and `sync` (`{result,detail,at}`, `null` before the host's
 first sync of that checkout).
+
+`workspaces.icon` is a workspace's app icon, the one Daedalus's Apps page shows for
+the project whose repo is that checkout. `contentType` is `image/png`,
+`image/svg+xml`, `image/x-icon` or `image/webp`, sniffed from the bytes by the host;
+`data` the bytes, at most 64 KiB decoded. `not_found` when there is none, `busy`
+under load, `bad_request` for a `name` that isn't one plain component. Kept apart
+from `workspaces.list` so a poll never carries image bytes.
 
 ### The agent ↔ session host link
 
@@ -584,6 +610,9 @@ or (by default) specta, and their public APIs are a contract with that repo.
   connection to a `FakeDaemon` — what the connector and the app's health,
   workspace and git tests connect through. `FakeDaemon::exec_log()` is the argv of
   every `exec.run` it served, so a test can say what ran on the "box".
+  `FakeOptions::icons` is what its `workspaces.icon` answers (served only while
+  `features` names it); `set_icon` changes it live and `icon_log()` is every name
+  asked.
   `FakeAgentControl` stands in for `agent.sock`: it answers `settings.get` /
   `settings.set` as agent 0.25 does, over settings the test moves (`apply`,
   `fail`, `set_linked`, `set_may_change`, `set_outdated`).
@@ -610,6 +639,12 @@ fake agent and daemon, whose `FakeOptions::env` gives the fake box a home and
   `stream::RUNS`.
 - `settings.rs` — this Mac's settings through `AgentControl`, as values, and
   the confirm page opened (https only).
+- `icons.rs` — `Icons` (Tauri-managed): `workspaces.icon` asked once per
+  workspace per link and kept, in memory and on disk (above, "States and
+  settings"). Its tests run over the fake agent and daemon: one ask per
+  workspace, a reconnect and a day asking again, a link that is down drawing
+  what was kept, a host without the feature never asked, and bytes that aren't
+  what they claim.
 - `mod.rs` — the health check, `workspaces.list` over the link, and registering a
   checkout. `git_tests.rs` drives a Daedalus project's git end to end: the
   worktree commands through a `FakeAgent` and `FakeDaemon` to real git in a temp

@@ -16,6 +16,8 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("../../lib/queries", () => ({
+  // RepoAvatar asks for a Daedalus project's icon; none here.
+  useDaedalusIcon: () => ({ data: null, status: "success" }),
   useRepos: () => ({ data: [{ name: "acme/app" }] }),
 }));
 

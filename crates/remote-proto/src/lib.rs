@@ -243,6 +243,9 @@ pub mod m {
         /// The checkouts under the host's projects root. A feature: a host
         /// that serves it names it in `hello`'s `features`.
         WorkspacesList = "workspaces.list": Empty => WorkspacesResult;
+        /// One workspace's app icon. A feature, like `workspaces.list`;
+        /// `not_found` when there is none.
+        WorkspacesIcon = "workspaces.icon": WorkspacesIconParams => WorkspaceIcon;
     }
 }
 
@@ -584,6 +587,70 @@ pub struct WorkspaceSync {
     pub at: String,
 }
 
+/// The largest icon `workspaces.icon` answers, decoded.
+pub const WORKSPACE_ICON_MAX: usize = 64 * 1024;
+
+/// Every `contentType` `workspaces.icon` answers.
+pub const WORKSPACE_ICON_TYPES: [&str; 4] =
+    ["image/png", "image/svg+xml", "image/x-icon", "image/webp"];
+
+/// `workspaces.icon`'s params. The host denies unknown keys, so this does too:
+/// the one place decoding is strict, to stay the host's mirror.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspacesIconParams {
+    /// A workspace's `name` from `workspaces.list`.
+    pub name: String,
+}
+
+/// `workspaces.icon`'s answer: the bytes and what they are, sniffed by the
+/// host. Untrusted all the same — see [`WorkspaceIcon::checked`]. An SVG is
+/// data for an image decoder, never markup to inline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceIcon {
+    /// One of [`WORKSPACE_ICON_TYPES`].
+    pub content_type: String,
+    #[serde(with = "b64")]
+    pub data: Vec<u8>,
+}
+
+impl WorkspaceIcon {
+    /// The icon, if it is what it says: an allowed type, 1..=
+    /// [`WORKSPACE_ICON_MAX`] bytes, and bytes that sniff as that type. A
+    /// client re-checks rather than trusting the host's sniff.
+    pub fn checked(self) -> Option<Self> {
+        let ok = !self.data.is_empty()
+            && self.data.len() <= WORKSPACE_ICON_MAX
+            && sniff_icon(&self.data) == Some(self.content_type.as_str());
+        ok.then_some(self)
+    }
+}
+
+/// What image bytes are, by their content alone — the host's own sniff: PNG,
+/// WebP, ICO/CUR, or a UTF-8 SVG (opening on `<svg`, or an XML prolog with an
+/// `<svg` in its first 512 chars). `None` for anything else, so the answer is
+/// always one of [`WORKSPACE_ICON_TYPES`].
+pub fn sniff_icon(body: &[u8]) -> Option<&'static str> {
+    if body.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("image/png");
+    }
+    if body.len() >= 12 && &body[..4] == b"RIFF" && &body[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if body.len() >= 6 && body[..2] == [0, 0] && matches!(body[2..4], [1, 0] | [2, 0]) {
+        return Some("image/x-icon");
+    }
+    let text = std::str::from_utf8(body).ok()?;
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    let end = text.char_indices().nth(512).map_or(text.len(), |(i, _)| i);
+    let head = &text[..end];
+    if head.starts_with("<svg") || (head.starts_with("<?xml") && head.contains("<svg")) {
+        return Some("image/svg+xml");
+    }
+    None
+}
+
 // ── events ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -836,6 +903,8 @@ mod tests {
         assert!(hello(&["workspaces.list"]).supports::<m::WorkspacesList>());
         assert!(!hello(&[]).supports::<m::WorkspacesList>());
         assert!(!hello(&["workspaces"]).supports::<m::WorkspacesList>());
+        assert!(hello(&["workspaces.list", "workspaces.icon"]).supports::<m::WorkspacesIcon>());
+        assert!(!hello(&["workspaces.list"]).supports::<m::WorkspacesIcon>());
         // The new fields are part of every hello, not optional.
         assert!(serde_json::from_str::<HelloResult>(
             r#"{"protocol":1,"version":"v","hostname":"h","user":"u","home":"/h","bootId":"b"}"#
@@ -892,6 +961,86 @@ mod tests {
             },
             r#"{"root":"/home/santiago/projects","generatedAt":null,"workspaces":[]}"#,
         );
+    }
+
+    #[test]
+    fn workspaces_icon_shapes() {
+        assert_eq!(
+            req::<m::WorkspacesIcon>(
+                7,
+                &WorkspacesIconParams {
+                    name: "iris".into()
+                }
+            ),
+            r#"{"id":7,"m":"workspaces.icon","p":{"name":"iris"}}"#
+        );
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#.to_vec();
+        round_trip(
+            &WorkspaceIcon {
+                content_type: "image/svg+xml".into(),
+                data: svg.clone(),
+            },
+            r#"{"contentType":"image/svg+xml","data":"PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4="}"#,
+        );
+        // A whole response line, as the host writes it.
+        let line = encode_ok(
+            7,
+            &WorkspaceIcon {
+                content_type: "image/png".into(),
+                data: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            r#"{"id":7,"ok":{"contentType":"image/png","data":"iVBORw0KGgo="}}"#
+        );
+        // The host denies unknown params, and so does this mirror of them.
+        assert!(
+            serde_json::from_str::<WorkspacesIconParams>(r#"{"name":"iris","size":64}"#).is_err()
+        );
+        assert!(serde_json::from_str::<WorkspacesIconParams>(r#"{}"#).is_err());
+        // Not base64: the frame fails, rather than handing over garbage.
+        assert!(serde_json::from_str::<WorkspaceIcon>(
+            r#"{"contentType":"image/png","data":"not base64!"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn an_icon_is_checked_against_its_own_bytes() {
+        let icon = |content_type: &str, data: &[u8]| WorkspaceIcon {
+            content_type: content_type.into(),
+            data: data.to_vec(),
+        };
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0];
+        let webp = *b"RIFF\0\0\0\0WEBPVP8 ";
+        let ico = [0, 0, 1, 0, 1, 0];
+        assert!(icon("image/png", &png).checked().is_some());
+        assert!(icon("image/webp", &webp).checked().is_some());
+        assert!(icon("image/x-icon", &ico).checked().is_some());
+        assert!(icon("image/svg+xml", b"\xef\xbb\xbf  <svg/>")
+            .checked()
+            .is_some());
+        assert!(icon("image/svg+xml", b"<?xml version=\"1.0\"?>\n<svg/>")
+            .checked()
+            .is_some());
+        // A type the bytes are not, a type outside the four, and no bytes.
+        assert!(icon("image/svg+xml", &png).checked().is_none());
+        assert!(icon("text/html", b"<html>login</html>").checked().is_none());
+        assert!(icon("image/svg+xml", b"<html><svg/></html>")
+            .checked()
+            .is_none());
+        assert!(icon("image/png", b"").checked().is_none());
+        // Past the cap, even with a good header.
+        let mut big = png.to_vec();
+        big.resize(WORKSPACE_ICON_MAX + 1, 0);
+        assert!(icon("image/png", &big).checked().is_none());
+        big.truncate(WORKSPACE_ICON_MAX);
+        assert!(icon("image/png", &big).checked().is_some());
+        for t in WORKSPACE_ICON_TYPES {
+            assert!(t.starts_with("image/"));
+        }
     }
 
     #[test]

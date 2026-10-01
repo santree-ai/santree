@@ -10,6 +10,8 @@ const state = vi.hoisted(() => ({
   setRepo: vi.fn(),
 }));
 vi.mock("../../lib/queries", () => ({
+  // RepoAvatar asks for a Daedalus project's icon; none here.
+  useDaedalusIcon: () => ({ data: null, status: "success" }),
   useRepos: () => ({ data: [{ name: "acme/app", path: "/src/app" }] }),
   useDaedalusStatus: () => ({ data: { kind: "Connected" } }),
   useTriageRepo: () => ({

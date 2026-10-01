@@ -238,6 +238,13 @@ impl RemoteHost {
         self.inner.live().as_ref().map(|(_, hello)| hello.clone())
     }
 
+    /// How many links this host has brought up, the one now live included —
+    /// the [`Reconnected::generation`] of the latest. What a cache keyed on
+    /// "this link" compares to know a reconnect happened since.
+    pub fn generation(&self) -> u64 {
+        self.inner.generation.load(Ordering::Relaxed)
+    }
+
     pub fn reconnected(&self) -> broadcast::Receiver<Reconnected> {
         self.inner.reconnected.subscribe()
     }
@@ -401,6 +408,9 @@ async fn serve(inner: &Inner, connection: Connection) {
         }
     };
 
+    // Counted before the link is handed out, so whoever sees this link's
+    // client or hello also sees its generation.
+    let generation = inner.generation.fetch_add(1, Ordering::Relaxed) + 1;
     let hello = &connection.hello;
     inner.set_live(Some((client.clone(), hello.clone())));
     inner.set_status(HostStatus::Connected {
@@ -409,7 +419,6 @@ async fn serve(inner: &Inner, connection: Connection) {
         projects_root: hello.projects_root.clone(),
         agent: connection.agent.clone(),
     });
-    let generation = inner.generation.fetch_add(1, Ordering::Relaxed) + 1;
     log::info!("remote: connected (generation {generation})");
     let _ = inner.reconnected.send(Reconnected { generation });
 

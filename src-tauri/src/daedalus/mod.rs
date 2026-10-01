@@ -1,8 +1,9 @@
 //! Daedalus — the user's home server, where Daedalus projects live and run
 //! (docs/remote.md). santree reaches it only through the Daedalus agent on
 //! this machine: [`host`] is that live link and the hook relay. This module
-//! answers the health check, lists the server's checkouts over the link, and
-//! registers one of them as a santree project.
+//! answers the health check, lists the server's checkouts over the link (and
+//! their app icons, [`icons`]), and registers one of them as a santree
+//! project.
 //!
 //! Unreachable is normal. Every read here answers with a [`DaedalusLink`] as
 //! a plain value; only genuinely broken local state (the database) is an
@@ -11,6 +12,7 @@
 pub mod agents;
 pub mod history;
 pub mod host;
+pub mod icons;
 pub mod settings;
 pub mod setup;
 pub mod terminals;
@@ -149,7 +151,7 @@ pub async fn add_repo(db: &Db, link: &DaedalusHost, name: &str) -> Result<Repo> 
 
 /// A workspace name is one directory under the projects root: a single normal
 /// path component that can't be read as a flag.
-fn validate_workspace_name(name: &str) -> Result<()> {
+pub(crate) fn validate_workspace_name(name: &str) -> Result<()> {
     let mut components = Path::new(name).components();
     let single = matches!(components.next(), Some(Component::Normal(c)) if c == name)
         && components.next().is_none();

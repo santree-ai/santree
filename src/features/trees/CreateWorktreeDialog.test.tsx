@@ -39,6 +39,10 @@ vi.mock("../../state/AppContext", () => ({
 }));
 
 vi.mock("../../lib/queries", () => ({
+  // RepoAvatar's reads: the repo list (for where a project lives) and a
+  // Daedalus project's icon. Neither matters here.
+  useRepos: () => ({ data: [] }),
+  useDaedalusIcon: () => ({ data: null, status: "success" }),
   useTicketProvider: () => "Linear",
   WORK_AGENT_KEY: "work_agent",
   // Only the fields the dialog reads. This used to also carry `state` and

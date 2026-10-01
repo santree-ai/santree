@@ -662,6 +662,18 @@ pub struct DaedalusWorkspace {
     pub registered: bool,
 }
 
+/// A Daedalus project's app icon, as the box serves it (`workspaces.icon`) and
+/// santree re-checked it: `content_type` is one of `image/png`,
+/// `image/svg+xml`, `image/x-icon` or `image/webp`, and `data` is the bytes as
+/// standard padded base64, at most 64 KiB decoded. Drawn only as an image (an
+/// `<img>` with a `data:` URL), never inlined: the bytes are the box's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DaedalusIcon {
+    pub content_type: String,
+    pub data: String,
+}
+
 /// What `daedalus_workspaces` answers: the link as it was, and the checkouts
 /// the host listed (empty unless `link` is `Connected` and the host lists).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
