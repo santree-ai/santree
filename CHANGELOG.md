@@ -7,6 +7,10 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.19 — 2026-10-01
+
+- Daedalus projects show their app icons. The sidebar, the project picker and everywhere else a project is drawn use the icon its app has on Daedalus, in place of the GitHub mark. A project without one keeps the GitHub mark, and icons stay put away from home.
+
 ## 0.1.17-beta.18 — 2026-09-30
 
 - Session history now works in Daedalus projects. The History pane lists the Claude and Codex sessions that ran in the worktree on the box, with what each was asked, its last reply, its model and cost, and its subagents. Expand a row to read more, or resume the session in a new tab on the box.
