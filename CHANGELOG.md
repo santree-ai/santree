@@ -7,6 +7,12 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.17-beta.18 — 2026-09-30
+
+- Session history now works in Daedalus projects. The History pane lists the Claude and Codex sessions that ran in the worktree on the box, with what each was asked, its last reply, its model and cost, and its subagents. Expand a row to read more, or resume the session in a new tab on the box.
+- Long transcripts are read from their start and end only, so opening history never pulls a huge file over the connection. Their message count then shows as a minimum, like "120+ msgs", and their cost isn't shown.
+- A Codex session that santree didn't start isn't listed for Daedalus projects.
+
 ## 0.1.17-beta.17 — 2026-09-30
 
 - Settings › Daedalus now has a This Mac card with this Mac's three settings: Keep awake, Claude Remote Control, and santree on the box. Flip one and Daedalus applies it within seconds. While it's on its way the switch says so, and if Daedalus doesn't apply it the card says why.
