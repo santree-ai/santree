@@ -1155,3 +1155,237 @@ fn fs_stat(path: &str) -> Result<FsStat, WireError> {
         mtime_ms,
     })
 }
+
+/// A stand-in for the Daedalus agent's own socket (`agent.sock`): it answers
+/// `settings.get` and `settings.set` the way agent 0.25 does, over settings
+/// the test holds and moves — the box applying a request ([`Self::apply`]),
+/// or failing it ([`Self::fail`]) — and logs every request it is sent.
+pub struct FakeAgentControl {
+    socket: PathBuf,
+    state: Arc<Mutex<ControlState>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// What the fake agent keeps and how it answers.
+struct ControlState {
+    settings: crate::control::MachineSettings,
+    /// The app a log-in named: santree ON's page is under it; `None` answers
+    /// `unsupported`, as an agent that never logged in does.
+    app_url: Option<String>,
+    /// Whether the caller is the operator (`settings.set` allowed).
+    may_change: bool,
+    /// An agent from before 0.25: every method is unknown.
+    outdated: bool,
+    requests: Vec<serde_json::Value>,
+}
+
+impl FakeAgentControl {
+    /// The app the fake agent logged in to.
+    pub const APP_URL: &'static str = "https://daedalus-app.example.test";
+
+    /// Listen at `socket` with `settings` as the box keeps them. Must be called
+    /// inside a tokio runtime.
+    pub fn serve(
+        socket: impl Into<PathBuf>,
+        settings: crate::control::MachineSettings,
+    ) -> std::io::Result<Self> {
+        let socket = socket.into();
+        let listener = tokio::net::UnixListener::bind(&socket)?;
+        let state = Arc::new(Mutex::new(ControlState {
+            settings,
+            app_url: Some(Self::APP_URL.into()),
+            may_change: true,
+            outdated: false,
+            requests: Vec::new(),
+        }));
+        let task = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        let (reader, mut writer) = stream.into_split();
+                        let mut reader = BufReader::new(reader);
+                        let mut line = String::new();
+                        if tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let answer = control_answer(&state, &line);
+                        let _ = writer.write_all(format!("{answer}\n").as_bytes()).await;
+                    });
+                }
+            })
+        };
+        Ok(Self {
+            socket,
+            state,
+            task,
+        })
+    }
+
+    /// An [`AgentControl`](crate::control::AgentControl) for this socket,
+    /// trusting its owner — the test.
+    pub fn control(&self) -> crate::control::AgentControl {
+        use std::os::unix::fs::MetadataExt;
+        let owner = std::fs::symlink_metadata(&self.socket)
+            .expect("the fake agent's socket")
+            .uid();
+        crate::control::AgentControl::at(&self.socket, owner)
+    }
+
+    /// The box applied `key` = `value`: the kept value moves and its request
+    /// is done.
+    pub fn apply(&self, key: crate::control::SettingKey, value: bool) {
+        let mut s = lock(&self.state);
+        *kept(&mut s.settings, key) = value;
+        s.settings.pending.retain(|p| p.key != key);
+    }
+
+    /// The request for `key` did not take, for `why`.
+    pub fn fail(&self, key: crate::control::SettingKey, why: &str) {
+        let mut s = lock(&self.state);
+        let want = s
+            .settings
+            .pending
+            .iter()
+            .find(|p| p.key == key)
+            .is_none_or(|p| p.want);
+        s.settings.pending.retain(|p| p.key != key);
+        s.settings.failed.retain(|f| f.key != key);
+        s.settings.failed.push(crate::control::FailedSetting {
+            key,
+            want,
+            why: why.into(),
+        });
+    }
+
+    /// Whether the agent's link to the box is up.
+    pub fn set_linked(&self, linked: bool) {
+        lock(&self.state).settings.linked = linked;
+    }
+
+    /// Whether the caller may change the settings (is the operator).
+    pub fn set_may_change(&self, may: bool) {
+        lock(&self.state).may_change = may;
+    }
+
+    /// Answer as an agent from before `settings.get` existed.
+    pub fn set_outdated(&self, outdated: bool) {
+        lock(&self.state).outdated = outdated;
+    }
+
+    /// The app santree ON's page is under; `None`: the agent knows none.
+    pub fn set_app_url(&self, url: Option<&str>) {
+        lock(&self.state).app_url = url.map(str::to_string);
+    }
+
+    /// Every request received, parsed, oldest first.
+    pub fn requests(&self) -> Vec<serde_json::Value> {
+        lock(&self.state).requests.clone()
+    }
+}
+
+impl Drop for FakeAgentControl {
+    fn drop(&mut self) {
+        self.task.abort();
+        let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
+fn kept(s: &mut crate::control::MachineSettings, key: crate::control::SettingKey) -> &mut bool {
+    use crate::control::SettingKey;
+    match key {
+        SettingKey::AwakeHold => &mut s.awake_hold,
+        SettingKey::ClaudeRemoteControl => &mut s.claude_remote_control,
+        SettingKey::Santree => &mut s.santree,
+    }
+}
+
+/// One request line, answered as agent 0.25's `settings.get` / `settings.set`
+/// do (its `local.rs` and `settings.rs`).
+fn control_answer(state: &Mutex<ControlState>, line: &str) -> String {
+    use crate::control::{PendingSetting, SettingKey, SettingVia};
+    let err = |code: &str, msg: &str| {
+        serde_json::json!({ "id": 1, "err": { "code": code, "msg": msg } }).to_string()
+    };
+    let ok = |v: serde_json::Value| serde_json::json!({ "id": 1, "ok": v }).to_string();
+    let Ok(req) = serde_json::from_str::<serde_json::Value>(line) else {
+        return err("bad_request", "not a request");
+    };
+    let mut s = lock(state);
+    s.requests.push(req.clone());
+    let method = req["m"].as_str().unwrap_or_default().to_string();
+    if s.outdated {
+        return err("unknown_method", &format!("no method `{method}`"));
+    }
+    match method.as_str() {
+        "settings.get" => {
+            let mut view = serde_json::to_value(&s.settings).expect("settings serialize");
+            view["may_change"] = s.may_change.into();
+            ok(view)
+        }
+        "settings.set" => {
+            let (Ok(key), Some(value)) = (
+                serde_json::from_value::<SettingKey>(req["p"]["key"].clone()),
+                req["p"]["value"].as_bool(),
+            ) else {
+                return err("bad_request", "settings.set: {key, value}");
+            };
+            if !s.may_change {
+                return err(
+                    "forbidden",
+                    "uid 502 may not change this machine's settings (root and the user who \
+                     installed the agent may)",
+                );
+            }
+            s.settings.failed.retain(|f| f.key != key);
+            if key == SettingKey::Santree && value {
+                if s.settings.santree {
+                    return ok(serde_json::json!({ "unchanged": true }));
+                }
+                let Some(app) = s.app_url.clone() else {
+                    return err("unsupported", "turn santree on in Settings › Machines");
+                };
+                let node = s.settings.node.clone().unwrap_or_default();
+                s.settings.pending.retain(|p| p.key != key);
+                s.settings.pending.push(PendingSetting {
+                    key,
+                    want: true,
+                    via: SettingVia::Browser,
+                });
+                return ok(serde_json::json!({
+                    "confirm_url": format!("{app}/settings?tab=machines&node={node}&santree=on")
+                }));
+            }
+            let in_flight = s
+                .settings
+                .pending
+                .iter()
+                .any(|p| p.key == key && p.via == SettingVia::Box && p.want != value);
+            if *kept(&mut s.settings, key) == value && !in_flight {
+                s.settings.pending.retain(|p| p.key != key);
+                return ok(serde_json::json!({ "unchanged": true }));
+            }
+            if !s.settings.linked {
+                s.settings.pending.retain(|p| p.key != key);
+                s.settings.failed.push(crate::control::FailedSetting {
+                    key,
+                    want: value,
+                    why: "not connected to the box".into(),
+                });
+                return err("unavailable", "not connected to the box");
+            }
+            s.settings.pending.retain(|p| p.key != key);
+            s.settings.pending.push(PendingSetting {
+                key,
+                want: value,
+                via: SettingVia::Box,
+            });
+            ok(serde_json::json!({ "sent": true }))
+        }
+        other => err("unknown_method", &format!("no method `{other}`")),
+    }
+}

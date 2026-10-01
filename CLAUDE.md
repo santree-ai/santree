@@ -123,6 +123,7 @@ crates/hook/src/   lib.rs — the bundled `santree-hook` (main.rs only calls `ru
                    for hooks relayed from Daedalus
 crates/remote/src/ the client for Daedalus's session host (docs/remote.md):
                    agent (the Daedalus agent's santree socket, its first line)
+                   · control (the agent's own socket: this Mac's settings)
                    · transport (the `Connector` seam, `ConnectError` states)
                    · client · host (reconnect, backoff, hook cursor) · fake
                    (test daemon + fake agent socket)
@@ -142,8 +143,9 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    box, re-attached across dropped links and relaunches —
                    `setup` — its setup scripts there — `agents` — Claude and
                    Codex there: hooks written on the box, launch resolution,
-                   the box's CLIs and process table — plus the health check
-                   and the workspace list over the link)
+                   the box's CLIs and process table — `settings` — this Mac's
+                   own settings through the agent's socket — plus the health
+                   check and the workspace list over the link)
                    · git.rs + git/checkout.rs (`Checkout`: the one seam a repo's
                    git, reads and writes, and its file access go through, here
                    or on Daedalus;

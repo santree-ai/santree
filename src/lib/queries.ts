@@ -34,6 +34,8 @@ import type {
   ChangedFile,
   ClaudeGlobalCapture,
   DaedalusLink,
+  DaedalusMachine,
+  DaedalusSettingKey,
   DaedalusWorkspaceList,
   KeepAwakeStatus,
   MoveChanges,
@@ -393,6 +395,7 @@ export const queryKeys = {
   daedalusStatus: ["daedalus-status"] as const,
   daedalusWorkspaces: ["daedalus-workspaces"] as const,
   daedalusHealth: ["daedalus-health"] as const,
+  daedalusMachine: ["daedalus-machine"] as const,
   initScript: (repo: string) => ["init-script", repo] as const,
   taskNote: (repo: string, id: string) => ["task-note", repo, id] as const,
   /** Prefixes for every repo's triage reads — invalidate these (not the
@@ -1948,6 +1951,75 @@ export const useAddDaedalusRepo = () =>
       return () => qc.setQueryData(key, prev);
     },
     invalidate: () => [queryKeys.repos, queryKeys.daedalusWorkspaces],
+  });
+
+/** How often this Mac's settings are re-read: briskly while a change is on its
+ *  way (the box answers within seconds), slowly otherwise (they change from
+ *  the menu bar and the web too). */
+const MACHINE_PENDING_POLL_MS = 2_000;
+const MACHINE_POLL_MS = 15_000;
+
+/** This Mac's own settings — Keep awake, Claude Remote Control, santree on the
+ *  box — as the Daedalus agent keeps them, or why they can't be read (a value,
+ *  never a failed read). When santree turns on (an admin confirmed it in the
+ *  browser), the link's state is re-read: the backend tries it at once. */
+export const useDaedalusMachine = (enabled = true) => {
+  const qc = useQueryClient();
+  const query = useUnwrappedQuery(queryKeys.daedalusMachine, () => commands.daedalusSettings(), {
+    enabled,
+    refetchInterval: (q) => {
+      const data = q.state.data as DaedalusMachine | undefined;
+      return data?.kind === "Ready" && data.settings.pending.length > 0
+        ? MACHINE_PENDING_POLL_MS
+        : MACHINE_POLL_MS;
+    },
+    refetchOnWindowFocus: true,
+  });
+  const santree = query.data?.kind === "Ready" ? query.data.settings.santree : undefined;
+  const seen = useRef(santree);
+  useEffect(() => {
+    if (santree !== undefined && seen.current !== undefined && santree !== seen.current) {
+      qc.invalidateQueries({ queryKey: queryKeys.daedalusStatus });
+      qc.invalidateQueries({ queryKey: queryKeys.daedalusHealth });
+    }
+    seen.current = santree;
+  }, [santree, qc]);
+  return query;
+};
+
+export interface MachineSettingVars {
+  key: DaedalusSettingKey;
+  value: boolean;
+}
+
+/** Ask the box for one of this Mac's settings. The switch reads as on its way
+ *  at once (santree ON: waiting on the browser, whose page the backend opens);
+ *  the agent's answer reconciles on settle. What it answered — a refusal, an
+ *  agent too old — is the mutation's data, for the card to show inline. */
+export const useSetDaedalusSetting = () =>
+  useOptimisticMutation({
+    mutationKey: ["daedalus-set-setting"],
+    mutationFn: ({ key, value }: MachineSettingVars) =>
+      unwrap(commands.daedalusSetSetting(key, value)),
+    optimistic: (qc, { key, value }) => {
+      const prev = qc.getQueryData<DaedalusMachine>(queryKeys.daedalusMachine);
+      if (prev?.kind !== "Ready") return undefined;
+      const via = key === "Santree" && value ? "Browser" : "Box";
+      const next: DaedalusMachine = {
+        kind: "Ready",
+        settings: {
+          ...prev.settings,
+          pending: [
+            ...prev.settings.pending.filter((p) => p.key !== key),
+            { key, want: value, via },
+          ],
+          failed: prev.settings.failed.filter((f) => f.key !== key),
+        },
+      };
+      qc.setQueryData(queryKeys.daedalusMachine, next);
+      return () => qc.setQueryData(queryKeys.daedalusMachine, prev);
+    },
+    invalidate: () => [queryKeys.daedalusMachine],
   });
 
 // ── Agent sessions and live agent state ──────────────────────────────────────

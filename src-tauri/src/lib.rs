@@ -253,6 +253,8 @@ fn specta_builder() -> AppBuilder {
             commands::jira_connect,
             commands::daedalus_status,
             commands::daedalus_health,
+            commands::daedalus_settings,
+            commands::daedalus_set_setting,
             commands::daedalus_workspaces,
             commands::add_daedalus_repo,
             commands::daedalus_agent_hooks,
@@ -716,6 +718,8 @@ pub fn run() {
                 data_dir.join("santree.db").to_string_lossy().into_owned(),
             );
             app.manage(daedalus_link);
+            // The agent's own socket, for this Mac's settings (Settings › Daedalus).
+            app.manage(santree_remote_client::AgentControl::new());
             {
                 let (app, db) = (app.handle().clone(), db.clone());
                 tauri::async_runtime::spawn(async move {

@@ -101,9 +101,12 @@ anchors.
   wording of each state and what to do about it.
 - `daedalus_health` is "Run check": skip the backoff, try now, and answer the state
   the attempt settled on (`DaedalusHealth { link, checkedAt }`).
-- Settings › Daedalus is one status card — the state, what to do, and for a
+- Settings › Daedalus is a status card — the state, what to do, and for a
   connected link the box, the session host's and agent's versions and the projects
-  root — plus "Run check". There is nothing to fill in.
+  root — plus "Run check", and a "This Mac" card of this machine's own settings
+  (below, "This Mac's settings"). There is nothing to fill in. With santree off,
+  the state's action is "Turn on santree for this Mac…" — the same request as the
+  card's santree switch, which opens Daedalus's confirm page.
 - `daedalus_workspaces` lists the checkouts over the link (`workspaces.list`), each
   marked with whether it is registered; empty, with the link state saying why,
   whenever the host can't list — `hostOutdated` when it is connected but predates
@@ -116,6 +119,56 @@ anchors.
 - `daedalus_connection` (one row, written with the first ack) holds only where the
   app is in the host's hook queue: `hook_cursor` and `boot_id` (see "How santree
   dispatches").
+
+## This Mac's settings: the agent's own socket
+
+Three of this machine's settings may be asked for from the machine itself — Keep
+awake (`awake_hold`), Claude Remote Control (`claude_remote_control`) and santree on
+the box (`santree`) — from the agent's menu bar and from santree's Settings ›
+Daedalus › This Mac. **The box decides them**: the agent keeps no setting of its
+own, it asks the box over its link and shows the request on its way until the
+box's policy carries it. santree reads and asks through the agent's **own** socket,
+`agent.sock`, beside `santree.sock` in the agent's run directory (santree.sock
+stays a pure pipe whose first line is the agent's):
+
+- `crates/remote/src/control.rs` (`AgentControl`): one request per connection, in
+  the agent's envelope — `{"id":1,"m":"settings.get","p":null}` →
+  `{"id":1,"ok":…}` or `{"id":1,"err":{"code","msg"}}`, one line each way (the
+  answer ≤ 16 KiB), the whole call within 5 s. The other end is checked exactly as
+  for santree.sock (`agent::check_server`: root serves it and owns the file).
+- `settings.get` → `{node, fingerprint, fingerprint_short, linked, awake_hold,
+  claude_remote_control, santree, pending:[{key,want,via:"box"|"browser"}],
+  failed:[{key,want,why}], operator, may_change}` — any user the agent's door
+  admits may read them; `may_change` says whether this one may change them (the
+  user who installed the agent, as for santree.sock).
+- `settings.set {key, value}` → `{sent}` (recorded; the agent asks the box now),
+  `{unchanged}` (the box holds it), or `{confirm_url}` for santree ON. Refusals are
+  the agent's codes: `forbidden` (not the operator), `unavailable` (the agent isn't
+  linked to the box — it also records that as `failed`), `unsupported` (no app to
+  name a page under). An agent from before 0.25 answers `unknown_method`, which
+  santree shows as "Update the Daedalus agent" for the switches alone.
+- **santree ON is never sent**: it grants a shell on the box as the operator, so the
+  agent records it pending on the browser and answers Daedalus's page for it
+  (Settings › Machines with this machine's "Turn on santree" dialog, behind the
+  first eight characters of this Mac's key typed). santree opens that page
+  (`daedalus_set_setting`, tauri-plugin-opener, an `https` URL checked by parse,
+  no credentials) and nothing else: the admin's confirm writes the policy, and
+  the policy is the answer. Asked again while it waits, the page opens again.
+- In santree: `daedalus_settings` → `DaedalusMachine` (`AgentMissing |
+  AgentOutdated | Unavailable { reason } | Ready { settings }`) and
+  `daedalus_set_setting(key, value)` → `DaedalusSettingAnswer` (`Sent | Unchanged
+  | Opened { url } | AgentOutdated | Refused { reason }`) — both plain values, so
+  nothing here toasts. `useDaedalusMachine` polls every 2 s while anything is
+  pending and every 15 s otherwise; when santree flips the link state is re-read,
+  and `daedalus_settings` itself skips the link's slow backoff once the box has
+  turned santree on.
+- The card: each switch shows the box's value, or the value on its way ("Sending
+  to Daedalus…"); santree ON waiting on the browser stays off and reads "Waiting
+  for your OK in the browser — Open again"; a failure reads "Not changed: <the
+  agent's words>". Not the operator: every switch disabled, "Only <operator> can
+  change these on this Mac". The agent not linked: every change but santree ON
+  disabled. "Last changed by" is the box's to show (Settings › Machines): the
+  agent's `settings.get` doesn't carry it.
 
 ## Protocol v1 (the contract with the session host)
 
@@ -460,8 +513,11 @@ or (by default) specta, and their public APIs are a contract with that repo.
 `crates/remote` (package `santree-remote-client`), which re-exports
 `santree-remote-proto` as `proto`:
 
-- `agent.rs` — `AgentConnector`: the socket path per OS, the root peer check, the
-  first line (`AgentOk` or a refusal).
+- `agent.rs` — `AgentConnector`: the socket path per OS, the root peer check
+  (`check_server`, shared with `control.rs`), the first line (`AgentOk` or a
+  refusal).
+- `control.rs` — `AgentControl`: this machine's settings on the agent's own
+  socket ("This Mac's settings").
 - `transport.rs` — the `Connector` seam, `Link`, `ConnectError` / `Refusal` and
   `permanent()`, `memory_link()`.
 - `client.rs` — `RemoteClient`: framing (32 MiB line cap), concurrent calls, event
@@ -477,6 +533,9 @@ or (by default) specta, and their public APIs are a contract with that repo.
   connection to a `FakeDaemon` — what the connector and the app's health,
   workspace and git tests connect through. `FakeDaemon::exec_log()` is the argv of
   every `exec.run` it served, so a test can say what ran on the "box".
+  `FakeAgentControl` stands in for `agent.sock`: it answers `settings.get` /
+  `settings.set` as agent 0.25 does, over settings the test moves (`apply`,
+  `fail`, `set_linked`, `set_may_change`, `set_outdated`).
 
 `src-tauri/src/daedalus/` (also `agents.rs`: "Agents on the box"; its tests,
 `agent_tests.rs`, run the launch, the relay, detection and the prompts over the
@@ -494,6 +553,8 @@ fake agent and daemon, whose `FakeOptions::env` gives the fake box a home and
   writer). Owned by `DaedalusHost`, started by `resume`.
 - `setup.rs` — `RemoteRuns`: setup scripts in a PTY on the box, keyed like
   `stream::RUNS`.
+- `settings.rs` — this Mac's settings through `AgentControl`, as values, and
+  the confirm page opened (https only).
 - `mod.rs` — the health check, `workspaces.list` over the link, and registering a
   checkout. `git_tests.rs` drives a Daedalus project's git end to end: the
   worktree commands through a `FakeAgent` and `FakeDaemon` to real git in a temp

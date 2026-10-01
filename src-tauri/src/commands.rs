@@ -20,17 +20,17 @@ use santree_core::{
         AgentAuth, AgentDef, AgentKind, AgentProcess, AgentSession, AgentVersionStatus,
         AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
         ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
-        DaedalusAgentHooks, DaedalusHealth, DaedalusLink, DaedalusWorkspaceList, EnglishAnalysis,
-        EnglishLog, FileSource, GithubApiBudget, GithubStatus, JiraSite, JiraStatus,
-        LegacyCliMigration, LinearApiBudget, LinearOrg, LinearStatus, LinearTeam, LogExport,
-        MergeQueueView, NewInlineComment, NewPr, NewReviewWorkItem, Opener, PrDetail, PrDraft,
-        PrLabel, PromptInfo, PromptLayer, PromptPreview, PromptWorkItemSample, Repo, RepoBranch,
-        RepoLocation, ResourceUsage, ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent,
-        ReviewInbox, ReviewPr, ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer,
-        ScriptInfo, SessionDetail, SessionState, SessionSubagent, SessionUsageLive, Settings,
-        TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail, TriageSchedule, TriageSession,
-        TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreeLaunch, WorktreePr,
-        WorktreeSession, WorktreeTab,
+        DaedalusAgentHooks, DaedalusHealth, DaedalusLink, DaedalusMachine, DaedalusSettingAnswer,
+        DaedalusSettingKey, DaedalusWorkspaceList, EnglishAnalysis, EnglishLog, FileSource,
+        GithubApiBudget, GithubStatus, JiraSite, JiraStatus, LegacyCliMigration, LinearApiBudget,
+        LinearOrg, LinearStatus, LinearTeam, LogExport, MergeQueueView, NewInlineComment, NewPr,
+        NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptLayer,
+        PromptPreview, PromptWorkItemSample, Repo, RepoBranch, RepoLocation, ResourceUsage,
+        ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
+        ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail,
+        SessionState, SessionSubagent, SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task,
+        TicketRef, TriageDetail, TriageSchedule, TriageSession, TriageTicket, UsageReport,
+        ViewedMarks, Worktree, WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
     },
 };
 
@@ -92,6 +92,47 @@ pub async fn add_repo(path: String, db: State<'_, Db>) -> CmdResult<Repo> {
 #[specta::specta]
 pub fn daedalus_status(link: State<'_, DaedalusHost>) -> DaedalusLink {
     link.state()
+}
+
+/// This Mac's own settings — Keep awake, Claude Remote Control, santree on the
+/// box — as the Daedalus agent here keeps them, or why they can't be read. A
+/// value, never an error. Once the box has turned santree on (an admin confirmed
+/// it in the browser), the link is tried at once rather than at the end of its
+/// slow backoff.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_settings(
+    control: State<'_, santree_remote_client::AgentControl>,
+    link: State<'_, DaedalusHost>,
+) -> CmdResult<DaedalusMachine> {
+    let machine = daedalus::settings::read(&control).await;
+    if matches!(&machine, DaedalusMachine::Ready { settings } if settings.santree)
+        && link.state() == DaedalusLink::SantreeOff
+    {
+        link.retry_now();
+    }
+    Ok(machine)
+}
+
+/// Ask the box for one of this Mac's settings, through the Daedalus agent.
+/// santree ON is never sent: the agent names the Daedalus page where an admin
+/// confirms it, and this opens it in the browser (https only). A refusal is a
+/// value the card shows, never an error.
+#[tauri::command]
+#[specta::specta]
+pub async fn daedalus_set_setting(
+    key: DaedalusSettingKey,
+    value: bool,
+    app: AppHandle,
+    control: State<'_, santree_remote_client::AgentControl>,
+) -> CmdResult<DaedalusSettingAnswer> {
+    use tauri_plugin_opener::OpenerExt;
+    Ok(daedalus::settings::set(&control, key, value, |url| {
+        app.opener()
+            .open_url(url, None::<&str>)
+            .map_err(anyhow::Error::from)
+    })
+    .await)
 }
 
 /// Try the link now, skipping its backoff, and report how it settled.

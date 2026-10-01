@@ -1185,6 +1185,21 @@ export const commands = {
 	/**  Try the link now, skipping its backoff, and report how it settled. */
 	daedalusHealth: () => typedError<DaedalusHealth, CmdError>(__TAURI_INVOKE("daedalus_health")),
 	/**
+	 *  This Mac's own settings — Keep awake, Claude Remote Control, santree on the
+	 *  box — as the Daedalus agent here keeps them, or why they can't be read. A
+	 *  value, never an error. Once the box has turned santree on (an admin confirmed
+	 *  it in the browser), the link is tried at once rather than at the end of its
+	 *  slow backoff.
+	 */
+	daedalusSettings: () => typedError<DaedalusMachine, CmdError>(__TAURI_INVOKE("daedalus_settings")),
+	/**
+	 *  Ask the box for one of this Mac's settings, through the Daedalus agent.
+	 *  santree ON is never sent: the agent names the Daedalus page where an admin
+	 *  confirms it, and this opens it in the browser (https only). A refusal is a
+	 *  value the card shows, never an error.
+	 */
+	daedalusSetSetting: (key: DaedalusSettingKey, value: boolean) => typedError<DaedalusSettingAnswer, CmdError>(__TAURI_INVOKE("daedalus_set_setting", { key, value })),
+	/**
 	 *  The server's checkouts, marked with which are already projects. Empty, with
 	 *  the link saying why, whenever the session host can't list them.
 	 */
@@ -2023,6 +2038,81 @@ agent: string | null };
  *  `daedalus_status`. Empty, like its siblings: the arrival is the news.
  */
 export type DaedalusLinkChanged = Record<string, never>;
+
+/**
+ *  `daedalus_settings`: this Mac's settings, or why santree can't read them —
+ *  a plain value, never an error, as every Daedalus state is.
+ */
+export type DaedalusMachine = 
+/**  No Daedalus agent on this Mac. */
+{ kind: "AgentMissing" } | 
+/**  The agent predates its settings socket (0.25): update it. */
+{ kind: "AgentOutdated" } | 
+/**  The agent's socket didn't answer; `reason` says why. */
+{ kind: "Unavailable"; reason: string } | { kind: "Ready"; settings: DaedalusMachineSettings };
+
+/**
+ *  This Mac's settings as the Daedalus agent keeps them: the box's values, what
+ *  is on its way, what failed, and whether this user may change them.
+ */
+export type DaedalusMachineSettings = {
+	/**  This Mac's key's fingerprint, whole and as the menu bar shows it. */
+	fingerprint: string | null,
+	fingerprintShort: string | null,
+	/**  The agent's link to the box is up: a request can go now. */
+	linked: boolean,
+	awakeHold: boolean,
+	claudeRemoteControl: boolean,
+	santree: boolean,
+	pending: DaedalusSettingPending[],
+	failed: DaedalusSettingFailed[],
+	/**  Who may change them here (the user who installed the agent). */
+	operator: string | null,
+	/**  Whether the user running santree may. */
+	mayChange: boolean,
+};
+
+/**
+ *  `daedalus_set_setting`: what asking for a setting did. A refusal is a value
+ *  the card shows beside the switch, never a toast.
+ */
+export type DaedalusSettingAnswer = 
+/**  Sent to the box; the settings show it pending until the box applies it. */
+{ kind: "Sent" } | 
+/**  The box already holds that value. */
+{ kind: "Unchanged" } | 
+/**  santree ON: the Daedalus page where an admin confirms it was opened. */
+{ kind: "Opened"; url: string } | 
+/**  The agent predates its settings socket (0.25). */
+{ kind: "AgentOutdated" } | 
+/**
+ *  Not asked: the agent's reason (not the operator, not connected, no
+ *  page to open), or santree's when the agent never answered.
+ */
+{ kind: "Refused"; reason: string };
+
+/**  A setting that did not take, in the agent's words. */
+export type DaedalusSettingFailed = {
+	key: DaedalusSettingKey,
+	want: boolean,
+	why: string,
+};
+
+/**
+ *  A setting this Mac may ask the box for, through the Daedalus agent here
+ *  (docs/remote.md, "This Mac's settings").
+ */
+export type DaedalusSettingKey = "AwakeHold" | "ClaudeRemoteControl" | "Santree";
+
+/**  A setting on its way to the box. */
+export type DaedalusSettingPending = {
+	key: DaedalusSettingKey,
+	want: boolean,
+	via: DaedalusSettingVia,
+};
+
+/**  Where a request waits: on the box, or on an admin in the browser (santree ON). */
+export type DaedalusSettingVia = "Box" | "Browser";
 
 /**  A checkout's last sync with its remote, as Daedalus reports it. */
 export type DaedalusSync = {

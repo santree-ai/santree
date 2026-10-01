@@ -38,13 +38,13 @@ use crate::transport::{AgentOk, BoxFuture, ConnectError, Connector, Link, Refusa
 
 /// Where the agent keeps its sockets (its data directory's `run/`).
 #[cfg(target_os = "macos")]
-const RUN_DIR: &str = "/Library/Application Support/daedalus-agent/run";
+pub(crate) const RUN_DIR: &str = "/Library/Application Support/daedalus-agent/run";
 #[cfg(not(target_os = "macos"))]
-const RUN_DIR: &str = "/var/lib/daedalus-agent/run";
+pub(crate) const RUN_DIR: &str = "/var/lib/daedalus-agent/run";
 
 /// santree's socket, and the agent's own beside it.
 const SANTREE_SOCKET: &str = "santree.sock";
-const AGENT_SOCKET: &str = "agent.sock";
+pub(crate) const AGENT_SOCKET: &str = "agent.sock";
 
 /// The longest first line the agent writes, with room to spare.
 pub const FIRST_LINE_MAX: usize = 4 * 1024;
@@ -120,7 +120,7 @@ impl AgentConnector {
                 )))
             }
         };
-        self.check_server(&stream)?;
+        check_server(&self.socket, &stream, self.server_uid)?;
         let line = tokio::time::timeout(FIRST_LINE_WAIT, first_line(&mut stream))
             .await
             .map_err(|_| {
@@ -134,35 +134,40 @@ impl AgentConnector {
             agent: Some(agent),
         })
     }
+}
 
-    /// The peer the kernel names, and the socket file's owner, are both
-    /// `server_uid`.
-    fn check_server(&self, stream: &UnixStream) -> Result<(), ConnectError> {
-        let peer = match stream.peer_cred() {
-            Ok(cred) => Some(cred.uid()),
-            // macOS can't name a peer that has already closed its end
-            // (ENOTCONN), and the agent closes right after writing a refusal.
-            // Nothing santree writes can reach a closed peer, so its line is
-            // still worth reading; the file's owner is still checked.
-            Err(e) if e.kind() == ErrorKind::NotConnected => None,
-            Err(e) => {
-                return Err(ConnectError::Failed(format!(
-                    "can't tell who serves the socket: {e}"
-                )))
-            }
-        };
-        let owner = std::fs::symlink_metadata(&self.socket)
-            .map_err(|e| ConnectError::Failed(format!("can't read the socket: {e}")))?
-            .uid();
-        if peer.is_some_and(|uid| uid != self.server_uid) || owner != self.server_uid {
-            return Err(ConnectError::Untrusted(format!(
-                "{} is served by uid {} and owned by uid {owner}, not the Daedalus agent's",
-                self.socket.display(),
-                peer.map_or_else(|| "?".into(), |uid| uid.to_string()),
-            )));
+/// The peer the kernel names on `stream`, and the owner of the socket file at
+/// `socket`, are both `server_uid` — the check every client of the agent's
+/// sockets makes (this connector and [`crate::control::AgentControl`]).
+pub(crate) fn check_server(
+    socket: &Path,
+    stream: &UnixStream,
+    server_uid: u32,
+) -> Result<(), ConnectError> {
+    let peer = match stream.peer_cred() {
+        Ok(cred) => Some(cred.uid()),
+        // macOS can't name a peer that has already closed its end
+        // (ENOTCONN), and the agent closes right after writing a refusal.
+        // Nothing santree writes can reach a closed peer, so its line is
+        // still worth reading; the file's owner is still checked.
+        Err(e) if e.kind() == ErrorKind::NotConnected => None,
+        Err(e) => {
+            return Err(ConnectError::Failed(format!(
+                "can't tell who serves the socket: {e}"
+            )))
         }
-        Ok(())
+    };
+    let owner = std::fs::symlink_metadata(socket)
+        .map_err(|e| ConnectError::Failed(format!("can't read the socket: {e}")))?
+        .uid();
+    if peer.is_some_and(|uid| uid != server_uid) || owner != server_uid {
+        return Err(ConnectError::Untrusted(format!(
+            "{} is served by uid {} and owned by uid {owner}, not the Daedalus agent's",
+            socket.display(),
+            peer.map_or_else(|| "?".into(), |uid| uid.to_string()),
+        )));
     }
+    Ok(())
 }
 
 /// The agent's first line, without its newline.

@@ -15,6 +15,10 @@ export interface LinkNotice {
   detail: string | null;
 }
 
+/** The santree-off state in a sentence, for the surfaces that put "Turn on
+ *  santree for this Mac…" on a button of its own beneath it. */
+export const SANTREE_OFF = "santree is off for this Mac";
+
 export function linkNotice(link: DaedalusLink): LinkNotice {
   switch (link.kind) {
     case "Connected":
@@ -46,8 +50,9 @@ export function linkNotice(link: DaedalusLink): LinkNotice {
     case "SantreeOff":
       return {
         tone: "warn",
-        title: "Turn on santree for this Mac in Daedalus › Settings › Machines",
-        detail: null,
+        title: "Turn on santree for this Mac…",
+        detail:
+          "Daedalus keeps santree off for this Mac. Turning it on opens Daedalus in your browser, where an admin confirms it.",
       };
     case "HostKeyChanged":
       return { tone: "error", title: "Daedalus's session host key changed", detail: link.reason };

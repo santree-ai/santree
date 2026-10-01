@@ -169,6 +169,8 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
       generatedAt: null,
       workspaces: [],
     }),
+    daedalus_settings: () => ({ kind: "AgentMissing" }),
+    daedalus_set_setting: () => ({ kind: "Refused", reason: "No Daedalus agent in fixtures." }),
 
     // ── Linear ────────────────────────────────────────────────────────────
     linear_auth_status: (): LinearStatus => ({

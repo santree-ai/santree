@@ -527,6 +527,97 @@ pub struct DaedalusHealth {
     pub checked_at: String,
 }
 
+/// A setting this Mac may ask the box for, through the Daedalus agent here
+/// (docs/remote.md, "This Mac's settings").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum DaedalusSettingKey {
+    AwakeHold,
+    ClaudeRemoteControl,
+    Santree,
+}
+
+/// Where a request waits: on the box, or on an admin in the browser (santree ON).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum DaedalusSettingVia {
+    Box,
+    Browser,
+}
+
+/// A setting on its way to the box.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DaedalusSettingPending {
+    pub key: DaedalusSettingKey,
+    pub want: bool,
+    pub via: DaedalusSettingVia,
+}
+
+/// A setting that did not take, in the agent's words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DaedalusSettingFailed {
+    pub key: DaedalusSettingKey,
+    pub want: bool,
+    pub why: String,
+}
+
+/// This Mac's settings as the Daedalus agent keeps them: the box's values, what
+/// is on its way, what failed, and whether this user may change them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DaedalusMachineSettings {
+    /// This Mac's key's fingerprint, whole and as the menu bar shows it.
+    pub fingerprint: Option<String>,
+    pub fingerprint_short: Option<String>,
+    /// The agent's link to the box is up: a request can go now.
+    pub linked: bool,
+    pub awake_hold: bool,
+    pub claude_remote_control: bool,
+    pub santree: bool,
+    pub pending: Vec<DaedalusSettingPending>,
+    pub failed: Vec<DaedalusSettingFailed>,
+    /// Who may change them here (the user who installed the agent).
+    pub operator: Option<String>,
+    /// Whether the user running santree may.
+    pub may_change: bool,
+}
+
+/// `daedalus_settings`: this Mac's settings, or why santree can't read them —
+/// a plain value, never an error, as every Daedalus state is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind")]
+pub enum DaedalusMachine {
+    /// No Daedalus agent on this Mac.
+    AgentMissing,
+    /// The agent predates its settings socket (0.25): update it.
+    AgentOutdated,
+    /// The agent's socket didn't answer; `reason` says why.
+    Unavailable {
+        reason: String,
+    },
+    Ready {
+        settings: DaedalusMachineSettings,
+    },
+}
+
+/// `daedalus_set_setting`: what asking for a setting did. A refusal is a value
+/// the card shows beside the switch, never a toast.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind")]
+pub enum DaedalusSettingAnswer {
+    /// Sent to the box; the settings show it pending until the box applies it.
+    Sent,
+    /// The box already holds that value.
+    Unchanged,
+    /// santree ON: the Daedalus page where an admin confirms it was opened.
+    Opened { url: String },
+    /// The agent predates its settings socket (0.25).
+    AgentOutdated,
+    /// Not asked: the agent's reason (not the operator, not connected, no
+    /// page to open), or santree's when the agent never answered.
+    Refused { reason: String },
+}
+
 /// `daedalus_agent_hooks`: santree's session hooks for agents launched in one
 /// Daedalus project, written on the box — what `useHookInjection` hands a
 /// launch there in place of this Mac's. Paths are on the server.

@@ -19,7 +19,8 @@ import { IssuePage } from "../../components/IssuePage";
 import { CloseIcon, PrIcon } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import { Button, EmptyState, TerminalActivity } from "../../components/primitives";
-import { linkNotice } from "../../lib/daedalusLink";
+import { TurnOnSantree } from "../../components/TurnOnSantree";
+import { linkNotice, SANTREE_OFF } from "../../lib/daedalusLink";
 import { useDaedalusStatus, usePrSummary, useWorktreeTabs } from "../../lib/queries";
 import { useAppUi } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
@@ -124,15 +125,17 @@ function DaedalusOutOfReach() {
   const navigate = useNavigate();
   const { data: link } = useDaedalusStatus();
   const notice = link ? linkNotice(link) : null;
+  const santreeOff = link?.kind === "SantreeOff";
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3">
       <EmptyState
         className="flex-none"
-        title={notice?.title ?? "Connecting to Daedalus…"}
+        title={santreeOff ? SANTREE_OFF : (notice?.title ?? "Connecting to Daedalus…")}
         subtitle={
           notice?.detail ?? "This project lives on Daedalus: santree reads it through the link."
         }
       />
+      {santreeOff && <TurnOnSantree className="flex flex-col items-center text-center" />}
       <Button
         variant="ghost"
         size="sm"

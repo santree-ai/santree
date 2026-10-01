@@ -10,6 +10,7 @@
 
 pub mod agents;
 pub mod host;
+pub mod settings;
 pub mod setup;
 pub mod terminals;
 

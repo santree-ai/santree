@@ -125,7 +125,7 @@ describe("DaedalusSection link", () => {
   it.each([
     [{ kind: "AgentMissing" }, "Install the Daedalus agent on this Mac"],
     [{ kind: "AgentOutdated" }, "Update the Daedalus agent on this Mac"],
-    [{ kind: "SantreeOff" }, "Turn on santree for this Mac in Daedalus › Settings › Machines"],
+    [{ kind: "SantreeOff" }, "Turn on santree for this Mac…"],
     [{ kind: "HostKeyChanged", reason: "another key" }, "Daedalus's session host key changed"],
   ] as [DaedalusLink, string][])("says what to do about %o", (link, hint) => {
     state.link = link;

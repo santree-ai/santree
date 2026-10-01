@@ -8,6 +8,8 @@
 //!   its types.
 //! - [`agent`]: [`AgentConnector`], the link through the Daedalus agent's
 //!   santree socket on this machine.
+//! - [`control`]: [`AgentControl`], this machine's settings on the agent's
+//!   own socket (`settings.get` / `settings.set`).
 //! - [`transport`]: the [`Connector`] seam, [`ConnectError`] (what a failed
 //!   connect is, as a state), and an in-memory link.
 //! - [`client`]: [`RemoteClient`], the JSON-lines client over any byte stream.
@@ -20,6 +22,7 @@ pub use santree_remote_proto as proto;
 
 pub mod agent;
 pub mod client;
+pub mod control;
 mod framing;
 pub mod host;
 pub mod transport;
@@ -32,5 +35,6 @@ mod tests;
 
 pub use agent::AgentConnector;
 pub use client::{ClientOptions, HookMessage, PtyEvent, RemoteClient, RemoteError};
+pub use control::{AgentControl, ControlError, MachineSettings, SetOutcome, SettingKey};
 pub use host::{HookDelivery, HostConfig, HostOptions, HostStatus, Reconnected, RemoteHost};
 pub use transport::{AgentOk, ConnectError, Connector, Link, Refusal};
