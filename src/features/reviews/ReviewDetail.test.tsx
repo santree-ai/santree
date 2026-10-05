@@ -8,6 +8,7 @@
  * hosts all of this is ReviewTabBar's own test.
  */
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ReviewPr } from "../../bindings";
@@ -54,9 +55,17 @@ vi.mock("./AiReviewSessionPane", async () => {
 
 vi.mock("./PrReviewPane", () => ({ PrReviewPane: () => <div data-testid="pr-pane" /> }));
 // The strip is its own test; this stand-in only has to name the tabs it was
-// handed and select or close them, without needing a terminal registry.
+// handed and select or close them, without needing a terminal registry — and,
+// as the split workspace does, draw every open tab's content, telling each
+// whether its group is showing it.
 vi.mock("./ReviewTabBar", () => ({
-  ReviewTabBar: ({ tabs }: { tabs: ReviewTabs }) => (
+  ReviewTabBar: ({
+    tabs,
+    renderTab,
+  }: {
+    tabs: ReviewTabs;
+    renderTab: (tab: ReviewMainTab, visible: boolean) => ReactNode;
+  }) => (
     <div data-testid="tab-bar">
       {(
         [
@@ -74,6 +83,16 @@ vi.mock("./ReviewTabBar", () => ({
           Close Linear
         </button>
       )}
+      {Object.values(tabs.split.layout.groups)
+        .flatMap((g) => g.tabs)
+        .map((t) => {
+          const visible = tabs.split.visible.includes(t);
+          return (
+            <div key={t} className={visible ? undefined : "hidden"}>
+              {renderTab(t, visible)}
+            </div>
+          );
+        })}
     </div>
   ),
 }));
@@ -120,11 +139,11 @@ vi.mock("../../lib/queries", () => ({
   useCodexHealth: () => ({ data: { available: true } }),
   useResolvedSetting: () => ({ data: "Codex" }),
   useReviewDrafts: () => ({ data: drafts }),
-  useSessionProviders: () => ({ data: storedProviders }),
+  useSessionProviders: () => ({ data: storedProviders, isFetched: true }),
   useCloseReviewSession: () => ({ mutate: vi.fn(), isPending: false }),
   useResumeWorktreeSession: () => ({ mutateAsync: vi.fn(), isPending: false }),
   usePrDetail: () => ({ data: detail }),
-  useWorktreeTabs: () => ({ data: [] }),
+  useWorktreeTabs: () => ({ data: [], isFetched: true }),
   useAddWorktreeTab: () => ({ mutate: vi.fn() }),
   useRenameWorktreeTab: () => ({ mutate: vi.fn() }),
   useRemoveWorktreeTab: () => ({ mutate: vi.fn() }),
@@ -154,6 +173,9 @@ let detail: { comments: unknown[]; commits: unknown[]; checks: unknown[] } | und
 const TICKETED_PR = model.active;
 
 beforeEach(() => {
+  // The split layout is persisted per pull request; one case's must not open the
+  // next on its tab.
+  localStorage.clear();
   ai.mounts = 0;
   drafts = [];
   storedProviders = [];

@@ -35,8 +35,13 @@ export interface TerminalViewProps {
   adoptId?: SessionId;
   /** Optional initial input, sent as if typed (followed by Enter). */
   seed?: string;
-  /** When this pane is the visible one — refit + focus on activation. */
+  /** When this pane is on screen — it refits as its box changes, and once more
+   *  when it comes back. */
   active?: boolean;
+  /** When this pane takes the keyboard. Distinct from `active` because a split
+   *  main area shows several panes and only one of them can have focus.
+   *  Defaults to `active`. */
+  focused?: boolean;
   /** Called once when the hosted process exits (so the tab can be torn down). */
   onExit?: () => void;
   /** Called once the PTY is live, handing out this pane's imperative handle:
@@ -76,6 +81,7 @@ export function TerminalView({
   adoptId,
   seed,
   active = true,
+  focused = active,
   onExit,
   onReady,
   backend = tauriBackend,
@@ -120,6 +126,8 @@ export function TerminalView({
   // catches up in the activation effect below, which refits when it comes back.
   const activeRef = useRef(active);
   activeRef.current = active;
+  const focusedRef = useRef(focused);
+  focusedRef.current = focused;
 
   // Send a resize to the PTY only if the grid size changed since the last send.
   const commitResize = useCallback(
@@ -229,7 +237,7 @@ export function TerminalView({
           seededRef.current = true;
           backend.seed(id, seed);
         }
-        renderer.focus();
+        if (focusedRef.current) renderer.focus();
       } catch (e) {
         // The pane can close while `open` is still in flight; writing to a disposed
         // renderer throws, and there'd be no one left to show the message to anyway.
@@ -291,8 +299,9 @@ export function TerminalView({
     };
   }, []);
 
-  // Refit + focus when this pane becomes the active one (it may have been sized
-  // to zero while hidden behind another tab).
+  // Refit when this pane comes on screen (it may have been sized to zero while
+  // hidden behind another tab), and take the keyboard when it is the one being
+  // worked in.
   useEffect(() => {
     if (!active) return;
     const renderer = rendererRef.current;
@@ -300,10 +309,10 @@ export function TerminalView({
     const raf = requestAnimationFrame(() => {
       const { cols, rows } = safeFit(renderer);
       commitResize(cols, rows);
-      renderer.focus();
+      if (focused) renderer.focus();
     });
     return () => cancelAnimationFrame(raf);
-  }, [active, commitResize]);
+  }, [active, focused, commitResize]);
 
   return (
     <div className="relative h-full w-full">

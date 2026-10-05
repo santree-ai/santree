@@ -24,6 +24,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AgentKind, ReviewPr, TabKind, WorktreeTab } from "../../bindings";
 import {
+  type SplitController,
+  useSplitLayout,
+  useSplitLayouts,
+} from "../../components/split/useSplitLayout";
+import {
   useAddWorktreeTab,
   useCloseReviewSession,
   useRemoveWorktreeTab,
@@ -31,12 +36,18 @@ import {
   useSessionProviders,
   useWorktreeTabs,
 } from "../../lib/queries";
+import { usePersistedState } from "../../lib/usePersistedState";
 import { useOptionalAgentRuns } from "../../state/AgentRuns";
 import { defaultTabTitle } from "../trees/model";
 import { aiReviewTermKey } from "./AiReviewSessionPane";
 import { type PrCheckout, usePrCheckout } from "./PrCheckout";
 import { ticketIdFor } from "./ticket";
 import { useWorktreeGate } from "./WorktreeGate";
+
+/** Each pull request's split layout, by its GitHub node id. */
+const LAYOUT_BY_PR_KEY = "santree-reviews-layout-by-pr";
+/** Which pull requests have their ticket open as a tab. */
+const ISSUE_VIEW_BY_PR_KEY = "santree-reviews-issue-view-by-pr";
 
 /** The providers that can review a pull request, in menu order. */
 export const REVIEW_AGENTS: AgentKind[] = ["Codex", "Claude"];
@@ -56,9 +67,12 @@ export function aiTabAgent(tab: ReviewMainTab): AgentKind | null {
 }
 
 export interface ReviewTabs {
-  /** The tab on screen. Always resolvable: `pr` is not a row, so it cannot be
-   *  closed and there is always something to fall back to. */
+  /** The focused split group's tab. Always resolvable: `pr` is not a row, so it
+   *  cannot be closed and there is always something to fall back to. */
   active: ReviewMainTab;
+  /** The main area's split layout — which tab is in which group, and what each
+   *  group is showing. */
+  split: SplitController<ReviewMainTab>;
   /** Show a tab. Picking an AI review tab is also what *opens* the session — a
    *  PR the AI has reviewed before gets its tab back from
    *  {@link ReviewTabs.providers} on the next launch, with nothing running in
@@ -97,20 +111,27 @@ export interface ReviewTabs {
 
 export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
   const checkout = usePrCheckout(pr);
-  const { data: allTabs = [] } = useWorktreeTabs(checkout.repo);
+  const { data: allTabs = [], isFetched: rowsFetched } = useWorktreeTabs(checkout.repo);
   const { mutate: addTabRow } = useAddWorktreeTab(checkout.repo);
   const { mutate: renameTabRow } = useRenameWorktreeTab(checkout.repo);
   const { mutate: removeTabRow } = useRemoveWorktreeTab(checkout.repo);
   // A session this PR has reviewed with before survives a restart, so its tab is
   // back on the strip without anyone re-opening it.
-  const { data: storedProviders = [] } = useSessionProviders(santreeRepo, aiReviewTermKey(pr));
+  const { data: storedProviders = [], isFetched: providersFetched } = useSessionProviders(
+    santreeRepo,
+    aiReviewTermKey(pr),
+  );
   const { mutate: closeSession } = useCloseReviewSession(santreeRepo);
   const askForWorktree = useWorktreeGate();
   const [mounted, setMounted] = useState<AgentKind[]>([]);
-  const [remembered, setRemembered] = useState<ReviewMainTab | null>(null);
-  // Plain state, like the two above: the host keys this hook by PR, so a new
-  // pull request starts with the ticket closed.
-  const [issueViewAsked, setIssueViewAsked] = useState(false);
+  const layouts = useSplitLayouts<ReviewMainTab>(LAYOUT_BY_PR_KEY);
+  // Persisted per pull request, like the layout it sits in: a ticket tab left
+  // open beside the diff is still there after a restart.
+  const [issueViewByPr, setIssueViewByPr] = usePersistedState<Record<string, true>>(
+    ISSUE_VIEW_BY_PR_KEY,
+    {},
+  );
+  const issueViewAsked = !!issueViewByPr[pr.id];
   // The rail only offers to open a ticket it has, so this is belt and braces —
   // but a tab for a PR whose title and branch name no ticket would open on an
   // empty page, and the strip must not list one.
@@ -128,30 +149,37 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
     [storedProviders, mounted],
   );
 
-  // The remembered tab resolved against what is actually open — one rule for
-  // "what am I looking at", so closing a tab needs no fallback of its own. The
-  // pull request is always open, which is what makes that fallback total.
+  // The layout fitted to what is actually open — one rule for "what am I looking
+  // at", so closing a tab needs no fallback of its own. The pull request is
+  // always open, which is what makes that fallback total.
   const open: ReviewMainTab[] = [
     "pr",
     ...rows.map((t) => checkoutTab(t.id)),
     ...(issueViewOpen ? (["issueView"] as const) : []),
     ...providers.map(aiTab),
   ];
-  const active = remembered && open.includes(remembered) ? remembered : "pr";
+  // Without a checkout there are no rows to wait for.
+  const ready = (!worktreeId || rowsFetched) && providersFetched;
+  const split = useSplitLayout(layouts, pr.id, open, ready);
+  const { select: show } = split;
+  const active = split.active ?? "pr";
 
   const openIssueView = useCallback(() => {
-    setIssueViewAsked(true);
-    setRemembered("issueView");
-  }, []);
-  const closeIssueView = useCallback(() => {
-    setIssueViewAsked(false);
-    setRemembered((current) => (current === "issueView" ? null : current));
-  }, []);
+    setIssueViewByPr((current) => ({ ...current, [pr.id]: true }));
+    show("issueView");
+  }, [show, setIssueViewByPr, pr.id]);
+  const closeIssueView = useCallback(
+    () =>
+      setIssueViewByPr((current) => {
+        const { [pr.id]: _, ...rest } = current;
+        return rest;
+      }),
+    [setIssueViewByPr, pr.id],
+  );
 
   const closeReview = useCallback(
     (agent: AgentKind) => {
       setMounted((current) => current.filter((a) => a !== agent));
-      setRemembered((current) => (current === aiTab(agent) ? null : current));
       // The stored session goes too, or the strip puts the tab straight back on
       // the next launch from a conversation nothing is running. Tearing the PTY
       // down is the strip's half — `ReviewTabBar` does it for these tabs exactly
@@ -161,11 +189,14 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
     [closeSession, pr.repo, pr.number],
   );
 
-  const openReview = useCallback((agent: AgentKind, runSetup = false) => {
-    if (runSetup) pendingSetup.current = true;
-    setMounted((current) => (current.includes(agent) ? current : [...current, agent]));
-    setRemembered(aiTab(agent));
-  }, []);
+  const openReview = useCallback(
+    (agent: AgentKind, runSetup = false) => {
+      if (runSetup) pendingSetup.current = true;
+      setMounted((current) => (current.includes(agent) ? current : [...current, agent]));
+      show(aiTab(agent));
+    },
+    [show],
+  );
 
   // The dialog said yes to the setup script, and the checkout it applies to only
   // exists once the review session has created it — so the request waits here for
@@ -191,7 +222,7 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
     (tab: ReviewMainTab) => {
       const agent = aiTabAgent(tab);
       if (!agent) {
-        setRemembered(tab);
+        show(tab);
         return;
       }
       if (worktreeId) {
@@ -202,7 +233,7 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
         if (choice.ok) openReview(agent, choice.runSetup);
       });
     },
-    [openReview, worktreeId, askForWorktree],
+    [openReview, worktreeId, askForWorktree, show],
   );
 
   const addTab = useCallback(
@@ -224,13 +255,14 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
         title: defaultTabTitle(kind, resolvedAgent, rows),
         pr: null,
       });
-      setRemembered(checkoutTab(id));
+      show(checkoutTab(id));
     },
-    [worktreeId, rows, addTabRow],
+    [worktreeId, rows, addTabRow, show],
   );
 
   return {
     active,
+    split,
     select,
     checkout,
     rows,

@@ -9,20 +9,19 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentKind, TabKind, WorktreeTab } from "../../bindings";
+import { seedSplit } from "../../components/split/testing";
 import type { TerminalTabs } from "../terminal/orchestrator";
 import { TerminalsProvider, useTerminals } from "../terminal/TerminalsContext";
 import { MainTabBar } from "./MainTabBar";
-import type { MainTab } from "./model";
+import { type MainTab, openMainTabs } from "./model";
 
 /** The Trees model slice the bar reads, dialled per test. */
 const trees = vi.hoisted(() => ({
   activeId: "AK-1",
-  activeTab: null as MainTab | null,
   tabs: [] as WorktreeTab[],
   active: { agent: "Claude" },
   selectedFile: null as string | null,
   setupFor: null as string | null,
-  setActiveTab: vi.fn(),
   closeFileTab: vi.fn(),
   addTab: vi.fn<(kind: TabKind, agentKind?: AgentKind) => string | null>(),
   closeTab: vi.fn<(id: string) => void>(),
@@ -38,10 +37,28 @@ const trees = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("./model", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./model")>()),
-  useTrees: () => trees,
-}));
+vi.mock("./model", async (importOriginal) => {
+  const model = await importOriginal<typeof import("./model")>();
+  const { useTestSplit } = await import("../../components/split/testing");
+  return {
+    ...model,
+    // A real split controller over the tabs the slice has open, so selecting a
+    // tab is the layout's own answer rather than a spy's.
+    useTrees: () => ({ ...trees, split: useTestSplit(openOf(model.openMainTabs)) }),
+  };
+});
+
+/** The slice's open tabs, in the model's own order. */
+function openOf(openMainTabs: typeof import("./model").openMainTabs): MainTab[] {
+  return openMainTabs({
+    tabIds: trees.tabs.map((t) => t.id),
+    hasPrView: false,
+    hasIssueView: false,
+    hasFile: trees.selectedFile !== null,
+    hasSetup: trees.setupFor !== null && trees.setupFor === trees.activeId,
+    hasCheckLog: false,
+  });
+}
 
 vi.mock("../../lib/queries", () => ({
   useTicketProvider: () => "Linear",
@@ -75,7 +92,7 @@ const refIdOf = (id: string) => `tree:${trees.activeId}:tab:${id}`;
 function mount() {
   return render(
     <TerminalsProvider>
-      <MainTabBar />
+      <MainTabBar renderTab={() => null} empty={null} />
       <Probe />
     </TerminalsProvider>,
   );
@@ -93,8 +110,8 @@ const kill = (id: string) =>
 const liveRefIds = () => registry.tabs.map((t) => t.refId);
 
 beforeEach(() => {
+  localStorage.clear();
   trees.activeId = "AK-1";
-  trees.activeTab = null;
   trees.tabs = [];
   trees.selectedFile = null;
   trees.setupFor = null;
@@ -130,7 +147,7 @@ describe("MainTabBar", () => {
 
       rerender(
         <TerminalsProvider>
-          <MainTabBar />
+          <MainTabBar renderTab={() => null} empty={null} />
           <Probe />
         </TerminalsProvider>,
       );
@@ -359,7 +376,6 @@ describe("fitting the tabs to the pane", () => {
   beforeEach(() => {
     trees.active = { agent: "Claude" };
     trees.tabs = sessions(4);
-    trees.setActiveTab.mockClear();
   });
   afterEach(() => {
     rect?.mockRestore();
@@ -402,14 +418,14 @@ describe("fitting the tabs to the pane", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show 3 hidden tabs" }));
     fireEvent.click(screen.getByRole("button", { name: "Session 4" }));
 
-    expect(trees.setActiveTab).toHaveBeenCalledWith("tab:t4");
+    expect(screen.getByRole("tab", { name: "Session 4" })).toHaveAttribute("aria-selected", "true");
   });
 
   // You can't switch away from a tab you can no longer see — and a hidden active
   // tab would strand the tablist with no `tabIndex=0` element, the keyboard's
   // only way in. So it takes the last visible slot instead of being dropped.
   it("never hides the active tab", () => {
-    trees.activeTab = "tab:t4";
+    seedSplit(openOf(openMainTabs), "tab:t4");
     paneWidth(300);
     mount();
 
@@ -420,7 +436,7 @@ describe("fitting the tabs to the pane", () => {
   });
 
   it("keeps the active tab even when only one fits", () => {
-    trees.activeTab = "tab:t2";
+    seedSplit(openOf(openMainTabs), "tab:t2");
     paneWidth(60);
     mount();
 

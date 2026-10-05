@@ -34,6 +34,11 @@ import type {
 } from "../../bindings";
 import { primaryPr } from "../../components/PrChip";
 import {
+  type SplitController,
+  useSplitLayout,
+  useSplitLayouts,
+} from "../../components/split/useSplitLayout";
+import {
   type RepoReach,
   useAddWorktreeTab,
   useBaseWorktree,
@@ -286,7 +291,7 @@ export function defaultTabTitle(
 }
 
 /** The main-area tabs a worktree has open, in strip order — the list the tab bar
- *  renders and {@link resolveActiveTab} picks from.
+ *  renders, and the order a new tab joins its split group in.
  *
  *  There is no privileged tab. A worktree's agents and shells are all persisted
  *  rows, so what is open is whatever `worktree_tabs` says, and a workspace whose
@@ -323,16 +328,6 @@ function omit<T>(map: Record<string, T>, key: string): Record<string, T> {
   const next = { ...map };
   delete next[key];
   return next;
-}
-
-/** Which open tab is showing: the remembered one while it is still open, else the
- *  first — and `null` once nothing is open, which is what puts the empty surface
- *  on screen. Closing a tab therefore needs no fallback of its own: dropping it
- *  from `open` is what moves the selection, so there is one rule for "what am I
- *  looking at" instead of one per close button.
- *  Exported for testing — see model.test.ts. */
-export function resolveActiveTab(remembered: MainTab | undefined, open: MainTab[]): MainTab | null {
-  return remembered !== undefined && open.includes(remembered) ? remembered : (open[0] ?? null);
 }
 
 /** Which of a worktree's tabs may name it in Claude's Remote Control web, or null
@@ -446,8 +441,12 @@ interface TreesModel {
    *  The runs themselves are owned by `AgentRuns` at the app shell (they outlive
    *  this route); this is just the slice the tab bar and tab resolution need. */
   setupFor: string | null;
-  /** Which main-area tab is showing, or null when the workspace has none open. */
+  /** The focused split group's tab, or null when the workspace has none open —
+   *  "the" active tab, for everything that needs one answer. */
   activeTab: MainTab | null;
+  /** The main area's split layout: which tab is in which group, and what is on
+   *  screen in each. */
+  split: SplitController<MainTab>;
   /** The check whose raw job log is open in the main area, or null. */
   openCheckLog: OpenCheckLog | null;
   /** Whether the worktree's pull request, and its ticket, are open as main-area
@@ -470,7 +469,7 @@ interface TreesModel {
   /** Open a file in the shared File tab (and focus it), or close it with null.
    *  `scope` picks the diff; it defaults to the working tree. */
   selectFile: (path: string | null, scope?: FileScope) => void;
-  /** Switch which main-area tab is showing (the tab must be present). */
+  /** Show a main-area tab, in whichever split group holds it. */
   setActiveTab: (tab: MainTab) => void;
   /** Close the File tab (the selection falls to whatever is still open). */
   closeFileTab: () => void;
@@ -549,7 +548,7 @@ const RIGHT_WIDTH_KEY = "santree-trees-right-width";
 // nothing and would silently drop the reader onto Changes.
 const FILE_TAB_KEY = "santree-trees-file-tab-v5";
 const FILE_SCOPE_BY_WT_KEY = "santree-trees-file-scope-by-wt";
-const TAB_BY_WT_KEY = "santree-trees-tab-by-worktree";
+const LAYOUT_BY_WT_KEY = "santree-trees-layout-by-worktree";
 const FILE_BY_WT_KEY = "santree-trees-file-by-worktree";
 const PR_VIEW_BY_WT_KEY = "santree-trees-pr-view-by-worktree";
 const ISSUE_VIEW_BY_WT_KEY = "santree-trees-issue-view-by-worktree";
@@ -585,7 +584,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const reach = useRepoReach(repo);
   const { data: realWorktrees = [], isLoading: worktreesLoading } = useWorktrees(repo);
   const { data: baseWorktree = null, isLoading: baseWorktreeLoading } = useBaseWorktree(repo);
-  const { data: worktreePrs = [] } = useWorktreePrs(repo);
+  const { data: worktreePrs = [], isFetched: prsFetched } = useWorktreePrs(repo);
   // Owned here (a stable provider) so optimistic delete's rollback still fires
   // after the deleted worktree's pane unmounts. Shared with the sidebar row's
   // right-click delete — see useWorktreeDeletion.
@@ -699,25 +698,20 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   const [fixCiLaunchByTab, setFixCiLaunchByTab] = useState<Record<string, FixCiLaunch>>({});
   // Deliberately NOT persisted, unlike the tab it opens under: a job log is
   // transient, and a `jobId` remembered from last week would reopen a stale log
-  // for a PR that has since moved on. `activeTabByWt` can still remember
-  // "checkLog" — with no log in the slot, `resolveActiveTab` falls back to the
-  // terminal, exactly as it does for a "setup" tab whose run has ended.
+  // for a PR that has since moved on. With no log in the slot the "checkLog" tab
+  // is simply not open, exactly like a "setup" tab whose run has ended.
   const [checkLogByWt, setCheckLogByWt] = useState<Record<string, OpenCheckLog>>({});
-  // Per-worktree main tab + open file, so switching worktrees restores whichever
-  // tab/file each one was last on instead of snapping every one back to the
-  // terminal. A worktree with no entry defaults to the terminal; the launch flow
-  // switches to setup as it starts.
-  const [activeTabByWt, setActiveTabByWt] = usePersistedState<Record<string, MainTab>>(
-    TAB_BY_WT_KEY,
-    {},
-  );
+  // Per-worktree split layout (which tab is in which group, and which is showing
+  // in each) + open file, so switching worktrees restores whatever each one was
+  // last showing instead of snapping every one back to its first tab.
+  const layouts = useSplitLayouts<MainTab>(LAYOUT_BY_WT_KEY);
   const [selectedFileByWt, setSelectedFileByWt] = usePersistedState<Record<string, string | null>>(
     FILE_BY_WT_KEY,
     {},
   );
   // Persisted like the file, unlike the check log: a PR page and a ticket page
   // are addressed by the worktree alone, so what reopens after a reload is
-  // exactly what was open — and a remembered "prView" in `activeTabByWt` would
+  // exactly what was open — and a remembered "prView" in the layout would
   // otherwise land on nothing.
   const [prViewByWt, setPrViewByWt] = usePersistedState<Record<string, true>>(
     PR_VIEW_BY_WT_KEY,
@@ -728,13 +722,12 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     ISSUE_VIEW_BY_WT_KEY,
     {},
   );
+  // Shows the tab in that worktree's layout whether or not it is on screen: a
+  // run being followed lands on its tab whenever the worktree is next opened.
+  const setTabFor = layouts.selectIn;
   // The setters below come from `usePersistedState`, which returns `useState`'s
   // own setter — stable for the component's life, so listing it changes nothing
   // at runtime. Biome only knows that guarantee for a literal `useState` call.
-  const setTabFor = useCallback(
-    (id: string, tab: MainTab) => setActiveTabByWt((m) => ({ ...m, [id]: tab })),
-    [setActiveTabByWt],
-  );
   const setFileFor = useCallback(
     (id: string, file: string | null) => setSelectedFileByWt((m) => ({ ...m, [id]: file })),
     [setSelectedFileByWt],
@@ -753,7 +746,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // Persisted extra tabs (the "+" tab: Claude sessions / terminals), DB-backed so
   // they survive app restarts. Grouped by worktree id; mutations are optimistic
   // (the tab appears/renames/closes instantly, the row lands in the background).
-  const { data: allExtraTabs = [] } = useWorktreeTabs(repo);
+  const { data: allExtraTabs = [], isFetched: tabsFetched } = useWorktreeTabs(repo);
   const tabsByWt = useMemo(() => {
     const map = new Map<string, WorktreeTab[]>();
     for (const t of allExtraTabs) {
@@ -959,39 +952,46 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [setRightCollapsed]);
 
+  // What the active worktree has open — see openMainTabs for why each tab comes
+  // and goes, and why the answer can be "nothing" — and its split layout fitted
+  // to that.
+  const tabs = useMemo(() => tabsByWt.get(activeId) ?? [], [tabsByWt, activeId]);
+  const selectedFile = selectedFileByWt[activeId] ?? null;
+  // The Setup tab only exists while THIS worktree's script is running.
+  const setupFor = settingUpActive ? activeId : null;
+  const openCheckLog = checkLogByWt[activeId] ?? null;
+  const activePr = primaryPr(prsByWorktree.get(activeId) ?? []) ?? null;
+  const hasActivePr = activePr !== null;
+  const paneInputs = useMemo<FileTabInputs>(
+    () => ({ isBase: activeId === BASE_ID, hasPr: hasActivePr, hasTicket }),
+    [activeId, hasActivePr, hasTicket],
+  );
+  // The expanded views follow their panes: a PR page for a worktree whose PR
+  // is gone, or a ticket page on the base checkout, is not open however it was
+  // remembered — the one rule that decides which panes exist decides this too.
+  const panes = availableFileTabs(paneInputs);
+  const prViewOpen = !!prViewByWt[activeId] && panes.includes("pr");
+  const issueViewOpen = !!issueViewByWt[activeId] && panes.includes("issue");
+  const openTabs = openMainTabs({
+    tabIds: tabs.map((t) => t.id),
+    hasPrView: prViewOpen,
+    hasIssueView: issueViewOpen,
+    hasFile: selectedFile !== null,
+    hasSetup: setupFor !== null,
+    hasCheckLog: openCheckLog !== null,
+  });
+  // Only once every input to `openTabs` has answered: a tab missing because its
+  // read is still in flight is not a closed tab, and the layout must not forget
+  // where it was.
+  const layoutReady =
+    !!activeId && tabsFetched && prsFetched && (ticketId === null || activeTicket !== undefined);
+  const split = useSplitLayout(layouts, activeId, openTabs, layoutReady);
+
   const value = useMemo<TreesModel>(() => {
     const active =
       activeId === BASE_ID ? baseWorktree : (worktrees.find((w) => w.id === activeId) ?? null);
-    const tabs = tabsByWt.get(activeId) ?? [];
-    const selectedFile = selectedFileByWt[activeId] ?? null;
     const selectedFileScope: FileScope = fileScopeByWt[activeId] ?? "working";
-    // The Setup tab only exists while THIS worktree's script is running.
-    const setupFor = settingUpActive ? activeId : null;
-    const openCheckLog = checkLogByWt[activeId] ?? null;
-    const activePr = primaryPr(prsByWorktree.get(activeId) ?? []) ?? null;
-    const paneInputs: FileTabInputs = {
-      isBase: activeId === BASE_ID,
-      hasPr: activePr !== null,
-      hasTicket,
-    };
-    // The expanded views follow their panes: a PR page for a worktree whose PR
-    // is gone, or a ticket page on the base checkout, is not open however it was
-    // remembered — the one rule that decides which panes exist decides this too.
-    const panes = availableFileTabs(paneInputs);
-    const prViewOpen = !!prViewByWt[activeId] && panes.includes("pr");
-    const issueViewOpen = !!issueViewByWt[activeId] && panes.includes("issue");
-    // One list of what is open, and the remembered selection resolved against it
-    // — see openMainTabs/resolveActiveTab for why each tab comes and goes, and
-    // why the answer can be "nothing".
-    const openTabs = openMainTabs({
-      tabIds: tabs.map((t) => t.id),
-      hasPrView: prViewOpen,
-      hasIssueView: issueViewOpen,
-      hasFile: selectedFile !== null,
-      hasSetup: setupFor !== null,
-      hasCheckLog: openCheckLog !== null,
-    });
-    const activeTab = resolveActiveTab(activeTabByWt[activeId], openTabs);
+    const activeTab = split.active;
     return {
       repo,
       reach,
@@ -1013,6 +1013,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       selectedFileScope,
       setupFor,
       activeTab,
+      split,
       openCheckLog,
       prViewOpen,
       issueViewOpen,
@@ -1025,7 +1026,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       closeSplit: () => setSplitByWt((current) => omit(current, activeId)),
       tabs,
       // Switching worktrees just changes which one is active — each remembers its
-      // own tab/file (see activeTabByWt/selectedFileByWt), so returning to a worktree
+      // own layout/file (see layouts/selectedFileByWt), so returning to a worktree
       // restores whatever it was last showing instead of snapping back to its first
       // tab.
       setActive: select,
@@ -1042,9 +1043,9 @@ export function TreesProvider({ children }: { children: ReactNode }) {
           setRightCollapsed(false);
         }
       },
-      setActiveTab: (tab) => setTabFor(activeId, tab),
+      setActiveTab: split.select,
       // No fallback to pick here: with no file the File tab leaves `openMainTabs`,
-      // and `resolveActiveTab` moves the selection to whatever is still open.
+      // and the layout moves its group's selection to whatever is still open.
       closeFileTab: () => setFileFor(activeId, null),
       showCheckLog: (log) => {
         setCheckLogByWt((current) => ({ ...current, [activeId]: log }));
@@ -1139,7 +1140,14 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     baseWorktreeLoading,
     baseWorktree,
     activeId,
-    tabsByWt,
+    tabs,
+    selectedFile,
+    setupFor,
+    openCheckLog,
+    activePr,
+    prViewOpen,
+    issueViewOpen,
+    split,
     addTabRow,
     renameTabRow,
     removeTabRow,
@@ -1147,14 +1155,12 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     rightWidth,
     fileTab,
     hasTicket,
+    paneInputs,
     setFileTab,
     setRightCollapsed,
     setRightWidth,
-    selectedFileByWt,
     fileScopeByWt,
     setFileScopeFor,
-    settingUpActive,
-    activeTabByWt,
     setTabFor,
     setFileFor,
     select,
@@ -1167,10 +1173,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     selectedWorktrees,
     deleteWorktree,
     deleteWorktrees,
-    checkLogByWt,
-    prViewByWt,
     splitByWt,
-    issueViewByWt,
     setPrViewByWt,
     setIssueViewByWt,
     reopenTab,
@@ -1196,22 +1199,25 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   useEffect(() => () => setFocusedAgent(null), [setFocusedAgent]);
 
   // What this view has on screen, for the off-screen launcher: the worktree and
-  // which of its tab rows is showing. From the *resolved* tab, so the launcher
-  // and this view agree on which pane exists — a remembered tab that is gone
-  // resolves to another, and only the pane actually mounted hosts a terminal.
+  // which of its tab rows are showing — one per split group. From the *drawn*
+  // layout, so the launcher and this view agree on which panes exist — only the
+  // pane actually mounted hosts a terminal.
   // Read off the route rather than published from `select`: a sidebar click, a
   // launch's own navigate, a link and a reload all change the selection without
   // passing through it, and publishing only at mount once left the launcher
   // skipping a worktree whose pane was long gone. The setter ignores an answer
   // it already holds. Unmounting releases it, so a launch for the worktree that
   // was open runs off-screen once Trees is gone.
-  const visibleTab = value.activeTab?.startsWith("tab:")
-    ? value.activeTab.slice("tab:".length)
-    : null;
+  const visibleRows = split.visible
+    .filter((t) => t.startsWith("tab:"))
+    .map((t) => t.slice("tab:".length))
+    .join(",");
   useEffect(() => {
-    setVisibleWorktree(activeId ? { repo, id: activeId, tab: visibleTab } : null);
+    setVisibleWorktree(
+      activeId ? { repo, id: activeId, tabs: visibleRows ? visibleRows.split(",") : [] } : null,
+    );
     return () => setVisibleWorktree(null);
-  }, [repo, activeId, visibleTab, setVisibleWorktree]);
+  }, [repo, activeId, visibleRows, setVisibleWorktree]);
 
   return <TreesContext.Provider value={value}>{children}</TreesContext.Provider>;
 }

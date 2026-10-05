@@ -1225,11 +1225,15 @@ export function PositionedMenu({
 /** Active/inactive style for an "inset underline" tab (a `bg-app` fill with an
  *  `inset 0 -2px 0` accent rule) — shared by the main-area and file-picker tab
  *  bars so the look can't drift. */
-export function underlineTabStyle(active: boolean): CSSProperties {
+export function underlineTabStyle(active: boolean, muted = false): CSSProperties {
   return {
     color: active ? "var(--color-fg-2)" : "var(--color-muted-2)",
     background: active ? "var(--color-app)" : "transparent",
-    boxShadow: active ? "inset 0 -2px 0 var(--accent)" : "none",
+    // `muted`: the selected tab of a split group that isn't the focused one —
+    // still marked, but the accent belongs to the group being worked in.
+    boxShadow: active
+      ? `inset 0 -2px 0 ${muted ? "var(--color-muted-5)" : "var(--accent)"}`
+      : "none",
   };
 }
 

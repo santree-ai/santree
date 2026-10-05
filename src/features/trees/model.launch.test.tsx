@@ -256,17 +256,17 @@ describe("TreesProvider · following a run", () => {
    *  or nothing at all, hosts nothing. That distinction is the bug this fixes. */
   it("tells the launcher which tab it is hosting, and none when the main area is empty", () => {
     mount();
-    expect(setVisibleWorktree).toHaveBeenLastCalledWith({ repo: A, id: "AK-1", tab: "t1" });
+    expect(setVisibleWorktree).toHaveBeenLastCalledWith({ repo: A, id: "AK-1", tabs: ["t1"] });
 
     act(() => {
       store.tabs = [];
       store.notify();
     });
-    expect(setVisibleWorktree).toHaveBeenLastCalledWith({ repo: A, id: "AK-1", tab: null });
+    expect(setVisibleWorktree).toHaveBeenLastCalledWith({ repo: A, id: "AK-1", tabs: [] });
 
     // A sidebar click: the url changes without passing through the view's own
     // `select`, which is the only writer the launcher used to hear from.
     act(() => route.go({ project: A, tree: "AK-2" }));
-    expect(setVisibleWorktree).toHaveBeenLastCalledWith({ repo: A, id: "AK-2", tab: null });
+    expect(setVisibleWorktree).toHaveBeenLastCalledWith({ repo: A, id: "AK-2", tabs: [] });
   });
 });

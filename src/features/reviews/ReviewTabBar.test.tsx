@@ -8,6 +8,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ReviewDraft, ReviewPr, TabKind, WorktreeTab } from "../../bindings";
+import { useTestSplit } from "../../components/split/testing";
 import { worktree as fxWorktree } from "../../test/fixtures";
 import type { TerminalTabs } from "../terminal/orchestrator";
 import { TerminalsProvider, useTerminals } from "../terminal/TerminalsContext";
@@ -25,7 +26,7 @@ vi.mock("../../lib/queries", () => ({
 }));
 
 import { ReviewTabBar } from "./ReviewTabBar";
-import type { ReviewMainTab, ReviewTabs } from "./useReviewTabs";
+import { aiTab, checkoutTab, type ReviewMainTab, type ReviewTabs } from "./useReviewTabs";
 
 const pr = { repo: "acme/app", number: 42 } as ReviewPr;
 const WORKTREE_ID = "review-4-acme-3-app-42";
@@ -40,8 +41,11 @@ const row = (id: string, kind: TabKind, title: string): WorktreeTab => ({
   pr: null,
 });
 
-/** The model the bar draws, dialled per test. */
-function tabsModel(over: Partial<ReviewTabs> = {}): ReviewTabs {
+/** The model the bar draws, dialled per test — all but its split layout, which
+ *  {@link Bar} builds for real over the tabs the model has open. */
+type TabsModel = Omit<ReviewTabs, "split">;
+
+function tabsModel(over: Partial<TabsModel> = {}): TabsModel {
   return {
     active: "pr" as ReviewMainTab,
     select: vi.fn(),
@@ -70,7 +74,7 @@ function tabsModel(over: Partial<ReviewTabs> = {}): ReviewTabs {
 }
 
 /** A checkout, and the rows that can only exist once there is one. */
-function checkedOut(over: Partial<ReviewTabs> = {}): ReviewTabs {
+function checkedOut(over: Partial<TabsModel> = {}): TabsModel {
   const base = tabsModel(over);
   return {
     ...base,
@@ -96,13 +100,25 @@ function Probe() {
   return null;
 }
 
-function mount(tabs: ReviewTabs) {
+/** The bar over `tabs`, with a real split controller over what they have open —
+ *  in the order `useReviewTabs` gives it. */
+function Bar({ tabs }: { tabs: TabsModel }) {
+  const split = useTestSplit<ReviewMainTab>([
+    "pr",
+    ...tabs.rows.map((t) => checkoutTab(t.id)),
+    ...(tabs.issueViewOpen ? (["issueView"] as const) : []),
+    ...tabs.providers.map(aiTab),
+  ]);
+  return <ReviewTabBar pr={pr} tabs={{ ...tabs, split }} renderTab={() => null} />;
+}
+
+function mount(tabs: TabsModel) {
   return render(
     <TerminalsProvider>
       {/* The real host mounts this around the whole view: without a checkout, an
           AI review has to cut one, and that is asked for rather than assumed. */}
       <WorktreeGateProvider>
-        <ReviewTabBar pr={pr} tabs={tabs} />
+        <Bar tabs={tabs} />
       </WorktreeGateProvider>
       <Probe />
     </TerminalsProvider>,
@@ -113,6 +129,7 @@ const openMenu = () => fireEvent.click(screen.getByRole("button", { name: /New t
 const tabNames = () => screen.getAllByRole("tab").map((t) => t.textContent);
 
 beforeEach(() => {
+  localStorage.clear();
   drafts = [];
 });
 

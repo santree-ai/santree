@@ -1,5 +1,6 @@
-/** Reviews' main tab bar: the pull request and everything you have open beside
- *  it, on the same {@link TabStrip} Trees draws.
+/** Reviews' main area: the pull request and everything you have open beside
+ *  it, on the same {@link SplitWorkspace} Trees draws — a strip per split group,
+ *  each over its active tab's content.
  *
  *  **The first tab is the view itself.** "Pull Request" is a deliberate exception
  *  to the rule that `worktree_tabs` rows are the whole set of what a workspace has
@@ -14,6 +15,8 @@
  *  an ordinary agent needs a directory to run in. With no checkout the menu offers
  *  to cut one — through the header's own "Open as tree" flow, not a second copy of
  *  it. */
+import type { ReactNode } from "react";
+
 import type { AgentKind, ReviewPr } from "../../bindings";
 import {
   AgentIcon,
@@ -24,7 +27,8 @@ import {
 } from "../../components/icons";
 import { MENU_ITEM } from "../../components/primitives";
 import { PanelToggle } from "../../components/SidePanel";
-import { type StripTab, TabStrip } from "../../components/TabStrip";
+import { SplitWorkspace } from "../../components/split/SplitWorkspace";
+import type { StripTab } from "../../components/TabStrip";
 import {
   useAgentAuth,
   useCodexAccount,
@@ -50,7 +54,16 @@ import {
 } from "./useReviewTabs";
 import { useWorktreeGate } from "./WorktreeGate";
 
-export function ReviewTabBar({ pr, tabs }: { pr: ReviewPr; tabs: ReviewTabs }) {
+export function ReviewTabBar({
+  pr,
+  tabs,
+  renderTab,
+}: {
+  pr: ReviewPr;
+  tabs: ReviewTabs;
+  /** A tab's content; `visible` is whether it is showing in its group. */
+  renderTab: (tab: ReviewMainTab, visible: boolean) => ReactNode;
+}) {
   const { infoCollapsed, toggleInfo, repo } = useReviewsModel();
   const provider = useTicketProvider(repo);
   const { data: drafts } = useReviewDrafts(pr.repo, pr.number);
@@ -118,10 +131,10 @@ export function ReviewTabBar({ pr, tabs }: { pr: ReviewPr; tabs: ReviewTabs }) {
   ];
 
   return (
-    <TabStrip
-      tabs={items}
-      active={tabs.active}
-      onSelect={tabs.select}
+    <SplitWorkspace
+      split={{ ...tabs.split, select: tabs.select }}
+      items={items}
+      renderTab={renderTab}
       ariaLabel="Pull request tabs"
       newTabMenu={(close) => <NewTabMenu tabs={tabs} close={close} />}
       trailing={infoCollapsed ? <PanelToggle collapsed onToggle={toggleInfo} /> : null}

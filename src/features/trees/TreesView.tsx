@@ -32,7 +32,7 @@ import { CreatePrDialog } from "./CreatePrDialog";
 import { FilePickerPanel } from "./FilePickerPanel";
 import { FileViewer } from "./FileViewer";
 import { MainTabBar } from "./MainTabBar";
-import { BASE_ID, extraTab, TreesProvider, useTrees } from "./model";
+import { BASE_ID, extraTab, type MainTab, TreesProvider, useTrees } from "./model";
 import { SetupLogsView } from "./SetupLogsView";
 import { useReopenClosedTab } from "./useReopenClosedTab";
 import { WelcomeSurface } from "./WelcomeSurface";
@@ -220,107 +220,79 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
   const {
     repo,
     reach,
-    selectedFile,
-    activeTab,
     tabs,
     setupFor,
     openCheckLog,
     addTab,
     fixCiLaunchFor,
     activePr,
+    selectedFile,
     prViewOpen,
     issueViewOpen,
   } = useTrees();
 
+  // A tab's content, wherever its split group puts it. A row's host is mounted
+  // ONLY while that tab is showing: the live xterm + PTY live in the global
+  // TerminalLayer (keyed `tree:<id>:tab:<tab id>`), so unmounting the host just
+  // detaches the overlay; the session + scrollback persist and re-attach on
+  // return. Terminal rows are plain login shells; agent rows (a started task's
+  // included) and review rows carry their own resumable agent session.
+  //
+  // The File / Setup / check log / PR / ticket views stay mounted while open —
+  // the workspace hides the ones not showing — so a running setup isn't
+  // restarted, and a long diff's or thread's scroll and expansions survive a
+  // switch.
+  const renderTab = (tab: MainTab, visible: boolean) => {
+    if (tab.startsWith("tab:")) {
+      const t = tabs.find((row) => extraTab(row.id) === tab);
+      if (!t || !visible) return null;
+      return t.kind !== "terminal" ? (
+        <AgentTabPane
+          repo={repo}
+          worktree={worktree}
+          tab={t}
+          tabs={tabs}
+          handoff={fixCiLaunchFor(t.id)}
+        />
+      ) : (
+        <WorktreeTerminal id={`${worktree.id}:tab:${t.id}`} branch={t.title} cwd={worktree.path} />
+      );
+    }
+    switch (tab) {
+      case "file":
+        return selectedFile !== null ? <FileViewer /> : null;
+      case "setup":
+        return setupFor !== null ? <SetupLogsView repo={repo} worktreeId={worktree.id} /> : null;
+      case "checkLog":
+        return openCheckLog !== null ? <CheckLogView log={openCheckLog} /> : null;
+      case "prView":
+        return prViewOpen && activePr ? (
+          <PrView key={`${activePr.repo}#${activePr.number}`} pr={activePr} />
+        ) : null;
+      case "issueView":
+        return issueViewOpen ? (
+          <IssuePage repo={repo} ticketId={worktree.ticketId ?? worktree.id} />
+        ) : null;
+    }
+  };
+
   return (
     <div className="flex min-h-0 flex-1">
       <div className="flex min-w-0 flex-1 flex-col">
-        <MainTabBar />
-        {/* A tab's host is mounted ONLY while that tab is showing (like the triage
-            Investigate pane). The live xterm + PTY live in the global TerminalLayer
-            (keyed `tree:<id>:tab:<tab id>`), so unmounting the host just detaches
-            the overlay; the session + scrollback persist and re-attach on return.
-            The File / Setup / PR / ticket views stay mounted (hidden when
-            inactive). */}
-        <div className="relative min-h-0 flex-1">
-          {/* Nothing open — every tab was closed, or this workspace has never had
-              one. The bar above still carries "+", and this offers the plainest
-              thing it can open; Session history resumes any past agent. */}
-          {activeTab === null && (
-            <div className="absolute inset-0 flex flex-col">
-              <WelcomeSurface
-                workspace={{
-                  onOpenTerminal: () => addTab("terminal"),
-                  actionsOff: reach.runOff,
-                }}
-              />
-            </div>
-          )}
-          {/* One pane per open tab, mounted only while showing — the session
-              persists in the global TerminalLayer. Terminal tabs are plain login
-              shells; agent tabs (a started task's included) and review tabs carry
-              their own resumable agent session. */}
-          {tabs.map((t) =>
-            activeTab === extraTab(t.id) ? (
-              t.kind !== "terminal" ? (
-                <AgentTabPane
-                  key={t.id}
-                  repo={repo}
-                  worktree={worktree}
-                  tab={t}
-                  tabs={tabs}
-                  handoff={fixCiLaunchFor(t.id)}
-                />
-              ) : (
-                <WorktreeTerminal
-                  key={t.id}
-                  id={`${worktree.id}:tab:${t.id}`}
-                  branch={t.title}
-                  cwd={worktree.path}
-                />
-              )
-            ) : null,
-          )}
-          {selectedFile !== null && (
-            <div className={`absolute inset-0 z-40 ${activeTab === "file" ? "" : "hidden"}`}>
-              <FileViewer />
-            </div>
-          )}
-          {setupFor !== null && (
-            <div className={`absolute inset-0 z-40 ${activeTab === "setup" ? "" : "hidden"}`}>
-              <SetupLogsView repo={repo} worktreeId={worktree.id} />
-            </div>
-          )}
-          {/* Mounted-and-hidden like its neighbours. The log fetch is idempotent
-              so `cond && <C/>` would be safe here, but a long log's scroll
-              position surviving a tab switch is the whole reason it's a tab. */}
-          {openCheckLog !== null && (
-            <div className={`absolute inset-0 z-40 ${activeTab === "checkLog" ? "" : "hidden"}`}>
-              <CheckLogView log={openCheckLog} />
-            </div>
-          )}
-          {/* The right panel's PR and Issue panes at reading width. Same rule as
-              the log above — mounted while open, hidden while another tab shows —
-              so a long diff's expansions and a thread's scroll survive a switch.
-              One display class rather than `flex … hidden`: which of the two wins
-              is a question about stylesheet order, and the answer must not be. */}
-          {prViewOpen && activePr && (
-            <div
-              className={activeTab === "prView" ? "absolute inset-0 z-40 flex flex-col" : "hidden"}
-            >
-              <PrView key={`${activePr.repo}#${activePr.number}`} pr={activePr} />
-            </div>
-          )}
-          {issueViewOpen && (
-            <div
-              className={
-                activeTab === "issueView" ? "absolute inset-0 z-40 flex flex-col" : "hidden"
-              }
-            >
-              <IssuePage repo={repo} ticketId={worktree.ticketId ?? worktree.id} />
-            </div>
-          )}
-        </div>
+        <MainTabBar
+          renderTab={renderTab}
+          // Nothing open — every tab was closed, or this workspace has never had
+          // one. The strip above still carries "+", and this offers the plainest
+          // thing it can open; Session history resumes any past agent.
+          empty={
+            <WelcomeSurface
+              workspace={{
+                onOpenTerminal: () => addTab("terminal"),
+                actionsOff: reach.runOff,
+              }}
+            />
+          }
+        />
         <PrSuggestionBar worktree={worktree} />
       </div>
       <FilePickerPanel />

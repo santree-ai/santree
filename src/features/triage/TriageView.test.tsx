@@ -83,26 +83,58 @@ vi.mock("./TriageSidePanel", () => ({
   DEFAULT_W: 400,
   TriageSidePanel: () => <aside data-testid="rail" />,
 }));
-vi.mock("./TriageTabBar", () => ({ TriageTabBar: () => <div data-testid="tab-bar" /> }));
-vi.mock("./useTriageTabs", () => ({
-  agentTabKind: (tab: string) => (tab.startsWith("agent:") ? tab.slice("agent:".length) : null),
-  rowTab: (id: string) => `tab:${id}`,
-  rowTabId: (tab: string) => (tab.startsWith("tab:") ? tab.slice("tab:".length) : null),
-  useTriageTabs: () => ({
-    active: state.active,
-    select: state.select,
-    providers: [],
-    hasStored: () => false,
-    openAgent: state.openAgent,
-    closeAgent: vi.fn(),
-    rows: [],
-    addTab: vi.fn(),
-    closeTab: vi.fn(),
-    renameTab: vi.fn(),
-  }),
+// The strip is its own test. This stand-in draws what the split workspace would:
+// every open tab's content, each told whether its group is showing it.
+vi.mock("./TriageTabBar", () => ({
+  TriageTabBar: ({
+    tabs,
+    renderTab,
+  }: {
+    tabs: TriageTabs;
+    renderTab: (tab: TriageMainTab, visible: boolean) => ReactNode;
+  }) => (
+    <div data-testid="tab-bar">
+      {Object.values(tabs.split.layout.groups)
+        .flatMap((g) => g.tabs)
+        .map((t) => {
+          const visible = tabs.split.visible.includes(t);
+          return (
+            <div key={t} className={visible ? undefined : "hidden"}>
+              {renderTab(t, visible)}
+            </div>
+          );
+        })}
+    </div>
+  ),
 }));
+vi.mock("./useTriageTabs", async () => {
+  const { fakeSplit } = await import("../../components/split/testing");
+  return {
+    agentTabKind: (tab: string) => (tab.startsWith("agent:") ? tab.slice("agent:".length) : null),
+    rowTab: (id: string) => `tab:${id}`,
+    rowTabId: (tab: string) => (tab.startsWith("tab:") ? tab.slice("tab:".length) : null),
+    useTriageTabs: () => ({
+      active: state.active,
+      // The ticket, and the one other tab the case put on screen.
+      split: fakeSplit(
+        state.active === "linear" ? ["linear"] : ["linear", state.active],
+        state.active,
+      ),
+      select: state.select,
+      providers: [],
+      hasStored: () => false,
+      openAgent: state.openAgent,
+      closeAgent: vi.fn(),
+      rows: [],
+      addTab: vi.fn(),
+      closeTab: vi.fn(),
+      renameTab: vi.fn(),
+    }),
+  };
+});
 
 import { TriageView } from "./TriageView";
+import type { TriageMainTab, TriageTabs } from "./useTriageTabs";
 
 const ticket = (id: string) => triageTicket(id);
 

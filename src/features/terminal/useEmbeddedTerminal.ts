@@ -23,6 +23,7 @@
  */
 import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
+import { useSplitPane } from "../../components/split/SplitPaneContext";
 import type { TerminalSpec } from "./orchestrator";
 import { useTerminals } from "./TerminalsContext";
 
@@ -63,6 +64,11 @@ export function useEmbeddedTerminal(opts: {
   // Latest exit callback without forcing the embed effect to re-run.
   const onExitedRef = useRef(onExited);
   onExitedRef.current = onExited;
+  // A press inside the session focuses the split group it is shown in — the
+  // layer draws the terminal, so the group never sees that press itself.
+  const pane = useSplitPane();
+  const activateRef = useRef(pane?.activate);
+  activateRef.current = pane?.activate;
 
   // Pull the spec into primitive fields so the embed effect re-runs on real
   // changes (a new ticket/command) rather than on every render's fresh object
@@ -80,7 +86,7 @@ export function useEmbeddedTerminal(opts: {
     seenRef.current = false;
     const host = hostRef.current;
     if (!attach || !host) return;
-    return attachEmbed({ host, key });
+    return attachEmbed({ host, key, onActivate: () => activateRef.current?.() });
   }, [title, cwd, command, seed, source, refId, argsKey, agentKey, attach, ensure, attachEmbed]);
 
   // Seen-latch exit detection (see the file header).

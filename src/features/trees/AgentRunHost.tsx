@@ -32,9 +32,9 @@ import { WorktreeTerminal } from "./WorktreeTerminal";
  *  it launches into.
  *
  *  Excluded: launches belonging to another project (each project has its own host
- *  — see `RepoLaunches`), the launch whose *tab* a view has on screen (that pane
- *  already hosts the terminal — two hosts for one session would fight over the
- *  single xterm overlay), and any launch whose worktree isn't real yet (a
+ *  — see `RepoLaunches`), a launch whose *tab* a view has on screen in any split
+ *  group (that pane already hosts the terminal — two hosts for one session would
+ *  each try to seed it), and any launch whose worktree isn't real yet (a
  *  placeholder has no path to root a terminal in). "On screen" is matched on
  *  project, id *and* tab: two projects of one Linear org can hold a worktree for
  *  the same ticket, and a worktree showing another of its tabs — or its empty
@@ -56,7 +56,7 @@ export function launchesToHost(
         !(
           visibleWorktree?.repo === launch.repo &&
           visibleWorktree.id === id &&
-          visibleWorktree.tab === launch.tabId
+          visibleWorktree.tabs.includes(launch.tabId)
         ),
     )
     .map(([id, launch]) => ({ worktree: worktrees.find((w) => w.id === id), tabId: launch.tabId }))

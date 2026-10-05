@@ -1,5 +1,6 @@
-/** Trees' main tab bar: the worktree's tabs on the shared {@link TabStrip}, plus
- *  the two controls that act on the pane as a whole.
+/** Trees' main area: the worktree's tabs on the shared {@link SplitWorkspace} —
+ *  one {@link TabStrip} per split group, each over its active tab's content —
+ *  plus the two controls that act on the pane as a whole.
  *
  *  Every tab is a `worktree_tabs` row — the agents and shells a worktree has
  *  open, including the one a started task runs in — and every one of them closes
@@ -13,10 +14,13 @@
  *  The trailing cluster is not part of the tablist: the worktree's setup script
  *  (the one command this pane runs) and the right panel's expand control, which
  *  lives here only while the panel is hidden — collapsing it from its own header
- *  and reopening it somewhere else is how a toggle goes missing.
+ *  and reopening it somewhere else is how a toggle goes missing. With the area
+ *  split it rides on the top-right group's strip, beside that panel.
  *
  *  This file is only Trees' *wiring*: the chrome, the fitting and the keyboard
  *  model belong to the strip, which knows nothing about either host's model. */
+import type { ReactNode } from "react";
+
 import type { AgentKind, TabKind } from "../../bindings";
 import {
   AgentIcon,
@@ -28,7 +32,8 @@ import {
 } from "../../components/icons";
 import { MENU_ITEM } from "../../components/primitives";
 import { PanelToggle } from "../../components/SidePanel";
-import { type StripTab, TabStrip } from "../../components/TabStrip";
+import { SplitWorkspace } from "../../components/split/SplitWorkspace";
+import type { StripTab } from "../../components/TabStrip";
 import {
   useAgentAuth,
   useCodexAccount,
@@ -39,14 +44,21 @@ import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { BASE_ID, extraTab, type MainTab, useTrees } from "./model";
 import { useTabSessions } from "./useTabSessions";
 
-export function MainTabBar() {
+export function MainTabBar({
+  renderTab,
+  empty,
+}: {
+  /** A tab's content; `visible` is whether it is showing in its group. */
+  renderTab: (tab: MainTab, visible: boolean) => ReactNode;
+  /** What the area shows with nothing open. */
+  empty: ReactNode;
+}) {
   const {
     active,
     selectedFile,
     setupFor,
     activeId,
-    activeTab,
-    setActiveTab,
+    split,
     closeFileTab,
     openCheckLog,
     closeCheckLog,
@@ -130,10 +142,11 @@ export function MainTabBar() {
   ];
 
   return (
-    <TabStrip
-      tabs={items}
-      active={activeTab}
-      onSelect={setActiveTab}
+    <SplitWorkspace
+      split={split}
+      items={items}
+      renderTab={renderTab}
+      empty={empty}
       ariaLabel="Worktree tabs"
       newTabMenu={(close) => (
         <NewTabMenu onAdd={addTab} close={close} remote={reach.remote} agentOff={reach.agentOff} />

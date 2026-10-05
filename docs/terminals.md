@@ -357,11 +357,23 @@ replacing one file.
 a `fixed` overlay positioned over whatever host element a view registered.
 Sessions belong to the document, not to the route.
 
+- **Each session has its own slot, so several can be on screen.** A split main
+  area (`components/split`) shows a terminal per group: every session's newest
+  claim (`TerminalTabs.embeds`) places that session's pane over its own host,
+  and the newest claim overall (`embed`) is the one that takes the keyboard
+  (`TerminalView`'s `focused`, distinct from `active`, which is "on screen").
+  A press inside a pane calls its claim's `onActivate`, which is how a split
+  group learns it was clicked — the terminal is drawn by the layer, not inside
+  the group. A host that *moves* without resizing (a tab dragged into a group
+  of the same width) is re-placed through `relayoutTerminals()`, since a
+  `ResizeObserver` only reports size.
+
 - **Hidden panes use `invisible`, never `display:none`**, so xterm never reflows
   from a zero-size state on a tab switch.
-- **Geometry freezes at the last embed rect** when nothing is embedded. Snapping
-  to the full content area would resize the grid and make zsh reprint its prompt,
-  leaving a blank prompt line every time you came back.
+- **A pane's geometry freezes at its last embed rect** when it is not embedded.
+  Snapping to the full content area would resize the grid and make zsh reprint
+  its prompt, leaving a blank prompt line every time you came back. A session
+  never shown parks at the last rect any pane had.
 - **WebGL contexts are rationed to 8** in an MRU pool. WebKit silently drops the
   oldest past ~16 per page, and an xterm that loses its context never gets it
   back; overflow panes render through the DOM fallback and reclaim a context on
@@ -371,7 +383,7 @@ Sessions belong to the document, not to the route.
   *grid*, not from the element it was mounted in, and nothing in xterm's own
   stylesheet keeps an over-sized canvas inside that box — so a grid lagging a
   shrinking pane paints over whatever is beside it, at z-index 30.
-  `overflow-hidden` on the layer makes that structurally impossible; putting the
+  `overflow-hidden` on each pane makes that structurally impossible; putting the
   host rect straight onto the element from the ResizeObserver — which the browser
   dispatches after layout and before paint — is what stops the overlay itself
   trailing a fast sidebar drag by a frame, the way a scheduled re-render did.
@@ -741,6 +753,7 @@ src/features/terminal/
   TerminalLayer.tsx          the persistent overlay that outlives routes
   TerminalsContext.tsx       once-per-document adoption
   orchestrator.ts            tabs, embed claims, the pane handle registry
+  relayout.ts                "hosts moved": re-place every embedded pane
   XtermRenderer.ts           the only xterm import; WebGL rationing; theming;
                              the untrusted mode (OSC 52 off, web-only OSC 8)
   agentProvider.ts           the seed line

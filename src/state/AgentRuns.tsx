@@ -104,7 +104,8 @@ export interface QueuedLaunch {
 export interface VisibleWorktree {
   repo: string;
   id: string;
-  tab: string | null;
+  /** The tab rows on screen — one per split group showing a row. */
+  tabs: string[];
 }
 
 const AgentRunsContext = createContext<AgentRuns | null>(null);
@@ -120,7 +121,11 @@ export function AgentRunsProvider({ children }: { children: ReactNode }) {
   const setVisibleWorktree = useCallback(
     (next: VisibleWorktree | null) =>
       setVisibleWorktreeState((prev) =>
-        prev?.repo === next?.repo && prev?.id === next?.id && prev?.tab === next?.tab ? prev : next,
+        prev?.repo === next?.repo &&
+        prev?.id === next?.id &&
+        prev?.tabs.join() === next?.tabs.join()
+          ? prev
+          : next,
       ),
     [],
   );

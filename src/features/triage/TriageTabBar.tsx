@@ -1,5 +1,6 @@
-/** Triage's main tab bar: the ticket, the investigations open beside it and the
- *  ticket's own tabs, on the same {@link TabStrip} Trees and Reviews draw.
+/** Triage's main area: the ticket, the investigations open beside it and the
+ *  ticket's own tabs, on the same {@link SplitWorkspace} Trees and Reviews draw
+ *  — a strip per split group, each over its active tab's content.
  *
  *  **The first tab is the workspace itself.** "Linear" is the ticket — not a
  *  stored row, so it always exists and carries no close ×. Everything after it
@@ -21,11 +22,14 @@
  *  The trailing cluster is not part of the tablist: the right rail's expand
  *  control, here only while the rail is hidden — the same hand-off Trees and
  *  Reviews make, so the button stays put across the toggle. */
+import type { ReactNode } from "react";
+
 import type { AgentKind, TabKind, TriageTicket } from "../../bindings";
 import { AgentIcon, TerminalIcon, TrackerLogo } from "../../components/icons";
 import { MENU_ITEM } from "../../components/primitives";
 import { PanelToggle } from "../../components/SidePanel";
-import { type StripTab, TabStrip } from "../../components/TabStrip";
+import { SplitWorkspace } from "../../components/split/SplitWorkspace";
+import type { StripTab } from "../../components/TabStrip";
 import {
   useAgentAuth,
   useCodexAccount,
@@ -46,11 +50,14 @@ export function TriageTabBar({
   tabs,
   rightCollapsed,
   onToggleRight,
+  renderTab,
 }: {
   ticket: TriageTicket;
   tabs: TriageTabs;
   rightCollapsed: boolean;
   onToggleRight: () => void;
+  /** A tab's content; `visible` is whether it is showing in its group. */
+  renderTab: (tab: TriageMainTab, visible: boolean) => ReactNode;
 }) {
   const termKey = triageTermKey(ticket.id);
   // The ticket came from the triage org's project, so that project's tracker
@@ -95,10 +102,10 @@ export function TriageTabBar({
   ];
 
   return (
-    <TabStrip
-      tabs={items}
-      active={tabs.active}
-      onSelect={tabs.select}
+    <SplitWorkspace
+      split={{ ...tabs.split, select: tabs.select }}
+      items={items}
+      renderTab={renderTab}
       ariaLabel="Ticket tabs"
       newTabMenu={(close) => <NewTabMenu onAdd={tabs.addTab} close={close} />}
       newTabMenuClassName="w-40 overflow-hidden"

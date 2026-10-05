@@ -31,6 +31,11 @@ import { useCallback, useMemo, useState } from "react";
 
 import type { AgentKind, TabKind, WorktreeTab } from "../../bindings";
 import {
+  type SplitController,
+  useSplitLayout,
+  useSplitLayouts,
+} from "../../components/split/useSplitLayout";
+import {
   useAddWorktreeTab,
   useCloseInvestigationSession,
   useRemoveWorktreeTab,
@@ -41,6 +46,9 @@ import {
 import { useTerminals } from "../terminal/TerminalsContext";
 import { defaultTabTitle } from "../trees/model";
 import { INTERACTIVE_AGENTS, orderedProviders, triageTermKey } from "./providerSessions";
+
+/** Each ticket's split layout, by ticket id. */
+const LAYOUT_BY_TICKET_KEY = "santree-triage-layout-by-ticket";
 
 export type TriageMainTab = "linear" | `agent:${AgentKind}` | `tab:${string}`;
 
@@ -62,9 +70,12 @@ export function rowTabId(tab: TriageMainTab): string | null {
 }
 
 export interface TriageTabs {
-  /** The tab on screen. Always resolvable: `linear` is not a row, so it cannot
-   *  be closed and there is always something to fall back to. */
+  /** The focused split group's tab. Always resolvable: `linear` is not a row,
+   *  so it cannot be closed and there is always something to fall back to. */
   active: TriageMainTab;
+  /** The main area's split layout — which tab is in which group, and what each
+   *  group is showing. */
+  split: SplitController<TriageMainTab>;
   select: (tab: TriageMainTab) => void;
   /** Providers with an investigation tab, in menu order. */
   providers: AgentKind[];
@@ -90,17 +101,17 @@ export interface TriageTabs {
 
 export function useTriageTabs(repo: string, ticketId: string): TriageTabs {
   const termKey = triageTermKey(ticketId);
-  const { data: stored = [] } = useStartedInvestigations(repo);
+  const { data: stored = [], isFetched: storedFetched } = useStartedInvestigations(repo);
   const { tabs: terminals } = useTerminals();
   const { mutate: closeSession } = useCloseInvestigationSession(repo);
   // The rows hang off the ticket's surface key, which is what `worktree_tabs`
   // stores as their owner and what their term keys are built from.
-  const { data: allTabs = [] } = useWorktreeTabs(repo);
+  const { data: allTabs = [], isFetched: rowsFetched } = useWorktreeTabs(repo);
   const { mutate: addTabRow } = useAddWorktreeTab(repo);
   const { mutate: renameTabRow } = useRenameWorktreeTab(repo);
   const { mutate: removeTabRow } = useRemoveWorktreeTab(repo);
   const [mounted, setMounted] = useState<AgentKind[]>([]);
-  const [remembered, setRemembered] = useState<TriageMainTab | null>(null);
+  const layouts = useSplitLayouts<TriageMainTab>(LAYOUT_BY_TICKET_KEY);
 
   // A stored row's `refId` is the bare ticket id: `started_investigations`
   // strips the `triage:` prefix on the way out. Matching it against the surface
@@ -124,24 +135,29 @@ export function useTriageTabs(repo: string, ticketId: string): TriageTabs {
   );
   const rows = useMemo(() => allTabs.filter((t) => t.worktreeId === termKey), [allTabs, termKey]);
 
-  // The remembered tab resolved against what is actually open — one rule for
-  // "what am I looking at", so closing a tab needs no fallback of its own.
+  // The layout fitted to what is actually open — one rule for "what am I
+  // looking at", so closing a tab needs no fallback of its own.
   const open: TriageMainTab[] = [
     "linear",
     ...providers.map(agentTab),
     ...rows.map((t) => rowTab(t.id)),
   ];
-  const active = remembered && open.includes(remembered) ? remembered : "linear";
+  // With no project attached there is nothing stored to wait for.
+  const split = useSplitLayout(layouts, ticketId, open, !repo || (storedFetched && rowsFetched));
+  const { select } = split;
+  const active = split.active ?? "linear";
 
-  const openAgent = useCallback((agent: AgentKind) => {
-    setMounted((current) => (current.includes(agent) ? current : [...current, agent]));
-    setRemembered(agentTab(agent));
-  }, []);
+  const openAgent = useCallback(
+    (agent: AgentKind) => {
+      setMounted((current) => (current.includes(agent) ? current : [...current, agent]));
+      select(agentTab(agent));
+    },
+    [select],
+  );
 
   const closeAgent = useCallback(
     (agent: AgentKind) => {
       setMounted((current) => current.filter((a) => a !== agent));
-      setRemembered((current) => (current === agentTab(agent) ? null : current));
       // The stored session goes too, or the strip puts the tab straight back on
       // the next launch from a conversation nothing is running.
       closeSession({ ticketId, agent });
@@ -167,18 +183,12 @@ export function useTriageTabs(repo: string, ticketId: string): TriageTabs {
         title: defaultTabTitle(kind, resolvedAgent, rows),
         pr: null,
       });
-      setRemembered(rowTab(id));
+      select(rowTab(id));
     },
-    [repo, termKey, rows, addTabRow],
+    [repo, termKey, rows, addTabRow, select],
   );
 
-  const closeTab = useCallback(
-    (id: string) => {
-      setRemembered((current) => (current === rowTab(id) ? null : current));
-      removeTabRow(id);
-    },
-    [removeTabRow],
-  );
+  const closeTab = useCallback((id: string) => removeTabRow(id), [removeTabRow]);
 
   const renameTab = useCallback(
     (id: string, title: string) => {
@@ -195,7 +205,8 @@ export function useTriageTabs(repo: string, ticketId: string): TriageTabs {
 
   return {
     active,
-    select: setRemembered,
+    split,
+    select,
     providers,
     hasStored,
     openAgent,

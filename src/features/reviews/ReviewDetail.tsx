@@ -25,10 +25,11 @@ import { useCallback, useEffect, useState } from "react";
 
 import type { AgentKind, ReviewPr } from "../../bindings";
 import { IssuePage } from "../../components/IssuePage";
-import { PrIcon } from "../../components/icons";
-import { EmptyState } from "../../components/primitives";
+import { AgentIcon, PrIcon } from "../../components/icons";
+import { Button, EmptyState } from "../../components/primitives";
 import { REVIEW_AGENT_KEY, useResolvedSetting } from "../../lib/queries";
 import { useAgentRuns } from "../../state/AgentRuns";
+import { agentProvider } from "../terminal/agentProvider";
 import { AgentTabPane } from "../trees/AgentTabPane";
 import { WorktreeTerminal } from "../trees/WorktreeTerminal";
 import { AiReviewSessionPane } from "./AiReviewSessionPane";
@@ -39,7 +40,13 @@ import { defaultRailTab, type RailTab, ReviewSidePanel } from "./ReviewSidePanel
 import { ReviewTabBar } from "./ReviewTabBar";
 import { ticketIdFor } from "./ticket";
 import { useResumeReviewSession } from "./useResumeReviewSession";
-import { aiTab, aiTabAgent, checkoutTab, type ReviewTabs, useReviewTabs } from "./useReviewTabs";
+import {
+  aiTabAgent,
+  checkoutTab,
+  type ReviewMainTab,
+  type ReviewTabs,
+  useReviewTabs,
+} from "./useReviewTabs";
 
 export function ReviewDetail() {
   const { active, showMergeQueue } = useReviewsModel();
@@ -102,14 +109,8 @@ function Detail({ pr }: { pr: ReviewPr }) {
   );
 }
 
-/** The main column: the tab strip, and whichever tab is showing.
- *
- *  Only the checkout's terminals mount and unmount with their tab — the live PTY
- *  lives in the global TerminalLayer, so unmounting the host just detaches the
- *  overlay. The pull request, the ticket and the AI reviews stay mounted and
- *  hidden: the first two so a long diff's (or thread's) scroll position and
- *  expansions survive a tab switch, the last because unmounting it would throw
- *  away a running session and its checkout. */
+/** The main column: the tab strips of its split groups, and whichever tab each
+ *  is showing. */
 function PrWorkspace({ pr, tabs }: { pr: ReviewPr; tabs: ReviewTabs }) {
   const { repo, fileFocus, focusFile, aiReviewRequest, inbox } = useReviewsModel();
   const [prTab, setPrTab] = useState<PrTab>("conversation");
@@ -143,78 +144,92 @@ function PrWorkspace({ pr, tabs }: { pr: ReviewPr; tabs: ReviewTabs }) {
   }, [aiReviewRequest, defaultAgent, openReview]);
 
   // A checkout tab hosts that worktree's session right here, so the off-screen
-  // launcher has to skip it — two hosts for one session fight over the single
-  // xterm overlay. Only that tab: with the pull request or another tab on
-  // screen there is no host here, and a queued launch should still run.
+  // launcher has to skip it — two hosts for one session would both seed it.
+  // Only the rows on screen (one per split group): with the pull request or
+  // another tab showing there is no host here, and a queued launch should still
+  // run.
   const { setVisibleWorktree } = useAgentRuns();
-  const hostedTab = tabs.active.startsWith("tab:") ? tabs.active.slice("tab:".length) : null;
-  const hosted = hostedTab ? tabs.checkout.worktreeId : "";
+  const hostedTabs = tabs.split.visible
+    .filter((t) => t.startsWith("tab:"))
+    .map((t) => t.slice("tab:".length))
+    .join(",");
+  const hosted = hostedTabs ? tabs.checkout.worktreeId : "";
   useEffect(() => {
-    setVisibleWorktree(hosted ? { repo, id: hosted, tab: hostedTab } : null);
+    setVisibleWorktree(hosted ? { repo, id: hosted, tabs: hostedTabs.split(",") } : null);
     return () => setVisibleWorktree(null);
-  }, [hosted, hostedTab, repo, setVisibleWorktree]);
+  }, [hosted, hostedTabs, repo, setVisibleWorktree]);
+
+  // A tab's content, wherever its split group puts it. Only the checkout's
+  // terminals mount and unmount with their tab — the live PTY lives in the global
+  // TerminalLayer, so unmounting the host just detaches the overlay. The pull
+  // request, the ticket and the AI reviews stay mounted and hidden: the first two
+  // so a long diff's (or thread's) scroll position and expansions survive a tab
+  // switch, the last because unmounting it would throw away a running session
+  // and its checkout.
+  const renderTab = (tab: ReviewMainTab, visible: boolean) => {
+    if (tab === "pr") {
+      return (
+        <PrPage
+          pr={pr}
+          tab={prTab}
+          onTab={setPrTab}
+          fileFocus={fileFocus}
+          focusFile={focusFile}
+          checkout={isMine ? undefined : tabs.checkout}
+        />
+      );
+    }
+    // The rail's ticket pane at reading width. It opens from that pane and only
+    // with a ticket to open — the strip's half of the same gate is in
+    // `useReviewTabs`.
+    if (tab === "issueView") {
+      return ticketId && tabs.issueViewOpen ? <IssuePage repo={repo} ticketId={ticketId} /> : null;
+    }
+    const agent = aiTabAgent(tab);
+    if (agent) {
+      if (tabs.mounted.includes(agent)) {
+        return (
+          <AiReviewSessionPane
+            pr={pr}
+            agentKind={agent}
+            visible={visible}
+            onShowDrafts={showFiles}
+          />
+        );
+      }
+      // A review from an earlier launch, restored on screen by the layout but
+      // not running: starting it is the tab's own act (`select`), never a side
+      // effect of a layout coming back.
+      return visible ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3">
+          <EmptyState
+            className="flex-none"
+            icon={<AgentIcon kind={agent} size={16} className="text-muted-4" />}
+            title={`${agentProvider(agent).label} review`}
+            subtitle="Not running. Open it to pick the review back up."
+          />
+          <Button size="sm" variant="tinted" onClick={() => tabs.select(tab)}>
+            Open review
+          </Button>
+        </div>
+      ) : null;
+    }
+    const row = tabs.rows.find((t) => checkoutTab(t.id) === tab);
+    if (!row || !worktree || !visible) return null;
+    return row.kind !== "terminal" ? (
+      <AgentTabPane repo={tabs.checkout.repo} worktree={worktree} tab={row} tabs={tabs.rows} />
+    ) : (
+      <WorktreeTerminal
+        id={`${worktree.id}:tab:${row.id}`}
+        branch={row.title}
+        cwd={worktree.path}
+      />
+    );
+  };
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">
-      <ReviewTabBar pr={pr} tabs={tabs} />
-      <div className="relative min-h-0 flex-1">
-        {/* One display class, not `flex … hidden`: which of the two wins is a
-            question about stylesheet order, and the answer must not be. */}
-        <div className={tabs.active === "pr" ? "absolute inset-0 flex flex-col" : "hidden"}>
-          <PrPage
-            pr={pr}
-            tab={prTab}
-            onTab={setPrTab}
-            fileFocus={fileFocus}
-            focusFile={focusFile}
-            checkout={isMine ? undefined : tabs.checkout}
-          />
-        </div>
-        {/* The rail's ticket pane at reading width. It opens from that pane and
-            only with a ticket to open — the strip's half of the same gate is in
-            `useReviewTabs`. */}
-        {ticketId && tabs.issueViewOpen && (
-          <div
-            className={tabs.active === "issueView" ? "absolute inset-0 flex flex-col" : "hidden"}
-          >
-            <IssuePage repo={repo} ticketId={ticketId} />
-          </div>
-        )}
-        {worktree &&
-          tabs.rows.map((t) =>
-            tabs.active === checkoutTab(t.id) ? (
-              t.kind !== "terminal" ? (
-                <AgentTabPane
-                  key={t.id}
-                  repo={tabs.checkout.repo}
-                  worktree={worktree}
-                  tab={t}
-                  tabs={tabs.rows}
-                />
-              ) : (
-                <WorktreeTerminal
-                  key={t.id}
-                  id={`${worktree.id}:tab:${t.id}`}
-                  branch={t.title}
-                  cwd={worktree.path}
-                />
-              )
-            ) : null,
-          )}
-        {tabs.mounted.map((agent) => (
-          <div
-            key={agent}
-            className={tabs.active === aiTab(agent) ? "absolute inset-0 flex flex-col" : "hidden"}
-          >
-            <AiReviewSessionPane
-              pr={pr}
-              agentKind={agent}
-              visible={tabs.active === aiTab(agent)}
-              onShowDrafts={showFiles}
-            />
-          </div>
-        ))}
-      </div>
+      <ReviewTabBar pr={pr} tabs={tabs} renderTab={renderTab} />
     </div>
   );
 }

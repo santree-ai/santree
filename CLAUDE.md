@@ -429,6 +429,21 @@ src/
   worktree, and its "+" opens the same rows anyway. Closing a row tears its
   PTY down and a dead process closes its row — both from
   `trees/useTabSessions`, once, for every strip.
+- **Every main area splits, for every kind of tab.** Each host's bar renders a
+  `components/split/SplitWorkspace`: a binary tree of tab *groups* (VS Code's
+  shape, not panes inside a tab), each a `TabStrip` over its active tab. Drag a
+  tab onto a strip to reorder or move it, onto a group's edge to split, into its
+  middle to move it there — the drop is previewed before release
+  (`dropZone.ts`). The layout is pure (`layout.ts`: `normalize` fits it to what
+  the host has open; a group whose last tab leaves collapses) and persisted per
+  surface — worktree, PR, ticket — in localStorage (`useSplitLayout`). The host
+  still owns *which* tabs exist and what each renders (`renderTab(tab,
+  visible)`); `active` is the focused group's tab, and ⌘T, ⌘F and the status
+  bar follow it. Content is rendered flat beside the groups and positioned over
+  them, so a moved tab never remounts — a non-idempotent effect in a tab
+  survives a drag. Terminals stay in the terminal layer, one slot per session
+  (docs/terminals.md). A "visible worktree" is now every row on screen
+  (`VisibleWorktree.tabs`), one per group.
 - **One place renders a diff.** `features/trees/DiffPane` picks the source with
   `prDiffModeFor`: GitHub's own patch when the file is in the PR (its line numbers
   are what the comments anchor to), the local branch-vs-base diff otherwise, and

@@ -6,9 +6,10 @@
  * an investigation, which is the ticket page's to start.
  */
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TriageTicket, WorktreeTab } from "../../bindings";
+import { useTestSplit } from "../../components/split/testing";
 import { triageTicket } from "../../test/fixtures";
 import type { TerminalTabs } from "../terminal/orchestrator";
 import { TerminalsProvider, useTerminals } from "../terminal/TerminalsContext";
@@ -22,7 +23,7 @@ vi.mock("../../lib/queries", () => ({
 }));
 
 import { TriageTabBar } from "./TriageTabBar";
-import type { TriageTabs } from "./useTriageTabs";
+import { agentTab, rowTab, type TriageMainTab, type TriageTabs } from "./useTriageTabs";
 
 const ticket: TriageTicket = triageTicket("AK-1");
 
@@ -35,8 +36,11 @@ const row = (id: string, kind: WorktreeTab["kind"], title: string): WorktreeTab 
   pr: null,
 });
 
-/** The model the bar draws, dialled per test. */
-function tabsModel(over: Partial<TriageTabs> = {}): TriageTabs {
+/** The model the bar draws, dialled per test — all but its split layout, which
+ *  {@link Bar} builds for real over the tabs the model has open. */
+type TabsModel = Omit<TriageTabs, "split">;
+
+function tabsModel(over: Partial<TabsModel> = {}): TabsModel {
   return {
     active: "linear",
     select: vi.fn(),
@@ -62,21 +66,37 @@ function Probe() {
 
 const onToggleRight = vi.fn();
 
-function mount(tabs: TriageTabs, rightCollapsed = false) {
+/** The bar over `tabs`, with a real split controller over what they have open —
+ *  in the order `useTriageTabs` gives it. */
+function Bar({ tabs, rightCollapsed }: { tabs: TabsModel; rightCollapsed: boolean }) {
+  const split = useTestSplit<TriageMainTab>([
+    "linear",
+    ...tabs.providers.map(agentTab),
+    ...tabs.rows.map((t) => rowTab(t.id)),
+  ]);
+  return (
+    <TriageTabBar
+      ticket={ticket}
+      tabs={{ ...tabs, split }}
+      rightCollapsed={rightCollapsed}
+      onToggleRight={onToggleRight}
+      renderTab={() => null}
+    />
+  );
+}
+
+function mount(tabs: TabsModel, rightCollapsed = false) {
   return render(
     <TerminalsProvider>
-      <TriageTabBar
-        ticket={ticket}
-        tabs={tabs}
-        rightCollapsed={rightCollapsed}
-        onToggleRight={onToggleRight}
-      />
+      <Bar tabs={tabs} rightCollapsed={rightCollapsed} />
       <Probe />
     </TerminalsProvider>,
   );
 }
 
 const tabNames = () => screen.getAllByRole("tab").map((t) => t.textContent);
+
+beforeEach(() => localStorage.clear());
 
 describe("TriageTabBar", () => {
   /** It is not a stored row — it is what the workspace *is*, so there is

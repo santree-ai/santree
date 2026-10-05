@@ -25,7 +25,6 @@ import {
   pendingWorktree,
   prDiffModeFor,
   remoteControlTab,
-  resolveActiveTab,
   resolveFileTab,
   shouldHoldTerminal,
   tabForRun,
@@ -311,66 +310,6 @@ describe("openMainTabs", () => {
   // those are views of the work, not tabs the workspace owns.
   it("keeps the on-demand views when no tab is open", () => {
     expect(openMainTabs({ ...base, hasFile: true })).toEqual(["file"]);
-  });
-});
-
-describe("resolveActiveTab", () => {
-  const open = (o: Partial<Parameters<typeof openMainTabs>[0]>) =>
-    openMainTabs({
-      tabIds: ["a1"],
-      hasPrView: false,
-      hasIssueView: false,
-      hasFile: false,
-      hasSetup: false,
-      hasCheckLog: false,
-      ...o,
-    });
-
-  it("defaults a never-visited worktree to its first tab", () => {
-    expect(resolveActiveTab(undefined, open({}))).toBe("tab:a1");
-  });
-
-  it("keeps a remembered tab as-is", () => {
-    expect(resolveActiveTab("tab:a1", open({}))).toBe("tab:a1");
-  });
-
-  it("keeps the File tab only while a file is actually open", () => {
-    expect(resolveActiveTab("file", open({ hasFile: true }))).toBe("file");
-    expect(resolveActiveTab("file", open({}))).toBe("tab:a1");
-  });
-
-  // A remembered "prView" survives a reload; the PR it showed may not have. The
-  // gate is the same one that decides whether the right panel has a PR pane.
-  it("keeps the PR and ticket views only while the worktree has them", () => {
-    expect(resolveActiveTab("prView", open({ hasPrView: true }))).toBe("prView");
-    expect(resolveActiveTab("prView", open({}))).toBe("tab:a1");
-    expect(resolveActiveTab("issueView", open({ hasIssueView: true }))).toBe("issueView");
-    expect(resolveActiveTab("issueView", open({}))).toBe("tab:a1");
-  });
-
-  it("keeps the Setup tab only while setup is running for THIS worktree", () => {
-    expect(resolveActiveTab("setup", open({ hasSetup: true }))).toBe("setup");
-    // A different worktree's setup superseded the single setupFor slot, so this
-    // one contributes no Setup tab at all.
-    expect(resolveActiveTab("setup", open({}))).toBe("tab:a1");
-  });
-
-  it("keeps a remembered tab only while that tab still exists", () => {
-    expect(resolveActiveTab("tab:b2", open({ tabIds: ["a1", "b2"] }))).toBe("tab:b2");
-    expect(resolveActiveTab("tab:b2", open({ tabIds: ["a1"] }))).toBe("tab:a1");
-  });
-
-  // The log itself is deliberately not persisted, so a remembered "checkLog" tab
-  // routinely comes back with an empty slot — after a reload, or on a worktree
-  // whose log was closed elsewhere.
-  it("keeps the check-log tab only while a log is actually open", () => {
-    expect(resolveActiveTab("checkLog", open({ hasCheckLog: true }))).toBe("checkLog");
-    expect(resolveActiveTab("checkLog", open({}))).toBe("tab:a1");
-  });
-
-  it("resolves to nothing at all once every tab is closed", () => {
-    expect(resolveActiveTab("tab:a1", [])).toBeNull();
-    expect(resolveActiveTab(undefined, [])).toBeNull();
   });
 });
 

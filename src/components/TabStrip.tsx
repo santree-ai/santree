@@ -20,6 +20,7 @@
  *  of squeezing them into unreadable slivers. See {@link fitTabs}. */
 import {
   type ReactNode,
+  type PointerEvent as ReactPointerEvent,
   type RefObject,
   useEffect,
   useLayoutEffect,
@@ -65,6 +66,10 @@ export function TabStrip<T extends string>({
   newTabDisabled,
   trailing,
   ariaLabel,
+  muted = false,
+  shortcut = true,
+  dragging = null,
+  onTabPointerDown,
 }: {
   tabs: StripTab<T>[];
   active: T | null;
@@ -84,6 +89,18 @@ export function TabStrip<T extends string>({
   /** The host's own cluster at the far edge — outside the tablist, because these
    *  act on the pane rather than being places in it. */
   trailing?: ReactNode;
+  /** This strip's group isn't the focused one (the area is split): its active
+   *  tab keeps its place but loses the accent, which belongs to the focused
+   *  group alone. */
+  muted?: boolean;
+  /** Whether ⌘T opens this strip's "+" — false on every strip but the focused
+   *  group's, or two menus would open at once. */
+  shortcut?: boolean;
+  /** The tab being dragged out of this strip, drawn faded in place. */
+  dragging?: T | null;
+  /** Where a tab drag starts (see `SplitWorkspace`); a plain click still
+   *  selects. */
+  onTabPointerDown?: (tab: T, e: ReactPointerEvent<HTMLElement>) => void;
 }) {
   const tabAreaRef = useRef<HTMLDivElement>(null);
   const tabAreaWidth = useTrackedWidth(tabAreaRef);
@@ -103,6 +120,7 @@ export function TabStrip<T extends string>({
     // gaps between them move the window, exactly like a native tab bar.
     <div
       data-tauri-drag-region
+      data-split-strip
       className={`flex ${CHROME.subBar} flex-none items-stretch border-b border-line bg-deep`}
     >
       {/* Everything the tabs may use: `flex-1 min-w-0` so it takes what the
@@ -122,7 +140,15 @@ export function TabStrip<T extends string>({
             className="flex min-w-0 items-stretch overflow-hidden"
           >
             {shown.map((it) => (
-              <Tab key={it.tab} {...it} active={active} onSelect={onSelect} />
+              <Tab
+                key={it.tab}
+                {...it}
+                active={active}
+                muted={muted}
+                faded={dragging === it.tab}
+                onSelect={onSelect}
+                onPointerDown={onTabPointerDown}
+              />
             ))}
           </div>
         )}
@@ -132,6 +158,7 @@ export function TabStrip<T extends string>({
             menu={newTabMenu}
             menuClassName={newTabMenuClassName}
             disabled={newTabDisabled}
+            shortcut={shortcut}
           />
         )}
         <div data-tauri-drag-region className="min-w-2 flex-1" />
@@ -265,17 +292,19 @@ function NewTabButton({
   menu,
   menuClassName = "w-52 overflow-hidden",
   disabled,
+  shortcut,
 }: {
   menu: (close: () => void) => ReactNode;
   menuClassName?: string;
   disabled?: string;
+  shortcut: boolean;
 }) {
   const [open, setOpen] = useState(false);
 
   // ⌘T opens the menu. Scoped to this component's lifetime, which matches "a
   // workspace is on screen" (the bar only renders then).
   useEffect(() => {
-    if (disabled) return;
+    if (disabled || !shortcut) return;
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.key !== "t") return;
       if (targetOwnsKey(e)) return;
@@ -284,7 +313,7 @@ function NewTabButton({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [disabled]);
+  }, [disabled, shortcut]);
 
   if (disabled) {
     return (
@@ -330,14 +359,20 @@ function Tab<T extends string>({
   label,
   icon,
   active,
+  muted,
+  faded,
   onSelect,
+  onPointerDown,
   onClose,
   onRename,
   trailing,
   badge,
 }: StripTab<T> & {
   active: T | null;
+  muted: boolean;
+  faded: boolean;
   onSelect: (tab: T) => void;
+  onPointerDown?: (tab: T, e: ReactPointerEvent<HTMLElement>) => void;
 }) {
   const on = active === tab;
   const [editing, setEditing] = useState(false);
@@ -347,11 +382,14 @@ function Tab<T extends string>({
     // presentational to AT and it would disappear inside one.
     <div
       role="presentation"
-      className="flex items-stretch border-r border-line text-[11.5px] font-medium"
+      data-split-tab={tab}
+      className={`flex items-stretch border-r border-line text-[11.5px] font-medium ${
+        faded ? "opacity-40" : ""
+      }`}
       // The floor and the cap the strip is fitted to (see `fitTabs`): a tab
       // shrinks between them and its label ellipsises, never below the floor —
       // the strip only renders as many tabs as fit at that floor.
-      style={{ ...underlineTabStyle(on), minWidth: TAB_MIN_W, maxWidth: TAB_MAX_W }}
+      style={{ ...underlineTabStyle(on, muted), minWidth: TAB_MIN_W, maxWidth: TAB_MAX_W }}
     >
       {editing && onRename ? (
         <RenameInput
@@ -368,6 +406,7 @@ function Tab<T extends string>({
           aria-selected={on}
           tabIndex={on ? 0 : -1}
           onClick={() => onSelect(tab)}
+          onPointerDown={onPointerDown ? (e) => onPointerDown(tab, e) : undefined}
           onDoubleClick={onRename ? () => setEditing(true) : undefined}
           // F2 is the keyboard path to the rename the double-click opens —
           // without it renaming a tab is pointer-only.

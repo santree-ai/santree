@@ -288,6 +288,42 @@ describe("useTerminalTabs", () => {
       expect(result.current.embed?.key).toBe("b");
     });
 
+    // A split main area shows a terminal per group: every session keeps its own
+    // slot (its newest claim), while `embed` still names the one claim that takes
+    // the keyboard.
+    it("holds one embed per session, the newest claim of each, beside the newest overall", () => {
+      const { result } = renderHook(() => useTerminalTabs());
+      const a1 = { id: "a1" } as unknown as HTMLElement;
+      const b = { id: "b" } as unknown as HTMLElement;
+      const a2 = { id: "a2" } as unknown as HTMLElement;
+      let releaseA2 = () => {};
+      act(() => {
+        result.current.attachEmbed({ host: a1, key: "a" });
+      });
+      act(() => {
+        result.current.attachEmbed({ host: b, key: "b" });
+      });
+      act(() => {
+        releaseA2 = result.current.attachEmbed({ host: a2, key: "a" });
+      });
+
+      expect(result.current.embeds.map((e) => [e.key, e.host])).toEqual([
+        ["b", b],
+        ["a", a2],
+      ]);
+      expect(result.current.embed?.host).toBe(a2);
+
+      // Releasing a session's newest claim hands *its* slot back to its previous
+      // host — the other session's slot is untouched.
+      act(() => releaseA2());
+
+      expect(result.current.embeds.map((e) => [e.key, e.host])).toEqual([
+        ["a", a1],
+        ["b", b],
+      ]);
+      expect(result.current.embed?.host).toBe(b);
+    });
+
     it("releasing the last claim empties the slot", () => {
       const { result } = renderHook(() => useTerminalTabs());
       let release = () => {};

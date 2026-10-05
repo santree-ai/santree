@@ -81,6 +81,10 @@ const withKey = (spec: TerminalSpec): TerminalTab => ({
 export interface TerminalEmbed {
   host: HTMLElement;
   key: string;
+  /** Called when the user presses inside the session. The terminal is drawn by
+   *  the layer, not inside its host, so a host that cares where the user is
+   *  working (a split group taking focus) can't see that press itself. */
+  onActivate?: () => void;
 }
 
 /** A live pane's imperative surface, registered by the render layer.
@@ -118,11 +122,13 @@ export interface TerminalTabs {
    *  detaches — see `TerminalView` — so closing has to be said explicitly here,
    *  and it happens before the tab goes away while the handle still exists. */
   close: (key: string) => void;
-  /** The session currently embedded inline (e.g. the triage Investigate tab) —
-   *  the newest live claim. */
+  /** Every session embedded inline right now — one per session, its newest
+   *  claim, oldest claim first. Several at once when the main area is split. */
+  embeds: TerminalEmbed[];
+  /** The newest live claim: the session that takes the keyboard. */
   embed: TerminalEmbed | null;
-  /** Claim the inline slot. Returns a release fn that hands the slot back to
-   *  whoever held it before, rather than blanking it: claims overlap (a route
+  /** Claim a session's inline slot. Returns a release fn that hands the slot back
+   *  to whoever held it before, rather than blanking it: claims overlap (a route
    *  swap mounts the incoming host before the outgoing one's cleanup runs), and
    *  a release that cleared the slot outright left the still-mounted host with a
    *  layer pointed nowhere and no reason to re-register. */
@@ -147,6 +153,16 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
   const [activeKey, setActiveKey] = useState<string | null>(tabs[0]?.key ?? null);
   const [claims, setClaims] = useState<EmbedClaim[]>([]);
   const embed = claims.length > 0 ? claims[claims.length - 1].embed : null;
+  // Per session, the newest claim wins — the same hand-back rule as `embed`, one
+  // slot per session instead of one for the app.
+  const embeds = useMemo(() => {
+    const newest = new Map<string, TerminalEmbed>();
+    for (const c of claims) {
+      newest.delete(c.embed.key);
+      newest.set(c.embed.key, c.embed);
+    }
+    return [...newest.values()];
+  }, [claims]);
   // Mirror the latest tabs so the mutators below can decide (and derive the next
   // activeKey) without an impure — StrictMode double-invoked — state updater.
   // Every writer updates the ref eagerly, so two calls in one tick see each other.
@@ -245,12 +261,25 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
       open,
       ensure,
       close,
+      embeds,
       embed,
       attachEmbed,
       detachEmbeds,
       registerPane,
       send,
     }),
-    [tabs, activeKey, open, ensure, close, embed, attachEmbed, detachEmbeds, registerPane, send],
+    [
+      tabs,
+      activeKey,
+      open,
+      ensure,
+      close,
+      embeds,
+      embed,
+      attachEmbed,
+      detachEmbeds,
+      registerPane,
+      send,
+    ],
   );
 }

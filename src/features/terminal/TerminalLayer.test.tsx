@@ -145,20 +145,37 @@ function stubRect(el: HTMLElement, box: Box) {
     }) as DOMRect;
 }
 
-/** A view that claims the inline slot for a host of a known size. */
-function Host({ box, claim = true }: { box: Box; claim?: boolean }) {
+/** A view that opens a session and claims its inline slot for a host of a known
+ *  size. The session's key goes on the host, so a test can find the pane the
+ *  layer drew for it. */
+function Host({
+  box,
+  refId = "tree:geo",
+  claim = true,
+}: {
+  box: Box;
+  refId?: string;
+  claim?: boolean;
+}) {
   const ref = useRef<HTMLDivElement>(null);
-  const { attachEmbed } = useTerminals();
+  const { ensure, attachEmbed } = useTerminals();
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el || !claim) return;
     stubRect(el, box);
-    return attachEmbed({ host: el, key: "term-0" });
-  }, [attachEmbed, box, claim]);
-  return <div ref={ref} data-testid="host" />;
+    const key = ensure({ title: refId, source: "shell", refId });
+    el.dataset.session = key;
+    return attachEmbed({ host: el, key });
+  }, [attachEmbed, ensure, box, claim, refId]);
+  return <div ref={ref} data-testid={`host:${refId}`} />;
 }
 
-const overlay = (container: HTMLElement) => container.querySelector<HTMLElement>("div.fixed");
+const hostOf = (container: HTMLElement, refId = "tree:geo") =>
+  container.querySelector<HTMLElement>(`[data-testid="host:${refId}"]`) as HTMLElement;
+
+/** The fixed pane the layer draws for the session `host` claimed. */
+const paneOf = (container: HTMLElement, host: HTMLElement) =>
+  container.querySelector<HTMLElement>(`div.fixed[data-terminal-pane="${host.dataset.session}"]`);
 
 const geometry = (el: HTMLElement) => ({
   top: el.style.top,
@@ -167,10 +184,11 @@ const geometry = (el: HTMLElement) => ({
   height: el.style.height,
 });
 
-const settled = async (container: HTMLElement) => {
+const settled = async (container: HTMLElement, refId = "tree:geo") => {
   // The layer renders nothing until adoption settles (see `useAdoptedSessions`).
-  await waitFor(() => expect(overlay(container)).not.toBeNull());
-  return overlay(container) as HTMLElement;
+  const host = hostOf(container, refId);
+  await waitFor(() => expect(paneOf(container, host)).not.toBeNull());
+  return paneOf(container, host) as HTMLElement;
 };
 
 describe("TerminalLayer", () => {
@@ -198,6 +216,7 @@ describe("TerminalLayer", () => {
     // its screen element from the grid, not from this box, and nothing in xterm's
     // own stylesheet keeps an over-sized canvas inside the pane.
     expect(layer.className).toContain("overflow-hidden");
+    expect(layer.className).not.toContain("invisible");
   });
 
   // The regression. The observer fires after layout and before paint, so the new
@@ -214,7 +233,7 @@ describe("TerminalLayer", () => {
     );
 
     const layer = await settled(container);
-    const host = container.querySelector<HTMLElement>('[data-testid="host"]') as HTMLElement;
+    const host = hostOf(container);
 
     // The sidebar was dragged 120px to the right: the pane moved and narrowed.
     stubRect(host, { top: 46, left: 380, width: 680, height: 520 });
@@ -257,6 +276,31 @@ describe("TerminalLayer", () => {
       height: "520px",
     });
     expect(layer.className).toContain("invisible");
+  });
+
+  // A split main area shows a terminal in each group at once. Each session has
+  // its own pane, and each pane sits on its own host — not one overlay that only
+  // the newest claim gets.
+  test("shows two embedded sessions at once, each on its own host", async () => {
+    const left = { top: 46, left: 260, width: 400, height: 520 };
+    const right = { top: 46, left: 661, width: 399, height: 520 };
+    const { container } = render(
+      <TerminalsProvider>
+        <Host box={left} refId="tree:AK-1:tab:a" />
+        <Host box={right} refId="tree:AK-1:tab:b" />
+        <TerminalLayer />
+      </TerminalsProvider>,
+    );
+
+    const a = await settled(container, "tree:AK-1:tab:a");
+    const b = await settled(container, "tree:AK-1:tab:b");
+    expect(a).not.toBe(b);
+    expect(geometry(a)).toEqual({ top: "46px", left: "260px", width: "400px", height: "520px" });
+    expect(geometry(b)).toEqual({ top: "46px", left: "661px", width: "399px", height: "520px" });
+    for (const pane of [a, b]) {
+      expect(pane.className).not.toContain("invisible");
+      expect(pane.className).toContain("overflow-hidden");
+    }
   });
 });
 

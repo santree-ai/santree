@@ -35,7 +35,11 @@ describe("launchesToHost", () => {
     new Map(ids.map((id) => [id, { repo: REPO, tabId: `tab-${id}` }]));
   /** What the workspace has on screen — the worktree, its project, and the tab
    *  row whose pane is showing (by default the launch's own). */
-  const open = (id: string, repo = REPO, tab: string | null = `tab-${id}`) => ({ repo, id, tab });
+  const open = (id: string, repo = REPO, tab: string | null = `tab-${id}`) => ({
+    repo,
+    id,
+    tabs: tab ? [tab] : [],
+  });
   const hostedIds = (hosted: { worktree: { id: string } }[]) => hosted.map((h) => h.worktree.id);
 
   // The whole point of lifting this out of TreesProvider: a "Run in background"

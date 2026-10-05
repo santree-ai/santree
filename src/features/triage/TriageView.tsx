@@ -62,7 +62,14 @@ import { DEFAULT_W, type TriageRailTab, TriageSidePanel } from "./TriageSidePane
 import { TriageTabBar } from "./TriageTabBar";
 import { TriageTabPane } from "./TriageTabPane";
 import { TriageTerminal } from "./TriageTerminal";
-import { agentTabKind, rowTab, rowTabId, type TriageTabs, useTriageTabs } from "./useTriageTabs";
+import {
+  agentTabKind,
+  rowTab,
+  rowTabId,
+  type TriageMainTab,
+  type TriageTabs,
+  useTriageTabs,
+} from "./useTriageTabs";
 
 const RIGHT_COLLAPSED_KEY = "santree.triage.right.collapsed";
 const RIGHT_WIDTH_KEY = "santree.triage.right.width";
@@ -226,9 +233,6 @@ function TicketWorkspace({
   // anywhere but the registered repository root, so this is not a choice the
   // frontend could get wrong quietly.
   const cwd = (repo && repos.find((r) => r.name === repo)?.path) || null;
-  const activeAgent = agentTabKind(tabs.active);
-  const activeRowId = rowTabId(tabs.active);
-  const activeRow = activeRowId ? tabs.rows.find((t) => t.id === activeRowId) : undefined;
   const { openAgent, addTab, select } = tabs;
 
   /** Run something on the ticket's project, asking for one first when there is
@@ -294,6 +298,57 @@ function TicketWorkspace({
   const [rail, setRailTab] = useState<TriageRailTab>("files");
   const ready = !repoLoading && repo !== null && cwd !== null;
 
+  // A tab's content, wherever its split group puts it. The ticket page stays
+  // mounted while another tab shows (the workspace hides it); an investigation
+  // and a row mount only while showing — see the component's doc.
+  const renderTab = (tab: TriageMainTab, visible: boolean) => {
+    if (tab === "linear") {
+      return (
+        <IssuePage
+          repo={orgRepo}
+          ticketId={ticket.id}
+          summary={ticket}
+          actions={<InvestigateActions agentKind={agentKind} onInvestigate={investigateWith} />}
+        />
+      );
+    }
+    if (!visible) return null;
+    const agent = agentTabKind(tab);
+    if (agent) {
+      return ready ? (
+        <InvestigatePane
+          key={`${ticket.id}:${agent}`}
+          repo={repo}
+          ticketId={ticket.id}
+          cwd={cwd}
+          agentKind={agent}
+          hasStartedSession={tabs.hasStored(agent)}
+          // A plain shell (no repo path) has nothing to resume when it exits,
+          // so it falls back to the ticket; a real investigation keeps its tab.
+          onExited={() => select("linear")}
+        />
+      ) : (
+        <Attaching />
+      );
+    }
+    const rowId = rowTabId(tab);
+    const row = rowId ? tabs.rows.find((t) => t.id === rowId) : undefined;
+    if (!row) return null;
+    if (!ready) return <Attaching />;
+    // A shell row's process ending is what closes the row — the strip's
+    // `useTabSessions` sees the session go — so the pane has nothing to do on
+    // exit.
+    return row.kind === "terminal" ? (
+      <TriageTerminal
+        refId={tabRefId(triageTermKey(ticket.id), row.id)}
+        title={row.title}
+        cwd={cwd}
+      />
+    ) : (
+      <TriageTabPane repo={repo} ticketId={ticket.id} cwd={cwd} tab={row} />
+    );
+  };
+
   // A row, with the tab strip *inside* the content column rather than spanning
   // the whole view — the same shape Trees and Reviews have. Both strips are
   // `CHROME.subBar` tall and are meant to sit side by side on one baseline (see
@@ -307,56 +362,8 @@ function TicketWorkspace({
           tabs={gatedTabs}
           rightCollapsed={rightCollapsed}
           onToggleRight={onToggleRight}
+          renderTab={renderTab}
         />
-        <div className={activeAgent || activeRow ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
-          <IssuePage
-            repo={orgRepo}
-            ticketId={ticket.id}
-            summary={ticket}
-            actions={<InvestigateActions agentKind={agentKind} onInvestigate={investigateWith} />}
-          />
-        </div>
-        {activeAgent &&
-          (ready ? (
-            <InvestigatePane
-              key={`${ticket.id}:${activeAgent}`}
-              repo={repo}
-              ticketId={ticket.id}
-              cwd={cwd}
-              agentKind={activeAgent}
-              hasStartedSession={tabs.hasStored(activeAgent)}
-              // A plain shell (no repo path) has nothing to resume when it
-              // exits, so it falls back to the ticket; a real investigation
-              // keeps its tab.
-              onExited={() => select("linear")}
-            />
-          ) : (
-            <Attaching />
-          ))}
-        {activeRow &&
-          (ready ? (
-            // A shell row's process ending is what closes the row — the strip's
-            // `useTabSessions` sees the session go — so the pane has nothing
-            // to do on exit.
-            activeRow.kind === "terminal" ? (
-              <TriageTerminal
-                key={activeRow.id}
-                refId={tabRefId(triageTermKey(ticket.id), activeRow.id)}
-                title={activeRow.title}
-                cwd={cwd}
-              />
-            ) : (
-              <TriageTabPane
-                key={activeRow.id}
-                repo={repo}
-                ticketId={ticket.id}
-                cwd={cwd}
-                tab={activeRow}
-              />
-            )
-          ) : (
-            <Attaching />
-          ))}
       </div>
       <TriageSidePanel
         repo={repo}
