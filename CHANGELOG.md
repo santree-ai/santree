@@ -7,6 +7,15 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.18 — 2026-10-05
+
+- Split the main area into several tab groups. Drag any tab (an agent, a terminal, a file diff, the pull request or the ticket) onto the edge of a pane to split it left, right, up or down, into the middle of a pane to move it there, or onto another tab strip to place it exactly. A preview shows where it will land before you let go, and Esc cancels.
+- Each group has its own tab strip, "+" and close buttons. Splits nest in any arrangement, and a group closes when its last tab leaves.
+- Two terminals or agents can now be on screen side by side, both live. Clicking into a group makes it the focused one: new tabs and ⌘T open there, and the status bar follows it.
+- Drag a divider to resize, or double-click it to even out the sizes.
+- Works the same in Trees, Reviews and Triage. Every worktree, pull request and ticket remembers its own layout across restarts, and the ticket tab in Reviews now stays open after a restart too.
+- Fixed a running agent sometimes showing as Exited in the sidebar after it had been resumed in another tab. Clicking it then tried to open the same session a second time, which Claude refuses. It now shows as running and opens its tab, and resuming a session that is still running elsewhere says so instead.
+
 ## 0.1.17 — 2026-10-01
 
 - Split a branch into smaller reviews from the Changes panel: commit the current part, then move remaining changes into one child branch and worktree. Choose its ticket and whether to run setup; staging is preserved and a recovery stash is kept.
