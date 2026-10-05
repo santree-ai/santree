@@ -10,7 +10,7 @@
 //! [`crate::english_tutor`] — because it's the one place every santree `claude`
 //! launch already passes through.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -854,7 +854,39 @@ pub async fn session_states(
     // read plus a JSON parse of every line, plus a subagent-dir scan with a
     // `metadata` call per entry — and this runs on a ~10s poll. One batch hop off
     // the async runtime, not one task per row.
-    Ok(tokio::task::spawn_blocking(move || reconcile_rows(rows, now_ms, &live_terminals)).await?)
+    Ok(tokio::task::spawn_blocking(move || {
+        one_per_session(reconcile_rows(rows, now_ms, &live_terminals))
+    })
+    .await?)
+}
+
+/// One state per session, preferring a binding whose terminal is alive.
+///
+/// `terminal_sessions` is keyed by surface, not by session, so one session can
+/// be bound to two surfaces: a resume opened in a new tab while the original was
+/// still running is exactly that. The join then answers twice for one session —
+/// once through the live tab and once, as `Exited`, through the dead one — and a
+/// reader keyed by session id keeps whichever came last. That is how a running
+/// agent read as exited in the sidebar, and why clicking it resumed it into a
+/// second tab that the CLI refused ("already running"). A session is running if
+/// any terminal holding it is.
+fn one_per_session(states: Vec<SessionState>) -> Vec<SessionState> {
+    let mut out: Vec<SessionState> = Vec::with_capacity(states.len());
+    let mut at: HashMap<String, usize> = HashMap::new();
+    for state in states {
+        match at.get(&state.session_id) {
+            Some(&i) => {
+                if out[i].state == AgentState::Exited && state.state != AgentState::Exited {
+                    out[i] = state;
+                }
+            }
+            None => {
+                at.insert(state.session_id.clone(), out.len());
+                out.push(state);
+            }
+        }
+    }
+    out
 }
 
 /// A `session_state` row as stored (`state` is the TEXT column, still unparsed),
@@ -1537,6 +1569,50 @@ mod tests {
         // attributes the session to.
         assert_eq!(out[0].term_key.as_deref(), Some("tree:AK-1"));
         assert_eq!(out[0].repo.as_deref(), Some("canary"));
+    }
+
+    /// A session bound to two surfaces — resumed into a new tab while its first
+    /// tab was still running — must read as running, through the live one, and
+    /// appear once. Reading it through the dead binding is how a working agent
+    /// showed as exited and a click resumed it a second time.
+    #[test]
+    fn a_session_bound_twice_reads_through_its_live_terminal() {
+        let bound = |term_key: &str| {
+            (
+                "s1".to_string(),
+                "active".to_string(),
+                "UserPromptSubmit".to_string(),
+                "/w".to_string(),
+                None,
+                None,
+                T,
+                Some("canary".to_string()),
+                Some(term_key.to_string()),
+                Some("Claude".to_string()),
+                None,
+            )
+        };
+        let live = live([("tree:AK-1:tab:live", CLAUDE)]);
+        for rows in [
+            vec![bound("tree:AK-1:tab:gone"), bound("tree:AK-1:tab:live")],
+            vec![bound("tree:AK-1:tab:live"), bound("tree:AK-1:tab:gone")],
+        ] {
+            let out = one_per_session(reconcile_rows(rows, T, &live));
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].state, AgentState::Active);
+            assert_eq!(out[0].term_key.as_deref(), Some("tree:AK-1:tab:live"));
+        }
+        // Bound twice and running in neither: still one row, and exited.
+        let out = one_per_session(reconcile_rows(
+            vec![
+                bound("tree:AK-1:tab:gone"),
+                bound("tree:AK-1:tab:also-gone"),
+            ],
+            T,
+            &live,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].state, AgentState::Exited);
     }
 
     /// The provider comes from the owning terminal's row, not from an assumption

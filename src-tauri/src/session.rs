@@ -30,6 +30,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::db::Db;
+use crate::terminal::LiveTerminal;
 
 /// Claude stores each session's transcript at
 /// `~/.claude/projects/<escaped-cwd>/<session-id>.jsonl`, escaping the working
@@ -776,6 +777,37 @@ pub struct ResumeRequest<'a> {
     pub home: Option<&'a Path>,
     /// `$CODEX_HOME/sessions`, which locates a Codex rollout.
     pub sessions_root: Option<&'a Path>,
+}
+
+/// Whether `session_id` is running right now in one of `repo`'s terminals: some
+/// surface it is bound to has a live PTY with that provider in it.
+///
+/// A resume of such a session must be refused rather than opened beside it. The
+/// CLI would refuse it anyway ("already running") — but only after santree had
+/// bound the session to the new tab as well, and a session bound to two
+/// surfaces reads through whichever join row comes last.
+pub async fn is_running(
+    db: &Db,
+    repo: &str,
+    session_id: &str,
+    agent_kind: AgentKind,
+    live: &HashSet<LiveTerminal>,
+) -> Result<bool> {
+    let keys: Vec<(String,)> = sqlx::query_as(
+        "SELECT term_key FROM terminal_sessions
+         WHERE repo = ? AND session_id = ? AND agent_kind = ?",
+    )
+    .bind(repo)
+    .bind(session_id)
+    .bind(agent_kind.as_str())
+    .fetch_all(db)
+    .await?;
+    Ok(keys.into_iter().any(|(term_key,)| {
+        live.contains(&LiveTerminal {
+            term_key,
+            agent_kind: Some(agent_kind),
+        })
+    }))
 }
 
 /// Point `term_key` at one of a worktree's past sessions, so the tab the user
@@ -1595,6 +1627,52 @@ mod tests {
                 .unwrap();
         assert_eq!(rows, vec![(first,)], "exactly one session row");
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn a_session_is_running_only_while_a_terminal_bound_to_it_is_live() {
+        let base =
+            std::env::temp_dir().join(format!("santree-session-running-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', 'tree:AK-1:tab:a', '/w', 's1', 'Claude')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let live = |term_key: &str, agent_kind| {
+            HashSet::from([LiveTerminal {
+                term_key: term_key.to_string(),
+                agent_kind: Some(agent_kind),
+            }])
+        };
+
+        let running = |live| {
+            let db = db.clone();
+            async move {
+                is_running(&db, "repo", "s1", AgentKind::Claude, &live)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(running(live("tree:AK-1:tab:a", AgentKind::Claude)).await);
+        // Another tab, the same tab with another provider, or nothing: not running.
+        assert!(!running(live("tree:AK-1:tab:b", AgentKind::Claude)).await);
+        assert!(!running(live("tree:AK-1:tab:a", AgentKind::Codex)).await);
+        assert!(!running(HashSet::new()).await);
+        // Bound in another repo only: not this one's.
+        assert!(!is_running(
+            &db,
+            "other",
+            "s1",
+            AgentKind::Claude,
+            &live("tree:AK-1:tab:a", AgentKind::Claude)
+        )
+        .await
+        .unwrap());
         let _ = std::fs::remove_dir_all(&base);
     }
 

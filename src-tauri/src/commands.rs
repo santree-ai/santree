@@ -699,6 +699,7 @@ pub async fn reveal_worktree_session_transcript(
 /// worktree's tab as the row to repoint.
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)] // The command's fields, plus the db, the link and the PTYs.
 pub async fn resume_worktree_session(
     repo: String,
     issue_id: String,
@@ -707,10 +708,18 @@ pub async fn resume_worktree_session(
     agent_kind: AgentKind,
     db: State<'_, Db>,
     link: State<'_, DaedalusHost>,
+    manager: State<'_, PtyManager>,
 ) -> CmdResult<()> {
     validate_tab_id(&tab_id)?;
     let term_key = format!("tree:{issue_id}:tab:{tab_id}");
     validate_term_key(&term_key)?;
+    // Still running in another tab: opening it again would bind it to two
+    // surfaces, and the CLI refuses a second copy anyway.
+    let mut live = crate::terminal::live_terminals(&manager);
+    live.extend(link.terminals().live());
+    if crate::session::is_running(&db, &repo, &session_id, agent_kind, &live).await? {
+        return Err(anyhow::anyhow!("That session is still running in another tab.").into());
+    }
     // Also the `issue_id` gate: this errors unless the id names a worktree the
     // repo actually tracks, before anything is written under the key.
     Ok(worktree::resume_session(
