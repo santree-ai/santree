@@ -66,3 +66,6 @@ website/src/routeTree.gen.ts
 # version bump triggers). Build cache from a validation run, never product code
 # — ignored so a broad `git add` during a release cut can't sweep it in.
 .pnpm-store/
+
+# Demo profile pictures (real people) — see src/dev/fixtures/demo/fetch-avatars.sh
+src/dev/fixtures/demo/avatars/

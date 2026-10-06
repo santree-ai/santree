@@ -69,6 +69,13 @@ async function boot() {
     const { installFixtures } = await import("./dev/fixtures/install");
     await installFixtures();
   }
+  // The live demo world (`VITE_SANTREE_FIXTURES=demo`). Its commands come in
+  // through `vite.config.ts`'s bindings alias; the query client is its one
+  // hook into the app, to refresh GitHub data the app only polls for.
+  if (import.meta.env.DEV && import.meta.env.VITE_SANTREE_FIXTURES === "demo") {
+    const { installDemo } = await import("./dev/fixtures/demo/install");
+    await installDemo(queryClient);
+  }
   createRoot(rootElement as HTMLElement).render(
     <StrictMode>
       {/* QueryClientProvider wraps ErrorBoundary (not the reverse) so QuitGuard — which

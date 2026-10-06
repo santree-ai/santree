@@ -1,7 +1,7 @@
 import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
-import { createLogger, loadEnv } from "vite";
+import { createLogger, loadEnv, type Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 
 // @ts-expect-error -- process is a Node global, not typed in the browser env.
@@ -20,26 +20,69 @@ viteLogger.info = (message, options) => {
   logInfo(message, options);
 };
 
+const fromRoot = (rel: string) => new URL(rel, import.meta.url).pathname;
+const cleanId = (id: string) => id.split("?")[0];
+
+/** `VITE_SANTREE_FIXTURES` in a dev build; never set in any other mode, so a
+ *  production build gets no alias, no plugin and none of `src/dev/fixtures`. */
+const fixtures = (mode: string) =>
+  mode === "development" ? loadEnv(mode, ".", "VITE_").VITE_SANTREE_FIXTURES : undefined;
+
+/**
+ * The live demo mode (`VITE_SANTREE_FIXTURES=demo`): every app import of the
+ * generated bindings resolves to `demo/bindings.ts`, which lays the demo's
+ * commands over the real `commands` object — typed against it, so the demo
+ * can't drift from the Rust signatures. Modules inside `demo/` keep the real
+ * file; that is how the shim itself reaches it without importing itself.
+ */
+function demoBindings(): Plugin {
+  const bindings = fromRoot("./src/bindings.ts");
+  const demoDir = fromRoot("./src/dev/fixtures/demo/");
+  return {
+    name: "santree-demo-bindings",
+    enforce: "pre",
+    async resolveId(source, importer, options) {
+      if (!importer || !source.includes("bindings")) return null;
+      if (cleanId(importer).startsWith(demoDir)) return null;
+      // Bindings is reached through many relative spellings, so compare what
+      // the import resolves to, not how it is written.
+      const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
+      if (!resolved || cleanId(resolved.id) !== bindings) return null;
+      return `${demoDir}bindings.ts`;
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => ({
   customLogger: viteLogger,
-  // The screenshot fixture mode (`VITE_SANTREE_FIXTURES=1 pnpm dev:alt`, see
-  // `src/dev/fixtures/README.md`): every generated binding imports `invoke`
-  // from `@tauri-apps/api/core`, and Tauri pins its own internals read-only, so
-  // the one place a fake backend can be seated is that import. Dev only, and
-  // only with the flag: without it there is no alias and the directory is dead.
   resolve: {
-    alias:
-      mode === "development" && loadEnv(mode, ".", "VITE_").VITE_SANTREE_FIXTURES === "1"
+    alias: [
+      // The screenshot fixture mode (`VITE_SANTREE_FIXTURES=1 pnpm dev:alt`, see
+      // `src/dev/fixtures/README.md`): every generated binding imports `invoke`
+      // from `@tauri-apps/api/core`, and Tauri pins its own internals read-only,
+      // so the one place a fake backend can be seated is that import.
+      ...(fixtures(mode) === "1"
         ? [
             {
               find: /^@tauri-apps\/api\/core$/,
-              replacement: new URL("./src/dev/fixtures/tauriCore.ts", import.meta.url).pathname,
+              replacement: fromRoot("./src/dev/fixtures/tauriCore.ts"),
             },
           ]
-        : [],
+        : []),
+      // The demo mode: links into its invented org open nothing (`demo/opener.ts`).
+      ...(fixtures(mode) === "demo"
+        ? [
+            {
+              find: /^@tauri-apps\/plugin-opener$/,
+              replacement: fromRoot("./src/dev/fixtures/demo/opener.ts"),
+            },
+          ]
+        : []),
+    ],
   },
   plugins: [
+    ...(fixtures(mode) === "demo" ? [demoBindings()] : []),
     // The router plugin must run before the React plugin so generated route
     // modules are transformed by React's Fast Refresh.
     tanstackRouter({

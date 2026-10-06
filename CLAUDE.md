@@ -98,6 +98,11 @@ React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
   answered at the `invoke` boundary through a Vite alias of `@tauri-apps/api/core`,
   for README and website captures. Dev-only by build-time constants, no view or
   hook knows it exists, and it never ships — see its README before touching it.
+  Its sibling, `VITE_SANTREE_FIXTURES=demo`, is a stateful world for recording
+  the product demo (`src/dev/fixtures/demo/`): a dev-only Vite plugin swaps
+  `bindings.ts` for a shim that lays typed overrides over `commands` for demo
+  repos only, so everything else, Daedalus included, reaches the real backend.
+  CI's `pnpm check:no-demo` fails a build whose `dist/` carries either world.
 - **Domain types** live in `crates/core/src/domain.rs` and derive `specta::Type` —
   that's how their shapes reach `bindings.ts`. **Never hand-edit `bindings.ts`** (it's
   generated; run `pnpm gen:bindings` after changing a command or `Type`).

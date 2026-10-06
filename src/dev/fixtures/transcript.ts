@@ -9,21 +9,21 @@
  */
 import type { TranscriptKind } from "./world";
 
-const ESC = "\x1b[";
+export const ESC = "\x1b[";
 const RESET = `${ESC}0m`;
-const paint = (codes: string, s: string) => `${ESC}${codes}m${s}${RESET}`;
-const dim = (s: string) => paint("2", s);
-const bold = (s: string) => paint("1", s);
-const green = (s: string) => paint("32", s);
-const red = (s: string) => paint("31", s);
-const cyan = (s: string) => paint("36", s);
-const blue = (s: string) => paint("34", s);
-const yellow = (s: string) => paint("33", s);
-const magenta = (s: string) => paint("35", s);
-const claude = (s: string) => paint("38;2;217;119;87", s);
+export const paint = (codes: string, s: string) => `${ESC}${codes}m${s}${RESET}`;
+export const dim = (s: string) => paint("2", s);
+export const bold = (s: string) => paint("1", s);
+export const green = (s: string) => paint("32", s);
+export const red = (s: string) => paint("31", s);
+export const cyan = (s: string) => paint("36", s);
+export const blue = (s: string) => paint("34", s);
+export const yellow = (s: string) => paint("33", s);
+export const magenta = (s: string) => paint("35", s);
+export const claude = (s: string) => paint("38;2;217;119;87", s);
 
 /** Word-wrap plain prose to `width`, every line after the first indented. */
-function wrap(text: string, width: number, indent = ""): string[] {
+export function wrap(text: string, width: number, indent = ""): string[] {
   const out: string[] = [];
   for (const para of text.split("\n")) {
     const words = para.split(" ");
@@ -45,18 +45,18 @@ function wrap(text: string, width: number, indent = ""): string[] {
 
 /** A styled line and its visible width — ANSI escapes are invisible on
  *  screen but count for `.length`, so a box can't measure its rows itself. */
-interface Styled {
+export interface Styled {
   text: string;
   visible: number;
 }
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ESC is the point — this strips ANSI escapes to measure text.
 const ANSI = /\x1b\[[0-9;]*m/g;
 const visibleWidth = (s: string) => s.replace(ANSI, "").length;
-const plain = (s: string): Styled => ({ text: s, visible: s.length });
-const styled = (text: string): Styled => ({ text, visible: visibleWidth(text) });
+export const plain = (s: string): Styled => ({ text: s, visible: s.length });
+export const styled = (text: string): Styled => ({ text, visible: visibleWidth(text) });
 
 /** A rounded box across `width` columns. */
-function box(lines: Styled[], width: number, tint = (s: string) => s): string[] {
+export function box(lines: Styled[], width: number, tint = (s: string) => s): string[] {
   const inner = Math.max(10, width - 2);
   const pad = (s: string, visible: number) => s + " ".repeat(Math.max(0, inner - visible));
   return [
@@ -68,8 +68,8 @@ function box(lines: Styled[], width: number, tint = (s: string) => s): string[] 
 
 // ── Claude Code ──────────────────────────────────────────────────────────────
 
-function claudeBanner(model: string, cwd: string, width: number): string[] {
-  const home = cwd.replace("/Users/sam", "~");
+export function claudeBanner(model: string, cwd: string, width: number): string[] {
+  const home = cwd.replace(/^\/Users\/[^/]+/, "~");
   return [
     `${claude(" ▐▛███▜▌")}   ${bold("Claude Code")} ${dim("v2.1.34")}`,
     `${claude("▝▜█████▛▘")}  ${model} ${dim("·")} ${dim("Claude Max")}`,
@@ -78,18 +78,18 @@ function claudeBanner(model: string, cwd: string, width: number): string[] {
   ];
 }
 
-const user = (text: string, width: number) =>
+export const user = (text: string, width: number) =>
   wrap(text, width - 2, "  ").map((l, i) => (i === 0 ? `${dim(">")} ${l}` : l));
 
-const say = (text: string, width: number) =>
+export const say = (text: string, width: number) =>
   wrap(text, width - 2, "  ").map((l, i) => (i === 0 ? `${claude("⏺")} ${l}` : l));
 
-const tool = (name: string, arg: string, results: string[] = []) => [
+export const tool = (name: string, arg: string, results: string[] = []) => [
   `${claude("⏺")} ${bold(name)}${dim("(")}${arg}${dim(")")}`,
   ...results.map((r, i) => (i === 0 ? `  ${dim("⎿")}  ${dim(r)}` : `     ${dim(r)}`)),
 ];
 
-const edit = (
+export const edit = (
   file: string,
   summary: string,
   lines: { n: number; kind: " " | "+" | "-"; text: string }[],
@@ -104,7 +104,7 @@ const edit = (
   }),
 ];
 
-const bash = (cmd: string, results: string[]) => [
+export const bash = (cmd: string, results: string[]) => [
   `${claude("⏺")} ${bold("Bash")}${dim("(")}${cmd}${dim(")")}`,
   ...results.map((r, i) => {
     const t = r.startsWith("✓")
@@ -116,11 +116,11 @@ const bash = (cmd: string, results: string[]) => [
   }),
 ];
 
-function claudePrompt(width: number, status: string, hint: string): string[] {
+export function claudePrompt(width: number, status: string, hint: string): string[] {
   return ["", ...box([styled(` ${dim(">")} `)], width, dim), `  ${dim(hint)}`, `  ${status}`];
 }
 
-const contextBar = (pct: number, model: string, cost: string, extra = "") => {
+export const contextBar = (pct: number, model: string, cost: string, extra = "") => {
   const filled = Math.round(pct / 10);
   const bar = green("▰".repeat(filled)) + dim("▱".repeat(10 - filled));
   return `${dim(model)} ${dim("·")} ${bar} ${pct}% ${dim("·")} ${dim(extra || `$${cost}`)}`;
@@ -277,8 +277,8 @@ function claudeIdle(width: number, cwd: string): string[] {
 
 // ── Codex ────────────────────────────────────────────────────────────────────
 
-function codexBanner(cwd: string, width: number): string[] {
-  const home = cwd.replace("/Users/sam", "~");
+export function codexBanner(cwd: string, width: number): string[] {
+  const home = cwd.replace(/^\/Users\/[^/]+/, "~");
   return [
     ...box(
       [
@@ -294,18 +294,18 @@ function codexBanner(cwd: string, width: number): string[] {
   ];
 }
 
-const ask = (text: string, width: number) =>
+export const ask = (text: string, width: number) =>
   wrap(text, width - 2, "  ").map((l, i) => (i === 0 ? `${bold("›")} ${l}` : l));
 
-const codexSay = (text: string, width: number) =>
+export const codexSay = (text: string, width: number) =>
   wrap(text, width - 2, "  ").map((l, i) => (i === 0 ? `${magenta("•")} ${l}` : l));
 
-const codexStep = (title: string, details: string[]) => [
+export const codexStep = (title: string, details: string[]) => [
   `${magenta("•")} ${bold(title)}`,
   ...details.map((d, i) => (i === 0 ? `  ${dim("└")} ${dim(d)}` : `    ${dim(d)}`)),
 ];
 
-const codexPrompt = (width: number, contextLeft: number) => [
+export const codexPrompt = (width: number, contextLeft: number) => [
   "",
   `${bold("›")} ${dim("Ask Codex to do anything")}`,
   "",
@@ -386,7 +386,7 @@ function codexReview(width: number): string[] {
 // ── Shell ────────────────────────────────────────────────────────────────────
 
 function shell(width: number, cwd: string, branch: string): string[] {
-  const home = cwd.replace("/Users/sam", "~");
+  const home = cwd.replace(/^\/Users\/[^/]+/, "~");
   const promptLine = `${blue(home)} ${dim("on")} ${magenta(` ${branch}`)} ${yellow("[!]")}`;
   return [
     promptLine,

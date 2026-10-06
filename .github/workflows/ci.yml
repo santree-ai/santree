@@ -61,6 +61,10 @@ jobs:
       # tsc --noEmit + production Vite build.
       - run: pnpm build
 
+      # The screenshot and demo fixture worlds are dev-only by build-time
+      # constants; prove the bundle that just built carries none of them.
+      - run: pnpm check:no-demo
+
       # tsconfig.json excludes the test files, and vitest transpiles them with
       # esbuild (which strips types without checking them) — so without this they
       # are type-checked nowhere and drift silently against bindings.ts.
