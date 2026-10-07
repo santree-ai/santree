@@ -182,14 +182,15 @@ html {
 }
 .stage-canvas {
   opacity: 0;
-  transition: opacity 1.1s ease;
+  transition: opacity 1.1s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .stage[data-live="webgpu"] .stage-canvas,
 .stage[data-live="webgl2"] .stage-canvas {
   opacity: 1;
 }
+/* The canvas fades in over the poster; the poster goes only once it is fully covered, so the two never average into a dip. */
 .poster {
-  transition: opacity 1.1s ease;
+  transition: opacity 0s linear 1.25s;
 }
 .stage[data-live="webgpu"] .poster,
 .stage[data-live="webgl2"] .poster {

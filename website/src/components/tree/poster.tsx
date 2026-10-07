@@ -1,4 +1,4 @@
-import { boughAt, GROUND, grow, LIGHTS_N, LIMBS, lightLevel, ROOT_Y, swayP, trunkAt } from "./grow";
+import { boughAt, GROUND, grow, LIGHTS_N, LIMBS, lightLevel, ROOT_Y, rand, swayP, trunkAt } from "./grow";
 import { ALL, COLOR, CROWN, heroPose, project, stateAt, type V3, viewOf } from "./model";
 
 /**
@@ -40,7 +40,7 @@ function build() {
   const W = camera(true);
   const g = grow({
     lite: false,
-    thin: 2,
+    thin: 1,
     needles: false,
     avoid: ALL.flatMap((b) => [boughAt(b, 1), boughAt(b, 0.6)]),
   });
@@ -127,6 +127,27 @@ function build() {
     return { x: n(q.x), y: n(q.y), lv: lightLevel(L, 0), size: L.size, near: i < LIGHTS_N.lite };
   });
 
+  // the pool of warm light the tree stands in, and the embers at the clock's zero
+  const c0 = W.pt([0, GROUND, 0]);
+  const pool = {
+    x: n(c0.x),
+    y: n(c0.y),
+    rx: n(Math.abs(W.pt([3.2, GROUND, 0]).x - c0.x)),
+    ry: n(Math.abs(W.pt([0, GROUND, 3.2]).y - c0.y)),
+  };
+  const embers = Array.from({ length: 16 }, (_, i) => {
+    const t = g.tips[Math.floor(rand(i, 31) * g.tips.length)] as V3;
+    const ph = rand(i, 32);
+    const f = (ph * 7) % 1;
+    const q = W.pt([
+      t[0] + Math.sin(ph * 40) * 0.12,
+      t[1] + f * 1.9,
+      t[2] + Math.sin(ph * 70) * 0.12,
+    ]);
+    const a = Math.min(1, f / 0.25) * Math.min(1, (1 - f) / 0.45);
+    return { x: n(q.x), y: n(q.y), a: 0.55 * a };
+  });
+
   const LIVE = ALL.map((b) => {
     const st = stateAt(b, b.offset);
     const m = 16;
@@ -151,7 +172,7 @@ function build() {
   const s = (n0.y - n1.y) / (w0.y - w1.y);
   const narrow = { s, tx: n1.x - w1.x * s, ty: n1.y - w1.y * s };
 
-  return { bins, spines, trunk, bark, soil, lights, LIVE, narrow, crown: W.pt(CROWN) };
+  return { bins, spines, trunk, bark, soil, lights, LIVE, narrow, pool, embers, crown: W.pt(CROWN) };
 }
 const T = build();
 const d = (ps: { x: number; y: number }[]) =>
@@ -162,7 +183,7 @@ const VE = "non-scaling-stroke";
 function Light({ l }: { l: (typeof T.lights)[number] }) {
   return (
     <>
-      <circle cx={l.x} cy={l.y} r={9 + 6 * l.size} fill={COLOR.light} fillOpacity={0.05 * l.lv} />
+      <circle cx={l.x} cy={l.y} r={13 + 9 * l.size} fill="url(#tp-halo)" fillOpacity={Math.min(1, 0.45 * l.lv)} />
       <circle cx={l.x} cy={l.y} r={1.8} fill={COLOR.light} fillOpacity={Math.min(1, 0.85 * l.lv)} />
     </>
   );
@@ -170,6 +191,10 @@ function Light({ l }: { l: (typeof T.lights)[number] }) {
 
 const Tree = () => (
   <symbol id="tree-poster" viewBox={`0 0 ${BW} ${BH}`} overflow="visible">
+    <ellipse cx={T.pool.x} cy={T.pool.y} rx={T.pool.rx} ry={T.pool.ry} fill="url(#tp-pool)" />
+    {T.embers.map((e, i) => (
+      <circle key={i} cx={e.x} cy={e.y} r={1.3} fill={COLOR.light} fillOpacity={e.a} />
+    ))}
     <g fill="none" strokeLinecap="round" strokeLinejoin="round">
       {T.soil.map((p) => (
         <path
@@ -181,9 +206,9 @@ const Tree = () => (
           vectorEffect={VE}
         />
       ))}
-      <g stroke="#9fcab6" strokeWidth={0.7}>
+      <g stroke="#8fc4ad" strokeWidth={0.8}>
         {T.bins.map((b, i) => (
-          <path key={i} d={b} strokeOpacity={[0.2, 0.3, 0.42][i]} vectorEffect={VE} />
+          <path key={i} d={b} strokeOpacity={[0.26, 0.38, 0.52][i]} vectorEffect={VE} />
         ))}
       </g>
       <g stroke="#d4dcd7">
@@ -268,6 +293,15 @@ export function TreePoster({ className }: { className?: string }) {
     <>
       <svg width="0" height="0" className="absolute" aria-hidden focusable="false">
         <defs>
+          <radialGradient id="tp-halo">
+            <stop offset="0" stopColor={COLOR.light} stopOpacity={0.9} />
+            <stop offset="0.35" stopColor={COLOR.light} stopOpacity={0.3} />
+            <stop offset="1" stopColor={COLOR.light} stopOpacity={0} />
+          </radialGradient>
+          <radialGradient id="tp-pool">
+            <stop offset="0" stopColor={COLOR.light} stopOpacity={0.06} />
+            <stop offset="1" stopColor={COLOR.light} stopOpacity={0} />
+          </radialGradient>
           <Tree />
         </defs>
       </svg>
@@ -294,6 +328,7 @@ export function TreePoster({ className }: { className?: string }) {
           href="#tree-poster"
           width={BW}
           height={BH}
+          opacity={0.8}
           transform={`translate(${n(nr.tx)} ${n(nr.ty)}) scale(${nr.s.toFixed(4)})`}
         />
       </svg>

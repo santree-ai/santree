@@ -167,6 +167,7 @@ export function TreeSequence() {
 
     // ——— the engine ———
     let engine: Engine | null = null;
+    let live = false;
     let disposed = false;
     const resize = () => {
       measure();
@@ -195,6 +196,7 @@ export function TreeSequence() {
         e.resize(W, H);
         draw(performance.now());
         stg.dataset.live = e.backend;
+        live = true;
       } catch (err) {
         console.warn("santree: the 3D tree could not start; the poster stays.", err);
         fail();
@@ -210,7 +212,8 @@ export function TreeSequence() {
     function draw(now: number) {
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
-      if (!reduced) t += dt;
+      // The clock holds at 0 until the first 3D frame is up, so that frame is exactly the poster's moment.
+      if (!reduced && live) t += dt;
       const sT = reduced ? 0 : targetS();
       s = reduced ? 0 : s + (sT - s) * (1 - Math.exp(-dt * 7));
       if (Math.abs(sT - s) < 1e-4) s = sT;
