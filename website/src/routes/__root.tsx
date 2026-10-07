@@ -57,9 +57,6 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <HeadContent />
       </head>
       <body className="bg-app text-fg antialiased">
-        <a href="#main" className="skip">
-          Skip to content
-        </a>
         <div className="grain" aria-hidden />
         <Nav />
         {children}

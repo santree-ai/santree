@@ -120,7 +120,7 @@ const SHORTCUTS: { group: string; rows: { label: string; keys: string[] }[] }[] 
 
 function DocsPage() {
   return (
-    <main id="main" tabIndex={-1} className="mx-auto max-w-5xl px-6 pb-32 pt-32">
+    <main className="mx-auto max-w-5xl px-6 pb-32 pt-32">
       <div className="lg:grid lg:grid-cols-[190px_1fr] lg:gap-14">
         {/* Section rail */}
         <aside className="mb-10 lg:mb-0">
