@@ -1,12 +1,12 @@
 import type { ReactNode } from "react";
 import { DownloadButton } from "~/components/download-button";
 import { GitHubLogo } from "~/components/icons";
-import { Logo } from "~/components/logo";
 
 const REPO = "https://github.com/santree-ai/santree";
 
 /** What santree touches. Each line is checked against the app: COMPLIANCE.md
- * for the agent credential rules, `claude_usage.rs` for the one documented read. */
+ * for the agent credential rules, `claude_usage.rs` for the one documented read.
+ * No provider is named: /docs#supported is the one place that lists them. */
 const FACTS = [
   {
     term: "Prompts",
@@ -18,38 +18,37 @@ const FACTS = [
   },
   {
     term: "Agent logins",
-    body: "santree never stores or proxies an agent's login. The one read is Claude Code's own token, sent only to api.anthropic.com to fill the usage meter.",
+    body: "santree never stores or proxies an agent's login. The one exception is a single read for the usage meter, sent only to that vendor's own API.",
   },
   {
     term: "Tokens",
-    body: "Linear and Jira tokens sit in the OS keychain. GitHub access is borrowed from the gh CLI you're already signed into.",
+    body: "Tracker tokens sit in the OS keychain. Code host access is borrowed from the command line tool you are already signed into.",
   },
   {
     term: "Publishing",
-    body: "An AI review's draft comments stay on your machine until you publish them. Nothing an agent writes reaches GitHub without your click.",
+    body: "An AI review's draft comments stay on your machine until you publish them. Nothing an agent writes reaches your code host without your click.",
   },
   {
     term: "Network",
-    body: "The integrations you connect, your agent CLI, and an update check against GitHub releases.",
+    body: "The integrations you connect, your agent's own CLI, and an update check.",
   },
 ];
 
 export function LocalFirst() {
   return (
-    <section id="local" className="relative border-t border-hairline">
-      <div className="mx-auto max-w-[1360px] px-6 pb-24 pt-28 sm:px-10 lg:px-14">
-        <h2 className="font-display max-w-[16ch] text-balance text-[clamp(2.4rem,1.5rem+3.4vw,4.4rem)] leading-[1.02] tracking-[-0.02em]">
-          Your repo never leaves your machine.
-        </h2>
-        <dl className="mt-16 grid gap-x-8 border-t border-hairline sm:grid-cols-2 lg:grid-cols-3">
+    <section id="local" className="sec">
+      <div className="sec-in">
+        <div>
+          <p className="t-label">Privacy</p>
+          <h2 className="font-display t-title mt-4 max-w-[14ch]">
+            Your repo never leaves your machine.
+          </h2>
+        </div>
+        <dl className="rows">
           {FACTS.map((f) => (
-            <div key={f.term} className="border-b border-hairline py-6 lg:pr-6">
-              <dt className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-2">
-                {f.term}
-              </dt>
-              <dd className="mt-3 text-pretty text-[14.5px] leading-relaxed text-[#bfc1c7]">
-                {f.body}
-              </dd>
+            <div key={f.term}>
+              <dt>{f.term}</dt>
+              <dd className="t-body">{f.body}</dd>
             </div>
           ))}
         </dl>
@@ -65,7 +64,7 @@ const QUESTIONS: { q: string; a: ReactNode }[] = [
   },
   {
     q: "What does it cost?",
-    a: "Nothing. santree is free and MIT licensed, with no account to create. Your agents run on your own Claude Code or Codex account, the same as they do in a terminal.",
+    a: "Nothing. santree is free and MIT licensed, with no account to create. Your agents run on your own agent account, the same as they do in a terminal.",
   },
   {
     q: "Which platforms does it run on?",
@@ -80,12 +79,22 @@ const QUESTIONS: { q: string; a: ReactNode }[] = [
     ),
   },
   {
-    q: "Which agents can it drive?",
-    a: "Codex and Claude Code: the real CLIs, unmodified, in a real terminal. Settings picks a provider and model per workflow, so triage, work and reviews can each use a different one.",
+    q: "Which trackers and agents work with it?",
+    a: (
+      <>
+        santree runs the real agent CLIs, unmodified, in a real terminal, and reads tickets from
+        your tracker and pull requests from your code host. Settings picks an agent and model per
+        workflow. The{" "}
+        <a className="faq-link" href="/docs#supported">
+          docs
+        </a>{" "}
+        keep the current list of supported trackers, code hosts and agents.
+      </>
+    ),
   },
   {
-    q: "Do I need Linear?",
-    a: "No. Tickets and Triage read Linear or Jira Cloud, chosen per project. Without either, Trees still works on any git repo, and Reviews needs only the gh CLI.",
+    q: "Do I need a ticket tracker?",
+    a: "No. Without one, Trees still works on any git repo, and Reviews needs only the command line tool for your code host.",
   },
   {
     q: "Where do I start?",
@@ -101,24 +110,20 @@ const QUESTIONS: { q: string; a: ReactNode }[] = [
   },
 ];
 
-/** The questions people ask before downloading, all open: a two-column page
- * of questions and answers, so every answer is in the prerendered HTML. */
+/** The questions people ask before downloading, all open, so every answer is in the prerendered HTML. */
 export function Questions() {
   return (
-    <section id="faq" className="scroll-mt-14 border-t border-hairline">
-      <div className="mx-auto max-w-[1360px] px-6 py-24 sm:px-10 lg:px-14">
-        <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-2">
-          Before you download
-        </p>
-        <div className="mt-10 grid gap-x-20 gap-y-12 md:grid-cols-2">
+    <section id="faq" className="sec scroll-mt-14">
+      <div className="sec-in">
+        <div>
+          <p className="t-label">Questions</p>
+          <h2 className="font-display t-title mt-4 max-w-[14ch]">Before you download.</h2>
+        </div>
+        <div className="rows">
           {QUESTIONS.map((item) => (
             <div key={item.q}>
-              <h3 className="font-display text-[1.6rem] leading-[1.15] tracking-[-0.01em]">
-                {item.q}
-              </h3>
-              <p className="mt-3 max-w-[34rem] text-pretty text-[15px] leading-relaxed text-muted">
-                {item.a}
-              </p>
+              <h3>{item.q}</h3>
+              <p className="t-body">{item.a}</p>
             </div>
           ))}
         </div>
@@ -129,16 +134,11 @@ export function Questions() {
 
 export function Closing() {
   return (
-    <section id="download" className="scroll-mt-14 border-t border-hairline">
-      <div className="mx-auto flex max-w-[1360px] flex-col gap-10 px-6 py-24 sm:px-10 md:flex-row md:items-end md:justify-between lg:px-14">
+    <section id="download" className="sec scroll-mt-14">
+      <div className="closing-in">
         <div>
-          <Logo size={30} />
-          <h2 className="font-display mt-8 text-[clamp(2.4rem,1.5rem+3vw,4rem)] leading-[1.02] tracking-[-0.02em]">
-            All branches merge eventually.
-          </h2>
-          <p className="mt-4 max-w-md text-pretty text-[15px] leading-relaxed text-muted">
-            Point santree at a repo and run your first ticket.
-          </p>
+          <h2 className="closing-title font-display">All branches merge eventually.</h2>
+          <p className="t-body mt-4 max-w-md">Point santree at a repo and run your first ticket.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <DownloadButton size="lg" />

@@ -2,10 +2,10 @@ import {
   ALL,
   boughAt,
   COLOR,
+  CONES,
   CROWN,
   heroPose,
   LINE,
-  lineAt,
   project,
   stateAt,
   type V3,
@@ -28,6 +28,27 @@ const BW = 3000;
 const BH = 1000;
 const r1 = (n: number) => Math.round(n * 2) / 2;
 
+type P = { x: number; y: number };
+
+/** Convex hull (monotone chain) of projected points: a cone's silhouette. */
+function hull(ps: P[]): P[] {
+  const s = [...ps].sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (o: P, a: P, b: P) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lo: P[] = [];
+  for (const p of s) {
+    while (lo.length >= 2 && cross(lo[lo.length - 2] as P, lo[lo.length - 1] as P, p) <= 0)
+      lo.pop();
+    lo.push(p);
+  }
+  const up: P[] = [];
+  for (const p of [...s].reverse()) {
+    while (up.length >= 2 && cross(up[up.length - 2] as P, up[up.length - 1] as P, p) <= 0)
+      up.pop();
+    up.push(p);
+  }
+  return [...lo.slice(0, -1), ...up.slice(0, -1)];
+}
+
 function poster(wide: boolean) {
   const POSE = heroPose(wide);
   const VIEW = viewOf(POSE, BW / BH);
@@ -40,20 +61,30 @@ function poster(wide: boolean) {
   /** The line in runs by depth: the far side lighter, as the scene draws it. */
   const RUNS = (() => {
     const runs: { d: string; o: number }[] = [];
+    const op = [0.13, 0.3, 0.5];
     let cur = "";
     let bin = -1;
-    for (let i = 0; i < LINE.pts.length; i += 3) {
-      const p = pt(LINE.pts[i]!);
+    for (let i = 0; i < LINE.pts.length; i += 5) {
+      const p = pt(LINE.pts[i] as V3);
       const b = p.depth > POSE.dist + 0.6 ? 0 : p.depth > POSE.dist - 0.4 ? 1 : 2;
       if (b !== bin) {
-        if (cur) runs.push({ d: cur, o: [0.16, 0.34, 0.62][bin]! });
+        if (cur) runs.push({ d: cur, o: op[bin] as number });
         cur = `M${r1(p.x)} ${r1(p.y)}`;
         bin = b;
       } else cur += `L${r1(p.x)} ${r1(p.y)}`;
     }
-    if (cur) runs.push({ d: cur, o: [0.16, 0.34, 0.62][bin]! });
+    if (cur) runs.push({ d: cur, o: op[bin] as number });
     return runs;
   })();
+
+  const BODIES = CONES.map((c) => {
+    const ring: P[] = Array.from({ length: 48 }, (_, i) => {
+      const a = (i / 48) * Math.PI * 2;
+      return pt([c.r * Math.cos(a), c.base, c.r * Math.sin(a)]);
+    });
+    const h = hull([...ring, pt([0, c.apex, 0])]);
+    return h.map((p, i) => `${i ? "L" : "M"}${r1(p.x)} ${r1(p.y)}`).join("") + "Z";
+  });
 
   const LIVE = ALL.map((b) => {
     const st = stateAt(b, b.offset);
@@ -68,11 +99,10 @@ function poster(wide: boolean) {
       lit,
       agent: st.stage === "work" ? pt(boughAt(b, st.progress)) : null,
       bud: st.bloom > 0.01 ? pt(boughAt(b, 1)) : null,
-      bead: st.bead >= 0 ? pt(lineAt(st.bead)) : null,
     };
   });
   const CROWN_P = pt(CROWN);
-  return { RUNS, LIVE, CROWN_P };
+  return { RUNS, LIVE, CROWN_P, BODIES };
 }
 const POSTERS = { wide: poster(true), narrow: poster(false) };
 const d = (ps: { x: number; y: number }[]) =>
@@ -88,7 +118,7 @@ export function TreePoster({ className }: { className?: string }) {
 }
 
 function PosterSvg({ className, p }: { className: string; p: (typeof POSTERS)["wide"] }) {
-  const { RUNS, LIVE, CROWN_P } = p;
+  const { RUNS, LIVE, CROWN_P, BODIES } = p;
   return (
     <svg
       viewBox={`0 0 ${BW} ${BH}`}
@@ -99,29 +129,37 @@ function PosterSvg({ className, p }: { className: string; p: (typeof POSTERS)["w
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <g stroke={COLOR.ink} strokeWidth={1.1}>
+      {BODIES.map((b) => (
+        <path key={b} d={b} fill={COLOR.accent} fillOpacity={0.035} />
+      ))}
+      <g stroke={COLOR.ink} strokeWidth={0.9}>
         {RUNS.map((r, i) => (
           <path key={i} d={r.d} strokeOpacity={r.o} />
         ))}
         {LIVE.map(({ b, st, lit }) =>
           lit.length > 1 ? (
-            <path key={b.id} d={d(lit)} strokeOpacity={0.9 * st.lit} strokeWidth={1.7} />
+            <path key={b.id} d={d(lit)} strokeOpacity={0.6 * st.lit} strokeWidth={1.1} />
           ) : null,
         )}
       </g>
-      {LIVE.map(({ b, st, agent, bud, bead }) => {
-        const hue = st.asking
-          ? COLOR.permission
-          : b.agent === "claude"
-            ? COLOR.claude
-            : COLOR.codex;
-        const budHue = st.stage === "merged" || st.stage === "back" ? COLOR.merged : COLOR.open;
+      {LIVE.map(({ b, st, agent, bud }) => {
+        const hue = st.asking ? COLOR.ask : COLOR.agent;
         return (
           <g key={b.id}>
             {agent && (
               <>
-                <circle cx={agent.x} cy={agent.y} r={20} fill={hue} fillOpacity={0.18} />
-                <circle cx={agent.x} cy={agent.y} r={3.6} fill={hue} />
+                <circle cx={agent.x} cy={agent.y} r={12} fill={hue} fillOpacity={0.08} />
+                {st.asking && (
+                  <circle
+                    cx={agent.x}
+                    cy={agent.y}
+                    r={8.5}
+                    stroke={hue}
+                    strokeWidth={0.9}
+                    strokeOpacity={0.55}
+                  />
+                )}
+                <circle cx={agent.x} cy={agent.y} r={2.3} fill={hue} />
               </>
             )}
             {bud && (
@@ -129,20 +167,27 @@ function PosterSvg({ className, p }: { className: string; p: (typeof POSTERS)["w
                 <circle
                   cx={bud.x}
                   cy={bud.y}
-                  r={8}
-                  stroke={budHue}
-                  strokeWidth={1.3}
-                  strokeOpacity={st.bloom}
+                  r={5.5}
+                  stroke={COLOR.open}
+                  strokeWidth={0.9}
+                  strokeOpacity={0.6 * st.bloom}
                 />
-                <circle cx={bud.x} cy={bud.y} r={2.8} fill={budHue} fillOpacity={st.bloom} />
+                <circle cx={bud.x} cy={bud.y} r={1.7} fill={COLOR.open} fillOpacity={st.bloom} />
               </>
             )}
-            {bead && <circle cx={bead.x} cy={bead.y} r={3.4} fill={COLOR.triage} />}
           </g>
         );
       })}
-      <circle cx={CROWN_P.x} cy={CROWN_P.y} r={18} fill={COLOR.accent} fillOpacity={0.16} />
-      <circle cx={CROWN_P.x} cy={CROWN_P.y} r={3.4} fill={COLOR.accent} />
+      <circle cx={CROWN_P.x} cy={CROWN_P.y} r={11} fill={COLOR.accent} fillOpacity={0.1} />
+      <circle
+        cx={CROWN_P.x}
+        cy={CROWN_P.y}
+        r={6}
+        stroke={COLOR.accent}
+        strokeWidth={0.9}
+        strokeOpacity={0.4}
+      />
+      <circle cx={CROWN_P.x} cy={CROWN_P.y} r={2.1} fill={COLOR.accent} />
     </svg>
   );
 }

@@ -5,7 +5,6 @@ import type { Engine } from "./engine";
 import {
   ALL,
   boughAt,
-  COLOR,
   CROWN,
   DOT_COLOR,
   DOT_WORD,
@@ -13,11 +12,8 @@ import {
   ease,
   FEATURED,
   featuredAt,
-  HOLD,
   heroPose,
   keys,
-  LEDGER_ROWS,
-  lineAt,
   markAt,
   type Pose,
   poseAt,
@@ -29,7 +25,7 @@ import {
   viewOf,
 } from "./model";
 import { TreePoster } from "./poster";
-import { PROMPT, SCREEN_H, SCREEN_W, STATIONS, screenSrc } from "./stations";
+import { type Crop, cropAspect, PROMPT, SCREEN_H, SCREEN_W, STATIONS, screenSrc } from "./stations";
 
 /**
  * The hero and the scroll through the tree, one sticky stage.
@@ -73,10 +69,8 @@ const smooth = (a: number, b: number, x: number) => ease(clamp01((x - a) / (b - 
 
 /** How present station i is at scroll s (0..1). */
 function presence(i: number, s: number) {
-  const at = STATIONS_S[i]!;
-  const next = STATIONS_S[i + 1] ?? END_S;
-  const leave = at + HOLD * (next - at);
-  return smooth(at - 0.42, at - 0.04, s) * (1 - smooth(leave + 0.02, leave + 0.3, s));
+  const at = STATIONS_S[i] ?? 0;
+  return smooth(at - 0.3, at - 0.08, s) * (1 - smooth(at + 0.56, at + 0.8, s));
 }
 
 function canRender(): boolean {
@@ -118,34 +112,18 @@ export function TreeSequence() {
     const wideQ = window.matchMedia("(min-width: 1000px)");
     let pin = root.classList.contains("pin");
     let wide = wideQ.matches;
-    let ks = keys(pin, wide);
+    let ks = keys(pin, wide, stg.clientWidth / stg.clientHeight);
     let W = stg.clientWidth;
     let H = stg.clientHeight;
 
-    // ——— the DOM that rides on the scene: a label per lit bough, the roots' ledger ———
+    // ——— the DOM that rides on the scene: one plain word per lit ticket, set at its light ———
     const labels = ALL.map((b) => {
       const n = el("div", "tree-label");
-      const head = el("span", "tree-label-head");
-      const id = el("span", "tree-label-id", b.id);
       const word = el("span", "tree-label-word");
-      head.append(id, word);
-      const sub = el("span", "tree-label-sub");
-      n.append(head, sub);
+      n.append(word);
       ov.append(n);
-      return { b, n, word, sub, key: "" };
+      return { b, n, word, key: "" };
     });
-    const ledger = el("div", "ledger");
-    ledger.append(el("div", "ledger-head", "QuackStack tickets"));
-    const rows = LEDGER_ROWS.map((r) => {
-      const row = el("div", r.bough === FEATURED ? "ledger-row is-featured" : "ledger-row");
-      const word = el("span", "ledger-word", "todo");
-      const dot = el("span", "ledger-dot");
-      dot.style.background = DOT_COLOR.todo;
-      row.append(el("span", "ledger-title", r.title), el("span", "ledger-id", r.id), word, dot);
-      ledger.append(row);
-      return { r, row, word, dot, key: "" };
-    });
-    ov.append(ledger);
 
     // ——— scroll → s (viewport heights from the top of the sequence) ———
     let secTop = 0;
@@ -190,6 +168,7 @@ export function TreeSequence() {
     let disposed = false;
     const resize = () => {
       measure();
+      ks = keys(pin, wide, W / H);
       engine?.resize(W, H);
       if (reduced) draw(performance.now());
     };
@@ -198,7 +177,7 @@ export function TreeSequence() {
       if (pin) {
         pin = false;
         root.classList.remove("pin");
-        ks = keys(false, wide);
+        ks = keys(false, wide, W / H);
         measure();
       }
     };
@@ -246,96 +225,40 @@ export function TreeSequence() {
       const stOf = (b: (typeof ALL)[number]) =>
         b === FEATURED ? stateAt(b, featured.u) : stateAt(b, t + b.offset);
 
-      // Labels: one per ticket on the tree, anchored to its light, in the hero, on wide screens.
+      // Labels: one plain word per lit ticket, set beside its light, in the hero, on wide screens.
       const heroS = reduced ? Math.max(0, (window.scrollY - secTop) / H) : s;
       const heroA = wide ? 1 - smooth(0.05, 0.4, heroS) : 0;
       const placed: { L: (typeof labels)[number]; x: number; y: number; right: boolean }[] = [];
       for (const L of labels) {
         const st = stOf(L.b);
-        const a =
-          heroA *
-          (L.b === FEATURED ? featured.alpha : 1) *
-          (st.stage === "travel"
-            ? smooth(0, 0.08, st.bead - 0.02)
-            : st.stage === "back"
-              ? st.back && "s" in st.back
-                ? 1
-                : 0
-              : st.stage === "rest"
-                ? 0
-                : 1);
-        L.n.style.opacity = String(a);
-        if (a <= 0.001) continue;
-        const bud = st.stage === "pr" || st.stage === "merged" || st.stage === "back";
-        const key = `${st.dot}${bud}`;
+        const shown = st.stage === "work" || st.stage === "pr" || st.stage === "merged";
+        L.n.style.opacity = String(shown ? heroA * (L.b === FEATURED ? featured.alpha : 1) : 0);
+        if (!shown) continue;
+        const key = st.dot;
         if (key !== L.key) {
           L.key = key;
           L.word.textContent = DOT_WORD[st.dot];
           L.word.style.color = DOT_COLOR[st.dot];
-          L.sub.textContent =
-            st.stage === "travel"
-              ? L.b.title
-              : st.stage === "sprout"
-                ? `.santree/worktrees/${L.b.id}`
-                : st.stage === "work"
-                  ? st.asking
-                    ? (L.b.ask ?? "")
-                    : L.b.agent === "claude"
-                      ? "Claude Code"
-                      : "Codex"
-                  : st.stage === "pr"
-                    ? `#${L.b.pr} ${L.b.diff ?? ""}`
-                    : `#${L.b.pr} into main`;
-          L.sub.style.color =
-            st.stage === "work"
-              ? st.asking
-                ? COLOR.permission
-                : L.b.agent === "claude"
-                  ? COLOR.claude
-                  : COLOR.codex
-              : "";
         }
-        // On the bead coming in, the agent's light while it works, the bud after.
         const at: V3 =
-          st.stage === "travel"
-            ? lineAt(st.bead)
-            : st.stage === "work"
-              ? boughAt(L.b, Math.max(0.05, st.progress))
-              : boughAt(L.b, bud ? 1 : st.grow);
+          st.stage === "work" ? boughAt(L.b, Math.max(0.05, st.progress)) : boughAt(L.b, 1);
         const p = toPx(at);
         placed.push({ L, x: p.x, y: p.y, right: p.x > toPx([0, at[1], 0]).x });
       }
       // Never on top of each other: on each side, push apart top to bottom.
       for (const side of [true, false]) {
         const col = placed.filter((q) => q.right === side).sort((a, b) => a.y - b.y);
-        for (let i = 1; i < col.length; i++) col[i]!.y = Math.max(col[i]!.y, col[i - 1]!.y + 34);
+        for (let i = 1; i < col.length; i++) {
+          const prev = col[i - 1];
+          const cur = col[i];
+          if (prev && cur) cur.y = Math.max(cur.y, prev.y + 26);
+        }
       }
       for (const q of placed) {
         q.L.n.style.transform = q.right
-          ? `translate3d(${q.x + 16}px, ${q.y}px, 0) translateY(-50%)`
-          : `translate3d(${q.x - 16}px, ${q.y}px, 0) translate(-100%, -50%)`;
+          ? `translate3d(${q.x + 14}px, ${q.y}px, 0) translateY(-50%)`
+          : `translate3d(${q.x - 14}px, ${q.y}px, 0) translate(-100%, -50%)`;
         q.L.n.dataset.side = q.right ? "r" : "l";
-      }
-
-      // The ledger, hung off the taproot: present around the first station.
-      const la = pin ? presence(0, s) : 0;
-      ledger.style.opacity = String(la);
-      if (la > 0.001) {
-        const top = toPx(rowPoint(0));
-        ledger.style.transform = `translate3d(${top.x - 14}px, ${top.y}px, 0) translate(-100%, 0)`;
-        for (const R of rows) {
-          const p = toPx(rowPoint(R.r.row));
-          R.row.style.transform = `translate3d(0, ${p.y - top.y}px, 0)`;
-          if (!R.r.bough) continue;
-          const st = stOf(R.r.bough);
-          const k = `${st.dot}${st.stage === "rest" ? 0 : 1}`;
-          if (k === R.key) continue;
-          R.key = k;
-          R.word.textContent = DOT_WORD[st.dot];
-          R.word.style.color = DOT_COLOR[st.dot];
-          R.dot.style.background = DOT_COLOR[st.dot];
-          R.row.classList.toggle("is-live", st.stage !== "rest");
-        }
       }
 
       // The panes and their leaders (pin); in the list layout the cards are in the flow.
@@ -358,12 +281,12 @@ export function TreeSequence() {
           lead.style.visibility = vis ? "visible" : "hidden";
           if (!vis) return;
           const a = toPx(STATION_ANCHOR(i, featured.u));
-          const rise = (1 - o) * 28;
-          const drift = (a.y - H / 2) * 0.06;
+          const rise = (1 - o) * 14;
+          const drift = 0;
           pane.style.opacity = String(o);
-          pane.style.transform = `perspective(2200px) translate3d(0, calc(-50% + ${drift + rise}px), 0) rotateY(${-4 + 3 * (1 - o)}deg) rotateX(${1.5 * (1 - o)}deg)`;
+          pane.style.transform = `translate3d(0, calc(-50% + ${rise}px), 0)`;
           cap.style.opacity = String(o);
-          cap.style.transform = `translate3d(0, ${rise * 0.5}px, 0)`;
+          cap.style.transform = `translate3d(0, ${rise * 0.6}px, 0)`;
           // The leader: from the 3D point to the pane's near edge.
           const box = paneBox[i] ?? { left: W * 0.5, top: H * 0.25, h: H * 0.5 };
           const top = box.top + drift + rise;
@@ -415,7 +338,7 @@ export function TreeSequence() {
     const onWide = () => {
       wide = wideQ.matches;
       pin = root.classList.contains("pin");
-      ks = keys(pin, wide);
+      ks = keys(pin, wide, W / H);
       resize();
     };
     wideQ.addEventListener("change", onWide);
@@ -443,7 +366,6 @@ export function TreeSequence() {
       if (!idle) window.clearTimeout(handle);
       engine?.dispose();
       for (const L of labels) L.n.remove();
-      ledger.remove();
     };
   }, []);
 
@@ -467,10 +389,10 @@ export function TreeSequence() {
                 }}
                 style={{ visibility: "hidden" }}
               >
-                <line stroke="rgba(233,241,237,0.5)" strokeWidth={1} strokeDasharray="2 3" />
-                <circle r={9} fill="none" stroke="rgba(233,241,237,0.6)" strokeWidth={1} />
-                <circle r={2} fill="#e9f1ed" />
-                <circle r={2.5} fill="#e9f1ed" />
+                <line stroke="rgba(233,241,237,0.34)" strokeWidth={1} />
+                <circle r={5.5} fill="none" stroke="rgba(233,241,237,0.5)" strokeWidth={1} />
+                <circle r={1.8} fill="#e9f1ed" />
+                <circle r={1.8} fill="rgba(233,241,237,0.7)" />
               </g>
             ))}
           </svg>
@@ -497,26 +419,18 @@ export function TreeSequence() {
                 }}
                 style={{ visibility: "hidden" }}
               >
-                <h2 className="font-display">{st.title}</h2>
-                <p>{st.body}</p>
-                <code>{st.trace}</code>
+                <h2 className="font-display t-title">{st.title}</h2>
+                <p className="t-body">{st.body}</p>
               </div>
               <figure
                 className="seq-pane"
                 ref={(p) => {
                   panes.current[i] = p;
                 }}
-                style={{ visibility: "hidden" }}
+                style={{ visibility: "hidden", ["--ar" as string]: cropAspect(st.crop) }}
               >
-                <img
-                  src={screenSrc(st.screen)}
-                  alt={st.alt}
-                  width={SCREEN_W}
-                  height={SCREEN_H}
-                  loading="lazy"
-                  decoding="async"
-                />
-                {st.id === "branch" && <PromptCard className="seq-prompt" />}
+                <Capture screen={st.screen} crop={st.crop} alt={st.alt} />
+                {st.id === "run" && <PromptCard className="seq-prompt" />}
               </figure>
             </div>
           ))}
@@ -536,21 +450,11 @@ export function TreeSequence() {
                 }}
                 className="seq-card"
               >
-                <p className="seq-card-name">
-                  <span>{st.name}</span>
-                  <code>{st.trace}</code>
-                </p>
-                <h2 className="font-display">{st.title}</h2>
-                <p className="seq-card-body">{st.body}</p>
-                {st.id === "branch" && <PromptCard className="seq-prompt-flow" />}
-                <img
-                  src={screenSrc(st.screen)}
-                  alt={st.alt}
-                  width={SCREEN_W}
-                  height={SCREEN_H}
-                  loading="lazy"
-                  decoding="async"
-                />
+                <p className="seq-card-name t-label">{st.name}</p>
+                <h2 className="font-display t-title">{st.title}</h2>
+                <p className="seq-card-body t-body">{st.body}</p>
+                {st.id === "run" && <PromptCard className="seq-prompt-flow" />}
+                <Capture screen={st.screen} crop={st.list} alt={st.alt} />
               </li>
             ))}
           </ol>
@@ -560,7 +464,36 @@ export function TreeSequence() {
   );
 }
 
-/** QK-138's opening prompt, as santree renders it from the ticket. Nobody typed it. */
+/** A capture cut to the part of the app a station is about: sharp at the size it is shown. */
+function Capture({
+  screen,
+  crop,
+  alt,
+}: {
+  screen: Parameters<typeof screenSrc>[0];
+  crop: Crop;
+  alt: string;
+}) {
+  return (
+    <div className="crop" style={{ aspectRatio: String(cropAspect(crop)) }}>
+      <img
+        src={screenSrc(screen)}
+        alt={alt}
+        width={SCREEN_W}
+        height={SCREEN_H}
+        loading="lazy"
+        decoding="async"
+        style={{
+          width: `${100 / crop.w}%`,
+          left: `${(-crop.x / crop.w) * 100}%`,
+          top: `${(-crop.y / crop.h) * 100}%`,
+        }}
+      />
+    </div>
+  );
+}
+
+/** The ticket's opening prompt, as santree renders it from the ticket. Nobody typed it. */
 function PromptCard({ className }: { className?: string }) {
   return (
     <div className={className}>
@@ -588,11 +521,9 @@ function Hero() {
           The ticket is the prompt.
           <span className="hero-title-2"> Tickets in, pull requests out.</span>
         </h1>
-        <p className="hero-sub">
-          Press Run on a Linear or Jira ticket and santree writes the first prompt from it, the
-          description, the comment thread and your notes, then starts Claude Code or Codex in a
-          worktree of its own. When review comes back, Start work turns the failing checks and
-          comments into the next prompt.
+        <p className="hero-sub t-lede">
+          Press Run on a ticket and santree writes the first prompt from it (the description, the
+          comments and your notes), then starts an agent in a worktree of its own.
         </p>
         <div className="mt-9 flex flex-wrap items-center gap-3">
           <DownloadButton size="lg" />
@@ -602,9 +533,9 @@ function Hero() {
           </a>
         </div>
       </div>
-      <a href="#how" className="hero-cue">
+      <a href="#how" className="hero-cue t-label">
         <span className="hero-cue-line" aria-hidden />
-        Follow QK-138 from triage to main
+        Scroll
       </a>
     </div>
   );

@@ -10,7 +10,7 @@ import stylesCss from "../styles.css?url";
 const SITE_URL = "https://santree.toscanini.me";
 const TITLE = "santree: the ticket is the prompt";
 const DESCRIPTION =
-  "A desktop app that starts Claude Code and Codex from your Linear or Jira tickets. santree writes each agent's prompt from the ticket, runs it in a worktree of its own, and turns review comments into the next prompt.";
+  "A desktop app that starts coding agents from your tickets. santree writes each agent's prompt from the ticket, runs it in a worktree of its own, and turns review comments into the next prompt.";
 
 // Picks the landing's layout before first paint (components/tree/stage.tsx):
 // `pin` scrolls the camera through the tree on wide screens; without it the

@@ -12,12 +12,16 @@
  * (M256 128 L173 232 L339 232 Z, M256 248 L148 384 L364 384 Z): the flat
  * spirals are the triangles' bases, the windings their sides.
  *
- * Everything that happens is a bead of light on that line. A ticket (from the
- * app's screenshot fixture, Mallard Labs' QuackStack, src/dev/fixtures/
- * world.ts) rises from its row in the roots and runs along the line to its
- * fork; there it leaves the line as a bough (its worktree), the agent's light
- * goes out along the bough, the tip buds into the PR, and on merge the light
- * runs back onto the line and climbs it to the crown, which brightens.
+ * Everything that happens is a quiet light on that line. A ticket rises up it
+ * as a front of light to its fork (a plain height, so it reads as a tide, not
+ * a dot orbiting the cone); there it leaves the line as a bough (its worktree),
+ * the agent's point of light goes out along the bough, the tip buds into the
+ * PR, and on merge a second front climbs the line to the crown, which
+ * brightens. The tickets are invented (the app's screenshot fixture) and are
+ * never named on the page: no tracker, code host or agent is either.
+ *
+ * One ticket's life is 41 s inside a 96 s loop, so at most two things move at
+ * once, and "needs you" is a steady warm hold, never a pulse.
  *
  * Meters, y up from the ground at the foot of the trunk.
  */
@@ -27,16 +31,13 @@ export type V3 = [number, number, number];
 /** The app's own colors (src/theme/colors.ts: palette, sessionStateMeta, prStateMeta). */
 export const COLOR = {
   ink: "#e9f1ed",
+  /** The one accent: the mark's emerald. */
   accent: "#2dd4a7",
-  claude: "#d97757",
-  codex: "#b9c6dc",
-  running: "#3fb950",
-  delegating: "#4493f8",
-  permission: "#f85149",
-  triage: "#4493f8",
-  worktree: "#a78bfa",
-  open: "#848d97",
-  merged: "#a371f7",
+  /** An agent at work: one neutral light, whichever agent it is. */
+  agent: "#dfe8e4",
+  /** Needs you: a warm hold, never a flare. */
+  ask: "#d9a55f",
+  open: "#8f989d",
 } as const;
 
 const deg = (d: number) => (d * Math.PI) / 180;
@@ -66,7 +67,9 @@ const coneR = (c: Cone, y: number) => (c.r * (c.apex - y)) / (c.apex - c.base);
 // ——— the line ———
 
 /** Turns per stretch: enough to read as a cone, few enough to read as one line. */
-const TURNS = { floor: 2.2, lower: 8, gap: 1.6, upper: 6 } as const;
+const TURNS = { floor: 3, lower: 18, gap: 1.2, upper: 13 } as const;
+/** Samples per turn. */
+const PER = 260;
 
 export type Part = "root" | "floor" | "lower" | "gap" | "upper" | "crown";
 
@@ -93,27 +96,27 @@ function buildLine(): Line {
   // the taproot, straight up to the floor of the lower tier
   for (let i = 0; i < 40; i++) at(0, ROOT_Y + ((LOWER.base - ROOT_Y) * i) / 40, "root");
   // out across the floor, an Archimedean spiral (equal spacing reads as a disc)
-  const nF = 520;
+  const nF = Math.round(TURNS.floor * PER);
   for (let i = 0; i < nF; i++) {
     const k = i / nF;
     at(LOWER.r * k, LOWER.base, "floor");
     a += (TAU * TURNS.floor) / nF;
   }
   // up the lower cone: the same angular speed per height keeps the pitch even
-  const nL = 2600;
+  const nL = Math.round(TURNS.lower * PER);
   for (let i = 0; i < nL; i++) {
     const y = LOWER.base + ((LOWER.apex - LOWER.base) * i) / nL;
     at(coneR(LOWER, y), y, "lower");
     a += (TAU * TURNS.lower) / nL;
   }
   // across the gap: out from the lower apex to the upper tier's rim, rising a little
-  const nG = 420;
+  const nG = Math.round(TURNS.gap * PER);
   for (let i = 0; i < nG; i++) {
     const k = i / nG;
     at(UPPER.r * k, LOWER.apex + (UPPER.base - LOWER.apex) * k, "gap");
     a += (TAU * TURNS.gap) / nG;
   }
-  const nU = 1900;
+  const nU = Math.round(TURNS.upper * PER);
   for (let i = 0; i <= nU; i++) {
     const y = UPPER.base + ((UPPER.apex - UPPER.base) * i) / nU;
     at(coneR(UPPER, y), y, "upper");
@@ -167,11 +170,6 @@ function indexAt(p: Part, y: number) {
 
 /** The ledger's rows hang off the taproot here, top to bottom. */
 export const rowPoint = (row: number): V3 => [0, -0.2 - row * 0.115, 0];
-export const rowSigma = (row: number) => {
-  const y = rowPoint(row)[1];
-  const i = Math.round(((y - ROOT_Y) / (LOWER.base - ROOT_Y)) * 40);
-  return LINE.sig[Math.max(0, Math.min(39, i))]!;
-};
 
 /** Deterministic noise, so the server and every client grow the same tree. */
 export function rand(i: number, salt = 0) {
@@ -215,23 +213,17 @@ export function boughAt(b: Limb, s: number): V3 {
 
 // ——— tickets ———
 
-export type Agent = "claude" | "codex";
-
 export interface Ticket {
   id: string;
   title: string;
-  agent: Agent;
-  /** What the agent's dot says while it works. */
-  work: "running" | "delegating" | "permission";
-  ask?: string;
-  diff?: string;
-  pr?: number;
+  /** Does its agent stop to ask partway out? */
+  asks?: boolean;
 }
 
 export interface Bough extends Ticket, Limb {
   /** Seconds into its loop when the page opens (the poster's moment). */
   offset: number;
-  /** Its row in the roots' ledger, top to bottom. */
+  /** Where its light enters the line, down the taproot. */
   row: number;
 }
 
@@ -244,92 +236,41 @@ const ticketBough = (t: Ticket, p: Part, y: number, offset: number, row: number)
 
 /** The ticket the scroll follows from triage to main: the one whose agent stops to ask. */
 export const FEATURED: Bough = ticketBough(
-  {
-    id: "QK-138",
-    title: "Migrate quack events to the pond_v2 schema",
-    agent: "claude",
-    work: "permission",
-    ask: "Allow Bash(pnpm db:migrate --dry-run)?",
-    diff: "+412 −88",
-    pr: 418,
-  },
+  { id: "featured", title: "", asks: true },
   "lower",
   1.38,
-  7.2,
+  19,
   1,
 );
 
-/** The others, on the wall clock, spread through the loop: two or three lit at once. */
+/** The others, on the wall clock, far apart in the loop: one or two things happen at once. */
 export const AMBIENT: Bough[] = [
-  ticketBough(
-    {
-      id: "QK-142",
-      title: "Ducks render upside down in Safari",
-      agent: "claude",
-      work: "running",
-      diff: "+54 −1",
-      pr: 421,
-    },
-    "lower",
-    0.78,
-    5.6,
-    0,
-  ),
-  ticketBough(
-    {
-      id: "QK-127",
-      title: "Pond dashboard: dark mode",
-      agent: "codex",
-      work: "delegating",
-      diff: "+188 −40",
-      pr: 409,
-    },
-    "lower",
-    1.95,
-    12.4,
-    2,
-  ),
-  ticketBough(
-    {
-      id: "QK-119",
-      title: "Rate-limit the bread dispenser API",
-      agent: "claude",
-      work: "running",
-      diff: "+156 −12",
-      pr: 412,
-    },
-    "upper",
-    3.2,
-    16.4,
-    3,
-  ),
+  ticketBough({ id: "a", title: "" }, "lower", 0.78, 27, 0),
+  ticketBough({ id: "b", title: "" }, "lower", 1.95, 60, 2),
+  ticketBough({ id: "c", title: "" }, "upper", 3.2, 70, 3),
 ];
 
 export const ALL: Bough[] = [FEATURED, ...AMBIENT];
 
-/** The ledger: the tickets on the tree, and two still waiting in the backlog. */
-export const LEDGER_ROWS: { id: string; title: string; row: number; bough?: Bough }[] = [
-  ...ALL.map((b) => ({ id: b.id, title: b.title, row: b.row, bough: b })),
-  { id: "QK-146", title: "Feather cache never evicts", row: 4 },
-  { id: "QK-147", title: "Realtime pond updates over WebSockets", row: 5 },
-].sort((a, b) => a.row - b.row);
-
 // ——— the clock ———
 
-/** One ticket's whole life, in seconds. */
-export const LOOP = 24;
+/** One ticket's whole life, in seconds: long, slow, and mostly rest. */
+export const LOOP = 96;
 export const PHASE = {
-  travel: [0, 2.6],
-  sprout: [2.6, 3.8],
-  work: [3.8, 10.8],
-  pr: [10.8, 13.0],
-  merged: [13.0, 13.7],
-  back: [13.7, 17.6],
+  travel: [0, 10],
+  sprout: [10, 12.5],
+  work: [12.5, 25],
+  pr: [25, 30],
+  merged: [30, 31.5],
+  back: [31.5, 41],
 } as const satisfies Record<string, readonly [number, number]>;
 /** The share of the run back spent on the bough; the rest is the climb up the line. */
 const BACK_SPLIT = 0.16;
 /** The permission prompt holds the agent this long, partway out. */
-export const ASK = { at: 0.55, from: 5.6, to: 8.4 } as const;
+export const ASK = { at: 0.55, from: 17, to: 22 } as const;
+
+/** The crown's answer to a merge: it swells over a second and a half and settles over many. */
+const crownFlash = (k: number) => ease(clamp01(k / 1.6)) * Math.exp(-Math.max(0, k - 1.6) * 0.35);
 
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 export const ease = (x: number) => x * x * (3 - 2 * x);
@@ -338,19 +279,11 @@ export const glide = (x: number) => (x < 0.5 ? 16 * x ** 5 : 1 - (-2 * x + 2) **
 const span = (u: number, [a, b]: readonly [number, number]) => clamp01((u - a) / (b - a));
 
 export type Stage = "rest" | "travel" | "sprout" | "work" | "pr" | "merged" | "back";
-export type Dot =
-  | "todo"
-  | "triage"
-  | "worktree"
-  | "running"
-  | "delegating"
-  | "permission"
-  | "open"
-  | "merged";
+export type Dot = "triage" | "worktree" | "running" | "permission" | "open" | "merged";
 
 export interface BoughState {
   stage: Stage;
-  /** Arc length of the incoming bead (triage), while it runs to the fork. */
+  /** Height of the front of light rising to the fork (triage), or -99. */
   bead: number;
   /** 0..1: the bough drawn out from the fork. */
   grow: number;
@@ -360,8 +293,8 @@ export interface BoughState {
   progress: number;
   /** 0..1: the PR's bud at the tip. */
   bloom: number;
-  /** The merge light: on the bough (s, 1 → 0) or on the line (arc length), or null. */
-  back: { s: number } | { sigma: number } | null;
+  /** The merge light: on the bough (s, 1 → 0) or the rising front on the line (height), or null. */
+  back: { s: number } | { y: number } | null;
   /** The crown's flash, after this merge reaches it. */
   flash: number;
   dot: Dot;
@@ -389,7 +322,7 @@ export function stateAt(b: Bough, u0: number): BoughState {
   let progress = 0;
   let asking = false;
   if (u >= PHASE.work[0]) {
-    if (b.work === "permission") {
+    if (b.asks) {
       const [w0, w1] = PHASE.work;
       if (u < ASK.from) progress = ASK.at * ease(span(u, [w0, ASK.from]));
       else if (u < ASK.to) {
@@ -404,7 +337,7 @@ export function stateAt(b: Bough, u0: number): BoughState {
       ? null
       : k < BACK_SPLIT
         ? { s: 1 - ease(k / BACK_SPLIT) }
-        : { sigma: b.sigma + (1 - b.sigma) * glide((k - BACK_SPLIT) / (1 - BACK_SPLIT)) };
+        : { y: b.fork[1] + (CROWN[1] - b.fork[1]) * ease((k - BACK_SPLIT) / (1 - BACK_SPLIT)) };
   const dot: Dot =
     stage === "travel"
       ? "triage"
@@ -413,30 +346,26 @@ export function stateAt(b: Bough, u0: number): BoughState {
         : stage === "work"
           ? asking
             ? "permission"
-            : b.work === "delegating"
-              ? "delegating"
-              : "running"
+            : "running"
           : stage === "pr"
             ? "open"
-            : stage === "merged" || stage === "back"
-              ? "merged"
-              : "todo";
+            : "merged";
   const grow = stage === "rest" || stage === "travel" ? 0 : ease(span(u, PHASE.sprout));
-  const r0 = rowSigma(b.row);
+  const y0 = rowPoint(b.row)[1];
   return {
     stage,
-    bead: stage === "travel" ? r0 + (b.sigma - r0) * glide(span(u, PHASE.travel)) : -1,
+    bead: stage === "travel" ? y0 + (b.fork[1] - y0) * ease(span(u, PHASE.travel)) : -99,
     grow,
     lit: stage === "back" ? 1 - ease(clamp01(k / (BACK_SPLIT * 1.6))) : grow,
     progress: stage === "rest" ? 0 : progress,
     bloom:
       stage === "pr" || stage === "merged"
-        ? ease(span(u, [PHASE.pr[0], PHASE.pr[0] + 0.7]))
+        ? ease(span(u, [PHASE.pr[0], PHASE.pr[0] + 2]))
         : stage === "back"
           ? 1 - ease(clamp01(k / BACK_SPLIT))
           : 0,
     back,
-    flash: u >= PHASE.back[1] ? Math.exp(-(u - PHASE.back[1]) * 1.2) : 0,
+    flash: u >= PHASE.back[1] ? crownFlash(u - PHASE.back[1]) : 0,
     dot,
     asking,
   };
@@ -444,26 +373,22 @@ export function stateAt(b: Bough, u0: number): BoughState {
 
 /** Where the merge light is, in the world. */
 export function backPoint(b: Bough, back: NonNullable<BoughState["back"]>): V3 {
-  return "s" in back ? boughAt(b, back.s) : lineAt(back.sigma);
+  return "s" in back ? boughAt(b, back.s) : b.fork;
 }
 
 export const DOT_COLOR: Record<Dot, string> = {
-  todo: "#6e7681",
-  triage: COLOR.triage,
-  worktree: COLOR.worktree,
-  running: COLOR.running,
-  delegating: COLOR.delegating,
-  permission: COLOR.permission,
+  triage: COLOR.open,
+  worktree: COLOR.open,
+  running: COLOR.agent,
+  permission: COLOR.ask,
   open: COLOR.open,
-  merged: COLOR.merged,
+  merged: COLOR.accent,
 };
 
 export const DOT_WORD: Record<Dot, string> = {
-  todo: "todo",
   triage: "triage",
   worktree: "worktree",
   running: "running",
-  delegating: "delegating",
   permission: "needs you",
   open: "in review",
   merged: "merged",
@@ -508,9 +433,10 @@ export function heroPose(wide: boolean): Pose {
 /** The camera sees bough b side-on, growing to the left of the screen, turned by `turn` toward the reader. */
 const sideOn = (b: Limb, turn: number) => b.phi + Math.PI - deg(turn);
 
-export function keys(wide: boolean, heroWide = wide): Key[] {
+export function keys(wide: boolean, heroWide = wide, aspect = 1.6): Key[] {
   const F = FEATURED;
-  const kx = wide ? -0.6 : 0;
+  // The pane takes the right ~48% of the width; the tree is centred in what is left.
+  const kx = wide ? -Math.min(0.95, Math.max(0.5, 0.48 * aspect)) : 0;
   const ky = 0.12;
   const far = wide ? 1 : 1.35;
   const list: Key[] = [
@@ -654,17 +580,17 @@ export function poseAt(ks: Key[], s: number, t: number, still: boolean): Pose {
  */
 const U_MAP: [number, number][] = [
   [0.4, 0.0],
-  [1.0, 1.0],
-  [1.4, 1.6],
-  [2.15, 3.2],
-  [2.55, 3.9],
-  [3.3, 5.8],
-  [3.75, 8.2],
-  [4.45, 11.4],
-  [4.85, 13.0],
-  [5.6, 15.4],
-  [6.0, 17.4],
-  [6.7, 18.4],
+  [1.0, 0.8],
+  [1.4, 3.5],
+  [2.15, 11.5],
+  [2.55, 13.5],
+  [3.3, 19],
+  [3.75, 23],
+  [4.45, 27.5],
+  [4.85, 31],
+  [5.6, 36],
+  [6.0, 39.5],
+  [6.7, 41],
 ];
 export function featuredAt(s: number, t: number): { u: number; alpha: number } {
   if (s < 0.3) return { u: t + FEATURED.offset, alpha: 1 - clamp01(s / 0.3) };

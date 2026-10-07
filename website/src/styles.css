@@ -156,17 +156,6 @@ html {
   border-color: rgba(255, 255, 255, 0.16);
 }
 
-/* FAQ answer links: underlined quietly, brightened on hover. */
-.faq-link {
-  color: var(--color-fg);
-  text-decoration: underline;
-  text-decoration-color: var(--color-line-2);
-  text-underline-offset: 3px;
-}
-.faq-link:hover {
-  text-decoration-color: var(--color-fg);
-}
-
 /* The display face: Newsreader at its display optical size, one weight. */
 .font-display {
   font-family: var(--font-display);
@@ -233,100 +222,57 @@ html {
   }
 }
 
-/* Bough labels in the hero: the app's own words, set at the tip. */
+/* Bough labels in the hero: one plain word per lit ticket, set beside its light. */
 .tree-label {
   position: absolute;
   left: 0;
   top: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
   white-space: nowrap;
   font-family: var(--font-mono);
   font-variant-ligatures: none;
-  opacity: 0;
-  will-change: transform, opacity;
-}
-.tree-label[data-side="l"] {
-  align-items: flex-end;
-  text-align: right;
-}
-.tree-label-head {
-  display: flex;
-  gap: 6px;
   font-size: 11px;
   letter-spacing: 0.02em;
+  opacity: 0;
+  transition: opacity 0.9s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform, opacity;
+  text-shadow:
+    0 0 6px #060708,
+    0 0 2px #060708;
 }
-.tree-label-id {
-  color: rgba(238, 241, 239, 0.92);
-}
-.tree-label-sub {
-  font-size: 10.5px;
-  color: rgba(238, 241, 239, 0.48);
+.tree-label[data-side="l"] {
+  text-align: right;
 }
 
-/* The roots' ledger: the tickets coming in, hung off the taproot. */
-.ledger {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 0;
-  height: 0;
-  opacity: 0;
+/* ---------------------------------------------------------------- *
+ * The type scale: one display face for headlines, one sans for text,
+ * one mono for labels, five steps. Nothing else sets a size.
+ * ---------------------------------------------------------------- */
+.t-title {
+  font-size: clamp(1.8rem, 1.2rem + 1.5vw, 2.7rem);
+  line-height: 1.08;
+  letter-spacing: -0.018em;
+  text-wrap: balance;
+  color: var(--color-fg);
+}
+.t-lede {
+  font-size: 17px;
+  line-height: 1.6;
+  color: #b9bcc2;
+  text-wrap: pretty;
+}
+.t-body {
+  font-size: 15px;
+  line-height: 1.62;
+  color: #b4b7bd;
+  text-wrap: pretty;
+}
+.t-label {
   font-family: var(--font-mono);
   font-variant-ligatures: none;
-  will-change: transform, opacity;
-}
-.ledger-head {
-  position: absolute;
-  right: 0;
-  bottom: 14px;
-  white-space: nowrap;
-  font-size: 10.5px;
-  letter-spacing: 0.16em;
+  font-size: 11px;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: rgba(238, 241, 239, 0.4);
-}
-.ledger-row {
-  position: absolute;
-  right: 0;
-  top: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-top: -6px;
-  white-space: nowrap;
-  font-size: 11.5px;
-  color: rgba(238, 241, 239, 0.4);
-  transition: color 0.4s ease;
-}
-.ledger-row.is-live {
-  color: rgba(238, 241, 239, 0.7);
-}
-.ledger-row.is-featured {
-  color: rgba(238, 241, 239, 0.98);
-}
-.ledger-title {
-  max-width: 26ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.ledger-id {
-  color: rgba(238, 241, 239, 0.85);
-}
-.ledger-word {
-  width: 9ch;
-  font-size: 10.5px;
-}
-.ledger-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  align-self: center;
-  transition: background 0.3s ease;
-}
-.ledger-row.is-featured .ledger-dot {
-  box-shadow: 0 0 10px currentColor;
+  color: var(--color-muted-2);
 }
 
 /* ---------------------------------------------------------------- *
@@ -346,19 +292,9 @@ html {
 }
 .hero-sub {
   margin-top: 1.75rem;
-  max-width: 31rem;
-  font-size: 16.5px;
-  line-height: 1.6;
-  color: #b9bcc2;
-  text-wrap: pretty;
+  max-width: 29rem;
 }
-.hero-meta {
-  margin-top: 1.4rem;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  letter-spacing: 0.02em;
-  color: #7c7f86;
-}
+/* Set once: a word and a thin line, nothing that loops. */
 .hero-cue {
   position: absolute;
   left: 50%;
@@ -367,37 +303,16 @@ html {
   align-items: center;
   gap: 12px;
   transform: translateX(-50%);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
-  color: #8c9096;
+  color: var(--color-muted-2);
   transition: color 0.2s ease;
 }
 .hero-cue:hover {
   color: var(--color-fg);
 }
 .hero-cue-line {
-  position: relative;
-  width: 1px;
-  height: 28px;
-  overflow: hidden;
-  background: rgba(238, 241, 239, 0.14);
-}
-.hero-cue-line::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(to bottom, transparent, var(--color-accent), transparent);
-  animation: cue 2.6s cubic-bezier(0.6, 0, 0.3, 1) infinite;
-}
-@keyframes cue {
-  from {
-    transform: translateY(-100%);
-  }
-  to {
-    transform: translateY(100%);
-  }
+  width: 28px;
+  height: 1px;
+  background: rgba(238, 241, 239, 0.22);
 }
 @media (min-width: 1000px) {
   .hero-cue {
@@ -405,15 +320,12 @@ html {
     transform: none;
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  .hero-cue-line::after {
-    animation: none;
-  }
-}
 
 /* ---------------------------------------------------------------- *
- * The stations, pinned: a caption under the tree, the capture as a
- * glass pane in the right half, the rail of stages above the caption.
+ * The stations, pinned: the rail of stages and a caption on the left
+ * edge, the capture as a solid panel on the right, a hairline leader
+ * from the light in the tree to the panel. Once a station has settled
+ * everything on it is at full strength.
  * ---------------------------------------------------------------- */
 .seq-rail {
   position: absolute;
@@ -421,28 +333,27 @@ html {
   top: 6.25rem;
   display: flex;
   align-items: center;
-  gap: 0;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
   opacity: var(--rail-o, 0);
-  color: rgba(238, 241, 239, 0.3);
 }
 .seq-rail span {
   display: flex;
   align-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(238, 241, 239, 0.34);
   transition: color 0.35s ease;
 }
 .seq-rail span + span::before {
   content: "";
-  width: 22px;
+  width: 18px;
   height: 1px;
   margin: 0 10px;
   background: rgba(238, 241, 239, 0.16);
 }
 .seq-rail span.is-past {
-  color: rgba(238, 241, 239, 0.52);
+  color: rgba(238, 241, 239, 0.58);
 }
 .seq-rail span.is-on {
   color: var(--color-fg);
@@ -450,59 +361,42 @@ html {
 .seq-caption {
   position: absolute;
   left: max(3.5rem, calc((100vw - 1360px) / 2 + 3.5rem));
-  bottom: 8svh;
+  bottom: 9svh;
   width: min(25rem, 30vw);
   opacity: 0;
   will-change: transform, opacity;
 }
-.seq-caption h2 {
-  font-size: clamp(1.9rem, 1rem + 1.5vw, 2.6rem);
-  line-height: 1.04;
-  letter-spacing: -0.018em;
-  text-wrap: balance;
-}
 .seq-caption p {
   margin-top: 0.9rem;
-  font-size: 15px;
-  line-height: 1.6;
-  color: #b4b7bd;
-  text-wrap: pretty;
-}
-.seq-caption code,
-.seq-card-name code {
-  display: inline-block;
-  margin-top: 1rem;
-  font-family: var(--font-mono);
-  font-variant-ligatures: none;
-  font-size: 11.5px;
-  color: #8c9096;
 }
 .seq-pane {
-  --pw: min(56vw, 60rem, calc((100svh - 9rem) * 1.6));
+  --pw: min(50vw, 56rem, calc((100svh - 15rem) * var(--ar, 1.5)));
   position: absolute;
   right: max(3.5rem, calc((100vw - 1360px) / 2 + 3.5rem));
   top: 50%;
   width: var(--pw);
-  padding: 9px;
-  border-radius: 18px;
+  margin: 0;
   opacity: 0;
-  transform-origin: 0% 50%;
-  background: linear-gradient(160deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.015) 40%);
-  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 12px;
+  background: #0a0b0d;
+  border: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 40px 120px -30px rgba(0, 0, 0, 0.9),
-    0 0 0 1px rgba(0, 0, 0, 0.4);
-  -webkit-backdrop-filter: blur(18px) saturate(1.2);
-  backdrop-filter: blur(18px) saturate(1.2);
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 30px 80px -24px rgba(0, 0, 0, 0.85);
   will-change: transform, opacity;
 }
-.seq-pane img,
-.seq-card img {
-  display: block;
+/* The capture, cut to its crop: the image is laid out at the full window's size inside a window of the crop's. */
+.crop {
+  position: relative;
   width: 100%;
+  overflow: hidden;
+  border-radius: 11px;
+}
+.crop img {
+  position: absolute;
+  display: block;
+  max-width: none;
   height: auto;
-  border-radius: 10px;
 }
 
 /* ---------------------------------------------------------------- *
@@ -513,52 +407,30 @@ html {
   position: relative;
   margin: 0 auto;
   max-width: 44rem;
-  padding: 0 1rem 40svh;
+  padding: 0 1rem 32svh;
 }
 .seq-card {
-  margin-top: 46svh;
-  padding: 1.4rem 1.1rem 1.1rem;
-  border-radius: 18px;
-  background: rgba(10, 11, 13, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  -webkit-backdrop-filter: blur(16px);
-  backdrop-filter: blur(16px);
+  margin-top: 26svh;
+  padding: 1.3rem 1.1rem 1.1rem;
+  border-radius: 14px;
+  background: rgba(8, 9, 11, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.09);
 }
 .seq-card:first-child {
   margin-top: 6svh;
 }
 .seq-card-name {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.25rem 1rem;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--color-fg);
-}
-.seq-card-name code {
-  margin-top: 0;
-  letter-spacing: 0;
-  text-transform: none;
-  font-size: 11px;
+  color: var(--color-muted-2);
 }
 .seq-card h2 {
-  margin-top: 1rem;
-  font-size: 1.85rem;
-  line-height: 1.06;
-  letter-spacing: -0.015em;
-  text-wrap: balance;
+  margin-top: 0.8rem;
 }
 .seq-card-body {
   margin: 0.7rem 0 1.2rem;
-  font-size: 15px;
-  line-height: 1.6;
-  color: #b4b7bd;
-  text-wrap: pretty;
+}
+.seq-card .crop {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
 }
 @media (prefers-reduced-motion: reduce) {
   .seq-card {
@@ -569,33 +441,33 @@ html {
   }
 }
 
-/* The DOM on the scene keeps a dark halo, so a bough behind it never cuts a glyph. */
-.tree-label,
-.ledger {
-  text-shadow:
-    0 0 6px #060708,
-    0 0 2px #060708;
-}
-
 /* Pinned: the caption sits in its own dark pocket under the tree. */
-.pin .stage-shade {
+.stage-shade {
   background:
-    radial-gradient(ellipse 42% 40% at 14% 86%, rgba(6, 7, 8, 0.9), rgba(6, 7, 8, 0.55) 55%, transparent 80%),
-    linear-gradient(90deg, rgba(6, 7, 8, 0.72) 0%, rgba(6, 7, 8, 0.35) 30%, transparent 52%),
+    linear-gradient(90deg, rgba(6, 7, 8, 0.7) 0%, rgba(6, 7, 8, 0.3) 30%, transparent 52%),
     linear-gradient(0deg, rgba(6, 7, 8, 0.85) 0%, transparent 22%);
 }
+.pin .stage-shade {
+  background:
+    radial-gradient(ellipse 40% 36% at 14% 86%, rgba(6, 7, 8, 0.92), rgba(6, 7, 8, 0.5) 60%, transparent 85%),
+    linear-gradient(0deg, rgba(6, 7, 8, 0.8) 0%, transparent 20%);
+}
 
-/* QK-138's rendered prompt: a sheet laid over the Tickets capture. */
+@media (max-width: 999px) {
+  .stage-shade {
+    background:
+      linear-gradient(0deg, rgba(6, 7, 8, 0.95) 0%, rgba(6, 7, 8, 0.82) 45%, transparent 66%),
+      linear-gradient(180deg, rgba(6, 7, 8, 0.5) 0%, transparent 18%);
+  }
+}
+
+/* The opening prompt: a sheet laid over the Tickets capture. */
 .seq-prompt,
 .seq-prompt-flow {
-  border-radius: 12px;
-  background: rgba(8, 9, 11, 0.86);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 30px 80px -20px rgba(0, 0, 0, 0.9);
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
+  border-radius: 10px;
+  background: #08090b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 24px 60px -18px rgba(0, 0, 0, 0.9);
   font-family: var(--font-mono);
   font-variant-ligatures: none;
 }
@@ -603,7 +475,7 @@ html {
   position: absolute;
   right: -3%;
   bottom: -12%;
-  width: 46%;
+  width: 50%;
 }
 .seq-prompt-flow {
   margin-bottom: 1.1rem;
@@ -612,11 +484,11 @@ html {
   display: flex;
   justify-content: space-between;
   gap: 1rem;
-  padding: 0.6rem 0.85rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  padding: 0.55rem 0.85rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 10.5px;
   letter-spacing: 0.04em;
-  color: #8c9096;
+  color: #9a9ea5;
 }
 .seq-prompt-head span:last-child {
   color: var(--color-accent);
@@ -624,18 +496,19 @@ html {
 .seq-prompt pre,
 .seq-prompt-flow pre {
   margin: 0;
-  padding: 0.75rem 0.85rem 0.85rem;
+  padding: 0.7rem 0.85rem 0.8rem;
   overflow: hidden;
-  white-space: pre-wrap;
-  font-size: clamp(9.5px, 0.72vw, 11px);
+  white-space: pre;
+  font-size: clamp(9px, 0.7vw, 10.5px);
   line-height: 1.55;
-  color: #c9ccd1;
+  color: #cfd2d7;
 }
 .seq-prompt-flow pre {
   font-size: 10.5px;
+  white-space: pre-wrap;
 }
 .pl-dim {
-  color: #6f747b;
+  color: #7b8087;
 }
 .pl-head {
   color: #8fb8f8;
@@ -651,6 +524,160 @@ html {
   }
   .hero-sub {
     margin-top: 1.1rem;
-    font-size: 15px;
+    font-size: 15.5px;
   }
+}
+
+/* ---------------------------------------------------------------- *
+ * The sections after the scroll share one grammar: a label and a
+ * headline in the left third, hairline-ruled rows in the right two.
+ * ---------------------------------------------------------------- */
+.sec {
+  border-top: 1px solid var(--color-hairline);
+}
+.sec-in > div:first-child {
+  align-self: start;
+}
+ (min-width: 1024px) {
+  .sec-in > div:first-child {
+    position: sticky;
+    top: 7rem;
+  }
+}
+.sec-in {
+  display: grid;
+  gap: 2.5rem 4rem;
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 6rem 1.5rem;
+}
+@media (min-width: 640px) {
+  .sec-in {
+    padding-inline: 2.5rem;
+  }
+}
+@media (min-width: 1024px) {
+  .sec-in {
+    grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+    padding: 7rem 3.5rem;
+  }
+}
+.rows > div {
+  display: grid;
+  gap: 0.5rem 3rem;
+  padding: 1.35rem 0;
+  border-top: 1px solid var(--color-hairline);
+}
+.rows > div:last-child {
+  border-bottom: 1px solid var(--color-hairline);
+}
+@media (min-width: 720px) {
+  .rows > div {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  }
+}
+.rows dt,
+.rows h3 {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--color-fg);
+}
+.rows dd,
+.rows p {
+  margin: 0;
+}
+
+/* Quiet, designed links: a hairline underline that firms up on hover. */
+.faq-link {
+  color: var(--color-fg);
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 255, 255, 0.24);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  transition: text-decoration-color 0.15s ease;
+}
+.faq-link:hover {
+  text-decoration-color: var(--color-fg);
+}
+
+/* The closing call. */
+.closing-in {
+  display: flex;
+  flex-direction: column;
+  gap: 2.5rem;
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 7rem 1.5rem;
+}
+@media (min-width: 640px) {
+  .closing-in {
+    padding-inline: 2.5rem;
+  }
+}
+@media (min-width: 1024px) {
+  .closing-in {
+    flex-direction: row;
+    align-items: flex-end;
+    justify-content: space-between;
+    padding: 8rem 3.5rem;
+  }
+}
+.closing-title {
+  font-size: clamp(2.4rem, 1.5rem + 3vw, 4rem);
+  line-height: 1.02;
+  letter-spacing: -0.02em;
+  color: var(--color-fg);
+}
+
+/* The footer: one rule above it, one grid, the last line in the same type. */
+.foot {
+  border-top: 1px solid var(--color-hairline);
+}
+.foot-in {
+  display: grid;
+  gap: 2.5rem 4rem;
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 3.5rem 1.5rem 3rem;
+}
+@media (min-width: 640px) {
+  .foot-in {
+    padding-inline: 2.5rem;
+  }
+}
+@media (min-width: 1024px) {
+  .foot-in {
+    grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+    padding-inline: 3.5rem;
+  }
+}
+.foot-links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2rem;
+}
+.foot-links ul {
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.65rem;
+  font-size: 13.5px;
+}
+.foot-links a {
+  color: var(--color-muted);
+  transition: color 0.15s ease;
+}
+.foot-links a:hover {
+  color: var(--color-fg);
+}
+.foot-last {
+  grid-column: 1 / -1;
+  margin: 1.5rem 0 0;
+}
+
+/* Scrollbars that belong to the page. */
+html {
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
 }

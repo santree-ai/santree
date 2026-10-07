@@ -66,10 +66,15 @@ jobs:
           test -f dist/client/index.html
           test -f dist/client/docs/index.html
           grep -q "The ticket is the prompt" dist/client/index.html
-          # The scroll's stations, their captures and QK-138's rendered prompt must be prerendered
-          grep -q "screens/trees.webp" dist/client/index.html
+          # The scroll's stations, their captures and the ticket's rendered prompt must be prerendered
+          grep -q "screens/queue.webp" dist/client/index.html
           grep -q "Review comes back as the next prompt" dist/client/index.html
-          grep -q "Linear Issue: QK-138" dist/client/index.html
+          grep -q "Migrate quack events to the pond_v2 schema" dist/client/index.html
+          # The landing names no tracker, code host or agent: the copy must stay true as support changes.
+          # The one place that lists them is the docs page.
+          if grep -qaiE "\b(linear|jira|claude|codex)\b" dist/client/index.html; then
+            echo "the landing names a provider"; exit 1
+          fi
           # The sections after the scroll
           grep -q "All branches merge eventually" dist/client/index.html
           grep -q "never stores or proxies" dist/client/index.html
@@ -77,6 +82,7 @@ jobs:
           # The docs page: section rail + a section body must be in the static HTML
           grep -q "Connect your tools" dist/client/docs/index.html
           grep -q "Keyboard shortcuts" dist/client/docs/index.html
+          grep -q "id=\"supported\"" dist/client/docs/index.html
 
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'

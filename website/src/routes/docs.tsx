@@ -15,7 +15,7 @@ export const Route = createFileRoute("/docs")({
       {
         name: "description",
         content:
-          "How to install santree, connect Linear and GitHub, and run Codex and Claude Code across your backlog in parallel git worktrees.",
+          "How to install santree, connect your tracker and code host, and run coding agents across your backlog in parallel git worktrees.",
       },
     ],
   }),
@@ -23,6 +23,7 @@ export const Route = createFileRoute("/docs")({
 
 const SECTIONS = [
   { id: "getting-started", label: "Getting started" },
+  { id: "supported", label: "Supported" },
   { id: "connect", label: "Connect your tools" },
   { id: "sidebar", label: "The sidebar" },
   { id: "tickets", label: "Tickets" },
@@ -211,6 +212,25 @@ function DocsPage() {
               Nothing is required up front: without a connection a view shows its real, empty state.
               There is no sample data anywhere in santree.
             </p>
+          </Section>
+
+          <Section id="supported" title="Supported">
+            <p>
+              The current list. Everything else on this site speaks of trackers, code hosts and
+              agents in general, so this is the one place that names them.
+            </p>
+            <ul className="flex list-disc flex-col gap-2 pl-5 marker:text-muted-4">
+              <li>
+                <B>Ticket trackers:</B> Linear and Jira Cloud, chosen per project.
+              </li>
+              <li>
+                <B>Code hosts:</B> GitHub, through the <Code>gh</Code> CLI or a personal access
+                token.
+              </li>
+              <li>
+                <B>Agents:</B> Claude Code and Codex, the real CLIs, each picked per workflow.
+              </li>
+            </ul>
           </Section>
 
           <Section id="connect" title="Connect your tools">
