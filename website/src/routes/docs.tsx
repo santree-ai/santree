@@ -205,7 +205,8 @@ function DocsPage() {
                 panes and the checks.
               </li>
               <li>
-                A <B>Linear</B> workspace. Optional; it powers Tickets and Triage.
+                A <B>Linear</B> workspace or a <B>Jira Cloud</B> site. Optional; it powers Tickets
+                and Triage, and each project picks which one it reads.
               </li>
             </ul>
             <p>
