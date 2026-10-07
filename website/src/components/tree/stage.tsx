@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { DownloadButton } from "~/components/download-button";
 import { GitHubLogo } from "~/components/icons";
 import type { Engine } from "./engine";
+import { AGENT_LAYER_SHIPPED, LAYER } from "./agent-layer";
 import { swayP } from "./grow";
 import {
   ALL,
@@ -432,6 +433,7 @@ export function TreeSequence() {
               >
                 <Capture screen={st.screen} crop={st.crop} alt={st.alt} />
                 {st.id === "run" && <PromptCard className="seq-prompt" />}
+                {st.id === "steer" && AGENT_LAYER_SHIPPED && <LayerCard className="seq-layer" />}
               </figure>
             </div>
           ))}
@@ -455,6 +457,7 @@ export function TreeSequence() {
                 <h2 className="font-display t-title">{st.title}</h2>
                 <p className="seq-card-body t-body">{st.body}</p>
                 {st.id === "run" && <PromptCard className="seq-prompt-flow" />}
+                {st.id === "steer" && AGENT_LAYER_SHIPPED && <LayerCard className="seq-layer-flow" />}
                 <Capture screen={st.screen} crop={st.list} alt={st.alt} />
               </li>
             ))}
@@ -510,6 +513,45 @@ function PromptCard({ className }: { className?: string }) {
           </span>
         ))}
       </pre>
+    </div>
+  );
+}
+
+/** What santree adds to a session: a redraw in the app's colors (agent-layer.ts says what is real). */
+function LayerCard({ className }: { className?: string }) {
+  const dot = { done: "#3fb950", doing: "#d29922", todo: "#6e7681" } as const;
+  return (
+    <div className={`layer ${className ?? ""}`}>
+      <p className="seq-prompt-head">
+        <span>{LAYER.head}</span>
+      </p>
+      <div className="layer-sec">
+        <p className="layer-label">{LAYER.progress.label}</p>
+        <ul>
+          {LAYER.progress.items.map((it) => (
+            <li key={it.t} data-s={it.s}>
+              <i style={{ background: dot[it.s] }} aria-hidden />
+              {it.t}
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div className="layer-sec">
+        <p className="layer-label">{LAYER.question.label}</p>
+        <p className="layer-q">{LAYER.question.text}</p>
+        <div className="layer-btns">
+          <span className="is-primary">{LAYER.question.yes}</span>
+          <span>{LAYER.question.no}</span>
+        </div>
+      </div>
+      <div className="layer-sec">
+        <p className="layer-label">{LAYER.plan.label}</p>
+        <ol>
+          {LAYER.plan.steps.map((t) => (
+            <li key={t}>{t}</li>
+          ))}
+        </ol>
+      </div>
     </div>
   );
 }

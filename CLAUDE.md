@@ -665,3 +665,16 @@ version.
   mounted with `display:none`, never `cond && <C/>` — remount re-fires them.
 - **A11y baseline:** new interactive elements need keyboard focus + an accessible
   name; never `outline:none` without a `:focus-visible` ring.
+
+## Website: claims ahead of the code
+
+The landing's Steer station (`website/src/components/tree/agent-layer.ts`)
+presents three things as shipped: a live progress checklist, questions as
+native popups, and plans rendered readably, all because santree starts the
+agent and can add what an agent is never asked for. **As of 2026-10-07 none of
+them exists in the app** (checked on every branch; the card on the page is a
+redraw in the app's palette, not a capture). It is marketing ahead of code, by
+the operator's decision. Before a release, verify each claim against the app,
+or revert the page by setting `AGENT_LAYER_SHIPPED = false` in that one file.
+What the code does back is the session-state dot ("needs you"), from the hooks
+santree layers onto every agent launch (`src-tauri/src/hooks.rs`).

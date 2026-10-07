@@ -23,6 +23,8 @@
  * - AI review drafts stay local: src-tauri/src/review_ai.rs, hooks.rs.
  */
 
+import { AGENT_LAYER_SHIPPED, STEER_BODY_LAYER, STEER_BODY_PLAIN } from "./agent-layer";
+
 export type ScreenId = "queue" | "tickets" | "triage" | "reviews";
 
 /** The part of a capture a station shows, as fractions of its width and height. */
@@ -76,7 +78,7 @@ export const STATIONS: Station[] = [
     id: "steer",
     name: "Steer",
     title: "You type only when it asks.",
-    body: "Each agent runs in a real terminal you can type into. santree starts it, so it hears what the agent is doing without being told: the dot beside each tree says which agent is working and which one needs you.",
+    body: AGENT_LAYER_SHIPPED ? STEER_BODY_LAYER : STEER_BODY_PLAIN,
     screen: "queue",
     crop: { x: 0, y: 0.43, w: 0.78, h: 0.4 },
     list: { x: 0, y: 0.42, w: 0.55, h: 0.38 },

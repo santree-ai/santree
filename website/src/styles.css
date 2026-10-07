@@ -463,7 +463,8 @@ html {
 
 /* The opening prompt: a sheet laid over the Tickets capture. */
 .seq-prompt,
-.seq-prompt-flow {
+.seq-prompt-flow,
+.layer {
   border-radius: 10px;
   background: #08090b;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -506,6 +507,97 @@ html {
 .seq-prompt-flow pre {
   font-size: 10.5px;
   white-space: pre-wrap;
+}
+.seq-layer {
+  position: absolute;
+  right: -3%;
+  bottom: -26%;
+  width: 36%;
+  font-family: var(--font-sans);
+}
+.seq-layer-flow {
+  margin-bottom: 1.1rem;
+}
+.layer {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: #cfd2d7;
+}
+.layer .seq-prompt-head {
+  font-family: var(--font-mono);
+}
+.layer-sec {
+  padding: 0.6rem 0.85rem;
+}
+.layer-sec + .layer-sec {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+.layer-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6e7681;
+  margin-bottom: 0.4rem;
+}
+.layer ul,
+.layer ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.3rem;
+}
+.layer ul li {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+.layer ul li[data-s="done"] {
+  color: #7b8087;
+  text-decoration: line-through;
+}
+.layer ul li[data-s="todo"] {
+  color: #9a9ea5;
+}
+.layer ul i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+.layer ol {
+  counter-reset: s;
+}
+.layer ol li {
+  counter-increment: s;
+  display: flex;
+  gap: 0.55rem;
+}
+.layer ol li::before {
+  content: counter(s);
+  font-family: var(--font-mono);
+  color: #6e7681;
+}
+.layer-q {
+  margin: 0 0 0.5rem;
+  color: #f2f2f4;
+}
+.layer-btns {
+  display: flex;
+  gap: 0.4rem;
+}
+.layer-btns span {
+  white-space: nowrap;
+  padding: 0.25rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #cfd2d7;
+}
+.layer-btns .is-primary {
+  background: #f2f2f4;
+  color: #08090b;
+  border-color: transparent;
 }
 .pl-dim {
   color: #7b8087;
