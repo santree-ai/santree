@@ -1,7 +1,7 @@
 /** The screenshots the site shows: real captures of the app in its screenshot
  * fixture mode (`src/dev/fixtures` in the app repo), so every pixel is the
  * real UI over an invented company. One entry per view; the hero cycles
- * through them and the feature rows each take one. */
+ * through them. */
 
 export type ScreenId = "trees" | "queue" | "tickets" | "triage" | "reviews";
 
@@ -38,7 +38,8 @@ export const SCREENS: Screen[] = [
     id: "tickets",
     label: "Tickets",
     alt: "The Tickets list grouped by project and milestone, each row marked ready or blocked, with pull request chips, cycle and estimate signals, and the selected ticket open in the right panel.",
-    caption: "Your Linear queue, grouped by project and milestone. Every row says what blocks it.",
+    caption:
+      "Your Linear or Jira queue, grouped by project and milestone. Every row says what blocks it.",
   },
   {
     id: "triage",

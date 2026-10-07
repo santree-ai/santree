@@ -1,7 +1,6 @@
 import { m, useScroll, useTransform } from "framer-motion";
 import { DownloadButton } from "~/components/download-button";
 import { HeroCanvas } from "~/components/hero/hero-canvas";
-import { StatusLine } from "~/components/hero/status-line";
 import { GitHubLogo } from "~/components/icons";
 import { ScreensShowcase } from "~/components/screens";
 import { usePrefersReducedMotion } from "~/lib/use-reduced-motion";
@@ -50,9 +49,8 @@ export function Hero() {
           <span className="text-gradient-emerald">shipped in parallel.</span>
         </h1>
         <p className="rise rise-1 mx-auto mt-7 max-w-xl text-pretty text-[17px] leading-relaxed text-[#c9cad2]">
-          santree runs Codex and Claude Code across your repo's tickets. Each agent gets an isolated
-          git worktree you can watch, steer, and merge, and one sidebar shows you every one of them.
-          Triage in, PRs out.
+          santree runs Codex and Claude Code on your repo&rsquo;s tickets, each agent in its own git
+          worktree, and one sidebar shows you which of them needs you. Triage in, PRs out.
         </p>
         <div className="rise rise-2 mt-10 flex flex-wrap items-center justify-center gap-3">
           <DownloadButton size="lg" />
@@ -61,9 +59,9 @@ export function Hero() {
             Read the source
           </a>
         </div>
-        <div className="rise rise-3 mt-7">
-          <StatusLine />
-        </div>
+        <p className="rise rise-3 mt-7 font-mono text-[11px] tracking-wide text-[#8f9099]">
+          macOS · free · MIT licensed
+        </p>
       </m.div>
 
       {/* The app, as it is: real captures of each view, one window. */}

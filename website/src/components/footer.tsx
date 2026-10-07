@@ -4,7 +4,7 @@ import { Logo } from "~/components/logo";
 export function Footer() {
   return (
     <footer className="border-t border-hairline">
-      <div className="mx-auto grid max-w-5xl gap-12 px-6 py-16 sm:grid-cols-[1fr_auto_auto] sm:gap-24">
+      <div className="mx-auto grid max-w-6xl gap-12 px-6 py-16 sm:grid-cols-[1fr_auto_auto] sm:gap-24">
         <div>
           <div className="flex items-center gap-2.5 font-medium">
             <Logo size={18} />
@@ -23,8 +23,8 @@ export function Footer() {
               </Link>
             </li>
             <li>
-              <Link to="/" hash="features" className="transition-colors hover:text-fg">
-                Features
+              <Link to="/" hash="faq" className="transition-colors hover:text-fg">
+                FAQ
               </Link>
             </li>
             <li>
@@ -67,8 +67,8 @@ export function Footer() {
         </nav>
       </div>
       <div className="border-t border-hairline">
-        <p className="mx-auto max-w-5xl px-6 py-6 font-mono text-[11px] text-muted-4">
-          © 2026 santree · made with worktrees
+        <p className="mx-auto max-w-6xl px-6 py-6 font-mono text-[11px] text-muted-4">
+          © 2026 santree
         </p>
       </div>
     </footer>

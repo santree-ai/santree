@@ -1,6 +1,6 @@
-@import "tailwindcss";
-/* Tailwind v4 scans outward from THIS file's directory — without explicit
- * @source directives the build succeeds and emits an empty utility layer. */
+@import "tailwindcss" source(none);
+/* source(none) turns off automatic detection, so the @source dirs below are
+ * the whole scan: the same tree on every machine, whatever .gitignore says. */
 @source "./routes";
 @source "./components";
 @source "./lib";
@@ -155,58 +155,6 @@ html {
 }
 
 /* ---------------------------------------------------------------- *
- * Cards
- * ---------------------------------------------------------------- */
-
-/* The one card treatment used everywhere: faint fill, hairline border, a
- * 1px light catch along the top edge. */
-.card {
-  position: relative;
-  border-radius: 1rem;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background-clip: padding-box;
-}
-.card::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 40%);
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
-}
-
-/* Pointer-tracking highlight, dialed way down — a hint, not a flashlight. */
-.spotlight::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: radial-gradient(
-    420px circle at var(--mx, 50%) var(--my, 50%),
-    rgba(45, 212, 167, 0.05),
-    transparent 70%
-  );
-  opacity: 0;
-  transition: opacity 0.4s ease;
-  pointer-events: none;
-}
-.spotlight:hover::after {
-  opacity: 1;
-}
-@media (prefers-reduced-motion: reduce) {
-  .spotlight::after {
-    display: none;
-  }
-}
-
-/* ---------------------------------------------------------------- *
  * Small pieces
  * ---------------------------------------------------------------- */
 
@@ -221,64 +169,6 @@ html {
 .hero-text h1,
 .hero-text .btn {
   text-shadow: none;
-}
-
-/* Section divider: a hairline horizon with an emerald heart. */
-.divider {
-  position: relative;
-  height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.07) 25%,
-    rgba(45, 212, 167, 0.35) 50%,
-    rgba(255, 255, 255, 0.07) 75%,
-    transparent
-  );
-}
-.divider::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: -14px;
-  width: 220px;
-  height: 28px;
-  transform: translateX(-50%);
-  background: radial-gradient(ellipse 50% 50% at 50% 50%, rgba(45, 212, 167, 0.18), transparent 70%);
-}
-
-/* (Loop stage progress lives inside each card as a top rule — see
- * LoopCard in loop.tsx. No standalone wire element.) */
-
-/* The five agents behind the parallelism claim: thin light shards on the
- * artwork's 24° axis, drifting almost imperceptibly. */
-.shard {
-  position: absolute;
-  width: 3px;
-  border-radius: 9999px;
-  transform: rotate(24deg);
-  background: linear-gradient(
-    180deg,
-    transparent,
-    rgba(45, 212, 167, var(--shard-a, 0.5)) 40%,
-    rgba(200, 246, 231, calc(var(--shard-a, 0.5) * 0.7)) 55%,
-    transparent
-  );
-  filter: blur(0.5px);
-  animation: shard-drift 9s ease-in-out infinite alternate;
-}
-@keyframes shard-drift {
-  from {
-    transform: rotate(24deg) translateY(-8px);
-  }
-  to {
-    transform: rotate(24deg) translateY(8px);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .shard {
-    animation: none;
-  }
 }
 
 /* FAQ items on native <details>: hairline separators, plus-to-x marker. */
@@ -360,27 +250,6 @@ html {
   mask-image: linear-gradient(to bottom, black 55%, transparent 88%);
 }
 
-/* Rotating status line caret. Blinks via CSS (works no-JS), solid while
- * typing, still under reduced motion. */
-.type-caret {
-  display: inline-block;
-  width: 6px;
-  height: 0.95em;
-  margin-left: 3px;
-  vertical-align: text-bottom;
-  background: var(--color-accent);
-  opacity: 0.8;
-  animation: caret-blink 1.1s steps(1) infinite;
-}
-.type-caret-solid {
-  animation: none;
-}
-@media (prefers-reduced-motion: reduce) {
-  .type-caret {
-    animation: none;
-  }
-}
-
 /* ---------------------------------------------------------------- *
  * Screens (the real captures in the hero and the feature rows)
  * ---------------------------------------------------------------- */
@@ -398,11 +267,6 @@ html {
     transform: scaleX(1);
   }
 }
-@keyframes caret-blink {
-  50% {
-    opacity: 0.1;
-  }
-}
 @media (prefers-reduced-motion: reduce) {
   .screens-advance {
     animation: none;
@@ -416,4 +280,98 @@ html {
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+}
+
+/* FAQ answer links: underlined quietly, brightened on hover. */
+.faq-link {
+  color: var(--color-fg);
+  text-decoration: underline;
+  text-decoration-color: var(--color-line-2);
+  text-underline-offset: 3px;
+}
+.faq-link:hover {
+  text-decoration-color: var(--color-fg);
+}
+
+/* ---------------------------------------------------------------- *
+ * The log (sections/log.tsx): a git graph that draws itself as it
+ * scrolls in. Each row's lanes draw top to bottom and its text comes
+ * up from a dim start, on the row's own view timeline: CSS only, so it
+ * runs before hydration. Without scroll-driven animations, or under
+ * reduced motion, the graph is simply drawn.
+ * ---------------------------------------------------------------- */
+
+.log-lane {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+}
+
+/* The "needs you" halo, the one thing on the graph that moves on its own:
+ * it is the state the sidebar asks you to act on. */
+.log-pulse {
+  opacity: 0.18;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: log-pulse 2.4s ease-in-out infinite;
+}
+@keyframes log-pulse {
+  0%,
+  100% {
+    transform: scale(0.6);
+    opacity: 0.28;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.08;
+  }
+}
+
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .log-row,
+    .log-bookend {
+      view-timeline-name: --log-row;
+    }
+    .log-lane {
+      animation: log-draw linear both;
+      animation-timeline: --log-row;
+      animation-range: entry 20% cover 45%;
+    }
+    .log-row > div,
+    .log-node {
+      animation: log-text linear both;
+      animation-timeline: --log-row;
+      animation-range: entry 40% cover 45%;
+    }
+  }
+}
+@keyframes log-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes log-text {
+  from {
+    opacity: 0.12;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .log-pulse {
+    animation: none;
+  }
+}
+
+/* Both graphs fade in at the top: the log's lanes and the bookend's
+ * branches come from somewhere above, they don't start on a cut. */
+.log,
+.log-bookend {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black 40px);
+  mask-image: linear-gradient(to bottom, transparent, black 40px);
 }

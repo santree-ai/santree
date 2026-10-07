@@ -2,59 +2,63 @@ import { DownloadButton } from "~/components/download-button";
 import { GitHubLogo } from "~/components/icons";
 import { FadeUp } from "~/components/motion/fade-up";
 
-/** Closing CTA: the open-source pitch over light rising from below the
- * horizon — the shard language from the parallel strip, closing the page
- * the way the aurora opened it.
- *
- * The action here is the same one the nav and hero offer: download. The
- * repo link is secondary because reading the source is a real thing people
- * do, not because a star is worth asking for. (This section used to lead
- * with "Star on GitHub" over a `git clone` box — correct when building
- * from source was the only way to run santree, wrong since the app ships
- * a signed DMG that updates itself.) */
+/** Closing CTA. The log's graph comes back as the bookend: three branches
+ * folding into one trunk above the line that names it. Same lane strokes and
+ * draw-in as the log (`.log-lane` in styles.css). */
+function Merge() {
+  const branch = "rgba(255, 255, 255, 0.2)";
+  return (
+    <svg
+      viewBox="0 0 120 120"
+      width={120}
+      height={120}
+      className="log-bookend mx-auto overflow-visible"
+      aria-hidden
+    >
+      {[18, 102].map((x) => (
+        <path
+          key={x}
+          className="log-lane"
+          pathLength={1}
+          d={`M${x} 0 V30 C${x} 62 60 52 60 80`}
+          fill="none"
+          stroke={branch}
+          strokeWidth={1.2}
+        />
+      ))}
+      <path
+        className="log-lane"
+        pathLength={1}
+        d="M60 0 V112"
+        fill="none"
+        stroke="rgba(45, 212, 167, 0.55)"
+        strokeWidth={1.6}
+      />
+      <circle cx={60} cy={80} r={4.5} fill="#a78bfa" />
+      <circle cx={60} cy={112} r={4.5} fill="#2dd4a7" />
+    </svg>
+  );
+}
+
 export function FinalCta() {
   return (
-    <section id="oss" className="relative scroll-mt-28 overflow-hidden py-36">
-      <div aria-hidden className="absolute inset-x-0 bottom-0 h-[26rem]">
-        {/* Floor bloom */}
-        <div
-          className="absolute inset-x-0 -bottom-40 h-[30rem]"
-          style={{
-            background:
-              "radial-gradient(ellipse 60% 55% at 50% 100%, rgba(45,212,167,0.14), rgba(31,156,125,0.05) 55%, transparent 75%)",
-          }}
-        />
-        {/* Light rising from below the horizon, on the 24° axis. */}
-        {[
-          { left: "22%", h: 200, a: 0.2, d: "-2s" },
-          { left: "38%", h: 280, a: 0.32, d: "-5s" },
-          { left: "55%", h: 340, a: 0.4, d: "0s" },
-          { left: "71%", h: 260, a: 0.3, d: "-3.5s" },
-          { left: "85%", h: 190, a: 0.2, d: "-7s" },
-        ].map((s) => (
-          <span
-            key={s.left}
-            className="shard bottom-0"
-            style={
-              {
-                left: s.left,
-                height: s.h,
-                "--shard-a": s.a,
-                animationDelay: s.d,
-              } as React.CSSProperties
-            }
-          />
-        ))}
-      </div>
-
+    <section id="download" className="relative scroll-mt-20 overflow-hidden pb-36 pt-8">
+      <div
+        aria-hidden
+        className="absolute inset-x-0 -bottom-40 h-[30rem]"
+        style={{
+          background:
+            "radial-gradient(ellipse 60% 55% at 50% 100%, rgba(45,212,167,0.13), rgba(31,156,125,0.05) 55%, transparent 75%)",
+        }}
+      />
       <div className="relative mx-auto max-w-2xl px-6 text-center">
+        <Merge />
         <FadeUp>
-          <h2 className="text-balance text-4xl font-semibold tracking-[-0.02em] sm:text-[2.75rem]">
+          <h2 className="mt-10 text-balance text-[clamp(2.25rem,1.5rem+3vw,3.25rem)] font-semibold leading-[1.05] tracking-[-0.03em]">
             All branches merge eventually.
           </h2>
-          <p className="mx-auto mt-5 max-w-lg text-pretty text-[15px] leading-relaxed text-muted">
-            santree is open source under the MIT license — every line of the app you'd be running.
-            Take it for what it is: a way to keep five agents honest.
+          <p className="mx-auto mt-5 max-w-md text-pretty text-[15px] leading-relaxed text-muted">
+            santree is free and MIT licensed. Point it at a repo and run your first ticket.
           </p>
         </FadeUp>
         <FadeUp delay={0.08}>
@@ -65,11 +69,6 @@ export function FinalCta() {
               Read the source
             </a>
           </div>
-        </FadeUp>
-        <FadeUp delay={0.14}>
-          <p className="mt-8 font-mono text-[11.5px] tracking-wide text-muted-4">
-            MIT licensed · signed &amp; notarized · updates itself
-          </p>
         </FadeUp>
       </div>
     </section>

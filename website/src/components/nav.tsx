@@ -8,7 +8,7 @@ import { Logo } from "~/components/logo";
 // from ANY page — a bare hash on /docs points at nothing and goes nowhere.
 const links = [
   { label: "How it works", hash: "loop" },
-  { label: "Features", hash: "features" },
+  { label: "FAQ", hash: "faq" },
 ];
 
 /** Slim full-width header: invisible over the hero, gaining a hairline

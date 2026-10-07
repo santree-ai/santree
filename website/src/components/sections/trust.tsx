@@ -1,88 +1,59 @@
-import { FadeUpGroup, FadeUpItem } from "~/components/motion/fade-up";
-import { SectionHeading } from "~/components/ui/section-heading";
-import { SpotlightCard } from "~/components/ui/spotlight-card";
+import { FadeUp } from "~/components/motion/fade-up";
 
-/** The local-first / security story. No cloud, no credential handling,
- * MIT in the open — the three reasons to trust a tool that runs agents
- * against your repo. */
+/** What santree touches, as a ruled list: a term, then the fact. Each line
+ * is checked against the app (COMPLIANCE.md is the source for the agent
+ * credential rules, `claude_usage.rs` the one documented read). */
 
-const CARDS = [
+const FACTS = [
   {
-    title: "Local-first",
-    body: "A desktop app, not a cloud IDE. Worktrees, terminals, and diffs live on your disk, and santree itself sends nothing anywhere.",
-    icon: (
-      <svg
-        viewBox="0 0 20 20"
-        width={22}
-        height={22}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={1.4}
-        aria-hidden
-      >
-        <path d="M3 8.5 10 3l7 5.5" strokeLinecap="round" strokeLinejoin="round" />
-        <path d="M5 8v8h10V8" strokeLinecap="round" strokeLinejoin="round" />
-        <path d="M8.5 16v-4h3v4" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    ),
+    term: "your code",
+    body: "Worktrees, terminals and diffs live on your disk. There is no santree account and no santree server.",
   },
   {
-    title: "You log in, not santree",
-    body: "The terminal runs the real, unmodified Codex or Claude Code CLI. Each provider owns its login; santree never reads, stores, or proxies agent credentials.",
-    icon: (
-      <svg
-        viewBox="0 0 20 20"
-        width={22}
-        height={22}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={1.4}
-        aria-hidden
-      >
-        <circle cx="7" cy="8" r="3.5" />
-        <path d="M10 10.5 16.5 17M14 14.5l2-2M16 16.5l2-2" strokeLinecap="round" />
-      </svg>
-    ),
+    term: "agent logins",
+    body: "santree never stores or proxies an agent's login. The one read is Claude Code's own token, sent only to api.anthropic.com to fill the usage meter.",
   },
   {
-    title: "MIT, in the open",
-    body: "Read the code that runs your agents. The compliance constraints are documented in the repo and enforced in the architecture, not a promise.",
-    icon: (
-      <svg
-        viewBox="0 0 20 20"
-        width={22}
-        height={22}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={1.4}
-        aria-hidden
-      >
-        <path d="m7 6-4 4 4 4M13 6l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    ),
+    term: "tokens",
+    body: "Linear and Jira tokens sit in the OS keychain. GitHub access is borrowed from the gh CLI you're already signed into.",
+  },
+  {
+    term: "publishing",
+    body: "An AI review's draft comments stay on your machine until you publish them. Nothing an agent writes reaches GitHub without your click.",
+  },
+  {
+    term: "network",
+    body: "The integrations you connect, your agent CLI, and an update check against GitHub releases.",
   },
 ];
 
 export function Trust() {
   return (
-    <section id="trust" className="scroll-mt-28 py-32">
-      <div className="mx-auto max-w-5xl px-6">
-        <SectionHeading
-          kicker="Local-first"
-          title="Your repo never leaves your machine."
-          sub="santree keeps that decision small."
-        />
-        <FadeUpGroup className="mt-14 grid gap-3 sm:grid-cols-3">
-          {CARDS.map((card) => (
-            <FadeUpItem key={card.title} className="h-full">
-              <SpotlightCard className="card h-full px-6 py-8">
-                <span className="text-accent/80">{card.icon}</span>
-                <h3 className="mt-4 text-[15px] font-medium">{card.title}</h3>
-                <p className="mt-2 text-[13px] leading-relaxed text-muted">{card.body}</p>
-              </SpotlightCard>
-            </FadeUpItem>
-          ))}
-        </FadeUpGroup>
+    <section id="trust" className="scroll-mt-20 border-y border-hairline bg-panel/60 py-28">
+      <div className="mx-auto grid max-w-6xl grid-cols-[minmax(0,1fr)] gap-12 px-6 lg:grid-cols-[5fr_7fr] lg:gap-20">
+        <FadeUp>
+          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-2">
+            Local-first
+          </p>
+          <h2 className="mt-4 text-balance text-[clamp(2rem,1.4rem+2.4vw,2.75rem)] font-semibold leading-[1.08] tracking-[-0.02em]">
+            Your repo never leaves your machine.
+          </h2>
+        </FadeUp>
+        <FadeUp delay={0.06}>
+          <dl>
+            {FACTS.map((f) => (
+              <div
+                key={f.term}
+                className="grid gap-1 border-t border-hairline py-5 first:border-t-0 first:pt-0 sm:grid-cols-[9rem_1fr] sm:gap-6"
+              >
+                <dt className="pt-[3px] font-mono text-[11px] uppercase tracking-[0.14em] text-muted-2">
+                  {f.term}
+                </dt>
+                <dd className="text-pretty text-[15px] leading-relaxed text-[#c9cad2]">{f.body}</dd>
+              </div>
+            ))}
+          </dl>
+        </FadeUp>
       </div>
     </section>
   );
