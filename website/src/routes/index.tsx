@@ -8,7 +8,7 @@ export const Route = createFileRoute("/")({
 
 function Landing() {
   return (
-    <main id="main">
+    <main id="main" tabIndex={-1}>
       <TreeSequence />
       <LocalFirst />
       <Questions />
