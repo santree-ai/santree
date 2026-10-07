@@ -8,6 +8,7 @@
 /* Bundled locally so the site never phones Google for fonts. */
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
+@import "@fontsource-variable/newsreader/opsz.css";
 
 /* Design tokens. Surfaces sit on a near-black page; depth comes from light
  * (aurora, blooms, grain) and hairline borders in white-alpha, not from
@@ -15,9 +16,10 @@
 @theme {
   --font-sans: "Geist Variable", system-ui, -apple-system, sans-serif;
   --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+  --font-display: "Newsreader Variable", "Iowan Old Style", Georgia, serif;
 
   /* Page + card surfaces */
-  --color-app: #07080a;
+  --color-app: #060708;
   --color-panel: #0b0c0f;
   --color-surface: #0d0e11;
   --color-skeleton: #1e1f24;
@@ -154,134 +156,6 @@ html {
   border-color: rgba(255, 255, 255, 0.16);
 }
 
-/* ---------------------------------------------------------------- *
- * Small pieces
- * ---------------------------------------------------------------- */
-
-/* Hero body copy sits on the glyph field — a soft dark halo keeps it
- * legible. The h1 is exempt: a shadow under gradient-clipped text reads
- * as a muddy emboss, and the scrim already seats it. */
-.hero-text {
-  text-shadow:
-    0 1px 2px rgba(4, 5, 6, 0.6),
-    0 6px 32px rgba(4, 5, 6, 0.55);
-}
-.hero-text h1,
-.hero-text .btn {
-  text-shadow: none;
-}
-
-/* FAQ items on native <details>: hairline separators, plus-to-x marker. */
-.faq-item {
-  border-bottom: 1px solid var(--color-hairline);
-}
-.faq-item:first-child {
-  border-top: 1px solid var(--color-hairline);
-}
-.faq-item summary {
-  list-style: none;
-}
-.faq-item summary::-webkit-details-marker {
-  display: none;
-}
-.faq-icon svg {
-  transition: transform 0.25s ease;
-}
-.faq-item[open] .faq-icon svg {
-  transform: rotate(45deg);
-}
-@media (prefers-reduced-motion: reduce) {
-  .faq-icon svg {
-    transition: none;
-  }
-}
-
-/* Hero entrance: pure CSS so the prerendered HTML paints immediately —
- * no JS, no hydration wait, no opacity-0 baked into the static page. */
-@keyframes rise {
-  from {
-    opacity: 0;
-    transform: translateY(12px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-.rise {
-  animation: rise 0.7s cubic-bezier(0.21, 0.47, 0.32, 0.98) both;
-}
-.rise-1 {
-  animation-delay: 0.1s;
-}
-.rise-2 {
-  animation-delay: 0.2s;
-}
-.rise-3 {
-  animation-delay: 0.4s;
-}
-@media (prefers-reduced-motion: reduce) {
-  .rise {
-    animation-duration: 0.001s;
-    animation-delay: 0s;
-  }
-}
-
-/* ---------------------------------------------------------------- *
- * Hero background + status line
- * ---------------------------------------------------------------- */
-
-/* The SSR-visible base light: layered emerald radials. The canvas paints on
- * top of this; with JS off (or reduced motion pre-hydration) this alone
- * carries the hero. */
-.hero-aurora {
-  position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(ellipse 58% 44% at 50% 14%, rgba(45, 212, 167, 0.17), transparent 65%),
-    radial-gradient(ellipse 80% 62% at 50% 0%, rgba(111, 227, 192, 0.08), transparent 70%),
-    radial-gradient(ellipse 40% 32% at 26% 40%, rgba(31, 156, 125, 0.09), transparent 70%),
-    radial-gradient(ellipse 40% 32% at 76% 30%, rgba(79, 212, 173, 0.07), transparent 70%);
-}
-
-/* The glyph canvas dissolves before it reaches the demo window. */
-.hero-canvas-mask {
-  -webkit-mask-image: linear-gradient(to bottom, black 55%, transparent 88%);
-  mask-image: linear-gradient(to bottom, black 55%, transparent 88%);
-}
-
-/* ---------------------------------------------------------------- *
- * Screens (the real captures in the hero and the feature rows)
- * ---------------------------------------------------------------- */
-
-/* Auto-advance progress underline on the active view pill. */
-.screens-advance {
-  transform-origin: left;
-  animation: screens-advance 6.5s linear both;
-}
-@keyframes screens-advance {
-  from {
-    transform: scaleX(0);
-  }
-  to {
-    transform: scaleX(1);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .screens-advance {
-    animation: none;
-  }
-}
-
-/* Emerald gradient text — bright throughout, no dark tail (a dark stop
- * over the near-black page reads as dirt, not depth). */
-.text-gradient-emerald {
-  background: linear-gradient(97deg, #eafff7 0%, #8beed2 34%, #46e2b6 68%, var(--color-accent) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
 /* FAQ answer links: underlined quietly, brightened on hover. */
 .faq-link {
   color: var(--color-fg);
@@ -293,85 +167,490 @@ html {
   text-decoration-color: var(--color-fg);
 }
 
+/* The display face: Newsreader at its display optical size, one weight. */
+.font-display {
+  font-family: var(--font-display);
+  font-weight: 380;
+  font-optical-sizing: auto;
+  font-feature-settings: "kern", "liga", "lnum";
+}
+
 /* ---------------------------------------------------------------- *
- * The log (sections/log.tsx): a git graph that draws itself as it
- * scrolls in. Each row's lanes draw top to bottom and its text comes
- * up from a dim start, on the row's own view timeline: CSS only, so it
- * runs before hydration. Without scroll-driven animations, or under
- * reduced motion, the graph is simply drawn.
+ * The layout switch (components/tree/stage.tsx). `html.pin` is set by
+ * the head script before first paint on wide screens with motion.
  * ---------------------------------------------------------------- */
-
-.log-lane {
-  stroke-dasharray: 1;
-  stroke-dashoffset: 0;
+:root:not(.pin) .pin-only,
+.pin .list-only {
+  display: none;
 }
 
-/* The "needs you" halo, the one thing on the graph that moves on its own:
- * it is the state the sidebar asks you to act on. */
-.log-pulse {
-  opacity: 0.18;
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: log-pulse 2.4s ease-in-out infinite;
+/* ---------------------------------------------------------------- *
+ * The stage: poster, canvas, shade, the DOM that rides on the scene
+ * ---------------------------------------------------------------- */
+.stage {
+  background: #060708;
 }
-@keyframes log-pulse {
-  0%,
-  100% {
-    transform: scale(0.6);
-    opacity: 0.28;
+.stage-canvas {
+  opacity: 0;
+  transition: opacity 1.1s ease;
+}
+.stage[data-live="webgpu"] .stage-canvas,
+.stage[data-live="webgl2"] .stage-canvas {
+  opacity: 1;
+}
+.poster {
+  transition: opacity 1.1s ease;
+}
+.stage[data-live="webgpu"] .poster,
+.stage[data-live="webgl2"] .poster {
+  opacity: 0;
+}
+/* Each width has its own poster, drawn for its own hero camera (poster.tsx). */
+@media (max-width: 999px) {
+  .poster-wide {
+    display: none;
   }
-  50% {
-    transform: scale(1.15);
-    opacity: 0.08;
+}
+@media (min-width: 1000px) {
+  .poster-narrow {
+    display: none;
   }
 }
 
-@supports (animation-timeline: view()) {
-  @media (prefers-reduced-motion: no-preference) {
-    .log-row,
-    .log-bookend {
-      view-timeline-name: --log-row;
-    }
-    .log-lane {
-      animation: log-draw linear both;
-      animation-timeline: --log-row;
-      animation-range: entry 20% cover 45%;
-    }
-    .log-row > div,
-    .log-node {
-      animation: log-text linear both;
-      animation-timeline: --log-row;
-      animation-range: entry 40% cover 45%;
-    }
+/* Seats the type: a darker pocket on the headline's side, and a floor
+ * the next section rises out of. */
+.stage-shade {
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(6, 7, 8, 0.72) 0%, rgba(6, 7, 8, 0.35) 30%, transparent 52%),
+    linear-gradient(0deg, rgba(6, 7, 8, 0.85) 0%, transparent 22%);
+}
+@media (max-width: 999px) {
+  .stage-shade {
+    background:
+      linear-gradient(0deg, rgba(6, 7, 8, 0.95) 0%, rgba(6, 7, 8, 0.82) 45%, transparent 66%),
+      linear-gradient(180deg, rgba(6, 7, 8, 0.5) 0%, transparent 18%);
   }
 }
-@keyframes log-draw {
+
+/* Bough labels in the hero: the app's own words, set at the tip. */
+.tree-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+  opacity: 0;
+  will-change: transform, opacity;
+}
+.tree-label[data-side="l"] {
+  align-items: flex-end;
+  text-align: right;
+}
+.tree-label-head {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+.tree-label-id {
+  color: rgba(238, 241, 239, 0.92);
+}
+.tree-label-sub {
+  font-size: 10.5px;
+  color: rgba(238, 241, 239, 0.48);
+}
+
+/* The roots' ledger: the tickets coming in, hung off the taproot. */
+.ledger {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+  will-change: transform, opacity;
+}
+.ledger-head {
+  position: absolute;
+  right: 0;
+  bottom: 14px;
+  white-space: nowrap;
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(238, 241, 239, 0.4);
+}
+.ledger-row {
+  position: absolute;
+  right: 0;
+  top: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: -6px;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: rgba(238, 241, 239, 0.4);
+  transition: color 0.4s ease;
+}
+.ledger-row.is-live {
+  color: rgba(238, 241, 239, 0.7);
+}
+.ledger-row.is-featured {
+  color: rgba(238, 241, 239, 0.98);
+}
+.ledger-title {
+  max-width: 26ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ledger-id {
+  color: rgba(238, 241, 239, 0.85);
+}
+.ledger-word {
+  width: 9ch;
+  font-size: 10.5px;
+}
+.ledger-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  align-self: center;
+  transition: background 0.3s ease;
+}
+.ledger-row.is-featured .ledger-dot {
+  box-shadow: 0 0 10px currentColor;
+}
+
+/* ---------------------------------------------------------------- *
+ * The hero
+ * ---------------------------------------------------------------- */
+.hero-title {
+  max-width: 14ch;
+  font-size: clamp(2.9rem, 1rem + 4.1vw, 5.1rem);
+  line-height: 0.98;
+  letter-spacing: -0.028em;
+  text-wrap: balance;
+  color: var(--color-fg);
+}
+.hero-title-2 {
+  display: block;
+  color: #868b90;
+}
+.hero-sub {
+  margin-top: 1.75rem;
+  max-width: 31rem;
+  font-size: 16.5px;
+  line-height: 1.6;
+  color: #b9bcc2;
+  text-wrap: pretty;
+}
+.hero-meta {
+  margin-top: 1.4rem;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+  color: #7c7f86;
+}
+.hero-cue {
+  position: absolute;
+  left: 50%;
+  bottom: 28px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transform: translateX(-50%);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: #8c9096;
+  transition: color 0.2s ease;
+}
+.hero-cue:hover {
+  color: var(--color-fg);
+}
+.hero-cue-line {
+  position: relative;
+  width: 1px;
+  height: 28px;
+  overflow: hidden;
+  background: rgba(238, 241, 239, 0.14);
+}
+.hero-cue-line::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent, var(--color-accent), transparent);
+  animation: cue 2.6s cubic-bezier(0.6, 0, 0.3, 1) infinite;
+}
+@keyframes cue {
   from {
-    stroke-dashoffset: 1;
+    transform: translateY(-100%);
   }
   to {
-    stroke-dashoffset: 0;
+    transform: translateY(100%);
   }
 }
-@keyframes log-text {
-  from {
-    opacity: 0.12;
-  }
-  to {
-    opacity: 1;
+@media (min-width: 1000px) {
+  .hero-cue {
+    left: max(3.5rem, calc((100vw - 1360px) / 2 + 3.5rem));
+    transform: none;
   }
 }
-
 @media (prefers-reduced-motion: reduce) {
-  .log-pulse {
+  .hero-cue-line::after {
     animation: none;
   }
 }
 
-/* Both graphs fade in at the top: the log's lanes and the bookend's
- * branches come from somewhere above, they don't start on a cut. */
-.log,
-.log-bookend {
-  -webkit-mask-image: linear-gradient(to bottom, transparent, black 40px);
-  mask-image: linear-gradient(to bottom, transparent, black 40px);
+/* ---------------------------------------------------------------- *
+ * The stations, pinned: a caption under the tree, the capture as a
+ * glass pane in the right half, the rail of stages above the caption.
+ * ---------------------------------------------------------------- */
+.seq-rail {
+  position: absolute;
+  left: max(3.5rem, calc((100vw - 1360px) / 2 + 3.5rem));
+  top: 6.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: var(--rail-o, 0);
+  color: rgba(238, 241, 239, 0.3);
+}
+.seq-rail span {
+  display: flex;
+  align-items: center;
+  transition: color 0.35s ease;
+}
+.seq-rail span + span::before {
+  content: "";
+  width: 22px;
+  height: 1px;
+  margin: 0 10px;
+  background: rgba(238, 241, 239, 0.16);
+}
+.seq-rail span.is-past {
+  color: rgba(238, 241, 239, 0.52);
+}
+.seq-rail span.is-on {
+  color: var(--color-fg);
+}
+.seq-caption {
+  position: absolute;
+  left: max(3.5rem, calc((100vw - 1360px) / 2 + 3.5rem));
+  bottom: 8svh;
+  width: min(25rem, 30vw);
+  opacity: 0;
+  will-change: transform, opacity;
+}
+.seq-caption h2 {
+  font-size: clamp(1.9rem, 1rem + 1.5vw, 2.6rem);
+  line-height: 1.04;
+  letter-spacing: -0.018em;
+  text-wrap: balance;
+}
+.seq-caption p {
+  margin-top: 0.9rem;
+  font-size: 15px;
+  line-height: 1.6;
+  color: #b4b7bd;
+  text-wrap: pretty;
+}
+.seq-caption code,
+.seq-card-name code {
+  display: inline-block;
+  margin-top: 1rem;
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+  font-size: 11.5px;
+  color: #8c9096;
+}
+.seq-pane {
+  --pw: min(56vw, 60rem, calc((100svh - 9rem) * 1.6));
+  position: absolute;
+  right: max(3.5rem, calc((100vw - 1360px) / 2 + 3.5rem));
+  top: 50%;
+  width: var(--pw);
+  padding: 9px;
+  border-radius: 18px;
+  opacity: 0;
+  transform-origin: 0% 50%;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.015) 40%);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 40px 120px -30px rgba(0, 0, 0, 0.9),
+    0 0 0 1px rgba(0, 0, 0, 0.4);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  backdrop-filter: blur(18px) saturate(1.2);
+  will-change: transform, opacity;
+}
+.seq-pane img,
+.seq-card img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 10px;
+}
+
+/* ---------------------------------------------------------------- *
+ * The stations, listed (phones, reduced motion, no GPU): cards in the
+ * flow over the tree, with room between them for it to show.
+ * ---------------------------------------------------------------- */
+.seq-list {
+  position: relative;
+  margin: 0 auto;
+  max-width: 44rem;
+  padding: 0 1rem 40svh;
+}
+.seq-card {
+  margin-top: 46svh;
+  padding: 1.4rem 1.1rem 1.1rem;
+  border-radius: 18px;
+  background: rgba(10, 11, 13, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+}
+.seq-card:first-child {
+  margin-top: 6svh;
+}
+.seq-card-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-fg);
+}
+.seq-card-name code {
+  margin-top: 0;
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 11px;
+}
+.seq-card h2 {
+  margin-top: 1rem;
+  font-size: 1.85rem;
+  line-height: 1.06;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+.seq-card-body {
+  margin: 0.7rem 0 1.2rem;
+  font-size: 15px;
+  line-height: 1.6;
+  color: #b4b7bd;
+  text-wrap: pretty;
+}
+@media (prefers-reduced-motion: reduce) {
+  .seq-card {
+    margin-top: 3rem;
+  }
+  .seq-list {
+    padding-bottom: 6rem;
+  }
+}
+
+/* The DOM on the scene keeps a dark halo, so a bough behind it never cuts a glyph. */
+.tree-label,
+.ledger {
+  text-shadow:
+    0 0 6px #060708,
+    0 0 2px #060708;
+}
+
+/* Pinned: the caption sits in its own dark pocket under the tree. */
+.pin .stage-shade {
+  background:
+    radial-gradient(ellipse 42% 40% at 14% 86%, rgba(6, 7, 8, 0.9), rgba(6, 7, 8, 0.55) 55%, transparent 80%),
+    linear-gradient(90deg, rgba(6, 7, 8, 0.72) 0%, rgba(6, 7, 8, 0.35) 30%, transparent 52%),
+    linear-gradient(0deg, rgba(6, 7, 8, 0.85) 0%, transparent 22%);
+}
+
+/* QK-138's rendered prompt: a sheet laid over the Tickets capture. */
+.seq-prompt,
+.seq-prompt-flow {
+  border-radius: 12px;
+  background: rgba(8, 9, 11, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 30px 80px -20px rgba(0, 0, 0, 0.9);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+}
+.seq-prompt {
+  position: absolute;
+  right: -3%;
+  bottom: -12%;
+  width: 46%;
+}
+.seq-prompt-flow {
+  margin-bottom: 1.1rem;
+}
+.seq-prompt-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: #8c9096;
+}
+.seq-prompt-head span:last-child {
+  color: var(--color-accent);
+}
+.seq-prompt pre,
+.seq-prompt-flow pre {
+  margin: 0;
+  padding: 0.75rem 0.85rem 0.85rem;
+  overflow: hidden;
+  white-space: pre-wrap;
+  font-size: clamp(9.5px, 0.72vw, 11px);
+  line-height: 1.55;
+  color: #c9ccd1;
+}
+.seq-prompt-flow pre {
+  font-size: 10.5px;
+}
+.pl-dim {
+  color: #6f747b;
+}
+.pl-head {
+  color: #8fb8f8;
+}
+.pl-strong {
+  color: #f2f2f4;
+}
+
+/* Phones: the tree holds the top of the screen, the type the bottom. */
+@media (max-width: 999px) {
+  .hero-title {
+    font-size: clamp(2.3rem, 1.2rem + 4.4vw, 3.4rem);
+  }
+  .hero-sub {
+    margin-top: 1.1rem;
+    font-size: 15px;
+  }
 }

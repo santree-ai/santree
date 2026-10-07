@@ -1,5 +1,4 @@
 import { createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
-import { LazyMotion, MotionConfig } from "framer-motion";
 import { Footer } from "~/components/footer";
 import { Nav } from "~/components/nav";
 
@@ -8,12 +7,16 @@ import { Nav } from "~/components/nav";
 // would arrive unstyled and repaint.
 import stylesCss from "../styles.css?url";
 
-const loadMotionFeatures = () => import("~/lib/motion-features").then((mod) => mod.default);
-
 const SITE_URL = "https://santree.toscanini.me";
-const TITLE = "santree: your backlog, shipped in parallel";
+const TITLE = "santree: the ticket is the prompt";
 const DESCRIPTION =
-  "A desktop app for running Codex and Claude Code across your repo's tickets. Each agent gets an isolated git worktree you can watch, steer, and merge, and one sidebar shows you every one of them.";
+  "A desktop app that starts Claude Code and Codex from your Linear or Jira tickets. santree writes each agent's prompt from the ticket, runs it in a worktree of its own, and turns review comments into the next prompt.";
+
+// Picks the landing's layout before first paint (components/tree/stage.tsx):
+// `pin` scrolls the camera through the tree on wide screens; without it the
+// stations are cards in the page's flow. Decided here, not after hydration,
+// so the prerendered page never reflows from one into the other.
+const LAYOUT = `try{var d=document.documentElement;if(matchMedia("(min-width: 1000px) and (min-height: 560px)").matches&&!matchMedia("(prefers-reduced-motion: reduce)").matches)d.classList.add("pin")}catch(e){}`;
 
 export const Route = createRootRoute({
   head: () => ({
@@ -22,7 +25,7 @@ export const Route = createRootRoute({
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: TITLE },
       { name: "description", content: DESCRIPTION },
-      { name: "theme-color", content: "#0a0b0e" },
+      { name: "theme-color", content: "#060708" },
       { property: "og:type", content: "website" },
       { property: "og:site_name", content: "santree" },
       { property: "og:title", content: TITLE },
@@ -41,13 +44,15 @@ export const Route = createRootRoute({
       { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
       { rel: "canonical", href: SITE_URL },
     ],
+    scripts: [{ children: LAYOUT }],
   }),
   shellComponent: RootDocument,
 });
 
 function RootDocument({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="bg-app">
+    // The layout script adds a class before hydration.
+    <html lang="en" className="bg-app" suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>
@@ -59,16 +64,9 @@ function RootDocument({ children }: { children: React.ReactNode }) {
           Skip to content
         </a>
         <div className="grain" aria-hidden />
-        {/* reducedMotion="user" neutralizes transform animations globally under
-            OS reduced-motion; LazyMotion strict keeps the full runtime in an
-            async chunk and throws if a `motion.*` (not `m.*`) import sneaks in. */}
-        <MotionConfig reducedMotion="user">
-          <LazyMotion features={loadMotionFeatures} strict>
-            <Nav />
-            {children}
-            <Footer />
-          </LazyMotion>
-        </MotionConfig>
+        <Nav />
+        {children}
+        <Footer />
         <Scripts />
       </body>
     </html>

@@ -65,13 +65,15 @@ jobs:
         run: |
           test -f dist/client/index.html
           test -f dist/client/docs/index.html
-          grep -q "shipped in parallel" dist/client/index.html
-          # The hero's screenshot showcase must be prerendered
+          grep -q "The ticket is the prompt" dist/client/index.html
+          # The scroll's stations, their captures and QK-138's rendered prompt must be prerendered
           grep -q "screens/trees.webp" dist/client/index.html
-          # Lazy below-fold sections must still land in the static HTML
+          grep -q "Review comes back as the next prompt" dist/client/index.html
+          grep -q "Linear Issue: QK-138" dist/client/index.html
+          # The sections after the scroll
           grep -q "All branches merge eventually" dist/client/index.html
           grep -q "never stores or proxies" dist/client/index.html
-          grep -q "santree/worktrees/QK-142" dist/client/index.html
+          grep -q "Do I still write prompts" dist/client/index.html
           # The docs page: section rail + a section body must be in the static HTML
           grep -q "Connect your tools" dist/client/docs/index.html
           grep -q "Keyboard shortcuts" dist/client/docs/index.html

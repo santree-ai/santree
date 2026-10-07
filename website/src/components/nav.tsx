@@ -7,7 +7,7 @@ import { Logo } from "~/components/logo";
 // Router Links with `to="/"` + hash (not bare `#loop` anchors) so they work
 // from ANY page — a bare hash on /docs points at nothing and goes nowhere.
 const links = [
-  { label: "How it works", hash: "loop" },
+  { label: "How it works", hash: "how" },
   { label: "FAQ", hash: "faq" },
 ];
 
@@ -30,7 +30,7 @@ export function Nav() {
         scrolled ? "border-hairline bg-app/75 backdrop-blur-xl" : "border-transparent"
       }`}
     >
-      <nav className="mx-auto flex h-14 max-w-6xl items-center px-6">
+      <nav className="mx-auto flex h-14 max-w-[1360px] items-center px-6 sm:px-10 lg:px-14">
         <Link to="/" className="flex items-center gap-2 font-medium">
           <Logo size={19} />
           <span className="text-[15px] tracking-tight">santree</span>
