@@ -28,10 +28,6 @@ const FACTS = [
     term: "Publishing",
     body: "An AI review's draft comments stay on your machine until you publish them. Nothing an agent writes reaches your code host without your click.",
   },
-  {
-    term: "Network",
-    body: "The integrations you connect, your agent's own CLI, and an update check.",
-  },
 ];
 
 export function LocalFirst() {
@@ -95,18 +91,6 @@ const QUESTIONS: { q: string; a: ReactNode }[] = [
   {
     q: "Do I need a ticket tracker?",
     a: "No. Without one, Trees still works on any git repo, and Reviews needs only the command line tool for your code host.",
-  },
-  {
-    q: "Where do I start?",
-    a: (
-      <>
-        Install it, add a repo, and press Run on a ticket. The{" "}
-        <a className="faq-link" href="/docs">
-          docs
-        </a>{" "}
-        cover connecting your tools and every keyboard shortcut.
-      </>
-    ),
   },
 ];
 

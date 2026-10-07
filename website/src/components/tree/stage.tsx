@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { DownloadButton } from "~/components/download-button";
 import { GitHubLogo } from "~/components/icons";
 import type { Engine } from "./engine";
+import { swayP } from "./grow";
 import {
   ALL,
   boughAt,
@@ -242,7 +243,7 @@ export function TreeSequence() {
         }
         const at: V3 =
           st.stage === "work" ? boughAt(L.b, Math.max(0.05, st.progress)) : boughAt(L.b, 1);
-        const p = toPx(at);
+        const p = toPx(swayP(at, t));
         placed.push({ L, x: p.x, y: p.y, right: p.x > toPx([0, at[1], 0]).x });
       }
       // Never on top of each other: on each side, push apart top to bottom.
@@ -280,7 +281,7 @@ export function TreeSequence() {
           cap.style.visibility = vis ? "visible" : "hidden";
           lead.style.visibility = vis ? "visible" : "hidden";
           if (!vis) return;
-          const a = toPx(STATION_ANCHOR(i, featured.u));
+          const a = toPx(swayP(STATION_ANCHOR(i, featured.u), t));
           const rise = (1 - o) * 14;
           const drift = 0;
           pane.style.opacity = String(o);

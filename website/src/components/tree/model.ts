@@ -1,32 +1,29 @@
 /**
- * santree's tree, as numbers: geometry, the ticket clock and the camera, with
- * no three.js in it. The live scene (engine.ts), the prerendered poster
- * (poster.tsx) and the DOM that rides on the scene (stage.tsx) all read this
- * file, so the drawing, the first frame and the panes agree to the pixel.
+ * santree's tree, as numbers: the clock the tickets live by and the camera,
+ * with no three.js in it. The grown tree itself (grow.ts) is a conifer from a
+ * seed. The live scene (engine.ts), the prerendered poster (poster.tsx) and the
+ * DOM that rides on the scene (stage.tsx) all read these two files, so the
+ * drawing, the first frame and the panes agree to the pixel.
  *
- * The tree is ONE line. It comes up the taproot (where tickets arrive),
- * spirals out across the floor of the lower tier, winds up a cone to its
- * apex, spirals out again across the gap, winds up the upper cone and ends
- * at the crown, `main`'s newest commit. The envelope of that line is
- * santree's mark, the two stacked triangles of its app icon
- * (M256 128 L173 232 L339 232 Z, M256 248 L148 384 L364 384 Z): the flat
- * spirals are the triangles' bases, the windings their sides.
- *
- * Everything that happens is a quiet light on that line. A ticket rises up it
- * as a front of light to its fork (a plain height, so it reads as a tide, not
- * a dot orbiting the cone); there it leaves the line as a bough (its worktree),
- * the agent's point of light goes out along the bough, the tip buds into the
- * PR, and on merge a second front climbs the line to the crown, which
- * brightens. The tickets are invented (the app's screenshot fixture) and are
- * never named on the page: no tracker, code host or agent is either.
+ * Everything that happens is a quiet light on the tree. A ticket rises up the
+ * trunk as a front of light to its fork (a plain height, so it reads as a
+ * tide); there it leaves for a branch (its worktree), the agent's point of
+ * light goes out along the branch, the tip buds into the PR, and on merge a
+ * second front climbs the trunk to the crown, which brightens, and the branch
+ * keeps a settled light. The tickets are invented (the app's screenshot
+ * fixture) and are never named on the page: no tracker, code host or agent is
+ * either. The other lights on the tree breathe on their own slow clocks
+ * (grow.ts); work landing on one swells it for a while and lets it settle.
  *
  * One ticket's life is 41 s inside a 96 s loop, so at most two things move at
  * once, and "needs you" is a steady warm hold, never a pulse.
  *
  * Meters, y up from the ground at the foot of the trunk.
  */
+import { boughAt, CONES, CROWN, type Limb, limbNear, rand, TOP, trunkAt, type V3 } from "./grow";
 
-export type V3 = [number, number, number];
+export type { Limb, V3 };
+export { boughAt, CONES, CROWN, rand, TOP };
 
 /** The app's own colors (src/theme/colors.ts: palette, sessionStateMeta, prStateMeta). */
 export const COLOR = {
@@ -38,178 +35,15 @@ export const COLOR = {
   /** Needs you: a warm hold, never a flare. */
   ask: "#d9a55f",
   open: "#8f989d",
+  /** The resting lights on the branches: tickets, in the warm of a window at dusk. */
+  light: "#f2d3a0",
 } as const;
 
 const deg = (d: number) => (d * Math.PI) / 180;
 const TAU = Math.PI * 2;
 
-// ——— the mark, as two cones ———
-
-/** Logo units to meters: the mark's 256 units of height are 3.8 m of tree. */
-const LS = 3.8 / 256;
-export const TOP = 4.15;
-export interface Cone {
-  apex: number;
-  base: number;
-  r: number;
-}
-export const CONES: readonly [Cone, Cone] = [
-  { apex: TOP, base: TOP - 104 * LS, r: 83 * LS },
-  { apex: TOP - 120 * LS, base: TOP - 256 * LS, r: 108 * LS },
-];
-const [UPPER, LOWER] = CONES;
-export const CROWN: V3 = [0, TOP + 0.08, 0];
-/** Where the taproot starts, under the ledger's last row. */
-export const ROOT_Y = -0.95;
-
-const coneR = (c: Cone, y: number) => (c.r * (c.apex - y)) / (c.apex - c.base);
-
-// ——— the line ———
-
-/** Turns per stretch: enough to read as a cone, few enough to read as one line. */
-const TURNS = { floor: 3, lower: 18, gap: 1.2, upper: 13 } as const;
-/** Samples per turn. */
-const PER = 260;
-
-export type Part = "root" | "floor" | "lower" | "gap" | "upper" | "crown";
-
-export interface Line {
-  pts: V3[];
-  /** Arc length at each point, 0..1. */
-  sig: number[];
-  part: Part[];
-  /** The winding angle at each point (rad). */
-  ang: number[];
-  length: number;
-}
-
-function buildLine(): Line {
-  const pts: V3[] = [];
-  const part: Part[] = [];
-  const ang: number[] = [];
-  let a = deg(-90);
-  const at = (r: number, y: number, p: Part) => {
-    pts.push([r * Math.cos(a), y, -r * Math.sin(a)]);
-    part.push(p);
-    ang.push(a);
-  };
-  // the taproot, straight up to the floor of the lower tier
-  for (let i = 0; i < 40; i++) at(0, ROOT_Y + ((LOWER.base - ROOT_Y) * i) / 40, "root");
-  // out across the floor, an Archimedean spiral (equal spacing reads as a disc)
-  const nF = Math.round(TURNS.floor * PER);
-  for (let i = 0; i < nF; i++) {
-    const k = i / nF;
-    at(LOWER.r * k, LOWER.base, "floor");
-    a += (TAU * TURNS.floor) / nF;
-  }
-  // up the lower cone: the same angular speed per height keeps the pitch even
-  const nL = Math.round(TURNS.lower * PER);
-  for (let i = 0; i < nL; i++) {
-    const y = LOWER.base + ((LOWER.apex - LOWER.base) * i) / nL;
-    at(coneR(LOWER, y), y, "lower");
-    a += (TAU * TURNS.lower) / nL;
-  }
-  // across the gap: out from the lower apex to the upper tier's rim, rising a little
-  const nG = Math.round(TURNS.gap * PER);
-  for (let i = 0; i < nG; i++) {
-    const k = i / nG;
-    at(UPPER.r * k, LOWER.apex + (UPPER.base - LOWER.apex) * k, "gap");
-    a += (TAU * TURNS.gap) / nG;
-  }
-  const nU = Math.round(TURNS.upper * PER);
-  for (let i = 0; i <= nU; i++) {
-    const y = UPPER.base + ((UPPER.apex - UPPER.base) * i) / nU;
-    at(coneR(UPPER, y), y, "upper");
-    if (i < nU) a += (TAU * TURNS.upper) / nU;
-  }
-  for (let i = 1; i <= 12; i++) at(0, UPPER.apex + ((CROWN[1] - UPPER.apex) * i) / 12, "crown");
-
-  const cum = [0];
-  for (let i = 1; i < pts.length; i++) {
-    const p = pts[i]!;
-    const q = pts[i - 1]!;
-    cum.push(cum[i - 1]! + Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]));
-  }
-  const length = cum[cum.length - 1]!;
-  return { pts, sig: cum.map((c) => c / length), part, ang, length };
-}
-
-export const LINE: Line = buildLine();
-
-/** The point at arc length sigma (0..1) along the line. */
-export function lineAt(sigma: number): V3 {
-  const { sig, pts } = LINE;
-  const s = Math.min(1, Math.max(0, sigma));
-  let lo = 0;
-  let hi = sig.length - 1;
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1;
-    if (sig[mid]! < s) lo = mid;
-    else hi = mid;
-  }
-  const a = pts[lo]!;
-  const b = pts[hi]!;
-  const k = (s - sig[lo]!) / Math.max(1e-9, sig[hi]! - sig[lo]!);
-  return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
-}
-
-/** The index on a winding stretch closest to height y. */
-function indexAt(p: Part, y: number) {
-  let best = -1;
-  let d = Number.POSITIVE_INFINITY;
-  LINE.pts.forEach((q, i) => {
-    if (LINE.part[i] !== p) return;
-    const e = Math.abs(q[1] - y);
-    if (e < d) {
-      d = e;
-      best = i;
-    }
-  });
-  return best;
-}
-
 /** The ledger's rows hang off the taproot here, top to bottom. */
-export const rowPoint = (row: number): V3 => [0, -0.2 - row * 0.115, 0];
-
-/** Deterministic noise, so the server and every client grow the same tree. */
-export function rand(i: number, salt = 0) {
-  const x = Math.sin(i * 127.1 + salt * 311.7) * 43758.5453;
-  return x - Math.floor(x);
-}
-
-// ——— a bough: where a ticket leaves the line ———
-
-export interface Limb {
-  /** The fork on the line, its arc length, and the bough's bearing (outward). */
-  fork: V3;
-  sigma: number;
-  phi: number;
-  /** How far out it reaches, and how far its tip droops below the fork. */
-  len: number;
-  droop: number;
-}
-
-function limbAt(p: Part, y: number): Limb {
-  const i = indexAt(p, y);
-  const fork = LINE.pts[i]!;
-  const r = Math.hypot(fork[0], fork[2]);
-  return {
-    fork,
-    sigma: LINE.sig[i]!,
-    phi: LINE.ang[i]!,
-    len: 0.62 + 0.28 * r,
-    droop: 0.16 + 0.08 * r,
-  };
-}
-
-/** Out from the fork: level at first, then the droop of a fir, curling a little with the winding. */
-export function boughAt(b: Limb, s: number): V3 {
-  const curl = 0.22 * s * s;
-  const ph = b.phi + curl;
-  const rho = b.len * s;
-  const y = b.fork[1] + 0.05 * Math.sin(Math.PI * s) * (1 - s) - b.droop * s * s;
-  return [b.fork[0] + rho * Math.cos(ph), y, b.fork[2] - rho * Math.sin(ph)];
-}
+export const rowPoint = (row: number): V3 => trunkAt(-0.2 - row * 0.115);
 
 // ——— tickets ———
 
@@ -227,9 +61,10 @@ export interface Bough extends Ticket, Limb {
   row: number;
 }
 
-const ticketBough = (t: Ticket, p: Part, y: number, offset: number, row: number): Bough => ({
+/** A ticket's bough is one of the tree's real branches: the one nearest a height and a bearing. */
+const ticketBough = (t: Ticket, y: number, phi: number, offset: number, row: number): Bough => ({
   ...t,
-  ...limbAt(p, y),
+  ...limbNear(y, phi),
   offset,
   row,
 });
@@ -237,17 +72,17 @@ const ticketBough = (t: Ticket, p: Part, y: number, offset: number, row: number)
 /** The ticket the scroll follows from triage to main: the one whose agent stops to ask. */
 export const FEATURED: Bough = ticketBough(
   { id: "featured", title: "", asks: true },
-  "lower",
   1.38,
+  deg(-34),
   19,
   1,
 );
 
 /** The others, on the wall clock, far apart in the loop: one or two things happen at once. */
 export const AMBIENT: Bough[] = [
-  ticketBough({ id: "a", title: "" }, "lower", 0.78, 27, 0),
-  ticketBough({ id: "b", title: "" }, "lower", 1.95, 60, 2),
-  ticketBough({ id: "c", title: "" }, "upper", 3.2, 70, 3),
+  ticketBough({ id: "a", title: "" }, 0.95, deg(-148), 27, 0),
+  ticketBough({ id: "b", title: "" }, 1.95, deg(-92), 60, 2),
+  ticketBough({ id: "c", title: "" }, 3.2, deg(-18), 70, 3),
 ];
 
 export const ALL: Bough[] = [FEATURED, ...AMBIENT];
@@ -297,6 +132,8 @@ export interface BoughState {
   back: { s: number } | { y: number } | null;
   /** The crown's flash, after this merge reaches it. */
   flash: number;
+  /** After a merge, the light left on its branch: it swells, then settles over many seconds. */
+  settled: number;
   dot: Dot;
   asking: boolean;
 }
@@ -366,6 +203,8 @@ export function stateAt(b: Bough, u0: number): BoughState {
           : 0,
     back,
     flash: u >= PHASE.back[1] ? crownFlash(u - PHASE.back[1]) : 0,
+    settled:
+      u >= PHASE.back[1] ? ease(clamp01((u - PHASE.back[1]) / 4)) * Math.exp(-Math.max(0, u - PHASE.back[1] - 4) / 20) : 0,
     dot,
     asking,
   };
