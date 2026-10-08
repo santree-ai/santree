@@ -283,7 +283,7 @@ html {
 .hero-title {
   max-width: 14ch;
   font-size: clamp(2.9rem, 1rem + 4.1vw, 5.1rem);
-  line-height: 0.98;
+  line-height: 1.08;
   letter-spacing: -0.028em;
   text-wrap: balance;
   color: var(--color-fg);
@@ -360,11 +360,18 @@ html {
 .seq-rail span.is-on {
   color: var(--color-fg);
 }
+/* The pinned stage is one grid in spirit: a safe edge, a caption column, the pane, and (for two stations) a side card, each with a real gap. */
+.stage {
+  --edge: max(3.5rem, calc((100vw - 1360px) / 2 + 3.5rem));
+  --region: calc(100vw - 2 * var(--edge));
+  --cap: min(25rem, calc(var(--region) * 0.27));
+  --gap: 2.25rem;
+}
 .seq-caption {
   position: absolute;
-  left: max(3.5rem, calc((100vw - 1360px) / 2 + 3.5rem));
+  left: var(--edge);
   bottom: 9svh;
-  width: min(25rem, 30vw);
+  width: var(--cap);
   opacity: 0;
   will-change: transform, opacity;
 }
@@ -372,9 +379,13 @@ html {
   margin-top: 0.9rem;
 }
 .seq-pane {
-  --pw: min(50vw, 56rem, calc((100svh - 15rem) * var(--ar, 1.5)));
+  --pw: min(
+    56rem,
+    calc(var(--region) - var(--cap) - var(--gap)),
+    calc((100svh - 15rem) * var(--ar, 1.5))
+  );
   position: absolute;
-  right: max(3.5rem, calc((100vw - 1360px) / 2 + 3.5rem));
+  right: var(--edge);
   top: 50%;
   width: var(--pw);
   margin: 0;
@@ -386,6 +397,16 @@ html {
     0 0 0 1px rgba(0, 0, 0, 0.5),
     0 30px 80px -24px rgba(0, 0, 0, 0.85);
   will-change: transform, opacity;
+}
+/* Run: the opening prompt sits to the pane's right, in its own column. */
+.seq-pane[data-side="prompt"] {
+  --side: clamp(16rem, 20vw, 21rem);
+  --pw: min(
+    44rem,
+    calc(var(--region) - var(--cap) - var(--side) - 2 * var(--gap)),
+    calc((100svh - 15rem) * var(--ar, 1.5))
+  );
+  right: calc(var(--edge) + var(--side) + 1.5rem);
 }
 /* The capture, cut to its crop: the image is laid out at the full window's size inside a window of the crop's. */
 .crop {
@@ -476,17 +497,19 @@ html {
 }
 .seq-prompt {
   position: absolute;
-  right: -3%;
-  bottom: -12%;
-  width: 50%;
+  left: calc(100% + 1.5rem);
+  top: 50%;
+  transform: translateY(-50%);
+  width: var(--side);
 }
 .seq-prompt-flow {
   margin-bottom: 1.1rem;
 }
 .seq-prompt-head {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.2rem 1rem;
   padding: 0.55rem 0.85rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 10.5px;
@@ -500,9 +523,9 @@ html {
 .seq-prompt-flow pre {
   margin: 0;
   padding: 0.7rem 0.85rem 0.8rem;
-  overflow: hidden;
-  white-space: pre;
-  font-size: clamp(9px, 0.7vw, 10.5px);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 10px;
   line-height: 1.55;
   color: #cfd2d7;
 }
@@ -512,10 +535,19 @@ html {
 }
 .seq-layer {
   position: absolute;
-  right: -3%;
-  bottom: -26%;
-  width: 36%;
+  left: 0;
+  right: 0;
+  top: calc(100% + 1rem);
+  display: grid;
+  grid-template-columns: 1.1fr 1.2fr 1fr;
   font-family: var(--font-sans);
+}
+.seq-layer .seq-prompt-head {
+  grid-column: 1 / -1;
+}
+.seq-layer .layer-sec + .layer-sec {
+  border-top: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.07);
 }
 .seq-layer-flow {
   margin-bottom: 1.1rem;

@@ -70,7 +70,7 @@ export const STATIONS: Station[] = [
     title: "Run, and the ticket becomes the prompt.",
     body: "santree writes the ticket, its whole comment thread and your notes into the agent's opening prompt, creates the worktree and starts it. Select Ready launches every ready ticket the same way.",
     screen: "tickets",
-    crop: { x: 0.195, y: 0.035, w: 0.6, h: 0.5 },
+    crop: { x: 0.195, y: 0.035, w: 0.375, h: 0.5 },
     list: { x: 0.2, y: 0.04, w: 0.5, h: 0.3 },
     alt: "The Tickets list grouped by project and milestone, each row marked ready or blocked, with the selected ticket open in the right panel.",
   },

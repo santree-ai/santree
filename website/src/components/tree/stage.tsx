@@ -432,6 +432,9 @@ export function TreeSequence() {
                 ref={(p) => {
                   panes.current[i] = p;
                 }}
+                data-side={
+                  st.id === "run" ? "prompt" : st.id === "steer" && AGENT_LAYER_SHIPPED ? "layer" : undefined
+                }
                 style={{ visibility: "hidden", ["--ar" as string]: cropAspect(st.crop) }}
               >
                 <Capture screen={st.screen} crop={st.crop} alt={st.alt} />
