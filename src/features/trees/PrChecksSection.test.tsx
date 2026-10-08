@@ -122,7 +122,7 @@ describe("PrChecksSection", () => {
   });
 
   /** A status context has no Actions run behind it, so there is no log to open —
-   *  and CLAUDE.md forbids rendering a control that can't do anything. */
+   *  and AGENTS.md forbids rendering a control that can't do anything. */
   it("offers no log for a check with no job", () => {
     renderSection([check({ status: "Success", jobId: null, runId: null })]);
     fireEvent.click(screen.getByRole("button", { name: /test \(ubuntu-latest\)/ }));

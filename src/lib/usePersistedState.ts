@@ -14,7 +14,7 @@
  * webview reload, but a cold launch starts from the fallback.
  *
  * Chrome/UI state only. Anything functional or cross-device belongs in the
- * settings table instead — see CLAUDE.md.
+ * settings table instead — see AGENTS.md.
  *
  * The value is JSON round-tripped, so it must be JSON-safe: no `Set`, `Map`, or
  * `undefined` members (a `Set` silently persists as `{}`).

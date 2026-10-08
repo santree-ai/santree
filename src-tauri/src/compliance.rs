@@ -506,7 +506,7 @@ fn f<'a>(x: &'a str) -> char { let q = '\''; let s = "said \" then // stopped"; 
 
 // ── COMPLIANCE.md § No credential handling ──────────────────────────────────
 
-/// COMPLIANCE.md, "No credential handling", and CLAUDE.md's secrets invariant:
+/// COMPLIANCE.md, "No credential handling", and AGENTS.md's secrets invariant:
 /// app-owned secrets belong in the OS keychain, never in plaintext SQLite.
 ///
 /// Breaking this puts a live credential on disk in the clear, where every later
@@ -746,7 +746,7 @@ fn the_usage_credential_is_never_logged_serialized_or_stored() {
     }
 }
 
-/// COMPLIANCE.md, "One host, matched by parse", and CLAUDE.md's sink-matching
+/// COMPLIANCE.md, "One host, matched by parse", and AGENTS.md's sink-matching
 /// invariant: a host allowlist is a parsed-host comparison, never a string
 /// prefix.
 ///
@@ -1470,7 +1470,7 @@ fn nothing_reads_codexs_auth_storage() {
     // santree's *own* predecessor CLI kept its Linear OAuth token in a file of
     // the same name (`~/.config/santree/auth.json`), and migrating it into the
     // keychain is the whole point of that module. Our own credential is not an
-    // agent CLI's — see CLAUDE.md, which draws the same line.
+    // agent CLI's — see AGENTS.md, which draws the same line.
     const OURS: &str = "src-tauri/src/legacy.rs";
 
     for (path, src) in rust_sources() {

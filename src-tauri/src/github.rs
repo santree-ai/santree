@@ -4207,7 +4207,7 @@ mod tests {
     /// An inline review thread, decoded from the shape the `reviewThreads`
     /// selection asks for.
     ///
-    /// CLAUDE.md's rule — never let a comment land on the wrong line — rests on
+    /// AGENTS.md's rule — never let a comment land on the wrong line — rests on
     /// these four fields. `startLine` and `diffSide` are `Option`s reached only
     /// through their renames, so losing one doesn't fail: a multi-line comment
     /// collapses to its last line, and an old-side comment is drawn on the new

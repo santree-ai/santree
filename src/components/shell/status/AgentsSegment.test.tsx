@@ -2,7 +2,7 @@
  * The status bar's "N agents" and the sidebar tree must be the same claim about
  * the same panes.
  *
- * They were not. Both were written against the rule in CLAUDE.md — a pane's
+ * They were not. Both were written against the rule in AGENTS.md — a pane's
  * agent is decided by session row, then process table, then santree's launch
  * record — but only the registry implemented it; this segment read the launch
  * record alone. A CLI the user started by hand in a shell pane therefore

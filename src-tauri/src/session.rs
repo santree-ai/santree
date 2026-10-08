@@ -742,7 +742,7 @@ pub async fn subagents(
 
 /// Reveal the session's transcript in the OS file browser. The path is derived
 /// here, from the same validated listing everything else in this pane uses — a
-/// webview supplies a session id and never a path (CLAUDE.md, "santree derives
+/// webview supplies a session id and never a path (AGENTS.md, "santree derives
 /// its own paths").
 pub async fn reveal_transcript(
     db: &Db,

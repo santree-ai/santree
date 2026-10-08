@@ -1,7 +1,7 @@
 /**
  * Presentation for the raw epoch-ms timestamps the backend sends for triage
  * tickets (created/SLA-breach/snooze times) — kept as plain numbers so the
- * frontend decides how to render them, per CLAUDE.md's "presentation is the
+ * frontend decides how to render them, per AGENTS.md's "presentation is the
  * frontend's job" rule. Baking a formatted "5m ago"/"SLA in 3h" string into
  * the domain field at fetch time would freeze between refetches — triage's
  * query has a multi-minute staleTime, so an SLA could read "in 3m" long after

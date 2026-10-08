@@ -18,7 +18,7 @@
 //!   `{name: value}` JSON map.
 //!
 //! The values are secrets — the settings UI masks them behind a padlock — and
-//! CLAUDE.md's invariant is that a secret belongs in the keychain, never in
+//! AGENTS.md's invariant is that a secret belongs in the keychain, never in
 //! plaintext SQLite. santree hands the agent CLIs it spawns whatever the user
 //! puts here, but a *different* process (an agent in another repo's scope, an
 //! unrelated tool, a copy of the db lifted off a backup) has no business reading

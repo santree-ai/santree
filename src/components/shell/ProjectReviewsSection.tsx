@@ -18,7 +18,7 @@
  * Above them sits the repo's merge queue, when it has one at all
  * ({@link MergeQueueRow}) — the section's one row that is a place rather than a
  * pull request. Your own PRs are not here: a PR you opened is worked on beside
- * its worktree, which already has a row in this rail (CLAUDE.md, "Trees is the
+ * its worktree, which already has a row in this rail (AGENTS.md, "Trees is the
  * workspace; Reviews is the inbox").
  *
  * **The number is what still needs you**: it comes off `awaitingReviewPrs`, the

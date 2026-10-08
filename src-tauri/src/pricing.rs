@@ -8,7 +8,7 @@
 //! prices); and retry in the future without an app restart (a short backoff after
 //! a failure, then another attempt on the next call).
 //! The fetch runs in the background so opening the panel never waits on the
-//! network (CLAUDE.md: never block the UI on a round-trip); it refreshes the DB
+//! network (AGENTS.md: never block the UI on a round-trip); it refreshes the DB
 //! for the *next* read.
 
 use std::sync::atomic::{AtomicBool, Ordering};

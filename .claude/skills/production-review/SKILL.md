@@ -9,7 +9,7 @@ Two modes. **Review mode** produces/refreshes `PRODUCTION_REVIEW.md`. **Fix mode
 burns down an existing `PRODUCTION_REVIEW.md`. The user prefers these as separate
 sessions — don't slide from one into the other unasked.
 
-Both modes: read `CLAUDE.md` and `COMPLIANCE.md` first. If `PRODUCTION_REVIEW.md`
+Both modes: read `AGENTS.md` and `COMPLIANCE.md` first. If `PRODUCTION_REVIEW.md`
 already exists, read it — its own checkboxes are the source of truth for what's
 done; never trust remembered "N of M fixed" counts, they go stale.
 
@@ -29,7 +29,7 @@ each feature view (`features/*`); shared UI (`components/`, `theme/`); ops
 nothing is out of scope on "still mocked" grounds.
 
 Categories per finder: correctness; React/TanStack idioms; Rust/tokio/Tauri
-idioms; security (the CLAUDE.md invariants: IPC path/id/branch validation,
+idioms; security (the AGENTS.md invariants: IPC path/id/branch validation,
 parse-at-sink host matching, keychain-only secrets); COMPLIANCE.md drift; perf;
 architecture; readability; UX responsiveness (optimistic updates); ops
 readiness; testing gaps; deps; a11y.

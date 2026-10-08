@@ -132,7 +132,7 @@ export function InvestigatePane({
   );
   // `--remote-control` is opt-out (Settings → Agents → Claude Code): some environments
   // run a `claude` build old enough to predate the flag, which would otherwise
-  // fail every launch with no visible cause (see CLAUDE.md's "verify vendor
+  // fail every launch with no visible cause (see AGENTS.md's "verify vendor
   // flags" gotcha) and no way to turn it off.
   const remoteControlSetting = useResolvedSetting(repo, CLAUDE_REMOTE_CONTROL_KEY);
   const remoteControlEnabled = remoteControlSetting.data !== "false";

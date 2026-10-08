@@ -112,7 +112,7 @@ tungstenite = { version = "0.28", default-features = false, features = ["handsha
 socket2 = "0.6"
 
 # Linear OAuth tokens live in the OS keychain (macOS Keychain / freedesktop Secret
-# Service), never in santree.db — see CLAUDE.md's secrets invariant and linear.rs.
+# Service), never in santree.db — see AGENTS.md's secrets invariant and linear.rs.
 # Default features are exactly the two native stores we target plus the `Entry` API.
 keyring = "4"
 

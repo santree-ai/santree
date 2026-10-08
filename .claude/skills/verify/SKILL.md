@@ -32,7 +32,7 @@ Run in this order (cheapest first). All must be green:
 6. `pnpm test` (vitest) and `cargo test --workspace`
 7. For any new/changed command taking a path, id, or branch: confirm it's
    validated (`safe_path`/`safe_real_path`, no leading `-`) before it reaches
-   fs or git — see CLAUDE.md "Security & validation invariants".
+   fs or git — see AGENTS.md "Security & validation invariants".
 
 ## Pass 2 — drive the real app
 

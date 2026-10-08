@@ -272,7 +272,7 @@ still sends one back if a future server hands it out, and re-initializes on the
    the Settings row.
 2. Reads: issues, triage, detail, `tickets_by_id`, team scope, images.
 3. Writes, for the tools phase 0 found.
-4. `useTrackerFeatures` gating across the UI, fixtures, CLAUDE.md.
+4. `useTrackerFeatures` gating across the UI, fixtures, AGENTS.md.
 
 ## Measured
 

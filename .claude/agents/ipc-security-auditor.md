@@ -9,7 +9,7 @@ read-only: you never edit files. You receive a diff or a list of changed files;
 audit exactly that surface (plus whatever context you need to read) against the
 invariants below, and report violations with `file:line` evidence.
 
-## Invariants (from CLAUDE.md — load-bearing)
+## Invariants (from AGENTS.md — load-bearing)
 
 1. **Every IPC value that becomes a path, id, or git arg is untrusted.** It must
    pass through `git.rs` `safe_path`/`safe_real_path` (single normal component;

@@ -5,7 +5,7 @@ view reads through: the Tauri `invoke` call the generated bindings make. The
 views render it exactly as they render a live backend, because as far as they
 can tell it is one.
 
-This is the **one sanctioned exception** to CLAUDE.md's no-mock-data rule, and
+This is the **one sanctioned exception** to AGENTS.md's no-mock-data rule, and
 it is built so it cannot leak: the whole directory is reached only from
 `main.tsx` behind `import.meta.env.DEV && import.meta.env.VITE_SANTREE_FIXTURES === …`,
 both build-time constants, and from `vite.config.ts` aliases and a plugin that

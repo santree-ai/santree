@@ -100,7 +100,7 @@ export function pendingWorktree(p: PendingLaunch): Worktree {
 }
 
 /** Fill in a worktree's `status`/`activity` from live signals — the backend ships
- *  both as `null` rather than guessing (see the no-placeholder rule in CLAUDE.md).
+ *  both as `null` rather than guessing (see the no-placeholder rule in AGENTS.md).
  *  `status` comes from the linked Linear task's workflow state, and stays null when
  *  the task isn't in the current tasks fetch (e.g. it isn't assigned to the viewer)
  *  — the sidebar then renders no chip, rather than a confident lie. `activity` is
