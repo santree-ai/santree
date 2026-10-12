@@ -3,9 +3,7 @@
 # CI (ci.yml) proves the code is good; this proves the *artifact* is. Everything
 # between the two — codesigning, notarization, the updater signature, and the
 # manifest clients poll — only exists here, so a tag is the only thing that
-# exercises it. Linux and Windows are deliberately out of scope: the app ships
-# for macOS, and ci.yml's Linux jobs exist to keep the code portable, not to
-# produce downloads.
+# exercises it. santree is macOS-only; there is no other platform to build.
 #
 # Channels are a property of the TAG, not of the build:
 #   v0.2.0          -> stable  (a normal release; GitHub's `releases/latest`

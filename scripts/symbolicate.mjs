@@ -78,8 +78,8 @@ const input = positional[0]
   : await new Response(process.stdin).text();
 
 // Any `<something>.js:<line>:<col>`, plus whatever URL wraps it — Tauri serves
-// the bundle as `tauri://localhost/...` on macOS and `http://tauri.localhost/...`
-// on Linux, and a pasted frame may carry no scheme at all. The prefix has to be
+// the bundle as `tauri://localhost/...`, and a pasted frame may carry no scheme
+// at all. The prefix has to be
 // part of the match, not just tolerated beside it: it names the *bundle's*
 // location, so leaving it in front of a resolved source path yields a path that
 // points nowhere.

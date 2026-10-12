@@ -26,9 +26,6 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// DMGs are macOS-only; the Linux target has nothing to clean up.
-if (process.platform !== "darwin") process.exit(0);
-
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { productName } = JSON.parse(
   await readFile(join(root, "src-tauri", "tauri.conf.json"), "utf8"),

@@ -1,9 +1,33 @@
 name: CI
 
+# santree ships for macOS only, so the app is built, linted and tested on macOS.
+# The one Linux job is for the engine crates (see `engine-linux`).
+#
+# A change that touches only the paths below runs nothing here: the website has
+# its own workflow, release.yml runs on tags, and no build or test reads a
+# Markdown file. Anything else runs every job.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
+      - "**.md"
+      - ".claude/**"
+      - ".agents/**"
+      - ".github/workflows/website.yml"
+      - ".github/workflows/audit.yml"
+      - ".github/workflows/release.yml"
   pull_request:
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
+      - "**.md"
+      - ".claude/**"
+      - ".agents/**"
+      - ".github/workflows/website.yml"
+      - ".github/workflows/audit.yml"
+      - ".github/workflows/release.yml"
 
 # Nothing here writes back to the repo — CI only reads the checkout.
 permissions:
@@ -30,7 +54,7 @@ jobs:
       # package.json, tauri.conf.json (what Tauri stamps into the bundle) and the
       # workspace Cargo.toml (what the About box reads via `package_info()`). Drift
       # is invisible until a release ships a DMG whose metadata contradicts itself,
-      # so guard it here — same idea as the bindings-drift check in the backend job.
+      # so guard it here — same idea as the bindings-drift check in `backend-test`.
       - name: Versions agree (package.json · tauri.conf.json · Cargo.toml)
         run: |
           pkg=$(jq -r .version package.json)
@@ -72,31 +96,17 @@ jobs:
 
       - run: pnpm test
 
-  backend:
-    name: Backend (fmt · clippy · test · bindings drift) — ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+  # fmt + clippy run beside the tests rather than before them: clippy's check
+  # metadata is no use to the test build, so in one job they were ~1 min of
+  # serial work on the critical path.
+  backend-lint:
+    name: Backend lint (fmt · clippy)
+    runs-on: macos-latest
+    env:
+      # Same as `backend-test`, so the two jobs' dependency builds agree.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      # Tauri builds against the OS webview — WebKitGTK — so its dev libs are
-      # required before the Rust side will compile (mirrors README's Linux deps).
-      # macOS ships WebKit as part of the OS, so this step is Linux-only.
-      - name: Install system dependencies
-        if: matrix.os == 'ubuntu-latest'
-        timeout-minutes: 10
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            libssl-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
 
       # The exact toolchain version + components (rustfmt, clippy) are pinned in
       # rust-toolchain.toml — the single source of truth. `rustup show` reads that
@@ -106,21 +116,20 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-
+      # First, and cheap: clippy and the tests pass on unformatted code.
       - name: Format check
         run: cargo fmt --all --check
 
-      # tauri.conf.json (and, on macOS, tauri.macos.conf.json) declares the hook
-      # and the server binaries as bundle resources, and Tauri's build script
-      # hard-errors ("resource path ... doesn't exist") when a declared resource
-      # is missing — so every cargo command below needs them staged first.
-      # The bundle jobs get this for free via `beforeBuildCommand` (`pnpm
-      # bundle:binaries`); this job is pure cargo, so do the same build+copy here
-      # rather than pulling node/pnpm into it. Debug is fine — nothing runs the
-      # binaries, the build script only checks that the paths exist. Linux does
-      # not declare the server, but stages it anyway: the step is one list, and
-      # a platform that starts shipping it should not be the thing that breaks.
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      # tauri.conf.json declares the hook and the server binaries as bundle
+      # resources, and Tauri's build script hard-errors ("resource path ...
+      # doesn't exist") when a declared resource is missing — so every cargo
+      # command on src-tauri needs them staged first. The bundle job gets this
+      # via `beforeBuildCommand` (`pnpm bundle:binaries`); these jobs are pure
+      # cargo, so they do the same build+copy rather than pulling node/pnpm in.
+      # Debug is fine — nothing runs the binaries, the build script only checks
+      # that the paths exist.
       - name: Stage the bundle resources
         run: |
           cargo build -p santree-hook -p santree-server
@@ -129,6 +138,30 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  backend-test:
+    name: Backend test (revision lock · tests · bindings drift)
+    runs-on: macos-latest
+    env:
+      # Full debuginfo is most of what a test build writes and links, and CI
+      # never attaches a debugger; line tables keep file:line in a panic's
+      # backtrace. (A CARGO_* var is part of rust-cache's key, so a change here
+      # starts a fresh cache rather than mixing builds.)
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      # See `backend-lint`.
+      - name: Stage the bundle resources
+        run: |
+          cargo build -p santree-hook -p santree-server
+          mkdir -p target/bundle-resources
+          cp target/debug/santree-hook target/debug/santree-server target/bundle-resources/
 
       # `cargo test --workspace` below runs this too; named on its own so a server
       # change without a REVISION bump fails with a legible step name. The fix is in
@@ -142,43 +175,72 @@ jobs:
       # `cargo test` re-runs the bindings export (export_bindings_succeeds), which
       # rewrites src/bindings.ts. If the committed file is stale, this fails —
       # forcing `pnpm gen:bindings` to be run + committed when a command changes.
-      # Only checked on one OS in the matrix — the export is platform-independent,
-      # so running it on both would just duplicate the check.
       - name: Bindings are up to date
-        if: matrix.os == 'ubuntu-latest'
         run: git diff --exit-code src/bindings.ts
 
-  # Nothing above ever packages the app, so bundle resources, the icon set, the
-  # release profile's codegen and the platform bundlers only get exercised at
-  # release time — where a break is discovered by hand. This builds the real
-  # bundle and asserts the artifacts (not a release pipeline: no signing, no
-  # upload, no tag — the artifacts are thrown away). Main-branch-only because a
-  # full release build is far too slow to gate every PR on.
-  bundle-smoke:
-    name: Bundle smoke (packaging + resources) — ${{ matrix.os }}
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+  # The engine crates are the one part of this workspace that runs on Linux: the
+  # daedalus engine depends on them by git rev and builds them there, with nix,
+  # on rustc 1.95 (AGENTS.md, "Crates the daedalus engine consumes"). None of
+  # them links Tauri or a webview, so this needs no system packages. The 1.95
+  # check is what keeps their `rust-version` honest; it resolves against this
+  # workspace's Cargo.lock, not the engine's, so a dependency bump that needs a
+  # newer rustc fails here first.
+  engine-linux:
+    name: Engine crates on Linux (clippy · test · rustc 1.95)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      ENGINE_CRATES: -p santree-pty -p santree-host -p santree-remote-proto -p santree-remote-tls -p santree-agent-kind
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      # Same WebKitGTK/GTK deps the backend job needs to compile, plus the ones
-      # the .deb bundler shells out to.
-      - name: Install system dependencies
-        if: matrix.os == 'ubuntu-latest'
-        timeout-minutes: 10
+      - name: Install pinned Rust toolchain and rustc 1.95
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            libssl-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
+          rustup show
+          rustup toolchain install 1.95 --profile minimal
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Clippy
+        run: |
+          # shellcheck disable=SC2086 # ENGINE_CRATES splits into -p flags
+          cargo clippy $ENGINE_CRATES --all-targets -- -D warnings
+
+      - name: Tests
+        run: |
+          # shellcheck disable=SC2086 # ENGINE_CRATES splits into -p flags
+          cargo test $ENGINE_CRATES
+
+      # `+1.95` overrides rust-toolchain.toml for this one command.
+      - name: Builds on rustc 1.95 (the crates' rust-version)
+        run: |
+          # shellcheck disable=SC2086 # ENGINE_CRATES splits into -p flags
+          cargo +1.95 check $ENGINE_CRATES --all-targets
+
+  # Nothing above ever packages the app, so bundle resources, the icon set and
+  # the bundler only get exercised at release time — where a break is
+  # discovered by hand. This builds the real .app, asserts its resources and
+  # launches it (not a release pipeline: no signing, no upload, no tag — the
+  # artifacts are thrown away). Main-branch-only because a bundle build is too
+  # slow to gate every PR on.
+  bundle-smoke:
+    name: Bundle smoke (packaging + resources + launch)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    env:
+      # This job asks one question — does a bundle assemble, carry its resources
+      # and launch — and none of it is about how fast the binary runs. With the
+      # release profile's optimizer on, compiling the `santree` crate alone took
+      # 6m24s of this job's ~9.5 min (thin LTO, 16 codegen units). The profile
+      # stays `release` (panic = "abort", the `server` profile's unwind, no
+      # debug-assertions), only the optimizer is off. Set as job env, not in a
+      # profile, so `release.yml`, which builds what users install, keeps the
+      # full settings; and at job level so rust-cache keys on them.
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "256"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Install pinned Rust toolchain
         run: rustup show
@@ -194,54 +256,27 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # One bundler per OS: `app` and `deb` cover resource staging and the
-      # release profile without the DMG's AppleScript layout (skipped under CI
-      # anyway) or the AppImage's network-fetched tooling.
+      # `app` only: the DMG's AppleScript layout is skipped under CI anyway.
       - name: Bundle
-        # This job asks one question — does a bundle assemble, carry its resources
-        # and launch — and none of it is about how fast the binary runs. The release
-        # profile's `lto = true` + `codegen-units = 1` buy runtime speed at a steep
-        # link-time cost, and they dominated this job: on the worst observed run it
-        # took 10m53s while both backend jobs finished under 3m, making it the whole
-        # critical path. Thin LTO answers the same question in a fraction of the time.
-        # Overridden per-step rather than in a profile so `release.yml`, which builds
-        # what users actually install, keeps the full-fat settings untouched.
-        env:
-          CARGO_PROFILE_RELEASE_LTO: thin
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
-        run: pnpm tauri build --bundles ${{ matrix.os == 'macos-latest' && 'app' || 'deb' }}
+        run: pnpm tauri build --bundles app
 
       # The hook and the server are staged by `pnpm bundle:binaries` and copied
       # in as bundle resources; when the hook goes missing, session-state tracking
       # silently dies for every agent terminal, and without the server the
       # terminals never outlive the app — so assert both actually landed inside
-      # the bundle. The server is macOS-only (tauri.macos.conf.json), so the deb
-      # is asserted NOT to carry it: a Linux package shipping an unused binary
-      # would mean the platform conf stopped being platform-specific.
+      # the bundle.
       - name: Assert artifacts
         run: |
-          if [ "${{ matrix.os }}" = macos-latest ]; then
-            app=target/release/bundle/macos/santree.app
-            test -d "$app"
-            test -x "$app/Contents/Resources/santree-hook"
-            test -x "$app/Contents/Resources/santree-server"
-          else
-            deb=$(ls target/release/bundle/deb/*.deb)
-            dpkg-deb -c "$deb" | grep -q '/santree-hook$'
-            # (`! cmd` is exempt from `set -e`, so spell the failure out.)
-            if dpkg-deb -c "$deb" | grep '/santree-server$' > /dev/null; then
-              echo "::error::the deb carries santree-server; it is macOS-only"
-              exit 1
-            fi
-          fi
+          app=target/release/bundle/macos/santree.app
+          test -d "$app"
+          test -x "$app/Contents/Resources/santree-hook"
+          test -x "$app/Contents/Resources/santree-server"
 
       # The assertions above prove the bundle's *shape*; this proves it runs.
       # SANTREE_SMOKE makes the app exit 0 once its window has loaded (and fail
       # on a watchdog if it never does) — so a panic in setup or a frontend that
       # didn't make it into the bundle fails here rather than at release time.
-      # macOS only: the Linux job has no display to open a window on.
       - name: Smoke-launch the bundle
-        if: matrix.os == 'macos-latest'
         timeout-minutes: 5
         env:
           SANTREE_SMOKE: "1"
