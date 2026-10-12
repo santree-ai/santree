@@ -7,6 +7,11 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.19-beta.2 — 2026-10-12
+
+- A tab whose agent Claude has moved to its own background now reopens straight onto it, instead of failing with "That session is running in the background".
+- Fixed a case where a new tab could attach to an agent that had just exited, so the resumed agent never started.
+
 ## 0.1.19-beta.1 — 2026-10-12
 
 - Agents and terminals now outlive the app. santree runs them in a small background server of its own, so quitting, a crash or an update no longer ends a running agent, a shell or a setup script. Reopen santree and every tab picks up where it was, with what it printed meanwhile.
